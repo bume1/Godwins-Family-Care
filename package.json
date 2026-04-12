@@ -1,0 +1,32 @@
+{
+  "name": "project-tracker",
+  "version": "3.0.0",
+  "description": "Multi-project launch tracker with templates and HubSpot integration",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "changelog": "node changelog-generator.js",
+    "changelog:version": "node changelog-generator.js"
+  },
+  "dependencies": {
+    "@hubspot/api-client": "^13.4.0",
+    "@replit/database": "^2.0.5",
+    "axios": "^1.13.2",
+    "bcryptjs": "^2.4.3",
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "form-data": "^4.0.5",
+    "googleapis": "^169.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.0.2",
+    "pdf-lib": "^1.17.1",
+    "pdfkit": "^0.17.2",
+    "pdfmake": "^0.3.3",
+    "resend": "^6.9.2",
+    "uuid": "^9.0.0"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}

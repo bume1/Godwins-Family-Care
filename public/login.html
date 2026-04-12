@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Thrive 365 Labs - Portal Hub</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            primary: { 50: '#eff6ff', 100: '#dbeafe', 200: '#bfdbfe', 300: '#93c5fd', 400: '#60a5fa', 500: '#045E9F', 600: '#0353a4', 700: '#00205A', 800: '#001d51', 900: '#001233' },
+            accent: '#00205A',
+            surface: { 50: '#fafafa', 100: '#f4f4f5', 200: '#e4e4e7' },
+            success: { 50: '#ecfdf5', 500: '#10b981', 600: '#059669' },
+            warning: { 50: '#fffbeb', 500: '#f59e0b', 600: '#d97706' },
+            danger: { 50: '#fef2f2', 500: '#ef4444', 600: '#dc2626' }
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif']
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    * { font-family: 'Inter', system-ui, sans-serif; }
+    body { background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 50%, #f1f5f9 100%); min-height: 100vh; }
+    .portal-card { background: white; border-radius: 1.25rem; box-shadow: 0 1px 3px rgba(0,0,0,0.05), 0 1px 2px rgba(0,0,0,0.1); transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); border: 1px solid rgba(0,0,0,0.04); }
+    .portal-card:hover { box-shadow: 0 20px 40px -12px rgba(0,0,0,0.15); transform: translateY(-4px); }
+    .btn-primary { background: linear-gradient(135deg, #045E9F 0%, #0353a4 100%); transition: all 0.2s; }
+    .btn-primary:hover { background: linear-gradient(135deg, #0353a4 0%, #00205A 100%); box-shadow: 0 4px 14px -3px rgba(4, 94, 159, 0.5); }
+    .input-modern { border: 1.5px solid #e4e4e7; border-radius: 0.75rem; transition: all 0.2s; }
+    .input-modern:focus { border-color: #045E9F; box-shadow: 0 0 0 3px rgba(4, 94, 159, 0.1); outline: none; }
+    .gradient-header { background: linear-gradient(135deg, #045E9F 0%, #00205A 100%); }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    .animate-fade-in { animation: fadeIn 0.4s ease-out forwards; }
+    .glass-card { backdrop-filter: blur(10px); background: rgba(255,255,255,0.95); }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    // Modern refined icons
+    const Icons = {
+      admin: <svg className="w-7 h-7" fill="none" stroke="currentColor" strokeWidth="1.75" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z"/><path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>,
+      implementation: <svg className="w-7 h-7" fill="none" stroke="currentColor" strokeWidth="1.75" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m0 0H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V9.375c0-.621-.504-1.125-1.125-1.125H8.25z"/></svg>,
+      service: <svg className="w-7 h-7" fill="none" stroke="currentColor" strokeWidth="1.75" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M11.42 15.17L17.25 21A2.652 2.652 0 0021 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 11-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 004.486-6.336l-3.276 3.277a3.004 3.004 0 01-2.25-2.25l3.276-3.276a4.5 4.5 0 00-6.336 4.486c.091 1.076-.071 2.264-.904 2.95l-.102.085m-1.745 1.437L5.909 7.5H4.5L2.25 3.75l1.5-1.5L7.5 4.5v1.409l4.26 4.26m-1.745 1.437l1.745-1.437m6.615 8.206L15.75 15.75M4.867 19.125h.008v.008h-.008v-.008z"/></svg>,
+      clientPortal: <svg className="w-7 h-7" fill="none" stroke="currentColor" strokeWidth="1.75" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z"/></svg>,
+      portal: <svg className="w-7 h-7" fill="none" stroke="currentColor" strokeWidth="1.75" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12l8.954-8.955c.44-.439 1.152-.439 1.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75M8.25 21h8.25"/></svg>,
+      logout: <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="1.75" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15M12 9l-3 3m0 0l3 3m-3-3h12.75"/></svg>,
+      beaker: <svg className="w-7 h-7" fill="none" stroke="currentColor" strokeWidth="1.75" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23.693L5 14.5m14.8.8l1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0112 21c-2.773 0-5.491-.235-8.135-.687-1.718-.293-2.3-2.379-1.067-3.61L5 14.5"/></svg>,
+      knowledge: <svg className="w-7 h-7" fill="none" stroke="currentColor" strokeWidth="1.75" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25"/></svg>
+    };
+
+    // Login Page Component
+    const LoginPage = ({ onLogin }) => {
+      const [email, setEmail] = useState('');
+      const [password, setPassword] = useState('');
+      const [error, setError] = useState('');
+      const [loading, setLoading] = useState(false);
+      const [showForgotPassword, setShowForgotPassword] = useState(false);
+      const [resetMessage, setResetMessage] = useState('');
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        setLoading(true);
+        setError('');
+
+        try {
+          const response = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, password })
+          });
+          const result = await response.json();
+
+          if (result.error) {
+            setError(result.error);
+          } else {
+            // Store token in multiple places for compatibility
+            localStorage.setItem('unified_token', result.token);
+            localStorage.setItem('unified_user', JSON.stringify(result.user));
+            localStorage.setItem('admin_token', result.token);
+            localStorage.setItem('admin_user', JSON.stringify(result.user));
+            localStorage.setItem('portal_token', result.token);
+            localStorage.setItem('portal_user', JSON.stringify(result.user));
+            onLogin(result.token, result.user);
+          }
+        } catch (err) {
+          setError('Connection error. Please try again.');
+        }
+        setLoading(false);
+      };
+
+      const handleForgotPassword = async (e) => {
+        e.preventDefault();
+        setLoading(true);
+        setResetMessage('');
+
+        try {
+          const response = await fetch('/api/auth/forgot-password', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email })
+          });
+          const result = await response.json();
+          setResetMessage(result.error || 'Password reset request submitted. An administrator will contact you.');
+        } catch (err) {
+          setResetMessage('Error submitting request. Please try again.');
+        }
+        setLoading(false);
+      };
+
+      if (showForgotPassword) {
+        return (
+          <div className="min-h-screen flex items-center justify-center p-4 relative">
+            <div className="absolute inset-0 overflow-hidden pointer-events-none">
+              <div className="absolute -top-40 -right-40 w-80 h-80 rounded-full opacity-20" style={{background: 'radial-gradient(circle, #045E9F 0%, transparent 70%)'}}></div>
+              <div className="absolute -bottom-40 -left-40 w-96 h-96 rounded-full opacity-10" style={{background: 'radial-gradient(circle, #00205A 0%, transparent 70%)'}}></div>
+            </div>
+            <div className="glass-card p-5 sm:p-8 rounded-2xl shadow-xl w-full max-w-md animate-fade-in relative border border-white/50">
+              <div className="text-center mb-8">
+                <img src="/thrive365-logo.webp" alt="Thrive 365 Labs" className="h-12 mx-auto mb-4" />
+                <h1 className="text-xl font-semibold text-gray-900">Reset Password</h1>
+                <p className="text-gray-500 mt-1 text-sm">Enter your email to request a reset</p>
+              </div>
+              <form onSubmit={handleForgotPassword} className="space-y-5">
+                {resetMessage && (
+                  <div className={`flex items-center gap-3 p-4 rounded-xl text-sm border ${resetMessage.includes('Error') ? 'bg-danger-50 text-danger-600 border-red-100' : 'bg-success-50 text-success-600 border-green-100'}`}>
+                    {resetMessage}
+                  </div>
+                )}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Email Address</label>
+                  <input type="email" value={email} onChange={(e) => setEmail(e.target.value)}
+                    className="input-modern w-full px-4 py-3 text-gray-900 placeholder-gray-400" placeholder="you@thrive365labs.live" required />
+                </div>
+                <button type="submit" disabled={loading}
+                  className="btn-primary w-full text-white py-3.5 rounded-xl font-semibold text-sm disabled:opacity-50 flex items-center justify-center gap-2">
+                  {loading ? <><svg className="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg><span>Submitting...</span></> : 'Request Reset'}
+                </button>
+                <button type="button" onClick={() => setShowForgotPassword(false)}
+                  className="w-full text-gray-500 py-2 text-sm hover:text-primary-500 transition">
+                  Back to Sign In
+                </button>
+              </form>
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div className="min-h-screen flex items-center justify-center p-4 relative">
+          <div className="absolute inset-0 overflow-hidden pointer-events-none">
+            <div className="absolute -top-40 -right-40 w-80 h-80 rounded-full opacity-20" style={{background: 'radial-gradient(circle, #045E9F 0%, transparent 70%)'}}></div>
+            <div className="absolute -bottom-40 -left-40 w-96 h-96 rounded-full opacity-10" style={{background: 'radial-gradient(circle, #00205A 0%, transparent 70%)'}}></div>
+          </div>
+          <div className="glass-card p-5 sm:p-8 rounded-2xl shadow-xl w-full max-w-md animate-fade-in relative border border-white/50">
+            <div className="text-center mb-8">
+              <img src="/thrive365-logo.webp" alt="Thrive 365 Labs" className="h-12 mx-auto mb-4" />
+              <h1 className="text-xl font-semibold text-gray-900">Welcome Back</h1>
+              <p className="text-gray-500 mt-1 text-sm">Sign in to access your portals</p>
+            </div>
+            <form onSubmit={handleSubmit} className="space-y-5">
+              {error && (
+                <div className="flex items-center gap-3 bg-danger-50 text-danger-600 p-4 rounded-xl text-sm border border-red-100">
+                  <svg className="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                  <span>{error}</span>
+                </div>
+              )}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Email Address</label>
+                <input type="email" value={email} onChange={(e) => setEmail(e.target.value)}
+                  className="input-modern w-full px-4 py-3 text-gray-900 placeholder-gray-400" placeholder="you@thrive365labs.live" required />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Password</label>
+                <input type="password" value={password} onChange={(e) => setPassword(e.target.value)}
+                  className="input-modern w-full px-4 py-3 text-gray-900 placeholder-gray-400" placeholder="Enter your password" required />
+              </div>
+              <button type="submit" disabled={loading}
+                className="btn-primary w-full text-white py-3.5 rounded-xl font-semibold text-sm disabled:opacity-50 flex items-center justify-center gap-2">
+                {loading ? <><svg className="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg><span>Signing in...</span></> : 'Sign In'}
+              </button>
+              <button type="button" onClick={() => setShowForgotPassword(true)}
+                className="w-full text-gray-500 py-2 text-sm hover:text-primary-500 transition">
+                Forgot your password?
+              </button>
+            </form>
+            <div className="mt-8 pt-6 border-t border-gray-100 text-center">
+              <p className="text-xs text-gray-400">&copy; 2026 Thrive 365 Labs. All rights reserved.</p>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // Feedback Modal Component
+    const FeedbackModal = ({ isOpen, onClose, user, token }) => {
+      const [type, setType] = useState('bug');
+      const [subject, setSubject] = useState('');
+      const [description, setDescription] = useState('');
+      const [submitting, setSubmitting] = useState(false);
+      const [submitted, setSubmitted] = useState(false);
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        setSubmitting(true);
+        try {
+          await fetch('/api/feedback', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${token}`
+            },
+            body: JSON.stringify({
+              type,
+              subject,
+              description,
+              userEmail: user.email,
+              userName: user.name
+            })
+          });
+          setSubmitted(true);
+          setTimeout(() => {
+            onClose();
+            setSubmitted(false);
+            setType('bug');
+            setSubject('');
+            setDescription('');
+          }, 2000);
+        } catch (err) {
+          console.error('Error submitting feedback:', err);
+        }
+        setSubmitting(false);
+      };
+
+      if (!isOpen) return null;
+
+      return (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg animate-fade-in">
+            <div className="p-6 border-b border-gray-100">
+              <div className="flex justify-between items-center">
+                <h2 className="text-xl font-bold text-accent">Submit Feedback</h2>
+                <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+              </div>
+            </div>
+            {submitted ? (
+              <div className="p-8 text-center">
+                <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <svg className="w-8 h-8 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"/></svg>
+                </div>
+                <h3 className="text-lg font-semibold text-gray-800">Thank You!</h3>
+                <p className="text-gray-500 mt-2">Your feedback has been submitted to our team.</p>
+              </div>
+            ) : (
+              <form onSubmit={handleSubmit} className="p-6 space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Type</label>
+                  <div className="flex gap-3">
+                    <button type="button" onClick={() => setType('bug')}
+                      className={`flex-1 py-2.5 px-4 rounded-lg border-2 text-sm font-medium transition ${type === 'bug' ? 'border-red-500 bg-red-50 text-red-700' : 'border-gray-200 text-gray-600 hover:border-gray-300'}`}>
+                      Bug Report
+                    </button>
+                    <button type="button" onClick={() => setType('feature')}
+                      className={`flex-1 py-2.5 px-4 rounded-lg border-2 text-sm font-medium transition ${type === 'feature' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-200 text-gray-600 hover:border-gray-300'}`}>
+                      Feature Request
+                    </button>
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Subject</label>
+                  <input type="text" value={subject} onChange={(e) => setSubject(e.target.value)}
+                    className="input-modern w-full px-4 py-3 text-gray-900" placeholder={type === 'bug' ? 'Brief description of the issue' : 'Brief description of the feature'} required />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Description</label>
+                  <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows="4"
+                    className="input-modern w-full px-4 py-3 text-gray-900 resize-none" placeholder={type === 'bug' ? 'Steps to reproduce, expected behavior, etc.' : 'Describe the feature and how it would help'} required />
+                </div>
+                <div className="flex gap-3 pt-2">
+                  <button type="button" onClick={onClose}
+                    className="flex-1 py-3 px-4 rounded-xl border border-gray-200 text-gray-600 font-medium hover:bg-gray-50 transition">
+                    Cancel
+                  </button>
+                  <button type="submit" disabled={submitting}
+                    className="flex-1 btn-primary py-3 px-4 rounded-xl text-white font-medium disabled:opacity-50">
+                    {submitting ? 'Submitting...' : 'Submit'}
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      );
+    };
+
+    // Portal Hub - Landing page after login showing available portals
+    const PortalHub = ({ user, token, onLogout }) => {
+      const [showFeedbackModal, setShowFeedbackModal] = useState(false);
+      const isAdmin = user.role === 'admin'; // Super Admin
+      const isManager = user.isManager && !isAdmin; // Manager (limited admin access)
+      const isTeamMember = user.role === 'user';
+      const isVendor = user.role === 'vendor';
+      const isClient = user.role === 'client';
+
+      // Build list of available portals based on permissions
+      const availablePortals = [];
+
+      // Admin Hub - super admins, managers, or users with hasAdminHubAccess
+      if (isAdmin || isManager || user.hasAdminHubAccess) {
+        availablePortals.push({
+          id: 'admin',
+          name: 'Admin Hub',
+          description: isManager
+            ? 'Service portal management (limited access)'
+            : 'Central administration, user management, and service portal',
+          icon: Icons.admin,
+          color: 'from-primary-500 to-primary-700',
+          path: '/admin'
+        });
+      }
+
+      // Implementations App - admins, users with hasImplementationsAccess, or team members with assigned projects
+      // Note: Clients are excluded even if they have assigned projects (those are for their portal timeline only)
+      if (!isClient && (isAdmin || user.hasImplementationsAccess || (user.assignedProjects && user.assignedProjects.length > 0))) {
+        availablePortals.push({
+          id: 'implementations',
+          name: 'Launch',
+          description: 'Project tracking, client onboarding, and implementation management',
+          icon: Icons.implementation,
+          color: 'from-purple-500 to-purple-700',
+          path: '/launch'
+        });
+      }
+
+      // Service Portal - super admins, users with hasServicePortalAccess, or vendors (NOT managers)
+      if (isAdmin || user.hasServicePortalAccess || isVendor) {
+        availablePortals.push({
+          id: 'service',
+          name: 'Service Portal',
+          description: 'Submit and track service reports for field operations',
+          icon: Icons.service,
+          color: 'from-success-500 to-success-600',
+          path: '/service-portal'
+        });
+      }
+
+      // Client Portal Admin - super admins, managers, or users with hasClientPortalAdminAccess
+      if (isAdmin || isManager || user.hasClientPortalAdminAccess) {
+        availablePortals.push({
+          id: 'clientPortalAdmin',
+          name: 'Client Portal Admin',
+          description: 'Manage client portal content, settings, and communications',
+          icon: Icons.clientPortal,
+          color: 'from-warning-500 to-warning-600',
+          path: '/portal'
+        });
+      }
+
+      // Client Portal - for clients only
+      if (isClient && user.slug) {
+        availablePortals.push({
+          id: 'clientPortal',
+          name: 'My Portal',
+          description: `Access your practice portal: ${user.practiceName || 'Your Practice'}`,
+          icon: Icons.portal,
+          color: 'from-teal-500 to-teal-600',
+          path: `/portal/${user.slug}`
+        });
+      }
+
+      // Knowledge Hub - visible to all users (content filtered by permissions)
+      availablePortals.push({
+        id: 'knowledge',
+        name: 'Knowledge Hub',
+        description: isClient ? 'Guides and documentation for your client portal' : isVendor ? 'Service documentation and guides' : 'Guides, tutorials, and documentation for using the Thrive 365 Labs Portal Hub',
+        icon: Icons.knowledge,
+        color: 'from-indigo-500 to-indigo-700',
+        path: '/knowledge'
+      });
+
+      const openPortal = (path) => {
+        localStorage.setItem('portal_token', token);
+        localStorage.setItem('portal_user', JSON.stringify(user));
+        localStorage.setItem('admin_token', token);
+        localStorage.setItem('admin_user', JSON.stringify(user));
+        window.location.href = path;
+      };
+
+      return (
+        <div className="min-h-screen">
+          {/* Header */}
+          <header className="bg-white/80 backdrop-blur-sm border-b border-gray-100 sticky top-0 z-10">
+            <div className="max-w-6xl mx-auto px-6 py-4 flex justify-between items-center">
+              <div className="flex items-center gap-4">
+                <img src="/thrive365-logo.webp" alt="Thrive 365 Labs" className="h-10" />
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h1 className="text-xl font-bold text-accent">Portal Hub</h1>
+                    <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${
+                      isAdmin ? 'bg-purple-100 text-purple-700' :
+                      isManager ? 'bg-indigo-100 text-indigo-700' :
+                      isClient ? 'bg-blue-100 text-blue-700' :
+                      isVendor ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'
+                    }`}>{
+                      isAdmin ? 'Super Admin' :
+                      isManager ? 'Manager' :
+                      isClient ? 'Client' :
+                      isVendor ? 'Vendor' : 'Team Member'
+                    }</span>
+                  </div>
+                  <p className="text-sm text-gray-500">Welcome back, {user.practiceName || user.name}</p>
+                </div>
+              </div>
+              <button onClick={onLogout}
+                className="flex items-center gap-2 px-4 py-2 text-gray-600 hover:text-red-600 hover:bg-red-50 rounded-lg transition">
+                {Icons.logout}
+                <span className="hidden sm:inline">Sign Out</span>
+              </button>
+            </div>
+          </header>
+
+          {/* Main Content */}
+          <main className="max-w-6xl mx-auto px-4 py-8">
+            {/* Dynamic Banner Header */}
+            <div className="relative rounded-2xl overflow-hidden shadow-lg mb-10" style={{minHeight: '160px'}}>
+              <div className="absolute inset-0 bg-cover bg-center" style={{backgroundImage: 'url(/banners/banner-admin.jpg)'}}></div>
+              <div className="absolute inset-0 bg-gradient-to-r from-primary-700/90 via-primary-600/70 to-transparent"></div>
+              <div className="relative p-5 sm:p-8 flex items-center min-h-[130px] sm:min-h-[160px]">
+                <div className="text-white">
+                  <h2 className="text-2xl sm:text-3xl font-bold drop-shadow-sm">Your Portals</h2>
+                  <p className="mt-2 text-white/80 text-sm">Select a portal to access Thrive 365 Labs services</p>
+                </div>
+              </div>
+            </div>
+
+            {availablePortals.length > 0 ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
+                {availablePortals.map((portal, idx) => (
+                  <button
+                    key={portal.id}
+                    onClick={() => openPortal(portal.path)}
+                    className="portal-card bg-white rounded-2xl shadow-lg p-4 sm:p-6 text-left hover:shadow-xl animate-fade-in"
+                    style={{ animationDelay: `${idx * 0.1}s` }}
+                  >
+                    <div className={`w-16 h-16 rounded-xl bg-gradient-to-br ${portal.color} flex items-center justify-center text-white mb-4`}>
+                      {portal.icon}
+                    </div>
+                    <h3 className="text-xl font-bold text-accent mb-2">{portal.name}</h3>
+                    <p className="text-gray-600 text-sm">{portal.description}</p>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="text-center bg-white rounded-2xl shadow-lg p-12">
+                <div className="w-20 h-20 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <svg className="w-10 h-10 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                  </svg>
+                </div>
+                <h3 className="text-xl font-bold text-gray-700 mb-2">No Portals Available</h3>
+                <p className="text-gray-500">Contact your administrator to request access to portals.</p>
+              </div>
+            )}
+
+            {/* User Info Card */}
+            <div className="mt-12 bg-white rounded-2xl shadow-lg p-6">
+              <h3 className="font-bold text-accent mb-4">Your Account</h3>
+              <div className="grid md:grid-cols-3 gap-4 text-sm">
+                <div>
+                  <p className="text-gray-500">Name</p>
+                  <p className="font-medium">{user.name}</p>
+                </div>
+                <div>
+                  <p className="text-gray-500">Email</p>
+                  <p className="font-medium">{user.email}</p>
+                </div>
+                <div>
+                  <p className="text-gray-500">Role</p>
+                  <p className="font-medium capitalize">
+                    {isAdmin ? 'Super Admin' : isManager ? 'Manager' : user.role === 'user' ? 'Team Member' : user.role === 'vendor' ? 'External Vendor' : user.role === 'client' ? 'Client' : user.role}
+                  </p>
+                </div>
+              </div>
+              {isVendor && user.assignedClients && user.assignedClients.length > 0 && (
+                <div className="mt-4 pt-4 border-t">
+                  <p className="text-gray-500 text-sm mb-2">Assigned Clients</p>
+                  <div className="flex flex-wrap gap-2">
+                    {user.assignedClients.map((client, idx) => (
+                      <span key={idx} className="px-3 py-1 bg-green-100 text-green-700 rounded-full text-sm">{client}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </main>
+
+          {/* Footer */}
+          <footer className="text-center py-6 text-gray-500 text-sm">
+            <p>&copy; 2026 Thrive 365 Labs. All rights reserved.</p>
+            <div className="flex justify-center gap-4 mt-2">
+              {!isClient && !isVendor && (
+                <a href="/changelog" className="text-primary-500 hover:underline text-xs">View Changelog</a>
+              )}
+              <button onClick={() => setShowFeedbackModal(true)} className="text-primary-500 hover:underline text-xs">
+                Report Bug or Request Feature
+              </button>
+            </div>
+          </footer>
+
+          {/* Feedback Modal */}
+          <FeedbackModal
+            isOpen={showFeedbackModal}
+            onClose={() => setShowFeedbackModal(false)}
+            user={user}
+            token={token}
+          />
+        </div>
+      );
+    };
+
+    // Password Change Modal Component
+    const PasswordChangeModal = ({ isOpen, isRequired, token, user, onPasswordChanged, onCancel }) => {
+      const [currentPassword, setCurrentPassword] = useState('');
+      const [newPassword, setNewPassword] = useState('');
+      const [confirmPassword, setConfirmPassword] = useState('');
+      const [error, setError] = useState('');
+      const [success, setSuccess] = useState(false);
+      const [loading, setLoading] = useState(false);
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        setError('');
+
+        if (newPassword !== confirmPassword) {
+          setError('Passwords do not match');
+          return;
+        }
+        if (newPassword.length < 8) {
+          setError('Password must be at least 8 characters');
+          return;
+        }
+
+        setLoading(true);
+        try {
+          const response = await fetch('/api/auth/change-password', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${token}`
+            },
+            body: JSON.stringify({
+              currentPassword: isRequired ? undefined : currentPassword,
+              newPassword
+            })
+          });
+          const result = await response.json();
+
+          if (result.error) {
+            setError(result.error);
+          } else {
+            setSuccess(true);
+            setTimeout(() => {
+              // Update local user to remove requirePasswordChange
+              const updatedUser = { ...user, requirePasswordChange: false };
+              localStorage.setItem('unified_user', JSON.stringify(updatedUser));
+              localStorage.setItem('admin_user', JSON.stringify(updatedUser));
+              localStorage.setItem('portal_user', JSON.stringify(updatedUser));
+              onPasswordChanged(updatedUser);
+            }, 1500);
+          }
+        } catch (err) {
+          setError('Connection error. Please try again.');
+        }
+        setLoading(false);
+      };
+
+      if (!isOpen) return null;
+
+      return (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md animate-fade-in">
+            <div className="p-6 border-b border-gray-100">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 bg-primary-100 rounded-full flex items-center justify-center">
+                  <svg className="w-6 h-6 text-primary-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/>
+                  </svg>
+                </div>
+                <div>
+                  <h2 className="text-xl font-bold text-accent">
+                    {isRequired ? 'Create New Password' : 'Change Password'}
+                  </h2>
+                  {isRequired && (
+                    <p className="text-sm text-gray-500">A temporary password was assigned. Please create your own password.</p>
+                  )}
+                </div>
+              </div>
+            </div>
+            {success ? (
+              <div className="p-8 text-center">
+                <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <svg className="w-8 h-8 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"/>
+                  </svg>
+                </div>
+                <h3 className="text-lg font-semibold text-gray-800">Password Changed!</h3>
+                <p className="text-gray-500 mt-2">Redirecting you to your portals...</p>
+              </div>
+            ) : (
+              <form onSubmit={handleSubmit} className="p-6 space-y-4">
+                {error && (
+                  <div className="flex items-center gap-3 bg-danger-50 text-danger-600 p-4 rounded-xl text-sm border border-red-100">
+                    <svg className="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+                    </svg>
+                    <span>{error}</span>
+                  </div>
+                )}
+
+                {!isRequired && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Current Password</label>
+                    <input type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)}
+                      className="input-modern w-full px-4 py-3 text-gray-900" placeholder="Enter current password" required />
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">New Password</label>
+                  <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)}
+                    className="input-modern w-full px-4 py-3 text-gray-900" placeholder="Enter new password (min. 8 characters)" required />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Confirm New Password</label>
+                  <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)}
+                    className="input-modern w-full px-4 py-3 text-gray-900" placeholder="Confirm new password" required />
+                </div>
+
+                <div className="flex gap-3 pt-2">
+                  {!isRequired && (
+                    <button type="button" onClick={onCancel}
+                      className="flex-1 py-3 px-4 rounded-xl border border-gray-200 text-gray-600 font-medium hover:bg-gray-50 transition">
+                      Cancel
+                    </button>
+                  )}
+                  <button type="submit" disabled={loading}
+                    className={`${isRequired ? 'w-full' : 'flex-1'} btn-primary py-3 px-4 rounded-xl text-white font-medium disabled:opacity-50`}>
+                    {loading ? 'Changing...' : 'Set New Password'}
+                  </button>
+                </div>
+
+                {isRequired && (
+                  <p className="text-xs text-gray-400 text-center mt-4">
+                    You must create a new password before continuing. Contact your administrator if you need assistance.
+                  </p>
+                )}
+              </form>
+            )}
+          </div>
+        </div>
+      );
+    };
+
+    // Main App Component
+    const App = () => {
+      const [token, setToken] = useState(localStorage.getItem('unified_token') || localStorage.getItem('admin_token'));
+      const [user, setUser] = useState(() => {
+        const stored = localStorage.getItem('unified_user') || localStorage.getItem('admin_user');
+        return stored ? JSON.parse(stored) : null;
+      });
+      const [showPasswordChange, setShowPasswordChange] = useState(false);
+
+      const handleLogin = (newToken, newUser) => {
+        setToken(newToken);
+        setUser(newUser);
+        // Check if password change is required
+        if (newUser.requirePasswordChange) {
+          setShowPasswordChange(true);
+        }
+      };
+
+      const handleLogout = () => {
+        localStorage.clear();
+        setToken(null);
+        setUser(null);
+        setShowPasswordChange(false);
+      };
+
+      const handlePasswordChanged = (updatedUser) => {
+        setUser(updatedUser);
+        setShowPasswordChange(false);
+      };
+
+      if (!token || !user) {
+        return <LoginPage onLogin={handleLogin} />;
+      }
+
+      // Show password change modal if required
+      if (user.requirePasswordChange || showPasswordChange) {
+        return (
+          <>
+            <PasswordChangeModal
+              isOpen={true}
+              isRequired={user.requirePasswordChange}
+              token={token}
+              user={user}
+              onPasswordChanged={handlePasswordChanged}
+              onCancel={() => setShowPasswordChange(false)}
+            />
+            {/* Show dimmed portal hub behind if password change was initiated voluntarily */}
+            {!user.requirePasswordChange && <div className="opacity-50 pointer-events-none"><PortalHub user={user} token={token} onLogout={handleLogout} /></div>}
+          </>
+        );
+      }
+
+      return <PortalHub user={user} token={token} onLogout={handleLogout} />;
+    };
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

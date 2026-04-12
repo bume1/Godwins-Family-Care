@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Changelog - Thrive 365 Labs</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            primary: { 50: '#eff6ff', 500: '#045E9F', 600: '#0353a4', 700: '#00205A' },
+            accent: '#00205A'
+          },
+          fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] }
+        }
+      }
+    }
+  </script>
+  <style>
+    * { font-family: 'Inter', system-ui, sans-serif; }
+    body { background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 50%, #f1f5f9 100%); }
+  </style>
+</head>
+<body class="min-h-screen py-8 px-4">
+  <div id="root"></div>
+
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    // Static changelog entries (fallback for when DB is empty or unavailable)
+    const staticChangelog = [
+      {
+        id: 'static-274',
+        version: '2.7.4',
+        date: 'February 3, 2026',
+        isCurrent: false,
+        sections: [
+          { title: 'Security Fixes', color: 'red', items: [
+            'Removed debug endpoints that leaked user emails, names, and password hash info',
+            'Added authentication to /uploads static path and client documents endpoint',
+            'Added field whitelist on task updates to prevent property injection via API',
+            'Added field whitelist on service report and validation report updates',
+            'Randomized temporary passwords for admin resets (was predictable pattern)',
+            'Added XSS sanitization on client portal filesFormEmbed HTML injection',
+            'Locked signup endpoint behind admin authentication',
+            'Added startup warning when JWT_SECRET environment variable is not set',
+            'Added startup warning when HUBSPOT_WEBHOOK_SECRET is not configured',
+            'Added email format validation and password strength requirements on signup'
+          ]},
+          { title: 'Authorization & Access Control', color: 'red', items: [
+            'Enforced project-level write access (projectAccessLevels) on task mutations',
+            'Added requireAdmin middleware to project create and clone endpoints',
+            'Fixed admin login to accept users with hasAdminHubAccess permission flag',
+            'Team members endpoint now filters out client and vendor users',
+            'Case-insensitive email matching on all login endpoints (client, service, forgot-password)'
+          ]},
+          { title: 'Bug Fixes', color: 'red', items: [
+            'Fixed handleResponse in app.js to properly surface server error messages to users',
+            'Fixed task ID generation crash when project has UUID-based task IDs (NaN from Math.max)',
+            'Fixed CSV export note field using wrong property name (n.text vs n.content)',
+            'Fixed project clone leaking files, HubSpot IDs, and completion status from original',
+            'Fixed task deletion not cleaning up dangling dependency references',
+            'Fixed bulk update not validating subtask completion before marking task complete',
+            'Fixed password reset API response referencing undefined variable (duplicate field)',
+            'Fixed template listing crash when a template has undefined tasks array',
+            'Fixed inventory template update accepting null/undefined values',
+            'Fixed project status accepting arbitrary strings (now validates active/paused/completed)',
+            'Fixed project update allowing empty name and clientName values',
+            'Fixed task completion not auto-setting dateCompleted server-side',
+            'Fixed subtask showToClient defaulting to true instead of inheriting from parent task',
+            'Fixed new task stage selector showing all stages regardless of selected phase',
+            'Fixed loadTeamMembers not checking for error response before updating state'
+          ]},
+          { title: 'Frontend Stability', color: 'primary', items: [
+            'Added error checking to all major handlers: create, delete, clone, save, toggle, notes, files',
+            'Fixed stale closure bugs in 8 state updaters using functional updaters (setTasks prev => ...)',
+            'Added double-click protection on project creation',
+            'Added null guard in handleToggleComplete for missing task',
+            'Added array validation in loadTasks before setting state',
+            'All portals auto-redirect to login on expired token (401/403) instead of showing empty data',
+            'Logout now clears all 10 localStorage token keys across all portals consistently',
+            'Fixed React index-as-key anti-pattern in calendar, timeline, and changelog components'
+          ]},
+          { title: 'Performance & Reliability', color: 'primary', items: [
+            'Added 5-second TTL user cache to reduce O(n) database lookups on every authenticated request',
+            'Added 30-second in-memory cache for project slug lookups in root-level catch-all route',
+            'Changed root-level slug redirects from 301 (permanent) to 302 (temporary) to prevent browser caching',
+            'Moved legacy hubspotDealId migration from every getProjects() call to one-time startup',
+            'Increased activity log capacity from 500 to 2000 entries with overflow warning',
+            'Added concurrent upload limiter (max 5) to prevent memory exhaustion from parallel file uploads',
+            'Added global Express error middleware and process-level uncaughtException/unhandledRejection handlers',
+            'Fixed date parsing year threshold to use dynamic current-year reference instead of fixed 2050 cutoff',
+            'Added logging when inventory data is auto-wrapped to non-batch format for debugging visibility'
+          ]},
+          { title: 'URL Stability', color: 'primary', items: [
+            'Client portal slug changes now preserve old slugs in previousSlugs array',
+            'Project slug changes likewise track previous slugs for redirect lookups',
+            'Portal routes check previousSlugs and issue 302 redirects to updated URLs',
+            'Changed bulk delete from all-or-nothing to partial success with skipped task reporting'
+          ]}
+        ]
+      },
+      {
+        id: 'static-272',
+        version: '2.7.2',
+        date: 'January 20, 2026',
+        isCurrent: false,
+        sections: [
+          { title: 'Security Improvements', color: 'green', items: [
+            'New users created by Super Admin now require password change on first login',
+            'Manual password resets by Super Admin now force users to create their own password',
+            'Consistent password change enforcement across all user creation and reset flows'
+          ]}
+        ]
+      },
+      {
+        id: 'static-271',
+        version: '2.7.1',
+        date: 'January 19, 2026',
+        isCurrent: false,
+        sections: [
+          { title: 'New Features', color: 'primary', items: [
+            'Add Manager permissions to edit client details in Client Portal Admin',
+            'Client details edited by Managers sync with Admin Hub User Management',
+            'Enhanced Client Users page in Client Portal Admin with edit functionality'
+          ]},
+          { title: 'Improvements', color: 'green', items: [
+            'Managers can now update: Practice Name, Logo, HubSpot Company/Deal/Contact IDs',
+            'All client detail changes are logged in activity log'
+          ]},
+          { title: 'Planned Features (Future Rollout)', color: 'purple', items: [
+            'Customer Support Pipeline Enhancement: Hide HubSpot pipeline view and show only portal-submitted tickets',
+            'Benefits: Cleaner client experience, privacy, focused support view',
+            'See README.md "Future Features" section for implementation details'
+          ]}
+        ]
+      },
+      {
+        id: 'static-270',
+        version: '2.7.0',
+        date: 'January 2026',
+        sections: [
+          { title: 'Portal Enhancements', color: 'primary', items: [
+            'Add Knowledge Hub module to Portal Hub with guides and documentation',
+            'Add URL routing for portal deep linking',
+            'Add token fallback for seamless Portal Hub navigation across all apps'
+          ]},
+          { title: 'Service Portal Updates', color: 'primary', items: [
+            'Add PDF generation for service/validation reports',
+            'Enhanced service portal forms and workflows'
+          ]},
+          { title: 'HubSpot Integration', color: 'primary', items: [
+            'Add HubSpot chatbot to Live Chat tab in Customer Support',
+            'Add readable stage labels for HubSpot tickets',
+            'Add debug logging for HubSpot ticket fetch and deal ID support'
+          ]},
+          { title: 'Admin Hub Improvements', color: 'primary', items: [
+            'Simplify admin dashboard: rename to Quick Stats, keep only New Launches and Open Tickets',
+            'Add bulk password reset system with first-login change prompt',
+            'Add automatic changelog management system',
+            'Remove unused New Client checkbox from user management'
+          ]},
+          { title: 'Technical Improvements', color: 'green', items: [
+            'Add comprehensive changelog with HTML viewer and downloadable MD file',
+            'Remove blue icon boxes from login pages',
+            'Add /login route for unified login portal',
+            'Add granular permissions and validation reports'
+          ]}
+        ]
+      },
+      {
+        id: 'static-261',
+        version: '2.6.1',
+        date: 'January 19, 2026',
+        sections: [
+          { title: 'Navigation Improvements', color: 'primary', items: [
+            'Added "Portal Hub" navigation button to Admin Hub sidebar for quick access to main portal',
+            'Added "Portal Hub" navigation button to Service Portal sidebar',
+            'Added "Portal Hub" navigation button to Client Portal Admin sidebar (admin users only)',
+            'Added "Portal Hub" link to Launch Portal header'
+          ]},
+          { title: 'Bug Fixes', color: 'red', items: [
+            'Fixed sign-out button in Admin Hub not redirecting to universal login',
+            'Fixed sign-out button in Service Portal not redirecting to universal login',
+            'Fixed sign-out button in Client Portal not redirecting to universal login',
+            'Fixed sign-out button in Launch Portal not redirecting to universal login',
+            'Sign-out now properly clears all authentication tokens across portals',
+            'Fixed Client Portal Admin access for users with hasClientPortalAdminAccess permission'
+          ]}
+        ]
+      },
+      {
+        id: 'static-260',
+        version: '2.6.0',
+        date: 'January 19, 2026',
+        sections: [
+          { title: 'Customer Support Center', color: 'primary', items: [
+            'HubSpot ticket history integration - clients can view their support tickets',
+            'Three-tab interface: Ticket History, Submit Ticket, Live Chat',
+            'Service reports now visible as tickets with file attachments',
+            'Ticket status and pipeline stage tracking from HubSpot'
+          ]},
+          { title: 'Service Report HubSpot Integration', color: 'primary', items: [
+            'All service reports auto-push to HubSpot Ticket, Company, and Deal records',
+            'PDF attachments uploaded to HubSpot Files and linked to tickets',
+            'Enhanced tracking across CRM with full audit trail'
+          ]},
+          { title: 'Admin Hub Improvements', color: 'primary', items: [
+            'New "Inbox" page for bug reports, feature requests, and password resets',
+            'Dashboard metrics updated: "New Launches" shows active projects, "Open Tickets" shows pending feedback',
+            'Personalized welcome messages using practice name'
+          ]},
+          { title: 'Client Portal Updates', color: 'primary', items: [
+            'Inventory view simplified to show current stock levels only',
+            'Removed "Top Consumed Items" and "View History" from client view',
+            'Weekly inventory submission tracking with flags for overdue submissions'
+          ]},
+          { title: 'Feedback System', color: 'primary', items: [
+            '"Report Bug or Request Feature" link added to Portal Hub footer',
+            'Bug report and feature request form with type selection',
+            'Admin inbox for reviewing and resolving submitted feedback'
+          ]},
+          { title: 'Bug Fixes', color: 'red', items: [
+            'Fixed client portal crash caused by missing SVG icons',
+            'Fixed changelog button link (route was not configured)',
+            'Fixed main login footer branding text'
+          ]}
+        ]
+      },
+      {
+        id: 'static-250',
+        version: '2.5.0',
+        date: 'January 2026',
+        sections: [
+          { title: 'UI Modernization & Branding Update', color: 'primary', items: [
+            'Modern Design System with Inter font, refined color palette, glass-card effects',
+            'Dynamic Banner Headers on Admin Hub, Service Portal, and Client Portal dashboards',
+            'Streamlined Login Pages featuring only Thrive 365 Labs logo',
+            'Consistent Heroicons v2 with 1.75 stroke weight across all portals'
+          ]},
+          { title: 'Permission System Overhaul', color: 'primary', items: [
+            'Granular access flags: hasServicePortalAccess, hasAdminHubAccess, hasImplementationsAccess',
+            'Client Portal admin flag: hasClientPortalAdminAccess',
+            'Vendor role with assignedClients array for external service providers'
+          ]},
+          { title: 'Unified Login Portal', color: 'primary', items: [
+            'Central authentication at /login route',
+            'Portal Hub showing all accessible portals after login',
+            'Role-based access automatically determines available portals'
+          ]}
+        ]
+      },
+      {
+        id: 'static-240',
+        version: '2.4.0',
+        date: 'January 2026',
+        sections: [
+          { title: 'Service Portal Updates', color: 'primary', items: [
+            'Support categories for service type classification',
+            'HubSpot integration for service report syncing',
+            'Enhanced report filtering and search capabilities'
+          ]},
+          { title: 'Validation Reports', color: 'primary', items: [
+            'Phase 3 validation service report functionality',
+            'Training report submissions for technical users',
+            'Improved server-side signature verification'
+          ]}
+        ]
+      },
+      {
+        id: 'static-230',
+        version: '2.3.0',
+        date: 'December 2025',
+        sections: [
+          { title: 'Central Admin Hub', color: 'primary', items: [
+            'New dedicated admin interface at /admin-hub',
+            'Dashboard with user counts, project stats, service reports overview',
+            'Streamlined admin workflows with quick actions'
+          ]},
+          { title: 'Service Portal Launch', color: 'primary', items: [
+            'Dedicated portal for Field Service Engineers',
+            'Clinical Application Specialist workflow support',
+            'Comprehensive service report forms with digital signatures'
+          ]}
+        ]
+      },
+      {
+        id: 'static-220',
+        version: '2.2.0',
+        date: 'December 2025',
+        sections: [
+          { title: 'User Management', color: 'primary', items: [
+            'Floating modal form for user creation/editing',
+            'Client selection restricted to system clients only',
+            'Implementation badge shows active for users with assigned projects'
+          ]}
+        ]
+      },
+      {
+        id: 'static-200',
+        version: '2.0.0',
+        date: 'Initial Release',
+        sections: [
+          { title: 'Core Features', color: 'primary', items: [
+            'Multi-project launch tracker with template system',
+            'HubSpot CRM integration for projects and clients',
+            'Google Drive integration for document management',
+            'Individual client portals with unique slugs',
+            'Task management with status tracking',
+            'Client inventory submission system'
+          ]}
+        ]
+      }
+    ];
+
+    // Compare two semver version strings (returns >0 if a > b)
+    function compareVersions(a, b) {
+      const pa = (a || '0').replace(/^Version\s+/i, '').split('.').map(n => parseInt(n) || 0);
+      const pb = (b || '0').replace(/^Version\s+/i, '').split('.').map(n => parseInt(n) || 0);
+      for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+        const diff = (pa[i] || 0) - (pb[i] || 0);
+        if (diff !== 0) return diff;
+      }
+      return 0;
+    }
+
+    // Strip "Version " prefix if present (fixes "Version Version X.Y.Z" bug)
+    function cleanVersion(v) {
+      return (v || '').replace(/^Version\s+/i, '');
+    }
+
+    const App = () => {
+      const [changelog, setChangelog] = useState([]);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        loadChangelog();
+      }, []);
+
+      const loadChangelog = async () => {
+        try {
+          const response = await fetch('/api/changelog');
+          const dynamicEntries = await response.json();
+
+          // Normalize all version strings (strip "Version " prefix)
+          dynamicEntries.forEach(e => { e.version = cleanVersion(e.version); });
+
+          // Merge dynamic entries with static (dynamic takes priority by version)
+          const dynamicVersions = new Set(dynamicEntries.map(e => e.version));
+          const filteredStatic = staticChangelog.filter(s => !dynamicVersions.has(s.version));
+
+          // Combine and sort by version descending (newest first)
+          const combined = [...dynamicEntries, ...filteredStatic];
+          combined.sort((a, b) => compareVersions(b.version, a.version));
+
+          // Mark the first one as current
+          combined.forEach((c, i) => { c.isCurrent = (i === 0); });
+
+          setChangelog(combined);
+        } catch (err) {
+          setChangelog(staticChangelog);
+        }
+        setLoading(false);
+      };
+
+      const currentVersion = changelog.find(c => c.isCurrent);
+
+      return (
+        <div className="max-w-4xl mx-auto">
+          {/* Header */}
+          <div className="bg-gradient-to-r from-primary-500 to-primary-700 text-white p-8 rounded-2xl shadow-lg mb-8">
+            <div className="flex items-center justify-between flex-wrap gap-4">
+              <div>
+                <h1 className="text-3xl font-bold">App Changelog</h1>
+                <p className="mt-2 text-white/80">Complete update history & release notes</p>
+                {currentVersion && (
+                  <p className="mt-1 text-white/60 text-sm">Current: v{currentVersion.version}</p>
+                )}
+              </div>
+              <div className="flex gap-3">
+                <a href="/login" className="bg-white text-primary-600 px-4 py-2 rounded-lg font-medium text-sm hover:bg-gray-100 transition">
+                  Back to App
+                </a>
+              </div>
+            </div>
+          </div>
+
+          {/* Loading */}
+          {loading ? (
+            <div className="flex items-center justify-center py-20">
+              <div className="animate-spin rounded-full h-10 w-10 border-[3px] border-primary-500 border-t-transparent"></div>
+            </div>
+          ) : (
+            <>
+              {/* Changelog Entries */}
+              {changelog.map((entry) => (
+                <div key={entry.id || entry.version} className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 mb-6">
+                  <div className="flex items-center gap-3 mb-4">
+                    {entry.isCurrent && (
+                      <span className="bg-green-100 text-green-700 px-3 py-1 rounded-full text-sm font-semibold">Current</span>
+                    )}
+                    <h2 className="text-xl font-bold text-gray-900">Version {entry.version} - {entry.date}</h2>
+                  </div>
+
+                  <div className="space-y-4">
+                    {entry.sections.map((section, sIdx) => (
+                      <div key={`${entry.version}-${sIdx}`}>
+                        <h3 className={`font-semibold mb-2 ${
+                          section.color === 'red' ? 'text-red-600' :
+                          section.color === 'green' || section.color === 'success' ? 'text-green-600' :
+                          section.color === 'purple' ? 'text-purple-600' :
+                          section.color === 'orange' ? 'text-orange-600' :
+                          section.color === 'blue' ? 'text-blue-600' :
+                          section.color === 'gray' ? 'text-gray-600' :
+                          'text-primary-600'
+                        }`}>
+                          {section.title}
+                        </h3>
+                        <ul className="text-gray-600 text-sm space-y-1 ml-4">
+                          {section.items.map((item, iIdx) => (
+                            <li key={`${entry.version}-${sIdx}-${iIdx}`}>• {item}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+
+          {/* Footer */}
+          <div className="text-center text-gray-500 text-sm py-4">
+            <p>Last Updated: {currentVersion ? `${currentVersion.date} - v${currentVersion.version}` : 'February 2026'}</p>
+            <p className="mt-1">&copy; 2026 Thrive 365 Labs. All rights reserved.</p>
+          </div>
+        </div>
+      );
+    };
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
