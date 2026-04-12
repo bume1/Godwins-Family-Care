@@ -17,8 +17,7 @@ const { sendEmail, sendBulkEmail, sendBatchEmails } = require('./email');
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: config.MAX_FILE_SIZE }i
-  
+  limits: { fileSize: config.MAX_FILE_SIZE }
 });
 
 // Concurrent upload limiter to prevent memory exhaustion (Gotcha #12)

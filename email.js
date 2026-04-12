@@ -1,11 +1,26 @@
 const { Resend } = require('resend');
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+let _resend = null;
+function getResend() {
+  if (!_resend) {
+    const key = process.env.RESEND_API_KEY;
+    if (!key) {
+      console.warn('[EMAIL] RESEND_API_KEY not set — email sending is disabled.');
+      return null;
+    }
+    _resend = new Resend(key);
+  }
+  return _resend;
+}
 
 const FROM_EMAIL = process.env.EMAIL_FROM_ADDRESS || 'no-reply@thrive365labs.live';
 const FROM_NAME = 'Thrive 365 Labs';
 
 async function sendEmail(to, subject, body, options = {}) {
+  const resend = getResend();
+  if (!resend) {
+    return { success: false, error: 'Email not configured (missing RESEND_API_KEY)' };
+  }
   try {
     const payload = {
       from: `${FROM_NAME} <${FROM_EMAIL}>`,
@@ -37,6 +52,16 @@ async function sendBulkEmail(recipients, subject, body, options = {}) {
     const result = await sendEmail(to, subject, body, options);
     const results = [{ email: to, ...result }];
     return { sent: result.success ? 1 : 0, failed: result.success ? 0 : 1, total: 1, results };
+  }
+
+  const resend = getResend();
+  if (!resend) {
+    const results = recipients.map(r => ({
+      email: typeof r === 'string' ? r : r.email,
+      success: false,
+      error: 'Email not configured (missing RESEND_API_KEY)'
+    }));
+    return { sent: 0, failed: recipients.length, total: recipients.length, results };
   }
 
   const fromAddress = `${FROM_NAME} <${FROM_EMAIL}>`;
@@ -103,6 +128,16 @@ async function sendBatchEmails(emailPayloads) {
     const p = emailPayloads[0];
     const result = await sendEmail(p.to, p.subject, p.text || p.body || '', { htmlBody: p.html || p.htmlBody });
     return { sent: result.success ? 1 : 0, failed: result.success ? 0 : 1, total: 1, results: [{ email: p.to, ...result }] };
+  }
+
+  const resend = getResend();
+  if (!resend) {
+    const results = emailPayloads.map(p => ({
+      email: p.to,
+      success: false,
+      error: 'Email not configured (missing RESEND_API_KEY)'
+    }));
+    return { sent: 0, failed: emailPayloads.length, total: emailPayloads.length, results };
   }
 
   const fromAddress = `${FROM_NAME} <${FROM_EMAIL}>`;
