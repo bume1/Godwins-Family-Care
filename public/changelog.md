@@ -4,6 +4,12 @@
 
 ---
 
+### Version 3.0.1 - April 12, 2026
+
+#### Changes
+- Prevent email sending from crashing the application on startup
+
+
 ### Version 3.22.5 - March 3, 2026
 
 #### Changes
