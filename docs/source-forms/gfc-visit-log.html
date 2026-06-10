@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Godwins Family Care | Caregiver Visit Daily Note</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; padding: 0; background: #FAF7F2; }
+</style>
+<!-- GODWINS FAMILY CARE — Caregiver Visit Daily Note Record -->
+<!-- Standalone page — upload to hosting or share direct link -->
+
+<style>
+  .gfc-visit-form * { box-sizing: border-box; margin: 0; padding: 0; }
+  .gfc-visit-form {
+    font-family: 'DM Sans', sans-serif;
+    color: #1a2a32;
+    font-size: 15px;
+    line-height: 1.5;
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 0 0 40px;
+  }
+  .gfc-form-header {
+    background: #033D50;
+    color: #fff;
+    padding: 28px 24px 24px;
+    text-align: center;
+    border-radius: 12px 12px 0 0;
+  }
+  .gfc-form-header h2 {
+    font-family: 'Playfair Display', serif;
+    font-size: 22px;
+    font-weight: 700;
+    margin: 0;
+    line-height: 1.3;
+  }
+  .gfc-form-header h2 span { color: #F5CD85; }
+  .gfc-form-header .gfc-sub {
+    font-size: 12px;
+    color: rgba(255,255,255,0.55);
+    margin-top: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+  }
+  .gfc-section {
+    background: #fff;
+    border-radius: 12px;
+    margin-bottom: 16px;
+    overflow: hidden;
+    border: 1px solid rgba(3,61,80,0.12);
+  }
+  .gfc-section:first-of-type { border-radius: 0 0 12px 12px; }
+  .gfc-section-head {
+    background: #033D50;
+    color: #fff;
+    padding: 14px 20px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+  }
+  .gfc-section-head h3 {
+    font-family: 'Playfair Display', serif;
+    font-size: 16px;
+    font-weight: 600;
+    flex: 1;
+    margin: 0;
+  }
+  .gfc-badge {
+    background: #F5CD85;
+    color: #033D50;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 3px 10px;
+    border-radius: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+  }
+  .gfc-toggle {
+    color: #F5CD85;
+    font-size: 18px;
+    transition: transform 0.2s;
+    line-height: 1;
+  }
+  .gfc-section.collapsed .gfc-toggle { transform: rotate(-90deg); }
+  .gfc-section.collapsed .gfc-section-body { display: none; }
+  .gfc-section-body { padding: 20px; }
+  .gfc-visit-form label.gfc-label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    color: #033D50;
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .gfc-visit-form .gfc-req { color: #c0392b; }
+  .gfc-visit-form input[type="text"],
+  .gfc-visit-form input[type="date"],
+  .gfc-visit-form input[type="time"],
+  .gfc-visit-form select,
+  .gfc-visit-form textarea {
+    width: 100%;
+    padding: 12px 14px;
+    border: 1px solid rgba(3,61,80,0.12);
+    border-radius: 8px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 15px;
+    color: #1a2a32;
+    background: #FAF7F2;
+    margin-bottom: 16px;
+    -webkit-appearance: none;
+    appearance: none;
+    line-height: 1.5;
+  }
+  .gfc-visit-form input:focus,
+  .gfc-visit-form select:focus,
+  .gfc-visit-form textarea:focus {
+    outline: none;
+    border-color: #033D50;
+    box-shadow: 0 0 0 3px rgba(3,61,80,0.08);
+  }
+  .gfc-visit-form textarea { resize: vertical; min-height: 80px; }
+  .gfc-field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 480px) { .gfc-field-row { grid-template-columns: 1fr; } }
+  .gfc-helper { font-size: 12px; color: #5a7080; margin: -10px 0 16px; line-height: 1.4; }
+  .gfc-task-group-label {
+    font-size: 12px; font-weight: 600; color: #c9a44a;
+    text-transform: uppercase; letter-spacing: 0.8px;
+    margin: 20px 0 10px; padding-bottom: 6px;
+    border-bottom: 1px solid rgba(3,61,80,0.12);
+  }
+  .gfc-task-group-label:first-child { margin-top: 0; }
+  .gfc-task-list { display: flex; flex-direction: column; gap: 2px; }
+  .gfc-task-item { border-radius: 8px; }
+  .gfc-task-item input[type="checkbox"] { display: none; }
+  .gfc-task-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 11px 12px; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    border-radius: 8px; transition: background 0.1s;
+  }
+  .gfc-task-row:active { background: rgba(3,61,80,0.03); }
+  .gfc-task-check {
+    width: 24px; height: 24px;
+    border: 2px solid rgba(3,61,80,0.15);
+    border-radius: 6px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.15s; background: #fff;
+  }
+  .gfc-task-item input:checked ~ .gfc-task-row .gfc-task-check { background: #033D50; border-color: #033D50; }
+  .gfc-task-item input:checked ~ .gfc-task-row .gfc-task-check::after { content: '\2713'; color: #F5CD85; font-size: 14px; font-weight: 700; }
+  .gfc-task-label { font-size: 14px; color: #1a2a32; flex: 1; line-height: 1.4; }
+  .gfc-task-detail { display: none; padding: 0 12px 12px 48px; }
+  .gfc-task-detail textarea { min-height: 48px; font-size: 13px; margin-bottom: 0; padding: 10px 12px; }
+  .gfc-task-item input:checked ~ .gfc-task-detail { display: block; }
+  .gfc-chip-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+  .gfc-chip {
+    display: inline-flex; align-items: center; padding: 9px 16px;
+    border-radius: 22px; border: 1.5px solid rgba(3,61,80,0.15);
+    font-size: 13px; font-weight: 500; color: #1a2a32; background: #fff;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+    transition: all 0.15s; user-select: none;
+  }
+  .gfc-chip input { display: none; }
+  .gfc-chip.selected { background: #033D50; color: #fff; border-color: #033D50; }
+  .gfc-chip.gfc-safety.selected { background: #c0392b; border-color: #c0392b; color: #fff; }
+  .gfc-chip.gfc-instruction.selected { background: #1a6b52; border-color: #1a6b52; color: #fff; }
+  .gfc-sat-row { display: flex; gap: 12px; margin-bottom: 16px; }
+  .gfc-sat-btn {
+    flex: 1; padding: 16px 12px; border-radius: 10px;
+    border: 2px solid rgba(3,61,80,0.12); text-align: center;
+    font-size: 15px; font-weight: 600; cursor: pointer;
+    -webkit-tap-highlight-color: transparent; transition: all 0.15s;
+    background: #fff; user-select: none; font-family: 'DM Sans', sans-serif;
+  }
+  .gfc-sat-btn.gfc-sat-yes.selected { background: #1a6b52; border-color: #1a6b52; color: #fff; }
+  .gfc-sat-btn.gfc-sat-no.selected { background: #c0392b; border-color: #c0392b; color: #fff; }
+  .gfc-sig-box {
+    border: 2px solid rgba(3,61,80,0.12);
+    border-radius: 10px;
+    padding: 16px;
+    background: #fff;
+    margin-bottom: 16px;
+  }
+  .gfc-sig-box .gfc-label { margin-bottom: 4px; }
+  .gfc-sig-box input { font-style: italic; }
+  .gfc-sig-line {
+    font-size: 11px;
+    color: #5a7080;
+    text-align: center;
+    border-top: 1px solid rgba(3,61,80,0.12);
+    padding-top: 8px;
+    margin-top: 4px;
+  }
+  .gfc-submit-btn {
+    width: 100%; padding: 18px; background: #033D50; color: #fff;
+    border: none; border-radius: 12px; font-family: 'DM Sans', sans-serif;
+    font-size: 16px; font-weight: 600; cursor: pointer;
+    letter-spacing: 0.3px; transition: all 0.2s; margin-top: 8px;
+  }
+  .gfc-submit-btn:active { transform: scale(0.98); opacity: 0.9; }
+  .gfc-submit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .gfc-status { text-align: center; padding: 16px; border-radius: 10px; font-size: 14px; font-weight: 500; margin-top: 12px; display: none; }
+  .gfc-status.gfc-success { display: block; background: #e8f4f0; color: #1a6b52; }
+  .gfc-status.gfc-error { display: block; background: #fde8e8; color: #c0392b; }
+</style>
+
+<div class="gfc-visit-form">
+  <div class="gfc-form-header">
+    <h2>Godwins Family Care <span>|</span> Visit Note</h2>
+    <div class="gfc-sub">Caregiver Visit Daily Note Record</div>
+  </div>
+  <form id="gfcVisitLogForm" autocomplete="off">
+
+    <div class="gfc-section">
+      <div class="gfc-section-head" onclick="gfcToggle(this)"><h3>Visit Information</h3><span class="gfc-badge">Required</span><span class="gfc-toggle">&#9660;</span></div>
+      <div class="gfc-section-body">
+        <label class="gfc-label">Employee Name <span class="gfc-req">*</span></label>
+        <input type="text" name="employeeName" required placeholder="Your full name">
+        <label class="gfc-label">Patient Name <span class="gfc-req">*</span></label>
+        <input type="text" name="patientName" required placeholder="Client full name">
+        <label class="gfc-label">Patient DOB</label>
+        <input type="date" name="patientDOB">
+        <label class="gfc-label">Visit Date <span class="gfc-req">*</span></label>
+        <input type="date" name="visitDate" required>
+        <label class="gfc-label">Day of Week</label>
+        <select name="dayOfWeek"><option value="">Auto-fills from date</option><option>Monday</option><option>Tuesday</option><option>Wednesday</option><option>Thursday</option><option>Friday</option><option>Saturday</option><option>Sunday</option></select>
+        <div class="gfc-field-row">
+          <div><label class="gfc-label">Arrival Time <span class="gfc-req">*</span></label><input type="time" name="arrivalTime" required></div>
+          <div><label class="gfc-label">Departure Time <span class="gfc-req">*</span></label><input type="time" name="departureTime" required></div>
+        </div>
+        <label class="gfc-label">Total Hours</label>
+        <input type="text" name="totalHours" readonly placeholder="Auto-calculated" style="background:#e8e5e0;cursor:default;">
+      </div>
+    </div>
+
+    <div class="gfc-section">
+      <div class="gfc-section-head" onclick="gfcToggle(this)"><h3>Tasks Performed</h3><span class="gfc-badge">Check All That Apply</span><span class="gfc-toggle">&#9660;</span></div>
+      <div class="gfc-section-body">
+        <div class="gfc-task-group-label">Personal Care / ADLs</div>
+        <div class="gfc-task-list">
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Bath / Tub / Shower / Wash" id="gt1"><label class="gfc-task-row" for="gt1"><span class="gfc-task-check"></span><span class="gfc-task-label">Bath / Tub / Shower / Wash</span></label><div class="gfc-task-detail"><textarea name="d_bath" placeholder="Details (optional)..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Toileting" id="gt2"><label class="gfc-task-row" for="gt2"><span class="gfc-task-check"></span><span class="gfc-task-label">Toileting</span></label><div class="gfc-task-detail"><textarea name="d_toileting" placeholder="Details (optional)..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Hair Care / Shampooing" id="gt3"><label class="gfc-task-row" for="gt3"><span class="gfc-task-check"></span><span class="gfc-task-label">Hair Care / Shampooing</span></label><div class="gfc-task-detail"><textarea name="d_hair" placeholder="Details (optional)..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Skin Care / Observe Skin" id="gt4"><label class="gfc-task-row" for="gt4"><span class="gfc-task-check"></span><span class="gfc-task-label">Skin Care / Observe Skin</span></label><div class="gfc-task-detail"><textarea name="d_skin" placeholder="Details (optional)..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Shaving" id="gt5"><label class="gfc-task-row" for="gt5"><span class="gfc-task-check"></span><span class="gfc-task-label">Shaving</span></label><div class="gfc-task-detail"><textarea name="d_shaving" placeholder="Details (optional)..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Brush Teeth" id="gt6"><label class="gfc-task-row" for="gt6"><span class="gfc-task-check"></span><span class="gfc-task-label">Brush Teeth</span></label><div class="gfc-task-detail"><textarea name="d_teeth" placeholder="Details (optional)..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Nails" id="gt7"><label class="gfc-task-row" for="gt7"><span class="gfc-task-check"></span><span class="gfc-task-label">Nails</span></label><div class="gfc-task-detail"><textarea name="d_nails" placeholder="Details (optional)..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Foot Care / Tepid Water Soak" id="gt8"><label class="gfc-task-row" for="gt8"><span class="gfc-task-check"></span><span class="gfc-task-label">Foot Care / Tepid Water Soak</span></label><div class="gfc-task-detail"><textarea name="d_foot" placeholder="Details (optional)..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Lotion Rubs - Back / Leg" id="gt9"><label class="gfc-task-row" for="gt9"><span class="gfc-task-check"></span><span class="gfc-task-label">Lotion Rubs - Back / Leg</span></label><div class="gfc-task-detail"><textarea name="d_lotion" placeholder="Details (optional)..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Assist with Dressing" id="gt10"><label class="gfc-task-row" for="gt10"><span class="gfc-task-check"></span><span class="gfc-task-label">Assist with Dressing</span></label><div class="gfc-task-detail"><textarea name="d_dressing" placeholder="Details (optional)..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Assist with Bedpan / Commode / Urinal / Diaper" id="gt11"><label class="gfc-task-row" for="gt11"><span class="gfc-task-check"></span><span class="gfc-task-label">Assist with Bedpan / Commode / Urinal / Diaper</span></label><div class="gfc-task-detail"><textarea name="d_bedpan" placeholder="Details (optional)..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Peri Care" id="gt12"><label class="gfc-task-row" for="gt12"><span class="gfc-task-check"></span><span class="gfc-task-label">Peri Care</span></label><div class="gfc-task-detail"><textarea name="d_peri" placeholder="Details (optional)..."></textarea></div></div>
+        </div>
+        <div class="gfc-task-group-label">Safety and Monitoring</div>
+        <div class="gfc-task-list">
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Monitor Safety / Fall / Accident" id="gt13"><label class="gfc-task-row" for="gt13"><span class="gfc-task-check"></span><span class="gfc-task-label">Monitor Safety / Fall / Accident</span></label><div class="gfc-task-detail"><textarea name="d_safety" placeholder="Details (optional)..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Check Temperature" id="gt14"><label class="gfc-task-row" for="gt14"><span class="gfc-task-check"></span><span class="gfc-task-label">Check Temperature</span></label><div class="gfc-task-detail"><textarea name="d_temp" placeholder="Reading / details..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Check Blood Pressure" id="gt15"><label class="gfc-task-row" for="gt15"><span class="gfc-task-check"></span><span class="gfc-task-label">Check Blood Pressure</span></label><div class="gfc-task-detail"><textarea name="d_bp" placeholder="Reading / details..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Vital Signs Monitoring" id="gt16"><label class="gfc-task-row" for="gt16"><span class="gfc-task-check"></span><span class="gfc-task-label">Vital Signs Monitoring</span></label><div class="gfc-task-detail"><textarea name="d_vitals" placeholder="Readings / details..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Check Pressure Areas" id="gt17"><label class="gfc-task-row" for="gt17"><span class="gfc-task-check"></span><span class="gfc-task-label">Check Pressure Areas</span></label><div class="gfc-task-detail"><textarea name="d_pressure" placeholder="Details (optional)..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Blood Sugar Management" id="gt18"><label class="gfc-task-row" for="gt18"><span class="gfc-task-check"></span><span class="gfc-task-label">Blood Sugar Management</span></label><div class="gfc-task-detail"><textarea name="d_sugar" placeholder="Reading / details..."></textarea></div></div>
+        </div>
+        <div class="gfc-task-group-label">Companionship and Activity</div>
+        <div class="gfc-task-list">
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Reading to and Companionship" id="gt19"><label class="gfc-task-row" for="gt19"><span class="gfc-task-check"></span><span class="gfc-task-label">Reading to and Companionship</span></label><div class="gfc-task-detail"><textarea name="d_companion" placeholder="Details (optional)..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Assist with Walking / Physical Activities" id="gt20"><label class="gfc-task-row" for="gt20"><span class="gfc-task-check"></span><span class="gfc-task-label">Assist with Walking / Physical Activities</span></label><div class="gfc-task-detail"><textarea name="d_walking" placeholder="Details (optional)..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Escort / Errand to Medical Appt" id="gt21"><label class="gfc-task-row" for="gt21"><span class="gfc-task-check"></span><span class="gfc-task-label">Escort / Errand to Medical Appt</span></label><div class="gfc-task-detail"><textarea name="d_escort" placeholder="Where / details..."></textarea></div></div>
+        </div>
+        <div class="gfc-task-group-label">Household / IADLs</div>
+        <div class="gfc-task-list">
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Sweep / Dust / Tidy / Vacuum Patient Room" id="gt22"><label class="gfc-task-row" for="gt22"><span class="gfc-task-check"></span><span class="gfc-task-label">Sweep / Dust / Tidy / Vacuum Patient Room</span></label><div class="gfc-task-detail"><textarea name="d_sweep" placeholder="Details (optional)..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Clean Patient Bathroom" id="gt23"><label class="gfc-task-row" for="gt23"><span class="gfc-task-check"></span><span class="gfc-task-label">Clean Patient Bathroom</span></label><div class="gfc-task-detail"><textarea name="d_bathroom" placeholder="Details (optional)..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Wash / Clean Patient Dishes" id="gt24"><label class="gfc-task-row" for="gt24"><span class="gfc-task-check"></span><span class="gfc-task-label">Wash / Clean Patient Dishes</span></label><div class="gfc-task-detail"><textarea name="d_dishes" placeholder="Details (optional)..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Assist with Patient Laundry" id="gt25"><label class="gfc-task-row" for="gt25"><span class="gfc-task-check"></span><span class="gfc-task-label">Assist with Patient Laundry</span></label><div class="gfc-task-detail"><textarea name="d_laundry" placeholder="Details (optional)..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Change Linens" id="gt26"><label class="gfc-task-row" for="gt26"><span class="gfc-task-check"></span><span class="gfc-task-label">Change Linens</span></label><div class="gfc-task-detail"><textarea name="d_linens" placeholder="Details (optional)..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Assist in Cleaning Kitchen Equipment" id="gt27"><label class="gfc-task-row" for="gt27"><span class="gfc-task-check"></span><span class="gfc-task-label">Assist in Cleaning Kitchen Equipment</span></label><div class="gfc-task-detail"><textarea name="d_kitchen" placeholder="Details (optional)..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Grocery Shopping" id="gt28"><label class="gfc-task-row" for="gt28"><span class="gfc-task-check"></span><span class="gfc-task-label">Grocery Shopping</span></label><div class="gfc-task-detail"><textarea name="d_grocery" placeholder="Items / store / details..."></textarea></div></div>
+        </div>
+        <div class="gfc-task-group-label">Meals and Nutrition</div>
+        <div class="gfc-task-list">
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Cook Meals" id="gt29"><label class="gfc-task-row" for="gt29"><span class="gfc-task-check"></span><span class="gfc-task-label">Cook Meals - Lunch / Dinner / Breakfast</span></label><div class="gfc-task-detail"><textarea name="d_cook" placeholder="What was prepared..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Set Up Meal / Feed Patient" id="gt30"><label class="gfc-task-row" for="gt30"><span class="gfc-task-check"></span><span class="gfc-task-label">Set Up Meal / Feed Patient</span></label><div class="gfc-task-detail"><textarea name="d_feed" placeholder="Details (optional)..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Offer Fluid" id="gt31"><label class="gfc-task-row" for="gt31"><span class="gfc-task-check"></span><span class="gfc-task-label">Offer Fluid</span></label><div class="gfc-task-detail"><textarea name="d_fluid" placeholder="Type / amount..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Observe and Record Meal / Fluid Intake" id="gt32"><label class="gfc-task-row" for="gt32"><span class="gfc-task-check"></span><span class="gfc-task-label">Observe and Record Meal / Fluid Intake</span></label><div class="gfc-task-detail"><textarea name="d_record" placeholder="What / how much consumed..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Encourage / Support Diet as Ordered" id="gt33"><label class="gfc-task-row" for="gt33"><span class="gfc-task-check"></span><span class="gfc-task-label">Encourage / Support Diet as Ordered</span></label><div class="gfc-task-detail"><textarea name="d_diet" placeholder="Details (optional)..."></textarea></div></div>
+        </div>
+        <div class="gfc-task-group-label">Medication Support</div>
+        <div class="gfc-task-list">
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Pick Up Prescriptions" id="gt34"><label class="gfc-task-row" for="gt34"><span class="gfc-task-check"></span><span class="gfc-task-label">Pick Up Prescriptions</span></label><div class="gfc-task-detail"><textarea name="d_pickup" placeholder="Pharmacy / medications..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Observe / Remind Client to Take Medication" id="gt35"><label class="gfc-task-row" for="gt35"><span class="gfc-task-check"></span><span class="gfc-task-label">Observe / Remind Client to Take Medication</span></label><div class="gfc-task-detail"><textarea name="d_medremind" placeholder="Details (optional)..."></textarea></div></div>
+        </div>
+        <div class="gfc-task-group-label">Mobility and Transfers</div>
+        <div class="gfc-task-list">
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Assist with Wheelchair" id="gt36"><label class="gfc-task-row" for="gt36"><span class="gfc-task-check"></span><span class="gfc-task-label">Assist with Wheelchair</span></label><div class="gfc-task-detail"><textarea name="d_wheelchair" placeholder="Details (optional)..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Assist with Transfers" id="gt37"><label class="gfc-task-row" for="gt37"><span class="gfc-task-check"></span><span class="gfc-task-label">Assist with Transfers</span></label><div class="gfc-task-detail"><textarea name="d_transfers" placeholder="Details (optional)..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Turn and Reposition" id="gt38"><label class="gfc-task-row" for="gt38"><span class="gfc-task-check"></span><span class="gfc-task-label">Turn and Reposition</span></label><div class="gfc-task-detail"><textarea name="d_turn" placeholder="Details (optional)..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Empty Drainage Bag" id="gt39"><label class="gfc-task-row" for="gt39"><span class="gfc-task-check"></span><span class="gfc-task-label">Empty Drainage Bag</span></label><div class="gfc-task-detail"><textarea name="d_drainage" placeholder="Details (optional)..."></textarea></div></div>
+        </div>
+        <div class="gfc-task-group-label">Skilled / Clinical Tasks</div>
+        <div class="gfc-task-list">
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Catheter Care" id="gt40"><label class="gfc-task-row" for="gt40"><span class="gfc-task-check"></span><span class="gfc-task-label">Catheter Care</span></label><div class="gfc-task-detail"><textarea name="d_catheter" placeholder="Details..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Ostomy Care" id="gt41"><label class="gfc-task-row" for="gt41"><span class="gfc-task-check"></span><span class="gfc-task-label">Ostomy Care</span></label><div class="gfc-task-detail"><textarea name="d_ostomy" placeholder="Details..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Injection and IV Therapy" id="gt42"><label class="gfc-task-row" for="gt42"><span class="gfc-task-check"></span><span class="gfc-task-label">Injection and IV Therapy</span></label><div class="gfc-task-detail"><textarea name="d_injection" placeholder="Details..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Post Operation Status / Care" id="gt43"><label class="gfc-task-row" for="gt43"><span class="gfc-task-check"></span><span class="gfc-task-label">Post Operation Status / Care</span></label><div class="gfc-task-detail"><textarea name="d_postop" placeholder="Details..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Wash and Redress Wound" id="gt44"><label class="gfc-task-row" for="gt44"><span class="gfc-task-check"></span><span class="gfc-task-label">Wash and Redress Wound</span></label><div class="gfc-task-detail"><textarea name="d_wound" placeholder="Location / details..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Specimen Collection" id="gt45"><label class="gfc-task-row" for="gt45"><span class="gfc-task-check"></span><span class="gfc-task-label">Specimen Collection - Blood / Urine</span></label><div class="gfc-task-detail"><textarea name="d_specimen" placeholder="Details..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Feeding Tube Care" id="gt46"><label class="gfc-task-row" for="gt46"><span class="gfc-task-check"></span><span class="gfc-task-label">Feeding Tube Care</span></label><div class="gfc-task-detail"><textarea name="d_feedtube" placeholder="Details..."></textarea></div></div>
+          <div class="gfc-task-item"><input type="checkbox" name="tasks" value="Teach / Train Client on Equipment" id="gt47"><label class="gfc-task-row" for="gt47"><span class="gfc-task-check"></span><span class="gfc-task-label">Teach / Train Client on Equipment Usage</span></label><div class="gfc-task-detail"><textarea name="d_teach" placeholder="What equipment / details..."></textarea></div></div>
+        </div>
+        <label class="gfc-label" style="margin-top:16px;">Obtain TPR Every Visit?</label>
+        <select name="obtainTPR"><option value="">Select</option><option value="Yes">Yes</option><option value="No">No</option></select>
+      </div>
+    </div>
+
+    <div class="gfc-section">
+      <div class="gfc-section-head" onclick="gfcToggle(this)"><h3>Tasks Not Performed</h3><span class="gfc-badge">If Applicable</span><span class="gfc-toggle">&#9660;</span></div>
+      <div class="gfc-section-body">
+        <p class="gfc-helper">Document why any requested tasks were not performed during this visit.</p>
+        <textarea name="tasksNotPerformed" rows="4" placeholder="List tasks not completed and reason why..."></textarea>
+      </div>
+    </div>
+
+    <div class="gfc-section">
+      <div class="gfc-section-head" onclick="gfcToggle(this)"><h3>Special Instructions</h3><span class="gfc-badge">Select All Active</span><span class="gfc-toggle">&#9660;</span></div>
+      <div class="gfc-section-body">
+        <div class="gfc-chip-grid">
+          <label class="gfc-chip gfc-instruction" onclick="gfcChip(this)"><input type="checkbox" name="specialInstructions" value="Encourage Physical Activity"><span>Encourage Physical Activity</span></label>
+          <label class="gfc-chip gfc-instruction" onclick="gfcChip(this)"><input type="checkbox" name="specialInstructions" value="Encourage Interaction with Others"><span>Encourage Interaction with Others</span></label>
+          <label class="gfc-chip gfc-instruction" onclick="gfcChip(this)"><input type="checkbox" name="specialInstructions" value="Encourage to Wear ERS"><span>Encourage to Wear ERS</span></label>
+          <label class="gfc-chip gfc-instruction" onclick="gfcChip(this)"><input type="checkbox" name="specialInstructions" value="Encourage Rest"><span>Encourage Rest</span></label>
+          <label class="gfc-chip gfc-instruction" onclick="gfcChip(this)"><input type="checkbox" name="specialInstructions" value="Watchful Supervision at All Times"><span>Watchful Supervision at All Times</span></label>
+          <label class="gfc-chip gfc-instruction" onclick="gfcChip(this)"><input type="checkbox" name="specialInstructions" value="Reminders for Bowel/Bladder"><span>Reminders for Bowel/Bladder</span></label>
+          <label class="gfc-chip gfc-instruction" onclick="gfcChip(this)"><input type="checkbox" name="specialInstructions" value="Report Abusive / Neglectful Behavior"><span>Report Abusive / Neglectful Behavior</span></label>
+          <label class="gfc-chip gfc-instruction" onclick="gfcChip(this)"><input type="checkbox" name="specialInstructions" value="Report All Falls"><span>Report All Falls</span></label>
+          <label class="gfc-chip gfc-instruction" onclick="gfcChip(this)"><input type="checkbox" name="specialInstructions" value="Socialize and Discuss Current Events"><span>Socialize and Discuss Current Events</span></label>
+          <label class="gfc-chip gfc-instruction" onclick="gfcChip(this)"><input type="checkbox" name="specialInstructions" value="Report Changes in Condition/Behavior"><span>Report Changes in Condition/Behavior</span></label>
+          <label class="gfc-chip gfc-instruction" onclick="gfcChip(this)"><input type="checkbox" name="specialInstructions" value="Report Health Changes / ER Visits"><span>Report Health Changes / ER Visits</span></label>
+          <label class="gfc-chip gfc-instruction" onclick="gfcChip(this)"><input type="checkbox" name="specialInstructions" value="Encourage Relaxation for Pain Relief"><span>Encourage Relaxation for Pain Relief</span></label>
+          <label class="gfc-chip gfc-instruction" onclick="gfcChip(this)"><input type="checkbox" name="specialInstructions" value="Encourage Elevation of Limbs"><span>Encourage Elevation of Limbs</span></label>
+          <label class="gfc-chip gfc-instruction" onclick="gfcChip(this)"><input type="checkbox" name="specialInstructions" value="Place Items Within Reach Before Leaving"><span>Place Items Within Reach Before Leaving</span></label>
+          <label class="gfc-chip gfc-instruction" onclick="gfcChip(this)"><input type="checkbox" name="specialInstructions" value="Keep Fluid/Food Within Reach"><span>Keep Fluid/Food Within Reach</span></label>
+          <label class="gfc-chip gfc-instruction" onclick="gfcChip(this)"><input type="checkbox" name="specialInstructions" value="Encourage/Cue for DME Use"><span>Encourage/Cue for DME Use</span></label>
+        </div>
+      </div>
+    </div>
+
+    <div class="gfc-section">
+      <div class="gfc-section-head" onclick="gfcToggle(this)"><h3>Patient Condition During Visit</h3><span class="gfc-badge">Select All Observed</span><span class="gfc-toggle">&#9660;</span></div>
+      <div class="gfc-section-body">
+        <p class="gfc-helper">Select all conditions that describe the patient during today's visit.</p>
+        <div class="gfc-chip-grid">
+          <label class="gfc-chip" onclick="gfcChip(this)"><input type="checkbox" name="patientCondition" value="Sick"><span>Sick</span></label>
+          <label class="gfc-chip" onclick="gfcChip(this)"><input type="checkbox" name="patientCondition" value="Alert"><span>Alert</span></label>
+          <label class="gfc-chip" onclick="gfcChip(this)"><input type="checkbox" name="patientCondition" value="Quiet"><span>Quiet</span></label>
+          <label class="gfc-chip" onclick="gfcChip(this)"><input type="checkbox" name="patientCondition" value="Angry"><span>Angry</span></label>
+          <label class="gfc-chip" onclick="gfcChip(this)"><input type="checkbox" name="patientCondition" value="Sleepy"><span>Sleepy</span></label>
+          <label class="gfc-chip" onclick="gfcChip(this)"><input type="checkbox" name="patientCondition" value="Pain"><span>Pain</span></label>
+          <label class="gfc-chip" onclick="gfcChip(this)"><input type="checkbox" name="patientCondition" value="Clean"><span>Clean</span></label>
+          <label class="gfc-chip" onclick="gfcChip(this)"><input type="checkbox" name="patientCondition" value="Happy"><span>Happy</span></label>
+          <label class="gfc-chip" onclick="gfcChip(this)"><input type="checkbox" name="patientCondition" value="Talkative"><span>Talkative</span></label>
+          <label class="gfc-chip" onclick="gfcChip(this)"><input type="checkbox" name="patientCondition" value="Grieving"><span>Grieving</span></label>
+          <label class="gfc-chip" onclick="gfcChip(this)"><input type="checkbox" name="patientCondition" value="Depressed"><span>Depressed</span></label>
+          <label class="gfc-chip" onclick="gfcChip(this)"><input type="checkbox" name="patientCondition" value="Hungry"><span>Hungry</span></label>
+        </div>
+      </div>
+    </div>
+
+    <div class="gfc-section">
+      <div class="gfc-section-head" onclick="gfcToggle(this)"><h3>Safety Concerns</h3><span class="gfc-badge">If Any</span><span class="gfc-toggle">&#9660;</span></div>
+      <div class="gfc-section-body">
+        <p class="gfc-helper">Select any safety concerns observed during this visit.</p>
+        <div class="gfc-chip-grid">
+          <label class="gfc-chip gfc-safety" onclick="gfcChip(this)"><input type="checkbox" name="safetyConcerns" value="Meal Consumption"><span>Meal Consumption</span></label>
+          <label class="gfc-chip gfc-safety" onclick="gfcChip(this)"><input type="checkbox" name="safetyConcerns" value="Safety in the Home"><span>Safety in the Home</span></label>
+          <label class="gfc-chip gfc-safety" onclick="gfcChip(this)"><input type="checkbox" name="safetyConcerns" value="Poor Physical Condition"><span>Poor Physical Condition</span></label>
+          <label class="gfc-chip gfc-safety" onclick="gfcChip(this)"><input type="checkbox" name="safetyConcerns" value="Falls"><span>Falls</span></label>
+          <label class="gfc-chip gfc-safety" onclick="gfcChip(this)"><input type="checkbox" name="safetyConcerns" value="Emotional Condition"><span>Emotional Condition</span></label>
+          <label class="gfc-chip gfc-safety" onclick="gfcChip(this)"><input type="checkbox" name="safetyConcerns" value="Slowness / Weakness"><span>Slowness / Weakness</span></label>
+          <label class="gfc-chip gfc-safety" onclick="gfcChip(this)"><input type="checkbox" name="safetyConcerns" value="Frequent Illness"><span>Frequent Illness</span></label>
+          <label class="gfc-chip gfc-safety" onclick="gfcChip(this)"><input type="checkbox" name="safetyConcerns" value="Abuse / Neglect"><span>Abuse / Neglect</span></label>
+          <label class="gfc-chip gfc-safety" onclick="gfcChip(this)"><input type="checkbox" name="safetyConcerns" value="Weight Loss"><span>Weight Loss</span></label>
+        </div>
+        <label class="gfc-label" style="margin-top:8px;">Safety Concern Details</label>
+        <textarea name="safetyConcernDetails" rows="3" placeholder="Describe any safety concerns in detail..."></textarea>
+        <label class="gfc-label">Recommended Changes</label>
+        <textarea name="recommendedChanges" rows="3" placeholder="Any changes to care plan or areas of focus you would recommend..."></textarea>
+      </div>
+    </div>
+
+    <div class="gfc-section">
+      <div class="gfc-section-head" onclick="gfcToggle(this)"><h3>Satisfaction and Signatures</h3><span class="gfc-badge">Required</span><span class="gfc-toggle">&#9660;</span></div>
+      <div class="gfc-section-body">
+        <label class="gfc-label">Client Satisfaction With Care <span class="gfc-req">*</span></label>
+        <div class="gfc-sat-row">
+          <div class="gfc-sat-btn gfc-sat-yes" onclick="gfcSat(this,'Satisfied')">Satisfied</div>
+          <div class="gfc-sat-btn gfc-sat-no" onclick="gfcSat(this,'Not Satisfied')">Not Satisfied</div>
+        </div>
+        <input type="hidden" name="satisfaction" id="gfcSatInput" required>
+
+        <div class="gfc-sig-box">
+          <label class="gfc-label">Caregiver Signature <span class="gfc-req">*</span></label>
+          <p class="gfc-helper">Type your full legal name to sign this record.</p>
+          <input type="text" name="caregiverSignature" required placeholder="Full legal name">
+          <div class="gfc-sig-line">Caregiver Signature</div>
+        </div>
+
+        <div class="gfc-sig-box">
+          <label class="gfc-label">Client / Responsible Party Signature</label>
+          <p class="gfc-helper">Have the client or responsible party type their full name.</p>
+          <input type="text" name="clientSignature" placeholder="Client or responsible party full name">
+          <div class="gfc-sig-line">Client / Patient Responsible Party Signature</div>
+        </div>
+
+        <input type="hidden" name="caregiverSignatureTimestamp" id="gfcSigTs">
+
+        <label class="gfc-label">Additional Notes</label>
+        <textarea name="additionalNotes" rows="3" placeholder="Any other observations or notes from this visit..."></textarea>
+      </div>
+    </div>
+
+    <button type="submit" class="gfc-submit-btn" id="gfcSubmitBtn">Submit Visit Note</button>
+    <div class="gfc-status" id="gfcStatusMsg"></div>
+  </form>
+</div>
+
+
+</body>
+</html>
