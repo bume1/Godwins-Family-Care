@@ -338,18 +338,7 @@
         });
       }
 
-      // Implementations App - admins, users with hasImplementationsAccess, or team members with assigned projects
-      // Note: Clients are excluded even if they have assigned projects (those are for their portal timeline only)
-      if (!isClient && (isAdmin || user.hasImplementationsAccess || (user.assignedProjects && user.assignedProjects.length > 0))) {
-        availablePortals.push({
-          id: 'implementations',
-          name: 'Launch',
-          description: 'Project tracking, client onboarding, and implementation management',
-          icon: Icons.implementation,
-          color: 'from-purple-500 to-purple-700',
-          path: '/launch'
-        });
-      }
+      // Implementations/Launch tracker deactivated (Session 2): nav tile hidden; tracker code retained.
 
       // Service Portal - super admins, users with hasServicePortalAccess, or vendors (NOT managers)
       if (isAdmin || user.hasServicePortalAccess || isVendor) {

@@ -78,7 +78,7 @@ app.get('/', (req, res) => {
 
 // Serve static files for the main app path
 // Note: index: false prevents serving index.html automatically for directory requests
-app.use('/launch', express.static('public', staticOptions));
+app.use('/launch', express.static('public', { ...staticOptions, index: false })); // tracker deactivated (Session 2): assets served, index page disabled
 // Legacy root paths with trailing slash - redirect before static middleware intercepts
 app.get('/thrive365labsLAUNCH/', (req, res) => {
   res.redirect(301, '/launch');
@@ -87,21 +87,23 @@ app.get('/thrive365labslaunch/', (req, res) => {
   res.redirect(301, '/launch');
 });
 // Legacy paths - keep for backward compatibility
-app.use('/thrive365labsLAUNCH', express.static('public', staticOptions));
-app.use('/thrive365labslaunch', express.static('public', staticOptions));
+app.use('/thrive365labsLAUNCH', express.static('public', { ...staticOptions, index: false }));
+app.use('/thrive365labslaunch', express.static('public', { ...staticOptions, index: false }));
 app.use(express.static('public', { ...staticOptions, index: false }));
 // NOTE: Authenticated /uploads static middleware is registered after authenticateToken is defined (see below)
 
 // ============== LAUNCH ROUTES (Implementations Portal) ==============
-// Main implementations dashboard
+// DEACTIVATED (Session 2): the launch/implementations tracker is not used by GFC.
+// Routes are retained but redirect to /login; public/app.js and tracker code remain
+// intact for future repurposing. Re-enable by restoring res.sendFile(index.html).
 app.get('/launch', (req, res) => {
-  res.sendFile(__dirname + '/public/index.html');
+  res.redirect('/login');
 });
 app.get('/launch/login', (req, res) => {
-  res.sendFile(__dirname + '/public/index.html');
+  res.redirect('/login');
 });
 app.get('/launch/home', (req, res) => {
-  res.sendFile(__dirname + '/public/index.html');
+  res.redirect('/login');
 });
 
 // Legacy routes - redirect to new /launch paths
@@ -7675,36 +7677,12 @@ app.delete('/api/templates/:id', authenticateToken, requireAdmin, async (req, re
 // ============== LAUNCH PORTAL SLUG ROUTES ==============
 // Internal project tracker: /launch/{slug}-internal (authenticated team access)
 app.get('/launch/:slug-internal', async (req, res) => {
-  const slug = req.params.slug;
-  const projects = await getProjects();
-  const project = projects.find(p => p.clientLinkSlug === slug || p.clientLinkId === slug);
-
-  if (project) {
-    res.sendFile(__dirname + '/public/index.html');
-  } else {
-    res.status(404).send('Project not found');
-  }
+  res.redirect('/login'); // tracker deactivated (Session 2)
 });
 
 // Public client launch board: /launch/{slug} (no auth required)
 app.get('/launch/:slug', async (req, res) => {
-  const slug = req.params.slug;
-  // Skip reserved paths
-  if (['login', 'home'].includes(slug)) {
-    return res.sendFile(__dirname + '/public/index.html');
-  }
-  // Skip if ends with -internal (handled above)
-  if (slug.endsWith('-internal')) {
-    return res.sendFile(__dirname + '/public/index.html');
-  }
-  const projects = await getProjects();
-  const project = projects.find(p => p.clientLinkSlug === slug || p.clientLinkId === slug);
-
-  if (project) {
-    res.sendFile(__dirname + '/public/client.html');
-  } else {
-    res.status(404).send('Project not found');
-  }
+  res.redirect('/login'); // tracker deactivated (Session 2)
 });
 
 // ============== LEGACY LAUNCH ROUTES (Redirects) ==============
