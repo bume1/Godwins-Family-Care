@@ -117,7 +117,10 @@ app.get('/thrive365labslaunch', (req, res) => {
 // Initialize admin user on startup
 (async () => {
   try {
-    const users = await db.get('users') || [];
+    let users = await db.get('users') || [];
+    let changed = false;
+
+    // Ensure the GFC default admin exists
     if (!users.find(u => u.email === config.DEFAULT_ADMIN.EMAIL)) {
       const hashedPassword = await bcrypt.hash(config.DEFAULT_ADMIN.PASSWORD, config.BCRYPT_SALT_ROUNDS);
       users.push({
@@ -128,12 +131,26 @@ app.get('/thrive365labslaunch', (req, res) => {
         role: config.ROLES.ADMIN,
         createdAt: new Date().toISOString()
       });
-      await db.set('users', users);
-    invalidateUsersCache();
+      changed = true;
       console.log(`✅ Admin user created: ${config.DEFAULT_ADMIN.EMAIL}`);
     }
+
+    // One-time cleanup: remove the legacy Thrive admin — but only once the GFC
+    // admin is confirmed present, so we can never end up with zero admins.
+    const LEGACY_ADMIN_EMAIL = 'bianca@thrive365labs.live';
+    const hasGfcAdmin = users.some(u => u.email === config.DEFAULT_ADMIN.EMAIL && u.role === config.ROLES.ADMIN);
+    if (hasGfcAdmin && users.some(u => u.email === LEGACY_ADMIN_EMAIL)) {
+      users = users.filter(u => u.email !== LEGACY_ADMIN_EMAIL);
+      changed = true;
+      console.log(`🗑️  Removed legacy admin: ${LEGACY_ADMIN_EMAIL}`);
+    }
+
+    if (changed) {
+      await db.set('users', users);
+      invalidateUsersCache();
+    }
   } catch (err) {
-    console.error('Error creating admin user:', err);
+    console.error('Error initializing admin user:', err);
   }
 })();
 
