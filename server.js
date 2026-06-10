@@ -513,7 +513,7 @@ function buildHtmlEmail(body, htmlBody, ctaUrl, ctaLabel, unsubscribeUrl, baseUr
   const unsubscribeBlock = unsubscribeUrl
     ? `<p style="color: #9ca3af; font-size: 11px; margin: 6px 0 0;"><a href="${unsubscribeUrl}" style="color: #9ca3af; text-decoration: underline;">Unsubscribe from these emails</a></p>`
     : '';
-  return renderTemplate(BASE_HTML_EMAIL_WRAPPER, { content: body, ctaBlock, unsubscribeBlock, appUrl: baseUrl || 'https://thrive365labs.live' });
+  return renderTemplate(BASE_HTML_EMAIL_WRAPPER, { content: body, ctaBlock, unsubscribeBlock, appUrl: baseUrl || 'https://godwinsfamilycarellc.com' });
 }
 
 // ============================================================
@@ -652,7 +652,7 @@ function getPoolGroupsForTemplate(templateId) {
 async function getAppBaseUrl() {
   const domain = await db.get('client_portal_domain');
   if (domain) return `https://${domain}`;
-  return 'https://thrive365labs.live';
+  return 'https://godwinsfamilycarellc.com';
 }
 
 function resolveSystemVars(appBaseUrl) {
@@ -820,66 +820,6 @@ async function sendAssignmentNotification(ownerEmail, task, subtask, project, tr
 
 const DEFAULT_EMAIL_TEMPLATES = [
   {
-    id: 'service_report_signature',
-    name: 'Service Report — Signature Request',
-    category: 'automated',
-    subject: 'Action needed: Service report for {{facilityName}} awaits your signature',
-    body: 'A service report from {{technicianName}} on {{reportDate}} requires your signature. Please review and sign at your earliest convenience.',
-    htmlBody: null,
-    variables: [
-      { key: 'facilityName', label: 'Facility Name', example: 'Valley Medical' },
-      { key: 'technicianName', label: 'Technician Name', example: 'John Smith' },
-      { key: 'reportDate', label: 'Report Date', example: '02/17/2026' }
-    ],
-    isDefault: true, updatedAt: null, updatedBy: null
-  },
-  {
-    id: 'service_report_review',
-    name: 'Service Report — Admin Review',
-    category: 'automated',
-    subject: 'Service report pending review: {{facilityName}}',
-    body: 'A service report from {{technicianName}} for {{facilityName}} has been pending review for {{reportAge}} days.',
-    htmlBody: null,
-    variables: [
-      { key: 'facilityName', label: 'Facility Name', example: 'Valley Medical' },
-      { key: 'technicianName', label: 'Technician Name', example: 'John Smith' },
-      { key: 'reportAge', label: 'Days Pending', example: '5' }
-    ],
-    isDefault: true, updatedAt: null, updatedBy: null
-  },
-  {
-    id: 'task_deadline',
-    name: 'Task Deadline Warning',
-    category: 'automated',
-    subject: 'Task due {{timeframe}}: {{taskTitle}} — {{projectName}}',
-    body: '"{{taskTitle}}" in {{phase}} is due {{dueDate}}. Project: {{projectName}}.',
-    htmlBody: null,
-    variables: [
-      { key: 'taskTitle', label: 'Task Title', example: 'Install AU480 Analyzer' },
-      { key: 'projectName', label: 'Project Name', example: 'Valley Medical Launch' },
-      { key: 'phase', label: 'Phase', example: 'Phase 2' },
-      { key: 'dueDate', label: 'Due Date', example: '03/15/2026' },
-      { key: 'timeframe', label: 'Timeframe', example: 'in 3 days' }
-    ],
-    isDefault: true, updatedAt: null, updatedBy: null
-  },
-  {
-    id: 'task_overdue',
-    name: 'Task Overdue — Owner',
-    category: 'automated',
-    subject: 'OVERDUE ({{daysOverdue}}d): {{taskTitle}} — {{projectName}}',
-    body: '"{{taskTitle}}" in {{phase}} was due {{dueDate}} and is now {{daysOverdue}} day(s) overdue. Project: {{projectName}}.',
-    htmlBody: null,
-    variables: [
-      { key: 'taskTitle', label: 'Task Title', example: 'Install AU480 Analyzer' },
-      { key: 'projectName', label: 'Project Name', example: 'Valley Medical Launch' },
-      { key: 'phase', label: 'Phase', example: 'Phase 2' },
-      { key: 'dueDate', label: 'Due Date', example: '03/01/2026' },
-      { key: 'daysOverdue', label: 'Days Overdue', example: '5' }
-    ],
-    isDefault: true, updatedAt: null, updatedBy: null
-  },
-  {
     id: 'task_overdue_escalation',
     name: 'Task Overdue — Admin Escalation',
     category: 'automated',
@@ -892,36 +832,6 @@ const DEFAULT_EMAIL_TEMPLATES = [
       { key: 'ownerName', label: 'Owner Name', example: 'Jane Doe' },
       { key: 'dueDate', label: 'Due Date', example: '03/01/2026' },
       { key: 'daysOverdue', label: 'Days Overdue', example: '10' }
-    ],
-    isDefault: true, updatedAt: null, updatedBy: null
-  },
-  {
-    id: 'milestone_reached',
-    name: 'Milestone Reached',
-    category: 'automated',
-    subject: 'Milestone reached: {{projectName}} is {{percentage}}% complete!',
-    body: 'Great progress! {{projectName}} has reached {{percentage}}% completion. {{completedTasks}} of {{totalTasks}} tasks are done.',
-    htmlBody: null,
-    variables: [
-      { key: 'projectName', label: 'Project Name', example: 'Valley Medical Launch' },
-      { key: 'percentage', label: 'Completion %', example: '75' },
-      { key: 'completedTasks', label: 'Completed Tasks', example: '76' },
-      { key: 'totalTasks', label: 'Total Tasks', example: '102' }
-    ],
-    isDefault: true, updatedAt: null, updatedBy: null
-  },
-  {
-    id: 'golive_reminder',
-    name: 'Go-Live Reminder',
-    category: 'automated',
-    subject: 'Go-live in {{daysUntil}} days: {{projectName}}',
-    body: '{{projectName}} is scheduled to go live on {{goLiveDate}}. That\'s {{daysUntil}} days from now. Current progress: {{percentage}}% complete.',
-    htmlBody: null,
-    variables: [
-      { key: 'projectName', label: 'Project Name', example: 'Valley Medical Launch' },
-      { key: 'goLiveDate', label: 'Go-Live Date', example: '04/01/2026' },
-      { key: 'daysUntil', label: 'Days Until Go-Live', example: '7' },
-      { key: 'percentage', label: 'Completion %', example: '92' }
     ],
     isDefault: true, updatedAt: null, updatedBy: null
   },
@@ -1141,6 +1051,7 @@ const scanAndQueueNotifications = async () => {
     // Helper: render a template with pool-resolved vars and queue the notification
     const renderAndQueue = async (templateId, recipientUser, allVars, ctaLabel, ctaUrl, entityId, entityType) => {
       const t = tpl(templateId);
+      if (!t) return; // template removed (e.g. lab default deleted); skip until a GFC template is created
       const renderedSubject = renderTemplate(t.subject, allVars);
       const renderedBody = renderTemplate(t.body, allVars);
       // Generate a long-lived unsubscribe token for this recipient
@@ -9486,7 +9397,7 @@ async function createPasswordResetLink(user, plainPassword) {
 
 // Send the password reset email with the secure link
 async function sendPasswordResetEmail(user, token) {
-  const resetUrl = `https://thrive365labs.live/password-reset-${token}`;
+  const resetUrl = `${await getAppBaseUrl()}/password-reset-${token}`;
   const htmlBody = `
     <div style="font-family: Inter, Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
       <div style="background: #045E9F; padding: 24px; border-radius: 8px 8px 0 0; text-align: center;">
@@ -10535,7 +10446,7 @@ process.on('unhandledRejection', (reason, promise) => {
 
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
-  console.log(`🔐 Admin login: bianca@thrive365labs.live / Thrive2025!`);
+  console.log(`🔐 Admin login: ${config.DEFAULT_ADMIN.EMAIL}`);
 
   // Safety net: reactivate any admin accounts that are inactive (prevent lockout)
   (async () => {
