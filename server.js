@@ -2262,7 +2262,8 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       email, password, name, role, practiceName, isNewClient, assignedProjects, logo,
       hasServicePortalAccess, hasAdminHubAccess, hasImplementationsAccess, hasClientPortalAdminAccess,
       isManager, assignedClients, hubspotCompanyId, hubspotDealId, hubspotContactId, projectAccessLevels,
-      existingPortalSlug, phone, sendWelcomeEmail: shouldSendWelcome = true
+      existingPortalSlug, phone, sendWelcomeEmail: shouldSendWelcome = true,
+      licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam
     } = req.body;
 
     // Managers can only create client users
@@ -2291,6 +2292,9 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       hasAdminHubAccess: hasAdminHubAccess || false,
       hasImplementationsAccess: hasImplementationsAccess || false,
       hasClientPortalAdminAccess: hasClientPortalAdminAccess || false,
+      // GFC extended fields
+      hasClinicalAccess: hasClinicalAccess || false,
+      licenseLevel: licenseLevel || null,
       createdAt: new Date().toISOString(),
       // Account status — active accounts receive notifications, inactive do not
       accountStatus: 'active',
@@ -2312,6 +2316,9 @@ app.post('/api/users', authenticateToken, async (req, res) => {
 
     // Client-specific fields
     if (role === config.ROLES.CLIENT) {
+      // GFC client enrollment & care team defaults
+      newUser.enrollmentStatus = enrollmentStatus || 'intake_pending';
+      newUser.careTeam = careTeam || { assignedFNPs: [], assignedCaseManager: null, primaryCaregiver: null, backupCaregiver: null };
       // If adding user to an existing portal, inherit slug and practice settings
       if (existingPortalSlug) {
         const existingClient = users.find(u => u.role === config.ROLES.CLIENT && u.slug === existingPortalSlug);
@@ -2880,7 +2887,8 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
       name, email, role, password, assignedProjects, projectAccessLevels,
       practiceName, isNewClient, logo, hubspotCompanyId, hubspotDealId, hubspotContactId,
       hasServicePortalAccess, hasAdminHubAccess, hasImplementationsAccess, hasClientPortalAdminAccess,
-      isManager, assignedClients, phone, accountStatus, emailUnsubscribed
+      isManager, assignedClients, phone, accountStatus, emailUnsubscribed,
+      licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam
     } = req.body;
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === userId);
@@ -2921,6 +2929,12 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
     if (hasAdminHubAccess !== undefined) users[idx].hasAdminHubAccess = hasAdminHubAccess;
     if (hasImplementationsAccess !== undefined) users[idx].hasImplementationsAccess = hasImplementationsAccess;
     if (hasClientPortalAdminAccess !== undefined) users[idx].hasClientPortalAdminAccess = hasClientPortalAdminAccess;
+
+    // GFC extended fields
+    if (licenseLevel !== undefined) users[idx].licenseLevel = licenseLevel;
+    if (hasClinicalAccess !== undefined) users[idx].hasClinicalAccess = hasClinicalAccess;
+    if (enrollmentStatus !== undefined) users[idx].enrollmentStatus = enrollmentStatus;
+    if (careTeam !== undefined) users[idx].careTeam = careTeam;
 
     // Account active status (no separate isActive - handled by accountStatus above)
 

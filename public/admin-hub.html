@@ -923,7 +923,10 @@
         practiceName: '', isNewClient: false, existingPortalSlug: '',
         logo: '', hubspotCompanyId: '', hubspotDealId: '', hubspotContactId: '',
         assignedProjects: [], projectAccessLevels: {}, assignedClients: [],
-        sendWelcomeEmail: true
+        sendWelcomeEmail: true,
+        // GFC extended fields
+        licenseLevel: '', hasClinicalAccess: false, enrollmentStatus: 'intake_pending',
+        careTeam: { assignedFNPs: [], assignedCaseManager: '', primaryCaregiver: '', backupCaregiver: '' }
       };
       const [formData, setFormData] = useState(defaultFormData);
 
@@ -1001,7 +1004,12 @@
           assignedProjects: user.assignedProjects || [],
           projectAccessLevels: user.projectAccessLevels || {},
           assignedClients: user.assignedClients || [],
-          existingPortalSlug: ''
+          existingPortalSlug: '',
+          // GFC extended fields
+          licenseLevel: user.licenseLevel || '',
+          hasClinicalAccess: user.hasClinicalAccess || false,
+          enrollmentStatus: user.enrollmentStatus || 'intake_pending',
+          careTeam: user.careTeam || { assignedFNPs: [], assignedCaseManager: '', primaryCaregiver: '', backupCaregiver: '' }
         });
         setShowForm(true);
       };
@@ -1123,9 +1131,11 @@
         const getRoleDisplay = (user) => {
           if (user.role === 'admin') return 'Super Admin';
           if (user.isManager) return 'Manager';
-          if (user.role === 'user') return 'Team Member';
+          if (user.role === 'user') return 'Clinical (FNP)';
           if (user.role === 'client') return 'Client';
-          if (user.role === 'vendor') return 'Vendor';
+          if (user.role === 'vendor') return 'Caregiver';
+          if (user.role === 'caseManager') return 'Case Manager';
+          if (user.role === 'family') return 'Family';
           return user.role || '';
         };
 
@@ -1318,11 +1328,13 @@
                           }
                         }}
                         className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
-                        <option value="user">Team Member</option>
+                        <option value="user">Clinical (FNP)</option>
                         <option value="manager">Manager</option>
                         <option value="admin">Super Admin</option>
                         <option value="client">Client</option>
-                        <option value="vendor">External Vendor</option>
+                        <option value="vendor">Caregiver</option>
+                        <option value="caseManager">Case Manager</option>
+                        <option value="family">Family / Authorized Contact</option>
                       </select>
                     </div>
                   </div>
@@ -1359,6 +1371,33 @@
                         </div>
                       </div>
                       <p className="text-xs text-gray-500 mt-2">Admins automatically have all permissions. Managers with Service Portal access can manage vendors and assignments.</p>
+                    </div>
+                  )}
+
+                  {/* License Level — shown for Caregiver (vendor) role */}
+                  {formData.role === 'vendor' && (
+                    <div className="border-t pt-4">
+                      <label className="block text-sm font-medium text-gray-700 mb-1">License Level</label>
+                      <select value={formData.licenseLevel} onChange={(e) => setFormData({ ...formData, licenseLevel: e.target.value })}
+                        className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
+                        <option value="">-- Select License Level --</option>
+                        <option value="sitter">Sitter / Companion</option>
+                        <option value="pca">PCA</option>
+                        <option value="cna">CNA</option>
+                        <option value="lpn">LPN</option>
+                      </select>
+                    </div>
+                  )}
+
+                  {/* Clinical Access — shown for Clinical (FNP) / user role */}
+                  {formData.role === 'user' && (
+                    <div className="border-t pt-4">
+                      <div className="flex items-center gap-3 p-3 bg-teal-50 rounded-lg">
+                        <input type="checkbox" id="hasClinicalAccess" checked={formData.hasClinicalAccess}
+                          onChange={(e) => setFormData({ ...formData, hasClinicalAccess: e.target.checked })}
+                          className="w-5 h-5 rounded border-gray-300 text-teal-600 focus:ring-teal-500" />
+                        <label htmlFor="hasClinicalAccess" className="text-sm font-medium text-gray-700">Clinical Access (FNP / charting)</label>
+                      </div>
                     </div>
                   )}
 
@@ -1497,6 +1536,63 @@
                           <label className="block text-sm font-medium text-gray-700 mb-1">Contact ID</label>
                           <input type="text" value={formData.hubspotContactId} onChange={(e) => setFormData({ ...formData, hubspotContactId: e.target.value })}
                             className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" placeholder="HubSpot Contact ID" />
+                        </div>
+                      </div>
+
+                      {/* Enrollment Status */}
+                      <h4 className="font-medium text-gray-800 mt-4 mb-2">Enrollment Status</h4>
+                      <select value={formData.enrollmentStatus} onChange={(e) => setFormData({ ...formData, enrollmentStatus: e.target.value })}
+                        className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
+                        <option value="intake_pending">Intake Pending</option>
+                        <option value="intake_complete">Intake Complete</option>
+                        <option value="enrolled">Enrolled</option>
+                      </select>
+
+                      {/* Care Team */}
+                      <h4 className="font-medium text-gray-800 mt-4 mb-2">Care Team</h4>
+                      <div className="grid md:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Primary Caregiver</label>
+                          <select value={formData.careTeam.primaryCaregiver} onChange={(e) => setFormData({ ...formData, careTeam: { ...formData.careTeam, primaryCaregiver: e.target.value } })}
+                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
+                            <option value="">-- None --</option>
+                            {users.filter(u => u.role === 'vendor').map(u => (
+                              <option key={u.id} value={u.id}>{u.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Backup Caregiver</label>
+                          <select value={formData.careTeam.backupCaregiver} onChange={(e) => setFormData({ ...formData, careTeam: { ...formData.careTeam, backupCaregiver: e.target.value } })}
+                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
+                            <option value="">-- None --</option>
+                            {users.filter(u => u.role === 'vendor').map(u => (
+                              <option key={u.id} value={u.id}>{u.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Assigned Case Manager</label>
+                          <select value={formData.careTeam.assignedCaseManager} onChange={(e) => setFormData({ ...formData, careTeam: { ...formData.careTeam, assignedCaseManager: e.target.value } })}
+                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
+                            <option value="">-- None --</option>
+                            {users.filter(u => u.role === 'caseManager').map(u => (
+                              <option key={u.id} value={u.id}>{u.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Assigned FNPs</label>
+                          <select multiple value={formData.careTeam.assignedFNPs} onChange={(e) => {
+                              const selected = Array.from(e.target.selectedOptions).map(o => o.value);
+                              setFormData({ ...formData, careTeam: { ...formData.careTeam, assignedFNPs: selected } });
+                            }}
+                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" size="4">
+                            {users.filter(u => u.role === 'user' && u.hasClinicalAccess).map(u => (
+                              <option key={u.id} value={u.id}>{u.name}</option>
+                            ))}
+                          </select>
+                          <p className="text-xs text-gray-500 mt-1">Hold Ctrl/Cmd to select multiple</p>
                         </div>
                       </div>
                     </div>
@@ -1706,13 +1802,17 @@
                               user.role === 'admin' ? 'bg-purple-100 text-purple-700' :
                               user.isManager ? 'bg-indigo-100 text-indigo-700' :
                               user.role === 'client' ? 'bg-blue-100 text-blue-700' :
-                              user.role === 'vendor' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'
+                              user.role === 'vendor' ? 'bg-green-100 text-green-700' :
+                              user.role === 'caseManager' ? 'bg-teal-100 text-teal-700' :
+                              user.role === 'family' ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-700'
                             }`}>{
                               user.role === 'admin' ? 'Super Admin' :
                               user.isManager ? 'Manager' :
                               user.role === 'client' ? 'Client' :
-                              user.role === 'vendor' ? 'Vendor' :
-                              user.role === 'user' ? 'Team Member' : user.role
+                              user.role === 'vendor' ? 'Caregiver' :
+                              user.role === 'user' ? 'Clinical (FNP)' :
+                              user.role === 'caseManager' ? 'Case Manager' :
+                              user.role === 'family' ? 'Family' : user.role
                             }</span>
                           </td>
                           <td className="px-4 py-4">
