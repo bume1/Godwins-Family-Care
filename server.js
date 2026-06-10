@@ -130,7 +130,7 @@ app.get('/thrive365labslaunch', (req, res) => {
       });
       await db.set('users', users);
     invalidateUsersCache();
-      console.log('✅ Admin user created: bianca@thrive365labs.live / Thrive2025!');
+      console.log(`✅ Admin user created: ${config.DEFAULT_ADMIN.EMAIL}`);
     }
   } catch (err) {
     console.error('Error creating admin user:', err);
