@@ -70,6 +70,9 @@
     .gfc-hdr i,.gfc-hdr button{color:var(--gold);background:none;border:none;cursor:pointer;font-size:15px;display:flex;align-items:center;}
     .gfc-hdr .r{font-size:11px;letter-spacing:.6px;color:var(--gold);font-weight:600;}
     .gfc-body{padding:20px 18px 110px;flex:1;}
+    /* Locked gate + intake fill the height; footer pins to the bottom, no tab-bar gap */
+    .gfc-body.gate{padding-bottom:24px;display:flex;flex-direction:column;}
+    .gfc-body.gate .gate-foot{margin-top:auto;padding-top:20px;}
     .gfc h2.disp{font-family:'Cormorant Garamond',serif;font-weight:600;font-size:28px;color:var(--navy);line-height:1.15;letter-spacing:-.3px;margin:0;}
     .gfc .disp em{font-style:italic;font-weight:500;}
     .gfc .sub{font-size:14.5px;color:var(--mut);margin-top:6px;line-height:1.5;}
@@ -145,6 +148,39 @@
     .gfc-tabs button.on i{color:var(--goldd);}
     .gfc-spin{width:40px;height:40px;border:4px solid rgba(3,61,80,.15);border-top-color:var(--navy);border-radius:50%;animation:spin 0.8s linear infinite;}
     @keyframes spin{to{transform:rotate(360deg);}}
+    /* ---- enrollment intake (Stage 2) ---- */
+    .gfc .progress{height:5px;background:rgba(3,61,80,.1);border-radius:4px;overflow:hidden;margin:12px 0 4px;}
+    .gfc .progress i{display:block;height:100%;background:var(--goldd);border-radius:4px;transition:width .3s ease;}
+    .gfc .fld{margin-top:16px;}
+    .gfc .fld label{display:block;font-size:11px;letter-spacing:.6px;text-transform:uppercase;color:var(--mut);font-weight:600;margin-bottom:7px;}
+    .gfc .fld .hint{font-size:11.5px;color:var(--mut);text-transform:none;letter-spacing:0;font-weight:400;margin:-3px 0 7px;}
+    .gfc input[type=text],.gfc input[type=date],.gfc input[type=tel],.gfc input[type=email],.gfc input[type=number],.gfc select,.gfc textarea{
+      width:100%;background:#fff;border:1px solid var(--line2);border-radius:11px;padding:12px 14px;font-size:15px;color:var(--ink);box-shadow:0 1px 2px rgba(3,61,80,.04);font-family:'DM Sans',sans-serif;}
+    .gfc textarea{min-height:70px;resize:vertical;}
+    .gfc input:focus,.gfc select:focus,.gfc textarea:focus{outline:none;border-color:var(--navy);box-shadow:0 0 0 3px rgba(3,61,80,.1);}
+    .gfc .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+    .gfc .seg.click span{cursor:pointer;}
+    .gfc .check{display:flex;align-items:center;gap:9px;padding:11px 13px;background:#fff;border:1px solid var(--line2);border-radius:11px;font-size:14px;color:var(--navy);margin-bottom:7px;cursor:pointer;}
+    .gfc .check.on{background:#fcf3da;border-color:rgba(245,205,133,.8);}
+    .gfc .check .box{width:20px;height:20px;border-radius:6px;border:1.5px solid var(--line2);display:flex;align-items:center;justify-content:center;flex-shrink:0;color:#fff;}
+    .gfc .check.on .box{background:var(--navy);border-color:var(--navy);color:var(--gold);}
+    .gfc .medrow{background:#fff;border:1px solid var(--line);border-radius:13px;padding:12px;margin-bottom:10px;position:relative;}
+    .gfc .medrow .rm{position:absolute;top:10px;right:10px;color:var(--mut);background:none;border:none;cursor:pointer;font-size:16px;}
+    .gfc .addrow{display:inline-flex;align-items:center;gap:6px;background:none;border:1.5px dashed var(--line2);border-radius:11px;padding:11px 14px;width:100%;justify-content:center;color:var(--navy);font-weight:600;font-size:13.5px;cursor:pointer;margin-top:2px;}
+    .gfc .consentbox{background:#fff;border:1px solid var(--line);border-radius:13px;padding:15px 16px;font-size:13.5px;color:var(--mut);line-height:1.65;max-height:200px;overflow-y:auto;box-shadow:0 1px 2px rgba(3,61,80,.04);}
+    .gfc .consentbox b,.gfc .consentbox strong{color:var(--navy);}
+    .gfc .consentbox h4{font-size:13.5px;color:var(--navy);margin:0 0 6px;}
+    .gfc .consentbox p{margin:0 0 9px;}
+    .gfc .sig{margin-top:14px;background:#fff;border:1px solid var(--line2);border-radius:12px;padding:14px;}
+    .gfc .sig .sigline{font-family:'Cormorant Garamond',serif;font-style:italic;font-size:22px;color:var(--navy);border:none;border-bottom:1.5px solid var(--line2);border-radius:0;padding:0 0 6px;box-shadow:none;width:100%;background:none;}
+    .gfc .sig .sigline:focus{box-shadow:none;border-bottom-color:var(--navy);}
+    .gfc .sig .ack{display:flex;gap:9px;align-items:flex-start;margin-top:12px;font-size:13px;color:var(--ink);line-height:1.45;cursor:pointer;}
+    .gfc .sig .ck{width:20px;height:20px;border-radius:5px;border:1.5px solid var(--line2);display:flex;align-items:center;justify-content:center;font-size:12px;flex-shrink:0;color:#fff;}
+    .gfc .sig .ack.on .ck{background:var(--navy);border-color:var(--navy);color:var(--gold);}
+    .gfc .intake-foot{display:flex;gap:10px;margin-top:20px;}
+    .gfc .intake-foot .btn{margin-top:0;}
+    .gfc .err{background:#fdecea;border:1px solid rgba(181,70,46,.3);color:var(--gfc-danger,#B5462E);border-radius:11px;padding:11px 13px;font-size:13px;margin-top:14px;}
+    .gfc .ok-badge{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:600;color:var(--teal);}
   </style>
 </head>
 <body class="bg-gray-50 min-h-screen">
@@ -264,6 +300,32 @@
       getGfcDocuments: (token) =>
         fetch(`${API_URL}/api/gfc/documents`, {
           headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+
+      // ---- GFC enrollment intake (Stage 2) ----
+      getGfcIntake: (token) =>
+        fetch(`${API_URL}/api/gfc/intake`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+
+      saveGfcIntake: (token, intake, serviceLine) =>
+        fetch(`${API_URL}/api/gfc/intake`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ intake, serviceLine })
+        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+
+      signGfcConsent: (token, payload) =>
+        fetch(`${API_URL}/api/gfc/consents`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+
+      submitGfcIntake: (token) =>
+        fetch(`${API_URL}/api/gfc/intake/submit`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
         }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
 
     };
@@ -3564,7 +3626,7 @@
       const consentDone = ['npp','roiFamily','serviceAgreement','billOfRights'].every(k => c[k] === 'signed');
       const intakeStarted = me.enrollmentStatus && me.enrollmentStatus !== 'intake_pending';
       return (
-        <div className="gfc-body">
+        <div className="gfc-body gate">
           {isFamily ? (
             <React.Fragment>
               <h2 className="disp">Family access is locked</h2>
@@ -3579,7 +3641,7 @@
                 <span className="nl"><i className="ti ti-lock" />Documents</span>
                 <span className="nl"><i className="ti ti-lock" />Monitoring</span>
               </div>
-              <p className="micro"><i className="ti ti-shield-lock" />ROI-gated · read-only family view</p>
+              <p className="micro gate-foot"><i className="ti ti-shield-lock" />ROI-gated · read-only family view</p>
             </React.Fragment>
           ) : (
             <React.Fragment>
@@ -3602,27 +3664,418 @@
                 <span className="nl"><i className="ti ti-lock" />Documents</span>
                 <span className="nl"><i className="ti ti-lock" />Messages</span>
               </div>
-              <p className="micro"><i className="ti ti-lock" />Private &amp; HIPAA-protected</p>
+              <p className="micro gate-foot"><i className="ti ti-lock" />Private &amp; HIPAA-protected</p>
             </React.Fragment>
           )}
         </div>
       );
     };
 
-    // PR1 intake placeholder. The full multi-step enrollment flow (ported from
-    // docs/source-forms/template-gfc-intake.php) is built in PR2 (Session 3.2).
-    const GfcIntakePlaceholder = ({ me, onBack }) => (
-      <div className="gfc-body">
-        <div className="step">Enrollment · intake</div>
-        <h2 className="disp" style={{ marginTop: 8 }}>Enrollment intake</h2>
-        <p className="sub">The guided intake and consent flow opens here. We collect your details once, then you e-sign the consents for your service line.</p>
-        <div className="lockcard">
-          <i className="ti ti-clipboard-list" />
-          <div><b>Multi-step intake coming next</b><span>The full intake form and branched consent set are delivered in the next release (Session 3.2). The enrollment gate that protects your portal is already live.</span></div>
-        </div>
-        <button className="btn ghost" onClick={onBack}>Back</button>
+    // ============================================================
+    // GFC ENROLLMENT INTAKE (Stage 2) — ported from
+    // docs/source-forms/template-gfc-intake-3.php into a React multi-step flow,
+    // triggered by the gate. The form's Google-Sheet token mechanism is replaced
+    // by the logged-in client's enrollmentStatus + the /api/gfc/intake endpoints.
+    // Revisions per GFC_Intake_and_Packet_Spec_v1.md: structured medication rows,
+    // DOB collected once (age derived), full insurance IDs, branched e-signed
+    // consent set with a status stored per type.
+    //
+    // NOTE: the consent language below is a WORKING DRAFT pending counsel /
+    // Georgia licensure review before HIPAA-live. TEST DATA ONLY.
+    // ============================================================
+
+    // Small field helpers ----------------------------------------------------
+    const TextField = ({ label, hint, value, onChange, type = 'text', placeholder, maxLength }) => (
+      <div className="fld">
+        <label>{label}</label>
+        {hint && <div className="hint">{hint}</div>}
+        <input type={type} value={value || ''} placeholder={placeholder} maxLength={maxLength}
+          onChange={e => onChange(e.target.value)} />
       </div>
     );
+    const SelectField = ({ label, value, onChange, options }) => (
+      <div className="fld">
+        <label>{label}</label>
+        <select value={value || ''} onChange={e => onChange(e.target.value)}>
+          <option value="">Select</option>
+          {options.map(o => <option key={o} value={o}>{o}</option>)}
+        </select>
+      </div>
+    );
+    const Pills = ({ label, value, onChange, options }) => (
+      <div className="fld">
+        <label>{label}</label>
+        <div className="seg click">
+          {options.map(o => (
+            <span key={o.value || o} className={value === (o.value || o) ? 'on' : ''}
+              onClick={() => onChange(o.value || o)}>{o.label || o}</span>
+          ))}
+        </div>
+      </div>
+    );
+    const CheckList = ({ label, hint, selected, onToggle, options }) => (
+      <div className="fld">
+        <label>{label}</label>
+        {hint && <div className="hint">{hint}</div>}
+        {options.map(o => {
+          const on = (selected || []).includes(o);
+          return (
+            <div key={o} className={`check ${on ? 'on' : ''}`} onClick={() => onToggle(o)}>
+              <span className="box">{on && <i className="ti ti-check" />}</span>{o}
+            </div>
+          );
+        })}
+      </div>
+    );
+
+    // Consent body text (working draft — counsel/licensure review pending) ----
+    const CONSENT_BODY = {
+      npp: (<React.Fragment><h4>Notice of Privacy Practices</h4><p>This notice describes how medical information about you may be used and disclosed and how you can get access to this information. We are required by law to maintain the privacy of your protected health information and to provide you with this notice of our legal duties and privacy practices.</p><p>By acknowledging below, you confirm you have received and had the opportunity to review our HIPAA Notice of Privacy Practices.</p></React.Fragment>),
+      roiFamily: (<React.Fragment><h4>Release of Information — Family / Authorized Contacts</h4><p>I authorize Godwins Family Care LLC to share relevant health and care information with the family members and authorized contacts I designate, for the purpose of coordinating care and ensuring client safety. <b>This authorization is what unlocks the family portal</b>; it may be revoked in writing at any time.</p></React.Fragment>),
+      roiProvider: (<React.Fragment><h4>Release of Information — Providers</h4><p>I authorize Godwins Family Care LLC to exchange relevant health information with the client's medical providers, pharmacies, and other treating clinicians for the purpose of coordinating care. This authorization does not extend to any party not involved in the client's care.</p></React.Fragment>),
+      serviceAgreement: (<React.Fragment><h4>Service Agreement</h4><p><b>Godwins Family Care LLC</b> delivers care through two service lines. <b>Private Home Care</b> provides non-medical personal care and companionship, including assistance with activities of daily living and medication reminders, and, where ordered, skilled nursing delivered by licensed nurses under the oversight of our family nurse practitioner or supervising physician. <b>In-Home Primary Care</b> provides medical visits, assessment, prescribing, and chronic disease management led by a nurse practitioner.</p><p>Personal care aides provide reminders and support and observe and report changes in condition. They do not administer medication or make clinical decisions. Skilled nursing and medical services are provided only by appropriately licensed clinicians and only as set out in your care plan.</p><p>Your care plan is developed with you, your family, and your care team, and is reviewed periodically. Please report any change in condition or care needs promptly so the plan can be updated.</p></React.Fragment>),
+      billOfRights: (<React.Fragment><h4>Patient Bill of Rights & Self-Determination</h4><p>You have the right to be treated with dignity and respect; to participate in your care planning; to be informed of your care and any changes; to voice grievances without retaliation; and to make decisions about your care, including the right to accept or refuse treatment. Georgia residents may contact the state licensing and complaint line for concerns about care.</p></React.Fragment>),
+      emergencyFinancial: (<React.Fragment><h4>Emergency Treatment & Financial Responsibility</h4><p>In a medical emergency, I authorize emergency treatment and transport as needed. I understand that I (or the responsible party) am financially responsible for the cost of emergency transport and treatment that is not otherwise covered by insurance or other benefits.</p></React.Fragment>),
+      crisisProtocol: (<React.Fragment><h4>Emergency & Crisis Protocol (911 / 988)</h4><p>In the event of a medical or behavioral emergency, Godwins Family Care caregivers are authorized to call 911 or 988 (Suicide & Crisis Lifeline) as appropriate, and will immediately notify the primary family contact. Caregivers follow established safety protocols and document all incidents.</p></React.Fragment>),
+      monitoring: (<React.Fragment><h4>Continuous Monitoring Opt-In <span className="ok-badge">Coming soon</span></h4><p>Optional. In a future release, Godwins Family Care may offer consent-gated in-home remote monitoring (activity and, where shared, video) viewable by your care team and, where you allow it, your family. This option is <b>inactive</b> today — recording your preference here does not start any monitoring.</p></React.Fragment>),
+      financialAgreement: (<React.Fragment><h4>Financial Agreement (Private Home Care)</h4><p>I understand the rates, billing cycle, and cancellation policy for personal care services as provided by Godwins Family Care, and I agree to be responsible for charges as set out in my care plan and service schedule.</p></React.Fragment>),
+      pcaScope: (<React.Fragment><h4>Personal Care Aide Scope Acknowledgment</h4><p>I understand that personal care aides provide reminders, support, and observation, and that they do <b>not</b> administer medication or make clinical decisions. Skilled and medical tasks are performed only by appropriately licensed clinicians as ordered in the care plan.</p></React.Fragment>),
+      consentToTreat: (<React.Fragment><h4>Consent to Medical Treatment (In-Home Primary Care)</h4><p>I consent to medical evaluation and treatment provided by the nurse practitioner and clinical team of Godwins Family Care's In-Home Primary Care service, consistent with the plan of care.</p></React.Fragment>),
+      assignmentOfBenefits: (<React.Fragment><h4>Assignment of Benefits</h4><p>I assign to Godwins Family Care LLC the right to receive payment of Medicare and/or insurance benefits otherwise payable to me for services rendered, and authorize the release of information necessary to process these claims.</p></React.Fragment>),
+      practiceNpp: (<React.Fragment><h4>Medical Practice Notice of Privacy Practices</h4><p>I acknowledge receipt of the In-Home Primary Care practice's Notice of Privacy Practices, describing how my medical information may be used and disclosed by the medical practice.</p></React.Fragment>)
+    };
+
+    // One consent card with typed-name + acknowledgment e-signature.
+    const ConsentCard = ({ def, status, meta, onSign, signedName }) => {
+      const [name, setName] = useState((meta && meta.typedName) || signedName || '');
+      const [ack, setAck] = useState(false);
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      const signed = status === 'signed' || status === 'na';
+      const inactive = def.inactive;
+
+      const handleSign = async (optOut) => {
+        setErr('');
+        if (!inactive) {
+          if (!name.trim()) { setErr('Type your full name to sign.'); return; }
+          if (!ack) { setErr('Check the acknowledgment box to sign.'); return; }
+        }
+        setBusy(true);
+        const res = await onSign(def.type, { typedName: name.trim(), acknowledged: ack, optOut });
+        setBusy(false);
+        if (res && res.error) setErr(res.error);
+      };
+
+      return (
+        <div className="card" style={{ marginBottom: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+            <div style={{ fontWeight: 600, color: 'var(--navy)', fontSize: 14.5 }}>{def.title}</div>
+            {signed
+              ? <span className="ok-badge"><i className="ti ti-circle-check" />{status === 'na' ? 'Declined' : 'Signed'}</span>
+              : (def.required ? <span style={{ fontSize: 11, color: 'var(--goldd)', fontWeight: 600 }}>REQUIRED</span> : <span style={{ fontSize: 11, color: 'var(--mut)', fontWeight: 600 }}>OPTIONAL</span>)}
+          </div>
+          <div className="consentbox" style={{ marginTop: 10 }}>{CONSENT_BODY[def.type]}</div>
+          {!signed && (
+            <React.Fragment>
+              {inactive ? (
+                <div className="intake-foot">
+                  <button className="btn ghost" disabled={busy} onClick={() => handleSign(true)} style={{ marginTop: 0 }}>Not now</button>
+                  <button className="btn" disabled={busy} onClick={() => handleSign(false)} style={{ marginTop: 0 }}>Opt in</button>
+                </div>
+              ) : (
+                <div className="sig">
+                  <input className="sigline" placeholder="Type your full name to sign" value={name} onChange={e => setName(e.target.value)} />
+                  <div className={`ack ${ack ? 'on' : ''}`} onClick={() => setAck(!ack)}>
+                    <span className="ck">{ack && <i className="ti ti-check" />}</span>
+                    <span>By typing my name above and checking this box, I electronically sign the {def.title} ({new Date().toLocaleDateString()}).</span>
+                  </div>
+                  <button className="btn" disabled={busy} onClick={() => handleSign(false)}>{busy ? 'Signing…' : 'Sign & save'}</button>
+                </div>
+              )}
+              {err && <div className="err">{err}</div>}
+            </React.Fragment>
+          )}
+        </div>
+      );
+    };
+
+    const ROUTE_OPTS = ['Oral', 'Topical', 'Injection', 'Inhaled', 'Patch', 'Other'];
+    const ADL_LEVELS = ['Independent', 'Needs verbal cues', 'Needs physical assistance', 'Fully dependent'];
+
+    const GfcIntakeFlow = ({ token, me, onBack, onComplete }) => {
+      const [loaded, setLoaded] = useState(false);
+      const [serviceLine, setServiceLine] = useState(me.serviceLine || 'PHC');
+      const [form, setForm] = useState({ medications: [{ name: '', dose: '', route: '', frequency: '', prescriber: '', pharmacy: '' }], insuranceIds: [{ carrier: '', memberId: '', group: '' }], primaryContact: {}, emergencyContacts: [{}, {}], adl: {}, skilledTasksNeeded: [], homeSafetyFlags: [], behavioralFlags: [] });
+      const [consents, setConsents] = useState({});
+      const [consentMeta, setConsentMeta] = useState({});
+      const [consentDefs, setConsentDefs] = useState([]);
+      const [requiredConsents, setRequiredConsents] = useState([]);
+      const [step, setStep] = useState(0);
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+
+      useEffect(() => {
+        (async () => {
+          const r = await api.getGfcIntake(token);
+          if (!r.error) {
+            const sl = r.serviceLine || 'PHC';
+            setServiceLine(sl);
+            setConsents(r.consents || {});
+            setConsentMeta(r.consentMeta || {});
+            setConsentDefs(r.consentDefs || []);
+            setRequiredConsents(r.requiredConsents || []);
+            if (r.intake && Object.keys(r.intake).length) {
+              setForm(f => ({
+                ...f, ...r.intake,
+                medications: (r.intake.medications && r.intake.medications.length) ? r.intake.medications : f.medications,
+                insuranceIds: (r.intake.insuranceIds && r.intake.insuranceIds.length) ? r.intake.insuranceIds : f.insuranceIds,
+                primaryContact: r.intake.primaryContact || {}, emergencyContacts: r.intake.emergencyContacts || [{}, {}],
+                adl: r.intake.adl || {}, skilledTasksNeeded: r.intake.skilledTasksNeeded || [], homeSafetyFlags: r.intake.homeSafetyFlags || [], behavioralFlags: r.intake.behavioralFlags || []
+              }));
+            }
+          }
+          setLoaded(true);
+        })();
+      }, [token]);
+
+      const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+      const setNested = (obj, k, v) => setForm(f => ({ ...f, [obj]: { ...(f[obj] || {}), [k]: v } }));
+      const toggleArr = (k, val) => setForm(f => {
+        const arr = f[k] || []; return { ...f, [k]: arr.includes(val) ? arr.filter(x => x !== val) : [...arr, val] };
+      });
+      const setMed = (i, k, v) => setForm(f => { const m = [...f.medications]; m[i] = { ...m[i], [k]: v }; return { ...f, medications: m }; });
+      const addMed = () => setForm(f => ({ ...f, medications: [...f.medications, { name: '', dose: '', route: '', frequency: '', prescriber: '', pharmacy: '' }] }));
+      const rmMed = (i) => setForm(f => ({ ...f, medications: f.medications.filter((_, x) => x !== i) }));
+      const setIns = (i, k, v) => setForm(f => { const a = [...f.insuranceIds]; a[i] = { ...a[i], [k]: v }; return { ...f, insuranceIds: a }; });
+      const addIns = () => setForm(f => ({ ...f, insuranceIds: [...f.insuranceIds, { carrier: '', memberId: '', group: '' }] }));
+
+      const activeConsentDefs = consentDefs.length ? consentDefs : [];
+      const requiredSigned = requiredConsents.every(t => consents[t] === 'signed');
+
+      // Persist the data steps as a draft when advancing.
+      const saveDraft = async () => {
+        const res = await api.saveGfcIntake(token, form, serviceLine);
+        return res;
+      };
+
+      const handleSignConsent = async (type, payload) => {
+        const res = await api.signGfcConsent(token, { type, ...payload });
+        if (!res.error) {
+          setConsents(c => ({ ...c, [type]: res.status }));
+        }
+        return res;
+      };
+
+      const steps = [
+        { key: 'path', label: 'Service path' },
+        { key: 'client', label: 'Client details' },
+        { key: 'contacts', label: 'Contacts' },
+        { key: 'medical', label: 'Medical' },
+        { key: 'function', label: 'Function & safety' },
+        { key: 'insurance', label: 'Insurance' },
+        { key: 'consents', label: 'Consents' },
+        { key: 'review', label: 'Review & submit' }
+      ];
+      const pct = Math.round(((step + 1) / steps.length) * 100);
+
+      const next = async () => {
+        setErr('');
+        // Validate per step
+        if (steps[step].key === 'client' && !form.dob) { setErr('Please enter the client date of birth.'); return; }
+        if (steps[step].key === 'contacts' && !(form.primaryContact && form.primaryContact.name)) { setErr('A primary family contact name is required.'); return; }
+        setBusy(true);
+        // Save draft on data steps (not on the consent step which saves per-signature)
+        if (steps[step].key !== 'consents' && steps[step].key !== 'review') {
+          const res = await saveDraft();
+          if (res.error) { setBusy(false); setErr(res.error); return; }
+        }
+        setBusy(false);
+        setStep(s => Math.min(s + 1, steps.length - 1));
+        window.scrollTo(0, 0);
+      };
+      const back = () => { setErr(''); if (step === 0) { onBack(); } else setStep(s => s - 1); };
+
+      const submit = async () => {
+        setErr(''); setBusy(true);
+        await saveDraft();
+        const res = await api.submitGfcIntake(token);
+        setBusy(false);
+        if (res.error) {
+          if (res.code === 'CONSENTS_INCOMPLETE') setErr('Some required consents still need signing. Go back to Consents.');
+          else if (res.code === 'INTAKE_INCOMPLETE') setErr('Some required details are missing: ' + (res.missingFields || []).join(', '));
+          else setErr(res.error);
+          return;
+        }
+        onComplete();
+      };
+
+      if (!loaded) {
+        return <div className="gfc-body" style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}><div className="gfc-spin" /></div>;
+      }
+
+      const k = steps[step].key;
+      return (
+        <div className="gfc-body">
+          <div className="step">Enrollment · {steps[step].label}</div>
+          <div className="progress"><i style={{ width: pct + '%' }} /></div>
+          <div style={{ fontSize: 11, color: 'var(--mut)', marginBottom: 6 }}>Step {step + 1} of {steps.length}</div>
+
+          {k === 'path' && (
+            <React.Fragment>
+              <h2 className="disp">What kind of care?</h2>
+              <p className="sub">This sets which consents and details we ask for.</p>
+              <Pills label="Service line" value={serviceLine}
+                onChange={setServiceLine}
+                options={[{ value: 'PHC', label: 'Private Home Care' }, { value: 'IHPC', label: 'In-Home Primary Care' }, { value: 'both', label: 'Both' }]} />
+            </React.Fragment>
+          )}
+
+          {k === 'client' && (
+            <React.Fragment>
+              <h2 className="disp">Client details</h2>
+              <p className="sub">We collect date of birth once and calculate age from it.</p>
+              <TextField label="Preferred name" value={form.preferredName} onChange={v => set('preferredName', v)} placeholder="What we should call them" />
+              <TextField label="Date of birth" type="date" value={form.dob} onChange={v => set('dob', v)} />
+              <SelectField label="Gender" value={form.gender} onChange={v => set('gender', v)} options={['Female', 'Male', 'Nonbinary', 'Prefer not to say']} />
+              <TextField label="Primary language" value={form.primaryLanguage} onChange={v => set('primaryLanguage', v)} placeholder="e.g. English" />
+              <TextField label="Phone" type="tel" value={form.phone} onChange={v => set('phone', v)} />
+              <TextField label="Home address" value={form.addressLine1} onChange={v => set('addressLine1', v)} placeholder="Street, city, GA, ZIP" />
+              <SelectField label="Lives with" value={form.livesWith} onChange={v => set('livesWith', v)} options={['Alone', 'Spouse', 'Adult child', 'Other family', 'Assisted living']} />
+            </React.Fragment>
+          )}
+
+          {k === 'contacts' && (
+            <React.Fragment>
+              <h2 className="disp">Contacts &amp; authority</h2>
+              <p className="lbl" style={{ marginTop: 8 }}>Primary family contact</p>
+              <TextField label="Name" value={form.primaryContact.name} onChange={v => setNested('primaryContact', 'name', v)} />
+              <TextField label="Relationship" value={form.primaryContact.relationship} onChange={v => setNested('primaryContact', 'relationship', v)} />
+              <TextField label="Phone" type="tel" value={form.primaryContact.phone} onChange={v => setNested('primaryContact', 'phone', v)} />
+              <TextField label="Email" type="email" value={form.primaryContact.email} onChange={v => setNested('primaryContact', 'email', v)} />
+              <SelectField label="Decision-making authority" value={form.decisionAuthority} onChange={v => set('decisionAuthority', v)} options={['Client', 'Shared', 'Surrogate', 'POA / Guardian']} />
+              <p className="lbl">Emergency contact 1</p>
+              <TextField label="Name" value={(form.emergencyContacts[0] || {}).name} onChange={v => setForm(f => { const e = [...f.emergencyContacts]; e[0] = { ...e[0], name: v }; return { ...f, emergencyContacts: e }; })} />
+              <TextField label="Phone" type="tel" value={(form.emergencyContacts[0] || {}).phone} onChange={v => setForm(f => { const e = [...f.emergencyContacts]; e[0] = { ...e[0], phone: v }; return { ...f, emergencyContacts: e }; })} />
+              <p className="lbl">Emergency contact 2</p>
+              <TextField label="Name" value={(form.emergencyContacts[1] || {}).name} onChange={v => setForm(f => { const e = [...f.emergencyContacts]; e[1] = { ...e[1], name: v }; return { ...f, emergencyContacts: e }; })} />
+              <TextField label="Phone" type="tel" value={(form.emergencyContacts[1] || {}).phone} onChange={v => setForm(f => { const e = [...f.emergencyContacts]; e[1] = { ...e[1], phone: v }; return { ...f, emergencyContacts: e }; })} />
+            </React.Fragment>
+          )}
+
+          {k === 'medical' && (
+            <React.Fragment>
+              <h2 className="disp">Medical</h2>
+              <div className="fld"><label>Diagnoses</label><textarea value={form.diagnoses || ''} onChange={e => set('diagnoses', e.target.value)} placeholder="Primary conditions / diagnoses" /></div>
+              <div className="fld"><label>Allergies</label><textarea value={form.allergies || ''} onChange={e => set('allergies', e.target.value)} placeholder="Medication, food, environmental — or 'none known'" /></div>
+              <p className="lbl">Current medications</p>
+              <div className="hint" style={{ fontSize: 11.5, color: 'var(--mut)', marginBottom: 8 }}>Caregivers provide reminders only — not administration.</div>
+              {form.medications.map((m, i) => (
+                <div className="medrow" key={i}>
+                  {form.medications.length > 1 && <button className="rm" onClick={() => rmMed(i)}><i className="ti ti-x" /></button>}
+                  <div className="grid2">
+                    <TextField label="Name" value={m.name} onChange={v => setMed(i, 'name', v)} placeholder="Medication" />
+                    <TextField label="Dose" value={m.dose} onChange={v => setMed(i, 'dose', v)} placeholder="e.g. 10mg" />
+                  </div>
+                  <SelectField label="Route" value={m.route} onChange={v => setMed(i, 'route', v)} options={ROUTE_OPTS} />
+                  <TextField label="Frequency" value={m.frequency} onChange={v => setMed(i, 'frequency', v)} placeholder="e.g. Once daily, morning" />
+                  <div className="grid2">
+                    <TextField label="Prescribing provider" value={m.prescriber} onChange={v => setMed(i, 'prescriber', v)} placeholder="Dr. name" />
+                    <TextField label="Pharmacy" value={m.pharmacy} onChange={v => setMed(i, 'pharmacy', v)} placeholder="Pharmacy" />
+                  </div>
+                </div>
+              ))}
+              <button className="addrow" onClick={addMed}><i className="ti ti-plus" /> Add another medication</button>
+              <CheckList label="Skilled care needs" hint="Check all that apply." selected={form.skilledTasksNeeded} onToggle={v => toggleArr('skilledTasksNeeded', v)}
+                options={['Wound care', 'Injections', 'Catheter care', 'Ostomy care', 'Tube feeding', 'Oxygen management', 'Blood glucose monitoring', 'Medication administration', 'None of the above']} />
+            </React.Fragment>
+          )}
+
+          {k === 'function' && (
+            <React.Fragment>
+              <h2 className="disp">Function &amp; safety</h2>
+              <p className="lbl" style={{ marginTop: 8 }}>Activities of daily living</p>
+              {[['bathing', 'Bathing'], ['dressing', 'Dressing'], ['toileting', 'Toileting'], ['transfers', 'Transferring'], ['ambulation', 'Walking'], ['eating', 'Eating']].map(([k2, lbl]) => (
+                <SelectField key={k2} label={lbl} value={(form.adl || {})[k2]} onChange={v => setNested('adl', k2, v)} options={ADL_LEVELS} />
+              ))}
+              <SelectField label="Fall risk" value={form.fallRisk} onChange={v => set('fallRisk', v)} options={['Low', 'Moderate', 'High']} />
+              <SelectField label="Transfer / lift need" value={form.transferNeed} onChange={v => set('transferNeed', v)} options={['Independent', 'Standby', 'One-person assist', 'Two-person assist', 'Mechanical lift']} />
+              <CheckList label="Behavioral flags" hint="Check all that apply." selected={form.behavioralFlags} onToggle={v => toggleArr('behavioralFlags', v)}
+                options={['Wandering', 'Aggression', 'Sundowning', 'Resistance to care', 'None']} />
+              <CheckList label="Home safety" hint="Anything in the home our team should know about." selected={form.homeSafetyFlags} onToggle={v => toggleArr('homeSafetyFlags', v)}
+                options={['Smokers', 'Pets', 'Firearms', 'Stairs', 'Oxygen tanks', 'None']} />
+            </React.Fragment>
+          )}
+
+          {k === 'insurance' && (
+            <React.Fragment>
+              <h2 className="disp">Insurance &amp; payer</h2>
+              <p className="sub">Capture full IDs now so enrollment can verify coverage.</p>
+              <SelectField label="Primary payer type" value={form.payerType} onChange={v => set('payerType', v)} options={['Private pay', 'LTC insurance', 'Medicaid waiver', 'VA', 'Medicare Part B', 'Dual eligible', 'Commercial', 'Combination']} />
+              <TextField label="Medicaid / Medicare ID" hint="Medicaid member ID or Medicare beneficiary number" value={form.medicaidId} onChange={v => set('medicaidId', v)} placeholder="Full ID number" />
+              <p className="lbl">Insurance cards</p>
+              {form.insuranceIds.map((ins, i) => (
+                <div className="medrow" key={i}>
+                  <TextField label="Carrier" value={ins.carrier} onChange={v => setIns(i, 'carrier', v)} placeholder="e.g. Blue Cross, Humana" />
+                  <div className="grid2">
+                    <TextField label="Member ID" value={ins.memberId} onChange={v => setIns(i, 'memberId', v)} placeholder="Member ID" />
+                    <TextField label="Group #" value={ins.group} onChange={v => setIns(i, 'group', v)} placeholder="Group number" />
+                  </div>
+                </div>
+              ))}
+              <button className="addrow" onClick={addIns}><i className="ti ti-plus" /> Add another card</button>
+            </React.Fragment>
+          )}
+
+          {k === 'consents' && (
+            <React.Fragment>
+              <h2 className="disp">Consents &amp; signatures</h2>
+              <p className="sub">Branched for your service line. Each is e-signed with a typed name and timestamp. <b>{requiredConsents.filter(t => consents[t] === 'signed').length}/{requiredConsents.length}</b> required signed.</p>
+              <p className="micro" style={{ justifyContent: 'flex-start', marginTop: 6 }}><i className="ti ti-info-circle" />Working draft — pending counsel/licensure review.</p>
+              {activeConsentDefs.map(def => (
+                <ConsentCard key={def.type} def={def} status={consents[def.type]} meta={consentMeta[def.type]} signedName={form.primaryContact?.name} onSign={handleSignConsent} />
+              ))}
+            </React.Fragment>
+          )}
+
+          {k === 'review' && (
+            <React.Fragment>
+              <h2 className="disp">Review &amp; submit</h2>
+              <p className="sub">Submitting completes enrollment and unlocks your portal.</p>
+              <div className="card">
+                <div className="goal"><i className={`ti ${form.dob ? 'ti-circle-check' : 'ti-circle'}`} style={{ color: form.dob ? 'var(--teal)' : 'var(--mut)' }} />Date of birth {form.dob ? `(age ${ageFromDob(form.dob)})` : '— missing'}</div>
+                <div className="goal"><i className={`ti ${form.primaryContact?.name ? 'ti-circle-check' : 'ti-circle'}`} style={{ color: form.primaryContact?.name ? 'var(--teal)' : 'var(--mut)' }} />Primary contact {form.primaryContact?.name || '— missing'}</div>
+                <div className="goal"><i className="ti ti-circle-check" style={{ color: 'var(--teal)' }} />{(form.medications || []).filter(m => m.name).length} medication(s) listed</div>
+                <div className="goal"><i className={`ti ${requiredSigned ? 'ti-circle-check' : 'ti-alert-circle'}`} style={{ color: requiredSigned ? 'var(--teal)' : 'var(--gfc-danger,#B5462E)' }} />Required consents {requiredSigned ? 'all signed' : `(${requiredConsents.filter(t => consents[t] === 'signed').length}/${requiredConsents.length})`}</div>
+              </div>
+              {!requiredSigned && <div className="err">Please sign all required consents before submitting (go back to Consents).</div>}
+              <button className="btn" disabled={busy || !requiredSigned} onClick={submit}>{busy ? 'Submitting…' : 'Complete enrollment'}</button>
+            </React.Fragment>
+          )}
+
+          {err && <div className="err">{err}</div>}
+
+          {k !== 'review' && (
+            <div className="intake-foot">
+              <button className="btn ghost" onClick={back} disabled={busy} style={{ flex: '0 0 auto', width: 110 }}>{step === 0 ? 'Cancel' : 'Back'}</button>
+              <button className="btn" onClick={next} disabled={busy}>{busy ? 'Saving…' : 'Continue'}</button>
+            </div>
+          )}
+          {k === 'review' && (
+            <button className="btn ghost" onClick={back} disabled={busy}>Back</button>
+          )}
+        </div>
+      );
+    };
+
+    // Derive whole-years age from a YYYY-MM-DD DOB for the review screen.
+    function ageFromDob(dob) {
+      if (!dob) return '';
+      const d = new Date(dob); if (isNaN(d)) return '';
+      const n = new Date(); let a = n.getFullYear() - d.getFullYear();
+      const m = n.getMonth() - d.getMonth();
+      if (m < 0 || (m === 0 && n.getDate() < d.getDate())) a--;
+      return a;
+    }
 
     const GfcDashboard = ({ data, onNavigate }) => {
       const cp = data.carePlan || {};
@@ -3763,6 +4216,12 @@
       const [messages, setMessages] = useState(null);
       const [docs, setDocs] = useState(null);
 
+      const reloadMe = async () => {
+        const result = await api.getGfcMe(token);
+        if (!result.error) setMe(result);
+        return result;
+      };
+
       // Step 1: load enrollment state (not gated).
       useEffect(() => {
         let cancelled = false;
@@ -3823,8 +4282,9 @@
               <span className="ttl">{showIntake ? 'Enrollment' : 'My Care'}</span>
               <button onClick={gfcLogout} title="Sign out"><i className="ti ti-logout" /></button>
             </div>
-            {showIntake
-              ? <GfcIntakePlaceholder me={me} onBack={() => setShowIntake(false)} />
+            {showIntake && !isFamily
+              ? <GfcIntakeFlow token={token} me={me} onBack={() => setShowIntake(false)}
+                  onComplete={async () => { setShowIntake(false); await reloadMe(); }} />
               : <GfcGate me={me} onStartIntake={() => setShowIntake(true)} />}
           </div></div>
         );

@@ -2105,6 +2105,50 @@ const requireEnrolledClient = async (req, res, next) => {
   }
 };
 
+// Intake-scoped access — only the client themselves runs Stage 2 enrollment,
+// regardless of enrollmentStatus (this is what the gate sends them to). Family
+// and staff never submit a client's intake. Default-deny.
+const requireClientForIntake = (req, res, next) => {
+  if (req.user.role === config.ROLES.CLIENT) return next();
+  return res.status(403).json({ error: 'Only the client can complete enrollment intake.' });
+};
+
+// ============== GFC ENROLLMENT INTAKE (Stage 2) — consent definitions ==============
+// Branched consent set per GFC_Intake_and_Packet_Spec_v1.md §4.2.
+// NOTE: the rewritten consent language below is a WORKING DRAFT, pending
+// counsel / Georgia licensure review before HIPAA-live. Do not treat as final.
+const GFC_CONSENT_DEFS = [
+  // Both service lines
+  { type: 'npp',                scope: 'both', required: true,  title: 'HIPAA Notice of Privacy Practices' },
+  { type: 'roiFamily',          scope: 'both', required: true,  title: 'Release of Information — Family' },
+  { type: 'roiProvider',        scope: 'both', required: true,  title: 'Release of Information — Providers' },
+  { type: 'serviceAgreement',   scope: 'both', required: true,  title: 'Service Agreement' },
+  { type: 'billOfRights',       scope: 'both', required: true,  title: 'Patient Bill of Rights & Self-Determination' },
+  { type: 'emergencyFinancial', scope: 'both', required: true,  title: 'Emergency Treatment & Financial Responsibility' },
+  { type: 'crisisProtocol',     scope: 'both', required: true,  title: 'Emergency & Crisis Protocol (911/988)' },
+  { type: 'monitoring',         scope: 'both', required: false, title: 'Continuous Monitoring Opt-In', inactive: true },
+  // Private Home Care only
+  { type: 'financialAgreement', scope: 'phc',  required: true,  title: 'Financial Agreement (rates, billing, cancellation)' },
+  { type: 'pcaScope',           scope: 'phc',  required: true,  title: 'Personal Care Aide Scope Acknowledgment' },
+  // In-Home Primary Care only
+  { type: 'consentToTreat',     scope: 'ihpc', required: true,  title: 'Consent to Medical Treatment' },
+  { type: 'assignmentOfBenefits', scope: 'ihpc', required: true, title: 'Assignment of Medicare / Insurance Benefits' },
+  { type: 'practiceNpp',        scope: 'ihpc', required: true,  title: 'Medical Practice Notice of Privacy Practices' }
+];
+
+// Which consent definitions apply to a given service line.
+const consentDefsForServiceLine = (serviceLine) => {
+  const line = (serviceLine || 'PHC').toUpperCase();
+  return GFC_CONSENT_DEFS.filter(d => {
+    if (d.scope === 'both') return true;
+    if (d.scope === 'phc') return line === 'PHC' || line === 'BOTH';
+    if (d.scope === 'ihpc') return line === 'IHPC' || line === 'BOTH';
+    return false;
+  });
+};
+const requiredConsentTypes = (serviceLine) =>
+  consentDefsForServiceLine(serviceLine).filter(d => d.required).map(d => d.type);
+
 // Uploads require authentication - registered here after authenticateToken is defined
 app.use('/uploads', authenticateToken, express.static('uploads', staticOptions));
 // Fallback: serve from public/uploads for files saved before path fix
@@ -5067,6 +5111,197 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
     res.json({ signedConsents, documents: clientDocs });
   } catch (error) {
     console.error('GFC documents error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============== GFC ENROLLMENT INTAKE (Stage 2) ==============
+// The gate sends an intake_pending client here. These routes are NOT behind the
+// enrollment gate (requireEnrolledClient would block a pending client) — instead
+// requireClientForIntake scopes them to the client themselves.
+// TEST DATA ONLY. No real PHI until HIPAA-live (AWS/RDS track).
+
+// Derive age in whole years from a YYYY-MM-DD DOB (single source of truth — §3).
+const deriveAge = (dob) => {
+  if (!dob) return null;
+  const d = new Date(dob);
+  if (isNaN(d)) return null;
+  const now = new Date();
+  let age = now.getFullYear() - d.getFullYear();
+  const m = now.getMonth() - d.getMonth();
+  if (m < 0 || (m === 0 && now.getDate() < d.getDate())) age--;
+  return age >= 0 && age < 130 ? age : null;
+};
+
+// Helper to load the fresh client user record + its index for mutation.
+const loadClientForMutation = async (userId) => {
+  const users = await getUsers();
+  const idx = users.findIndex(u => u.id === userId && u.role === config.ROLES.CLIENT);
+  return { users, idx };
+};
+
+// GET /api/gfc/intake — return the saved intake draft + consent state so the
+// flow can resume, plus the branched consent definitions for the service line.
+app.get('/api/gfc/intake', authenticateToken, requireClientForIntake, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const client = users.find(u => u.id === req.user.id) || {};
+    const serviceLine = client.serviceLine || (client.intake && client.intake.serviceLine) || 'PHC';
+    res.json({
+      enrollmentStatus: client.enrollmentStatus || 'intake_pending',
+      serviceLine,
+      intake: client.intake || {},
+      consents: client.consents || {},
+      consentMeta: client.consentMeta || {},
+      consentDefs: consentDefsForServiceLine(serviceLine),
+      requiredConsents: requiredConsentTypes(serviceLine)
+    });
+  } catch (error) {
+    console.error('GFC get intake error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/gfc/intake — save/merge the intake data (draft-friendly).
+// Structured per the v1 client schema so it can later swap to AWS RDS.
+app.post('/api/gfc/intake', authenticateToken, requireClientForIntake, async (req, res) => {
+  try {
+    const { intake, serviceLine } = req.body || {};
+    if (!intake || typeof intake !== 'object') {
+      return res.status(400).json({ error: 'intake object is required' });
+    }
+    const { users, idx } = await loadClientForMutation(req.user.id);
+    if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
+
+    // Normalize structured medication rows (name/dose/route/frequency/prescriber/pharmacy).
+    const meds = Array.isArray(intake.medications) ? intake.medications
+      .filter(m => m && (m.name || '').trim())
+      .map(m => ({
+        name: (m.name || '').trim(),
+        dose: (m.dose || '').trim(),
+        route: (m.route || '').trim(),
+        frequency: (m.frequency || '').trim(),
+        prescriber: (m.prescriber || '').trim(),
+        pharmacy: (m.pharmacy || '').trim()
+      })) : [];
+
+    // DOB collected once → derive age (never stored as a separate input, §3/§4).
+    const dob = intake.dob || (users[idx].intake && users[idx].intake.dob) || null;
+
+    const merged = {
+      ...(users[idx].intake || {}),
+      ...intake,
+      medications: meds,
+      dob,
+      age: deriveAge(dob),
+      updatedAt: new Date().toISOString()
+    };
+    users[idx].intake = merged;
+    if (serviceLine) users[idx].serviceLine = serviceLine;
+    // Carry a few matching/profile fields up onto the client record (schema mirror).
+    if (intake.dob) users[idx].dob = intake.dob;
+    if (Array.isArray(meds)) users[idx].medications = meds;
+    if (intake.payer) users[idx].payer = intake.payer;
+
+    await db.set('users', users);
+    invalidateUsersCache();
+    res.json({ message: 'Intake saved', intake: merged, age: merged.age });
+  } catch (error) {
+    console.error('GFC save intake error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/gfc/consents — e-sign a single consent (typed name + ack checkbox).
+// Stores a consent STATUS PER TYPE + server timestamp + IP (§4.3). The portal
+// gate reads consents.roiFamily.
+app.post('/api/gfc/consents', authenticateToken, requireClientForIntake, async (req, res) => {
+  try {
+    const { type, typedName, acknowledged, optOut } = req.body || {};
+    if (!type) return res.status(400).json({ error: 'consent type is required' });
+
+    const { users, idx } = await loadClientForMutation(req.user.id);
+    if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
+
+    const serviceLine = users[idx].serviceLine || 'PHC';
+    const def = consentDefsForServiceLine(serviceLine).find(d => d.type === type);
+    if (!def) return res.status(400).json({ error: `Consent "${type}" does not apply to this service line` });
+
+    // The monitoring opt-in is inactive (Track C) — record the choice, do not require a signature.
+    if (def.inactive) {
+      users[idx].consents = { ...(users[idx].consents || {}), [type]: optOut ? 'na' : 'signed' };
+      users[idx].monitoringOptIn = !optOut;
+    } else {
+      if (!typedName || !typedName.trim()) return res.status(400).json({ error: 'Typed signature name is required' });
+      if (!acknowledged) return res.status(400).json({ error: 'You must check the acknowledgment box to sign' });
+      users[idx].consents = { ...(users[idx].consents || {}), [type]: 'signed' };
+      users[idx].consentMeta = {
+        ...(users[idx].consentMeta || {}),
+        [type]: {
+          typedName: typedName.trim(),
+          acknowledged: true,
+          signedAt: new Date().toISOString(),
+          ip: req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null,
+          // Working-draft consent text version — bump when language is revised.
+          version: 'draft-1'
+        }
+      };
+    }
+
+    await db.set('users', users);
+    invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'consent_signed', 'consent', type, { serviceLine });
+    res.json({ message: 'Consent recorded', type, status: users[idx].consents[type] });
+  } catch (error) {
+    console.error('GFC consent error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/gfc/intake/submit — validate required consents + intake, then flip
+// intake_pending → intake_complete and unlock the portal.
+app.post('/api/gfc/intake/submit', authenticateToken, requireClientForIntake, async (req, res) => {
+  try {
+    const { users, idx } = await loadClientForMutation(req.user.id);
+    if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
+
+    const client = users[idx];
+    const serviceLine = client.serviceLine || 'PHC';
+    const consents = client.consents || {};
+
+    // Required consents for the service line must all be signed.
+    const required = requiredConsentTypes(serviceLine);
+    const missingConsents = required.filter(t => consents[t] !== 'signed');
+    if (missingConsents.length) {
+      return res.status(400).json({
+        error: 'Required consents are not all signed yet.',
+        code: 'CONSENTS_INCOMPLETE',
+        missingConsents
+      });
+    }
+
+    // Minimal required intake fields (DOB once + a primary contact).
+    const intake = client.intake || {};
+    const missingFields = [];
+    if (!intake.dob) missingFields.push('dob');
+    if (!(intake.primaryContact && intake.primaryContact.name)) missingFields.push('primaryContact.name');
+    if (missingFields.length) {
+      return res.status(400).json({ error: 'Required intake details are missing.', code: 'INTAKE_INCOMPLETE', missingFields });
+    }
+
+    // Flip the gate. (Already-complete/enrolled stays as-is.)
+    if (client.enrollmentStatus === 'intake_pending' || !client.enrollmentStatus) {
+      client.enrollmentStatus = 'intake_complete';
+    }
+    client.intake = { ...intake, submittedAt: new Date().toISOString(), age: deriveAge(intake.dob) };
+    users[idx] = client;
+    await db.set('users', users);
+    invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'intake_completed', 'enrollment', client.id, { serviceLine });
+
+    res.json({ message: 'Enrollment complete', enrollmentStatus: client.enrollmentStatus });
+  } catch (error) {
+    console.error('GFC intake submit error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
