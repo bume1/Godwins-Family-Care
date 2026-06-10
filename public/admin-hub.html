@@ -266,22 +266,6 @@
           headers: { 'Authorization': `Bearer ${token}` }
         }).then(handleResponse).catch(err => ({ error: err.message })),
 
-      getInventoryReports: (token) =>
-        fetch(`${API_URL}/api/inventory/report-all`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        }).then(handleResponse).catch(err => ({ error: err.message })),
-
-      getInventoryTemplate: () =>
-        fetch(`${API_URL}/api/inventory/template`)
-          .then(handleResponse).catch(err => ({ error: err.message })),
-
-      updateInventoryTemplate: (token, template) =>
-        fetch(`${API_URL}/api/inventory/template`, {
-          method: 'PUT',
-          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ template })
-        }).then(handleResponse).catch(err => ({ error: err.message })),
-
       // Feedback/Inbox APIs
       getFeedback: (token) =>
         fetch(`${API_URL}/api/admin/feedback`, {
@@ -3009,12 +2993,6 @@
       const [settings, setSettings] = useState({ portalName: '', welcomeMessage: '', primaryColor: '#045E9F' });
       const [announcements, setAnnouncements] = useState([]);
       const [clientUsers, setClientUsers] = useState([]);
-      const [inventoryReports, setInventoryReports] = useState([]);
-      const [inventoryTemplate, setInventoryTemplate] = useState([]);
-      const [templateSaving, setTemplateSaving] = useState(false);
-      const [templateMsg, setTemplateMsg] = useState('');
-      const [newCategoryName, setNewCategoryName] = useState('');
-      const [newItemInputs, setNewItemInputs] = useState({});
       const [loading, setLoading] = useState(true);
       const [saving, setSaving] = useState(false);
       const [newAnnouncement, setNewAnnouncement] = useState({ title: '', content: '', type: 'info' });
@@ -3025,64 +3003,15 @@
 
       const loadData = async () => {
         setLoading(true);
-        const [settingsData, announcementsData, usersData, reportsData, templateData] = await Promise.all([
+        const [settingsData, announcementsData, usersData] = await Promise.all([
           api.getPortalSettings(),
           api.getAnnouncements(token),
-          api.getUsers(token),
-          api.getInventoryReports(token),
-          api.getInventoryTemplate()
+          api.getUsers(token)
         ]);
         if (!settingsData.error) setSettings(settingsData);
         if (!announcementsData.error) setAnnouncements(announcementsData);
         if (!usersData.error) setClientUsers(usersData.filter(u => u.role === 'client'));
-        if (!reportsData.error) setInventoryReports(reportsData.clientSummaries || []);
-        if (!templateData.error && Array.isArray(templateData)) setInventoryTemplate(templateData);
         setLoading(false);
-      };
-
-      const handleSaveTemplate = async () => {
-        setTemplateSaving(true);
-        setTemplateMsg('');
-        const result = await api.updateInventoryTemplate(token, inventoryTemplate);
-        if (result.error) {
-          setTemplateMsg('Error: ' + result.error);
-        } else {
-          setTemplateMsg('Template saved successfully.');
-          setTimeout(() => setTemplateMsg(''), 3000);
-        }
-        setTemplateSaving(false);
-      };
-
-      const handleAddCategory = () => {
-        const name = newCategoryName.trim();
-        if (!name) return;
-        if (inventoryTemplate.find(c => c.category === name)) return;
-        setInventoryTemplate([...inventoryTemplate, { category: name, items: [] }]);
-        setNewCategoryName('');
-      };
-
-      const handleRemoveCategory = (catIdx) => {
-        setInventoryTemplate(inventoryTemplate.filter((_, i) => i !== catIdx));
-      };
-
-      const handleAddItem = (catIdx) => {
-        const name = (newItemInputs[catIdx] || '').trim();
-        if (!name) return;
-        const updated = inventoryTemplate.map((cat, i) => {
-          if (i !== catIdx) return cat;
-          if (cat.items.includes(name)) return cat;
-          return { ...cat, items: [...cat.items, name] };
-        });
-        setInventoryTemplate(updated);
-        setNewItemInputs({ ...newItemInputs, [catIdx]: '' });
-      };
-
-      const handleRemoveItem = (catIdx, itemIdx) => {
-        const updated = inventoryTemplate.map((cat, i) => {
-          if (i !== catIdx) return cat;
-          return { ...cat, items: cat.items.filter((_, j) => j !== itemIdx) };
-        });
-        setInventoryTemplate(updated);
       };
 
       const handleSaveSettings = async () => {
@@ -3135,14 +3064,6 @@
               <button onClick={() => setActiveTab('clients')}
                 className={`px-6 py-4 font-medium whitespace-nowrap ${activeTab === 'clients' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'}`}>
                 Client Users ({clientUsers.length})
-              </button>
-              <button onClick={() => setActiveTab('inventory')}
-                className={`px-6 py-4 font-medium whitespace-nowrap ${activeTab === 'inventory' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'}`}>
-                Inventory Reports
-              </button>
-              <button onClick={() => setActiveTab('inventoryTemplate')}
-                className={`px-6 py-4 font-medium whitespace-nowrap ${activeTab === 'inventoryTemplate' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'}`}>
-                Inventory Template
               </button>
             </div>
 
@@ -3266,115 +3187,6 @@
               </div>
             )}
 
-            {/* Inventory Reports Tab */}
-            {activeTab === 'inventory' && (
-              <div className="p-6">
-                {inventoryReports.length > 0 ? (
-                  <div className="overflow-x-auto">
-                    <table className="w-full">
-                      <thead className="bg-gray-50 border-b">
-                        <tr>
-                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Last Submission</th>
-                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Client</th>
-                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Items</th>
-                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Total Qty</th>
-                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Alerts</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-200">
-                        {inventoryReports.map((report, idx) => (
-                          <tr key={idx} className="hover:bg-gray-50">
-                            <td className="px-4 py-3 text-sm">{report.lastSubmission ? new Date(report.lastSubmission).toLocaleDateString() : '—'}</td>
-                            <td className="px-4 py-3 font-medium text-gray-900">{report.clientName || 'Unknown'}</td>
-                            <td className="px-4 py-3 text-sm">{report.totalItems || 0}</td>
-                            <td className="px-4 py-3 text-sm">{report.totalQuantity || 0}</td>
-                            <td className="px-4 py-3 text-sm flex gap-2">
-                              {report.lowStockCount > 0 && <span className="px-2 py-0.5 text-xs rounded bg-red-100 text-red-700">{report.lowStockCount} low stock</span>}
-                              {report.expiringCount > 0 && <span className="px-2 py-0.5 text-xs rounded bg-orange-100 text-orange-700">{report.expiringCount} expiring</span>}
-                              {!report.lowStockCount && !report.expiringCount && <span className="px-2 py-0.5 text-xs rounded bg-green-100 text-green-700">OK</span>}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <div className="text-center py-12 text-gray-500">
-                    <p>No inventory reports submitted yet</p>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Inventory Template Tab */}
-            {activeTab === 'inventoryTemplate' && (
-              <div className="p-6 space-y-6">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h2 className="text-lg font-semibold text-gray-900">Inventory Template</h2>
-                    <p className="text-sm text-gray-500 mt-0.5">Define the standard categories and items shown to all clients on their weekly update form.</p>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    {templateMsg && <span className={`text-sm ${templateMsg.startsWith('Error') ? 'text-red-600' : 'text-green-600'}`}>{templateMsg}</span>}
-                    <button onClick={handleSaveTemplate} disabled={templateSaving}
-                      className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50">
-                      {templateSaving ? 'Saving…' : 'Save Template'}
-                    </button>
-                  </div>
-                </div>
-
-                {/* Add Category */}
-                <div className="flex gap-2">
-                  <input type="text" value={newCategoryName} onChange={e => setNewCategoryName(e.target.value)}
-                    onKeyDown={e => e.key === 'Enter' && handleAddCategory()}
-                    placeholder="New category name"
-                    className="flex-1 px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500" />
-                  <button onClick={handleAddCategory}
-                    className="px-4 py-2 bg-gray-800 text-white text-sm font-medium rounded-lg hover:bg-gray-900">
-                    Add Category
-                  </button>
-                </div>
-
-                {/* Category + Items List */}
-                <div className="space-y-4">
-                  {inventoryTemplate.length === 0 && (
-                    <p className="text-sm text-gray-500 text-center py-8">No categories yet. Add one above.</p>
-                  )}
-                  {inventoryTemplate.map((cat, catIdx) => (
-                    <div key={catIdx} className="border rounded-lg overflow-hidden">
-                      <div className="flex items-center justify-between bg-gray-50 px-4 py-3 border-b">
-                        <span className="font-medium text-gray-800">{cat.category}</span>
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs text-gray-500">{cat.items.length} items</span>
-                          <button onClick={() => handleRemoveCategory(catIdx)}
-                            className="text-red-500 hover:text-red-700 text-xs font-medium px-2 py-1 rounded hover:bg-red-50">
-                            Remove Category
-                          </button>
-                        </div>
-                      </div>
-                      <div className="p-4 space-y-2">
-                        {cat.items.map((item, itemIdx) => (
-                          <div key={itemIdx} className="flex items-center justify-between text-sm py-1 border-b border-gray-100 last:border-0">
-                            <span className="text-gray-700">{item}</span>
-                            <button onClick={() => handleRemoveItem(catIdx, itemIdx)}
-                              className="text-red-400 hover:text-red-600 text-xs ml-4 shrink-0">Remove</button>
-                          </div>
-                        ))}
-                        <div className="flex gap-2 pt-2">
-                          <input type="text" value={newItemInputs[catIdx] || ''}
-                            onChange={e => setNewItemInputs({ ...newItemInputs, [catIdx]: e.target.value })}
-                            onKeyDown={e => e.key === 'Enter' && handleAddItem(catIdx)}
-                            placeholder="Add item…"
-                            className="flex-1 px-3 py-1.5 border rounded text-sm focus:ring-2 focus:ring-blue-500" />
-                          <button onClick={() => handleAddItem(catIdx)}
-                            className="px-3 py-1.5 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">Add</button>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
           </div>
         </div>
       );
@@ -3580,7 +3392,6 @@
         task_deadline: 'Task Deadline',
         task_overdue: 'Task Overdue',
         task_overdue_escalation: 'Task Overdue (Escalation)',
-        inventory_reminder: 'Inventory Reminder',
         milestone_reached: 'Milestone Reached',
         milestone_reminder: 'Go-Live Reminder',
         custom_email: 'Custom Email',
@@ -4009,7 +3820,6 @@
                   {[
                     { key: 'serviceReportFollowups', label: 'Service Report Follow-Ups', desc: 'Notify clients for missing signatures, admins for pending reviews' },
                     { key: 'taskDeadlines', label: 'Task Deadline Alerts', desc: 'Warn owners at 7/3/1 days before due, escalate when overdue' },
-                    { key: 'clientActivityNudges', label: 'Client Activity Nudges', desc: 'Remind clients to submit inventory when overdue' },
                     { key: 'milestoneReminders', label: 'Milestone Reminders', desc: 'Notify at 25/50/75/100% completion and approaching go-live' },
                   ].map(scenario => (
                     <div key={scenario.key} className="flex items-center justify-between py-3 border-b last:border-0">

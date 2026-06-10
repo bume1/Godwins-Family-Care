@@ -45,7 +45,6 @@ const JWT_SECRET = config.JWT_SECRET;
 const HUBSPOT_STAGE_CACHE_TTL = config.HUBSPOT_STAGE_CACHE_TTL;
 const HUBSPOT_POLL_MIN_SECONDS = config.HUBSPOT_POLL_MIN_SECONDS;
 const HUBSPOT_POLL_MAX_SECONDS = config.HUBSPOT_POLL_MAX_SECONDS;
-const INVENTORY_EXPIRY_WARNING_DAYS = config.INVENTORY_EXPIRY_WARNING_DAYS;
 
 // Startup security warnings
 if (!process.env.JWT_SECRET) {
@@ -568,14 +567,6 @@ const VARIABLE_POOLS = {
       { key: 'projectLink', label: 'Project Link', example: 'https://thrive365labs.live/launch/valley-medical' }
     ]
   },
-  inventory: {
-    label: 'Inventory',
-    variables: [
-      { key: 'practiceName', label: 'Practice Name', example: 'Valley Medical' },
-      { key: 'daysSince', label: 'Days Since Last Submission', example: '10' },
-      { key: 'inventoryLink', label: 'Inventory Portal Link', example: 'https://thrive365labs.live/portal/valley-medical' }
-    ]
-  },
   announcement: {
     label: 'Announcement',
     variables: [
@@ -613,7 +604,6 @@ const TEMPLATE_POOL_MAPPING = {
   task_deadline:            ['task', 'project', 'recipient', 'system'],
   task_overdue:             ['task', 'project', 'recipient', 'system'],
   task_overdue_escalation:  ['task', 'project', 'recipient', 'system'],
-  inventory_reminder:       ['inventory', 'recipient', 'system'],
   milestone_reached:        ['project', 'recipient', 'system'],
   golive_reminder:          ['project', 'recipient', 'system'],
   announcement:             ['announcement', 'recipient', 'system'],
@@ -750,14 +740,6 @@ function resolveProjectVars(project, tasks, appBaseUrl) {
     projectLink: project.clientLinkSlug
       ? `${appBaseUrl}/launch/${project.clientLinkSlug}`
       : appBaseUrl
-  };
-}
-
-function resolveInventoryVars(client, daysSince, appBaseUrl) {
-  return {
-    practiceName: client.practiceName || 'Your Practice',
-    daysSince: String(daysSince),
-    inventoryLink: client.slug ? `${appBaseUrl}/portal/${client.slug}` : appBaseUrl
   };
 }
 
@@ -910,19 +892,6 @@ const DEFAULT_EMAIL_TEMPLATES = [
       { key: 'ownerName', label: 'Owner Name', example: 'Jane Doe' },
       { key: 'dueDate', label: 'Due Date', example: '03/01/2026' },
       { key: 'daysOverdue', label: 'Days Overdue', example: '10' }
-    ],
-    isDefault: true, updatedAt: null, updatedBy: null
-  },
-  {
-    id: 'inventory_reminder',
-    name: 'Inventory Reminder',
-    category: 'automated',
-    subject: 'Reminder: Your weekly inventory update is due — {{practiceName}}',
-    body: 'Your last inventory submission was {{daysSince}} days ago. Please submit your weekly update to keep your lab supplies on track.',
-    htmlBody: null,
-    variables: [
-      { key: 'practiceName', label: 'Practice Name', example: 'Valley Medical' },
-      { key: 'daysSince', label: 'Days Since Last Submission', example: '10' }
     ],
     isDefault: true, updatedAt: null, updatedBy: null
   },
@@ -1298,37 +1267,6 @@ const scanAndQueueNotifications = async () => {
                 }
               }
             }
-          }
-        }
-      }
-    }
-
-    // --- Scenario C: Client Portal Activity Nudges ---
-    if (!scenarios.clientActivityNudges || scenarios.clientActivityNudges.enabled !== false) {
-      const inventoryDays = (scenarios.clientActivityNudges && scenarios.clientActivityNudges.inventoryReminderDays) || config.INVENTORY_REMINDER_DAYS;
-      const clientUsers = users.filter(u => u.role === config.ROLES.CLIENT && u.slug && u.email && u.accountStatus !== 'inactive' && !u.emailUnsubscribed);
-      const slugsSeen = new Set();
-
-      for (const client of clientUsers) {
-        if (slugsSeen.has(client.slug)) continue;
-        slugsSeen.add(client.slug);
-
-        // Check notification preferences
-        if (client.notificationPreferences && client.notificationPreferences.inventoryReminders === false) continue;
-
-        const submissions = (await db.get(`inventory_submissions_${client.slug}`)) || [];
-        if (submissions.length === 0) continue; // No submissions ever, likely not onboarded yet
-        const lastSubmission = submissions.sort((a, b) => new Date(b.submittedAt || b.createdAt) - new Date(a.submittedAt || a.createdAt))[0];
-        const lastDate = new Date(lastSubmission.submittedAt || lastSubmission.createdAt);
-        const daysSince = Math.floor((now - lastDate) / (1000 * 60 * 60 * 24));
-
-        if (daysSince >= inventoryDays) {
-          const portalClients = clientUsers.filter(u => u.slug === client.slug);
-          for (const pc of portalClients) {
-            const invVars = resolveInventoryVars(pc, daysSince, appBaseUrl);
-            const allVars = buildTemplateVars({ inventory: invVars }, pc, appBaseUrl);
-            const ctaUrl = invVars.inventoryLink;
-            await renderAndQueue('inventory_reminder', pc, allVars, 'Submit Inventory', ctaUrl, pc.slug, 'inventory');
           }
         }
       }
@@ -1852,30 +1790,10 @@ async function cascadeUserNameUpdate(userId, oldName, newName, oldPracticeName, 
   }
 }
 
-// Cascade slug change: migrate inventory keys and update references when a client's slug changes
+// Cascade slug change: migrate per-slug keys and update references when a client's slug changes
 async function cascadeSlugChange(userId, oldSlug, newSlug) {
   if (!oldSlug || !newSlug || oldSlug === newSlug) return;
   const changes = [];
-
-  // Migrate inventory submissions
-  try {
-    const submissions = await db.get(`inventory_submissions_${oldSlug}`);
-    if (submissions) {
-      await db.set(`inventory_submissions_${newSlug}`, submissions);
-      await db.delete(`inventory_submissions_${oldSlug}`);
-      changes.push('inventory_submissions');
-    }
-  } catch (err) { console.error('Cascade slug inventory_submissions error:', err.message); }
-
-  // Migrate custom inventory items
-  try {
-    const customItems = await db.get(`inventory_custom_${oldSlug}`);
-    if (customItems) {
-      await db.set(`inventory_custom_${newSlug}`, customItems);
-      await db.delete(`inventory_custom_${oldSlug}`);
-      changes.push('inventory_custom');
-    }
-  } catch (err) { console.error('Cascade slug inventory_custom error:', err.message); }
 
   // Update client_documents slug references
   try {
@@ -2323,7 +2241,6 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       notificationPreferences: {
         emailReminders: true,
         overdueReminders: true,
-        inventoryReminders: true,
         milestoneNotifications: true
       },
       // Force new users to change their password on first login
@@ -3013,7 +2930,7 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
       });
     }
 
-    // Cascade slug changes (migrate inventory keys, update references)
+    // Cascade slug changes (migrate per-slug keys, update references)
     const currentSlug = users[idx].slug;
     const oldSlugForCascade = users[idx].previousSlugs && users[idx].previousSlugs.length > 0
       ? users[idx].previousSlugs[users[idx].previousSlugs.length - 1] : null;
@@ -3134,7 +3051,7 @@ app.put('/api/client-portal/clients/:clientId', authenticateToken, requireClient
       });
     }
 
-    // Cascade slug changes (migrate inventory keys, update references)
+    // Cascade slug changes (migrate per-slug keys, update references)
     const currentSlug = users[idx].slug;
     const oldSlugForCascade = users[idx].previousSlugs && users[idx].previousSlugs.length > 0
       ? users[idx].previousSlugs[users[idx].previousSlugs.length - 1] : null;
@@ -4839,23 +4756,11 @@ app.delete('/api/announcements/:id', authenticateToken, requireClientPortalAdmin
   }
 });
 
-// Reset test data (admin only) - clears inventory submissions and announcements
+// Reset test data (admin only) - clears announcements
 app.delete('/api/admin/reset-test-data', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { resetSubmissions, resetAnnouncements } = req.body || { resetSubmissions: true, resetAnnouncements: true };
     const results = {};
-
-    if (resetSubmissions !== false) {
-      const allUsers = await getUsers();
-      const clientUsers = allUsers.filter(u => u.role === config.ROLES.CLIENT && u.slug);
-      let clearedCount = 0;
-      for (const u of clientUsers) {
-        const subs = (await db.get(`inventory_submissions_${u.slug}`)) || [];
-        clearedCount += subs.length;
-        await db.set(`inventory_submissions_${u.slug}`, []);
-      }
-      results.submissionsCleared = clearedCount;
-    }
 
     if (resetAnnouncements !== false) {
       const oldAnnouncements = (await db.get('announcements')) || [];
@@ -4938,10 +4843,10 @@ app.get('/api/client-portal/data', authenticateToken, async (req, res) => {
           (clientSlug && (a.details?.slug === clientSlug || a.details?.clientSlug === clientSlug)) ||
           (clientName && a.details?.clientName && a.details.clientName.toLowerCase() === clientName.toLowerCase());
         if (matchesClient) {
-          if (['inventory_submitted', 'hubspot_file_upload', 'support_ticket_submitted',
+          if (['hubspot_file_upload', 'support_ticket_submitted',
                'document_added', 'service_report_client_signed', 'service_report_created',
                'service_report_completed', 'service_report_pending_signature',
-               'form_submitted', 'inventory_submissions_deleted'].includes(a.action)) {
+               'form_submitted'].includes(a.action)) {
             return true;
           }
         }
@@ -5184,7 +5089,6 @@ app.post('/api/client-portal/soft-pilot/submit', authenticateToken, async (req, 
 app.get('/api/portal-settings', async (req, res) => {
   try {
     const settings = (await db.get('portal_settings')) || {
-      inventoryFormEmbed: '',
       filesFormEmbed: '',
       supportUrl: 'https://thrive365labs-49020024.hs-sites.com/support',
       supportFormId: '089d904f-4acb-4ff7-8c61-53ee99e12345',
@@ -5199,9 +5103,8 @@ app.get('/api/portal-settings', async (req, res) => {
 // Update portal settings (admin only)
 app.put('/api/portal-settings', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const { inventoryFormEmbed, filesFormEmbed, supportUrl, supportFormId, hubspotPortalId } = req.body;
+    const { filesFormEmbed, supportUrl, supportFormId, hubspotPortalId } = req.body;
     const settings = {
-      inventoryFormEmbed: inventoryFormEmbed || '',
       filesFormEmbed: filesFormEmbed || '',
       supportUrl: supportUrl || 'https://thrive365labs-49020024.hs-sites.com/support',
       supportFormId: supportFormId || '089d904f-4acb-4ff7-8c61-53ee99e12345',
@@ -6789,691 +6692,6 @@ app.post('/api/webhooks/hubspot', validateHubSpotWebhook, async (req, res) => {
   } catch (error) {
     console.error('Webhook error:', error);
     res.status(500).json({ error: 'Webhook processing failed' });
-  }
-});
-
-// ============== INVENTORY MANAGEMENT ==============
-const DEFAULT_INVENTORY_ITEMS = config.DEFAULT_INVENTORY_ITEMS;
-
-app.get('/api/inventory/custom-items/:slug', authenticateToken, async (req, res) => {
-  try {
-    const { slug } = req.params;
-    if (req.user.role === config.ROLES.CLIENT && req.user.slug !== slug) {
-      return res.status(403).json({ error: 'Access denied' });
-    }
-    const customItems = (await db.get(`inventory_custom_${slug}`)) || [];
-    res.json(customItems);
-  } catch (error) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-app.post('/api/inventory/custom-items/:slug', authenticateToken, async (req, res) => {
-  try {
-    const { slug } = req.params;
-    if (req.user.role === config.ROLES.CLIENT && req.user.slug !== slug) {
-      return res.status(403).json({ error: 'Access denied' });
-    }
-    const { category, itemName } = req.body;
-    if (!category || !itemName) {
-      return res.status(400).json({ error: 'Category and item name required' });
-    }
-    const customItems = (await db.get(`inventory_custom_${slug}`)) || [];
-    const newItem = { id: uuidv4(), category, itemName, createdAt: new Date().toISOString() };
-    customItems.push(newItem);
-    await db.set(`inventory_custom_${slug}`, customItems);
-    res.json(newItem);
-  } catch (error) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-app.delete('/api/inventory/custom-items/:slug/:itemId', authenticateToken, async (req, res) => {
-  try {
-    const { slug, itemId } = req.params;
-    if (req.user.role === config.ROLES.CLIENT && req.user.slug !== slug) {
-      return res.status(403).json({ error: 'Access denied' });
-    }
-    const customItems = (await db.get(`inventory_custom_${slug}`)) || [];
-    const filtered = customItems.filter(i => i.id !== itemId);
-    await db.set(`inventory_custom_${slug}`, filtered);
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-app.get('/api/inventory/template', async (req, res) => {
-  try {
-    const template = (await db.get('inventory_template')) || DEFAULT_INVENTORY_ITEMS;
-    res.json(template);
-  } catch (error) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-app.put('/api/inventory/template', authenticateToken, requireAdmin, async (req, res) => {
-  try {
-    const { template } = req.body;
-    if (!template || typeof template !== 'object') {
-      return res.status(400).json({ error: 'Invalid template data. Must be a non-empty object.' });
-    }
-    await db.set('inventory_template', template);
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-app.get('/api/inventory/submissions/:slug', authenticateToken, async (req, res) => {
-  try {
-    const { slug } = req.params;
-    if (req.user.role === config.ROLES.CLIENT && req.user.slug !== slug) {
-      return res.status(403).json({ error: 'Access denied' });
-    }
-    const allSubmissions = (await db.get(`inventory_submissions_${slug}`)) || [];
-    const clientSubmissions = [...allSubmissions].sort((a, b) => new Date(b.submittedAt) - new Date(a.submittedAt));
-    res.json(clientSubmissions);
-  } catch (error) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Export inventory submission as CSV (client-specific)
-app.get('/api/inventory/export/:slug', authenticateToken, async (req, res) => {
-  try {
-    const { slug } = req.params;
-    const { submissionId } = req.query;
-    
-    if (req.user.role === config.ROLES.CLIENT && req.user.slug !== slug) {
-      return res.status(403).json({ error: 'Access denied' });
-    }
-    
-    const allSubmissions = (await db.get(`inventory_submissions_${slug}`)) || [];
-    const clientSubmissions = [...allSubmissions]
-      .sort((a, b) => new Date(b.submittedAt) - new Date(a.submittedAt));
-
-    let dataToExport;
-    if (submissionId) {
-      const submission = clientSubmissions.find(s => s.id === submissionId);
-      if (!submission) return res.status(404).json({ error: 'Submission not found' });
-      dataToExport = [submission];
-    } else {
-      dataToExport = clientSubmissions;
-    }
-    
-    // Build CSV
-    const headers = ['Submission Date', 'Submitted By', 'Category', 'Item', 'Lot Number', 'Expiry Date', 'Open Qty', 'Open Date', 'Closed Qty', 'Notes'];
-    let csv = headers.join(',') + '\n';
-    
-    dataToExport.forEach(sub => {
-      Object.entries(sub.data || {}).forEach(([key, value]) => {
-        const [category, itemName] = key.split('|');
-        const batches = Array.isArray(value?.batches) ? value.batches : [value || {}];
-        batches.forEach(batch => {
-          const row = [
-            `"${new Date(sub.submittedAt).toLocaleString()}"`,
-            `"${sub.submittedBy || ''}"`,
-            `"${category}"`,
-            `"${itemName}"`,
-            `"${batch.lotNumber || ''}"`,
-            `"${batch.expiry || ''}"`,
-            batch.openQty || 0,
-            `"${batch.openDate || ''}"`,
-            batch.closedQty || 0,
-            `"${(batch.notes || '').replace(/"/g, '""')}"`
-          ];
-          csv += row.join(',') + '\n';
-        });
-      });
-    });
-    
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename="inventory_${slug}_${new Date().toISOString().split('T')[0]}.csv"`);
-    res.send(csv);
-  } catch (error) {
-    console.error('Export error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Download inventory import CSV template
-app.get('/api/inventory/import-template', async (req, res) => {
-  try {
-    const template = (await db.get('inventory_template')) || DEFAULT_INVENTORY_ITEMS;
-
-    const headers = ['Category', 'Item Name', 'Lot Number', 'Expiry Date (YYYY-MM-DD)', 'Open Qty', 'Open Date (YYYY-MM-DD)', 'Closed Qty', 'Notes'];
-    let csv = headers.join(',') + '\n';
-
-    // Add one example row per category with first item as a guide
-    template.forEach(cat => {
-      if (cat.items && cat.items.length > 0) {
-        const row = [
-          `"${cat.category}"`,
-          `"${cat.items[0]}"`,
-          '"LOT12345"',
-          '"2026-12-31"',
-          '10',
-          '"2026-01-15"',
-          '2',
-          '"Example notes"'
-        ];
-        csv += row.join(',') + '\n';
-      }
-    });
-
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', 'attachment; filename="inventory_import_template.csv"');
-    res.send(csv);
-  } catch (error) {
-    console.error('Import template error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Admin: Export all clients inventory data
-app.get('/api/inventory/export-all', authenticateToken, requireAdmin, async (req, res) => {
-  try {
-    const users = await getUsers();
-    const clientUsers = users.filter(u => u.role === config.ROLES.CLIENT && u.slug);
-
-    // Get client names mapping
-    const clientNames = {};
-    clientUsers.forEach(u => { clientNames[u.slug] = u.practiceName || u.name || u.slug; });
-
-    // Gather submissions from all per-client keys
-    const allSubmissions = [];
-    for (const u of clientUsers) {
-      const subs = (await db.get(`inventory_submissions_${u.slug}`)) || [];
-      allSubmissions.push(...subs);
-    }
-
-    // Build CSV with client info
-    const headers = ['Client', 'Submission Date', 'Submitted By', 'Category', 'Item', 'Lot Number', 'Expiry Date', 'Open Qty', 'Open Date', 'Closed Qty', 'Notes'];
-    let csv = headers.join(',') + '\n';
-
-    // Sort by date descending
-    allSubmissions.sort((a, b) => new Date(b.submittedAt) - new Date(a.submittedAt));
-    
-    allSubmissions.forEach(sub => {
-      const clientName = clientNames[sub.slug] || sub.slug;
-      Object.entries(sub.data || {}).forEach(([key, value]) => {
-        const [category, itemName] = key.split('|');
-        const batches = Array.isArray(value?.batches) ? value.batches : [value || {}];
-        batches.forEach(batch => {
-          const row = [
-            `"${clientName}"`,
-            `"${new Date(sub.submittedAt).toLocaleString()}"`,
-            `"${sub.submittedBy || ''}"`,
-            `"${category}"`,
-            `"${itemName}"`,
-            `"${batch.lotNumber || ''}"`,
-            `"${batch.expiry || ''}"`,
-            batch.openQty || 0,
-            `"${batch.openDate || ''}"`,
-            batch.closedQty || 0,
-            `"${(batch.notes || '').replace(/"/g, '""')}"`
-          ];
-          csv += row.join(',') + '\n';
-        });
-      });
-    });
-    
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename="all_inventory_${new Date().toISOString().split('T')[0]}.csv"`);
-    res.send(csv);
-  } catch (error) {
-    console.error('Export all error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Normalize inventory data to batch format (Gotcha #13)
-// Logs a warning when auto-wrapping occurs to aid debugging
-const normalizeInventoryData = (data) => {
-  const normalized = {};
-  let wrappedCount = 0;
-  Object.entries(data || {}).forEach(([key, value]) => {
-    if (value && Array.isArray(value.batches)) {
-      normalized[key] = value;
-    } else {
-      wrappedCount++;
-      normalized[key] = { batches: [value || {}] };
-    }
-  });
-  if (wrappedCount > 0) {
-    console.warn(`Inventory data auto-wrapped: ${wrappedCount} item(s) were not in { batches: [...] } format and were converted automatically.`);
-  }
-  return normalized;
-};
-
-app.get('/api/inventory/latest/:slug', authenticateToken, async (req, res) => {
-  try {
-    const { slug } = req.params;
-    if (req.user.role === config.ROLES.CLIENT && req.user.slug !== slug) {
-      return res.status(403).json({ error: 'Access denied' });
-    }
-    const allSubmissions = (await db.get(`inventory_submissions_${slug}`)) || [];
-    const clientSubmissions = [...allSubmissions]
-      .sort((a, b) => new Date(b.submittedAt) - new Date(a.submittedAt));
-
-    if (clientSubmissions.length === 0) {
-      const template = (await db.get('inventory_template')) || DEFAULT_INVENTORY_ITEMS;
-      const emptyData = {};
-      template.forEach(cat => {
-        cat.items.forEach(item => {
-          emptyData[`${cat.category}|${item}`] = { batches: [{ lotNumber: '', expiry: '', openQty: '', openDate: '', closedQty: '', notes: '' }] };
-        });
-      });
-      return res.json({ data: emptyData, submittedAt: null });
-    }
-    
-    const latest = clientSubmissions[0];
-    res.json({ ...latest, data: normalizeInventoryData(latest.data) });
-  } catch (error) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-app.post('/api/inventory/submit', authenticateToken, async (req, res) => {
-  try {
-    const { slug, data } = req.body;
-
-    if (!slug || typeof slug !== 'string') {
-      return res.status(400).json({ error: 'slug is required' });
-    }
-    if (!data || typeof data !== 'object' || Array.isArray(data)) {
-      return res.status(400).json({ error: 'data must be a non-empty object' });
-    }
-
-    if (req.user.role === config.ROLES.CLIENT && req.user.slug !== slug) {
-      return res.status(403).json({ error: 'Access denied' });
-    }
-
-    // Normalize batches and coerce qty fields to numbers
-    const sanitizedData = {};
-    Object.entries(data).forEach(([key, value]) => {
-      const batches = Array.isArray(value?.batches) ? value.batches : [value || {}];
-      sanitizedData[key] = {
-        batches: batches.map(b => ({
-          ...b,
-          openQty: parseInt(b.openQty) || 0,
-          closedQty: parseInt(b.closedQty) || 0
-        }))
-      };
-    });
-
-    const submission = {
-      id: require('uuid').v4(),
-      slug,
-      data: sanitizedData,
-      submittedAt: new Date().toISOString(),
-      submittedBy: req.user.name || req.user.email
-    };
-
-    const clientSubmissions = (await db.get(`inventory_submissions_${slug}`)) || [];
-    clientSubmissions.unshift(submission);
-    if (clientSubmissions.length > 1000) clientSubmissions.length = 1000;
-    await db.set(`inventory_submissions_${slug}`, clientSubmissions);
-
-    await logActivity(
-      req.user.id || null,
-      req.user.name || req.user.email,
-      'inventory_submitted',
-      'inventory',
-      submission.id,
-      { slug, itemCount: Object.keys(sanitizedData).length }
-    );
-
-    res.json({ success: true, submission });
-  } catch (error) {
-    console.error('Inventory submit error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Delete inventory submissions (Super Admin & Manager only)
-app.delete('/api/inventory/submissions', authenticateToken, async (req, res) => {
-  try {
-    // Only allow Super Admins and Managers
-    if (req.user.role !== config.ROLES.ADMIN && !req.user.isManager) {
-      return res.status(403).json({ error: 'Access denied. Only Super Admins and Managers can delete submissions.' });
-    }
-
-    const { submissionIds, slug } = req.body;
-
-    if (!slug) {
-      return res.status(400).json({ error: 'slug is required' });
-    }
-    if (!submissionIds || !Array.isArray(submissionIds) || submissionIds.length === 0) {
-      return res.status(400).json({ error: 'submissionIds array is required' });
-    }
-    if (!slug || typeof slug !== 'string') {
-      return res.status(400).json({ error: 'slug is required' });
-    }
-
-    const clientSubmissions = (await db.get(`inventory_submissions_${slug}`)) || [];
-    const idsToDelete = new Set(submissionIds);
-
-    // Pre-validate: all requested IDs must exist before deleting any
-    const missingIds = submissionIds.filter(id => !clientSubmissions.find(s => s.id === id));
-    if (missingIds.length > 0) {
-      return res.status(400).json({ error: `Submissions not found: ${missingIds.join(', ')}` });
-    }
-
-    const remainingSubmissions = clientSubmissions.filter(s => !idsToDelete.has(s.id));
-    const deletedCount = clientSubmissions.length - remainingSubmissions.length;
-
-    await db.set(`inventory_submissions_${slug}`, remainingSubmissions);
-
-    await logActivity(
-      req.user.id || null,
-      req.user.name || req.user.email,
-      'inventory_submissions_deleted',
-      'inventory',
-      null,
-      { slug, deletedCount, submissionIds }
-    );
-
-    res.json({ success: true, deletedCount });
-  } catch (error) {
-    console.error('Delete submissions error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-app.get('/api/inventory/report/:slug', authenticateToken, async (req, res) => {
-  try {
-    const { slug } = req.params;
-    if (req.user.role === config.ROLES.CLIENT && req.user.slug !== slug) {
-      return res.status(403).json({ error: 'Access denied' });
-    }
-    
-    const allSubmissions = (await db.get(`inventory_submissions_${slug}`)) || [];
-    const clientSubmissions = [...allSubmissions]
-      .sort((a, b) => new Date(b.submittedAt) - new Date(a.submittedAt))
-      .slice(0, 52);
-    
-    const template = (await db.get('inventory_template')) || DEFAULT_INVENTORY_ITEMS;
-    const customItems = (await db.get(`inventory_custom_${slug}`)) || [];
-    
-    const lowStockItems = [];
-    const expiringItems = [];
-    const today = new Date();
-    const thirtyDaysFromNow = new Date(today.getTime() + INVENTORY_EXPIRY_WARNING_DAYS * 24 * 60 * 60 * 1000);
-    
-    if (clientSubmissions.length > 0) {
-      const latest = clientSubmissions[0].data;
-      Object.entries(latest).forEach(([key, value]) => {
-        const [category, itemName] = key.split('|');
-        
-        const batches = Array.isArray(value.batches) ? value.batches : [value];
-        
-        batches.forEach((batch, batchIdx) => {
-          const totalQty = (parseInt(batch.openQty) || 0) + (parseInt(batch.closedQty) || 0);
-          const lotLabel = batch.lotNumber ? ` (Lot: ${batch.lotNumber})` : (batches.length > 1 ? ` (Batch ${batchIdx + 1})` : '');
-          
-          if (totalQty > 0 && totalQty <= 2) {
-            lowStockItems.push({ category, itemName: itemName + lotLabel, quantity: totalQty, lotNumber: batch.lotNumber });
-          }
-          
-          if (batch.expiry) {
-            const expiryDate = new Date(batch.expiry);
-            if (expiryDate <= thirtyDaysFromNow && expiryDate >= today) {
-              expiringItems.push({ 
-                category, 
-                itemName: itemName + lotLabel, 
-                expiry: batch.expiry, 
-                lotNumber: batch.lotNumber,
-                daysUntilExpiry: Math.ceil((expiryDate - today) / (1000 * 60 * 60 * 24)) 
-              });
-            }
-          }
-        });
-      });
-    }
-    
-    const getItemTotal = (data, key) => {
-      const value = data[key];
-      if (!value) return 0;
-      const batches = Array.isArray(value.batches) ? value.batches : [value];
-      return batches.reduce((sum, b) => sum + (parseInt(b.openQty) || 0) + (parseInt(b.closedQty) || 0), 0);
-    };
-    
-    const itemUsage = {};
-    if (clientSubmissions.length >= 2) {
-      const current = clientSubmissions[0].data;
-      const previous = clientSubmissions[1].data;
-      const allKeys = new Set([...Object.keys(current), ...Object.keys(previous)]);
-      
-      allKeys.forEach(key => {
-        const currentQty = getItemTotal(current, key);
-        const prevQty = getItemTotal(previous, key);
-        const change = currentQty - prevQty;
-        const [category, itemName] = key.split('|');
-        if (prevQty > 0 || currentQty > 0) {
-          itemUsage[key] = { category, itemName, currentQty, prevQty, change, 
-            trend: change > 0 ? 'up' : change < 0 ? 'down' : 'stable' };
-        }
-      });
-    }
-    
-    const usageSummary = clientSubmissions.slice(0, 8).reverse().map(sub => {
-      let totalQty = 0;
-      Object.values(sub.data).forEach(v => {
-        const batches = Array.isArray(v?.batches) ? v.batches : [v || {}];
-        totalQty += batches.reduce((s, b) => s + (parseInt(b.openQty) || 0) + (parseInt(b.closedQty) || 0), 0);
-      });
-      return { date: sub.submittedAt, totalQuantity: totalQty, itemCount: Object.keys(sub.data).length };
-    });
-    
-    // Build per-item time series for charting individual items
-    const itemTimeSeries = {};
-    const recentSubs = clientSubmissions.slice(0, 12).reverse();
-    recentSubs.forEach(sub => {
-      Object.entries(sub.data || {}).forEach(([key, val]) => {
-        const [category, itemName] = key.split('|');
-        if (!itemTimeSeries[key]) {
-          itemTimeSeries[key] = { category, itemName, dataPoints: [] };
-        }
-        const batches = Array.isArray(val?.batches) ? val.batches : [val || {}];
-        const qty = batches.reduce((s, b) => s + (parseInt(b.openQty) || 0) + (parseInt(b.closedQty) || 0), 0);
-        itemTimeSeries[key].dataPoints.push({ date: sub.submittedAt, quantity: qty });
-      });
-    });
-    // Convert to array and sort by category/name
-    const itemTimeSeriesArray = Object.entries(itemTimeSeries)
-      .map(([key, val]) => ({ key, ...val }))
-      .sort((a, b) => a.category.localeCompare(b.category) || a.itemName.localeCompare(b.itemName));
-    
-    const consumptionRate = [];
-    // Only analyze submissions from the last 30 days for rolling average
-    const thirtyDaysAgo = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000);
-    const submissionsToAnalyze = clientSubmissions.filter(s => new Date(s.submittedAt) >= thirtyDaysAgo);
-
-    if (submissionsToAnalyze.length >= 2) {
-      const itemConsumption = {};
-      
-      for (let i = 0; i < submissionsToAnalyze.length - 1; i++) {
-        const newer = submissionsToAnalyze[i];
-        const older = submissionsToAnalyze[i + 1];
-        const daysBetween = Math.max(1, Math.ceil((new Date(newer.submittedAt) - new Date(older.submittedAt)) / (1000 * 60 * 60 * 24)));
-        
-        const allKeys = new Set([...Object.keys(newer.data || {}), ...Object.keys(older.data || {})]);
-        allKeys.forEach(key => {
-          const newerQty = getItemTotal(newer.data, key);
-          const olderQty = getItemTotal(older.data, key);
-          const consumed = olderQty - newerQty;
-          
-          if (consumed > 0) {
-            if (!itemConsumption[key]) {
-              const [category, itemName] = key.split('|');
-              itemConsumption[key] = { category, itemName, totalConsumed: 0, totalDays: 0, dataPoints: 0 };
-            }
-            itemConsumption[key].totalConsumed += consumed;
-            itemConsumption[key].totalDays += daysBetween;
-            itemConsumption[key].dataPoints += 1;
-          }
-        });
-      }
-      
-      Object.entries(itemConsumption)
-        .filter(([_, v]) => v.totalConsumed > 0 && v.totalDays > 0)
-        .map(([key, v]) => {
-          const avgWeeklyRate = (v.totalConsumed / v.totalDays) * 7;
-          const currentQty = getItemTotal(submissionsToAnalyze[0].data, key);
-          const weeksRemaining = avgWeeklyRate > 0 && currentQty > 0 ? Math.ceil(currentQty / avgWeeklyRate) : 0;
-          return { 
-            ...v, 
-            currentQty,
-            weeklyRate: avgWeeklyRate.toFixed(1), 
-            weeksRemaining,
-            avgWeeklyRate
-          };
-        })
-        .sort((a, b) => b.avgWeeklyRate - a.avgWeeklyRate)
-        .slice(0, 10)
-        .forEach(item => consumptionRate.push(item));
-    }
-    
-    res.json({
-      submissions: clientSubmissions.slice(0, 12),
-      template,
-      customItems,
-      alerts: {
-        lowStock: lowStockItems.sort((a, b) => a.quantity - b.quantity),
-        expiringSoon: expiringItems.sort((a, b) => a.daysUntilExpiry - b.daysUntilExpiry)
-      },
-      usageTrends: { itemChanges: Object.values(itemUsage), usageSummary, consumptionRate, itemTimeSeries: itemTimeSeriesArray }
-    });
-  } catch (error) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// ============== ADMIN AGGREGATE INVENTORY REPORT ==============
-// Allow Super Admins, Managers, and Client Portal Admins to access
-app.get('/api/inventory/report-all', authenticateToken, requireClientPortalAdmin, async (req, res) => {
-  try {
-    const users = await getUsers();
-    const clientUsers = users.filter(u => u.role === config.ROLES.CLIENT && u.slug);
-
-    // Load per-client submissions
-    const submissionsBySlug = {};
-    for (const u of clientUsers) {
-      const subs = (await db.get(`inventory_submissions_${u.slug}`)) || [];
-      if (subs.length > 0) {
-        submissionsBySlug[u.slug] = [...subs]
-          .sort((a, b) => new Date(b.submittedAt) - new Date(a.submittedAt))
-          .slice(0, 12);
-      }
-    }
-    
-    const today = new Date();
-    const thirtyDaysFromNow = new Date(today.getTime() + INVENTORY_EXPIRY_WARNING_DAYS * 24 * 60 * 60 * 1000);
-    
-    // Aggregate data across all clients
-    const allLowStock = [];
-    const allExpiring = [];
-    const clientSummaries = [];
-    
-    const getItemTotal = (data, key) => {
-      const value = data[key];
-      if (!value) return 0;
-      const batches = Array.isArray(value.batches) ? value.batches : [value];
-      return batches.reduce((sum, b) => sum + (parseInt(b.openQty) || 0) + (parseInt(b.closedQty) || 0), 0);
-    };
-    
-    Object.entries(submissionsBySlug).forEach(([slug, submissions]) => {
-      if (submissions.length === 0) return;
-      
-      const clientUser = clientUsers.find(u => u.slug === slug);
-      const clientName = clientUser?.practiceName || clientUser?.name || slug;
-      
-      const latest = submissions[0];
-      let totalItems = 0;
-      let totalQuantity = 0;
-      let lowStockCount = 0;
-      let expiringCount = 0;
-      
-      Object.entries(latest.data || {}).forEach(([key, value]) => {
-        const [category, itemName] = key.split('|');
-        const batches = Array.isArray(value.batches) ? value.batches : [value];
-        
-        batches.forEach((batch, batchIdx) => {
-          const qty = (parseInt(batch.openQty) || 0) + (parseInt(batch.closedQty) || 0);
-          totalQuantity += qty;
-          totalItems++;
-          
-          const lotLabel = batch.lotNumber ? ` (Lot: ${batch.lotNumber})` : '';
-          
-          if (qty > 0 && qty <= 2) {
-            lowStockCount++;
-            allLowStock.push({ 
-              clientName, 
-              slug, 
-              category, 
-              itemName: itemName + lotLabel, 
-              quantity: qty 
-            });
-          }
-          
-          if (batch.expiry) {
-            const expiryDate = new Date(batch.expiry);
-            if (expiryDate <= thirtyDaysFromNow && expiryDate >= today) {
-              expiringCount++;
-              allExpiring.push({ 
-                clientName, 
-                slug, 
-                category, 
-                itemName: itemName + lotLabel, 
-                expiry: batch.expiry,
-                daysUntilExpiry: Math.ceil((expiryDate - today) / (1000 * 60 * 60 * 24))
-              });
-            }
-          }
-        });
-      });
-      
-      clientSummaries.push({
-        slug,
-        clientName,
-        lastSubmission: latest.submittedAt,
-        totalItems,
-        totalQuantity,
-        lowStockCount,
-        expiringCount,
-        submissionCount: submissions.length
-      });
-    });
-    
-    // Calculate submission frequency stats
-    const activeClients = clientSummaries.filter(c => c.submissionCount > 0).length;
-    const totalClients = clientUsers.length;
-    
-    // Get clients who haven't submitted in over 7 days
-    const sevenDaysAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
-    const inactiveClients = clientSummaries.filter(c => 
-      new Date(c.lastSubmission) < sevenDaysAgo
-    );
-    
-    res.json({
-      summary: {
-        totalClients,
-        activeClients,
-        totalLowStockAlerts: allLowStock.length,
-        totalExpiringAlerts: allExpiring.length
-      },
-      alerts: {
-        lowStock: allLowStock.sort((a, b) => a.quantity - b.quantity),
-        expiringSoon: allExpiring.sort((a, b) => a.daysUntilExpiry - b.daysUntilExpiry)
-      },
-      clientSummaries: clientSummaries.sort((a, b) => new Date(b.lastSubmission) - new Date(a.lastSubmission)),
-      inactiveClients: inactiveClients.sort((a, b) => new Date(a.lastSubmission) - new Date(b.lastSubmission))
-    });
-  } catch (error) {
-    console.error('Admin inventory report error:', error);
-    res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -12387,7 +11605,6 @@ app.get('/api/admin/reminder-settings', authenticateToken, requireAdminHubAccess
       scenarios: {
         serviceReportFollowups: { enabled: true, reminderAfterDays: config.SERVICE_REPORT_FOLLOWUP_DAYS },
         taskDeadlines: { enabled: true, daysBefore: config.TASK_DEADLINE_DAYS_BEFORE, overdueEscalationDays: config.TASK_OVERDUE_ESCALATION_DAYS },
-        clientActivityNudges: { enabled: true, inventoryReminderDays: config.INVENTORY_REMINDER_DAYS },
         milestoneReminders: { enabled: true, milestoneThresholds: config.MILESTONE_THRESHOLDS, goLiveDaysBefore: config.GOLIVE_REMINDER_DAYS_BEFORE }
       }
     };
@@ -13181,42 +12398,4 @@ app.listen(PORT, () => {
   // Auto-generate changelog from git commits on startup
   changelogGenerator.autoUpdateChangelog(db);
 
-  // One-time migration: move global inventory_submissions to per-client keys
-  (async () => {
-    try {
-      const migKey = 'migration_inventory_per_client_v1';
-      const alreadyRan = await db.get(migKey);
-      if (alreadyRan) return;
-
-      const globalSubs = (await db.get('inventory_submissions')) || [];
-      if (globalSubs.length === 0) {
-        await db.set(migKey, { ranAt: new Date().toISOString(), migrated: 0 });
-        return;
-      }
-
-      // Group by slug
-      const bySlug = {};
-      globalSubs.forEach(sub => {
-        if (!sub.slug) return;
-        if (!bySlug[sub.slug]) bySlug[sub.slug] = [];
-        bySlug[sub.slug].push(sub);
-      });
-
-      let migrated = 0;
-      for (const [slug, subs] of Object.entries(bySlug)) {
-        const existing = (await db.get(`inventory_submissions_${slug}`)) || [];
-        if (existing.length === 0) {
-          subs.sort((a, b) => new Date(b.submittedAt) - new Date(a.submittedAt));
-          await db.set(`inventory_submissions_${slug}`, subs.slice(0, 1000));
-          migrated += subs.length;
-        }
-      }
-
-      await db.set('inventory_submissions', []);
-      await db.set(migKey, { ranAt: new Date().toISOString(), migrated });
-      console.log(`✅ Migration: Moved ${migrated} inventory submissions to per-client storage`);
-    } catch (e) {
-      console.error('Inventory migration error (non-blocking):', e.message);
-    }
-  })();
 });
