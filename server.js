@@ -13523,7 +13523,7 @@ process.on('unhandledRejection', (reason, promise) => {
 
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
-  console.log(`🔐 Admin login: bianca@thrive365labs.live / Thrive2025!`);
+  console.log(`🔐 Admin login: ${config.DEFAULT_ADMIN.EMAIL} / ${config.DEFAULT_ADMIN.PASSWORD}`);
 
   // Safety net: reactivate any admin accounts that are inactive (prevent lockout)
   (async () => {

@@ -4,6 +4,30 @@
 
 ---
 
+### Version 3.1.0 - June 10, 2026
+
+#### New Features
+- Add files via upload
+- Add files via upload
+- Session 1: GFC favicon + new admin credentials
+- Session 1: Add lab strip-list checklist (analysis only)
+- Add files via upload
+- Add files via upload
+
+#### Documentation
+- add prototype visual references
+
+#### Changes
+- Session 1: Auto-remove legacy Thrive admin on startup
+- Session 1: Rebrand Thrive 365 Labs → Godwins Family Care
+- Session 1: Rebrand WIP — token stylesheet + login/admin-hub partial
+- Session 1: Extend GFC role model (additive)
+- public/brand/logos
+- Remove superseded GFC build plan and Claude Code prompt docs
+- Move GFC build/spec docs into docs/ folder
+- Create docs
+
+
 ### Version 3.0.1 - April 12, 2026
 
 #### Changes
