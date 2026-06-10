@@ -11,6 +11,7 @@ This guide is the index and source of truth. The detail lives in:
 - `GFC_Matching_Engine_Spec_v1.md` — caregiver ↔ client matching algorithm.
 - `GFC_Client_Care_Profile_Schema_v1.md` — client data model (includes `careTeam`).
 - `GFC_Caregiver_Profile_Schema_v1.md` — caregiver data model (includes `licenseLevel`).
+- `docs/prototype/` — visual reference prototypes (sibling of `docs/design-system/`). Three files: `client-prototype-full.html` (full client journey — Session 3 build target), `caregiver-app-prototype.html` (caregiver app — Session 4 build target), and `phcp-portal-prototype.html` (gate, family monitoring, and the staff Care Match screen — reference for both).
 
 ---
 

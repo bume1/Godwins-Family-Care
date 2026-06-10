@@ -4,6 +4,7 @@
 **Sources reviewed:** `template-gfc-intake.php` (digital Assessment + Intake), the scanned paper packet (Face Sheet, Nursing Assessment, Service Plan, Medication Form, Pain Assessment, Care Instructions, Service Agreement, Bill of Rights, Supervisory note), the GFC build prompt/plan, and the service-line handout.
 **Not legal advice.** The consent language below is a working draft. Have counsel or your Georgia licensure consultant review it against PCH/home-care rules and, for the primary care arm, Medicare conditions of participation before it goes live.
 **Companion to** `GFC_App_Build_v2.md` (the master guide). This holds the field-level intake detail; the guide holds the architecture and sequencing.
+**Visual reference:** `docs/prototype/client-prototype-full.html` is the build target for the client portal + intake screens (Session 3); `docs/prototype/phcp-portal-prototype.html` also shows the gate and family-monitoring views.
 
 ---
 
