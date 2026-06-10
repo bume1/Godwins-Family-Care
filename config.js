@@ -123,10 +123,10 @@ const LEGACY_STAGE_TO_PHASE = Object.freeze({
 
 // ---- Brand / Display ----
 const BRAND = Object.freeze({
-  COMPANY_NAME: process.env.BRAND_COMPANY_NAME || 'Thrive 365 Labs',
-  PRIMARY_COLOR: process.env.BRAND_PRIMARY_COLOR || '#045E9F',
-  ACCENT_COLOR: process.env.BRAND_ACCENT_COLOR || '#00205A',
-  FONT_FAMILY: process.env.BRAND_FONT_FAMILY || 'Inter',
+  COMPANY_NAME: process.env.BRAND_COMPANY_NAME || 'Godwins Family Care',
+  PRIMARY_COLOR: process.env.BRAND_PRIMARY_COLOR || '#033D50',
+  ACCENT_COLOR: process.env.BRAND_ACCENT_COLOR || '#F5CD85',
+  FONT_FAMILY: process.env.BRAND_FONT_FAMILY || 'DM Sans',
   SUCCESS_COLOR: '#10B981',
   WARNING_COLOR: '#F59E0B',
   DANGER_COLOR: '#EF4444'
@@ -153,7 +153,7 @@ const NOTIFICATION_CHECK_INTERVAL_MINUTES = parseInt(process.env.NOTIFICATION_CH
 const NOTIFICATION_LOG_MAX_ENTRIES = parseInt(process.env.NOTIFICATION_LOG_MAX_ENTRIES || '2000', 10);
 const NOTIFICATION_MAX_RETRIES = parseInt(process.env.NOTIFICATION_MAX_RETRIES || '3', 10);
 const NOTIFICATION_DAILY_SEND_LIMIT = parseInt(process.env.NOTIFICATION_DAILY_SEND_LIMIT || '500', 10);
-const EMAIL_FROM_ADDRESS = process.env.EMAIL_FROM_ADDRESS || 'no-reply@thrive365labs.live';
+const EMAIL_FROM_ADDRESS = process.env.EMAIL_FROM_ADDRESS || 'no-reply@godwinsfamilycarellc.com';
 
 // ---- Automated Reminders (Feature 2) ----
 const NOTIFICATION_SCAN_INTERVAL_MINUTES = parseInt(process.env.NOTIFICATION_SCAN_INTERVAL_MINUTES || '30', 10);
@@ -180,7 +180,7 @@ const NOTIFICATION_COOLDOWN_HOURS = Object.freeze({
 
 // ---- Default Admin (initial setup only) ----
 const DEFAULT_ADMIN = Object.freeze({
-  EMAIL: process.env.DEFAULT_ADMIN_EMAIL || 'admin@godwinsfamilycarellc.com',
+  EMAIL: process.env.DEFAULT_ADMIN_EMAIL || 'support@godwinsfamilycarellc.com',
   NAME: process.env.DEFAULT_ADMIN_NAME || 'GFC Admin',
   PASSWORD: process.env.DEFAULT_ADMIN_PASSWORD || 'gfcforever2026'
 });
