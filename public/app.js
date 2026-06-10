@@ -286,32 +286,6 @@ const api = {
       headers: { 'Authorization': `Bearer ${token}` }
     }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
 
-  getProjectActiveValidations: (token, projectId) =>
-    fetch(`${API_URL}/api/projects/${projectId}/active-validations`, {
-      headers: { 'Authorization': `Bearer ${token}` }
-    }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
-
-  completeOnsiteValidation: (token, reportId, data) =>
-    fetch(`${API_URL}/api/service-reports/${reportId}/complete-onsite`, {
-      method: 'PUT',
-      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(data)
-    }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
-
-  addOffsiteSegment: (token, reportId, data) =>
-    fetch(`${API_URL}/api/service-reports/${reportId}/offsite-segment`, {
-      method: 'PUT',
-      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(data)
-    }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
-
-  submitValidationReport: (token, reportId, formData) =>
-    fetch(`${API_URL}/api/service-reports/${reportId}/submit-validation`, {
-      method: 'PUT',
-      headers: { 'Authorization': `Bearer ${token}` },
-      body: formData
-    }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
-
   getTeamMembers: (token, projectId = null) =>
     fetch(`${API_URL}/api/team-members${projectId ? `?projectId=${projectId}` : ''}`, {
       headers: { 'Authorization': `Bearer ${token}` }
@@ -3091,7 +3065,6 @@ const ProjectTracker = ({ token, user, project: initialProject, scrollToTaskId, 
   const [showNotesLog, setShowNotesLog] = useState(false);
   const [showEditProject, setShowEditProject] = useState(false);
   const [collapsedPhases, setCollapsedPhases] = useState([]);
-  const [activeValidations, setActiveValidations] = useState([]);
   const [showEmailComposer, setShowEmailComposer] = useState(false);
   const [emailForm, setEmailForm] = useState({ to: [], subject: '', message: '' });
   const [emailSending, setEmailSending] = useState(false);
@@ -3250,10 +3223,7 @@ const ProjectTracker = ({ token, user, project: initialProject, scrollToTaskId, 
   const loadTasks = async () => {
     setLoading(true);
     try {
-      const [data, validationsData] = await Promise.all([
-        api.getTasks(token, project.id),
-        api.getProjectActiveValidations(token, project.id)
-      ]);
+      const data = await api.getTasks(token, project.id);
       if (Array.isArray(data)) {
         setTasks(data);
       } else if (data && data.error) {
@@ -3261,9 +3231,6 @@ const ProjectTracker = ({ token, user, project: initialProject, scrollToTaskId, 
         setTasks([]);
       } else {
         setTasks([]);
-      }
-      if (Array.isArray(validationsData)) {
-        setActiveValidations(validationsData);
       }
     } catch (err) {
       console.error('Failed to load tasks:', err);
@@ -4751,13 +4718,6 @@ const ProjectTracker = ({ token, user, project: initialProject, scrollToTaskId, 
                     <div className="flex-1">
                       <h2 className="text-lg font-bold flex items-center gap-2">
                         {phaseNames[phase] || phase}
-                        {phase === 'Phase 8' && activeValidations.length > 0 && (
-                          <span className={`px-2 py-0.5 text-white text-xs rounded-full font-medium animate-pulse ${activeValidations.some(v => v.status !== 'assigned') ? 'bg-blue-500/30' : 'bg-amber-500/40'}`}>
-                            {activeValidations.filter(v => v.status !== 'assigned').length > 0
-                              ? `${activeValidations.filter(v => v.status !== 'assigned').length} validation${activeValidations.filter(v => v.status !== 'assigned').length > 1 ? 's' : ''} in progress`
-                              : `${activeValidations.length} validation${activeValidations.length > 1 ? 's' : ''} scheduled`}
-                          </span>
-                        )}
                       </h2>
                       <p className="text-sm opacity-80">
                         {Object.values(groupedByPhase[phase] || {}).flat().filter(t => t.completed).length} of {Object.values(groupedByPhase[phase] || {}).flat().length} complete
@@ -4770,148 +4730,6 @@ const ProjectTracker = ({ token, user, project: initialProject, scrollToTaskId, 
                 </div>
                 {!isCollapsed && (
                 <>
-                {/* Active Validation Progress Card for Phase 8 */}
-                {phase === 'Phase 8' && (
-                  (() => {
-                    const inProgress = activeValidations.filter(v => v.status !== 'assigned');
-                    const scheduled = activeValidations.filter(v => v.status === 'assigned');
-                    const hasActive = inProgress.length > 0;
-                    const hasAny = activeValidations.length > 0;
-                    const headerGradient = hasActive ? 'bg-gradient-to-r from-blue-600 to-blue-700' : hasAny ? 'bg-gradient-to-r from-amber-500 to-amber-600' : 'bg-gradient-to-r from-gray-500 to-gray-600';
-                    const borderColor = hasActive ? 'border-blue-200' : hasAny ? 'border-amber-200' : 'border-gray-200';
-                    const badgeBg = hasActive ? 'bg-blue-500/30' : hasAny ? 'bg-amber-400/30' : 'bg-gray-400/30';
-                    const headerTitle = hasActive
-                      ? `Active Validation${inProgress.length > 1 ? 's' : ''} In Progress`
-                      : hasAny ? `Validation${scheduled.length > 1 ? 's' : ''} Scheduled`
-                      : 'Validation Tracking';
-                    const badgeLabel = hasActive
-                      ? `${inProgress.length} in progress${scheduled.length > 0 ? `, ${scheduled.length} scheduled` : ''}`
-                      : hasAny ? `${scheduled.length} scheduled`
-                      : '0 active';
-                    return (
-                      <div className={`bg-white rounded-xl shadow-sm border-2 ${borderColor} overflow-hidden`}>
-                        <div className={`${headerGradient} p-4 text-white`}>
-                          <div className="flex items-center justify-between">
-                            <div>
-                              <h3 className="font-bold flex items-center gap-2">
-                                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23.693L5 14.5m14.8.8l1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0112 21c-2.773 0-5.491-.235-8.135-.687-1.718-.293-2.3-2.379-1.067-3.61L5 14.5"/></svg>
-                                {headerTitle}
-                              </h3>
-                              <p className={`${hasAny ? (hasActive ? 'text-blue-100' : 'text-amber-100') : 'text-gray-200'} text-sm mt-1`}>Multi-day analyzer validation progress</p>
-                            </div>
-                            <span className={`px-3 py-1 ${badgeBg} rounded-full text-sm font-medium`}>{badgeLabel}</span>
-                          </div>
-                        </div>
-                        <div className="p-4 space-y-3">
-                          {activeValidations.length > 0 ? activeValidations.map(v => {
-                            const isScheduled = v.status === 'assigned';
-                            const isOnsiteSubmitted = v.status === 'onsite_submitted';
-                            const onsiteDays = v.onsiteDaysLogged || 0;
-                            const offsiteDays = v.offsiteDaysLogged || 0;
-                            const daysLogged = (onsiteDays + offsiteDays) || v.daysLogged || 0;
-                            const expected = v.expectedDays;
-                            const pct = expected ? Math.min(100, Math.round((daysLogged / expected) * 100)) : null;
-                            const scheduledStart = v.validationStartDate
-                              ? new Date(v.validationStartDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-                              : null;
-                            const onsiteSegsAll = (v.segments || []).filter(s => !s.phase || s.phase === 'onsite');
-                            const offsiteSegsAll = (v.segments || []).filter(s => s.phase === 'offsite');
-                            return (
-                              <div key={v.id} className={`border rounded-lg p-3 transition ${isScheduled ? 'bg-amber-50 border-amber-200' : isOnsiteSubmitted ? 'bg-blue-50 border-blue-200' : 'hover:bg-gray-50'}`}>
-                                <div className="flex items-center justify-between">
-                                  <div>
-                                    <div className="flex items-center gap-2 flex-wrap">
-                                      <p className="font-medium text-gray-900">{v.analyzerModel || 'Biolis AU480'} {v.analyzerSerialNumber ? `(${v.analyzerSerialNumber})` : ''}</p>
-                                      {isScheduled && <span className="text-xs px-1.5 py-0.5 rounded bg-amber-200 text-amber-800 font-medium">Scheduled</span>}
-                                      {isOnsiteSubmitted && <span className="text-xs px-1.5 py-0.5 rounded bg-green-200 text-green-800 font-medium">On-Site Complete</span>}
-                                      {isOnsiteSubmitted && <span className="text-xs px-1.5 py-0.5 rounded bg-blue-200 text-blue-800 font-medium animate-pulse">Off-Site In Progress</span>}
-                                    </div>
-                                    {isScheduled ? (
-                                      <p className="text-sm text-gray-500">
-                                        Technician: {v.technicianName || '—'}
-                                        {scheduledStart ? ` · Starts ${scheduledStart}` : ''}
-                                        {expected ? ` · ${expected} day${expected !== 1 ? 's' : ''} planned` : ''}
-                                      </p>
-                                    ) : isOnsiteSubmitted ? (
-                                      <p className="text-sm text-gray-600">
-                                        Technician: {v.technicianName || '—'} · On-Site: {onsiteDays} day{onsiteDays !== 1 ? 's' : ''} · Off-Site: {offsiteDays} day{offsiteDays !== 1 ? 's' : ''}
-                                      </p>
-                                    ) : (
-                                      <p className="text-sm text-gray-600">Technician: {v.technicianName || '—'} · {daysLogged} day{daysLogged !== 1 ? 's' : ''} logged</p>
-                                    )}
-                                  </div>
-                                  {!isScheduled && (
-                                    <div className="flex items-center gap-1 flex-wrap">
-                                      {onsiteSegsAll.map((s, i) => (
-                                        <div key={`on-${i}`} className={`w-2.5 h-2.5 rounded-full ${s.status === 'complete' ? 'bg-green-500' : 'bg-yellow-400'}`} title={`On-Site Day ${s.day || i + 1}`}></div>
-                                      ))}
-                                      {offsiteSegsAll.length > 0 && <div className="w-px h-2.5 bg-gray-400 mx-0.5"></div>}
-                                      {offsiteSegsAll.map((s, i) => (
-                                        <div key={`off-${i}`} className={`w-2.5 h-2.5 rounded-full border border-blue-400 ${s.status === 'complete' ? 'bg-blue-500' : 'bg-blue-200'}`} title={`Off-Site Day ${s.day || i + 1}`}></div>
-                                      ))}
-                                    </div>
-                                  )}
-                                </div>
-                                {!isScheduled && expected && pct !== null && (
-                                  <div className="mt-2">
-                                    <div className="w-full bg-gray-200 rounded-full h-1.5 overflow-hidden">
-                                      <div className={`h-full rounded-full transition-all ${pct >= 100 ? 'bg-green-500' : 'bg-blue-500'}`} style={{ width: `${pct}%` }} />
-                                    </div>
-                                    <p className="text-xs text-gray-500 mt-0.5">{daysLogged} of {expected} days · {pct}%</p>
-                                  </div>
-                                )}
-                                {!isScheduled && (v.segments || []).length > 0 && (
-                                  <details className="mt-2">
-                                    <summary className="text-xs text-blue-600 cursor-pointer hover:text-blue-800 font-medium">View daily log</summary>
-                                    <div className="mt-2 space-y-3">
-                                      {(() => {
-                                        const segs = v.segments || [];
-                                        const onsiteSegs = segs.filter(s => !s.phase || s.phase === 'onsite');
-                                        const offsiteSegs = segs.filter(s => s.phase === 'offsite');
-                                        const renderSeg = (seg) => (
-                                          <div key={`${seg.phase}-${seg.day}`} className="bg-gray-50 rounded p-2 text-xs">
-                                            <span className="font-medium text-gray-900">Day {seg.day}</span>
-                                            <span className="text-gray-500 ml-2">{seg.date ? new Date(seg.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }) : ''}</span>
-                                            {seg.testsPerformed && <p className="text-gray-700 mt-1"><span className="text-gray-500">Tests:</span> {seg.testsPerformed}</p>}
-                                            {seg.results && <p className="text-gray-700"><span className="text-gray-500">Results:</span> {seg.results}</p>}
-                                            {seg.trainingCompleted !== undefined && <p className="text-gray-700"><span className="text-gray-500">Training:</span> {seg.trainingCompleted ? 'Yes' : `No${seg.trainingReason ? ` — ${seg.trainingReason}` : ''}`}</p>}
-                                            {(seg.outstandingIssues || seg.observations) && <p className="text-gray-700"><span className="text-gray-500">Outstanding Issues:</span> {seg.outstandingIssues || seg.observations}</p>}
-                                            {seg.finalRecommendations && <p className="text-gray-700"><span className="text-gray-500">Recommendations:</span> {seg.finalRecommendations}</p>}
-                                          </div>
-                                        );
-                                        return (
-                                          <>
-                                            {onsiteSegs.length > 0 && (
-                                              <div>
-                                                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">On-Site Days</p>
-                                                <div className="space-y-1">{onsiteSegs.map(renderSeg)}</div>
-                                              </div>
-                                            )}
-                                            {offsiteSegs.length > 0 && (
-                                              <div>
-                                                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1 mt-2">Off-Site Days</p>
-                                                <div className="space-y-1">{offsiteSegs.map(renderSeg)}</div>
-                                              </div>
-                                            )}
-                                          </>
-                                        );
-                                      })()}
-                                    </div>
-                                  </details>
-                                )}
-                              </div>
-                            );
-                          }) : (
-                            <div className="text-center py-4 text-gray-500">
-                              <p className="text-sm">No active validations for this project.</p>
-                              <p className="text-xs mt-1">When a technician is assigned a validation in the Service Portal, it will appear here.</p>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })()
-                )}
                 {(() => {
                   const phaseTasks = Object.values(groupedByPhase[phase] || {}).flat().sort((a, b) => {
                     const aDate = a.dueDate ? new Date(a.dueDate).getTime() : Infinity;
@@ -7117,7 +6935,6 @@ const HubSpotSettings = ({ token, user, onBack, onLogout }) => {
 // ============== REPORTING COMPONENT ==============
 const Reporting = ({ token, user, onBack, onLogout }) => {
   const [reportData, setReportData] = useState([]);
-  const [validationData, setValidationData] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -7126,16 +6943,8 @@ const Reporting = ({ token, user, onBack, onLogout }) => {
 
   const loadReportData = async () => {
     try {
-      const [projectData, serviceReportsRes] = await Promise.all([
-        api.getReportingData(token),
-        fetch(`${API_URL}/api/service-reports`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        }).then(r => r.json()).catch(() => [])
-      ]);
+      const projectData = await api.getReportingData(token);
       setReportData(projectData);
-      // Filter validation service reports
-      const validations = (serviceReportsRes || []).filter(r => r.serviceType === 'Validations');
-      setValidationData(validations);
     } catch (error) {
       console.error('Failed to load reporting data:', error);
     } finally {
@@ -7143,41 +6952,6 @@ const Reporting = ({ token, user, onBack, onLogout }) => {
     }
   };
 
-  // Validation metrics
-  const getValidationMetrics = () => {
-    const totalValidations = validationData.length;
-    let totalDaysOnSite = 0;
-    let totalAnalyzers = 0;
-    const statusCounts = { Passed: 0, Failed: 0, Pending: 0 };
-    const clientValidations = {};
-
-    validationData.forEach(v => {
-      // Calculate days on-site
-      if (v.validationStartDate && v.validationEndDate) {
-        const days = Math.ceil(Math.abs(new Date(v.validationEndDate) - new Date(v.validationStartDate)) / (1000 * 60 * 60 * 24)) + 1;
-        totalDaysOnSite += days;
-      }
-      // Count analyzers and statuses
-      if (v.analyzersValidated && Array.isArray(v.analyzersValidated)) {
-        totalAnalyzers += v.analyzersValidated.length;
-        v.analyzersValidated.forEach(a => {
-          const status = a.status || 'Pending';
-          statusCounts[status] = (statusCounts[status] || 0) + 1;
-        });
-      }
-      // Count by client
-      const clientName = v.clientFacilityName || 'Unknown';
-      clientValidations[clientName] = (clientValidations[clientName] || 0) + 1;
-    });
-
-    return {
-      total: totalValidations,
-      avgDaysOnSite: totalValidations > 0 ? Math.round(totalDaysOnSite / totalValidations) : 0,
-      totalAnalyzers,
-      statusCounts,
-      clientValidations
-    };
-  };
 
   // Chart 1: Completed vs In Progress by client
   const getStatusByClient = () => {
@@ -7356,88 +7130,6 @@ const Reporting = ({ token, user, onBack, onLogout }) => {
             </div>
           </div>
 
-          {/* Validation Metrics */}
-          {validationData.length > 0 && (() => {
-            const metrics = getValidationMetrics();
-            return (
-              <div className="mt-8">
-                <h2 className="text-xl font-bold mb-4">Validation Reports</h2>
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-                  <div className="bg-purple-50 p-4 rounded-lg text-center">
-                    <div className="text-3xl font-bold text-purple-600">{metrics.total}</div>
-                    <div className="text-sm text-purple-800">Total Validations</div>
-                  </div>
-                  <div className="bg-indigo-50 p-4 rounded-lg text-center">
-                    <div className="text-3xl font-bold text-indigo-600">{metrics.avgDaysOnSite}</div>
-                    <div className="text-sm text-indigo-800">Avg Days On-Site</div>
-                  </div>
-                  <div className="bg-cyan-50 p-4 rounded-lg text-center">
-                    <div className="text-3xl font-bold text-cyan-600">{metrics.totalAnalyzers}</div>
-                    <div className="text-sm text-cyan-800">Analyzers Validated</div>
-                  </div>
-                  <div className="bg-green-50 p-4 rounded-lg text-center">
-                    <div className="text-3xl font-bold text-green-600">{metrics.statusCounts.Passed || 0}</div>
-                    <div className="text-sm text-green-800">Passed</div>
-                  </div>
-                </div>
-
-                {/* Validations by Client */}
-                <div className="bg-gray-50 rounded-lg p-4">
-                  <h3 className="font-semibold text-gray-800 mb-3">Validations by Client</h3>
-                  <div className="space-y-2">
-                    {Object.entries(metrics.clientValidations)
-                      .sort((a, b) => b[1] - a[1])
-                      .map(([client, count]) => (
-                        <div key={client} className="flex items-center gap-3">
-                          <div className="w-40 text-sm font-medium truncate">{client}</div>
-                          <div className="flex-1 bg-gray-200 rounded h-6 overflow-hidden">
-                            <div
-                              className="bg-gradient-to-r from-purple-500 to-indigo-500 h-full flex items-center justify-end pr-2"
-                              style={{ width: `${(count / metrics.total) * 100}%`, minWidth: '30px' }}
-                            >
-                              <span className="text-white text-xs font-bold">{count}</span>
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                  </div>
-                </div>
-
-                {/* Analyzer Status Breakdown */}
-                {metrics.totalAnalyzers > 0 && (
-                  <div className="mt-4 bg-gray-50 rounded-lg p-4">
-                    <h3 className="font-semibold text-gray-800 mb-3">Analyzer Validation Status</h3>
-                    <div className="flex h-8 rounded overflow-hidden">
-                      {metrics.statusCounts.Passed > 0 && (
-                        <div
-                          className="bg-green-500 flex items-center justify-center text-white text-xs font-medium"
-                          style={{ width: `${(metrics.statusCounts.Passed / metrics.totalAnalyzers) * 100}%` }}
-                        >
-                          {metrics.statusCounts.Passed} Passed
-                        </div>
-                      )}
-                      {metrics.statusCounts.Failed > 0 && (
-                        <div
-                          className="bg-red-500 flex items-center justify-center text-white text-xs font-medium"
-                          style={{ width: `${(metrics.statusCounts.Failed / metrics.totalAnalyzers) * 100}%` }}
-                        >
-                          {metrics.statusCounts.Failed} Failed
-                        </div>
-                      )}
-                      {metrics.statusCounts.Pending > 0 && (
-                        <div
-                          className="bg-yellow-500 flex items-center justify-center text-white text-xs font-medium"
-                          style={{ width: `${(metrics.statusCounts.Pending / metrics.totalAnalyzers) * 100}%` }}
-                        >
-                          {metrics.statusCounts.Pending} Pending
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })()}
 
           {/* Detailed Table */}
           <div className="mt-8">

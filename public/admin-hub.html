@@ -1859,7 +1859,6 @@
     const ServicePortalPage = ({ token, user }) => {
       const [activeTab, setActiveTab] = useState('reports');
       const [reports, setReports] = useState([]);
-      const [validationReports, setValidationReports] = useState([]);
       const [clients, setClients] = useState([]);
       const [technicians, setTechnicians] = useState([]);
       const [loading, setLoading] = useState(true);
@@ -1867,7 +1866,6 @@
       const [sortBy, setSortBy] = useState('date_desc');
       const [statusFilter, setStatusFilter] = useState('');
       const [viewingReport, setViewingReport] = useState(null);
-      const [viewingValidation, setViewingValidation] = useState(null);
       const [showNewReport, setShowNewReport] = useState(false);
       const [submitting, setSubmitting] = useState(false);
       const [formData, setFormData] = useState({
@@ -1875,15 +1873,6 @@
         address: '', serviceCompletionDate: new Date().toISOString().split('T')[0],
         analyzerModel: '', analyzerSerialNumber: '', hubspotTicketNumber: '', hubspotCompanyId: '',
         serviceType: '', descriptionOfWork: '', materialsUsed: '', solution: '', outstandingIssues: ''
-      });
-      const [validationFormData, setValidationFormData] = useState({
-        clientFacilityName: '', serviceProviderName: user?.name || '',
-        startDate: new Date().toISOString().split('T')[0],
-        endDate: new Date().toISOString().split('T')[0],
-        daysOnSite: 1,
-        hubspotCompanyId: '',
-        analyzersValidated: [{ model: '', serialNumber: '', validationStatus: 'Passed' }],
-        trainingProvided: '', validationResults: '', outstandingItems: '', nextSteps: ''
       });
 
       // Assignment form state
@@ -1944,12 +1933,7 @@
           setAllClients(allClientsData);
         }
         if (!reportsData.error) {
-          // Separate service reports from validation service reports
-          const serviceReportsOnly = reportsData.filter(r => r.serviceType !== 'Validations');
-          const validationServiceReports = reportsData.filter(r => r.serviceType === 'Validations');
-          setReports(serviceReportsOnly);
-          // Validation reports tab shows only service reports submitted by techs with serviceType='Validations'
-          setValidationReports(validationServiceReports);
+          setReports(reportsData);
         }
         if (!clientsData.error) setClients(clientsData);
         setLoading(false);
@@ -1978,80 +1962,16 @@
         setDismissingAll(false);
       };
 
-      const handleClientSelect = (clientName, isValidation = false) => {
+      const handleClientSelect = (clientName) => {
         const client = clients.find(c => c.name === clientName || c.clientName === clientName);
         if (client) {
-          if (isValidation) {
-            setValidationFormData(prev => ({
-              ...prev,
-              clientFacilityName: client.name || client.clientName || '',
-              hubspotCompanyId: client.hubspotCompanyId || ''
-            }));
-          } else {
-            setFormData(prev => ({
-              ...prev,
-              clientFacilityName: client.name || client.clientName || '',
-              address: client.address || '',
-              hubspotCompanyId: client.hubspotCompanyId || ''
-            }));
-          }
+          setFormData(prev => ({
+            ...prev,
+            clientFacilityName: client.name || client.clientName || '',
+            address: client.address || '',
+            hubspotCompanyId: client.hubspotCompanyId || ''
+          }));
         }
-      };
-
-      const handleAddAnalyzer = () => {
-        setValidationFormData(prev => ({
-          ...prev,
-          analyzersValidated: [...prev.analyzersValidated, { model: '', serialNumber: '', validationStatus: 'Passed' }]
-        }));
-      };
-
-      const handleRemoveAnalyzer = (idx) => {
-        setValidationFormData(prev => ({
-          ...prev,
-          analyzersValidated: prev.analyzersValidated.filter((_, i) => i !== idx)
-        }));
-      };
-
-      const handleAnalyzerChange = (idx, field, value) => {
-        setValidationFormData(prev => ({
-          ...prev,
-          analyzersValidated: prev.analyzersValidated.map((a, i) => i === idx ? { ...a, [field]: value } : a)
-        }));
-      };
-
-      const handleSubmitValidation = async (e) => {
-        e.preventDefault();
-        if (!validationFormData.clientFacilityName || !validationFormData.startDate || !validationFormData.endDate) {
-          alert('Please fill in all required fields');
-          return;
-        }
-        setSubmitting(true);
-        try {
-          const response = await fetch('/api/validation-reports', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-            body: JSON.stringify(validationFormData)
-          });
-          const result = await response.json();
-          if (result.error) {
-            alert('Error: ' + result.error);
-          } else {
-            setActiveTab('validation');
-            setValidationFormData({
-              clientFacilityName: '', serviceProviderName: user?.name || '',
-              startDate: new Date().toISOString().split('T')[0],
-              endDate: new Date().toISOString().split('T')[0],
-              daysOnSite: 1,
-              hubspotCompanyId: '',
-              analyzersValidated: [{ model: '', serialNumber: '', validationStatus: 'Passed' }],
-              trainingProvided: '', validationResults: '', outstandingItems: '', nextSteps: ''
-            });
-            loadData();
-          }
-        } catch (err) {
-          alert('Error submitting validation report');
-        }
-        setSubmitting(false);
       };
 
       const handleSubmitReport = async (e) => {
@@ -2241,204 +2161,6 @@
         }
       };
 
-      // View single validation report
-      if (viewingValidation) {
-        const startDate = viewingValidation.validationStartDate || viewingValidation.startDate;
-        const endDate = viewingValidation.validationEndDate || viewingValidation.endDate;
-        const daysOnSite = startDate && endDate
-          ? Math.ceil(Math.abs(new Date(endDate) - new Date(startDate)) / (1000 * 60 * 60 * 24)) + 1
-          : viewingValidation.dayEntries?.length || 1;
-        return (
-          <div className="space-y-6">
-            <button onClick={() => setViewingValidation(null)} className="flex items-center gap-2 text-primary hover:text-accent">
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
-              Back to Validation Reports
-            </button>
-            <div className="bg-white rounded-xl shadow-sm overflow-hidden">
-              <div className="bg-gradient-to-r from-purple-600 to-purple-800 text-white p-6">
-                <h1 className="text-2xl font-bold">Validation Report Details</h1>
-                <p className="opacity-90">Report ID: {viewingValidation.id}</p>
-              </div>
-              <div className="p-6">
-                <div className="grid md:grid-cols-3 gap-6 mb-6">
-                  <div className="bg-purple-50 p-4 rounded-lg">
-                    <p className="text-sm text-purple-600 font-medium">Client</p>
-                    <p className="text-lg font-bold text-gray-900">{viewingValidation.clientFacilityName}</p>
-                  </div>
-                  <div className="bg-purple-50 p-4 rounded-lg">
-                    <p className="text-sm text-purple-600 font-medium">Date Range</p>
-                    <p className="text-lg font-bold text-gray-900">
-                      {startDate && endDate
-                        ? `${new Date(startDate).toLocaleDateString()} - ${new Date(endDate).toLocaleDateString()}`
-                        : new Date(viewingValidation.createdAt).toLocaleDateString()}
-                    </p>
-                  </div>
-                  <div className="bg-purple-50 p-4 rounded-lg">
-                    <p className="text-sm text-purple-600 font-medium">Days On-Site</p>
-                    <p className="text-lg font-bold text-gray-900">{daysOnSite} days</p>
-                  </div>
-                </div>
-
-                <div className="mb-6">
-                  <p className="text-sm text-gray-500">Service Provider</p>
-                  <p className="font-medium">{viewingValidation.serviceProviderName || viewingValidation.technicianName}</p>
-                </div>
-
-                {viewingValidation.analyzersValidated && viewingValidation.analyzersValidated.length > 0 && (
-                  <div className="mb-6">
-                    <h3 className="font-bold text-accent mb-3">Analyzers Validated</h3>
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-sm">
-                        <thead className="bg-gray-50">
-                          <tr>
-                            <th className="px-4 py-2 text-left">Model</th>
-                            <th className="px-4 py-2 text-left">Serial Number</th>
-                            <th className="px-4 py-2 text-left">Status</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y">
-                          {viewingValidation.analyzersValidated.map((a, idx) => (
-                            <tr key={idx}>
-                              <td className="px-4 py-2">{a.model || '-'}</td>
-                              <td className="px-4 py-2">{a.serialNumber || '-'}</td>
-                              <td className="px-4 py-2">
-                                <span className={`px-2 py-1 rounded text-xs font-medium ${
-                                  (a.validationStatus || a.status) === 'Passed' ? 'bg-green-100 text-green-700' :
-                                  (a.validationStatus || a.status) === 'Failed' ? 'bg-red-100 text-red-700' :
-                                  (a.validationStatus || a.status) === 'Conditional' || (a.validationStatus || a.status) === 'Pending' ? 'bg-yellow-100 text-yellow-700' :
-                                  'bg-gray-100 text-gray-700'
-                                }`}>
-                                  {a.validationStatus || a.status}
-                                </span>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                )}
-
-                {viewingValidation.trainingProvided && (
-                  <div className="mb-6">
-                    <h3 className="font-bold text-accent mb-2">Training Provided</h3>
-                    <p className="text-sm bg-gray-50 p-3 rounded-lg whitespace-pre-wrap">{viewingValidation.trainingProvided}</p>
-                  </div>
-                )}
-
-                <div className="mb-6">
-                  <h3 className="font-bold text-accent mb-2">Validation Results</h3>
-                  <p className="text-sm bg-gray-50 p-3 rounded-lg whitespace-pre-wrap">{viewingValidation.validationResults || '-'}</p>
-                </div>
-
-                {viewingValidation.descriptionOfWork && (
-                  <div className="mb-6">
-                    <h3 className="font-bold text-accent mb-2">Description of Work</h3>
-                    <p className="text-sm bg-gray-50 p-3 rounded-lg whitespace-pre-wrap">{viewingValidation.descriptionOfWork}</p>
-                  </div>
-                )}
-
-                {viewingValidation.outstandingIssues && (
-                  <div className="mb-6">
-                    <h3 className="font-bold text-accent mb-2">Outstanding Issues / Recommendations</h3>
-                    <p className="text-sm bg-yellow-50 p-3 rounded-lg whitespace-pre-wrap">{viewingValidation.outstandingIssues}</p>
-                  </div>
-                )}
-
-                {/* Day-Over-Day Validation Entries */}
-                {viewingValidation.dayEntries && viewingValidation.dayEntries.length > 0 && (
-                  <div className="mb-6">
-                    <h3 className="font-bold text-accent mb-3">Day-Over-Day Validation Entries ({viewingValidation.dayEntries.length} day{viewingValidation.dayEntries.length !== 1 ? 's' : ''})</h3>
-                    <div className="space-y-2">
-                      {viewingValidation.dayEntries.sort((a, b) => a.dayNumber - b.dayNumber).map((entry, idx) => (
-                        <div key={entry.id || idx} className="bg-gray-50 rounded-lg p-3 border border-gray-200 text-sm">
-                          <div className="flex items-center gap-2 mb-1">
-                            <span className="w-6 h-6 rounded-full bg-purple-600 text-white flex items-center justify-center text-xs font-bold">{entry.dayNumber}</span>
-                            <span className="font-medium text-gray-900">Day {entry.dayNumber}</span>
-                            <span className="text-gray-400">{entry.date ? new Date(entry.date + 'T12:00:00').toLocaleDateString() : ''}</span>
-                          </div>
-                          {entry.testsPerformed && <p className="text-gray-600 ml-8"><span className="font-medium text-gray-700">Tests:</span> {entry.testsPerformed}</p>}
-                          {entry.readings && <p className="text-gray-600 ml-8"><span className="font-medium text-gray-700">Readings:</span> {entry.readings}</p>}
-                          {entry.results && <p className="text-gray-600 ml-8"><span className="font-medium text-gray-700">Results:</span> {entry.results}</p>}
-                          {entry.notes && <p className="text-gray-500 ml-8"><span className="font-medium">Notes:</span> {entry.notes}</p>}
-                          {entry.issues && <p className="text-orange-600 ml-8"><span className="font-medium">Issues:</span> {entry.issues}</p>}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {viewingValidation.validationReportFileName && (
-                  <div className="mb-6">
-                    <h3 className="font-bold text-accent mb-2">Validation Report File</h3>
-                    <div className="flex items-center gap-2 bg-gray-50 p-3 rounded-lg">
-                      <svg className="w-5 h-5 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
-                      </svg>
-                      {viewingValidation.validationReportFile ? (
-                        <a href={viewingValidation.validationReportFile} download={viewingValidation.validationReportFileName} className="text-purple-600 hover:underline font-medium">
-                          {viewingValidation.validationReportFileName}
-                        </a>
-                      ) : (
-                        <span className="font-medium">{viewingValidation.validationReportFileName}</span>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {viewingValidation.recommendations && (
-                  <div className="mb-6">
-                    <h3 className="font-bold text-accent mb-2">Recommendations</h3>
-                    <p className="text-sm bg-blue-50 p-3 rounded-lg whitespace-pre-wrap">{viewingValidation.recommendations}</p>
-                  </div>
-                )}
-
-                {viewingValidation.outstandingItems && (
-                  <div className="mb-6">
-                    <h3 className="font-bold text-accent mb-2">Outstanding Items</h3>
-                    <p className="text-sm bg-yellow-50 p-3 rounded-lg whitespace-pre-wrap">{viewingValidation.outstandingItems}</p>
-                  </div>
-                )}
-
-                {viewingValidation.nextSteps && (
-                  <div className="mb-6">
-                    <h3 className="font-bold text-accent mb-2">Next Steps</h3>
-                    <p className="text-sm bg-blue-50 p-3 rounded-lg whitespace-pre-wrap">{viewingValidation.nextSteps}</p>
-                  </div>
-                )}
-
-                {/* Signatures if available */}
-                {(viewingValidation.customerSignature || viewingValidation.technicianSignature) && (
-                  <div className="mt-6 pt-6 border-t">
-                    <h3 className="font-bold text-accent mb-4">Signatures</h3>
-                    <div className="grid md:grid-cols-2 gap-6">
-                      {viewingValidation.customerSignature && (
-                        <div>
-                          <p className="text-sm text-gray-500 mb-2">Customer Signature</p>
-                          <div className="border rounded-lg p-2 bg-gray-50">
-                            <img src={viewingValidation.customerSignature} alt="Customer Signature" className="max-h-20" />
-                          </div>
-                          {viewingValidation.customerSignatureDate && <p className="text-xs text-gray-500 mt-1">Date: {viewingValidation.customerSignatureDate}</p>}
-                        </div>
-                      )}
-                      {viewingValidation.technicianSignature && (
-                        <div>
-                          <p className="text-sm text-gray-500 mb-2">Technician Signature</p>
-                          <div className="border rounded-lg p-2 bg-gray-50">
-                            <img src={viewingValidation.technicianSignature} alt="Technician Signature" className="max-h-20" />
-                          </div>
-                          {viewingValidation.technicianSignatureDate && <p className="text-xs text-gray-500 mt-1">Date: {viewingValidation.technicianSignatureDate}</p>}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        );
-      }
-
       // View single report
       if (viewingReport) {
         const isAssigned = viewingReport.status === 'assigned';
@@ -2595,10 +2317,6 @@
                 className={`px-6 py-4 font-medium ${activeTab === 'reports' ? 'text-green-600 border-b-2 border-green-600' : 'text-gray-500 hover:text-gray-700'}`}>
                 Service Reports ({reports.length})
               </button>
-              <button onClick={() => setActiveTab('validation')}
-                className={`px-6 py-4 font-medium ${activeTab === 'validation' ? 'text-purple-600 border-b-2 border-purple-600' : 'text-gray-500 hover:text-gray-700'}`}>
-                Validation Reports ({validationReports.length})
-              </button>
               {canManageVendors && (
                 <button onClick={() => setActiveTab('vendors')}
                   className={`px-6 py-4 font-medium ${activeTab === 'vendors' ? 'text-orange-600 border-b-2 border-orange-600' : 'text-gray-500 hover:text-gray-700'}`}>
@@ -2696,81 +2414,6 @@
                   </div>
                 ) : (
                   <div className="text-center py-12 text-gray-500"><p>No service reports found</p></div>
-                )}
-              </div>
-            )}
-
-            {/* Validation Reports Tab */}
-            {activeTab === 'validation' && (
-              <div className="p-6">
-                <div className="mb-4">
-                  <input type="text" placeholder="Search validation reports..." value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)} className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-purple-500" />
-                </div>
-                <p className="text-sm text-gray-500 mb-4">Showing validation reports submitted by service technicians and vendors</p>
-                {loading ? (
-                  <div className="flex justify-center py-12"><div className="animate-spin rounded-full h-8 w-8 border-4 border-purple-600 border-t-transparent"></div></div>
-                ) : validationReports.filter(r => r.clientFacilityName?.toLowerCase().includes(searchTerm.toLowerCase())).length > 0 ? (
-                  <div className="overflow-x-auto">
-                    <table className="w-full">
-                      <thead className="bg-gray-50 border-b">
-                        <tr>
-                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Date</th>
-                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Client</th>
-                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Days On-Site</th>
-                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Analyzers</th>
-                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Technician</th>
-                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Status</th>
-                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-200">
-                        {validationReports.filter(r => r.clientFacilityName?.toLowerCase().includes(searchTerm.toLowerCase())).map(report => {
-                          const startDate = report.validationStartDate || report.startDate;
-                          const endDate = report.validationEndDate || report.endDate;
-                          const daysOnSite = startDate && endDate
-                            ? Math.ceil(Math.abs(new Date(endDate) - new Date(startDate)) / (1000 * 60 * 60 * 24)) + 1
-                            : report.dayEntries?.length || 1;
-                          return (
-                            <tr key={report.id} className="hover:bg-gray-50">
-                              <td className="px-4 py-3 text-sm">
-                                {startDate && endDate
-                                  ? `${new Date(startDate).toLocaleDateString()} - ${new Date(endDate).toLocaleDateString()}`
-                                  : new Date(report.createdAt).toLocaleDateString()}
-                              </td>
-                              <td className="px-4 py-3 font-medium text-gray-900">{report.clientFacilityName}</td>
-                              <td className="px-4 py-3 text-sm">{daysOnSite} days</td>
-                              <td className="px-4 py-3 text-sm">{report.analyzersValidated?.length || 0} units</td>
-                              <td className="px-4 py-3 text-sm">{report.serviceProviderName || report.technicianName}</td>
-                              <td className="px-4 py-3 text-sm">
-                                {(() => {
-                                  const s = report.status;
-                                  const hasTech = !!report.technicianSignature;
-                                  const hasCust = !!report.customerSignature;
-                                  if (s === 'assigned') return <span className="px-2 py-1 rounded text-xs font-medium bg-yellow-100 text-yellow-700">Pending</span>;
-                                  if (s === 'submitted' && hasTech && hasCust) return <span className="px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-700">Complete</span>;
-                                  if (s === 'submitted' && hasTech) return <span className="px-2 py-1 rounded text-xs font-medium bg-orange-100 text-orange-700">Signature Needed</span>;
-                                  if (s === 'submitted') return <span className="px-2 py-1 rounded text-xs font-medium bg-blue-100 text-blue-700">Submitted</span>;
-                                  if (s === 'completed') return <span className="px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-700">Complete</span>;
-                                  return <span className="px-2 py-1 rounded text-xs font-medium bg-gray-100 text-gray-700">{s || 'Unknown'}</span>;
-                                })()}
-                              </td>
-                              <td className="px-4 py-3">
-                                <button onClick={() => setViewingValidation(report)} className="flex items-center gap-1 text-purple-600 hover:text-purple-800">
-                                  {Icons.eye} View
-                                </button>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <div className="text-center py-12 text-gray-500">
-                    <p>No validation reports found</p>
-                    <p className="text-sm mt-2">Validation reports are submitted by service technicians through the Service Portal</p>
-                  </div>
                 )}
               </div>
             )}

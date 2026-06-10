@@ -144,11 +144,6 @@
           headers: { 'Authorization': `Bearer ${token}` }
         }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
 
-      getValidationProgress: (token) =>
-        fetch(`${API_URL}/api/client-portal/validation-progress`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
-
     };
     
     const LoginPage = ({ slug, onLogin }) => {
@@ -600,8 +595,6 @@
       const allTasks = project?.tasks || [];
       const tasks = allTasks.filter(t => t.showToClient !== false);
       const [viewType, setViewType] = useState('list');
-      const [validationProgress, setValidationProgress] = useState([]);
-      const [showValidationDetails, setShowValidationDetails] = useState(false);
       const [collapsedPhases, setCollapsedPhases] = useState([]);
       // Get current client user's email for ownership comparison
       const clientUserEmail = currentUser?.email || '';
@@ -617,17 +610,6 @@
           prev.includes(phase) ? prev.filter(p => p !== phase) : [...prev, phase]
         );
       };
-
-      // Fetch active validation progress
-      useEffect(() => {
-        if (token) {
-          api.getValidationProgress(token).then(result => {
-            if (!result.error && Array.isArray(result)) {
-              setValidationProgress(result);
-            }
-          });
-        }
-      }, [token]);
 
       // Phase name mappings for full display titles
       const phaseNames = {
@@ -746,248 +728,9 @@
         }
       }, [tasks.length]);
 
-      const ValidationProgressCard = () => {
-        const renderSegmentCard = (seg, dayLabel) => (
-          <div key={`${seg.phase || 'onsite'}-${seg.day}`} className="bg-gray-50 rounded-lg p-3 border border-gray-200">
-            <div className="flex items-center gap-2 mb-2">
-              <div className={`w-5 h-5 rounded-full flex items-center justify-center text-white text-xs ${seg.status === 'complete' ? 'bg-green-500' : 'bg-yellow-400'}`}>
-                {seg.status === 'complete' ? '✓' : '…'}
-              </div>
-              <span className="font-medium text-gray-900 text-sm">
-                {dayLabel}{seg.date ? ` — ${new Date(seg.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}` : ''}
-              </span>
-            </div>
-            {seg.testsPerformed && (
-              <div className="mb-1"><span className="text-xs font-medium text-gray-500">Tests Performed:</span> <span className="text-sm text-gray-700">{seg.testsPerformed}</span></div>
-            )}
-            {seg.results && (
-              <div className="mb-1"><span className="text-xs font-medium text-gray-500">Results/Readings:</span> <span className="text-sm text-gray-700">{seg.results}</span></div>
-            )}
-            <div className="mb-1">
-              <span className="text-xs font-medium text-gray-500">Training Completed:</span>{' '}
-              <span className={`text-sm font-medium ${seg.trainingCompleted === true || seg.trainingCompleted === 'Yes' ? 'text-green-600' : 'text-red-500'}`}>
-                {seg.trainingCompleted === true || seg.trainingCompleted === 'Yes' ? 'Yes' : 'No'}
-              </span>
-              {(seg.trainingCompleted === false || seg.trainingCompleted === 'No') && seg.trainingReason && (
-                <span className="text-sm text-gray-600 ml-1">— {seg.trainingReason}</span>
-              )}
-            </div>
-            {(seg.outstandingIssues || seg.observations) && (
-              <div className="mb-1"><span className="text-xs font-medium text-gray-500">Outstanding Issues/Items:</span> <span className="text-sm text-gray-700">{seg.outstandingIssues || seg.observations}</span></div>
-            )}
-            {seg.finalRecommendations && (
-              <div><span className="text-xs font-medium text-gray-500">Final Recommendations:</span> <span className="text-sm text-gray-700">{seg.finalRecommendations}</span></div>
-            )}
-          </div>
-        );
-
-        return (
-          <div className="space-y-4 mb-8">
-            {validationProgress.length === 0 ? (
-              <div className="bg-white rounded-xl shadow-sm border-2 border-gray-200 overflow-hidden">
-                <div className="bg-gradient-to-r from-gray-500 to-gray-600 p-4 text-white">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h3 className="font-bold text-lg flex items-center gap-2">
-                        <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082"/></svg>
-                        Validation Tracking
-                      </h3>
-                      <p className="text-gray-200 text-sm mt-1">Multi-day analyzer validation progress</p>
-                    </div>
-                  </div>
-                </div>
-                <div className="p-4 text-center">
-                  <p className="text-sm text-gray-500">No active validations at this time.</p>
-                  <p className="text-xs text-gray-400 mt-1">When your analyzer validation begins, daily progress will appear here.</p>
-                </div>
-              </div>
-            ) : null}
-            {validationProgress.map(v => {
-              const isScheduled = v.status === 'assigned';
-              const isOnsiteSubmitted = v.status === 'onsite_submitted';
-              const isSubmitted = v.status === 'submitted';
-              const isSignatureNeeded = v.status === 'signature_needed';
-              const onsiteDays = v.onsiteDaysLogged || 0;
-              const offsiteDays = v.offsiteDaysLogged || 0;
-              const totalDaysLogged = (onsiteDays + offsiteDays) || v.daysLogged || 0;
-              const expected = v.expectedDays;
-              const onsiteSegs = (v.segments || []).filter(s => !s.phase || s.phase === 'onsite');
-              const offsiteSegs = (v.segments || []).filter(s => s.phase === 'offsite');
-              const scheduledStart = v.validationStartDate
-                ? new Date(v.validationStartDate + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
-                : null;
-              const reportDocUrl = v.reportDocumentUrl || v.validationReportDocumentUrl;
-
-              const headerClass = isSubmitted
-                ? 'bg-gradient-to-r from-green-600 to-green-700'
-                : isSignatureNeeded
-                  ? 'bg-gradient-to-r from-orange-500 to-orange-600'
-                  : isScheduled
-                    ? 'bg-gradient-to-r from-amber-500 to-amber-600'
-                    : 'bg-gradient-to-r from-blue-600 to-blue-700';
-              const borderClass = isSubmitted ? 'border-green-200' : isSignatureNeeded ? 'border-orange-300' : isScheduled ? 'border-amber-200' : 'border-blue-200';
-              const statusTitle = isSubmitted ? 'Validation Complete' : isSignatureNeeded ? 'Signature Required' : isScheduled ? 'Validation Scheduled' : 'Active Validation';
-              const statusBadge = isSubmitted ? 'Complete' : isSignatureNeeded ? 'Awaiting Signature' : isOnsiteSubmitted ? 'On-Site Complete' : isScheduled ? 'Scheduled' : 'In Progress';
-
-              return (
-                <div key={v.id} className={`bg-white rounded-xl shadow-sm border-2 ${borderClass} overflow-hidden`}>
-                  <div className={`${headerClass} p-4 text-white`}>
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <h3 className="font-bold text-lg flex items-center gap-2">
-                          <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082"/></svg>
-                          {statusTitle}
-                        </h3>
-                        <p className="text-sm mt-1 opacity-80">
-                          {v.analyzerModel || 'Biolis AU480'} {v.analyzerSerialNumber ? `· ${v.analyzerSerialNumber}` : ''}
-                          {v.technicianName ? ` · Technician: ${v.technicianName}` : ''}
-                        </p>
-                      </div>
-                      <div className="text-right">
-                        <div className="text-xs px-2 py-1 rounded-full font-medium bg-white/20">{statusBadge}</div>
-                        {isScheduled && scheduledStart && <div className="text-xs opacity-80 mt-1">{scheduledStart}</div>}
-                        {!isScheduled && (
-                          <>
-                            <div className="text-2xl font-bold mt-1">{totalDaysLogged}</div>
-                            <div className="text-xs opacity-80">day{totalDaysLogged !== 1 ? 's' : ''} logged</div>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                    {!isScheduled && !isSubmitted && !isSignatureNeeded && expected && (
-                      <div className="mt-3">
-                        <div className="w-full bg-white/20 rounded-full h-2 overflow-hidden">
-                          <div className="h-full rounded-full transition-all duration-500 bg-white" style={{ width: `${Math.min(100, Math.round((totalDaysLogged / expected) * 100))}%` }} />
-                        </div>
-                        <p className="text-xs opacity-80 mt-1">{totalDaysLogged} of {expected} expected days</p>
-                      </div>
-                    )}
-                    {isScheduled && expected && (
-                      <div className="mt-2">
-                        <p className="text-xs opacity-80">{expected} day{expected !== 1 ? 's' : ''} planned · Validation not yet started</p>
-                      </div>
-                    )}
-                    {isOnsiteSubmitted && (
-                      <div className="mt-3 flex items-center gap-3 flex-wrap">
-                        <div className="flex items-center gap-1.5 bg-green-500/30 rounded-full px-2 py-0.5">
-                          <div className="w-1.5 h-1.5 rounded-full bg-green-300"></div>
-                          <span className="text-xs text-white font-medium">On-Site Complete ({onsiteDays} day{onsiteDays !== 1 ? 's' : ''})</span>
-                        </div>
-                        <div className="flex items-center gap-1.5 bg-blue-500/30 rounded-full px-2 py-0.5">
-                          <div className="w-1.5 h-1.5 rounded-full bg-yellow-300 animate-pulse"></div>
-                          <span className="text-xs text-white font-medium">Off-Site In Progress ({offsiteDays} day{offsiteDays !== 1 ? 's' : ''})</span>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                  <div className="p-4">
-                    {isScheduled && (
-                      <p className="text-sm text-gray-500 text-center py-2">
-                        Your technician has been assigned. Daily validation progress will appear here once work begins.
-                      </p>
-                    )}
-                    {!isScheduled && (
-                      <>
-                        <div className="flex items-center gap-2 mb-3 flex-wrap">
-                          {onsiteSegs.map((s, i) => (
-                            <div key={`on-${i}`} className={`w-3 h-3 rounded-full ${s.status === 'complete' ? 'bg-green-500' : 'bg-yellow-400'}`} title={`Day ${s.day || i + 1} (On-Site): ${s.status}`}></div>
-                          ))}
-                          {offsiteSegs.length > 0 && <div className="w-px h-3 bg-gray-300 mx-0.5"></div>}
-                          {offsiteSegs.map((s, i) => (
-                            <div key={`off-${i}`} className={`w-3 h-3 rounded-full border-2 border-blue-400 ${s.status === 'complete' ? 'bg-blue-500' : 'bg-blue-200'}`} title={`Day ${s.day || i + 1} (Off-Site): ${s.status}`}></div>
-                          ))}
-                          {expected && totalDaysLogged < expected && Array.from({ length: Math.max(0, expected - totalDaysLogged) }).map((_, i) => (
-                            <div key={`pending-${i}`} className="w-3 h-3 rounded-full bg-gray-200" title="Pending"></div>
-                          ))}
-                        </div>
-                        {(onsiteSegs.length > 0 || offsiteSegs.length > 0) && (
-                          <button
-                            onClick={() => setShowValidationDetails(!showValidationDetails)}
-                            className="text-sm text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1 mb-2"
-                          >
-                            {showValidationDetails ? 'Hide' : 'View'} Daily Details
-                            <svg className={`w-4 h-4 transition-transform ${showValidationDetails ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5"/></svg>
-                          </button>
-                        )}
-                        {showValidationDetails && (
-                          <div className="mt-1 space-y-4">
-                            {onsiteSegs.length > 0 && (
-                              <div>
-                                <div className="flex items-center gap-2 mb-2">
-                                  <div className="w-2 h-2 rounded-full bg-green-500"></div>
-                                  <span className="text-xs font-semibold text-green-700 uppercase tracking-wide">On-Site Days</span>
-                                </div>
-                                <div className="space-y-2">
-                                  {onsiteSegs.map((seg, idx) => renderSegmentCard(seg, `Day ${seg.day || idx + 1}`))}
-                                </div>
-                              </div>
-                            )}
-                            {offsiteSegs.length > 0 && (
-                              <div>
-                                <div className="flex items-center gap-2 mb-2">
-                                  <div className="w-2 h-2 rounded-full bg-blue-500"></div>
-                                  <span className="text-xs font-semibold text-blue-700 uppercase tracking-wide">Off-Site Days</span>
-                                </div>
-                                <div className="space-y-2">
-                                  {offsiteSegs.map((seg, idx) => renderSegmentCard(seg, `Day ${seg.day || idx + 1}`))}
-                                </div>
-                              </div>
-                            )}
-                            {expected && totalDaysLogged < expected && (
-                              <div className="bg-gray-50 rounded-lg p-3 border border-dashed border-gray-300 text-center text-sm text-gray-400">
-                                {expected - totalDaysLogged} more day{expected - totalDaysLogged > 1 ? 's' : ''} remaining
-                              </div>
-                            )}
-                          </div>
-                        )}
-                        {isSignatureNeeded && (
-                          <div className="mt-3 bg-orange-50 border border-orange-200 rounded-lg p-4">
-                            <p className="text-sm font-semibold text-orange-800 flex items-center gap-2 mb-1">
-                              <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"/></svg>
-                              Your signature is required
-                            </p>
-                            <p className="text-xs text-orange-700 mb-3">The validation report has been completed by your technician and is awaiting your signature to be finalized.</p>
-                            {onNavigateToFile && (
-                              <button
-                                onClick={() => onNavigateToFile(v.id)}
-                                className="inline-flex items-center gap-2 bg-orange-600 hover:bg-orange-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
-                              >
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10"/></svg>
-                                View &amp; Sign Report
-                              </button>
-                            )}
-                          </div>
-                        )}
-                        {isSubmitted && reportDocUrl && (
-                          <a
-                            href={reportDocUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="mt-3 inline-flex items-center gap-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
-                          >
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg>
-                            Download Validation Report
-                          </a>
-                        )}
-                        {isSubmitted && !reportDocUrl && (
-                          <p className="mt-3 text-sm text-green-700 font-medium flex items-center gap-2">
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                            Validation report complete
-                          </p>
-                        )}
-                      </>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        );
-      };
 
       const ListView = () => (
         <div className="space-y-8">
-          <ValidationProgressCard />
           {PHASE_ORDER.map((phase, phaseIndex) => {
             const isCollapsed = collapsedPhases.includes(phase);
             const phaseTasks = groupedByPhase[phase] || [];
@@ -1026,13 +769,6 @@
               </div>
               {!isCollapsed && phaseTasks.length > 0 && (
                 <div className={`bg-white rounded-lg shadow-sm overflow-hidden border-l-4 ${getPhaseColor(phase, phaseIndex)}`}>
-                  {phase === 'Phase 8' && onNavigate && (
-                    <div className="bg-gray-50 p-3 border-b">
-                      <button onClick={() => onNavigate('files')} className="text-xs text-primary hover:underline inline-block">
-                        View Validation Reports in Files →
-                      </button>
-                    </div>
-                  )}
                   <div className="divide-y divide-gray-200">
                     {phaseTasks.map(task => {
                       const clientOwns = isClientOwnedTask(task);
@@ -1125,7 +861,6 @@
       const TimelineView = () => (
         <div className="bg-white rounded-lg shadow-sm p-4 sm:p-6">
           <h2 className="text-xl sm:text-2xl font-bold mb-4 sm:mb-6 text-accent">Project Timeline</h2>
-          <ValidationProgressCard />
           <div className="space-y-8">
             {PHASE_ORDER.map((phase, phaseIndex) => {
               const phaseTasks = groupedByPhase[phase] || [];
@@ -1137,13 +872,6 @@
                     <p className="text-sm text-gray-600">{completedCount} of {phaseTasks.length} complete ({phaseTasks.length > 0 ? Math.round((completedCount / phaseTasks.length) * 100) : 0}%)</p>
                   </div>
                   <div className="space-y-2">
-                    {phase === 'Phase 8' && onNavigate && (
-                      <div className="mb-2">
-                        <button onClick={() => onNavigate('files')} className="text-xs text-primary hover:underline inline-block">
-                          View Validation Reports in Files →
-                        </button>
-                      </div>
-                    )}
                     {phaseTasks.map(task => {
                       const clientOwns = isClientOwnedTask(task);
                       const clientVisibleSubtasks = (task.subtasks || []).filter(st => st.showToClient !== false);
