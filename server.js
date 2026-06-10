@@ -1821,7 +1821,14 @@ const authenticateToken = async (req, res, next) => {
         // Client-specific fields
         isNewClient: freshUser.isNewClient || false,
         slug: freshUser.slug || null,
-        practiceName: freshUser.practiceName || null
+        practiceName: freshUser.practiceName || null,
+        // GFC client/family enrollment + consent fields (drive the portal gate)
+        enrollmentStatus: freshUser.enrollmentStatus || null,
+        serviceLine: freshUser.serviceLine || null,
+        consents: freshUser.consents || {},
+        careTeam: freshUser.careTeam || null,
+        // Family role: the client whose record this family member is authorized to view
+        familyOfClientId: freshUser.familyOfClientId || (freshUser.role === config.ROLES.FAMILY ? (freshUser.assignedClients || [])[0] : null) || null
       };
       next();
     } catch (error) {
@@ -2025,6 +2032,77 @@ const requireClientPortalAdmin = (req, res, next) => {
     return next();
   }
   return res.status(403).json({ error: 'Client Portal admin access required' });
+};
+
+// ============== GFC ENROLLMENT GATE ==============
+// Resolve the underlying client record a request operates on.
+//   - client role  → the client themselves
+//   - family role  → the client they are an authorized contact for (familyOfClientId)
+// Returns the full fresh user record (not the trimmed req.user), or null.
+const resolveGfcClientRecord = async (reqUser) => {
+  const users = await getUsers();
+  if (reqUser.role === config.ROLES.CLIENT) {
+    return users.find(u => u.id === reqUser.id) || null;
+  }
+  if (reqUser.role === config.ROLES.FAMILY) {
+    const clientId = reqUser.familyOfClientId;
+    if (!clientId) return null;
+    return users.find(u => u.id === clientId && u.role === config.ROLES.CLIENT) || null;
+  }
+  return null;
+};
+
+// The enrollment gate — enforced at the API layer, default-deny.
+// Protects every client-portal data route EXCEPT the intake/consent flow itself.
+//   - client  + enrollmentStatus 'intake_pending'  → 403 INTAKE_REQUIRED (portal shows only intake)
+//   - client  + intake_complete | enrolled         → allowed
+//   - family  + linked client's consents.roiFamily 'signed' → allowed, else 403 ROI_FAMILY_REQUIRED
+//   - admin / manager / clinical / case manager     → allowed (staff oversight)
+// Anything not explicitly allowed is denied.
+const requireEnrolledClient = async (req, res, next) => {
+  try {
+    const role = req.user.role;
+
+    // Staff oversight roles are not subject to the client enrollment gate.
+    if (role === config.ROLES.ADMIN || role === config.ROLES.USER ||
+        role === config.ROLES.CASE_MANAGER || req.user.isManager ||
+        req.user.hasClientPortalAdminAccess) {
+      return next();
+    }
+
+    if (role === config.ROLES.CLIENT) {
+      const status = req.user.enrollmentStatus || 'intake_pending';
+      if (status === 'intake_pending') {
+        return res.status(403).json({
+          error: 'Enrollment is not complete. Finish intake and required consents to unlock your portal.',
+          code: 'INTAKE_REQUIRED'
+        });
+      }
+      // intake_complete or enrolled → portal unlocked
+      return next();
+    }
+
+    if (role === config.ROLES.FAMILY) {
+      const client = await resolveGfcClientRecord(req.user);
+      if (!client) {
+        return res.status(403).json({ error: 'No authorized client on file for this account.', code: 'NO_CLIENT_LINK' });
+      }
+      const roiFamily = (client.consents || {}).roiFamily;
+      if (roiFamily !== 'signed') {
+        return res.status(403).json({
+          error: 'Family access is locked until the Release of Information (family) consent is signed. No override.',
+          code: 'ROI_FAMILY_REQUIRED'
+        });
+      }
+      return next();
+    }
+
+    // Default-deny: any other role has no business on client-portal routes.
+    return res.status(403).json({ error: 'Access denied' });
+  } catch (error) {
+    console.error('Enrollment gate error:', error);
+    return res.status(500).json({ error: 'Authorization error' });
+  }
 };
 
 // Uploads require authentication - registered here after authenticateToken is defined
@@ -4806,6 +4884,189 @@ app.get('/api/client-portal/data', authenticateToken, async (req, res) => {
     });
   } catch (error) {
     console.error('Client portal data error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============== GFC CLIENT PORTAL (Private Home Care) ==============
+// Session 3 — TEST DATA ONLY. No real PHI until HIPAA-live (AWS/RDS track).
+// Care-plan / visit / message records here are dev fixtures; the structured
+// shapes mirror the v1 client schema so they can later swap to AWS RDS.
+
+const CARE_TIER_LABELS = {
+  '1': 'Tier 1 · Essential ADL',
+  '2': 'Tier 2 · Comprehensive',
+  '3': 'Tier 3 · Behavioral Support & Cognitive Wellness'
+};
+
+// Build a display-ready snapshot of the gate-relevant enrollment state.
+const buildEnrollmentSnapshot = (client) => {
+  const consents = client.consents || {};
+  return {
+    enrollmentStatus: client.enrollmentStatus || 'intake_pending',
+    serviceLine: client.serviceLine || null,
+    careTier: client.careTier || null,
+    careTierLabel: client.careTier ? CARE_TIER_LABELS[String(client.careTier)] : null,
+    consents,
+    // Convenience flags the UI/gate can read directly
+    roiFamilySigned: consents.roiFamily === 'signed',
+    monitoringOptIn: client.monitoringOptIn || false
+  };
+};
+
+// Dev fixtures for an enrolled client. Pulls real careTeam names where present,
+// otherwise falls back to prototype sample names so the portal renders fully.
+const buildGfcTestData = (client) => {
+  const firstName = (client.preferredName || client.name || 'there').split(' ')[0];
+  const tierLabel = client.careTier ? CARE_TIER_LABELS[String(client.careTier)] : 'Tier 2 · Comprehensive';
+
+  const carePlan = {
+    version: 3,
+    updatedAt: '2026-06-08',
+    updatedBy: 'Bethel N., FNP',
+    careTier: client.careTier || '2',
+    careTierLabel: tierLabel,
+    primaryCaregiver: { name: 'Joelle T.', role: 'Primary caregiver', credential: 'LPN-track', initials: 'JT' },
+    goals: [
+      'Stay steady on her feet',
+      'A daily walk in the garden',
+      'Medication on time, every day'
+    ],
+    authorizedServices: ['Bathing', 'Dressing', 'Med reminders', 'Meals', 'Mobility'],
+    careTeam: [
+      { name: 'Joelle T.', role: 'Primary caregiver', initials: 'JT' },
+      { name: 'Bethel N., FNP', role: 'Clinical lead', initials: 'BN' },
+      { name: 'Courtney W.', role: 'Case manager', initials: 'CW' }
+    ]
+  };
+
+  const visits = {
+    upcoming: [
+      { id: 'v-up-1', day: 'Today', time: '2:00 PM', type: 'Personal care', with: 'Joelle T.', duration: '4 hrs', highlight: false },
+      { id: 'v-up-2', day: 'Wed', time: '3:00 PM', type: 'Video check-in', with: 'Bethel, FNP', duration: null, highlight: true },
+      { id: 'v-up-3', day: 'Fri', time: '9:00 AM', type: 'Personal care', with: 'Joelle T.', duration: '4 hrs', highlight: false }
+    ],
+    recent: [
+      { id: 'v-rc-1', day: 'Mon', time: '2:00 PM', type: 'Personal care', with: 'Joelle T.', completed: true },
+      { id: 'v-rc-2', day: 'Sat', time: '10:00 AM', type: 'Companionship', with: 'Adaeze R.', completed: true }
+    ]
+  };
+
+  const messages = {
+    channels: ['caregiver', 'clinical', 'admin'],
+    threads: [
+      { id: 'm-1', from: 'Joelle T.', role: 'Primary caregiver', initials: 'JT', preview: "See you at 2 — I'll bring the new grip socks.", time: '9:02', unread: true },
+      { id: 'm-2', from: 'Bethel, FNP', role: 'Clinical lead', initials: 'BN', preview: "Care plan updated after Monday's check-in.", time: 'Mon', unread: false },
+      { id: 'm-3', from: 'Godwins Admin', role: 'Admin', initials: 'GF', preview: 'Welcome to Godwins Family Care.', time: 'Jun 4', unread: false }
+    ]
+  };
+
+  return { greetingName: firstName, carePlan, visits, messages };
+};
+
+// /api/gfc/me — NOT gated. The portal calls this first to decide whether to
+// render the intake flow (gate) or the unlocked portal.
+app.get('/api/gfc/me', authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== config.ROLES.CLIENT && req.user.role !== config.ROLES.FAMILY) {
+      return res.status(403).json({ error: 'Client or family access required' });
+    }
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) {
+      return res.status(404).json({ error: 'No client record on file' });
+    }
+    const snapshot = buildEnrollmentSnapshot(client);
+    res.json({
+      role: req.user.role,
+      isFamily: req.user.role === config.ROLES.FAMILY,
+      name: req.user.name,
+      clientName: client.preferredName || client.name,
+      slug: client.slug || null,
+      ...snapshot
+    });
+  } catch (error) {
+    console.error('GFC me error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// /api/gfc/care-plan — gated. Care plan summary (read-only for the client).
+app.get('/api/gfc/care-plan', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const { greetingName, carePlan, visits } = buildGfcTestData(client);
+    res.json({ greetingName, carePlan, upcomingVisits: visits.upcoming, recentVisits: visits.recent });
+  } catch (error) {
+    console.error('GFC care-plan error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// /api/gfc/visits — gated. Upcoming + recent visits.
+app.get('/api/gfc/visits', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const { visits } = buildGfcTestData(client);
+    res.json(visits);
+  } catch (error) {
+    console.error('GFC visits error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// /api/gfc/messages — gated. Structured channels (client ↔ caregiver/admin/clinical).
+app.get('/api/gfc/messages', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const { messages } = buildGfcTestData(client);
+    res.json(messages);
+  } catch (error) {
+    console.error('GFC messages error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// /api/gfc/documents — gated. Signed consents + client documents (Drive-backed).
+app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+
+    const consents = client.consents || {};
+    const consentLabels = {
+      npp: 'HIPAA Notice of Privacy Practices',
+      roiFamily: 'Release of Information — Family',
+      roiProvider: 'Release of Information — Provider',
+      serviceAgreement: 'Service Agreement',
+      billOfRights: 'Patient Bill of Rights & Self-Determination',
+      emergencyFinancial: 'Emergency Treatment & Financial Responsibility',
+      crisisProtocol: 'Emergency & Crisis Protocol (911/988)',
+      monitoring: 'Continuous Monitoring Opt-In',
+      financialAgreement: 'Financial Agreement (PHC)',
+      pcaScope: 'Personal Care Aide Scope Acknowledgment (PHC)',
+      consentToTreat: 'Consent to Medical Treatment (IHPC)',
+      assignmentOfBenefits: 'Assignment of Benefits (IHPC)',
+      practiceNpp: 'Practice Notice of Privacy Practices (IHPC)'
+    };
+    const signedConsents = Object.keys(consents)
+      .filter(k => consents[k] && consents[k] !== 'na')
+      .map(k => ({
+        key: k,
+        label: consentLabels[k] || k,
+        status: consents[k],
+        signedAt: (client.consentMeta && client.consentMeta[k] && client.consentMeta[k].signedAt) || null
+      }));
+
+    // Documents shared with this client via the existing client-documents store (Drive-backed).
+    const allDocs = (await db.get('client_documents')) || [];
+    const clientDocs = allDocs.filter(d => !d.slug || d.slug === client.slug);
+
+    res.json({ signedConsents, documents: clientDocs });
+  } catch (error) {
+    console.error('GFC documents error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
