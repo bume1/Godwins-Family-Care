@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>New Client Implementations - Thrive 365 Labs</title>
+  <title>Godwins Family Care — Dashboard</title>
   <link rel="icon" type="image/x-icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -17,31 +17,33 @@
       theme: {
         extend: {
           colors: {
-            primary: '#045E9F',
-            accent: '#00205A',
+            primary: '#033D50',
+            accent: '#C9A44A',
             brand: {
-              50: '#e6f2fa',
-              100: '#cce5f5',
-              200: '#99cbeb',
-              300: '#66b1e1',
-              400: '#3397d7',
-              500: '#045E9F',
-              600: '#034b7f',
-              700: '#02385f',
-              800: '#012540',
-              900: '#001320'
+              50: '#e8f0f4',
+              100: '#c5d9e3',
+              200: '#9fc0d0',
+              300: '#6ea3bb',
+              400: '#3d86a6',
+              500: '#033D50',
+              600: '#02334a',
+              700: '#022A38',
+              800: '#011f2a',
+              900: '#01141c'
             }
           },
           fontFamily: {
-            sans: ['Open Sans', 'sans-serif']
-          }
+            serif: ['"Cormorant Garamond"', 'Georgia', 'serif'],
+            sans: ['"DM Sans"', '"Inter"', 'system-ui', 'sans-serif'],
+          },
         }
       }
     }
   </script>
+  <link rel="stylesheet" href="/css/gfc-tokens.css">
   <style>
     body {
-      font-family: 'Open Sans', sans-serif;
+      font-family: var(--font-sans);
     }
   </style>
 </head>
