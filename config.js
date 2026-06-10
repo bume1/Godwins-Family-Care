@@ -180,9 +180,9 @@ const NOTIFICATION_COOLDOWN_HOURS = Object.freeze({
 
 // ---- Default Admin (initial setup only) ----
 const DEFAULT_ADMIN = Object.freeze({
-  EMAIL: process.env.DEFAULT_ADMIN_EMAIL || 'bianca@thrive365labs.live',
-  NAME: process.env.DEFAULT_ADMIN_NAME || 'Bianca Ume',
-  PASSWORD: process.env.DEFAULT_ADMIN_PASSWORD || 'Thrive2025!'
+  EMAIL: process.env.DEFAULT_ADMIN_EMAIL || 'admin@godwinsfamilycarellc.com',
+  NAME: process.env.DEFAULT_ADMIN_NAME || 'GFC Admin',
+  PASSWORD: process.env.DEFAULT_ADMIN_PASSWORD || 'gfcforever2026'
 });
 
 // ---- API endpoint for frontend config ----
