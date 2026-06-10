@@ -286,32 +286,6 @@ const api = {
       headers: { 'Authorization': `Bearer ${token}` }
     }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
 
-  getProjectActiveValidations: (token, projectId) =>
-    fetch(`${API_URL}/api/projects/${projectId}/active-validations`, {
-      headers: { 'Authorization': `Bearer ${token}` }
-    }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
-
-  completeOnsiteValidation: (token, reportId, data) =>
-    fetch(`${API_URL}/api/service-reports/${reportId}/complete-onsite`, {
-      method: 'PUT',
-      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(data)
-    }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
-
-  addOffsiteSegment: (token, reportId, data) =>
-    fetch(`${API_URL}/api/service-reports/${reportId}/offsite-segment`, {
-      method: 'PUT',
-      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(data)
-    }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
-
-  submitValidationReport: (token, reportId, formData) =>
-    fetch(`${API_URL}/api/service-reports/${reportId}/submit-validation`, {
-      method: 'PUT',
-      headers: { 'Authorization': `Bearer ${token}` },
-      body: formData
-    }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
-
   getTeamMembers: (token, projectId = null) =>
     fetch(`${API_URL}/api/team-members${projectId ? `?projectId=${projectId}` : ''}`, {
       headers: { 'Authorization': `Bearer ${token}` }
@@ -634,16 +608,6 @@ const api = {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({ pipelineId, mapping })
-    }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
-
-  submitSoftPilotChecklist: (token, projectId, data) =>
-    fetch(`${API_URL}/api/projects/${projectId}/soft-pilot-checklist`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(data)
     }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
 
   uploadTaskFile: (token, projectId, taskId, file) => {
@@ -1509,7 +1473,6 @@ const ProjectList = ({ token, user, onSelectProject, onLogout, onManageTemplates
                     <li><strong>Task Completion:</strong> Creates a completed HubSpot task with phase, stage, completion details, and all notes</li>
                     <li><strong>Stage Completion:</strong> When all tasks in a stage are done, logs a summary note to HubSpot</li>
                     <li><strong>Phase Completion:</strong> Logs stage-by-stage summary AND moves the deal to the mapped pipeline stage</li>
-                    <li><strong>Soft-Pilot Checklist:</strong> Creates note with signature and Google Drive link</li>
                   </ul>
                   <p className="text-gray-700 mb-2 font-medium">Manual Sync:</p>
                   <ul className="list-disc ml-5 text-gray-600 space-y-1 mb-3">
@@ -3065,361 +3028,6 @@ const CalendarView = ({ tasks, viewMode, onScrollToTask }) => {
   );
 };
 
-// ============== SOFT-PILOT CHECKLIST COMPONENT ==============
-const SoftPilotChecklist = ({ token, project, tasks, teamMembers, onClose, onSubmitSuccess, onTaskUpdate }) => {
-  const [signature, setSignature] = useState({ name: '', title: '', date: new Date().toISOString().split('T')[0] });
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState('');
-  const [localTasks, setLocalTasks] = useState([]);
-  const [hasChanges, setHasChanges] = useState(false);
-
-  const isResubmission = !!project.softPilotChecklistSubmitted;
-  
-  useEffect(() => {
-    const softPilotOnly = tasks.filter(t => (t.tags || []).some(tag => tag.toLowerCase() === 'softpilot'));
-    setLocalTasks(JSON.parse(JSON.stringify(softPilotOnly)));
-  }, [tasks]);
-
-  const softPilotTasks = localTasks;
-  
-  const getOwnerName = (email) => {
-    if (!email) return '';
-    const member = teamMembers.find(m => m.email?.toLowerCase() === email.toLowerCase());
-    return member ? member.name : email;
-  };
-
-  const toggleTaskCompletion = async (taskId) => {
-    const updatedTasks = localTasks.map(t => {
-      if (t.id === taskId) {
-        const newCompleted = !t.completed;
-        return { 
-          ...t, 
-          completed: newCompleted,
-          dateCompleted: newCompleted ? new Date().toISOString().split('T')[0] : null
-        };
-      }
-      return t;
-    });
-    setLocalTasks(updatedTasks);
-    setHasChanges(true);
-    
-    const task = updatedTasks.find(t => t.id === taskId);
-    if (onTaskUpdate && task) {
-      await onTaskUpdate(taskId, { 
-        completed: task.completed, 
-        dateCompleted: task.dateCompleted 
-      });
-    }
-  };
-
-  const toggleSubtaskStatus = async (taskId, subtaskId) => {
-    const updatedTasks = localTasks.map(t => {
-      if (t.id === taskId && t.subtasks) {
-        const updatedSubtasks = t.subtasks.map(st => {
-          if (st.id === subtaskId) {
-            const statusCycle = ['Pending', 'Complete', 'N/A'];
-            const currentIndex = statusCycle.indexOf(st.status || 'Pending');
-            const nextStatus = statusCycle[(currentIndex + 1) % statusCycle.length];
-            return { ...st, status: nextStatus };
-          }
-          return st;
-        });
-        return { ...t, subtasks: updatedSubtasks };
-      }
-      return t;
-    });
-    setLocalTasks(updatedTasks);
-    setHasChanges(true);
-    
-    const task = updatedTasks.find(t => t.id === taskId);
-    if (onTaskUpdate && task) {
-      await onTaskUpdate(taskId, { subtasks: task.subtasks });
-    }
-  };
-
-  const generateChecklistHtml = () => {
-    const taskRows = softPilotTasks.map(task => {
-      const subtaskRows = (task.subtasks || []).map(st => `
-        <tr style="background-color: #f9fafb;">
-          <td style="padding: 8px; border: 1px solid #e5e7eb; padding-left: 30px;">└ ${st.title || ''}</td>
-          <td style="padding: 8px; border: 1px solid #e5e7eb;">${getOwnerName(st.owner)}</td>
-          <td style="padding: 8px; border: 1px solid #e5e7eb;">${st.status || 'Pending'}</td>
-          <td style="padding: 8px; border: 1px solid #e5e7eb; text-align: center;">${st.status === 'Complete' ? '☑' : '☐'}</td>
-        </tr>
-      `).join('');
-      
-      return `
-        <tr>
-          <td style="padding: 8px; border: 1px solid #e5e7eb; font-weight: ${task.subtasks?.length ? 'bold' : 'normal'};">${task.taskTitle}</td>
-          <td style="padding: 8px; border: 1px solid #e5e7eb;">${getOwnerName(task.owner)}</td>
-          <td style="padding: 8px; border: 1px solid #e5e7eb;">${task.completed ? 'Complete' : 'Pending'}</td>
-          <td style="padding: 8px; border: 1px solid #e5e7eb; text-align: center;">${task.completed ? '☑' : '☐'}</td>
-        </tr>
-        ${subtaskRows}
-      `;
-    }).join('');
-
-    return `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <title>Soft-Pilot Checklist - ${project.name}</title>
-  <style>
-    body { font-family: 'Open Sans', Arial, sans-serif; padding: 40px; max-width: 900px; margin: 0 auto; }
-    h1 { color: #045E9F; margin-bottom: 5px; }
-    h2 { color: #00205A; margin-top: 30px; }
-    table { width: 100%; border-collapse: collapse; margin: 20px 0; }
-    th { background-color: #045E9F; color: white; padding: 12px 8px; text-align: left; }
-    .signature-section { margin-top: 50px; border-top: 2px solid #e5e7eb; padding-top: 30px; }
-    .signature-field { margin: 15px 0; }
-    .signature-label { font-weight: bold; color: #374151; }
-    .signature-value { border-bottom: 1px solid #374151; padding: 5px 0; min-width: 250px; display: inline-block; }
-  </style>
-</head>
-<body>
-  <img src="/thrive365-logo.webp" alt="Thrive 365 Labs" style="max-width: 200px; margin-bottom: 20px;">
-  <h1>Soft-Pilot Checklist</h1>
-  <p style="color: #6b7280; margin-bottom: 5px;"><strong>Project:</strong> ${project.name}</p>
-  <p style="color: #6b7280; margin-bottom: 20px;"><strong>Client:</strong> ${project.clientName}</p>
-  <p style="color: #6b7280;"><strong>Date Generated:</strong> ${new Date().toLocaleDateString()}</p>
-
-  <h2>Virtual Soft Pilot Tasks</h2>
-  <table>
-    <thead>
-      <tr>
-        <th>Task</th>
-        <th>Owner</th>
-        <th>Status</th>
-        <th>Verified</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${taskRows}
-    </tbody>
-  </table>
-
-  <div class="signature-section">
-    <h2>Clinical Application Specialist Signature</h2>
-    <div class="signature-field">
-      <span class="signature-label">Name:</span>
-      <span class="signature-value">${signature.name}</span>
-    </div>
-    <div class="signature-field">
-      <span class="signature-label">Title:</span>
-      <span class="signature-value">${signature.title}</span>
-    </div>
-    <div class="signature-field">
-      <span class="signature-label">Date:</span>
-      <span class="signature-value">${signature.date}</span>
-    </div>
-  </div>
-
-  <footer style="margin-top: 50px; text-align: center; color: #9ca3af; font-size: 12px;">
-    <p>&copy; 2026 Thrive 365 Labs. All rights reserved.</p>
-    <p>Thrive 365 Labs - Portal</p>
-  </footer>
-</body>
-</html>
-    `;
-  };
-
-  const handleSubmit = async () => {
-    if (!signature.name.trim() || !signature.title.trim()) {
-      setError('Please enter your name and title');
-      return;
-    }
-    
-    setSubmitting(true);
-    setError('');
-    
-    try {
-      const checklistHtml = generateChecklistHtml();
-      const result = await api.submitSoftPilotChecklist(token, project.id, {
-        signature,
-        checklistHtml,
-        projectName: project.name,
-        clientName: project.clientName,
-        isResubmission
-      });
-      
-      if (result.error) {
-        setError(result.error);
-      } else {
-        onSubmitSuccess();
-        onClose();
-      }
-    } catch (err) {
-      setError('Failed to submit checklist. Please try again.');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-2 sm:p-4">
-      <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col">
-        <div className="p-4 sm:p-6 border-b bg-gradient-to-r from-primary to-accent text-white">
-          <div className="flex justify-between items-center">
-            <div>
-              <h2 className="text-xl sm:text-2xl font-bold">Soft-Pilot Checklist</h2>
-              <p className="text-blue-100">{project.name} - {project.clientName}</p>
-            </div>
-            <button onClick={onClose} className="text-white hover:text-blue-200 text-2xl">&times;</button>
-          </div>
-        </div>
-
-        <div className="flex-1 overflow-y-auto p-6">
-          {isResubmission && (
-            <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg">
-              <div className="flex items-center gap-2 text-amber-800">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                </svg>
-                <span className="font-medium">Previously Submitted</span>
-              </div>
-              <p className="text-sm text-amber-700 mt-1">
-                Last submitted on {new Date(project.softPilotChecklistSubmitted.submittedAt).toLocaleDateString()} 
-                by {project.softPilotChecklistSubmitted.submittedBy}. 
-                You can edit and resubmit - an updated note will be sent to HubSpot.
-              </p>
-            </div>
-          )}
-
-          <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-            <p className="text-sm text-blue-800">
-              Click on tasks to mark them complete or incomplete. Click on subtasks to cycle through Pending → Complete → N/A. Changes are saved automatically.
-            </p>
-          </div>
-
-          <div className="mb-6">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">Virtual Soft Pilot Tasks ({softPilotTasks.length})</h3>
-            <div className="space-y-2">
-              {softPilotTasks.map(task => (
-                <div key={task.id} className="border rounded-lg p-3 hover:bg-gray-50">
-                  <div 
-                    className="flex items-center gap-3 cursor-pointer"
-                    onClick={() => toggleTaskCompletion(task.id)}
-                  >
-                    <span className={`text-lg ${task.completed ? 'text-green-600' : 'text-gray-400'} hover:scale-110 transition-transform`}>
-                      {task.completed ? '☑' : '☐'}
-                    </span>
-                    <div className="flex-1">
-                      <div className={`font-medium ${task.completed ? 'text-gray-500 line-through' : 'text-gray-900'}`}>
-                        {task.taskTitle}
-                      </div>
-                      <div className="text-sm text-gray-500">
-                        Owner: {getOwnerName(task.owner) || 'Unassigned'}
-                      </div>
-                    </div>
-                  </div>
-                  {task.subtasks && task.subtasks.length > 0 && (
-                    <div className="ml-8 mt-2 space-y-1">
-                      {task.subtasks.map(st => (
-                        <div 
-                          key={st.id} 
-                          className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer hover:bg-gray-100 p-1 rounded"
-                          onClick={(e) => { e.stopPropagation(); toggleSubtaskStatus(task.id, st.id); }}
-                        >
-                          <span className={`${st.status === 'Complete' ? 'text-green-600' : 'text-gray-400'} hover:scale-110 transition-transform`}>
-                            {st.status === 'Complete' ? '☑' : st.status === 'N/A' ? '○' : '☐'}
-                          </span>
-                          <span className={st.status === 'Complete' ? 'line-through' : ''}>
-                            {st.title} - {getOwnerName(st.owner) || 'Unassigned'}
-                          </span>
-                          <span className={`text-xs px-2 py-0.5 rounded ${
-                            st.status === 'Complete' ? 'bg-green-100 text-green-700' :
-                            st.status === 'N/A' ? 'bg-gray-100 text-gray-700' :
-                            'bg-yellow-100 text-yellow-700'
-                          }`}>
-                            {st.status || 'Pending'}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="border-t pt-6">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">Clinical Application Specialist Signature</h3>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Full Name *</label>
-                <input
-                  type="text"
-                  value={signature.name}
-                  onChange={(e) => setSignature({...signature, name: e.target.value})}
-                  className="w-full px-3 py-2 border rounded-md"
-                  placeholder="Enter your full name"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Title *</label>
-                <input
-                  type="text"
-                  value={signature.title}
-                  onChange={(e) => setSignature({...signature, title: e.target.value})}
-                  className="w-full px-3 py-2 border rounded-md"
-                  placeholder="e.g., Clinical Application Specialist"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
-                <input
-                  type="date"
-                  value={signature.date}
-                  onChange={(e) => setSignature({...signature, date: e.target.value})}
-                  className="w-full px-3 py-2 border rounded-md"
-                />
-              </div>
-            </div>
-          </div>
-
-          {error && (
-            <div className="mt-4 p-3 bg-red-50 text-red-700 rounded-md">
-              {error}
-            </div>
-          )}
-        </div>
-
-        <div className="p-6 border-t bg-gray-50 flex justify-between items-center">
-          <p className="text-sm text-gray-500">
-            {isResubmission 
-              ? 'Updated checklist will be saved to Drive > Operations > Installations > Client Onboarding > "Soft" Launches. HubSpot will receive notes automatically.' 
-              : 'This checklist will be saved to Drive > Operations > Installations > Client Onboarding > "Soft" Launches. HubSpot will receive notes automatically.'}
-          </p>
-          <div className="flex gap-3">
-            <button
-              onClick={onClose}
-              className="px-4 py-2 bg-gray-200 text-gray-700 rounded-md hover:bg-gray-300"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={handleSubmit}
-              disabled={submitting || !project.hubspotRecordId}
-              className="px-6 py-2 bg-gradient-to-r from-primary to-accent text-white rounded-md hover:opacity-90 disabled:bg-gray-400"
-            >
-              {submitting ? 'Submitting...' : isResubmission ? 'Resubmit & Upload' : 'Submit & Upload'}
-            </button>
-          </div>
-        </div>
-        
-        {!project.hubspotRecordId && (
-          <div className="px-6 pb-4 bg-gray-50">
-            <p className="text-sm text-amber-600">
-              Note: This project needs a HubSpot Record ID to upload the checklist. Edit project details to add one.
-            </p>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-};
-
 // ============== PROJECT TRACKER COMPONENT ==============
 const ProjectTracker = ({ token, user, project: initialProject, scrollToTaskId, onBack, onLogout }) => {
   const [project, setProject] = useState(initialProject);
@@ -3453,12 +3061,10 @@ const ProjectTracker = ({ token, user, project: initialProject, scrollToTaskId, 
   const [editingSubtask, setEditingSubtask] = useState(null);
   const [expandedSubtasksId, setExpandedSubtasksId] = useState(null);
   const [clientPortalDomain, setClientPortalDomain] = useState('');
-  const [showSoftPilotChecklist, setShowSoftPilotChecklist] = useState(false);
   const [creatingTemplate, setCreatingTemplate] = useState(false);
   const [showNotesLog, setShowNotesLog] = useState(false);
   const [showEditProject, setShowEditProject] = useState(false);
   const [collapsedPhases, setCollapsedPhases] = useState([]);
-  const [activeValidations, setActiveValidations] = useState([]);
   const [showEmailComposer, setShowEmailComposer] = useState(false);
   const [emailForm, setEmailForm] = useState({ to: [], subject: '', message: '' });
   const [emailSending, setEmailSending] = useState(false);
@@ -3617,10 +3223,7 @@ const ProjectTracker = ({ token, user, project: initialProject, scrollToTaskId, 
   const loadTasks = async () => {
     setLoading(true);
     try {
-      const [data, validationsData] = await Promise.all([
-        api.getTasks(token, project.id),
-        api.getProjectActiveValidations(token, project.id)
-      ]);
+      const data = await api.getTasks(token, project.id);
       if (Array.isArray(data)) {
         setTasks(data);
       } else if (data && data.error) {
@@ -3628,9 +3231,6 @@ const ProjectTracker = ({ token, user, project: initialProject, scrollToTaskId, 
         setTasks([]);
       } else {
         setTasks([]);
-      }
-      if (Array.isArray(validationsData)) {
-        setActiveValidations(validationsData);
       }
     } catch (err) {
       console.error('Failed to load tasks:', err);
@@ -4656,22 +4256,6 @@ const ProjectTracker = ({ token, user, project: initialProject, scrollToTaskId, 
                 Notes Log ({aggregatedNotes.length})
               </button>
               
-              {tasks.some(t => (t.tags || []).some(tag => tag.toLowerCase() === 'softpilot')) && (
-                <>
-                  <div className="border-l border-gray-300 mx-2"></div>
-                  <button
-                    onClick={() => setShowSoftPilotChecklist(true)}
-                    className="px-3 py-1.5 rounded-md text-sm flex items-center gap-1.5 bg-gradient-to-r from-primary to-accent text-white hover:opacity-90"
-                    title="View and complete the Soft-Pilot Checklist"
-                  >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                    Soft-Pilot Checklist
-                  </button>
-                </>
-              )}
-              
               {canManagePublish && (
                 <>
                   <div className="border-l border-gray-300 mx-2"></div>
@@ -5134,13 +4718,6 @@ const ProjectTracker = ({ token, user, project: initialProject, scrollToTaskId, 
                     <div className="flex-1">
                       <h2 className="text-lg font-bold flex items-center gap-2">
                         {phaseNames[phase] || phase}
-                        {phase === 'Phase 8' && activeValidations.length > 0 && (
-                          <span className={`px-2 py-0.5 text-white text-xs rounded-full font-medium animate-pulse ${activeValidations.some(v => v.status !== 'assigned') ? 'bg-blue-500/30' : 'bg-amber-500/40'}`}>
-                            {activeValidations.filter(v => v.status !== 'assigned').length > 0
-                              ? `${activeValidations.filter(v => v.status !== 'assigned').length} validation${activeValidations.filter(v => v.status !== 'assigned').length > 1 ? 's' : ''} in progress`
-                              : `${activeValidations.length} validation${activeValidations.length > 1 ? 's' : ''} scheduled`}
-                          </span>
-                        )}
                       </h2>
                       <p className="text-sm opacity-80">
                         {Object.values(groupedByPhase[phase] || {}).flat().filter(t => t.completed).length} of {Object.values(groupedByPhase[phase] || {}).flat().length} complete
@@ -5153,148 +4730,6 @@ const ProjectTracker = ({ token, user, project: initialProject, scrollToTaskId, 
                 </div>
                 {!isCollapsed && (
                 <>
-                {/* Active Validation Progress Card for Phase 8 */}
-                {phase === 'Phase 8' && (
-                  (() => {
-                    const inProgress = activeValidations.filter(v => v.status !== 'assigned');
-                    const scheduled = activeValidations.filter(v => v.status === 'assigned');
-                    const hasActive = inProgress.length > 0;
-                    const hasAny = activeValidations.length > 0;
-                    const headerGradient = hasActive ? 'bg-gradient-to-r from-blue-600 to-blue-700' : hasAny ? 'bg-gradient-to-r from-amber-500 to-amber-600' : 'bg-gradient-to-r from-gray-500 to-gray-600';
-                    const borderColor = hasActive ? 'border-blue-200' : hasAny ? 'border-amber-200' : 'border-gray-200';
-                    const badgeBg = hasActive ? 'bg-blue-500/30' : hasAny ? 'bg-amber-400/30' : 'bg-gray-400/30';
-                    const headerTitle = hasActive
-                      ? `Active Validation${inProgress.length > 1 ? 's' : ''} In Progress`
-                      : hasAny ? `Validation${scheduled.length > 1 ? 's' : ''} Scheduled`
-                      : 'Validation Tracking';
-                    const badgeLabel = hasActive
-                      ? `${inProgress.length} in progress${scheduled.length > 0 ? `, ${scheduled.length} scheduled` : ''}`
-                      : hasAny ? `${scheduled.length} scheduled`
-                      : '0 active';
-                    return (
-                      <div className={`bg-white rounded-xl shadow-sm border-2 ${borderColor} overflow-hidden`}>
-                        <div className={`${headerGradient} p-4 text-white`}>
-                          <div className="flex items-center justify-between">
-                            <div>
-                              <h3 className="font-bold flex items-center gap-2">
-                                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23.693L5 14.5m14.8.8l1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0112 21c-2.773 0-5.491-.235-8.135-.687-1.718-.293-2.3-2.379-1.067-3.61L5 14.5"/></svg>
-                                {headerTitle}
-                              </h3>
-                              <p className={`${hasAny ? (hasActive ? 'text-blue-100' : 'text-amber-100') : 'text-gray-200'} text-sm mt-1`}>Multi-day analyzer validation progress</p>
-                            </div>
-                            <span className={`px-3 py-1 ${badgeBg} rounded-full text-sm font-medium`}>{badgeLabel}</span>
-                          </div>
-                        </div>
-                        <div className="p-4 space-y-3">
-                          {activeValidations.length > 0 ? activeValidations.map(v => {
-                            const isScheduled = v.status === 'assigned';
-                            const isOnsiteSubmitted = v.status === 'onsite_submitted';
-                            const onsiteDays = v.onsiteDaysLogged || 0;
-                            const offsiteDays = v.offsiteDaysLogged || 0;
-                            const daysLogged = (onsiteDays + offsiteDays) || v.daysLogged || 0;
-                            const expected = v.expectedDays;
-                            const pct = expected ? Math.min(100, Math.round((daysLogged / expected) * 100)) : null;
-                            const scheduledStart = v.validationStartDate
-                              ? new Date(v.validationStartDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-                              : null;
-                            const onsiteSegsAll = (v.segments || []).filter(s => !s.phase || s.phase === 'onsite');
-                            const offsiteSegsAll = (v.segments || []).filter(s => s.phase === 'offsite');
-                            return (
-                              <div key={v.id} className={`border rounded-lg p-3 transition ${isScheduled ? 'bg-amber-50 border-amber-200' : isOnsiteSubmitted ? 'bg-blue-50 border-blue-200' : 'hover:bg-gray-50'}`}>
-                                <div className="flex items-center justify-between">
-                                  <div>
-                                    <div className="flex items-center gap-2 flex-wrap">
-                                      <p className="font-medium text-gray-900">{v.analyzerModel || 'Biolis AU480'} {v.analyzerSerialNumber ? `(${v.analyzerSerialNumber})` : ''}</p>
-                                      {isScheduled && <span className="text-xs px-1.5 py-0.5 rounded bg-amber-200 text-amber-800 font-medium">Scheduled</span>}
-                                      {isOnsiteSubmitted && <span className="text-xs px-1.5 py-0.5 rounded bg-green-200 text-green-800 font-medium">On-Site Complete</span>}
-                                      {isOnsiteSubmitted && <span className="text-xs px-1.5 py-0.5 rounded bg-blue-200 text-blue-800 font-medium animate-pulse">Off-Site In Progress</span>}
-                                    </div>
-                                    {isScheduled ? (
-                                      <p className="text-sm text-gray-500">
-                                        Technician: {v.technicianName || '—'}
-                                        {scheduledStart ? ` · Starts ${scheduledStart}` : ''}
-                                        {expected ? ` · ${expected} day${expected !== 1 ? 's' : ''} planned` : ''}
-                                      </p>
-                                    ) : isOnsiteSubmitted ? (
-                                      <p className="text-sm text-gray-600">
-                                        Technician: {v.technicianName || '—'} · On-Site: {onsiteDays} day{onsiteDays !== 1 ? 's' : ''} · Off-Site: {offsiteDays} day{offsiteDays !== 1 ? 's' : ''}
-                                      </p>
-                                    ) : (
-                                      <p className="text-sm text-gray-600">Technician: {v.technicianName || '—'} · {daysLogged} day{daysLogged !== 1 ? 's' : ''} logged</p>
-                                    )}
-                                  </div>
-                                  {!isScheduled && (
-                                    <div className="flex items-center gap-1 flex-wrap">
-                                      {onsiteSegsAll.map((s, i) => (
-                                        <div key={`on-${i}`} className={`w-2.5 h-2.5 rounded-full ${s.status === 'complete' ? 'bg-green-500' : 'bg-yellow-400'}`} title={`On-Site Day ${s.day || i + 1}`}></div>
-                                      ))}
-                                      {offsiteSegsAll.length > 0 && <div className="w-px h-2.5 bg-gray-400 mx-0.5"></div>}
-                                      {offsiteSegsAll.map((s, i) => (
-                                        <div key={`off-${i}`} className={`w-2.5 h-2.5 rounded-full border border-blue-400 ${s.status === 'complete' ? 'bg-blue-500' : 'bg-blue-200'}`} title={`Off-Site Day ${s.day || i + 1}`}></div>
-                                      ))}
-                                    </div>
-                                  )}
-                                </div>
-                                {!isScheduled && expected && pct !== null && (
-                                  <div className="mt-2">
-                                    <div className="w-full bg-gray-200 rounded-full h-1.5 overflow-hidden">
-                                      <div className={`h-full rounded-full transition-all ${pct >= 100 ? 'bg-green-500' : 'bg-blue-500'}`} style={{ width: `${pct}%` }} />
-                                    </div>
-                                    <p className="text-xs text-gray-500 mt-0.5">{daysLogged} of {expected} days · {pct}%</p>
-                                  </div>
-                                )}
-                                {!isScheduled && (v.segments || []).length > 0 && (
-                                  <details className="mt-2">
-                                    <summary className="text-xs text-blue-600 cursor-pointer hover:text-blue-800 font-medium">View daily log</summary>
-                                    <div className="mt-2 space-y-3">
-                                      {(() => {
-                                        const segs = v.segments || [];
-                                        const onsiteSegs = segs.filter(s => !s.phase || s.phase === 'onsite');
-                                        const offsiteSegs = segs.filter(s => s.phase === 'offsite');
-                                        const renderSeg = (seg) => (
-                                          <div key={`${seg.phase}-${seg.day}`} className="bg-gray-50 rounded p-2 text-xs">
-                                            <span className="font-medium text-gray-900">Day {seg.day}</span>
-                                            <span className="text-gray-500 ml-2">{seg.date ? new Date(seg.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }) : ''}</span>
-                                            {seg.testsPerformed && <p className="text-gray-700 mt-1"><span className="text-gray-500">Tests:</span> {seg.testsPerformed}</p>}
-                                            {seg.results && <p className="text-gray-700"><span className="text-gray-500">Results:</span> {seg.results}</p>}
-                                            {seg.trainingCompleted !== undefined && <p className="text-gray-700"><span className="text-gray-500">Training:</span> {seg.trainingCompleted ? 'Yes' : `No${seg.trainingReason ? ` — ${seg.trainingReason}` : ''}`}</p>}
-                                            {(seg.outstandingIssues || seg.observations) && <p className="text-gray-700"><span className="text-gray-500">Outstanding Issues:</span> {seg.outstandingIssues || seg.observations}</p>}
-                                            {seg.finalRecommendations && <p className="text-gray-700"><span className="text-gray-500">Recommendations:</span> {seg.finalRecommendations}</p>}
-                                          </div>
-                                        );
-                                        return (
-                                          <>
-                                            {onsiteSegs.length > 0 && (
-                                              <div>
-                                                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">On-Site Days</p>
-                                                <div className="space-y-1">{onsiteSegs.map(renderSeg)}</div>
-                                              </div>
-                                            )}
-                                            {offsiteSegs.length > 0 && (
-                                              <div>
-                                                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1 mt-2">Off-Site Days</p>
-                                                <div className="space-y-1">{offsiteSegs.map(renderSeg)}</div>
-                                              </div>
-                                            )}
-                                          </>
-                                        );
-                                      })()}
-                                    </div>
-                                  </details>
-                                )}
-                              </div>
-                            );
-                          }) : (
-                            <div className="text-center py-4 text-gray-500">
-                              <p className="text-sm">No active validations for this project.</p>
-                              <p className="text-xs mt-1">When a technician is assigned a validation in the Service Portal, it will appear here.</p>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })()
-                )}
                 {(() => {
                   const phaseTasks = Object.values(groupedByPhase[phase] || {}).flat().sort((a, b) => {
                     const aDate = a.dueDate ? new Date(a.dueDate).getTime() : Infinity;
@@ -6386,30 +5821,6 @@ const ProjectTracker = ({ token, user, project: initialProject, scrollToTaskId, 
               </div>
             </div>
           </div>
-        )}
-
-        {showSoftPilotChecklist && (
-          <SoftPilotChecklist
-            token={token}
-            project={project}
-            tasks={tasks}
-            teamMembers={teamMembers}
-            onClose={() => setShowSoftPilotChecklist(false)}
-            onSubmitSuccess={() => {
-              loadTasks();
-              alert(project.softPilotChecklistSubmitted 
-                ? 'Soft-Pilot Checklist updated and saved to Google Drive!' 
-                : 'Soft-Pilot Checklist submitted and saved to Google Drive!');
-            }}
-            onTaskUpdate={async (taskId, updates) => {
-              try {
-                await api.updateTask(token, project.id, taskId, updates);
-                setTasks(prev => prev.map(t => t.id === taskId ? { ...t, ...updates } : t));
-              } catch (err) {
-                console.error('Failed to update task:', err);
-              }
-            }}
-          />
         )}
 
         {/* Notes Log Side Panel */}
@@ -7524,7 +6935,6 @@ const HubSpotSettings = ({ token, user, onBack, onLogout }) => {
 // ============== REPORTING COMPONENT ==============
 const Reporting = ({ token, user, onBack, onLogout }) => {
   const [reportData, setReportData] = useState([]);
-  const [validationData, setValidationData] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -7533,16 +6943,8 @@ const Reporting = ({ token, user, onBack, onLogout }) => {
 
   const loadReportData = async () => {
     try {
-      const [projectData, serviceReportsRes] = await Promise.all([
-        api.getReportingData(token),
-        fetch(`${API_URL}/api/service-reports`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        }).then(r => r.json()).catch(() => [])
-      ]);
+      const projectData = await api.getReportingData(token);
       setReportData(projectData);
-      // Filter validation service reports
-      const validations = (serviceReportsRes || []).filter(r => r.serviceType === 'Validations');
-      setValidationData(validations);
     } catch (error) {
       console.error('Failed to load reporting data:', error);
     } finally {
@@ -7550,41 +6952,6 @@ const Reporting = ({ token, user, onBack, onLogout }) => {
     }
   };
 
-  // Validation metrics
-  const getValidationMetrics = () => {
-    const totalValidations = validationData.length;
-    let totalDaysOnSite = 0;
-    let totalAnalyzers = 0;
-    const statusCounts = { Passed: 0, Failed: 0, Pending: 0 };
-    const clientValidations = {};
-
-    validationData.forEach(v => {
-      // Calculate days on-site
-      if (v.validationStartDate && v.validationEndDate) {
-        const days = Math.ceil(Math.abs(new Date(v.validationEndDate) - new Date(v.validationStartDate)) / (1000 * 60 * 60 * 24)) + 1;
-        totalDaysOnSite += days;
-      }
-      // Count analyzers and statuses
-      if (v.analyzersValidated && Array.isArray(v.analyzersValidated)) {
-        totalAnalyzers += v.analyzersValidated.length;
-        v.analyzersValidated.forEach(a => {
-          const status = a.status || 'Pending';
-          statusCounts[status] = (statusCounts[status] || 0) + 1;
-        });
-      }
-      // Count by client
-      const clientName = v.clientFacilityName || 'Unknown';
-      clientValidations[clientName] = (clientValidations[clientName] || 0) + 1;
-    });
-
-    return {
-      total: totalValidations,
-      avgDaysOnSite: totalValidations > 0 ? Math.round(totalDaysOnSite / totalValidations) : 0,
-      totalAnalyzers,
-      statusCounts,
-      clientValidations
-    };
-  };
 
   // Chart 1: Completed vs In Progress by client
   const getStatusByClient = () => {
@@ -7763,88 +7130,6 @@ const Reporting = ({ token, user, onBack, onLogout }) => {
             </div>
           </div>
 
-          {/* Validation Metrics */}
-          {validationData.length > 0 && (() => {
-            const metrics = getValidationMetrics();
-            return (
-              <div className="mt-8">
-                <h2 className="text-xl font-bold mb-4">Validation Reports</h2>
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-                  <div className="bg-purple-50 p-4 rounded-lg text-center">
-                    <div className="text-3xl font-bold text-purple-600">{metrics.total}</div>
-                    <div className="text-sm text-purple-800">Total Validations</div>
-                  </div>
-                  <div className="bg-indigo-50 p-4 rounded-lg text-center">
-                    <div className="text-3xl font-bold text-indigo-600">{metrics.avgDaysOnSite}</div>
-                    <div className="text-sm text-indigo-800">Avg Days On-Site</div>
-                  </div>
-                  <div className="bg-cyan-50 p-4 rounded-lg text-center">
-                    <div className="text-3xl font-bold text-cyan-600">{metrics.totalAnalyzers}</div>
-                    <div className="text-sm text-cyan-800">Analyzers Validated</div>
-                  </div>
-                  <div className="bg-green-50 p-4 rounded-lg text-center">
-                    <div className="text-3xl font-bold text-green-600">{metrics.statusCounts.Passed || 0}</div>
-                    <div className="text-sm text-green-800">Passed</div>
-                  </div>
-                </div>
-
-                {/* Validations by Client */}
-                <div className="bg-gray-50 rounded-lg p-4">
-                  <h3 className="font-semibold text-gray-800 mb-3">Validations by Client</h3>
-                  <div className="space-y-2">
-                    {Object.entries(metrics.clientValidations)
-                      .sort((a, b) => b[1] - a[1])
-                      .map(([client, count]) => (
-                        <div key={client} className="flex items-center gap-3">
-                          <div className="w-40 text-sm font-medium truncate">{client}</div>
-                          <div className="flex-1 bg-gray-200 rounded h-6 overflow-hidden">
-                            <div
-                              className="bg-gradient-to-r from-purple-500 to-indigo-500 h-full flex items-center justify-end pr-2"
-                              style={{ width: `${(count / metrics.total) * 100}%`, minWidth: '30px' }}
-                            >
-                              <span className="text-white text-xs font-bold">{count}</span>
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                  </div>
-                </div>
-
-                {/* Analyzer Status Breakdown */}
-                {metrics.totalAnalyzers > 0 && (
-                  <div className="mt-4 bg-gray-50 rounded-lg p-4">
-                    <h3 className="font-semibold text-gray-800 mb-3">Analyzer Validation Status</h3>
-                    <div className="flex h-8 rounded overflow-hidden">
-                      {metrics.statusCounts.Passed > 0 && (
-                        <div
-                          className="bg-green-500 flex items-center justify-center text-white text-xs font-medium"
-                          style={{ width: `${(metrics.statusCounts.Passed / metrics.totalAnalyzers) * 100}%` }}
-                        >
-                          {metrics.statusCounts.Passed} Passed
-                        </div>
-                      )}
-                      {metrics.statusCounts.Failed > 0 && (
-                        <div
-                          className="bg-red-500 flex items-center justify-center text-white text-xs font-medium"
-                          style={{ width: `${(metrics.statusCounts.Failed / metrics.totalAnalyzers) * 100}%` }}
-                        >
-                          {metrics.statusCounts.Failed} Failed
-                        </div>
-                      )}
-                      {metrics.statusCounts.Pending > 0 && (
-                        <div
-                          className="bg-yellow-500 flex items-center justify-center text-white text-xs font-medium"
-                          style={{ width: `${(metrics.statusCounts.Pending / metrics.totalAnalyzers) * 100}%` }}
-                        >
-                          {metrics.statusCounts.Pending} Pending
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })()}
 
           {/* Detailed Table */}
           <div className="mt-8">
