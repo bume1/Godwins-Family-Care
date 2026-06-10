@@ -7,6 +7,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.1.0/dist/tabler-icons.min.css">
   <script src="https://cdn.tailwindcss.com"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -50,6 +52,99 @@
     .glass-card { backdrop-filter: blur(10px); background: rgba(255,255,255,0.95); }
     @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
     .animate-fade-in { animation: fadeIn 0.4s ease-out forwards; }
+
+    /* ============================================================
+       GFC client portal — adapted from docs/prototype/client-prototype-full.html
+       Navy #033D50, gold #C9A44A buttons / #F5CD85 highlights, cream #FAF7F2.
+       White on navy, never grey. Cormorant Garamond + DM Sans.
+       ============================================================ */
+    .gfc{--navy:#033D50;--navy2:#0a5066;--gold:#F5CD85;--goldd:#C9A44A;--cream:#FAF7F2;
+      --ink:#16242b;--mut:#51636d;--line:rgba(3,61,80,.08);--line2:rgba(3,61,80,.14);
+      --teal:#1d9e75;--tealbg:#e7f4ee;}
+    .gfc *{font-family:'DM Sans','Inter',sans-serif;box-sizing:border-box;}
+    .gfc{min-height:100vh;background:#ece6da;}
+    .gfc-shell{max-width:480px;margin:0 auto;min-height:100vh;background:var(--cream);
+      box-shadow:0 24px 60px -16px rgba(3,61,80,.22);display:flex;flex-direction:column;position:relative;}
+    .gfc-hdr{background:var(--navy);padding:16px 20px;display:flex;align-items:center;justify-content:space-between;gap:8px;position:sticky;top:0;z-index:20;}
+    .gfc-hdr .ttl{font-family:'Cormorant Garamond',serif;font-size:22px;font-weight:600;color:var(--cream);}
+    .gfc-hdr i,.gfc-hdr button{color:var(--gold);background:none;border:none;cursor:pointer;font-size:15px;display:flex;align-items:center;}
+    .gfc-hdr .r{font-size:11px;letter-spacing:.6px;color:var(--gold);font-weight:600;}
+    .gfc-body{padding:20px 18px 110px;flex:1;}
+    .gfc h2.disp{font-family:'Cormorant Garamond',serif;font-weight:600;font-size:28px;color:var(--navy);line-height:1.15;letter-spacing:-.3px;margin:0;}
+    .gfc .disp em{font-style:italic;font-weight:500;}
+    .gfc .sub{font-size:14.5px;color:var(--mut);margin-top:6px;line-height:1.5;}
+    .gfc .lbl{font-size:10.5px;letter-spacing:1.3px;text-transform:uppercase;color:var(--goldd);margin:18px 0 10px;font-weight:600;}
+    .gfc .step{font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--goldd);font-weight:600;}
+    /* care-plan hero */
+    .gfc .planhero{background:var(--navy);border-radius:16px;padding:18px;margin-top:16px;box-shadow:0 10px 26px -12px rgba(3,61,80,.5);}
+    .gfc .planhero .pe{font-size:10.5px;letter-spacing:1.4px;text-transform:uppercase;color:var(--gold);margin-bottom:12px;font-weight:600;}
+    .gfc .prow{display:flex;align-items:center;gap:11px;}
+    .gfc .av{border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:600;color:var(--navy);flex-shrink:0;}
+    .gfc .planhero .nm{font-size:15px;font-weight:600;color:var(--cream);}
+    .gfc .planhero .rl{font-size:12.5px;color:rgba(250,247,242,.78);}
+    .gfc .pill{display:inline-flex;align-items:center;gap:6px;margin-top:14px;background:rgba(245,205,133,.16);color:var(--gold);border:1px solid rgba(245,205,133,.45);border-radius:20px;padding:6px 14px;font-size:12px;font-weight:600;}
+    .gfc .plink{display:flex;align-items:center;justify-content:space-between;margin-top:14px;font-size:13.5px;color:var(--gold);font-weight:600;cursor:pointer;}
+    /* visits */
+    .gfc .visit{display:flex;align-items:center;gap:13px;padding:13px 14px;background:#fff;border:1px solid var(--line);border-radius:13px;margin-bottom:8px;box-shadow:0 1px 3px rgba(3,61,80,.04);}
+    .gfc .visit .vt{font-family:'Cormorant Garamond',serif;font-size:15px;font-weight:600;color:var(--navy);min-width:64px;line-height:1.15;}
+    .gfc .visit .vm b{display:block;font-size:14px;color:var(--navy);font-weight:600;}
+    .gfc .visit .vm span{font-size:12.5px;color:var(--mut);}
+    .gfc .visit.hl{background:#fcf3da;border-color:rgba(245,205,133,.7);}
+    .gfc .visit .chk{margin-left:auto;color:var(--teal);font-size:18px;}
+    /* tiles */
+    .gfc .tiles{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:6px;}
+    .gfc .tile{background:#fff;border:1px solid var(--line);border-radius:14px;padding:15px;position:relative;box-shadow:0 1px 3px rgba(3,61,80,.04);cursor:pointer;text-align:left;}
+    .gfc .tile i{font-size:22px;color:var(--navy);}
+    .gfc .tile .tl{display:block;font-size:13.5px;color:var(--navy);font-weight:600;margin-top:8px;}
+    .gfc .tile .ts{font-size:11.5px;color:var(--mut);}
+    .gfc .badge{position:absolute;top:12px;right:12px;background:var(--gold);color:var(--navy);font-size:11px;font-weight:600;border-radius:11px;padding:1px 8px;}
+    /* card / goals / services */
+    .gfc .card{background:#fff;border:1px solid var(--line);border-radius:15px;padding:16px;box-shadow:0 2px 8px rgba(3,61,80,.05);margin-bottom:12px;}
+    .gfc .goal{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--line);font-size:14px;color:var(--navy);}
+    .gfc .goal:last-child{border:none;} .gfc .goal i{color:var(--teal);font-size:18px;}
+    .gfc .seg{display:flex;flex-wrap:wrap;gap:7px;}
+    .gfc .seg span{font-size:12.5px;padding:8px 13px;border-radius:20px;border:1px solid var(--line2);background:#fff;color:var(--navy);font-weight:500;}
+    .gfc .seg span.on{background:var(--navy);border-color:var(--navy);color:var(--cream);}
+    /* buttons */
+    .gfc .btn{display:block;width:100%;text-align:center;background:var(--goldd);color:var(--navy);border:none;border-radius:12px;padding:14px;font-size:14.5px;font-weight:600;margin-top:18px;box-shadow:0 4px 14px -4px rgba(201,164,74,.55);cursor:pointer;}
+    .gfc .btn.ghost{background:#fff;border:1.5px solid var(--navy);color:var(--navy);box-shadow:none;}
+    .gfc .micro{font-size:11.5px;color:var(--mut);text-align:center;margin-top:14px;display:flex;align-items:center;justify-content:center;gap:5px;}
+    /* gate / lock */
+    .gfc .lockcard{background:var(--navy);border-radius:15px;padding:16px;display:flex;gap:12px;align-items:flex-start;box-shadow:0 8px 22px -10px rgba(3,61,80,.5);margin-top:16px;}
+    .gfc .lockcard i{color:var(--gold);font-size:22px;margin-top:1px;}
+    .gfc .lockcard b{display:block;color:var(--cream);font-size:15px;font-weight:600;margin-bottom:3px;}
+    .gfc .lockcard span{color:rgba(250,247,242,.78);font-size:12.5px;line-height:1.5;}
+    .gfc .clist{display:flex;flex-direction:column;gap:8px;margin-top:18px;}
+    .gfc .crow{display:flex;align-items:center;gap:10px;font-size:13.5px;color:var(--navy);}
+    .gfc .crow .dot{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;flex-shrink:0;}
+    .gfc .crow .d-done{background:var(--teal);color:#fff;} .gfc .crow .d-now{background:var(--gold);color:var(--navy);} .gfc .crow .d-lock{background:#e2dccf;color:#9a917f;}
+    .gfc .crow.off{color:#9a917f;}
+    .gfc .navlocks{display:flex;flex-wrap:wrap;gap:7px;margin-top:18px;}
+    .gfc .nl{display:flex;align-items:center;gap:5px;background:rgba(3,61,80,.05);border-radius:8px;padding:8px 11px;font-size:12px;color:#7c756a;}
+    .gfc .nl i{font-size:13px;}
+    /* messages */
+    .gfc .thread{display:flex;align-items:center;gap:12px;padding:13px 4px;border-bottom:1px solid var(--line);}
+    .gfc .thread .tm{flex:1;min-width:0;}
+    .gfc .thread .tn{font-size:14px;font-weight:600;color:var(--navy);}
+    .gfc .thread .tp{font-size:12.5px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .gfc .thread .tt{font-size:11px;color:var(--mut);}
+    .gfc .thread .un{width:9px;height:9px;border-radius:50%;background:var(--gold);margin-top:5px;margin-left:auto;}
+    /* documents / consents */
+    .gfc .doc{display:flex;align-items:center;gap:12px;padding:13px 14px;background:#fff;border:1px solid var(--line);border-radius:13px;margin-bottom:8px;box-shadow:0 1px 3px rgba(3,61,80,.04);}
+    .gfc .doc i{font-size:20px;color:var(--navy);}
+    .gfc .doc b{display:block;font-size:13.5px;color:var(--navy);font-weight:600;}
+    .gfc .doc span{font-size:12px;color:var(--mut);}
+    .gfc .doc .sgn{margin-left:auto;display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:600;color:var(--teal);}
+    /* family read-only banner */
+    .gfc .ro{display:inline-flex;align-items:center;gap:6px;background:rgba(3,61,80,.06);color:var(--navy);font-size:11.5px;font-weight:600;border-radius:20px;padding:6px 12px;margin-bottom:14px;}
+    /* bottom tab nav */
+    .gfc-tabs{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;background:#fff;border-top:1px solid var(--line2);display:flex;z-index:30;box-shadow:0 -4px 16px rgba(3,61,80,.06);}
+    .gfc-tabs button{flex:1;background:none;border:none;padding:10px 4px 14px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:3px;color:var(--mut);font-size:10.5px;font-weight:600;letter-spacing:.3px;}
+    .gfc-tabs button i{font-size:20px;}
+    .gfc-tabs button.on{color:var(--navy);}
+    .gfc-tabs button.on i{color:var(--goldd);}
+    .gfc-spin{width:40px;height:40px;border:4px solid rgba(3,61,80,.15);border-top-color:var(--navy);border-radius:50%;animation:spin 0.8s linear infinite;}
+    @keyframes spin{to{transform:rotate(360deg);}}
   </style>
 </head>
 <body class="bg-gray-50 min-h-screen">
@@ -141,6 +236,33 @@
 
       getClientDocuments: (slug, token) =>
         fetch(`${API_URL}/api/client-documents/${slug}`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+
+      // ---- GFC client portal (Private Home Care) ----
+      // /api/gfc/me is NOT gated; the others return 403 until enrollment is complete.
+      getGfcMe: (token) =>
+        fetch(`${API_URL}/api/gfc/me`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+
+      getGfcCarePlan: (token) =>
+        fetch(`${API_URL}/api/gfc/care-plan`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+
+      getGfcVisits: (token) =>
+        fetch(`${API_URL}/api/gfc/visits`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+
+      getGfcMessages: (token) =>
+        fetch(`${API_URL}/api/gfc/messages`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+
+      getGfcDocuments: (token) =>
+        fetch(`${API_URL}/api/gfc/documents`, {
           headers: { 'Authorization': `Bearer ${token}` }
         }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
 
@@ -3417,7 +3539,335 @@
     };
     
     
+    // ============================================================
+    // GFC CLIENT PORTAL (Private Home Care) — Session 3
+    // Mobile-first client/family experience matching
+    // docs/prototype/client-prototype-full.html. The enrollment gate is
+    // enforced server-side (default-deny); this UI reflects that state.
+    // ============================================================
+    const gfcLogout = () => {
+      ['portal_token','portal_user','unified_token','unified_user','admin_token','admin_user']
+        .forEach(k => localStorage.removeItem(k));
+      window.location.href = '/login';
+    };
+
+    const Avatar = ({ initials, size = 42, bg = 'var(--gold)', color = 'var(--navy)' }) => (
+      <div className="av" style={{ width: size, height: size, background: bg, color, fontSize: size * 0.33 }}>{initials}</div>
+    );
+
+    // The enrollment gate screen — shown until intake + required consents are done.
+    const GfcGate = ({ me, onStartIntake }) => {
+      const isFamily = me.isFamily;
+      const firstName = (me.clientName || 'there').split(' ')[0];
+      // Consent checklist state derived from the server-stored per-type consent statuses.
+      const c = me.consents || {};
+      const consentDone = ['npp','roiFamily','serviceAgreement','billOfRights'].every(k => c[k] === 'signed');
+      const intakeStarted = me.enrollmentStatus && me.enrollmentStatus !== 'intake_pending';
+      return (
+        <div className="gfc-body">
+          {isFamily ? (
+            <React.Fragment>
+              <h2 className="disp">Family access is locked</h2>
+              <p className="sub">This portal opens once {firstName}'s Release of Information (family) consent is signed.</p>
+              <div className="lockcard">
+                <i className="ti ti-lock" />
+                <div><b>Awaiting ROI — family</b><span>For privacy, family and authorized-contact access stays locked until the client signs the family Release of Information. There is no manual override.</span></div>
+              </div>
+              <div className="navlocks">
+                <span className="nl"><i className="ti ti-lock" />Care plan</span>
+                <span className="nl"><i className="ti ti-lock" />Visits</span>
+                <span className="nl"><i className="ti ti-lock" />Documents</span>
+                <span className="nl"><i className="ti ti-lock" />Monitoring</span>
+              </div>
+              <p className="micro"><i className="ti ti-shield-lock" />ROI-gated · read-only family view</p>
+            </React.Fragment>
+          ) : (
+            <React.Fragment>
+              <h2 className="disp">Welcome, {firstName}</h2>
+              <p className="sub">Let's finish setting up your care.</p>
+              <div className="lockcard">
+                <i className="ti ti-lock" />
+                <div><b>Your portal is locked</b><span>Finish enrollment to open your care plan, visits, and messages.</span></div>
+              </div>
+              <div className="clist">
+                <div className="crow"><span className="dot d-done"><i className="ti ti-check" /></span>Assessment</div>
+                <div className="crow"><span className={`dot ${intakeStarted ? 'd-done' : 'd-now'}`}><i className={`ti ${intakeStarted ? 'ti-check' : 'ti-dots'}`} /></span>Intake details</div>
+                <div className={`crow ${consentDone ? '' : 'off'}`}><span className={`dot ${consentDone ? 'd-done' : 'd-lock'}`}><i className={`ti ${consentDone ? 'ti-check' : 'ti-lock'}`} /></span>Consents &amp; signatures</div>
+                <div className="crow off"><span className="dot d-lock"><i className="ti ti-lock" /></span>Enrollment</div>
+              </div>
+              <button className="btn" onClick={onStartIntake}>{intakeStarted ? 'Continue intake' : 'Begin intake'}</button>
+              <div className="navlocks">
+                <span className="nl"><i className="ti ti-lock" />Care plan</span>
+                <span className="nl"><i className="ti ti-lock" />Visits</span>
+                <span className="nl"><i className="ti ti-lock" />Documents</span>
+                <span className="nl"><i className="ti ti-lock" />Messages</span>
+              </div>
+              <p className="micro"><i className="ti ti-lock" />Private &amp; HIPAA-protected</p>
+            </React.Fragment>
+          )}
+        </div>
+      );
+    };
+
+    // PR1 intake placeholder. The full multi-step enrollment flow (ported from
+    // docs/source-forms/template-gfc-intake.php) is built in PR2 (Session 3.2).
+    const GfcIntakePlaceholder = ({ me, onBack }) => (
+      <div className="gfc-body">
+        <div className="step">Enrollment · intake</div>
+        <h2 className="disp" style={{ marginTop: 8 }}>Enrollment intake</h2>
+        <p className="sub">The guided intake and consent flow opens here. We collect your details once, then you e-sign the consents for your service line.</p>
+        <div className="lockcard">
+          <i className="ti ti-clipboard-list" />
+          <div><b>Multi-step intake coming next</b><span>The full intake form and branched consent set are delivered in the next release (Session 3.2). The enrollment gate that protects your portal is already live.</span></div>
+        </div>
+        <button className="btn ghost" onClick={onBack}>Back</button>
+      </div>
+    );
+
+    const GfcDashboard = ({ data, onNavigate }) => {
+      const cp = data.carePlan || {};
+      const pc = cp.primaryCaregiver || {};
+      const upcoming = data.upcomingVisits || [];
+      const unread = (data.messages?.threads || []).filter(t => t.unread).length;
+      return (
+        <div className="gfc-body">
+          <h2 className="disp">Good morning, {data.greetingName}</h2>
+          <p className="sub">{pc.name ? `${pc.name.split(' ')[0]} arrives at ${(upcoming[0]||{}).time || 'your next visit'}.` : 'Your care team is ready.'}</p>
+          <div className="planhero">
+            <div className="pe">Your care plan</div>
+            <div className="prow">
+              <Avatar initials={pc.initials || 'GF'} />
+              <div><div className="nm">{pc.name || 'Caregiver'}{pc.credential ? `, ${pc.credential}` : ''}</div><div className="rl">{pc.role || 'Your primary caregiver'}</div></div>
+            </div>
+            <span className="pill"><i className="ti ti-heart-handshake" style={{ fontSize: 13 }} />{cp.careTierLabel || 'Care plan'}</span>
+            <div className="plink" onClick={() => onNavigate('care')}>View full care plan <i className="ti ti-arrow-right" /></div>
+          </div>
+          <p className="lbl">Upcoming visits</p>
+          {upcoming.slice(0, 2).map(v => (
+            <div className={`visit ${v.highlight ? 'hl' : ''}`} key={v.id}>
+              <span className="vt" dangerouslySetInnerHTML={{ __html: `${v.day}<br>${v.time}` }} />
+              <div className="vm"><b>{v.type}</b><span>{v.with}</span></div>
+            </div>
+          ))}
+          <div className="tiles" style={{ marginTop: 14 }}>
+            <button className="tile" onClick={() => onNavigate('messages')}>{unread > 0 && <span className="badge">{unread}</span>}<i className="ti ti-message" /><span className="tl">Messages</span><span className="ts">Care team</span></button>
+            <button className="tile" onClick={() => onNavigate('documents')}><i className="ti ti-file-text" /><span className="tl">Documents</span><span className="ts">Consents signed</span></button>
+          </div>
+        </div>
+      );
+    };
+
+    const GfcCarePlan = ({ data, readOnly }) => {
+      const cp = data.carePlan || {};
+      const upcoming = data.upcomingVisits || [];
+      const recent = data.recentVisits || [];
+      const teamColors = ['var(--gold)', '#9FE1CB', '#CECBF6'];
+      const teamTextColors = ['var(--navy)', '#0f6e56', '#3c3489'];
+      return (
+        <div className="gfc-body">
+          {readOnly && <span className="ro"><i className="ti ti-eye" />Family view · read-only</span>}
+          <p className="lbl" style={{ marginTop: 0 }}>Goals</p>
+          {(cp.goals || []).map((g, i) => (
+            <div className="goal" key={i}><i className="ti ti-circle-check" />{g}</div>
+          ))}
+          <p className="lbl">Authorized services</p>
+          <div className="seg">{(cp.authorizedServices || []).map((s, i) => <span className="on" key={i}>{s}</span>)}</div>
+          <p className="lbl">Care team</p>
+          <div className="card" style={{ margin: 0 }}>
+            {(cp.careTeam || []).map((m, i) => (
+              <div className="prow" style={{ marginBottom: i < (cp.careTeam.length - 1) ? 10 : 0 }} key={i}>
+                <Avatar initials={m.initials} size={34} bg={teamColors[i % 3]} color={teamTextColors[i % 3]} />
+                <div><div style={{ fontSize: 14, fontWeight: 600, color: 'var(--navy)' }}>{m.name}</div><div style={{ fontSize: 12, color: 'var(--mut)' }}>{m.role}</div></div>
+              </div>
+            ))}
+          </div>
+          <p className="lbl">Upcoming visits</p>
+          {upcoming.map(v => (
+            <div className={`visit ${v.highlight ? 'hl' : ''}`} key={v.id}>
+              <span className="vt" dangerouslySetInnerHTML={{ __html: `${v.day}<br>${v.time}` }} />
+              <div className="vm"><b>{v.type}</b><span>{v.with}{v.duration ? ` · ${v.duration}` : ''}</span></div>
+            </div>
+          ))}
+          <p className="lbl">Recent visits</p>
+          {recent.map(v => (
+            <div className="visit" key={v.id}>
+              <span className="vt" dangerouslySetInnerHTML={{ __html: `${v.day}<br>${v.time}` }} />
+              <div className="vm"><b>{v.type}</b><span>{v.with}</span></div>
+              {v.completed && <i className="ti ti-circle-check chk" />}
+            </div>
+          ))}
+          {!readOnly && (
+            <button className="btn ghost" onClick={() => alert('Visit requests open in a later session.')}><i className="ti ti-plus" style={{ verticalAlign: -2 }} /> Request a visit</button>
+          )}
+          <p className="micro"><i className="ti ti-history" />{cp.careTierLabel} · Version {cp.version} · updated {cp.updatedAt} by {cp.updatedBy}</p>
+        </div>
+      );
+    };
+
+    const GfcMessages = ({ messages, readOnly }) => {
+      const teamColors = ['var(--gold)', '#9FE1CB', 'var(--navy)'];
+      const teamTextColors = ['var(--navy)', '#0f6e56', 'var(--cream)'];
+      return (
+        <div className="gfc-body">
+          {readOnly && <span className="ro"><i className="ti ti-eye" />Family view · read-only</span>}
+          {(messages?.threads || []).map((t, i) => (
+            <div className="thread" key={t.id}>
+              <Avatar initials={t.initials} bg={teamColors[i % 3]} color={teamTextColors[i % 3]} />
+              <div className="tm"><div className="tn">{t.from}</div><div className="tp">{t.preview}</div></div>
+              <div style={{ textAlign: 'right' }}><div className="tt">{t.time}</div>{t.unread && <div className="un" />}</div>
+            </div>
+          ))}
+          <div className="card" style={{ marginTop: 14, background: 'rgba(3,61,80,.04)', border: 'none', boxShadow: 'none', fontSize: 12, color: 'var(--mut)', textAlign: 'center' }}>
+            Channels open to your assigned caregiver, admin, and clinical team. Structured channels, not open chat.
+          </div>
+        </div>
+      );
+    };
+
+    const GfcDocuments = ({ docs, readOnly }) => {
+      const signed = docs?.signedConsents || [];
+      const files = docs?.documents || [];
+      return (
+        <div className="gfc-body">
+          {readOnly && <span className="ro"><i className="ti ti-eye" />Family view · read-only</span>}
+          <p className="lbl" style={{ marginTop: 0 }}>Signed consents</p>
+          {signed.length === 0 && <p className="sub">No consents on file yet.</p>}
+          {signed.map(s => (
+            <div className="doc" key={s.key}>
+              <i className="ti ti-file-certificate" />
+              <div><b>{s.label}</b><span>{s.signedAt ? `Signed ${new Date(s.signedAt).toLocaleDateString()}` : (s.status === 'signed' ? 'Signed' : s.status)}</span></div>
+              {s.status === 'signed' && <span className="sgn"><i className="ti ti-circle-check" />Signed</span>}
+            </div>
+          ))}
+          <p className="lbl">Documents</p>
+          {files.length === 0 && <p className="sub">Shared documents from your care team will appear here.</p>}
+          {files.map(f => (
+            <a className="doc" key={f.id} href={f.url || '#'} target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'none' }}>
+              <i className="ti ti-file-text" />
+              <div><b>{f.title || f.name || 'Document'}</b><span>{f.description || 'Shared by your care team'}</span></div>
+              <i className="ti ti-download" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
+            </a>
+          ))}
+          <p className="micro"><i className="ti ti-cloud-lock" />Documents stored in HIPAA Google Drive</p>
+        </div>
+      );
+    };
+
+    const GfcClientPortal = ({ token, user }) => {
+      const [me, setMe] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [error, setError] = useState(null);
+      const [view, setView] = useState('home');       // home | care | messages | documents
+      const [showIntake, setShowIntake] = useState(false);
+      const [data, setData] = useState(null);          // care-plan + visits
+      const [messages, setMessages] = useState(null);
+      const [docs, setDocs] = useState(null);
+
+      // Step 1: load enrollment state (not gated).
+      useEffect(() => {
+        let cancelled = false;
+        (async () => {
+          const result = await api.getGfcMe(token);
+          if (cancelled) return;
+          if (result.error) { setError(result.error); setLoading(false); return; }
+          setMe(result);
+          setLoading(false);
+        })();
+        return () => { cancelled = true; };
+      }, [token]);
+
+      const isFamily = me?.isFamily;
+      const locked = me && (isFamily ? !me.roiFamilySigned : me.enrollmentStatus === 'intake_pending');
+
+      // Step 2: once unlocked, load portal data (these endpoints are gated server-side).
+      useEffect(() => {
+        if (!me || locked) return;
+        let cancelled = false;
+        (async () => {
+          const [cp, msg, dc] = await Promise.all([
+            api.getGfcCarePlan(token),
+            api.getGfcMessages(token),
+            api.getGfcDocuments(token)
+          ]);
+          if (cancelled) return;
+          if (!cp.error) { cp.messages = msg.error ? null : msg; setData(cp); }
+          if (!msg.error) setMessages(msg);
+          if (!dc.error) setDocs(dc);
+        })();
+        return () => { cancelled = true; };
+      }, [me, locked, token]);
+
+      if (loading) {
+        return (
+          <div className="gfc"><div className="gfc-shell"><div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16 }}>
+            <div className="gfc-spin" /><p style={{ color: 'var(--mut)' }}>Loading your care portal…</p>
+          </div></div></div>
+        );
+      }
+
+      if (error) {
+        return (
+          <div className="gfc"><div className="gfc-shell">
+            <div className="gfc-hdr"><span className="ttl">Godwins Family Care</span><button onClick={gfcLogout} title="Sign out"><i className="ti ti-logout" /></button></div>
+            <div className="gfc-body"><div className="lockcard"><i className="ti ti-alert-triangle" /><div><b>We couldn't load your portal</b><span>{error}</span></div></div></div>
+          </div></div>
+        );
+      }
+
+      // LOCKED → render only the gate / intake. Every other area is blocked server-side too.
+      if (locked) {
+        return (
+          <div className="gfc"><div className="gfc-shell">
+            <div className="gfc-hdr">
+              {showIntake ? <button onClick={() => setShowIntake(false)}><i className="ti ti-chevron-left" /></button> : <span style={{ width: 18 }} />}
+              <span className="ttl">{showIntake ? 'Enrollment' : 'My Care'}</span>
+              <button onClick={gfcLogout} title="Sign out"><i className="ti ti-logout" /></button>
+            </div>
+            {showIntake
+              ? <GfcIntakePlaceholder me={me} onBack={() => setShowIntake(false)} />
+              : <GfcGate me={me} onStartIntake={() => setShowIntake(true)} />}
+          </div></div>
+        );
+      }
+
+      // UNLOCKED portal.
+      const titles = { home: 'My Care', care: 'Care Plan', messages: 'Messages', documents: 'Documents' };
+      const tabs = [
+        { id: 'home', icon: 'ti-home', label: 'Home' },
+        { id: 'care', icon: 'ti-clipboard-heart', label: 'Care' },
+        { id: 'messages', icon: 'ti-message', label: 'Messages' },
+        { id: 'documents', icon: 'ti-file-text', label: 'Documents' }
+      ];
+      return (
+        <div className="gfc"><div className="gfc-shell">
+          <div className="gfc-hdr">
+            <span className="ttl">{titles[view]}</span>
+            <button onClick={gfcLogout} title="Sign out"><i className="ti ti-logout" /></button>
+          </div>
+          {view === 'home' && data && <GfcDashboard data={data} onNavigate={setView} />}
+          {view === 'care' && data && <GfcCarePlan data={data} readOnly={isFamily} />}
+          {view === 'messages' && <GfcMessages messages={messages} readOnly={isFamily} />}
+          {view === 'documents' && <GfcDocuments docs={docs} readOnly={isFamily} />}
+          {!data && view !== 'messages' && view !== 'documents' && (
+            <div className="gfc-body" style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}><div className="gfc-spin" /></div>
+          )}
+          <nav className="gfc-tabs">
+            {tabs.map(t => (
+              <button key={t.id} className={view === t.id ? 'on' : ''} onClick={() => setView(t.id)}>
+                <i className={`ti ${t.icon}`} />{t.label}
+              </button>
+            ))}
+          </nav>
+        </div></div>
+      );
+    };
+
     const Portal = ({ token, user }) => {
+      // GFC client + family users get the converted Private Home Care portal.
+      // Staff (admin/manager/client-portal-admin) keep the existing admin view below.
+      if (user && (user.role === 'client' || user.role === 'family')) {
+        return <GfcClientPortal token={token} user={user} />;
+      }
       const urlSlug = getSlugFromUrl();
       // Super Admin, Manager, or users with hasClientPortalAdminAccess can access admin features
       const isAdmin = user?.role === 'admin' || user?.isManager || user?.hasClientPortalAdminAccess;
@@ -3630,6 +4080,11 @@
         }
         // Super Admin, Manager, or users with Client Portal Admin access get the admin portal view directly at /portal
         if (user.role === 'admin' || user.isManager || user.hasClientPortalAdminAccess) {
+          return <Portal token={token} user={user} />;
+        }
+        // Family / authorized contacts have no slug of their own — render the
+        // GFC portal directly (it resolves the linked client via /api/gfc/me).
+        if (user.role === 'family') {
           return <Portal token={token} user={user} />;
         }
         // Client users logged in from central portal - redirect to their portal
