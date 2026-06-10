@@ -8,7 +8,33 @@ that item should be removed. Leave items unchecked or move them to "Uncertain" i
 investigate further. Items marked "REUSE" appear in the Uncertain section per §8 of `GFC_App_Build_v2.md`.
 
 **Source of truth:** `docs/GFC_App_Build_v2.md` §7 (strip) and §8 (reuse).
-**No code was modified during this analysis.**
+**No code was modified during the original analysis.**
+
+---
+
+## Session 2 execution status (2026-06-10)
+
+Executed per `docs/strip-list-DECISIONS.md` (which overrides this list).
+
+**DONE — fully stripped**
+- [x] §1 CLIA template (`template-biolis-au480-clia.json`) + `zipFile.zip`. `STANDARD_PHASES`/`PHASE_ORDER` left in place.
+- [x] §2 Inventory module — all routes, DB keys, config constants, notification scanner, portal/admin UI.
+- [x] §3 Validation reports — **backend** (all multi-day/validation routes, `validation_reports` key, cascade blocks), **pdf-generator** (`generateValidationReportPDF` + `drawAnalyzersTable` + analyzers table in service-report PDF), and **frontend** in `portal.html`, `app.js`, `admin-hub.html`. `SignaturePad`/`ServiceReportDetail`/service reports kept.
+- [x] §5 Soft-pilot checklist — all routes, `app.js`/`portal.html` UI, `googledrive.uploadSoftPilotChecklist()`.
+- [x] §6 Knowledge hub — all routes, DB keys, `knowledge.html`, admin/portal/login references.
+- [x] §8 link-directory (`/directory` + `link-directory.html`).
+- [x] Notification templates — the 7 seeded lab templates removed; notification system + admin template editing kept; `renderAndQueue` guarded for missing templates.
+- [x] Brand cleanups — `config.js` (`BRAND`, admin email, inventory constants), `email.js` (from/name), email base-URLs.
+
+**DONE — deactivated (code retained)**
+- [x] §7 Project/launch tracker — `/launch*` routes redirect to `/login`, static `index:false`, login-hub tile hidden. `app.js`/`index.html`/`client.html` and tracker API routes retained.
+
+**KEPT (rebrand only)**
+- §4 Service field reports — entire feature retained; `pdf-generator.js`, `googledrive.js` (minus soft-pilot), changelog, `debug-db.js`, notification system, all portal shells.
+
+**PARTIAL — remaining for a follow-up session (does not affect boot / acceptance)**
+- [ ] §3 `service-portal.html` validation: on-load validation fetch removed, HomePage "Active Validations" card removed, and `'Validations'` removed from the service-type selectors, so validation flows are **unreachable** and no removed endpoint is called. The dormant validation components (`DailyLogSection`, `ViewValidationPage`, `ContinueValidationPage`) and the `isValidation` branches inside `CompleteAssignmentPage`/`NewReportPage` are still present and should be fully excised in a follow-up (left in place to avoid destabilizing the kept service-report completion/creation flows in one pass).
+- [ ] Lab HubSpot — connector kept dormant (`getAccessToken`/`getHubSpotClient`/`testConnection`/`getOwners` available; env not configured so all calls no-op). The ticket/deal/service-report-mapping functions and routes are still present. They are inert without `REPLIT_CONNECTORS_HOSTNAME`; full removal is woven through the poll loop, the (deactivated) tracker, and service-report routes and is recommended as a focused follow-up.
 
 ---
 
