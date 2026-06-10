@@ -149,24 +149,6 @@
           headers: { 'Authorization': `Bearer ${token}` }
         }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
 
-      getSoftPilot: (token) =>
-        fetch(`${API_URL}/api/client-portal/soft-pilot`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
-
-      updateSoftPilot: (token, responses) =>
-        fetch(`${API_URL}/api/client-portal/soft-pilot`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-          body: JSON.stringify({ responses })
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
-
-      submitSoftPilot: (token, signature) =>
-        fetch(`${API_URL}/api/client-portal/soft-pilot/submit`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-          body: JSON.stringify({ signature })
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' }))
     };
     
     const LoginPage = ({ slug, onLogin }) => {
@@ -613,319 +595,6 @@
       );
     };
     
-    const SoftPilotForm = ({ token, onClose }) => {
-      const [loading, setLoading] = useState(true);
-      const [saving, setSaving] = useState(false);
-      const [submitting, setSubmitting] = useState(false);
-      const [tasks, setTasks] = useState([]);
-      const [responses, setResponses] = useState({});
-      const [submitted, setSubmitted] = useState(null);
-      const [signature, setSignature] = useState({ name: '', title: '', date: new Date().toISOString().split('T')[0] });
-      const [saveMsg, setSaveMsg] = useState(null);
-
-      useEffect(() => {
-        loadData();
-      }, []);
-
-      const loadData = async () => {
-        setLoading(true);
-        const result = await api.getSoftPilot(token);
-        if (!result.error) {
-          setTasks(result.tasks || []);
-          setResponses(result.responses || {});
-          setSubmitted(result.submitted || null);
-        }
-        setLoading(false);
-      };
-
-      const getTaskStatus = (taskId) => {
-        return (responses[taskId] || {}).status || 'pending';
-      };
-
-      const getTaskNotes = (taskId) => {
-        return (responses[taskId] || {}).notes || '';
-      };
-
-      const getSubtaskStatus = (taskId, subtaskId) => {
-        const r = responses[taskId] || {};
-        return ((r.subtasks || {})[subtaskId] || {}).status || 'Pending';
-      };
-
-      const updateTaskResponse = (taskId, field, value) => {
-        setResponses(prev => ({
-          ...prev,
-          [taskId]: { ...(prev[taskId] || {}), [field]: value }
-        }));
-      };
-
-      const updateSubtaskResponse = (taskId, subtaskId, status) => {
-        setResponses(prev => ({
-          ...prev,
-          [taskId]: {
-            ...(prev[taskId] || {}),
-            subtasks: {
-              ...((prev[taskId] || {}).subtasks || {}),
-              [subtaskId]: { status }
-            }
-          }
-        }));
-      };
-
-      const completedCount = tasks.filter(t => {
-        const status = getTaskStatus(t.id);
-        return status === 'complete' || status === 'na';
-      }).length;
-
-      const handleSave = async () => {
-        setSaving(true);
-        setSaveMsg(null);
-        const result = await api.updateSoftPilot(token, responses);
-        if (result.error) {
-          setSaveMsg({ type: 'error', text: result.error });
-        } else {
-          setSaveMsg({ type: 'success', text: 'Progress saved!' });
-          setTimeout(() => setSaveMsg(null), 3000);
-        }
-        setSaving(false);
-      };
-
-      const handleSubmit = async () => {
-        if (!signature.name.trim() || !signature.title.trim() || !signature.date.trim()) {
-          setSaveMsg({ type: 'error', text: 'Please fill in all signature fields before submitting.' });
-          return;
-        }
-        if (!confirm('Are you sure you want to submit the checklist? This will finalize your responses.')) return;
-        setSubmitting(true);
-        setSaveMsg(null);
-        const saveResult = await api.updateSoftPilot(token, responses);
-        if (saveResult.error) {
-          setSaveMsg({ type: 'error', text: saveResult.error });
-          setSubmitting(false);
-          return;
-        }
-        const result = await api.submitSoftPilot(token, signature);
-        if (result.error) {
-          setSaveMsg({ type: 'error', text: result.error });
-        } else {
-          setSubmitted(result.submitted || { date: new Date().toISOString(), signature });
-          setSaveMsg({ type: 'success', text: 'Checklist submitted successfully!' });
-        }
-        setSubmitting(false);
-      };
-
-      const statusOptions = [
-        { value: 'pending', label: 'Pending', color: 'bg-yellow-100 text-yellow-800' },
-        { value: 'complete', label: 'Complete', color: 'bg-green-100 text-green-800' },
-        { value: 'na', label: 'N/A', color: 'bg-gray-100 text-gray-600' }
-      ];
-
-      const subtaskStatusOptions = [
-        { value: 'Pending', label: 'Pending', color: 'bg-yellow-100 text-yellow-800' },
-        { value: 'Complete', label: 'Complete', color: 'bg-green-100 text-green-800' },
-        { value: 'N/A', label: 'N/A', color: 'bg-gray-100 text-gray-600' }
-      ];
-
-      const isReadOnly = !!submitted;
-
-      return (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={onClose}>
-          <div className="bg-white rounded-2xl shadow-2xl max-w-3xl w-full max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-            <div className="gradient-header p-6 rounded-t-2xl flex items-center justify-between">
-              <div>
-                <h2 className="text-xl font-bold text-white">Virtual Soft Pilot Checklist</h2>
-                {!loading && tasks.length > 0 && (
-                  <p className="text-white/80 text-sm mt-1">{completedCount} of {tasks.length} tasks complete</p>
-                )}
-              </div>
-              <button onClick={onClose} className="text-white/80 hover:text-white">
-                {Icons.close}
-              </button>
-            </div>
-
-            {loading ? (
-              <div className="p-12 text-center">
-                <div className="inline-block animate-spin rounded-full h-8 w-8 border-4 border-primary border-t-transparent"></div>
-                <p className="mt-4 text-gray-500">Loading checklist...</p>
-              </div>
-            ) : tasks.length === 0 ? (
-              <div className="p-12 text-center text-gray-500">
-                <p className="text-lg font-medium">No soft pilot tasks found</p>
-                <p className="text-sm mt-2">Tasks tagged "softpilot" will appear here.</p>
-              </div>
-            ) : (
-              <div className="p-6 space-y-6">
-                {isReadOnly && (
-                  <div className="bg-green-50 border border-green-200 rounded-xl p-4 flex items-center gap-3">
-                    <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center flex-shrink-0">
-                      <svg className="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"/></svg>
-                    </div>
-                    <div>
-                      <p className="font-semibold text-green-800">Checklist Submitted</p>
-                      <p className="text-sm text-green-600">
-                        Signed by {submitted.signature?.name} on {new Date(submitted.date || submitted.submittedAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
-                      </p>
-                    </div>
-                  </div>
-                )}
-
-                {!loading && tasks.length > 0 && (
-                  <div className="w-full bg-gray-200 rounded-full h-3 overflow-hidden">
-                    <div className="h-full bg-primary rounded-full transition-all duration-500" style={{ width: `${Math.round((completedCount / tasks.length) * 100)}%` }} />
-                  </div>
-                )}
-
-                {saveMsg && (
-                  <div className={`p-3 rounded-lg text-sm font-medium ${saveMsg.type === 'success' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
-                    {saveMsg.text}
-                  </div>
-                )}
-
-                <div className="space-y-4">
-                  {tasks.map((task, idx) => (
-                    <div key={task.id} className="border rounded-xl overflow-hidden">
-                      <div className="bg-gray-50 p-4">
-                        <div className="flex items-start justify-between gap-4">
-                          <div className="flex-1">
-                            <h3 className="font-semibold text-gray-900">{idx + 1}. {task.title || 'Untitled Task'}</h3>
-                            {task.description && <p className="text-sm text-gray-600 mt-1">{task.description}</p>}
-                            {task.dueDate && (
-                              <p className="text-xs text-gray-500 mt-1 flex items-center gap-1">
-                                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
-                                Due: {new Date(task.dueDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                              </p>
-                            )}
-                          </div>
-                          <div className="flex-shrink-0">
-                            {isReadOnly ? (
-                              <span className={`px-3 py-1 rounded-full text-xs font-medium ${
-                                statusOptions.find(s => s.value === getTaskStatus(task.id))?.color || 'bg-gray-100 text-gray-600'
-                              }`}>
-                                {statusOptions.find(s => s.value === getTaskStatus(task.id))?.label || 'Pending'}
-                              </span>
-                            ) : (
-                              <select
-                                value={getTaskStatus(task.id)}
-                                onChange={e => updateTaskResponse(task.id, 'status', e.target.value)}
-                                className="input-modern text-sm px-3 py-1.5"
-                              >
-                                {statusOptions.map(opt => (
-                                  <option key={opt.value} value={opt.value}>{opt.label}</option>
-                                ))}
-                              </select>
-                            )}
-                          </div>
-                        </div>
-
-                        {!isReadOnly && (
-                          <div className="mt-3">
-                            <textarea
-                              value={getTaskNotes(task.id)}
-                              onChange={e => updateTaskResponse(task.id, 'notes', e.target.value)}
-                              placeholder="Add notes (optional)..."
-                              className="input-modern w-full text-sm px-3 py-2"
-                              rows="2"
-                            />
-                          </div>
-                        )}
-                        {isReadOnly && getTaskNotes(task.id) && (
-                          <div className="mt-2 p-2 bg-white rounded-lg border-l-2 border-primary">
-                            <p className="text-sm text-gray-700">{getTaskNotes(task.id)}</p>
-                          </div>
-                        )}
-                      </div>
-
-                      {task.subtasks && task.subtasks.length > 0 && (
-                        <div className="divide-y">
-                          {task.subtasks.map(st => (
-                            <div key={st.id} className="px-4 py-3 flex items-center justify-between gap-3 bg-white">
-                              <span className="text-sm text-gray-700 flex-1 pl-4">↳ {st.title}</span>
-                              {isReadOnly ? (
-                                <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-                                  subtaskStatusOptions.find(s => s.value === getSubtaskStatus(task.id, st.id))?.color || 'bg-gray-100 text-gray-600'
-                                }`}>
-                                  {getSubtaskStatus(task.id, st.id)}
-                                </span>
-                              ) : (
-                                <select
-                                  value={getSubtaskStatus(task.id, st.id)}
-                                  onChange={e => updateSubtaskResponse(task.id, st.id, e.target.value)}
-                                  className="input-modern text-xs px-2 py-1"
-                                >
-                                  {subtaskStatusOptions.map(opt => (
-                                    <option key={opt.value} value={opt.value}>{opt.label}</option>
-                                  ))}
-                                </select>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-
-                {!isReadOnly && (
-                  <>
-                    <div className="border-t pt-6">
-                      <h3 className="font-semibold text-gray-900 mb-4">Signature</h3>
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
-                          <input
-                            type="text"
-                            value={signature.name}
-                            onChange={e => setSignature(prev => ({ ...prev, name: e.target.value }))}
-                            className="input-modern w-full px-3 py-2 text-sm"
-                            placeholder="Your full name"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Title</label>
-                          <input
-                            type="text"
-                            value={signature.title}
-                            onChange={e => setSignature(prev => ({ ...prev, title: e.target.value }))}
-                            className="input-modern w-full px-3 py-2 text-sm"
-                            placeholder="Your title"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
-                          <input
-                            type="date"
-                            value={signature.date}
-                            onChange={e => setSignature(prev => ({ ...prev, date: e.target.value }))}
-                            className="input-modern w-full px-3 py-2 text-sm"
-                          />
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-3 pt-2">
-                      <button
-                        onClick={handleSave}
-                        disabled={saving}
-                        className="flex-1 px-4 py-3 border-2 border-primary text-primary rounded-xl font-semibold text-sm hover:bg-primary/5 transition disabled:opacity-50"
-                      >
-                        {saving ? 'Saving...' : 'Save Progress'}
-                      </button>
-                      <button
-                        onClick={handleSubmit}
-                        disabled={submitting}
-                        className="flex-1 btn-primary text-white py-3 rounded-xl font-semibold text-sm disabled:opacity-50"
-                      >
-                        {submitting ? 'Submitting...' : 'Submit Checklist'}
-                      </button>
-                    </div>
-                  </>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-      );
-    };
-
     const MilestonesPage = ({ data, onNavigate, token, currentUser, onNavigateToFile }) => {
       const project = data?.projects?.[0];
       const allTasks = project?.tasks || [];
@@ -934,9 +603,6 @@
       const [validationProgress, setValidationProgress] = useState([]);
       const [showValidationDetails, setShowValidationDetails] = useState(false);
       const [collapsedPhases, setCollapsedPhases] = useState([]);
-      const [showSoftPilot, setShowSoftPilot] = useState(false);
-      const [softPilotStatus, setSoftPilotStatus] = useState(null);
-
       // Get current client user's email for ownership comparison
       const clientUserEmail = currentUser?.email || '';
 
@@ -958,11 +624,6 @@
           api.getValidationProgress(token).then(result => {
             if (!result.error && Array.isArray(result)) {
               setValidationProgress(result);
-            }
-          });
-          api.getSoftPilot(token).then(result => {
-            if (!result.error) {
-              setSoftPilotStatus(result);
             }
           });
         }
@@ -1363,37 +1024,6 @@
                   </div>
                 )}
               </div>
-              {!isCollapsed && phase === 'Phase 7' && softPilotStatus && (softPilotStatus.tasks || []).length > 0 && (
-                <div className="bg-white rounded-lg shadow-sm overflow-hidden border-l-4 border-indigo-400 p-4">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 bg-indigo-100 rounded-lg flex items-center justify-center">
-                        <svg className="w-5 h-5 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"/></svg>
-                      </div>
-                      <div>
-                        <h3 className="font-semibold text-gray-900">Complete Virtual Soft Pilot Checklist</h3>
-                        <p className="text-sm text-gray-500">
-                          {softPilotStatus.submitted
-                            ? `Submitted on ${new Date(softPilotStatus.submitted.date || softPilotStatus.submitted.submittedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`
-                            : (() => {
-                                const responses = softPilotStatus.responses || {};
-                                const answered = Object.values(responses).filter(r => r.status === 'complete' || r.status === 'na').length;
-                                const total = (softPilotStatus.tasks || []).length;
-                                return answered > 0 ? `In Progress (${answered}/${total})` : 'Not Started';
-                              })()
-                          }
-                        </p>
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => setShowSoftPilot(true)}
-                      className="btn-primary text-white px-4 py-2 rounded-lg text-sm font-medium"
-                    >
-                      {softPilotStatus.submitted ? 'View Checklist' : 'Open Checklist'}
-                    </button>
-                  </div>
-                </div>
-              )}
               {!isCollapsed && phaseTasks.length > 0 && (
                 <div className={`bg-white rounded-lg shadow-sm overflow-hidden border-l-4 ${getPhaseColor(phase, phaseIndex)}`}>
                   {phase === 'Phase 8' && onNavigate && (
@@ -1729,7 +1359,6 @@
           {viewType === 'timeline' && <TimelineView />}
           {viewType === 'calendar' && <CalendarView />}
 
-          {showSoftPilot && <SoftPilotForm token={token} onClose={() => setShowSoftPilot(false)} />}
         </div>
       );
     };
@@ -2182,19 +1811,6 @@
       const [reportSort, setReportSort] = useState('date_desc');
       const [reportStatusFilter, setReportStatusFilter] = useState('');
       const highlightRef = useRef(null);
-      const [showSoftPilot, setShowSoftPilot] = useState(false);
-      const [softPilotStatus, setSoftPilotStatus] = useState(null);
-
-      useEffect(() => {
-        if (token) {
-          api.getSoftPilot(token).then(result => {
-            if (!result.error) {
-              setSoftPilotStatus(result);
-            }
-          });
-        }
-      }, [token]);
-
       const slug = localStorage.getItem('portal_user') ? JSON.parse(localStorage.getItem('portal_user')).slug : null;
 
       // Check if user has any HubSpot IDs configured for uploads
@@ -2535,39 +2151,6 @@
             );
           })()}
           
-          {softPilotStatus && (softPilotStatus.tasks || []).length > 0 && (
-            <div className="bg-white p-6 rounded-xl shadow-sm">
-              <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
-                <span>📋</span> Checklists
-              </h2>
-              <div
-                onClick={() => setShowSoftPilot(true)}
-                className="flex items-center gap-3 p-3 rounded-lg border hover:bg-gray-50 transition cursor-pointer group"
-              >
-                <div className="w-10 h-10 bg-indigo-100 rounded-lg flex items-center justify-center flex-shrink-0">
-                  <svg className="w-5 h-5 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"/></svg>
-                </div>
-                <div className="flex-1">
-                  <p className="font-medium text-gray-800 group-hover:text-primary">Virtual Soft Pilot Checklist</p>
-                  <p className="text-sm text-gray-500">
-                    {softPilotStatus.submitted
-                      ? `Submitted on ${new Date(softPilotStatus.submitted.date || softPilotStatus.submitted.submittedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`
-                      : (() => {
-                          const responses = softPilotStatus.responses || {};
-                          const answered = Object.values(responses).filter(r => r.status === 'complete' || r.status === 'na').length;
-                          const total = (softPilotStatus.tasks || []).length;
-                          return answered > 0 ? `In Progress (${answered}/${total})` : 'Not Started';
-                        })()
-                    }
-                  </p>
-                </div>
-                <span className="text-primary text-sm font-medium flex items-center gap-1">
-                  {softPilotStatus.submitted ? 'View' : 'Open'} →
-                </span>
-              </div>
-            </div>
-          )}
-
           {clientUploads.length > 0 && (
             <div className="bg-white p-6 rounded-xl shadow-sm">
               <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
@@ -2693,7 +2276,6 @@
             </div>
           )}
 
-          {showSoftPilot && <SoftPilotForm token={token} onClose={() => setShowSoftPilot(false)} />}
 
           {/* Full Report View overlay for reviewing + signing service reports */}
           {viewingReport && (
@@ -4146,8 +3728,6 @@
       const [loading, setLoading] = useState(true);
       const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
       const [highlightServiceReportId, setHighlightServiceReportId] = useState(null);
-      const [softPilotBanner, setSoftPilotBanner] = useState(null);
-      const [showSoftPilotFromBanner, setShowSoftPilotFromBanner] = useState(false);
 
       // Navigate with URL update
       const navigateTo = (page, tab = null) => {
@@ -4194,29 +3774,6 @@
             setSettings(portalSettings);
             setAnnouncements(announcementsData);
             setDocuments(docsData);
-            try {
-              const spResult = await api.getSoftPilot(token);
-              if (!spResult.error && (spResult.tasks || []).length > 0 && !spResult.submitted) {
-                const hasDueDate = (spResult.tasks || []).some(t => t.dueDate);
-                if (hasDueDate) {
-                  const earliestDue = (spResult.tasks || [])
-                    .filter(t => t.dueDate)
-                    .sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate))[0];
-                  const responses = spResult.responses || {};
-                  const completed = (spResult.tasks || []).filter(t => {
-                    const s = (responses[t.id] || {}).status;
-                    return s === 'complete' || s === 'na';
-                  }).length;
-                  setSoftPilotBanner({
-                    total: spResult.tasks.length,
-                    completed,
-                    dueDate: earliestDue?.dueDate
-                  });
-                }
-              }
-            } catch (spErr) {
-              console.error('Failed to load soft pilot status:', spErr);
-            }
           } catch (err) {
             console.error('Failed to load portal data:', err);
           } finally {
@@ -4305,31 +3862,6 @@
                 </div>
               );
             })()}
-            {!isAdmin && softPilotBanner && (
-              <div className="mb-6 bg-purple-50 border border-purple-300 rounded-xl p-4 flex items-center gap-4 shadow-sm">
-                <div className="flex-shrink-0 w-10 h-10 bg-purple-100 rounded-full flex items-center justify-center">
-                  <svg className="w-5 h-5 text-purple-600" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                </div>
-                <div className="flex-1">
-                  <p className="font-semibold text-purple-800">
-                    Soft-Pilot Checklist Assigned
-                  </p>
-                  <p className="text-sm text-purple-600">
-                    {softPilotBanner.completed} of {softPilotBanner.total} items complete
-                    {softPilotBanner.dueDate && (
-                      <span> — Due by {new Date(softPilotBanner.dueDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span>
-                    )}
-                  </p>
-                </div>
-                <button
-                  onClick={() => { navigateTo('milestones'); setShowSoftPilotFromBanner(true); }}
-                  className="px-4 py-2 bg-purple-600 text-white rounded-lg font-medium hover:bg-purple-700 transition-colors text-sm whitespace-nowrap"
-                >
-                  Open Checklist
-                </button>
-              </div>
-            )}
-            {showSoftPilotFromBanner && <SoftPilotForm token={token} onClose={() => setShowSoftPilotFromBanner(false)} />}
             {renderPage()}
             
             <footer className="mt-12 text-center text-sm text-gray-500">
