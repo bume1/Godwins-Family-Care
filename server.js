@@ -2458,6 +2458,53 @@ app.get('/api/config', (req, res) => {
   res.json(config.getPublicConfig());
 });
 
+// One-time bootstrap: re-run the admin seed on demand without a server restart.
+// Secured by a token that must match the JWT_SECRET env var so it can't be
+// triggered by an anonymous caller. Remove this route after the GFC admin is
+// confirmed working (it is intentionally not behind authenticateToken since
+// the whole point is to recover from a locked-out state).
+app.post('/api/bootstrap-admin', async (req, res) => {
+  try {
+    const { token } = req.body;
+    if (!token || token !== process.env.JWT_SECRET) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    let users = await db.get('users') || [];
+    let changed = false;
+
+    if (!users.find(u => u.email === config.DEFAULT_ADMIN.EMAIL)) {
+      const hashedPassword = await bcrypt.hash(config.DEFAULT_ADMIN.PASSWORD, config.BCRYPT_SALT_ROUNDS);
+      users.push({
+        id: uuidv4(),
+        email: config.DEFAULT_ADMIN.EMAIL,
+        name: config.DEFAULT_ADMIN.NAME,
+        password: hashedPassword,
+        role: config.ROLES.ADMIN,
+        createdAt: new Date().toISOString()
+      });
+      changed = true;
+    }
+
+    const LEGACY_ADMIN_EMAIL = 'bianca@thrive365labs.live';
+    const hasGfcAdmin = users.some(u => u.email === config.DEFAULT_ADMIN.EMAIL && u.role === config.ROLES.ADMIN);
+    if (hasGfcAdmin && users.some(u => u.email === LEGACY_ADMIN_EMAIL)) {
+      users = users.filter(u => u.email !== LEGACY_ADMIN_EMAIL);
+      changed = true;
+    }
+
+    if (changed) {
+      await db.set('users', users);
+      invalidateUsersCache();
+    }
+
+    const admins = users.filter(u => u.role === config.ROLES.ADMIN).map(u => u.email);
+    res.json({ ok: true, changed, admins });
+  } catch (err) {
+    console.error('Bootstrap error:', err);
+    res.status(500).json({ error: 'Bootstrap failed' });
+  }
+});
+
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
