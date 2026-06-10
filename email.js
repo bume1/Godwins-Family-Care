@@ -13,8 +13,8 @@ function getResend() {
   return _resend;
 }
 
-const FROM_EMAIL = process.env.EMAIL_FROM_ADDRESS || 'no-reply@thrive365labs.live';
-const FROM_NAME = 'Thrive 365 Labs';
+const FROM_EMAIL = process.env.EMAIL_FROM_ADDRESS || 'no-reply@godwinsfamilycarellc.com';
+const FROM_NAME = 'Godwins Family Care';
 
 async function sendEmail(to, subject, body, options = {}) {
   const resend = getResend();

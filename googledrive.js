@@ -163,7 +163,6 @@ async function uploadHtmlFile(fileName, htmlContent, folderId = null) {
   }
 }
 
-const SOFT_PILOT_FOLDER_ID = '16Tsa2IJypBBvvoVsLamy5j0DFgVUGLSN';
 const TASK_FILES_FOLDER_ID = '16Tsa2IJypBBvvoVsLamy5j0DFgVUGLSN'; // Same parent folder for now
 
 async function uploadTaskFile(projectName, clientName, fileName, fileBuffer, mimeType) {
@@ -227,23 +226,6 @@ async function deleteFile(fileId) {
     return true;
   } catch (error) {
     console.error('Error deleting file from Google Drive:', error.message);
-    throw error;
-  }
-}
-
-async function uploadSoftPilotChecklist(projectName, clientName, htmlContent) {
-  try {
-    const clientFolderId = await findOrCreateFolder(clientName, SOFT_PILOT_FOLDER_ID);
-    
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const fileName = `Soft-Pilot-Checklist_${projectName.replace(/[^a-zA-Z0-9]/g, '-')}_${timestamp}.html`;
-    
-    const result = await uploadHtmlFile(fileName, htmlContent, clientFolderId);
-    
-    console.log(`✅ Uploaded checklist to Google Drive: ${result.fileName}`);
-    return result;
-  } catch (error) {
-    console.error('Error uploading soft-pilot checklist:', error.message);
     throw error;
   }
 }
@@ -351,7 +333,6 @@ module.exports = {
   testConnection,
   findOrCreateFolder,
   uploadHtmlFile,
-  uploadSoftPilotChecklist,
   uploadTaskFile,
   deleteFile,
   uploadServiceReportPDF,
