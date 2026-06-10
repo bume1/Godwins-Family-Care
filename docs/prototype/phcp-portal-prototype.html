@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GFC PHCP Portal Prototype</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.1.0/dist/tabler-icons.min.css">
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600&family=DM+Sans:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{--navy:#033D50;--navy2:#054f67;--gold:#F5CD85;--goldd:#c9a44a;--cream:#FAF7F2;--ink:#1a2a32;--mut:#41555f}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'DM Sans',sans-serif;background:#efe9dd;color:var(--ink);padding:40px 16px}
+  .head{text-align:center;max-width:640px;margin:0 auto 34px}
+  .head .e{font-size:12px;letter-spacing:1.6px;text-transform:uppercase;color:var(--goldd);font-weight:500}
+  .head h1{font-family:'Cormorant Garamond',serif;font-weight:600;font-size:34px;color:var(--navy);margin:6px 0 8px}
+  .head p{font-size:14px;color:var(--mut);line-height:1.6}
+  .board{display:flex;flex-wrap:wrap;justify-content:center;gap:40px 36px;max-width:1320px;margin:0 auto}
+  .col{display:flex;flex-direction:column;align-items:center}
+  .eyebrow{font-size:11px;font-weight:500;letter-spacing:1.4px;text-transform:uppercase;color:var(--goldd);margin-bottom:10px}
+  .cap{font-family:'Cormorant Garamond',serif;font-size:18px;color:var(--navy);max-width:300px;text-align:center;line-height:1.3;margin-top:14px}
+  .phone{width:300px;background:#0e0f11;border-radius:40px;padding:9px;box-shadow:0 14px 40px rgba(3,61,80,.22)}
+  .screen{background:var(--cream);border-radius:32px;overflow:hidden}
+  .sbar{display:flex;justify-content:space-between;align-items:center;padding:9px 18px 4px;font-size:12px;font-weight:500;color:var(--navy)}
+  .dots{letter-spacing:1px}
+  .hdr{background:var(--navy);padding:13px 16px;display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .hdr .ttl{font-family:'Cormorant Garamond',serif;font-size:20px;color:var(--cream)}
+  .hdr i{color:var(--gold);font-size:18px}
+  .hdr .r{font-size:11px;letter-spacing:.6px;color:var(--gold)}
+  .live{display:flex;align-items:center;gap:6px;font-size:11px;letter-spacing:.8px;color:var(--cream)}
+  .live .d{width:8px;height:8px;border-radius:50%;background:#5DCAA5}
+  .body{padding:16px}
+  h3{font-family:'Cormorant Garamond',serif;font-weight:600;font-size:25px;color:var(--navy);margin-bottom:2px}
+  .sub{font-size:13.5px;color:var(--mut);margin-bottom:14px}
+  .lockcard{background:var(--navy);border-radius:14px;padding:15px 16px;display:flex;gap:12px;align-items:flex-start}
+  .lockcard i{color:var(--gold);font-size:22px;margin-top:2px}
+  .lockcard b{display:block;color:var(--cream);font-size:14.5px;font-weight:500;margin-bottom:3px}
+  .lockcard span{color:rgba(250,247,242,.72);font-size:12.5px;line-height:1.45}
+  .steps{margin:16px 0}
+  .step{display:flex;align-items:center;gap:11px;padding:9px 2px;border-bottom:1px solid #e7e1d6;font-size:14px;color:var(--navy)}
+  .step:last-child{border-bottom:none}.step.off{color:#8a8378}
+  .chip{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0}
+  .done{background:var(--gold);color:var(--navy)}.now{background:var(--navy);color:var(--gold)}.lk{background:#e7e1d6;color:#8a8378}
+  .btn{width:100%;background:var(--goldd);color:var(--navy);border:none;border-radius:9px;padding:13px;font-family:'DM Sans',sans-serif;font-size:14.5px;font-weight:500;cursor:pointer}
+  .btn:hover{background:var(--goldd)}
+  .navlocks{display:flex;flex-wrap:wrap;gap:7px;margin-top:14px}
+  .nl{display:flex;align-items:center;gap:5px;background:#efe9dd;border-radius:7px;padding:7px 9px;font-size:12px;color:#7c756a}.nl i{font-size:13px}
+  .banner{background:var(--navy);border-radius:13px;padding:13px 15px;display:flex;align-items:center;gap:11px;margin-bottom:14px}
+  .banner b{color:var(--cream);font-size:14.5px;font-weight:500}.banner span{color:rgba(250,247,242,.72);font-size:12.5px}
+  .tl{background:#fff;border:1px solid #ece6db;border-radius:11px;padding:11px 13px;margin-bottom:9px}
+  .tl .t{font-size:11px;color:var(--goldd);font-weight:500;letter-spacing:.5px}
+  .tl b{display:block;font-size:14px;color:var(--navy);font-weight:500;margin:1px 0 2px}
+  .tl span{font-size:12.5px;color:var(--mut);line-height:1.4}
+  .flag{background:#fbf1d8;border:1px solid var(--gold)}
+  .next{background:var(--cream);border:1.5px dashed var(--goldd);border-radius:11px;padding:13px;margin-top:4px}
+  .next .e{font-size:10.5px;letter-spacing:1px;color:var(--goldd);text-transform:uppercase}
+  .next b{font-family:'Cormorant Garamond',serif;font-size:22px;color:var(--navy);display:block}
+  .next span{font-size:12.5px;color:var(--mut)}
+  .lead{font-size:12.5px;color:var(--mut);font-weight:500;margin-bottom:12px}
+  .cg{border-radius:13px;padding:12px 13px;margin-bottom:9px;display:flex;align-items:center;gap:11px}
+  .cg.sel{background:var(--navy)}.cg.alt{background:#fff;border:1px solid #ece6db}
+  .av{width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:500;color:var(--navy);flex-shrink:0}
+  .cg .info{flex:1;min-width:0}.cg .nm{font-size:14px;font-weight:500}.cg .mt{font-size:12px}
+  .cg.sel .nm{color:var(--cream)}.cg.sel .mt{color:rgba(250,247,242,.72)}
+  .cg.alt .nm{color:var(--navy)}.cg.alt .mt{color:var(--mut)}
+  .pct{font-family:'Cormorant Garamond',serif;font-size:24px;font-weight:600}
+  .cg.sel .pct{color:var(--gold)}.cg.alt .pct{color:var(--navy)}
+  .tags{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:12px}
+  .tag{background:#eef3f0;color:#0f6e56;border-radius:6px;padding:4px 8px;font-size:11px;font-weight:500}
+  .plan{background:var(--navy);border-radius:15px;padding:15px 16px;margin-bottom:16px}
+  .plan .pe{font-size:11px;letter-spacing:1.2px;text-transform:uppercase;color:var(--gold);margin-bottom:10px}
+  .prow{display:flex;align-items:center;gap:11px}
+  .prow .nm2{font-size:14.5px;font-weight:500;color:var(--cream)}
+  .prow .rl{font-size:12px;color:rgba(250,247,242,.72)}
+  .pill{display:inline-block;margin-top:12px;background:rgba(245,205,133,.16);color:var(--gold);border:1px solid rgba(245,205,133,.5);border-radius:20px;padding:4px 12px;font-size:11.5px;font-weight:500}
+  .plink{display:block;margin-top:12px;font-size:13px;color:var(--gold);font-weight:500;text-decoration:none}
+  .lbl{font-size:11px;letter-spacing:1.2px;text-transform:uppercase;color:var(--goldd);margin:2px 0 9px}
+  .visit{background:#fff;border:1px solid #ece6db;border-radius:11px;padding:10px 13px;margin-bottom:8px;display:flex;align-items:center;gap:12px}
+  .vt{font-family:'Cormorant Garamond',serif;font-size:15px;color:var(--navy);min-width:64px;font-weight:600;line-height:1.2}
+  .vmain b{display:block;font-size:13.5px;color:var(--navy);font-weight:500}
+  .vmain span{font-size:12px;color:var(--mut)}
+  .visit.hl{background:#fbf1d8;border-color:var(--gold)}
+  .tiles{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:14px}
+  .tile{background:#fff;border:1px solid #ece6db;border-radius:12px;padding:13px;position:relative}
+  .tile i{font-size:21px;color:var(--navy)}
+  .tile .tlb{display:block;font-size:13px;color:var(--navy);font-weight:500;margin-top:7px}
+  .tile .tsb{font-size:11.5px;color:var(--mut)}
+  .badge{position:absolute;top:11px;right:11px;background:var(--gold);color:var(--navy);font-size:11px;font-weight:500;border-radius:11px;padding:1px 8px}
+  .livedot{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:#0f6e56;font-weight:500;margin-top:7px}
+  .livedot .d{width:7px;height:7px;border-radius:50%;background:#5DCAA5}
+</style>
+</head>
+<body>
+  <div class="head">
+    <p class="e">Godwins Family Care · Private Home Care</p>
+    <h1>PHCP Portal Prototype</h1>
+    <p>The PHCP spine: the enrollment gate, the unlocked client dashboard, the family monitoring view, and the staff care-match. Brand: navy #033D50, gold #F5CD85, cream #FAF7F2, Cormorant Garamond + DM Sans.</p>
+  </div>
+  <div class="board">
+
+    <div class="col">
+      <p class="eyebrow">Client portal · the gate</p>
+      <div class="phone"><div class="screen">
+        <div class="sbar"><span>9:41</span><span class="dots">&#9679;&#9679;&#9679;&#9679;&#9679; 5G</span></div>
+        <div class="hdr"><i class="ti ti-chevron-left"></i><span class="ttl">My Care Portal</span><i class="ti ti-menu-2"></i></div>
+        <div class="body">
+          <h3>Welcome, Margaret</h3>
+          <p class="sub">Let's finish setting up your care.</p>
+          <div class="lockcard"><i class="ti ti-lock"></i><div><b>Your portal is locked</b><span>Finish enrollment to open your care plan, visits, and messages.</span></div></div>
+          <div class="steps">
+            <div class="step"><span class="chip done"><i class="ti ti-check"></i></span>Assessment</div>
+            <div class="step" id="s-intake"><span class="chip now"><i class="ti ti-dots"></i></span>Intake details</div>
+            <div class="step off" id="s-consent"><span class="chip lk"><i class="ti ti-lock"></i></span>Consents &amp; signatures</div>
+            <div class="step off"><span class="chip lk"><i class="ti ti-lock"></i></span>Enrollment</div>
+          </div>
+          <button class="btn" id="gateBtn">Continue intake</button>
+          <div class="navlocks">
+            <span class="nl"><i class="ti ti-lock"></i>Care plan</span>
+            <span class="nl"><i class="ti ti-lock"></i>Visits</span>
+            <span class="nl"><i class="ti ti-lock"></i>Documents</span>
+            <span class="nl"><i class="ti ti-lock"></i>Messages</span>
+          </div>
+        </div>
+      </div></div>
+      <p class="cap">Nothing opens until intake and consents are signed.</p>
+    </div>
+
+    <div class="col">
+      <p class="eyebrow">Client portal · unlocked</p>
+      <div class="phone"><div class="screen">
+        <div class="sbar"><span>9:41</span><span class="dots">&#9679;&#9679;&#9679;&#9679;&#9679; 5G</span></div>
+        <div class="hdr"><span class="ttl">My Care</span><i class="ti ti-bell"></i></div>
+        <div class="body">
+          <h3>Good morning, Margaret</h3>
+          <p class="sub">Joelle arrives at 2:00 today.</p>
+          <div class="plan">
+            <div class="pe">Your care plan</div>
+            <div class="prow"><div class="av" style="background:#F5CD85">JT</div><div><div class="nm2">Joelle T., LPN-track</div><div class="rl">Your primary caregiver</div></div></div>
+            <span class="pill">Tier 2 &middot; Comprehensive</span>
+            <a class="plink">View full care plan &rarr;</a>
+          </div>
+          <p class="lbl">Upcoming visits</p>
+          <div class="visit"><span class="vt">Today<br>2:00 PM</span><div class="vmain"><b>Personal care</b><span>Joelle T.</span></div></div>
+          <div class="visit hl"><span class="vt">Wed<br>3:00 PM</span><div class="vmain"><b>Video check-in</b><span>Bethel, FNP</span></div></div>
+          <div class="visit"><span class="vt">Fri<br>9:00 AM</span><div class="vmain"><b>Personal care</b><span>Joelle T.</span></div></div>
+          <div class="tiles">
+            <div class="tile"><span class="badge">2</span><i class="ti ti-message"></i><span class="tlb">Messages</span><span class="tsb">From your care team</span></div>
+            <div class="tile"><i class="ti ti-file-text"></i><span class="tlb">Documents</span><span class="tsb">Consents signed</span></div>
+            <div class="tile"><i class="ti ti-users"></i><span class="tlb">Care team</span><span class="tsb">Joelle, Bethel +1</span></div>
+            <div class="tile"><i class="ti ti-device-tv"></i><span class="tlb">Continuous Care</span><span class="livedot"><span class="d"></span>Live</span></div>
+          </div>
+        </div>
+      </div></div>
+      <p class="cap">What opens once enrollment is complete.</p>
+    </div>
+
+    <div class="col">
+      <p class="eyebrow">Family view · monitoring</p>
+      <div class="phone"><div class="screen">
+        <div class="sbar"><span>9:41</span><span class="dots">&#9679;&#9679;&#9679;&#9679;&#9679; 5G</span></div>
+        <div class="hdr"><i class="ti ti-chevron-left"></i><span class="ttl">Mom &middot; Today</span><span class="live"><span class="d"></span>LIVE</span></div>
+        <div class="body">
+          <div class="banner"><span class="live"><span class="d"></span></span><div><b>Joelle arrived</b><br><span>9:02 AM &middot; check-in confirmed</span></div></div>
+          <p class="eyebrow">Today's care</p>
+          <div class="tl"><span class="t">9:15</span><b>Morning meds taken</b><span>Lisinopril, Metformin &middot; with breakfast</span></div>
+          <div class="tl"><span class="t">10:00</span><b>Walked 10 min in garden</b><span>Mood: bright. Steady on cane.</span></div>
+          <div class="tl"><span class="t">12:30</span><b>BP &amp; pulse logged</b><span>128/76 &middot; 72 bpm</span></div>
+          <div class="tl flag"><span class="t">12:05</span><b>Note from caregiver</b><span>Slightly more confused than yesterday &mdash; flagged to clinical.</span></div>
+          <div class="next"><span class="e">Next video check-in</span><b>Wed 3:00 PM</b><span>with Bethel, FNP</span></div>
+        </div>
+      </div></div>
+      <p class="cap">Family sees each visit as it happens. Opens only after ROI is signed.</p>
+    </div>
+
+    <div class="col">
+      <p class="eyebrow">Staff view · care match</p>
+      <div class="phone"><div class="screen">
+        <div class="sbar"><span>9:41</span><span class="dots">&#9679;&#9679;&#9679;&#9679;&#9679; 5G</span></div>
+        <div class="hdr"><i class="ti ti-chevron-left"></i><span class="ttl">Care Match</span><span class="r">MARGARET W.</span></div>
+        <div class="body">
+          <p class="lead">3 caregivers suited to this client</p>
+          <div class="cg sel"><div class="av" style="background:#F5CD85">JT</div><div class="info"><div class="nm">Joelle T., LPN-track</div><div class="mt">Dementia &middot; Overnight &middot; Marietta</div></div><div class="pct">98%</div></div>
+          <div class="tags"><span class="tag">&#10003; Clinical fit</span><span class="tag">&#10003; Personality</span><span class="tag">&#10003; Schedule</span><span class="tag">&#10003; 12 mi away</span></div>
+          <div class="cg alt"><div class="av" style="background:#CECBF6">AR</div><div class="info"><div class="nm">Adaeze R., CNA</div><div class="mt">Behavioral &middot; Days &middot; Smyrna</div></div><div class="pct">94%</div></div>
+          <div class="cg alt"><div class="av" style="background:#9FE1CB">MS</div><div class="info"><div class="nm">Marcus S., LPN-track</div><div class="mt">Post-stroke &middot; Nights &middot; Kennesaw</div></div><div class="pct">89%</div></div>
+          <button class="btn">Assign &amp; notify family</button>
+        </div>
+      </div></div>
+      <p class="cap">Staff match on clinical need, behavior, personality, schedule, continuity.</p>
+    </div>
+
+  </div>
+<script>
+  var b=document.getElementById('gateBtn');
+  if(b){b.addEventListener('click',function(){
+    var i=document.getElementById('s-intake'),c=document.getElementById('s-consent');
+    i.classList.add('off');i.querySelector('.chip').className='chip done';i.querySelector('.chip i').className='ti ti-check';
+    c.classList.remove('off');c.querySelector('.chip').className='chip now';c.querySelector('.chip i').className='ti ti-dots';
+    b.textContent='Continue to consents';
+  });}
+</script>
+</body>
+</html>
