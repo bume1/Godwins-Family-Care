@@ -2,6 +2,8 @@
 
 Converts the repo's service portal into the caregiver and clinician work area. Caregiver side is built now; clinician side is a placeholder until AWS/OpenEMR is connected. Aligns with the client portal, the matching schema, and the monitoring loop.
 
+**Visual reference:** `docs/prototype/caregiver-app-prototype.html` is the build target for these screens (Session 4); the staff Care Match screen is in `docs/prototype/phcp-portal-prototype.html`.
+
 ---
 
 ## 1. Two surfaces under one umbrella
