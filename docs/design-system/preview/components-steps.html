@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<!-- @dsCard group="Components" name="Step sequence" subtitle="Gold serif numerals 01 02 03" viewport="700x230" -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>GFC — Steps</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 28px; background: var(--gfc-cream); font-family: var(--font-sans); }
+  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+  .step { background: #fff; border-radius: 14px; padding: 22px; box-shadow: var(--shadow-sm); }
+  .num { font-family: var(--font-serif); font-size: 44px; line-height: 1; color: var(--gfc-gold); font-weight: 500; margin-bottom: 12px; display: block; }
+  h4 { font-family: var(--font-serif); font-size: 22px; color: var(--gfc-navy); margin: 0 0 6px; font-weight: 600; }
+  p { font-size: 15px; color: var(--gfc-ink-muted); margin: 0; line-height: 1.5; }
+</style>
+</head>
+<body>
+  <div class="steps">
+    <div class="step"><span class="num">01</span><h4>Free Consultation</h4><p>We talk through your loved one's needs — no pressure, no commitment.</p></div>
+    <div class="step"><span class="num">02</span><h4>In-Home Assessment</h4><p>We evaluate abilities, routines, and safety at home.</p></div>
+    <div class="step"><span class="num">03</span><h4>Personalized Plan</h4><p>A clinical care plan that coordinates with their medical team.</p></div>
+  </div>
+</body>
+</html>

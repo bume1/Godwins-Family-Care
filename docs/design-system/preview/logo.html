@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<!-- @dsCard group="Brand" name="Logo" subtitle="Wordmark on cream and on navy" viewport="700x220" -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>GFC — Logo</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 0; background: var(--gfc-cream); }
+  .wrap { display: grid; grid-template-columns: 1fr 1fr; height: 220px; }
+  .col { position: relative; display: flex; align-items: center; justify-content: center;
+    /* Transparent checkerboard so transparency is visible */
+    background-image:
+      linear-gradient(45deg, #e6dfd0 25%, transparent 25%),
+      linear-gradient(-45deg, #e6dfd0 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #e6dfd0 75%),
+      linear-gradient(-45deg, transparent 75%, #e6dfd0 75%);
+    background-size: 16px 16px;
+    background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+    background-color: var(--gfc-cream);
+  }
+  .col.dark {
+    background-image:
+      linear-gradient(45deg, #0a4d62 25%, transparent 25%),
+      linear-gradient(-45deg, #0a4d62 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #0a4d62 75%),
+      linear-gradient(-45deg, transparent 75%, #0a4d62 75%);
+    background-size: 16px 16px;
+    background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+    background-color: var(--gfc-navy);
+  }
+  .col img { height: 90px; display: block; }
+  .label { position: absolute; bottom: 12px; left: 16px; font: 600 11px var(--font-sans); letter-spacing: 0.18em; text-transform: uppercase; }
+  .col:not(.dark) .label { color: var(--gfc-ink-muted); }
+  .col.dark .label { color: rgba(255,255,255,0.72); }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="col"><img src="../assets/logo-full-color-transparent.png" alt="Godwins Family Care logo"><span class="label">Full mark · transparent</span></div>
+    <div class="col dark"><img src="../assets/logo-full-white-transparent.png" alt="Godwins Family Care white logo" style="height: 110px;"><span class="label">Full mark · white · for navy</span></div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<!-- @dsCard group="Spacing" name="Elevation" subtitle="Three navy-tinted shadow levels" viewport="700x180" -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>GFC — Elevation</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 36px; background: var(--gfc-cream); font-family: var(--font-sans); }
+  .row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+  .card { background: #fff; border-radius: 14px; padding: 28px 20px; text-align: center; }
+  .sm { box-shadow: var(--shadow-sm); }
+  .md { box-shadow: var(--shadow-md); }
+  .lg { box-shadow: var(--shadow-lg); }
+  .name { font-weight: 600; color: var(--gfc-navy); font-size: 14px; margin-bottom: 4px; }
+  .desc { font-size: 12px; color: var(--gfc-ink-muted); }
+</style>
+</head>
+<body>
+  <div class="row">
+    <div class="card sm"><div class="name">shadow-sm</div><div class="desc">Inputs, chips</div></div>
+    <div class="card md"><div class="name">shadow-md</div><div class="desc">Cards on cream</div></div>
+    <div class="card lg"><div class="name">shadow-lg</div><div class="desc">Floating CTAs</div></div>
+  </div>
+</body>
+</html>

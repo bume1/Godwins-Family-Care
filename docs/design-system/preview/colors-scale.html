@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<!-- @dsCard group="Colors" name="Color scales" subtitle="Navy and gold/cream extended scales" viewport="700x320" -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>GFC — Extended Palette</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 24px; background: var(--gfc-cream); font-family: var(--font-sans); }
+  .row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .group-label { font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase; font-weight: 600; color: var(--gfc-ink-muted); margin: 0 0 12px 4px; }
+  .swatch { border-radius: 12px; overflow: hidden; box-shadow: var(--shadow-sm); }
+  .chip { height: 70px; }
+  .meta { background: #fff; padding: 8px 10px; }
+  .name { font-weight: 600; color: var(--gfc-navy); font-size: 12px; display: block; }
+  .hex  { font-size: 10px; color: var(--gfc-ink-muted); font-variant-numeric: tabular-nums; }
+  .group { margin-bottom: 16px; }
+</style>
+</head>
+<body>
+  <div class="group">
+    <div class="group-label">Navy scale</div>
+    <div class="row">
+      <div class="swatch"><div class="chip" style="background: #022A38;"></div><div class="meta"><span class="name">Navy Deep</span><span class="hex">#022A38</span></div></div>
+      <div class="swatch"><div class="chip" style="background: #033D50;"></div><div class="meta"><span class="name">Navy</span><span class="hex">#033D50</span></div></div>
+      <div class="swatch"><div class="chip" style="background: #0A4F66;"></div><div class="meta"><span class="name">Navy Soft</span><span class="hex">#0A4F66</span></div></div>
+      <div class="swatch"><div class="chip" style="background: #1B2A33;"></div><div class="meta"><span class="name">Ink</span><span class="hex">#1B2A33</span></div></div>
+    </div>
+  </div>
+  <div class="group">
+    <div class="group-label">Gold + cream scale</div>
+    <div class="row">
+      <div class="swatch"><div class="chip" style="background: #C9A44A;"></div><div class="meta"><span class="name">Gold</span><span class="hex">#C9A44A</span></div></div>
+      <div class="swatch"><div class="chip" style="background: #F5CD85;"></div><div class="meta"><span class="name">Gold Light</span><span class="hex">#F5CD85</span></div></div>
+      <div class="swatch"><div class="chip" style="background: #F1E2BE;"></div><div class="meta"><span class="name">Gold Pale</span><span class="hex">#F1E2BE</span></div></div>
+      <div class="swatch"><div class="chip" style="background: #F2EBDD;"></div><div class="meta"><span class="name">Cream Warm</span><span class="hex">#F2EBDD</span></div></div>
+    </div>
+  </div>
+</body>
+</html>

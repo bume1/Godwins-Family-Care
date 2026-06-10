@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<!-- @dsCard group="Components" name="Feature list" subtitle="Gold ✓ checks with two-line items" viewport="700x220" -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>GFC — Feature List</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 28px; background: var(--gfc-cream); font-family: var(--font-sans); }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 32px; }
+  .item { display: flex; gap: 12px; align-items: flex-start; }
+  .check { color: var(--gfc-gold); font-size: 22px; line-height: 1.2; flex-shrink: 0; font-weight: 600; }
+  .text { font-size: 17px; color: var(--gfc-ink); line-height: 1.5; }
+  .text strong { color: var(--gfc-navy); font-weight: 600; display: block; margin-bottom: 2px; }
+</style>
+</head>
+<body>
+  <div class="grid">
+    <div class="item"><span class="check">✓</span><span class="text"><strong>Same caregiver, every visit</strong>Critical for cognitive decline.</span></div>
+    <div class="item"><span class="check">✓</span><span class="text"><strong>Physician &amp; FNP-owned</strong>Medical training drives every decision.</span></div>
+    <div class="item"><span class="check">✓</span><span class="text"><strong>Around-the-clock</strong>Nights, weekends, holidays.</span></div>
+    <div class="item"><span class="check">✓</span><span class="text"><strong>Full care coordination</strong>Direct contact with their entire team.</span></div>
+  </div>
+</body>
+</html>

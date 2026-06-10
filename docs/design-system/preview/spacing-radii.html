@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<!-- @dsCard group="Spacing" name="Spacing & radii" subtitle="8pt scale and rounded corner system" viewport="700x220" -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>GFC — Spacing & Radii</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 24px; background: var(--gfc-cream); font-family: var(--font-sans); }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  .panel { background: #fff; border-radius: 14px; padding: 20px; box-shadow: var(--shadow-sm); }
+  .lab { font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--gfc-ink-muted); font-weight: 600; margin-bottom: 14px; }
+  .sp-row { display: flex; align-items: flex-end; gap: 12px; }
+  .sp { background: var(--gfc-gold-pale); border-radius: 4px; }
+  .sp-name { font-size: 11px; color: var(--gfc-ink-muted); text-align: center; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .rad-row { display: flex; gap: 12px; align-items: flex-end; }
+  .rad { width: 60px; height: 60px; background: var(--gfc-navy); }
+  .rad + .sp-name { display: block; }
+  .rad-item { text-align: center; }
+</style>
+</head>
+<body>
+  <div class="grid">
+    <div class="panel">
+      <div class="lab">Spacing scale (8pt)</div>
+      <div class="sp-row">
+        <div><div class="sp" style="width: 4px;  height: 4px;"></div><div class="sp-name">4</div></div>
+        <div><div class="sp" style="width: 8px;  height: 8px;"></div><div class="sp-name">8</div></div>
+        <div><div class="sp" style="width: 12px; height: 12px;"></div><div class="sp-name">12</div></div>
+        <div><div class="sp" style="width: 16px; height: 16px;"></div><div class="sp-name">16</div></div>
+        <div><div class="sp" style="width: 24px; height: 24px;"></div><div class="sp-name">24</div></div>
+        <div><div class="sp" style="width: 32px; height: 32px;"></div><div class="sp-name">32</div></div>
+        <div><div class="sp" style="width: 48px; height: 48px;"></div><div class="sp-name">48</div></div>
+        <div><div class="sp" style="width: 64px; height: 64px;"></div><div class="sp-name">64</div></div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="lab">Corner radii</div>
+      <div class="rad-row">
+        <div class="rad-item"><div class="rad" style="border-radius: 4px;"></div><div class="sp-name">xs · 4</div></div>
+        <div class="rad-item"><div class="rad" style="border-radius: 8px;"></div><div class="sp-name">sm · 8</div></div>
+        <div class="rad-item"><div class="rad" style="border-radius: 14px;"></div><div class="sp-name">md · 14</div></div>
+        <div class="rad-item"><div class="rad" style="border-radius: 20px;"></div><div class="sp-name">lg · 20</div></div>
+        <div class="rad-item"><div class="rad" style="border-radius: 999px;"></div><div class="sp-name">pill</div></div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

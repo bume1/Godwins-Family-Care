@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<!-- @dsCard group="Components" name="Service tier card" subtitle="Gold rule + tier label + price/duration" viewport="700x280" -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>GFC — Service Tier Card</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 28px; background: var(--gfc-cream); font-family: var(--font-sans); }
+  .card { background: #fff; border-radius: 20px; padding: 28px; box-shadow: var(--shadow-md); max-width: 620px; }
+  .rule { width: 36px; height: 2px; background: var(--gfc-gold); margin-bottom: 14px; }
+  .tier { font: 600 12px var(--font-sans); letter-spacing: 0.2em; text-transform: uppercase; color: var(--gfc-gold); }
+  h3 { font-family: var(--font-serif); font-size: 30px; font-weight: 600; color: var(--gfc-navy); margin: 6px 0 10px; line-height: 1.1; }
+  .desc { font-size: 16px; color: var(--gfc-ink); line-height: 1.55; margin: 0 0 14px; }
+  .meta { display: flex; justify-content: space-between; align-items: center; padding-top: 14px; border-top: 1px solid var(--gfc-line); font-size: 14px; }
+  .meta strong { color: var(--gfc-navy); font-weight: 600; }
+  .price { font-family: var(--font-serif); font-size: 22px; color: var(--gfc-navy); }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="rule"></div>
+    <span class="tier">Tier 03 · Specialty</span>
+    <h3>Behavioral Support &amp; Cognitive Wellness</h3>
+    <p class="desc">Specialized dementia and Alzheimer's care. Behavioral observation, crisis de-escalation, cognitive activities, safety planning, and full coordination with the medical team.</p>
+    <div class="meta">
+      <span><strong>4-hour</strong> minimum visits</span>
+      <span class="price">$36–$42<span style="font-size:14px; font-family: var(--font-sans); color: var(--gfc-ink-muted);">/hr</span></span>
+    </div>
+  </div>
+</body>
+</html>

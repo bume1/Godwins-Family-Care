@@ -1,0 +1,1670 @@
+<!DOCTYPE html>
+<!-- @dsCard group="UI Kit — Website V2" name="Website v2 — Clinical Document" subtitle="Newspaper-grade reference document: numbered sections, ruled tables, founder-forward, referral-partner depth" -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Godwins Family Care — Atlanta's clinician-led private home care.</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500;1,600&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link rel="icon" href="../../../assets/logo-mark-transparent.png">
+<style>
+  :root {
+    --navy: #033D50;
+    --navy-deep: #022a37;
+    --navy-soft: #1a4d61;
+    --gold: #c9a44a;
+    --gold-light: #F5CD85;
+    --gold-pale: #fbf6e9;
+    --paper: #FBF8F2;
+    --paper-deep: #f3ede2;
+    --ink: #15252d;
+    --ink-soft: #2d3d45;
+    --ink-mute: #5a6a72;
+    --rule: #d8cdb8;
+    --rule-strong: #968a73;
+    --serif: 'Cormorant Garamond', Georgia, serif;
+    --sans: 'DM Sans', system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  img { max-width: 100%; display: block; }
+  a { color: inherit; }
+
+  .container { max-width: 1280px; margin: 0 auto; padding: 0 40px; }
+  @media (max-width: 880px) { .container { padding: 0 24px; } }
+
+  /* ============ TOP RULE ============ */
+  .top-rule {
+    background: var(--navy);
+    color: #fff;
+    font: 500 11px var(--sans);
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    padding: 8px 0;
+  }
+  .top-rule .container {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .top-rule .col {
+    display: flex; gap: 18px; align-items: center;
+    color: rgba(255,255,255,0.8);
+  }
+  .top-rule .col a { text-decoration: none; color: #fff; }
+  .top-rule .col .dot { color: var(--gold-light); }
+
+  /* ============ HEADER ============ */
+  .site-header {
+    background: var(--paper);
+    border-bottom: 1px solid var(--rule);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .site-header.is-stuck {
+    box-shadow: 0 4px 16px -8px rgba(3,61,80,0.15);
+  }
+  .header-inner {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 22px 0; gap: 24px;
+  }
+  .brand-link {
+    display: flex; align-items: center; gap: 16px;
+    text-decoration: none;
+  }
+  .brand-link img { height: 56px; width: auto; }
+  .brand-link .wordmark-block { line-height: 1; }
+  .brand-link .wordmark {
+    font-family: var(--serif);
+    font-size: 26px; font-weight: 600;
+    color: var(--navy);
+    letter-spacing: -0.005em;
+    line-height: 1.05;
+    display: block;
+  }
+  .brand-link .wordmark-sub {
+    display: block;
+    font: 500 10px var(--sans);
+    color: var(--ink-mute);
+    letter-spacing: 0.32em;
+    text-transform: uppercase;
+    margin-top: 6px;
+  }
+  .nav { display: none; gap: 28px; }
+  @media (min-width: 1100px) { .nav { display: flex; } }
+  .nav a {
+    font: 500 13px var(--sans); color: var(--navy);
+    text-decoration: none; letter-spacing: 0.03em;
+    transition: color .2s;
+    text-transform: uppercase;
+  }
+  .nav a:hover { color: var(--gold); }
+  .header-cta {
+    display: flex; align-items: center; gap: 14px;
+  }
+  .tel-link {
+    display: none; gap: 4px; flex-direction: column;
+    text-decoration: none;
+    text-align: right;
+  }
+  @media (min-width: 720px) { .tel-link { display: flex; } }
+  .tel-link span:first-child {
+    font: 600 10px var(--sans); color: var(--ink-mute);
+    letter-spacing: 0.22em; text-transform: uppercase;
+  }
+  .tel-link span:last-child {
+    font-family: var(--serif); font-size: 22px;
+    color: var(--navy); font-weight: 600;
+  }
+
+  /* ============ BUTTONS ============ */
+  .btn {
+    display: inline-flex; align-items: center; gap: 10px;
+    padding: 13px 22px;
+    font: 600 12px var(--sans);
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    border: 0; cursor: pointer;
+    text-decoration: none;
+    transition: all .2s cubic-bezier(.22,1,.36,1);
+    white-space: nowrap;
+  }
+  .btn-navy { background: var(--navy); color: #fff; }
+  .btn-navy:hover { background: var(--navy-deep); }
+  .btn-gold { background: var(--gold); color: var(--navy); }
+  .btn-gold:hover { background: #b89139; }
+  .btn-outline { background: transparent; color: var(--navy); box-shadow: inset 0 0 0 1.5px var(--navy); }
+  .btn-outline:hover { background: var(--navy); color: #fff; }
+  .btn-ghost-light { background: transparent; color: #fff; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.4); }
+  .btn-ghost-light:hover { background: rgba(255,255,255,0.08); }
+  .btn-lg { padding: 16px 26px; font-size: 12px; }
+  .btn-sm { padding: 10px 16px; font-size: 11px; }
+
+  /* ============ SECTION KICKER (numbered) ============ */
+  .section-num {
+    display: flex; align-items: baseline; gap: 16px;
+    margin-bottom: 24px;
+    padding-bottom: 18px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .section-num .num {
+    font-family: var(--serif); font-style: italic;
+    font-weight: 500; font-size: 32px;
+    color: var(--gold); line-height: 1;
+  }
+  .section-num .label {
+    font: 600 12px var(--sans);
+    letter-spacing: 0.32em; text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+
+  .section-h2 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: clamp(40px, 4.6vw, 64px);
+    line-height: 1.04;
+    letter-spacing: -0.012em;
+    color: var(--navy);
+    margin-bottom: 20px;
+    text-wrap: balance;
+    max-width: 920px;
+  }
+  .section-h2 .ital {
+    font-style: italic; color: var(--gold); font-weight: 600;
+  }
+  .section-lead {
+    font-size: 19px;
+    line-height: 1.55;
+    color: var(--ink-soft);
+    max-width: 760px;
+  }
+
+  /* ============ HERO MASTHEAD ============ */
+  .masthead {
+    border-bottom: 2px solid var(--navy);
+    padding: 56px 0 0;
+  }
+  .masthead-grid {
+    display: grid;
+    grid-template-columns: 1.4fr 1fr;
+    gap: 56px;
+    align-items: end;
+    padding-bottom: 56px;
+  }
+  .masthead-issue {
+    font: 600 11px var(--sans);
+    letter-spacing: 0.32em; text-transform: uppercase;
+    color: var(--ink-mute);
+    display: flex; align-items: center; gap: 14px;
+    margin-bottom: 28px;
+  }
+  .masthead-issue .gold-rule {
+    width: 48px; height: 1px; background: var(--gold);
+  }
+  .masthead-title {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: clamp(56px, 7vw, 108px);
+    line-height: 0.92;
+    letter-spacing: -0.024em;
+    color: var(--navy);
+    margin-bottom: 28px;
+  }
+  .masthead-title .ital { font-style: italic; color: var(--gold); font-weight: 600; }
+  .masthead-deck {
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 24px;
+    line-height: 1.5;
+    color: var(--ink-soft);
+    border-left: 3px solid var(--gold);
+    padding-left: 22px;
+    max-width: 600px;
+    margin-bottom: 36px;
+  }
+  .masthead-actions {
+    display: flex; gap: 14px; flex-wrap: wrap;
+  }
+  .masthead-side {
+    border: 1px solid var(--rule);
+    background: #fff;
+    padding: 28px;
+  }
+  .masthead-side-eyebrow {
+    font: 600 10px var(--sans);
+    letter-spacing: 0.32em; text-transform: uppercase;
+    color: var(--gold); margin-bottom: 14px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .masthead-side h4 {
+    font-family: var(--serif); font-size: 24px;
+    font-weight: 500; color: var(--navy);
+    line-height: 1.15; margin-bottom: 14px;
+  }
+  .masthead-side ul {
+    list-style: none;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .masthead-side li {
+    display: grid; grid-template-columns: 22px 1fr; gap: 10px;
+    font-size: 14px; line-height: 1.45;
+    color: var(--ink-soft);
+  }
+  .masthead-side li::before {
+    content: "→"; color: var(--gold); font-weight: 700;
+  }
+
+  /* ============ MASTHEAD BANNER (image) ============ */
+  .masthead-banner {
+    height: 480px;
+    overflow: hidden;
+    position: relative;
+    border-bottom: 1px solid var(--rule);
+  }
+  .masthead-banner img {
+    width: 100%; height: 100%; object-fit: cover;
+  }
+  .masthead-caption {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    background: linear-gradient(to top, rgba(3,61,80,0.92), transparent);
+    color: #fff;
+    padding: 64px 0 28px;
+  }
+  .masthead-caption .container {
+    display: flex; justify-content: space-between;
+    align-items: flex-end; flex-wrap: wrap; gap: 20px;
+  }
+  .masthead-caption-quote {
+    font-family: var(--serif); font-style: italic;
+    font-size: 22px; line-height: 1.4;
+    max-width: 600px; color: rgba(255,255,255,0.95);
+  }
+  .masthead-caption-attr {
+    font: 600 11px var(--sans);
+    letter-spacing: 0.32em; text-transform: uppercase;
+    color: var(--gold-light);
+  }
+  @media (max-width: 980px) {
+    .masthead-grid { grid-template-columns: 1fr; gap: 40px; }
+    .masthead-banner { height: 320px; }
+  }
+
+  /* ============ FOUNDER BAR ============ */
+  .founder-bar {
+    background: var(--paper-deep);
+    border-bottom: 1px solid var(--rule);
+    padding: 36px 0;
+  }
+  .founder-bar-inner {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    gap: 56px;
+    align-items: center;
+  }
+  .founder-bar-divider {
+    width: 1px; height: 80px;
+    background: var(--rule-strong);
+  }
+  .founder-mini {
+    display: grid;
+    grid-template-columns: 72px 1fr;
+    gap: 18px;
+    align-items: center;
+  }
+  .founder-mini-photo {
+    width: 72px; height: 72px;
+    border-radius: 50%;
+    background: var(--paper);
+    overflow: hidden;
+  }
+  .founder-mini-photo img { width: 100%; height: 100%; object-fit: cover; }
+  .founder-mini-name {
+    font-family: var(--serif); font-size: 22px;
+    color: var(--navy); font-weight: 600;
+    line-height: 1.1;
+  }
+  .founder-mini-creds {
+    font: 500 11px var(--sans);
+    letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--gold); margin-top: 4px;
+  }
+  .founder-mini-role {
+    font-family: var(--serif); font-style: italic;
+    font-size: 14px; color: var(--ink-mute);
+    margin-top: 2px;
+  }
+  @media (max-width: 880px) {
+    .founder-bar-inner { grid-template-columns: 1fr; gap: 24px; }
+    .founder-bar-divider { display: none; }
+  }
+
+  /* ============ SECTION ============ */
+  section { position: relative; }
+  .section-pad { padding: 96px 0; }
+
+  /* ============ INTRO ============ */
+  .intro-cols {
+    display: grid;
+    grid-template-columns: 0.4fr 1.6fr;
+    gap: 56px;
+    padding: 96px 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .intro-cols .lhs {
+    font: 500 11px var(--sans);
+    letter-spacing: 0.32em; text-transform: uppercase;
+    color: var(--gold);
+  }
+  .intro-cols-body {
+    columns: 2; column-gap: 48px;
+    font-size: 17px;
+    line-height: 1.65;
+    color: var(--ink);
+  }
+  .intro-cols-body p { margin-bottom: 14px; break-inside: avoid; }
+  .intro-cols-body p:first-child::first-letter {
+    font-family: var(--serif);
+    font-size: 64px;
+    font-weight: 500;
+    line-height: 0.85;
+    color: var(--gold);
+    float: left;
+    margin: 6px 8px 0 0;
+  }
+  @media (max-width: 880px) {
+    .intro-cols { grid-template-columns: 1fr; gap: 24px; padding: 64px 0; }
+    .intro-cols-body { columns: 1; }
+  }
+
+  /* ============ FOUNDATION CALLOUT ============ */
+  .foundation-section { padding: 64px 0; border-bottom: 1px solid var(--rule); }
+  .foundation {
+    background: var(--navy);
+    color: #fff;
+    padding: 52px 56px;
+    position: relative;
+  }
+  .foundation::before {
+    content: ""; position: absolute;
+    top: 0; left: 0; width: 6px; height: 100%;
+    background: var(--gold);
+  }
+  .foundation-grid {
+    display: grid;
+    grid-template-columns: 1fr 2fr;
+    gap: 48px;
+    align-items: start;
+  }
+  .foundation-eyebrow {
+    font: 600 11px var(--sans);
+    letter-spacing: 0.32em; text-transform: uppercase;
+    color: var(--gold-light); margin-bottom: 14px;
+  }
+  .foundation h3 {
+    font-family: var(--serif); font-size: 40px;
+    font-weight: 500; line-height: 1.05;
+    margin-bottom: 14px;
+  }
+  .foundation .lead {
+    color: rgba(255,255,255,0.88);
+    font-family: var(--serif); font-style: italic;
+    font-size: 19px; line-height: 1.5;
+  }
+  .foundation-list {
+    list-style: none;
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 24px 32px;
+  }
+  .foundation-list li {
+    border-top: 1px solid rgba(245,205,133,0.3);
+    padding-top: 14px;
+    color: rgba(255,255,255,0.9);
+    font-size: 15px; line-height: 1.5;
+  }
+  .foundation-list li strong {
+    display: block;
+    font: 600 11px var(--sans);
+    letter-spacing: 0.22em; text-transform: uppercase;
+    color: var(--gold-light);
+    margin-bottom: 6px;
+  }
+  @media (max-width: 880px) {
+    .foundation { padding: 36px 32px; }
+    .foundation-grid { grid-template-columns: 1fr; gap: 32px; }
+    .foundation h3 { font-size: 30px; }
+    .foundation-list { grid-template-columns: 1fr; }
+  }
+
+  /* ============ TRACKS ============ */
+  .tracks-section { padding: 96px 0; }
+  .tracks-header {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 40px;
+    align-items: end;
+    margin-bottom: 56px;
+    padding-bottom: 40px;
+    border-bottom: 2px solid var(--navy);
+  }
+  .legend {
+    display: flex; gap: 32px;
+    font: 500 11px var(--sans);
+    letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--ink-mute);
+  }
+  .legend-key {
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  .legend-key .swatch {
+    width: 12px; height: 12px; display: inline-block;
+  }
+  .swatch.a { background: var(--gold); }
+  .swatch.b { background: var(--navy); }
+  @media (max-width: 880px) { .tracks-header { grid-template-columns: 1fr; gap: 16px; } }
+
+  .track-block {
+    margin-bottom: 64px;
+  }
+  .track-banner {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    align-items: stretch;
+    border: 1px solid var(--rule);
+    background: #fff;
+    margin-bottom: 0;
+  }
+  .track-banner-text {
+    padding: 40px 44px;
+    display: flex; flex-direction: column;
+    justify-content: center;
+  }
+  .track-id {
+    display: flex; align-items: baseline; gap: 14px;
+    margin-bottom: 14px;
+  }
+  .track-id .letter {
+    font-family: var(--serif); font-style: italic;
+    font-weight: 600;
+    font-size: 80px; line-height: 0.85;
+    color: var(--gold);
+  }
+  .track-id .meta {
+    font: 600 11px var(--sans);
+    letter-spacing: 0.28em; text-transform: uppercase;
+    color: var(--ink-soft);
+    line-height: 1.4;
+  }
+  .track-id .meta strong {
+    color: var(--navy); display: block; font-weight: 700; font-size: 12px;
+  }
+  .track-banner-text h3 {
+    font-family: var(--serif);
+    font-size: 36px; font-weight: 500;
+    color: var(--navy); line-height: 1.1;
+    margin-bottom: 12px;
+  }
+  .track-banner-text .scope {
+    font-family: var(--serif); font-style: italic;
+    font-size: 17px; line-height: 1.5;
+    color: var(--ink-soft);
+  }
+  .track-banner-image { overflow: hidden; min-height: 280px; }
+  .track-banner-image img {
+    width: 100%; height: 100%;
+    object-fit: cover;
+  }
+
+  .level-table {
+    border: 1px solid var(--rule);
+    border-top: 0;
+    background: #fff;
+  }
+  .level-row {
+    display: grid;
+    grid-template-columns: 88px 1.2fr 2fr 1.4fr;
+    gap: 32px;
+    padding: 28px 32px;
+    border-top: 1px solid var(--rule);
+    align-items: start;
+  }
+  .level-row:first-child { border-top: 0; }
+  .level-code {
+    font-family: var(--serif); font-style: italic;
+    font-weight: 600;
+    font-size: 38px;
+    color: var(--gold);
+    line-height: 1;
+  }
+  .level-name {
+    font-family: var(--serif);
+    font-size: 22px; font-weight: 600;
+    color: var(--navy);
+    line-height: 1.2;
+  }
+  .level-name .scope {
+    display: block;
+    font: 500 10px var(--sans);
+    letter-spacing: 0.22em; text-transform: uppercase;
+    color: var(--gold);
+    margin-top: 8px;
+    font-style: normal;
+  }
+  .level-includes {
+    font-size: 14.5px;
+    line-height: 1.55;
+    color: var(--ink);
+  }
+  .level-includes strong { color: var(--navy); font-weight: 600; }
+  .level-fit {
+    background: var(--paper-deep);
+    padding: 16px 20px;
+    font-family: var(--serif); font-style: italic;
+    font-size: 14.5px; line-height: 1.5;
+    color: var(--ink);
+    border-left: 2px solid var(--gold);
+  }
+  .level-fit::before {
+    content: "Where do I fit?";
+    display: block;
+    font-family: var(--sans); font-style: normal;
+    font-weight: 700; font-size: 9px;
+    letter-spacing: 0.28em; text-transform: uppercase;
+    color: var(--gold);
+    margin-bottom: 6px;
+  }
+  @media (max-width: 1080px) {
+    .level-row { grid-template-columns: 60px 1fr; gap: 18px 16px; }
+    .level-includes, .level-fit { grid-column: 1 / -1; }
+    .track-banner { grid-template-columns: 1fr; }
+    .track-banner-image { min-height: 200px; }
+  }
+
+  /* ============ COORD VS CASE MGMT TABLE ============ */
+  .coord-section {
+    padding: 96px 0;
+    background: var(--paper-deep);
+    border-top: 2px solid var(--navy);
+    border-bottom: 2px solid var(--navy);
+  }
+  .matrix {
+    border: 1px solid var(--rule-strong);
+    background: #fff;
+    margin-top: 56px;
+  }
+  .matrix-header {
+    display: grid;
+    grid-template-columns: 220px repeat(3, 1fr);
+    background: var(--navy);
+    color: #fff;
+  }
+  .matrix-header > div {
+    padding: 22px 24px;
+    border-right: 1px solid rgba(255,255,255,0.15);
+  }
+  .matrix-header > div:last-child { border-right: 0; }
+  .matrix-header h3 {
+    font-family: var(--serif);
+    font-size: 22px; font-weight: 500;
+    line-height: 1.15;
+    margin-bottom: 6px;
+  }
+  .matrix-header .role-tag {
+    font: 700 9px var(--sans);
+    letter-spacing: 0.28em; text-transform: uppercase;
+    color: var(--gold-light);
+    margin-bottom: 8px;
+    display: block;
+  }
+  .matrix-header .blank {
+    background: var(--navy-deep);
+    font: 600 11px var(--sans);
+    letter-spacing: 0.32em; text-transform: uppercase;
+    color: var(--gold-light);
+    align-self: end;
+    text-align: right;
+  }
+  .matrix-row {
+    display: grid;
+    grid-template-columns: 220px repeat(3, 1fr);
+    border-top: 1px solid var(--rule);
+  }
+  .matrix-row > div {
+    padding: 24px;
+    border-right: 1px solid var(--rule);
+    font-size: 14px;
+    line-height: 1.55;
+    color: var(--ink-soft);
+  }
+  .matrix-row > div:last-child { border-right: 0; }
+  .matrix-row .row-label {
+    background: var(--paper-deep);
+    font: 700 11px var(--sans);
+    letter-spacing: 0.22em; text-transform: uppercase;
+    color: var(--navy);
+  }
+  .matrix-row .check {
+    color: var(--gold);
+    font-family: var(--serif); font-size: 28px;
+    font-style: italic; font-weight: 600;
+    display: block; margin-bottom: 6px; line-height: 1;
+  }
+  .matrix-row .ex {
+    font-family: var(--serif); font-style: italic;
+    color: var(--ink); font-size: 14.5px;
+  }
+  .matrix-row .ex strong {
+    display: block;
+    font-family: var(--sans); font-style: normal; font-weight: 700;
+    font-size: 9px; letter-spacing: 0.28em; text-transform: uppercase;
+    color: var(--gold); margin-bottom: 6px;
+  }
+  @media (max-width: 1080px) {
+    .matrix-header, .matrix-row { grid-template-columns: 1fr; }
+    .matrix-header > div, .matrix-row > div { border-right: 0; border-bottom: 1px solid var(--rule); }
+    .matrix-header .blank { display: none; }
+  }
+
+  /* ============ CCP ============ */
+  .ccp-section { padding: 96px 0; border-bottom: 1px solid var(--rule); }
+  .ccp-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 0;
+    margin-top: 56px;
+    border-top: 2px solid var(--navy);
+    border-bottom: 2px solid var(--navy);
+  }
+  .ccp-block {
+    padding: 36px 32px;
+    border-right: 1px solid var(--rule);
+    display: flex; flex-direction: column;
+    background: #fff;
+  }
+  .ccp-block:last-child { border-right: 0; }
+  .ccp-block.future { background: var(--paper); }
+  .ccp-phase {
+    font: 700 10px var(--sans);
+    letter-spacing: 0.32em; text-transform: uppercase;
+    color: var(--gold);
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--rule);
+    margin-bottom: 20px;
+    display: flex; justify-content: space-between;
+    align-items: center;
+  }
+  .ccp-phase .timing {
+    color: var(--ink-mute);
+    font-weight: 500;
+  }
+  .ccp-block h3 {
+    font-family: var(--serif);
+    font-size: 26px; font-weight: 500;
+    color: var(--navy); line-height: 1.15;
+    margin-bottom: 8px;
+  }
+  .ccp-delivery {
+    font: 500 11px var(--sans);
+    letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--ink-mute); margin-bottom: 16px;
+  }
+  .ccp-block p {
+    font-size: 15px; line-height: 1.6;
+    color: var(--ink-soft);
+    margin-bottom: 16px;
+  }
+  .ccp-block ul {
+    list-style: none;
+    display: flex; flex-direction: column; gap: 10px;
+    margin-bottom: 18px;
+    flex: 1;
+  }
+  .ccp-block li {
+    font-size: 14px; line-height: 1.5;
+    padding-left: 18px; position: relative;
+    color: var(--ink-soft);
+  }
+  .ccp-block li::before {
+    content: "·"; position: absolute;
+    left: 4px; top: 4px; line-height: 1;
+    color: var(--gold); font-weight: 700;
+    font-size: 22px;
+  }
+  .ccp-block .price {
+    font-family: var(--serif); font-style: italic;
+    font-size: 15px; color: var(--ink-soft);
+    border-top: 1px solid var(--rule);
+    padding-top: 16px;
+    margin-top: auto;
+  }
+  @media (max-width: 1080px) {
+    .ccp-grid { grid-template-columns: 1fr; }
+    .ccp-block { border-right: 0; border-bottom: 1px solid var(--rule); }
+    .ccp-block:last-child { border-bottom: 0; }
+  }
+
+  /* ============ PROCESS ============ */
+  .process-section { padding: 96px 0; background: var(--paper-deep); border-bottom: 1px solid var(--rule); }
+  .process-list {
+    list-style: none;
+    border-top: 2px solid var(--navy);
+    border-bottom: 2px solid var(--navy);
+    margin-top: 56px;
+  }
+  .process-step {
+    display: grid;
+    grid-template-columns: 100px 240px 1fr auto;
+    gap: 32px;
+    padding: 28px 32px;
+    border-top: 1px solid var(--rule);
+    align-items: center;
+  }
+  .process-step:first-child { border-top: 0; }
+  .process-step .step-num {
+    font-family: var(--serif); font-style: italic;
+    font-weight: 600;
+    font-size: 56px;
+    color: var(--gold);
+    line-height: 1;
+  }
+  .process-step h3 {
+    font-family: var(--serif); font-size: 24px;
+    font-weight: 600; color: var(--navy);
+    line-height: 1.15;
+  }
+  .process-step p {
+    font-size: 15px; color: var(--ink-soft);
+    line-height: 1.55;
+  }
+  .step-meta {
+    font: 600 10px var(--sans);
+    letter-spacing: 0.28em; text-transform: uppercase;
+    color: var(--ink-mute);
+    text-align: right;
+  }
+  .step-meta strong { color: var(--navy); display: block; font-weight: 700; }
+  @media (max-width: 880px) {
+    .process-step { grid-template-columns: 60px 1fr; gap: 16px; padding: 24px; }
+    .process-step h3 { grid-column: 2; }
+    .process-step p { grid-column: 1 / -1; }
+    .step-meta { display: none; }
+  }
+
+  /* ============ TESTIMONIALS ============ */
+  .testimonials {
+    background: var(--navy);
+    color: #fff;
+    padding: 96px 0;
+  }
+  .testimonials .section-h2 { color: #fff; }
+  .testimonials .section-h2 .ital { color: var(--gold-light); }
+  .testimonials .section-num { border-bottom-color: rgba(255,255,255,0.18); }
+  .testimonials .section-num .label { color: rgba(255,255,255,0.75); }
+  .testimonials .section-num .num { color: var(--gold-light); }
+  .quote-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 40px;
+    margin-top: 56px;
+    border-top: 1px solid rgba(255,255,255,0.15);
+    padding-top: 56px;
+  }
+  .quote-mark {
+    font-family: var(--serif);
+    font-size: 80px; line-height: 0.4;
+    color: var(--gold-light);
+    display: block; height: 24px;
+    font-weight: 600;
+  }
+  .quote blockquote {
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 22px; line-height: 1.4;
+    color: #fff; margin: 18px 0 24px;
+  }
+  .quote figcaption strong {
+    color: #fff; font-weight: 600; font-size: 14px;
+    display: block;
+    border-top: 1px solid rgba(245,205,133,0.4);
+    padding-top: 14px;
+  }
+  .quote figcaption span {
+    color: var(--gold-light);
+    font-size: 11px; letter-spacing: 0.22em;
+    text-transform: uppercase; font-weight: 500;
+  }
+  @media (max-width: 980px) { .quote-grid { grid-template-columns: 1fr; } }
+
+  /* ============ AREA + PAYMENT (split) ============ */
+  .ledger-section {
+    padding: 96px 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .ledger-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 80px;
+  }
+  .ledger-col h3 {
+    font-family: var(--serif);
+    font-size: 36px; font-weight: 500;
+    color: var(--navy);
+    margin-bottom: 14px;
+    line-height: 1.05;
+  }
+  .ledger-col h3 .ital { font-style: italic; color: var(--gold); font-weight: 600; }
+  .ledger-col .lead {
+    font-size: 16px; line-height: 1.6;
+    color: var(--ink-soft);
+    margin-bottom: 28px;
+    max-width: 480px;
+  }
+  .area-pills {
+    display: flex; flex-wrap: wrap; gap: 8px;
+    margin-bottom: 24px;
+  }
+  .area-pill {
+    padding: 11px 20px;
+    border: 1px solid var(--rule-strong);
+    color: var(--navy);
+    background: #fff;
+    font: 600 13px var(--sans);
+    letter-spacing: 0.04em;
+  }
+  .area-pill.primary {
+    background: var(--navy); color: #fff;
+    border-color: var(--navy);
+  }
+  .area-note {
+    font-family: var(--serif); font-style: italic;
+    font-size: 15px; color: var(--ink-mute);
+    border-top: 1px solid var(--rule);
+    padding-top: 18px;
+  }
+
+  .payment-tile {
+    background: #fff;
+    border: 1px solid var(--rule);
+    margin-bottom: 16px;
+  }
+  .payment-tile-head {
+    background: var(--paper-deep);
+    padding: 18px 22px;
+    border-bottom: 1px solid var(--rule);
+    display: flex; justify-content: space-between;
+    align-items: center; flex-wrap: wrap; gap: 12px;
+  }
+  .payment-tile-head h4 {
+    font-family: var(--serif); font-size: 19px;
+    font-weight: 600; color: var(--navy);
+  }
+  .payment-tile-head .who {
+    font: 600 10px var(--sans);
+    letter-spacing: 0.28em; text-transform: uppercase;
+    color: var(--gold);
+  }
+  .payment-tile-body {
+    padding: 22px;
+    font-size: 14.5px; line-height: 1.6;
+    color: var(--ink-soft);
+  }
+  .payment-tile-body strong { color: var(--navy); font-weight: 600; }
+  @media (max-width: 880px) {
+    .ledger-grid { grid-template-columns: 1fr; gap: 56px; }
+  }
+
+  /* ============ CLOSING ============ */
+  .closing {
+    background: var(--navy);
+    color: #fff;
+    overflow: hidden;
+  }
+  .closing-inner {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    align-items: stretch;
+    min-height: 600px;
+  }
+  .closing-image { overflow: hidden; }
+  .closing-image img {
+    width: 100%; height: 100%; object-fit: cover;
+  }
+  .closing-text {
+    padding: 88px 64px;
+    display: flex; flex-direction: column;
+    justify-content: center;
+  }
+  .closing-eyebrow {
+    font: 600 11px var(--sans);
+    letter-spacing: 0.32em; text-transform: uppercase;
+    color: var(--gold-light);
+    margin-bottom: 28px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid rgba(245,205,133,0.35);
+  }
+  .closing-text h2 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: clamp(40px, 4.6vw, 60px);
+    line-height: 1.05;
+    color: #fff;
+    margin-bottom: 24px;
+  }
+  .closing-text h2 .ital-life { font-style: italic; color: var(--gold-light); font-weight: 600; }
+  .closing-body {
+    font-family: var(--serif); font-style: italic;
+    font-size: 22px; line-height: 1.5;
+    color: rgba(255,255,255,0.92);
+    margin-bottom: 36px;
+    max-width: 480px;
+  }
+  .closing-actions {
+    display: flex; gap: 12px; flex-wrap: wrap;
+    margin-bottom: 28px;
+  }
+  .closing-meta {
+    border-top: 1px solid rgba(255,255,255,0.18);
+    padding-top: 24px;
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 20px 32px;
+  }
+  .closing-meta-item .label {
+    display: block;
+    font: 600 10px var(--sans);
+    letter-spacing: 0.32em; text-transform: uppercase;
+    color: var(--gold-light); margin-bottom: 6px;
+  }
+  .closing-meta-item .value {
+    font-family: var(--serif); font-size: 18px;
+    color: #fff; line-height: 1.3;
+  }
+  .closing-meta-item a { color: #fff; text-decoration: none; }
+  @media (max-width: 980px) {
+    .closing-inner { grid-template-columns: 1fr; min-height: auto; }
+    .closing-image { min-height: 320px; }
+    .closing-text { padding: 56px 32px; }
+  }
+
+  /* ============ FOOTER ============ */
+  .footer {
+    background: var(--navy-deep);
+    color: #fff;
+    padding: 72px 0 0;
+  }
+  .footer-grid {
+    display: grid;
+    grid-template-columns: 1.4fr 1fr 1fr 1fr;
+    gap: 48px;
+    padding-bottom: 56px;
+  }
+  .footer-mark { width: 56px; margin-bottom: 22px; }
+  .footer p {
+    color: rgba(255,255,255,0.72);
+    font-size: 13.5px; line-height: 1.6;
+    max-width: 320px; margin-bottom: 18px;
+  }
+  .footer h5 {
+    font: 700 11px var(--sans);
+    letter-spacing: 0.24em; text-transform: uppercase;
+    color: var(--gold-light);
+    margin-bottom: 18px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid rgba(245,205,133,0.2);
+  }
+  .footer ul {
+    list-style: none;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .footer ul a, .footer ul li {
+    color: rgba(255,255,255,0.78);
+    font-size: 13.5px; text-decoration: none;
+  }
+  .footer ul a:hover { color: var(--gold-light); }
+  .footer-fine {
+    border-top: 1px solid rgba(255,255,255,0.12);
+    padding: 22px 0;
+    font-size: 11.5px;
+    color: rgba(255,255,255,0.55);
+    letter-spacing: 0.06em;
+  }
+  .footer-fine .container {
+    display: flex; justify-content: space-between;
+    flex-wrap: wrap; gap: 16px;
+  }
+  .footer-fine a { color: inherit; text-decoration: none; }
+  @media (max-width: 880px) {
+    .footer-grid { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ============ TOP RULE ============ -->
+<div class="top-rule">
+  <div class="container">
+    <div class="col">
+      <span>Issue No. 01</span>
+      <span class="dot">·</span>
+      <span>Atlanta, GA</span>
+      <span class="dot">·</span>
+      <span>Founded 2024</span>
+    </div>
+    <div class="col">
+      <span>Referral partners welcome</span>
+      <span class="dot">·</span>
+      <a href="tel:4049136705">(404) 913-6705</a>
+    </div>
+  </div>
+</div>
+
+<!-- ============ HEADER ============ -->
+<header class="site-header" id="top">
+  <div class="container header-inner">
+    <a href="#top" class="brand-link">
+      <img src="../../../assets/logo-mark.png" alt="">
+      <span class="wordmark-block">
+        <span class="wordmark">Godwins Family Care</span>
+        <span class="wordmark-sub">Private Home Care · Atlanta, GA</span>
+      </span>
+    </a>
+    <nav class="nav">
+      <a href="#services">Services</a>
+      <a href="#coordination">Coordination</a>
+      <a href="#continuous">Continuous Care</a>
+      <a href="#process">Process</a>
+      <a href="#payment">Payment</a>
+      <a href="#contact">Contact</a>
+    </nav>
+    <div class="header-cta">
+      <a href="tel:4049136705" class="tel-link">
+        <span>Care Line</span>
+        <span>(404) 913-6705</span>
+      </a>
+      <a href="#contact" class="btn btn-navy">Free consultation</a>
+    </div>
+  </div>
+</header>
+
+<!-- ============ MASTHEAD ============ -->
+<section class="masthead">
+  <div class="container">
+    <div class="masthead-grid">
+      <div>
+        <div class="masthead-issue">
+          <span class="gold-rule"></span>
+          <span>A Service Guide From Godwins Family Care</span>
+        </div>
+        <h1 class="masthead-title">Atlanta's clinician-led <span class="ital">private home care.</span></h1>
+        <p class="masthead-deck">A physician and family nurse practitioner team, providing personal home care, in-home clinical practice, and care coordination across nine North Atlanta counties. Care designed as a sliding scale — enter at the level that fits today, adjust as life changes.</p>
+        <div class="masthead-actions">
+          <a href="#contact" class="btn btn-navy btn-lg">Schedule free consultation</a>
+          <a href="#services" class="btn btn-outline btn-lg">Browse all services</a>
+        </div>
+      </div>
+      <aside class="masthead-side">
+        <div class="masthead-side-eyebrow">In this guide</div>
+        <h4>Eight services. Two tracks. One coordinated team.</h4>
+        <ul>
+          <li>Track A: Companion · ADL · Comprehensive · Behavioral</li>
+          <li>Track B: Skilled visits · Continuous nursing · Provider visits</li>
+          <li>Care coordination, included foundation across both tracks</li>
+          <li>Case management, available at standard or intensive intensity</li>
+          <li>Continuous Care Program: enhanced monitoring, CCM, RPM</li>
+        </ul>
+      </aside>
+    </div>
+  </div>
+</section>
+
+<!-- ============ MASTHEAD BANNER ============ -->
+<div class="masthead-banner">
+  <img src="../../../assets/photo-couple-walking.jpg" alt="Couple walking together at home">
+  <div class="masthead-caption">
+    <div class="container">
+      <p class="masthead-caption-quote">"Care that holds steady, when life shifts. There when everyday life... changes."</p>
+      <span class="masthead-caption-attr">— The Godwins Promise</span>
+    </div>
+  </div>
+</div>
+
+<!-- ============ FOUNDER BAR ============ -->
+<section class="founder-bar">
+  <div class="container">
+    <div class="founder-bar-inner">
+      <div class="founder-mini">
+        <div class="founder-mini-photo"><img src="../../../assets/team-portrait.png" alt="Dr. Bianca Ume"></div>
+        <div>
+          <div class="founder-mini-name">Bianca G. C. Ume</div>
+          <div class="founder-mini-creds">MD · MBA · MS</div>
+          <div class="founder-mini-role">Owner &amp; Executive Director</div>
+        </div>
+      </div>
+      <div class="founder-bar-divider"></div>
+      <div class="founder-mini">
+        <div class="founder-mini-photo"><img src="../../../assets/team-bethel.webp" alt="Bethel Godwins"></div>
+        <div>
+          <div class="founder-mini-name">Bethel Godwins</div>
+          <div class="founder-mini-creds">RN · MSN · FNP-C</div>
+          <div class="founder-mini-role">Owner &amp; Clinical Director</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ INTRO ============ -->
+<section class="container">
+  <div class="intro-cols">
+    <div class="lhs">§ I · Premise</div>
+    <div class="intro-cols-body">
+      <p>Godwins Family Care is a physician and FNP-led healthcare organization providing private home care, in-home clinical practice, and independent medical evaluations in the metro Atlanta area. We deliver care across two distinct paths — non-medical home care and clinical home care — with a complementary medical service line through our nurse practitioners and collaborating physician.</p>
+      <p>Whether you need a companion for a few hours a week, full personal care for a loved one aging in place, or skilled nursing for complex medical needs, we have a service level that matches today and a path to adjust as needs change.</p>
+      <p>Care coordination runs underneath every service we deliver, at every level. It is not an upsell; it is the brand promise that comes with being clinician-led. Case management, when needed, layers on top — delivered by our LMSW team and available at two intensity levels.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FOUNDATION CALLOUT ============ -->
+<section class="container foundation-section">
+  <div class="foundation">
+    <div class="foundation-grid">
+      <div>
+        <div class="foundation-eyebrow">§ II · Foundation</div>
+        <h3>Care Coordination</h3>
+        <p class="lead">Included in every service we provide, at every level, on both tracks.</p>
+      </div>
+      <div>
+        <ul class="foundation-list">
+          <li>
+            <strong>What it is</strong>
+            Direct communication with your physicians, specialists, therapists, and care team — built into how we deliver care, not billed as a separate service.
+          </li>
+          <li>
+            <strong>What you see</strong>
+            Documentation shared with families and providers. Proactive escalation when something changes. Single point of contact across your care team.
+          </li>
+          <li>
+            <strong>What it isn't</strong>
+            Not an add-on. Not an upsell. Not a substitute for clinical case management when more intensive advocacy is needed.
+          </li>
+          <li>
+            <strong>Why it matters</strong>
+            Most home care complaints stem from communication gaps. We removed the gap by making coordination part of the foundation, not the menu.
+          </li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ TRACKS A + B ============ -->
+<section class="tracks-section" id="services">
+  <div class="container">
+    <div class="tracks-header">
+      <div>
+        <div class="section-num">
+          <span class="num">III</span>
+          <span class="label">The Service Architecture</span>
+        </div>
+        <h2 class="section-h2">A sliding scale, <span class="ital">not rigid tiers.</span></h2>
+        <p class="section-lead">Track A is non-medical home care — personal care and companion scope, delivered by trained caregivers. Track B is clinical home care — skilled nursing and our nurse practitioner team. Both tracks share the same care coordination foundation. Move within or between tracks as needs change.</p>
+      </div>
+      <div class="legend">
+        <span class="legend-key"><span class="swatch a"></span> Track A · Non-medical</span>
+        <span class="legend-key"><span class="swatch b"></span> Track B · Clinical</span>
+      </div>
+    </div>
+
+    <!-- Track A -->
+    <div class="track-block">
+      <div class="track-banner">
+        <div class="track-banner-text">
+          <div class="track-id">
+            <span class="letter">A</span>
+            <span class="meta"><strong>Track A</strong>Non-Medical Home Care<br>Personal Care &amp; Companion Scope</span>
+          </div>
+          <h3>Personal Care &amp; Companion Services</h3>
+          <p class="scope">Hands-on personal care, daily living support, and companionship delivered by trained caregivers in the home or facility.</p>
+        </div>
+        <div class="track-banner-image">
+          <img src="https://godwinsfamilycarellc.com/wp-content/uploads/2026/05/pexels-gustavo-fring-7446759-scaled.jpg" alt="">
+        </div>
+      </div>
+      <div class="level-table">
+        <div class="level-row">
+          <div class="level-code">A1</div>
+          <div class="level-name">Companion &amp; Wellness Visits<span class="scope">Companion scope · Hourly</span></div>
+          <div class="level-includes">Companionship, social engagement, supervised activity, transportation to appointments and outings, light errands, consistent presence between family visits.</div>
+          <div class="level-fit">I want consistent presence and engagement at home, but I don't need help with personal care yet. I'm still independent — I just shouldn't be alone all the time.</div>
+        </div>
+        <div class="level-row">
+          <div class="level-code">A2</div>
+          <div class="level-name">Essential ADL Support<span class="scope">Personal care · Hands-on</span></div>
+          <div class="level-includes"><strong>Bathing, dressing, grooming, toileting</strong> assistance, transfers and mobility, feeding support, hygiene and incontinence care.</div>
+          <div class="level-fit">I need help with the physical tasks of daily living. Getting dressed, bathing safely, moving around the house. My body needs hands-on support.</div>
+        </div>
+        <div class="level-row">
+          <div class="level-code">A3</div>
+          <div class="level-name">Comprehensive Home Care<span class="scope">Personal care + Home support</span></div>
+          <div class="level-includes">Everything in A2, plus <strong>meal preparation, light housekeeping, medication reminders, transportation,</strong> companionship.</div>
+          <div class="level-fit">I need help with daily living and keeping the household running. Cooking, cleaning, getting to appointments, remembering medications.</div>
+        </div>
+        <div class="level-row">
+          <div class="level-code">A4</div>
+          <div class="level-name">Behavioral Support &amp; Cognitive Wellness<span class="scope">Memory care · Trained</span></div>
+          <div class="level-includes">Everything in A3, plus <strong>dementia and Alzheimer's care, behavioral observation, structured routines, cognitive activities, crisis de-escalation,</strong> safety planning.</div>
+          <div class="level-fit">I'm managing memory loss or behavioral changes. My family worries about agitation or wandering. I need someone trained to keep me safe without making me feel managed.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Track B -->
+    <div class="track-block">
+      <div class="track-banner">
+        <div class="track-banner-text">
+          <div class="track-id">
+            <span class="letter">B</span>
+            <span class="meta"><strong>Track B</strong>Clinical Home Care<br>Nursing &amp; Provider Scope</span>
+          </div>
+          <h3>Skilled Nursing &amp; Provider Services</h3>
+          <p class="scope">Skilled nursing visits, continuous shift nursing, and family nurse practitioner-led provider visits in your home or facility.</p>
+        </div>
+        <div class="track-banner-image">
+          <img src="https://godwinsfamilycarellc.com/wp-content/uploads/2026/05/julia-taubitz-vN5s_G5SPkY-unsplash-scaled.jpg" alt="">
+        </div>
+      </div>
+      <div class="level-table">
+        <div class="level-row">
+          <div class="level-code">B1</div>
+          <div class="level-name">Skilled Nursing Visits<span class="scope">LPN with RN oversight · 1–2 hr</span></div>
+          <div class="level-includes"><strong>Wound care, medication administration including injections, vital sign monitoring with intervention, diabetic management, catheter and ostomy care, G-tube feeds,</strong> post-surgical observation.</div>
+          <div class="level-fit">I need specific clinical tasks done at home a few times a week. Skilled hands for what my family or I can't safely do — without needing a nurse here all day.</div>
+        </div>
+        <div class="level-row">
+          <div class="level-code">B2</div>
+          <div class="level-name">Continuous Skilled Care<span class="scope">LPN shift · 4–24 hours</span></div>
+          <div class="level-includes">Extended LPN shift nursing in the home or facility. <strong>Four-to-twelve-hour shifts, up to 24-hour coverage</strong> for highest acuity. Continuous skilled monitoring, complex chronic disease management, post-discharge stabilization.</div>
+          <div class="level-fit">I need a nurse here for extended hours. Post-discharge recovery, advanced chronic disease, ventilator or trach care. My situation needs a nurse present, not visiting.</div>
+        </div>
+        <div class="level-row">
+          <div class="level-code">B3</div>
+          <div class="level-name">Provider Care Visits<span class="scope">FNP · Medicare Part B</span></div>
+          <div class="level-includes"><strong>In-home assessments by your nurse practitioner,</strong> prescribing in coordination with your primary care provider, behavioral health medication management, chronic disease management, post-hospital follow-up, care plan oversight.</div>
+          <div class="level-fit">I need a primary care or specialist provider who comes to me — for behavioral health med management, chronic disease oversight, or post-hospital follow-up under one coordinated team.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ COORD VS CASE MGMT ============ -->
+<section class="coord-section" id="coordination">
+  <div class="container">
+    <div class="section-num">
+      <span class="num">IV</span>
+      <span class="label">Coordination &amp; Case Management</span>
+    </div>
+    <h2 class="section-h2">What's included, <span class="ital">what you can add.</span></h2>
+    <p class="section-lead">Care coordination is the foundation included in every Godwins service. Case management is professional psychosocial advocacy and care planning delivered by our LMSW team. The two work together — coordination handles logistics, case management handles strategy.</p>
+
+    <div class="matrix">
+      <div class="matrix-header">
+        <div class="blank">Comparison</div>
+        <div>
+          <span class="role-tag">Foundation</span>
+          <h3>Care Coordination</h3>
+        </div>
+        <div>
+          <span class="role-tag">Add-on · Standard</span>
+          <h3>Standard Case Management</h3>
+        </div>
+        <div>
+          <span class="role-tag">Add-on · Intensive</span>
+          <h3>Intensive Case Management</h3>
+        </div>
+      </div>
+      <div class="matrix-row">
+        <div class="row-label">What it is</div>
+        <div>Logistics across the existing care team. Built into how we deliver care, documented and communicated proactively to family and providers.</div>
+        <div>Active clinical advocacy and planning for clients managing multiple providers. Delivered by our LMSW team.</div>
+        <div>High-touch clinical management for clients in active transition or crisis. Weekly contact and active intervention authority.</div>
+      </div>
+      <div class="matrix-row">
+        <div class="row-label">Who delivers</div>
+        <div>Caregivers, LPNs, FNPs, MDs as part of their existing role.</div>
+        <div>Licensed master social worker (LMSW) team.</div>
+        <div>LMSW team with direct provider access.</div>
+      </div>
+      <div class="matrix-row">
+        <div class="row-label">How it's billed</div>
+        <div><strong>No additional cost.</strong> Part of every service we provide, at every level.</div>
+        <div>Monthly care coverage. Professional services under our LMSW team.</div>
+        <div>Higher monthly care coverage. Weekly contact + active intervention.</div>
+      </div>
+      <div class="matrix-row">
+        <div class="row-label">In practice</div>
+        <div>
+          <div class="ex"><strong>Example</strong>Caregiver notices Mom isn't eating well. We document it, alert the PCP, follow up on whether labs or a med review are needed. Daughter texts that Dad fell overnight — we alert the FNP, update the care plan with fall precautions.</div>
+        </div>
+        <div>
+          <div class="ex"><strong>Example</strong>Comprehensive psychosocial assessment at intake. Master care plan integrating PCP chronic disease orders, neurologist's recommendations, psychiatrist's regimen. LTC insurance benefit-claim advocacy when claims are denied.</div>
+        </div>
+        <div>
+          <div class="ex"><strong>Example</strong>Coordinating discharge from psychiatric hospitalization — med reconciliation, securing seven-day post-discharge psychiatry appointment. Convening family meeting after new dementia diagnosis. Navigating Medicaid waiver applications (Katie Beckett, ICWP).</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CCP ============ -->
+<section class="ccp-section" id="continuous">
+  <div class="container">
+    <div class="section-num">
+      <span class="num">V</span>
+      <span class="label">Continuous Care Program</span>
+    </div>
+    <h2 class="section-h2">A hybrid program for <span class="ital">memory care &amp; complex chronic disease.</span></h2>
+    <p class="section-lead">Combines private-pay enhanced monitoring under the agency with Medicare-billable chronic care management under our nurse practitioner team's clinical practice. Pairs with any home care service.</p>
+
+    <div class="ccp-grid">
+      <article class="ccp-block">
+        <div class="ccp-phase">
+          <span>Phase 1</span>
+          <span class="timing">Available now</span>
+        </div>
+        <h3>Enhanced Monitoring &amp; Family Communication</h3>
+        <div class="ccp-delivery">Delivered by Godwins · Private pay</div>
+        <p>Camera-based behavioral observation between caregiver visits, scheduled video check-ins, and a real-time family communication portal. Designed to extend clinical eyes beyond scheduled hours.</p>
+        <ul>
+          <li>Blink camera setup and behavioral monitoring</li>
+          <li>Three video check-ins per defined window</li>
+          <li>Family portal for daily updates and clinical notes</li>
+          <li>Escalation pathway when monitoring surfaces concerns</li>
+        </ul>
+        <div class="price">Pricing details available on request.</div>
+      </article>
+
+      <article class="ccp-block">
+        <div class="ccp-phase">
+          <span style="color: var(--navy);">Phase 2</span>
+          <span class="timing">Coming soon</span>
+        </div>
+        <h3>Chronic Care Management</h3>
+        <div class="ccp-delivery">Under our FNP team · Medicare Part B</div>
+        <p>For clients with two or more chronic conditions, chronic care management provides Medicare-covered care coordination time delivered by clinical staff under FNP supervision within our practice.</p>
+        <ul>
+          <li>Medicare-covered care coordination, billed to Part B and most Medicare Advantage plans</li>
+          <li>Twenty or more minutes monthly of dedicated coordination time</li>
+          <li>Comprehensive care plan signed by your nurse practitioner</li>
+          <li>Twenty-four-seven access to the care team for urgent needs</li>
+        </ul>
+        <div class="price">Standard cost share applies at your plan rate.</div>
+      </article>
+
+      <article class="ccp-block future">
+        <div class="ccp-phase">
+          <span style="color: var(--ink-mute);">Phase 3</span>
+          <span class="timing">Future rollout</span>
+        </div>
+        <h3>Remote Patient Monitoring</h3>
+        <div class="ccp-delivery">Under our FNP team · Medicare Part B</div>
+        <p>Adds Medicare-covered physiological monitoring with FDA-approved devices for blood pressure, weight, glucose, pulse oximetry, or heart rate. Layers on top of chronic care management — not a replacement.</p>
+        <ul>
+          <li>Medicare-covered remote monitoring through approved devices</li>
+          <li>Daily readings reviewed by your care team</li>
+          <li>Early intervention when readings trend out of range</li>
+          <li>Coordinated with your existing chronic care management plan</li>
+        </ul>
+        <div class="price">Timing tied to device platform selection and Medicare enrollment.</div>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ============ PROCESS ============ -->
+<section class="process-section" id="process">
+  <div class="container">
+    <div class="section-num">
+      <span class="num">VI</span>
+      <span class="label">How It Works</span>
+    </div>
+    <h2 class="section-h2">Five steps from <span class="ital">first call to ongoing care.</span></h2>
+    <ol class="process-list">
+      <li class="process-step">
+        <span class="step-num">i</span>
+        <h3>Free Consultation</h3>
+        <p>We talk through your loved one's needs — no pressure, no commitment.</p>
+        <span class="step-meta"><strong>15 min</strong>By phone</span>
+      </li>
+      <li class="process-step">
+        <span class="step-num">ii</span>
+        <h3>In-Home Assessment</h3>
+        <p>We evaluate abilities, routines, and safety concerns at home.</p>
+        <span class="step-meta"><strong>60–90 min</strong>In-home</span>
+      </li>
+      <li class="process-step">
+        <span class="step-num">iii</span>
+        <h3>Personalized Care Plan</h3>
+        <p>A clinical care plan that coordinates with their medical team.</p>
+        <span class="step-meta"><strong>2–3 days</strong>Drafted &amp; reviewed</span>
+      </li>
+      <li class="process-step">
+        <span class="step-num">iv</span>
+        <h3>Caregiver Match</h3>
+        <p>Matched by personality and clinical need — same caregiver every time.</p>
+        <span class="step-meta"><strong>3–7 days</strong>To start</span>
+      </li>
+      <li class="process-step">
+        <span class="step-num">v</span>
+        <h3>Ongoing Oversight</h3>
+        <p>Regular updates, proactive communication, direct provider coordination.</p>
+        <span class="step-meta"><strong>Monthly</strong>Care reviews</span>
+      </li>
+    </ol>
+  </div>
+</section>
+
+<!-- ============ TESTIMONIALS ============ -->
+<section class="testimonials" id="stories">
+  <div class="container">
+    <div class="section-num">
+      <span class="num">VII</span>
+      <span class="label">Voices · From Our Families</span>
+    </div>
+    <h2 class="section-h2">The difference families <span class="ital">notice.</span></h2>
+    <div class="quote-grid">
+      <figure class="quote">
+        <span class="quote-mark">"</span>
+        <blockquote>It helps having the same caregiver week to week. I can better manage my routine.</blockquote>
+        <figcaption>
+          <strong>Florence, age 79</strong>
+          <span>Atlanta · A2 client</span>
+        </figcaption>
+      </figure>
+      <figure class="quote">
+        <span class="quote-mark">"</span>
+        <blockquote>My mother doesn't like to be alone and we were traveling. Godwins stepped in — they were amazing.</blockquote>
+        <figcaption>
+          <strong>Summer</strong>
+          <span>Family member · A1 client</span>
+        </figcaption>
+      </figure>
+      <figure class="quote">
+        <span class="quote-mark">"</span>
+        <blockquote>They knew exactly how to handle my dad's behavioral outbursts.</blockquote>
+        <figcaption>
+          <strong>Marlene</strong>
+          <span>Family member · A4 client</span>
+        </figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<!-- ============ AREA + PAYMENT (LEDGER) ============ -->
+<section class="ledger-section" id="payment">
+  <div class="container">
+    <div class="ledger-grid">
+      <div class="ledger-col" id="area">
+        <div class="section-num">
+          <span class="num">VIII</span>
+          <span class="label">Service Area</span>
+        </div>
+        <h3>North Atlanta &amp; <span class="ital">Cobb County.</span></h3>
+        <p class="lead">Locally owned, based in Atlanta. We serve nine counties across metro Atlanta and West Cobb. Adjacent areas considered case-by-case.</p>
+        <div class="area-pills">
+          <span class="area-pill primary">Cobb</span>
+          <span class="area-pill primary">Cherokee</span>
+          <span class="area-pill primary">Fulton</span>
+          <span class="area-pill">Rockdale</span>
+          <span class="area-pill">Douglas</span>
+          <span class="area-pill">Paulding</span>
+          <span class="area-pill">DeKalb</span>
+          <span class="area-pill">Gwinnett</span>
+          <span class="area-pill">Bartow</span>
+        </div>
+        <p class="area-note">Filled pills indicate primary coverage zones with the lowest scheduling minimums. Outlined pills are full-service with standard scheduling. Outside these counties, call to ask.</p>
+      </div>
+
+      <div class="ledger-col">
+        <div class="section-num">
+          <span class="num">IX</span>
+          <span class="label">How Payment Works</span>
+        </div>
+        <h3>Clear, by service line.</h3>
+        <p class="lead">We bill by the service line that delivered the care. Some services run through home care channels; others run through our clinical practice.</p>
+
+        <div class="payment-tile">
+          <div class="payment-tile-head">
+            <h4>Personal Care &amp; Skilled Nursing</h4>
+            <span class="who">Billed by Godwins</span>
+          </div>
+          <div class="payment-tile-body">
+            Personal care, companion services, skilled nursing visits, and continuous shift nursing are billed by Godwins directly. Paid through <strong>private pay</strong>, <strong>long-term care insurance</strong> (Genworth, Mutual of Omaha, Northwestern Mutual, John Hancock; Transamerica paneling in progress), <strong>VA contracts</strong>, and <strong>Georgia Medicaid waivers</strong> (Katie Beckett, ICWP) once Medicaid certification is approved.
+          </div>
+        </div>
+        <div class="payment-tile">
+          <div class="payment-tile-head">
+            <h4>Provider Care Visits</h4>
+            <span class="who">Billed by our FNP team</span>
+          </div>
+          <div class="payment-tile-body">
+            In-home visits with your nurse practitioner are billed as professional services through <strong>Medicare Part B</strong>, commercial insurance once credentialing completes, or private pay/membership at your preference.
+          </div>
+        </div>
+        <div class="payment-tile">
+          <div class="payment-tile-head">
+            <h4>Labs, Imaging &amp; Prescriptions</h4>
+            <span class="who">Billed by ancillary facility</span>
+          </div>
+          <div class="payment-tile-body">
+            Bloodwork, imaging, and prescriptions are placed by your NP with the lab, imaging center, or pharmacy of your choice — those facilities bill insurance through their own channels. <strong>Godwins does not process these claims.</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CLOSING ============ -->
+<section class="closing" id="contact">
+  <div class="closing-inner">
+    <div class="closing-image">
+      <img src="https://godwinsfamilycarellc.com/wp-content/uploads/2026/05/pexels-jsme-mila-523821574-16364308-scaled.jpg" alt="Hands held in a moment of care">
+    </div>
+    <div class="closing-text">
+      <div class="closing-eyebrow">§ X · Begin · Godwins Family Care</div>
+      <h2>There when everyday <span class="ital-life">life</span>… changes.</h2>
+      <p class="closing-body">Care that holds steady when life shifts. We'd love to hear from you when you're ready to talk — or before, if you just have questions about whether we're a fit.</p>
+      <div class="closing-actions">
+        <a href="tel:4049136705" class="btn btn-gold btn-lg">Call (404) 913-6705</a>
+        <a href="mailto:godwinsfamilycarellc@gmail.com" class="btn btn-ghost-light btn-lg">Email us</a>
+      </div>
+      <div class="closing-meta">
+        <div class="closing-meta-item">
+          <span class="label">Care Line</span>
+          <span class="value"><a href="tel:4049136705">(404) 913-6705</a></span>
+        </div>
+        <div class="closing-meta-item">
+          <span class="label">Email</span>
+          <span class="value" style="font-size: 14px;"><a href="mailto:godwinsfamilycarellc@gmail.com">godwinsfamilycarellc@gmail.com</a></span>
+        </div>
+        <div class="closing-meta-item" style="grid-column: 1 / -1;">
+          <span class="label">Office</span>
+          <span class="value">4300 Paces Ferry Rd SE, Suite 500 · Atlanta, GA 30339</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FOOTER ============ -->
+<footer class="footer">
+  <div class="container">
+    <div class="footer-grid">
+      <div>
+        <img src="../../../assets/logo-mark-white-transparent.png" alt="" class="footer-mark">
+        <p>Godwins Family Care LLC is a healthcare organization providing private home care, in-home medical care, and independent medical examinations in Atlanta, GA.</p>
+      </div>
+      <div>
+        <h5>Services</h5>
+        <ul>
+          <li><a href="#services">Track A · Personal Care</a></li>
+          <li><a href="#services">Track B · Skilled Nursing</a></li>
+          <li><a href="#continuous">Continuous Care Program</a></li>
+          <li><a href="#coordination">Case Management</a></li>
+          <li><a href="#">Independent Medical Exams</a></li>
+        </ul>
+      </div>
+      <div>
+        <h5>Company</h5>
+        <ul>
+          <li><a href="#process">How it works</a></li>
+          <li><a href="#payment">Payment</a></li>
+          <li><a href="#stories">Stories</a></li>
+          <li><a href="#">Referral partners</a></li>
+          <li><a href="#">Careers</a></li>
+        </ul>
+      </div>
+      <div>
+        <h5>Contact</h5>
+        <ul>
+          <li><a href="tel:4049136705">(404) 913-6705</a></li>
+          <li><a href="mailto:godwinsfamilycarellc@gmail.com">godwinsfamilycarellc@gmail.com</a></li>
+          <li>4300 Paces Ferry Rd SE, #500</li>
+          <li>Atlanta, GA 30339</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div class="footer-fine">
+    <div class="container">
+      <span>© 2026 Godwins Family Care LLC. Georgia PHCP licensed. Medicaid certification in progress.</span>
+      <span><a href="#">Privacy</a> · <a href="#">Terms</a> · <a href="#">Accessibility</a></span>
+    </div>
+  </div>
+</footer>
+
+<script>
+  const header = document.querySelector('.site-header');
+  window.addEventListener('scroll', () => {
+    header.classList.toggle('is-stuck', window.scrollY > 8);
+  }, { passive: true });
+</script>
+
+</body>
+</html>

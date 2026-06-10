@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<!-- @dsCard group="Components" name="Form inputs" subtitle="Generous padding, gold focus ring" viewport="700x320" -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>GFC — Form Inputs</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 28px; background: var(--gfc-cream); font-family: var(--font-sans); }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; max-width: 620px; }
+  label { display: block; font-size: 13px; font-weight: 600; color: var(--gfc-navy); letter-spacing: 0.04em; margin-bottom: 6px; }
+  input, select, textarea {
+    width: 100%; box-sizing: border-box;
+    padding: 14px 16px;
+    font: 400 17px var(--font-sans);
+    color: var(--gfc-ink);
+    background: #fff;
+    border: 1.5px solid var(--gfc-line);
+    border-radius: 12px;
+    outline: none;
+    transition: border-color 180ms ease, box-shadow 180ms ease;
+  }
+  input:focus, select:focus, textarea:focus {
+    border-color: var(--gfc-gold);
+    box-shadow: 0 0 0 4px rgba(245, 205, 133, 0.25);
+  }
+  input::placeholder { color: var(--gfc-ink-muted); }
+  .full { grid-column: 1/-1; }
+</style>
+</head>
+<body>
+  <div class="grid">
+    <div><label>First name</label><input value="Margaret" /></div>
+    <div><label>Last name</label><input placeholder="Johnson" /></div>
+    <div class="full"><label>Phone</label><input value="(404) 913-6705" /></div>
+    <div class="full"><label>Tell us about your loved one</label><textarea rows="3" placeholder="A few sentences is enough — we'll follow up."></textarea></div>
+  </div>
+</body>
+</html>

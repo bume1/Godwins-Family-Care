@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<!-- @dsCard group="Colors" name="Brand palette" subtitle="Navy, gold, cream — the three brand pillars" viewport="700x230" -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>GFC — Brand Palette</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body { margin: 0; padding: 24px; background: var(--gfc-cream); font-family: var(--font-sans); }
+  .row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .swatch { border-radius: 14px; overflow: hidden; box-shadow: var(--shadow-sm); }
+  .chip { height: 130px; display: flex; align-items: flex-end; padding: 14px 16px; }
+  .meta { background: var(--gfc-white); padding: 12px 16px; display: flex; justify-content: space-between; align-items: baseline; }
+  .name { font-weight: 600; color: var(--gfc-navy); font-size: 14px; }
+  .hex  { font-size: 12px; color: var(--gfc-ink-muted); font-variant-numeric: tabular-nums; }
+  .lab  { font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase; font-weight: 600; }
+</style>
+</head>
+<body>
+  <div class="row">
+    <div class="swatch">
+      <div class="chip" style="background: #033D50;"><span class="lab" style="color: #fff;">Primary</span></div>
+      <div class="meta"><span class="name">Navy</span><span class="hex">#033D50</span></div>
+    </div>
+    <div class="swatch">
+      <div class="chip" style="background: #C9A44A;"><span class="lab" style="color: #fff;">Accent</span></div>
+      <div class="meta"><span class="name">Gold</span><span class="hex">#C9A44A</span></div>
+    </div>
+    <div class="swatch">
+      <div class="chip" style="background: #FAF7F2; box-shadow: inset 0 0 0 1px #E1D9C9;"><span class="lab" style="color: #4F6470;">Surface</span></div>
+      <div class="meta"><span class="name">Cream</span><span class="hex">#FAF7F2</span></div>
+    </div>
+  </div>
+</body>
+</html>
