@@ -602,7 +602,125 @@ async function generateServiceReportWithAttachments(reportData, technicianName) 
   return mergePDFBuffers([reportBuffer, ...attachmentBuffers]);
 }
 
+// GFC brand colors for the enrollment packet.
+const GFC_COLORS = { navy: '#033D50', gold: '#C9A44A', ink: '#1B2A33', muted: '#4F6470', line: '#E1D9C9' };
+
+// Human-readable consent labels for the packet.
+const GFC_CONSENT_LABELS = {
+  npp: 'HIPAA Notice of Privacy Practices',
+  roiFamily: 'Release of Information — Family',
+  roiProvider: 'Release of Information — Providers',
+  serviceAgreement: 'Service Agreement',
+  billOfRights: 'Patient Bill of Rights & Self-Determination',
+  emergencyFinancial: 'Emergency Treatment & Financial Responsibility',
+  crisisProtocol: 'Emergency & Crisis Protocol (911/988)',
+  monitoring: 'Continuous Monitoring Opt-In',
+  financialAgreement: 'Financial Agreement (Private Home Care)',
+  pcaScope: 'Personal Care Aide Scope Acknowledgment',
+  consentToTreat: 'Consent to Medical Treatment',
+  assignmentOfBenefits: 'Assignment of Benefits',
+  practiceNpp: 'Medical Practice Notice of Privacy Practices'
+};
+
+/**
+ * Generate the client's Enrollment Packet PDF — an in-portal copy of the Stage 2
+ * intake summary plus every signed consent with its e-signature metadata
+ * (typed name + server timestamp). This is the portal-delivered record; per the
+ * compliance decision, the full packet is NEVER emailed — it lives in the
+ * Documents tab only.
+ *
+ * NOTE: consent language is a working draft pending counsel/licensure review.
+ * TEST DATA ONLY until HIPAA-live.
+ *
+ * @param {Object} client - the client user record (intake, consents, consentMeta)
+ * @returns {Promise<Buffer>}
+ */
+async function generateEnrollmentPacketPDF(client) {
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ size: 'LETTER', margin: 50, bufferPages: true });
+      const chunks = [];
+      doc.on('data', c => chunks.push(c));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+
+      const intake = client.intake || {};
+      const consents = client.consents || {};
+      const meta = client.consentMeta || {};
+      const name = client.preferredName || client.name || 'Client';
+
+      // Header
+      doc.fontSize(18).fillColor(GFC_COLORS.navy).font('Helvetica-Bold');
+      doc.text('Godwins Family Care', 50, 40);
+      doc.fontSize(12).fillColor(GFC_COLORS.gold).text('Enrollment Packet', 50, 64);
+      doc.moveTo(50, 84).lineTo(562, 84).strokeColor(GFC_COLORS.gold).lineWidth(2).stroke();
+
+      doc.fontSize(9).fillColor(GFC_COLORS.muted).font('Helvetica');
+      doc.text(`Generated ${new Date().toLocaleString('en-US')}`, 50, 92, { align: 'right', width: 512 });
+      doc.fontSize(8).fillColor(GFC_COLORS.muted)
+        .text('Working draft — consent language pending counsel/licensure review. Test data until HIPAA-live.', 50, 92, { width: 380 });
+
+      let y = 120;
+      const heading = (t) => {
+        if (y > 690) { doc.addPage(); y = 50; }
+        doc.fontSize(12).fillColor(GFC_COLORS.navy).font('Helvetica-Bold').text(t, 50, y);
+        doc.moveTo(50, y + 16).lineTo(200, y + 16).strokeColor(GFC_COLORS.line).lineWidth(1).stroke();
+        y += 26;
+      };
+      const row = (label, value) => {
+        if (y > 720) { doc.addPage(); y = 50; }
+        doc.fontSize(9).fillColor(GFC_COLORS.muted).font('Helvetica-Bold').text(label, 50, y, { width: 160 });
+        doc.fontSize(9).fillColor(GFC_COLORS.ink).font('Helvetica').text(value || '—', 215, y, { width: 347 });
+        y += 18;
+      };
+
+      // Client summary
+      heading('Client');
+      row('Name', name);
+      row('Date of birth', intake.dob ? `${intake.dob}${intake.age != null ? `  (age ${intake.age})` : ''}` : '—');
+      row('Service line', client.serviceLine || '—');
+      if (intake.primaryContact) row('Primary contact', `${intake.primaryContact.name || '—'}${intake.primaryContact.relationship ? ` (${intake.primaryContact.relationship})` : ''}`);
+      if (intake.payerType) row('Payer', intake.payerType);
+
+      // Medications (structured rows)
+      const meds = Array.isArray(intake.medications) ? intake.medications.filter(m => m && m.name) : [];
+      if (meds.length) {
+        y += 6; heading('Medications');
+        meds.forEach(m => {
+          const parts = [m.dose, m.route, m.frequency].filter(Boolean).join(' · ');
+          row(m.name, [parts, m.prescriber ? `Rx: ${m.prescriber}` : '', m.pharmacy ? `Pharmacy: ${m.pharmacy}` : ''].filter(Boolean).join('   '));
+        });
+      }
+
+      // Signed consents
+      y += 6; heading('Signed Consents');
+      const signedKeys = Object.keys(consents).filter(k => consents[k] === 'signed' || consents[k] === 'na');
+      if (!signedKeys.length) {
+        row('—', 'No consents on file.');
+      } else {
+        signedKeys.forEach(k => {
+          if (y > 720) { doc.addPage(); y = 50; }
+          const m = meta[k] || {};
+          const status = consents[k] === 'na' ? 'Declined' : 'Signed';
+          doc.fontSize(10).fillColor(GFC_COLORS.navy).font('Helvetica-Bold').text(GFC_CONSENT_LABELS[k] || k, 50, y, { width: 512 });
+          y += 15;
+          const detail = consents[k] === 'na'
+            ? 'Opt-out recorded'
+            : `${status} by ${m.typedName || name}${m.signedAt ? ` on ${new Date(m.signedAt).toLocaleString('en-US')}` : ''}${m.ip ? `  ·  IP ${m.ip}` : ''}`;
+          doc.fontSize(8.5).fillColor(GFC_COLORS.muted).font('Helvetica').text(detail, 50, y, { width: 512 });
+          y += 20;
+        });
+      }
+
+      doc.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
 module.exports = {
   generateServiceReportPDF,
-  generateServiceReportWithAttachments
+  generateServiceReportWithAttachments,
+  generateEnrollmentPacketPDF
 };

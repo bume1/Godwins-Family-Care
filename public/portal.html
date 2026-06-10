@@ -4177,13 +4177,30 @@
       );
     };
 
-    const GfcDocuments = ({ docs, readOnly }) => {
+    const GfcDocuments = ({ docs, readOnly, token }) => {
       const signed = docs?.signedConsents || [];
       const files = docs?.documents || [];
+      const packet = docs?.enrollmentPacket || null;
+      const openPacket = () => {
+        if (!packet) return;
+        // Drive-hosted copy opens directly; on-demand PDF uses the auth-header download helper.
+        if (packet.url && packet.url.startsWith('http')) window.open(packet.url, '_blank');
+        else openPdfSecurely(`${API_URL}${packet.url}`, token);
+      };
       return (
         <div className="gfc-body">
           {readOnly && <span className="ro"><i className="ti ti-eye" />Family view · read-only</span>}
-          <p className="lbl" style={{ marginTop: 0 }}>Signed consents</p>
+          {packet && (
+            <React.Fragment>
+              <p className="lbl" style={{ marginTop: 0 }}>Enrollment</p>
+              <div className="doc" onClick={openPacket} style={{ cursor: 'pointer' }}>
+                <i className="ti ti-file-certificate" />
+                <div><b>{packet.title}</b><span>{packet.description}</span></div>
+                <i className="ti ti-download" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
+              </div>
+            </React.Fragment>
+          )}
+          <p className="lbl" style={{ marginTop: packet ? undefined : 0 }}>Signed consents</p>
           {signed.length === 0 && <p className="sub">No consents on file yet.</p>}
           {signed.map(s => (
             <div className="doc" key={s.key}>
@@ -4307,7 +4324,7 @@
           {view === 'home' && data && <GfcDashboard data={data} onNavigate={setView} />}
           {view === 'care' && data && <GfcCarePlan data={data} readOnly={isFamily} />}
           {view === 'messages' && <GfcMessages messages={messages} readOnly={isFamily} />}
-          {view === 'documents' && <GfcDocuments docs={docs} readOnly={isFamily} />}
+          {view === 'documents' && <GfcDocuments docs={docs} readOnly={isFamily} token={token} />}
           {!data && view !== 'messages' && view !== 'documents' && (
             <div className="gfc-body" style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}><div className="gfc-spin" /></div>
           )}

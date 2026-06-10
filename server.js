@@ -5108,10 +5108,36 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
     const allDocs = (await db.get('client_documents')) || [];
     const clientDocs = allDocs.filter(d => !d.slug || d.slug === client.slug);
 
-    res.json({ signedConsents, documents: clientDocs });
+    // The signed Enrollment Packet — served on demand (and persisted to Drive when configured).
+    const hasSignedConsents = signedConsents.length > 0;
+    const enrollmentPacket = hasSignedConsents ? {
+      title: 'Signed enrollment packet',
+      description: 'Your intake summary and signed consents',
+      // Prefer the Drive copy if we persisted one; otherwise the on-demand PDF endpoint.
+      url: (client.enrollmentPacket && client.enrollmentPacket.url) || '/api/gfc/enrollment-packet.pdf',
+      generated: true
+    } : null;
+
+    res.json({ signedConsents, documents: clientDocs, enrollmentPacket });
   } catch (error) {
     console.error('GFC documents error:', error);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/gfc/enrollment-packet.pdf — stream the signed enrollment packet (intake
+// summary + signed consents). Gated; accepts the ?token= param for downloads.
+app.get('/api/gfc/enrollment-packet.pdf', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const pdf = await pdfGenerator.generateEnrollmentPacketPDF(client);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="enrollment-packet-${client.slug || client.id}.pdf"`);
+    res.send(pdf);
+  } catch (error) {
+    console.error('GFC enrollment packet PDF error:', error);
+    res.status(500).json({ error: 'Failed to generate enrollment packet' });
   }
 });
 
@@ -5258,6 +5284,49 @@ app.post('/api/gfc/consents', authenticateToken, requireClientForIntake, async (
   }
 });
 
+// Confirmation email on enrollment — NON-PHI by design. Per the compliance
+// decision, we never email clinical detail or signed-consent content; the email
+// is only a receipt that directs the client to the portal, where the signed
+// documents live (Documents tab). Safe to send pre-BAA.
+async function sendEnrollmentConfirmation(client, portalUrl, extraRecipient) {
+  const to = [client.email, extraRecipient].filter(Boolean);
+  if (!to.length) return;
+  const firstName = (client.preferredName || client.name || 'there').split(' ')[0];
+  const subject = 'Your Godwins Family Care enrollment is complete';
+  const text = `Hi ${firstName},\n\nWe've received your enrollment with Godwins Family Care. Your care plan, signed consents, and documents are now available in your secure portal.\n\nView them here: ${portalUrl}\n\nFor your privacy, we don't include any health or consent details in email — everything lives in your portal.\n\n— Godwins Family Care`;
+  const htmlBody = `<div style="font-family:'DM Sans',Arial,sans-serif;color:#1B2A33;max-width:520px">
+    <h2 style="color:#033D50;font-weight:600">Enrollment complete</h2>
+    <p>Hi ${firstName},</p>
+    <p>We've received your enrollment with <strong>Godwins Family Care</strong>. Your care plan, signed consents, and documents are now available in your secure portal.</p>
+    <p><a href="${portalUrl}" style="display:inline-block;background:#C9A44A;color:#033D50;text-decoration:none;font-weight:600;padding:12px 20px;border-radius:10px">Open your portal</a></p>
+    <p style="font-size:13px;color:#4F6470">For your privacy, we don't include any health or consent details in email — everything lives in your portal.</p>
+    <p style="font-size:13px;color:#4F6470">— Godwins Family Care</p>
+  </div>`;
+  try {
+    await sendEmail(to, subject, text, { htmlBody });
+  } catch (e) {
+    console.error('Enrollment confirmation email failed (non-fatal):', e.message);
+  }
+}
+
+// Best-effort: render the Enrollment Packet PDF and persist it to HIPAA Google
+// Drive so it's referenced from the Documents tab. No-op (and non-fatal) when
+// Drive isn't configured in dev — the packet is still served on demand via
+// GET /api/gfc/enrollment-packet.pdf.
+async function persistEnrollmentPacketToDrive(client) {
+  try {
+    const ok = await googledrive.testConnection().then(r => r && r.success).catch(() => false);
+    if (!ok) return null;
+    const pdf = await pdfGenerator.generateEnrollmentPacketPDF(client);
+    const fileName = `Enrollment-Packet-${(client.slug || client.id)}-${Date.now()}.pdf`;
+    const result = await googledrive.uploadServiceReportPDF(client.name || 'Client', fileName, pdf);
+    return result && (result.webViewLink || result.url) ? { driveFileId: result.id || null, url: result.webViewLink || result.url, generatedAt: new Date().toISOString() } : null;
+  } catch (e) {
+    console.error('Enrollment packet Drive persist failed (non-fatal):', e.message);
+    return null;
+  }
+}
+
 // POST /api/gfc/intake/submit — validate required consents + intake, then flip
 // intake_pending → intake_complete and unlock the portal.
 app.post('/api/gfc/intake/submit', authenticateToken, requireClientForIntake, async (req, res) => {
@@ -5298,6 +5367,19 @@ app.post('/api/gfc/intake/submit', authenticateToken, requireClientForIntake, as
     await db.set('users', users);
     invalidateUsersCache();
     await logActivity(req.user.id, req.user.name || req.user.email, 'intake_completed', 'enrollment', client.id, { serviceLine });
+
+    // Fire-and-forget side effects (non-blocking, non-PHI email + best-effort Drive copy).
+    const portalUrl = `${req.protocol}://${req.get('host')}/portal/${client.slug || ''}`;
+    sendEnrollmentConfirmation(client, portalUrl, intake.primaryContact && intake.primaryContact.email)
+      .catch(e => console.error('Confirmation email error (non-fatal):', e.message));
+    persistEnrollmentPacketToDrive(client).then(async (ref) => {
+      if (!ref) return;
+      try {
+        const fresh = await getUsers();
+        const i = fresh.findIndex(u => u.id === client.id);
+        if (i !== -1) { fresh[i].enrollmentPacket = ref; await db.set('users', fresh); invalidateUsersCache(); }
+      } catch (e) { console.error('Packet ref save failed (non-fatal):', e.message); }
+    }).catch(() => {});
 
     res.json({ message: 'Enrollment complete', enrollmentStatus: client.enrollmentStatus });
   } catch (error) {
