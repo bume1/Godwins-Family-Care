@@ -1,0 +1,227 @@
+/* ==========================================================================
+   Godwins Family Care — Colors & Type Tokens
+   Brand: Physician & FNP-owned · personal home care · Atlanta/Cobb County
+   ========================================================================== */
+
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&display=swap');
+
+:root {
+  /* ---------- Brand colors ---------- */
+  --gfc-navy:        #033D50;   /* primary dark — backgrounds, headlines */
+  --gfc-navy-deep:   #022A38;   /* hover/pressed for navy surfaces */
+  --gfc-navy-soft:   #0A4F66;   /* lifted navy for cards-on-navy */
+
+  --gfc-gold:        #C9A44A;   /* primary accent — buttons, dividers */
+  --gfc-gold-light:  #F5CD85;   /* tints, highlights, badges */
+  --gfc-gold-pale:   #F1E2BE;   /* surface wash on cream */
+
+  --gfc-cream:       #FAF7F2;   /* page surface — never on navy */
+  --gfc-cream-warm:  #F2EBDD;   /* card on cream */
+  --gfc-ink:         #1B2A33;   /* body text on cream */
+  --gfc-ink-muted:   #4F6470;   /* secondary text on cream */
+  --gfc-line:        #E1D9C9;   /* hairlines on cream */
+
+  --gfc-white:       #FFFFFF;   /* always-white text on navy */
+
+  /* Semantic */
+  --gfc-success:     #3F7A5C;
+  --gfc-danger:      #B5462E;
+  --gfc-info:        #0A4F66;
+
+  /* Surfaces (token aliases) */
+  --bg:              var(--gfc-cream);
+  --bg-elev:         var(--gfc-white);
+  --bg-warm:         var(--gfc-cream-warm);
+  --bg-dark:         var(--gfc-navy);
+  --fg:              var(--gfc-ink);
+  --fg-muted:        var(--gfc-ink-muted);
+  --fg-on-dark:      var(--gfc-white);            /* WHITE on navy, never grey */
+  --accent:          var(--gfc-gold);
+  --accent-soft:     var(--gfc-gold-light);
+  --line:            var(--gfc-line);
+
+  /* ---------- Type ---------- */
+  --font-serif: "Cormorant Garamond", "Garamond", "Iowan Old Style", Georgia, serif;
+  --font-sans:  "DM Sans", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  /* Skews larger — audience includes elderly + adult children. Min body 17px. */
+  --fs-display:   clamp(48px, 6vw, 88px);   /* hero */
+  --fs-h1:        clamp(40px, 4.5vw, 64px);
+  --fs-h2:        clamp(32px, 3.4vw, 48px);
+  --fs-h3:        clamp(24px, 2.2vw, 32px);
+  --fs-h4:        20px;
+  --fs-eyebrow:   13px;     /* small caps label */
+  --fs-body-lg:   20px;
+  --fs-body:      18px;     /* default reading size */
+  --fs-body-sm:   16px;
+  --fs-caption:   14px;
+
+  --lh-tight:    1.08;
+  --lh-snug:     1.25;
+  --lh-body:     1.55;
+  --lh-loose:    1.7;
+
+  --tracking-eyebrow: 0.18em;   /* small-caps eyebrows */
+  --tracking-button:  0.06em;
+  --tracking-tight:   -0.01em;
+
+  /* ---------- Shape ---------- */
+  --radius-xs:  4px;
+  --radius-sm:  8px;
+  --radius-md:  14px;
+  --radius-lg:  20px;
+  --radius-xl:  28px;
+  --radius-pill: 999px;
+
+  /* ---------- Spacing scale (8pt) ---------- */
+  --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px; --sp-4: 16px;
+  --sp-5: 24px; --sp-6: 32px; --sp-7: 48px; --sp-8: 64px;
+  --sp-9: 96px; --sp-10: 128px;
+
+  /* ---------- Elevation ---------- */
+  --shadow-sm:  0 1px 2px rgba(3, 61, 80, 0.06), 0 1px 1px rgba(3, 61, 80, 0.04);
+  --shadow-md:  0 6px 18px rgba(3, 61, 80, 0.08), 0 2px 4px rgba(3, 61, 80, 0.04);
+  --shadow-lg:  0 20px 50px rgba(3, 61, 80, 0.14), 0 4px 12px rgba(3, 61, 80, 0.06);
+  --shadow-inset: inset 0 0 0 1px rgba(3, 61, 80, 0.08);
+
+  /* ---------- Motion ---------- */
+  --ease-out:  cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-fast:  140ms;
+  --dur-base:  240ms;
+  --dur-slow:  420ms;
+
+  /* ---------- Layout ---------- */
+  --container: 1200px;
+  --container-narrow: 880px;
+}
+
+/* ==========================================================================
+   Semantic element styles
+   ========================================================================== */
+html { font-size: 16px; }
+body {
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  color: var(--fg);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1, h2, h3, h4, .h-display {
+  font-family: var(--font-serif);
+  font-weight: 500;
+  line-height: var(--lh-tight);
+  letter-spacing: var(--tracking-tight);
+  color: var(--gfc-navy);
+  margin: 0 0 0.4em 0;
+  text-wrap: balance;
+}
+h1 { font-size: var(--fs-h1); }
+h2 { font-size: var(--fs-h2); }
+h3 { font-size: var(--fs-h3); font-weight: 600; }
+h4 { font-size: var(--fs-h4); font-family: var(--font-sans); font-weight: 600; letter-spacing: 0; }
+
+.h-display { font-size: var(--fs-display); font-weight: 500; }
+
+p { margin: 0 0 1em 0; text-wrap: pretty; max-width: 65ch; }
+p.lead { font-size: var(--fs-body-lg); color: var(--fg); }
+
+.eyebrow {
+  font-family: var(--font-sans);
+  font-size: var(--fs-eyebrow);
+  font-weight: 600;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--gfc-gold);
+}
+
+a {
+  color: var(--gfc-navy);
+  text-decoration-color: var(--gfc-gold);
+  text-underline-offset: 3px;
+  transition: color var(--dur-fast) var(--ease-out);
+}
+a:hover { color: var(--gfc-navy-deep); }
+
+/* On-navy variants */
+.on-navy, .on-navy h1, .on-navy h2, .on-navy h3, .on-navy h4, .on-navy p {
+  color: var(--gfc-white);   /* WHITE only — never grey/cream */
+}
+.on-navy .eyebrow { color: var(--gfc-gold-light); }
+.on-navy a { color: var(--gfc-white); text-decoration-color: var(--gfc-gold-light); }
+
+/* Utility text colors */
+.text-muted { color: var(--fg-muted); }
+.text-gold  { color: var(--gfc-gold); }
+.text-navy  { color: var(--gfc-navy); }
+
+/* Small caps eyebrow with rule */
+.eyebrow-rule {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+}
+.eyebrow-rule::before {
+  content: "";
+  display: block;
+  width: 28px;
+  height: 1px;
+  background: currentColor;
+  opacity: 0.6;
+}
+
+/* ==========================================================================
+   GFC App — shared utility overrides (appended to token file)
+   ========================================================================== */
+
+/* Tailwind primary override shim — maps Tailwind primary-* to GFC navy */
+/* Used by files that still use Tailwind's `primary` color via config */
+
+/* Button styles */
+.btn-gfc-primary {
+  background-color: var(--gfc-navy);
+  color: var(--gfc-white);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-sans);
+  font-size: var(--fs-body-sm);
+  font-weight: 600;
+  letter-spacing: var(--tracking-button);
+  padding: 10px 24px;
+  border: none;
+  cursor: pointer;
+  transition: background-color var(--dur-base) var(--ease-out);
+}
+.btn-gfc-primary:hover { background-color: var(--gfc-navy-deep); }
+
+.btn-gfc-gold {
+  background-color: var(--gfc-gold);
+  color: var(--gfc-navy);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-sans);
+  font-size: var(--fs-body-sm);
+  font-weight: 600;
+  letter-spacing: var(--tracking-button);
+  padding: 10px 24px;
+  border: none;
+  cursor: pointer;
+  transition: background-color var(--dur-base) var(--ease-out);
+}
+.btn-gfc-gold:hover { background-color: #b8933f; }
+
+/* Card */
+.card-gfc {
+  background: var(--gfc-cream-warm);
+  border: 1px solid var(--gfc-line);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  padding: var(--sp-6);
+}
+
+/* Nav / sidebar active state */
+.gfc-nav-active {
+  background-color: var(--gfc-navy);
+  color: var(--gfc-white) !important;
+}

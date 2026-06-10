@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Thrive 365 Labs Client Portal</title>
+  <title>Godwins Family Care — Care Portal</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -16,34 +16,36 @@
       theme: {
         extend: {
           colors: {
-            primary: { DEFAULT: '#045E9F', 50: '#eff6ff', 100: '#dbeafe', 200: '#bfdbfe', 300: '#93c5fd', 400: '#60a5fa', 500: '#045E9F', 600: '#0353a4', 700: '#00205A', 800: '#001d51', 900: '#001233' },
-            accent: '#00205A',
+            primary: { DEFAULT: '#033D50', 50: '#e8f0f4', 100: '#c5d9e3', 200: '#9fc0d0', 300: '#6ea3bb', 400: '#3d86a6', 500: '#033D50', 600: '#02334a', 700: '#022A38', 800: '#011f2a', 900: '#01141c' },
+            accent: '#C9A44A',
             surface: { 50: '#fafafa', 100: '#f4f4f5', 200: '#e4e4e7' },
             success: { DEFAULT: '#10b981', 50: '#ecfdf5', 500: '#10b981', 600: '#059669' },
             warning: { DEFAULT: '#f59e0b', 50: '#fffbeb', 500: '#f59e0b', 600: '#d97706' },
             danger: { DEFAULT: '#ef4444', 50: '#fef2f2', 500: '#ef4444', 600: '#dc2626' }
           },
           fontFamily: {
-            sans: ['Inter', 'system-ui', 'sans-serif']
-          }
+            serif: ['"Cormorant Garamond"', 'Georgia', 'serif'],
+            sans: ['"DM Sans"', '"Inter"', 'system-ui', 'sans-serif'],
+          },
         }
       }
     }
   </script>
+  <link rel="stylesheet" href="/css/gfc-tokens.css">
   <style>
     html { scroll-behavior: smooth; }
     * { font-family: 'Inter', system-ui, sans-serif; }
     body { background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 50%, #f1f5f9 100%); min-height: 100vh; }
     .sidebar-link { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); border-radius: 0.75rem; }
-    .sidebar-link:hover { background: linear-gradient(135deg, rgba(4, 94, 159, 0.08) 0%, rgba(4, 94, 159, 0.12) 100%); }
-    .sidebar-link.active { background: linear-gradient(135deg, #045E9F 0%, #0353a4 100%); color: white; box-shadow: 0 4px 14px -3px rgba(4, 94, 159, 0.4); }
+    .sidebar-link:hover { background: linear-gradient(135deg, rgba(3, 61, 80, 0.08) 0%, rgba(3, 61, 80, 0.12) 100%); }
+    .sidebar-link.active { background: linear-gradient(135deg, var(--gfc-navy) 0%, var(--gfc-navy-soft) 100%); color: white; box-shadow: 0 4px 14px -3px rgba(3, 61, 80, 0.4); }
     .card-modern { background: white; border-radius: 1.25rem; box-shadow: 0 1px 3px rgba(0,0,0,0.05), 0 1px 2px rgba(0,0,0,0.1); border: 1px solid rgba(0,0,0,0.04); }
     .card-modern:hover { box-shadow: 0 10px 25px -5px rgba(0,0,0,0.1), 0 8px 10px -6px rgba(0,0,0,0.1); }
-    .btn-primary { background: linear-gradient(135deg, #045E9F 0%, #0353a4 100%); transition: all 0.2s; }
-    .btn-primary:hover { background: linear-gradient(135deg, #0353a4 0%, #00205A 100%); box-shadow: 0 4px 14px -3px rgba(4, 94, 159, 0.5); transform: translateY(-1px); }
+    .btn-primary { background: linear-gradient(135deg, var(--gfc-navy) 0%, var(--gfc-navy-soft) 100%); transition: all 0.2s; }
+    .btn-primary:hover { background: linear-gradient(135deg, var(--gfc-navy-soft) 0%, var(--gfc-navy-deep) 100%); box-shadow: 0 4px 14px -3px rgba(3, 61, 80, 0.5); transform: translateY(-1px); }
     .input-modern { border: 1.5px solid #e4e4e7; border-radius: 0.75rem; transition: all 0.2s; background: white; }
-    .input-modern:focus { border-color: #045E9F; box-shadow: 0 0 0 3px rgba(4, 94, 159, 0.1); outline: none; }
-    .gradient-header { background: linear-gradient(135deg, #045E9F 0%, #00205A 100%); }
+    .input-modern:focus { border-color: var(--gfc-navy); box-shadow: 0 0 0 3px rgba(3, 61, 80, 0.1); outline: none; }
+    .gradient-header { background: linear-gradient(135deg, var(--gfc-navy) 0%, var(--gfc-navy-deep) 100%); }
     .glass-card { backdrop-filter: blur(10px); background: rgba(255,255,255,0.95); }
     @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
     .animate-fade-in { animation: fadeIn 0.4s ease-out forwards; }
@@ -201,13 +203,13 @@
         <div className="min-h-screen flex items-center justify-center p-4 relative">
           {/* Decorative background elements */}
           <div className="absolute inset-0 overflow-hidden pointer-events-none">
-            <div className="absolute -top-40 -right-40 w-80 h-80 rounded-full opacity-20" style={{background: 'radial-gradient(circle, #045E9F 0%, transparent 70%)'}}></div>
-            <div className="absolute -bottom-40 -left-40 w-96 h-96 rounded-full opacity-10" style={{background: 'radial-gradient(circle, #00205A 0%, transparent 70%)'}}></div>
+            <div className="absolute -top-40 -right-40 w-80 h-80 rounded-full opacity-20" style={{background: 'radial-gradient(circle, #033D50 0%, transparent 70%)'}}></div>
+            <div className="absolute -bottom-40 -left-40 w-96 h-96 rounded-full opacity-10" style={{background: 'radial-gradient(circle, #022A38 0%, transparent 70%)'}}></div>
           </div>
 
           <div className="glass-card p-5 sm:p-8 rounded-2xl shadow-xl w-full max-w-md animate-fade-in relative border border-white/50">
             <div className="text-center mb-6 sm:mb-8">
-              <img src="/thrive365-logo.webp" alt="Thrive 365 Labs" className="h-12 mx-auto mb-4" />
+              <img src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" className="h-12 mx-auto mb-4" />
               <h1 className="text-xl font-semibold text-gray-900">Client Portal</h1>
               <p className="text-gray-500 mt-1 text-sm">Sign in to access your portal</p>
             </div>
@@ -337,7 +339,7 @@
               {user?.logo ? (
                 <img src={user.logo} alt={user.practiceName || 'Practice Logo'} className="h-12 max-w-full object-contain" />
               ) : (
-                <img src="/thrive365-logo.webp" alt="Thrive 365 Labs" className="h-10" />
+                <img src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" className="h-10" />
               )}
               <button onClick={onClose} className="lg:hidden text-gray-500 hover:text-gray-700">
                 {Icons.close}
@@ -521,7 +523,7 @@
         <div className="space-y-6">
           {/* Dynamic Banner Header */}
           <div className="relative rounded-2xl overflow-hidden shadow-lg" style={{minHeight: '160px'}}>
-            <div className="absolute inset-0 bg-cover bg-center" style={{backgroundImage: 'url(/banners/banner-client.jpg)', backgroundColor: '#00205A'}}></div>
+            <div className="absolute inset-0 bg-cover bg-center" style={{backgroundImage: 'url(/banners/banner-client.jpg)', backgroundColor: '#033D50'}}></div>
             <div className="absolute inset-0" style={{background: 'linear-gradient(to right, rgba(0,32,90,0.95) 0%, rgba(4,94,159,0.8) 50%, rgba(4,94,159,0.4) 100%)'}}></div>
             <div className="relative p-6 md:p-8 flex items-center justify-between min-h-[160px]">
               <div className="text-white">
@@ -1723,7 +1725,7 @@
             <div className="px-4 sm:px-6 py-4">
               <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                 <div className="flex items-center gap-4">
-                  <img src="/thrive365-logo.webp" alt="Thrive 365 Labs" className="h-10" />
+                  <img src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" className="h-10" />
                   <div>
                     <h1 className="text-xl font-bold text-accent">{project.name}</h1>
                     <p className="text-sm text-gray-600">{project.clientName}</p>
@@ -1765,19 +1767,19 @@
           </div>
           
           <div className="flex gap-2 bg-white p-2 rounded-lg shadow-sm">
-            <button onClick={() => setViewType('list')} style={viewType === 'list' ? {backgroundColor: '#045E9F', color: 'white'} : {}} className={`px-4 py-2 rounded-md font-medium transition-all ${viewType === 'list' ? 'shadow-md' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>
+            <button onClick={() => setViewType('list')} style={viewType === 'list' ? {backgroundColor: '#033D50', color: 'white'} : {}} className={`px-4 py-2 rounded-md font-medium transition-all ${viewType === 'list' ? 'shadow-md' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>
               <span className="flex items-center gap-2">
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" /></svg>
                 List View
               </span>
             </button>
-            <button onClick={() => setViewType('timeline')} style={viewType === 'timeline' ? {backgroundColor: '#045E9F', color: 'white'} : {}} className={`px-4 py-2 rounded-md font-medium transition-all ${viewType === 'timeline' ? 'shadow-md' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>
+            <button onClick={() => setViewType('timeline')} style={viewType === 'timeline' ? {backgroundColor: '#033D50', color: 'white'} : {}} className={`px-4 py-2 rounded-md font-medium transition-all ${viewType === 'timeline' ? 'shadow-md' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>
               <span className="flex items-center gap-2">
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
                 Timeline
               </span>
             </button>
-            <button onClick={() => setViewType('calendar')} style={viewType === 'calendar' ? {backgroundColor: '#045E9F', color: 'white'} : {}} className={`px-4 py-2 rounded-md font-medium transition-all ${viewType === 'calendar' ? 'shadow-md' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>
+            <button onClick={() => setViewType('calendar')} style={viewType === 'calendar' ? {backgroundColor: '#033D50', color: 'white'} : {}} className={`px-4 py-2 rounded-md font-medium transition-all ${viewType === 'calendar' ? 'shadow-md' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>
               <span className="flex items-center gap-2">
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
                 Calendar
@@ -3609,7 +3611,7 @@
             />
             <div className="absolute inset-0 z-20 flex flex-col justify-center items-center text-white text-center px-6">
               <h1 className="text-3xl md:text-4xl font-bold drop-shadow-lg">Customer Support Center</h1>
-              <p className="text-lg mt-2 opacity-90 drop-shadow">Thrive 365 Labs Client Portal</p>
+              <p className="text-lg mt-2 opacity-90 drop-shadow">Godwins Family Care — Care Portal</p>
             </div>
           </div>
 
@@ -3618,7 +3620,7 @@
             <div className="grid grid-cols-3 border-b">
               <button
                 onClick={() => setActiveTab('history')}
-                style={activeTab === 'history' ? {backgroundColor: '#045E9F', color: 'white'} : {}}
+                style={activeTab === 'history' ? {backgroundColor: '#033D50', color: 'white'} : {}}
                 className={`py-4 px-4 font-medium transition flex items-center justify-center gap-2 ${activeTab === 'history' ? '' : 'text-gray-600 hover:bg-gray-50 border-r'}`}
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" /></svg>
@@ -3632,7 +3634,7 @@
               </button>
               <button
                 onClick={() => setActiveTab('tickets')}
-                style={activeTab === 'tickets' ? {backgroundColor: '#045E9F', color: 'white'} : {}}
+                style={activeTab === 'tickets' ? {backgroundColor: '#033D50', color: 'white'} : {}}
                 className={`py-4 px-4 font-medium transition flex items-center justify-center gap-2 ${activeTab === 'tickets' ? '' : 'text-gray-600 hover:bg-gray-50 border-r'}`}
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" /></svg>
@@ -3641,7 +3643,7 @@
               </button>
               <button
                 onClick={() => setActiveTab('submit')}
-                style={activeTab === 'submit' ? {backgroundColor: '#045E9F', color: 'white'} : {}}
+                style={activeTab === 'submit' ? {backgroundColor: '#033D50', color: 'white'} : {}}
                 className={`py-4 px-4 font-medium transition flex items-center justify-center gap-2 ${activeTab === 'submit' ? '' : 'text-gray-600 hover:bg-gray-50'}`}
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
@@ -3838,8 +3840,8 @@
                     <h2 className="text-2xl sm:text-4xl font-bold text-gray-800 mb-4 sm:mb-6">Submit a Ticket</h2>
                     <p className="text-gray-500 text-lg">
                       <span className="italic">or</span> email us at{' '}
-                      <a href="mailto:support@thrive365labs.com" className="text-primary hover:text-accent font-semibold">
-                        support@thrive365labs.com
+                      <a href="mailto:support@godwinsfamilycarellc.com" className="text-primary hover:text-accent font-semibold">
+                        support@godwinsfamilycarellc.com
                       </a>
                     </p>
                   </div>
@@ -4092,7 +4094,7 @@
           
           <div className="bg-white p-6 rounded-xl shadow-sm">
             <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
-              <span>📥</span> Documents From Thrive 365 Labs
+              <span>📥</span> Documents From Godwins Family Care
             </h2>
             {adminDocs.length > 0 ? (
               <div className="space-y-4">
@@ -4204,7 +4206,7 @@
             ) : (
               <div className="text-center py-8 text-gray-500">
                 <div className="text-4xl mb-2">📂</div>
-                <p>No documents from Thrive 365 Labs yet.</p>
+                <p>No documents from Godwins Family Care yet.</p>
               </div>
             )}
           </div>
@@ -4325,7 +4327,7 @@
               <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
                 <span>📤</span> Your Uploaded Files
               </h2>
-              <p className="text-sm text-gray-500 mb-4">Files you've uploaded to Thrive 365 Labs</p>
+              <p className="text-sm text-gray-500 mb-4">Files you've uploaded to Godwins Family Care</p>
               <div className="space-y-2">
                 {clientUploads.map(doc => (
                   <div
@@ -4365,7 +4367,7 @@
           {hasHubSpotConfig && (
             <div className="bg-white p-6 rounded-xl shadow-sm">
               <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
-                <span>📤</span> Upload Files to Thrive 365 Labs
+                <span>📤</span> Upload Files to Godwins Family Care
               </h2>
               <p className="text-gray-600 text-sm mb-4">
                 Upload documents directly to your account record. Accepted formats: PDF, DOC, DOCX, XLS, XLSX, PNG, JPG, GIF, TXT, CSV (max 10MB)
@@ -6025,7 +6027,7 @@
             <button onClick={() => setMobileMenuOpen(true)} className="text-gray-600 hover:text-gray-800">
               {Icons.menu}
             </button>
-            <img src="/thrive365-logo.webp" alt="Thrive 365 Labs" className="h-8" />
+            <img src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" className="h-8" />
             <div className="w-6"></div>
           </div>
           
@@ -6091,7 +6093,7 @@
             {renderPage()}
             
             <footer className="mt-12 text-center text-sm text-gray-500">
-              <p>&copy; 2026 Thrive 365 Labs. All rights reserved.</p>
+              <p>&copy; 2026 Godwins Family Care LLC. All rights reserved.</p>
               {isAdmin && (
                 <a href="/changelog" className="text-primary hover:underline text-xs mt-1 inline-block">View Changelog</a>
               )}

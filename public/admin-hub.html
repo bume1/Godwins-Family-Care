@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Thrive 365 Labs - Admin Hub</title>
+  <title>Godwins Family Care — Admin Hub</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -17,15 +17,16 @@
       theme: {
         extend: {
           colors: {
-            primary: { 50: '#eff6ff', 100: '#dbeafe', 200: '#bfdbfe', 300: '#93c5fd', 400: '#60a5fa', 500: '#045E9F', 600: '#0353a4', 700: '#00205A', 800: '#001d51', 900: '#001233' },
-            accent: '#00205A',
+            primary: { 50: '#e8f0f4', 100: '#c5d9e3', 200: '#9fc0d0', 300: '#6ea3bb', 400: '#3d86a6', 500: '#033D50', 600: '#02334a', 700: '#022A38', 800: '#011f2a', 900: '#01141c' },
+            accent: '#C9A44A',
             surface: { 50: '#fafafa', 100: '#f4f4f5', 200: '#e4e4e7' },
             success: { 50: '#ecfdf5', 500: '#10b981', 600: '#059669' },
             warning: { 50: '#fffbeb', 500: '#f59e0b', 600: '#d97706' },
             danger: { 50: '#fef2f2', 500: '#ef4444', 600: '#dc2626' }
           },
           fontFamily: {
-            sans: ['Inter', 'system-ui', 'sans-serif']
+            serif: ['"Cormorant Garamond"', 'Georgia', 'serif'],
+            sans: ['"DM Sans"', '"Inter"', 'system-ui', 'sans-serif'],
           },
           boxShadow: {
             'soft': '0 2px 15px -3px rgba(0, 0, 0, 0.07), 0 10px 20px -2px rgba(0, 0, 0, 0.04)',
@@ -36,19 +37,20 @@
       }
     }
   </script>
+  <link rel="stylesheet" href="/css/gfc-tokens.css">
   <style>
     * { font-family: 'Inter', system-ui, sans-serif; }
     body { background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%); }
     .sidebar-link { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); border-radius: 0.75rem; }
-    .sidebar-link:hover { background: linear-gradient(90deg, rgba(4, 94, 159, 0.08) 0%, rgba(4, 94, 159, 0.02) 100%); }
-    .sidebar-link.active { background: linear-gradient(135deg, #045E9F 0%, #0353a4 100%); color: white; box-shadow: 0 4px 14px -3px rgba(4, 94, 159, 0.4); }
+    .sidebar-link:hover { background: linear-gradient(90deg, rgba(3, 61, 80, 0.08) 0%, rgba(3, 61, 80, 0.02) 100%); }
+    .sidebar-link.active { background: linear-gradient(135deg, var(--gfc-navy) 0%, var(--gfc-navy-soft) 100%); color: white; box-shadow: 0 4px 14px -3px rgba(3, 61, 80, 0.4); }
     .card-modern { background: white; border-radius: 1rem; box-shadow: 0 1px 3px rgba(0,0,0,0.05), 0 1px 2px rgba(0,0,0,0.1); transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); border: 1px solid rgba(0,0,0,0.04); }
     .card-modern:hover { box-shadow: 0 10px 40px -10px rgba(0,0,0,0.1), 0 4px 6px -2px rgba(0,0,0,0.05); transform: translateY(-2px); }
-    .btn-primary { background: linear-gradient(135deg, #045E9F 0%, #0353a4 100%); transition: all 0.2s; }
-    .btn-primary:hover { background: linear-gradient(135deg, #0353a4 0%, #00205A 100%); box-shadow: 0 4px 14px -3px rgba(4, 94, 159, 0.5); transform: translateY(-1px); }
+    .btn-primary { background: linear-gradient(135deg, var(--gfc-navy) 0%, var(--gfc-navy-soft) 100%); transition: all 0.2s; }
+    .btn-primary:hover { background: linear-gradient(135deg, var(--gfc-navy-soft) 0%, var(--gfc-navy-deep) 100%); box-shadow: 0 4px 14px -3px rgba(3, 61, 80, 0.5); transform: translateY(-1px); }
     .input-modern { border: 1.5px solid #e4e4e7; border-radius: 0.75rem; transition: all 0.2s; }
-    .input-modern:focus { border-color: #045E9F; box-shadow: 0 0 0 3px rgba(4, 94, 159, 0.1); outline: none; }
-    .gradient-header { background: linear-gradient(135deg, #045E9F 0%, #00205A 100%); }
+    .input-modern:focus { border-color: var(--gfc-navy); box-shadow: 0 0 0 3px rgba(3, 61, 80, 0.1); outline: none; }
+    .gradient-header { background: linear-gradient(135deg, var(--gfc-navy) 0%, var(--gfc-navy-deep) 100%); }
     .stat-card { position: relative; overflow: hidden; }
     .stat-card::before { content: ''; position: absolute; top: 0; right: 0; width: 100px; height: 100px; background: linear-gradient(135deg, rgba(255,255,255,0.1) 0%, transparent 100%); border-radius: 0 1rem 0 100%; }
     @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
@@ -368,8 +370,8 @@
         <div className="min-h-screen flex items-center justify-center p-4" style={{background: 'linear-gradient(135deg, #f8fafc 0%, #e2e8f0 50%, #f1f5f9 100%)'}}>
           {/* Decorative elements */}
           <div className="absolute inset-0 overflow-hidden pointer-events-none">
-            <div className="absolute -top-40 -right-40 w-80 h-80 rounded-full opacity-20" style={{background: 'radial-gradient(circle, #045E9F 0%, transparent 70%)'}}></div>
-            <div className="absolute -bottom-40 -left-40 w-96 h-96 rounded-full opacity-10" style={{background: 'radial-gradient(circle, #00205A 0%, transparent 70%)'}}></div>
+            <div className="absolute -top-40 -right-40 w-80 h-80 rounded-full opacity-20" style={{background: 'radial-gradient(circle, #033D50 0%, transparent 70%)'}}></div>
+            <div className="absolute -bottom-40 -left-40 w-96 h-96 rounded-full opacity-10" style={{background: 'radial-gradient(circle, #022A38 0%, transparent 70%)'}}></div>
           </div>
 
           <div className="relative w-full max-w-md">
@@ -377,7 +379,7 @@
             <div className="bg-white/95 backdrop-blur-sm rounded-2xl shadow-soft p-5 sm:p-8 border border-white/50">
               {/* Logo and header */}
               <div className="text-center mb-6 sm:mb-8">
-                <img src="/thrive365-logo.webp" alt="Thrive 365 Labs" className="h-12 mx-auto mb-4" />
+                <img src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" className="h-12 mx-auto mb-4" />
                 <h1 className="text-2xl font-semibold text-gray-900 tracking-tight">Admin Hub</h1>
                 <p className="text-gray-500 mt-1 text-sm">Precision Diagnostics Administration</p>
               </div>
@@ -398,7 +400,7 @@
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     className="input-modern w-full px-4 py-3 text-gray-900 placeholder-gray-400"
-                    placeholder="you@thrive365labs.live"
+                    placeholder="you@godwinsfamilycarellc.com"
                     required
                   />
                 </div>
@@ -433,7 +435,7 @@
 
               {/* Footer */}
               <div className="mt-8 pt-6 border-t border-gray-100 text-center">
-                <p className="text-xs text-gray-400">&copy; 2026 Thrive 365 Labs. All rights reserved.</p>
+                <p className="text-xs text-gray-400">&copy; 2026 Godwins Family Care LLC. All rights reserved.</p>
                 <a href="/changelog" className="text-primary-500 hover:underline text-xs mt-1 inline-block">View Changelog</a>
               </div>
             </div>
@@ -485,7 +487,7 @@
           <aside className={`w-72 bg-white min-h-screen fixed left-0 top-0 z-50 transform transition-all duration-300 ease-out shadow-soft ${isMobileOpen ? 'translate-x-0' : '-translate-x-full'} lg:translate-x-0`}>
             {/* Logo Header */}
             <div className="p-5 border-b border-gray-100 flex justify-between items-center">
-              <img src="/thrive365-logo.webp" alt="Thrive 365 Labs" className="h-9" />
+              <img src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" className="h-9" />
               <button onClick={onClose} className="lg:hidden text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 transition">{Icons.close}</button>
             </div>
 
@@ -595,7 +597,7 @@
                   <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-xl bg-white/20 backdrop-blur-sm flex items-center justify-center shadow-lg">{Icons.chart}</div>
                   <h1 className="text-xl sm:text-3xl font-bold tracking-tight drop-shadow-sm">Admin Hub Dashboard</h1>
                 </div>
-                <p className="text-white/90 text-sm max-w-xl mt-2">Central management console for Thrive 365 Labs diagnostic platforms and services.</p>
+                <p className="text-white/90 text-sm max-w-xl mt-2">Central management console for Godwins Family Care platforms and services.</p>
               </div>
             </div>
           </div>
@@ -923,7 +925,10 @@
         practiceName: '', isNewClient: false, existingPortalSlug: '',
         logo: '', hubspotCompanyId: '', hubspotDealId: '', hubspotContactId: '',
         assignedProjects: [], projectAccessLevels: {}, assignedClients: [],
-        sendWelcomeEmail: true
+        sendWelcomeEmail: true,
+        // GFC extended fields
+        licenseLevel: '', hasClinicalAccess: false, enrollmentStatus: 'intake_pending',
+        careTeam: { assignedFNPs: [], assignedCaseManager: '', primaryCaregiver: '', backupCaregiver: '' }
       };
       const [formData, setFormData] = useState(defaultFormData);
 
@@ -1001,7 +1006,12 @@
           assignedProjects: user.assignedProjects || [],
           projectAccessLevels: user.projectAccessLevels || {},
           assignedClients: user.assignedClients || [],
-          existingPortalSlug: ''
+          existingPortalSlug: '',
+          // GFC extended fields
+          licenseLevel: user.licenseLevel || '',
+          hasClinicalAccess: user.hasClinicalAccess || false,
+          enrollmentStatus: user.enrollmentStatus || 'intake_pending',
+          careTeam: user.careTeam || { assignedFNPs: [], assignedCaseManager: '', primaryCaregiver: '', backupCaregiver: '' }
         });
         setShowForm(true);
       };
@@ -1123,9 +1133,11 @@
         const getRoleDisplay = (user) => {
           if (user.role === 'admin') return 'Super Admin';
           if (user.isManager) return 'Manager';
-          if (user.role === 'user') return 'Team Member';
+          if (user.role === 'user') return 'Clinical (FNP)';
           if (user.role === 'client') return 'Client';
-          if (user.role === 'vendor') return 'Vendor';
+          if (user.role === 'vendor') return 'Caregiver';
+          if (user.role === 'caseManager') return 'Case Manager';
+          if (user.role === 'family') return 'Family';
           return user.role || '';
         };
 
@@ -1173,7 +1185,7 @@
 
         // Generate filename with date
         const date = new Date().toISOString().split('T')[0];
-        const filename = `thrive365-users-${date}.xlsx`;
+        const filename = `gfc-users-${date}.xlsx`;
 
         // Download file
         XLSX.writeFile(wb, filename);
@@ -1204,7 +1216,7 @@
                 </button>
                 <button onClick={() => { setShowForm(true); setEditingUser(null); setFormData(defaultFormData); }}
                   className="px-4 py-2 rounded-lg font-medium flex items-center gap-2 shadow-sm hover:shadow-md transition-all"
-                  style={{backgroundColor: '#045E9F', color: 'white'}}>
+                  style={{backgroundColor: '#033D50', color: 'white'}}>
                   {Icons.plus} Add User
                 </button>
               </div>
@@ -1318,11 +1330,13 @@
                           }
                         }}
                         className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
-                        <option value="user">Team Member</option>
+                        <option value="user">Clinical (FNP)</option>
                         <option value="manager">Manager</option>
                         <option value="admin">Super Admin</option>
                         <option value="client">Client</option>
-                        <option value="vendor">External Vendor</option>
+                        <option value="vendor">Caregiver</option>
+                        <option value="caseManager">Case Manager</option>
+                        <option value="family">Family / Authorized Contact</option>
                       </select>
                     </div>
                   </div>
@@ -1359,6 +1373,33 @@
                         </div>
                       </div>
                       <p className="text-xs text-gray-500 mt-2">Admins automatically have all permissions. Managers with Service Portal access can manage vendors and assignments.</p>
+                    </div>
+                  )}
+
+                  {/* License Level — shown for Caregiver (vendor) role */}
+                  {formData.role === 'vendor' && (
+                    <div className="border-t pt-4">
+                      <label className="block text-sm font-medium text-gray-700 mb-1">License Level</label>
+                      <select value={formData.licenseLevel} onChange={(e) => setFormData({ ...formData, licenseLevel: e.target.value })}
+                        className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
+                        <option value="">-- Select License Level --</option>
+                        <option value="sitter">Sitter / Companion</option>
+                        <option value="pca">PCA</option>
+                        <option value="cna">CNA</option>
+                        <option value="lpn">LPN</option>
+                      </select>
+                    </div>
+                  )}
+
+                  {/* Clinical Access — shown for Clinical (FNP) / user role */}
+                  {formData.role === 'user' && (
+                    <div className="border-t pt-4">
+                      <div className="flex items-center gap-3 p-3 bg-teal-50 rounded-lg">
+                        <input type="checkbox" id="hasClinicalAccess" checked={formData.hasClinicalAccess}
+                          onChange={(e) => setFormData({ ...formData, hasClinicalAccess: e.target.checked })}
+                          className="w-5 h-5 rounded border-gray-300 text-teal-600 focus:ring-teal-500" />
+                        <label htmlFor="hasClinicalAccess" className="text-sm font-medium text-gray-700">Clinical Access (FNP / charting)</label>
+                      </div>
                     </div>
                   )}
 
@@ -1499,6 +1540,63 @@
                             className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" placeholder="HubSpot Contact ID" />
                         </div>
                       </div>
+
+                      {/* Enrollment Status */}
+                      <h4 className="font-medium text-gray-800 mt-4 mb-2">Enrollment Status</h4>
+                      <select value={formData.enrollmentStatus} onChange={(e) => setFormData({ ...formData, enrollmentStatus: e.target.value })}
+                        className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
+                        <option value="intake_pending">Intake Pending</option>
+                        <option value="intake_complete">Intake Complete</option>
+                        <option value="enrolled">Enrolled</option>
+                      </select>
+
+                      {/* Care Team */}
+                      <h4 className="font-medium text-gray-800 mt-4 mb-2">Care Team</h4>
+                      <div className="grid md:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Primary Caregiver</label>
+                          <select value={formData.careTeam.primaryCaregiver} onChange={(e) => setFormData({ ...formData, careTeam: { ...formData.careTeam, primaryCaregiver: e.target.value } })}
+                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
+                            <option value="">-- None --</option>
+                            {users.filter(u => u.role === 'vendor').map(u => (
+                              <option key={u.id} value={u.id}>{u.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Backup Caregiver</label>
+                          <select value={formData.careTeam.backupCaregiver} onChange={(e) => setFormData({ ...formData, careTeam: { ...formData.careTeam, backupCaregiver: e.target.value } })}
+                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
+                            <option value="">-- None --</option>
+                            {users.filter(u => u.role === 'vendor').map(u => (
+                              <option key={u.id} value={u.id}>{u.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Assigned Case Manager</label>
+                          <select value={formData.careTeam.assignedCaseManager} onChange={(e) => setFormData({ ...formData, careTeam: { ...formData.careTeam, assignedCaseManager: e.target.value } })}
+                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
+                            <option value="">-- None --</option>
+                            {users.filter(u => u.role === 'caseManager').map(u => (
+                              <option key={u.id} value={u.id}>{u.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Assigned FNPs</label>
+                          <select multiple value={formData.careTeam.assignedFNPs} onChange={(e) => {
+                              const selected = Array.from(e.target.selectedOptions).map(o => o.value);
+                              setFormData({ ...formData, careTeam: { ...formData.careTeam, assignedFNPs: selected } });
+                            }}
+                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" size="4">
+                            {users.filter(u => u.role === 'user' && u.hasClinicalAccess).map(u => (
+                              <option key={u.id} value={u.id}>{u.name}</option>
+                            ))}
+                          </select>
+                          <p className="text-xs text-gray-500 mt-1">Hold Ctrl/Cmd to select multiple</p>
+                        </div>
+                      </div>
                     </div>
                   )}
 
@@ -1542,7 +1640,7 @@
                         id="sendWelcomeEmail"
                         checked={formData.sendWelcomeEmail !== false}
                         onChange={(e) => setFormData({...formData, sendWelcomeEmail: e.target.checked})}
-                        className="mt-0.5 h-4 w-4 rounded border-gray-300 accent-[#045E9F]"
+                        className="mt-0.5 h-4 w-4 rounded border-gray-300 accent-[#033D50]"
                       />
                       <label htmlFor="sendWelcomeEmail" className="text-sm text-blue-800 cursor-pointer">
                         <span className="font-medium">Send welcome email</span> — automatically email the new user their username and temporary password with a login link
@@ -1554,7 +1652,7 @@
                     <button type="button" onClick={() => { setShowForm(false); setEditingUser(null); setMessage(''); }} className="px-6 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 font-medium" disabled={saving}>
                       Cancel
                     </button>
-                    <button type="submit" disabled={saving} className="px-6 py-2.5 rounded-lg font-medium flex items-center gap-2" style={{backgroundColor: '#045E9F', color: 'white'}}>
+                    <button type="submit" disabled={saving} className="px-6 py-2.5 rounded-lg font-medium flex items-center gap-2" style={{backgroundColor: '#033D50', color: 'white'}}>
                       {saving && <span className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></span>}
                       {saving ? 'Saving...' : (editingUser ? 'Update User' : 'Create User')}
                     </button>
@@ -1706,13 +1804,17 @@
                               user.role === 'admin' ? 'bg-purple-100 text-purple-700' :
                               user.isManager ? 'bg-indigo-100 text-indigo-700' :
                               user.role === 'client' ? 'bg-blue-100 text-blue-700' :
-                              user.role === 'vendor' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'
+                              user.role === 'vendor' ? 'bg-green-100 text-green-700' :
+                              user.role === 'caseManager' ? 'bg-teal-100 text-teal-700' :
+                              user.role === 'family' ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-700'
                             }`}>{
                               user.role === 'admin' ? 'Super Admin' :
                               user.isManager ? 'Manager' :
                               user.role === 'client' ? 'Client' :
-                              user.role === 'vendor' ? 'Vendor' :
-                              user.role === 'user' ? 'Team Member' : user.role
+                              user.role === 'vendor' ? 'Caregiver' :
+                              user.role === 'user' ? 'Clinical (FNP)' :
+                              user.role === 'caseManager' ? 'Case Manager' :
+                              user.role === 'family' ? 'Family' : user.role
                             }</span>
                           </td>
                           <td className="px-4 py-4">
@@ -3943,7 +4045,7 @@
                         <p className="text-xs text-gray-500">To: {n.recipientEmail} | Trigger: {new Date(n.triggerDate).toLocaleString()}</p>
                       </div>
                       <div className="flex items-center gap-2 flex-shrink-0">
-                        <button onClick={() => setPreviewNotification(n)} className="text-xs text-[#045E9F] hover:underline">View</button>
+                        <button onClick={() => setPreviewNotification(n)} className="text-xs text-[#033D50] hover:underline">View</button>
                         {n.status === 'pending' && (
                           <button onClick={() => handleCancel(n.id)} className="text-xs text-red-600 hover:underline">Cancel</button>
                         )}
@@ -3990,7 +4092,7 @@
                             <p className="text-xs text-gray-500">To: {n.recipientEmail} | {n.sentAt ? `Sent: ${new Date(n.sentAt).toLocaleString()}` : n.status === 'cancelled' ? `Cancelled` : `Failed: ${n.failureReason || 'Unknown'}`}</p>
                           </div>
                           <div className="flex items-center gap-2 flex-shrink-0">
-                            <button onClick={() => setPreviewNotification(n)} className="text-xs text-[#045E9F] hover:underline">View</button>
+                            <button onClick={() => setPreviewNotification(n)} className="text-xs text-[#033D50] hover:underline">View</button>
                             {n.status === 'failed' && (
                               <button onClick={() => handleRetry(n.id)} className="text-xs text-red-600 hover:underline">Retry</button>
                             )}
@@ -4397,7 +4499,7 @@
           <Sidebar activePage={activePage} onNavigate={handleNavigation} user={user} token={token} isMobileOpen={isMobileOpen} onClose={() => setIsMobileOpen(false)} />
           <div className="lg:hidden bg-white border-b p-4 flex items-center justify-between sticky top-0 z-30">
             <button onClick={() => setIsMobileOpen(true)} className="text-gray-600">{Icons.menu}</button>
-            <img src="/thrive365-logo.webp" alt="Thrive 365 Labs" className="h-8" />
+            <img src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" className="h-8" />
             <div className="w-6"></div>
           </div>
           <main className="lg:ml-72 p-4 lg:p-8">{renderPage()}</main>

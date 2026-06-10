@@ -55,14 +55,24 @@ const SERVICE_TYPE_MAP = {
   'other': 'Other'
 };
 
+// GFC role model (repurposes the former lab app's 4 roles, adds 2):
+//   admin       = Admin (Owner/MD)                         [keep]
+//   user        = Clinical (FNP)                           [repurposed from "team member"]
+//   vendor      = Caregiver (PCA/CNA/LPN/Sitter)           [repurposed from "external vendor"]
+//   client      = Client (private home care)               [keep]
+//   caseManager = Case Manager                             [new]
+//   family      = Family / Authorized Contact (read-only, ROI-gated)  [new]
+
 // ---- Roles & Permissions ----
 const ROLES = Object.freeze({
   ADMIN: 'admin',
   USER: 'user',
   CLIENT: 'client',
-  VENDOR: 'vendor'
+  VENDOR: 'vendor',
+  CASE_MANAGER: 'caseManager',
+  FAMILY: 'family'
 });
-const ALL_ROLES = Object.freeze([ROLES.ADMIN, ROLES.USER, ROLES.CLIENT, ROLES.VENDOR]);
+const ALL_ROLES = Object.freeze([ROLES.ADMIN, ROLES.USER, ROLES.CLIENT, ROLES.VENDOR, ROLES.CASE_MANAGER, ROLES.FAMILY]);
 
 // ---- Project & Task Statuses ----
 const PROJECT_STATUSES = Object.freeze(['active', 'paused', 'completed']);
