@@ -1,0 +1,1 @@
+- [CDN Babel version pinning](cdn-babel-pinning.md) — pin in-browser `@babel/standalone` to `@7`; unpinned "latest" moved to Babel 8 and rendered every page blank.
