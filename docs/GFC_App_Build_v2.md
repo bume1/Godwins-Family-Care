@@ -219,6 +219,6 @@ Consent-gated remote patient monitoring with in-home video, viewable by internal
 - HIPAA: all audio/video is PHI. Encrypted storage in the AWS boundary (S3 SSE/KMS), strict RBAC, full audit on every view, BAA-covered. Never on Replit, never outside the boundary.
 
 ## 12. Open items
-- Tier vocabulary: adopt app Tier 1/2/3, retire "Triage Level" (from the intake spec). Confirm.
+- ~~Tier vocabulary: adopt app Tier 1/2/3, retire "Triage Level"~~ — **resolved (intake spec v1.1):** adopt the canonical **Track A (A1–A4) / Track B** enum; retire both "Care Tier 1/2/3" and "Triage Level," mapping legacy labels per `GFC_Intake_and_Packet_Spec_v1.md` §3.2.
 - Counsel/licensure review of the rewritten consents before live.
 - Who owns Track 0 (AWS/OpenEMR provisioning) and the start date — this sets whether 1.5 and 3 weeks hold.
