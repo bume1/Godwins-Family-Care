@@ -11,7 +11,12 @@ This guide is the index and source of truth. The detail lives in:
 - `GFC_Matching_Engine_Spec_v1.md` — caregiver ↔ client matching algorithm.
 - `GFC_Client_Care_Profile_Schema_v1.md` — client data model (includes `careTeam`).
 - `GFC_Caregiver_Profile_Schema_v1.md` — caregiver data model (includes `licenseLevel`).
-- `docs/prototype/` — visual reference prototypes (sibling of `docs/design-system/`). Three files: `client-prototype-full.html` (full client journey — Session 3 build target), `caregiver-app-prototype.html` (caregiver app — Session 4 build target), and `phcp-portal-prototype.html` (gate, family monitoring, and the staff Care Match screen — reference for both).
+- `docs/prototype/` — **visual reference prototypes** (sibling of `docs/design-system/`). Three files: `client-prototype-full.html` (full client journey — Session 3 build target), `caregiver-app-prototype.html` (caregiver app — Session 4 build target), and `phcp-portal-prototype.html` (gate, family monitoring, and the staff Care Match screen — reference for both). Code builds from the specs + design system; the prototypes show what the result should look like.
+
+---
+
+## Build priority (revised 06/2026) — CLINICAL-FIRST
+First clinical (In-Home Primary Care) clients begin in 1–2 weeks, so the **clinical line builds before the PHCP caregiver segment**. Order: shared client portal + gated intake (Session 3) → clinical portal + OpenEMR (Session 4) → clinical HIPAA go-live (Session 5) → then the PHCP caregiver app, scheduling, and matching (Sessions 6–8). See `GFC_SESSION_PLAN.md`. The PHCP build detail in §5 still applies; it just executes after the clinical line (§6).
 
 ---
 
@@ -27,10 +32,10 @@ This guide is the index and source of truth. The detail lives in:
 | Replit | Demoted to non-PHI only: marketing site + design prototyping. |
 | Build tool | Claude design for the prototype UI. |
 
-### Timeline
-- **PHCP working prototype:** under 1 week (dev env, test data, full UX).
-- **PHCP HIPAA-live:** 1.5 weeks.
-- **Full (PHCP + Clinical/OpenEMR):** 3 weeks.
+### Timeline (clinical-first)
+- **Clinical line live (first IHPC clients):** 1–2 weeks. Priority.
+- **PHCP caregiver segment:** follows the clinical go-live.
+- Shared client portal + gated intake (Session 3) lands before both.
 
 ---
 
@@ -109,7 +114,7 @@ The existing permission-flag pattern (`hasXAccess`) and per-request fresh-user l
 A client cannot reach any portal area until intake is complete.
 - Add `enrollmentStatus` to the client user: `intake_pending → intake_complete → enrolled`.
 - On every portal load (the app already does a fresh user lookup per request), if status is `intake_pending`, render only the intake workflow. Block all other routes at the API layer, not just the UI.
-- Port `template-gfc-intake.php` into a React portal flow. For the prototype it can post to the current endpoint; for HIPAA-live it posts to the app API → RDS, with documents to Drive. **Retire the Google Sheet path for live PHI** (a Workspace Sheet is an acceptable interim only if it must stay).
+- Port `template-gfc-intake-3.php` (current version) into a React portal flow. For the prototype it can post to the current endpoint; for HIPAA-live it posts to the app API → RDS, with documents to Drive. **Retire the Google Sheet path for live PHI** (a Workspace Sheet is an acceptable interim only if it must stay).
 - Family portal stays locked until ROI-family is signed. No manual override.
 
 ### 5.3 Intake → enrollment build plan (embedded)
@@ -187,11 +192,11 @@ Grounded in the repo's own documented gotchas plus the move off Replit:
 
 ---
 
-## 10. Sequencing and dependencies
-1. **Now, parallel:** Track 0 infra. Until AWS + OpenEMR + BAAs exist, nothing is HIPAA-live. This is the bottleneck, not the UI.
-2. **Days 1–6:** PHCP prototype on dev (Claude design), test data, full UX, gated intake working.
-3. **Days 7–10:** PHCP to AWS, PHI to RDS + Drive, consents live, hardening pass → HIPAA-live.
-4. **Days 10–21:** Track B — OpenEMR FHIR integration, clinician front end, RN packet, IHPC intake branch → full.
+## 10. Sequencing and dependencies (clinical-first)
+1. **Now, accelerated:** Track 0 infra — OpenEMR live ~tonight, AWS boundary, BAAs. Front-loaded because clinical go-live is 1–2 weeks out.
+2. **This week:** finish Session 3 (shared client portal + gated intake, both service paths) on dev/test data.
+3. **This week → 1–2 wks:** Session 4 clinical portal + OpenEMR, then Session 5 clinical HIPAA go-live → first clinical clients live.
+4. **Following weeks:** Sessions 6–8 PHCP caregiver app, scheduling, matching; then 9–12 (messaging, family, RPM, audit).
 
 ## 11. RPM / Remote monitoring (Track C, post-revision)
 
