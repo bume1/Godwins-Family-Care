@@ -4,6 +4,29 @@
 
 ---
 
+### Version 3.2.0 - June 10, 2026
+
+#### New Features
+- Session 2: Deactivate launch/implementations tracker (DECISIONS §7)
+
+#### Bug Fixes
+- add /api/bootstrap-admin recovery endpoint
+
+#### Improvements
+- Update admin login credentials and startup information
+- Session 2: Update strip-list with execution status
+
+#### Changes
+- Session 3.1: GFC client portal conversion + enrollment gate
+- Session 2: Neutralize analyzer-validation entry points in service portal (DECISIONS §3)
+- Session 2: Delete seeded lab notification templates + brand-URL cleanup (DECISIONS)
+- Session 2: Remove analyzer-validation workflow — backend, PDF, and portal/app/admin frontends (DECISIONS §3)
+- Session 2: Remove soft-pilot checklist (DECISIONS §5)
+- Session 2: Remove inventory module (DECISIONS §2)
+- Session 2: Remove CLIA template, link-directory, and knowledge hub
+- Session 2: Brand cleanup in config.js and email.js
+
+
 ### Version 3.1.0 - June 10, 2026
 
 #### New Features
