@@ -162,12 +162,14 @@ Detail in `GFC_Matching_Engine_Spec_v1.md`. Two stages: **hard filters** (licens
 
 ---
 
-## 6. Clinical build (Track B) — weeks 2–3
+## 6. Clinical build (Track B) — PRIORITY, Session 4 (clinical-first)
+**Model: one patient record in OpenEMR, two role-scoped views.** The clinician charts from a clinician-scoped view of the patient's chart (write); the patient sees a filtered read of the same record. The app is a front end over OpenEMR — it never duplicates the clinical record.
+
 - Stand up the FHIR client against OpenEMR (OAuth2).
-- Clinician front end in the app: patient list, encounters, problems, meds, allergies, documents — all reading/writing OpenEMR, not RDS.
-- RN clinician packet form writes a structured encounter to OpenEMR, pre-filled from the family's PHCP intake.
+- **Clinician workspace (write):** patient list/search → open a patient's chart → document the initial comprehensive visit (H&P), med reconciliation, problem list, care plan, notes — all to OpenEMR.
+- **Clinician scheduling (OpenEMR-tied):** provider appointments managed in the app but tied to OpenEMR's appointment/calendar, so a booked visit is an OpenEMR appointment linked to the billable encounter. Same UX pattern as PHCP scheduling, **different backend** — clinical → OpenEMR, PHCP caregiver shifts → app/RDS. Two scheduling systems by design.
+- **Patient portal clinical read (fast-follow):** the Session 3 portal shell surfaces the patient's own clinical data from OpenEMR (visit summaries, meds, care plan), filtered per sharing rules, read-only, scoped to that patient. Not OpenEMR's native portal.
 - In-Home Primary Care intake branch + its medical consents (consent to treat, assignment of benefits, practice NPP).
-- App never duplicates the clinical record; it renders and edits OpenEMR's.
 
 ---
 
