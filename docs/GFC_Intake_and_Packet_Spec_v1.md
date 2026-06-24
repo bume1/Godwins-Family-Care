@@ -1,4 +1,6 @@
-# GFC Intake & Patient Packet — Build-Ready Spec v1
+# GFC Intake & Patient Packet — Build-Ready Spec v1.1
+
+**Revision v1.1:** Tier and Triage Level vocabulary corrected to the canonical Track A / Track B system throughout (§2B, §2C, §3.2, §5, §6). No other content changed.
 
 **Scope:** Private Home Care arm. In-Home Primary Care arm noted where it branches; its own packet comes later.
 **Sources reviewed:** `template-gfc-intake.php` (digital Assessment + Intake), the scanned paper packet (Face Sheet, Nursing Assessment, Service Plan, Medication Form, Pain Assessment, Care Instructions, Service Agreement, Bill of Rights, Supervisory note), the GFC build prompt/plan, and the service-line handout.
@@ -36,7 +38,7 @@ Demographics, primary family contact, service-path selector, ADL level and help-
 | HIPAA Notice of Privacy Practices acknowledgment | New | Distinct from the ROI. The ROI authorizes sharing; the NPP documents that they received your privacy practices. |
 | Split ROI into **ROI-family** and **ROI-provider** | Refines current single ROI | The app gates the family portal on ROI-family. One combined ROI can't drive that gate. |
 | Service-path-branched consents (IHPC) | New | See §4.2. |
-| Computed acuity / care tier output | New | See §3. |
+| Computed acuity / Track placement output | New | See §3. |
 
 ### 2C. Move to the Clinician Packet — Stage 3, RN completes in the home
 These are in the paper packet and should be rebuilt as an app-owned clinician form, pre-filled from the family's intake so the nurse confirms rather than re-keys.
@@ -44,7 +46,7 @@ These are in the paper packet and should be rebuilt as an app-owned clinician fo
 - Systems exam, lung sounds, skin and wound findings with measurements
 - Behavioral pain assessment (the PAINAD-style tool on the paper Pain Assessment)
 - Detailed home-hazard inventory (smoke/CO detectors, grab bars, non-skid, running water, secondary exit) — this is a clinical safety check, separate from the intake's staff-safety screen
-- RN triage / care-tier assignment and signature
+- RN triage / Track assignment and signature
 - Physician orders for any skilled task
 - Care Plan / Service Plan authored by the RN: problems, goals and objectives, task list, visit frequency, days/times, duration, charge plan, client co-signature, effective and target dates
 - Medication reconciliation against the family-reported list
@@ -60,7 +62,7 @@ These are in the paper packet and should be rebuilt as an app-owned clinician fo
 
 ## 3. Data-shape fixes for app integration
 1. **Medications.** The form concatenates rows into one pipe-delimited string on submit and drops prescribing provider. The app wants structured records: name, dose, route, frequency, prescribing provider, pharmacy — and they must match the care plan and client profile. Store as rows, not a string.
-2. **Tier vocabulary.** Paper says "Triage Level I/II/III," the app says "Care Tier 1/2/3," the form outputs neither. Pick one enum. Recommend the app's Tier 1 (Essential ADL) / Tier 2 (Comprehensive) / Tier 3 (Behavioral Support & Cognitive Wellness), and retire "Triage Level," or map it explicitly so nothing is re-keyed.
+2. **Track vocabulary.** Paper says "Triage Level I/II/III" and older drafts say "Care Tier 1/2/3." Retire both. The canonical system is **Track A and Track B**, and no new materials should carry tier language. Track A (Personal Care) runs A1 Essential ADL, A2 Comprehensive ADL and IADL, A3 IADL-Forward Support, and A4 Behavioral Support and Cognitive Wellness. Track B is skilled nursing. Use this as the single enum and map the legacy labels so nothing is re-keyed: Tier 1 / Level I maps to A1, Tier 2 / Level II maps to A2, Tier 3 / Level III maps to A4, and any skilled-nursing designation maps to Track B. (A3 is new and has no legacy equivalent.)
 3. **PHI destination (resolved).** Stage 1 (lead, no PHI) can stay on the current Apps Script. Stage 2 PHI now writes to **encrypted AWS RDS** inside the BAA boundary; uploaded documents go to **HIPAA Google Drive**; Stage 3 clinical data goes to **OpenEMR**. No PHI to a Google Sheet, and drop the blind `no-cors` submit so success is confirmable.
 4. **DOB once.** Stage 1 asks Age, Stage 2 asks DOB. Collect DOB once and derive age.
 
@@ -108,14 +110,14 @@ Every consent: typed name + acknowledgment checkbox + server-side timestamp and 
 ---
 
 ## 5. Who completes what, and when
-1. Family submits **Assessment** (public). System routes by service path and payer, outputs a provisional tier.
+1. Family submits **Assessment** (public). System routes by service path and payer, outputs a provisional Track placement.
 2. Team connects, sends token. Family completes **Intake**, signs the branched consent set.
-3. RN visit: completes the **Clinician Packet** in the app, confirms or corrects the family's report, takes vitals, runs the safety and pain assessments, assigns the final tier, authors and co-signs the care plan.
+3. RN visit: completes the **Clinician Packet** in the app, confirms or corrects the family's report, takes vitals, runs the safety and pain assessments, assigns the final Track placement, authors and co-signs the care plan.
 4. Ongoing: supervisory visits and reassessments append to the record; care-plan versions are retained.
 
 ---
 
 ## 6. Open decisions for Bianca
-- Confirm the tier vocabulary (adopt app Tiers, or keep Triage Levels and map).
+- ~~Confirm the tier vocabulary~~ — **resolved:** adopt Track A (A1 to A4) and Track B as the single enum; retire Tier and Triage Level, mapping legacy labels per §3.2.
 - ~~Where Stage 2 PHI writes~~ — **resolved:** encrypted AWS RDS (operational) + Drive (documents) + OpenEMR (clinical).
 - Confirm counsel/licensure review of the rewritten Service Agreement and the IHPC medical consents before launch.
