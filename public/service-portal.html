@@ -272,61 +272,6 @@
           headers: { 'Authorization': `Bearer ${token}` }
         }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
 
-      // Multi-day validation APIs
-      startValidation: (token, reportData) =>
-        fetch(`${API_URL}/api/service-reports/start-validation`, {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify(reportData)
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
-
-      addValidationSegment: (token, reportId, segmentData) =>
-        fetch(`${API_URL}/api/service-reports/${reportId}/segment`, {
-          method: 'PUT',
-          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify(segmentData)
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
-
-      completeValidation: (token, reportId, completionData) =>
-        fetch(`${API_URL}/api/service-reports/${reportId}/complete-validation`, {
-          method: 'PUT',
-          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify(completionData)
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
-
-      getActiveValidations: (token) =>
-        fetch(`${API_URL}/api/service-reports/active-validations`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
-
-      // Two-phase assigned validation APIs
-      completeOnsiteValidation: (token, reportId, data) =>
-        fetch(`${API_URL}/api/service-reports/${reportId}/complete-onsite`, {
-          method: 'PUT',
-          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify(data)
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
-
-      addOffsiteSegment: (token, reportId, data) =>
-        fetch(`${API_URL}/api/service-reports/${reportId}/offsite-segment`, {
-          method: 'PUT',
-          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify(data)
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
-
-      saveDayProgress: (token, reportId, data) =>
-        fetch(`${API_URL}/api/service-reports/${reportId}/save-day-progress`, {
-          method: 'PUT',
-          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify(data)
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
-
-      submitValidationReport: (token, reportId, formData) =>
-        fetch(`${API_URL}/api/service-reports/${reportId}/submit-validation`, {
-          method: 'PUT',
-          headers: { 'Authorization': `Bearer ${token}` },
-          body: formData
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' }))
     };
 
     // Modern Heroicons v2 with consistent 1.75 stroke weight
@@ -562,7 +507,7 @@
     };
 
     // Dashboard Home Page
-    const HomePage = ({ user, onNavigate, recentReports, assignedReports = [], onEditAssignment, activeValidations = [], onContinueValidation, onViewValidation, isAdminView, allReportsCount, openCount, closedCount }) => {
+    const HomePage = ({ user, onNavigate, recentReports, assignedReports = [], onEditAssignment, isAdminView, allReportsCount, openCount, closedCount }) => {
       const [recentSort, setRecentSort] = useState('date_desc');
       const [recentTypeFilter, setRecentTypeFilter] = useState('');
       const [assignedSort, setAssignedSort] = useState('date_desc');
@@ -582,8 +527,8 @@
         });
 
       const sortedAssigned = [...assignedReports].sort((a, b) => {
-        const dateA = new Date(a.plannedVisitDate || a.validationStartDate || a.assignedAt || a.createdAt);
-        const dateB = new Date(b.plannedVisitDate || b.validationStartDate || b.assignedAt || b.createdAt);
+        const dateA = new Date(a.plannedVisitDate || a.assignedAt || a.createdAt);
+        const dateB = new Date(b.plannedVisitDate || b.assignedAt || b.createdAt);
         if (assignedSort === 'date_desc') return dateB - dateA;
         if (assignedSort === 'date_asc') return dateA - dateB;
         if (assignedSort === 'client_asc') return (a.clientFacilityName || '').localeCompare(b.clientFacilityName || '');
@@ -636,38 +581,20 @@
                         <p className="font-semibold text-gray-900">{report.clientFacilityName}</p>
                         <div className="flex flex-wrap items-center gap-2 mt-1 text-sm text-gray-600">
                           {report.serviceType && <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs">{report.serviceType}</span>}
-                          {(report.plannedVisitDate || report.validationStartDate) && <span className="text-xs text-blue-600">Planned: {new Date((report.plannedVisitDate || report.validationStartDate) + 'T12:00:00').toLocaleDateString()}</span>}
+                          {report.plannedVisitDate && <span className="text-xs text-blue-600">Planned: {new Date(report.plannedVisitDate + 'T12:00:00').toLocaleDateString()}</span>}
                         </div>
                         {report.managerNotes && (
                           <p className="text-xs text-gray-500 mt-2 line-clamp-1">Note: {report.managerNotes}</p>
                         )}
                         <p className="text-xs text-gray-400 mt-1">Assigned by {report.assignedByName} on {new Date(report.assignedAt).toLocaleDateString()}</p>
                       </div>
-                      {(user?.role === 'admin' || user?.isManager) && report.serviceType === 'Validations' && onViewValidation ? (
-                        <button
-                          onClick={() => onViewValidation(report)}
-                          className="px-4 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition text-sm flex items-center gap-2"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M11.35 3.836c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m8.9-4.414c.376.023.75.05 1.124.08 1.131.094 1.976 1.057 1.976 2.192V16.5A2.25 2.25 0 0118 18.75h-2.25m-7.5-10.5H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V18.75m-7.5-10.5h6.375c.621 0 1.125.504 1.125 1.125v9.375"/></svg>
-                          View Details
-                        </button>
-                      ) : report.serviceType === 'Validations' ? (
-                        <button
-                          onClick={() => onEditAssignment(report)}
-                          className="px-4 py-2 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 transition text-sm flex items-center gap-2"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z"/></svg>
-                          Complete Report
-                        </button>
-                      ) : (
-                        <button
-                          onClick={() => onEditAssignment(report)}
-                          className="px-4 py-2 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 transition text-sm flex items-center gap-2"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z"/></svg>
-                          Complete Report
-                        </button>
-                      )}
+                      <button
+                        onClick={() => onEditAssignment(report)}
+                        className="px-4 py-2 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 transition text-sm flex items-center gap-2"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z"/></svg>
+                        Complete Report
+                      </button>
                     </div>
                   </div>
                 ))}
@@ -785,15 +712,9 @@
                     <span className={`text-xs px-3 py-1.5 rounded-full font-medium ${
                       report.status === 'assigned'
                         ? 'bg-warning-50 text-warning-600'
-                        : report.status === 'validation_in_progress'
-                          ? 'bg-blue-50 text-blue-600'
-                          : report.status === 'onsite_submitted'
-                            ? 'bg-blue-50 text-blue-600'
-                            : report.status === 'signature_needed'
-                              ? 'bg-orange-50 text-orange-600'
-                              : 'bg-success-50 text-success-600'
+                        : 'bg-success-50 text-success-600'
                     }`}>
-                      {report.status === 'assigned' ? 'Pending' : report.status === 'validation_in_progress' ? 'Validation In Progress' : report.status === 'onsite_submitted' ? 'On-Site Complete' : report.status === 'signature_needed' ? 'Signature Needed' : 'Complete'}
+                      {report.status === 'assigned' ? 'Pending' : 'Complete'}
                     </span>
                   </div>
                 ))}
@@ -944,18 +865,6 @@
           solution: '',
           outstandingIssues: '',
 
-          // Validation-specific fields
-          validationSegments: '',
-          recommendations: '',
-          analyzersValidated: [{ model: '', serialNumber: '', status: 'Passed' }],
-          validationStartDate: new Date().toISOString().split('T')[0],
-          validationEndDate: new Date().toISOString().split('T')[0],
-          trainingProvided: '',
-          testProcedures: '',
-          validationResults: '',
-          validationReportFile: null,
-          validationReportFileName: '',
-
           // Signatures
           customerSignature: '',
           customerSignatureDate: '',
@@ -986,8 +895,6 @@
         const savedDraft = localStorage.getItem('service_report_draft');
         setHasDraft(!!savedDraft);
       }, []);
-
-      const isValidationType = formData.serviceType === 'Validations';
 
       const updateField = (field, value) => {
         setFormData(prev => ({ ...prev, [field]: value }));
@@ -1028,16 +935,6 @@
           materialsUsed: '',
           solution: '',
           outstandingIssues: '',
-          validationSegments: '',
-          recommendations: '',
-          analyzersValidated: [{ model: '', serialNumber: '', status: 'Passed' }],
-          validationStartDate: new Date().toISOString().split('T')[0],
-          validationEndDate: new Date().toISOString().split('T')[0],
-          trainingProvided: '',
-          testProcedures: '',
-          validationResults: '',
-          validationReportFile: null,
-          validationReportFileName: '',
           customerSignature: '',
           customerSignatureDate: '',
           customerFirstName: '',
@@ -1047,61 +944,6 @@
           technicianFirstName: user?.name?.split(' ')[0] || '',
           technicianLastName: user?.name?.split(' ').slice(1).join(' ') || ''
         });
-      };
-
-      // Calculate days on-site from start and end dates
-      const calculateDaysOnSite = () => {
-        if (formData.validationStartDate && formData.validationEndDate) {
-          const start = new Date(formData.validationStartDate);
-          const end = new Date(formData.validationEndDate);
-          const diffTime = Math.abs(end - start);
-          const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
-          return diffDays;
-        }
-        return 1;
-      };
-
-      // Add analyzer to the list
-      const addAnalyzer = () => {
-        setFormData(prev => ({
-          ...prev,
-          analyzersValidated: [...prev.analyzersValidated, { model: '', serialNumber: '', status: 'Passed' }]
-        }));
-      };
-
-      // Update analyzer in the list
-      const updateAnalyzer = (index, field, value) => {
-        setFormData(prev => {
-          const updated = [...prev.analyzersValidated];
-          updated[index] = { ...updated[index], [field]: value };
-          return { ...prev, analyzersValidated: updated };
-        });
-      };
-
-      // Remove analyzer from the list
-      const removeAnalyzer = (index) => {
-        if (formData.analyzersValidated.length > 1) {
-          setFormData(prev => ({
-            ...prev,
-            analyzersValidated: prev.analyzersValidated.filter((_, i) => i !== index)
-          }));
-        }
-      };
-
-      // Handle validation report file upload
-      const handleValidationFileChange = (e) => {
-        const file = e.target.files[0];
-        if (file) {
-          const reader = new FileReader();
-          reader.onloadend = () => {
-            setFormData(prev => ({
-              ...prev,
-              validationReportFile: reader.result,
-              validationReportFileName: file.name
-            }));
-          };
-          reader.readAsDataURL(file);
-        }
       };
 
       const handleClientSelect = (clientName) => {
@@ -1122,23 +964,12 @@
         setError('');
 
         // Validate required fields
-        const isValidation = formData.serviceType === 'Validations';
         if (!formData.clientFacilityName || !formData.serviceType) {
           setError('Please fill in all required fields');
           setLoading(false);
           return;
         }
-        if (isValidation && !formData.validationResults) {
-          setError('Please fill in the validation results');
-          setLoading(false);
-          return;
-        }
-        if (isValidation && !formData.testProcedures) {
-          setError('Please fill in the test procedures');
-          setLoading(false);
-          return;
-        }
-        if (!isValidation && !formData.descriptionOfWork) {
+        if (!formData.descriptionOfWork) {
           setError('Please fill in the description of work');
           setLoading(false);
           return;
@@ -1175,65 +1006,14 @@
         }
       };
 
-      // Multi-day validation state
-      const [showMultiDayForm, setShowMultiDayForm] = useState(false);
-      const [multiDayForm, setMultiDayForm] = useState({
-        firstDayDate: new Date().toISOString().split('T')[0],
-        firstDayTests: '',
-        firstDayResults: '',
-        firstDayObservations: '',
-        expectedDays: ''
-      });
-
-      const daysOnSite = calculateDaysOnSite();
-      const isMultiDay = isValidationType && daysOnSite > 1;
-
-      const handleStartMultiDay = async () => {
-        if (!formData.clientFacilityName || !formData.testProcedures) {
-          setError('Client facility and test procedures are required');
-          return;
-        }
-        if (!multiDayForm.firstDayTests.trim()) {
-          setError('Day 1 tests performed is required');
-          return;
-        }
-        setLoading(true);
-        setError('');
-
-        try {
-          const result = await api.startValidation(token, {
-            ...formData,
-            ...multiDayForm,
-            expectedDays: multiDayForm.expectedDays ? parseInt(multiDayForm.expectedDays) : daysOnSite > 1 ? daysOnSite : null,
-            technicianId: user?.id,
-            technicianName: user?.name
-          });
-
-          if (result.error) {
-            setError(result.error);
-          } else {
-            localStorage.removeItem('service_report_draft');
-            setHasDraft(false);
-            setSuccess(true);
-            setTimeout(() => {
-              if (onSuccess) onSuccess();
-            }, 2000);
-          }
-        } catch (err) {
-          setError('Failed to start validation. Please try again.');
-        } finally {
-          setLoading(false);
-        }
-      };
-
       if (success) {
         return (
           <div className="bg-white p-5 sm:p-8 rounded-xl shadow-sm text-center">
             <div className="flex justify-center mb-4 text-green-500">
               {React.cloneElement(Icons.check, { className: 'w-12 h-12 sm:w-16 sm:h-16' })}
             </div>
-            <h2 className="text-xl sm:text-2xl font-bold text-accent mb-2">{showMultiDayForm ? 'Multi-Day Validation Started!' : 'Report Submitted!'}</h2>
-            <p className="text-gray-600">{showMultiDayForm ? 'Day 1 has been logged. Continue logging daily from your dashboard.' : 'Your service report has been submitted successfully.'}</p>
+            <h2 className="text-xl sm:text-2xl font-bold text-accent mb-2">Report Submitted!</h2>
+            <p className="text-gray-600">Your service report has been submitted successfully.</p>
           </div>
         );
       }
@@ -1387,201 +1167,9 @@
                     <option value="LIS/EMR">LIS/EMR</option>
                     <option value="Compliance">Compliance</option>
                     <option value="Training">Training</option>
-                    <option value="Validations">Validations</option>
                   </select>
                 </div>
 
-                {isValidationType ? (
-                  <>
-                    {/* Date Range and Days On-Site */}
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Start Date *</label>
-                        <input
-                          type="date"
-                          value={formData.validationStartDate}
-                          onChange={(e) => updateField('validationStartDate', e.target.value)}
-                          className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary"
-                          required
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">End Date *</label>
-                        <input
-                          type="date"
-                          value={formData.validationEndDate}
-                          onChange={(e) => updateField('validationEndDate', e.target.value)}
-                          className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary"
-                          required
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Days On-Site</label>
-                        <input
-                          type="text"
-                          value={calculateDaysOnSite()}
-                          className="w-full px-4 py-2 border rounded-lg bg-gray-50 text-gray-700"
-                          readOnly
-                        />
-                      </div>
-                    </div>
-
-                    {/* Analyzers Validated */}
-                    <div className="border rounded-lg p-4 bg-gray-50">
-                      <div className="flex justify-between items-center mb-3">
-                        <label className="text-sm font-semibold text-gray-700">Analyzers Validated</label>
-                        <button
-                          type="button"
-                          onClick={addAnalyzer}
-                          className="text-sm text-primary hover:text-accent font-medium"
-                        >
-                          + Add Analyzer
-                        </button>
-                      </div>
-                      <div className="space-y-3">
-                        {formData.analyzersValidated.map((analyzer, idx) => (
-                          <div key={idx} className="grid grid-cols-2 sm:grid-cols-12 gap-2 items-end">
-                            <div className="col-span-2 sm:col-span-4">
-                              {idx === 0 && <label className="block text-xs text-gray-500 mb-1">Model</label>}
-                              <input
-                                type="text"
-                                value={analyzer.model}
-                                onChange={(e) => updateAnalyzer(idx, 'model', e.target.value)}
-                                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary text-sm"
-                                placeholder="Analyzer model"
-                              />
-                            </div>
-                            <div className="col-span-2 sm:col-span-4">
-                              {idx === 0 && <label className="block text-xs text-gray-500 mb-1">Serial Number</label>}
-                              <input
-                                type="text"
-                                value={analyzer.serialNumber}
-                                onChange={(e) => updateAnalyzer(idx, 'serialNumber', e.target.value)}
-                                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary text-sm"
-                                placeholder="S/N"
-                              />
-                            </div>
-                            <div className="col-span-1 sm:col-span-3">
-                              {idx === 0 && <label className="block text-xs text-gray-500 mb-1">Status</label>}
-                              <select
-                                value={analyzer.status}
-                                onChange={(e) => updateAnalyzer(idx, 'status', e.target.value)}
-                                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary text-sm"
-                              >
-                                <option value="Passed">Passed</option>
-                                <option value="Failed">Failed</option>
-                                <option value="Pending">Pending</option>
-                              </select>
-                            </div>
-                            <div className="col-span-1 sm:col-span-1">
-                              {formData.analyzersValidated.length > 1 && (
-                                <button
-                                  type="button"
-                                  onClick={() => removeAnalyzer(idx)}
-                                  className="p-2 text-red-500 hover:bg-red-50 rounded-lg"
-                                  title="Remove"
-                                >
-                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"/>
-                                  </svg>
-                                </button>
-                              )}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Test Procedures */}
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Test Procedures *</label>
-                      <textarea
-                        value={formData.testProcedures}
-                        onChange={(e) => updateField('testProcedures', e.target.value)}
-                        rows={4}
-                        className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary"
-                        placeholder="Describe the test procedures used during validation (e.g., precision, accuracy, linearity, reportable range, reference interval verification)..."
-                        required
-                      />
-                    </div>
-
-                    {/* Training Provided */}
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Training Provided</label>
-                      <textarea
-                        value={formData.trainingProvided}
-                        onChange={(e) => updateField('trainingProvided', e.target.value)}
-                        rows={3}
-                        className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary"
-                        placeholder="Describe training activities, topics covered, and personnel trained..."
-                      />
-                    </div>
-
-                    {/* Validation Results */}
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Validation Results *</label>
-                      <textarea
-                        value={formData.validationResults}
-                        onChange={(e) => updateField('validationResults', e.target.value)}
-                        rows={4}
-                        className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary"
-                        placeholder="Summary of validation tests performed and results..."
-                        required
-                      />
-                    </div>
-
-                    {/* Validation Report File Upload */}
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Validation Report File</label>
-                      <div className="border-2 border-dashed border-gray-300 rounded-lg p-4 text-center hover:border-primary transition-colors">
-                        <input
-                          type="file"
-                          id="validationReportFile"
-                          onChange={handleValidationFileChange}
-                          className="hidden"
-                          accept=".pdf,.doc,.docx,.xls,.xlsx"
-                        />
-                        {formData.validationReportFileName ? (
-                          <div className="flex items-center justify-center gap-2">
-                            <svg className="w-5 h-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                            </svg>
-                            <span className="text-sm text-gray-700">{formData.validationReportFileName}</span>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                updateField('validationReportFile', null);
-                                updateField('validationReportFileName', '');
-                              }}
-                              className="text-red-500 hover:text-red-700 text-sm ml-2"
-                            >
-                              Remove
-                            </button>
-                          </div>
-                        ) : (
-                          <label htmlFor="validationReportFile" className="cursor-pointer">
-                            <svg className="w-8 h-8 text-gray-400 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
-                            </svg>
-                            <span className="text-sm text-gray-500">Click to upload validation report (PDF, DOC, XLS)</span>
-                          </label>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Recommendations */}
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Recommendations</label>
-                      <textarea
-                        value={formData.recommendations}
-                        onChange={(e) => updateField('recommendations', e.target.value)}
-                        rows={3}
-                        className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary focus:border-primary"
-                        placeholder="List any recommendations for the client..."
-                      />
-                    </div>
-                  </>
-                ) : (
                   <>
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Description of Work Performed *</label>
@@ -1628,7 +1216,6 @@
                       />
                     </div>
                   </>
-                )}
               </div>
             </div>
 
@@ -1717,65 +1304,6 @@
               </div>
             </div>
 
-            {/* Multi-day validation info banner */}
-            {isMultiDay && !showMultiDayForm && (
-              <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
-                <div className="flex items-start gap-3">
-                  <svg className="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23.693L5 14.5m14.8.8l1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0112 21c-2.773 0-5.491-.235-8.135-.687-1.718-.293-2.3-2.379-1.067-3.61L5 14.5"/></svg>
-                  <div>
-                    <p className="font-semibold text-blue-800">Multi-day validation detected ({daysOnSite} days)</p>
-                    <p className="text-sm text-blue-600 mt-1">You can submit as a single report now, or start a multi-day validation to log each day's data separately.</p>
-                    <button
-                      type="button"
-                      onClick={() => setShowMultiDayForm(true)}
-                      className="mt-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition"
-                    >
-                      Start Multi-Day Validation
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Multi-day Day 1 form */}
-            {showMultiDayForm && (
-              <div className="bg-white p-6 rounded-xl shadow-sm border-2 border-blue-200">
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center gap-2">
-                    <div className="w-7 h-7 bg-blue-500 rounded-full flex items-center justify-center text-white text-sm font-bold">1</div>
-                    <h3 className="text-lg font-bold text-gray-900">Day 1 — Start Validation</h3>
-                  </div>
-                  <button type="button" onClick={() => setShowMultiDayForm(false)} className="text-sm text-gray-500 hover:text-gray-700">Cancel multi-day</button>
-                </div>
-                <p className="text-sm text-gray-600 mb-4">Log Day 1 data below. You'll add subsequent days from your dashboard.</p>
-
-                <div className="space-y-4">
-                  <div className="grid md:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Day 1 Date</label>
-                      <input type="date" value={multiDayForm.firstDayDate} onChange={(e) => setMultiDayForm(prev => ({ ...prev, firstDayDate: e.target.value }))} className="w-full px-3 py-2 border rounded-lg text-sm" />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Expected Total Days</label>
-                      <input type="number" min="2" max="365" value={multiDayForm.expectedDays} onChange={(e) => setMultiDayForm(prev => ({ ...prev, expectedDays: e.target.value }))} className="w-full px-3 py-2 border rounded-lg text-sm" placeholder={daysOnSite > 1 ? `${daysOnSite} (from date range)` : 'e.g. 5'} />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Tests Performed *</label>
-                    <textarea value={multiDayForm.firstDayTests} onChange={(e) => setMultiDayForm(prev => ({ ...prev, firstDayTests: e.target.value }))} rows="3" className="w-full px-3 py-2 border rounded-lg text-sm" placeholder="Initial calibration, baseline QC runs..." />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Results / Readings</label>
-                    <textarea value={multiDayForm.firstDayResults} onChange={(e) => setMultiDayForm(prev => ({ ...prev, firstDayResults: e.target.value }))} rows="3" className="w-full px-3 py-2 border rounded-lg text-sm" placeholder="Na: 140±2, K: 4.1±0.3..." />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Observations / Notes</label>
-                    <textarea value={multiDayForm.firstDayObservations} onChange={(e) => setMultiDayForm(prev => ({ ...prev, firstDayObservations: e.target.value }))} rows="2" className="w-full px-3 py-2 border rounded-lg text-sm" placeholder="Reagent carousel loaded, ISE module initialized..." />
-                  </div>
-                </div>
-              </div>
-            )}
-
             {/* Draft and Submit Buttons */}
             <div className="flex justify-between items-center gap-4">
               <div className="flex items-center gap-3">
@@ -1797,28 +1325,13 @@
                 )}
               </div>
               <div className="flex items-center gap-3">
-                {showMultiDayForm ? (
-                  <button
-                    type="button"
-                    onClick={handleStartMultiDay}
-                    disabled={loading}
-                    className="px-8 py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition-colors disabled:opacity-50 flex items-center gap-2"
-                  >
-                    {loading ? (
-                      <><svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg> Starting...</>
-                    ) : (
-                      <><svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082"/></svg> Start Multi-Day Validation</>
-                    )}
-                  </button>
-                ) : (
-                  <button
-                    type="submit"
-                    disabled={loading}
-                    className="px-8 py-3 bg-gradient-to-r from-primary to-accent text-white rounded-lg font-medium hover:opacity-90 transition-colors disabled:opacity-50"
-                  >
-                    {loading ? 'Submitting...' : 'Submit Service Report'}
-                  </button>
-                )}
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="px-8 py-3 bg-gradient-to-r from-primary to-accent text-white rounded-lg font-medium hover:opacity-90 transition-colors disabled:opacity-50"
+                >
+                  {loading ? 'Submitting...' : 'Submit Service Report'}
+                </button>
               </div>
             </div>
           </form>
@@ -1846,20 +1359,10 @@
       const isServiceTechnician = (currentUser?.role === 'vendor' || currentUser?.hasServicePortalAccess) && !isManager;
       const canDeleteAny = isSuperAdmin || isManager || isServiceTechnician;
 
-      // Returns true if a validation report has day 1 log data saved by the technician
-      const validationHasDay1Data = (report) => {
-        const isValidationType = report.serviceType === 'Validations';
-        const hasSegments = Array.isArray(report.validationSegments) && report.validationSegments.length > 0;
-        const technicianStarted = ['validation_in_progress', 'onsite_submitted', 'signature_needed', 'submitted'].includes(report.status);
-        return isValidationType && (hasSegments || technicianStarted);
-      };
-
       // Check if current user can delete a specific report
       const canDeleteReport = (report) => {
         if (isSuperAdmin) return true;
         if (isManager && String(report.assignedById) === String(currentUser?.id)) {
-          // Managers cannot delete validation reports once technician has saved day 1 data
-          if (validationHasDay1Data(report)) return false;
           return true;
         }
         if (isServiceTechnician && report.technicianId === currentUser?.id) return true;
@@ -2065,9 +1568,6 @@
                       <option value="">All Statuses</option>
                       <option value="submitted">Complete</option>
                       <option value="assigned">Pending</option>
-                      <option value="validation_in_progress">Validation In Progress</option>
-                      <option value="onsite_submitted">On-Site Complete</option>
-                      <option value="signature_needed">Signature Needed</option>
                     </select>
                   </div>
                 </div>
@@ -2157,12 +1657,9 @@
                       <td className="px-6 py-4">
                         <span className={`px-2 py-1 rounded text-xs font-medium ${
                           report.status === 'assigned' ? 'bg-yellow-100 text-yellow-700' :
-                          report.status === 'validation_in_progress' ? 'bg-blue-100 text-blue-700' :
-                          report.status === 'onsite_submitted' ? 'bg-blue-100 text-blue-700' :
-                          report.status === 'signature_needed' ? 'bg-orange-100 text-orange-700' :
                           'bg-green-100 text-green-700'
                         }`}>
-                          {report.status === 'assigned' ? 'Pending' : report.status === 'validation_in_progress' ? 'In Progress' : report.status === 'onsite_submitted' ? 'On-Site Complete' : report.status === 'signature_needed' ? 'Signature Needed' : 'Complete'}
+                          {report.status === 'assigned' ? 'Pending' : 'Complete'}
                         </span>
                       </td>
                       <td className="px-6 py-4 text-sm text-gray-900">
@@ -2401,15 +1898,9 @@
                     <p className="font-medium">
                       <span className={`px-2 py-1 rounded text-xs font-medium ${
                         report.status === 'assigned' ? 'bg-yellow-100 text-yellow-700' :
-                        report.status === 'onsite_submitted' ? 'bg-blue-100 text-blue-700' :
-                        report.status === 'validation_in_progress' ? 'bg-blue-100 text-blue-700' :
-                        report.status === 'signature_needed' ? 'bg-orange-100 text-orange-700' :
                         report.status === 'submitted' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'
                       }`}>
                         {report.status === 'assigned' ? 'Pending' :
-                         report.status === 'onsite_submitted' ? 'On-Site Complete · Off-Site In Progress' :
-                         report.status === 'validation_in_progress' ? 'Validation In Progress' :
-                         report.status === 'signature_needed' ? 'Signature Needed' :
                          report.status === 'submitted' ? 'Complete' : report.status}
                       </span>
                     </p>
@@ -2434,137 +1925,7 @@
                   <p className="text-sm text-gray-500">Service Type</p>
                   <p className="font-medium">{report.serviceType}</p>
                 </div>
-                {report.serviceType === 'Validations' ? (() => {
-                  const segments = Array.isArray(report.validationSegments) ? report.validationSegments : [];
-                  const onsiteSegs = segments.filter(s => !s.phase || s.phase === 'onsite');
-                  const offsiteSegs = segments.filter(s => s.phase === 'offsite');
-                  const isOnsiteSubmitted = report.status === 'onsite_submitted';
-                  const isFullySubmitted = report.status === 'submitted';
-
-                  const SegDay = ({ seg, index, label }) => (
-                    <div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
-                      <div className="flex items-center justify-between mb-3">
-                        <div className="flex items-center gap-2">
-                          <div className="w-6 h-6 bg-blue-600 rounded-full flex items-center justify-center text-white text-xs font-bold">{index + 1}</div>
-                          <span className="font-semibold text-sm text-accent">{label} — Day {index + 1}</span>
-                        </div>
-                        {seg.date && <span className="text-xs text-gray-400">{new Date(seg.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}</span>}
-                      </div>
-                      <div className="space-y-2 text-sm">
-                        {seg.testsPerformed && <div><span className="text-gray-500 font-medium">Tests Performed: </span><span className="whitespace-pre-wrap">{seg.testsPerformed}</span></div>}
-                        {seg.results && <div><span className="text-gray-500 font-medium">Results / Readings: </span><span className="whitespace-pre-wrap">{seg.results}</span></div>}
-                        {seg.outstandingIssues && <div><span className="text-gray-500 font-medium">Outstanding Issues: </span><span className="whitespace-pre-wrap">{seg.outstandingIssues}</span></div>}
-                        {seg.finalRecommendations && <div><span className="text-gray-500 font-medium">Recommendations: </span><span className="whitespace-pre-wrap">{seg.finalRecommendations}</span></div>}
-                        <div>
-                          <span className="text-gray-500 font-medium">Training Completed: </span>
-                          <span className={seg.trainingCompleted ? 'text-green-700 font-medium' : 'text-red-600 font-medium'}>{seg.trainingCompleted ? 'Yes' : 'No'}</span>
-                          {seg.trainingCompleted === false && seg.trainingReason && <span className="text-gray-500"> — {seg.trainingReason}</span>}
-                        </div>
-                        {seg.attachments && seg.attachments.length > 0 && (
-                          <div className="flex flex-wrap gap-2 pt-1">
-                            {seg.attachments.map((a, ai) => (
-                              <a key={ai} href={a.url} target="_blank" rel="noopener noreferrer" className="text-xs px-2 py-1 bg-white border rounded-lg text-blue-600 hover:underline">{a.filename || (a.type === 'photo' ? `Photo ${ai+1}` : `File ${ai+1}`)}</a>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-
-                  return (
-                    <>
-                      {/* Date Range */}
-                      <div className="grid md:grid-cols-2 gap-4">
-                        <div>
-                          <p className="text-sm text-gray-500">Proposed Start Date</p>
-                          <p className="font-medium">{report.validationStartDate || '-'}</p>
-                        </div>
-                        <div>
-                          <p className="text-sm text-gray-500">Proposed End Date</p>
-                          <p className="font-medium">{report.validationEndDate || '-'}</p>
-                        </div>
-                      </div>
-
-                      {/* Phase 1: On-Site */}
-                      <div className="border border-gray-200 rounded-xl overflow-hidden">
-                        <div className={`px-4 py-3 flex items-center gap-3 border-b ${onsiteSegs.length > 0 || isOnsiteSubmitted || isFullySubmitted ? 'bg-green-50 border-green-100' : 'bg-gray-50'}`}>
-                          <div className={`w-7 h-7 rounded-full flex items-center justify-center text-sm font-bold ${onsiteSegs.length > 0 || isOnsiteSubmitted || isFullySubmitted ? 'bg-green-500 text-white' : 'bg-gray-200 text-gray-500'}`}>1</div>
-                          <div>
-                            <p className="font-bold text-sm text-accent">Phase 1: On-Site Validation</p>
-                            <p className="text-xs text-gray-500">{onsiteSegs.length} day{onsiteSegs.length !== 1 ? 's' : ''} logged{(isOnsiteSubmitted || isFullySubmitted) ? ' · Submitted' : ''}</p>
-                          </div>
-                          {(isOnsiteSubmitted || isFullySubmitted) && <span className="ml-auto text-xs px-2 py-0.5 bg-green-100 text-green-700 rounded-full font-medium">Complete</span>}
-                        </div>
-                        <div className="p-4 space-y-3">
-                          {onsiteSegs.length > 0
-                            ? onsiteSegs.map((seg, i) => <SegDay key={i} seg={seg} index={i} label="On-Site" />)
-                            : <p className="text-sm text-gray-400 text-center py-3">No on-site days logged yet.</p>
-                          }
-                          {(report.onsiteTechnicianSignature || report.onsiteCustomerSignature) && (
-                            <div className="pt-3 border-t border-gray-100">
-                              <p className="text-xs font-medium text-gray-500 mb-2">Signatures</p>
-                              <div className="grid md:grid-cols-2 gap-3">
-                                {report.onsiteTechnicianSignature && (
-                                  <div className="bg-gray-50 rounded-xl p-3 text-center border">
-                                    <p className="text-xs text-gray-500 mb-1">Technician</p>
-                                    <img src={report.onsiteTechnicianSignature} className="h-12 object-contain mx-auto" alt="Technician signature" />
-                                    {report.onsiteTechnicianFirstName && <p className="text-xs text-gray-600 mt-1">{report.onsiteTechnicianFirstName} {report.onsiteTechnicianLastName}</p>}
-                                  </div>
-                                )}
-                                {report.onsiteCustomerSignature && (
-                                  <div className="bg-gray-50 rounded-xl p-3 text-center border">
-                                    <p className="text-xs text-gray-500 mb-1">Customer</p>
-                                    <img src={report.onsiteCustomerSignature} className="h-12 object-contain mx-auto" alt="Customer signature" />
-                                    {report.onsiteCustomerFirstName && <p className="text-xs text-gray-600 mt-1">{report.onsiteCustomerFirstName} {report.onsiteCustomerLastName}</p>}
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Phase 2: Off-Site */}
-                      <div className="border border-gray-200 rounded-xl overflow-hidden">
-                        <div className={`px-4 py-3 flex items-center gap-3 border-b ${isFullySubmitted ? 'bg-green-50 border-green-100' : isOnsiteSubmitted ? 'bg-blue-50 border-blue-100' : 'bg-gray-50'}`}>
-                          <div className={`w-7 h-7 rounded-full flex items-center justify-center text-sm font-bold ${isFullySubmitted ? 'bg-green-500 text-white' : isOnsiteSubmitted ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-500'}`}>2</div>
-                          <div>
-                            <p className="font-bold text-sm text-accent">Phase 2: Off-Site Validation</p>
-                            <p className="text-xs text-gray-500">{offsiteSegs.length} day{offsiteSegs.length !== 1 ? 's' : ''} logged{isFullySubmitted ? ' · Submitted' : ''}</p>
-                          </div>
-                          {isFullySubmitted && <span className="ml-auto text-xs px-2 py-0.5 bg-green-100 text-green-700 rounded-full font-medium">Complete</span>}
-                          {isOnsiteSubmitted && !isFullySubmitted && <span className="ml-auto text-xs px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full font-medium">In Progress</span>}
-                          {!isOnsiteSubmitted && !isFullySubmitted && <span className="ml-auto text-xs px-2 py-0.5 bg-gray-100 text-gray-500 rounded-full font-medium">Pending Phase 1</span>}
-                        </div>
-                        <div className="p-4 space-y-3">
-                          {offsiteSegs.length > 0
-                            ? offsiteSegs.map((seg, i) => <SegDay key={i} seg={seg} index={i} label="Off-Site" />)
-                            : <p className="text-sm text-gray-400 text-center py-3">{isOnsiteSubmitted ? 'No off-site days logged yet.' : 'Off-site phase begins after on-site submission.'}</p>
-                          }
-                        </div>
-                      </div>
-
-                      {/* Validation Report File */}
-                      {report.validationReportFileName && (
-                        <div>
-                          <p className="text-sm text-gray-500">Validation Report File</p>
-                          <div className="flex items-center gap-2 mt-1">
-                            <svg className="w-5 h-5 text-primary-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
-                            </svg>
-                            {report.validationReportFile ? (
-                              <a href={report.validationReportFile} download={report.validationReportFileName} className="text-primary-500 hover:underline font-medium">
-                                {report.validationReportFileName}
-                              </a>
-                            ) : (
-                              <span className="font-medium">{report.validationReportFileName}</span>
-                            )}
-                          </div>
-                        </div>
-                      )}
-                    </>
-                  );
-                })() : (
+                {
                   <>
                     <div>
                       <p className="text-sm text-gray-500">Description of Work Performed</p>
@@ -2583,7 +1944,7 @@
                       <p className="font-medium whitespace-pre-wrap bg-gray-50 p-3 rounded-lg">{report.outstandingIssues || '-'}</p>
                     </div>
                   </>
-                )}
+                }
               </div>
             </div>
 
@@ -2815,11 +2176,6 @@
         solution: report.solution || '',
         outstandingIssues: report.outstandingIssues || '',
         recommendations: report.recommendations || '',
-        validationResults: report.validationResults || '',
-        validationStartDate: report.validationStartDate || '',
-        validationEndDate: report.validationEndDate || '',
-        trainingProvided: report.trainingProvided || '',
-        testProcedures: report.testProcedures || '',
         customerFirstName: report.customerFirstName || '',
         customerLastName: report.customerLastName || '',
         technicianFirstName: report.technicianFirstName || '',
@@ -2903,7 +2259,6 @@
       };
 
       const serviceTypes = ['Analyzer Hardware', 'Inventory', 'LIS/EMR', 'Compliance', 'Training'];
-      const isValidation = formData.serviceType === 'Validations';
 
       return (
         <div className="space-y-6 animate-fade-in">
@@ -2999,40 +2354,6 @@
               </div>
             </div>
 
-            {/* Validation Fields (conditional) */}
-            {isValidation && (
-              <div>
-                <h3 className="font-bold text-gray-900 mb-4 flex items-center gap-2">
-                  <span className="w-6 h-6 bg-purple-100 rounded-full flex items-center justify-center text-purple-600 text-sm">V</span>
-                  Validation Details
-                </h3>
-                <div className="space-y-4">
-                  <div className="grid md:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Validation Start Date</label>
-                      <input type="date" value={formData.validationStartDate} onChange={e => handleChange('validationStartDate', e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm" />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Validation End Date</label>
-                      <input type="date" value={formData.validationEndDate} onChange={e => handleChange('validationEndDate', e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm" />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Validation Results</label>
-                    <textarea value={formData.validationResults} onChange={e => handleChange('validationResults', e.target.value)} rows={3} className="w-full border rounded-lg px-3 py-2 text-sm" />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Training Provided</label>
-                    <textarea value={formData.trainingProvided} onChange={e => handleChange('trainingProvided', e.target.value)} rows={3} className="w-full border rounded-lg px-3 py-2 text-sm" />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Test Procedures</label>
-                    <textarea value={formData.testProcedures} onChange={e => handleChange('testProcedures', e.target.value)} rows={3} className="w-full border rounded-lg px-3 py-2 text-sm" />
-                  </div>
-                </div>
-              </div>
-            )}
-
             {/* Signer Names */}
             <div>
               <h3 className="font-bold text-gray-900 mb-4 flex items-center gap-2">
@@ -3124,7 +2445,7 @@
     };
 
     // Assigned Reports Page - Shows reports assigned to the current vendor/technician
-    const AssignedReportsPage = ({ assignedReports, onEditAssignment, onBack, user, onViewValidation }) => {
+    const AssignedReportsPage = ({ assignedReports, onEditAssignment, onBack, user }) => {
       return (
         <div className="space-y-6 animate-fade-in">
           {/* Header */}
@@ -3214,31 +2535,13 @@
                         </div>
                       </div>
 
-                      {(user?.role === 'admin' || user?.isManager) && report.serviceType === 'Validations' && onViewValidation ? (
-                        <button
-                          onClick={() => onViewValidation(report)}
-                          className="px-5 py-2.5 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition flex items-center gap-2"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M11.35 3.836c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m8.9-4.414c.376.023.75.05 1.124.08 1.131.094 1.976 1.057 1.976 2.192V16.5A2.25 2.25 0 0118 18.75h-2.25m-7.5-10.5H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V18.75m-7.5-10.5h6.375c.621 0 1.125.504 1.125 1.125v9.375"/></svg>
-                          View Details
-                        </button>
-                      ) : report.serviceType === 'Validations' ? (
-                        <button
-                          onClick={() => onViewValidation ? onViewValidation(report) : onEditAssignment(report)}
-                          className="px-5 py-2.5 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 transition flex items-center gap-2"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M11.35 3.836c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m8.9-4.414c.376.023.75.05 1.124.08 1.131.094 1.976 1.057 1.976 2.192V16.5A2.25 2.25 0 0118 18.75h-2.25m-7.5-10.5H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V18.75m-7.5-10.5h6.375c.621 0 1.125.504 1.125 1.125v9.375"/></svg>
-                          View Details
-                        </button>
-                      ) : (
-                        <button
-                          onClick={() => onEditAssignment(report)}
-                          className="px-5 py-2.5 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 transition flex items-center gap-2"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z"/></svg>
-                          Complete Report
-                        </button>
-                      )}
+                      <button
+                        onClick={() => onEditAssignment(report)}
+                        className="px-5 py-2.5 bg-red-600 text-white rounded-lg font-medium hover:bg-red-700 transition flex items-center gap-2"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z"/></svg>
+                        Complete Report
+                      </button>
                     </div>
                   </div>
                 ))}
@@ -3257,373 +2560,9 @@
       );
     };
 
-    // Shared daily log section used by both Phase 1 and Phase 2
-    const DailyLogSection = ({ token, reportId, savedDays, onSaveDay, onUpdateDay, onSubmitClick, submitLabel, showSubmit, isSubmitting, dayOffset = 0 }) => {
-      const blankDay = { date: new Date().toISOString().split('T')[0], testsPerformed: '', trainingCompleted: true, trainingReason: '', results: '', outstandingIssues: '', finalRecommendations: '' };
-      // dayOffset makes day numbers continuous across phases (e.g. onsite days 1-2, offsite days 3-4)
-      const currentDayNum = dayOffset + savedDays.length + 1;
-      const draftKey = reportId ? `validation_day_draft_${reportId}_${currentDayNum}` : null;
-
-      const [dayForm, setDayForm] = React.useState(blankDay);
-      const [savingDay, setSavingDay] = React.useState(false);
-      const [draftSaved, setDraftSaved] = React.useState(false);
-      const [dayPhotos, setDayPhotos] = React.useState([]);
-      const [dayPhotoUrls, setDayPhotoUrls] = React.useState([]);
-      const [dayFiles, setDayFiles] = React.useState([]);
-      const [dayFileNames, setDayFileNames] = React.useState([]);
-      const [editingIndex, setEditingIndex] = React.useState(null);
-      const dayPhotoRef = React.useRef(null);
-      const dayFileRef = React.useRef(null);
-
-      // Load any saved draft whenever the active day number changes (day saved → move to next)
-      React.useEffect(() => {
-        if (!draftKey) return;
-        try {
-          const saved = localStorage.getItem(draftKey);
-          setDayForm(saved ? JSON.parse(saved) : { ...blankDay, date: new Date().toISOString().split('T')[0] });
-        } catch(e) {
-          setDayForm({ ...blankDay, date: new Date().toISOString().split('T')[0] });
-        }
-        setDraftSaved(false);
-      }, [currentDayNum, reportId]); // eslint-disable-line react-hooks/exhaustive-deps
-
-      const handleSaveDraft = () => {
-        if (!draftKey) return;
-        try { localStorage.setItem(draftKey, JSON.stringify(dayForm)); } catch(e) {}
-        setDraftSaved(true);
-        setTimeout(() => setDraftSaved(false), 2500);
-      };
-
-      const startEdit = (index) => {
-        const d = savedDays[index];
-        setDayForm({
-          date: d.date || new Date().toISOString().split('T')[0],
-          testsPerformed: d.testsPerformed || '',
-          trainingCompleted: d.trainingCompleted !== false,
-          trainingReason: d.trainingReason || '',
-          results: d.results || '',
-          outstandingIssues: d.outstandingIssues || '',
-          finalRecommendations: d.finalRecommendations || ''
-        });
-        setDayPhotos([]); setDayPhotoUrls([]); setDayFiles([]); setDayFileNames([]);
-        setEditingIndex(index);
-      };
-
-      const cancelEdit = () => {
-        setEditingIndex(null);
-        setDayForm(blankDay);
-        setDayPhotos([]); setDayPhotoUrls([]); setDayFiles([]); setDayFileNames([]);
-      };
-
-      const handleSave = async () => {
-        if (!dayForm.testsPerformed.trim()) { alert('Tests Performed is required'); return; }
-        setSavingDay(true);
-        if (editingIndex !== null) {
-          await onUpdateDay(editingIndex, { ...dayForm, day: savedDays[editingIndex].day }, dayPhotos, dayFiles);
-          dayPhotoUrls.forEach(u => URL.revokeObjectURL(u));
-          setDayForm({ ...blankDay, date: new Date().toISOString().split('T')[0] });
-          setDayPhotos([]); setDayPhotoUrls([]); setDayFiles([]); setDayFileNames([]);
-          setEditingIndex(null);
-        } else {
-          await onSaveDay({ ...dayForm, day: currentDayNum }, dayPhotos, dayFiles);
-          // Clear draft now that this day is fully saved
-          if (draftKey) { try { localStorage.removeItem(draftKey); } catch(e) {} }
-          dayPhotoUrls.forEach(u => URL.revokeObjectURL(u));
-          setDayForm({ ...blankDay, date: new Date().toISOString().split('T')[0] });
-          setDayPhotos([]); setDayPhotoUrls([]); setDayFiles([]); setDayFileNames([]);
-        }
-        setSavingDay(false);
-      };
-
-      return (
-        <div className="space-y-3">
-          {savedDays.map((d, i) => (
-            editingIndex === i ? null : (
-            <div key={i} className="flex items-center gap-3 p-3 bg-green-50 border border-green-200 rounded-xl">
-              <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center flex-shrink-0">
-                <svg className="w-3.5 h-3.5 text-white" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5"/></svg>
-              </div>
-              <span className="font-semibold text-gray-800 text-sm">Day {d.day}</span>
-              {d.date && <span className="text-gray-500 text-sm">— {new Date(d.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}</span>}
-              {onUpdateDay && (
-                <button
-                  type="button"
-                  onClick={() => startEdit(i)}
-                  disabled={editingIndex !== null}
-                  title="Edit this day"
-                  className="ml-auto p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition disabled:opacity-30"
-                >
-                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z"/></svg>
-                </button>
-              )}
-            </div>
-            )
-          ))}
-
-          <div className={`border-2 rounded-xl p-5 ${editingIndex !== null ? 'border-yellow-300 bg-yellow-50/20' : 'border-blue-200 bg-blue-50/20'}`}>
-            <h4 className="font-semibold text-gray-800 mb-4 text-sm">
-              {editingIndex !== null ? `Edit Day ${savedDays[editingIndex].day}` : `Day ${currentDayNum}`}
-            </h4>
-            <div className="space-y-4">
-              <div className="grid md:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
-                  <input type="date" value={dayForm.date} onChange={e => setDayForm({...dayForm, date: e.target.value})} className="input-modern w-full px-4 py-3" />
-                </div>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Tests Performed <span className="text-red-500">*</span></label>
-                <textarea value={dayForm.testsPerformed} onChange={e => setDayForm({...dayForm, testsPerformed: e.target.value})} rows={3} className="input-modern w-full px-4 py-3" placeholder="Describe the tests performed today..." />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Training Completed</label>
-                <div className="flex gap-3">
-                  <button type="button" onClick={() => setDayForm({...dayForm, trainingCompleted: true, trainingReason: ''})} className={`flex-1 py-2.5 rounded-xl border-2 font-medium text-sm transition ${dayForm.trainingCompleted ? 'border-green-500 bg-green-50 text-green-700' : 'border-gray-200 text-gray-600 hover:border-gray-300'}`}>Yes</button>
-                  <button type="button" onClick={() => setDayForm({...dayForm, trainingCompleted: false})} className={`flex-1 py-2.5 rounded-xl border-2 font-medium text-sm transition ${dayForm.trainingCompleted === false ? 'border-red-400 bg-red-50 text-red-700' : 'border-gray-200 text-gray-600 hover:border-gray-300'}`}>No</button>
-                </div>
-                {dayForm.trainingCompleted === false && (
-                  <textarea value={dayForm.trainingReason} onChange={e => setDayForm({...dayForm, trainingReason: e.target.value})} rows={2} className="input-modern w-full px-4 py-3 mt-2" placeholder="Why was training not completed?" />
-                )}
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Results / Readings</label>
-                <textarea value={dayForm.results} onChange={e => setDayForm({...dayForm, results: e.target.value})} rows={3} className="input-modern w-full px-4 py-3" placeholder="Document today's results and readings..." />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Outstanding Issues / Items</label>
-                <textarea value={dayForm.outstandingIssues} onChange={e => setDayForm({...dayForm, outstandingIssues: e.target.value})} rows={2} className="input-modern w-full px-4 py-3" placeholder="Note any outstanding issues or items..." />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Final Recommendations</label>
-                <textarea value={dayForm.finalRecommendations} onChange={e => setDayForm({...dayForm, finalRecommendations: e.target.value})} rows={2} className="input-modern w-full px-4 py-3" placeholder="Any recommendations for today..." />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Attachments</label>
-                <div className="grid md:grid-cols-2 gap-3">
-                  <div>
-                    <input ref={dayPhotoRef} type="file" accept="image/*" multiple onChange={e => { const f = Array.from(e.target.files); setDayPhotos(p => [...p, ...f]); setDayPhotoUrls(p => [...p, ...f.map(x => URL.createObjectURL(x))]); }} className="hidden" />
-                    <button type="button" onClick={() => dayPhotoRef.current?.click()} className="w-full border-2 border-dashed border-gray-300 rounded-xl p-3 text-center hover:border-primary-400 hover:bg-primary-50/50 transition text-sm text-gray-500">+ Photos</button>
-                    {dayPhotoUrls.length > 0 && <div className="flex flex-wrap gap-2 mt-2">{dayPhotoUrls.map((u, i) => <div key={i} className="relative group"><img src={u} className="w-12 h-12 object-cover rounded-lg border" /><button type="button" onClick={() => { URL.revokeObjectURL(u); setDayPhotos(p => p.filter((_,j)=>j!==i)); setDayPhotoUrls(p => p.filter((_,j)=>j!==i)); }} className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 text-white rounded-full text-xs flex items-center justify-center opacity-0 group-hover:opacity-100">&times;</button></div>)}</div>}
-                  </div>
-                  <div>
-                    <input ref={dayFileRef} type="file" multiple onChange={e => { const f = Array.from(e.target.files); setDayFiles(p => [...p, ...f]); setDayFileNames(p => [...p, ...f.map(x => x.name)]); }} className="hidden" />
-                    <button type="button" onClick={() => dayFileRef.current?.click()} className="w-full border-2 border-dashed border-gray-300 rounded-xl p-3 text-center hover:border-primary-400 hover:bg-primary-50/50 transition text-sm text-gray-500">+ Files</button>
-                    {dayFileNames.length > 0 && <div className="space-y-1 mt-2">{dayFileNames.map((n, i) => <div key={i} className="flex items-center gap-2 p-1.5 bg-gray-50 rounded border text-xs text-gray-700 group"><span className="flex-1 truncate">{n}</span><button type="button" onClick={() => { setDayFiles(p => p.filter((_,j)=>j!==i)); setDayFileNames(p => p.filter((_,j)=>j!==i)); }} className="text-red-400 opacity-0 group-hover:opacity-100">&times;</button></div>)}</div>}
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div className="flex gap-3 mt-5 flex-wrap items-center">
-              <button type="button" onClick={handleSave} disabled={savingDay} className="btn-primary px-5 py-2.5 text-white rounded-xl font-medium disabled:opacity-50 text-sm">
-                {savingDay ? 'Saving...' : editingIndex !== null ? `Update Day ${savedDays[editingIndex].day}` : `Save Day ${currentDayNum}`}
-              </button>
-              {editingIndex !== null ? (
-                <button type="button" onClick={cancelEdit} className="px-5 py-2.5 border-2 border-gray-300 text-gray-600 hover:bg-gray-50 rounded-xl font-medium text-sm transition">
-                  Cancel
-                </button>
-              ) : (
-                <button type="button" onClick={handleSaveDraft} className="px-5 py-2.5 border-2 border-gray-300 text-gray-600 hover:border-gray-400 hover:bg-gray-50 rounded-xl font-medium text-sm transition flex items-center gap-2">
-                  {draftSaved ? (
-                    <><svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5"/></svg>Draft Saved</>
-                  ) : (
-                    <><svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0111.186 0z"/></svg>Save Draft</>
-                  )}
-                </button>
-              )}
-              {showSubmit && editingIndex === null && (
-                <button type="button" onClick={onSubmitClick} disabled={isSubmitting} className="px-5 py-2.5 border-2 border-primary text-primary-600 hover:bg-primary-50 rounded-xl font-medium text-sm disabled:opacity-50 transition">
-                  {isSubmitting ? 'Submitting...' : submitLabel}
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-      );
-    };
-
-    // View Validation Page - Read-only phased view for managers/admins to review technician progress
-    const ViewValidationPage = ({ assignment, user, onEdit, onBack }) => {
-      const segments = (assignment.validationSegments || []);
-      const onsiteSegs = segments.filter(s => !s.phase || s.phase === 'onsite');
-      const offsiteSegs = segments.filter(s => s.phase === 'offsite');
-      const isOnsiteSubmitted = assignment.status === 'onsite_submitted';
-      const isFullySubmitted = assignment.status === 'submitted';
-      // Managers cannot edit after technician has saved day 1 log data
-      const hasDay1Data = segments.length > 0 || isOnsiteSubmitted;
-      const managerBlocked = user?.isManager && !isFullySubmitted && hasDay1Data;
-      const canEdit = !isFullySubmitted && !managerBlocked;
-
-      const statusLabel = isFullySubmitted ? 'Completed' : isOnsiteSubmitted ? 'Off-Site In Progress' : 'On-Site In Progress';
-      const statusColor = isFullySubmitted ? 'bg-green-100 text-green-700' : isOnsiteSubmitted ? 'bg-blue-100 text-blue-700' : 'bg-yellow-100 text-yellow-700';
-
-      const DayCard = ({ seg, index, phaseLabel }) => {
-        // Use global day number (seg.day) for chronological display across phases
-        const dayNum = seg.day || (index + 1);
-        return (
-        <div className="border border-gray-200 rounded-xl p-4 bg-white">
-          <div className="flex items-center gap-2 mb-3">
-            <div className="w-6 h-6 bg-blue-600 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0">{dayNum}</div>
-            <span className="font-semibold text-gray-800 text-sm">Day {dayNum} — {phaseLabel}</span>
-            {seg.date && <span className="text-gray-400 text-xs ml-auto">{new Date(seg.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}</span>}
-          </div>
-          <div className="space-y-2 text-sm">
-            {seg.testsPerformed && (
-              <div><span className="font-medium text-gray-600">Tests Performed:</span> <span className="text-gray-800">{seg.testsPerformed}</span></div>
-            )}
-            {seg.results && (
-              <div><span className="font-medium text-gray-600">Results / Readings:</span> <span className="text-gray-800">{seg.results}</span></div>
-            )}
-            {seg.outstandingIssues && (
-              <div><span className="font-medium text-gray-600">Outstanding Issues:</span> <span className="text-gray-800">{seg.outstandingIssues}</span></div>
-            )}
-            {seg.finalRecommendations && (
-              <div><span className="font-medium text-gray-600">Recommendations:</span> <span className="text-gray-800">{seg.finalRecommendations}</span></div>
-            )}
-            <div>
-              <span className="font-medium text-gray-600">Training Completed:</span>{' '}
-              <span className={seg.trainingCompleted ? 'text-green-700 font-medium' : 'text-red-600 font-medium'}>{seg.trainingCompleted ? 'Yes' : 'No'}</span>
-              {seg.trainingCompleted === false && seg.trainingReason && <span className="text-gray-500"> — {seg.trainingReason}</span>}
-            </div>
-            {seg.attachments && seg.attachments.length > 0 && (
-              <div className="flex flex-wrap gap-2 mt-1">
-                {seg.attachments.map((a, ai) => (
-                  <a key={ai} href={a.url} target="_blank" rel="noopener noreferrer" className="text-xs px-2 py-1 bg-gray-100 rounded-lg text-blue-600 hover:underline">{a.filename || (a.type === 'photo' ? `Photo ${ai+1}` : `File ${ai+1}`)}</a>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      );
-      };
-
-      return (
-        <div className="max-w-3xl mx-auto space-y-6 p-4 md:p-6">
-          {/* Header */}
-          <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6">
-            <div className="flex items-start justify-between gap-4 flex-wrap">
-              <div>
-                <div className="flex items-center gap-2 flex-wrap mb-1">
-                  <h1 className="text-xl font-bold text-gray-900">{assignment.clientFacilityName}</h1>
-                  <span className={`text-xs px-2.5 py-0.5 rounded-full font-medium ${statusColor}`}>{statusLabel}</span>
-                </div>
-                <p className="text-sm text-gray-500">{assignment.analyzerModel || 'Biolis AU480'}{assignment.analyzerSerialNumber ? ` · S/N ${assignment.analyzerSerialNumber}` : ''}</p>
-                {assignment.technicianName && <p className="text-sm text-gray-500 mt-0.5">Technician: <span className="font-medium text-gray-700">{assignment.technicianName}</span></p>}
-                {(assignment.validationStartDate || assignment.validationEndDate) && (
-                  <p className="text-sm text-gray-500 mt-0.5">
-                    {assignment.validationStartDate && `Start: ${new Date(assignment.validationStartDate + 'T12:00:00').toLocaleDateString()}`}
-                    {assignment.validationStartDate && assignment.validationEndDate && ' · '}
-                    {assignment.validationEndDate && `End: ${new Date(assignment.validationEndDate + 'T12:00:00').toLocaleDateString()}`}
-                  </p>
-                )}
-              </div>
-              <div className="flex gap-2">
-                {canEdit && (
-                  <button onClick={onEdit} className="px-4 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition text-sm flex items-center gap-2">
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z"/></svg>
-                    Edit Report
-                  </button>
-                )}
-                <button onClick={onBack} className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg font-medium hover:bg-gray-200 transition text-sm">Back</button>
-              </div>
-            </div>
-          </div>
-
-          {/* Phase 1: On-Site */}
-          <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
-            <div className={`px-6 py-4 flex items-center gap-3 border-b ${onsiteSegs.length > 0 || isOnsiteSubmitted || isFullySubmitted ? 'bg-green-50 border-green-100' : 'bg-gray-50 border-gray-100'}`}>
-              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${onsiteSegs.length > 0 || isOnsiteSubmitted || isFullySubmitted ? 'bg-green-500 text-white' : 'bg-gray-200 text-gray-500'}`}>1</div>
-              <div>
-                <h2 className="font-bold text-gray-900">Phase 1: On-Site Validation</h2>
-                <p className="text-xs text-gray-500">{onsiteSegs.length} day{onsiteSegs.length !== 1 ? 's' : ''} logged{(isOnsiteSubmitted || isFullySubmitted) ? ' · Submitted' : ''}</p>
-              </div>
-              {(isOnsiteSubmitted || isFullySubmitted) && (
-                <span className="ml-auto text-xs px-2.5 py-0.5 bg-green-100 text-green-700 rounded-full font-medium">Complete</span>
-              )}
-            </div>
-            <div className="p-6 space-y-3">
-              {onsiteSegs.length > 0 ? (
-                onsiteSegs.map((seg, i) => <DayCard key={i} seg={seg} index={i} phaseLabel="On-Site" />)
-              ) : (
-                <p className="text-sm text-gray-400 text-center py-4">No on-site days logged yet.</p>
-              )}
-              {assignment.onsiteTechnicianSignature && (
-                <div className="mt-3 pt-3 border-t border-gray-100">
-                  <p className="text-xs font-medium text-gray-500 mb-2">Signatures</p>
-                  <div className="grid md:grid-cols-2 gap-3">
-                    <div className="bg-gray-50 rounded-xl p-3 text-center">
-                      <p className="text-xs text-gray-500 mb-1">Technician</p>
-                      <img src={assignment.onsiteTechnicianSignature} className="h-12 object-contain mx-auto" alt="Technician signature" />
-                      {assignment.onsiteTechnicianFirstName && <p className="text-xs text-gray-600 mt-1">{assignment.onsiteTechnicianFirstName} {assignment.onsiteTechnicianLastName}</p>}
-                    </div>
-                    {assignment.onsiteCustomerSignature && (
-                      <div className="bg-gray-50 rounded-xl p-3 text-center">
-                        <p className="text-xs text-gray-500 mb-1">Customer</p>
-                        <img src={assignment.onsiteCustomerSignature} className="h-12 object-contain mx-auto" alt="Customer signature" />
-                        {assignment.onsiteCustomerFirstName && <p className="text-xs text-gray-600 mt-1">{assignment.onsiteCustomerFirstName} {assignment.onsiteCustomerLastName}</p>}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Phase 2: Off-Site */}
-          <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
-            <div className={`px-6 py-4 flex items-center gap-3 border-b ${isFullySubmitted ? 'bg-green-50 border-green-100' : isOnsiteSubmitted ? 'bg-blue-50 border-blue-100' : 'bg-gray-50 border-gray-100'}`}>
-              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${isFullySubmitted ? 'bg-green-500 text-white' : isOnsiteSubmitted ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-500'}`}>2</div>
-              <div>
-                <h2 className="font-bold text-gray-900">Phase 2: Off-Site Validation</h2>
-                <p className="text-xs text-gray-500">{offsiteSegs.length} day{offsiteSegs.length !== 1 ? 's' : ''} logged{isFullySubmitted ? ' · Submitted' : ''}</p>
-              </div>
-              {isFullySubmitted && <span className="ml-auto text-xs px-2.5 py-0.5 bg-green-100 text-green-700 rounded-full font-medium">Complete</span>}
-              {isOnsiteSubmitted && !isFullySubmitted && <span className="ml-auto text-xs px-2.5 py-0.5 bg-blue-100 text-blue-700 rounded-full font-medium animate-pulse">In Progress</span>}
-              {!isOnsiteSubmitted && !isFullySubmitted && <span className="ml-auto text-xs px-2.5 py-0.5 bg-gray-100 text-gray-500 rounded-full font-medium">Pending Phase 1</span>}
-            </div>
-            <div className="p-6 space-y-3">
-              {offsiteSegs.length > 0 ? (
-                offsiteSegs.map((seg, i) => <DayCard key={i} seg={seg} index={i} phaseLabel="Off-Site" />)
-              ) : (
-                <p className="text-sm text-gray-400 text-center py-4">{isOnsiteSubmitted ? 'No off-site days logged yet.' : 'Off-site phase begins after on-site submission.'}</p>
-              )}
-            </div>
-          </div>
-        </div>
-      );
-    };
-
     // Complete Assignment Page - For technicians to complete assigned service reports
     const CompleteAssignmentPage = ({ token, user, assignment, onSuccess, onCancel }) => {
-      const isValidation = assignment.serviceType === 'Validations';
-
-      // Local assignment state — updated in-place after Phase 1 submit so Phase 2 renders without navigation
-      const [localAssignment, setLocalAssignment] = useState(assignment);
-      const isPhase1 = isValidation && localAssignment.status === 'assigned';
-      const isPhase2 = isValidation && localAssignment.status === 'onsite_submitted';
-
-      // ---- Validation Phase 1 state ----
-      const [onsiteFormData, setOnsiteFormData] = useState({
-        validationStartDate: assignment.validationStartDate || '',
-        validationEndDate: assignment.validationEndDate || '',
-        analyzerSerialNumber: assignment.analyzerSerialNumber || '',
-        materialsAvailable: ''
-      });
-      const [onsiteDays, setOnsiteDays] = useState(() =>
-        (assignment.validationSegments || []).filter(s => !s.phase || s.phase === 'onsite')
-      );
-      const [showSignatures, setShowSignatures] = useState(false);
-      const [submittingOnsite, setSubmittingOnsite] = useState(false);
-
-      // ---- Validation Phase 2 state ----
-      const [offsiteDays, setOffsiteDays] = useState(() =>
-        (assignment.validationSegments || []).filter(s => s.phase === 'offsite')
-      );
-      const [showDocUpload, setShowDocUpload] = useState(false);
-      const [validationDocFile, setValidationDocFile] = useState(null);
-      const [submittingFinal, setSubmittingFinal] = useState(false);
-      const docFileRef = useRef(null);
-
-      // ---- Shared signature state (used by Phase 1 and non-validation) ----
+      // ---- Signature state ----
       const [customerSignature, setCustomerSignature] = useState(null);
       const [technicianSignature, setTechnicianSignature] = useState(null);
       const [customerFirstName, setCustomerFirstName] = useState('');
@@ -3631,19 +2570,12 @@
       const [technicianFirstName, setTechnicianFirstName] = useState(user?.name?.split(' ')[0] || '');
       const [technicianLastName, setTechnicianLastName] = useState(user?.name?.split(' ').slice(1).join(' ') || '');
 
-      // ---- Non-validation form state (unchanged) ----
+      // ---- Service report form state ----
       const [formData, setFormData] = useState({
         descriptionOfWork: '',
         materialsUsed: '',
         solution: '',
         outstandingIssues: '',
-        validationResults: '',
-        validationStartDate: '',
-        validationEndDate: '',
-        trainingProvided: '',
-        testProcedures: '',
-        recommendations: '',
-        analyzersValidated: [],
         serviceCompletionDate: assignment.serviceCompletionDate || new Date().toISOString().split('T')[0],
         analyzerSerialNumber: assignment.analyzerSerialNumber || ''
       });
@@ -3656,90 +2588,6 @@
       const techFileInputRef = useRef(null);
 
       const serviceTypes = ['Analyzer Hardware', 'Inventory', 'LIS/EMR', 'Compliance', 'Training'];
-
-      // ---- Phase 1 handlers ----
-      const handleSaveOnsiteDay = async (dayData, photos, files) => {
-        let attachments = [];
-        if (photos.length > 0) {
-          const r = await api.uploadTechnicianPhotos(token, localAssignment.id, photos);
-          if (!r.error && Array.isArray(r)) attachments = [...attachments, ...r.map(p => ({...p, type: 'photo'}))];
-        }
-        if (files.length > 0) {
-          const r = await api.uploadTechnicianFiles(token, localAssignment.id, files);
-          if (!r.error && Array.isArray(r)) attachments = [...attachments, ...r.map(f => ({...f, type: 'file'}))];
-        }
-        const savedDay = { ...dayData, attachments };
-        // Persist to server immediately so dashboard/launchboard/client portal show live progress
-        await api.saveDayProgress(token, localAssignment.id, { ...savedDay, phase: 'onsite' });
-        setOnsiteDays(prev => [...prev, savedDay]);
-      };
-
-      const handleUpdateOnsiteDay = async (index, dayData, photos, files) => {
-        let attachments = [...(onsiteDays[index].attachments || [])];
-        if (photos.length > 0) {
-          const r = await api.uploadTechnicianPhotos(token, localAssignment.id, photos);
-          if (!r.error && Array.isArray(r)) attachments = [...attachments, ...r.map(p => ({...p, type: 'photo'}))];
-        }
-        if (files.length > 0) {
-          const r = await api.uploadTechnicianFiles(token, localAssignment.id, files);
-          if (!r.error && Array.isArray(r)) attachments = [...attachments, ...r.map(f => ({...f, type: 'file'}))];
-        }
-        setOnsiteDays(prev => prev.map((d, i) => i === index ? { ...dayData, attachments } : d));
-      };
-
-      const handleOnsiteSubmit = async () => {
-        if (!technicianSignature) { alert('Technician signature is required'); return; }
-        setSubmittingOnsite(true);
-        const result = await api.completeOnsiteValidation(token, localAssignment.id, {
-          ...onsiteFormData,
-          onsiteSegments: onsiteDays,
-          technicianSignature,
-          technicianSignatureDate: new Date().toISOString().split('T')[0],
-          technicianFirstName,
-          technicianLastName,
-          customerSignature: customerSignature || '',
-          customerSignatureDate: customerSignature ? new Date().toISOString().split('T')[0] : null,
-          customerFirstName,
-          customerLastName
-        });
-        if (result.error) {
-          alert('Error: ' + result.error);
-        } else {
-          setLocalAssignment(result);
-          setOffsiteDays((result.validationSegments || []).filter(s => s.phase === 'offsite'));
-        }
-        setSubmittingOnsite(false);
-      };
-
-      // ---- Phase 2 handlers ----
-      const handleSaveOffsiteDay = async (dayData, photos, files) => {
-        let attachments = [];
-        if (photos.length > 0) {
-          const r = await api.uploadTechnicianPhotos(token, localAssignment.id, photos);
-          if (!r.error && Array.isArray(r)) attachments = [...attachments, ...r.map(p => ({...p, type: 'photo'}))];
-        }
-        if (files.length > 0) {
-          const r = await api.uploadTechnicianFiles(token, localAssignment.id, files);
-          if (!r.error && Array.isArray(r)) attachments = [...attachments, ...r.map(f => ({...f, type: 'file'}))];
-        }
-        const result = await api.addOffsiteSegment(token, localAssignment.id, { ...dayData, attachments });
-        if (result.error) { alert('Error saving day: ' + result.error); return; }
-        setOffsiteDays(prev => [...prev, { ...dayData, attachments }]);
-      };
-
-      const handleFinalSubmit = async () => {
-        if (!validationDocFile) { alert('Please upload your completed validation report document'); return; }
-        setSubmittingFinal(true);
-        const fd = new FormData();
-        fd.append('validationReportDocument', validationDocFile);
-        const result = await api.submitValidationReport(token, localAssignment.id, fd);
-        if (result.error) {
-          alert('Error: ' + result.error);
-          setSubmittingFinal(false);
-          return;
-        }
-        onSuccess();
-      };
 
       const handleTechPhotoSelect = (e) => {
         const selectedFiles = Array.from(e.target.files);
@@ -3918,148 +2766,13 @@
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082"/></svg>
                 </div>
                 <div>
-                  <h1 className="text-2xl font-bold">{isValidation ? 'Complete Validation Service Report' : 'Complete Service Report'}</h1>
+                  <h1 className="text-2xl font-bold">Complete Service Report</h1>
                   <p className="opacity-90">Assigned by {assignment.assignedByName}</p>
                 </div>
               </div>
             </div>
 
-            {/* ============ VALIDATION PHASE 1 ============ */}
-            {isPhase1 && (
-              <div className="space-y-0">
-                <AssignmentDetails />
-
-                {/* Section 2 — Your On-Site Service Details */}
-                <div className="p-6 border-b">
-                  <h2 className="font-bold text-gray-900 mb-4 flex items-center gap-2">
-                    <span className="w-6 h-6 bg-primary-100 rounded-full flex items-center justify-center text-primary-600 text-sm">2</span>
-                    Your On-Site Service Details
-                  </h2>
-                  <div className="grid md:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Validation Start Date</label>
-                      <input type="date" value={onsiteFormData.validationStartDate} onChange={e => setOnsiteFormData({...onsiteFormData, validationStartDate: e.target.value})} className="input-modern w-full px-4 py-3" />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Validation End Date</label>
-                      <input type="date" value={onsiteFormData.validationEndDate} onChange={e => setOnsiteFormData({...onsiteFormData, validationEndDate: e.target.value})} className="input-modern w-full px-4 py-3" />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Analyzer Serial Number</label>
-                      <input type="text" value={onsiteFormData.analyzerSerialNumber} onChange={e => setOnsiteFormData({...onsiteFormData, analyzerSerialNumber: e.target.value})} className="input-modern w-full px-4 py-3" placeholder="e.g., 601744124" />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Materials Available</label>
-                      <input type="text" value={onsiteFormData.materialsAvailable} onChange={e => setOnsiteFormData({...onsiteFormData, materialsAvailable: e.target.value})} className="input-modern w-full px-4 py-3" placeholder="List available materials / reagents..." />
-                    </div>
-                  </div>
-                </div>
-
-                {/* Section 3 — On-Site Daily Validation Log */}
-                <div className="p-6 border-b">
-                  <h2 className="font-bold text-gray-900 mb-4 flex items-center gap-2">
-                    <span className="w-6 h-6 bg-primary-100 rounded-full flex items-center justify-center text-primary-600 text-sm">3</span>
-                    On-Site Daily Validation Log
-                  </h2>
-                  <DailyLogSection
-                    token={token}
-                    reportId={localAssignment.id}
-                    savedDays={onsiteDays}
-                    onSaveDay={handleSaveOnsiteDay}
-                    onUpdateDay={handleUpdateOnsiteDay}
-                    onSubmitClick={() => setShowSignatures(true)}
-                    submitLabel="Submit Daily Log"
-                    showSubmit={onsiteDays.length > 0}
-                    isSubmitting={false}
-                  />
-                </div>
-
-                {/* Section 4 — Signatures (revealed after Submit Daily Log) */}
-                {showSignatures && (
-                  <div className="p-6 border-b">
-                    {signaturesJSX}
-                    <div className="flex justify-end gap-3 pt-6 mt-2 border-t">
-                      <button type="button" onClick={() => setShowSignatures(false)} className="px-6 py-3 border rounded-xl hover:bg-gray-50 font-medium">Back to Log</button>
-                      <button type="button" onClick={handleOnsiteSubmit} disabled={submittingOnsite} className="btn-primary px-8 py-3 text-white rounded-xl font-medium disabled:opacity-50">
-                        {submittingOnsite ? 'Submitting...' : 'Submit On-Site Report'}
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* ============ VALIDATION PHASE 2 ============ */}
-            {isPhase2 && (
-              <div className="space-y-0">
-                {/* On-Site Visit Complete banner */}
-                <div className="p-5 bg-green-50 border-b border-green-200 flex items-center gap-4">
-                  <div className="w-10 h-10 bg-green-500 rounded-full flex items-center justify-center flex-shrink-0">
-                    <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5"/></svg>
-                  </div>
-                  <div>
-                    <h3 className="font-bold text-green-800">On-Site Visit Complete</h3>
-                    <p className="text-sm text-green-700">
-                      On-site phase submitted{localAssignment.onsiteSubmittedAt ? ` on ${new Date(localAssignment.onsiteSubmittedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}` : ''}.
-                      Continue logging off-site validation days below.
-                    </p>
-                  </div>
-                </div>
-
-                {/* Off-Site Continued Validation Log */}
-                <div className="p-6">
-                  <h2 className="font-bold text-gray-900 mb-1 flex items-center gap-2">
-                    <svg className="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082"/></svg>
-                    Off-Site Continued Validation Log
-                  </h2>
-                  <p className="text-sm text-gray-500 mb-5 ml-7">Log each day of off-site validation work. Submit when complete.</p>
-
-                  <DailyLogSection
-                    token={token}
-                    reportId={localAssignment.id}
-                    savedDays={offsiteDays}
-                    onSaveDay={handleSaveOffsiteDay}
-                    onSubmitClick={() => setShowDocUpload(true)}
-                    submitLabel="Submit Validation Report"
-                    showSubmit={offsiteDays.length > 0}
-                    isSubmitting={submittingFinal}
-                    dayOffset={onsiteDays.length}
-                  />
-
-                  {/* Document upload + final submit */}
-                  {showDocUpload && (
-                    <div className="mt-6 p-5 border-2 border-blue-200 rounded-xl bg-blue-50/20">
-                      <h3 className="font-semibold text-gray-800 mb-3">Upload Completed Validation Report Document</h3>
-                      <p className="text-sm text-gray-600 mb-4">Upload your finalized validation report document (PDF, Word, or Excel). This will be attached to the report and made available for client download.</p>
-                      <input ref={docFileRef} type="file" accept=".pdf,.doc,.docx,.xls,.xlsx" onChange={e => setValidationDocFile(e.target.files[0] || null)} className="hidden" />
-                      {validationDocFile ? (
-                        <div className="flex items-center gap-3 p-3 bg-white rounded-xl border border-blue-200 mb-4">
-                          <svg className="w-5 h-5 text-blue-500 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="1.75" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"/></svg>
-                          <span className="flex-1 text-sm text-gray-700 truncate">{validationDocFile.name}</span>
-                          <button type="button" onClick={() => setValidationDocFile(null)} className="text-red-400 hover:text-red-600 text-sm">Remove</button>
-                        </div>
-                      ) : (
-                        <button type="button" onClick={() => docFileRef.current?.click()} className="w-full border-2 border-dashed border-blue-300 rounded-xl p-4 text-center hover:border-blue-400 hover:bg-blue-50 transition mb-4">
-                          <svg className="w-8 h-8 mx-auto text-blue-400 mb-1" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/></svg>
-                          <p className="text-sm text-blue-600 font-medium">Click to select your validation report document</p>
-                          <p className="text-xs text-gray-400 mt-0.5">PDF, Word, or Excel</p>
-                        </button>
-                      )}
-                      <div className="flex gap-3">
-                        <button type="button" onClick={() => setShowDocUpload(false)} className="px-5 py-2.5 border rounded-xl hover:bg-gray-50 font-medium text-sm">Back</button>
-                        <button type="button" onClick={handleFinalSubmit} disabled={submittingFinal || !validationDocFile} className="btn-primary px-7 py-2.5 text-white rounded-xl font-medium disabled:opacity-50 text-sm flex-1">
-                          {submittingFinal ? 'Submitting...' : 'Submit Full Validation Report'}
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {/* ============ NON-VALIDATION (existing behavior unchanged) ============ */}
-            {!isValidation && (
-              <div>
+            <div>
                 <AssignmentDetails />
                 <form onSubmit={handleSubmit} className="p-6 space-y-6">
                   <h2 className="font-bold text-gray-900 flex items-center gap-2">
@@ -4147,7 +2860,6 @@
                   </div>
                 </form>
               </div>
-            )}
           </div>
         </div>
       );
@@ -4166,8 +2878,7 @@
       const [formData, setFormData] = useState({
         assignedToId: '', clientFacilityName: '', customerName: '', address: '',
         serviceType: '', analyzerModel: '', analyzerSerialNumber: '',
-        hubspotTicketNumber: '', plannedVisitDate: '', managerNotes: '',
-        validationStartDate: '', validationEndDate: '', expectedDays: ''
+        hubspotTicketNumber: '', plannedVisitDate: '', managerNotes: ''
       });
 
       // File upload state
@@ -4276,8 +2987,7 @@
           setFormData({
             assignedToId: '', clientFacilityName: '', customerName: '', address: '',
             serviceType: '', analyzerModel: '', analyzerSerialNumber: '',
-            hubspotTicketNumber: '', plannedVisitDate: '', managerNotes: '',
-            validationStartDate: '', validationEndDate: '', expectedDays: ''
+            hubspotTicketNumber: '', plannedVisitDate: '', managerNotes: ''
           });
           setPhotos([]);
           setFiles([]);
@@ -4604,17 +3314,15 @@
                     ))}
                   </select>
                 </div>
-                {formData.serviceType !== 'Validations' && (
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Planned Visit Date</label>
-                    <input
-                      type="date"
-                      value={formData.plannedVisitDate}
-                      onChange={(e) => setFormData({...formData, plannedVisitDate: e.target.value})}
-                      className="input-modern w-full px-4 py-3"
-                    />
-                  </div>
-                )}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Planned Visit Date</label>
+                  <input
+                    type="date"
+                    value={formData.plannedVisitDate}
+                    onChange={(e) => setFormData({...formData, plannedVisitDate: e.target.value})}
+                    className="input-modern w-full px-4 py-3"
+                  />
+                </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Analyzer Model</label>
                   <input
@@ -4647,68 +3355,7 @@
                 </div>
               </div>
 
-              {/* Validation Date Fields - shown when service type is Validations */}
-              {formData.serviceType === 'Validations' && (
-                <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-xl">
-                  <div className="flex items-center gap-2 mb-3">
-                    <svg className="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082"/></svg>
-                    <p className="font-semibold text-blue-800">Validation Schedule</p>
-                  </div>
-                  <p className="text-sm text-blue-600 mb-3">Set the expected validation window. The technician can adjust dates and duration as needed.</p>
-                  <div className="grid grid-cols-3 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Validation Start Date</label>
-                      <input
-                        type="date"
-                        value={formData.validationStartDate}
-                        onChange={(e) => {
-                          const newStart = e.target.value;
-                          setFormData(prev => {
-                            const updated = { ...prev, validationStartDate: newStart };
-                            if (newStart && prev.validationEndDate) {
-                              const days = Math.ceil(Math.abs(new Date(prev.validationEndDate) - new Date(newStart)) / (1000 * 60 * 60 * 24)) + 1;
-                              if (days > 0) updated.expectedDays = String(days);
-                            }
-                            return updated;
-                          });
-                        }}
-                        className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Validation End Date</label>
-                      <input
-                        type="date"
-                        value={formData.validationEndDate}
-                        onChange={(e) => {
-                          const newEnd = e.target.value;
-                          setFormData(prev => {
-                            const updated = { ...prev, validationEndDate: newEnd };
-                            if (prev.validationStartDate && newEnd) {
-                              const days = Math.ceil(Math.abs(new Date(newEnd) - new Date(prev.validationStartDate)) / (1000 * 60 * 60 * 24)) + 1;
-                              if (days > 0) updated.expectedDays = String(days);
-                            }
-                            return updated;
-                          });
-                        }}
-                        className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Expected Days</label>
-                      <input
-                        type="number"
-                        min="1"
-                        max="365"
-                        value={formData.expectedDays}
-                        onChange={(e) => setFormData({...formData, expectedDays: e.target.value})}
-                        className="w-full px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                        placeholder="Auto-calculated from dates"
-                      />
-                    </div>
-                  </div>
-                </div>
-              )}
+
             </div>
 
             {/* Manager Notes Section */}
@@ -4815,8 +3462,7 @@
                   setFormData({
                     assignedToId: '', clientFacilityName: '', customerName: '', address: '',
                     serviceType: '', analyzerModel: '', analyzerSerialNumber: '',
-                    hubspotTicketNumber: '', plannedVisitDate: '', managerNotes: '',
-                    validationStartDate: '', validationEndDate: '', expectedDays: ''
+                    hubspotTicketNumber: '', plannedVisitDate: '', managerNotes: ''
                   });
                   setPhotos([]);
                   setFiles([]);
@@ -4925,494 +3571,6 @@
       );
     };
 
-    // Continue Validation Page - Multi-day validation daily segment form
-    const ContinueValidationPage = ({ token, user, validation, onSuccess, onBack }) => {
-      const [liveValidation, setLiveValidation] = useState(validation);
-      const [loading, setLoading] = useState(false);
-      const [saving, setSaving] = useState(false);
-      const [error, setError] = useState('');
-      const [expandedDays, setExpandedDays] = useState(new Set());
-      // Show completion form directly if status is signature_needed (awaiting finalization)
-      const [showCompletionForm, setShowCompletionForm] = useState(validation?.status === 'signature_needed');
-      const [editingExpectedDays, setEditingExpectedDays] = useState(false);
-      const [expectedDaysInput, setExpectedDaysInput] = useState(validation?.expectedDays || '');
-
-      const segments = Array.isArray(liveValidation?.validationSegments) ? liveValidation.validationSegments : [];
-      const nextDay = segments.length + 1;
-
-      // New day form state
-      const [dayForm, setDayForm] = useState({
-        testsPerformed: '',
-        results: '',
-        observations: '',
-        date: new Date().toISOString().split('T')[0]
-      });
-
-      // Completion form — pre-populate from existing report data if present
-      const [completionForm, setCompletionForm] = useState({
-        validationResults: validation?.validationResults || '',
-        trainingProvided: validation?.trainingProvided || '',
-        recommendations: validation?.recommendations || '',
-        technicianSignature: '',
-        technicianSignatureDate: new Date().toISOString().split('T')[0],
-        technicianFirstName: validation?.technicianFirstName || user?.name?.split(' ')[0] || '',
-        technicianLastName: validation?.technicianLastName || user?.name?.split(' ').slice(1).join(' ') || '',
-        customerSignature: '',
-        customerSignatureDate: '',
-        customerFirstName: validation?.customerFirstName || '',
-        customerLastName: validation?.customerLastName || ''
-      });
-
-      // Load fresh data on mount so real-time day entries are visible immediately
-      useEffect(() => {
-        const loadFresh = async () => {
-          if (!validation?.id) return;
-          setLoading(true);
-          const result = await api.getServiceReport(token, validation.id);
-          if (!result.error) {
-            setLiveValidation(result);
-            setExpectedDaysInput(result.expectedDays || '');
-            // Keep completion form pre-population up to date
-            setCompletionForm(prev => ({
-              ...prev,
-              validationResults: result.validationResults || prev.validationResults,
-              trainingProvided: result.trainingProvided || prev.trainingProvided,
-              recommendations: result.recommendations || prev.recommendations,
-              technicianFirstName: result.technicianFirstName || prev.technicianFirstName,
-              technicianLastName: result.technicianLastName || prev.technicianLastName,
-              customerFirstName: result.customerFirstName || prev.customerFirstName,
-              customerLastName: result.customerLastName || prev.customerLastName,
-            }));
-          }
-          setLoading(false);
-        };
-        loadFresh();
-      }, []);
-
-      const toggleDay = (day) => {
-        const next = new Set(expandedDays);
-        if (next.has(day)) next.delete(day); else next.add(day);
-        setExpandedDays(next);
-      };
-
-      // Progress bar calculation (use liveValidation expectedDays)
-      const expectedDays = liveValidation?.expectedDays;
-      const daysLogged = segments.length;
-      const progressPercent = expectedDays ? Math.min(100, Math.round((daysLogged / expectedDays) * 100)) : null;
-      const allDaysLogged = expectedDays && daysLogged >= expectedDays;
-
-      // Reload validation data in place (stay on this page)
-      const reloadValidation = async () => {
-        const result = await api.getServiceReport(token, liveValidation.id);
-        if (!result.error) {
-          setLiveValidation(result);
-          setExpectedDaysInput(result.expectedDays || '');
-        }
-        return result;
-      };
-
-      const handleSaveDay = async () => {
-        if (!dayForm.testsPerformed.trim()) {
-          setError('Tests performed is required');
-          return;
-        }
-        setSaving(true);
-        setError('');
-
-        const result = await api.addValidationSegment(token, liveValidation.id, {
-          day: nextDay,
-          date: dayForm.date,
-          testsPerformed: dayForm.testsPerformed,
-          results: dayForm.results,
-          observations: dayForm.observations,
-          status: 'complete',
-          expectedDays: expectedDaysInput ? parseInt(expectedDaysInput) : liveValidation?.expectedDays
-        });
-
-        if (result.error) {
-          setError(result.error);
-          setSaving(false);
-        } else {
-          // Stay on this page — reload data in place, clear the day form
-          await reloadValidation();
-          setDayForm({ testsPerformed: '', results: '', observations: '', date: new Date().toISOString().split('T')[0] });
-          setSaving(false);
-        }
-      };
-
-      const handleUpdateExpectedDays = async () => {
-        const val = expectedDaysInput ? parseInt(expectedDaysInput) : null;
-        // Save the expected days update via a no-op segment update (update last segment)
-        if (segments.length > 0) {
-          const lastSeg = segments[segments.length - 1];
-          await api.addValidationSegment(token, liveValidation.id, {
-            day: lastSeg.day,
-            date: lastSeg.date,
-            testsPerformed: lastSeg.testsPerformed,
-            results: lastSeg.results,
-            observations: lastSeg.observations,
-            status: lastSeg.status,
-            expectedDays: val
-          });
-        }
-        setEditingExpectedDays(false);
-        await reloadValidation();
-      };
-
-      const handleCompleteValidation = async () => {
-        if (!completionForm.validationResults.trim()) {
-          setError('Overall validation results are required');
-          return;
-        }
-        if (!completionForm.technicianSignature) {
-          setError('Technician signature is required');
-          return;
-        }
-        setSaving(true);
-        setError('');
-
-        const result = await api.completeValidation(token, liveValidation.id, { ...completionForm, validationSegments: segments });
-        if (result.error) {
-          setError(result.error);
-          setSaving(false);
-        } else {
-          if (onSuccess) onSuccess(result);
-        }
-      };
-
-      const formatDate = (dateStr) => {
-        if (!dateStr) return '';
-        try {
-          const d = new Date(dateStr + 'T12:00:00');
-          return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
-        } catch { return dateStr; }
-      };
-
-      if (loading) {
-        return (
-          <div className="flex items-center justify-center py-20">
-            <div className="text-center">
-              <svg className="animate-spin w-8 h-8 text-primary-500 mx-auto mb-3" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-              <p className="text-gray-500 text-sm">Loading validation data...</p>
-            </div>
-          </div>
-        );
-      }
-
-      return (
-        <div className="space-y-6 animate-fade-in">
-          {/* Header */}
-          <div className="flex items-center gap-3">
-            <button onClick={onBack} className="p-2 hover:bg-gray-100 rounded-lg transition">
-              <svg className="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"/></svg>
-            </button>
-            <div>
-              <h1 className="text-2xl font-bold text-accent">Validation: {liveValidation?.clientFacilityName}</h1>
-              <p className="text-sm text-gray-600">
-                {liveValidation?.analyzerModel || 'Biolis AU480'} {liveValidation?.analyzerSerialNumber ? `(${liveValidation.analyzerSerialNumber})` : ''}
-                {liveValidation?.validationStartDate && ` · Started ${formatDate(liveValidation.validationStartDate)}`}
-              </p>
-            </div>
-          </div>
-
-          {/* Progress Bar with Expected Days */}
-          <div className="card-modern p-5">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center text-blue-600">
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23.693L5 14.5m14.8.8l1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0112 21c-2.773 0-5.491-.235-8.135-.687-1.718-.293-2.3-2.379-1.067-3.61L5 14.5"/></svg>
-                </div>
-                <div>
-                  <p className="font-semibold text-gray-900">{daysLogged} day{daysLogged !== 1 ? 's' : ''} logged</p>
-                  {expectedDays && !editingExpectedDays && (
-                    <p className={`text-sm ${allDaysLogged ? 'text-green-600 font-medium' : 'text-gray-500'}`}>
-                      {daysLogged} of {expectedDays} planned days
-                      {allDaysLogged && <span className="ml-1">✓ All days logged</span>}
-                      <button onClick={() => setEditingExpectedDays(true)} className="ml-2 text-blue-500 hover:text-blue-700 text-xs">(edit)</button>
-                    </p>
-                  )}
-                  {!expectedDays && !editingExpectedDays && (
-                    <p className="text-sm text-gray-500">
-                      Flexible duration
-                      <button onClick={() => setEditingExpectedDays(true)} className="ml-2 text-blue-500 hover:text-blue-700 text-xs">(set planned days)</button>
-                    </p>
-                  )}
-                </div>
-              </div>
-              <div className="flex gap-1">
-                {segments.map((s, i) => (
-                  <div key={i} className="w-3 h-3 rounded-full bg-green-500" title={`Day ${s.day}`}></div>
-                ))}
-                <div className="w-3 h-3 rounded-full bg-gray-200 border-2 border-blue-400 animate-pulse" title="Next day"></div>
-              </div>
-            </div>
-
-            {/* Edit expected days inline */}
-            {editingExpectedDays && (
-              <div className="flex items-center gap-2 mt-2 p-3 bg-blue-50 rounded-lg">
-                <label className="text-sm text-gray-700">Expected total days:</label>
-                <input
-                  type="number"
-                  min="1"
-                  max="365"
-                  value={expectedDaysInput}
-                  onChange={(e) => setExpectedDaysInput(e.target.value)}
-                  className="w-20 px-2 py-1 border rounded text-sm"
-                  placeholder="e.g. 5"
-                />
-                <button onClick={handleUpdateExpectedDays} className="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">Save</button>
-                <button onClick={() => setEditingExpectedDays(false)} className="px-3 py-1 text-gray-600 text-sm hover:text-gray-800">Cancel</button>
-              </div>
-            )}
-
-            {/* Progress bar (only shown when expectedDays is set) */}
-            {expectedDays && progressPercent !== null && (
-              <div className="mt-3">
-                <div className="w-full bg-gray-200 rounded-full h-2.5 overflow-hidden">
-                  <div
-                    className={`h-full rounded-full transition-all duration-500 ${progressPercent >= 100 ? 'bg-green-500' : 'bg-blue-500'}`}
-                    style={{ width: `${progressPercent}%` }}
-                  />
-                </div>
-                <p className="text-xs text-gray-500 mt-1 text-right">{progressPercent}%</p>
-              </div>
-            )}
-          </div>
-
-          {/* Daily Log */}
-          <div className="card-modern p-6">
-            <h2 className="text-lg font-bold text-gray-900 mb-4">Daily Validation Log</h2>
-
-            {/* Completed days */}
-            <div className="space-y-3 mb-4">
-              {segments.map((seg) => (
-                <div key={seg.day} className="border rounded-xl overflow-hidden">
-                  <button
-                    onClick={() => toggleDay(seg.day)}
-                    className="w-full flex items-center justify-between p-4 hover:bg-gray-50 transition"
-                  >
-                    <div className="flex items-center gap-3">
-                      <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center text-white text-xs">✓</div>
-                      <span className="font-medium text-gray-900">Day {seg.day} — {formatDate(seg.date)}</span>
-                    </div>
-                    <svg className={`w-5 h-5 text-gray-400 transition-transform ${expandedDays.has(seg.day) ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5"/></svg>
-                  </button>
-                  {expandedDays.has(seg.day) && (
-                    <div className="px-4 pb-4 space-y-2 border-t bg-gray-50">
-                      <div className="pt-3">
-                        <p className="text-xs font-medium text-gray-500 uppercase">Tests Performed</p>
-                        <p className="text-sm text-gray-800 mt-1">{seg.testsPerformed}</p>
-                      </div>
-                      {seg.results && (
-                        <div>
-                          <p className="text-xs font-medium text-gray-500 uppercase">Results / Readings</p>
-                          <p className="text-sm text-gray-800 mt-1">{seg.results}</p>
-                        </div>
-                      )}
-                      {seg.observations && (
-                        <div>
-                          <p className="text-xs font-medium text-gray-500 uppercase">Observations / Notes</p>
-                          <p className="text-sm text-gray-800 mt-1">{seg.observations}</p>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-
-            {/* Days alignment warning */}
-            {!showCompletionForm && allDaysLogged && (
-              <div className="flex items-center gap-3 p-3 bg-green-50 border border-green-200 rounded-xl mb-2">
-                <svg className="w-5 h-5 text-green-600 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                <p className="text-sm text-green-700">All {expectedDays} planned days have been logged. You can finalize the validation or add additional days if needed.</p>
-                <button onClick={() => setShowCompletionForm(true)} className="ml-auto px-3 py-1.5 bg-green-600 text-white text-xs rounded-lg font-medium hover:bg-green-700 whitespace-nowrap">Finalize Now</button>
-              </div>
-            )}
-
-            {/* New day form */}
-            {!showCompletionForm && (
-              <div className="border-2 border-blue-200 rounded-xl p-5 bg-blue-50/30">
-                <div className="flex items-center gap-2 mb-4">
-                  <div className="w-6 h-6 bg-blue-500 rounded-full flex items-center justify-center text-white text-xs font-bold">{nextDay}</div>
-                  <h3 className="font-semibold text-gray-900">Day {nextDay}</h3>
-                  <span className="text-xs text-blue-600 bg-blue-100 px-2 py-0.5 rounded">Current</span>
-                </div>
-
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
-                    <input
-                      type="date"
-                      value={dayForm.date}
-                      onChange={(e) => setDayForm(prev => ({ ...prev, date: e.target.value }))}
-                      className="w-full px-3 py-2 border rounded-lg text-sm"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Tests Performed *</label>
-                    <textarea
-                      value={dayForm.testsPerformed}
-                      onChange={(e) => setDayForm(prev => ({ ...prev, testsPerformed: e.target.value }))}
-                      rows="3"
-                      className="w-full px-3 py-2 border rounded-lg text-sm"
-                      placeholder="Calibration verification, QC testing, patient sample runs..."
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Results / Readings</label>
-                    <textarea
-                      value={dayForm.results}
-                      onChange={(e) => setDayForm(prev => ({ ...prev, results: e.target.value }))}
-                      rows="3"
-                      className="w-full px-3 py-2 border rounded-lg text-sm"
-                      placeholder="Na: 140±2, K: 4.1±0.3, Cl: 101±2..."
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Observations / Notes</label>
-                    <textarea
-                      value={dayForm.observations}
-                      onChange={(e) => setDayForm(prev => ({ ...prev, observations: e.target.value }))}
-                      rows="2"
-                      className="w-full px-3 py-2 border rounded-lg text-sm"
-                      placeholder="Any observations, issues, or notes for this day..."
-                    />
-                  </div>
-
-                  {error && <div className="bg-red-50 text-red-600 p-3 rounded-lg text-sm">{error}</div>}
-
-                  <div className="flex gap-3 pt-2">
-                    <button
-                      onClick={handleSaveDay}
-                      disabled={saving}
-                      className="flex-1 px-4 py-2.5 bg-blue-600 text-white rounded-xl font-medium hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-2"
-                    >
-                      {saving ? (
-                        <><svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg> Saving...</>
-                      ) : `Save Day ${nextDay}`}
-                    </button>
-                    {segments.length > 0 && (
-                      <button
-                        onClick={() => setShowCompletionForm(true)}
-                        className="px-4 py-2.5 bg-gradient-to-r from-primary to-accent text-white rounded-xl font-medium hover:opacity-90 flex items-center gap-2"
-                      >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                        Finalize Validation
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Completion form */}
-            {showCompletionForm && (
-              <div className="border-2 border-green-200 rounded-xl p-5 bg-green-50/30">
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center gap-2">
-                    <svg className="w-6 h-6 text-green-600" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                    <h3 className="text-lg font-bold text-gray-900">Finalize Validation</h3>
-                  </div>
-                  {liveValidation?.status !== 'signature_needed' && (
-                    <button onClick={() => setShowCompletionForm(false)} className="text-sm text-gray-500 hover:text-gray-700">
-                      ← Back to daily log
-                    </button>
-                  )}
-                </div>
-
-                <p className="text-sm text-gray-600 mb-4">
-                  {liveValidation?.status === 'signature_needed'
-                    ? 'This validation is awaiting finalization. Review the details below and add signatures.'
-                    : `${segments.length} day${segments.length !== 1 ? 's' : ''} logged. Provide the overall summary and signatures to complete.`}
-                </p>
-
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Overall Validation Results *</label>
-                    <textarea
-                      value={completionForm.validationResults}
-                      onChange={(e) => setCompletionForm(prev => ({ ...prev, validationResults: e.target.value }))}
-                      rows="4"
-                      className="w-full px-3 py-2 border rounded-lg text-sm"
-                      placeholder="All analytes within acceptable tolerance ranges..."
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Training Provided</label>
-                    <textarea
-                      value={completionForm.trainingProvided}
-                      onChange={(e) => setCompletionForm(prev => ({ ...prev, trainingProvided: e.target.value }))}
-                      rows="3"
-                      className="w-full px-3 py-2 border rounded-lg text-sm"
-                      placeholder="Trained staff on daily maintenance, QC procedures..."
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Recommendations</label>
-                    <textarea
-                      value={completionForm.recommendations}
-                      onChange={(e) => setCompletionForm(prev => ({ ...prev, recommendations: e.target.value }))}
-                      rows="3"
-                      className="w-full px-3 py-2 border rounded-lg text-sm"
-                      placeholder="Schedule 6-month follow-up calibration..."
-                    />
-                  </div>
-
-                  {/* Signatures */}
-                  <div className="border-t pt-4 mt-4">
-                    <h4 className="font-semibold text-gray-900 mb-3">Signatures</h4>
-                    <div className="grid md:grid-cols-2 gap-4">
-                      <SignaturePad
-                        label="Technician Signature *"
-                        onSave={(sig) => setCompletionForm(prev => ({ ...prev, technicianSignature: sig }))}
-                      />
-                      <SignaturePad
-                        label="Customer Signature"
-                        onSave={(sig) => setCompletionForm(prev => ({ ...prev, customerSignature: sig, customerSignatureDate: sig ? new Date().toISOString().split('T')[0] : '' }))}
-                      />
-                    </div>
-                    {completionForm.customerSignature && (
-                      <div className="grid md:grid-cols-2 gap-4 mt-3">
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Customer First Name</label>
-                          <input type="text" value={completionForm.customerFirstName} onChange={(e) => setCompletionForm(prev => ({ ...prev, customerFirstName: e.target.value }))} className="w-full px-3 py-2 border rounded-lg text-sm" />
-                        </div>
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Customer Last Name</label>
-                          <input type="text" value={completionForm.customerLastName} onChange={(e) => setCompletionForm(prev => ({ ...prev, customerLastName: e.target.value }))} className="w-full px-3 py-2 border rounded-lg text-sm" />
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {error && <div className="bg-red-50 text-red-600 p-3 rounded-lg text-sm">{error}</div>}
-
-                  <div className="flex gap-3 pt-2">
-                    <button
-                      onClick={() => setShowCompletionForm(false)}
-                      className="px-4 py-2.5 border border-gray-300 text-gray-700 rounded-xl font-medium hover:bg-gray-50"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      onClick={handleCompleteValidation}
-                      disabled={saving}
-                      className="flex-1 px-4 py-2.5 bg-gradient-to-r from-primary to-accent text-white rounded-xl font-medium hover:opacity-90 disabled:opacity-50 flex items-center justify-center gap-2"
-                    >
-                      {saving ? (
-                        <><svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg> Finalizing...</>
-                      ) : 'Finalize Validation'}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      );
-    };
-
     // Main App Component
     const App = () => {
       // Check multiple token sources - service_token, unified_token, or admin_token
@@ -5435,9 +3593,6 @@
       const [editingReport, setEditingReport] = useState(null);
       const [assignedReports, setAssignedReports] = useState([]);
       const [editingAssignment, setEditingAssignment] = useState(null);
-      const [viewingValidation, setViewingValidation] = useState(null);
-      const [activeValidations, setActiveValidations] = useState([]);
-      const [continueValidation, setContinueValidation] = useState(null);
 
       useEffect(() => {
         if (token) {
@@ -5543,40 +3698,11 @@
         setActivePage('complete_assignment');
       };
 
-      const handleViewValidation = (assignment) => {
-        setViewingValidation(assignment);
-        setActivePage('view_validation');
-      };
-
-      const handleContinueValidation = (validation) => {
-        setContinueValidation(validation);
-        setActivePage('continue_validation');
-      };
-
       if (!token || !user) {
         return <LoginPage onLogin={handleLogin} />;
       }
 
       const renderPage = () => {
-        if (continueValidation && activePage === 'continue_validation') {
-          return (
-            <ContinueValidationPage
-              token={token}
-              user={user}
-              validation={continueValidation}
-              onSuccess={(updatedReport) => {
-                setContinueValidation(null);
-                loadData();
-                setActivePage('home');
-              }}
-              onBack={() => {
-                setContinueValidation(null);
-                setActivePage('home');
-              }}
-            />
-          );
-        }
-
         if (editingReport && activePage === 'edit_report') {
           return (
             <EditReportPage
@@ -5610,24 +3736,6 @@
           );
         }
 
-        if (viewingValidation && activePage === 'view_validation') {
-          return (
-            <ViewValidationPage
-              assignment={viewingValidation}
-              user={user}
-              onEdit={() => {
-                setEditingAssignment(viewingValidation);
-                setViewingValidation(null);
-                setActivePage('complete_assignment');
-              }}
-              onBack={() => {
-                setViewingValidation(null);
-                setActivePage('home');
-              }}
-            />
-          );
-        }
-
         if (editingAssignment && activePage === 'complete_assignment') {
           return (
             <CompleteAssignmentPage
@@ -5649,7 +3757,7 @@
 
         switch (activePage) {
           case 'home':
-            return <HomePage user={user} onNavigate={setActivePage} recentReports={data?.recentReports || []} assignedReports={assignedReports} onEditAssignment={handleEditAssignment} activeValidations={activeValidations} onContinueValidation={handleContinueValidation} onViewValidation={handleViewValidation} isAdminView={data?.isAdminView} allReportsCount={data?.allReportsCount} openCount={data?.openCount} closedCount={data?.closedCount} />;
+            return <HomePage user={user} onNavigate={setActivePage} recentReports={data?.recentReports || []} assignedReports={assignedReports} onEditAssignment={handleEditAssignment} isAdminView={data?.isAdminView} allReportsCount={data?.allReportsCount} openCount={data?.openCount} closedCount={data?.closedCount} />;
           case 'new_report':
             return (
               <NewReportPage
@@ -5671,7 +3779,6 @@
                 onEditAssignment={handleEditAssignment}
                 onBack={() => setActivePage('home')}
                 user={user}
-                onViewValidation={handleViewValidation}
               />
             );
           case 'assign_report':
@@ -5689,9 +3796,9 @@
                 />
               );
             }
-            return <HomePage user={user} onNavigate={setActivePage} recentReports={data?.recentReports || []} assignedReports={assignedReports} onEditAssignment={handleEditAssignment} activeValidations={activeValidations} onContinueValidation={handleContinueValidation} onViewValidation={handleViewValidation} isAdminView={data?.isAdminView} allReportsCount={data?.allReportsCount} openCount={data?.openCount} closedCount={data?.closedCount} />;
+            return <HomePage user={user} onNavigate={setActivePage} recentReports={data?.recentReports || []} assignedReports={assignedReports} onEditAssignment={handleEditAssignment} isAdminView={data?.isAdminView} allReportsCount={data?.allReportsCount} openCount={data?.openCount} closedCount={data?.closedCount} />;
           default:
-            return <HomePage user={user} onNavigate={setActivePage} recentReports={data?.recentReports || []} assignedReports={assignedReports} onEditAssignment={handleEditAssignment} activeValidations={activeValidations} onContinueValidation={handleContinueValidation} onViewValidation={handleViewValidation} isAdminView={data?.isAdminView} allReportsCount={data?.allReportsCount} openCount={data?.openCount} closedCount={data?.closedCount} />;
+            return <HomePage user={user} onNavigate={setActivePage} recentReports={data?.recentReports || []} assignedReports={assignedReports} onEditAssignment={handleEditAssignment} isAdminView={data?.isAdminView} allReportsCount={data?.allReportsCount} openCount={data?.openCount} closedCount={data?.closedCount} />;
         }
       };
 
