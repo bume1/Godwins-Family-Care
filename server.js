@@ -4937,10 +4937,35 @@ app.get('/api/client-portal/data', authenticateToken, async (req, res) => {
 // Care-plan / visit / message records here are dev fixtures; the structured
 // shapes mirror the v1 client schema so they can later swap to AWS RDS.
 
+// Care-tier vocabulary — Track A/B per Intake & Packet Spec v1.1 §3.2.
+// Track A (Personal Care) runs A1–A4; Track B is skilled nursing. Tier /
+// Triage Level language is retired.
 const CARE_TIER_LABELS = {
-  '1': 'Tier 1 · Essential ADL',
-  '2': 'Tier 2 · Comprehensive',
-  '3': 'Tier 3 · Behavioral Support & Cognitive Wellness'
+  'A1': 'A1 · Essential ADL',
+  'A2': 'A2 · Comprehensive ADL & IADL',
+  'A3': 'A3 · IADL-Forward Support',
+  'A4': 'A4 · Behavioral Support & Cognitive Wellness',
+  'B': 'Track B · Skilled Nursing'
+};
+
+// Map legacy 1/2/3 care-tier codes onto the Track A/B enum so stored records
+// resolve without re-keying (spec v1.1 §3.2): Tier 1 / Level I → A1,
+// Tier 2 / Level II → A2, Tier 3 / Level III → A4. A3 is new and has no
+// legacy equivalent; any skilled-nursing designation is Track B.
+const LEGACY_CARE_TIER_MAP = { '1': 'A1', '2': 'A2', '3': 'A4' };
+
+// Resolve any stored careTier (legacy numeric or Track A/B code) to its
+// canonical Track code, or null if unset/unrecognized.
+const normalizeCareTier = (careTier) => {
+  if (!careTier) return null;
+  const code = String(careTier).toUpperCase();
+  return LEGACY_CARE_TIER_MAP[code] || (CARE_TIER_LABELS[code] ? code : null);
+};
+
+// Display label for a stored careTier value (legacy or Track A/B).
+const careTierLabelFor = (careTier) => {
+  const code = normalizeCareTier(careTier);
+  return code ? CARE_TIER_LABELS[code] : null;
 };
 
 // Build a display-ready snapshot of the gate-relevant enrollment state.
@@ -4949,8 +4974,8 @@ const buildEnrollmentSnapshot = (client) => {
   return {
     enrollmentStatus: client.enrollmentStatus || 'intake_pending',
     serviceLine: client.serviceLine || null,
-    careTier: client.careTier || null,
-    careTierLabel: client.careTier ? CARE_TIER_LABELS[String(client.careTier)] : null,
+    careTier: normalizeCareTier(client.careTier),
+    careTierLabel: careTierLabelFor(client.careTier),
     consents,
     // Convenience flags the UI/gate can read directly
     roiFamilySigned: consents.roiFamily === 'signed',
@@ -4962,13 +4987,13 @@ const buildEnrollmentSnapshot = (client) => {
 // otherwise falls back to prototype sample names so the portal renders fully.
 const buildGfcTestData = (client) => {
   const firstName = (client.preferredName || client.name || 'there').split(' ')[0];
-  const tierLabel = client.careTier ? CARE_TIER_LABELS[String(client.careTier)] : 'Tier 2 · Comprehensive';
+  const tierLabel = careTierLabelFor(client.careTier) || CARE_TIER_LABELS['A2'];
 
   const carePlan = {
     version: 3,
     updatedAt: '2026-06-08',
     updatedBy: 'Bethel N., FNP',
-    careTier: client.careTier || '2',
+    careTier: normalizeCareTier(client.careTier) || 'A2',
     careTierLabel: tierLabel,
     primaryCaregiver: { name: 'Joelle T.', role: 'Primary caregiver', credential: 'LPN-track', initials: 'JT' },
     goals: [
