@@ -131,10 +131,10 @@ Full field-level detail lives in `GFC_Intake_and_Packet_Spec_v1.md`. The build-r
 **The gate.** `enrollmentStatus` on the client (`intake_pending → intake_complete → enrolled`). Until intake + consents are done, the portal renders only the intake flow; all other routes blocked at the API layer. Family portal stays locked until ROI-family is signed, no override.
 
 **Consent set (e-signed, branched by service path), this is the enrollment step:**
-- Both arms: HIPAA NPP acknowledgment, ROI split into family + provider, Service Agreement (rewritten to cover both service lines, not "non-medical only"), Patient Bill of Rights & Self-Determination, emergency-treatment + financial-responsibility, crisis protocol (911/988), monitoring opt-in (inactive, feeds Track C).
+- Both arms: HIPAA NPP acknowledgment, ROI split into family + provider, **Transfer-of-Care ROI (multi-provider record release; built in Session 3.4)**, Service Agreement (rewritten to cover both service lines, not "non-medical only"), Patient Bill of Rights & Self-Determination, emergency-treatment + financial-responsibility, crisis protocol (911/988), monitoring opt-in (inactive, feeds Track C).
 - PHC only: financial agreement + PCA scope acknowledgment.
 - IHPC only: consent to treat, assignment of benefits, practice NPP.
-- Every consent: typed name + checkbox + server timestamp + IP; status stored per type; portal gate reads ROI-family.
+- Every consent: typed name + checkbox (or canvas signature for the Transfer-of-Care ROI) + server timestamp + IP; status stored per type; portal gate reads ROI-family. Transfer-of-Care ROI does NOT gate the portal.
 
 **Field dispositions:**
 - *Add to intake:* full insurance IDs / Medicaid #, advance-directive document upload, the consents above.
@@ -144,7 +144,7 @@ Full field-level detail lives in `GFC_Intake_and_Packet_Spec_v1.md`. The build-r
 **Data-shape fixes:** structured medication rows (name/dose/route/frequency/prescribing provider/pharmacy), single DOB (derive age), Stage 2 PHI posts to RDS not a Google Sheet.
 
 ### 5.4 PHCP data model (RDS, in-boundary)
-`clients` (incl. `enrollmentStatus`, `monitoringOptIn`, `careTeam`), `family_contacts`, `caregivers` (incl. `licenseLevel`), `consents` (status per type), `care_plans` (versioned), `visit_logs` (tier-branched), `messages`, `shifts`, `availability`, `escalation_events`, `monitoring_events` (scaffold, see §11), `audit_log`. Documents by reference to Drive, not stored in the DB.
+`clients` (incl. `enrollmentStatus`, `monitoringOptIn`, `careTeam`, `priorProviders`), `family_contacts`, `caregivers` (incl. `licenseLevel`), `consents` (status per type, including `roiTransfer`), `consent_events` + `consent_provider_authorizations` + `consent_records_categories` (parent/child for the multi-provider Transfer-of-Care ROI built in Session 3.4), `care_plans` (versioned), `visit_logs` (tier-branched), `messages`, `shifts`, `availability`, `escalation_events`, `monitoring_events` (scaffold, see §11), `audit_log`. Documents by reference to Drive, not stored in the DB.
 
 ### 5.5 Caregiver & clinician workspace
 Detail in `GFC_Caregiver_Workspace_Spec_v1.md`. Repurpose the repo's service portal into two surfaces:
@@ -162,12 +162,14 @@ Detail in `GFC_Matching_Engine_Spec_v1.md`. Two stages: **hard filters** (licens
 
 ---
 
-## 6. Clinical build (Track B) — weeks 2–3
+## 6. Clinical build (Track B) — PRIORITY, Session 4 (clinical-first)
+**Model: one patient record in OpenEMR, two role-scoped views.** The clinician charts from a clinician-scoped view of the patient's chart (write); the patient sees a filtered read of the same record. The app is a front end over OpenEMR — it never duplicates the clinical record.
+
 - Stand up the FHIR client against OpenEMR (OAuth2).
-- Clinician front end in the app: patient list, encounters, problems, meds, allergies, documents — all reading/writing OpenEMR, not RDS.
-- RN clinician packet form writes a structured encounter to OpenEMR, pre-filled from the family's PHCP intake.
+- **Clinician workspace (write):** patient list/search → open a patient's chart → document the initial comprehensive visit (H&P), med reconciliation, problem list, care plan, notes — all to OpenEMR.
+- **Clinician scheduling (OpenEMR-tied):** provider appointments managed in the app but tied to OpenEMR's appointment/calendar, so a booked visit is an OpenEMR appointment linked to the billable encounter. Same UX pattern as PHCP scheduling, **different backend** — clinical → OpenEMR, PHCP caregiver shifts → app/RDS. Two scheduling systems by design.
+- **Patient portal clinical read (fast-follow):** the Session 3 portal shell surfaces the patient's own clinical data from OpenEMR (visit summaries, meds, care plan), filtered per sharing rules, read-only, scoped to that patient. Not OpenEMR's native portal.
 - In-Home Primary Care intake branch + its medical consents (consent to treat, assignment of benefits, practice NPP).
-- App never duplicates the clinical record; it renders and edits OpenEMR's.
 
 ---
 

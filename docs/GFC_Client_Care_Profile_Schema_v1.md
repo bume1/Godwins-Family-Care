@@ -66,13 +66,24 @@ The client side of the match, and the core of the client record. Built to compar
                      "prescriber": "string", "pharmacy": "string" } ],
   "advanceDirective": { "status": "dnr|living_will|healthcare_poa|none|unknown", "documentRef": "drive://..." },
   "medicalTeam": { "pcpName": "string", "pcpPhone": "string", "preferredHospital": "string", "preferredPharmacy": "string" },
+
+  // — Prior providers (feeds the Transfer-of-Care ROI form; editable independently of any ROI signing event) —
+  "priorProviders": [ { "name": "string", "dept": "string", "address": "string", "phone": "string", "fax": "string",
+                        "roleLabel": "pcp|specialist|hospital|other",
+                        "addedFrom": "intake_prefill|manual|roi_form",
+                        "createdAt": "timestamp" } ],
+
   "homeSafetyFlags": ["smokers|pets|firearms|hoarding|pests|stairs|oxygen_tanks"],
   "twoPersonAssistRequired": "no|sometimes|routinely",
   "openEmrPatientId": "string|null",     // link to clinical record for IHPC
 
   // — Consents (status per type) —
+  // Note: roiTransfer is the Transfer-of-Care ROI (multi-provider record release, Session 3.4).
+  // Detailed rows for each signing event live in the consent_events + consent_provider_authorizations
+  // + consent_records_categories tables. Status here is a rollup for the client profile.
   "consents": { "serviceAgreement": "signed|pending", "roiFamily": "signed|pending|na",
-                "roiProvider": "signed|pending", "npp": "signed|pending",
+                "roiProvider": "signed|pending", "roiTransfer": "signed|pending|na",
+                "npp": "signed|pending",
                 "billOfRights": "signed|pending", "emergencyFinancial": "signed|pending",
                 "crisisProtocol": "signed|pending", "monitoring": "signed|pending|na" },
 

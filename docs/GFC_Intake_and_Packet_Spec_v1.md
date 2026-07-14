@@ -89,6 +89,7 @@ The form already knows which arm the client chose. Branch the consent page on it
 **Both arms:**
 - HIPAA Notice of Privacy Practices acknowledgment *(add)*
 - HIPAA ROI — split into ROI-family and ROI-provider *(refine)*
+- **HIPAA Transfer-of-Care ROI** — client authorization for GFC to request records from prior providers. Multi-provider (one signing event generates one PDF per prior provider). Handles 42 CFR Part 2 protected categories (mental health, substance use, HIV/AIDS, genetic testing) as a separate opt-in defaulted FALSE. Prefills from the `priorProviders` field group on the client profile (§ Client Care Profile Schema). Uses canvas signature capture rather than typed name. Does NOT gate the portal. Reference implementations: `docs/source-forms/gfc_roi_upload.gs` and `docs/source-forms/template-gfc-roi-upload.php`. Built in Session 3.4. *(add)*
 - Service Agreement *(rewrite per 4.1)*
 - Patient Bill of Rights & Self-Determination acknowledgment *(add)*
 - Emergency treatment + financial-responsibility consent *(add)*
@@ -105,7 +106,9 @@ The form already knows which arm the client chose. Branch the consent page on it
 - The medical practice's Notice of Privacy Practices
 
 ### 4.3 Signature and audit requirements
-Every consent: typed name + acknowledgment checkbox + server-side timestamp and IP. Store a consent **status per type** (Service Agreement, ROI-family, ROI-provider, monitoring) so it maps directly to the app's consent records and drives the family-portal gate. The app should refuse to activate the family portal until ROI-family is signed, with no manual override.
+Every consent: typed name + acknowledgment checkbox + server-side timestamp and IP. Store a consent **status per type** (Service Agreement, ROI-family, ROI-provider, `roiTransfer`, monitoring) so it maps directly to the app's consent records and drives the family-portal gate. The app should refuse to activate the family portal until ROI-family is signed, with no manual override.
+
+**Transfer-of-Care ROI exception.** The Transfer-of-Care ROI uses canvas signature capture rather than typed name, because it produces provider-facing PDFs that need an actual signature image. All other elements (timestamp, IP, status per type) apply. This ROI spawns a parent `consent_events` record plus one `consent_provider_authorizations` child row per authorized prior provider, plus `consent_records_categories` rows for each checked record type. Server-side must validate all 45 CFR 164.508 required elements (description of information, purpose, expiration, right to revoke, redisclosure statement, signature, date) before saving. 42 CFR Part 2 protected categories (substance use, mental health, HIV/AIDS, genetic testing) are gated behind a separate opt-in that defaults FALSE and MUST be enforced at the query layer, not just the UI.
 
 ---
 

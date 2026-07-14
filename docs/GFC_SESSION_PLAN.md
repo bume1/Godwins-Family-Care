@@ -12,7 +12,7 @@ Each session ends in a PR you review and merge. **Companion to** `GFC_App_Build_
 | 0 | Infra — AWS + OpenEMR + BAAs (accelerated; OpenEMR live ~tonight) | Shared | 🟡 In progress |
 | 1 | Repo prep · rebrand · role model | Shared | ✅ Done |
 | 2 | Strip lab features · deactivate tracker · brand cleanup | Shared | 📄 Prompt ready |
-| 3 | Client portal + gated intake (both service paths) | Shared | 🔵 In progress — 3.1/3.2 built, **3.3 not complete** |
+| 3 | Client portal + gated intake (both service paths) | Shared | 🔵 In progress — 3.1/3.2 built; **3.3 (staff enrollment view) and 3.4 (Transfer-of-Care ROI) not complete** |
 | 4 | **Clinical / In-Home Primary Care portal + OpenEMR** | Clinical | ⬜ Next priority |
 | 5 | **Clinical HIPAA go-live** (app → AWS boundary, MFA, audit, BAAs) | Clinical | ⬜ Planned |
 | 6 | Caregiver app | PHCP | ⬜ Planned |
@@ -33,9 +33,13 @@ Each session ends in a PR you review and merge. **Companion to** `GFC_App_Build_
 
 **Session 2 — Strip + deactivate + brand cleanup.** Remove the lab modules, deactivate (keep) the tracker, strip lab HubSpot routes, delete lab notification templates, fix brand strings. Ref: `strip-list.md` + `strip-list-DECISIONS.md`.
 
-**Session 3 — Client portal + gated intake.** Shared front door for BOTH service paths (the intake branches PHC vs IHPC consents). 3.1 portal + gate (built), 3.2 intake + consents (built), **3.3 staff enrollment-submissions view (not complete)**. Dev/test data only. Ref: client prototype, intake spec (`template-gfc-intake-3.php`), client schema.
+**Session 3 — Client portal + gated intake.** Shared front door for BOTH service paths (the intake branches PHC vs IHPC consents). 3.1 portal + gate (built), 3.2 intake + consents (built), **3.3 staff enrollment-submissions view (not complete)**, **3.4 Transfer-of-Care Provider ROI (not complete — additive, can run in parallel with 3.3)**. Dev/test data only. Ref: client prototype, intake spec (`template-gfc-intake-3.php`), client schema. Session 3.4 additionally references the source-form pair `source-forms/gfc_roi_upload.gs` and `source-forms/template-gfc-roi-upload.php` and adds the `roiTransfer` consent status + `priorProviders` field group to the client schema.
 
-**Session 4 — Clinical / In-Home Primary Care (PRIORITY).** OpenEMR integration (FHIR/OAuth), the clinician/provider workspace, the primary-care enrollment branch (consent to treat, assignment of benefits, practice NPP), the initial comprehensive visit / H&P + medication reconciliation, care plan + program layering (CCM / CCP / RPM-flag), documentation written to OpenEMR. Implements the clinical enrollment sequence: payer verification → records/ROI → NPA/prescriptive authority → initial visit → care plan → activation.
+**Session 4 — Clinical / In-Home Primary Care (PRIORITY).** OpenEMR integration (FHIR/OAuth2). Architecture: one patient record in OpenEMR, two role-scoped views over it — the clinician charts from a clinician-scoped view of the patient's chart (write), the patient sees a filtered read of the same record. Three sub-PRs:
+
+- **4.1 Clinician workspace (OpenEMR write) — priority.** Patient list/search → open a patient's chart (clinician view) → document the initial comprehensive visit (H&P), medication reconciliation, problem list, care plan, notes — all writing to OpenEMR via FHIR. The app never duplicates the clinical record; it renders and edits OpenEMR's. Implements the clinical enrollment sequence: payer verification → records/ROI → NPA/prescriptive authority → initial visit → care plan + program layering (CCM / CCP / RPM-flag) → activation. Includes the primary-care enrollment branch consents (consent to treat, assignment of benefits, practice NPP) if not already covered in 3.2.
+- **4.2 Clinician scheduling (OpenEMR-tied) — priority.** Provider appointment management in the app, tied to OpenEMR's appointment/calendar so a booked visit is an OpenEMR appointment linked to the billable encounter. Same UX pattern as PHCP scheduling (Session 7) but its backend is OpenEMR, not the app shift store. (PHCP caregiver scheduling stays app/RDS — two scheduling systems by design.)
+- **4.3 Patient portal clinical read — fast-follow.** The Session 3 portal shell surfaces the patient's own clinical data from OpenEMR (visit summaries, medications, care plan), filtered per sharing rules — not raw clinical notes. Read-only via the app's FHIR client, scoped to that patient. Not OpenEMR's native patient portal.
 
 **Session 5 — Clinical HIPAA go-live.** Move the clinical front end into the AWS boundary, PHI to OpenEMR/RDS, MFA for Admin/Clinical, audit-log persistence, PII-scrubbed logs, BAAs on file. The gate that lets the first clinical clients be seen compliantly.
 
