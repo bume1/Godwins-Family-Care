@@ -101,7 +101,7 @@ Three billing patterns, one app. See §13 for the phase breakdown.
 
 | GFC role | Repo role | Action |
 |---|---|---|
-| **Owner (MD, agency owner)** | new: `owner` | **add (future)** — full access to everything Admin sees plus billing. Reserved for Bethel. Not built now; scaffolded so `hasBillingAccess` reads cleanly. |
+| **Owner (Founder / Executive Director)** | new: `owner` | **add (future)** — full access to everything Admin sees plus billing. Reserved for Bianca G. C. Ume, MD, MBA, MS. Not built now; scaffolded so `hasBillingAccess` reads cleanly. |
 | Admin (operational owner) | `admin` | keep. Sees billing for now, until Owner + Billing/Coder roles are split. |
 | Clinical (FNP) | `user` | repurpose |
 | Caregiver (PCA) | `vendor` | repurpose |
