@@ -22,7 +22,7 @@ The client side of the match, and the core of the client record. Built to compar
   "phone": "string",
   "livesWith": "alone|spouse|adult_child|other_family|assisted_living",
   "serviceLine": "PHC | IHPC | both",
-  "careTier": "1|2|3",                 // Essential ADL | Comprehensive | Behavioral
+  "careTier": "A1|A2|A3|A4|B",         // Track A/B per Intake Spec v1.1 §3.2. A1 Essential ADL | A2 Comprehensive ADL & IADL | A3 IADL-Forward Support | A4 Behavioral Support & Cognitive Wellness | B Skilled Nursing. Legacy 1/2/3 → A1/A2/A4.
   "enrollmentStatus": "intake_pending|intake_complete|enrolled",
   "monitoringOptIn": false,
 
