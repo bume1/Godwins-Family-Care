@@ -3822,10 +3822,85 @@
     const ROUTE_OPTS = ['Oral', 'Topical', 'Injection', 'Inhaled', 'Patch', 'Other'];
     const ADL_LEVELS = ['Independent', 'Needs verbal cues', 'Needs physical assistance', 'Fully dependent'];
 
+    // ── Intake option lists — mirror the legacy WordPress intake form field-for-field
+    //    (docs/source-forms/template-gfc-intake-3.php) so the app captures the same
+    //    information; stored in the app's structured shape for the matching/billing engines.
+    const IO = {
+      gender: ['Female', 'Male', 'Non-binary', 'Prefer not to say'],
+      livesWith: ['Lives alone', 'Spouse / partner', 'Adult child', 'Other family member', 'Assisted living / memory care'],
+      contactRelationship: ['Spouse / Partner', 'Adult child', 'Sibling', 'Legal guardian', 'Other family member'],
+      contactPreference: ['Phone call', 'Text message', 'Email'],
+      decisionAuthority: ['Yes — legal (POA/guardianship)', 'Yes — family decision-maker, informal', 'No — client decides', 'Shared'],
+      servicePath: ['Home Care', 'In-Home Primary Care', 'Both', 'Not sure'],
+      adlLevel: ['Independent', 'Some help', 'A lot of help', 'Total assistance'],
+      helpNeeded: ['Companionship & socialization', 'Personal care / bathing / dressing', 'Medication reminders', 'Mobility & transfer assistance', 'Meal preparation', 'Transportation to appointments', 'Overnight or 24/7 care', 'Memory care / dementia support', 'Skilled nursing at home', 'Hospice or end-of-life support'],
+      appointmentAccess: ['No difficulty', 'Somewhat difficult', 'Very difficult', 'Cannot attend'],
+      ongoingConditions: ['Diabetes', 'Heart condition / CHF', 'COPD / breathing issues', "Dementia / Alzheimer's", 'Stroke / neurological', 'Recent hospitalization', 'Multiple chronic conditions', 'None / generally healthy'],
+      hasPCP: ['Yes', 'No', 'Unsure'],
+      cognitionLevel: ['None', 'Mild', 'Moderate', 'Significant'],
+      urgency: ['Immediately', 'Within a week', 'Within a month', 'Just exploring'],
+      preferredDays: ['Weekday mornings', 'Weekday afternoons', 'Weekday evenings', 'Weekends', 'Overnight', '24/7 continuous'],
+      recurring: ['Recurring', 'One-time', 'Not sure'],
+      paymentExpectation: ['Private pay', 'Insurance', 'Medicaid', 'Medicare', 'Combination', 'Not sure'],
+      serviceInterests: ['Case management', 'Behavioral health support', 'Continuous Care Program', 'Not interested in add-on services'],
+      caregiverStress: ['Managing fine', 'Stretched thin', 'Overwhelmed', 'Breaking point'],
+      homebound: ['Completely homebound', 'Leaves with assistance', 'Leaves occasionally', 'Independent'],
+      appointmentDifficulty: ['Cannot attend', 'Very difficult', 'Somewhat difficult', 'No difficulty'],
+      currentServices: ['Home health', 'Hospice', 'Palliative care', 'Skilled nursing (private)', 'Outpatient PT/OT', 'None'],
+      hbpcInterests: ['In-home primary care visits', 'Telehealth visits', 'Medication management', 'Chronic disease management', 'Labs drawn at home', 'Mobile imaging', 'Care coordination across providers'],
+      diagnoses: ["Dementia / Alzheimer's", "Parkinson's disease", 'Stroke / TIA', 'Depression', 'Anxiety', 'COPD / respiratory', 'Heart failure / cardiac', 'Diabetes', 'Cancer', 'Arthritis', 'Osteoporosis', 'Renal disease', 'Bipolar disorder', 'Schizophrenia', 'PTSD', 'Substance use history'],
+      dnr: ['Yes — DNR in place', 'Yes — advance directive / living will', 'Yes — healthcare proxy / POA', 'No', 'Unknown'],
+      skilledTasks: ['Wound care', 'Injections', 'Catheter care', 'Ostomy care', 'Tube feeding', 'Oxygen management', 'Suctioning', 'Tracheostomy care', 'IV therapy', 'Blood glucose monitoring', 'Blood pressure monitoring', 'Medication administration', 'Behavioral supervision', 'Seizure monitoring', 'None'],
+      recentEvents: ['Hospitalized in past 30 days', 'SNF or rehab stay in past 90 days', 'Recent falls', 'Recent infections', 'New medications since discharge', 'Difficulty following discharge instructions', 'Concern for readmission'],
+      adlWalking: ['Independent', 'Uses walker / cane', 'Needs physical assistance', 'Wheelchair — self-propels', 'Wheelchair — pushed', 'Bed-bound'],
+      adlToileting: ['Independent', 'Needs verbal cues', 'Needs physical assistance', 'Incontinent — needs full care'],
+      adlTransfers: ['Independent', 'Standby assist', 'Hands-on assist', 'Two-person assist / mechanical lift'],
+      fallRisk: ['Low', 'Moderate', 'High'],
+      equipment: ['Walker', 'Cane', 'Wheelchair', 'Hoyer lift', 'Hospital bed', 'Grab bars', 'Shower chair', 'Stair lift'],
+      iadl: ['Meal preparation', 'Grocery shopping', 'Light housekeeping', 'Laundry', 'Medication reminders', 'Transportation to appointments', 'Errands', 'Companionship', 'Phone / technology help', 'Managing mail / paperwork'],
+      cognitiveStatus: ['Intact', 'Mild impairment', 'Moderate dementia', 'Severe dementia', 'Mental health diagnosis affecting cognition'],
+      dementiaStage: ['Early / mild', 'Moderate', 'Late / severe', 'Unknown / undiagnosed'],
+      behavioral: ['Wandering', 'Agitation / aggression', 'Sundowning', 'Sleep disturbances', 'Hallucinations', 'Mood swings', 'Resistance to care', 'Self-harm risk', 'Suicidal ideation history'],
+      functionalRisk6mo: ['Fallen', 'Wandered from home', 'Been hospitalized', 'Significant weight loss', 'Missed medications', 'Left stove/appliances running', 'Become aggressive', 'Missed important appointments', 'Experienced dehydration', 'None'],
+      homeSafety: ['Smokers in home', 'Pets in home', 'Firearms in home', 'Hoarding or clutter', 'Pest issues', 'Stairs required', 'Oxygen tanks', 'Working utilities', 'Other household substance use', 'None'],
+      twoPersonAssist: ['No', 'Sometimes', 'Yes routinely'],
+      decisionMaking: ['Client independently', 'Shared with family', 'Surrogate decision-maker needed', 'Capacity concerns'],
+      legalDocs: ['Healthcare POA activated', 'Financial POA activated', 'Guardianship', 'Healthcare surrogate designated', 'Advance directive on file', 'None'],
+      personality: ['Quiet and reserved', 'Warm and chatty', 'Likes structure and routine', 'Prefers independence', 'Can get anxious', 'Resistant to care'],
+      genderPref: ['No preference', 'Female preferred', 'Male preferred', 'Female — strong', 'Male — strong'],
+      caregiverExp: ['Entry-level OK', 'Some experience', 'Experienced', 'Dementia-trained', 'Behavioral support certified'],
+      insuranceTypes: ['Medicare Part A & B', 'Medicare Advantage', 'Medicaid', 'Dual eligible', 'VA benefits', 'Commercial insurance', 'Managed care organization', 'Long-term care insurance', 'Private pay only'],
+      medicareType: ['Part A & B', 'Medicare Advantage (Part C)', 'Dual eligible', 'Not applicable'],
+      medicaidWaiver: ['CCSP', 'ICWP', 'SOURCE', 'Katie Beckett', 'Other waiver', 'Not on a waiver'],
+      policyHolderRel: ['Self', 'Spouse', 'Parent', 'Child', 'Other'],
+      homeBenefit: ['Covered — verified', 'Covered — unverified', 'Not covered', 'Unknown'],
+      ltcCarrier: ['Genworth', 'Mutual of Omaha', 'Northwestern Mutual', 'John Hancock', 'Transamerica', 'Other', 'Not applicable'],
+      auth911: ['Yes — authorized', 'Yes — call family first if time allows', 'No — always call family first']
+    };
+
+    // Small textarea field matching the .fld/label convention used across the wizard.
+    const TextArea = ({ label, hint, value, onChange, placeholder }) => (
+      <div className="fld">
+        <label>{label}</label>
+        {hint && <div className="hint">{hint}</div>}
+        <textarea value={value || ''} placeholder={placeholder} onChange={e => onChange(e.target.value)} />
+      </div>
+    );
+
     const GfcIntakeFlow = ({ token, me, onBack, onComplete }) => {
       const [loaded, setLoaded] = useState(false);
       const [serviceLine, setServiceLine] = useState(me.serviceLine || 'PHC');
-      const [form, setForm] = useState({ medications: [{ name: '', dose: '', route: '', frequency: '', prescriber: '', pharmacy: '' }], insuranceIds: [{ carrier: '', memberId: '', group: '' }], primaryContact: {}, emergencyContacts: [{}, {}], adl: {}, skilledTasksNeeded: [], homeSafetyFlags: [], behavioralFlags: [] });
+      const [form, setForm] = useState({
+        medications: [{ name: '', dose: '', route: '', frequency: '', prescriber: '', pharmacy: '' }],
+        insuranceIds: [{ carrier: '', memberId: '', group: '' }],
+        submitter: {}, primaryContact: {}, emergencyContacts: [{}, {}],
+        medicalTeam: {}, situation: {}, schedule: {}, matching: {}, advanceDirective: {},
+        medicare: {}, medicaid: {}, commercial: {}, ltc: {},
+        adl: {}, conditions: [], skilledTasksNeeded: [], recentEvents: [],
+        equipment: [], iadl: [], behavioralFlags: [], functionalRisk6mo: [],
+        homeSafetyFlags: [], legalDocs: [], helpNeeded: [], ongoingConditions: [],
+        preferredDays: [], serviceInterests: [], currentServices: [], hbpcInterests: [], insuranceTypes: []
+      });
       const [consents, setConsents] = useState({});
       const [consentMeta, setConsentMeta] = useState({});
       const [consentDefs, setConsentDefs] = useState([]);
@@ -3845,12 +3920,25 @@
             setConsentDefs(r.consentDefs || []);
             setRequiredConsents(r.requiredConsents || []);
             if (r.intake && Object.keys(r.intake).length) {
+              const it = r.intake;
+              const arr = (v) => Array.isArray(v) ? v : [];
+              const obj = (v) => (v && typeof v === 'object') ? v : {};
               setForm(f => ({
-                ...f, ...r.intake,
-                medications: (r.intake.medications && r.intake.medications.length) ? r.intake.medications : f.medications,
-                insuranceIds: (r.intake.insuranceIds && r.intake.insuranceIds.length) ? r.intake.insuranceIds : f.insuranceIds,
-                primaryContact: r.intake.primaryContact || {}, emergencyContacts: r.intake.emergencyContacts || [{}, {}],
-                adl: r.intake.adl || {}, skilledTasksNeeded: r.intake.skilledTasksNeeded || [], homeSafetyFlags: r.intake.homeSafetyFlags || [], behavioralFlags: r.intake.behavioralFlags || []
+                ...f, ...it,
+                medications: (it.medications && it.medications.length) ? it.medications : f.medications,
+                insuranceIds: (it.insuranceIds && it.insuranceIds.length) ? it.insuranceIds : f.insuranceIds,
+                submitter: obj(it.submitter), primaryContact: obj(it.primaryContact),
+                emergencyContacts: (it.emergencyContacts && it.emergencyContacts.length) ? it.emergencyContacts : [{}, {}],
+                medicalTeam: obj(it.medicalTeam), situation: obj(it.situation), schedule: obj(it.schedule),
+                matching: obj(it.matching), advanceDirective: obj(it.advanceDirective),
+                medicare: obj(it.medicare), medicaid: obj(it.medicaid), commercial: obj(it.commercial), ltc: obj(it.ltc),
+                adl: obj(it.adl), conditions: arr(it.conditions), skilledTasksNeeded: arr(it.skilledTasksNeeded),
+                recentEvents: arr(it.recentEvents), equipment: arr(it.equipment), iadl: arr(it.iadl),
+                behavioralFlags: arr(it.behavioralFlags), functionalRisk6mo: arr(it.functionalRisk6mo),
+                homeSafetyFlags: arr(it.homeSafetyFlags), legalDocs: arr(it.legalDocs), helpNeeded: arr(it.helpNeeded),
+                ongoingConditions: arr(it.ongoingConditions), preferredDays: arr(it.preferredDays),
+                serviceInterests: arr(it.serviceInterests), currentServices: arr(it.currentServices),
+                hbpcInterests: arr(it.hbpcInterests), insuranceTypes: arr(it.insuranceTypes)
               }));
             }
           }
@@ -3868,6 +3956,7 @@
       const rmMed = (i) => setForm(f => ({ ...f, medications: f.medications.filter((_, x) => x !== i) }));
       const setIns = (i, k, v) => setForm(f => { const a = [...f.insuranceIds]; a[i] = { ...a[i], [k]: v }; return { ...f, insuranceIds: a }; });
       const addIns = () => setForm(f => ({ ...f, insuranceIds: [...f.insuranceIds, { carrier: '', memberId: '', group: '' }] }));
+      const setEC = (i, k, v) => setForm(f => { const e = [...f.emergencyContacts]; e[i] = { ...(e[i] || {}), [k]: v }; return { ...f, emergencyContacts: e }; });
 
       const activeConsentDefs = consentDefs.length ? consentDefs : [];
       const requiredSigned = requiredConsents.every(t => consents[t] === 'signed');
@@ -3890,8 +3979,12 @@
         { key: 'path', label: 'Service path' },
         { key: 'client', label: 'Client details' },
         { key: 'contacts', label: 'Contacts' },
+        { key: 'situation', label: 'Care situation' },
+        { key: 'schedule', label: 'Schedule & urgency' },
+        { key: 'homebound', label: 'Homebound & recent care' },
         { key: 'medical', label: 'Medical' },
         { key: 'function', label: 'Function & safety' },
+        { key: 'matching', label: 'Caregiver match' },
         { key: 'insurance', label: 'Insurance' },
         { key: 'consents', label: 'Consents' },
         { key: 'review', label: 'Review & submit' }
@@ -3954,39 +4047,101 @@
             <React.Fragment>
               <h2 className="disp">Client details</h2>
               <p className="sub">We collect date of birth once and calculate age from it.</p>
-              <TextField label="Preferred name" value={form.preferredName} onChange={v => set('preferredName', v)} placeholder="What we should call them" />
+              <div className="grid2">
+                <TextField label="Client first name" value={form.clientFirst} onChange={v => set('clientFirst', v)} />
+                <TextField label="Client last name" value={form.clientLast} onChange={v => set('clientLast', v)} />
+              </div>
+              <TextField label="Preferred name / nickname" value={form.preferredName} onChange={v => set('preferredName', v)} placeholder="What we should call them" />
               <TextField label="Date of birth" type="date" value={form.dob} onChange={v => set('dob', v)} />
-              <SelectField label="Gender" value={form.gender} onChange={v => set('gender', v)} options={['Female', 'Male', 'Nonbinary', 'Prefer not to say']} />
+              {form.dob && <div className="hint" style={{ fontSize: 11.5, color: 'var(--mut)', marginTop: -8, marginBottom: 8 }}>Age {ageFromDob(form.dob)} (calculated)</div>}
+              <SelectField label="Gender" value={form.gender} onChange={v => set('gender', v)} options={IO.gender} />
               <TextField label="Primary language" value={form.primaryLanguage} onChange={v => set('primaryLanguage', v)} placeholder="e.g. English" />
-              <TextField label="Phone" type="tel" value={form.phone} onChange={v => set('phone', v)} />
+              <TextField label="Home phone" type="tel" value={form.phone} onChange={v => set('phone', v)} />
               <TextField label="Home address" value={form.addressLine1} onChange={v => set('addressLine1', v)} placeholder="Street, city, GA, ZIP" />
-              <SelectField label="Lives with" value={form.livesWith} onChange={v => set('livesWith', v)} options={['Alone', 'Spouse', 'Adult child', 'Other family', 'Assisted living']} />
+              <SelectField label="Lives with" value={form.livesWith} onChange={v => set('livesWith', v)} options={IO.livesWith} />
             </React.Fragment>
           )}
 
           {k === 'contacts' && (
             <React.Fragment>
               <h2 className="disp">Contacts &amp; authority</h2>
-              <p className="lbl" style={{ marginTop: 8 }}>Primary family contact</p>
-              <TextField label="Name" value={form.primaryContact.name} onChange={v => setNested('primaryContact', 'name', v)} />
-              <TextField label="Relationship" value={form.primaryContact.relationship} onChange={v => setNested('primaryContact', 'relationship', v)} />
-              <TextField label="Phone" type="tel" value={form.primaryContact.phone} onChange={v => setNested('primaryContact', 'phone', v)} />
-              <TextField label="Email" type="email" value={form.primaryContact.email} onChange={v => setNested('primaryContact', 'email', v)} />
-              <SelectField label="Decision-making authority" value={form.decisionAuthority} onChange={v => set('decisionAuthority', v)} options={['Client', 'Shared', 'Surrogate', 'POA / Guardian']} />
-              <p className="lbl">Emergency contact 1</p>
-              <TextField label="Name" value={(form.emergencyContacts[0] || {}).name} onChange={v => setForm(f => { const e = [...f.emergencyContacts]; e[0] = { ...e[0], name: v }; return { ...f, emergencyContacts: e }; })} />
-              <TextField label="Phone" type="tel" value={(form.emergencyContacts[0] || {}).phone} onChange={v => setForm(f => { const e = [...f.emergencyContacts]; e[0] = { ...e[0], phone: v }; return { ...f, emergencyContacts: e }; })} />
-              <p className="lbl">Emergency contact 2</p>
-              <TextField label="Name" value={(form.emergencyContacts[1] || {}).name} onChange={v => setForm(f => { const e = [...f.emergencyContacts]; e[1] = { ...e[1], name: v }; return { ...f, emergencyContacts: e }; })} />
-              <TextField label="Phone" type="tel" value={(form.emergencyContacts[1] || {}).phone} onChange={v => setForm(f => { const e = [...f.emergencyContacts]; e[1] = { ...e[1], phone: v }; return { ...f, emergencyContacts: e }; })} />
+              <p className="lbl" style={{ marginTop: 8 }}>About you (form submitter)</p>
+              <div className="grid2">
+                <TextField label="First name" value={form.submitter.first} onChange={v => setNested('submitter', 'first', v)} />
+                <TextField label="Last name" value={form.submitter.last} onChange={v => setNested('submitter', 'last', v)} />
+              </div>
+              <TextField label="Email address" type="email" value={form.submitter.email} onChange={v => setNested('submitter', 'email', v)} />
+              <TextField label="Phone number" type="tel" value={form.submitter.phone} onChange={v => setNested('submitter', 'phone', v)} />
+              <p className="lbl">Primary family contact</p>
+              <TextField label="Full name" value={form.primaryContact.name} onChange={v => setNested('primaryContact', 'name', v)} />
+              <SelectField label="Relationship to client" value={form.primaryContact.relationship} onChange={v => setNested('primaryContact', 'relationship', v)} options={IO.contactRelationship} />
+              <TextField label="Phone (cell preferred)" type="tel" value={form.primaryContact.phone} onChange={v => setNested('primaryContact', 'phone', v)} />
+              <TextField label="Email address" type="email" value={form.primaryContact.email} onChange={v => setNested('primaryContact', 'email', v)} />
+              <SelectField label="Best way to reach" value={form.primaryContact.preferredChannel} onChange={v => setNested('primaryContact', 'preferredChannel', v)} options={IO.contactPreference} />
+              <SelectField label="Authorized to make care decisions?" value={form.decisionAuthority} onChange={v => set('decisionAuthority', v)} options={IO.decisionAuthority} />
+              {[0, 1].map(i => (
+                <React.Fragment key={i}>
+                  <p className="lbl">Emergency contact {i + 1}</p>
+                  <TextField label="Full name" value={(form.emergencyContacts[i] || {}).name} onChange={v => setEC(i, 'name', v)} />
+                  <TextField label="Relationship to client" value={(form.emergencyContacts[i] || {}).relationship} onChange={v => setEC(i, 'relationship', v)} />
+                  <TextField label="Phone" type="tel" value={(form.emergencyContacts[i] || {}).phone} onChange={v => setEC(i, 'phone', v)} />
+                  <TextField label="Email" type="email" value={(form.emergencyContacts[i] || {}).email} onChange={v => setEC(i, 'email', v)} />
+                  <TextField label="Address" value={(form.emergencyContacts[i] || {}).address} onChange={v => setEC(i, 'address', v)} />
+                </React.Fragment>
+              ))}
+            </React.Fragment>
+          )}
+
+          {k === 'situation' && (
+            <React.Fragment>
+              <h2 className="disp">Care situation</h2>
+              <p className="sub">A quick picture of what's needed and what's prompting the request.</p>
+              <SelectField label="Level of help needed with daily activities" value={(form.situation || {}).adlLevel} onChange={v => setNested('situation', 'adlLevel', v)} options={IO.adlLevel} />
+              <CheckList label="Types of personal care / home support" hint="Check all that apply." selected={form.helpNeeded} onToggle={v => toggleArr('helpNeeded', v)} options={IO.helpNeeded} />
+              <SelectField label="How difficult is it to get to in-office appointments?" value={(form.situation || {}).appointmentAccess} onChange={v => setNested('situation', 'appointmentAccess', v)} options={IO.appointmentAccess} />
+              <CheckList label="Ongoing health conditions being managed" hint="Check all that apply." selected={form.ongoingConditions} onToggle={v => toggleArr('ongoingConditions', v)} options={IO.ongoingConditions} />
+              <SelectField label="Does the client currently have a primary care provider?" value={(form.situation || {}).hasPCP} onChange={v => setNested('situation', 'hasPCP', v)} options={IO.hasPCP} />
+              <SelectField label="Memory or cognition concerns" value={(form.situation || {}).cognitionLevel} onChange={v => setNested('situation', 'cognitionLevel', v)} options={IO.cognitionLevel} />
+              <TextArea label="What's prompting you to reach out now?" value={(form.situation || {}).mainReason} onChange={v => setNested('situation', 'mainReason', v)} placeholder="Tell us what's going on" />
+            </React.Fragment>
+          )}
+
+          {k === 'schedule' && (
+            <React.Fragment>
+              <h2 className="disp">Schedule &amp; urgency</h2>
+              <TextField label="Requested start date" type="date" value={(form.schedule || {}).startDate} onChange={v => setNested('schedule', 'startDate', v)} />
+              <TextField label="Hours per week (approx.)" type="number" value={(form.schedule || {}).hoursPerWeek} onChange={v => setNested('schedule', 'hoursPerWeek', v)} placeholder="e.g. 20" />
+              <SelectField label="How soon do you need care?" value={(form.schedule || {}).urgency} onChange={v => setNested('schedule', 'urgency', v)} options={IO.urgency} />
+              <CheckList label="Preferred days / shifts" hint="Check all that apply." selected={form.preferredDays} onToggle={v => toggleArr('preferredDays', v)} options={IO.preferredDays} />
+              <SelectField label="Recurring or one-time?" value={(form.schedule || {}).recurring} onChange={v => setNested('schedule', 'recurring', v)} options={IO.recurring} />
+              <SelectField label="How do you expect to pay for care?" value={(form.schedule || {}).paymentExpectation} onChange={v => setNested('schedule', 'paymentExpectation', v)} options={IO.paymentExpectation} />
+              <CheckList label="Support services of interest" selected={form.serviceInterests} onToggle={v => toggleArr('serviceInterests', v)} options={IO.serviceInterests} />
+              <SelectField label="How are you holding up right now?" value={form.caregiverStress} onChange={v => set('caregiverStress', v)} options={IO.caregiverStress} />
+              <TextArea label="Anything else we should know?" value={form.stressNotes} onChange={v => set('stressNotes', v)} />
+            </React.Fragment>
+          )}
+
+          {k === 'homebound' && (
+            <React.Fragment>
+              <h2 className="disp">Homebound &amp; recent care</h2>
+              <SelectField label="Homebound status" value={form.homebound} onChange={v => set('homebound', v)} options={IO.homebound} />
+              <SelectField label="Difficulty attending in-office appointments" value={form.appointmentDifficulty} onChange={v => set('appointmentDifficulty', v)} options={IO.appointmentDifficulty} />
+              <p className="lbl">Recent medical activity</p>
+              <TextField label="Last PCP visit" value={form.lastPCPVisit} onChange={v => set('lastPCPVisit', v)} placeholder="e.g. Mar 2026" />
+              <TextField label="Last hospitalization" value={form.lastHospitalization} onChange={v => set('lastHospitalization', v)} placeholder="e.g. Jan 2026" />
+              <TextField label="ER visits in past 6 months" type="number" value={form.erVisits6mo} onChange={v => set('erVisits6mo', v)} />
+              <CheckList label="Currently receiving" selected={form.currentServices} onToggle={v => toggleArr('currentServices', v)} options={IO.currentServices} />
+              <CheckList label="In-home medical services of interest" selected={form.hbpcInterests} onToggle={v => toggleArr('hbpcInterests', v)} options={IO.hbpcInterests} />
             </React.Fragment>
           )}
 
           {k === 'medical' && (
             <React.Fragment>
               <h2 className="disp">Medical</h2>
-              <div className="fld"><label>Diagnoses</label><textarea value={form.diagnoses || ''} onChange={e => set('diagnoses', e.target.value)} placeholder="Primary conditions / diagnoses" /></div>
-              <div className="fld"><label>Allergies</label><textarea value={form.allergies || ''} onChange={e => set('allergies', e.target.value)} placeholder="Medication, food, environmental — or 'none known'" /></div>
+              <CheckList label="Primary diagnoses" hint="Check all that apply." selected={form.conditions} onToggle={v => toggleArr('conditions', v)} options={IO.diagnoses} />
+              <TextArea label="Additional diagnoses or medical history" value={form.additionalDiagnoses} onChange={v => set('additionalDiagnoses', v)} />
+              <TextArea label="Known allergies" value={form.allergies} onChange={v => set('allergies', v)} placeholder="Medication, food, environmental — or 'none known'" />
+              <SelectField label="DNR / advance directive on file?" value={(form.advanceDirective || {}).status} onChange={v => setNested('advanceDirective', 'status', v)} options={IO.dnr} />
               <p className="lbl">Current medications</p>
               <div className="hint" style={{ fontSize: 11.5, color: 'var(--mut)', marginBottom: 8 }}>Caregivers provide reminders only — not administration.</div>
               {form.medications.map((m, i) => (
@@ -4005,6 +4160,7 @@
                 </div>
               ))}
               <button className="addrow" onClick={addMed}><i className="ti ti-plus" /> Add another medication</button>
+              <TextArea label="Additional medication notes" value={form.medNotes} onChange={v => set('medNotes', v)} />
               <p className="lbl">Medical team</p>
               <div className="hint" style={{ fontSize: 11.5, color: 'var(--mut)', marginBottom: 8 }}>Used to coordinate care and to pre-fill any future record-release request.</div>
               <TextField label="Primary care physician" value={(form.medicalTeam || {}).pcpName} onChange={v => setNested('medicalTeam', 'pcpName', v)} placeholder="Dr. name" />
@@ -4013,9 +4169,12 @@
               <TextField label="Specialist 1" value={(form.medicalTeam || {}).specialist1Name} onChange={v => setNested('medicalTeam', 'specialist1Name', v)} placeholder="Name / practice" />
               <TextField label="Specialist 1 phone" type="tel" value={(form.medicalTeam || {}).specialist1Phone} onChange={v => setNested('medicalTeam', 'specialist1Phone', v)} />
               <TextField label="Specialist 2" value={(form.medicalTeam || {}).specialist2Name} onChange={v => setNested('medicalTeam', 'specialist2Name', v)} placeholder="Name / practice" />
-              <TextField label="Preferred hospital" value={(form.medicalTeam || {}).preferredHospital} onChange={v => setNested('medicalTeam', 'preferredHospital', v)} />
-              <CheckList label="Skilled care needs" hint="Check all that apply." selected={form.skilledTasksNeeded} onToggle={v => toggleArr('skilledTasksNeeded', v)}
-                options={['Wound care', 'Injections', 'Catheter care', 'Ostomy care', 'Tube feeding', 'Oxygen management', 'Blood glucose monitoring', 'Medication administration', 'None of the above']} />
+              <TextField label="Preferred hospital / ER" value={(form.medicalTeam || {}).preferredHospital} onChange={v => setNested('medicalTeam', 'preferredHospital', v)} />
+              <TextField label="Preferred pharmacy" value={(form.medicalTeam || {}).preferredPharmacy} onChange={v => setNested('medicalTeam', 'preferredPharmacy', v)} />
+              <TextField label="Pharmacy phone" type="tel" value={(form.medicalTeam || {}).pharmacyPhone} onChange={v => setNested('medicalTeam', 'pharmacyPhone', v)} />
+              <CheckList label="Skilled care needs" hint="Check all that apply." selected={form.skilledTasksNeeded} onToggle={v => toggleArr('skilledTasksNeeded', v)} options={IO.skilledTasks} />
+              <TextArea label="Who currently performs these skilled tasks?" value={form.skilledTasksProvider} onChange={v => set('skilledTasksProvider', v)} />
+              <CheckList label="Recent clinical events (past 30–90 days)" selected={form.recentEvents} onToggle={v => toggleArr('recentEvents', v)} options={IO.recentEvents} />
             </React.Fragment>
           )}
 
@@ -4023,15 +4182,47 @@
             <React.Fragment>
               <h2 className="disp">Function &amp; safety</h2>
               <p className="lbl" style={{ marginTop: 8 }}>Activities of daily living</p>
-              {[['bathing', 'Bathing'], ['dressing', 'Dressing'], ['toileting', 'Toileting'], ['transfers', 'Transferring'], ['ambulation', 'Walking'], ['eating', 'Eating']].map(([k2, lbl]) => (
-                <SelectField key={k2} label={lbl} value={(form.adl || {})[k2]} onChange={v => setNested('adl', k2, v)} options={ADL_LEVELS} />
-              ))}
-              <SelectField label="Fall risk" value={form.fallRisk} onChange={v => set('fallRisk', v)} options={['Low', 'Moderate', 'High']} />
+              <SelectField label="Bathing / showering" value={(form.adl || {}).bathing} onChange={v => setNested('adl', 'bathing', v)} options={ADL_LEVELS} />
+              <SelectField label="Dressing" value={(form.adl || {}).dressing} onChange={v => setNested('adl', 'dressing', v)} options={ADL_LEVELS} />
+              <SelectField label="Grooming (hair, teeth, nails)" value={(form.adl || {}).grooming} onChange={v => setNested('adl', 'grooming', v)} options={ADL_LEVELS} />
+              <SelectField label="Toileting" value={(form.adl || {}).toileting} onChange={v => setNested('adl', 'toileting', v)} options={IO.adlToileting} />
+              <SelectField label="Transferring (bed, chair, car)" value={(form.adl || {}).transfers} onChange={v => setNested('adl', 'transfers', v)} options={IO.adlTransfers} />
+              <SelectField label="Ambulation / walking" value={(form.adl || {}).ambulation} onChange={v => setNested('adl', 'ambulation', v)} options={IO.adlWalking} />
+              <SelectField label="Eating / feeding" value={(form.adl || {}).eating} onChange={v => setNested('adl', 'eating', v)} options={ADL_LEVELS} />
+              <SelectField label="Fall risk" value={form.fallRisk} onChange={v => set('fallRisk', v)} options={IO.fallRisk} />
               <SelectField label="Transfer / lift need" value={form.transferNeed} onChange={v => set('transferNeed', v)} options={['Independent', 'Standby', 'One-person assist', 'Two-person assist', 'Mechanical lift']} />
-              <CheckList label="Behavioral flags" hint="Check all that apply." selected={form.behavioralFlags} onToggle={v => toggleArr('behavioralFlags', v)}
-                options={['Wandering', 'Aggression', 'Sundowning', 'Resistance to care', 'None']} />
-              <CheckList label="Home safety" hint="Anything in the home our team should know about." selected={form.homeSafetyFlags} onToggle={v => toggleArr('homeSafetyFlags', v)}
-                options={['Smokers', 'Pets', 'Firearms', 'Stairs', 'Oxygen tanks', 'None']} />
+              <CheckList label="Mobility equipment at home" selected={form.equipment} onToggle={v => toggleArr('equipment', v)} options={IO.equipment} />
+              <TextArea label="Additional ADL notes" value={form.adlNotes} onChange={v => set('adlNotes', v)} />
+              <p className="lbl">IADL &amp; home support</p>
+              <CheckList label="Tasks needing help" hint="Check all that apply." selected={form.iadl} onToggle={v => toggleArr('iadl', v)} options={IO.iadl} />
+              <TextField label="Dietary needs or restrictions" value={form.dietary} onChange={v => set('dietary', v)} />
+              <TextField label="Food allergies" value={form.foodAllergies} onChange={v => set('foodAllergies', v)} />
+              <p className="lbl">Behavioral &amp; cognitive status</p>
+              <SelectField label="Cognitive status" value={form.cognitiveStatus} onChange={v => set('cognitiveStatus', v)} options={IO.cognitiveStatus} />
+              <SelectField label="Dementia stage" value={form.dementiaStage} onChange={v => set('dementiaStage', v)} options={IO.dementiaStage} />
+              <CheckList label="Behavioral concerns" hint="Check all that apply." selected={form.behavioralFlags} onToggle={v => toggleArr('behavioralFlags', v)} options={IO.behavioral} />
+              <TextArea label="Behavioral notes — triggers, patterns, what helps" value={form.behavioralNotes} onChange={v => set('behavioralNotes', v)} />
+              <CheckList label="In the past 6 months, has the client…" hint="Check all that apply." selected={form.functionalRisk6mo} onToggle={v => toggleArr('functionalRisk6mo', v)} options={IO.functionalRisk6mo} />
+              <p className="lbl">Home environment &amp; staff safety</p>
+              <CheckList label="Home environment / staff safety" hint="Check all that apply." selected={form.homeSafetyFlags} onToggle={v => toggleArr('homeSafetyFlags', v)} options={IO.homeSafety} />
+              <SelectField label="Does any task require two-person assist?" value={form.twoPersonAssist} onChange={v => set('twoPersonAssist', v)} options={IO.twoPersonAssist} />
+              <TextArea label="Anything else affecting staff safety?" value={form.staffSafetyConcerns} onChange={v => set('staffSafetyConcerns', v)} />
+              <p className="lbl">Decision-making &amp; legal status</p>
+              <SelectField label="Who makes healthcare / care decisions?" value={form.decisionMaking} onChange={v => set('decisionMaking', v)} options={IO.decisionMaking} />
+              <CheckList label="Legal status" hint="Check all that apply." selected={form.legalDocs} onToggle={v => toggleArr('legalDocs', v)} options={IO.legalDocs} />
+            </React.Fragment>
+          )}
+
+          {k === 'matching' && (
+            <React.Fragment>
+              <h2 className="disp">Caregiver match</h2>
+              <p className="sub">Helps us pair the right caregiver — personality, preferences, and experience.</p>
+              <CheckList label="Client's personality" hint="Check all that apply." selected={(form.matching || {}).personality || []} onToggle={v => setForm(f => { const cur = (f.matching || {}).personality || []; const nx = cur.includes(v) ? cur.filter(x => x !== v) : [...cur, v]; return { ...f, matching: { ...(f.matching || {}), personality: nx } }; })} options={IO.personality} />
+              <SelectField label="Gender preference for caregiver" value={(form.matching || {}).genderPreference} onChange={v => setNested('matching', 'genderPreference', v)} options={IO.genderPref} />
+              <TextField label="Language / cultural preferences" value={(form.matching || {}).languagePreference} onChange={v => setNested('matching', 'languagePreference', v)} />
+              <SelectField label="Caregiver experience required" value={(form.matching || {}).caregiverExperience} onChange={v => setNested('matching', 'caregiverExperience', v)} options={IO.caregiverExp} />
+              <TextArea label="Interests, hobbies, what brings comfort" value={(form.matching || {}).interests} onChange={v => setNested('matching', 'interests', v)} />
+              <TextArea label="Past caregiver experience" value={(form.matching || {}).pastCaregiver} onChange={v => setNested('matching', 'pastCaregiver', v)} />
             </React.Fragment>
           )}
 
@@ -4039,9 +4230,55 @@
             <React.Fragment>
               <h2 className="disp">Insurance &amp; payer</h2>
               <p className="sub">Capture full IDs now so enrollment can verify coverage.</p>
+              <p className="lbl" style={{ marginTop: 8 }}>Identification</p>
+              <TextField label="SSN (last 4 only)" value={form.ssnLast4} onChange={v => set('ssnLast4', (v || '').replace(/\D/g, '').slice(0, 4))} placeholder="1234" />
               <SelectField label="Primary payer type" value={form.payerType} onChange={v => set('payerType', v)} options={['Private pay', 'LTC insurance', 'Medicaid waiver', 'VA', 'Medicare Part B', 'Dual eligible', 'Commercial', 'Combination']} />
-              <TextField label="Medicaid / Medicare ID" hint="Medicaid member ID or Medicare beneficiary number" value={form.medicaidId} onChange={v => set('medicaidId', v)} placeholder="Full ID number" />
-              <p className="lbl">Insurance cards</p>
+              <CheckList label="Insurance types held" hint="Check all that apply." selected={form.insuranceTypes} onToggle={v => toggleArr('insuranceTypes', v)} options={IO.insuranceTypes} />
+              <p className="lbl">Medicare</p>
+              <TextField label="Medicare ID / beneficiary number" value={(form.medicare || {}).id} onChange={v => setNested('medicare', 'id', v)} />
+              <SelectField label="Medicare type" value={(form.medicare || {}).type} onChange={v => setNested('medicare', 'type', v)} options={IO.medicareType} />
+              <TextField label="Medicare Advantage plan name" value={(form.medicare || {}).advantagePlan} onChange={v => setNested('medicare', 'advantagePlan', v)} />
+              <div className="grid2">
+                <TextField label="Advantage member ID" value={(form.medicare || {}).advMemberId} onChange={v => setNested('medicare', 'advMemberId', v)} />
+                <TextField label="Advantage group #" value={(form.medicare || {}).advGroupNum} onChange={v => setNested('medicare', 'advGroupNum', v)} />
+              </div>
+              <TextField label="Medicare Part D plan" value={(form.medicare || {}).partD} onChange={v => setNested('medicare', 'partD', v)} />
+              <p className="lbl">Medicaid</p>
+              <TextField label="Medicaid member ID" value={(form.medicaid || {}).memberId} onChange={v => setNested('medicaid', 'memberId', v)} />
+              <TextField label="Medicaid managed care plan" value={(form.medicaid || {}).plan} onChange={v => setNested('medicaid', 'plan', v)} />
+              <SelectField label="Medicaid waiver program" value={(form.medicaid || {}).waiver} onChange={v => setNested('medicaid', 'waiver', v)} options={IO.medicaidWaiver} />
+              <div className="grid2">
+                <TextField label="Case manager name" value={(form.medicaid || {}).caseManager} onChange={v => setNested('medicaid', 'caseManager', v)} />
+                <TextField label="Case manager phone" type="tel" value={(form.medicaid || {}).caseManagerPhone} onChange={v => setNested('medicaid', 'caseManagerPhone', v)} />
+              </div>
+              <p className="lbl">Commercial insurance</p>
+              <TextField label="Insurance carrier" value={(form.commercial || {}).carrier} onChange={v => setNested('commercial', 'carrier', v)} />
+              <TextField label="Plan name" value={(form.commercial || {}).planName} onChange={v => setNested('commercial', 'planName', v)} />
+              <div className="grid2">
+                <TextField label="Member ID" value={(form.commercial || {}).memberId} onChange={v => setNested('commercial', 'memberId', v)} />
+                <TextField label="Group number" value={(form.commercial || {}).groupNum} onChange={v => setNested('commercial', 'groupNum', v)} />
+              </div>
+              <TextField label="Policy holder name" value={(form.commercial || {}).policyHolder} onChange={v => setNested('commercial', 'policyHolder', v)} />
+              <div className="grid2">
+                <TextField label="Policy holder DOB" type="date" value={(form.commercial || {}).policyHolderDob} onChange={v => setNested('commercial', 'policyHolderDob', v)} />
+                <SelectField label="Relationship" value={(form.commercial || {}).policyHolderRel} onChange={v => setNested('commercial', 'policyHolderRel', v)} options={IO.policyHolderRel} />
+              </div>
+              <TextField label="Insurance phone (member services)" type="tel" value={(form.commercial || {}).insPhone} onChange={v => setNested('commercial', 'insPhone', v)} />
+              <SelectField label="Home health / personal care benefit" value={(form.commercial || {}).homeBenefit} onChange={v => setNested('commercial', 'homeBenefit', v)} options={IO.homeBenefit} />
+              <p className="lbl">Long-term care insurance</p>
+              <SelectField label="LTC insurance carrier" value={(form.ltc || {}).carrier} onChange={v => setNested('ltc', 'carrier', v)} options={IO.ltcCarrier} />
+              {(form.ltc || {}).carrier === 'Other' && <TextField label="Other carrier name" value={(form.ltc || {}).carrierOther} onChange={v => setNested('ltc', 'carrierOther', v)} />}
+              <TextField label="Policy number" value={(form.ltc || {}).policyNum} onChange={v => setNested('ltc', 'policyNum', v)} />
+              <TextField label="Policy holder name" value={(form.ltc || {}).policyHolder} onChange={v => setNested('ltc', 'policyHolder', v)} />
+              <div className="grid2">
+                <TextField label="Daily / monthly benefit" value={(form.ltc || {}).benefit} onChange={v => setNested('ltc', 'benefit', v)} />
+                <TextField label="Elimination period" value={(form.ltc || {}).elimination} onChange={v => setNested('ltc', 'elimination', v)} />
+              </div>
+              <TextArea label="LTC insurance notes" value={(form.ltc || {}).notes} onChange={v => setNested('ltc', 'notes', v)} />
+              <p className="lbl">Payment</p>
+              <TextField label="Primary payment method" value={form.paymentMethod} onChange={v => set('paymentMethod', v)} />
+              <TextField label="Billing contact (if different)" value={form.billingContact} onChange={v => set('billingContact', v)} />
+              <p className="lbl">Other insurance cards</p>
               {form.insuranceIds.map((ins, i) => (
                 <div className="medrow" key={i}>
                   <TextField label="Carrier" value={ins.carrier} onChange={v => setIns(i, 'carrier', v)} placeholder="e.g. Blue Cross, Humana" />
@@ -4058,6 +4295,10 @@
           {k === 'consents' && (
             <React.Fragment>
               <h2 className="disp">Consents &amp; signatures</h2>
+              <p className="lbl" style={{ marginTop: 8 }}>Emergency &amp; crisis protocol</p>
+              <SelectField label="Call 911 in a medical emergency?" value={form.auth911} onChange={v => set('auth911', v)} options={IO.auth911} />
+              <TextField label="Who should we notify first in a crisis?" value={form.crisisNotify} onChange={v => set('crisisNotify', v)} placeholder="Name & phone" />
+              <p className="lbl">Signatures</p>
               <p className="sub">Branched for your service line. Each is e-signed with a typed name and timestamp. <b>{requiredConsents.filter(t => consents[t] === 'signed').length}/{requiredConsents.length}</b> required signed.</p>
               <p className="micro" style={{ justifyContent: 'flex-start', marginTop: 6 }}><i className="ti ti-info-circle" />Working draft — pending counsel/licensure review.</p>
               {activeConsentDefs.map(def => (

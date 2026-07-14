@@ -5233,6 +5233,72 @@ const deriveProvidersFromMedicalTeam = (medicalTeam) => {
   return out;
 };
 
+// Map the structured intake into the v1 Client Care Profile schema shape on the
+// client record, so the matching/billing engines read normalized fields off the
+// profile rather than the raw intake blob. Only sets a field when the intake
+// actually carries it, so partial/draft saves don't wipe existing profile data.
+const mirrorIntakeToClientProfile = (client, intake, meds, priorProviders) => {
+  const set = (k, v) => { if (v !== undefined) client[k] = v; };
+  const nonEmptyArr = (v) => Array.isArray(v) ? v : undefined;
+
+  if (intake.dob) set('dob', intake.dob);
+  if (Array.isArray(meds)) set('medications', meds);
+  set('priorProviders', priorProviders);
+
+  // Identity / demographics
+  if (intake.clientFirst || intake.clientLast) {
+    const full = `${intake.clientFirst || ''} ${intake.clientLast || ''}`.trim();
+    if (full) set('legalName', full);
+  }
+  set('preferredName', intake.preferredName || client.preferredName);
+  set('gender', intake.gender);
+  set('primaryLanguage', intake.primaryLanguage);
+
+  // Clinical context (light — full clinical → OpenEMR)
+  set('conditions', nonEmptyArr(intake.conditions));           // coded diagnoses (matching)
+  set('allergies', intake.allergies);
+  if (intake.advanceDirective) set('advanceDirective', intake.advanceDirective);
+  if (intake.medicalTeam) set('medicalTeam', intake.medicalTeam);
+
+  // Function / safety (hard filters for matching)
+  if (intake.adl) set('adl', intake.adl);
+  set('homeSafetyFlags', nonEmptyArr(intake.homeSafetyFlags));
+  set('behavioralFlags', nonEmptyArr(intake.behavioralFlags));
+  set('skilledTasksNeeded', nonEmptyArr(intake.skilledTasksNeeded));
+  set('fallRisk', intake.fallRisk);
+  set('cognitiveStatus', intake.cognitiveStatus);
+  set('dementiaStage', intake.dementiaStage);
+  if (intake.twoPersonAssist) set('twoPersonAssistRequired', intake.twoPersonAssist);
+
+  // Caregiver-matching preferences
+  const m = intake.matching || {};
+  set('temperament', nonEmptyArr(m.personality));
+  if (m.genderPreference) set('genderPreference', m.genderPreference);
+  if (m.languagePreference) set('languagePreference', m.languagePreference);
+  if (m.caregiverExperience) set('caregiverExperienceRequired', m.caregiverExperience);
+  if (m.interests) set('interests', m.interests);
+
+  // Payer — billing. Prefer an explicit payer object; otherwise assemble a
+  // normalized summary from the structured payer blocks the wizard captured.
+  if (intake.payer) {
+    set('payer', intake.payer);
+  } else if (intake.payerType || intake.insuranceTypes || intake.medicare || intake.medicaid || intake.commercial || intake.ltc) {
+    client.payer = {
+      ...(client.payer || {}),
+      type: intake.payerType || (client.payer && client.payer.type) || null,
+      insuranceTypes: nonEmptyArr(intake.insuranceTypes) || (client.payer && client.payer.insuranceTypes) || [],
+      medicare: intake.medicare || (client.payer && client.payer.medicare) || {},
+      medicaid: intake.medicaid || (client.payer && client.payer.medicaid) || {},
+      commercial: intake.commercial || (client.payer && client.payer.commercial) || {},
+      ltc: intake.ltc || (client.payer && client.payer.ltc) || {},
+      insuranceIds: Array.isArray(intake.insuranceIds) ? intake.insuranceIds.filter(x => x && (x.carrier || x.memberId)) : ((client.payer && client.payer.insuranceIds) || []),
+      ssnLast4: intake.ssnLast4 || (client.payer && client.payer.ssnLast4) || null,
+      paymentMethod: intake.paymentMethod || (client.payer && client.payer.paymentMethod) || null,
+      billingContact: intake.billingContact || (client.payer && client.payer.billingContact) || null
+    };
+  }
+};
+
 // Helper to load the fresh client user record + its index for mutation.
 const loadClientForMutation = async (userId) => {
   const users = await getUsers();
@@ -5320,11 +5386,13 @@ app.post('/api/gfc/intake', authenticateToken, requireClientForIntake, async (re
     };
     users[idx].intake = merged;
     if (serviceLine) users[idx].serviceLine = serviceLine;
-    // Carry a few matching/profile fields up onto the client record (schema mirror).
-    if (intake.dob) users[idx].dob = intake.dob;
-    if (Array.isArray(meds)) users[idx].medications = meds;
-    if (intake.payer) users[idx].payer = intake.payer;
-    users[idx].priorProviders = priorProviders; // schema mirror (client profile)
+    // ── Schema mirror ──────────────────────────────────────────────
+    // The intake wizard captures every legacy WordPress field in its native
+    // structure; here we map the matching/billing-relevant pieces up onto the
+    // client profile in the v1 Client Care Profile schema shape, so the future
+    // matching (Session 8) and billing (Track D) engines read them directly off
+    // the client record instead of digging through the raw intake blob.
+    mirrorIntakeToClientProfile(users[idx], merged, meds, priorProviders);
 
     await db.set('users', users);
     invalidateUsersCache();
