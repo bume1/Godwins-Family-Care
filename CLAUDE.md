@@ -60,6 +60,15 @@ Optional in parallel: Session 3.3 (staff enrollment-submissions view) if not alr
 - Revocation UI deferred to a later session; `revoked_at` field exists.
 - Reference implementations in `docs/source-forms/gfc_roi_upload.gs` and `docs/source-forms/template-gfc-roi-upload.php`.
 
+**07/2026 — Lab HubSpot connector kept dormant (do not delete).**
+- The HubSpot integration is legacy lab-diagnostic CRM code, intentionally **retained but inactive**, to be reactivated when GFC's CRM is upgraded. Do not remove it.
+- **Where it lives:** `hubspot.js` (the connector — deals, tickets, owners, notes, file uploads); the ticket-polling engine + `resolveHubSpotOwnerToUser` + `buildServiceReportFromTicket` in `server.js`; the HubSpot config block in `config.js`; and client company/deal/contact linking + ticket display in `public/app.js`, `public/portal.html`, `public/admin-hub.html`, `public/service-portal.html`.
+- **Why it's dormant (two gates):**
+  1. **Auth** — `hubspot.js` `getAccessToken()` fetches its token from the Replit connector broker via `REPLIT_CONNECTORS_HOSTNAME`. That env var is unset outside Replit (and absent in the AWS boundary), so every HubSpot call throws `HubSpot connector not configured` and no-ops.
+  2. **Polling** — the ticket→service-report poll loop only starts when its stored config `enabled` flag is true (`if (config.enabled)` in `server.js`); it ships disabled.
+- **To reactivate (on CRM upgrade):** replace the Replit-broker token fetch in `getAccessToken()` with a real HubSpot OAuth / private-app token sourced from the AWS-boundary secrets store; confirm the `config.js` HubSpot poll interval/target-stage values and the pipeline/stage IDs match the live account; then flip the polling `enabled` flag (admin config endpoint). If the new CRM is **not** HubSpot, treat `hubspot.js` as the reference contract (tickets → service reports, owner→user mapping, note/file sync) and reimplement against the new vendor rather than reviving the Replit path.
+- Note: the lab **validation** workflow that was interwoven with this connector was removed from `public/service-portal.html` (its backend routes went in Session 2); the HubSpot connector itself was deliberately left intact.
+
 ---
 
 ## Spec documents (source of truth)
