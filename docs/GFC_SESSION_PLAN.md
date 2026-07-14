@@ -9,7 +9,7 @@ Each session ends in a PR you review and merge. **Companion to** `GFC_App_Build_
 ## Status at a glance
 | # | Session | Segment | Status |
 |---|---|---|---|
-| 0 | Infra — AWS + OpenEMR + BAAs (accelerated; OpenEMR live ~tonight) | Shared | 🟡 In progress |
+| 0 | Infra — AWS + OpenEMR + BAAs (**OpenEMR live, configurations in progress**) | Shared | 🟡 In progress — see `GFC_App_Build_v2.md` §15 for config items still open |
 | 1 | Repo prep · rebrand · role model | Shared | ✅ Done |
 | 2 | Strip lab features · deactivate tracker · brand cleanup | Shared | 📄 Prompt ready |
 | 3 | Client portal + gated intake (both service paths) | Shared | 🔵 In progress — 3.1/3.2 built; **3.3 (staff enrollment view) and 3.4 (Transfer-of-Care ROI) not complete** |
@@ -22,6 +22,8 @@ Each session ends in a PR you review and merge. **Companion to** `GFC_App_Build_
 | 10 | Family portal | Shared | ⬜ Planned |
 | 11 | RPM / Continuous Care monitoring (scaffold → later) | Shared | ⬜ Planned |
 | 12 | Audit log UI + final HIPAA / BAA review | Shared | ⬜ Planned |
+| **B-series** | **Billing (Track D)** — eligibility, patient payments, rate card, PHC invoicing, OpenEMR integration, clearinghouse, IME contractor invoicing | **Billing** | ⬜ **Planned** — session prompts to be defined in `GFC_Billing_Architecture_Spec_v1.md`; scope + phase order per v2 §13 |
+| **E-series** | **IME / C&P Track E** — contractor exam capture, scheduling, hours rollup (feeds Track D B7) | **IME** | ⬜ **Planned** — spec per v2 §14 |
 
 ---
 

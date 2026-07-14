@@ -2,6 +2,8 @@
 
 **Supersedes** `GFC_ClaudeCode_Prompt_v2.md` and `GFC_BuildPlan_v1.md` wherever they conflict, specifically the locked Next.js/Postgres stack and the two-line (PCS + VA) scope. This plan reflects the org expansion, the real repo, and the HIPAA architecture approved 06/2026.
 
+**Scope revision — 07/2026.** The original v2 spec limited scope to PHCP + Clinical only and explicitly excluded billing. That is no longer accurate. GFC now operates three revenue-producing lines: **PHCP (Private Home Care)**, **Clinical (In-Home Primary Care via PCHP and HBPC programs)**, and **IME/C&P Contract Exams** for LSGS and Leidos QTC. Each has a distinct billing model, all three need first-class support in the app, and billing is now Track D of this plan. See §13 for the billing overview and §14 for the IME/C&P operational scope. OpenEMR is now considered live (configuration in progress); the FHIR integration in Track B and Track D can proceed on that basis.
+
 ---
 
 ## Companion specs (read alongside this)
@@ -25,12 +27,18 @@ First clinical (In-Home Primary Care) clients begin in 1–2 weeks, so the **cli
 | Decision | Resolution |
 |---|---|
 | Hosting for PHI | AWS, inside a signed BAA boundary. **Not Replit** — Replit does not sign a BAA and cannot hold PHI. |
-| Clinical system of record | OpenEMR on AWS (FHIR R4 / REST). App is a front end over it, never the record. |
+| Clinical system of record | OpenEMR on AWS (FHIR R4 / REST). App is a front end over it, never the record. **Status: live, configurations in progress.** |
 | Documents, consents, email | HIPAA Google Workspace (Drive + Gmail) under existing BAA. |
 | Operational data (shifts, visit logs, messaging) | Encrypted AWS RDS Postgres, in-boundary. |
 | Codebase | Keep the existing Express + CDN-React app. Re-host to AWS, swap the data layer. Not a rewrite. |
 | Replit | Demoted to non-PHI only: marketing site + design prototyping. |
 | Build tool | Claude design for the prototype UI. |
+| **Billing system of record (clinical)** | OpenEMR. Charges, balances, ERAs live there. Portal is a read-through window with a payment trigger, never a second ledger. |
+| **PHC invoicing method** | Automated. App generates invoice PDFs from time logs and rate cards, sends via HIPAA Google Workspace Gmail with a Stripe payment link. Payment status tracked in app RDS. |
+| **IME / C&P billing** | App captures exam hours and anonymized veteran-reference IDs per provider; app generates the invoice to LSGS or Leidos QTC; contractor payments to FNPs handled by app-generated payment records, not by LSGS/Leidos directly. |
+| **Patient payments (clinical)** | Stripe with strict PHI segregation. Neutral descriptors only. No BAA required under segregation; documented exception. |
+| **Billing role visibility** | For now, **Admin only**. Reserved for future: **Owner** role (full access including billing), plus a **Billing/Coder** role (billing scope only). |
+| **Payroll integration** | Deferred to backend later. Not in Track D scope for the initial billing build. |
 
 ### Timeline (clinical-first)
 - **Clinical line live (first IHPC clients):** 1–2 weeks. Priority.
@@ -58,12 +66,12 @@ Public Assessment form  ──▶     ├─ Auth / RBAC / audit                
 
 ---
 
-## 3. Three tracks
+## 3. Tracks
 
 ### Track 0 — Infra (parallel, critical path)
-Owner: AWS/OpenEMR setup (pending). Everything HIPAA-live depends on this.
+Owner: AWS/OpenEMR setup. Everything HIPAA-live depends on this.
 - AWS account + BAA via AWS Artifact.
-- Provision OpenEMR (EC2 + RDS, encrypted, KMS). Enable FHIR/OAuth2 API.
+- Provision OpenEMR (EC2 + RDS, encrypted, KMS). Enable FHIR/OAuth2 API. **Live; configurations in progress (see §15 for the config help needed for app UI integration).**
 - Encrypted RDS Postgres for the app's operational data.
 - App hosting on AWS (Elastic Beanstalk or ECS), TLS, secrets manager.
 - Confirm Google Workspace BAA covers Drive + Gmail; provision a service account.
@@ -72,28 +80,41 @@ Owner: AWS/OpenEMR setup (pending). Everything HIPAA-live depends on this.
 ### Track A — PHCP (Private Home Care), priority
 Non-medical personal care: client + family + caregiver portal, gated intake. No OpenEMR dependency.
 
-### Track B — Clinical (In-Home Primary Care)
-Clinicians use the app as the front end to OpenEMR. Includes the RN clinician packet writing to OpenEMR. Full by week 3.
+### Track B — Clinical (In-Home Primary Care via PCHP + HBPC)
+Clinicians use the app as the front end to OpenEMR. Includes the RN clinician packet writing to OpenEMR. Full by week 3. Serves both PCHP (Personal Home Care Program) and HBPC (Home-Based Primary Care) service lines through the same clinical infrastructure — same OpenEMR records, same charts, same claims pipeline, differentiated by service line tag and billing rules.
 
 ### Track C — RPM / Remote Monitoring (post-revision)
 Consent-gated remote patient monitoring with video. Built *after* the initial PHCP + Clinical revision ships. The hooks are scaffolded during the initial build so it drops in without rearchitecting (see §11).
 
+### Track D — Billing (cross-cutting, phased)
+Three billing patterns, one app. See §13 for the phase breakdown.
+- **PHC invoicing.** Automated Google-Workspace Gmail send from time logs + rate card, Stripe payment link, RDS-tracked status.
+- **Clinical claims (PCHP + HBPC).** OpenEMR generates the 837, clearinghouse transmits, ERA auto-posts in OpenEMR, portal is a read-through window. Patient copays via Stripe with strict PHI segregation.
+- **IME / C&P contractor invoicing.** App captures exam hours per provider, generates GFC-to-LSGS/Leidos invoices, tracks contractor payment records to FNPs.
+
+### Track E — IME / C&P Contract Exams
+1099 FNP contractors performing disability evaluations under Loyal Source Government Services (LSGS) and Leidos QTC Health Services. See §14. The app owns scheduling, exam-hours capture, anonymized veteran reference IDs, contractor communication, and the invoicing/payment records that feed Track D. GFC bills the contracting entity; GFC pays the contractors from that revenue. Contractors are NOT paid directly by LSGS or Leidos.
+
 ---
 
-## 4. Roles (6-role model on the repo's 4)
+## 4. Roles (6 today, 8 targeted with the billing role split)
 
 | GFC role | Repo role | Action |
 |---|---|---|
-| Admin (Owner/MD) | `admin` | keep |
+| **Owner (MD, agency owner)** | new: `owner` | **add (future)** — full access to everything Admin sees plus billing. Reserved for Bethel. Not built now; scaffolded so `hasBillingAccess` reads cleanly. |
+| Admin (operational owner) | `admin` | keep. Sees billing for now, until Owner + Billing/Coder roles are split. |
 | Clinical (FNP) | `user` | repurpose |
 | Caregiver (PCA) | `vendor` | repurpose |
-| Client (PHC) | `client` | keep |
+| Client (PHC or IHPC) | `client` | keep |
 | Case Manager | — | add |
 | Family / Authorized Contact | — | add (read-only, ROI-gated) |
+| **Billing / Coder** | new: `billing` | **add (future)** — billing scope only. No clinical read/write, no scheduling. Sees billing dashboard, claims status, invoices, payments. Not built now; permission scaffold via `hasBillingAccess`. |
 
 The existing permission-flag pattern (`hasXAccess`) and per-request fresh-user lookup support this without re-architecting.
 
-**New fields the roles need:** `caregiver.licenseLevel` (sitter/pca/cna/lpn), `hasClinicalAccess` (FNP), `client.enrollmentStatus`, and `client.careTeam` (assignedFNPs, assignedCaseManager, primary/backup caregiver). Escalation routing and provider access both read `careTeam`. All admin-managed.
+**New fields the roles need:** `caregiver.licenseLevel` (sitter/pca/cna/lpn), `hasClinicalAccess` (FNP), `hasBillingAccess` (Admin now, Owner + Billing/Coder later), `client.enrollmentStatus`, and `client.careTeam` (assignedFNPs, assignedCaseManager, primary/backup caregiver). Escalation routing and provider access both read `careTeam`. All admin-managed.
+
+**Billing visibility rule.** Every billing route and every billing UI element checks `hasBillingAccess`. Today the only role with that flag is `admin`. When the Owner and Billing/Coder roles land, the same flag flips on for them without touching any billing route.
 
 ---
 
@@ -222,3 +243,87 @@ Consent-gated remote patient monitoring with in-home video, viewable by internal
 - Tier vocabulary: adopt app Tier 1/2/3, retire "Triage Level" (from the intake spec). Confirm.
 - Counsel/licensure review of the rewritten consents before live.
 - Who owns Track 0 (AWS/OpenEMR provisioning) and the start date — this sets whether 1.5 and 3 weeks hold.
+- **OpenEMR configuration help needed** for app UI integration. See §15.
+- **Billing vendor decisions — RESOLVED 07/2026:**
+  - Clearinghouse: **Availity** (free tier for sponsored payers).
+  - Eligibility API: **Availity** (same vendor, one integration).
+  - Patient cost-share collection: **charge estimated at time of service, reconcile against ERA when it posts.**
+  - PHC sliding-scale mechanism: **custom dollar amount per hour per client**, not percentage discount.
+  - Pre-credentialing billing path: **self-pay + superbill** for payers GFC is not yet credentialed with. Availity handles credentialed payers; superbill handles the rest until credentialing completes.
+  - Credentialing operations tool: **CAQH ProView** (free) to consolidate commercial-payer credentialing paperwork. Not a code decision.
+- **Owner / Billing-Coder role split** — scaffold the flag now, decide when to activate the split (likely when a dedicated biller comes on staff).
+
+---
+
+## 13. Track D — Billing overview
+
+Three distinct billing patterns, one app. Vendor stack locked. Detail spec lives in `GFC_Billing_Architecture_Spec_v1.md` (to be created). Phase summary:
+
+- **B1 Eligibility check.** Real-time payer eligibility (270/271) via **Availity** API. Called from a client profile at intake and again before each visit. Returns coverage status, copay, deductible met/remaining, and effective dates onto the client record. Buildable now. No OpenEMR dependency.
+- **B2 Patient payment (Stripe).** Card on file plus one-time charge for estimated copay at time of service. Reconciles against ERA when it posts. Strict PHI segregation: neutral descriptors only (e.g. "Office visit"), no clinical text in Stripe payloads. Automated test enforcement — the build fails if a diagnosis code, procedure code, or clinical term leaks into a Stripe payload, receipt, metadata field, or webhook. Buildable now.
+- **B3 PHC automated invoicing.** From `time_logs` × `rate_card` (with `client_rate_overrides` applied), generate an invoice PDF, send via HIPAA Google Workspace Gmail with a Stripe payment link. Track paid/unpaid status in RDS. Depends on Session 7 (PHCP time tracking) and B4.
+- **B4 Rate card + sliding-scale overrides.** Master `rate_card` table sets default rates keyed by `service_line` (PHC, PCHP, HBPC, IME), tier, unit, effective date, retirement date. Separate `client_rate_overrides` table holds per-client custom dollar amounts (sliding-scale) with reason code, effective date, retirement date. Invoice generator checks override first, falls back to card default. Clinical rates (PCHP, HBPC) are set by CMS fee schedule and payer contracts and are NOT subject to sliding scale — the `service_line` column enforces that separation. Foundational for B3 and B7.
+- **B5 OpenEMR integration.** Read balances, post payments, ingest ERAs. OpenEMR is live; this phase wires the portal to it via FHIR/REST + OAuth2. See §15 for the OpenEMR configs Bianca needs help with.
+- **B6 Clearinghouse (Availity) connection.** 837P out, 835 in, 999 + 277CA status codes handled. Configured inside OpenEMR pointing at Availity endpoints. Portal side is a claim-status dashboard for Admin. Depends on B5 and payer-by-payer Availity enrollment.
+- **B7 IME / C&P contract invoicing.** From `exam_logs` (Track E) × contract terms, generate GFC-to-LSGS/Leidos invoice, track contractor payment records to FNPs from that revenue. Depends on §14 exam capture.
+
+**Superbill + self-pay path (built as first-class, not a workaround).** For payers GFC is not yet credentialed with, the app supports a self-pay flow: patient pays through Stripe at time of service, the app generates a properly coded superbill (diagnosis codes, CPT/HCPCS procedure codes, rendering provider NPI, tax ID, dates of service) that the patient submits to their insurance for out-of-network reimbursement. This is the default clinical billing path until each payer's credentialing completes.
+
+**Per-payer credentialing status (org level, not client level).** A `gfc_payer_credentialing` table holds one row per payer with:
+- `payer_id`, `payer_name`, `payer_type` (medicare | medicaid | commercial | tricare | other)
+- `credentialing_status`: `in_network` | `out_of_network` | `pending_credentialing` | `not_credentialed`
+- `effective_date`, `expiration_date` (for periodic re-credentialing)
+- `billing_npi_used` (Bethel's individual NPI or GFC organizational NPI when that enrollment lands)
+- `notes`
+
+Invoice/claim generator branches on this row (looked up via the client's `payer.carrier`):
+- `in_network` or `out_of_network` → submit 837 through Availity
+- `pending_credentialing` → hold claim, notify Admin
+- `not_credentialed` → self-pay + superbill path
+
+**Compliance guardrails (non-negotiable, apply across all phases):**
+- Stripe carries neutral descriptors only. Automated tests fail the build if any diagnosis code, procedure code, or clinical term reaches a Stripe payload, receipt, metadata field, or webhook.
+- Every billing operation writes to the existing `audit_log`.
+- Every billing route checks `hasBillingAccess`.
+- Bethel Godwins's individual NPI is a config-flag value (`BILLING_NPI`) on `gfc_payer_credentialing.billing_npi_used`, not a hardcoded string. When GFC's organizational Medicare enrollment lands, update the row per payer.
+
+---
+
+## 14. Track E — IME / C&P Contract Exams
+
+1099 FNP contractors perform disability evaluations under Loyal Source Government Services (LSGS) and Leidos QTC Health Services. GFC is the contracting entity; contractors do NOT invoice LSGS/Leidos directly.
+
+**App captures:**
+- Exam schedule per provider (contractor calendar view, admin master calendar).
+- Exam log per encounter: date, start/end time, exam type/category, veteran reference ID (anonymized — never full name or SSN in the app), contracting entity (LSGS or Leidos QTC), location or telehealth flag.
+- Provider hours rollup per pay period.
+
+**Feeds Track D:**
+- B7 invoicing: GFC bills LSGS or Leidos based on exam category and completion, per each contract's rate structure.
+- Contractor payment records: from GFC-received revenue, the app generates payment records for each FNP contractor showing exams performed, hours, and amounts owed. Actual disbursement handled by payroll integration (deferred, backend).
+
+**RBAC and PHI rules:**
+- Contractor sees only their own schedule and exam log.
+- Admin sees everything, including all contractor schedules and rollups.
+- No veteran PHI in the app beyond the anonymized reference ID. No exam findings, no health details.
+- Messaging (Admin ↔ contractor) is subject-threaded, HIPAA-compliant, and PHI-free.
+
+---
+
+## 15. OpenEMR configurations that need help
+
+OpenEMR is live but not fully configured for app UI integration. The following configurations are pending and Bianca has flagged she needs help on the more complex ones:
+
+- FHIR / REST API + OAuth2 client registration for the app (Administration → Connectors).
+- Practice + facility setup (GFC as billing entity vs. Bethel-individual-NPI rendering-provider split).
+- Provider records for each FNP contractor (Track E) with correct NPI, taxonomy, and pay-tier attributes.
+- Fee schedule import (feeds Track D B4 rate card cross-reference).
+- **Availity clearinghouse profile** (Track D B6). Configure Availity as the outbound clearinghouse for 837P and inbound for 835. Payer enrollment is done payer-by-payer inside the Availity portal, not in OpenEMR.
+- ERA auto-post configuration.
+- User roles matched to app roles (Admin, Clinical, and future Billing).
+
+**Operations (not code, but needed alongside):**
+- **CAQH ProView profile** (free). Complete once; commercial-payer credentialing forms (BCBS GA, Aetna, UHC, Cigna, Humana, Anthem) auto-populate from it. Cuts weeks off each application. Bianca owns this.
+- Prioritize credentialing by target patient population, not by trying to credential with every payer at once.
+
+Session 4.1 kickoff should identify which of these are already done vs. still open and pull Bianca in for the ones flagged as complex.

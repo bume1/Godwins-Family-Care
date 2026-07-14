@@ -88,8 +88,16 @@ The client side of the match, and the core of the client record. Built to compar
                 "crisisProtocol": "signed|pending", "monitoring": "signed|pending|na" },
 
   // — Payer —
+  // Note: GFC's credentialing status per payer lives in the org-level `gfc_payer_credentialing`
+  // table, NOT on the client. The invoice/claim generator looks up credentialing status by
+  // matching `insuranceIds[].carrier` to a row in that table. See GFC_App_Build_v2.md §13.
   "payer": { "type": "private_pay|ltc_insurance|medicaid_waiver|va|medicare_b|combination",
-             "insuranceIds": [ { "carrier": "string", "memberId": "string", "group": "string" } ] },
+             "insuranceIds": [ { "carrier": "string", "memberId": "string", "group": "string" } ],
+             "eligibility": { "lastCheckedAt": "timestamp|null", "status": "active|inactive|unknown",
+                              "copayAmount": "number|null", "deductibleMet": "number|null",
+                              "deductibleRemaining": "number|null",
+                              "coverageEffective": "date|null", "coverageEnd": "date|null" },
+             "stripeCustomerId": "string|null" },
 
   "carePlanRef": "care_plan_id|null"     // versioned plan lives in care_plans
 }
