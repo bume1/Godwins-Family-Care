@@ -80,6 +80,15 @@ async function getDriveClient() {
   return google.drive({ version: 'v3', auth: oauth2Client });
 }
 
+// Sheets client over the same OAuth token — used by the Transfer-of-Care ROI
+// parallel-run logger and the legacy importer (Session 3.4).
+async function getSheetsClient() {
+  const accessToken = await getAccessToken();
+  const oauth2Client = new google.auth.OAuth2();
+  oauth2Client.setCredentials({ access_token: accessToken });
+  return google.sheets({ version: 'v4', auth: oauth2Client });
+}
+
 async function testConnection() {
   try {
     const drive = await getDriveClient();
@@ -329,6 +338,43 @@ async function uploadServiceReportAttachment(clientName, fileName, fileBuffer, m
   }
 }
 
+// ── Transfer-of-Care Provider ROI (Session 3.4) ──────────────
+// Writes generated ROI PDFs and uploaded scans into the same named Drive folder
+// the legacy Google Apps Script handler used ("GFC Provider ROI Uploads"), so
+// the parallel run keeps populating Drive. Returns a shareable webViewLink.
+async function uploadProviderROIFile(folderName, fileName, fileBuffer, mimeType) {
+  try {
+    const drive = await getDriveClient();
+    const { Readable } = require('stream');
+
+    // Root-level named folder (no parent), matching ROI_FOLDER_NAME in gfc_roi_upload.gs.
+    const folderId = await findOrCreateFolder(folderName || 'GFC Provider ROI Uploads', null);
+
+    const response = await drive.files.create({
+      resource: { name: fileName, parents: [folderId] },
+      media: { mimeType: mimeType || 'application/pdf', body: Readable.from([fileBuffer]) },
+      fields: 'id, name, webViewLink, webContentLink'
+    });
+
+    // Match the legacy handler: shareable by anyone with the link.
+    await drive.permissions.create({
+      fileId: response.data.id,
+      requestBody: { role: 'reader', type: 'anyone' }
+    });
+
+    console.log(`✅ Uploaded provider ROI to Google Drive: ${response.data.name}`);
+    return {
+      fileId: response.data.id,
+      fileName: response.data.name,
+      webViewLink: response.data.webViewLink,
+      webContentLink: response.data.webContentLink
+    };
+  } catch (error) {
+    console.error('Error uploading provider ROI to Google Drive:', error.message);
+    throw error;
+  }
+}
+
 module.exports = {
   testConnection,
   findOrCreateFolder,
@@ -336,5 +382,8 @@ module.exports = {
   uploadTaskFile,
   deleteFile,
   uploadServiceReportPDF,
-  uploadServiceReportAttachment
+  uploadServiceReportAttachment,
+  uploadProviderROIFile,
+  getSheetsClient,
+  getDriveClient
 };

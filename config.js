@@ -167,6 +167,23 @@ const NOTIFICATION_COOLDOWN_HOURS = Object.freeze({
   milestone_reached:          9999  // effectively one-time (also guarded by lastMilestoneNotified)
 });
 
+// ---- Transfer-of-Care Provider ROI (Session 3.4) ----
+// During the transition off the legacy WordPress + Google Apps Script system,
+// every consent_event created in the portal ALSO writes to the legacy Google
+// Sheet + admin/patient emails (parallel run). Track 0 flips this to false at
+// cutover. Default true so nothing breaks during the window.
+const PARALLEL_LEGACY_SYNC = (process.env.PARALLEL_LEGACY_SYNC || 'true') === 'true';
+// Drive folder the legacy GAS handler wrote provider ROIs to; the portal keeps
+// populating it during the parallel run.
+const ROI_DRIVE_FOLDER_NAME = process.env.ROI_DRIVE_FOLDER_NAME || 'GFC Provider ROI Uploads';
+// Admin notification address for received ROIs (matches ROI_NOTIFY_EMAIL in the
+// legacy gfc_roi_upload.gs handler). Override per environment.
+const ROI_ADMIN_EMAIL = process.env.ROI_ADMIN_EMAIL || 'admin@godwinsfamilycarellc.com';
+// Legacy "Assessments & Intakes" spreadsheet the GAS handler logged to. Used by
+// the parallel-run sheet writer and the one-time legacy importer. Empty in dev.
+const ROI_LEGACY_SHEET_ID = process.env.ROI_LEGACY_SHEET_ID || '';
+const ROI_LEGACY_SHEET_TAB = process.env.ROI_LEGACY_SHEET_TAB || 'Assessments & Intakes';
+
 // ---- Default Admin (initial setup only) ----
 const DEFAULT_ADMIN = Object.freeze({
   EMAIL: process.env.DEFAULT_ADMIN_EMAIL || 'admin@godwinsfamilycarell.com',
@@ -244,6 +261,12 @@ module.exports = {
   MILESTONE_THRESHOLDS,
   GOLIVE_REMINDER_DAYS_BEFORE,
   NOTIFICATION_COOLDOWN_HOURS,
+  // Transfer-of-Care Provider ROI (Session 3.4)
+  PARALLEL_LEGACY_SYNC,
+  ROI_DRIVE_FOLDER_NAME,
+  ROI_ADMIN_EMAIL,
+  ROI_LEGACY_SHEET_ID,
+  ROI_LEGACY_SHEET_TAB,
   // Public config
   getPublicConfig
 };

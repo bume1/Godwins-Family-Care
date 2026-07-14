@@ -610,6 +610,7 @@ const GFC_CONSENT_LABELS = {
   npp: 'HIPAA Notice of Privacy Practices',
   roiFamily: 'Release of Information — Family',
   roiProvider: 'Release of Information — Providers',
+  roiTransfer: 'Transfer-of-Care Authorization (record release)',
   serviceAgreement: 'Service Agreement',
   billOfRights: 'Patient Bill of Rights & Self-Determination',
   emergencyFinancial: 'Emergency Treatment & Financial Responsibility',
@@ -719,8 +720,241 @@ async function generateEnrollmentPacketPDF(client) {
   });
 }
 
+// ============================================================
+// Transfer-of-Care Provider ROI PDF (Session 3.4)
+//
+// One PDF per authorized prior provider, matching the layout and brand tokens
+// of renderROIHtml() in docs/source-forms/gfc_roi_upload.gs (navy #033D50, gold
+// #F5CD85, cream #FAF7F2, serif display + sans body). The legacy handler built
+// HTML→PDF; this repo renders PDFs with pdfkit, so the layout is reproduced with
+// pdfkit primitives (navy section bars w/ gold numerals, checkbox glyphs, a
+// canvas-signature image). The static Rights (revocation) and Redisclosure
+// blocks are rendered verbatim so the 45 CFR 164.508 elements are always present.
+//
+// TEST DATA ONLY until HIPAA-live.
+// ============================================================
+
+// GFC ROI brand tokens (mirror the .gs renderer).
+const ROI_COLORS = { navy: '#033D50', gold: '#F5CD85', goldRule: '#C9A44A', cream: '#FAF7F2', ink: '#1a1a1a', muted: '#666666', line: '#BBBBBB' };
+
+const ROI_ORG = {
+  name: 'Godwins Family Care LLC',
+  address: '4300 Paces Ferry Rd SE, Ste 500, Atlanta, GA 30339',
+  tel: '404-913-6705',
+  fax: '678-692-7445'
+};
+
+// Verbatim static blocks — required 45 CFR 164.508 elements (right to revoke +
+// redisclosure). Kept identical to the legacy form / portal consent language.
+const AUTH_RIGHTS_TEXT =
+  'I understand that: (1) I may revoke this authorization at any time by writing to Godwins Family Care LLC, ' +
+  'except to the extent action has already been taken in reliance on it; (2) treatment, payment, enrollment, ' +
+  'and eligibility for benefits may not be conditioned on signing, except where the law allows; (3) information ' +
+  'disclosed under this authorization may be re-disclosed by the recipient and may no longer be protected by ' +
+  'federal privacy law; and (4) I am entitled to a copy of this signed authorization.';
+
+// Section-4 standard categories, in display order (label per the .gs renderer).
+const ROI_CATEGORY_LABELS = {
+  hp: 'History & physical / progress notes',
+  lab: 'Lab and pathology results',
+  diag: 'Problem & diagnosis list',
+  imaging: 'Imaging / radiology reports',
+  meds: 'Current medication list',
+  discharge: 'Discharge summaries',
+  allergies: 'Allergies',
+  immune: 'Immunization records',
+  other: 'Other'
+};
+
+/**
+ * Generate one Transfer-of-Care ROI PDF for a single provider.
+ *
+ * @param {Object} d
+ * @param {string} d.patientName
+ * @param {string} d.patientDOB
+ * @param {string} d.patientAddress
+ * @param {string} d.patientPhone
+ * @param {Object} d.provider  - { name, dept, address, phone, fax }
+ * @param {Object} d.categories - { hp,lab,diag,imaging,meds,discharge,allergies,immune,other:bool, otherText }
+ * @param {boolean} d.includesProtected - the 42 CFR Part 2 opt-in (defaults false)
+ * @param {boolean} d.purposeTreatment
+ * @param {boolean} d.purposeOther
+ * @param {string}  d.purposeOtherText
+ * @param {string}  d.expDate
+ * @param {string}  d.expEvent
+ * @param {string}  d.signatureImageB64 - canvas capture data URI
+ * @param {string}  d.signedDate
+ * @param {string}  d.printedName
+ * @param {string}  d.relationship
+ * @returns {Promise<Buffer>}
+ */
+async function generateProviderROIPDF(d) {
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ size: 'LETTER', margin: 44, bufferPages: true });
+      const chunks = [];
+      doc.on('data', c => chunks.push(c));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+
+      const L = 44;               // left margin
+      const R = 612 - 44;         // right edge (LETTER width 612)
+      const W = R - L;            // content width
+      const cat = d.categories || {};
+      const provider = d.provider || {};
+      const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+      let y = 40;
+
+      const chk = (on) => (on ? '☑' : '☐'); // ☑ / ☐
+
+      // Section bar: navy strip, gold numeral, white caps label.
+      const section = (num, label) => {
+        if (y > 700) { doc.addPage(); y = 44; }
+        y += 6;
+        doc.rect(L, y, W, 17).fill(ROI_COLORS.navy);
+        doc.fontSize(9).fillColor(ROI_COLORS.gold).font('Helvetica-Bold').text(String(num), L + 8, y + 4.5);
+        doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(8.5)
+          .text(label.toUpperCase(), L + 22, y + 5, { characterSpacing: 0.6 });
+        y += 24;
+        doc.fillColor(ROI_COLORS.ink);
+      };
+
+      // Labeled underlined value field (one or two columns).
+      const fieldRow = (fields) => {
+        if (y > 715) { doc.addPage(); y = 44; }
+        const gap = 16;
+        const colW = (W - gap * (fields.length - 1)) / fields.length;
+        fields.forEach((f, i) => {
+          const x = L + i * (colW + gap);
+          doc.fontSize(7).fillColor(ROI_COLORS.muted).font('Helvetica').text((f.label || '').toUpperCase(), x, y, { width: colW, characterSpacing: 0.4 });
+          doc.fontSize(10.5).fillColor(ROI_COLORS.ink).font('Helvetica').text(f.value || ' ', x, y + 10, { width: colW });
+          doc.moveTo(x, y + 26).lineTo(x + colW, y + 26).strokeColor(ROI_COLORS.line).lineWidth(0.7).stroke();
+        });
+        y += 36;
+      };
+
+      const checkLine = (on, label, indent) => {
+        if (y > 730) { doc.addPage(); y = 44; }
+        const x = L + (indent || 0);
+        doc.fontSize(11).fillColor(ROI_COLORS.navy).font('Helvetica').text(chk(on), x, y - 1, { continued: false });
+        doc.fontSize(9.5).fillColor(ROI_COLORS.ink).font('Helvetica').text(label, x + 16, y, { width: W - 16 - (indent || 0) });
+        y += Math.max(15, doc.heightOfString(label, { width: W - 16 - (indent || 0) }) + 4);
+      };
+
+      // ── Header ───────────────────────────────────────────────
+      doc.fontSize(13).fillColor(ROI_COLORS.navy).font('Helvetica-Bold').text(ROI_ORG.name, L, y);
+      doc.fontSize(8).fillColor(ROI_COLORS.muted).font('Helvetica')
+        .text(`${ROI_ORG.address}   Tel ${ROI_ORG.tel}   Fax ${ROI_ORG.fax}`, L, y + 17, { width: W, align: 'right' });
+      y += 30;
+      doc.rect(L, y, W, 2).fill(ROI_COLORS.goldRule);
+      y += 12;
+
+      // ── Title ────────────────────────────────────────────────
+      doc.fontSize(21).fillColor(ROI_COLORS.navy).font('Times-Bold').text('Authorization to Obtain Medical Records', L, y);
+      y += 28;
+      doc.fontSize(9).fillColor(ROI_COLORS.muted).font('Times-Italic')
+        .text('HIPAA authorization for Godwins Family Care LLC to request and receive protected health information.', L, y, { width: W });
+      y += 16;
+      doc.fontSize(9.5).fillColor(ROI_COLORS.ink).font('Helvetica')
+        .text('I authorize the provider or facility named below to release the medical records described to Godwins Family Care LLC, for the purpose of my treatment, care coordination, and care planning.', L, y, { width: W });
+      y += doc.heightOfString('I authorize the provider or facility named below to release the medical records described to Godwins Family Care LLC, for the purpose of my treatment, care coordination, and care planning.', { width: W }) + 2;
+
+      // ── Section 1: Patient ───────────────────────────────────
+      section(1, 'Patient (whose records)');
+      fieldRow([{ label: 'Patient full name', value: d.patientName }, { label: 'Date of birth', value: d.patientDOB }]);
+      fieldRow([{ label: 'Address', value: d.patientAddress }, { label: 'Phone', value: d.patientPhone }]);
+
+      // ── Section 2: Release from (this provider) ──────────────
+      section(2, 'Release records from (provider or facility)');
+      fieldRow([{ label: 'Provider / facility name', value: provider.name }, { label: 'Department', value: provider.dept }]);
+      fieldRow([{ label: 'Address', value: provider.address }]);
+      fieldRow([{ label: 'Phone', value: provider.phone }, { label: 'Fax', value: provider.fax }]);
+
+      // ── Section 3: Release to (static) ───────────────────────
+      section(3, 'Release records to');
+      doc.rect(L, y, W, 34).fillAndStroke(ROI_COLORS.cream, '#cccccc');
+      doc.fontSize(11).fillColor(ROI_COLORS.navy).font('Helvetica-Bold').text(ROI_ORG.name, L + 10, y + 7);
+      doc.fontSize(9).fillColor(ROI_COLORS.ink).font('Helvetica')
+        .text(`${ROI_ORG.address}   Tel ${ROI_ORG.tel}   Fax ${ROI_ORG.fax}`, L + 10, y + 21, { width: W - 20 });
+      y += 44;
+
+      // ── Section 4: Information authorized ────────────────────
+      section(4, 'Information authorized for release');
+      const catKeys = ['hp', 'lab', 'diag', 'imaging', 'meds', 'discharge', 'allergies', 'immune'];
+      // Two-column checkbox grid.
+      const colW2 = W / 2;
+      let gridStartY = y;
+      catKeys.forEach((k, i) => {
+        const col = i % 2;
+        const rowIdx = Math.floor(i / 2);
+        const x = L + col * colW2;
+        const yy = gridStartY + rowIdx * 16;
+        doc.fontSize(11).fillColor(ROI_COLORS.navy).font('Helvetica').text(chk(!!cat[k]), x, yy - 1);
+        doc.fontSize(9).fillColor(ROI_COLORS.ink).font('Helvetica').text(ROI_CATEGORY_LABELS[k], x + 15, yy, { width: colW2 - 20 });
+      });
+      y = gridStartY + Math.ceil(catKeys.length / 2) * 16 + 2;
+      checkLine(!!cat.other, 'Other: ' + (cat.otherText || ''), 0);
+      // Specially protected info opt-in.
+      y += 2;
+      doc.fontSize(8.5).fillColor(ROI_COLORS.muted).font('Helvetica-Oblique')
+        .text('Specially protected information. Records of mental health, substance use treatment, HIV/AIDS, or genetic testing are released ONLY if specifically authorized here:', L, y, { width: W });
+      y += doc.heightOfString('Specially protected information. Records of mental health, substance use treatment, HIV/AIDS, or genetic testing are released ONLY if specifically authorized here:', { width: W }) + 4;
+      checkLine(d.includesProtected === true, 'Yes, include specially protected information listed above', 0);
+
+      // ── Section 5: Purpose ───────────────────────────────────
+      section(5, 'Purpose of disclosure');
+      checkLine(d.purposeTreatment !== false, 'Treatment, care coordination, and care planning', 0);
+      if (d.purposeOther) checkLine(true, 'Other: ' + (d.purposeOtherText || ''), 0);
+
+      // ── Section 6: Expiration ────────────────────────────────
+      section(6, 'Expiration');
+      doc.fontSize(9.5).fillColor(ROI_COLORS.ink).font('Helvetica')
+        .text('Unless revoked sooner, this authorization expires one year from the date signed, or on the earlier of:', L, y, { width: W });
+      y += 16;
+      fieldRow([{ label: 'Expiration date (optional)', value: d.expDate }, { label: 'Expiration event (optional)', value: d.expEvent }]);
+
+      // ── Section 7: Rights (verbatim, required element) ───────
+      section(7, 'Your rights');
+      doc.fontSize(9).fillColor(ROI_COLORS.ink).font('Helvetica').text(AUTH_RIGHTS_TEXT, L, y, { width: W, align: 'left', lineGap: 1.5 });
+      y += doc.heightOfString(AUTH_RIGHTS_TEXT, { width: W, lineGap: 1.5 }) + 6;
+
+      // ── Section 8: Signature ─────────────────────────────────
+      section(8, 'Signature');
+      if (y > 640) { doc.addPage(); y = 44; }
+      const sigBoxY = y;
+      doc.fontSize(7).fillColor(ROI_COLORS.muted).font('Helvetica').text('SIGNATURE OF PATIENT OR PERSONAL REPRESENTATIVE', L, sigBoxY);
+      // Embed the canvas signature image.
+      const sig = d.signatureImageB64;
+      if (typeof sig === 'string' && sig.startsWith('data:image')) {
+        try {
+          const b64 = sig.slice(sig.indexOf(',') + 1);
+          const buf = Buffer.from(b64, 'base64');
+          doc.image(buf, L, sigBoxY + 10, { fit: [240, 46] });
+        } catch (e) { /* non-fatal: leave signature area blank */ }
+      }
+      doc.moveTo(L, sigBoxY + 58).lineTo(L + 300, sigBoxY + 58).strokeColor(ROI_COLORS.line).lineWidth(0.7).stroke();
+      // Date to the right.
+      doc.fontSize(7).fillColor(ROI_COLORS.muted).font('Helvetica').text('DATE', L + 330, sigBoxY);
+      doc.fontSize(10.5).fillColor(ROI_COLORS.ink).font('Helvetica').text(d.signedDate || today, L + 330, sigBoxY + 12);
+      doc.moveTo(L + 330, sigBoxY + 58).lineTo(R, sigBoxY + 58).strokeColor(ROI_COLORS.line).lineWidth(0.7).stroke();
+      y = sigBoxY + 66;
+      fieldRow([{ label: 'Printed name', value: d.printedName }, { label: 'If representative, relationship / authority', value: d.relationship }]);
+
+      // ── Footer ───────────────────────────────────────────────
+      doc.fontSize(7.5).fillColor(ROI_COLORS.muted).font('Helvetica-Oblique')
+        .text(`${ROI_ORG.name}  ·  Authorization to Obtain Medical Records  ·  Submitted ${today}`, L, Math.min(y + 8, 760), { width: W });
+
+      doc.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
 module.exports = {
   generateServiceReportPDF,
   generateServiceReportWithAttachments,
-  generateEnrollmentPacketPDF
+  generateEnrollmentPacketPDF,
+  generateProviderROIPDF,
+  ROI_CATEGORY_LABELS
 };

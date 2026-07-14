@@ -328,6 +328,26 @@
           headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
         }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
 
+      // ---- Transfer-of-Care Provider ROI (Session 3.4) ----
+      getGfcTransferRoi: (token) =>
+        fetch(`${API_URL}/api/gfc/transfer-roi`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+
+      submitGfcTransferRoi: (token, payload) =>
+        fetch(`${API_URL}/api/gfc/transfer-roi/submit`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+
+      uploadGfcTransferRoi: (token, payload) =>
+        fetch(`${API_URL}/api/gfc/transfer-roi/upload`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+
     };
     
     const LoginPage = ({ slug, onLogin }) => {
@@ -4177,7 +4197,318 @@
       );
     };
 
-    const GfcDocuments = ({ docs, readOnly, token }) => {
+    // ── Transfer-of-Care Provider ROI (Session 3.4) ──
+    // Multi-screen flow mirroring docs/source-forms/template-gfc-roi-upload.php:
+    // choose path → upload a signed scan OR complete the 8-section online form
+    // (provider cards prefilled from priorProviders + canvas signature) → success.
+    // Uses canvas signature capture (not typed name) because the PDF is
+    // provider-facing. Does NOT gate the portal.
+    const ROI_CATS = [
+      { key: 'hp', label: 'History & physical / progress notes' },
+      { key: 'lab', label: 'Lab and pathology results' },
+      { key: 'diag', label: 'Problem & diagnosis list' },
+      { key: 'imaging', label: 'Imaging / radiology reports' },
+      { key: 'meds', label: 'Current medication list' },
+      { key: 'discharge', label: 'Discharge summaries' },
+      { key: 'allergies', label: 'Allergies' },
+      { key: 'immune', label: 'Immunization records' }
+    ];
+
+    const RoiProviderCard = ({ p, idx, removable, onChange, onRemove }) => (
+      <div className="card" style={{ background: 'var(--cream)', marginBottom: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+          <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '.6px', textTransform: 'uppercase', color: 'var(--navy)' }}>{p.label || 'Provider / facility'}</span>
+          {removable && <button onClick={onRemove} style={{ background: 'none', border: 'none', color: '#B5462E', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Remove</button>}
+        </div>
+        <TextField label="Provider / facility name" value={p.name} onChange={v => onChange(idx, 'name', v)} placeholder="e.g. Northside Hospital" />
+        <TextField label="Department" value={p.dept} onChange={v => onChange(idx, 'dept', v)} placeholder="e.g. Medical Records" />
+        <TextField label="Address" value={p.address} onChange={v => onChange(idx, 'address', v)} placeholder="Street, City, State ZIP" />
+        <TextField label="Phone" type="tel" value={p.phone} onChange={v => onChange(idx, 'phone', v)} />
+        <TextField label="Fax" type="tel" value={p.fax} onChange={v => onChange(idx, 'fax', v)} />
+      </div>
+    );
+
+    const GfcTransferRoi = ({ token, onClose, onDone }) => {
+      const [screen, setScreen] = useState('choice'); // choice | upload | form | success
+      const [loaded, setLoaded] = useState(false);
+      const [patient, setPatient] = useState({});
+      const [providers, setProviders] = useState([]);
+      const [cats, setCats] = useState({});
+      const [otherText, setOtherText] = useState('');
+      const [includesProtected, setIncludesProtected] = useState(false); // 42 CFR Part 2 — defaults FALSE
+      const [purposeOther, setPurposeOther] = useState(false);
+      const [purposeOtherText, setPurposeOtherText] = useState('');
+      const [expDate, setExpDate] = useState('');
+      const [expEvent, setExpEvent] = useState('');
+      const [printedName, setPrintedName] = useState('');
+      const [relationship, setRelationship] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      const [file, setFile] = useState(null); // { name, dataB64, type }
+      const canvasRef = useRef(null);
+      const sigState = useRef({ drawing: false, empty: true });
+      const today = new Date().toLocaleDateString();
+
+      useEffect(() => {
+        (async () => {
+          const r = await api.getGfcTransferRoi(token);
+          if (!r.error) {
+            setPatient(r.patient || {});
+            setPrintedName((r.patient && r.patient.patientName) || '');
+            const pre = (r.priorProviders || []).map(pp => ({
+              label: pp.roleLabel === 'pcp' ? 'Primary care physician' : pp.roleLabel === 'specialist' ? 'Specialist' : pp.roleLabel === 'hospital' ? 'Hospital / facility' : 'Provider / facility',
+              name: pp.name || '', dept: pp.dept || '', address: pp.address || '', phone: pp.phone || '', fax: pp.fax || ''
+            }));
+            setProviders(pre.length ? pre : [{ label: 'Provider / facility', name: '', dept: '', address: '', phone: '', fax: '' }]);
+          }
+          setLoaded(true);
+        })();
+      }, [token]);
+
+      // Canvas signature pad — initialized when the form screen mounts.
+      useEffect(() => {
+        if (screen !== 'form') return;
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        const ratio = window.devicePixelRatio || 1;
+        const w = canvas.offsetWidth || 400;
+        canvas.width = w * ratio; canvas.height = 130 * ratio;
+        ctx.scale(ratio, ratio);
+        ctx.strokeStyle = '#033D50'; ctx.lineWidth = 2; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        sigState.current = { drawing: false, empty: true };
+        const pos = (e) => { const r = canvas.getBoundingClientRect(); const s = e.touches ? e.touches[0] : e; return { x: s.clientX - r.left, y: s.clientY - r.top }; };
+        const down = (e) => { sigState.current.drawing = true; const p = pos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); };
+        const move = (e) => { if (!sigState.current.drawing) return; e.preventDefault && e.preventDefault(); const p = pos(e); ctx.lineTo(p.x, p.y); ctx.stroke(); sigState.current.empty = false; };
+        const up = () => { sigState.current.drawing = false; };
+        canvas.addEventListener('mousedown', down); canvas.addEventListener('mousemove', move);
+        canvas.addEventListener('mouseup', up); canvas.addEventListener('mouseleave', up);
+        canvas.addEventListener('touchstart', down, { passive: false });
+        canvas.addEventListener('touchmove', move, { passive: false });
+        canvas.addEventListener('touchend', up);
+        return () => {
+          canvas.removeEventListener('mousedown', down); canvas.removeEventListener('mousemove', move);
+          canvas.removeEventListener('mouseup', up); canvas.removeEventListener('mouseleave', up);
+          canvas.removeEventListener('touchstart', down); canvas.removeEventListener('touchmove', move);
+          canvas.removeEventListener('touchend', up);
+        };
+      }, [screen]);
+
+      const clearSig = () => {
+        const canvas = canvasRef.current; if (!canvas) return;
+        canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+        sigState.current.empty = true;
+      };
+
+      const setP = (i, k, v) => setProviders(ps => ps.map((p, idx) => idx === i ? { ...p, [k]: v } : p));
+      const addProvider = () => setProviders(ps => [...ps, { label: 'Additional provider', name: '', dept: '', address: '', phone: '', fax: '' }]);
+      const rmProvider = (i) => setProviders(ps => ps.filter((_, idx) => idx !== i));
+      const toggleCat = (k) => setCats(c => ({ ...c, [k]: !c[k] }));
+
+      const handleFile = (f) => {
+        if (!f) return;
+        const allowed = ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png'];
+        if (allowed.indexOf(f.type) === -1) { setErr('Only PDF, JPG, and PNG files are accepted.'); return; }
+        if (f.size > 10 * 1024 * 1024) { setErr('File must be under 10 MB.'); return; }
+        setErr('');
+        const reader = new FileReader();
+        reader.onload = () => setFile({ name: f.name, dataB64: String(reader.result), type: f.type });
+        reader.readAsDataURL(f);
+      };
+
+      const submitUpload = async () => {
+        if (!file) { setErr('Choose a file first.'); return; }
+        setBusy(true); setErr('');
+        const res = await api.uploadGfcTransferRoi(token, { fileName: file.name, fileDataB64: file.dataB64, mimeType: file.type });
+        setBusy(false);
+        if (res.error) { setErr(res.error); return; }
+        onDone && onDone();
+        setScreen('success');
+      };
+
+      const submitForm = async () => {
+        setErr('');
+        const named = providers.filter(p => (p.name || '').trim());
+        if (named.length === 0) { setErr('Add at least one provider before submitting.'); return; }
+        if (sigState.current.empty) { setErr('Please draw your signature before submitting.'); return; }
+        if (!printedName.trim()) { setErr('Printed name is required.'); return; }
+        const signatureImageB64 = canvasRef.current.toDataURL('image/png');
+        const checkedAny = ROI_CATS.some(c => cats[c.key]) || cats.other;
+        if (!checkedAny) { setErr('Select at least one type of record to request.'); return; }
+        setBusy(true);
+        const payload = {
+          patientName: patient.patientName, patientDOB: patient.patientDOB, patientAddress: patient.patientAddress, patientPhone: patient.patientPhone,
+          providers: named.map(p => ({ name: p.name, dept: p.dept, address: p.address, phone: p.phone, fax: p.fax })),
+          categories: { ...cats, otherText },
+          includesProtected: includesProtected === true,
+          purposeTreatment: true, purposeOther, purposeOtherText,
+          expDate, expEvent,
+          signatureImageB64, printedName: printedName.trim(), relationship
+        };
+        const res = await api.submitGfcTransferRoi(token, payload);
+        setBusy(false);
+        if (res.error) {
+          if (res.fieldErrors) setErr('Missing required fields: ' + Object.values(res.fieldErrors).join(' '));
+          else setErr(res.error);
+          return;
+        }
+        onDone && onDone();
+        setScreen('success');
+      };
+
+      if (!loaded) return <div className="gfc-body" style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}><div className="gfc-spin" /></div>;
+
+      const backBtn = (to) => (
+        <button className="back-min" onClick={() => { setErr(''); setScreen(to); }} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: 'none', border: 'none', color: 'var(--mut)', fontSize: 13, cursor: 'pointer', padding: 0, marginBottom: 8 }}>
+          <i className="ti ti-chevron-left" /> Back
+        </button>
+      );
+
+      if (screen === 'success') {
+        return (
+          <div className="gfc-body">
+            <div style={{ textAlign: 'center', padding: '50px 0 30px' }}>
+              <div style={{ width: 60, height: 60, background: 'var(--navy)', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 20px' }}>
+                <i className="ti ti-check" style={{ color: 'var(--gold)', fontSize: 28 }} />
+              </div>
+              <h2 className="disp">Authorization received</h2>
+              <p className="sub" style={{ maxWidth: 360, margin: '12px auto' }}>Your form was submitted to our care team. We'll use it to request your records from your provider and will be in touch with next steps. A confirmation email is on its way.</p>
+              <button className="btn" style={{ maxWidth: 240, margin: '18px auto 0' }} onClick={onClose}>Back to Documents</button>
+            </div>
+          </div>
+        );
+      }
+
+      if (screen === 'choice') {
+        return (
+          <div className="gfc-body">
+            {backBtn && <button className="back-min" onClick={onClose} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: 'none', border: 'none', color: 'var(--mut)', fontSize: 13, cursor: 'pointer', padding: 0, marginBottom: 8 }}><i className="ti ti-chevron-left" /> Documents</button>}
+            <h2 className="disp">Authorize record release</h2>
+            <p className="sub">To request your records from a prior provider, we need a signed Authorization to Obtain Medical Records. Choose how you'd like to complete it.</p>
+            <div className="card" style={{ cursor: 'pointer', marginTop: 16 }} onClick={() => setScreen('upload')}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <i className="ti ti-upload" style={{ fontSize: 22, color: 'var(--navy)' }} />
+                <div><b style={{ color: 'var(--navy)', fontSize: 14.5 }}>Upload a signed form</b><div className="sub" style={{ marginTop: 2 }}>Already printed, signed, and scanned it? Upload it here.</div></div>
+              </div>
+            </div>
+            <div className="card" style={{ cursor: 'pointer' }} onClick={() => setScreen('form')}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <i className="ti ti-edit" style={{ fontSize: 22, color: 'var(--navy)' }} />
+                <div><b style={{ color: 'var(--navy)', fontSize: 14.5 }}>Complete the form online</b><div className="sub" style={{ marginTop: 2 }}>Fill it out now — we'll generate one authorization per provider.</div></div>
+              </div>
+            </div>
+            {err && <div className="err">{err}</div>}
+          </div>
+        );
+      }
+
+      if (screen === 'upload') {
+        return (
+          <div className="gfc-body">
+            {backBtn('choice')}
+            <h2 className="disp">Upload signed form</h2>
+            <div className="card" style={{ marginTop: 14 }}>
+              <label className="fld" style={{ margin: 0, display: 'block', cursor: 'pointer' }}>
+                <div style={{ border: '2px dashed var(--line2)', borderRadius: 12, padding: '32px 18px', textAlign: 'center', background: 'var(--cream)' }}>
+                  <i className="ti ti-cloud-upload" style={{ fontSize: 34, color: 'var(--navy)' }} />
+                  <div style={{ marginTop: 8, fontSize: 13.5, color: 'var(--ink)' }}><b style={{ color: 'var(--navy)' }}>Click to select your file</b></div>
+                  <div className="sub" style={{ fontSize: 12 }}>PDF, JPG, or PNG · max 10 MB</div>
+                </div>
+                <input type="file" accept=".pdf,.jpg,.jpeg,.png" style={{ display: 'none' }} onChange={e => handleFile(e.target.files[0])} />
+              </label>
+              {file && <div className="doc" style={{ marginTop: 12 }}><i className="ti ti-file-check" /><div><b>{file.name}</b><span>Ready to upload</span></div></div>}
+              <button className="btn" disabled={busy || !file} onClick={submitUpload}>{busy ? 'Uploading…' : 'Upload document'}</button>
+              {err && <div className="err">{err}</div>}
+            </div>
+          </div>
+        );
+      }
+
+      // screen === 'form'
+      return (
+        <div className="gfc-body">
+          {backBtn('choice')}
+          <h2 className="disp">Authorization form</h2>
+
+          <p className="lbl">1 · Patient (whose records)</p>
+          <div className="card">
+            <TextField label="Patient full name" value={patient.patientName} onChange={v => setPatient(p => ({ ...p, patientName: v }))} />
+            <TextField label="Date of birth" value={patient.patientDOB} onChange={v => setPatient(p => ({ ...p, patientDOB: v }))} placeholder="MM/DD/YYYY" />
+            <TextField label="Address" value={patient.patientAddress} onChange={v => setPatient(p => ({ ...p, patientAddress: v }))} />
+            <TextField label="Phone" type="tel" value={patient.patientPhone} onChange={v => setPatient(p => ({ ...p, patientPhone: v }))} />
+          </div>
+
+          <p className="lbl">2 · Release records from</p>
+          <div className="hint" style={{ fontSize: 11.5, color: 'var(--mut)', marginBottom: 8 }}>Providers from your intake are pre-filled. Edit any field and add more. A separate authorization PDF is generated for each provider.</div>
+          {providers.map((p, i) => (
+            <RoiProviderCard key={i} p={p} idx={i} removable={providers.length > 1} onChange={setP} onRemove={() => rmProvider(i)} />
+          ))}
+          <button className="btn ghost" onClick={addProvider} style={{ marginTop: 4 }}><i className="ti ti-plus" /> Add another provider</button>
+
+          <p className="lbl">3 · Release records to</p>
+          <div className="card" style={{ background: 'var(--cream)' }}>
+            <b style={{ color: 'var(--navy)', fontSize: 14 }}>Godwins Family Care LLC</b>
+            <div className="sub" style={{ marginTop: 3, fontSize: 12.5 }}>4300 Paces Ferry Rd SE, Ste 500, Atlanta, GA 30339 · Tel 404-913-6705 · Fax 678-692-7445</div>
+          </div>
+
+          <p className="lbl">4 · Information authorized</p>
+          <div className="card">
+            {ROI_CATS.map(c => (
+              <div key={c.key} className={`check ${cats[c.key] ? 'on' : ''}`} onClick={() => toggleCat(c.key)}>
+                <span className="box">{cats[c.key] && <i className="ti ti-check" />}</span>{c.label}
+              </div>
+            ))}
+            <div className={`check ${cats.other ? 'on' : ''}`} onClick={() => toggleCat('other')}>
+              <span className="box">{cats.other && <i className="ti ti-check" />}</span>Other
+            </div>
+            {cats.other && <TextField label="Other — specify" value={otherText} onChange={setOtherText} />}
+            <div style={{ marginTop: 14, padding: '12px 14px', background: 'var(--cream)', borderRadius: 11, border: '1px solid var(--line2)' }}>
+              <div style={{ fontSize: 12, color: 'var(--mut)', lineHeight: 1.55, marginBottom: 8 }}>
+                <b style={{ color: 'var(--navy)' }}>Specially protected information.</b> Records of mental health, substance use, HIV/AIDS, or genetic testing are released <b>only</b> if you specifically authorize it here.
+              </div>
+              <div className={`check ${includesProtected ? 'on' : ''}`} onClick={() => setIncludesProtected(v => !v)} style={{ marginBottom: 0 }}>
+                <span className="box">{includesProtected && <i className="ti ti-check" />}</span>Yes, include specially protected information listed above
+              </div>
+            </div>
+          </div>
+
+          <p className="lbl">5 · Purpose</p>
+          <div className="card">
+            <div className="check on" style={{ cursor: 'default' }}><span className="box"><i className="ti ti-check" /></span>Treatment, care coordination, and care planning</div>
+            <div className={`check ${purposeOther ? 'on' : ''}`} onClick={() => setPurposeOther(v => !v)}><span className="box">{purposeOther && <i className="ti ti-check" />}</span>Other</div>
+            {purposeOther && <TextField label="Other purpose — specify" value={purposeOtherText} onChange={setPurposeOtherText} />}
+          </div>
+
+          <p className="lbl">6 · Expiration</p>
+          <div className="card">
+            <div className="hint" style={{ fontSize: 11.5, color: 'var(--mut)', marginBottom: 4 }}>Unless revoked sooner, this authorization expires one year from the date signed, or on the earlier of:</div>
+            <TextField label="Expiration date (optional)" value={expDate} onChange={setExpDate} placeholder="MM/DD/YYYY" />
+            <TextField label="Expiration event (optional)" value={expEvent} onChange={setExpEvent} placeholder="e.g. end of treatment" />
+          </div>
+
+          <p className="lbl">7 · Your rights</p>
+          <div className="consentbox">
+            <p>I understand that: (1) I may revoke this authorization at any time by writing to Godwins Family Care LLC, except to the extent action has already been taken in reliance on it; (2) treatment, payment, enrollment, and eligibility for benefits may not be conditioned on signing, except where the law allows; (3) information disclosed under this authorization may be re-disclosed by the recipient and may no longer be protected by federal privacy law; and (4) I am entitled to a copy of this signed authorization.</p>
+          </div>
+
+          <p className="lbl">8 · Signature</p>
+          <div className="card">
+            <div className="hint" style={{ fontSize: 11.5, color: 'var(--mut)', marginBottom: 8 }}>Draw your signature below using your mouse or finger.</div>
+            <div style={{ position: 'relative', border: '1px solid var(--line2)', borderRadius: 10, background: '#fff' }}>
+              <canvas ref={canvasRef} style={{ display: 'block', width: '100%', height: 130, touchAction: 'none' }} />
+              <button onClick={clearSig} style={{ position: 'absolute', top: 6, right: 8, background: '#fff', border: '1px solid var(--line2)', borderRadius: 6, fontSize: 11, color: 'var(--mut)', padding: '2px 8px', cursor: 'pointer' }}>Clear</button>
+            </div>
+            <TextField label="Printed name" value={printedName} onChange={setPrintedName} />
+            <TextField label="Relationship / authority (if signing for patient)" value={relationship} onChange={setRelationship} placeholder="e.g. Power of attorney" />
+            <div className="sub" style={{ fontSize: 12, marginTop: 8 }}>Date: {today}</div>
+            <button className="btn" disabled={busy} onClick={submitForm}>{busy ? (providers.filter(p => (p.name || '').trim()).length > 1 ? 'Generating authorizations…' : 'Submitting…') : 'Submit authorization'}</button>
+            {err && <div className="err">{err}</div>}
+          </div>
+        </div>
+      );
+    };
+
+    const GfcDocuments = ({ docs, readOnly, token, onOpenTransferRoi }) => {
       const signed = docs?.signedConsents || [];
       const files = docs?.documents || [];
       const packet = docs?.enrollmentPacket || null;
@@ -4190,6 +4521,16 @@
       return (
         <div className="gfc-body">
           {readOnly && <span className="ro"><i className="ti ti-eye" />Family view · read-only</span>}
+          {!readOnly && onOpenTransferRoi && (
+            <React.Fragment>
+              <p className="lbl" style={{ marginTop: 0 }}>Record release</p>
+              <div className="doc" onClick={onOpenTransferRoi} style={{ cursor: 'pointer' }}>
+                <i className="ti ti-file-symlink" />
+                <div><b>Authorize record release from prior providers</b><span>Request your records from a prior doctor, specialist, or hospital</span></div>
+                <i className="ti ti-chevron-right" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
+              </div>
+            </React.Fragment>
+          )}
           {packet && (
             <React.Fragment>
               <p className="lbl" style={{ marginTop: 0 }}>Enrollment</p>
@@ -4229,6 +4570,7 @@
       const [error, setError] = useState(null);
       const [view, setView] = useState('home');       // home | care | messages | documents
       const [showIntake, setShowIntake] = useState(false);
+      const [showTransferRoi, setShowTransferRoi] = useState(false); // Transfer-of-Care ROI overlay (Session 3.4)
       const [data, setData] = useState(null);          // care-plan + visits
       const [messages, setMessages] = useState(null);
       const [docs, setDocs] = useState(null);
@@ -4307,6 +4649,22 @@
         );
       }
 
+      // Transfer-of-Care ROI overlay — takes over the shell (client-only, Session 3.4).
+      if (showTransferRoi && !isFamily) {
+        return (
+          <div className="gfc"><div className="gfc-shell">
+            <div className="gfc-hdr">
+              <button onClick={() => setShowTransferRoi(false)}><i className="ti ti-chevron-left" /></button>
+              <span className="ttl">Record Release</span>
+              <button onClick={gfcLogout} title="Sign out"><i className="ti ti-logout" /></button>
+            </div>
+            <GfcTransferRoi token={token}
+              onClose={() => setShowTransferRoi(false)}
+              onDone={async () => { const dc = await api.getGfcDocuments(token); if (!dc.error) setDocs(dc); }} />
+          </div></div>
+        );
+      }
+
       // UNLOCKED portal.
       const titles = { home: 'My Care', care: 'Care Plan', messages: 'Messages', documents: 'Documents' };
       const tabs = [
@@ -4324,7 +4682,7 @@
           {view === 'home' && data && <GfcDashboard data={data} onNavigate={setView} />}
           {view === 'care' && data && <GfcCarePlan data={data} readOnly={isFamily} />}
           {view === 'messages' && <GfcMessages messages={messages} readOnly={isFamily} />}
-          {view === 'documents' && <GfcDocuments docs={docs} readOnly={isFamily} token={token} />}
+          {view === 'documents' && <GfcDocuments docs={docs} readOnly={isFamily} token={token} onOpenTransferRoi={() => setShowTransferRoi(true)} />}
           {!data && view !== 'messages' && view !== 'documents' && (
             <div className="gfc-body" style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}><div className="gfc-spin" /></div>
           )}

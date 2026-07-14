@@ -14,6 +14,8 @@ const pdfGenerator = require('./pdf-generator');
 const changelogGenerator = require('./changelog-generator');
 const config = require('./config');
 const { sendEmail, sendBulkEmail, sendBatchEmails } = require('./email');
+const roiRepo = require('./roiRepository');           // Transfer-of-Care ROI data model (Session 3.4)
+const legacySync = require('./legacySync');            // ROI parallel-run legacy sync (Session 3.4)
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -37,6 +39,10 @@ const uploadLimiter = (req, res, next) => {
 
 const app = express();
 const db = new Database();
+// Transfer-of-Care ROI repository (Session 3.4) — three KV collections
+// (consent_events / consent_provider_authorizations / consent_records_categories)
+// bound to the same db, keyed for a later RDS migration.
+const roiStore = roiRepo.createRepository(db);
 const PORT = config.PORT;
 
 // HubSpot ticket polling timer reference
@@ -5109,6 +5115,7 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
       npp: 'HIPAA Notice of Privacy Practices',
       roiFamily: 'Release of Information — Family',
       roiProvider: 'Release of Information — Provider',
+      roiTransfer: 'Transfer-of-Care Authorization (record release)',
       serviceAgreement: 'Service Agreement',
       billOfRights: 'Patient Bill of Rights & Self-Determination',
       emergencyFinancial: 'Emergency Treatment & Financial Responsibility',
@@ -5184,6 +5191,25 @@ const deriveAge = (dob) => {
   return age >= 0 && age < 130 ? age : null;
 };
 
+// Normalize a priorProviders array to the client schema shape (§ Client Care
+// Profile Schema). Feeds the Transfer-of-Care ROI prefill (Session 3.4).
+const normalizePriorProviders = (arr, defaultAddedFrom) => {
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .map(p => p || {})
+    .filter(p => (p.name || '').trim())
+    .map(p => ({
+      name: (p.name || '').trim(),
+      dept: (p.dept || '').trim(),
+      address: (p.address || '').trim(),
+      phone: (p.phone || '').trim(),
+      fax: (p.fax || '').trim(),
+      roleLabel: ['pcp', 'specialist', 'hospital', 'other'].includes(p.roleLabel) ? p.roleLabel : 'other',
+      addedFrom: ['intake_prefill', 'manual', 'roi_form'].includes(p.addedFrom) ? p.addedFrom : (defaultAddedFrom || 'manual'),
+      createdAt: p.createdAt || new Date().toISOString()
+    }));
+};
+
 // Helper to load the fresh client user record + its index for mutation.
 const loadClientForMutation = async (userId) => {
   const users = await getUsers();
@@ -5239,10 +5265,18 @@ app.post('/api/gfc/intake', authenticateToken, requireClientForIntake, async (re
     // DOB collected once → derive age (never stored as a separate input, §3/§4).
     const dob = intake.dob || (users[idx].intake && users[idx].intake.dob) || null;
 
+    // Prior providers feed the Transfer-of-Care ROI form (Session 3.4). Editable
+    // independently of any ROI signing event; normalized to the client schema
+    // shape. Only overwrite when the payload actually includes the array.
+    const priorProviders = Array.isArray(intake.priorProviders)
+      ? normalizePriorProviders(intake.priorProviders, 'intake_prefill')
+      : (users[idx].intake && users[idx].intake.priorProviders) || [];
+
     const merged = {
       ...(users[idx].intake || {}),
       ...intake,
       medications: meds,
+      priorProviders,
       dob,
       age: deriveAge(dob),
       updatedAt: new Date().toISOString()
@@ -5253,6 +5287,7 @@ app.post('/api/gfc/intake', authenticateToken, requireClientForIntake, async (re
     if (intake.dob) users[idx].dob = intake.dob;
     if (Array.isArray(meds)) users[idx].medications = meds;
     if (intake.payer) users[idx].payer = intake.payer;
+    users[idx].priorProviders = priorProviders; // schema mirror (client profile)
 
     await db.set('users', users);
     invalidateUsersCache();
@@ -5409,6 +5444,300 @@ app.post('/api/gfc/intake/submit', authenticateToken, requireClientForIntake, as
     res.json({ message: 'Enrollment complete', enrollmentStatus: client.enrollmentStatus });
   } catch (error) {
     console.error('GFC intake submit error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============== TRANSFER-OF-CARE PROVIDER ROI (Session 3.4) ==============
+// A fifth ROI type: client authorization for GFC to request medical records
+// from one or more prior providers. One signing event → one consent_event, one
+// consent_provider_authorizations row per provider, one consent_records_categories
+// row per checked category, and one generated PDF per provider. This ROI does
+// NOT gate the portal (unlike roiFamily). 42 CFR Part 2 protected categories are
+// gated at the data-access layer (roiRepository.getRequestableRecordCategories).
+// Runs in parallel with the legacy WordPress + GAS system (PARALLEL_LEGACY_SYNC).
+// TEST DATA ONLY until HIPAA-live.
+
+// Shared side-effect dispatcher: legacy sheet log + admin email (PDFs attached)
+// + patient/submitter confirmation (no PDFs). All best-effort and non-fatal;
+// gated by config.PARALLEL_LEGACY_SYNC. NEVER attaches PHI to patient email.
+async function dispatchRoiNotifications({ client, event, fileNames, fileUrls, pdfAttachments, submitterEmail }) {
+  if (!config.PARALLEL_LEGACY_SYNC) return;
+  const clientName = client.preferredName || client.name || 'Client';
+  // Sheet key: the client's legacy intake token if present, else a stable portal key.
+  const sheetKey = client.legacyIntakeToken || client.slug || client.id;
+  try {
+    await legacySync.logRoiToSheet(
+      config.ROI_LEGACY_SHEET_ID, config.ROI_LEGACY_SHEET_TAB, sheetKey,
+      Array.isArray(fileNames) ? fileNames.join(' | ') : fileNames,
+      Array.isArray(fileUrls) ? fileUrls.join(' | ') : fileUrls
+    );
+  } catch (e) { console.error('[ROI] legacy sheet log failed (non-fatal):', e.message); }
+
+  // Admin email — one message, all generated PDFs attached (internal recipient).
+  try {
+    const adminHtml = legacySync.buildAdminEmailHtml(clientName, sheetKey, fileNames, fileUrls);
+    const providerCount = Array.isArray(fileNames) ? fileNames.length : 1;
+    await sendEmail(
+      config.ROI_ADMIN_EMAIL,
+      `Provider ROI Submitted — ${clientName}${providerCount > 1 ? ` (${providerCount} authorizations)` : ''}`,
+      `A Transfer-of-Care authorization was received for ${clientName}. See attached PDF(s).`,
+      { htmlBody: adminHtml, attachments: (pdfAttachments || []) }
+    );
+  } catch (e) { console.error('[ROI] admin email failed (non-fatal):', e.message); }
+
+  // Patient + submitter confirmation — plain receipt, NEVER any PDF/PHI.
+  try {
+    const recipients = [client.email, submitterEmail, (client.intake && client.intake.primaryContact && client.intake.primaryContact.email)]
+      .filter(Boolean)
+      .filter((v, i, a) => a.indexOf(v) === i);
+    if (recipients.length) {
+      await sendEmail(
+        recipients,
+        'We received your authorization form — Godwins Family Care',
+        `Hi,\n\nYour signed Authorization to Obtain Medical Records was received. Our care team will use it to request your records and will be in touch with next steps.\n\n— Godwins Family Care`,
+        { htmlBody: legacySync.buildPatientEmailHtml(clientName) }
+      );
+    }
+  } catch (e) { console.error('[ROI] patient email failed (non-fatal):', e.message); }
+}
+
+// GET /api/gfc/transfer-roi — prefill data for the flow: patient identity from
+// intake, prior-provider cards, prior signed events (summary), category catalog.
+app.get('/api/gfc/transfer-roi', authenticateToken, requireClientForIntake, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const intake = client.intake || {};
+    const pc = intake.primaryContact || {};
+    const patient = {
+      patientName: client.preferredName || client.name || `${intake.firstName || ''} ${intake.lastName || ''}`.trim(),
+      patientDOB: intake.dob || '',
+      patientAddress: intake.address || client.address || '',
+      patientPhone: intake.phone || pc.phone || ''
+    };
+    const events = (await roiStore.listConsentEventsByClient(client.id)).map(e => ({
+      id: e.id, signed_at: e.signed_at, source: e.source,
+      includes_protected_info: e.includes_protected_info, revoked_at: e.revoked_at
+    }));
+    res.json({
+      patient,
+      priorProviders: Array.isArray(client.priorProviders) ? client.priorProviders : (intake.priorProviders || []),
+      status: (client.consents || {}).roiTransfer || 'pending',
+      events,
+      recordCategories: roiRepo.RECORD_CATEGORIES,
+      categoryLabels: pdfGenerator.ROI_CATEGORY_LABELS
+    });
+  } catch (error) {
+    console.error('GFC transfer-roi get error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PUT /api/gfc/prior-providers — edit the client's prior-provider list
+// independently of any ROI signing event (§ Client Care Profile Schema).
+app.put('/api/gfc/prior-providers', authenticateToken, requireClientForIntake, async (req, res) => {
+  try {
+    const { priorProviders } = req.body || {};
+    if (!Array.isArray(priorProviders)) return res.status(400).json({ error: 'priorProviders array is required' });
+    const { users, idx } = await loadClientForMutation(req.user.id);
+    if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
+    const normalized = normalizePriorProviders(priorProviders, 'manual');
+    users[idx].priorProviders = normalized;
+    users[idx].intake = { ...(users[idx].intake || {}), priorProviders: normalized };
+    await db.set('users', users);
+    invalidateUsersCache();
+    res.json({ message: 'Prior providers saved', priorProviders: normalized });
+  } catch (error) {
+    console.error('GFC prior-providers save error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/gfc/transfer-roi/upload — Screen 2A: client uploads an already-signed
+// scan. Creates a consent_event (source=portal_upload) with NO provider auth rows
+// (admin classifies the scan later), writes the file to Drive, updates the
+// rollup status, and runs the parallel legacy sync.
+app.post('/api/gfc/transfer-roi/upload', authenticateToken, requireClientForIntake, async (req, res) => {
+  try {
+    const { fileName, fileDataB64, mimeType } = req.body || {};
+    if (!fileName || !fileDataB64) return res.status(400).json({ error: 'fileName and fileDataB64 are required' });
+    const allowed = ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png'];
+    if (mimeType && !allowed.includes(mimeType)) {
+      return res.status(400).json({ error: 'Only PDF, JPG, and PNG files are accepted.' });
+    }
+    let buffer;
+    try {
+      const b64 = fileDataB64.startsWith('data:') ? fileDataB64.slice(fileDataB64.indexOf(',') + 1) : fileDataB64;
+      buffer = Buffer.from(b64, 'base64');
+    } catch (e) { return res.status(400).json({ error: 'File data is not valid base64.' }); }
+    if (buffer.length > config.MAX_FILE_SIZE) return res.status(400).json({ error: 'File exceeds 10 MB limit.' });
+
+    const { users, idx } = await loadClientForMutation(req.user.id);
+    if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
+    const client = users[idx];
+
+    const ipHash = roiRepo.hashIp(req.headers['x-forwarded-for'] || req.socket?.remoteAddress, JWT_SECRET);
+    const event = await roiStore.insertConsentEvent({
+      client_id: client.id,
+      printed_name: client.preferredName || client.name || 'Client',
+      signer_ip_hash: ipHash,
+      includes_protected_info: false, // unknown from a scan; classified later
+      source: roiRepo.SOURCE.UPLOAD
+    });
+
+    // Write the uploaded scan to Drive (best-effort; non-fatal in dev).
+    let driveUrl = null, storedName = fileName;
+    try {
+      const safeName = `ROI_upload_${(client.slug || client.id)}_${Date.now()}_${String(fileName).replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+      const result = await googledrive.uploadProviderROIFile(config.ROI_DRIVE_FOLDER_NAME, safeName, buffer, mimeType || 'application/octet-stream');
+      driveUrl = result && (result.webViewLink || result.webContentLink) || null;
+      storedName = safeName;
+    } catch (e) { console.error('[ROI] upload to Drive failed (non-fatal):', e.message); }
+
+    // Rollup status on the client profile.
+    client.consents = { ...(client.consents || {}), roiTransfer: 'signed' };
+    users[idx] = client;
+    await db.set('users', users);
+    invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'roi_transfer_uploaded', 'consent_event', event.id, { source: 'portal_upload' });
+
+    // Parallel legacy sync (no PDF attachment — this is the client's own scan).
+    dispatchRoiNotifications({ client, event, fileNames: storedName, fileUrls: driveUrl || '', pdfAttachments: [] })
+      .catch(e => console.error('[ROI] dispatch failed (non-fatal):', e.message));
+
+    res.json({ message: 'Authorization uploaded', eventId: event.id, driveUrl });
+  } catch (error) {
+    console.error('GFC transfer-roi upload error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/gfc/transfer-roi/submit — Screen 2B: the online form. One signing
+// event authorizes multiple providers; one PDF is generated per provider.
+// Validates the 45 CFR 164.508 required elements server-side before saving.
+app.post('/api/gfc/transfer-roi/submit', authenticateToken, requireClientForIntake, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const providers = Array.isArray(b.providers)
+      ? b.providers.filter(p => p && (p.name || p.provider_name || '').trim())
+      : [];
+    if (providers.length === 0) return res.status(400).json({ error: 'Add at least one provider before submitting.', field: 'providers' });
+
+    // Collect checked standard categories (+ Other text).
+    const cat = b.categories || {};
+    const checkedCategories = roiRepo.RECORD_CATEGORIES.filter(k => cat[k]);
+    const signedAt = new Date().toISOString();
+
+    // Server-side 45 CFR 164.508 element validation.
+    const validation = roiRepo.validateAuthorizationElements({
+      categories: checkedCategories,
+      purpose_treatment: b.purposeTreatment !== false,
+      purpose_other_text: b.purposeOtherText,
+      expiration_date: b.expDate,
+      signature_image_b64: b.signatureImageB64,
+      printed_name: b.printedName,
+      signed_at: signedAt
+    });
+    if (!validation.ok) {
+      return res.status(400).json({ error: 'Some required fields are missing or invalid.', code: 'ROI_508_INCOMPLETE', fieldErrors: validation.errors });
+    }
+
+    const { users, idx } = await loadClientForMutation(req.user.id);
+    if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
+    const client = users[idx];
+
+    const ipHash = roiRepo.hashIp(req.headers['x-forwarded-for'] || req.socket?.remoteAddress, JWT_SECRET);
+
+    // Parent consent_event. includes_protected_info defaults FALSE and is only
+    // true when the client explicitly opted in (42 CFR Part 2).
+    const event = await roiStore.insertConsentEvent({
+      client_id: client.id,
+      signed_at: signedAt,
+      signature_image_b64: b.signatureImageB64,
+      printed_name: b.printedName,
+      relationship_authority: b.relationship,
+      signer_ip_hash: ipHash,
+      expiration_date: b.expDate || null,
+      expiration_event: b.expEvent || null,
+      purpose_treatment: b.purposeTreatment !== false,
+      purpose_other_text: b.purposeOtherText,
+      includes_protected_info: b.includesProtected === true,
+      source: roiRepo.SOURCE.ONLINE_FORM
+    });
+
+    // Category rows (one per checked category).
+    await roiStore.insertRecordCategories(event.id, checkedCategories, cat.otherText);
+
+    // Provider authorization rows (one per provider card).
+    const providerInputs = providers.map(p => ({
+      provider_name: p.name || p.provider_name, dept: p.dept, address: p.address, phone: p.phone, fax: p.fax
+    }));
+    const authRows = await roiStore.insertProviderAuthorizations(event.id, providerInputs);
+
+    // Generate one PDF per provider, upload to Drive, record the URL.
+    const lastName = (client.name || client.preferredName || 'Client').trim().split(/\s+/).pop() || 'Client';
+    const dateStr = signedAt.slice(0, 10).replace(/-/g, '');
+    const fileNames = [], fileUrls = [], pdfAttachments = [];
+    for (let i = 0; i < authRows.length; i++) {
+      const row = authRows[i];
+      const provClean = (row.provider_name || 'Provider').replace(/[^a-zA-Z0-9 ]/g, '').replace(/\s+/g, '_').substring(0, 30);
+      const seq = authRows.length > 1 ? `_${i + 1}` : '';
+      const fileName = `ROI_${lastName}_${provClean}_${dateStr}${seq}.pdf`;
+      let pdfBuffer = null;
+      try {
+        pdfBuffer = await pdfGenerator.generateProviderROIPDF({
+          patientName: b.patientName, patientDOB: b.patientDOB, patientAddress: b.patientAddress, patientPhone: b.patientPhone,
+          provider: { name: row.provider_name, dept: row.dept, address: row.address, phone: row.phone, fax: row.fax },
+          categories: { ...cat },
+          includesProtected: event.includes_protected_info,
+          purposeTreatment: event.purpose_treatment,
+          purposeOther: !!b.purposeOther, purposeOtherText: b.purposeOtherText,
+          expDate: b.expDate, expEvent: b.expEvent,
+          signatureImageB64: b.signatureImageB64, signedDate: new Date(signedAt).toLocaleDateString('en-US'),
+          printedName: b.printedName, relationship: b.relationship
+        });
+      } catch (e) { console.error('[ROI] PDF generation failed for provider:', row.provider_name, e.message); }
+
+      let driveUrl = null;
+      if (pdfBuffer) {
+        pdfAttachments.push({ filename: fileName, content: pdfBuffer });
+        try {
+          const result = await googledrive.uploadProviderROIFile(config.ROI_DRIVE_FOLDER_NAME, fileName, pdfBuffer, 'application/pdf');
+          driveUrl = result && (result.webViewLink || result.webContentLink) || null;
+        } catch (e) { console.error('[ROI] provider PDF Drive upload failed (non-fatal):', e.message); }
+      }
+      await roiStore.updateProviderAuthorizationPdf(row.id, { driveUrl, fileName });
+      fileNames.push(fileName);
+      fileUrls.push(driveUrl || '');
+    }
+
+    // Merge any new providers into the client's prior-provider list (roi_form).
+    const merged = normalizePriorProviders([
+      ...(Array.isArray(client.priorProviders) ? client.priorProviders : []),
+      ...providerInputs.map(p => ({ name: p.provider_name, dept: p.dept, address: p.address, phone: p.phone, fax: p.fax, addedFrom: 'roi_form' }))
+    ], 'roi_form');
+    // De-dupe by name (keep first occurrence).
+    const seen = new Set();
+    client.priorProviders = merged.filter(p => { const k = p.name.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; });
+    client.intake = { ...(client.intake || {}), priorProviders: client.priorProviders };
+
+    // Rollup status.
+    client.consents = { ...(client.consents || {}), roiTransfer: 'signed' };
+    users[idx] = client;
+    await db.set('users', users);
+    invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'roi_transfer_signed', 'consent_event', event.id, {
+      source: 'portal_online_form', providerCount: authRows.length, includesProtected: event.includes_protected_info
+    });
+
+    // Parallel legacy sync: sheet + admin email (PDFs attached) + confirmations.
+    dispatchRoiNotifications({ client, event, fileNames, fileUrls, pdfAttachments, submitterEmail: b.submitterEmail })
+      .catch(e => console.error('[ROI] dispatch failed (non-fatal):', e.message));
+
+    res.json({ message: 'Authorization submitted', eventId: event.id, providerCount: authRows.length, files: fileNames });
+  } catch (error) {
+    console.error('GFC transfer-roi submit error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
