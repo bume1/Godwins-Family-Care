@@ -5210,6 +5210,29 @@ const normalizePriorProviders = (arr, defaultAddedFrom) => {
     }));
 };
 
+// Derive prior-provider entries from the intake wizard's Medical-team fields
+// (PCP name/practice/phone, up to 2 specialists, preferred hospital) — mirrors
+// the legacy WordPress intake's field set (PCP Name, PCP Practice, PCP Phone,
+// Specialist 1[+Phone], Specialist 2, Preferred Hospital), which is how the
+// legacy ROI form's prefillForm() built its provider list.
+const deriveProvidersFromMedicalTeam = (medicalTeam) => {
+  const mt = medicalTeam || {};
+  const out = [];
+  const pcpName = (mt.pcpName || '').trim();
+  const pcpPractice = (mt.pcpPractice || '').trim();
+  const pcpPhone = (mt.pcpPhone || '').trim();
+  if (pcpName || pcpPractice) {
+    out.push({ name: pcpName || pcpPractice, dept: (pcpName && pcpPractice) ? pcpPractice : '', phone: pcpPhone, roleLabel: 'pcp' });
+  }
+  const spec1Name = (mt.specialist1Name || '').trim();
+  if (spec1Name) out.push({ name: spec1Name, phone: (mt.specialist1Phone || '').trim(), roleLabel: 'specialist' });
+  const spec2Name = (mt.specialist2Name || '').trim();
+  if (spec2Name) out.push({ name: spec2Name, phone: '', roleLabel: 'specialist' }); // phone not captured in intake — patient fills in on the ROI form
+  const hospital = (mt.preferredHospital || '').trim();
+  if (hospital) out.push({ name: hospital, roleLabel: 'hospital' });
+  return out;
+};
+
 // Helper to load the fresh client user record + its index for mutation.
 const loadClientForMutation = async (userId) => {
   const users = await getUsers();
@@ -5265,12 +5288,26 @@ app.post('/api/gfc/intake', authenticateToken, requireClientForIntake, async (re
     // DOB collected once → derive age (never stored as a separate input, §3/§4).
     const dob = intake.dob || (users[idx].intake && users[idx].intake.dob) || null;
 
-    // Prior providers feed the Transfer-of-Care ROI form (Session 3.4). Editable
-    // independently of any ROI signing event; normalized to the client schema
-    // shape. Only overwrite when the payload actually includes the array.
-    const priorProviders = Array.isArray(intake.priorProviders)
-      ? normalizePriorProviders(intake.priorProviders, 'intake_prefill')
-      : (users[idx].intake && users[idx].intake.priorProviders) || [];
+    // Prior providers feed the Transfer-of-Care ROI form (Session 3.4), derived
+    // from the intake wizard's Medical-team fields (PCP, up to 2 specialists,
+    // preferred hospital) — same source fields the legacy WordPress form used
+    // to seed its ROI provider list. Entries added manually or from a signed
+    // ROI (addedFrom 'manual' | 'roi_form') are preserved untouched; the
+    // 'intake_prefill' entries are recomputed fresh from the current
+    // medical-team fields on every save so edits stay in sync.
+    const existingProviders = Array.isArray(users[idx].priorProviders) ? users[idx].priorProviders : [];
+    const preservedProviders = existingProviders.filter(p => p.addedFrom === 'manual' || p.addedFrom === 'roi_form');
+    const explicitPrefill = Array.isArray(intake.priorProviders) ? normalizePriorProviders(intake.priorProviders, 'intake_prefill') : [];
+    const derivedPrefill = deriveProvidersFromMedicalTeam(intake.medicalTeam).map(p => ({ ...p, addedFrom: 'intake_prefill' }));
+    const seenNames = new Set(preservedProviders.map(p => (p.name || '').toLowerCase()));
+    const mergedPrefill = [];
+    [...explicitPrefill, ...derivedPrefill].forEach(p => {
+      const key = (p.name || '').toLowerCase();
+      if (!key || seenNames.has(key)) return;
+      seenNames.add(key);
+      mergedPrefill.push(p);
+    });
+    const priorProviders = normalizePriorProviders([...preservedProviders, ...mergedPrefill], 'intake_prefill');
 
     const merged = {
       ...(users[idx].intake || {}),

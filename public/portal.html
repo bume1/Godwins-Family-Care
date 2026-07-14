@@ -4005,6 +4005,15 @@
                 </div>
               ))}
               <button className="addrow" onClick={addMed}><i className="ti ti-plus" /> Add another medication</button>
+              <p className="lbl">Medical team</p>
+              <div className="hint" style={{ fontSize: 11.5, color: 'var(--mut)', marginBottom: 8 }}>Used to coordinate care and to pre-fill any future record-release request.</div>
+              <TextField label="Primary care physician" value={(form.medicalTeam || {}).pcpName} onChange={v => setNested('medicalTeam', 'pcpName', v)} placeholder="Dr. name" />
+              <TextField label="PCP practice / clinic" value={(form.medicalTeam || {}).pcpPractice} onChange={v => setNested('medicalTeam', 'pcpPractice', v)} />
+              <TextField label="PCP phone" type="tel" value={(form.medicalTeam || {}).pcpPhone} onChange={v => setNested('medicalTeam', 'pcpPhone', v)} />
+              <TextField label="Specialist 1" value={(form.medicalTeam || {}).specialist1Name} onChange={v => setNested('medicalTeam', 'specialist1Name', v)} placeholder="Name / practice" />
+              <TextField label="Specialist 1 phone" type="tel" value={(form.medicalTeam || {}).specialist1Phone} onChange={v => setNested('medicalTeam', 'specialist1Phone', v)} />
+              <TextField label="Specialist 2" value={(form.medicalTeam || {}).specialist2Name} onChange={v => setNested('medicalTeam', 'specialist2Name', v)} placeholder="Name / practice" />
+              <TextField label="Preferred hospital" value={(form.medicalTeam || {}).preferredHospital} onChange={v => setNested('medicalTeam', 'preferredHospital', v)} />
               <CheckList label="Skilled care needs" hint="Check all that apply." selected={form.skilledTasksNeeded} onToggle={v => toggleArr('skilledTasksNeeded', v)}
                 options={['Wound care', 'Injections', 'Catheter care', 'Ostomy care', 'Tube feeding', 'Oxygen management', 'Blood glucose monitoring', 'Medication administration', 'None of the above']} />
             </React.Fragment>
@@ -4571,6 +4580,7 @@
       const [view, setView] = useState('home');       // home | care | messages | documents
       const [showIntake, setShowIntake] = useState(false);
       const [showTransferRoi, setShowTransferRoi] = useState(false); // Transfer-of-Care ROI overlay (Session 3.4)
+      const [justEnrolled, setJustEnrolled] = useState(false); // one-time nudge right after intake completes (Session 3.4)
       const [data, setData] = useState(null);          // care-plan + visits
       const [messages, setMessages] = useState(null);
       const [docs, setDocs] = useState(null);
@@ -4643,8 +4653,28 @@
             </div>
             {showIntake && !isFamily
               ? <GfcIntakeFlow token={token} me={me} onBack={() => setShowIntake(false)}
-                  onComplete={async () => { setShowIntake(false); await reloadMe(); }} />
+                  onComplete={async () => { setShowIntake(false); await reloadMe(); setJustEnrolled(true); }} />
               : <GfcGate me={me} onStartIntake={() => setShowIntake(true)} />}
+          </div></div>
+        );
+      }
+
+      // One-time nudge right after enrollment completes — offers the full
+      // Transfer-of-Care ROI immediately rather than leaving it to be
+      // discovered later in Documents (Session 3.4).
+      if (justEnrolled && !isFamily) {
+        return (
+          <div className="gfc"><div className="gfc-shell">
+            <div className="gfc-hdr"><span className="ttl">Welcome</span><button onClick={gfcLogout} title="Sign out"><i className="ti ti-logout" /></button></div>
+            <div className="gfc-body" style={{ textAlign: 'center', padding: '50px 20px 20px' }}>
+              <div style={{ width: 60, height: 60, background: 'var(--navy)', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 20px' }}>
+                <i className="ti ti-check" style={{ color: 'var(--gold)', fontSize: 28 }} />
+              </div>
+              <h2 className="disp">You're enrolled!</h2>
+              <p className="sub" style={{ maxWidth: 340, margin: '12px auto 24px' }}>If you're transferring care from another doctor, specialist, or hospital, you can authorize us to request your records now — it only takes a minute.</p>
+              <button className="btn" style={{ maxWidth: 280, margin: '0 auto' }} onClick={() => { setJustEnrolled(false); setShowTransferRoi(true); }}>Authorize record release now</button>
+              <button className="btn ghost" style={{ maxWidth: 280, margin: '10px auto 0' }} onClick={() => setJustEnrolled(false)}>Not now — I'll do this later</button>
+            </div>
           </div></div>
         );
       }
