@@ -146,3 +146,11 @@ The map is admin-editable. Scores 0–1 by strength of the favored-trait overlap
 
 ## 5. Field → matching use
 Same as the caregiver doc's table, from the client side: `transferNeed`, `skilledTasksNeeded`, `behavioralFlags`, geography, `schedule`, and strong `genderPreference`/`languagePreference` drive the hard filters; `conditions`, `temperament`, `interests`, soft preferences, and `careTier` drive the weighted score and select the tier weight profile.
+
+---
+
+## 6. Portal visibility & clinical-link lifecycle
+Two fields on this record drive the patient portal, not just matching. Detail and the full section map live in `GFC_Patient_Portal_Alignment_Matrix_v1.md`.
+
+- **`serviceLine`** (`PHC | IHPC | both`) drives which portal sections a patient sees. Personal-care sections show to all; the clinical-read sections (visit summaries, medications, problems, results, clinical care plan) show only when `serviceLine` is `IHPC` or `both`. The portal is a superset of OpenEMR's — a PHCP-only patient has no OpenEMR record and never sees a clinical section.
+- **`openEmrPatientId`** is the join key to the OpenEMR chart. Set at *clinical* enrollment: the app creates the patient's OpenEMR record via FHIR (`POST /fhir/Patient`) and stores the returned ID here. Null = personal-care-only or not-yet-linked. Every patient-portal clinical read and clinician write resolves the chart through this ID. Clinical-read endpoints return 403 until it is set, the patient is on a clinical line, and consent-to-treat is signed.

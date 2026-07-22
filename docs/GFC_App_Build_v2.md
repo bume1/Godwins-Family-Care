@@ -13,6 +13,7 @@ This guide is the index and source of truth. The detail lives in:
 - `GFC_Matching_Engine_Spec_v1.md` — caregiver ↔ client matching algorithm.
 - `GFC_Client_Care_Profile_Schema_v1.md` — client data model (includes `careTeam`).
 - `GFC_Caregiver_Profile_Schema_v1.md` — caregiver data model (includes `licenseLevel`).
+- `GFC_Patient_Portal_Alignment_Matrix_v1.md` — patient-portal section map (data home, service-line visibility, launch vs Session 4), the two-lane read model, and the repo change list. Session 3/4 code against it.
 - `docs/prototype/` — **visual reference prototypes** (sibling of `docs/design-system/`). Three files: `client-prototype-full.html` (full client journey — Session 3 build target), `caregiver-app-prototype.html` (caregiver app — Session 4 build target), and `phcp-portal-prototype.html` (gate, family monitoring, and the staff Care Match screen — reference for both). Code builds from the specs + design system; the prototypes show what the result should look like.
 
 ---
@@ -131,6 +132,8 @@ The existing permission-flag pattern (`hasXAccess`) and per-request fresh-user l
 | Files | Documents & signed consents (Drive) |
 | Soft-Pilot Checklist | **remove** |
 
+**One portal, superset, conditional by service line.** The client portal is the ONLY patient-facing surface (OpenEMR's native portal stays off), and it is a *superset*, not a mirror, of OpenEMR's portal. PHCP personal-care clients have no OpenEMR record, so a mirror would leave them with an empty portal. Personal-care sections show to all patients; the clinical-read sections (visit summaries, medications, problems, results, clinical care plan) render *only* when `serviceLine` is `IHPC` or `both`, are scaffolded now as empty placeholders, and light up in Session 4.3. Full section map, real endpoints, and service-line visibility live in `GFC_Patient_Portal_Alignment_Matrix_v1.md`.
+
 ### 5.2 Gated intake → enrollment (the hard requirement)
 A client cannot reach any portal area until intake is complete.
 - Add `enrollmentStatus` to the client user: `intake_pending → intake_complete → enrolled`.
@@ -167,6 +170,10 @@ Full field-level detail lives in `GFC_Intake_and_Packet_Spec_v1.md`. The build-r
 ### 5.4 PHCP data model (RDS, in-boundary)
 `clients` (incl. `enrollmentStatus`, `monitoringOptIn`, `careTeam`, `priorProviders`), `family_contacts`, `caregivers` (incl. `licenseLevel`), `consents` (status per type, including `roiTransfer`), `consent_events` + `consent_provider_authorizations` + `consent_records_categories` (parent/child for the multi-provider Transfer-of-Care ROI built in Session 3.4), `care_plans` (versioned), `visit_logs` (tier-branched), `messages`, `shifts`, `availability`, `escalation_events`, `monitoring_events` (scaffold, see §11), `audit_log`. Documents by reference to Drive, not stored in the DB.
 
+**Document routing rule.** Two document homes, each with a job. *Drive (BAA):* consents, intake paperwork, service agreements, and anything a client or family views in the portal — collected by the app, works across both service lines. *OpenEMR document area:* records *received for clinical care* (discharge summaries, specialist reports, ROI-obtained records) for IHPC clients, filed to the patient's chart so the FNP has them chart-side. Never split one category across both stores.
+
+**`openEmrPatientId` lifecycle.** The client record's `openEmrPatientId` (see `GFC_Client_Care_Profile_Schema_v1.md`) is the join key between the app record and the OpenEMR chart. It is set at *clinical* enrollment: the app creates the patient's OpenEMR record via FHIR (`POST /fhir/Patient`) and stores the returned ID. Null means personal-care-only or not-yet-linked. Every patient-portal clinical read and every clinician write resolves the chart through this ID.
+
 ### 5.5 Caregiver & clinician workspace
 Detail in `GFC_Caregiver_Workspace_Spec_v1.md`. Repurpose the repo's service portal into two surfaces:
 - **Mobile caregiver app** — 4-tab (Home, Feed, Clients, More). Where Sitters, PCAs, CNAs, and LPNs work.
@@ -189,7 +196,7 @@ Detail in `GFC_Matching_Engine_Spec_v1.md`. Two stages: **hard filters** (licens
 - Stand up the FHIR client against OpenEMR (OAuth2).
 - **Clinician workspace (write):** patient list/search → open a patient's chart → document the initial comprehensive visit (H&P), med reconciliation, problem list, care plan, notes — all to OpenEMR.
 - **Clinician scheduling (OpenEMR-tied):** provider appointments managed in the app but tied to OpenEMR's appointment/calendar, so a booked visit is an OpenEMR appointment linked to the billable encounter. Same UX pattern as PHCP scheduling, **different backend** — clinical → OpenEMR, PHCP caregiver shifts → app/RDS. Two scheduling systems by design.
-- **Patient portal clinical read (fast-follow):** the Session 3 portal shell surfaces the patient's own clinical data from OpenEMR (visit summaries, meds, care plan), filtered per sharing rules, read-only, scoped to that patient. Not OpenEMR's native portal.
+- **Patient portal clinical read (fast-follow):** the Session 3 portal shell surfaces the patient's own clinical data from OpenEMR (visit summaries, meds, care plan), filtered per sharing rules, read-only, scoped to that patient. Not OpenEMR's native portal. **One portal, superset, conditional:** the clinical sections render only for `serviceLine` `IHPC`/`both` and resolve the chart via the client's `openEmrPatientId`; PHCP-only patients never see them. **Two-lane integration:** patient reads use the FHIR lane; most clinician writes use OpenEMR's Standard REST lane. Verify each section/field against the live server per the OpenEMR guide's Appendix D and `GFC_Patient_Portal_Alignment_Matrix_v1.md`. "Complete" for the patient view means the full *patient-appropriate* field set, not raw EMR columns.
 - In-Home Primary Care intake branch + its medical consents (consent to treat, assignment of benefits, practice NPP).
 
 ---
