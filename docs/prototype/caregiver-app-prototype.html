@@ -17,10 +17,14 @@
   .board{display:flex;flex-wrap:wrap;justify-content:center;gap:40px 36px;max-width:1320px;margin:0 auto}
   .col{display:flex;flex-direction:column;align-items:center}
   .eyebrow{font-size:11px;font-weight:500;letter-spacing:1.4px;text-transform:uppercase;color:var(--goldd);margin-bottom:10px}
-  .cap{font-family:'Cormorant Garamond',serif;font-size:18px;color:var(--navy);max-width:300px;text-align:center;line-height:1.3;margin-top:14px}
-  .phone{width:300px;background:#0e0f11;border-radius:40px;padding:9px;box-shadow:0 14px 40px rgba(3,61,80,.22)}
-  .screen{background:var(--cream);border-radius:32px;overflow:hidden}
-  .sbar{display:flex;justify-content:space-between;align-items:center;padding:9px 18px 4px;font-size:12px;font-weight:500;color:var(--navy)}
+  .cap{font-family:'Cormorant Garamond',serif;font-size:18px;color:var(--navy);max-width:393px;text-align:center;line-height:1.3;margin-top:14px}
+  .phone{position:relative;width:411px;background:#0e0f11;border-radius:53px;padding:9px;box-shadow:0 14px 40px rgba(3,61,80,.22)}
+  .screen{position:relative;display:flex;flex-direction:column;width:393px;height:852px;background:var(--cream);border-radius:45px;overflow:hidden}
+  .screen .body{flex:1;overflow-y:auto}
+  .island{position:absolute;top:20px;left:50%;transform:translateX(-50%);width:118px;height:33px;background:#0e0f11;border-radius:20px;z-index:6}
+  .home{position:absolute;bottom:9px;left:50%;transform:translateX(-50%);width:138px;height:5px;border-radius:3px;background:rgba(0,0,0,.32);z-index:6}
+  .sbar{display:flex;justify-content:space-between;align-items:center;padding:15px 30px 7px;font-size:15px;font-weight:600;color:var(--navy)}
+  .sbar .si{display:flex;align-items:center;gap:6px;font-size:16px}
   .dots{letter-spacing:1px}
   .hdr{background:var(--navy);padding:13px 16px;display:flex;align-items:center;justify-content:space-between;gap:8px}
   .hdr .ttl{font-family:'Cormorant Garamond',serif;font-size:20px;color:var(--cream)}
@@ -34,16 +38,16 @@
   .shift .e{font-size:11px;letter-spacing:1.2px;text-transform:uppercase;color:var(--gold);margin-bottom:7px}
   .shift .nm{font-size:16px;font-weight:500;color:var(--cream)}
   .shift .mt{font-size:12.5px;color:rgba(250,247,242,.72);margin-bottom:12px}
-  .clock{width:100%;background:var(--goldd);color:var(--navy);border:none;border-radius:10px;padding:13px;font-size:14.5px;font-weight:500;display:flex;align-items:center;justify-content:center;gap:7px;font-family:'DM Sans',sans-serif}
+  .clock{width:100%;background:var(--gold);color:var(--navy);border:none;border-radius:10px;padding:13px;font-size:14.5px;font-weight:500;display:flex;align-items:center;justify-content:center;gap:7px;font-family:'DM Sans',sans-serif}
   .loc{font-size:11.5px;color:rgba(250,247,242,.6);margin-top:8px;display:flex;align-items:center;gap:5px}
   .qa{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:14px}
   .qb{border-radius:10px;padding:13px 10px;text-align:center;font-size:13px;font-weight:500;border:1.5px solid}
   .qb i{display:block;font-size:20px;margin-bottom:5px}
   .qb.o{background:#fff;border-color:#d8cdb8;color:var(--navy)}
-  .qb.g{background:var(--goldd);border-color:var(--goldd);color:var(--navy)}
+  .qb.g{background:var(--gold);border-color:var(--gold);color:var(--navy)}
   .mini{background:#fff;border:1px solid #ece6db;border-radius:10px;padding:10px 13px;font-size:12.5px;color:var(--mut)}
   .mini b{color:var(--navy);font-weight:500}
-  .nav{display:flex;background:#fff;border-top:1px solid #e7e1d6}
+  .nav{display:flex;background:#fff;border-top:1px solid #e7e1d6;padding-bottom:20px}
   .nav .n{flex:1;text-align:center;padding:9px 0 11px;font-size:10.5px;color:#9a9388}
   .nav .n i{display:block;font-size:19px;margin-bottom:2px}
   .nav .n.on{color:var(--navy)}.nav .n.on i{color:var(--goldd)}
@@ -61,7 +65,7 @@
   .pend{background:var(--cream);border:1.5px dashed var(--goldd);border-radius:10px;padding:11px 13px;margin:12px 0;display:flex;gap:9px;align-items:flex-start}
   .pend i{color:var(--goldd);font-size:18px;margin-top:1px}
   .pend b{display:block;font-size:13px;color:var(--navy);font-weight:500}.pend span{font-size:11.5px;color:var(--mut)}
-  .btn{width:100%;background:var(--goldd);color:var(--navy);border:none;border-radius:9px;padding:13px;font-size:14px;font-weight:500;margin-top:6px;font-family:'DM Sans',sans-serif}
+  .btn{width:100%;background:var(--gold);color:var(--navy);border:none;border-radius:9px;padding:13px;font-size:14px;font-weight:500;margin-top:6px;font-family:'DM Sans',sans-serif}
   .opt{border:1.5px solid #d8cdb8;border-radius:12px;padding:13px 14px;margin-bottom:9px;display:flex;align-items:center;gap:12px;background:#fff}
   .opt i{font-size:20px;color:var(--navy)}.opt b{font-size:14.5px;color:var(--navy);font-weight:500}
   .opt span{font-size:12px;color:var(--mut);display:block}
@@ -71,6 +75,19 @@
   .notif{background:#eef3f0;border-radius:10px;padding:11px 13px;margin:4px 0 12px;display:flex;align-items:center;gap:10px}
   .notif .av{width:30px;height:30px;border-radius:50%;background:#9FE1CB;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:500;color:#0f6e56}
   .notif b{font-size:13px;color:var(--navy);font-weight:500}.notif span{font-size:11.5px;color:var(--mut)}
+  .stat{display:flex;align-items:center;gap:4px;margin:2px 0 10px}
+  .st{font-size:10.5px;font-weight:500;border-radius:12px;padding:3px 9px;background:#eee8db;color:#8a8378}
+  .st.on{background:var(--navy);color:var(--gold)}
+  .stat i{color:#c8bda6;font-size:12px}
+  .cal{display:grid;grid-template-columns:repeat(7,1fr);gap:5px;margin-bottom:14px}
+  .cd{background:#fff;border:1px solid #ece6db;border-radius:9px;text-align:center;padding:7px 0 8px}
+  .cd small{display:block;font-size:9.5px;letter-spacing:.6px;color:#9a9388;font-weight:500;margin-bottom:2px}
+  .cd b{font-size:14px;font-weight:500;color:var(--navy)}
+  .cd .dt{display:block;width:5px;height:5px;border-radius:50%;background:var(--goldd);margin:4px auto 0}
+  .cd .dt.x{background:transparent}
+  .cd.on{background:var(--navy);border-color:var(--navy)}
+  .cd.on b{color:var(--cream)}.cd.on small{color:rgba(250,247,242,.6)}.cd.on .dt{background:var(--gold)}
+  .cd.of{border:1.5px dashed var(--goldd)}
 </style>
 </head>
 <body>
@@ -83,12 +100,12 @@
 
     <div class="col">
       <p class="eyebrow">Caregiver app · home</p>
-      <div class="phone"><div class="screen">
-        <div class="sbar"><span>9:41</span><span class="dots">&#9679;&#9679;&#9679;&#9679;&#9679; 5G</span></div>
+      <div class="phone"><div class="island"></div><div class="screen">
+        <div class="sbar"><span>9:41</span><span class="si"><i class="ti ti-cell-signal-4"></i><i class="ti ti-wifi"></i><i class="ti ti-battery-3"></i></span></div>
         <div class="hdr"><span class="ttl">Today</span><i class="ti ti-bell"></i></div>
         <div class="body">
           <h3>Hi, Joelle</h3>
-          <p class="sub"><span class="pill">PCA</span> &nbsp;2 shifts today</p>
+          <p class="sub"><span class="pill">LPN</span> &nbsp;2 shifts today</p>
           <div class="shift">
             <div class="e">Current shift</div>
             <div class="nm">Margaret W.</div>
@@ -108,14 +125,45 @@
           <div class="n"><i class="ti ti-users"></i>Clients</div>
           <div class="n"><i class="ti ti-dots"></i>More</div>
         </div>
-      </div></div>
+      </div><div class="home"></div></div>
       <p class="cap">Clock in, log a visit, flag a concern. Same four tabs for every level.</p>
     </div>
 
     <div class="col">
+      <p class="eyebrow">Caregiver app · my schedule</p>
+      <div class="phone"><div class="island"></div><div class="screen">
+        <div class="sbar"><span>9:41</span><span class="si"><i class="ti ti-cell-signal-4"></i><i class="ti ti-wifi"></i><i class="ti ti-battery-3"></i></span></div>
+        <div class="hdr"><i class="ti ti-chevron-left"></i><span class="ttl">My Schedule</span><span class="lvl">WEEK OF JUL 27</span></div>
+        <div class="body">
+          <div class="cal">
+            <div class="cd on"><small>MON</small><b>27</b><span class="dt"></span></div>
+            <div class="cd"><small>TUE</small><b>28</b><span class="dt x"></span></div>
+            <div class="cd on"><small>WED</small><b>29</b><span class="dt"></span></div>
+            <div class="cd on"><small>THU</small><b>30</b><span class="dt"></span></div>
+            <div class="cd of"><small>FRI</small><b>31</b><span class="dt"></span></div>
+            <div class="cd"><small>SAT</small><b>1</b><span class="dt x"></span></div>
+            <div class="cd"><small>SUN</small><b>2</b><span class="dt x"></span></div>
+          </div>
+          <p class="grp" style="margin-top:0">Confirmed shifts</p>
+          <div class="mini" style="margin-bottom:8px"><b>Mon, Jul 27 · 2:00 to 6:00 PM</b> · Margaret W. · personal care</div>
+          <div class="mini" style="margin-bottom:8px"><b>Wed, Jul 29 · 2:00 to 6:00 PM</b> · Margaret W. · personal care</div>
+          <div class="mini"><b>Thu, Jul 30 · 9:00 AM to 1:00 PM</b> · Harold B. · companionship</div>
+          <p class="grp">Offered to you</p>
+          <div class="opt" style="align-items:center"><i class="ti ti-calendar-plus"></i><div style="flex:1"><b>Fri, Jul 31 · 9:00 AM to 1:00 PM</b><span>Margaret W. · covers Joelle's Fri visit</span></div><button class="btn" style="width:auto;padding:9px 16px;margin:0">Accept</button></div>
+          <p class="grp">My availability</p>
+          <div class="stat" style="margin:0 0 8px"><span class="st on">Mon</span><span class="st on">Tue</span><span class="st on">Wed</span><span class="st on">Thu</span><span class="st on">Fri</span><span class="st">Sat</span><span class="st">Sun</span></div>
+          <div class="ck"><span class="box on"><i class="ti ti-check"></i></span>Days, 8 AM to 6 PM</div>
+          <div class="ck"><span class="box"></span>Overnights</div>
+          <div class="mini" style="margin-top:10px">Availability feeds the office scheduler and Care Match. Changes apply from next week.</div>
+        </div>
+      </div><div class="home"></div></div>
+      <p class="cap">Confirmed shifts, offers to accept, and availability the scheduler and Care Match both read.</p>
+    </div>
+
+    <div class="col">
       <p class="eyebrow">Visit log · Sitter</p>
-      <div class="phone"><div class="screen">
-        <div class="sbar"><span>9:41</span><span class="dots">&#9679;&#9679;&#9679;&#9679;&#9679; 5G</span></div>
+      <div class="phone"><div class="island"></div><div class="screen">
+        <div class="sbar"><span>9:41</span><span class="si"><i class="ti ti-cell-signal-4"></i><i class="ti ti-wifi"></i><i class="ti ti-battery-3"></i></span></div>
         <div class="hdr"><i class="ti ti-chevron-left"></i><span class="ttl">Visit Log</span><span class="lvl">SITTER</span></div>
         <div class="body">
           <p class="auto"><b>Margaret W.</b> &middot; 2:00&ndash;6:00 PM &middot; auto-timestamped</p>
@@ -125,14 +173,14 @@
           <div class="fld"><label>Notable events</label><div class="inp ph">Anything worth noting&hellip;</div></div>
           <button class="btn">Submit visit log</button>
         </div>
-      </div></div>
+      </div><div class="home"></div></div>
       <p class="cap">Sitter: presence and behavioral only. No ADL or skilled fields.</p>
     </div>
 
     <div class="col">
       <p class="eyebrow">Visit log · PCA / CNA</p>
-      <div class="phone"><div class="screen">
-        <div class="sbar"><span>9:41</span><span class="dots">&#9679;&#9679;&#9679;&#9679;&#9679; 5G</span></div>
+      <div class="phone"><div class="island"></div><div class="screen">
+        <div class="sbar"><span>9:41</span><span class="si"><i class="ti ti-cell-signal-4"></i><i class="ti ti-wifi"></i><i class="ti ti-battery-3"></i></span></div>
         <div class="hdr"><i class="ti ti-chevron-left"></i><span class="ttl">Visit Log</span><span class="lvl">PCA / CNA</span></div>
         <div class="body">
           <p class="auto"><b>Margaret W.</b> &middot; 2:00&ndash;6:00 PM &middot; Tier 2</p>
@@ -142,18 +190,19 @@
           <div class="ck"><span class="box on"><i class="ti ti-check"></i></span>Medication reminder given</div>
           <div class="ck"><span class="box"></span>Meal preparation</div>
           <div class="ck"><span class="box"></span>Transfers / mobility</div>
-          <p class="grp">Vitals &middot; CNA, competency-verified</p>
-          <div class="vit"><div class="fld"><label>BP</label><div class="inp">128/76</div></div><div class="fld"><label>Pulse</label><div class="inp">72</div></div></div>
+          <p class="grp">Vitals &middot; CNA, competency-gated</p>
+          <div class="vit"><div class="fld"><label>BP</label><div class="inp">128/76</div></div><div class="fld"><label>Pulse</label><div class="inp">72</div></div><div class="fld"><label>Glucose</label><div class="inp">104</div></div></div>
+          <div class="ck"><span class="box"></span>Intake &amp; output recorded</div>
           <button class="btn">Submit visit log</button>
         </div>
-      </div></div>
-      <p class="cap">PCA/CNA: ADLs, reminders, behavioral, and vitals for CNA.</p>
+      </div><div class="home"></div></div>
+      <p class="cap">PCA: ADLs + reminders (meds reminder-only). CNA adds competency-gated vitals, glucose, I&amp;O.</p>
     </div>
 
     <div class="col">
       <p class="eyebrow">Visit log · LPN skilled</p>
-      <div class="phone"><div class="screen">
-        <div class="sbar"><span>9:41</span><span class="dots">&#9679;&#9679;&#9679;&#9679;&#9679; 5G</span></div>
+      <div class="phone"><div class="island"></div><div class="screen">
+        <div class="sbar"><span>9:41</span><span class="si"><i class="ti ti-cell-signal-4"></i><i class="ti ti-wifi"></i><i class="ti ti-battery-3"></i></span></div>
         <div class="hdr"><i class="ti ti-chevron-left"></i><span class="ttl">Skilled Note</span><span class="lvl">LPN</span></div>
         <div class="body">
           <p class="auto"><b>Margaret W.</b> &middot; 2:00&ndash;6:00 PM &middot; skilled visit</p>
@@ -163,17 +212,18 @@
           <div class="ck"><span class="box"></span>Injection</div>
           <div class="ck"><span class="box"></span>Catheter care</div>
           <div class="fld" style="margin-top:12px"><label>Clinical observation</label><div class="inp ph">Wound healing, no drainage&hellip;</div></div>
-          <div class="pend"><i class="ti ti-cloud-lock"></i><div><b>Pending review</b><span>Routes to OpenEMR once connected.</span></div></div>
+          <div class="fld"><label>Additional notes &middot; optional</label><div class="inp ph">Anything else for the reviewing FNP&hellip;</div></div>
+          <div class="pend"><i class="ti ti-cloud-check"></i><div><b>Pending review</b><span>On FNP sign-off, files to the patient's OpenEMR chart.</span></div></div>
           <button class="btn">Submit for review</button>
         </div>
-      </div></div>
-      <p class="cap">LPN skilled note. Held as pending review, routes to OpenEMR on connect.</p>
+      </div><div class="home"></div></div>
+      <p class="cap">LPN skilled note. Held as pending review; files to OpenEMR on FNP sign-off.</p>
     </div>
 
     <div class="col">
       <p class="eyebrow">Escalation · flag a concern</p>
-      <div class="phone"><div class="screen">
-        <div class="sbar"><span>9:41</span><span class="dots">&#9679;&#9679;&#9679;&#9679;&#9679; 5G</span></div>
+      <div class="phone"><div class="island"></div><div class="screen">
+        <div class="sbar"><span>9:41</span><span class="si"><i class="ti ti-cell-signal-4"></i><i class="ti ti-wifi"></i><i class="ti ti-battery-3"></i></span></div>
         <div class="hdr"><i class="ti ti-chevron-left"></i><span class="ttl">Flag a concern</span><span></span></div>
         <div class="body">
           <h3>What's going on?</h3>
@@ -183,9 +233,11 @@
           <div class="opt urg"><i class="ti ti-urgent"></i><div><b>Safety &mdash; urgent</b><span>Needs immediate attention</span></div></div>
           <p class="grp">Will notify</p>
           <div class="notif"><span class="av">CW</span><div><b>Courtney W.</b><span>Case manager &middot; in-app + push</span></div></div>
+          <p class="grp">Tracked until resolved</p>
+          <div class="stat"><span class="st on">Raised</span><i class="ti ti-chevron-right"></i><span class="st">Received</span><i class="ti ti-chevron-right"></i><span class="st">Acknowledged</span><i class="ti ti-chevron-right"></i><span class="st">Resolved</span></div>
           <button class="btn">Send alert</button>
         </div>
-      </div></div>
+      </div><div class="home"></div></div>
       <p class="cap">Two taps. The app routes to the right person, then tracks until resolved.</p>
     </div>
 
