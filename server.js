@@ -5244,6 +5244,15 @@ app.post('/api/gfc/care-plan/cosign', authenticateToken, requireEnrolledClient, 
   try {
     const version = req.body && req.body.version;
     if (version == null) return res.status(400).json({ error: 'version is required' });
+    // Drawn signature (canvas PNG data URL) — same mechanism as the provider ROI;
+    // the co-signature is the legal artifact of agreement, so it is required.
+    const signatureImageB64 = req.body && req.body.signatureImageB64;
+    if (typeof signatureImageB64 !== 'string' || !/^data:image\/png;base64,/.test(signatureImageB64)) {
+      return res.status(400).json({ error: 'A drawn signature is required' });
+    }
+    if (signatureImageB64.length > 600 * 1024) {
+      return res.status(413).json({ error: 'Signature image is too large' });
+    }
     const client = await resolveGfcClientRecord(req.user);
     if (!client) return res.status(404).json({ error: 'No client record on file' });
     // Family (read-only) may not co-sign — only the client.
@@ -5255,7 +5264,7 @@ app.post('/api/gfc/care-plan/cosign', authenticateToken, requireEnrolledClient, 
     const ipHash = roiRepo.hashIp(req.headers['x-forwarded-for'] || req.socket?.remoteAddress, JWT_SECRET);
     users[idx].carePlanCoSign = {
       ...(users[idx].carePlanCoSign || {}),
-      [`v${version}`]: { at, name: users[idx].preferredName || users[idx].name || 'Client', ipHash }
+      [`v${version}`]: { at, name: users[idx].preferredName || users[idx].name || 'Client', ipHash, signatureImage: signatureImageB64 }
     };
     await db.set('users', users);
     invalidateUsersCache();

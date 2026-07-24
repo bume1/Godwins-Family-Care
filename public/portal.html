@@ -356,11 +356,11 @@
           body: JSON.stringify(payload)
         }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
 
-      coSignGfcCarePlan: (token, version) =>
+      coSignGfcCarePlan: (token, version, signatureImageB64) =>
         fetch(`${API_URL}/api/gfc/care-plan/cosign`, {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ version })
+          body: JSON.stringify({ version, signatureImageB64 })
         }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
 
     };
@@ -4472,9 +4472,48 @@
       const [coSigned, setCoSigned] = useState(!!cp.coSignedAt);
       const [coSignBusy, setCoSignBusy] = useState(false);
       const [coSignErr, setCoSignErr] = useState('');
+      // Canvas signature pad — same drawn-signature mechanism as the provider ROI.
+      const sigCanvasRef = useRef(null);
+      const sigState = useRef({ drawing: false, empty: true });
+      const padVisible = !readOnly && !coSigned;
+      useEffect(() => {
+        if (!padVisible) return;
+        const canvas = sigCanvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        const ratio = window.devicePixelRatio || 1;
+        const w = canvas.offsetWidth || 400;
+        canvas.width = w * ratio; canvas.height = 130 * ratio;
+        ctx.scale(ratio, ratio);
+        ctx.strokeStyle = '#033D50'; ctx.lineWidth = 2; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        sigState.current = { drawing: false, empty: true };
+        const pos = (e) => { const r = canvas.getBoundingClientRect(); const s = e.touches ? e.touches[0] : e; return { x: s.clientX - r.left, y: s.clientY - r.top }; };
+        const down = (e) => { sigState.current.drawing = true; const p = pos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); };
+        const move = (e) => { if (!sigState.current.drawing) return; e.preventDefault && e.preventDefault(); const p = pos(e); ctx.lineTo(p.x, p.y); ctx.stroke(); sigState.current.empty = false; };
+        const up = () => { sigState.current.drawing = false; };
+        canvas.addEventListener('mousedown', down); canvas.addEventListener('mousemove', move);
+        canvas.addEventListener('mouseup', up); canvas.addEventListener('mouseleave', up);
+        canvas.addEventListener('touchstart', down, { passive: false });
+        canvas.addEventListener('touchmove', move, { passive: false });
+        canvas.addEventListener('touchend', up);
+        return () => {
+          canvas.removeEventListener('mousedown', down); canvas.removeEventListener('mousemove', move);
+          canvas.removeEventListener('mouseup', up); canvas.removeEventListener('mouseleave', up);
+          canvas.removeEventListener('touchstart', down); canvas.removeEventListener('touchmove', move);
+          canvas.removeEventListener('touchend', up);
+        };
+      }, [padVisible, cp.version]);
+      const clearSig = () => {
+        const canvas = sigCanvasRef.current; if (!canvas) return;
+        canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+        sigState.current.empty = true;
+      };
       const handleCoSign = async () => {
-        setCoSignErr(''); setCoSignBusy(true);
-        const res = await api.coSignGfcCarePlan(token, cp.version);
+        setCoSignErr('');
+        if (sigState.current.empty) { setCoSignErr('Please draw your signature before co-signing.'); return; }
+        const signatureImageB64 = sigCanvasRef.current.toDataURL('image/png');
+        setCoSignBusy(true);
+        const res = await api.coSignGfcCarePlan(token, cp.version, signatureImageB64);
         setCoSignBusy(false);
         if (res.error) { setCoSignErr(res.error); return; }
         setCoSigned(true);
@@ -4538,12 +4577,19 @@
             <React.Fragment>
               <p className="lbl">Your co-signature</p>
               <div className="card" style={{ margin: 0 }}>
-                <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: 22, fontWeight: 600, color: 'var(--navy)', borderBottom: '1px solid var(--line2)', paddingBottom: 8, marginBottom: 8 }}>{data.greetingName}</div>
                 {coSigned ? (
-                  <div className="goal" style={{ margin: 0 }}><i className="ti ti-circle-check" style={{ color: 'var(--teal)' }} />You co-signed care plan v{cp.version} · versions are retained.</div>
+                  <React.Fragment>
+                    <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: 22, fontWeight: 600, color: 'var(--navy)', borderBottom: '1px solid var(--line2)', paddingBottom: 8, marginBottom: 8 }}>{data.greetingName}</div>
+                    <div className="goal" style={{ margin: 0 }}><i className="ti ti-circle-check" style={{ color: 'var(--teal)' }} />You co-signed care plan v{cp.version} · versions are retained.</div>
+                  </React.Fragment>
                 ) : (
                   <React.Fragment>
-                    <div className="goal" style={{ margin: 0, alignItems: 'flex-start' }}><i className="ti ti-square-check" style={{ color: 'var(--navy)' }} />I reviewed this plan and agree to it · co-signature required, every version kept.</div>
+                    <div className="goal" style={{ margin: '0 0 10px', alignItems: 'flex-start' }}><i className="ti ti-square-check" style={{ color: 'var(--navy)' }} />I reviewed this plan and agree to it · sign below. Co-signature required, every version kept.</div>
+                    <div style={{ position: 'relative', border: '1px solid var(--line2)', borderRadius: 10, background: '#fff' }}>
+                      <canvas ref={sigCanvasRef} style={{ display: 'block', width: '100%', height: 130, touchAction: 'none' }} />
+                      <button type="button" onClick={clearSig} style={{ position: 'absolute', top: 6, right: 8, background: 'none', border: 'none', color: 'var(--mut)', fontSize: 12, cursor: 'pointer' }}>Clear</button>
+                    </div>
+                    <div style={{ fontSize: 11.5, color: 'var(--mut)', margin: '6px 0 10px' }}>Draw your signature above — {data.greetingName}</div>
                     <button className="btn" disabled={coSignBusy} onClick={handleCoSign}>{coSignBusy ? 'Signing…' : `Co-sign care plan v${cp.version}`}</button>
                     {coSignErr && <div className="err">{coSignErr}</div>}
                   </React.Fragment>
