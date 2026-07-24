@@ -4,6 +4,23 @@
 
 ---
 
+### Version 3.3.0 - June 24, 2026
+
+#### New Features
+- Add files via upload
+- Add files via upload
+
+#### Documentation
+- refresh GFC specs — intake v1.1 (Track A/B vocab), App Build v2, add Session Plan + Session 3 prompt
+
+#### Changes
+- Pin Babel CDN versions to prevent blank pages on load
+- Delete docs/GFC_Intake_and_Packet_Spec_v1.md
+- Delete docs/source-forms/template-gfc-intake-3.php
+- Session 3.2: Enrollment confirmation email + signed packet in portal
+- Session 3.2: Gated enrollment intake (Stage 2)
+
+
 ### Version 3.2.0 - June 10, 2026
 
 #### New Features

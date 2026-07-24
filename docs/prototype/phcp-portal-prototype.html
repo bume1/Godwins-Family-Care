@@ -17,10 +17,13 @@
   .board{display:flex;flex-wrap:wrap;justify-content:center;gap:40px 36px;max-width:1320px;margin:0 auto}
   .col{display:flex;flex-direction:column;align-items:center}
   .eyebrow{font-size:11px;font-weight:500;letter-spacing:1.4px;text-transform:uppercase;color:var(--goldd);margin-bottom:10px}
-  .cap{font-family:'Cormorant Garamond',serif;font-size:18px;color:var(--navy);max-width:300px;text-align:center;line-height:1.3;margin-top:14px}
-  .phone{width:300px;background:#0e0f11;border-radius:40px;padding:9px;box-shadow:0 14px 40px rgba(3,61,80,.22)}
-  .screen{background:var(--cream);border-radius:32px;overflow:hidden}
-  .sbar{display:flex;justify-content:space-between;align-items:center;padding:9px 18px 4px;font-size:12px;font-weight:500;color:var(--navy)}
+  .cap{font-family:'Cormorant Garamond',serif;font-size:18px;color:var(--navy);max-width:393px;text-align:center;line-height:1.3;margin-top:14px}
+  .phone{position:relative;width:411px;background:#0e0f11;border-radius:53px;padding:9px;box-shadow:0 14px 40px rgba(3,61,80,.22)}
+  .screen{position:relative;width:393px;height:852px;background:var(--cream);border-radius:45px;overflow-y:auto}
+  .island{position:absolute;top:20px;left:50%;transform:translateX(-50%);width:118px;height:33px;background:#0e0f11;border-radius:20px;z-index:6}
+  .home{position:absolute;bottom:17px;left:50%;transform:translateX(-50%);width:138px;height:5px;border-radius:3px;background:rgba(0,0,0,.32);z-index:6}
+  .sbar{display:flex;justify-content:space-between;align-items:center;padding:15px 30px 7px;font-size:15px;font-weight:600;color:var(--navy)}
+  .sbar .si{display:flex;align-items:center;gap:6px;font-size:16px}
   .dots{letter-spacing:1px}
   .hdr{background:var(--navy);padding:13px 16px;display:flex;align-items:center;justify-content:space-between;gap:8px}
   .hdr .ttl{font-family:'Cormorant Garamond',serif;font-size:20px;color:var(--cream)}
@@ -40,7 +43,7 @@
   .step:last-child{border-bottom:none}.step.off{color:#8a8378}
   .chip{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0}
   .done{background:var(--gold);color:var(--navy)}.now{background:var(--navy);color:var(--gold)}.lk{background:#e7e1d6;color:#8a8378}
-  .btn{width:100%;background:var(--goldd);color:var(--navy);border:none;border-radius:9px;padding:13px;font-family:'DM Sans',sans-serif;font-size:14.5px;font-weight:500;cursor:pointer}
+  .btn{width:100%;background:var(--gold);color:var(--navy);border:none;border-radius:9px;padding:13px;font-family:'DM Sans',sans-serif;font-size:14.5px;font-weight:500;cursor:pointer}
   .btn:hover{background:var(--goldd)}
   .navlocks{display:flex;flex-wrap:wrap;gap:7px;margin-top:14px}
   .nl{display:flex;align-items:center;gap:5px;background:#efe9dd;border-radius:7px;padding:7px 9px;font-size:12px;color:#7c756a}.nl i{font-size:13px}
@@ -93,14 +96,14 @@
   <div class="head">
     <p class="e">Godwins Family Care · Private Home Care</p>
     <h1>PHCP Portal Prototype</h1>
-    <p>The PHCP spine: the enrollment gate, the unlocked client dashboard, the family monitoring view, and the staff care-match. Brand: navy #033D50, gold #F5CD85, cream #FAF7F2, Cormorant Garamond + DM Sans.</p>
+    <p>The PHCP spine: the enrollment gate, the unlocked client dashboard (one portal, superset &mdash; clinical reads render only for in-home medical clients), the family care feed (ROI-gated), the staff care-match, and shift scheduling. Brand: navy #033D50, gold #F5CD85, cream #FAF7F2, Cormorant Garamond + DM Sans.</p>
   </div>
   <div class="board">
 
     <div class="col">
       <p class="eyebrow">Client portal · the gate</p>
-      <div class="phone"><div class="screen">
-        <div class="sbar"><span>9:41</span><span class="dots">&#9679;&#9679;&#9679;&#9679;&#9679; 5G</span></div>
+      <div class="phone"><div class="island"></div><div class="screen">
+        <div class="sbar"><span>9:41</span><span class="si"><i class="ti ti-cell-signal-4"></i><i class="ti ti-wifi"></i><i class="ti ti-battery-3"></i></span></div>
         <div class="hdr"><i class="ti ti-chevron-left"></i><span class="ttl">My Care Portal</span><i class="ti ti-menu-2"></i></div>
         <div class="body">
           <h3>Welcome, Margaret</h3>
@@ -120,14 +123,14 @@
             <span class="nl"><i class="ti ti-lock"></i>Messages</span>
           </div>
         </div>
-      </div></div>
+      </div><div class="home"></div></div>
       <p class="cap">Nothing opens until intake and consents are signed.</p>
     </div>
 
     <div class="col">
       <p class="eyebrow">Client portal · unlocked</p>
-      <div class="phone"><div class="screen">
-        <div class="sbar"><span>9:41</span><span class="dots">&#9679;&#9679;&#9679;&#9679;&#9679; 5G</span></div>
+      <div class="phone"><div class="island"></div><div class="screen">
+        <div class="sbar"><span>9:41</span><span class="si"><i class="ti ti-cell-signal-4"></i><i class="ti ti-wifi"></i><i class="ti ti-battery-3"></i></span></div>
         <div class="hdr"><span class="ttl">My Care</span><i class="ti ti-bell"></i></div>
         <div class="body">
           <h3>Good morning, Margaret</h3>
@@ -146,18 +149,23 @@
             <div class="tile"><span class="badge">2</span><i class="ti ti-message"></i><span class="tlb">Messages</span><span class="tsb">From your care team</span></div>
             <div class="tile"><i class="ti ti-file-text"></i><span class="tlb">Documents</span><span class="tsb">Consents signed</span></div>
             <div class="tile"><i class="ti ti-users"></i><span class="tlb">Care team</span><span class="tsb">Joelle, Bethel +1</span></div>
-            <div class="tile"><i class="ti ti-device-tv"></i><span class="tlb">Continuous Care</span><span class="livedot"><span class="d"></span>Live</span></div>
+            <div class="tile"><i class="ti ti-video"></i><span class="tlb">Monitoring</span><span class="tsb">Coming soon &middot; opt-in</span></div>
+          </div>
+          <p class="lbl" style="margin-top:14px">Health record &middot; medical care clients</p>
+          <div class="tiles">
+            <div class="tile"><i class="ti ti-report-medical"></i><span class="tlb">Visit summaries</span><span class="tsb">From Bethel, FNP</span></div>
+            <div class="tile"><i class="ti ti-pill"></i><span class="tlb">Medications</span><span class="tsb">From your chart</span></div>
           </div>
         </div>
-      </div></div>
-      <p class="cap">What opens once enrollment is complete.</p>
+      </div><div class="home"></div></div>
+      <p class="cap">One portal, superset: personal-care sections for all; health-record reads appear only for medical-care clients.</p>
     </div>
 
     <div class="col">
-      <p class="eyebrow">Family view · monitoring</p>
-      <div class="phone"><div class="screen">
-        <div class="sbar"><span>9:41</span><span class="dots">&#9679;&#9679;&#9679;&#9679;&#9679; 5G</span></div>
-        <div class="hdr"><i class="ti ti-chevron-left"></i><span class="ttl">Mom &middot; Today</span><span class="live"><span class="d"></span>LIVE</span></div>
+      <p class="eyebrow">Family view · care feed</p>
+      <div class="phone"><div class="island"></div><div class="screen">
+        <div class="sbar"><span>9:41</span><span class="si"><i class="ti ti-cell-signal-4"></i><i class="ti ti-wifi"></i><i class="ti ti-battery-3"></i></span></div>
+        <div class="hdr"><i class="ti ti-chevron-left"></i><span class="ttl">Mom &middot; Today</span><span class="r">UPDATED 12:31 PM</span></div>
         <div class="body">
           <div class="banner"><span class="live"><span class="d"></span></span><div><b>Joelle arrived</b><br><span>9:02 AM &middot; check-in confirmed</span></div></div>
           <p class="eyebrow">Today's care</p>
@@ -167,25 +175,47 @@
           <div class="tl flag"><span class="t">12:05</span><b>Note from caregiver</b><span>Slightly more confused than yesterday &mdash; flagged to clinical.</span></div>
           <div class="next"><span class="e">Next video check-in</span><b>Wed 3:00 PM</b><span>with Bethel, FNP</span></div>
         </div>
-      </div></div>
+      </div><div class="home"></div></div>
       <p class="cap">Family sees each visit as it happens. Opens only after ROI is signed.</p>
     </div>
 
     <div class="col">
       <p class="eyebrow">Staff view · care match</p>
-      <div class="phone"><div class="screen">
-        <div class="sbar"><span>9:41</span><span class="dots">&#9679;&#9679;&#9679;&#9679;&#9679; 5G</span></div>
+      <div class="phone"><div class="island"></div><div class="screen">
+        <div class="sbar"><span>9:41</span><span class="si"><i class="ti ti-cell-signal-4"></i><i class="ti ti-wifi"></i><i class="ti ti-battery-3"></i></span></div>
         <div class="hdr"><i class="ti ti-chevron-left"></i><span class="ttl">Care Match</span><span class="r">MARGARET W.</span></div>
         <div class="body">
-          <p class="lead">3 caregivers suited to this client</p>
+          <p class="lead">14 checked &middot; 6 passed hard filters &middot; ranked by Care Match %</p>
           <div class="cg sel"><div class="av" style="background:#F5CD85">JT</div><div class="info"><div class="nm">Joelle T., LPN-track</div><div class="mt">Dementia &middot; Overnight &middot; Marietta</div></div><div class="pct">98%</div></div>
-          <div class="tags"><span class="tag">&#10003; Clinical fit</span><span class="tag">&#10003; Personality</span><span class="tag">&#10003; Schedule</span><span class="tag">&#10003; 12 mi away</span></div>
+          <div class="tags"><span class="tag">&#10003; License &amp; scope</span><span class="tag">&#10003; Availability</span><span class="tag">&#10003; 12 mi away</span><span class="tag">&#10003; Personality</span></div>
+          <a class="plink">See score breakdown &rarr;</a>
           <div class="cg alt"><div class="av" style="background:#CECBF6">AR</div><div class="info"><div class="nm">Adaeze R., CNA</div><div class="mt">Behavioral &middot; Days &middot; Smyrna</div></div><div class="pct">94%</div></div>
           <div class="cg alt"><div class="av" style="background:#9FE1CB">MS</div><div class="info"><div class="nm">Marcus S., LPN-track</div><div class="mt">Post-stroke &middot; Nights &middot; Kennesaw</div></div><div class="pct">89%</div></div>
           <button class="btn">Assign &amp; notify family</button>
         </div>
-      </div></div>
-      <p class="cap">Staff match on clinical need, behavior, personality, schedule, continuity.</p>
+      </div><div class="home"></div></div>
+      <p class="cap">Hard filters build the pool; a weighted, explainable score ranks it. Deterministic, admin-tunable.</p>
+    </div>
+
+    <div class="col">
+      <p class="eyebrow">Staff view · shift scheduling</p>
+      <div class="phone"><div class="island"></div><div class="screen">
+        <div class="sbar"><span>9:41</span><span class="si"><i class="ti ti-cell-signal-4"></i><i class="ti ti-wifi"></i><i class="ti ti-battery-3"></i></span></div>
+        <div class="hdr"><i class="ti ti-chevron-left"></i><span class="ttl">Scheduling</span><span class="r">MARGARET W.</span></div>
+        <div class="body">
+          <div class="plan">
+            <div class="pe">Recurring pattern</div>
+            <div class="prow"><div class="av" style="background:#F5CD85">JT</div><div><div class="nm2">Mon · Wed · Fri, 2:00 to 6:00 PM</div><div class="rl">Joelle T., primary caregiver</div></div></div>
+          </div>
+          <p class="lbl">Week of Jul 28</p>
+          <div class="visit"><span class="vt">Mon<br>2:00 PM</span><div class="vmain"><b>Personal care · Joelle T.</b><span>Confirmed</span></div></div>
+          <div class="visit"><span class="vt">Wed<br>2:00 PM</span><div class="vmain"><b>Personal care · Joelle T.</b><span>Confirmed</span></div></div>
+          <div class="visit hl"><span class="vt">Fri<br>9:00 AM</span><div class="vmain"><b>Coverage needed</b><span>Joelle is out Fri. Ranked backups below.</span></div></div>
+          <div class="cg alt"><div class="av" style="background:#CECBF6">AR</div><div class="info"><div class="nm">Adaeze R., CNA</div><div class="mt">Backup on Margaret's care team · available Fri</div></div><div class="pct">94%</div></div>
+          <button class="btn">Offer Fri shift to Adaeze</button>
+        </div>
+      </div><div class="home"></div></div>
+      <p class="cap">PHCP shifts live in the app. Offers go to the caregiver's schedule to accept. Clinical visits book separately in OpenEMR.</p>
     </div>
 
   </div>

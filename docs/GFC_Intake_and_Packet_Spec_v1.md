@@ -6,7 +6,7 @@
 **Sources reviewed:** `template-gfc-intake.php` (digital Assessment + Intake), the scanned paper packet (Face Sheet, Nursing Assessment, Service Plan, Medication Form, Pain Assessment, Care Instructions, Service Agreement, Bill of Rights, Supervisory note), the GFC build prompt/plan, and the service-line handout.
 **Not legal advice.** The consent language below is a working draft. Have counsel or your Georgia licensure consultant review it against PCH/home-care rules and, for the primary care arm, Medicare conditions of participation before it goes live.
 **Companion to** `GFC_App_Build_v2.md` (the master guide). This holds the field-level intake detail; the guide holds the architecture and sequencing.
-**Visual reference:** `docs/prototype/client-prototype-full.html` is the build target for the client portal + intake screens (Session 3); `docs/prototype/phcp-portal-prototype.html` also shows the gate and family-monitoring views.
+**Visual reference (updated 07/2026):** `docs/prototype/client-prototype-full.html` is the build target for the client portal + intake screens (Session 3); `docs/prototype/phcp-portal-prototype.html` also shows the gate and family-monitoring views.
 
 ---
 
@@ -109,6 +109,8 @@ The form already knows which arm the client chose. Branch the consent page on it
 Every consent: typed name + acknowledgment checkbox + server-side timestamp and IP. Store a consent **status per type** (Service Agreement, ROI-family, ROI-provider, `roiTransfer`, monitoring) so it maps directly to the app's consent records and drives the family-portal gate. The app should refuse to activate the family portal until ROI-family is signed, with no manual override.
 
 **Transfer-of-Care ROI exception.** The Transfer-of-Care ROI uses canvas signature capture rather than typed name, because it produces provider-facing PDFs that need an actual signature image. All other elements (timestamp, IP, status per type) apply. This ROI spawns a parent `consent_events` record plus one `consent_provider_authorizations` child row per authorized prior provider, plus `consent_records_categories` rows for each checked record type. Server-side must validate all 45 CFR 164.508 required elements (description of information, purpose, expiration, right to revoke, redisclosure statement, signature, date) before saving. 42 CFR Part 2 protected categories (substance use, mental health, HIV/AIDS, genetic testing) are gated behind a separate opt-in that defaults FALSE and MUST be enforced at the query layer, not just the UI.
+
+**Offline provenance (added 07/2026, Session 3.3).** A `signed_offline` status is valid alongside `signed` for every consent type: it marks a consent executed on paper before the app (the 7 legacy patients) and satisfies the enrollment gate identically to `signed`, while preserving provenance for audit. New patients always sign in-app; `signed_offline` is set only through the admin offline-onboarding flow or the one-shot import script.
 
 ---
 

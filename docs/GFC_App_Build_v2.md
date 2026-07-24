@@ -13,7 +13,14 @@ This guide is the index and source of truth. The detail lives in:
 - `GFC_Matching_Engine_Spec_v1.md` — caregiver ↔ client matching algorithm.
 - `GFC_Client_Care_Profile_Schema_v1.md` — client data model (includes `careTeam`).
 - `GFC_Caregiver_Profile_Schema_v1.md` — caregiver data model (includes `licenseLevel`).
-- `docs/prototype/` — **visual reference prototypes** (sibling of `docs/design-system/`). Three files: `client-prototype-full.html` (full client journey — Session 3 build target), `caregiver-app-prototype.html` (caregiver app — Session 4 build target), and `phcp-portal-prototype.html` (gate, family monitoring, and the staff Care Match screen — reference for both). Code builds from the specs + design system; the prototypes show what the result should look like.
+- `docs/prototype/` — **visual reference prototypes** (sibling of `docs/design-system/`). Updated 07/2026:
+  - `client-prototype-full.html` — full client journey: Stage 1 public assessment → Stage 2 token intake + branched consents → enrolled portal (care plan & co-sign, messages, documents). Session 3 build target.
+  - `caregiver-app-prototype.html` — caregiver mobile app: home, schedule, license-branched visit logs (Sitter / PCA-CNA / LPN skilled), two-tap escalation. Session 6 build target.
+  - `phcp-portal-prototype.html` — enrollment gate, unlocked client portal, family care feed, staff Care Match, staff shift scheduling. Reference for Sessions 3, 7, 8, 10.
+  - `clinical-emr-prototype-v1.html` + `clinical-emr-mobile-prototype-v1.html` — clinician workspace over OpenEMR (desktop + mobile). **Session 4.1/4.2 build targets.**
+  - `patient-portal-prototype-v2.html` — patient portal including the clinical read views. **Session 4.3 build target.**
+
+  Code builds from the specs + design system; the prototypes show what the result should look like.
 
 ---
 
@@ -167,6 +174,8 @@ Full field-level detail lives in `GFC_Intake_and_Packet_Spec_v1.md`. The build-r
 ### 5.4 PHCP data model (RDS, in-boundary)
 `clients` (incl. `enrollmentStatus`, `monitoringOptIn`, `careTeam`, `priorProviders`), `family_contacts`, `caregivers` (incl. `licenseLevel`), `consents` (status per type, including `roiTransfer`), `consent_events` + `consent_provider_authorizations` + `consent_records_categories` (parent/child for the multi-provider Transfer-of-Care ROI built in Session 3.4), `care_plans` (versioned), `visit_logs` (tier-branched), `messages`, `shifts`, `availability`, `escalation_events`, `monitoring_events` (scaffold, see §11), `audit_log`. Documents by reference to Drive, not stored in the DB.
 
+**Document routing rule (07/2026).** Two document homes, each with a job. **Drive (BAA):** consents, intake paperwork, service agreements, and anything a client or family views through the portal — collected by the app, works across both service lines. **OpenEMR document area:** records *received for clinical care* (hospital discharge summaries, specialist reports, prior records obtained via ROI) for Track B clients — filed to the patient's chart via REST `POST /api/patient/:puuid/document` so the FNP has them chart-side. The typed clinical chart (notes, meds, problems, care plans) is OpenEMR data either way. Never split one category across both stores. Detail + verification row: `GFC_OpenEMR_Deploy_Setup_Guide_v2.pdf` Phase 10 and Appendix D.
+
 ### 5.5 Caregiver & clinician workspace
 Detail in `GFC_Caregiver_Workspace_Spec_v1.md`. Repurpose the repo's service portal into two surfaces:
 - **Mobile caregiver app** — 4-tab (Home, Feed, Clients, More). Where Sitters, PCAs, CNAs, and LPNs work.
@@ -187,7 +196,7 @@ Detail in `GFC_Matching_Engine_Spec_v1.md`. Two stages: **hard filters** (licens
 **Model: one patient record in OpenEMR, two role-scoped views.** The clinician charts from a clinician-scoped view of the patient's chart (write); the patient sees a filtered read of the same record. The app is a front end over OpenEMR — it never duplicates the clinical record.
 
 - Stand up the FHIR client against OpenEMR (OAuth2).
-- **Clinician workspace (write):** patient list/search → open a patient's chart → document the initial comprehensive visit (H&P), med reconciliation, problem list, care plan, notes — all to OpenEMR.
+- **Clinician workspace (write):** patient list/search → open a patient's chart → document the initial comprehensive visit (H&P), med reconciliation, problem list, care plan, notes — all to OpenEMR. Received clinical records (per the §5.4 document routing rule) file to the patient's OpenEMR document area and surface in this workspace. **Integration is two-lane: FHIR for reads (and Patient write), OpenEMR's Standard REST API for most clinical writes (encounter, notes, vitals, problems, documents) — see the compatibility matrix in `GFC_OpenEMR_Deploy_Setup_Guide_v2.pdf` Appendix D; verify each row against the live server before coding.**
 - **Clinician scheduling (OpenEMR-tied):** provider appointments managed in the app but tied to OpenEMR's appointment/calendar, so a booked visit is an OpenEMR appointment linked to the billable encounter. Same UX pattern as PHCP scheduling, **different backend** — clinical → OpenEMR, PHCP caregiver shifts → app/RDS. Two scheduling systems by design.
 - **Patient portal clinical read (fast-follow):** the Session 3 portal shell surfaces the patient's own clinical data from OpenEMR (visit summaries, meds, care plan), filtered per sharing rules, read-only, scoped to that patient. Not OpenEMR's native portal.
 - In-Home Primary Care intake branch + its medical consents (consent to treat, assignment of benefits, practice NPP).
@@ -257,14 +266,14 @@ Consent-gated remote patient monitoring with in-home video, viewable by internal
 
 ## 13. Track D — Billing overview
 
-Three distinct billing patterns, one app. Vendor stack locked. Detail spec lives in `GFC_Billing_Architecture_Spec_v1.md` (to be created). Phase summary:
+Three distinct billing patterns, one app. Vendor stack locked. Detail spec `GFC_Billing_Architecture_Spec_v1.md` **is to be written before any B-session prompt is executed** — this section is the phase map, not the field-level detail. Phase summary:
 
 - **B1 Eligibility check.** Real-time payer eligibility (270/271) via **Availity** API. Called from a client profile at intake and again before each visit. Returns coverage status, copay, deductible met/remaining, and effective dates onto the client record. Buildable now. No OpenEMR dependency.
 - **B2 Patient payment (Stripe).** Card on file plus one-time charge for estimated copay at time of service. Reconciles against ERA when it posts. Strict PHI segregation: neutral descriptors only (e.g. "Office visit"), no clinical text in Stripe payloads. Automated test enforcement — the build fails if a diagnosis code, procedure code, or clinical term leaks into a Stripe payload, receipt, metadata field, or webhook. Buildable now.
 - **B3 PHC automated invoicing.** From `time_logs` × `rate_card` (with `client_rate_overrides` applied), generate an invoice PDF, send via HIPAA Google Workspace Gmail with a Stripe payment link. Track paid/unpaid status in RDS. Depends on Session 7 (PHCP time tracking) and B4.
 - **B4 Rate card + sliding-scale overrides.** Master `rate_card` table sets default rates keyed by `service_line` (PHC, PCHP, HBPC, IME), tier, unit, effective date, retirement date. Separate `client_rate_overrides` table holds per-client custom dollar amounts (sliding-scale) with reason code, effective date, retirement date. Invoice generator checks override first, falls back to card default. Clinical rates (PCHP, HBPC) are set by CMS fee schedule and payer contracts and are NOT subject to sliding scale — the `service_line` column enforces that separation. Foundational for B3 and B7.
 - **B5 OpenEMR integration.** Read balances, post payments, ingest ERAs. OpenEMR is live; this phase wires the portal to it via FHIR/REST + OAuth2. See §15 for the OpenEMR configs Bianca needs help with.
-- **B6 Clearinghouse (Availity) connection.** 837P out, 835 in, 999 + 277CA status codes handled. Configured inside OpenEMR pointing at Availity endpoints. Portal side is a claim-status dashboard for Admin. Depends on B5 and payer-by-payer Availity enrollment.
+- **B6 Clearinghouse (Availity) connection.** 837P out, 835 in, 999 + 277CA status codes handled. Configured inside OpenEMR pointing at Availity endpoints. Payer enrollment is done payer-by-payer inside the Availity portal, not in OpenEMR. Portal side is a claim-status dashboard for Admin. Depends on B5 and payer-by-payer Availity enrollment.
 - **B7 IME / C&P contract invoicing.** From `exam_logs` (Track E) × contract terms, generate GFC-to-LSGS/Leidos invoice, track contractor payment records to FNPs from that revenue. Depends on §14 exam capture.
 
 **Superbill + self-pay path (built as first-class, not a workaround).** For payers GFC is not yet credentialed with, the app supports a self-pay flow: patient pays through Stripe at time of service, the app generates a properly coded superbill (diagnosis codes, CPT/HCPCS procedure codes, rendering provider NPI, tax ID, dates of service) that the patient submits to their insurance for out-of-network reimbursement. This is the default clinical billing path until each payer's credentialing completes.

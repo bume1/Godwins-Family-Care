@@ -4,15 +4,17 @@
 
 Each session ends in a PR you review and merge. **Companion to** `GFC_App_Build_v2.md` (architecture).
 
+**Prototypes updated 07/2026.** The clinical EMR prototypes (`clinical-emr-prototype-v1.html`, `clinical-emr-mobile-prototype-v1.html`) and `patient-portal-prototype-v2.html` are the Session 4 build targets. See the prototype list in `GFC_App_Build_v2.md` §Companion specs.
+
 ---
 
 ## Status at a glance
 | # | Session | Segment | Status |
 |---|---|---|---|
 | 0 | Infra — AWS + OpenEMR + BAAs (**OpenEMR live, configurations in progress**) | Shared | 🟡 In progress — see `GFC_App_Build_v2.md` §15 for config items still open |
-| 1 | Repo prep · rebrand · role model | Shared | ✅ Done |
-| 2 | Strip lab features · deactivate tracker · brand cleanup | Shared | 📄 Prompt ready |
-| 3 | Client portal + gated intake (both service paths) | Shared | 🔵 In progress — 3.1/3.2 built; **3.3 (staff enrollment view) and 3.4 (Transfer-of-Care ROI) not complete** |
+| 1 | Repo prep · rebrand · role model | Shared | ✅ Done (PR #2, #3) |
+| 2 | Strip lab features · deactivate tracker · brand cleanup | Shared | ✅ Done (PR #5, 2026-06-10; cleanup follow-ups completed 07/2026) |
+| 3 | Client portal + gated intake (both service paths) | Shared | 🔵 In progress — 3.1/3.2 built (PR #6, #7); **3.3 (staff enrollment view + offline onboarding + care-tier migration) and 3.4 (Transfer-of-Care ROI) not complete** |
 | 4 | **Clinical / In-Home Primary Care portal + OpenEMR** | Clinical | ⬜ Next priority |
 | 5 | **Clinical HIPAA go-live** (app → AWS boundary, MFA, audit, BAAs) | Clinical | ⬜ Planned |
 | 6 | Caregiver app | PHCP | ⬜ Planned |
@@ -22,22 +24,22 @@ Each session ends in a PR you review and merge. **Companion to** `GFC_App_Build_
 | 10 | Family portal | Shared | ⬜ Planned |
 | 11 | RPM / Continuous Care monitoring (scaffold → later) | Shared | ⬜ Planned |
 | 12 | Audit log UI + final HIPAA / BAA review | Shared | ⬜ Planned |
-| **B-series** | **Billing (Track D)** — eligibility, patient payments, rate card, PHC invoicing, OpenEMR integration, clearinghouse, IME contractor invoicing | **Billing** | ⬜ **Planned** — session prompts to be defined in `GFC_Billing_Architecture_Spec_v1.md`; scope + phase order per v2 §13 |
-| **E-series** | **IME / C&P Track E** — contractor exam capture, scheduling, hours rollup (feeds Track D B7) | **IME** | ⬜ **Planned** — spec per v2 §14 |
+| B-series | Billing (Track D) — eligibility, patient payments, rate card, PHC invoicing, OpenEMR integration, clearinghouse, IME contractor invoicing | Billing | ⬜ Planned — session prompts to be defined in `GFC_Billing_Architecture_Spec_v1.md` (to be written); scope + phase order per v2 §13 |
+| E-series | IME / C&P Track E — contractor exam capture, scheduling, hours rollup (feeds Track D B7) | IME | ⬜ Planned — spec per v2 §14 |
 
 ---
 
 ## Detail
 
-**Track 0 — Infra (accelerated, critical path).** AWS account + BAA, OpenEMR on AWS (live ~tonight), encrypted RDS, app hosting in the AWS boundary, Google Workspace BAA, secrets + MFA. Now front-loaded because clinical go-live is 1–2 weeks out.
+**Track 0 — Infra (accelerated, critical path).** AWS account + BAA, OpenEMR on AWS (**live, configurations in progress** — see v2 §15), encrypted RDS, app hosting in the AWS boundary, Google Workspace BAA, secrets + MFA.
 
 **Session 1 — Foundation.** ✅ Done. Rebrand, 6-role model + new fields, strip-list.
 
-**Session 2 — Strip + deactivate + brand cleanup.** Remove the lab modules, deactivate (keep) the tracker, strip lab HubSpot routes, delete lab notification templates, fix brand strings. Ref: `strip-list.md` + `strip-list-DECISIONS.md`.
+**Session 2 — Strip + deactivate + brand cleanup.** ✅ Done (PR #5). Lab modules removed, tracker deactivated, brand strings fixed. Cleanup follow-ups (dormant `service-portal.html` validation components, lab HubSpot connector) completed 07/2026. Ref: `strip-list.md` + `strip-list-DECISIONS.md`.
 
-**Session 3 — Client portal + gated intake.** Shared front door for BOTH service paths (the intake branches PHC vs IHPC consents). 3.1 portal + gate (built), 3.2 intake + consents (built), **3.3 staff enrollment-submissions view (not complete)**, **3.4 Transfer-of-Care Provider ROI (not complete — additive, can run in parallel with 3.3)**. Dev/test data only. Ref: client prototype, intake spec (`template-gfc-intake-3.php`), client schema. Session 3.4 additionally references the source-form pair `source-forms/gfc_roi_upload.gs` and `source-forms/template-gfc-roi-upload.php` and adds the `roiTransfer` consent status + `priorProviders` field group to the client schema.
+**Session 3 — Client portal + gated intake.** Shared front door for BOTH service paths (the intake branches PHC vs IHPC consents). 3.1 portal + gate (built, PR #6), 3.2 intake + consents (built, PR #7), **3.3 staff enrollment-submissions view + offline patient onboarding + care-tier code migration (prompt ready: `GFC_Session3.3_ClaudeCode_Prompt.md`)**, **3.4 Transfer-of-Care Provider ROI (prompt ready: `GFC_Session3.4_ClaudeCode_Prompt.md`; additive, can run in parallel with 3.3)**. Dev/test data only. Ref: `client-prototype-full.html`, `phcp-portal-prototype.html`, intake spec (`template-gfc-intake-3.php`), client schema. Session 3.4 additionally references the source-form pair `source-forms/gfc_roi_upload.gs` and `source-forms/template-gfc-roi-upload.php` and adds the `roiTransfer` consent status + `priorProviders` field group to the client schema.
 
-**Session 4 — Clinical / In-Home Primary Care (PRIORITY).** OpenEMR integration (FHIR/OAuth2). Architecture: one patient record in OpenEMR, two role-scoped views over it — the clinician charts from a clinician-scoped view of the patient's chart (write), the patient sees a filtered read of the same record. Three sub-PRs:
+**Session 4 — Clinical / In-Home Primary Care (PRIORITY).** OpenEMR integration (FHIR/OAuth2). Architecture: one patient record in OpenEMR, two role-scoped views over it — the clinician charts from a clinician-scoped view of the patient's chart (write), the patient sees a filtered read of the same record. **Visual build targets: `clinical-emr-prototype-v1.html` (desktop), `clinical-emr-mobile-prototype-v1.html` (mobile), `patient-portal-prototype-v2.html` (patient read).** Three sub-PRs:
 
 - **4.1 Clinician workspace (OpenEMR write) — priority.** Patient list/search → open a patient's chart (clinician view) → document the initial comprehensive visit (H&P), medication reconciliation, problem list, care plan, notes — all writing to OpenEMR via FHIR. The app never duplicates the clinical record; it renders and edits OpenEMR's. Implements the clinical enrollment sequence: payer verification → records/ROI → NPA/prescriptive authority → initial visit → care plan + program layering (CCM / CCP / RPM-flag) → activation. Includes the primary-care enrollment branch consents (consent to treat, assignment of benefits, practice NPP) if not already covered in 3.2.
 - **4.2 Clinician scheduling (OpenEMR-tied) — priority.** Provider appointment management in the app, tied to OpenEMR's appointment/calendar so a booked visit is an OpenEMR appointment linked to the billable encounter. Same UX pattern as PHCP scheduling (Session 7) but its backend is OpenEMR, not the app shift store. (PHCP caregiver scheduling stays app/RDS — two scheduling systems by design.)
@@ -45,15 +47,15 @@ Each session ends in a PR you review and merge. **Companion to** `GFC_App_Build_
 
 **Session 5 — Clinical HIPAA go-live.** Move the clinical front end into the AWS boundary, PHI to OpenEMR/RDS, MFA for Admin/Clinical, audit-log persistence, PII-scrubbed logs, BAAs on file. The gate that lets the first clinical clients be seen compliantly.
 
-**Session 6 — Caregiver app (PHCP).** The 4-tab mobile workspace, tier-branched visit log (Sitter/PCA/CNA/LPN), escalation, submission loop. Ref: caregiver prototype + workspace spec.
+**Session 6 — Caregiver app (PHCP).** The 4-tab mobile workspace, tier-branched visit log (Sitter/PCA/CNA/LPN), escalation, submission loop. Ref: `caregiver-app-prototype.html` + workspace spec.
 
-**Session 7 — Scheduling · availability · time tracking (PHCP).** Availability submission, open-shift posting + matching, GPS clock-in/out, payroll export. *(Where caregivers submit availability.)*
+**Session 7 — Scheduling · availability · time tracking (PHCP).** Availability submission, open-shift posting + matching, GPS clock-in/out, payroll export. *(Where caregivers submit availability.)* Ref: staff shift-scheduling screens in `phcp-portal-prototype.html`.
 
-**Session 8 — Matching engine (PHCP).** Two-stage caregiver↔client matching. Ref: matching spec + schemas.
+**Session 8 — Matching engine (PHCP).** Two-stage caregiver↔client matching. Ref: matching spec + schemas + staff Care Match screen in `phcp-portal-prototype.html`.
 
 **Session 9 — Messaging module.** Full structured channel matrix with role-based visibility + escalation events.
 
-**Session 10 — Family portal.** Read-only, ROI-gated, monitoring feed.
+**Session 10 — Family portal.** Read-only, ROI-gated, monitoring feed. Ref: family care-feed screens in `phcp-portal-prototype.html`.
 
 **Session 11 — RPM / Continuous Care.** Track C; hooks scaffolded earlier, live build later.
 
@@ -62,6 +64,6 @@ Each session ends in a PR you review and merge. **Companion to** `GFC_App_Build_
 ---
 
 ## Rough timeline
-- **This week:** finish Session 3, build Session 4 (clinical) + Session 5 (clinical go-live).
+- **This week:** finish Session 3 (3.3 + 3.4), build Session 4 (clinical) + Session 5 (clinical go-live).
 - **1–2 weeks:** first clinical clients live.
 - **Following weeks:** Sessions 6–10 (PHCP segment + shared), then 11–12.
