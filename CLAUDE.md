@@ -17,6 +17,8 @@ On branch `claude/docs-addition-a9g0p1` (PR pending), and now rebased on latest 
 
 **Next: Session 4 — Clinical portal + OpenEMR** (`GFC_SESSION_PLAN.md` §Session 4): 4.1 clinician workspace (OpenEMR write via FHIR), 4.2 clinician scheduling (OpenEMR-tied), 4.3 patient portal clinical read. Build targets: `docs/prototype/clinical-emr-prototype-v1.html` (desktop), `clinical-emr-mobile-prototype-v1.html` (mobile), `patient-portal-prototype-v2.html` (patient read).
 
+**Session 4 also carries the signed-PDF requirement:** every signable document must render a PDF with **all of that document's captured digital signatures populated, per document, respectively** (signature image + name + timestamp + IP). Care plan → client co-signature *and* RN author signature; each consent → its signer's signature; Transfer-of-Care ROI already does this per provider (3.4, the reference pattern). Carry-over from Session 3: the care-plan co-signature image is captured and stored, but no signed care-plan PDF is emitted yet — 4.1 must add it. Spec: `GFC_Intake_and_Packet_Spec_v1.md` §4.3, `GFC_SESSION_PLAN.md` §Session 4, `GFC_App_Build_v2.md` §Session 4.
+
 ---
 
 ## Session status
@@ -45,6 +47,11 @@ On branch `claude/docs-addition-a9g0p1` (PR pending), and now rebased on latest 
 ---
 
 ## Recent decisions
+
+**07/2026 — Care-plan co-signature = drawn signature pad; signed-PDF requirement set for Session 4.**
+- The care-plan co-signature in the portal (`GfcCarePlan` in `public/portal.html`) now uses the **canvas signature-pad** mechanism (same as the Transfer-of-Care ROI), not a checkbox. `POST /api/gfc/care-plan/cosign` requires a PNG data-URL signature (400 on missing/invalid, 413 on oversize) and stores the image on the per-version co-sign record; the care-plan GET returns only `coSignedAt`, never the image.
+- Care-plan endpoint is now **per-patient**: real `client.carePlan` wins field-by-field over the dev sample fixture, `careTier` always from the client record, `coSignedAt` keyed to the plan's actual version. No patient names/dates are baked into the UI.
+- **Signed-PDF requirement (Session 4+):** every signable document must render a PDF with **all of that document's captured digital signatures populated, per document, respectively** (image + name + timestamp + IP). Care plan → client co-signature *and* RN author signature; each consent → its signer's signature; ROI already does this per provider (3.4). Carry-over: the care-plan co-signature image is captured/stored but **no signed care-plan PDF is emitted yet** — Session 4 (4.1) must add it. Spec: `GFC_Intake_and_Packet_Spec_v1.md` §4.3, `GFC_SESSION_PLAN.md` + `GFC_App_Build_v2.md` §Session 4.
 
 **07/2026 — Prototypes updated (late July).**
 - Prototypes updated: `client-prototype-full.html` (Session 3 target), `caregiver-app-prototype.html` (Session 6 target), `phcp-portal-prototype.html` (Sessions 3/7/8/10 reference).

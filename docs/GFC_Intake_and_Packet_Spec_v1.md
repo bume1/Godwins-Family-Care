@@ -112,6 +112,13 @@ Every consent: typed name + acknowledgment checkbox + server-side timestamp and 
 
 **Offline provenance (added 07/2026, Session 3.3).** A `signed_offline` status is valid alongside `signed` for every consent type: it marks a consent executed on paper before the app (the 7 legacy patients) and satisfies the enrollment gate identically to `signed`, while preserving provenance for audit. New patients always sign in-app; `signed_offline` is set only through the admin offline-onboarding flow or the one-shot import script.
 
+**Signed-PDF requirement (Session 4+).** Every signable document must render a PDF in which **all of that document's captured digital signatures are populated — per document, respectively.** A document's PDF is not complete until every required signature on it is embedded as its captured signature image alongside the signer's name, timestamp, and IP:
+- **Care plan / Service Plan** → client (or authorized representative) co-signature **and** the RN/clinician author signature.
+- **Each consent** (Service Agreement, Bill of Rights & Self-Determination, consent to treat, assignment of benefits, practice NPP, monitoring) → its signer's signature.
+- **Transfer-of-Care ROI** → the client authorization signature, one PDF per prior provider (already implemented in Session 3.4 — the reference pattern).
+
+Signatures are captured with the canvas signature-pad mechanism (the same one used by the Transfer-of-Care ROI and the care-plan co-signature added in Session 3) and embedded into the corresponding document's PDF; typed-name consents may remain typed-name where 4.3 permits, but a captured signature image, when present, MUST appear in that document's PDF. **Carry-over from Session 3:** the care-plan co-signature is captured and the signature image is stored on the co-sign record, but no signed care-plan PDF is generated yet — Session 4 must add that PDF and populate it with both the client co-signature and the RN author signature. Do not aggregate signatures across documents: each document's PDF carries only its own respective signatures.
+
 ---
 
 ## 5. Who completes what, and when

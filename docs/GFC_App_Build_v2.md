@@ -200,6 +200,7 @@ Detail in `GFC_Matching_Engine_Spec_v1.md`. Two stages: **hard filters** (licens
 - **Clinician scheduling (OpenEMR-tied):** provider appointments managed in the app but tied to OpenEMR's appointment/calendar, so a booked visit is an OpenEMR appointment linked to the billable encounter. Same UX pattern as PHCP scheduling, **different backend** — clinical → OpenEMR, PHCP caregiver shifts → app/RDS. Two scheduling systems by design.
 - **Patient portal clinical read (fast-follow):** the Session 3 portal shell surfaces the patient's own clinical data from OpenEMR (visit summaries, meds, care plan), filtered per sharing rules, read-only, scoped to that patient. Not OpenEMR's native portal.
 - In-Home Primary Care intake branch + its medical consents (consent to treat, assignment of benefits, practice NPP).
+- **Signed-PDF generation:** every signable document renders a PDF with **all of that document's captured digital signatures populated, per document, respectively** (signature image + signer name + timestamp + IP). Care plan → client co-signature *and* RN author signature; each consent → its signer's signature; Transfer-of-Care ROI → per-provider signature (built in 3.4, the reference pattern). Carry-over: Session 3 captures/stores the care-plan co-signature image but does not yet emit a signed care-plan PDF — add it here. Spec: `GFC_Intake_and_Packet_Spec_v1.md` §4.3.
 
 ---
 
