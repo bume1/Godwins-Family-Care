@@ -4999,6 +4999,8 @@ const buildGfcTestData = (client) => {
     version: 3,
     updatedAt: '2026-06-08',
     updatedBy: 'Bethel N., FNP',
+    effectiveDate: '2026-06-08',
+    authoredBy: 'Bethel N., FNP',
     careTier: normalizeCareTier(client.careTier) || 'A2',
     careTierLabel: tierLabel,
     primaryCaregiver: { name: 'Joelle T.', role: 'Primary caregiver', credential: 'LPN-track', initials: 'JT' },
@@ -5008,6 +5010,12 @@ const buildGfcTestData = (client) => {
       'Medication on time, every day'
     ],
     authorizedServices: ['Bathing', 'Dressing', 'Med reminders', 'Meals', 'Mobility'],
+    // Prototype "Each visit" task list — what the caregiver does at every visit.
+    eachVisit: ['Bathing, grooming, dressing', 'Meal preparation', 'Medication reminders', '10-minute walk, weather permitting'],
+    // Prototype "Visit schedule" card.
+    visitSchedule: { days: 'Mon · Wed · Fri', hours: '2:00 to 6:00 PM', caregiver: 'Joelle T., your caregiver' },
+    // Co-signature state: the RN-authored plan is co-signed electronically; versions retained.
+    coSignedAt: (client.carePlanCoSign && client.carePlanCoSign.v3) ? client.carePlanCoSign.v3.at : null,
     careTeam: [
       { name: 'Joelle T.', role: 'Primary caregiver', initials: 'JT' },
       { name: 'Bethel N., FNP', role: 'Clinical lead', initials: 'BN' },
@@ -5133,7 +5141,8 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
         key: k,
         label: consentLabels[k] || k,
         status: consents[k],
-        signedAt: (client.consentMeta && client.consentMeta[k] && client.consentMeta[k].signedAt) || null
+        signedAt: (client.consentMeta && client.consentMeta[k] && client.consentMeta[k].signedAt) || null,
+        signerName: (client.consentMeta && client.consentMeta[k] && client.consentMeta[k].typedName) || null
       }));
 
     // Documents shared with this client via the existing client-documents store (Drive-backed).
@@ -5170,6 +5179,81 @@ app.get('/api/gfc/enrollment-packet.pdf', authenticateToken, requireEnrolledClie
   } catch (error) {
     console.error('GFC enrollment packet PDF error:', error);
     res.status(500).json({ error: 'Failed to generate enrollment packet' });
+  }
+});
+
+// POST /api/gfc/intake/upload — attach an intake document (advance directive,
+// insurance card, discharge paperwork) to HIPAA Google Drive. Client-only; runs
+// during intake (before the enrollment gate), so it uses requireClientForIntake.
+// Base64 upload, same contract as the ROI scan upload.
+app.post('/api/gfc/intake/upload', authenticateToken, requireClientForIntake, async (req, res) => {
+  try {
+    const { fileName, fileDataB64, mimeType } = req.body || {};
+    if (!fileName || !fileDataB64) return res.status(400).json({ error: 'fileName and fileDataB64 are required' });
+    const allowed = ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png'];
+    if (mimeType && !allowed.includes(mimeType)) return res.status(400).json({ error: 'Only PDF, JPG, and PNG files are accepted.' });
+    let buffer;
+    try {
+      const b64 = fileDataB64.startsWith('data:') ? fileDataB64.slice(fileDataB64.indexOf(',') + 1) : fileDataB64;
+      buffer = Buffer.from(b64, 'base64');
+    } catch (e) { return res.status(400).json({ error: 'File data is not valid base64.' }); }
+    if (buffer.length > config.MAX_FILE_SIZE) return res.status(400).json({ error: 'File exceeds 10 MB limit.' });
+
+    const { users, idx } = await loadClientForMutation(req.user.id);
+    if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
+    const client = users[idx];
+
+    // Write to Drive (best-effort; non-fatal in dev when Drive isn't configured).
+    let driveUrl = null;
+    const safeName = `intake_${(client.slug || client.id)}_${Date.now()}_${String(fileName).replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+    try {
+      const result = await googledrive.uploadServiceReportAttachment(client.name || 'Client', safeName, buffer, mimeType || 'application/octet-stream');
+      driveUrl = (result && (result.webViewLink || result.webContentLink)) || null;
+    } catch (e) { console.error('[INTAKE] upload to Drive failed (non-fatal):', e.message); }
+
+    // Record the upload reference on the client record (never the bytes).
+    const uploadRef = { name: fileName, storedName: safeName, url: driveUrl, uploadedAt: new Date().toISOString() };
+    client.intakeUploads = [...(client.intakeUploads || []), uploadRef];
+    users[idx] = client;
+    await db.set('users', users);
+    invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'intake_document_uploaded', 'client', client.id, { fileName });
+
+    res.json({ message: 'Document uploaded', name: fileName, url: driveUrl });
+  } catch (error) {
+    console.error('GFC intake upload error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/gfc/care-plan/cosign — the client electronically co-signs the current
+// RN-authored care-plan version. Versions are retained: we store one co-signature
+// record per version key (v<version>) so a re-authored plan requires a fresh
+// co-signature. Enrolled-only (the care plan is post-enrollment).
+app.post('/api/gfc/care-plan/cosign', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const version = req.body && req.body.version;
+    if (version == null) return res.status(400).json({ error: 'version is required' });
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    // Family (read-only) may not co-sign — only the client.
+    if (req.user.role !== config.ROLES.CLIENT) return res.status(403).json({ error: 'Only the client may co-sign the care plan' });
+
+    const { users, idx } = await loadClientForMutation(req.user.id);
+    if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
+    const at = new Date().toISOString();
+    const ipHash = roiRepo.hashIp(req.headers['x-forwarded-for'] || req.socket?.remoteAddress, JWT_SECRET);
+    users[idx].carePlanCoSign = {
+      ...(users[idx].carePlanCoSign || {}),
+      [`v${version}`]: { at, name: users[idx].preferredName || users[idx].name || 'Client', ipHash }
+    };
+    await db.set('users', users);
+    invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'care_plan_cosigned', 'care_plan', `v${version}`, {});
+    res.json({ message: 'Care plan co-signed', version, coSignedAt: at });
+  } catch (error) {
+    console.error('GFC care-plan cosign error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 

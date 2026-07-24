@@ -349,6 +349,20 @@
           body: JSON.stringify(payload)
         }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
 
+      uploadGfcIntakeDoc: (token, payload) =>
+        fetch(`${API_URL}/api/gfc/intake/upload`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+
+      coSignGfcCarePlan: (token, version) =>
+        fetch(`${API_URL}/api/gfc/care-plan/cosign`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ version })
+        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+
     };
     
     const LoginPage = ({ slug, onLogin }) => {
@@ -3976,6 +3990,26 @@
         return res;
       };
 
+      // Intake document uploads → HIPAA Drive (reuses the same base64 pattern as the ROI upload).
+      const [uploadBusy, setUploadBusy] = useState(false);
+      const [uploadErr, setUploadErr] = useState('');
+      const handleUploadFiles = async (e) => {
+        const files = Array.from(e.target.files || []);
+        e.target.value = '';
+        if (!files.length) return;
+        setUploadErr(''); setUploadBusy(true);
+        for (const file of files) {
+          if (file.size > 10 * 1024 * 1024) { setUploadErr(`${file.name} exceeds 10 MB.`); continue; }
+          try {
+            const b64 = await new Promise((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.onerror = reject; r.readAsDataURL(file); });
+            const res = await api.uploadGfcIntakeDoc(token, { fileName: file.name, fileDataB64: b64, mimeType: file.type });
+            if (res.error) { setUploadErr(res.error); continue; }
+            setForm(f => ({ ...f, uploads: [...(f.uploads || []), { name: file.name, url: res.url || null }] }));
+          } catch (err) { setUploadErr('Upload failed. Please try again.'); }
+        }
+        setUploadBusy(false);
+      };
+
       const steps = [
         { key: 'path', label: 'Service path' },
         { key: 'client', label: 'Client details' },
@@ -4176,6 +4210,20 @@
               <CheckList label="Skilled care needs" hint="Check all that apply." selected={form.skilledTasksNeeded} onToggle={v => toggleArr('skilledTasksNeeded', v)} options={IO.skilledTasks} />
               <TextArea label="Who currently performs these skilled tasks?" value={form.skilledTasksProvider} onChange={v => set('skilledTasksProvider', v)} />
               <CheckList label="Recent clinical events (past 30–90 days)" selected={form.recentEvents} onToggle={v => toggleArr('recentEvents', v)} options={IO.recentEvents} />
+              <p className="lbl">Upload documents (optional)</p>
+              <div className="hint" style={{ fontSize: 11.5, color: 'var(--mut)', marginBottom: 8 }}>Advance directive, insurance cards, discharge paperwork. Stored in HIPAA Google Drive — never on your device.</div>
+              <label className="addrow" style={{ display: 'flex', cursor: uploadBusy ? 'wait' : 'pointer', opacity: uploadBusy ? .6 : 1 }}>
+                <i className="ti ti-upload" /> {uploadBusy ? 'Uploading…' : 'Choose files to attach'}
+                <input type="file" multiple accept=".pdf,.jpg,.jpeg,.png" disabled={uploadBusy} style={{ display: 'none' }} onChange={handleUploadFiles} />
+              </label>
+              {uploadErr && <div className="err">{uploadErr}</div>}
+              {(form.uploads || []).map((u, i) => (
+                <div className="doc" key={i} style={{ marginTop: 6 }}>
+                  <i className="ti ti-file-text" />
+                  <div><b style={{ fontSize: 13 }}>{u.name || u}</b><span>{u.url ? 'Stored in HIPAA Drive' : 'Uploaded'}</span></div>
+                  <button className="rm" style={{ marginLeft: 'auto', position: 'static' }} onClick={() => set('uploads', form.uploads.filter((_, x) => x !== i))}><i className="ti ti-x" /></button>
+                </div>
+              ))}
             </React.Fragment>
           )}
 
@@ -4338,6 +4386,13 @@
       );
     };
 
+    // Friendly date like "Jul 21" (prototype uses month-abbrev, no year for recency).
+    function prettyDate(iso) {
+      if (!iso) return '';
+      const d = new Date(iso); if (isNaN(d)) return '';
+      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    }
+
     // Derive whole-years age from a YYYY-MM-DD DOB for the review screen.
     function ageFromDob(dob) {
       if (!dob) return '';
@@ -4348,15 +4403,35 @@
       return a;
     }
 
-    const GfcDashboard = ({ data, onNavigate }) => {
+    // Enrollment status-pill progression (prototype screen 4).
+    const EnrollmentPills = ({ status }) => {
+      const order = ['intake_pending', 'intake_complete', 'enrolled'];
+      const labels = { intake_pending: 'Intake pending', intake_complete: 'Intake complete', enrolled: 'Enrolled' };
+      const cur = order.indexOf(status === 'intake_pending' ? 'intake_pending' : (status === 'enrolled' ? 'enrolled' : 'intake_complete'));
+      return (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '2px 0 16px' }}>
+          {order.map((s, i) => {
+            const active = i === cur;
+            const done = i <= cur;
+            return <span key={s} style={{ fontSize: 11.5, fontWeight: 600, padding: '5px 12px', borderRadius: 20,
+              background: active ? 'var(--navy)' : (done ? 'var(--gold)' : 'rgba(3,61,80,.06)'),
+              color: active ? 'var(--cream)' : (done ? 'var(--navy)' : 'var(--mut)') }}>{labels[s]}</span>;
+          })}
+        </div>
+      );
+    };
+
+    const GfcDashboard = ({ data, onNavigate, me }) => {
       const cp = data.carePlan || {};
       const pc = cp.primaryCaregiver || {};
       const upcoming = data.upcomingVisits || [];
       const unread = (data.messages?.threads || []).filter(t => t.unread).length;
+      const roiFamilySigned = me && me.roiFamilySigned;
       return (
         <div className="gfc-body">
           <h2 className="disp">Good morning, {data.greetingName}</h2>
           <p className="sub">{pc.name ? `${pc.name.split(' ')[0]} arrives at ${(upcoming[0]||{}).time || 'your next visit'}.` : 'Your care team is ready.'}</p>
+          {me && <EnrollmentPills status={me.enrollmentStatus} />}
           <div className="planhero">
             <div className="pe">Your care plan</div>
             <div className="prow">
@@ -4377,23 +4452,62 @@
             <button className="tile" onClick={() => onNavigate('messages')}>{unread > 0 && <span className="badge">{unread}</span>}<i className="ti ti-message" /><span className="tl">Messages</span><span className="ts">Care team</span></button>
             <button className="tile" onClick={() => onNavigate('documents')}><i className="ti ti-file-text" /><span className="tl">Documents</span><span className="ts">Consents signed</span></button>
           </div>
+          {roiFamilySigned && (
+            <div className="card" style={{ marginTop: 14, background: 'var(--cream)', border: '1px solid var(--line2)', boxShadow: 'none' }}>
+              <div style={{ fontSize: 13, color: 'var(--ink)', lineHeight: 1.55 }}>
+                <b style={{ color: 'var(--navy)' }}>Family portal unlocked.</b> Your Release of Information — Family consent is signed, so the family members you designated can now follow along.
+              </div>
+            </div>
+          )}
         </div>
       );
     };
 
-    const GfcCarePlan = ({ data, readOnly }) => {
+    const GfcCarePlan = ({ data, readOnly, token }) => {
       const cp = data.carePlan || {};
       const upcoming = data.upcomingVisits || [];
       const recent = data.recentVisits || [];
       const teamColors = ['var(--gold)', '#9FE1CB', '#CECBF6'];
       const teamTextColors = ['var(--navy)', '#0f6e56', '#3c3489'];
+      const [coSigned, setCoSigned] = useState(!!cp.coSignedAt);
+      const [coSignBusy, setCoSignBusy] = useState(false);
+      const [coSignErr, setCoSignErr] = useState('');
+      const handleCoSign = async () => {
+        setCoSignErr(''); setCoSignBusy(true);
+        const res = await api.coSignGfcCarePlan(token, cp.version);
+        setCoSignBusy(false);
+        if (res.error) { setCoSignErr(res.error); return; }
+        setCoSigned(true);
+      };
       return (
         <div className="gfc-body">
           {readOnly && <span className="ro"><i className="ti ti-eye" />Family view · read-only</span>}
+          {(cp.version != null) && (
+            <p className="sub" style={{ marginTop: 0, marginBottom: 12 }}>
+              Version {cp.version}{cp.effectiveDate ? ` · effective ${prettyDate(cp.effectiveDate)}` : ''}{cp.authoredBy ? ` · written by ${cp.authoredBy}` : ''}, reviewed with you and your family.
+            </p>
+          )}
           <p className="lbl" style={{ marginTop: 0 }}>Goals</p>
           {(cp.goals || []).map((g, i) => (
             <div className="goal" key={i}><i className="ti ti-circle-check" />{g}</div>
           ))}
+          {(cp.eachVisit || []).length > 0 && (
+            <React.Fragment>
+              <p className="lbl">Each visit</p>
+              {cp.eachVisit.map((t, i) => (
+                <div className="goal" key={i}><i className="ti ti-square-check" style={{ color: 'var(--navy)' }} />{t}</div>
+              ))}
+            </React.Fragment>
+          )}
+          {cp.visitSchedule && (
+            <React.Fragment>
+              <p className="lbl">Visit schedule</p>
+              <div className="card" style={{ margin: 0 }}>
+                <div style={{ fontSize: 14.5, fontWeight: 600, color: 'var(--navy)' }}>{cp.visitSchedule.days} · {cp.visitSchedule.hours}</div>
+                {cp.visitSchedule.caregiver && <div style={{ fontSize: 12.5, color: 'var(--mut)', marginTop: 2 }}>{cp.visitSchedule.caregiver}</div>}
+              </div>
+            </React.Fragment>
+          )}
           <p className="lbl">Authorized services</p>
           <div className="seg">{(cp.authorizedServices || []).map((s, i) => <span className="on" key={i}>{s}</span>)}</div>
           <p className="lbl">Care team</p>
@@ -4421,7 +4535,22 @@
             </div>
           ))}
           {!readOnly && (
-            <button className="btn ghost" onClick={() => alert('Visit requests open in a later session.')}><i className="ti ti-plus" style={{ verticalAlign: -2 }} /> Request a visit</button>
+            <React.Fragment>
+              <p className="lbl">Your co-signature</p>
+              <div className="card" style={{ margin: 0 }}>
+                <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: 22, fontWeight: 600, color: 'var(--navy)', borderBottom: '1px solid var(--line2)', paddingBottom: 8, marginBottom: 8 }}>{data.greetingName}</div>
+                {coSigned ? (
+                  <div className="goal" style={{ margin: 0 }}><i className="ti ti-circle-check" style={{ color: 'var(--teal)' }} />You co-signed care plan v{cp.version} · versions are retained.</div>
+                ) : (
+                  <React.Fragment>
+                    <div className="goal" style={{ margin: 0, alignItems: 'flex-start' }}><i className="ti ti-square-check" style={{ color: 'var(--navy)' }} />I reviewed this plan and agree to it · co-signature required, every version kept.</div>
+                    <button className="btn" disabled={coSignBusy} onClick={handleCoSign}>{coSignBusy ? 'Signing…' : `Co-sign care plan v${cp.version}`}</button>
+                    {coSignErr && <div className="err">{coSignErr}</div>}
+                  </React.Fragment>
+                )}
+              </div>
+              <button className="btn ghost" onClick={() => alert('Visit requests open in a later session.')}><i className="ti ti-plus" style={{ verticalAlign: -2 }} /> Request a visit</button>
+            </React.Fragment>
           )}
           <p className="micro"><i className="ti ti-history" />{cp.careTierLabel} · Version {cp.version} · updated {cp.updatedAt} by {cp.updatedBy}</p>
         </div>
@@ -4794,14 +4923,21 @@
           )}
           <p className="lbl" style={{ marginTop: packet ? undefined : 0 }}>Signed consents</p>
           {signed.length === 0 && <p className="sub">No consents on file yet.</p>}
-          {signed.map(s => (
-            <div className="doc" key={s.key}>
-              <i className="ti ti-file-certificate" />
-              <div><b>{s.label}</b><span>{s.signedAt ? `Signed ${new Date(s.signedAt).toLocaleDateString()}` : (s.status === 'signed' ? 'Signed' : s.status)}</span></div>
-              {s.status === 'signed' && <span className="sgn"><i className="ti ti-circle-check" />Signed</span>}
-            </div>
-          ))}
-          <p className="lbl">Documents</p>
+          {signed.map(s => {
+            // Each signed consent is a filed PDF (opens the signed enrollment packet,
+            // which contains the consent + its e-signature metadata).
+            const openConsentPdf = () => { if (!packet) return; packet.url && packet.url.startsWith('http') ? window.open(packet.url, '_blank') : openPdfSecurely(`${API_URL}${packet.url}`, token); };
+            const sub = s.status === 'na' ? 'Opt-out recorded'
+              : `Signed ${s.signedAt ? prettyDate(s.signedAt) : ''}${s.signerName ? ` · ${s.signerName}` : ''}`.trim();
+            return (
+              <div className="doc" key={s.key} onClick={s.status === 'signed' ? openConsentPdf : undefined} style={{ cursor: s.status === 'signed' ? 'pointer' : 'default' }}>
+                <i className="ti ti-file-certificate" />
+                <div><b>{s.label}</b><span>{sub}</span></div>
+                {s.status === 'signed' && <span style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 700, letterSpacing: '.06em', color: 'var(--goldd)' }}>PDF</span>}
+              </div>
+            );
+          })}
+          <p className="lbl">From your care team</p>
           {files.length === 0 && <p className="sub">Shared documents from your care team will appear here.</p>}
           {files.map(f => (
             <a className="doc" key={f.id} href={f.url || '#'} target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'none' }}>
@@ -4951,8 +5087,8 @@
             <span className="ttl">{titles[view]}</span>
             <button onClick={gfcLogout} title="Sign out"><i className="ti ti-logout" /></button>
           </div>
-          {view === 'home' && data && <GfcDashboard data={data} onNavigate={setView} />}
-          {view === 'care' && data && <GfcCarePlan data={data} readOnly={isFamily} />}
+          {view === 'home' && data && <GfcDashboard data={data} onNavigate={setView} me={me} />}
+          {view === 'care' && data && <GfcCarePlan data={data} readOnly={isFamily} token={token} />}
           {view === 'messages' && <GfcMessages messages={messages} readOnly={isFamily} />}
           {view === 'documents' && <GfcDocuments docs={docs} readOnly={isFamily} token={token} onOpenTransferRoi={() => setShowTransferRoi(true)} />}
           {!data && view !== 'messages' && view !== 'documents' && (
