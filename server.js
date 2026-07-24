@@ -4995,14 +4995,16 @@ const buildGfcTestData = (client) => {
   const firstName = (client.preferredName || client.name || 'there').split(' ')[0];
   const tierLabel = careTierLabelFor(client.careTier) || CARE_TIER_LABELS['A2'];
 
-  const carePlan = {
+  // Sample care-plan CONTENT is a dev fixture only — the real, per-patient plan is
+  // RN-authored in Session 4 (OpenEMR) and stored on `client.carePlan`. When that
+  // exists it wins field-by-field, so nothing here is patient-specific: this block
+  // just lets the portal render its structure before clinical data exists.
+  const carePlanSample = {
     version: 3,
     updatedAt: '2026-06-08',
     updatedBy: 'Bethel N., FNP',
     effectiveDate: '2026-06-08',
     authoredBy: 'Bethel N., FNP',
-    careTier: normalizeCareTier(client.careTier) || 'A2',
-    careTierLabel: tierLabel,
     primaryCaregiver: { name: 'Joelle T.', role: 'Primary caregiver', credential: 'LPN-track', initials: 'JT' },
     goals: [
       'Stay steady on her feet',
@@ -5010,18 +5012,26 @@ const buildGfcTestData = (client) => {
       'Medication on time, every day'
     ],
     authorizedServices: ['Bathing', 'Dressing', 'Med reminders', 'Meals', 'Mobility'],
-    // Prototype "Each visit" task list — what the caregiver does at every visit.
     eachVisit: ['Bathing, grooming, dressing', 'Meal preparation', 'Medication reminders', '10-minute walk, weather permitting'],
-    // Prototype "Visit schedule" card.
     visitSchedule: { days: 'Mon · Wed · Fri', hours: '2:00 to 6:00 PM', caregiver: 'Joelle T., your caregiver' },
-    // Co-signature state: the RN-authored plan is co-signed electronically; versions retained.
-    coSignedAt: (client.carePlanCoSign && client.carePlanCoSign.v3) ? client.carePlanCoSign.v3.at : null,
     careTeam: [
       { name: 'Joelle T.', role: 'Primary caregiver', initials: 'JT' },
       { name: 'Bethel N., FNP', role: 'Clinical lead', initials: 'BN' },
       { name: 'Courtney W.', role: 'Case manager', initials: 'CW' }
     ]
   };
+  // Real per-patient plan wins field-by-field; tier always reflects the client record.
+  const carePlan = {
+    ...carePlanSample,
+    ...(client.carePlan && typeof client.carePlan === 'object' ? client.carePlan : {}),
+    careTier: normalizeCareTier(client.careTier) || 'A2',
+    careTierLabel: tierLabel
+  };
+  // Co-signature state keyed to THIS plan's version (versions retained) — read from
+  // the client's own co-sign record, never hardcoded.
+  const cpVersion = carePlan.version;
+  const coSign = (client.carePlanCoSign || {})[`v${cpVersion}`];
+  carePlan.coSignedAt = coSign ? coSign.at : null;
 
   const visits = {
     upcoming: [
