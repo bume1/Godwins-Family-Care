@@ -1,7 +1,20 @@
 const { google } = require('googleapis');
+const config = require('./config');
 
 let connectionSettings = null;
 let tokenExpiresAt = null;
+
+// PHI files must not be world-readable. By default we do NOT grant "anyone with
+// link" access — files inherit their (private, BAA-scoped) folder's permissions.
+// The legacy Apps Script shared PHI via anyone-link; that is re-enabled only when
+// DRIVE_ALLOW_ANYONE_LINK is explicitly true (non-PHI contexts only).
+async function maybeGrantAnyoneLink(drive, fileId) {
+  if (!config.DRIVE_ALLOW_ANYONE_LINK) return;
+  await drive.permissions.create({
+    fileId,
+    requestBody: { role: 'reader', type: 'anyone' }
+  });
+}
 
 async function getAccessToken() {
   if (connectionSettings && tokenExpiresAt && (tokenExpiresAt - Date.now() > 60000)) {
@@ -265,14 +278,8 @@ async function uploadServiceReportPDF(clientName, fileName, pdfBuffer) {
       fields: 'id, name, webViewLink, webContentLink'
     });
 
-    // Make file viewable by anyone with link
-    await drive.permissions.create({
-      fileId: response.data.id,
-      requestBody: {
-        role: 'reader',
-        type: 'anyone'
-      }
-    });
+    // PHI: no anyone-link grant unless explicitly enabled (see maybeGrantAnyoneLink).
+    await maybeGrantAnyoneLink(drive, response.data.id);
 
     console.log(`✅ Uploaded service report PDF to Google Drive: ${response.data.name}`);
 
@@ -314,14 +321,8 @@ async function uploadServiceReportAttachment(clientName, fileName, fileBuffer, m
       fields: 'id, name, webViewLink, webContentLink, thumbnailLink'
     });
 
-    // Make file viewable by anyone with link
-    await drive.permissions.create({
-      fileId: response.data.id,
-      requestBody: {
-        role: 'reader',
-        type: 'anyone'
-      }
-    });
+    // PHI: no anyone-link grant unless explicitly enabled (see maybeGrantAnyoneLink).
+    await maybeGrantAnyoneLink(drive, response.data.id);
 
     console.log(`✅ Uploaded service report attachment to Google Drive: ${response.data.name}`);
 
@@ -356,11 +357,10 @@ async function uploadProviderROIFile(folderName, fileName, fileBuffer, mimeType)
       fields: 'id, name, webViewLink, webContentLink'
     });
 
-    // Match the legacy handler: shareable by anyone with the link.
-    await drive.permissions.create({
-      fileId: response.data.id,
-      requestBody: { role: 'reader', type: 'anyone' }
-    });
+    // PHI (provider-facing ROI): no anyone-link grant unless explicitly enabled.
+    // The legacy handler shared these via anyone-link; that is now gated off by
+    // default (see maybeGrantAnyoneLink / DRIVE_ALLOW_ANYONE_LINK).
+    await maybeGrantAnyoneLink(drive, response.data.id);
 
     console.log(`✅ Uploaded provider ROI to Google Drive: ${response.data.name}`);
     return {

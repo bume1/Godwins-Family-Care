@@ -15,6 +15,16 @@ const BCRYPT_SALT_ROUNDS = parseInt(process.env.BCRYPT_SALT_ROUNDS || '10', 10);
 const MIN_PASSWORD_LENGTH = parseInt(process.env.MIN_PASSWORD_LENGTH || '8', 10);
 const PASSWORD_REGEX = /^(?=.*[A-Z])(?=.*[a-z])(?=.*\d)/; // uppercase + lowercase + number
 
+// Fail-fast in production if the JWT secret was never overridden. The default
+// secret makes every JWT forgeable (defeating the per-request user lookup and
+// the client-scoping that guards against IDOR), and it doubles as the salt for
+// the ROI / care-plan signer-IP hash. Never blocks dev or tests — only when
+// NODE_ENV is explicitly 'production'.
+if (process.env.NODE_ENV === 'production' &&
+    (!process.env.JWT_SECRET || JWT_SECRET === 'thrive365-secret-change-in-production')) {
+  throw new Error('JWT_SECRET must be set to a strong, unique value in production — refusing to boot with the default secret.');
+}
+
 // ---- Server ----
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const BODY_PARSER_LIMIT = process.env.BODY_PARSER_LIMIT || '50mb';
@@ -176,6 +186,12 @@ const PARALLEL_LEGACY_SYNC = (process.env.PARALLEL_LEGACY_SYNC || 'true') === 't
 // Drive folder the legacy GAS handler wrote provider ROIs to; the portal keeps
 // populating it during the parallel run.
 const ROI_DRIVE_FOLDER_NAME = process.env.ROI_DRIVE_FOLDER_NAME || 'GFC Provider ROI Uploads';
+// PHI documents (ROI PDFs, signed consents, intake attachments, service reports)
+// must NOT be world-readable. By default files inherit their (private, BAA-scoped)
+// Drive folder's permissions and NO "anyone with link" grant is created. The
+// legacy Apps Script used anyone-link sharing; re-enable that ONLY in a non-PHI
+// context by setting DRIVE_ALLOW_ANYONE_LINK=true. Never enable with real PHI.
+const DRIVE_ALLOW_ANYONE_LINK = (process.env.DRIVE_ALLOW_ANYONE_LINK || 'false') === 'true';
 // Admin notification address for received ROIs (matches ROI_NOTIFY_EMAIL in the
 // legacy gfc_roi_upload.gs handler). Override per environment.
 const ROI_ADMIN_EMAIL = process.env.ROI_ADMIN_EMAIL || 'admin@godwinsfamilycarellc.com';
@@ -264,6 +280,7 @@ module.exports = {
   // Transfer-of-Care Provider ROI (Session 3.4)
   PARALLEL_LEGACY_SYNC,
   ROI_DRIVE_FOLDER_NAME,
+  DRIVE_ALLOW_ANYONE_LINK,
   ROI_ADMIN_EMAIL,
   ROI_LEGACY_SHEET_ID,
   ROI_LEGACY_SHEET_TAB,

@@ -221,10 +221,20 @@
           throw new Error('Session expired. Redirecting to login...');
         }
 
-        throw new Error(errorData?.error || `HTTP error ${response.status}`);
+        // Preserve the server's structured error body (code / missingFields /
+        // fieldErrors) on the thrown error so callers can surface field-level
+        // remediation, not just the top-level message.
+        const err = new Error(errorData?.error || `HTTP error ${response.status}`);
+        err.data = errorData || {};
+        err.status = response.status;
+        throw err;
       }
       return response.json();
     };
+
+    // Normalize a caught error into the { error, ...structured } shape the api
+    // methods return, carrying through any structured fields from handleResponse.
+    const asError = (err) => ({ error: (err && err.message) || 'Network error', ...((err && err.data) || {}) });
 
     // Helper to download a PDF via Authorization header instead of token in URL
     const openPdfSecurely = async (url, token) => {
@@ -256,112 +266,112 @@
             return { error: 'This account is not associated with this portal' };
           }
           return result;
-        }).catch(err => ({ error: err.message || 'Network error' })),
+        }).catch(asError),
 
       getPortalData: (token) =>
         fetch(`${API_URL}/api/client-portal/data`, {
           headers: { 'Authorization': `Bearer ${token}` }
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       getPortalSettings: () =>
-        fetch(`${API_URL}/api/portal-settings`).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        fetch(`${API_URL}/api/portal-settings`).then(handleResponse).catch(asError),
 
       getAnnouncements: (token) =>
         fetch(`${API_URL}/api/announcements`, {
           headers: { 'Authorization': `Bearer ${token}` }
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       getClientDocuments: (slug, token) =>
         fetch(`${API_URL}/api/client-documents/${slug}`, {
           headers: { 'Authorization': `Bearer ${token}` }
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       // ---- GFC client portal (Private Home Care) ----
       // /api/gfc/me is NOT gated; the others return 403 until enrollment is complete.
       getGfcMe: (token) =>
         fetch(`${API_URL}/api/gfc/me`, {
           headers: { 'Authorization': `Bearer ${token}` }
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       getGfcCarePlan: (token) =>
         fetch(`${API_URL}/api/gfc/care-plan`, {
           headers: { 'Authorization': `Bearer ${token}` }
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       getGfcVisits: (token) =>
         fetch(`${API_URL}/api/gfc/visits`, {
           headers: { 'Authorization': `Bearer ${token}` }
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       getGfcMessages: (token) =>
         fetch(`${API_URL}/api/gfc/messages`, {
           headers: { 'Authorization': `Bearer ${token}` }
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       getGfcDocuments: (token) =>
         fetch(`${API_URL}/api/gfc/documents`, {
           headers: { 'Authorization': `Bearer ${token}` }
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       // ---- GFC enrollment intake (Stage 2) ----
       getGfcIntake: (token) =>
         fetch(`${API_URL}/api/gfc/intake`, {
           headers: { 'Authorization': `Bearer ${token}` }
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       saveGfcIntake: (token, intake, serviceLine) =>
         fetch(`${API_URL}/api/gfc/intake`, {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ intake, serviceLine })
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       signGfcConsent: (token, payload) =>
         fetch(`${API_URL}/api/gfc/consents`, {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       submitGfcIntake: (token) =>
         fetch(`${API_URL}/api/gfc/intake/submit`, {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       // ---- Transfer-of-Care Provider ROI (Session 3.4) ----
       getGfcTransferRoi: (token) =>
         fetch(`${API_URL}/api/gfc/transfer-roi`, {
           headers: { 'Authorization': `Bearer ${token}` }
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       submitGfcTransferRoi: (token, payload) =>
         fetch(`${API_URL}/api/gfc/transfer-roi/submit`, {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       uploadGfcTransferRoi: (token, payload) =>
         fetch(`${API_URL}/api/gfc/transfer-roi/upload`, {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       uploadGfcIntakeDoc: (token, payload) =>
         fetch(`${API_URL}/api/gfc/intake/upload`, {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       coSignGfcCarePlan: (token, version, signatureImageB64) =>
         fetch(`${API_URL}/api/gfc/care-plan/cosign`, {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ version, signatureImageB64 })
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
     };
     
@@ -3974,12 +3984,36 @@
       const setEC = (i, k, v) => setForm(f => { const e = [...f.emergencyContacts]; e[i] = { ...(e[i] || {}), [k]: v }; return { ...f, emergencyContacts: e }; });
 
       const activeConsentDefs = consentDefs.length ? consentDefs : [];
-      const requiredSigned = requiredConsents.every(t => consents[t] === 'signed');
+      // Guard against a vacuous "all signed": if the consent defs never loaded,
+      // requiredConsents is [] and .every() is trivially true. Require defs to be
+      // present before treating consents as satisfied.
+      const consentsLoaded = consentDefs.length > 0;
+      const requiredSigned = consentsLoaded && requiredConsents.every(t => consents[t] === 'signed');
 
       // Persist the data steps as a draft when advancing.
       const saveDraft = async () => {
         const res = await api.saveGfcIntake(token, form, serviceLine);
         return res;
+      };
+
+      // Changing the service line changes the branched consent set. Persist the
+      // new line, then refresh consentDefs/requiredConsents so the Consents step
+      // renders the correct cards and the submit gate matches what the server
+      // will require — otherwise a PHC→IHPC switch leaves stale consent cards and
+      // enrollment cannot be completed.
+      const changeServiceLine = async (newLine) => {
+        if (newLine === serviceLine) return;
+        setServiceLine(newLine);
+        try {
+          await api.saveGfcIntake(token, form, newLine);
+          const r = await api.getGfcIntake(token);
+          if (!r.error) {
+            setConsentDefs(r.consentDefs || []);
+            setRequiredConsents(r.requiredConsents || []);
+            setConsents(r.consents || {});
+            setConsentMeta(r.consentMeta || {});
+          }
+        } catch (_) { /* non-fatal; user can retry by re-selecting */ }
       };
 
       const handleSignConsent = async (type, payload) => {
@@ -4073,7 +4107,7 @@
               <h2 className="disp">What kind of care?</h2>
               <p className="sub">This sets which consents and details we ask for.</p>
               <Pills label="Service line" value={serviceLine}
-                onChange={setServiceLine}
+                onChange={changeServiceLine}
                 options={[{ value: 'PHC', label: 'Private Home Care' }, { value: 'IHPC', label: 'In-Home Primary Care' }, { value: 'both', label: 'Both' }]} />
             </React.Fragment>
           )}
@@ -4351,7 +4385,16 @@
               <p className="sub">Branched for your service line. Each is e-signed with a typed name and timestamp. <b>{requiredConsents.filter(t => consents[t] === 'signed').length}/{requiredConsents.length}</b> required signed.</p>
               <p className="micro" style={{ justifyContent: 'flex-start', marginTop: 6 }}><i className="ti ti-info-circle" />Working draft — pending counsel/licensure review.</p>
               {activeConsentDefs.map(def => (
-                <ConsentCard key={def.type} def={def} status={consents[def.type]} meta={consentMeta[def.type]} signedName={form.primaryContact?.name} onSign={handleSignConsent} />
+                <React.Fragment key={def.type}>
+                  {def.type === 'roiFamily' && (
+                    <div className="card" style={{ marginBottom: 8 }}>
+                      <p className="lbl" style={{ marginTop: 0 }}>Family / representative information sharing</p>
+                      <TextField label="Who is authorized to receive information about the client?" value={(form.roiFamilyDetail || {}).authorized} onChange={v => setNested('roiFamilyDetail', 'authorized', v)} placeholder="Names & relationships" />
+                      <TextField label="Any restrictions on information sharing?" value={(form.roiFamilyDetail || {}).restrictions} onChange={v => setNested('roiFamilyDetail', 'restrictions', v)} placeholder="Optional" />
+                    </div>
+                  )}
+                  <ConsentCard def={def} status={consents[def.type]} meta={consentMeta[def.type]} signedName={form.primaryContact?.name} onSign={handleSignConsent} />
+                </React.Fragment>
               ))}
             </React.Fragment>
           )}
@@ -4366,7 +4409,8 @@
                 <div className="goal"><i className="ti ti-circle-check" style={{ color: 'var(--teal)' }} />{(form.medications || []).filter(m => m.name).length} medication(s) listed</div>
                 <div className="goal"><i className={`ti ${requiredSigned ? 'ti-circle-check' : 'ti-alert-circle'}`} style={{ color: requiredSigned ? 'var(--teal)' : 'var(--gfc-danger,#B5462E)' }} />Required consents {requiredSigned ? 'all signed' : `(${requiredConsents.filter(t => consents[t] === 'signed').length}/${requiredConsents.length})`}</div>
               </div>
-              {!requiredSigned && <div className="err">Please sign all required consents before submitting (go back to Consents).</div>}
+              {!consentsLoaded && <div className="err">We couldn't load your consent forms. Please refresh the page and try again.</div>}
+              {consentsLoaded && !requiredSigned && <div className="err">Please sign all required consents before submitting (go back to Consents).</div>}
               <button className="btn" disabled={busy || !requiredSigned} onClick={submit}>{busy ? 'Submitting…' : 'Complete enrollment'}</button>
             </React.Fragment>
           )}
@@ -4475,7 +4519,7 @@
       // Canvas signature pad — same drawn-signature mechanism as the provider ROI.
       const sigCanvasRef = useRef(null);
       const sigState = useRef({ drawing: false, empty: true });
-      const padVisible = !readOnly && !coSigned;
+      const padVisible = !readOnly && !coSigned && cp.version != null;
       useEffect(() => {
         if (!padVisible) return;
         const canvas = sigCanvasRef.current;
@@ -4590,7 +4634,7 @@
                       <button type="button" onClick={clearSig} style={{ position: 'absolute', top: 6, right: 8, background: 'none', border: 'none', color: 'var(--mut)', fontSize: 12, cursor: 'pointer' }}>Clear</button>
                     </div>
                     <div style={{ fontSize: 11.5, color: 'var(--mut)', margin: '6px 0 10px' }}>Draw your signature above — {data.greetingName}</div>
-                    <button className="btn" disabled={coSignBusy} onClick={handleCoSign}>{coSignBusy ? 'Signing…' : `Co-sign care plan v${cp.version}`}</button>
+                    <button className="btn" disabled={coSignBusy || cp.version == null} onClick={handleCoSign}>{coSignBusy ? 'Signing…' : `Co-sign care plan v${cp.version}`}</button>
                     {coSignErr && <div className="err">{coSignErr}</div>}
                   </React.Fragment>
                 )}

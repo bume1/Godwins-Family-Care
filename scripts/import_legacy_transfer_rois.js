@@ -100,10 +100,12 @@ async function main() {
     const clientId = await resolveClientId(users, token);
     if (!clientId) { unmatched++; log(`row ${i + 1}: no client match for token "${token}" — skipping`); continue; }
 
-    // signed_at: legacy sheet has no explicit ROI timestamp; use a stable
-    // synthetic derived from the row so the dedupe hash is deterministic.
-    const signedAt = `legacy:${token}`;
-    const dedupeHash = roiRepo.contentHash([clientId, signedAt, urls.join('|'), files.join('|')]);
+    // The legacy sheet has no explicit ROI timestamp. Use a stable synthetic
+    // token ONLY as the dedupe-hash input (deterministic across runs) — it is
+    // NOT a date and must never be routed through the event's signed_at, which
+    // buildConsentEvent parses to compute the one-year expiration.
+    const dedupeToken = `legacy:${token}`;
+    const dedupeHash = roiRepo.contentHash([clientId, dedupeToken, urls.join('|'), files.join('|')]);
 
     const existing = await roiStore.findEventByDedupeHash(dedupeHash);
     if (existing) { skipped++; continue; }
@@ -114,10 +116,12 @@ async function main() {
 
     if (DRY_RUN) { log(`row ${i + 1}: WOULD import event for client ${clientId} (${urls.length} url(s))`); created++; continue; }
 
-    // Create the legacy consent_event.
+    // Create the legacy consent_event. The original signing date is unknown, so
+    // record the import time as signed_at; provenance is captured by
+    // source=LEGACY_IMPORT (and the dedupe hash keys off the synthetic token).
     const event = await roiStore.insertConsentEvent({
       client_id: clientId,
-      signed_at: signedAt,
+      signed_at: new Date().toISOString(),
       printed_name: printedName,
       includes_protected_info: false, // unknown from legacy; conservative default
       source: roiRepo.SOURCE.LEGACY_IMPORT

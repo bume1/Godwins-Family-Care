@@ -192,7 +192,13 @@ function createRepository(db) {
   // default FALSE, revoked_at null, and a computed one-year expiration when none
   // is supplied.
   function buildConsentEvent(input) {
-    const now = input.signed_at || new Date().toISOString();
+    // signed_at must be a parseable date — the one-year expiration default is
+    // computed from it. Guard against a caller passing an unparseable string
+    // (e.g. a synthetic dedupe token): fall back to now rather than throwing a
+    // RangeError when materializing the expiration.
+    const rawSigned = input.signed_at || new Date().toISOString();
+    const parsed = new Date(rawSigned);
+    const now = isNaN(parsed.getTime()) ? new Date().toISOString() : rawSigned;
     const oneYear = new Date(new Date(now).getTime());
     oneYear.setFullYear(oneYear.getFullYear() + 1);
     return {

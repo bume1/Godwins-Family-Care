@@ -1,5 +1,5 @@
 # GFC Care Platform — running status
-_Last updated: 2026-07-24_
+_Last updated: 2026-08-13_
 
 This file is auto-loaded at the start of every Claude Code session. Read it first for current state. Details live in `docs/`.
 
@@ -47,6 +47,15 @@ On branch `claude/docs-addition-a9g0p1` (PR pending), and now rebased on latest 
 ---
 
 ## Recent decisions
+
+**08/2026 — Session 3 audit remediation (branch `claude/docs-addition-a9g0p1`).** A four-dimension audit (security/HIPAA, backend, frontend, spec) ran against the branch; all findings fixed before Session 4:
+- **Importer crash (P0):** the legacy ROI importer routed a synthetic `legacy:<token>` through `signed_at`, crashing `buildConsentEvent` (RangeError on the 1-yr expiration) on every real row. Importer now passes a real ISO timestamp (token stays in the dedupe hash only); `buildConsentEvent` also guards unparseable dates. Test: `test/roi_importer_date.test.js`.
+- **Service-line lockout (P0):** switching service line mid-wizard left a stale consent set → unsubmittable enrollment. The path step now persists the new line and refetches `consentDefs`/`requiredConsents` (`changeServiceLine`); the submit gate also refuses a vacuous "all signed" when consent defs failed to load.
+- **Enum fidelity (P1):** `mirrorIntakeToClientProfile` was storing wizard display labels; it now normalizes to schema **enum codes** for every matching/billing field (gender, conditions[open-enum→slug fallback], skilledTasks, per-ADL levels, fallRisk, cognitiveStatus, dementiaStage, behavioral/homeSafety flags, temperament, advanceDirective.status, twoPersonAssist, transferNeed, payer.type). `genderPreference`→`{value,strength}`, `interests`→string[]; `transferNeed`+`schedule` now mirrored. Raw labels stay in the intake blob for round-trip.
+- **Structured errors (P1):** portal `handleResponse` now preserves the server's `code`/`missingFields`/`fieldErrors` (via `err.data` + shared `asError`), so intake and ROI field-level remediation UX works.
+- **Care-plan co-sign (P1):** version validated against the resolved plan version (409 on mismatch); co-signatures are **append-only** in a new `care_plan_cosign_events` KV collection (the signature image lives there, out of the hot-path `users` blob); the dev fixture uses a non-real version sentinel (`SAMPLE_CARE_PLAN_VERSION = 0`) so a sample co-sign can't collide with a real future version.
+- **Parity + hardening (P2/P3):** ROI-family "authorized recipients / restrictions" fields added (wizard + `roiFamilyAuthorization` mirror); uploads now content-sniff magic bytes (declared mime no longer trusted); **PHI Drive files no longer world-readable** — the `type:'anyone'` grant is gated behind `DRIVE_ALLOW_ANYONE_LINK` (default false); JWT_SECRET fail-fast in production; consent e-sign IP now hashed (consistent with ROI); patient name removed from the admin ROI email subject.
+- Verified: 12/12 unit tests, a 30-check integration harness (enum round-trip, co-sign version/append-only, MIME sniff, service-line refresh), and esbuild JSX compile of `portal.html`.
 
 **07/2026 — Care-plan co-signature = drawn signature pad; signed-PDF requirement set for Session 4.**
 - The care-plan co-signature in the portal (`GfcCarePlan` in `public/portal.html`) now uses the **canvas signature-pad** mechanism (same as the Transfer-of-Care ROI), not a checkbox. `POST /api/gfc/care-plan/cosign` requires a PNG data-URL signature (400 on missing/invalid, 413 on oversize) and stores the image on the per-version co-sign record; the care-plan GET returns only `coSignedAt`, never the image.
