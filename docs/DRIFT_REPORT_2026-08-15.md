@@ -52,11 +52,9 @@ Severity: **FIX-NOW** = mechanical, fixed in this PR. **DECISION** = needs Bianc
 
 ## 5. DECISION items for Bianca
 
-Short answers only — nothing blocks Session 4.
-
-1. **Banner photography.** `public/banners/banner-{admin,client,service}.jpg` are still the lab photos (shelving, test tubes, analyzers) and show at the top of the Admin Hub, admin portal view, Portal Hub, and Service Portal. Replacing them needs care-appropriate imagery from you — want to supply photos, or should the banners be swapped to flat brand-navy gradients until you have them?
-2. **Client→admin messages, staff side.** Client-sent messages now persist to the `gfc_messages` store, but no staff view reads them until the Session 9 messaging module. Until then, is "admin sees them in the KV store only" acceptable, or do you want a minimal admin-hub inbox tile ahead of Session 9?
-3. **`hasImplementationsAccess` flag.** The user-form checkbox for the deactivated tracker still exists (harmless; tracker is retained for repurposing). Keep the checkbox, or hide it until the tracker is repurposed?
+1. **Banner photography.** ✅ **ANSWERED (Bianca, 08/15):** lab photos removed; banners now use brand photography from `docs/design-system/assets/` — `team-bethel.webp` on the Admin Hub + Portal Hub, `photo-couple-walking.jpg` on the client-portal admin view + Service Portal. `public/banners/README.md` updated.
+2. **Client→admin messages, staff side.** ⏳ **OPEN.** Client-sent messages persist to the `gfc_messages` store, but no staff view reads them until the Session 9 messaging module. Until then, is "admin sees them in the KV store only" acceptable, or do you want a minimal admin-hub inbox tile ahead of Session 9?
+3. **`hasImplementationsAccess` flag.** ✅ **ANSWERED (Bianca, 08/15):** checkbox (and the "Impl" badge in the user list) hidden. The flag itself stays on user records for future tracker repurposing.
 
 ## 6. Acceptance verification (this PR)
 
@@ -68,3 +66,14 @@ Short answers only — nothing blocks Session 4.
 - `npm test` — all unit tests pass.
 
 _Environment note (harness, not app drift): the portal pages load React/Tailwind/Babel/fonts from public CDNs; these are unreachable from the CI-style sandbox and were served locally for browser verification. Worth revisiting before HIPAA-live (vendored assets = fewer third-party runtime dependencies), but that is a Session 5 hardening item, not 3.5 scope._
+
+## 7. Supplemental docs-accuracy sweep (follow-up, same day)
+
+On Bianca's question ("are we sure everything inconsistent between the docs and the build is accurate?"), a second sweep compared the **docs to each other and to the code contracts** (the Phase-1 audit compared the docs to the app's live behavior). Contract points re-verified against code: consent taxonomy per service line (matches Intake spec §4.2 exactly, including monitoring-inactive and the non-gating Transfer-of-Care ROI), careTier enum + legacy mapping (matches schema v1 §3.2), enrollment gate states and family ROI gate (match v2 §5.2), 42 CFR Part 2 query-layer enforcement (covered by `npm test`). Stale docs found and fixed:
+
+| Doc | Staleness | Status |
+|---|---|---|
+| `docs/GFC_SESSION_PLAN.md` | Status table + detail still said 3.4 "prompt ready / not complete" (merged in PR #13) and had no 3.5 entry | ✅ FIXED |
+| `replit.md` | Entire file still described the Thrive 365 Labs launch tracker (102-task CLIA template, inventory, soft-pilot) — three sessions stale | ✅ FIXED — now points at CLAUDE.md and carries only Replit-environment facts |
+
+**Known verification limits (honest scope):** all verification ran against the GitHub code with a local KV substitute and mocked external network. Not verifiable from here: (a) whether the **deployed Replit instance** is running this branch/commit or an older one, (b) whatever data its **live Replit KV** currently holds (e.g., leftover fixture rows written by earlier deployed versions — the code no longer generates sample content, but stored data persists until cleared), and (c) live Drive/Sheet/Gmail side-effects, which need real credentials. After this PR merges, redeploy on Replit and spot-check one fresh test client to close that last gap._
