@@ -4383,7 +4383,6 @@
               <TextField label="Who should we notify first in a crisis?" value={form.crisisNotify} onChange={v => set('crisisNotify', v)} placeholder="Name & phone" />
               <p className="lbl">Signatures</p>
               <p className="sub">Branched for your service line. Each is e-signed with a typed name and timestamp. <b>{requiredConsents.filter(t => consents[t] === 'signed').length}/{requiredConsents.length}</b> required signed.</p>
-              <p className="micro" style={{ justifyContent: 'flex-start', marginTop: 6 }}><i className="ti ti-info-circle" />Working draft — pending counsel/licensure review.</p>
               {activeConsentDefs.map(def => (
                 <React.Fragment key={def.type}>
                   {def.type === 'roiFamily' && (
