@@ -58,8 +58,9 @@
        Navy #033D50, gold #C9A44A buttons / #F5CD85 highlights, cream #FAF7F2.
        White on navy, never grey. Cormorant Garamond + DM Sans.
        ============================================================ */
+    /* Design tokens aligned to docs/prototype/client-prototype-full.html (updated 07/2026). */
     .gfc{--navy:#033D50;--navy2:#0a5066;--gold:#F5CD85;--goldd:#C9A44A;--cream:#FAF7F2;
-      --ink:#16242b;--mut:#51636d;--line:rgba(3,61,80,.08);--line2:rgba(3,61,80,.14);
+      --ink:#1a2a32;--mut:#41555f;--line:rgba(3,61,80,.08);--line2:rgba(3,61,80,.14);
       --teal:#1d9e75;--tealbg:#e7f4ee;}
     .gfc *{font-family:'DM Sans','Inter',sans-serif;box-sizing:border-box;}
     .gfc{min-height:100vh;background:#ece6da;}
@@ -220,10 +221,20 @@
           throw new Error('Session expired. Redirecting to login...');
         }
 
-        throw new Error(errorData?.error || `HTTP error ${response.status}`);
+        // Preserve the server's structured error body (code / missingFields /
+        // fieldErrors) on the thrown error so callers can surface field-level
+        // remediation, not just the top-level message.
+        const err = new Error(errorData?.error || `HTTP error ${response.status}`);
+        err.data = errorData || {};
+        err.status = response.status;
+        throw err;
       }
       return response.json();
     };
+
+    // Normalize a caught error into the { error, ...structured } shape the api
+    // methods return, carrying through any structured fields from handleResponse.
+    const asError = (err) => ({ error: (err && err.message) || 'Network error', ...((err && err.data) || {}) });
 
     // Helper to download a PDF via Authorization header instead of token in URL
     const openPdfSecurely = async (url, token) => {
@@ -255,78 +266,112 @@
             return { error: 'This account is not associated with this portal' };
           }
           return result;
-        }).catch(err => ({ error: err.message || 'Network error' })),
+        }).catch(asError),
 
       getPortalData: (token) =>
         fetch(`${API_URL}/api/client-portal/data`, {
           headers: { 'Authorization': `Bearer ${token}` }
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       getPortalSettings: () =>
-        fetch(`${API_URL}/api/portal-settings`).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        fetch(`${API_URL}/api/portal-settings`).then(handleResponse).catch(asError),
 
       getAnnouncements: (token) =>
         fetch(`${API_URL}/api/announcements`, {
           headers: { 'Authorization': `Bearer ${token}` }
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       getClientDocuments: (slug, token) =>
         fetch(`${API_URL}/api/client-documents/${slug}`, {
           headers: { 'Authorization': `Bearer ${token}` }
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       // ---- GFC client portal (Private Home Care) ----
       // /api/gfc/me is NOT gated; the others return 403 until enrollment is complete.
       getGfcMe: (token) =>
         fetch(`${API_URL}/api/gfc/me`, {
           headers: { 'Authorization': `Bearer ${token}` }
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       getGfcCarePlan: (token) =>
         fetch(`${API_URL}/api/gfc/care-plan`, {
           headers: { 'Authorization': `Bearer ${token}` }
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       getGfcVisits: (token) =>
         fetch(`${API_URL}/api/gfc/visits`, {
           headers: { 'Authorization': `Bearer ${token}` }
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       getGfcMessages: (token) =>
         fetch(`${API_URL}/api/gfc/messages`, {
           headers: { 'Authorization': `Bearer ${token}` }
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       getGfcDocuments: (token) =>
         fetch(`${API_URL}/api/gfc/documents`, {
           headers: { 'Authorization': `Bearer ${token}` }
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       // ---- GFC enrollment intake (Stage 2) ----
       getGfcIntake: (token) =>
         fetch(`${API_URL}/api/gfc/intake`, {
           headers: { 'Authorization': `Bearer ${token}` }
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       saveGfcIntake: (token, intake, serviceLine) =>
         fetch(`${API_URL}/api/gfc/intake`, {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ intake, serviceLine })
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       signGfcConsent: (token, payload) =>
         fetch(`${API_URL}/api/gfc/consents`, {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
 
       submitGfcIntake: (token) =>
         fetch(`${API_URL}/api/gfc/intake/submit`, {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
-        }).then(handleResponse).catch(err => ({ error: err.message || 'Network error' })),
+        }).then(handleResponse).catch(asError),
+
+      // ---- Transfer-of-Care Provider ROI (Session 3.4) ----
+      getGfcTransferRoi: (token) =>
+        fetch(`${API_URL}/api/gfc/transfer-roi`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(asError),
+
+      submitGfcTransferRoi: (token, payload) =>
+        fetch(`${API_URL}/api/gfc/transfer-roi/submit`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        }).then(handleResponse).catch(asError),
+
+      uploadGfcTransferRoi: (token, payload) =>
+        fetch(`${API_URL}/api/gfc/transfer-roi/upload`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        }).then(handleResponse).catch(asError),
+
+      uploadGfcIntakeDoc: (token, payload) =>
+        fetch(`${API_URL}/api/gfc/intake/upload`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        }).then(handleResponse).catch(asError),
+
+      coSignGfcCarePlan: (token, version, signatureImageB64) =>
+        fetch(`${API_URL}/api/gfc/care-plan/cosign`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ version, signatureImageB64 })
+        }).then(handleResponse).catch(asError),
 
     };
     
@@ -3802,10 +3847,85 @@
     const ROUTE_OPTS = ['Oral', 'Topical', 'Injection', 'Inhaled', 'Patch', 'Other'];
     const ADL_LEVELS = ['Independent', 'Needs verbal cues', 'Needs physical assistance', 'Fully dependent'];
 
+    // ── Intake option lists — mirror the legacy WordPress intake form field-for-field
+    //    (docs/source-forms/template-gfc-intake-3.php) so the app captures the same
+    //    information; stored in the app's structured shape for the matching/billing engines.
+    const IO = {
+      gender: ['Female', 'Male', 'Non-binary', 'Prefer not to say'],
+      livesWith: ['Lives alone', 'Spouse / partner', 'Adult child', 'Other family member', 'Assisted living / memory care'],
+      contactRelationship: ['Spouse / Partner', 'Adult child', 'Sibling', 'Legal guardian', 'Other family member'],
+      contactPreference: ['Phone call', 'Text message', 'Email'],
+      decisionAuthority: ['Yes — legal (POA/guardianship)', 'Yes — family decision-maker, informal', 'No — client decides', 'Shared'],
+      servicePath: ['Home Care', 'In-Home Primary Care', 'Both', 'Not sure'],
+      adlLevel: ['Independent', 'Some help', 'A lot of help', 'Total assistance'],
+      helpNeeded: ['Companionship & socialization', 'Personal care / bathing / dressing', 'Medication reminders', 'Mobility & transfer assistance', 'Meal preparation', 'Transportation to appointments', 'Overnight or 24/7 care', 'Memory care / dementia support', 'Skilled nursing at home', 'Hospice or end-of-life support'],
+      appointmentAccess: ['No difficulty', 'Somewhat difficult', 'Very difficult', 'Cannot attend'],
+      ongoingConditions: ['Diabetes', 'Heart condition / CHF', 'COPD / breathing issues', "Dementia / Alzheimer's", 'Stroke / neurological', 'Recent hospitalization', 'Multiple chronic conditions', 'None / generally healthy'],
+      hasPCP: ['Yes', 'No', 'Unsure'],
+      cognitionLevel: ['None', 'Mild', 'Moderate', 'Significant'],
+      urgency: ['Immediately', 'Within a week', 'Within a month', 'Just exploring'],
+      preferredDays: ['Weekday mornings', 'Weekday afternoons', 'Weekday evenings', 'Weekends', 'Overnight', '24/7 continuous'],
+      recurring: ['Recurring', 'One-time', 'Not sure'],
+      paymentExpectation: ['Private pay', 'Insurance', 'Medicaid', 'Medicare', 'Combination', 'Not sure'],
+      serviceInterests: ['Case management', 'Behavioral health support', 'Continuous Care Program', 'Not interested in add-on services'],
+      caregiverStress: ['Managing fine', 'Stretched thin', 'Overwhelmed', 'Breaking point'],
+      homebound: ['Completely homebound', 'Leaves with assistance', 'Leaves occasionally', 'Independent'],
+      appointmentDifficulty: ['Cannot attend', 'Very difficult', 'Somewhat difficult', 'No difficulty'],
+      currentServices: ['Home health', 'Hospice', 'Palliative care', 'Skilled nursing (private)', 'Outpatient PT/OT', 'None'],
+      hbpcInterests: ['In-home primary care visits', 'Telehealth visits', 'Medication management', 'Chronic disease management', 'Labs drawn at home', 'Mobile imaging', 'Care coordination across providers'],
+      diagnoses: ["Dementia / Alzheimer's", "Parkinson's disease", 'Stroke / TIA', 'Depression', 'Anxiety', 'COPD / respiratory', 'Heart failure / cardiac', 'Diabetes', 'Cancer', 'Arthritis', 'Osteoporosis', 'Renal disease', 'Bipolar disorder', 'Schizophrenia', 'PTSD', 'Substance use history'],
+      dnr: ['Yes — DNR in place', 'Yes — advance directive / living will', 'Yes — healthcare proxy / POA', 'No', 'Unknown'],
+      skilledTasks: ['Wound care', 'Injections', 'Catheter care', 'Ostomy care', 'Tube feeding', 'Oxygen management', 'Suctioning', 'Tracheostomy care', 'IV therapy', 'Blood glucose monitoring', 'Blood pressure monitoring', 'Medication administration', 'Behavioral supervision', 'Seizure monitoring', 'None'],
+      recentEvents: ['Hospitalized in past 30 days', 'SNF or rehab stay in past 90 days', 'Recent falls', 'Recent infections', 'New medications since discharge', 'Difficulty following discharge instructions', 'Concern for readmission'],
+      adlWalking: ['Independent', 'Uses walker / cane', 'Needs physical assistance', 'Wheelchair — self-propels', 'Wheelchair — pushed', 'Bed-bound'],
+      adlToileting: ['Independent', 'Needs verbal cues', 'Needs physical assistance', 'Incontinent — needs full care'],
+      adlTransfers: ['Independent', 'Standby assist', 'Hands-on assist', 'Two-person assist / mechanical lift'],
+      fallRisk: ['Low', 'Moderate', 'High'],
+      equipment: ['Walker', 'Cane', 'Wheelchair', 'Hoyer lift', 'Hospital bed', 'Grab bars', 'Shower chair', 'Stair lift'],
+      iadl: ['Meal preparation', 'Grocery shopping', 'Light housekeeping', 'Laundry', 'Medication reminders', 'Transportation to appointments', 'Errands', 'Companionship', 'Phone / technology help', 'Managing mail / paperwork'],
+      cognitiveStatus: ['Intact', 'Mild impairment', 'Moderate dementia', 'Severe dementia', 'Mental health diagnosis affecting cognition'],
+      dementiaStage: ['Early / mild', 'Moderate', 'Late / severe', 'Unknown / undiagnosed'],
+      behavioral: ['Wandering', 'Agitation / aggression', 'Sundowning', 'Sleep disturbances', 'Hallucinations', 'Mood swings', 'Resistance to care', 'Self-harm risk', 'Suicidal ideation history'],
+      functionalRisk6mo: ['Fallen', 'Wandered from home', 'Been hospitalized', 'Significant weight loss', 'Missed medications', 'Left stove/appliances running', 'Become aggressive', 'Missed important appointments', 'Experienced dehydration', 'None'],
+      homeSafety: ['Smokers in home', 'Pets in home', 'Firearms in home', 'Hoarding or clutter', 'Pest issues', 'Stairs required', 'Oxygen tanks', 'Working utilities', 'Other household substance use', 'None'],
+      twoPersonAssist: ['No', 'Sometimes', 'Yes routinely'],
+      decisionMaking: ['Client independently', 'Shared with family', 'Surrogate decision-maker needed', 'Capacity concerns'],
+      legalDocs: ['Healthcare POA activated', 'Financial POA activated', 'Guardianship', 'Healthcare surrogate designated', 'Advance directive on file', 'None'],
+      personality: ['Quiet and reserved', 'Warm and chatty', 'Likes structure and routine', 'Prefers independence', 'Can get anxious', 'Resistant to care'],
+      genderPref: ['No preference', 'Female preferred', 'Male preferred', 'Female — strong', 'Male — strong'],
+      caregiverExp: ['Entry-level OK', 'Some experience', 'Experienced', 'Dementia-trained', 'Behavioral support certified'],
+      insuranceTypes: ['Medicare Part A & B', 'Medicare Advantage', 'Medicaid', 'Dual eligible', 'VA benefits', 'Commercial insurance', 'Managed care organization', 'Long-term care insurance', 'Private pay only'],
+      medicareType: ['Part A & B', 'Medicare Advantage (Part C)', 'Dual eligible', 'Not applicable'],
+      medicaidWaiver: ['CCSP', 'ICWP', 'SOURCE', 'Katie Beckett', 'Other waiver', 'Not on a waiver'],
+      policyHolderRel: ['Self', 'Spouse', 'Parent', 'Child', 'Other'],
+      homeBenefit: ['Covered — verified', 'Covered — unverified', 'Not covered', 'Unknown'],
+      ltcCarrier: ['Genworth', 'Mutual of Omaha', 'Northwestern Mutual', 'John Hancock', 'Transamerica', 'Other', 'Not applicable'],
+      auth911: ['Yes — authorized', 'Yes — call family first if time allows', 'No — always call family first']
+    };
+
+    // Small textarea field matching the .fld/label convention used across the wizard.
+    const TextArea = ({ label, hint, value, onChange, placeholder }) => (
+      <div className="fld">
+        <label>{label}</label>
+        {hint && <div className="hint">{hint}</div>}
+        <textarea value={value || ''} placeholder={placeholder} onChange={e => onChange(e.target.value)} />
+      </div>
+    );
+
     const GfcIntakeFlow = ({ token, me, onBack, onComplete }) => {
       const [loaded, setLoaded] = useState(false);
       const [serviceLine, setServiceLine] = useState(me.serviceLine || 'PHC');
-      const [form, setForm] = useState({ medications: [{ name: '', dose: '', route: '', frequency: '', prescriber: '', pharmacy: '' }], insuranceIds: [{ carrier: '', memberId: '', group: '' }], primaryContact: {}, emergencyContacts: [{}, {}], adl: {}, skilledTasksNeeded: [], homeSafetyFlags: [], behavioralFlags: [] });
+      const [form, setForm] = useState({
+        medications: [{ name: '', dose: '', route: '', frequency: '', prescriber: '', pharmacy: '' }],
+        insuranceIds: [{ carrier: '', memberId: '', group: '' }],
+        submitter: {}, primaryContact: {}, emergencyContacts: [{}, {}],
+        medicalTeam: {}, situation: {}, schedule: {}, matching: {}, advanceDirective: {},
+        medicare: {}, medicaid: {}, commercial: {}, ltc: {},
+        adl: {}, conditions: [], skilledTasksNeeded: [], recentEvents: [],
+        equipment: [], iadl: [], behavioralFlags: [], functionalRisk6mo: [],
+        homeSafetyFlags: [], legalDocs: [], helpNeeded: [], ongoingConditions: [],
+        preferredDays: [], serviceInterests: [], currentServices: [], hbpcInterests: [], insuranceTypes: []
+      });
       const [consents, setConsents] = useState({});
       const [consentMeta, setConsentMeta] = useState({});
       const [consentDefs, setConsentDefs] = useState([]);
@@ -3825,12 +3945,25 @@
             setConsentDefs(r.consentDefs || []);
             setRequiredConsents(r.requiredConsents || []);
             if (r.intake && Object.keys(r.intake).length) {
+              const it = r.intake;
+              const arr = (v) => Array.isArray(v) ? v : [];
+              const obj = (v) => (v && typeof v === 'object') ? v : {};
               setForm(f => ({
-                ...f, ...r.intake,
-                medications: (r.intake.medications && r.intake.medications.length) ? r.intake.medications : f.medications,
-                insuranceIds: (r.intake.insuranceIds && r.intake.insuranceIds.length) ? r.intake.insuranceIds : f.insuranceIds,
-                primaryContact: r.intake.primaryContact || {}, emergencyContacts: r.intake.emergencyContacts || [{}, {}],
-                adl: r.intake.adl || {}, skilledTasksNeeded: r.intake.skilledTasksNeeded || [], homeSafetyFlags: r.intake.homeSafetyFlags || [], behavioralFlags: r.intake.behavioralFlags || []
+                ...f, ...it,
+                medications: (it.medications && it.medications.length) ? it.medications : f.medications,
+                insuranceIds: (it.insuranceIds && it.insuranceIds.length) ? it.insuranceIds : f.insuranceIds,
+                submitter: obj(it.submitter), primaryContact: obj(it.primaryContact),
+                emergencyContacts: (it.emergencyContacts && it.emergencyContacts.length) ? it.emergencyContacts : [{}, {}],
+                medicalTeam: obj(it.medicalTeam), situation: obj(it.situation), schedule: obj(it.schedule),
+                matching: obj(it.matching), advanceDirective: obj(it.advanceDirective),
+                medicare: obj(it.medicare), medicaid: obj(it.medicaid), commercial: obj(it.commercial), ltc: obj(it.ltc),
+                adl: obj(it.adl), conditions: arr(it.conditions), skilledTasksNeeded: arr(it.skilledTasksNeeded),
+                recentEvents: arr(it.recentEvents), equipment: arr(it.equipment), iadl: arr(it.iadl),
+                behavioralFlags: arr(it.behavioralFlags), functionalRisk6mo: arr(it.functionalRisk6mo),
+                homeSafetyFlags: arr(it.homeSafetyFlags), legalDocs: arr(it.legalDocs), helpNeeded: arr(it.helpNeeded),
+                ongoingConditions: arr(it.ongoingConditions), preferredDays: arr(it.preferredDays),
+                serviceInterests: arr(it.serviceInterests), currentServices: arr(it.currentServices),
+                hbpcInterests: arr(it.hbpcInterests), insuranceTypes: arr(it.insuranceTypes)
               }));
             }
           }
@@ -3848,14 +3981,39 @@
       const rmMed = (i) => setForm(f => ({ ...f, medications: f.medications.filter((_, x) => x !== i) }));
       const setIns = (i, k, v) => setForm(f => { const a = [...f.insuranceIds]; a[i] = { ...a[i], [k]: v }; return { ...f, insuranceIds: a }; });
       const addIns = () => setForm(f => ({ ...f, insuranceIds: [...f.insuranceIds, { carrier: '', memberId: '', group: '' }] }));
+      const setEC = (i, k, v) => setForm(f => { const e = [...f.emergencyContacts]; e[i] = { ...(e[i] || {}), [k]: v }; return { ...f, emergencyContacts: e }; });
 
       const activeConsentDefs = consentDefs.length ? consentDefs : [];
-      const requiredSigned = requiredConsents.every(t => consents[t] === 'signed');
+      // Guard against a vacuous "all signed": if the consent defs never loaded,
+      // requiredConsents is [] and .every() is trivially true. Require defs to be
+      // present before treating consents as satisfied.
+      const consentsLoaded = consentDefs.length > 0;
+      const requiredSigned = consentsLoaded && requiredConsents.every(t => consents[t] === 'signed');
 
       // Persist the data steps as a draft when advancing.
       const saveDraft = async () => {
         const res = await api.saveGfcIntake(token, form, serviceLine);
         return res;
+      };
+
+      // Changing the service line changes the branched consent set. Persist the
+      // new line, then refresh consentDefs/requiredConsents so the Consents step
+      // renders the correct cards and the submit gate matches what the server
+      // will require — otherwise a PHC→IHPC switch leaves stale consent cards and
+      // enrollment cannot be completed.
+      const changeServiceLine = async (newLine) => {
+        if (newLine === serviceLine) return;
+        setServiceLine(newLine);
+        try {
+          await api.saveGfcIntake(token, form, newLine);
+          const r = await api.getGfcIntake(token);
+          if (!r.error) {
+            setConsentDefs(r.consentDefs || []);
+            setRequiredConsents(r.requiredConsents || []);
+            setConsents(r.consents || {});
+            setConsentMeta(r.consentMeta || {});
+          }
+        } catch (_) { /* non-fatal; user can retry by re-selecting */ }
       };
 
       const handleSignConsent = async (type, payload) => {
@@ -3866,12 +4024,36 @@
         return res;
       };
 
+      // Intake document uploads → HIPAA Drive (reuses the same base64 pattern as the ROI upload).
+      const [uploadBusy, setUploadBusy] = useState(false);
+      const [uploadErr, setUploadErr] = useState('');
+      const handleUploadFiles = async (e) => {
+        const files = Array.from(e.target.files || []);
+        e.target.value = '';
+        if (!files.length) return;
+        setUploadErr(''); setUploadBusy(true);
+        for (const file of files) {
+          if (file.size > 10 * 1024 * 1024) { setUploadErr(`${file.name} exceeds 10 MB.`); continue; }
+          try {
+            const b64 = await new Promise((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.onerror = reject; r.readAsDataURL(file); });
+            const res = await api.uploadGfcIntakeDoc(token, { fileName: file.name, fileDataB64: b64, mimeType: file.type });
+            if (res.error) { setUploadErr(res.error); continue; }
+            setForm(f => ({ ...f, uploads: [...(f.uploads || []), { name: file.name, url: res.url || null }] }));
+          } catch (err) { setUploadErr('Upload failed. Please try again.'); }
+        }
+        setUploadBusy(false);
+      };
+
       const steps = [
         { key: 'path', label: 'Service path' },
         { key: 'client', label: 'Client details' },
         { key: 'contacts', label: 'Contacts' },
+        { key: 'situation', label: 'Care situation' },
+        { key: 'schedule', label: 'Schedule & urgency' },
+        { key: 'homebound', label: 'Homebound & recent care' },
         { key: 'medical', label: 'Medical' },
         { key: 'function', label: 'Function & safety' },
+        { key: 'matching', label: 'Caregiver match' },
         { key: 'insurance', label: 'Insurance' },
         { key: 'consents', label: 'Consents' },
         { key: 'review', label: 'Review & submit' }
@@ -3925,7 +4107,7 @@
               <h2 className="disp">What kind of care?</h2>
               <p className="sub">This sets which consents and details we ask for.</p>
               <Pills label="Service line" value={serviceLine}
-                onChange={setServiceLine}
+                onChange={changeServiceLine}
                 options={[{ value: 'PHC', label: 'Private Home Care' }, { value: 'IHPC', label: 'In-Home Primary Care' }, { value: 'both', label: 'Both' }]} />
             </React.Fragment>
           )}
@@ -3934,39 +4116,101 @@
             <React.Fragment>
               <h2 className="disp">Client details</h2>
               <p className="sub">We collect date of birth once and calculate age from it.</p>
-              <TextField label="Preferred name" value={form.preferredName} onChange={v => set('preferredName', v)} placeholder="What we should call them" />
+              <div className="grid2">
+                <TextField label="Client first name" value={form.clientFirst} onChange={v => set('clientFirst', v)} />
+                <TextField label="Client last name" value={form.clientLast} onChange={v => set('clientLast', v)} />
+              </div>
+              <TextField label="Preferred name / nickname" value={form.preferredName} onChange={v => set('preferredName', v)} placeholder="What we should call them" />
               <TextField label="Date of birth" type="date" value={form.dob} onChange={v => set('dob', v)} />
-              <SelectField label="Gender" value={form.gender} onChange={v => set('gender', v)} options={['Female', 'Male', 'Nonbinary', 'Prefer not to say']} />
+              {form.dob && <div className="hint" style={{ fontSize: 11.5, color: 'var(--mut)', marginTop: -8, marginBottom: 8 }}>Age {ageFromDob(form.dob)} (calculated)</div>}
+              <SelectField label="Gender" value={form.gender} onChange={v => set('gender', v)} options={IO.gender} />
               <TextField label="Primary language" value={form.primaryLanguage} onChange={v => set('primaryLanguage', v)} placeholder="e.g. English" />
-              <TextField label="Phone" type="tel" value={form.phone} onChange={v => set('phone', v)} />
+              <TextField label="Home phone" type="tel" value={form.phone} onChange={v => set('phone', v)} />
               <TextField label="Home address" value={form.addressLine1} onChange={v => set('addressLine1', v)} placeholder="Street, city, GA, ZIP" />
-              <SelectField label="Lives with" value={form.livesWith} onChange={v => set('livesWith', v)} options={['Alone', 'Spouse', 'Adult child', 'Other family', 'Assisted living']} />
+              <SelectField label="Lives with" value={form.livesWith} onChange={v => set('livesWith', v)} options={IO.livesWith} />
             </React.Fragment>
           )}
 
           {k === 'contacts' && (
             <React.Fragment>
               <h2 className="disp">Contacts &amp; authority</h2>
-              <p className="lbl" style={{ marginTop: 8 }}>Primary family contact</p>
-              <TextField label="Name" value={form.primaryContact.name} onChange={v => setNested('primaryContact', 'name', v)} />
-              <TextField label="Relationship" value={form.primaryContact.relationship} onChange={v => setNested('primaryContact', 'relationship', v)} />
-              <TextField label="Phone" type="tel" value={form.primaryContact.phone} onChange={v => setNested('primaryContact', 'phone', v)} />
-              <TextField label="Email" type="email" value={form.primaryContact.email} onChange={v => setNested('primaryContact', 'email', v)} />
-              <SelectField label="Decision-making authority" value={form.decisionAuthority} onChange={v => set('decisionAuthority', v)} options={['Client', 'Shared', 'Surrogate', 'POA / Guardian']} />
-              <p className="lbl">Emergency contact 1</p>
-              <TextField label="Name" value={(form.emergencyContacts[0] || {}).name} onChange={v => setForm(f => { const e = [...f.emergencyContacts]; e[0] = { ...e[0], name: v }; return { ...f, emergencyContacts: e }; })} />
-              <TextField label="Phone" type="tel" value={(form.emergencyContacts[0] || {}).phone} onChange={v => setForm(f => { const e = [...f.emergencyContacts]; e[0] = { ...e[0], phone: v }; return { ...f, emergencyContacts: e }; })} />
-              <p className="lbl">Emergency contact 2</p>
-              <TextField label="Name" value={(form.emergencyContacts[1] || {}).name} onChange={v => setForm(f => { const e = [...f.emergencyContacts]; e[1] = { ...e[1], name: v }; return { ...f, emergencyContacts: e }; })} />
-              <TextField label="Phone" type="tel" value={(form.emergencyContacts[1] || {}).phone} onChange={v => setForm(f => { const e = [...f.emergencyContacts]; e[1] = { ...e[1], phone: v }; return { ...f, emergencyContacts: e }; })} />
+              <p className="lbl" style={{ marginTop: 8 }}>About you (form submitter)</p>
+              <div className="grid2">
+                <TextField label="First name" value={form.submitter.first} onChange={v => setNested('submitter', 'first', v)} />
+                <TextField label="Last name" value={form.submitter.last} onChange={v => setNested('submitter', 'last', v)} />
+              </div>
+              <TextField label="Email address" type="email" value={form.submitter.email} onChange={v => setNested('submitter', 'email', v)} />
+              <TextField label="Phone number" type="tel" value={form.submitter.phone} onChange={v => setNested('submitter', 'phone', v)} />
+              <p className="lbl">Primary family contact</p>
+              <TextField label="Full name" value={form.primaryContact.name} onChange={v => setNested('primaryContact', 'name', v)} />
+              <SelectField label="Relationship to client" value={form.primaryContact.relationship} onChange={v => setNested('primaryContact', 'relationship', v)} options={IO.contactRelationship} />
+              <TextField label="Phone (cell preferred)" type="tel" value={form.primaryContact.phone} onChange={v => setNested('primaryContact', 'phone', v)} />
+              <TextField label="Email address" type="email" value={form.primaryContact.email} onChange={v => setNested('primaryContact', 'email', v)} />
+              <SelectField label="Best way to reach" value={form.primaryContact.preferredChannel} onChange={v => setNested('primaryContact', 'preferredChannel', v)} options={IO.contactPreference} />
+              <SelectField label="Authorized to make care decisions?" value={form.decisionAuthority} onChange={v => set('decisionAuthority', v)} options={IO.decisionAuthority} />
+              {[0, 1].map(i => (
+                <React.Fragment key={i}>
+                  <p className="lbl">Emergency contact {i + 1}</p>
+                  <TextField label="Full name" value={(form.emergencyContacts[i] || {}).name} onChange={v => setEC(i, 'name', v)} />
+                  <TextField label="Relationship to client" value={(form.emergencyContacts[i] || {}).relationship} onChange={v => setEC(i, 'relationship', v)} />
+                  <TextField label="Phone" type="tel" value={(form.emergencyContacts[i] || {}).phone} onChange={v => setEC(i, 'phone', v)} />
+                  <TextField label="Email" type="email" value={(form.emergencyContacts[i] || {}).email} onChange={v => setEC(i, 'email', v)} />
+                  <TextField label="Address" value={(form.emergencyContacts[i] || {}).address} onChange={v => setEC(i, 'address', v)} />
+                </React.Fragment>
+              ))}
+            </React.Fragment>
+          )}
+
+          {k === 'situation' && (
+            <React.Fragment>
+              <h2 className="disp">Care situation</h2>
+              <p className="sub">A quick picture of what's needed and what's prompting the request.</p>
+              <SelectField label="Level of help needed with daily activities" value={(form.situation || {}).adlLevel} onChange={v => setNested('situation', 'adlLevel', v)} options={IO.adlLevel} />
+              <CheckList label="Types of personal care / home support" hint="Check all that apply." selected={form.helpNeeded} onToggle={v => toggleArr('helpNeeded', v)} options={IO.helpNeeded} />
+              <SelectField label="How difficult is it to get to in-office appointments?" value={(form.situation || {}).appointmentAccess} onChange={v => setNested('situation', 'appointmentAccess', v)} options={IO.appointmentAccess} />
+              <CheckList label="Ongoing health conditions being managed" hint="Check all that apply." selected={form.ongoingConditions} onToggle={v => toggleArr('ongoingConditions', v)} options={IO.ongoingConditions} />
+              <SelectField label="Does the client currently have a primary care provider?" value={(form.situation || {}).hasPCP} onChange={v => setNested('situation', 'hasPCP', v)} options={IO.hasPCP} />
+              <SelectField label="Memory or cognition concerns" value={(form.situation || {}).cognitionLevel} onChange={v => setNested('situation', 'cognitionLevel', v)} options={IO.cognitionLevel} />
+              <TextArea label="What's prompting you to reach out now?" value={(form.situation || {}).mainReason} onChange={v => setNested('situation', 'mainReason', v)} placeholder="Tell us what's going on" />
+            </React.Fragment>
+          )}
+
+          {k === 'schedule' && (
+            <React.Fragment>
+              <h2 className="disp">Schedule &amp; urgency</h2>
+              <TextField label="Requested start date" type="date" value={(form.schedule || {}).startDate} onChange={v => setNested('schedule', 'startDate', v)} />
+              <TextField label="Hours per week (approx.)" type="number" value={(form.schedule || {}).hoursPerWeek} onChange={v => setNested('schedule', 'hoursPerWeek', v)} placeholder="e.g. 20" />
+              <SelectField label="How soon do you need care?" value={(form.schedule || {}).urgency} onChange={v => setNested('schedule', 'urgency', v)} options={IO.urgency} />
+              <CheckList label="Preferred days / shifts" hint="Check all that apply." selected={form.preferredDays} onToggle={v => toggleArr('preferredDays', v)} options={IO.preferredDays} />
+              <SelectField label="Recurring or one-time?" value={(form.schedule || {}).recurring} onChange={v => setNested('schedule', 'recurring', v)} options={IO.recurring} />
+              <SelectField label="How do you expect to pay for care?" value={(form.schedule || {}).paymentExpectation} onChange={v => setNested('schedule', 'paymentExpectation', v)} options={IO.paymentExpectation} />
+              <CheckList label="Support services of interest" selected={form.serviceInterests} onToggle={v => toggleArr('serviceInterests', v)} options={IO.serviceInterests} />
+              <SelectField label="How are you holding up right now?" value={form.caregiverStress} onChange={v => set('caregiverStress', v)} options={IO.caregiverStress} />
+              <TextArea label="Anything else we should know?" value={form.stressNotes} onChange={v => set('stressNotes', v)} />
+            </React.Fragment>
+          )}
+
+          {k === 'homebound' && (
+            <React.Fragment>
+              <h2 className="disp">Homebound &amp; recent care</h2>
+              <SelectField label="Homebound status" value={form.homebound} onChange={v => set('homebound', v)} options={IO.homebound} />
+              <SelectField label="Difficulty attending in-office appointments" value={form.appointmentDifficulty} onChange={v => set('appointmentDifficulty', v)} options={IO.appointmentDifficulty} />
+              <p className="lbl">Recent medical activity</p>
+              <TextField label="Last PCP visit" value={form.lastPCPVisit} onChange={v => set('lastPCPVisit', v)} placeholder="e.g. Mar 2026" />
+              <TextField label="Last hospitalization" value={form.lastHospitalization} onChange={v => set('lastHospitalization', v)} placeholder="e.g. Jan 2026" />
+              <TextField label="ER visits in past 6 months" type="number" value={form.erVisits6mo} onChange={v => set('erVisits6mo', v)} />
+              <CheckList label="Currently receiving" selected={form.currentServices} onToggle={v => toggleArr('currentServices', v)} options={IO.currentServices} />
+              <CheckList label="In-home medical services of interest" selected={form.hbpcInterests} onToggle={v => toggleArr('hbpcInterests', v)} options={IO.hbpcInterests} />
             </React.Fragment>
           )}
 
           {k === 'medical' && (
             <React.Fragment>
               <h2 className="disp">Medical</h2>
-              <div className="fld"><label>Diagnoses</label><textarea value={form.diagnoses || ''} onChange={e => set('diagnoses', e.target.value)} placeholder="Primary conditions / diagnoses" /></div>
-              <div className="fld"><label>Allergies</label><textarea value={form.allergies || ''} onChange={e => set('allergies', e.target.value)} placeholder="Medication, food, environmental — or 'none known'" /></div>
+              <CheckList label="Primary diagnoses" hint="Check all that apply." selected={form.conditions} onToggle={v => toggleArr('conditions', v)} options={IO.diagnoses} />
+              <TextArea label="Additional diagnoses or medical history" value={form.additionalDiagnoses} onChange={v => set('additionalDiagnoses', v)} />
+              <TextArea label="Known allergies" value={form.allergies} onChange={v => set('allergies', v)} placeholder="Medication, food, environmental — or 'none known'" />
+              <SelectField label="DNR / advance directive on file?" value={(form.advanceDirective || {}).status} onChange={v => setNested('advanceDirective', 'status', v)} options={IO.dnr} />
               <p className="lbl">Current medications</p>
               <div className="hint" style={{ fontSize: 11.5, color: 'var(--mut)', marginBottom: 8 }}>Caregivers provide reminders only — not administration.</div>
               {form.medications.map((m, i) => (
@@ -3985,8 +4229,35 @@
                 </div>
               ))}
               <button className="addrow" onClick={addMed}><i className="ti ti-plus" /> Add another medication</button>
-              <CheckList label="Skilled care needs" hint="Check all that apply." selected={form.skilledTasksNeeded} onToggle={v => toggleArr('skilledTasksNeeded', v)}
-                options={['Wound care', 'Injections', 'Catheter care', 'Ostomy care', 'Tube feeding', 'Oxygen management', 'Blood glucose monitoring', 'Medication administration', 'None of the above']} />
+              <TextArea label="Additional medication notes" value={form.medNotes} onChange={v => set('medNotes', v)} />
+              <p className="lbl">Medical team</p>
+              <div className="hint" style={{ fontSize: 11.5, color: 'var(--mut)', marginBottom: 8 }}>Used to coordinate care and to pre-fill any future record-release request.</div>
+              <TextField label="Primary care physician" value={(form.medicalTeam || {}).pcpName} onChange={v => setNested('medicalTeam', 'pcpName', v)} placeholder="Dr. name" />
+              <TextField label="PCP practice / clinic" value={(form.medicalTeam || {}).pcpPractice} onChange={v => setNested('medicalTeam', 'pcpPractice', v)} />
+              <TextField label="PCP phone" type="tel" value={(form.medicalTeam || {}).pcpPhone} onChange={v => setNested('medicalTeam', 'pcpPhone', v)} />
+              <TextField label="Specialist 1" value={(form.medicalTeam || {}).specialist1Name} onChange={v => setNested('medicalTeam', 'specialist1Name', v)} placeholder="Name / practice" />
+              <TextField label="Specialist 1 phone" type="tel" value={(form.medicalTeam || {}).specialist1Phone} onChange={v => setNested('medicalTeam', 'specialist1Phone', v)} />
+              <TextField label="Specialist 2" value={(form.medicalTeam || {}).specialist2Name} onChange={v => setNested('medicalTeam', 'specialist2Name', v)} placeholder="Name / practice" />
+              <TextField label="Preferred hospital / ER" value={(form.medicalTeam || {}).preferredHospital} onChange={v => setNested('medicalTeam', 'preferredHospital', v)} />
+              <TextField label="Preferred pharmacy" value={(form.medicalTeam || {}).preferredPharmacy} onChange={v => setNested('medicalTeam', 'preferredPharmacy', v)} />
+              <TextField label="Pharmacy phone" type="tel" value={(form.medicalTeam || {}).pharmacyPhone} onChange={v => setNested('medicalTeam', 'pharmacyPhone', v)} />
+              <CheckList label="Skilled care needs" hint="Check all that apply." selected={form.skilledTasksNeeded} onToggle={v => toggleArr('skilledTasksNeeded', v)} options={IO.skilledTasks} />
+              <TextArea label="Who currently performs these skilled tasks?" value={form.skilledTasksProvider} onChange={v => set('skilledTasksProvider', v)} />
+              <CheckList label="Recent clinical events (past 30–90 days)" selected={form.recentEvents} onToggle={v => toggleArr('recentEvents', v)} options={IO.recentEvents} />
+              <p className="lbl">Upload documents (optional)</p>
+              <div className="hint" style={{ fontSize: 11.5, color: 'var(--mut)', marginBottom: 8 }}>Advance directive, insurance cards, discharge paperwork. Stored in HIPAA Google Drive — never on your device.</div>
+              <label className="addrow" style={{ display: 'flex', cursor: uploadBusy ? 'wait' : 'pointer', opacity: uploadBusy ? .6 : 1 }}>
+                <i className="ti ti-upload" /> {uploadBusy ? 'Uploading…' : 'Choose files to attach'}
+                <input type="file" multiple accept=".pdf,.jpg,.jpeg,.png" disabled={uploadBusy} style={{ display: 'none' }} onChange={handleUploadFiles} />
+              </label>
+              {uploadErr && <div className="err">{uploadErr}</div>}
+              {(form.uploads || []).map((u, i) => (
+                <div className="doc" key={i} style={{ marginTop: 6 }}>
+                  <i className="ti ti-file-text" />
+                  <div><b style={{ fontSize: 13 }}>{u.name || u}</b><span>{u.url ? 'Stored in HIPAA Drive' : 'Uploaded'}</span></div>
+                  <button className="rm" style={{ marginLeft: 'auto', position: 'static' }} onClick={() => set('uploads', form.uploads.filter((_, x) => x !== i))}><i className="ti ti-x" /></button>
+                </div>
+              ))}
             </React.Fragment>
           )}
 
@@ -3994,15 +4265,47 @@
             <React.Fragment>
               <h2 className="disp">Function &amp; safety</h2>
               <p className="lbl" style={{ marginTop: 8 }}>Activities of daily living</p>
-              {[['bathing', 'Bathing'], ['dressing', 'Dressing'], ['toileting', 'Toileting'], ['transfers', 'Transferring'], ['ambulation', 'Walking'], ['eating', 'Eating']].map(([k2, lbl]) => (
-                <SelectField key={k2} label={lbl} value={(form.adl || {})[k2]} onChange={v => setNested('adl', k2, v)} options={ADL_LEVELS} />
-              ))}
-              <SelectField label="Fall risk" value={form.fallRisk} onChange={v => set('fallRisk', v)} options={['Low', 'Moderate', 'High']} />
+              <SelectField label="Bathing / showering" value={(form.adl || {}).bathing} onChange={v => setNested('adl', 'bathing', v)} options={ADL_LEVELS} />
+              <SelectField label="Dressing" value={(form.adl || {}).dressing} onChange={v => setNested('adl', 'dressing', v)} options={ADL_LEVELS} />
+              <SelectField label="Grooming (hair, teeth, nails)" value={(form.adl || {}).grooming} onChange={v => setNested('adl', 'grooming', v)} options={ADL_LEVELS} />
+              <SelectField label="Toileting" value={(form.adl || {}).toileting} onChange={v => setNested('adl', 'toileting', v)} options={IO.adlToileting} />
+              <SelectField label="Transferring (bed, chair, car)" value={(form.adl || {}).transfers} onChange={v => setNested('adl', 'transfers', v)} options={IO.adlTransfers} />
+              <SelectField label="Ambulation / walking" value={(form.adl || {}).ambulation} onChange={v => setNested('adl', 'ambulation', v)} options={IO.adlWalking} />
+              <SelectField label="Eating / feeding" value={(form.adl || {}).eating} onChange={v => setNested('adl', 'eating', v)} options={ADL_LEVELS} />
+              <SelectField label="Fall risk" value={form.fallRisk} onChange={v => set('fallRisk', v)} options={IO.fallRisk} />
               <SelectField label="Transfer / lift need" value={form.transferNeed} onChange={v => set('transferNeed', v)} options={['Independent', 'Standby', 'One-person assist', 'Two-person assist', 'Mechanical lift']} />
-              <CheckList label="Behavioral flags" hint="Check all that apply." selected={form.behavioralFlags} onToggle={v => toggleArr('behavioralFlags', v)}
-                options={['Wandering', 'Aggression', 'Sundowning', 'Resistance to care', 'None']} />
-              <CheckList label="Home safety" hint="Anything in the home our team should know about." selected={form.homeSafetyFlags} onToggle={v => toggleArr('homeSafetyFlags', v)}
-                options={['Smokers', 'Pets', 'Firearms', 'Stairs', 'Oxygen tanks', 'None']} />
+              <CheckList label="Mobility equipment at home" selected={form.equipment} onToggle={v => toggleArr('equipment', v)} options={IO.equipment} />
+              <TextArea label="Additional ADL notes" value={form.adlNotes} onChange={v => set('adlNotes', v)} />
+              <p className="lbl">IADL &amp; home support</p>
+              <CheckList label="Tasks needing help" hint="Check all that apply." selected={form.iadl} onToggle={v => toggleArr('iadl', v)} options={IO.iadl} />
+              <TextField label="Dietary needs or restrictions" value={form.dietary} onChange={v => set('dietary', v)} />
+              <TextField label="Food allergies" value={form.foodAllergies} onChange={v => set('foodAllergies', v)} />
+              <p className="lbl">Behavioral &amp; cognitive status</p>
+              <SelectField label="Cognitive status" value={form.cognitiveStatus} onChange={v => set('cognitiveStatus', v)} options={IO.cognitiveStatus} />
+              <SelectField label="Dementia stage" value={form.dementiaStage} onChange={v => set('dementiaStage', v)} options={IO.dementiaStage} />
+              <CheckList label="Behavioral concerns" hint="Check all that apply." selected={form.behavioralFlags} onToggle={v => toggleArr('behavioralFlags', v)} options={IO.behavioral} />
+              <TextArea label="Behavioral notes — triggers, patterns, what helps" value={form.behavioralNotes} onChange={v => set('behavioralNotes', v)} />
+              <CheckList label="In the past 6 months, has the client…" hint="Check all that apply." selected={form.functionalRisk6mo} onToggle={v => toggleArr('functionalRisk6mo', v)} options={IO.functionalRisk6mo} />
+              <p className="lbl">Home environment &amp; staff safety</p>
+              <CheckList label="Home environment / staff safety" hint="Check all that apply." selected={form.homeSafetyFlags} onToggle={v => toggleArr('homeSafetyFlags', v)} options={IO.homeSafety} />
+              <SelectField label="Does any task require two-person assist?" value={form.twoPersonAssist} onChange={v => set('twoPersonAssist', v)} options={IO.twoPersonAssist} />
+              <TextArea label="Anything else affecting staff safety?" value={form.staffSafetyConcerns} onChange={v => set('staffSafetyConcerns', v)} />
+              <p className="lbl">Decision-making &amp; legal status</p>
+              <SelectField label="Who makes healthcare / care decisions?" value={form.decisionMaking} onChange={v => set('decisionMaking', v)} options={IO.decisionMaking} />
+              <CheckList label="Legal status" hint="Check all that apply." selected={form.legalDocs} onToggle={v => toggleArr('legalDocs', v)} options={IO.legalDocs} />
+            </React.Fragment>
+          )}
+
+          {k === 'matching' && (
+            <React.Fragment>
+              <h2 className="disp">Caregiver match</h2>
+              <p className="sub">Helps us pair the right caregiver — personality, preferences, and experience.</p>
+              <CheckList label="Client's personality" hint="Check all that apply." selected={(form.matching || {}).personality || []} onToggle={v => setForm(f => { const cur = (f.matching || {}).personality || []; const nx = cur.includes(v) ? cur.filter(x => x !== v) : [...cur, v]; return { ...f, matching: { ...(f.matching || {}), personality: nx } }; })} options={IO.personality} />
+              <SelectField label="Gender preference for caregiver" value={(form.matching || {}).genderPreference} onChange={v => setNested('matching', 'genderPreference', v)} options={IO.genderPref} />
+              <TextField label="Language / cultural preferences" value={(form.matching || {}).languagePreference} onChange={v => setNested('matching', 'languagePreference', v)} />
+              <SelectField label="Caregiver experience required" value={(form.matching || {}).caregiverExperience} onChange={v => setNested('matching', 'caregiverExperience', v)} options={IO.caregiverExp} />
+              <TextArea label="Interests, hobbies, what brings comfort" value={(form.matching || {}).interests} onChange={v => setNested('matching', 'interests', v)} />
+              <TextArea label="Past caregiver experience" value={(form.matching || {}).pastCaregiver} onChange={v => setNested('matching', 'pastCaregiver', v)} />
             </React.Fragment>
           )}
 
@@ -4010,9 +4313,55 @@
             <React.Fragment>
               <h2 className="disp">Insurance &amp; payer</h2>
               <p className="sub">Capture full IDs now so enrollment can verify coverage.</p>
+              <p className="lbl" style={{ marginTop: 8 }}>Identification</p>
+              <TextField label="SSN (last 4 only)" value={form.ssnLast4} onChange={v => set('ssnLast4', (v || '').replace(/\D/g, '').slice(0, 4))} placeholder="1234" />
               <SelectField label="Primary payer type" value={form.payerType} onChange={v => set('payerType', v)} options={['Private pay', 'LTC insurance', 'Medicaid waiver', 'VA', 'Medicare Part B', 'Dual eligible', 'Commercial', 'Combination']} />
-              <TextField label="Medicaid / Medicare ID" hint="Medicaid member ID or Medicare beneficiary number" value={form.medicaidId} onChange={v => set('medicaidId', v)} placeholder="Full ID number" />
-              <p className="lbl">Insurance cards</p>
+              <CheckList label="Insurance types held" hint="Check all that apply." selected={form.insuranceTypes} onToggle={v => toggleArr('insuranceTypes', v)} options={IO.insuranceTypes} />
+              <p className="lbl">Medicare</p>
+              <TextField label="Medicare ID / beneficiary number" value={(form.medicare || {}).id} onChange={v => setNested('medicare', 'id', v)} />
+              <SelectField label="Medicare type" value={(form.medicare || {}).type} onChange={v => setNested('medicare', 'type', v)} options={IO.medicareType} />
+              <TextField label="Medicare Advantage plan name" value={(form.medicare || {}).advantagePlan} onChange={v => setNested('medicare', 'advantagePlan', v)} />
+              <div className="grid2">
+                <TextField label="Advantage member ID" value={(form.medicare || {}).advMemberId} onChange={v => setNested('medicare', 'advMemberId', v)} />
+                <TextField label="Advantage group #" value={(form.medicare || {}).advGroupNum} onChange={v => setNested('medicare', 'advGroupNum', v)} />
+              </div>
+              <TextField label="Medicare Part D plan" value={(form.medicare || {}).partD} onChange={v => setNested('medicare', 'partD', v)} />
+              <p className="lbl">Medicaid</p>
+              <TextField label="Medicaid member ID" value={(form.medicaid || {}).memberId} onChange={v => setNested('medicaid', 'memberId', v)} />
+              <TextField label="Medicaid managed care plan" value={(form.medicaid || {}).plan} onChange={v => setNested('medicaid', 'plan', v)} />
+              <SelectField label="Medicaid waiver program" value={(form.medicaid || {}).waiver} onChange={v => setNested('medicaid', 'waiver', v)} options={IO.medicaidWaiver} />
+              <div className="grid2">
+                <TextField label="Case manager name" value={(form.medicaid || {}).caseManager} onChange={v => setNested('medicaid', 'caseManager', v)} />
+                <TextField label="Case manager phone" type="tel" value={(form.medicaid || {}).caseManagerPhone} onChange={v => setNested('medicaid', 'caseManagerPhone', v)} />
+              </div>
+              <p className="lbl">Commercial insurance</p>
+              <TextField label="Insurance carrier" value={(form.commercial || {}).carrier} onChange={v => setNested('commercial', 'carrier', v)} />
+              <TextField label="Plan name" value={(form.commercial || {}).planName} onChange={v => setNested('commercial', 'planName', v)} />
+              <div className="grid2">
+                <TextField label="Member ID" value={(form.commercial || {}).memberId} onChange={v => setNested('commercial', 'memberId', v)} />
+                <TextField label="Group number" value={(form.commercial || {}).groupNum} onChange={v => setNested('commercial', 'groupNum', v)} />
+              </div>
+              <TextField label="Policy holder name" value={(form.commercial || {}).policyHolder} onChange={v => setNested('commercial', 'policyHolder', v)} />
+              <div className="grid2">
+                <TextField label="Policy holder DOB" type="date" value={(form.commercial || {}).policyHolderDob} onChange={v => setNested('commercial', 'policyHolderDob', v)} />
+                <SelectField label="Relationship" value={(form.commercial || {}).policyHolderRel} onChange={v => setNested('commercial', 'policyHolderRel', v)} options={IO.policyHolderRel} />
+              </div>
+              <TextField label="Insurance phone (member services)" type="tel" value={(form.commercial || {}).insPhone} onChange={v => setNested('commercial', 'insPhone', v)} />
+              <SelectField label="Home health / personal care benefit" value={(form.commercial || {}).homeBenefit} onChange={v => setNested('commercial', 'homeBenefit', v)} options={IO.homeBenefit} />
+              <p className="lbl">Long-term care insurance</p>
+              <SelectField label="LTC insurance carrier" value={(form.ltc || {}).carrier} onChange={v => setNested('ltc', 'carrier', v)} options={IO.ltcCarrier} />
+              {(form.ltc || {}).carrier === 'Other' && <TextField label="Other carrier name" value={(form.ltc || {}).carrierOther} onChange={v => setNested('ltc', 'carrierOther', v)} />}
+              <TextField label="Policy number" value={(form.ltc || {}).policyNum} onChange={v => setNested('ltc', 'policyNum', v)} />
+              <TextField label="Policy holder name" value={(form.ltc || {}).policyHolder} onChange={v => setNested('ltc', 'policyHolder', v)} />
+              <div className="grid2">
+                <TextField label="Daily / monthly benefit" value={(form.ltc || {}).benefit} onChange={v => setNested('ltc', 'benefit', v)} />
+                <TextField label="Elimination period" value={(form.ltc || {}).elimination} onChange={v => setNested('ltc', 'elimination', v)} />
+              </div>
+              <TextArea label="LTC insurance notes" value={(form.ltc || {}).notes} onChange={v => setNested('ltc', 'notes', v)} />
+              <p className="lbl">Payment</p>
+              <TextField label="Primary payment method" value={form.paymentMethod} onChange={v => set('paymentMethod', v)} />
+              <TextField label="Billing contact (if different)" value={form.billingContact} onChange={v => set('billingContact', v)} />
+              <p className="lbl">Other insurance cards</p>
               {form.insuranceIds.map((ins, i) => (
                 <div className="medrow" key={i}>
                   <TextField label="Carrier" value={ins.carrier} onChange={v => setIns(i, 'carrier', v)} placeholder="e.g. Blue Cross, Humana" />
@@ -4029,10 +4378,23 @@
           {k === 'consents' && (
             <React.Fragment>
               <h2 className="disp">Consents &amp; signatures</h2>
+              <p className="lbl" style={{ marginTop: 8 }}>Emergency &amp; crisis protocol</p>
+              <SelectField label="Call 911 in a medical emergency?" value={form.auth911} onChange={v => set('auth911', v)} options={IO.auth911} />
+              <TextField label="Who should we notify first in a crisis?" value={form.crisisNotify} onChange={v => set('crisisNotify', v)} placeholder="Name & phone" />
+              <p className="lbl">Signatures</p>
               <p className="sub">Branched for your service line. Each is e-signed with a typed name and timestamp. <b>{requiredConsents.filter(t => consents[t] === 'signed').length}/{requiredConsents.length}</b> required signed.</p>
               <p className="micro" style={{ justifyContent: 'flex-start', marginTop: 6 }}><i className="ti ti-info-circle" />Working draft — pending counsel/licensure review.</p>
               {activeConsentDefs.map(def => (
-                <ConsentCard key={def.type} def={def} status={consents[def.type]} meta={consentMeta[def.type]} signedName={form.primaryContact?.name} onSign={handleSignConsent} />
+                <React.Fragment key={def.type}>
+                  {def.type === 'roiFamily' && (
+                    <div className="card" style={{ marginBottom: 8 }}>
+                      <p className="lbl" style={{ marginTop: 0 }}>Family / representative information sharing</p>
+                      <TextField label="Who is authorized to receive information about the client?" value={(form.roiFamilyDetail || {}).authorized} onChange={v => setNested('roiFamilyDetail', 'authorized', v)} placeholder="Names & relationships" />
+                      <TextField label="Any restrictions on information sharing?" value={(form.roiFamilyDetail || {}).restrictions} onChange={v => setNested('roiFamilyDetail', 'restrictions', v)} placeholder="Optional" />
+                    </div>
+                  )}
+                  <ConsentCard def={def} status={consents[def.type]} meta={consentMeta[def.type]} signedName={form.primaryContact?.name} onSign={handleSignConsent} />
+                </React.Fragment>
               ))}
             </React.Fragment>
           )}
@@ -4047,7 +4409,8 @@
                 <div className="goal"><i className="ti ti-circle-check" style={{ color: 'var(--teal)' }} />{(form.medications || []).filter(m => m.name).length} medication(s) listed</div>
                 <div className="goal"><i className={`ti ${requiredSigned ? 'ti-circle-check' : 'ti-alert-circle'}`} style={{ color: requiredSigned ? 'var(--teal)' : 'var(--gfc-danger,#B5462E)' }} />Required consents {requiredSigned ? 'all signed' : `(${requiredConsents.filter(t => consents[t] === 'signed').length}/${requiredConsents.length})`}</div>
               </div>
-              {!requiredSigned && <div className="err">Please sign all required consents before submitting (go back to Consents).</div>}
+              {!consentsLoaded && <div className="err">We couldn't load your consent forms. Please refresh the page and try again.</div>}
+              {consentsLoaded && !requiredSigned && <div className="err">Please sign all required consents before submitting (go back to Consents).</div>}
               <button className="btn" disabled={busy || !requiredSigned} onClick={submit}>{busy ? 'Submitting…' : 'Complete enrollment'}</button>
             </React.Fragment>
           )}
@@ -4067,6 +4430,13 @@
       );
     };
 
+    // Friendly date like "Jul 21" (prototype uses month-abbrev, no year for recency).
+    function prettyDate(iso) {
+      if (!iso) return '';
+      const d = new Date(iso); if (isNaN(d)) return '';
+      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    }
+
     // Derive whole-years age from a YYYY-MM-DD DOB for the review screen.
     function ageFromDob(dob) {
       if (!dob) return '';
@@ -4077,15 +4447,35 @@
       return a;
     }
 
-    const GfcDashboard = ({ data, onNavigate }) => {
+    // Enrollment status-pill progression (prototype screen 4).
+    const EnrollmentPills = ({ status }) => {
+      const order = ['intake_pending', 'intake_complete', 'enrolled'];
+      const labels = { intake_pending: 'Intake pending', intake_complete: 'Intake complete', enrolled: 'Enrolled' };
+      const cur = order.indexOf(status === 'intake_pending' ? 'intake_pending' : (status === 'enrolled' ? 'enrolled' : 'intake_complete'));
+      return (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '2px 0 16px' }}>
+          {order.map((s, i) => {
+            const active = i === cur;
+            const done = i <= cur;
+            return <span key={s} style={{ fontSize: 11.5, fontWeight: 600, padding: '5px 12px', borderRadius: 20,
+              background: active ? 'var(--navy)' : (done ? 'var(--gold)' : 'rgba(3,61,80,.06)'),
+              color: active ? 'var(--cream)' : (done ? 'var(--navy)' : 'var(--mut)') }}>{labels[s]}</span>;
+          })}
+        </div>
+      );
+    };
+
+    const GfcDashboard = ({ data, onNavigate, me }) => {
       const cp = data.carePlan || {};
       const pc = cp.primaryCaregiver || {};
       const upcoming = data.upcomingVisits || [];
       const unread = (data.messages?.threads || []).filter(t => t.unread).length;
+      const roiFamilySigned = me && me.roiFamilySigned;
       return (
         <div className="gfc-body">
           <h2 className="disp">Good morning, {data.greetingName}</h2>
           <p className="sub">{pc.name ? `${pc.name.split(' ')[0]} arrives at ${(upcoming[0]||{}).time || 'your next visit'}.` : 'Your care team is ready.'}</p>
+          {me && <EnrollmentPills status={me.enrollmentStatus} />}
           <div className="planhero">
             <div className="pe">Your care plan</div>
             <div className="prow">
@@ -4106,23 +4496,101 @@
             <button className="tile" onClick={() => onNavigate('messages')}>{unread > 0 && <span className="badge">{unread}</span>}<i className="ti ti-message" /><span className="tl">Messages</span><span className="ts">Care team</span></button>
             <button className="tile" onClick={() => onNavigate('documents')}><i className="ti ti-file-text" /><span className="tl">Documents</span><span className="ts">Consents signed</span></button>
           </div>
+          {roiFamilySigned && (
+            <div className="card" style={{ marginTop: 14, background: 'var(--cream)', border: '1px solid var(--line2)', boxShadow: 'none' }}>
+              <div style={{ fontSize: 13, color: 'var(--ink)', lineHeight: 1.55 }}>
+                <b style={{ color: 'var(--navy)' }}>Family portal unlocked.</b> Your Release of Information — Family consent is signed, so the family members you designated can now follow along.
+              </div>
+            </div>
+          )}
         </div>
       );
     };
 
-    const GfcCarePlan = ({ data, readOnly }) => {
+    const GfcCarePlan = ({ data, readOnly, token }) => {
       const cp = data.carePlan || {};
       const upcoming = data.upcomingVisits || [];
       const recent = data.recentVisits || [];
       const teamColors = ['var(--gold)', '#9FE1CB', '#CECBF6'];
       const teamTextColors = ['var(--navy)', '#0f6e56', '#3c3489'];
+      const [coSigned, setCoSigned] = useState(!!cp.coSignedAt);
+      const [coSignBusy, setCoSignBusy] = useState(false);
+      const [coSignErr, setCoSignErr] = useState('');
+      // Canvas signature pad — same drawn-signature mechanism as the provider ROI.
+      const sigCanvasRef = useRef(null);
+      const sigState = useRef({ drawing: false, empty: true });
+      const padVisible = !readOnly && !coSigned && cp.version != null;
+      useEffect(() => {
+        if (!padVisible) return;
+        const canvas = sigCanvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        const ratio = window.devicePixelRatio || 1;
+        const w = canvas.offsetWidth || 400;
+        canvas.width = w * ratio; canvas.height = 130 * ratio;
+        ctx.scale(ratio, ratio);
+        ctx.strokeStyle = '#033D50'; ctx.lineWidth = 2; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        sigState.current = { drawing: false, empty: true };
+        const pos = (e) => { const r = canvas.getBoundingClientRect(); const s = e.touches ? e.touches[0] : e; return { x: s.clientX - r.left, y: s.clientY - r.top }; };
+        const down = (e) => { sigState.current.drawing = true; const p = pos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); };
+        const move = (e) => { if (!sigState.current.drawing) return; e.preventDefault && e.preventDefault(); const p = pos(e); ctx.lineTo(p.x, p.y); ctx.stroke(); sigState.current.empty = false; };
+        const up = () => { sigState.current.drawing = false; };
+        canvas.addEventListener('mousedown', down); canvas.addEventListener('mousemove', move);
+        canvas.addEventListener('mouseup', up); canvas.addEventListener('mouseleave', up);
+        canvas.addEventListener('touchstart', down, { passive: false });
+        canvas.addEventListener('touchmove', move, { passive: false });
+        canvas.addEventListener('touchend', up);
+        return () => {
+          canvas.removeEventListener('mousedown', down); canvas.removeEventListener('mousemove', move);
+          canvas.removeEventListener('mouseup', up); canvas.removeEventListener('mouseleave', up);
+          canvas.removeEventListener('touchstart', down); canvas.removeEventListener('touchmove', move);
+          canvas.removeEventListener('touchend', up);
+        };
+      }, [padVisible, cp.version]);
+      const clearSig = () => {
+        const canvas = sigCanvasRef.current; if (!canvas) return;
+        canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+        sigState.current.empty = true;
+      };
+      const handleCoSign = async () => {
+        setCoSignErr('');
+        if (sigState.current.empty) { setCoSignErr('Please draw your signature before co-signing.'); return; }
+        const signatureImageB64 = sigCanvasRef.current.toDataURL('image/png');
+        setCoSignBusy(true);
+        const res = await api.coSignGfcCarePlan(token, cp.version, signatureImageB64);
+        setCoSignBusy(false);
+        if (res.error) { setCoSignErr(res.error); return; }
+        setCoSigned(true);
+      };
       return (
         <div className="gfc-body">
           {readOnly && <span className="ro"><i className="ti ti-eye" />Family view · read-only</span>}
+          {(cp.version != null) && (
+            <p className="sub" style={{ marginTop: 0, marginBottom: 12 }}>
+              Version {cp.version}{cp.effectiveDate ? ` · effective ${prettyDate(cp.effectiveDate)}` : ''}{cp.authoredBy ? ` · written by ${cp.authoredBy}` : ''}, reviewed with you and your family.
+            </p>
+          )}
           <p className="lbl" style={{ marginTop: 0 }}>Goals</p>
           {(cp.goals || []).map((g, i) => (
             <div className="goal" key={i}><i className="ti ti-circle-check" />{g}</div>
           ))}
+          {(cp.eachVisit || []).length > 0 && (
+            <React.Fragment>
+              <p className="lbl">Each visit</p>
+              {cp.eachVisit.map((t, i) => (
+                <div className="goal" key={i}><i className="ti ti-square-check" style={{ color: 'var(--navy)' }} />{t}</div>
+              ))}
+            </React.Fragment>
+          )}
+          {cp.visitSchedule && (
+            <React.Fragment>
+              <p className="lbl">Visit schedule</p>
+              <div className="card" style={{ margin: 0 }}>
+                <div style={{ fontSize: 14.5, fontWeight: 600, color: 'var(--navy)' }}>{cp.visitSchedule.days} · {cp.visitSchedule.hours}</div>
+                {cp.visitSchedule.caregiver && <div style={{ fontSize: 12.5, color: 'var(--mut)', marginTop: 2 }}>{cp.visitSchedule.caregiver}</div>}
+              </div>
+            </React.Fragment>
+          )}
           <p className="lbl">Authorized services</p>
           <div className="seg">{(cp.authorizedServices || []).map((s, i) => <span className="on" key={i}>{s}</span>)}</div>
           <p className="lbl">Care team</p>
@@ -4150,7 +4618,29 @@
             </div>
           ))}
           {!readOnly && (
-            <button className="btn ghost" onClick={() => alert('Visit requests open in a later session.')}><i className="ti ti-plus" style={{ verticalAlign: -2 }} /> Request a visit</button>
+            <React.Fragment>
+              <p className="lbl">Your co-signature</p>
+              <div className="card" style={{ margin: 0 }}>
+                {coSigned ? (
+                  <React.Fragment>
+                    <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: 22, fontWeight: 600, color: 'var(--navy)', borderBottom: '1px solid var(--line2)', paddingBottom: 8, marginBottom: 8 }}>{data.greetingName}</div>
+                    <div className="goal" style={{ margin: 0 }}><i className="ti ti-circle-check" style={{ color: 'var(--teal)' }} />You co-signed care plan v{cp.version} · versions are retained.</div>
+                  </React.Fragment>
+                ) : (
+                  <React.Fragment>
+                    <div className="goal" style={{ margin: '0 0 10px', alignItems: 'flex-start' }}><i className="ti ti-square-check" style={{ color: 'var(--navy)' }} />I reviewed this plan and agree to it · sign below. Co-signature required, every version kept.</div>
+                    <div style={{ position: 'relative', border: '1px solid var(--line2)', borderRadius: 10, background: '#fff' }}>
+                      <canvas ref={sigCanvasRef} style={{ display: 'block', width: '100%', height: 130, touchAction: 'none' }} />
+                      <button type="button" onClick={clearSig} style={{ position: 'absolute', top: 6, right: 8, background: 'none', border: 'none', color: 'var(--mut)', fontSize: 12, cursor: 'pointer' }}>Clear</button>
+                    </div>
+                    <div style={{ fontSize: 11.5, color: 'var(--mut)', margin: '6px 0 10px' }}>Draw your signature above — {data.greetingName}</div>
+                    <button className="btn" disabled={coSignBusy || cp.version == null} onClick={handleCoSign}>{coSignBusy ? 'Signing…' : `Co-sign care plan v${cp.version}`}</button>
+                    {coSignErr && <div className="err">{coSignErr}</div>}
+                  </React.Fragment>
+                )}
+              </div>
+              <button className="btn ghost" onClick={() => alert('Visit requests open in a later session.')}><i className="ti ti-plus" style={{ verticalAlign: -2 }} /> Request a visit</button>
+            </React.Fragment>
           )}
           <p className="micro"><i className="ti ti-history" />{cp.careTierLabel} · Version {cp.version} · updated {cp.updatedAt} by {cp.updatedBy}</p>
         </div>
@@ -4177,7 +4667,318 @@
       );
     };
 
-    const GfcDocuments = ({ docs, readOnly, token }) => {
+    // ── Transfer-of-Care Provider ROI (Session 3.4) ──
+    // Multi-screen flow mirroring docs/source-forms/template-gfc-roi-upload.php:
+    // choose path → upload a signed scan OR complete the 8-section online form
+    // (provider cards prefilled from priorProviders + canvas signature) → success.
+    // Uses canvas signature capture (not typed name) because the PDF is
+    // provider-facing. Does NOT gate the portal.
+    const ROI_CATS = [
+      { key: 'hp', label: 'History & physical / progress notes' },
+      { key: 'lab', label: 'Lab and pathology results' },
+      { key: 'diag', label: 'Problem & diagnosis list' },
+      { key: 'imaging', label: 'Imaging / radiology reports' },
+      { key: 'meds', label: 'Current medication list' },
+      { key: 'discharge', label: 'Discharge summaries' },
+      { key: 'allergies', label: 'Allergies' },
+      { key: 'immune', label: 'Immunization records' }
+    ];
+
+    const RoiProviderCard = ({ p, idx, removable, onChange, onRemove }) => (
+      <div className="card" style={{ background: 'var(--cream)', marginBottom: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+          <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '.6px', textTransform: 'uppercase', color: 'var(--navy)' }}>{p.label || 'Provider / facility'}</span>
+          {removable && <button onClick={onRemove} style={{ background: 'none', border: 'none', color: '#B5462E', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Remove</button>}
+        </div>
+        <TextField label="Provider / facility name" value={p.name} onChange={v => onChange(idx, 'name', v)} placeholder="e.g. Northside Hospital" />
+        <TextField label="Department" value={p.dept} onChange={v => onChange(idx, 'dept', v)} placeholder="e.g. Medical Records" />
+        <TextField label="Address" value={p.address} onChange={v => onChange(idx, 'address', v)} placeholder="Street, City, State ZIP" />
+        <TextField label="Phone" type="tel" value={p.phone} onChange={v => onChange(idx, 'phone', v)} />
+        <TextField label="Fax" type="tel" value={p.fax} onChange={v => onChange(idx, 'fax', v)} />
+      </div>
+    );
+
+    const GfcTransferRoi = ({ token, onClose, onDone }) => {
+      const [screen, setScreen] = useState('choice'); // choice | upload | form | success
+      const [loaded, setLoaded] = useState(false);
+      const [patient, setPatient] = useState({});
+      const [providers, setProviders] = useState([]);
+      const [cats, setCats] = useState({});
+      const [otherText, setOtherText] = useState('');
+      const [includesProtected, setIncludesProtected] = useState(false); // 42 CFR Part 2 — defaults FALSE
+      const [purposeOther, setPurposeOther] = useState(false);
+      const [purposeOtherText, setPurposeOtherText] = useState('');
+      const [expDate, setExpDate] = useState('');
+      const [expEvent, setExpEvent] = useState('');
+      const [printedName, setPrintedName] = useState('');
+      const [relationship, setRelationship] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      const [file, setFile] = useState(null); // { name, dataB64, type }
+      const canvasRef = useRef(null);
+      const sigState = useRef({ drawing: false, empty: true });
+      const today = new Date().toLocaleDateString();
+
+      useEffect(() => {
+        (async () => {
+          const r = await api.getGfcTransferRoi(token);
+          if (!r.error) {
+            setPatient(r.patient || {});
+            setPrintedName((r.patient && r.patient.patientName) || '');
+            const pre = (r.priorProviders || []).map(pp => ({
+              label: pp.roleLabel === 'pcp' ? 'Primary care physician' : pp.roleLabel === 'specialist' ? 'Specialist' : pp.roleLabel === 'hospital' ? 'Hospital / facility' : 'Provider / facility',
+              name: pp.name || '', dept: pp.dept || '', address: pp.address || '', phone: pp.phone || '', fax: pp.fax || ''
+            }));
+            setProviders(pre.length ? pre : [{ label: 'Provider / facility', name: '', dept: '', address: '', phone: '', fax: '' }]);
+          }
+          setLoaded(true);
+        })();
+      }, [token]);
+
+      // Canvas signature pad — initialized when the form screen mounts.
+      useEffect(() => {
+        if (screen !== 'form') return;
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        const ratio = window.devicePixelRatio || 1;
+        const w = canvas.offsetWidth || 400;
+        canvas.width = w * ratio; canvas.height = 130 * ratio;
+        ctx.scale(ratio, ratio);
+        ctx.strokeStyle = '#033D50'; ctx.lineWidth = 2; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        sigState.current = { drawing: false, empty: true };
+        const pos = (e) => { const r = canvas.getBoundingClientRect(); const s = e.touches ? e.touches[0] : e; return { x: s.clientX - r.left, y: s.clientY - r.top }; };
+        const down = (e) => { sigState.current.drawing = true; const p = pos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); };
+        const move = (e) => { if (!sigState.current.drawing) return; e.preventDefault && e.preventDefault(); const p = pos(e); ctx.lineTo(p.x, p.y); ctx.stroke(); sigState.current.empty = false; };
+        const up = () => { sigState.current.drawing = false; };
+        canvas.addEventListener('mousedown', down); canvas.addEventListener('mousemove', move);
+        canvas.addEventListener('mouseup', up); canvas.addEventListener('mouseleave', up);
+        canvas.addEventListener('touchstart', down, { passive: false });
+        canvas.addEventListener('touchmove', move, { passive: false });
+        canvas.addEventListener('touchend', up);
+        return () => {
+          canvas.removeEventListener('mousedown', down); canvas.removeEventListener('mousemove', move);
+          canvas.removeEventListener('mouseup', up); canvas.removeEventListener('mouseleave', up);
+          canvas.removeEventListener('touchstart', down); canvas.removeEventListener('touchmove', move);
+          canvas.removeEventListener('touchend', up);
+        };
+      }, [screen]);
+
+      const clearSig = () => {
+        const canvas = canvasRef.current; if (!canvas) return;
+        canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+        sigState.current.empty = true;
+      };
+
+      const setP = (i, k, v) => setProviders(ps => ps.map((p, idx) => idx === i ? { ...p, [k]: v } : p));
+      const addProvider = () => setProviders(ps => [...ps, { label: 'Additional provider', name: '', dept: '', address: '', phone: '', fax: '' }]);
+      const rmProvider = (i) => setProviders(ps => ps.filter((_, idx) => idx !== i));
+      const toggleCat = (k) => setCats(c => ({ ...c, [k]: !c[k] }));
+
+      const handleFile = (f) => {
+        if (!f) return;
+        const allowed = ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png'];
+        if (allowed.indexOf(f.type) === -1) { setErr('Only PDF, JPG, and PNG files are accepted.'); return; }
+        if (f.size > 10 * 1024 * 1024) { setErr('File must be under 10 MB.'); return; }
+        setErr('');
+        const reader = new FileReader();
+        reader.onload = () => setFile({ name: f.name, dataB64: String(reader.result), type: f.type });
+        reader.readAsDataURL(f);
+      };
+
+      const submitUpload = async () => {
+        if (!file) { setErr('Choose a file first.'); return; }
+        setBusy(true); setErr('');
+        const res = await api.uploadGfcTransferRoi(token, { fileName: file.name, fileDataB64: file.dataB64, mimeType: file.type });
+        setBusy(false);
+        if (res.error) { setErr(res.error); return; }
+        onDone && onDone();
+        setScreen('success');
+      };
+
+      const submitForm = async () => {
+        setErr('');
+        const named = providers.filter(p => (p.name || '').trim());
+        if (named.length === 0) { setErr('Add at least one provider before submitting.'); return; }
+        if (sigState.current.empty) { setErr('Please draw your signature before submitting.'); return; }
+        if (!printedName.trim()) { setErr('Printed name is required.'); return; }
+        const signatureImageB64 = canvasRef.current.toDataURL('image/png');
+        const checkedAny = ROI_CATS.some(c => cats[c.key]) || cats.other;
+        if (!checkedAny) { setErr('Select at least one type of record to request.'); return; }
+        setBusy(true);
+        const payload = {
+          patientName: patient.patientName, patientDOB: patient.patientDOB, patientAddress: patient.patientAddress, patientPhone: patient.patientPhone,
+          providers: named.map(p => ({ name: p.name, dept: p.dept, address: p.address, phone: p.phone, fax: p.fax })),
+          categories: { ...cats, otherText },
+          includesProtected: includesProtected === true,
+          purposeTreatment: true, purposeOther, purposeOtherText,
+          expDate, expEvent,
+          signatureImageB64, printedName: printedName.trim(), relationship
+        };
+        const res = await api.submitGfcTransferRoi(token, payload);
+        setBusy(false);
+        if (res.error) {
+          if (res.fieldErrors) setErr('Missing required fields: ' + Object.values(res.fieldErrors).join(' '));
+          else setErr(res.error);
+          return;
+        }
+        onDone && onDone();
+        setScreen('success');
+      };
+
+      if (!loaded) return <div className="gfc-body" style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}><div className="gfc-spin" /></div>;
+
+      const backBtn = (to) => (
+        <button className="back-min" onClick={() => { setErr(''); setScreen(to); }} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: 'none', border: 'none', color: 'var(--mut)', fontSize: 13, cursor: 'pointer', padding: 0, marginBottom: 8 }}>
+          <i className="ti ti-chevron-left" /> Back
+        </button>
+      );
+
+      if (screen === 'success') {
+        return (
+          <div className="gfc-body">
+            <div style={{ textAlign: 'center', padding: '50px 0 30px' }}>
+              <div style={{ width: 60, height: 60, background: 'var(--navy)', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 20px' }}>
+                <i className="ti ti-check" style={{ color: 'var(--gold)', fontSize: 28 }} />
+              </div>
+              <h2 className="disp">Authorization received</h2>
+              <p className="sub" style={{ maxWidth: 360, margin: '12px auto' }}>Your form was submitted to our care team. We'll use it to request your records from your provider and will be in touch with next steps. A confirmation email is on its way.</p>
+              <button className="btn" style={{ maxWidth: 240, margin: '18px auto 0' }} onClick={onClose}>Back to Documents</button>
+            </div>
+          </div>
+        );
+      }
+
+      if (screen === 'choice') {
+        return (
+          <div className="gfc-body">
+            {backBtn && <button className="back-min" onClick={onClose} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: 'none', border: 'none', color: 'var(--mut)', fontSize: 13, cursor: 'pointer', padding: 0, marginBottom: 8 }}><i className="ti ti-chevron-left" /> Documents</button>}
+            <h2 className="disp">Authorize record release</h2>
+            <p className="sub">To request your records from a prior provider, we need a signed Authorization to Obtain Medical Records. Choose how you'd like to complete it.</p>
+            <div className="card" style={{ cursor: 'pointer', marginTop: 16 }} onClick={() => setScreen('upload')}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <i className="ti ti-upload" style={{ fontSize: 22, color: 'var(--navy)' }} />
+                <div><b style={{ color: 'var(--navy)', fontSize: 14.5 }}>Upload a signed form</b><div className="sub" style={{ marginTop: 2 }}>Already printed, signed, and scanned it? Upload it here.</div></div>
+              </div>
+            </div>
+            <div className="card" style={{ cursor: 'pointer' }} onClick={() => setScreen('form')}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <i className="ti ti-edit" style={{ fontSize: 22, color: 'var(--navy)' }} />
+                <div><b style={{ color: 'var(--navy)', fontSize: 14.5 }}>Complete the form online</b><div className="sub" style={{ marginTop: 2 }}>Fill it out now — we'll generate one authorization per provider.</div></div>
+              </div>
+            </div>
+            {err && <div className="err">{err}</div>}
+          </div>
+        );
+      }
+
+      if (screen === 'upload') {
+        return (
+          <div className="gfc-body">
+            {backBtn('choice')}
+            <h2 className="disp">Upload signed form</h2>
+            <div className="card" style={{ marginTop: 14 }}>
+              <label className="fld" style={{ margin: 0, display: 'block', cursor: 'pointer' }}>
+                <div style={{ border: '2px dashed var(--line2)', borderRadius: 12, padding: '32px 18px', textAlign: 'center', background: 'var(--cream)' }}>
+                  <i className="ti ti-cloud-upload" style={{ fontSize: 34, color: 'var(--navy)' }} />
+                  <div style={{ marginTop: 8, fontSize: 13.5, color: 'var(--ink)' }}><b style={{ color: 'var(--navy)' }}>Click to select your file</b></div>
+                  <div className="sub" style={{ fontSize: 12 }}>PDF, JPG, or PNG · max 10 MB</div>
+                </div>
+                <input type="file" accept=".pdf,.jpg,.jpeg,.png" style={{ display: 'none' }} onChange={e => handleFile(e.target.files[0])} />
+              </label>
+              {file && <div className="doc" style={{ marginTop: 12 }}><i className="ti ti-file-check" /><div><b>{file.name}</b><span>Ready to upload</span></div></div>}
+              <button className="btn" disabled={busy || !file} onClick={submitUpload}>{busy ? 'Uploading…' : 'Upload document'}</button>
+              {err && <div className="err">{err}</div>}
+            </div>
+          </div>
+        );
+      }
+
+      // screen === 'form'
+      return (
+        <div className="gfc-body">
+          {backBtn('choice')}
+          <h2 className="disp">Authorization form</h2>
+
+          <p className="lbl">1 · Patient (whose records)</p>
+          <div className="card">
+            <TextField label="Patient full name" value={patient.patientName} onChange={v => setPatient(p => ({ ...p, patientName: v }))} />
+            <TextField label="Date of birth" value={patient.patientDOB} onChange={v => setPatient(p => ({ ...p, patientDOB: v }))} placeholder="MM/DD/YYYY" />
+            <TextField label="Address" value={patient.patientAddress} onChange={v => setPatient(p => ({ ...p, patientAddress: v }))} />
+            <TextField label="Phone" type="tel" value={patient.patientPhone} onChange={v => setPatient(p => ({ ...p, patientPhone: v }))} />
+          </div>
+
+          <p className="lbl">2 · Release records from</p>
+          <div className="hint" style={{ fontSize: 11.5, color: 'var(--mut)', marginBottom: 8 }}>Providers from your intake are pre-filled. Edit any field and add more. A separate authorization PDF is generated for each provider.</div>
+          {providers.map((p, i) => (
+            <RoiProviderCard key={i} p={p} idx={i} removable={providers.length > 1} onChange={setP} onRemove={() => rmProvider(i)} />
+          ))}
+          <button className="btn ghost" onClick={addProvider} style={{ marginTop: 4 }}><i className="ti ti-plus" /> Add another provider</button>
+
+          <p className="lbl">3 · Release records to</p>
+          <div className="card" style={{ background: 'var(--cream)' }}>
+            <b style={{ color: 'var(--navy)', fontSize: 14 }}>Godwins Family Care LLC</b>
+            <div className="sub" style={{ marginTop: 3, fontSize: 12.5 }}>4300 Paces Ferry Rd SE, Ste 500, Atlanta, GA 30339 · Tel 404-913-6705 · Fax 678-692-7445</div>
+          </div>
+
+          <p className="lbl">4 · Information authorized</p>
+          <div className="card">
+            {ROI_CATS.map(c => (
+              <div key={c.key} className={`check ${cats[c.key] ? 'on' : ''}`} onClick={() => toggleCat(c.key)}>
+                <span className="box">{cats[c.key] && <i className="ti ti-check" />}</span>{c.label}
+              </div>
+            ))}
+            <div className={`check ${cats.other ? 'on' : ''}`} onClick={() => toggleCat('other')}>
+              <span className="box">{cats.other && <i className="ti ti-check" />}</span>Other
+            </div>
+            {cats.other && <TextField label="Other — specify" value={otherText} onChange={setOtherText} />}
+            <div style={{ marginTop: 14, padding: '12px 14px', background: 'var(--cream)', borderRadius: 11, border: '1px solid var(--line2)' }}>
+              <div style={{ fontSize: 12, color: 'var(--mut)', lineHeight: 1.55, marginBottom: 8 }}>
+                <b style={{ color: 'var(--navy)' }}>Specially protected information.</b> Records of mental health, substance use, HIV/AIDS, or genetic testing are released <b>only</b> if you specifically authorize it here.
+              </div>
+              <div className={`check ${includesProtected ? 'on' : ''}`} onClick={() => setIncludesProtected(v => !v)} style={{ marginBottom: 0 }}>
+                <span className="box">{includesProtected && <i className="ti ti-check" />}</span>Yes, include specially protected information listed above
+              </div>
+            </div>
+          </div>
+
+          <p className="lbl">5 · Purpose</p>
+          <div className="card">
+            <div className="check on" style={{ cursor: 'default' }}><span className="box"><i className="ti ti-check" /></span>Treatment, care coordination, and care planning</div>
+            <div className={`check ${purposeOther ? 'on' : ''}`} onClick={() => setPurposeOther(v => !v)}><span className="box">{purposeOther && <i className="ti ti-check" />}</span>Other</div>
+            {purposeOther && <TextField label="Other purpose — specify" value={purposeOtherText} onChange={setPurposeOtherText} />}
+          </div>
+
+          <p className="lbl">6 · Expiration</p>
+          <div className="card">
+            <div className="hint" style={{ fontSize: 11.5, color: 'var(--mut)', marginBottom: 4 }}>Unless revoked sooner, this authorization expires one year from the date signed, or on the earlier of:</div>
+            <TextField label="Expiration date (optional)" value={expDate} onChange={setExpDate} placeholder="MM/DD/YYYY" />
+            <TextField label="Expiration event (optional)" value={expEvent} onChange={setExpEvent} placeholder="e.g. end of treatment" />
+          </div>
+
+          <p className="lbl">7 · Your rights</p>
+          <div className="consentbox">
+            <p>I understand that: (1) I may revoke this authorization at any time by writing to Godwins Family Care LLC, except to the extent action has already been taken in reliance on it; (2) treatment, payment, enrollment, and eligibility for benefits may not be conditioned on signing, except where the law allows; (3) information disclosed under this authorization may be re-disclosed by the recipient and may no longer be protected by federal privacy law; and (4) I am entitled to a copy of this signed authorization.</p>
+          </div>
+
+          <p className="lbl">8 · Signature</p>
+          <div className="card">
+            <div className="hint" style={{ fontSize: 11.5, color: 'var(--mut)', marginBottom: 8 }}>Draw your signature below using your mouse or finger.</div>
+            <div style={{ position: 'relative', border: '1px solid var(--line2)', borderRadius: 10, background: '#fff' }}>
+              <canvas ref={canvasRef} style={{ display: 'block', width: '100%', height: 130, touchAction: 'none' }} />
+              <button onClick={clearSig} style={{ position: 'absolute', top: 6, right: 8, background: '#fff', border: '1px solid var(--line2)', borderRadius: 6, fontSize: 11, color: 'var(--mut)', padding: '2px 8px', cursor: 'pointer' }}>Clear</button>
+            </div>
+            <TextField label="Printed name" value={printedName} onChange={setPrintedName} />
+            <TextField label="Relationship / authority (if signing for patient)" value={relationship} onChange={setRelationship} placeholder="e.g. Power of attorney" />
+            <div className="sub" style={{ fontSize: 12, marginTop: 8 }}>Date: {today}</div>
+            <button className="btn" disabled={busy} onClick={submitForm}>{busy ? (providers.filter(p => (p.name || '').trim()).length > 1 ? 'Generating authorizations…' : 'Submitting…') : 'Submit authorization'}</button>
+            {err && <div className="err">{err}</div>}
+          </div>
+        </div>
+      );
+    };
+
+    const GfcDocuments = ({ docs, readOnly, token, onOpenTransferRoi }) => {
       const signed = docs?.signedConsents || [];
       const files = docs?.documents || [];
       const packet = docs?.enrollmentPacket || null;
@@ -4190,6 +4991,16 @@
       return (
         <div className="gfc-body">
           {readOnly && <span className="ro"><i className="ti ti-eye" />Family view · read-only</span>}
+          {!readOnly && onOpenTransferRoi && (
+            <React.Fragment>
+              <p className="lbl" style={{ marginTop: 0 }}>Record release</p>
+              <div className="doc" onClick={onOpenTransferRoi} style={{ cursor: 'pointer' }}>
+                <i className="ti ti-file-symlink" />
+                <div><b>Authorize record release from prior providers</b><span>Request your records from a prior doctor, specialist, or hospital</span></div>
+                <i className="ti ti-chevron-right" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
+              </div>
+            </React.Fragment>
+          )}
           {packet && (
             <React.Fragment>
               <p className="lbl" style={{ marginTop: 0 }}>Enrollment</p>
@@ -4202,14 +5013,21 @@
           )}
           <p className="lbl" style={{ marginTop: packet ? undefined : 0 }}>Signed consents</p>
           {signed.length === 0 && <p className="sub">No consents on file yet.</p>}
-          {signed.map(s => (
-            <div className="doc" key={s.key}>
-              <i className="ti ti-file-certificate" />
-              <div><b>{s.label}</b><span>{s.signedAt ? `Signed ${new Date(s.signedAt).toLocaleDateString()}` : (s.status === 'signed' ? 'Signed' : s.status)}</span></div>
-              {s.status === 'signed' && <span className="sgn"><i className="ti ti-circle-check" />Signed</span>}
-            </div>
-          ))}
-          <p className="lbl">Documents</p>
+          {signed.map(s => {
+            // Each signed consent is a filed PDF (opens the signed enrollment packet,
+            // which contains the consent + its e-signature metadata).
+            const openConsentPdf = () => { if (!packet) return; packet.url && packet.url.startsWith('http') ? window.open(packet.url, '_blank') : openPdfSecurely(`${API_URL}${packet.url}`, token); };
+            const sub = s.status === 'na' ? 'Opt-out recorded'
+              : `Signed ${s.signedAt ? prettyDate(s.signedAt) : ''}${s.signerName ? ` · ${s.signerName}` : ''}`.trim();
+            return (
+              <div className="doc" key={s.key} onClick={s.status === 'signed' ? openConsentPdf : undefined} style={{ cursor: s.status === 'signed' ? 'pointer' : 'default' }}>
+                <i className="ti ti-file-certificate" />
+                <div><b>{s.label}</b><span>{sub}</span></div>
+                {s.status === 'signed' && <span style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 700, letterSpacing: '.06em', color: 'var(--goldd)' }}>PDF</span>}
+              </div>
+            );
+          })}
+          <p className="lbl">From your care team</p>
           {files.length === 0 && <p className="sub">Shared documents from your care team will appear here.</p>}
           {files.map(f => (
             <a className="doc" key={f.id} href={f.url || '#'} target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'none' }}>
@@ -4229,6 +5047,8 @@
       const [error, setError] = useState(null);
       const [view, setView] = useState('home');       // home | care | messages | documents
       const [showIntake, setShowIntake] = useState(false);
+      const [showTransferRoi, setShowTransferRoi] = useState(false); // Transfer-of-Care ROI overlay (Session 3.4)
+      const [justEnrolled, setJustEnrolled] = useState(false); // one-time nudge right after intake completes (Session 3.4)
       const [data, setData] = useState(null);          // care-plan + visits
       const [messages, setMessages] = useState(null);
       const [docs, setDocs] = useState(null);
@@ -4301,8 +5121,44 @@
             </div>
             {showIntake && !isFamily
               ? <GfcIntakeFlow token={token} me={me} onBack={() => setShowIntake(false)}
-                  onComplete={async () => { setShowIntake(false); await reloadMe(); }} />
+                  onComplete={async () => { setShowIntake(false); await reloadMe(); setJustEnrolled(true); }} />
               : <GfcGate me={me} onStartIntake={() => setShowIntake(true)} />}
+          </div></div>
+        );
+      }
+
+      // One-time nudge right after enrollment completes — offers the full
+      // Transfer-of-Care ROI immediately rather than leaving it to be
+      // discovered later in Documents (Session 3.4).
+      if (justEnrolled && !isFamily) {
+        return (
+          <div className="gfc"><div className="gfc-shell">
+            <div className="gfc-hdr"><span className="ttl">Welcome</span><button onClick={gfcLogout} title="Sign out"><i className="ti ti-logout" /></button></div>
+            <div className="gfc-body" style={{ textAlign: 'center', padding: '50px 20px 20px' }}>
+              <div style={{ width: 60, height: 60, background: 'var(--navy)', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 20px' }}>
+                <i className="ti ti-check" style={{ color: 'var(--gold)', fontSize: 28 }} />
+              </div>
+              <h2 className="disp">You're enrolled!</h2>
+              <p className="sub" style={{ maxWidth: 340, margin: '12px auto 24px' }}>If you're transferring care from another doctor, specialist, or hospital, you can authorize us to request your records now — it only takes a minute.</p>
+              <button className="btn" style={{ maxWidth: 280, margin: '0 auto' }} onClick={() => { setJustEnrolled(false); setShowTransferRoi(true); }}>Authorize record release now</button>
+              <button className="btn ghost" style={{ maxWidth: 280, margin: '10px auto 0' }} onClick={() => setJustEnrolled(false)}>Not now — I'll do this later</button>
+            </div>
+          </div></div>
+        );
+      }
+
+      // Transfer-of-Care ROI overlay — takes over the shell (client-only, Session 3.4).
+      if (showTransferRoi && !isFamily) {
+        return (
+          <div className="gfc"><div className="gfc-shell">
+            <div className="gfc-hdr">
+              <button onClick={() => setShowTransferRoi(false)}><i className="ti ti-chevron-left" /></button>
+              <span className="ttl">Record Release</span>
+              <button onClick={gfcLogout} title="Sign out"><i className="ti ti-logout" /></button>
+            </div>
+            <GfcTransferRoi token={token}
+              onClose={() => setShowTransferRoi(false)}
+              onDone={async () => { const dc = await api.getGfcDocuments(token); if (!dc.error) setDocs(dc); }} />
           </div></div>
         );
       }
@@ -4321,10 +5177,10 @@
             <span className="ttl">{titles[view]}</span>
             <button onClick={gfcLogout} title="Sign out"><i className="ti ti-logout" /></button>
           </div>
-          {view === 'home' && data && <GfcDashboard data={data} onNavigate={setView} />}
-          {view === 'care' && data && <GfcCarePlan data={data} readOnly={isFamily} />}
+          {view === 'home' && data && <GfcDashboard data={data} onNavigate={setView} me={me} />}
+          {view === 'care' && data && <GfcCarePlan data={data} readOnly={isFamily} token={token} />}
           {view === 'messages' && <GfcMessages messages={messages} readOnly={isFamily} />}
-          {view === 'documents' && <GfcDocuments docs={docs} readOnly={isFamily} token={token} />}
+          {view === 'documents' && <GfcDocuments docs={docs} readOnly={isFamily} token={token} onOpenTransferRoi={() => setShowTransferRoi(true)} />}
           {!data && view !== 'messages' && view !== 'documents' && (
             <div className="gfc-body" style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}><div className="gfc-spin" /></div>
           )}

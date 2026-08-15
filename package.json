@@ -5,6 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "test": "node --test",
     "changelog": "node changelog-generator.js",
     "changelog:version": "node changelog-generator.js"
   },

@@ -33,6 +33,16 @@ async function sendEmail(to, subject, body, options = {}) {
       payload.html = options.htmlBody;
     }
 
+    // Attachments: [{ filename, content: Buffer|base64 }]. Used by the admin
+    // Transfer-of-Care ROI notification (Session 3.4). Client/patient receipts
+    // are NEVER sent attachments — compliance keeps PHI out of patient email.
+    if (Array.isArray(options.attachments) && options.attachments.length) {
+      payload.attachments = options.attachments.map(a => ({
+        filename: a.filename,
+        content: Buffer.isBuffer(a.content) ? a.content.toString('base64') : a.content
+      }));
+    }
+
     const result = await resend.emails.send(payload);
     console.log('Email sent:', result);
     return { success: true, id: result.id };

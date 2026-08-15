@@ -14,6 +14,8 @@ const pdfGenerator = require('./pdf-generator');
 const changelogGenerator = require('./changelog-generator');
 const config = require('./config');
 const { sendEmail, sendBulkEmail, sendBatchEmails } = require('./email');
+const roiRepo = require('./roiRepository');           // Transfer-of-Care ROI data model (Session 3.4)
+const legacySync = require('./legacySync');            // ROI parallel-run legacy sync (Session 3.4)
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -37,6 +39,10 @@ const uploadLimiter = (req, res, next) => {
 
 const app = express();
 const db = new Database();
+// Transfer-of-Care ROI repository (Session 3.4) — three KV collections
+// (consent_events / consent_provider_authorizations / consent_records_categories)
+// bound to the same db, keyed for a later RDS migration.
+const roiStore = roiRepo.createRepository(db);
 const PORT = config.PORT;
 
 // HubSpot ticket polling timer reference
@@ -4983,18 +4989,32 @@ const buildEnrollmentSnapshot = (client) => {
   };
 };
 
+// The dev care-plan fixture uses a NON-REAL version sentinel so a co-signature
+// captured against the sample can never collide with a future real plan version
+// (real plans authored in Session 4 carry their own version starting from 1).
+const SAMPLE_CARE_PLAN_VERSION = 0;
+// Resolve the authoritative current care-plan version for a client — the real
+// per-patient plan's version when present, else the sample sentinel. Used by
+// both the care-plan GET and the co-sign route so they agree on the version.
+const resolveCarePlanVersion = (client) =>
+  (client && client.carePlan && client.carePlan.version != null) ? client.carePlan.version : SAMPLE_CARE_PLAN_VERSION;
+
 // Dev fixtures for an enrolled client. Pulls real careTeam names where present,
 // otherwise falls back to prototype sample names so the portal renders fully.
 const buildGfcTestData = (client) => {
   const firstName = (client.preferredName || client.name || 'there').split(' ')[0];
   const tierLabel = careTierLabelFor(client.careTier) || CARE_TIER_LABELS['A2'];
 
-  const carePlan = {
-    version: 3,
+  // Sample care-plan CONTENT is a dev fixture only — the real, per-patient plan is
+  // RN-authored in Session 4 (OpenEMR) and stored on `client.carePlan`. When that
+  // exists it wins field-by-field, so nothing here is patient-specific: this block
+  // just lets the portal render its structure before clinical data exists.
+  const carePlanSample = {
+    version: SAMPLE_CARE_PLAN_VERSION,
     updatedAt: '2026-06-08',
     updatedBy: 'Bethel N., FNP',
-    careTier: normalizeCareTier(client.careTier) || 'A2',
-    careTierLabel: tierLabel,
+    effectiveDate: '2026-06-08',
+    authoredBy: 'Bethel N., FNP',
     primaryCaregiver: { name: 'Joelle T.', role: 'Primary caregiver', credential: 'LPN-track', initials: 'JT' },
     goals: [
       'Stay steady on her feet',
@@ -5002,12 +5022,26 @@ const buildGfcTestData = (client) => {
       'Medication on time, every day'
     ],
     authorizedServices: ['Bathing', 'Dressing', 'Med reminders', 'Meals', 'Mobility'],
+    eachVisit: ['Bathing, grooming, dressing', 'Meal preparation', 'Medication reminders', '10-minute walk, weather permitting'],
+    visitSchedule: { days: 'Mon · Wed · Fri', hours: '2:00 to 6:00 PM', caregiver: 'Joelle T., your caregiver' },
     careTeam: [
       { name: 'Joelle T.', role: 'Primary caregiver', initials: 'JT' },
       { name: 'Bethel N., FNP', role: 'Clinical lead', initials: 'BN' },
       { name: 'Courtney W.', role: 'Case manager', initials: 'CW' }
     ]
   };
+  // Real per-patient plan wins field-by-field; tier always reflects the client record.
+  const carePlan = {
+    ...carePlanSample,
+    ...(client.carePlan && typeof client.carePlan === 'object' ? client.carePlan : {}),
+    careTier: normalizeCareTier(client.careTier) || 'A2',
+    careTierLabel: tierLabel
+  };
+  // Co-signature state keyed to THIS plan's version (versions retained) — read from
+  // the client's own co-sign record, never hardcoded.
+  const cpVersion = carePlan.version;
+  const coSign = (client.carePlanCoSign || {})[`v${cpVersion}`];
+  carePlan.coSignedAt = coSign ? coSign.at : null;
 
   const visits = {
     upcoming: [
@@ -5109,6 +5143,7 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
       npp: 'HIPAA Notice of Privacy Practices',
       roiFamily: 'Release of Information — Family',
       roiProvider: 'Release of Information — Provider',
+      roiTransfer: 'Transfer-of-Care Authorization (record release)',
       serviceAgreement: 'Service Agreement',
       billOfRights: 'Patient Bill of Rights & Self-Determination',
       emergencyFinancial: 'Emergency Treatment & Financial Responsibility',
@@ -5126,7 +5161,8 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
         key: k,
         label: consentLabels[k] || k,
         status: consents[k],
-        signedAt: (client.consentMeta && client.consentMeta[k] && client.consentMeta[k].signedAt) || null
+        signedAt: (client.consentMeta && client.consentMeta[k] && client.consentMeta[k].signedAt) || null,
+        signerName: (client.consentMeta && client.consentMeta[k] && client.consentMeta[k].typedName) || null
       }));
 
     // Documents shared with this client via the existing client-documents store (Drive-backed).
@@ -5166,11 +5202,129 @@ app.get('/api/gfc/enrollment-packet.pdf', authenticateToken, requireEnrolledClie
   }
 });
 
+// POST /api/gfc/intake/upload — attach an intake document (advance directive,
+// insurance card, discharge paperwork) to HIPAA Google Drive. Client-only; runs
+// during intake (before the enrollment gate), so it uses requireClientForIntake.
+// Base64 upload, same contract as the ROI scan upload.
+app.post('/api/gfc/intake/upload', authenticateToken, requireClientForIntake, async (req, res) => {
+  try {
+    const { fileName, fileDataB64 } = req.body || {};
+    if (!fileName || !fileDataB64) return res.status(400).json({ error: 'fileName and fileDataB64 are required' });
+    let buffer;
+    try {
+      const b64 = fileDataB64.startsWith('data:') ? fileDataB64.slice(fileDataB64.indexOf(',') + 1) : fileDataB64;
+      buffer = Buffer.from(b64, 'base64');
+    } catch (e) { return res.status(400).json({ error: 'File data is not valid base64.' }); }
+    if (buffer.length > config.MAX_FILE_SIZE) return res.status(400).json({ error: 'File exceeds 10 MB limit.' });
+    // Authoritative type check by content, not the client-declared mimeType.
+    const sniffedType = detectFileType(buffer);
+    if (!sniffedType) return res.status(400).json({ error: 'Only PDF, JPG, and PNG files are accepted.' });
+
+    const { users, idx } = await loadClientForMutation(req.user.id);
+    if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
+    const client = users[idx];
+
+    // Write to Drive (best-effort; non-fatal in dev when Drive isn't configured).
+    let driveUrl = null;
+    const safeName = `intake_${(client.slug || client.id)}_${Date.now()}_${String(fileName).replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+    try {
+      const result = await googledrive.uploadServiceReportAttachment(client.name || 'Client', safeName, buffer, sniffedType);
+      driveUrl = (result && (result.webViewLink || result.webContentLink)) || null;
+    } catch (e) { console.error('[INTAKE] upload to Drive failed (non-fatal):', e.message); }
+
+    // Record the upload reference on the client record (never the bytes).
+    const uploadRef = { name: fileName, storedName: safeName, url: driveUrl, uploadedAt: new Date().toISOString() };
+    client.intakeUploads = [...(client.intakeUploads || []), uploadRef];
+    users[idx] = client;
+    await db.set('users', users);
+    invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'intake_document_uploaded', 'client', client.id, { fileName });
+
+    res.json({ message: 'Document uploaded', name: fileName, url: driveUrl });
+  } catch (error) {
+    console.error('GFC intake upload error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/gfc/care-plan/cosign — the client electronically co-signs the current
+// RN-authored care-plan version. Versions are retained: we store one co-signature
+// record per version key (v<version>) so a re-authored plan requires a fresh
+// co-signature. Enrolled-only (the care plan is post-enrollment).
+app.post('/api/gfc/care-plan/cosign', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const version = req.body && req.body.version;
+    if (version == null) return res.status(400).json({ error: 'version is required' });
+    // Drawn signature (canvas PNG data URL) — same mechanism as the provider ROI;
+    // the co-signature is the legal artifact of agreement, so it is required.
+    const signatureImageB64 = req.body && req.body.signatureImageB64;
+    if (typeof signatureImageB64 !== 'string' || !/^data:image\/png;base64,/.test(signatureImageB64)) {
+      return res.status(400).json({ error: 'A drawn signature is required' });
+    }
+    if (signatureImageB64.length > 600 * 1024) {
+      return res.status(413).json({ error: 'Signature image is too large' });
+    }
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    // Family (read-only) may not co-sign — only the client.
+    if (req.user.role !== config.ROLES.CLIENT) return res.status(403).json({ error: 'Only the client may co-sign the care plan' });
+
+    // The co-signature must bind to the CURRENT plan version. If the client's UI
+    // is showing a stale version (plan re-authored since load), refuse so they
+    // re-review the current version before signing.
+    const currentVersion = resolveCarePlanVersion(client);
+    if (String(version) !== String(currentVersion)) {
+      return res.status(409).json({
+        error: 'This care plan has been updated. Please review the current version before co-signing.',
+        code: 'CARE_PLAN_VERSION_MISMATCH', currentVersion
+      });
+    }
+
+    const { users, idx } = await loadClientForMutation(req.user.id);
+    if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
+    const at = new Date().toISOString();
+    const ipHash = roiRepo.hashIp(req.headers['x-forwarded-for'] || req.socket?.remoteAddress, JWT_SECRET);
+    const signerName = users[idx].preferredName || users[idx].name || 'Client';
+
+    // Append-only co-signature history — the legal artifact (incl. the signature
+    // image) lives in a side collection, never overwritten, and kept OUT of the
+    // hot-path `users` blob that every authenticated request loads.
+    const coSignEvents = (await db.get('care_plan_cosign_events')) || [];
+    coSignEvents.push({ id: uuidv4(), client_id: client.id, version: currentVersion, at, name: signerName, ipHash, signatureImage: signatureImageB64 });
+    await db.set('care_plan_cosign_events', coSignEvents);
+
+    // Lightweight "latest co-sign per version" pointer on the client (NO image)
+    // drives the care-plan GET's coSignedAt.
+    users[idx].carePlanCoSign = {
+      ...(users[idx].carePlanCoSign || {}),
+      [`v${currentVersion}`]: { at, name: signerName, ipHash }
+    };
+    await db.set('users', users);
+    invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'care_plan_cosigned', 'care_plan', `v${currentVersion}`, {});
+    res.json({ message: 'Care plan co-signed', version: currentVersion, coSignedAt: at });
+  } catch (error) {
+    console.error('GFC care-plan cosign error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // ============== GFC ENROLLMENT INTAKE (Stage 2) ==============
 // The gate sends an intake_pending client here. These routes are NOT behind the
 // enrollment gate (requireEnrolledClient would block a pending client) — instead
 // requireClientForIntake scopes them to the client themselves.
 // TEST DATA ONLY. No real PHI until HIPAA-live (AWS/RDS track).
+
+// Content-sniff an uploaded file by magic bytes, so validation can't be bypassed
+// by omitting/faking the client-declared mimeType. Returns the canonical mime or
+// null when the bytes are not one of the accepted types (PDF / JPEG / PNG).
+const detectFileType = (buf) => {
+  if (!Buffer.isBuffer(buf) || buf.length < 4) return null;
+  if (buf[0] === 0x25 && buf[1] === 0x50 && buf[2] === 0x44 && buf[3] === 0x46) return 'application/pdf';   // %PDF
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) return 'image/png';         // \x89PNG
+  if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return 'image/jpeg';                            // JPEG SOI
+  return null;
+};
 
 // Derive age in whole years from a YYYY-MM-DD DOB (single source of truth — §3).
 const deriveAge = (dob) => {
@@ -5182,6 +5336,208 @@ const deriveAge = (dob) => {
   const m = now.getMonth() - d.getMonth();
   if (m < 0 || (m === 0 && now.getDate() < d.getDate())) age--;
   return age >= 0 && age < 130 ? age : null;
+};
+
+// Normalize a priorProviders array to the client schema shape (§ Client Care
+// Profile Schema). Feeds the Transfer-of-Care ROI prefill (Session 3.4).
+const normalizePriorProviders = (arr, defaultAddedFrom) => {
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .map(p => p || {})
+    .filter(p => (p.name || '').trim())
+    .map(p => ({
+      name: (p.name || '').trim(),
+      dept: (p.dept || '').trim(),
+      address: (p.address || '').trim(),
+      phone: (p.phone || '').trim(),
+      fax: (p.fax || '').trim(),
+      roleLabel: ['pcp', 'specialist', 'hospital', 'other'].includes(p.roleLabel) ? p.roleLabel : 'other',
+      addedFrom: ['intake_prefill', 'manual', 'roi_form'].includes(p.addedFrom) ? p.addedFrom : (defaultAddedFrom || 'manual'),
+      createdAt: p.createdAt || new Date().toISOString()
+    }));
+};
+
+// Derive prior-provider entries from the intake wizard's Medical-team fields
+// (PCP name/practice/phone, up to 2 specialists, preferred hospital) — mirrors
+// the legacy WordPress intake's field set (PCP Name, PCP Practice, PCP Phone,
+// Specialist 1[+Phone], Specialist 2, Preferred Hospital), which is how the
+// legacy ROI form's prefillForm() built its provider list.
+const deriveProvidersFromMedicalTeam = (medicalTeam) => {
+  const mt = medicalTeam || {};
+  const out = [];
+  const pcpName = (mt.pcpName || '').trim();
+  const pcpPractice = (mt.pcpPractice || '').trim();
+  const pcpPhone = (mt.pcpPhone || '').trim();
+  if (pcpName || pcpPractice) {
+    out.push({ name: pcpName || pcpPractice, dept: (pcpName && pcpPractice) ? pcpPractice : '', phone: pcpPhone, roleLabel: 'pcp' });
+  }
+  const spec1Name = (mt.specialist1Name || '').trim();
+  if (spec1Name) out.push({ name: spec1Name, phone: (mt.specialist1Phone || '').trim(), roleLabel: 'specialist' });
+  const spec2Name = (mt.specialist2Name || '').trim();
+  if (spec2Name) out.push({ name: spec2Name, phone: '', roleLabel: 'specialist' }); // phone not captured in intake — patient fills in on the ROI form
+  const hospital = (mt.preferredHospital || '').trim();
+  if (hospital) out.push({ name: hospital, roleLabel: 'hospital' });
+  return out;
+};
+
+// ── Intake → schema enum normalization ─────────────────────────────
+// The wizard captures human-readable option strings; the matching (Session 8)
+// and billing (Track D) engines compare on the schema's canonical enum CODES.
+// These tables translate the wizard labels to codes when mirroring onto the
+// client profile. For CLOSED enums an unmapped label is dropped (never stored
+// as a label); the open-ended `conditions` enum falls back to a deterministic
+// slug so every diagnosis persists as a code. The raw labels remain untouched
+// in the intake blob for form round-trip/display.
+const ENUM = {
+  gender: { 'Female': 'female', 'Male': 'male', 'Non-binary': 'nonbinary', 'Prefer not to say': null },
+  conditions: {
+    "Dementia / Alzheimer's": 'dementia', "Parkinson's disease": 'parkinsons', 'Stroke / TIA': 'post_stroke',
+    'COPD / respiratory': 'copd', 'Heart failure / cardiac': 'cardiac', 'Diabetes': 'diabetes'
+  },
+  skilledTasks: {
+    'Wound care': 'wound_care', 'Injections': 'injections', 'Catheter care': 'catheter', 'Ostomy care': 'ostomy',
+    'Tube feeding': 'g_tube', 'Oxygen management': 'oxygen', 'Suctioning': 'suctioning', 'Tracheostomy care': 'trach',
+    'Blood glucose monitoring': 'blood_glucose', 'Medication administration': 'med_administration'
+  },
+  adlLevel: { 'Independent': 'independent', 'Needs verbal cues': 'cues', 'Needs physical assistance': 'assist', 'Fully dependent': 'dependent' },
+  adlToileting: { 'Independent': 'independent', 'Needs verbal cues': 'cues', 'Needs physical assistance': 'assist', 'Incontinent — needs full care': 'dependent' },
+  adlTransfers: { 'Independent': 'independent', 'Standby assist': 'cues', 'Hands-on assist': 'assist', 'Two-person assist / mechanical lift': 'dependent' },
+  adlAmbulation: { 'Independent': 'independent', 'Uses walker / cane': 'cues', 'Needs physical assistance': 'assist', 'Wheelchair — self-propels': 'assist', 'Wheelchair — pushed': 'dependent', 'Bed-bound': 'dependent' },
+  fallRisk: { 'Low': 'low', 'Moderate': 'moderate', 'High': 'high' },
+  cognitiveStatus: { 'Intact': 'intact', 'Mild impairment': 'mild', 'Moderate dementia': 'moderate', 'Severe dementia': 'severe', 'Mental health diagnosis affecting cognition': null },
+  dementiaStage: { 'Early / mild': 'early', 'Moderate': 'moderate', 'Late / severe': 'late', 'Unknown / undiagnosed': 'undiagnosed' },
+  behavioral: { 'Wandering': 'wandering', 'Agitation / aggression': 'aggression', 'Sundowning': 'sundowning', 'Resistance to care': 'resistance_to_care', 'Self-harm risk': 'self_harm_risk' },
+  homeSafety: { 'Smokers in home': 'smokers', 'Pets in home': 'pets', 'Firearms in home': 'firearms', 'Hoarding or clutter': 'hoarding', 'Pest issues': 'pests', 'Stairs required': 'stairs', 'Oxygen tanks': 'oxygen_tanks' },
+  temperament: { 'Quiet and reserved': 'quiet', 'Warm and chatty': 'warm', 'Likes structure and routine': 'likes_routine', 'Prefers independence': 'prefers_independence', 'Can get anxious': 'anxious', 'Resistant to care': 'resistant_to_care' },
+  advanceDirective: { 'Yes — DNR in place': 'dnr', 'Yes — advance directive / living will': 'living_will', 'Yes — healthcare proxy / POA': 'healthcare_poa', 'No': 'none', 'Unknown': 'unknown' },
+  twoPersonAssist: { 'No': 'no', 'Sometimes': 'sometimes', 'Yes routinely': 'routinely' },
+  // 'Dual eligible' = Medicare + Medicaid → combination; 'Commercial' has no schema
+  // code (the granular commercial block on payer still captures the detail).
+  payerType: { 'Private pay': 'private_pay', 'LTC insurance': 'ltc_insurance', 'Medicaid waiver': 'medicaid_waiver', 'VA': 'va', 'Medicare Part B': 'medicare_b', 'Dual eligible': 'combination', 'Commercial': null, 'Combination': 'combination' },
+  transferNeed: { 'Independent': 'independent', 'Standby': 'standby', 'One-person assist': 'one_person', 'Two-person assist': 'two_person', 'Mechanical lift': 'mechanical_lift' }
+};
+// Each ADL sub-field uses its own option list → its own map.
+const ADL_MAP_BY_KEY = { bathing: 'adlLevel', dressing: 'adlLevel', grooming: 'adlLevel', eating: 'adlLevel', toileting: 'adlToileting', transfers: 'adlTransfers', ambulation: 'adlAmbulation' };
+
+const slugCode = (s) => String(s || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+// Scalar label → enum code; undefined when unmapped/null so the caller skips it.
+const codeFrom = (mapName, label) => {
+  if (label == null || label === '') return undefined;
+  const m = ENUM[mapName] || {};
+  return Object.prototype.hasOwnProperty.call(m, label) ? (m[label] || undefined) : undefined;
+};
+// Array of labels → array of codes, dropping unmapped/null (closed enums).
+const codesFrom = (mapName, labels) => {
+  if (!Array.isArray(labels)) return undefined;
+  const m = ENUM[mapName] || {};
+  return labels.map(l => m[l]).filter(Boolean);
+};
+// conditions is open-ended: explicit code when known, else a deterministic slug.
+const normalizeConditions = (labels) => Array.isArray(labels)
+  ? labels.map(l => (ENUM.conditions[l] || slugCode(l))).filter(Boolean)
+  : undefined;
+// Per-ADL normalization: map each sub-field's level to its code (drop unmapped).
+const normalizeAdl = (adl) => {
+  if (!adl || typeof adl !== 'object') return undefined;
+  const out = {};
+  for (const [k, v] of Object.entries(adl)) {
+    const code = ADL_MAP_BY_KEY[k] ? codeFrom(ADL_MAP_BY_KEY[k], v) : undefined;
+    if (code) out[k] = code;
+  }
+  return out;
+};
+// genderPreference → schema object { value: female|male|none, strength }.
+// Test 'female' first — the substring "male" also matches inside "female".
+const parseGenderPref = (s) => {
+  if (!s || typeof s !== 'string') return undefined;
+  return { value: /female/i.test(s) ? 'female' : /male/i.test(s) ? 'male' : 'none', strength: /strong/i.test(s) ? 'strong' : 'preferred' };
+};
+// interests → array of tags (schema shape) from the wizard's free-text field.
+const tokenizeInterests = (v) => {
+  if (Array.isArray(v)) return v.map(x => String(x).trim()).filter(Boolean);
+  if (typeof v === 'string') return v.split(/[,\n;]+/).map(s => s.trim()).filter(Boolean);
+  return undefined;
+};
+
+// Map the structured intake into the v1 Client Care Profile schema shape on the
+// client record, so the matching/billing engines read normalized fields off the
+// profile rather than the raw intake blob. Only sets a field when the intake
+// actually carries it, so partial/draft saves don't wipe existing profile data.
+const mirrorIntakeToClientProfile = (client, intake, meds, priorProviders) => {
+  const set = (k, v) => { if (v !== undefined) client[k] = v; };
+  const nonEmptyArr = (v) => Array.isArray(v) ? v : undefined;
+
+  if (intake.dob) set('dob', intake.dob);
+  if (Array.isArray(meds)) set('medications', meds);
+  set('priorProviders', priorProviders);
+
+  // Identity / demographics
+  if (intake.clientFirst || intake.clientLast) {
+    const full = `${intake.clientFirst || ''} ${intake.clientLast || ''}`.trim();
+    if (full) set('legalName', full);
+  }
+  set('preferredName', intake.preferredName || client.preferredName);
+  set('gender', codeFrom('gender', intake.gender));            // → female|male|nonbinary
+  set('primaryLanguage', intake.primaryLanguage);
+
+  // Clinical context (light — full clinical → OpenEMR). Coded diagnoses/tasks
+  // are normalized to schema enum codes so Session 8 matching compares exactly.
+  set('conditions', normalizeConditions(intake.conditions));   // coded diagnoses (matching)
+  set('allergies', intake.allergies);
+  if (intake.advanceDirective) {
+    // Normalize the directive status enum; keep the rest of the object as-is.
+    const adCode = codeFrom('advanceDirective', intake.advanceDirective.status);
+    set('advanceDirective', adCode ? { ...intake.advanceDirective, status: adCode } : intake.advanceDirective);
+  }
+  if (intake.medicalTeam) set('medicalTeam', intake.medicalTeam);
+  // ROI-family sharing detail (legacy intake parity): named authorized recipients
+  // + any sharing restrictions the family specified for the family-ROI consent.
+  if (intake.roiFamilyDetail && typeof intake.roiFamilyDetail === 'object') {
+    set('roiFamilyAuthorization', {
+      authorizedRecipients: (intake.roiFamilyDetail.authorized || '').trim(),
+      restrictions: (intake.roiFamilyDetail.restrictions || '').trim()
+    });
+  }
+
+  // Function / safety (hard filters for matching) — all normalized to codes.
+  set('adl', normalizeAdl(intake.adl));
+  set('homeSafetyFlags', codesFrom('homeSafety', intake.homeSafetyFlags));
+  set('behavioralFlags', codesFrom('behavioral', intake.behavioralFlags));
+  set('skilledTasksNeeded', codesFrom('skilledTasks', intake.skilledTasksNeeded));
+  set('fallRisk', codeFrom('fallRisk', intake.fallRisk));
+  set('cognitiveStatus', codeFrom('cognitiveStatus', intake.cognitiveStatus));
+  set('dementiaStage', codeFrom('dementiaStage', intake.dementiaStage));
+  set('twoPersonAssistRequired', codeFrom('twoPersonAssist', intake.twoPersonAssist));
+  set('transferNeed', codeFrom('transferNeed', intake.transferNeed));  // → liftCapacity hard filter
+  if (intake.schedule && typeof intake.schedule === 'object') set('schedule', intake.schedule);
+
+  // Caregiver-matching preferences
+  const m = intake.matching || {};
+  set('temperament', codesFrom('temperament', m.personality));
+  set('genderPreference', parseGenderPref(m.genderPreference));  // → { value, strength }
+  if (m.languagePreference) set('languagePreference', m.languagePreference);
+  if (m.caregiverExperience) set('caregiverExperienceRequired', m.caregiverExperience);
+  set('interests', tokenizeInterests(m.interests));              // → string[] tags
+
+  // Payer — billing. Prefer an explicit payer object; otherwise assemble a
+  // normalized summary from the structured payer blocks the wizard captured.
+  if (intake.payer) {
+    set('payer', intake.payer);
+  } else if (intake.payerType || intake.insuranceTypes || intake.medicare || intake.medicaid || intake.commercial || intake.ltc) {
+    client.payer = {
+      ...(client.payer || {}),
+      type: codeFrom('payerType', intake.payerType) || (client.payer && client.payer.type) || null,
+      insuranceTypes: nonEmptyArr(intake.insuranceTypes) || (client.payer && client.payer.insuranceTypes) || [],
+      medicare: intake.medicare || (client.payer && client.payer.medicare) || {},
+      medicaid: intake.medicaid || (client.payer && client.payer.medicaid) || {},
+      commercial: intake.commercial || (client.payer && client.payer.commercial) || {},
+      ltc: intake.ltc || (client.payer && client.payer.ltc) || {},
+      insuranceIds: Array.isArray(intake.insuranceIds) ? intake.insuranceIds.filter(x => x && (x.carrier || x.memberId)) : ((client.payer && client.payer.insuranceIds) || []),
+      ssnLast4: intake.ssnLast4 || (client.payer && client.payer.ssnLast4) || null,
+      paymentMethod: intake.paymentMethod || (client.payer && client.payer.paymentMethod) || null,
+      billingContact: intake.billingContact || (client.payer && client.payer.billingContact) || null
+    };
+  }
 };
 
 // Helper to load the fresh client user record + its index for mutation.
@@ -5239,20 +5595,45 @@ app.post('/api/gfc/intake', authenticateToken, requireClientForIntake, async (re
     // DOB collected once → derive age (never stored as a separate input, §3/§4).
     const dob = intake.dob || (users[idx].intake && users[idx].intake.dob) || null;
 
+    // Prior providers feed the Transfer-of-Care ROI form (Session 3.4), derived
+    // from the intake wizard's Medical-team fields (PCP, up to 2 specialists,
+    // preferred hospital) — same source fields the legacy WordPress form used
+    // to seed its ROI provider list. Entries added manually or from a signed
+    // ROI (addedFrom 'manual' | 'roi_form') are preserved untouched; the
+    // 'intake_prefill' entries are recomputed fresh from the current
+    // medical-team fields on every save so edits stay in sync.
+    const existingProviders = Array.isArray(users[idx].priorProviders) ? users[idx].priorProviders : [];
+    const preservedProviders = existingProviders.filter(p => p.addedFrom === 'manual' || p.addedFrom === 'roi_form');
+    const explicitPrefill = Array.isArray(intake.priorProviders) ? normalizePriorProviders(intake.priorProviders, 'intake_prefill') : [];
+    const derivedPrefill = deriveProvidersFromMedicalTeam(intake.medicalTeam).map(p => ({ ...p, addedFrom: 'intake_prefill' }));
+    const seenNames = new Set(preservedProviders.map(p => (p.name || '').toLowerCase()));
+    const mergedPrefill = [];
+    [...explicitPrefill, ...derivedPrefill].forEach(p => {
+      const key = (p.name || '').toLowerCase();
+      if (!key || seenNames.has(key)) return;
+      seenNames.add(key);
+      mergedPrefill.push(p);
+    });
+    const priorProviders = normalizePriorProviders([...preservedProviders, ...mergedPrefill], 'intake_prefill');
+
     const merged = {
       ...(users[idx].intake || {}),
       ...intake,
       medications: meds,
+      priorProviders,
       dob,
       age: deriveAge(dob),
       updatedAt: new Date().toISOString()
     };
     users[idx].intake = merged;
     if (serviceLine) users[idx].serviceLine = serviceLine;
-    // Carry a few matching/profile fields up onto the client record (schema mirror).
-    if (intake.dob) users[idx].dob = intake.dob;
-    if (Array.isArray(meds)) users[idx].medications = meds;
-    if (intake.payer) users[idx].payer = intake.payer;
+    // ── Schema mirror ──────────────────────────────────────────────
+    // The intake wizard captures every legacy WordPress field in its native
+    // structure; here we map the matching/billing-relevant pieces up onto the
+    // client profile in the v1 Client Care Profile schema shape, so the future
+    // matching (Session 8) and billing (Track D) engines read them directly off
+    // the client record instead of digging through the raw intake blob.
+    mirrorIntakeToClientProfile(users[idx], merged, meds, priorProviders);
 
     await db.set('users', users);
     invalidateUsersCache();
@@ -5292,7 +5673,9 @@ app.post('/api/gfc/consents', authenticateToken, requireClientForIntake, async (
           typedName: typedName.trim(),
           acknowledged: true,
           signedAt: new Date().toISOString(),
-          ip: req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null,
+          // Store only a salted hash of the signer IP (consistent with the ROI /
+          // care-plan paths) — never the raw address, which is retained PII.
+          ipHash: roiRepo.hashIp(req.headers['x-forwarded-for'] || req.socket?.remoteAddress, JWT_SECRET),
           // Working-draft consent text version — bump when language is revised.
           version: 'draft-1'
         }
@@ -5409,6 +5792,303 @@ app.post('/api/gfc/intake/submit', authenticateToken, requireClientForIntake, as
     res.json({ message: 'Enrollment complete', enrollmentStatus: client.enrollmentStatus });
   } catch (error) {
     console.error('GFC intake submit error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============== TRANSFER-OF-CARE PROVIDER ROI (Session 3.4) ==============
+// A fifth ROI type: client authorization for GFC to request medical records
+// from one or more prior providers. One signing event → one consent_event, one
+// consent_provider_authorizations row per provider, one consent_records_categories
+// row per checked category, and one generated PDF per provider. This ROI does
+// NOT gate the portal (unlike roiFamily). 42 CFR Part 2 protected categories are
+// gated at the data-access layer (roiRepository.getRequestableRecordCategories).
+// Runs in parallel with the legacy WordPress + GAS system (PARALLEL_LEGACY_SYNC).
+// TEST DATA ONLY until HIPAA-live.
+
+// Shared side-effect dispatcher: legacy sheet log + admin email (PDFs attached)
+// + patient/submitter confirmation (no PDFs). All best-effort and non-fatal;
+// gated by config.PARALLEL_LEGACY_SYNC. NEVER attaches PHI to patient email.
+async function dispatchRoiNotifications({ client, event, fileNames, fileUrls, pdfAttachments, submitterEmail }) {
+  if (!config.PARALLEL_LEGACY_SYNC) return;
+  const clientName = client.preferredName || client.name || 'Client';
+  // Sheet key: the client's legacy intake token if present, else a stable portal key.
+  const sheetKey = client.legacyIntakeToken || client.slug || client.id;
+  try {
+    await legacySync.logRoiToSheet(
+      config.ROI_LEGACY_SHEET_ID, config.ROI_LEGACY_SHEET_TAB, sheetKey,
+      Array.isArray(fileNames) ? fileNames.join(' | ') : fileNames,
+      Array.isArray(fileUrls) ? fileUrls.join(' | ') : fileUrls
+    );
+  } catch (e) { console.error('[ROI] legacy sheet log failed (non-fatal):', e.message); }
+
+  // Admin email — one message, all generated PDFs attached (internal recipient).
+  try {
+    const adminHtml = legacySync.buildAdminEmailHtml(clientName, sheetKey, fileNames, fileUrls);
+    const providerCount = Array.isArray(fileNames) ? fileNames.length : 1;
+    // Keep the patient name OUT of the subject line (subjects are the most
+    // widely-logged/previewed part of an email and the mailer is not yet on a
+    // BAA — see the Resend→Workspace/SES migration item). The name and PDFs
+    // remain in the internal-only body/attachments.
+    await sendEmail(
+      config.ROI_ADMIN_EMAIL,
+      `Provider ROI Submitted${providerCount > 1 ? ` (${providerCount} authorizations)` : ''}`,
+      `A Transfer-of-Care authorization was received for ${clientName}. See attached PDF(s).`,
+      { htmlBody: adminHtml, attachments: (pdfAttachments || []) }
+    );
+  } catch (e) { console.error('[ROI] admin email failed (non-fatal):', e.message); }
+
+  // Patient + submitter confirmation — plain receipt, NEVER any PDF/PHI.
+  try {
+    const recipients = [client.email, submitterEmail, (client.intake && client.intake.primaryContact && client.intake.primaryContact.email)]
+      .filter(Boolean)
+      .filter((v, i, a) => a.indexOf(v) === i);
+    if (recipients.length) {
+      await sendEmail(
+        recipients,
+        'We received your authorization form — Godwins Family Care',
+        `Hi,\n\nYour signed Authorization to Obtain Medical Records was received. Our care team will use it to request your records and will be in touch with next steps.\n\n— Godwins Family Care`,
+        { htmlBody: legacySync.buildPatientEmailHtml(clientName) }
+      );
+    }
+  } catch (e) { console.error('[ROI] patient email failed (non-fatal):', e.message); }
+}
+
+// GET /api/gfc/transfer-roi — prefill data for the flow: patient identity from
+// intake, prior-provider cards, prior signed events (summary), category catalog.
+app.get('/api/gfc/transfer-roi', authenticateToken, requireClientForIntake, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const intake = client.intake || {};
+    const pc = intake.primaryContact || {};
+    const patient = {
+      patientName: client.preferredName || client.name || `${intake.firstName || ''} ${intake.lastName || ''}`.trim(),
+      patientDOB: intake.dob || '',
+      patientAddress: intake.address || client.address || '',
+      patientPhone: intake.phone || pc.phone || ''
+    };
+    const events = (await roiStore.listConsentEventsByClient(client.id)).map(e => ({
+      id: e.id, signed_at: e.signed_at, source: e.source,
+      includes_protected_info: e.includes_protected_info, revoked_at: e.revoked_at
+    }));
+    res.json({
+      patient,
+      priorProviders: Array.isArray(client.priorProviders) ? client.priorProviders : (intake.priorProviders || []),
+      status: (client.consents || {}).roiTransfer || 'pending',
+      events,
+      recordCategories: roiRepo.RECORD_CATEGORIES,
+      categoryLabels: pdfGenerator.ROI_CATEGORY_LABELS
+    });
+  } catch (error) {
+    console.error('GFC transfer-roi get error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PUT /api/gfc/prior-providers — edit the client's prior-provider list
+// independently of any ROI signing event (§ Client Care Profile Schema).
+app.put('/api/gfc/prior-providers', authenticateToken, requireClientForIntake, async (req, res) => {
+  try {
+    const { priorProviders } = req.body || {};
+    if (!Array.isArray(priorProviders)) return res.status(400).json({ error: 'priorProviders array is required' });
+    const { users, idx } = await loadClientForMutation(req.user.id);
+    if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
+    const normalized = normalizePriorProviders(priorProviders, 'manual');
+    users[idx].priorProviders = normalized;
+    users[idx].intake = { ...(users[idx].intake || {}), priorProviders: normalized };
+    await db.set('users', users);
+    invalidateUsersCache();
+    res.json({ message: 'Prior providers saved', priorProviders: normalized });
+  } catch (error) {
+    console.error('GFC prior-providers save error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/gfc/transfer-roi/upload — Screen 2A: client uploads an already-signed
+// scan. Creates a consent_event (source=portal_upload) with NO provider auth rows
+// (admin classifies the scan later), writes the file to Drive, updates the
+// rollup status, and runs the parallel legacy sync.
+app.post('/api/gfc/transfer-roi/upload', authenticateToken, requireClientForIntake, async (req, res) => {
+  try {
+    const { fileName, fileDataB64 } = req.body || {};
+    if (!fileName || !fileDataB64) return res.status(400).json({ error: 'fileName and fileDataB64 are required' });
+    let buffer;
+    try {
+      const b64 = fileDataB64.startsWith('data:') ? fileDataB64.slice(fileDataB64.indexOf(',') + 1) : fileDataB64;
+      buffer = Buffer.from(b64, 'base64');
+    } catch (e) { return res.status(400).json({ error: 'File data is not valid base64.' }); }
+    if (buffer.length > config.MAX_FILE_SIZE) return res.status(400).json({ error: 'File exceeds 10 MB limit.' });
+    // Authoritative type check by content, not the client-declared mimeType.
+    const sniffedType = detectFileType(buffer);
+    if (!sniffedType) return res.status(400).json({ error: 'Only PDF, JPG, and PNG files are accepted.' });
+
+    const { users, idx } = await loadClientForMutation(req.user.id);
+    if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
+    const client = users[idx];
+
+    const ipHash = roiRepo.hashIp(req.headers['x-forwarded-for'] || req.socket?.remoteAddress, JWT_SECRET);
+    const event = await roiStore.insertConsentEvent({
+      client_id: client.id,
+      printed_name: client.preferredName || client.name || 'Client',
+      signer_ip_hash: ipHash,
+      includes_protected_info: false, // unknown from a scan; classified later
+      source: roiRepo.SOURCE.UPLOAD
+    });
+
+    // Write the uploaded scan to Drive (best-effort; non-fatal in dev).
+    let driveUrl = null, storedName = fileName;
+    try {
+      const safeName = `ROI_upload_${(client.slug || client.id)}_${Date.now()}_${String(fileName).replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+      const result = await googledrive.uploadProviderROIFile(config.ROI_DRIVE_FOLDER_NAME, safeName, buffer, sniffedType);
+      driveUrl = result && (result.webViewLink || result.webContentLink) || null;
+      storedName = safeName;
+    } catch (e) { console.error('[ROI] upload to Drive failed (non-fatal):', e.message); }
+
+    // Rollup status on the client profile.
+    client.consents = { ...(client.consents || {}), roiTransfer: 'signed' };
+    users[idx] = client;
+    await db.set('users', users);
+    invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'roi_transfer_uploaded', 'consent_event', event.id, { source: 'portal_upload' });
+
+    // Parallel legacy sync (no PDF attachment — this is the client's own scan).
+    dispatchRoiNotifications({ client, event, fileNames: storedName, fileUrls: driveUrl || '', pdfAttachments: [] })
+      .catch(e => console.error('[ROI] dispatch failed (non-fatal):', e.message));
+
+    res.json({ message: 'Authorization uploaded', eventId: event.id, driveUrl });
+  } catch (error) {
+    console.error('GFC transfer-roi upload error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/gfc/transfer-roi/submit — Screen 2B: the online form. One signing
+// event authorizes multiple providers; one PDF is generated per provider.
+// Validates the 45 CFR 164.508 required elements server-side before saving.
+app.post('/api/gfc/transfer-roi/submit', authenticateToken, requireClientForIntake, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const providers = Array.isArray(b.providers)
+      ? b.providers.filter(p => p && (p.name || p.provider_name || '').trim())
+      : [];
+    if (providers.length === 0) return res.status(400).json({ error: 'Add at least one provider before submitting.', field: 'providers' });
+
+    // Collect checked standard categories (+ Other text).
+    const cat = b.categories || {};
+    const checkedCategories = roiRepo.RECORD_CATEGORIES.filter(k => cat[k]);
+    const signedAt = new Date().toISOString();
+
+    // Server-side 45 CFR 164.508 element validation.
+    const validation = roiRepo.validateAuthorizationElements({
+      categories: checkedCategories,
+      purpose_treatment: b.purposeTreatment !== false,
+      purpose_other_text: b.purposeOtherText,
+      expiration_date: b.expDate,
+      signature_image_b64: b.signatureImageB64,
+      printed_name: b.printedName,
+      signed_at: signedAt
+    });
+    if (!validation.ok) {
+      return res.status(400).json({ error: 'Some required fields are missing or invalid.', code: 'ROI_508_INCOMPLETE', fieldErrors: validation.errors });
+    }
+
+    const { users, idx } = await loadClientForMutation(req.user.id);
+    if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
+    const client = users[idx];
+
+    const ipHash = roiRepo.hashIp(req.headers['x-forwarded-for'] || req.socket?.remoteAddress, JWT_SECRET);
+
+    // Parent consent_event. includes_protected_info defaults FALSE and is only
+    // true when the client explicitly opted in (42 CFR Part 2).
+    const event = await roiStore.insertConsentEvent({
+      client_id: client.id,
+      signed_at: signedAt,
+      signature_image_b64: b.signatureImageB64,
+      printed_name: b.printedName,
+      relationship_authority: b.relationship,
+      signer_ip_hash: ipHash,
+      expiration_date: b.expDate || null,
+      expiration_event: b.expEvent || null,
+      purpose_treatment: b.purposeTreatment !== false,
+      purpose_other_text: b.purposeOtherText,
+      includes_protected_info: b.includesProtected === true,
+      source: roiRepo.SOURCE.ONLINE_FORM
+    });
+
+    // Category rows (one per checked category).
+    await roiStore.insertRecordCategories(event.id, checkedCategories, cat.otherText);
+
+    // Provider authorization rows (one per provider card).
+    const providerInputs = providers.map(p => ({
+      provider_name: p.name || p.provider_name, dept: p.dept, address: p.address, phone: p.phone, fax: p.fax
+    }));
+    const authRows = await roiStore.insertProviderAuthorizations(event.id, providerInputs);
+
+    // Generate one PDF per provider, upload to Drive, record the URL.
+    const lastName = (client.name || client.preferredName || 'Client').trim().split(/\s+/).pop() || 'Client';
+    const dateStr = signedAt.slice(0, 10).replace(/-/g, '');
+    const fileNames = [], fileUrls = [], pdfAttachments = [];
+    for (let i = 0; i < authRows.length; i++) {
+      const row = authRows[i];
+      const provClean = (row.provider_name || 'Provider').replace(/[^a-zA-Z0-9 ]/g, '').replace(/\s+/g, '_').substring(0, 30);
+      const seq = authRows.length > 1 ? `_${i + 1}` : '';
+      const fileName = `ROI_${lastName}_${provClean}_${dateStr}${seq}.pdf`;
+      let pdfBuffer = null;
+      try {
+        pdfBuffer = await pdfGenerator.generateProviderROIPDF({
+          patientName: b.patientName, patientDOB: b.patientDOB, patientAddress: b.patientAddress, patientPhone: b.patientPhone,
+          provider: { name: row.provider_name, dept: row.dept, address: row.address, phone: row.phone, fax: row.fax },
+          categories: { ...cat },
+          includesProtected: event.includes_protected_info,
+          purposeTreatment: event.purpose_treatment,
+          purposeOther: !!b.purposeOther, purposeOtherText: b.purposeOtherText,
+          expDate: b.expDate, expEvent: b.expEvent,
+          signatureImageB64: b.signatureImageB64, signedDate: new Date(signedAt).toLocaleDateString('en-US'),
+          printedName: b.printedName, relationship: b.relationship
+        });
+      } catch (e) { console.error('[ROI] PDF generation failed for provider:', row.provider_name, e.message); }
+
+      let driveUrl = null;
+      if (pdfBuffer) {
+        pdfAttachments.push({ filename: fileName, content: pdfBuffer });
+        try {
+          const result = await googledrive.uploadProviderROIFile(config.ROI_DRIVE_FOLDER_NAME, fileName, pdfBuffer, 'application/pdf');
+          driveUrl = result && (result.webViewLink || result.webContentLink) || null;
+        } catch (e) { console.error('[ROI] provider PDF Drive upload failed (non-fatal):', e.message); }
+      }
+      await roiStore.updateProviderAuthorizationPdf(row.id, { driveUrl, fileName });
+      fileNames.push(fileName);
+      fileUrls.push(driveUrl || '');
+    }
+
+    // Merge any new providers into the client's prior-provider list (roi_form).
+    const merged = normalizePriorProviders([
+      ...(Array.isArray(client.priorProviders) ? client.priorProviders : []),
+      ...providerInputs.map(p => ({ name: p.provider_name, dept: p.dept, address: p.address, phone: p.phone, fax: p.fax, addedFrom: 'roi_form' }))
+    ], 'roi_form');
+    // De-dupe by name (keep first occurrence).
+    const seen = new Set();
+    client.priorProviders = merged.filter(p => { const k = p.name.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; });
+    client.intake = { ...(client.intake || {}), priorProviders: client.priorProviders };
+
+    // Rollup status.
+    client.consents = { ...(client.consents || {}), roiTransfer: 'signed' };
+    users[idx] = client;
+    await db.set('users', users);
+    invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'roi_transfer_signed', 'consent_event', event.id, {
+      source: 'portal_online_form', providerCount: authRows.length, includesProtected: event.includes_protected_info
+    });
+
+    // Parallel legacy sync: sheet + admin email (PDFs attached) + confirmations.
+    dispatchRoiNotifications({ client, event, fileNames, fileUrls, pdfAttachments, submitterEmail: b.submitterEmail })
+      .catch(e => console.error('[ROI] dispatch failed (non-fatal):', e.message));
+
+    res.json({ message: 'Authorization submitted', eventId: event.id, providerCount: authRows.length, files: fileNames });
+  } catch (error) {
+    console.error('GFC transfer-roi submit error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
