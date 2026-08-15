@@ -2216,7 +2216,7 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       hasServicePortalAccess, hasAdminHubAccess, hasImplementationsAccess, hasClientPortalAdminAccess,
       isManager, assignedClients, hubspotCompanyId, hubspotDealId, hubspotContactId, projectAccessLevels,
       existingPortalSlug, phone, sendWelcomeEmail: shouldSendWelcome = true,
-      licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam
+      licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId
     } = req.body;
 
     // Managers can only create client users
@@ -2311,6 +2311,12 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       newUser.assignedClients = assignedClients || [];
       // Vendors automatically get service portal access
       newUser.hasServicePortalAccess = true;
+    }
+
+    // Family / authorized contact: the client (user id) this account is linked
+    // to — drives the ROI-family portal gate (resolveGfcClientRecord).
+    if (role === config.ROLES.FAMILY && familyOfClientId !== undefined) {
+      newUser.familyOfClientId = familyOfClientId || null;
     }
 
     // User/team member fields
@@ -2887,7 +2893,7 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
       practiceName, isNewClient, logo, hubspotCompanyId, hubspotDealId, hubspotContactId,
       hasServicePortalAccess, hasAdminHubAccess, hasImplementationsAccess, hasClientPortalAdminAccess,
       isManager, assignedClients, phone, accountStatus, emailUnsubscribed,
-      licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam
+      licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId
     } = req.body;
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === userId);
@@ -2934,6 +2940,9 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
     if (hasClinicalAccess !== undefined) users[idx].hasClinicalAccess = hasClinicalAccess;
     if (enrollmentStatus !== undefined) users[idx].enrollmentStatus = enrollmentStatus;
     if (careTeam !== undefined) users[idx].careTeam = careTeam;
+    // Family / authorized contact → linked client (user id); drives the
+    // ROI-family portal gate (resolveGfcClientRecord).
+    if (familyOfClientId !== undefined) users[idx].familyOfClientId = familyOfClientId || null;
 
     // Account active status (no separate isActive - handled by accountStatus above)
 
@@ -4989,82 +4998,92 @@ const buildEnrollmentSnapshot = (client) => {
   };
 };
 
-// The dev care-plan fixture uses a NON-REAL version sentinel so a co-signature
-// captured against the sample can never collide with a future real plan version
-// (real plans authored in Session 4 carry their own version starting from 1).
-const SAMPLE_CARE_PLAN_VERSION = 0;
 // Resolve the authoritative current care-plan version for a client — the real
-// per-patient plan's version when present, else the sample sentinel. Used by
-// both the care-plan GET and the co-sign route so they agree on the version.
+// per-patient plan's version when present, else null (no plan on file yet; real
+// plans are RN-authored in Session 4 and carry their own version starting at 1).
+// Used by both the care-plan GET and the co-sign route so they agree.
+// Session 3.5: the prototype-derived sample plan (and its v0 sentinel) is gone —
+// a client with no real plan gets `carePlan: null` and a portal empty state,
+// never sample content, and can never co-sign a non-existent plan.
 const resolveCarePlanVersion = (client) =>
-  (client && client.carePlan && client.carePlan.version != null) ? client.carePlan.version : SAMPLE_CARE_PLAN_VERSION;
+  (client && client.carePlan && typeof client.carePlan === 'object' && client.carePlan.version != null)
+    ? client.carePlan.version : null;
 
-// Dev fixtures for an enrolled client. Pulls real careTeam names where present,
-// otherwise falls back to prototype sample names so the portal renders fully.
-const buildGfcTestData = (client) => {
-  const firstName = (client.preferredName || client.name || 'there').split(' ')[0];
-  const tierLabel = careTierLabelFor(client.careTier) || CARE_TIER_LABELS['A2'];
+const gfcGreetingName = (client) => (client.preferredName || client.name || 'there').split(' ')[0];
 
-  // Sample care-plan CONTENT is a dev fixture only — the real, per-patient plan is
-  // RN-authored in Session 4 (OpenEMR) and stored on `client.carePlan`. When that
-  // exists it wins field-by-field, so nothing here is patient-specific: this block
-  // just lets the portal render its structure before clinical data exists.
-  const carePlanSample = {
-    version: SAMPLE_CARE_PLAN_VERSION,
-    updatedAt: '2026-06-08',
-    updatedBy: 'Bethel N., FNP',
-    effectiveDate: '2026-06-08',
-    authoredBy: 'Bethel N., FNP',
-    primaryCaregiver: { name: 'Joelle T.', role: 'Primary caregiver', credential: 'LPN-track', initials: 'JT' },
-    goals: [
-      'Stay steady on her feet',
-      'A daily walk in the garden',
-      'Medication on time, every day'
-    ],
-    authorizedServices: ['Bathing', 'Dressing', 'Med reminders', 'Meals', 'Mobility'],
-    eachVisit: ['Bathing, grooming, dressing', 'Meal preparation', 'Medication reminders', '10-minute walk, weather permitting'],
-    visitSchedule: { days: 'Mon · Wed · Fri', hours: '2:00 to 6:00 PM', caregiver: 'Joelle T., your caregiver' },
-    careTeam: [
-      { name: 'Joelle T.', role: 'Primary caregiver', initials: 'JT' },
-      { name: 'Bethel N., FNP', role: 'Clinical lead', initials: 'BN' },
-      { name: 'Courtney W.', role: 'Case manager', initials: 'CW' }
-    ]
-  };
-  // Real per-patient plan wins field-by-field; tier always reflects the client record.
+// Display initials for a person name ("Jane D." → "JD").
+const nameInitials = (name) => String(name || '')
+  .split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join('') || 'GF';
+
+// Build the client's REAL care plan for portal display, or null when none is on
+// file. Tier/label always come from the client record; co-signature state is
+// keyed to the plan's actual version (versions retained).
+const buildClientCarePlan = (client) => {
+  const plan = (client.carePlan && typeof client.carePlan === 'object') ? client.carePlan : null;
+  if (!plan) return null;
   const carePlan = {
-    ...carePlanSample,
-    ...(client.carePlan && typeof client.carePlan === 'object' ? client.carePlan : {}),
-    careTier: normalizeCareTier(client.careTier) || 'A2',
-    careTierLabel: tierLabel
+    ...plan,
+    careTier: normalizeCareTier(client.careTier),
+    careTierLabel: careTierLabelFor(client.careTier)
   };
-  // Co-signature state keyed to THIS plan's version (versions retained) — read from
-  // the client's own co-sign record, never hardcoded.
-  const cpVersion = carePlan.version;
-  const coSign = (client.carePlanCoSign || {})[`v${cpVersion}`];
+  const coSign = (client.carePlanCoSign || {})[`v${plan.version}`];
   carePlan.coSignedAt = coSign ? coSign.at : null;
+  return carePlan;
+};
 
-  const visits = {
-    upcoming: [
-      { id: 'v-up-1', day: 'Today', time: '2:00 PM', type: 'Personal care', with: 'Joelle T.', duration: '4 hrs', highlight: false },
-      { id: 'v-up-2', day: 'Wed', time: '3:00 PM', type: 'Video check-in', with: 'Bethel, FNP', duration: null, highlight: true },
-      { id: 'v-up-3', day: 'Fri', time: '9:00 AM', type: 'Personal care', with: 'Joelle T.', duration: '4 hrs', highlight: false }
-    ],
-    recent: [
-      { id: 'v-rc-1', day: 'Mon', time: '2:00 PM', type: 'Personal care', with: 'Joelle T.', completed: true },
-      { id: 'v-rc-2', day: 'Sat', time: '10:00 AM', type: 'Companionship', with: 'Adaeze R.', completed: true }
-    ]
+// Visits for a client from the visit_logs KV collection (spec v2 §5.4). Nothing
+// writes visit_logs until the scheduling/visit-log sessions land, so this is
+// empty for now — the portal renders branded empty states, never sample visits.
+const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const visitDisplayRow = (v) => {
+  const when = v.scheduledAt || v.date || null;
+  const d = when ? new Date(when) : null;
+  const valid = d && !isNaN(d.getTime());
+  const today = valid && d.toDateString() === new Date().toDateString();
+  return {
+    id: v.id,
+    day: valid ? (today ? 'Today' : DAY_NAMES[d.getDay()]) : (v.day || ''),
+    time: v.time || (valid ? d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : ''),
+    type: v.type || 'Visit',
+    with: v.caregiverName || v.with || 'Your care team',
+    duration: v.duration || null,
+    highlight: !!v.highlight,
+    completed: v.status === 'completed'
   };
+};
+const getClientVisits = async (client) => {
+  const rows = ((await db.get('visit_logs')) || []).filter(v => v && v.client_id === client.id);
+  const now = Date.now();
+  const ts = (v) => { const d = new Date(v.scheduledAt || v.date || 0); return isNaN(d.getTime()) ? 0 : d.getTime(); };
+  const upcoming = rows.filter(v => v.status !== 'completed' && ts(v) >= now)
+    .sort((a, b) => ts(a) - ts(b)).slice(0, 10).map(visitDisplayRow);
+  const recent = rows.filter(v => v.status === 'completed' || ts(v) < now)
+    .sort((a, b) => ts(b) - ts(a)).slice(0, 10).map(visitDisplayRow);
+  return { upcoming, recent };
+};
 
-  const messages = {
-    channels: ['caregiver', 'clinical', 'admin'],
-    threads: [
-      { id: 'm-1', from: 'Joelle T.', role: 'Primary caregiver', initials: 'JT', preview: "See you at 2 — I'll bring the new grip socks.", time: '9:02', unread: true },
-      { id: 'm-2', from: 'Bethel, FNP', role: 'Clinical lead', initials: 'BN', preview: "Care plan updated after Monday's check-in.", time: 'Mon', unread: false },
-      { id: 'm-3', from: 'Godwins Admin', role: 'Admin', initials: 'GF', preview: 'Welcome to Godwins Family Care.', time: 'Jun 4', unread: false }
-    ]
+// Messages for a client from the gfc_messages KV collection, scoped to the
+// logged-in user's client record. Structured channels (admin/caregiver/clinical);
+// the full channel matrix is Session 9 — today the client can read their real
+// thread and send a basic message to admin (persisted). Never sample content.
+const GFC_MESSAGE_CHANNELS = ['caregiver', 'clinical', 'admin'];
+const getClientMessages = async (client) => {
+  const rows = ((await db.get('gfc_messages')) || []).filter(m => m && m.client_id === client.id);
+  rows.sort((a, b) => new Date(b.sentAt || 0) - new Date(a.sentAt || 0));
+  return {
+    channels: GFC_MESSAGE_CHANNELS,
+    messages: rows.slice(0, 100).map(m => ({
+      id: m.id,
+      channel: m.channel || 'admin',
+      direction: m.direction || 'out',           // 'in' = staff → client, 'out' = client → staff
+      from: m.fromName || 'You',
+      fromRole: m.fromRole || null,
+      initials: nameInitials(m.fromName),
+      body: m.body,
+      sentAt: m.sentAt,
+      unread: m.direction === 'in' && !m.readAt
+    }))
   };
-
-  return { greetingName: firstName, carePlan, visits, messages };
 };
 
 // /api/gfc/me — NOT gated. The portal calls this first to decide whether to
@@ -5093,41 +5112,84 @@ app.get('/api/gfc/me', authenticateToken, async (req, res) => {
   }
 });
 
-// /api/gfc/care-plan — gated. Care plan summary (read-only for the client).
+// /api/gfc/care-plan — gated. The client's REAL care plan (or null + empty
+// state), their real visits, and tier from the client record. No sample data.
 app.get('/api/gfc/care-plan', authenticateToken, requireEnrolledClient, async (req, res) => {
   try {
     const client = await resolveGfcClientRecord(req.user);
     if (!client) return res.status(404).json({ error: 'No client record on file' });
-    const { greetingName, carePlan, visits } = buildGfcTestData(client);
-    res.json({ greetingName, carePlan, upcomingVisits: visits.upcoming, recentVisits: visits.recent });
+    const visits = await getClientVisits(client);
+    res.json({
+      greetingName: gfcGreetingName(client),
+      carePlan: buildClientCarePlan(client),
+      careTier: normalizeCareTier(client.careTier),
+      careTierLabel: careTierLabelFor(client.careTier),
+      upcomingVisits: visits.upcoming,
+      recentVisits: visits.recent
+    });
   } catch (error) {
     console.error('GFC care-plan error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// /api/gfc/visits — gated. Upcoming + recent visits.
+// /api/gfc/visits — gated. Upcoming + recent visits from visit_logs.
 app.get('/api/gfc/visits', authenticateToken, requireEnrolledClient, async (req, res) => {
   try {
     const client = await resolveGfcClientRecord(req.user);
     if (!client) return res.status(404).json({ error: 'No client record on file' });
-    const { visits } = buildGfcTestData(client);
-    res.json(visits);
+    res.json(await getClientVisits(client));
   } catch (error) {
     console.error('GFC visits error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// /api/gfc/messages — gated. Structured channels (client ↔ caregiver/admin/clinical).
+// /api/gfc/messages — gated. Real messages scoped to the client from the
+// gfc_messages store (structured channels; full channel matrix is Session 9).
 app.get('/api/gfc/messages', authenticateToken, requireEnrolledClient, async (req, res) => {
   try {
     const client = await resolveGfcClientRecord(req.user);
     if (!client) return res.status(404).json({ error: 'No client record on file' });
-    const { messages } = buildGfcTestData(client);
-    res.json(messages);
+    res.json(await getClientMessages(client));
   } catch (error) {
     console.error('GFC messages error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/gfc/messages — gated, client only (family is read-only). Basic
+// client→admin message send, persisted to the gfc_messages store. Minimal by
+// design: routing/replies/notifications arrive with the Session 9 module.
+app.post('/api/gfc/messages', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    if (req.user.role !== config.ROLES.CLIENT) {
+      return res.status(403).json({ error: 'Only the client may send messages' });
+    }
+    const body = req.body && typeof req.body.body === 'string' ? req.body.body.trim() : '';
+    if (!body) return res.status(400).json({ error: 'Message text is required' });
+    if (body.length > 4000) return res.status(413).json({ error: 'Message is too long (4000 characters max)' });
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+
+    const messages = (await db.get('gfc_messages')) || [];
+    const message = {
+      id: uuidv4(),
+      client_id: client.id,
+      channel: 'admin',
+      direction: 'out',
+      fromName: client.preferredName || client.name || 'Client',
+      fromRole: 'Client',
+      body,
+      sentAt: new Date().toISOString(),
+      readAt: null
+    };
+    messages.push(message);
+    await db.set('gfc_messages', messages);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'gfc_message_sent', 'message', message.id, { channel: 'admin' });
+    res.json({ message: 'Message sent', sent: { id: message.id, sentAt: message.sentAt } });
+  } catch (error) {
+    console.error('GFC message send error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -5269,10 +5331,15 @@ app.post('/api/gfc/care-plan/cosign', authenticateToken, requireEnrolledClient, 
     // Family (read-only) may not co-sign — only the client.
     if (req.user.role !== config.ROLES.CLIENT) return res.status(403).json({ error: 'Only the client may co-sign the care plan' });
 
+    // No real plan on file → nothing to co-sign (the sample-plan path is gone;
+    // Session 3.5). The UI hides the pad in this state, so this is a backstop.
+    const currentVersion = resolveCarePlanVersion(client);
+    if (currentVersion == null) {
+      return res.status(409).json({ error: 'No care plan is on file yet — there is nothing to co-sign.', code: 'NO_CARE_PLAN' });
+    }
     // The co-signature must bind to the CURRENT plan version. If the client's UI
     // is showing a stale version (plan re-authored since load), refuse so they
     // re-review the current version before signing.
-    const currentVersion = resolveCarePlanVersion(client);
     if (String(version) !== String(currentVersion)) {
       return res.status(409).json({
         error: 'This care plan has been updated. Please review the current version before co-signing.',
