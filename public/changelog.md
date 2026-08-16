@@ -4,6 +4,30 @@
 
 ---
 
+### Version 3.4.0 - July 14, 2026
+
+#### New Features
+- Add files via upload
+- Add files via upload
+- Add files via upload
+- Add files via upload
+
+#### Documentation
+- record HubSpot connector as intentionally dormant + how to reactivate
+- align client schema careTier enum with Track A/B (spec v1.1 §3.2)
+- relocate ROI reference files into source-forms/
+- add repo-vs-plan status audit (2026-07-14)
+- add CLAUDE.md running-status file at repo roo
+
+#### Changes
+- Session 2 cleanup: remove dormant lab validation components
+- migrate care-tier labels from legacy 1/2/3 to Track A/B enum
+- Delete README-active.md
+- Delete CLAUDE.md
+- Delete CHANGELOG-GUIDE.md
+- Delete README.md
+
+
 ### Version 3.3.0 - June 24, 2026
 
 #### New Features
