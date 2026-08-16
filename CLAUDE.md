@@ -1,5 +1,5 @@
 # GFC Care Platform — running status
-_Last updated: 2026-08-13_
+_Last updated: 2026-08-15_
 
 This file is auto-loaded at the start of every Claude Code session. Read it first for current state. Details live in `docs/`.
 
@@ -7,15 +7,13 @@ This file is auto-loaded at the start of every Claude Code session. Read it firs
 
 ## Current session focus
 
-**Session 3 nearly complete → Session 4 (Clinical / In-Home Primary Care + OpenEMR) is next priority.**
+**Session 3.5 (reconciliation) built → Session 4 (Clinical / In-Home Primary Care + OpenEMR) is next priority.**
 
-On branch `claude/docs-addition-a9g0p1` (PR pending), and now rebased on latest `main` (late-July prototype + spec updates merged in):
-- **3.4 — ✅ built.** Transfer-of-Care Provider ROI (`docs/GFC_Session3.4_ClaudeCode_Prompt.md`). See Recent decisions.
-- **Intake field parity — ✅ built.** Stage-2 wizard expanded to full legacy-WordPress field parity (12 steps), structured backend for the matching/billing engines. See Recent decisions.
-- **Session 3 client-prototype visual refresh** (`docs/prototype/client-prototype-full.html`) applied to `public/portal.html`.
-- **3.3 — 📄 prompt ready, not yet built** (`docs/GFC_Session3.3_ClaudeCode_Prompt.md`): staff enrollment view + offline onboarding + care-tier migration. Independent of 3.4.
+On branch `claude/new-session-dxkmip` (PR pending):
+- **3.5 — ✅ built.** Reconciliation per `docs/GFC_Session3.5_ClaudeCode_Prompt.md`: all prototype/fixture data removed from the live portal (care plan, visits, messages now real per-client data with branded empty states), client→admin message send persists to a new `gfc_messages` store, desktop layout for the client portal, family→client linkage fixed in the admin UI. Full findings + DECISION items for Bianca: `docs/DRIFT_REPORT_2026-08-15.md`.
+- **3.3 — 📄 prompt ready, not yet built** (`docs/GFC_Session3.3_ClaudeCode_Prompt.md`): staff enrollment view + offline onboarding + care-tier migration.
 
-**Next: Session 4 — Clinical portal + OpenEMR** (`GFC_SESSION_PLAN.md` §Session 4): 4.1 clinician workspace (OpenEMR write via FHIR), 4.2 clinician scheduling (OpenEMR-tied), 4.3 patient portal clinical read. Build targets: `docs/prototype/clinical-emr-prototype-v1.html` (desktop), `clinical-emr-mobile-prototype-v1.html` (mobile), `patient-portal-prototype-v2.html` (patient read).
+**Next: Session 4 — Clinical portal + OpenEMR** (`GFC_SESSION_PLAN.md` §Session 4): 4.1 clinician workspace (OpenEMR write via FHIR), 4.2 clinician scheduling (OpenEMR-tied), 4.3 patient portal clinical read. Build targets: `docs/prototype/clinical-emr-prototype-v1.html` (desktop), `clinical-emr-mobile-prototype-v1.html` (mobile), `patient-portal-prototype-v2.html` (patient read). **Session 4's care-plan authoring must write `client.carePlan` (versioned, starting at 1) — the portal now renders a "being prepared" empty state until it exists, and the co-sign flow refuses to sign until a real plan is on file.**
 
 **Session 4 also carries the signed-PDF requirement:** every signable document must render a PDF with **all of that document's captured digital signatures populated, per document, respectively** (signature image + name + timestamp + IP). Care plan → client co-signature *and* RN author signature; each consent → its signer's signature; Transfer-of-Care ROI already does this per provider (3.4, the reference pattern). Carry-over from Session 3: the care-plan co-signature image is captured and stored, but no signed care-plan PDF is emitted yet — 4.1 must add it. Spec: `GFC_Intake_and_Packet_Spec_v1.md` §4.3, `GFC_SESSION_PLAN.md` §Session 4, `GFC_App_Build_v2.md` §Session 4.
 
@@ -29,9 +27,10 @@ On branch `claude/docs-addition-a9g0p1` (PR pending), and now rebased on latest 
 | 1 | Repo prep · rebrand · role model | ✅ Done | #2 (+ #3) |
 | 2 | Strip lab features · deactivate tracker · brand cleanup | ✅ Done (incl. 07/2026 cleanup follow-ups) | #5 |
 | 3.1 | Client portal + enrollment gate | ✅ Done | #6 |
-| 3.2 | Gated enrollment intake + consents (+ full intake field-parity build) | ✅ Done · parity build ✅ on branch `claude/docs-addition-a9g0p1` (PR pending) | #7 |
+| 3.2 | Gated enrollment intake + consents (+ full intake field-parity build) | ✅ Done (parity build merged in #13) | #7 |
 | 3.3 | Staff enrollment view + offline onboarding + care-tier migration | 📄 Prompt ready | — |
-| 3.4 | Transfer-of-Care Provider ROI | ✅ Built on branch `claude/docs-addition-a9g0p1` (PR pending) | — |
+| 3.4 | Transfer-of-Care Provider ROI | ✅ Done | #13 |
+| 3.5 | Reconciliation — fixture removal, live data wiring, desktop pass | ✅ Built on branch `claude/new-session-dxkmip` (PR pending) | — |
 | 4 | Clinical portal + OpenEMR (4.1 clinician workspace, 4.2 clinician scheduling, 4.3 patient portal clinical read) | ⬜ Next priority | — |
 | 5 | Clinical HIPAA go-live | ⬜ Planned | — |
 | 6 | Caregiver app (mobile, tier-branched visit log) | ⬜ Planned | — |
@@ -47,6 +46,15 @@ On branch `claude/docs-addition-a9g0p1` (PR pending), and now rebased on latest 
 ---
 
 ## Recent decisions
+
+**08/2026 — Session 3.5 reconciliation (branch `claude/new-session-dxkmip`).** Bianca's walkthrough found fixture/prototype content in the unlocked portal and no desktop layout; a full drift audit ran (`docs/DRIFT_REPORT_2026-08-15.md`). Locked in:
+- **No sample data, ever.** The server-side sample care plan / fixture visits / fixture messages (`buildGfcTestData`) are deleted. `GET /api/gfc/care-plan` returns the client's real `carePlan` or `null`; visits come from `visit_logs`; messages from a new `gfc_messages` KV collection — all scoped to the logged-in client. A client with no data sees branded empty states.
+- **Session 4 contract:** RN-authored care plans write `client.carePlan` with `version` starting at **1**; the co-sign route 409s (`NO_CARE_PLAN`) when no real plan exists, so nothing can ever be signed against sample content. The v0 sample sentinel is retired.
+- **Messages:** basic client→admin send persists (`POST /api/gfc/messages`, channel `admin`, 4000-char cap, family blocked). Staff-side inbox + full channel matrix stay in Session 9; until then admin-bound messages live in the `gfc_messages` store (DECISION item pending on an interim admin view).
+- **Client portal desktop layout:** at ≥1024px the unlocked portal renders a persistent left side-nav grid (`.gfc-shell.desktopnav`); gate/intake/ROI keep a widened centered column; mobile (<1024px) untouched.
+- **Family linkage fixed:** admin-hub user form now has a "Linked client" selector for the Family role, stored as `familyOfClientId` (client user id) and persisted by both `/api/users` create + update. The vendor-only `assignedClients` name-based picker is no longer the (broken) only path.
+- Dead lab nav removed per strip-list §7: "Implementations" sidebar entry (admin hub) and "Launch App" quick action (client-portal admin). Tracker code itself stays retained.
+- DECISION items for Bianca in the drift report §5: banner photography (still lab imagery), interim admin message inbox, `hasImplementationsAccess` checkbox.
 
 **08/2026 — Session 3 audit remediation (branch `claude/docs-addition-a9g0p1`).** A four-dimension audit (security/HIPAA, backend, frontend, spec) ran against the branch; all findings fixed before Session 4:
 - **Importer crash (P0):** the legacy ROI importer routed a synthetic `legacy:<token>` through `signed_at`, crashing `buildConsentEvent` (RangeError on the 1-yr expiration) on every real row. Importer now passes a real ISO timestamp (token stays in the dedupe hash only); `buildConsentEvent` also guards unparseable dates. Test: `test/roi_importer_date.test.js`.

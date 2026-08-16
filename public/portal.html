@@ -149,6 +149,32 @@
     .gfc-tabs button.on i{color:var(--goldd);}
     .gfc-spin{width:40px;height:40px;border:4px solid rgba(3,61,80,.15);border-top-color:var(--navy);border-radius:50%;animation:spin 0.8s linear infinite;}
     @keyframes spin{to{transform:rotate(360deg);}}
+    /* ---- desktop layout (Session 3.5) ----
+       ≥1024px: the unlocked portal (.gfc-shell.desktopnav) becomes a two-column
+       desktop app — persistent left side navigation (same four destinations the
+       bottom tab bar offers on mobile) + a max-width content column. The gate /
+       intake / ROI flows keep their centered column, slightly widened. Mobile
+       (<1024px) is untouched: every rule here lives inside this media query. */
+    @media (min-width:1024px){
+      .gfc{padding:36px 24px;}
+      .gfc-shell{min-height:calc(100vh - 72px);border-radius:18px;overflow:hidden;box-shadow:0 24px 60px -16px rgba(3,61,80,.25);}
+      /* Pre-unlock flows (gate, intake, record release): wider, still centered */
+      .gfc-shell:not(.desktopnav){max-width:600px;}
+      /* Unlocked portal: side-nav + content grid */
+      .gfc-shell.desktopnav{max-width:1080px;display:grid;grid-template-columns:232px minmax(0,1fr);grid-template-rows:auto 1fr;}
+      .gfc-shell.desktopnav .gfc-hdr{grid-column:1 / -1;grid-row:1;position:static;padding:18px 28px;}
+      .gfc-shell.desktopnav .gfc-hdr .ttl{font-size:24px;}
+      .gfc-shell.desktopnav .gfc-tabs{grid-column:1;grid-row:2;position:static;transform:none;max-width:none;width:auto;
+        flex-direction:column;justify-content:flex-start;align-items:stretch;gap:4px;padding:20px 14px;
+        background:#fff;border-top:none;border-right:1px solid var(--line);box-shadow:none;}
+      .gfc-shell.desktopnav .gfc-tabs button{flex:0 0 auto;flex-direction:row;justify-content:flex-start;gap:11px;
+        padding:12px 15px;border-radius:11px;font-size:13.5px;letter-spacing:.2px;}
+      .gfc-shell.desktopnav .gfc-tabs button i{font-size:19px;}
+      .gfc-shell.desktopnav .gfc-tabs button.on{background:var(--navy);color:var(--cream);}
+      .gfc-shell.desktopnav .gfc-tabs button.on i{color:var(--gold);}
+      .gfc-shell.desktopnav .gfc-body{grid-column:2;grid-row:2;width:100%;max-width:780px;padding:30px 40px 48px;}
+      .gfc-shell.desktopnav .tiles{grid-template-columns:1fr 1fr;}
+    }
     /* ---- enrollment intake (Stage 2) ---- */
     .gfc .progress{height:5px;background:rgba(3,61,80,.1);border-radius:4px;overflow:hidden;margin:12px 0 4px;}
     .gfc .progress i{display:block;height:100%;background:var(--goldd);border-radius:4px;transition:width .3s ease;}
@@ -306,6 +332,13 @@
       getGfcMessages: (token) =>
         fetch(`${API_URL}/api/gfc/messages`, {
           headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(asError),
+
+      sendGfcMessage: (token, body) =>
+        fetch(`${API_URL}/api/gfc/messages`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ body })
         }).then(handleResponse).catch(asError),
 
       getGfcDocuments: (token) =>
@@ -2329,10 +2362,8 @@
                 <span className="text-primary">{AdminIcons.settings}</span>
                 <span className="font-medium text-gray-700 group-hover:text-primary">Admin Hub</span>
               </a>
-              <a href="/launch" className="flex items-center gap-3 p-4 bg-gray-50 rounded-lg hover:bg-primary/10 transition group">
-                <span className="text-primary">{AdminIcons.back}</span>
-                <span className="font-medium text-gray-700 group-hover:text-primary">Launch App</span>
-              </a>
+              {/* "Launch App" quick action removed (Session 3.5): /launch is
+                  deactivated per strip-list decision §7. */}
               <a href="/login" className="flex items-center gap-3 p-4 bg-gray-50 rounded-lg hover:bg-primary/10 transition group">
                 <span className="text-primary">{Icons.home}</span>
                 <span className="font-medium text-gray-700 group-hover:text-primary">Portal Hub</span>
@@ -4466,29 +4497,43 @@
     };
 
     const GfcDashboard = ({ data, onNavigate, me }) => {
-      const cp = data.carePlan || {};
-      const pc = cp.primaryCaregiver || {};
+      const cp = data.carePlan;                       // null until an RN authors the real plan (Session 4)
+      const pc = (cp && cp.primaryCaregiver) || {};
       const upcoming = data.upcomingVisits || [];
-      const unread = (data.messages?.threads || []).filter(t => t.unread).length;
+      const unread = (data.messages?.messages || []).filter(m => m.unread).length;
       const roiFamilySigned = me && me.roiFamilySigned;
+      const tierLabel = (cp && cp.careTierLabel) || data.careTierLabel;
       return (
         <div className="gfc-body">
           <h2 className="disp">Good morning, {data.greetingName}</h2>
-          <p className="sub">{pc.name ? `${pc.name.split(' ')[0]} arrives at ${(upcoming[0]||{}).time || 'your next visit'}.` : 'Your care team is ready.'}</p>
+          <p className="sub">{pc.name ? `${pc.name.split(' ')[0]} arrives at ${(upcoming[0]||{}).time || 'your next visit'}.` : 'Welcome to your care portal.'}</p>
           {me && <EnrollmentPills status={me.enrollmentStatus} />}
           <div className="planhero">
             <div className="pe">Your care plan</div>
-            <div className="prow">
-              <Avatar initials={pc.initials || 'GF'} />
-              <div><div className="nm">{pc.name || 'Caregiver'}{pc.credential ? `, ${pc.credential}` : ''}</div><div className="rl">{pc.role || 'Your primary caregiver'}</div></div>
-            </div>
-            <span className="pill"><i className="ti ti-heart-handshake" style={{ fontSize: 13 }} />{cp.careTierLabel || 'Care plan'}</span>
-            <div className="plink" onClick={() => onNavigate('care')}>View full care plan <i className="ti ti-arrow-right" /></div>
+            {cp ? (
+              <React.Fragment>
+                <div className="prow">
+                  <Avatar initials={pc.initials || 'GF'} />
+                  <div><div className="nm">{pc.name || 'Your care team'}{pc.credential ? `, ${pc.credential}` : ''}</div><div className="rl">{pc.role || 'Primary caregiver'}</div></div>
+                </div>
+                {tierLabel && <span className="pill"><i className="ti ti-heart-handshake" style={{ fontSize: 13 }} />{tierLabel}</span>}
+                <div className="plink" onClick={() => onNavigate('care')}>View full care plan <i className="ti ti-arrow-right" /></div>
+              </React.Fragment>
+            ) : (
+              <React.Fragment>
+                <div className="prow">
+                  <Avatar initials="GF" />
+                  <div><div className="nm">Your care plan is being prepared</div><div className="rl">Your nurse will review it with you</div></div>
+                </div>
+                {tierLabel && <span className="pill"><i className="ti ti-heart-handshake" style={{ fontSize: 13 }} />{tierLabel}</span>}
+              </React.Fragment>
+            )}
           </div>
           <p className="lbl">Upcoming visits</p>
+          {upcoming.length === 0 && <p className="sub" style={{ marginTop: 0 }}>No visits scheduled yet — your care coordinator will reach out to set up your schedule.</p>}
           {upcoming.slice(0, 2).map(v => (
             <div className={`visit ${v.highlight ? 'hl' : ''}`} key={v.id}>
-              <span className="vt" dangerouslySetInnerHTML={{ __html: `${v.day}<br>${v.time}` }} />
+              <span className="vt">{v.day}<br />{v.time}</span>
               <div className="vm"><b>{v.type}</b><span>{v.with}</span></div>
             </div>
           ))}
@@ -4509,6 +4554,7 @@
 
     const GfcCarePlan = ({ data, readOnly, token }) => {
       const cp = data.carePlan || {};
+      const hasPlan = !!data.carePlan;               // null until the RN-authored plan exists (Session 4)
       const upcoming = data.upcomingVisits || [];
       const recent = data.recentVisits || [];
       const teamColors = ['var(--gold)', '#9FE1CB', '#CECBF6'];
@@ -4565,11 +4611,24 @@
       return (
         <div className="gfc-body">
           {readOnly && <span className="ro"><i className="ti ti-eye" />Family view · read-only</span>}
-          {(cp.version != null) && (
+          {!hasPlan && (
+            <div className="card" style={{ marginTop: 0 }}>
+              <div className="prow">
+                <Avatar initials="GF" size={34} />
+                <div>
+                  <div style={{ fontSize: 14.5, fontWeight: 600, color: 'var(--navy)' }}>Your care plan is being prepared</div>
+                  <div style={{ fontSize: 12.5, color: 'var(--mut)', marginTop: 2 }}>Your nurse will write your personalized plan and review it with you{readOnly ? '' : ' — you’ll co-sign it right here'}.</div>
+                </div>
+              </div>
+            </div>
+          )}
+          {hasPlan && (cp.version != null) && (
             <p className="sub" style={{ marginTop: 0, marginBottom: 12 }}>
               Version {cp.version}{cp.effectiveDate ? ` · effective ${prettyDate(cp.effectiveDate)}` : ''}{cp.authoredBy ? ` · written by ${cp.authoredBy}` : ''}, reviewed with you and your family.
             </p>
           )}
+          {hasPlan && (
+          <React.Fragment>
           <p className="lbl" style={{ marginTop: 0 }}>Goals</p>
           {(cp.goals || []).map((g, i) => (
             <div className="goal" key={i}><i className="ti ti-circle-check" />{g}</div>
@@ -4591,33 +4650,45 @@
               </div>
             </React.Fragment>
           )}
-          <p className="lbl">Authorized services</p>
-          <div className="seg">{(cp.authorizedServices || []).map((s, i) => <span className="on" key={i}>{s}</span>)}</div>
-          <p className="lbl">Care team</p>
-          <div className="card" style={{ margin: 0 }}>
-            {(cp.careTeam || []).map((m, i) => (
-              <div className="prow" style={{ marginBottom: i < (cp.careTeam.length - 1) ? 10 : 0 }} key={i}>
-                <Avatar initials={m.initials} size={34} bg={teamColors[i % 3]} color={teamTextColors[i % 3]} />
-                <div><div style={{ fontSize: 14, fontWeight: 600, color: 'var(--navy)' }}>{m.name}</div><div style={{ fontSize: 12, color: 'var(--mut)' }}>{m.role}</div></div>
+          {(cp.authorizedServices || []).length > 0 && (
+            <React.Fragment>
+              <p className="lbl">Authorized services</p>
+              <div className="seg">{(cp.authorizedServices || []).map((s, i) => <span className="on" key={i}>{s}</span>)}</div>
+            </React.Fragment>
+          )}
+          {(cp.careTeam || []).length > 0 && (
+            <React.Fragment>
+              <p className="lbl">Care team</p>
+              <div className="card" style={{ margin: 0 }}>
+                {(cp.careTeam || []).map((m, i) => (
+                  <div className="prow" style={{ marginBottom: i < (cp.careTeam.length - 1) ? 10 : 0 }} key={i}>
+                    <Avatar initials={m.initials} size={34} bg={teamColors[i % 3]} color={teamTextColors[i % 3]} />
+                    <div><div style={{ fontSize: 14, fontWeight: 600, color: 'var(--navy)' }}>{m.name}</div><div style={{ fontSize: 12, color: 'var(--mut)' }}>{m.role}</div></div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
+            </React.Fragment>
+          )}
+          </React.Fragment>
+          )}
           <p className="lbl">Upcoming visits</p>
+          {upcoming.length === 0 && <p className="sub" style={{ marginTop: 0 }}>No visits scheduled yet.</p>}
           {upcoming.map(v => (
             <div className={`visit ${v.highlight ? 'hl' : ''}`} key={v.id}>
-              <span className="vt" dangerouslySetInnerHTML={{ __html: `${v.day}<br>${v.time}` }} />
+              <span className="vt">{v.day}<br />{v.time}</span>
               <div className="vm"><b>{v.type}</b><span>{v.with}{v.duration ? ` · ${v.duration}` : ''}</span></div>
             </div>
           ))}
           <p className="lbl">Recent visits</p>
+          {recent.length === 0 && <p className="sub" style={{ marginTop: 0 }}>No completed visits yet.</p>}
           {recent.map(v => (
             <div className="visit" key={v.id}>
-              <span className="vt" dangerouslySetInnerHTML={{ __html: `${v.day}<br>${v.time}` }} />
+              <span className="vt">{v.day}<br />{v.time}</span>
               <div className="vm"><b>{v.type}</b><span>{v.with}</span></div>
               {v.completed && <i className="ti ti-circle-check chk" />}
             </div>
           ))}
-          {!readOnly && (
+          {!readOnly && hasPlan && (
             <React.Fragment>
               <p className="lbl">Your co-signature</p>
               <div className="card" style={{ margin: 0 }}>
@@ -4639,29 +4710,72 @@
                   </React.Fragment>
                 )}
               </div>
-              <button className="btn ghost" onClick={() => alert('Visit requests open in a later session.')}><i className="ti ti-plus" style={{ verticalAlign: -2 }} /> Request a visit</button>
+              {/* Visit requests arrive with the scheduling session (Session 7) —
+                  labeled and disabled, no fake interactivity. */}
+              <button className="btn ghost" disabled style={{ opacity: .55, cursor: 'default' }}><i className="ti ti-calendar-plus" style={{ verticalAlign: -2 }} /> Visit requests — coming with scheduling</button>
             </React.Fragment>
           )}
-          <p className="micro"><i className="ti ti-history" />{cp.careTierLabel} · Version {cp.version} · updated {cp.updatedAt} by {cp.updatedBy}</p>
+          {hasPlan && (
+            <p className="micro"><i className="ti ti-history" />{[cp.careTierLabel, cp.version != null ? `Version ${cp.version}` : null, cp.updatedAt ? `updated ${prettyDate(cp.updatedAt)}${cp.updatedBy ? ` by ${cp.updatedBy}` : ''}` : null].filter(Boolean).join(' · ')}</p>
+          )}
         </div>
       );
     };
 
-    const GfcMessages = ({ messages, readOnly }) => {
-      const teamColors = ['var(--gold)', '#9FE1CB', 'var(--navy)'];
-      const teamTextColors = ['var(--navy)', '#0f6e56', 'var(--cream)'];
+    const GfcMessages = ({ messages, readOnly, token, onSent }) => {
+      const rows = messages?.messages || [];
+      const [draft, setDraft] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      const send = async () => {
+        const body = draft.trim();
+        if (!body || busy) return;
+        setErr(''); setBusy(true);
+        const res = await api.sendGfcMessage(token, body);
+        setBusy(false);
+        if (res.error) { setErr(res.error); return; }
+        setDraft('');
+        onSent && onSent();
+      };
+      const roleColor = (m) => m.direction === 'out' ? 'var(--gold)' : 'var(--navy)';
+      const roleText = (m) => m.direction === 'out' ? 'var(--navy)' : 'var(--cream)';
+      const when = (iso) => {
+        if (!iso) return '';
+        const d = new Date(iso);
+        if (isNaN(d.getTime())) return '';
+        const today = d.toDateString() === new Date().toDateString();
+        return today ? d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : prettyDate(iso);
+      };
       return (
         <div className="gfc-body">
           {readOnly && <span className="ro"><i className="ti ti-eye" />Family view · read-only</span>}
-          {(messages?.threads || []).map((t, i) => (
-            <div className="thread" key={t.id}>
-              <Avatar initials={t.initials} bg={teamColors[i % 3]} color={teamTextColors[i % 3]} />
-              <div className="tm"><div className="tn">{t.from}</div><div className="tp">{t.preview}</div></div>
-              <div style={{ textAlign: 'right' }}><div className="tt">{t.time}</div>{t.unread && <div className="un" />}</div>
+          {rows.length === 0 && (
+            <div className="card" style={{ marginTop: 0 }}>
+              <div className="prow">
+                <Avatar initials="GF" size={34} />
+                <div>
+                  <div style={{ fontSize: 14.5, fontWeight: 600, color: 'var(--navy)' }}>No messages yet</div>
+                  <div style={{ fontSize: 12.5, color: 'var(--mut)', marginTop: 2 }}>{readOnly ? 'Messages with the care team will appear here.' : 'Send a message below and our team will get back to you.'}</div>
+                </div>
+              </div>
+            </div>
+          )}
+          {rows.map(m => (
+            <div className="thread" key={m.id}>
+              <Avatar initials={m.initials} bg={roleColor(m)} color={roleText(m)} />
+              <div className="tm"><div className="tn">{m.direction === 'out' ? 'You' : m.from}{m.fromRole && m.direction !== 'out' ? ` · ${m.fromRole}` : ''}</div><div className="tp">{m.body}</div></div>
+              <div style={{ textAlign: 'right' }}><div className="tt">{when(m.sentAt)}</div>{m.unread && <div className="un" />}</div>
             </div>
           ))}
+          {!readOnly && (
+            <div className="card" style={{ marginTop: 14 }}>
+              <textarea value={draft} onChange={e => setDraft(e.target.value)} placeholder="Write a message to your care team…" maxLength={4000} style={{ minHeight: 64 }} />
+              <button className="btn" style={{ marginTop: 10 }} disabled={busy || !draft.trim()} onClick={send}>{busy ? 'Sending…' : 'Send to care team'}</button>
+              {err && <div className="err">{err}</div>}
+            </div>
+          )}
           <div className="card" style={{ marginTop: 14, background: 'rgba(3,61,80,.04)', border: 'none', boxShadow: 'none', fontSize: 12, color: 'var(--mut)', textAlign: 'center' }}>
-            Channels open to your assigned caregiver, admin, and clinical team. Structured channels, not open chat.
+            Messages go to the Godwins Family Care team. Direct caregiver and clinical channels open in a later session.
           </div>
         </div>
       );
@@ -5172,14 +5286,15 @@
         { id: 'documents', icon: 'ti-file-text', label: 'Documents' }
       ];
       return (
-        <div className="gfc"><div className="gfc-shell">
+        <div className="gfc"><div className="gfc-shell desktopnav">
           <div className="gfc-hdr">
             <span className="ttl">{titles[view]}</span>
             <button onClick={gfcLogout} title="Sign out"><i className="ti ti-logout" /></button>
           </div>
           {view === 'home' && data && <GfcDashboard data={data} onNavigate={setView} me={me} />}
           {view === 'care' && data && <GfcCarePlan data={data} readOnly={isFamily} token={token} />}
-          {view === 'messages' && <GfcMessages messages={messages} readOnly={isFamily} />}
+          {view === 'messages' && <GfcMessages messages={messages} readOnly={isFamily} token={token}
+            onSent={async () => { const msg = await api.getGfcMessages(token); if (!msg.error) { setMessages(msg); setData(d => d ? { ...d, messages: msg } : d); } }} />}
           {view === 'documents' && <GfcDocuments docs={docs} readOnly={isFamily} token={token} onOpenTransferRoi={() => setShowTransferRoi(true)} />}
           {!data && view !== 'messages' && view !== 'documents' && (
             <div className="gfc-body" style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}><div className="gfc-spin" /></div>
