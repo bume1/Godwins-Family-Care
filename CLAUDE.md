@@ -147,6 +147,10 @@ Session-specific prompts live at `docs/GFC_SessionN_ClaudeCode_Prompt.md`.
 
 ---
 
+## Prerequisite gate — read before starting ANY session
+
+Before beginning any session's work, check the session status table above for any EARLIER-numbered session that is not ✅ Done. If one exists, STOP and tell Bianca which sessions are pending, and ask whether to (a) run the pending session first or (b) explicitly skip it and proceed. Do not proceed on an implicit skip. Record any approved skip as a bullet under "Recent decisions" with the date and reason.
+
 ## Running instruction for every session
 
 **Before opening the PR at the end of any session, update this file:**
