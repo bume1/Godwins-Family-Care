@@ -1,5 +1,5 @@
 # GFC Care Platform — running status
-_Last updated: 2026-08-15 (post-#15 merge sync)_
+_Last updated: 2026-08-16 (Session 3.3 built)_
 
 This file is auto-loaded at the start of every Claude Code session. Read it first for current state. Details live in `docs/`.
 
@@ -7,11 +7,10 @@ This file is auto-loaded at the start of every Claude Code session. Read it firs
 
 ## Current session focus
 
-**Session 3.5 merged (PR #15). Remaining before Session 4: run 3.3 (prompt ready) and answer the DRIFT_REPORT DECISION items. Session 4 (Clinical + OpenEMR) is next priority.**
+**Session 3.3 built (this branch, not yet merged). Session 3 is now feature-complete pending PR/merge. Session 4 (Clinical + OpenEMR) is next priority once 3.3 merges.**
 
-Merged to main (PR #15):
-- **3.5 — ✅ built.** Reconciliation per `docs/GFC_Session3.5_ClaudeCode_Prompt.md`: all prototype/fixture data removed from the live portal (care plan, visits, messages now real per-client data with branded empty states), client→admin message send persists to a new `gfc_messages` store, desktop layout for the client portal, family→client linkage fixed in the admin UI. Full findings + DECISION items for Bianca: `docs/DRIFT_REPORT_2026-08-15.md`.
-- **3.3 — 📄 prompt ready, not yet built** (`docs/GFC_Session3.3_ClaudeCode_Prompt.md`): staff enrollment view + offline onboarding + care-tier migration.
+- **3.3 — ✅ built, unmerged.** Per `docs/GFC_Session3.3_ClaudeCode_Prompt.md`: staff enrollment-submissions view (`/admin/enrollment`, role-gated at the API layer for admin/clinical/case-manager), offline patient onboarding (`signed_offline` consent status satisfies the gate identically to `signed`; admin "Add offline-onboarded patient" form with Drive-uploaded paper packets; idempotent bulk CSV importer `scripts/import_offline_patients.js`), and the careTier one-shot data migration (legacy `1/2/3` → Track `A1/A2/A3/A4/B`, gated by `CARE_TIER_MIGRATION_APPLIED`, runs once on boot).
+- **3.5 — ✅ built.** (merged PR #15) Reconciliation per `docs/GFC_Session3.5_ClaudeCode_Prompt.md`: all prototype/fixture data removed from the live portal (care plan, visits, messages now real per-client data with branded empty states), client→admin message send persists to a new `gfc_messages` store, desktop layout for the client portal, family→client linkage fixed in the admin UI. Full findings + DECISION items for Bianca: `docs/DRIFT_REPORT_2026-08-15.md`.
 
 **Next: Session 4 — Clinical portal + OpenEMR** (`GFC_SESSION_PLAN.md` §Session 4): 4.1 clinician workspace (OpenEMR write via FHIR), 4.2 clinician scheduling (OpenEMR-tied), 4.3 patient portal clinical read. Build targets: `docs/prototype/clinical-emr-prototype-v1.html` (desktop), `clinical-emr-mobile-prototype-v1.html` (mobile), `patient-portal-prototype-v2.html` (patient read). **Session 4's care-plan authoring must write `client.carePlan` (versioned, starting at 1) — the portal now renders a "being prepared" empty state until it exists, and the co-sign flow refuses to sign until a real plan is on file.**
 
@@ -28,7 +27,7 @@ Merged to main (PR #15):
 | 2 | Strip lab features · deactivate tracker · brand cleanup | ✅ Done (incl. 07/2026 cleanup follow-ups) | #5 |
 | 3.1 | Client portal + enrollment gate | ✅ Done | #6 |
 | 3.2 | Gated enrollment intake + consents (+ full intake field-parity build) | ✅ Done (parity build merged in #13) | #7 |
-| 3.3 | Staff enrollment view + offline onboarding + care-tier migration | 📄 Prompt ready | — |
+| 3.3 | Staff enrollment view + offline onboarding + care-tier migration | ✅ Built, unmerged | — |
 | 3.4 | Transfer-of-Care Provider ROI | ✅ Done | #13 |
 | 3.5 | Reconciliation — fixture removal, live data wiring, desktop pass | ✅ Done | #15 |
 | 4 | Clinical portal + OpenEMR (4.1 clinician workspace, 4.2 clinician scheduling, 4.3 patient portal clinical read) | ⬜ Next priority | — |
@@ -46,6 +45,13 @@ Merged to main (PR #15):
 ---
 
 ## Recent decisions
+
+**08/2026 — Session 3.3 built (branch `claude/session-3-3-review-5xa6f2`).** Staff enrollment view + offline onboarding + care-tier migration, per `docs/GFC_Session3.3_ClaudeCode_Prompt.md`. Locked in:
+- **Staff enrollment view (`/admin/enrollment`, `public/admin-enrollment.html`):** paginated/filterable/searchable list of all clients (filter chips: All / Intake pending / Ready for review / Enrolled / Needs follow-up), a detail view grouped by intake section with per-consent provenance badges, and role-gated actions — "Mark as reviewed" and "Request follow-up" (admin/clinical/case-manager), "Approve enrollment" and "Add offline-onboarded patient" (admin only). All five new endpoints under `/api/gfc/admin/enrollment/*` are role-gated at the API layer (`requireEnrollmentStaff` / `requireAdmin`), not just the UI. `POST .../approve` 409s with the specific missing consents/fields when enrollment isn't actually complete. Every action writes to `logActivity()`.
+- **`signed_offline` consent status:** a third satisfying value alongside `signed` (vs. `pending`/`na`) — `isConsentSatisfied()` is now the single source of truth used by the enrollment gate, the family ROI check, and intake submit's required-consent check, so paper-signed consents unlock the portal identically to in-app e-signed ones while staying distinguishable for audit/provenance.
+- **Offline onboarding:** `POST /api/gfc/admin/enrollment/offline` (admin only) creates a client with `source: 'legacy_offline'`, `enrollmentStatus: 'intake_complete'`, uploads paper-packet scans to Drive (`googledrive.uploadOfflinePacketFile`, PHI-safe — routes through the existing `DRIVE_ALLOW_ANYONE_LINK`-gated helper, no anyone-link grant by default), and sets consent statuses per a per-consent radio checklist (signed on paper / not on paper / N/A). `scripts/import_offline_patients.js` bulk-imports from CSV, idempotent by `firstName+lastName+dob`, logs to `scripts/import_offline_patients.log`; sample CSV + `scripts/README.md` included.
+- **Care-tier migration:** `migrateCareTierEnum()` runs once on boot (gated by `CARE_TIER_MIGRATION_APPLIED`, unset/false by default), rewrites stored legacy `1/2/3` values to `A1/A2/A4` in place, logs and leaves alone any unrecognized value (no data loss). The read-time `normalizeCareTier()` resolution added in an earlier session already handled display; this is the one-shot write-side migration PR #8's original note called for.
+- Not yet opened as a PR — flip the "Merged PR" column once it lands.
 
 **08/2026 — Session 3.5 reconciliation (branch `claude/new-session-dxkmip`).** Bianca's walkthrough found fixture/prototype content in the unlocked portal and no desktop layout; a full drift audit ran (`docs/DRIFT_REPORT_2026-08-15.md`). Locked in:
 - **No sample data, ever.** The server-side sample care plan / fixture visits / fixture messages (`buildGfcTestData`) are deleted. `GET /api/gfc/care-plan` returns the client's real `carePlan` or `null`; visits come from `visit_logs`; messages from a new `gfc_messages` KV collection — all scoped to the logged-in client. A client with no data sees branded empty states.

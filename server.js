@@ -2094,7 +2094,8 @@ const requireEnrolledClient = async (req, res, next) => {
         return res.status(403).json({ error: 'No authorized client on file for this account.', code: 'NO_CLIENT_LINK' });
       }
       const roiFamily = (client.consents || {}).roiFamily;
-      if (roiFamily !== 'signed') {
+      // Accept signed OR signed_offline (paper-signed ROI is equally valid — Scope B1).
+      if (!isConsentSatisfied(roiFamily)) {
         return res.status(403).json({
           error: 'Family access is locked until the Release of Information (family) consent is signed. No override.',
           code: 'ROI_FAMILY_REQUIRED'
@@ -2123,6 +2124,10 @@ const requireClientForIntake = (req, res, next) => {
 // Branched consent set per GFC_Intake_and_Packet_Spec_v1.md §4.2.
 // NOTE: the rewritten consent language below is a WORKING DRAFT, pending
 // counsel / Georgia licensure review before HIPAA-live. Do not treat as final.
+// Each consent status is one of: signed | signed_offline | pending | na.
+// A requirement is SATISFIED by either `signed` (e-signed in-app) or
+// `signed_offline` (signed on paper, offline onboarding — Scope B1). See
+// isConsentSatisfied() — the enrollment gate treats the two identically.
 const GFC_CONSENT_DEFS = [
   // Both service lines
   { type: 'npp',                scope: 'both', required: true,  title: 'HIPAA Notice of Privacy Practices' },
@@ -2154,6 +2159,17 @@ const consentDefsForServiceLine = (serviceLine) => {
 };
 const requiredConsentTypes = (serviceLine) =>
   consentDefsForServiceLine(serviceLine).filter(d => d.required).map(d => d.type);
+
+// Consent status vocabulary (Session 3.3, Scope B1):
+//   signed         — e-signed in-app during Stage-2 intake
+//   signed_offline — signed on paper before the app existed (offline onboarding);
+//                    satisfies the enrollment gate identically to `signed`, kept
+//                    distinct only so the audit trail preserves how it was captured
+//   pending        — required but not yet satisfied
+//   na             — not applicable / opted out (inactive consents)
+// Both `signed` and `signed_offline` satisfy every enrollment requirement.
+const CONSENT_SATISFIED_STATUSES = ['signed', 'signed_offline'];
+const isConsentSatisfied = (status) => CONSENT_SATISFIED_STATUSES.includes(status);
 
 // Uploads require authentication - registered here after authenticateToken is defined
 app.use('/uploads', authenticateToken, express.static('uploads', staticOptions));
@@ -4983,6 +4999,42 @@ const careTierLabelFor = (careTier) => {
   return code ? CARE_TIER_LABELS[code] : null;
 };
 
+// One-shot data migration (Session 3.3, Scope C). Read-normalization above lets
+// old records resolve on the fly, but per the intake spec v1.1 §3.2 and PR #8's
+// note we also rewrite the STORED value once so every record persists a Track A/B
+// code. Legacy mapping: 1 → A1, 2 → A2, 3 → A4 (A3 is new, no legacy equivalent).
+// Gated by CARE_TIER_MIGRATION_APPLIED (default false/unset) so it runs exactly
+// once; records with an unexpected value are logged and left untouched (no loss).
+const CARE_TIER_LEGACY_KEYS = Object.keys(LEGACY_CARE_TIER_MAP);           // ['1','2','3']
+const CARE_TIER_KNOWN_VALUES = CARE_TIER_LEGACY_KEYS.concat(Object.keys(CARE_TIER_LABELS)); // + A1..A4,B
+async function migrateCareTierEnum() {
+  if (String(process.env.CARE_TIER_MIGRATION_APPLIED).toLowerCase() === 'true') {
+    return { skipped: true };
+  }
+  const users = await getUsers();
+  let rewritten = 0;
+  const unexpected = [];
+  users.forEach(u => {
+    if (u.role !== config.ROLES.CLIENT || u.careTier == null || u.careTier === '') return;
+    const raw = String(u.careTier);
+    if (CARE_TIER_LEGACY_KEYS.includes(raw)) {
+      u.careTier = LEGACY_CARE_TIER_MAP[raw];
+      rewritten++;
+    } else if (!CARE_TIER_KNOWN_VALUES.includes(raw.toUpperCase()) && !CARE_TIER_KNOWN_VALUES.includes(raw)) {
+      unexpected.push({ id: u.id, careTier: u.careTier });
+    }
+    // Already-canonical Track A/B codes need no rewrite.
+  });
+  if (rewritten > 0) {
+    await db.set('users', users);
+    invalidateUsersCache();
+  }
+  unexpected.forEach(r => console.warn(`⚠️  Care-tier migration: client ${r.id} has unexpected careTier "${r.careTier}" — left untouched`));
+  console.log(`🔧 Care-tier migration: rewrote ${rewritten} legacy careTier value(s) to Track A/B; ${unexpected.length} unexpected left untouched.`);
+  console.log('   ↳ Migration complete. Set CARE_TIER_MIGRATION_APPLIED=true in your env so this does not re-run.');
+  return { skipped: false, rewritten, unexpected: unexpected.length };
+}
+
 // Build a display-ready snapshot of the gate-relevant enrollment state.
 const buildEnrollmentSnapshot = (client) => {
   const consents = client.consents || {};
@@ -4993,8 +5045,10 @@ const buildEnrollmentSnapshot = (client) => {
     careTierLabel: careTierLabelFor(client.careTier),
     consents,
     // Convenience flags the UI/gate can read directly
-    roiFamilySigned: consents.roiFamily === 'signed',
-    monitoringOptIn: client.monitoringOptIn || false
+    roiFamilySigned: isConsentSatisfied(consents.roiFamily),
+    monitoringOptIn: client.monitoringOptIn || false,
+    // Non-PHI follow-up request from staff (Scope A "Request follow-up"), if any.
+    followUp: client.enrollmentFollowUp || null
   };
 };
 
@@ -5813,9 +5867,10 @@ app.post('/api/gfc/intake/submit', authenticateToken, requireClientForIntake, as
     const serviceLine = client.serviceLine || 'PHC';
     const consents = client.consents || {};
 
-    // Required consents for the service line must all be signed.
+    // Required consents for the service line must all be satisfied
+    // (signed in-app OR signed_offline — Scope B1).
     const required = requiredConsentTypes(serviceLine);
-    const missingConsents = required.filter(t => consents[t] !== 'signed');
+    const missingConsents = required.filter(t => !isConsentSatisfied(consents[t]));
     if (missingConsents.length) {
       return res.status(400).json({
         error: 'Required consents are not all signed yet.',
@@ -5859,6 +5914,455 @@ app.post('/api/gfc/intake/submit', authenticateToken, requireClientForIntake, as
     res.json({ message: 'Enrollment complete', enrollmentStatus: client.enrollmentStatus });
   } catch (error) {
     console.error('GFC intake submit error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============== GFC STAFF ENROLLMENT-SUBMISSIONS VIEW (Session 3.3, Scope A) ==============
+// Staff area for reviewing Stage-2 intake submissions. Role-gated at the API
+// layer (default-deny) — not just in the UI. Admin + clinical (user) + case
+// manager can view and review; Approve enrollment and Add offline-onboarded
+// patient are admin-only (enforced with requireAdmin on those two routes).
+// TEST DATA ONLY. No real PHI until HIPAA-live.
+
+const ENROLLMENT_STAFF_ROLES = [config.ROLES.ADMIN, config.ROLES.USER, config.ROLES.CASE_MANAGER];
+const requireEnrollmentStaff = (req, res, next) => {
+  const role = req.user.role;
+  if (ENROLLMENT_STAFF_ROLES.includes(role) || req.user.isManager || req.user.hasClientPortalAdminAccess) {
+    return next();
+  }
+  return res.status(403).json({ error: 'Staff access required for the enrollment view.', code: 'ENROLLMENT_STAFF_ONLY' });
+};
+
+// Required structured intake fields for a complete submission (intake spec §2A).
+// Each reads from client.intake first, then falls back to the mirrored top-level
+// client fields the intake flow copies up.
+const ENROLLMENT_REQUIRED_FIELDS = [
+  { key: 'name',             label: 'Name',              present: (c, i) => !!(c.name || (i.firstName && i.lastName)) },
+  { key: 'dob',              label: 'Date of birth',     present: (c, i) => !!(i.dob || c.dob) },
+  { key: 'gender',           label: 'Gender',            present: (c, i) => !!i.gender },
+  { key: 'address',          label: 'Address',           present: (c, i) => !!(i.address && (i.address.line1 || i.address.city)) },
+  { key: 'phone',            label: 'Phone',             present: (c, i) => !!(i.phone || c.phone) },
+  { key: 'primaryLanguage',  label: 'Primary language',  present: (c, i) => !!i.primaryLanguage },
+  { key: 'serviceLine',      label: 'Service line',      present: (c, i) => !!(c.serviceLine || i.serviceLine) },
+  { key: 'careTier',         label: 'Care tier',         present: (c) => !!normalizeCareTier(c.careTier) },
+  { key: 'primaryContact',   label: 'Primary contact',   present: (c, i) => !!(i.primaryContact && i.primaryContact.name) },
+  { key: 'emergencyContact', label: 'Emergency contact', present: (c, i) => Array.isArray(i.emergencyContacts) && i.emergencyContacts.some(e => e && e.name) }
+];
+
+// Intake completion = (required consents satisfied + required fields present) / total.
+const computeEnrollmentCompletion = (client) => {
+  const serviceLine = client.serviceLine || (client.intake && client.intake.serviceLine) || 'PHC';
+  const intake = client.intake || {};
+  const consents = client.consents || {};
+  const requiredConsents = requiredConsentTypes(serviceLine);
+  const safe = (fn) => { try { return !!fn(); } catch { return false; } };
+
+  const missingConsents = requiredConsents.filter(t => !isConsentSatisfied(consents[t]));
+  const missingFields = ENROLLMENT_REQUIRED_FIELDS.filter(f => !safe(() => f.present(client, intake)));
+  const total = requiredConsents.length + ENROLLMENT_REQUIRED_FIELDS.length;
+  const satisfied = total - missingConsents.length - missingFields.length;
+  return {
+    total, satisfied,
+    pct: total ? Math.round((satisfied / total) * 100) : 0,
+    missingConsents,
+    missingFieldKeys: missingFields.map(f => f.key),
+    missingConsentLabels: missingConsents.map(t => (GFC_CONSENT_DEFS.find(x => x.type === t) || {}).title || t),
+    missingFieldLabels: missingFields.map(f => f.label)
+  };
+};
+
+// Coarse review state used by the list filter chips.
+//   enrolled | needs_followup | ready_for_review | intake_pending
+const enrollmentReviewState = (client) => {
+  const status = client.enrollmentStatus || 'intake_pending';
+  if (status === 'enrolled') return 'enrolled';
+  if (client.reviewStatus === 'needs_followup') return 'needs_followup';
+  if (status === 'intake_complete') return 'ready_for_review';
+  return 'intake_pending';
+};
+
+const enrollmentDisplayName = (client) => {
+  const i = client.intake || {};
+  return client.name || [i.firstName, i.lastName].filter(Boolean).join(' ') || client.email || 'Unnamed client';
+};
+
+const enrollmentListRow = (client) => {
+  const comp = computeEnrollmentCompletion(client);
+  const i = client.intake || {};
+  const rawSource = client.source || 'in_app';
+  return {
+    id: client.id,
+    name: enrollmentDisplayName(client),
+    dob: i.dob || client.dob || null,
+    serviceLine: client.serviceLine || i.serviceLine || null,
+    careTier: normalizeCareTier(client.careTier),
+    careTierLabel: careTierLabelFor(client.careTier),
+    enrollmentStatus: client.enrollmentStatus || 'intake_pending',
+    reviewState: enrollmentReviewState(client),
+    completionPct: comp.pct,
+    completion: { satisfied: comp.satisfied, total: comp.total },
+    submittedAt: i.submittedAt || null,
+    source: /offline/i.test(rawSource) ? 'offline' : 'in_app',
+    sourceRaw: rawSource,
+    reviewedAt: (client.enrollmentReview && client.enrollmentReview.reviewedAt) || null,
+    needsFollowUp: client.reviewStatus === 'needs_followup'
+  };
+};
+
+const enrollmentDetail = (client) => {
+  const serviceLine = client.serviceLine || (client.intake && client.intake.serviceLine) || 'PHC';
+  const intake = client.intake || {};
+  const consents = client.consents || {};
+  const consentMeta = client.consentMeta || {};
+  const defs = consentDefsForServiceLine(serviceLine);
+  const comp = computeEnrollmentCompletion(client);
+  return {
+    ...enrollmentListRow(client),
+    email: client.email || null,
+    serviceLineResolved: serviceLine,
+    age: intake.age != null ? intake.age : deriveAge(intake.dob || client.dob),
+    intake,
+    consents: defs.map(d => {
+      const status = consents[d.type] || 'pending';
+      return {
+        type: d.type, title: d.title, required: !!d.required, inactive: !!d.inactive,
+        status,
+        satisfied: isConsentSatisfied(status),
+        // Provenance badge for the detail view (in_app | signed_offline).
+        provenance: status === 'signed_offline' ? 'signed_offline' : (status === 'signed' ? 'in_app' : null),
+        signedAt: (consentMeta[d.type] && consentMeta[d.type].signedAt) || null,
+        meta: consentMeta[d.type] || null
+      };
+    }),
+    medications: Array.isArray(intake.medications) ? intake.medications : (Array.isArray(client.medications) ? client.medications : []),
+    payer: intake.payer || client.payer || null,
+    careTeam: client.careTeam || null,
+    files: {
+      advanceDirective: intake.advanceDirectiveUrl || null,
+      insuranceCard: intake.insuranceCardUrl || null,
+      offlinePacketUrls: Array.isArray(client.offlinePacketDriveUrls) ? client.offlinePacketDriveUrls : [],
+      enrollmentPacket: client.enrollmentPacket || null
+    },
+    review: client.enrollmentReview || null,
+    followUp: client.enrollmentFollowUp || null,
+    missing: { consents: comp.missingConsentLabels, fields: comp.missingFieldLabels }
+  };
+};
+
+// GET /api/gfc/admin/enrollment/list — paginated, filterable, searchable.
+app.get('/api/gfc/admin/enrollment/list', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const users = await getUsers();
+    let clients = users.filter(u => u.role === config.ROLES.CLIENT);
+
+    // Search first (name or DOB), so the chip counts reflect the search scope.
+    const query = String(req.query.q || '').trim().toLowerCase();
+    if (query) {
+      clients = clients.filter(c => {
+        const i = c.intake || {};
+        const name = enrollmentDisplayName(c).toLowerCase();
+        const dob = String(i.dob || c.dob || '').toLowerCase();
+        return name.includes(query) || dob.includes(query);
+      });
+    }
+
+    // Chip counts across the searched set.
+    const counts = { all: clients.length, intake_pending: 0, ready_for_review: 0, enrolled: 0, needs_followup: 0 };
+    clients.forEach(c => { counts[enrollmentReviewState(c)]++; });
+
+    // Apply the active filter chip.
+    const f = String(req.query.filter || 'all').toLowerCase();
+    const filterMap = { pending: 'intake_pending', intake_pending: 'intake_pending', ready: 'ready_for_review', ready_for_review: 'ready_for_review', enrolled: 'enrolled', followup: 'needs_followup', needs_followup: 'needs_followup' };
+    if (filterMap[f]) clients = clients.filter(c => enrollmentReviewState(c) === filterMap[f]);
+
+    let rows = clients.map(enrollmentListRow);
+
+    // Sort.
+    const s = String(req.query.sort || 'submitted_desc').toLowerCase();
+    rows.sort((a, b) => {
+      if (s === 'name') return (a.name || '').localeCompare(b.name || '');
+      if (s === 'service_line' || s === 'serviceline') return (a.serviceLine || '').localeCompare(b.serviceLine || '') || (a.name || '').localeCompare(b.name || '');
+      const av = a.submittedAt || '', bv = b.submittedAt || '';
+      if (!av && !bv) return (a.name || '').localeCompare(b.name || '');
+      if (!av) return 1;
+      if (!bv) return -1;
+      return s === 'submitted_asc' ? av.localeCompare(bv) : bv.localeCompare(av);
+    });
+
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize, 10) || 25));
+    const total = rows.length;
+    const start = (page - 1) * pageSize;
+    res.json({
+      clients: rows.slice(start, start + pageSize),
+      page, pageSize, total,
+      totalPages: Math.max(1, Math.ceil(total / pageSize)),
+      counts
+    });
+  } catch (error) {
+    console.error('GFC enrollment list error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/gfc/admin/enrollment/:clientId — full submission detail.
+app.get('/api/gfc/admin/enrollment/:clientId', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+    res.json({ client: enrollmentDetail(client) });
+  } catch (error) {
+    console.error('GFC enrollment detail error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/gfc/admin/enrollment/:clientId/review — record a review (no state change).
+app.post('/api/gfc/admin/enrollment/:clientId/review', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const idx = users.findIndex(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (idx === -1) return res.status(404).json({ error: 'Client not found' });
+    users[idx].enrollmentReview = {
+      reviewedAt: new Date().toISOString(),
+      reviewerId: req.user.id,
+      reviewerName: req.user.name || req.user.email
+    };
+    await db.set('users', users);
+    invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'enrollment_reviewed', 'enrollment', users[idx].id, {});
+    res.json({ message: 'Marked as reviewed', review: users[idx].enrollmentReview });
+  } catch (error) {
+    console.error('GFC enrollment review error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Non-PHI follow-up notice — lists ONLY the outstanding item labels, never any
+// clinical or consent content. Safe to email pre-BAA (mirrors the enrollment
+// confirmation pattern).
+async function sendFollowUpNotification(client, itemLabels) {
+  try {
+    const to = [client.email, (client.intake && client.intake.primaryContact && client.intake.primaryContact.email)].filter(Boolean);
+    if (!to.length) return;
+    const firstName = enrollmentDisplayName(client).split(' ')[0];
+    const list = (itemLabels || []).map(l => `• ${l}`).join('\n');
+    const subject = 'Action needed to complete your Godwins Family Care enrollment';
+    const text = `Hi ${firstName},\n\nA few items still need your attention before we can finish your enrollment:\n\n${list}\n\nPlease sign in to your secure portal to complete them. For your privacy, no health details are included in this email.\n\n— Godwins Family Care`;
+    await sendEmail(to, subject, text, {});
+  } catch (e) {
+    console.error('Follow-up notification failed (non-fatal):', e.message);
+  }
+}
+
+// POST /api/gfc/admin/enrollment/:clientId/follow-up — request patient action.
+// body: { items: [key1, key2, ...] }  (keys are consent types or field keys)
+app.post('/api/gfc/admin/enrollment/:clientId/follow-up', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const { items } = req.body || {};
+    if (!Array.isArray(items) || !items.length) {
+      return res.status(400).json({ error: 'At least one follow-up item is required.' });
+    }
+    const users = await getUsers();
+    const idx = users.findIndex(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (idx === -1) return res.status(404).json({ error: 'Client not found' });
+    const client = users[idx];
+
+    // Resolve item keys to friendly, non-PHI labels (consent titles / field labels).
+    const labelFor = (key) => {
+      const consent = GFC_CONSENT_DEFS.find(d => d.type === key);
+      if (consent) return consent.title;
+      const field = ENROLLMENT_REQUIRED_FIELDS.find(fd => fd.key === key);
+      if (field) return field.label;
+      return key;
+    };
+    const itemLabels = items.map(labelFor);
+
+    client.reviewStatus = 'needs_followup';
+    client.enrollmentFollowUp = {
+      items,
+      itemLabels,
+      requestedAt: new Date().toISOString(),
+      requestedById: req.user.id,
+      requestedByName: req.user.name || req.user.email
+    };
+    users[idx] = client;
+    await db.set('users', users);
+    invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'enrollment_follow_up_requested', 'enrollment', client.id, { items });
+    sendFollowUpNotification(client, itemLabels).catch(() => {});
+    res.json({ message: 'Follow-up requested', followUp: client.enrollmentFollowUp });
+  } catch (error) {
+    console.error('GFC enrollment follow-up error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/gfc/admin/enrollment/:clientId/approve — flip to enrolled (admin only).
+// Blocks with 409 + specific missing items if any required consent/field is absent.
+app.post('/api/gfc/admin/enrollment/:clientId/approve', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const idx = users.findIndex(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (idx === -1) return res.status(404).json({ error: 'Client not found' });
+    const client = users[idx];
+
+    const comp = computeEnrollmentCompletion(client);
+    if (comp.missingConsentLabels.length || comp.missingFieldLabels.length) {
+      return res.status(409).json({
+        error: 'Cannot approve — required items are missing.',
+        code: 'ENROLLMENT_INCOMPLETE',
+        missingConsents: comp.missingConsentLabels,
+        missingFields: comp.missingFieldLabels
+      });
+    }
+
+    client.enrollmentStatus = 'enrolled';
+    if (client.reviewStatus === 'needs_followup') client.reviewStatus = null;
+    client.enrollmentApproval = {
+      approvedAt: new Date().toISOString(),
+      approvedById: req.user.id,
+      approvedByName: req.user.name || req.user.email
+    };
+    users[idx] = client;
+    await db.set('users', users);
+    invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'enrollment_approved', 'enrollment', client.id, {});
+    res.json({ message: 'Enrollment approved', enrollmentStatus: client.enrollmentStatus });
+  } catch (error) {
+    console.error('GFC enrollment approve error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/gfc/admin/enrollment/offline — Add offline-onboarded patient (admin
+// only, Scope B2). Multipart: `files` (paper-packet scans) + `payload` (JSON of
+// the structured entry + consent checklist). Creates a client with
+// source=legacy_offline and enrollmentStatus=intake_complete.
+app.post('/api/gfc/admin/enrollment/offline', authenticateToken, requireAdmin, uploadLimiter, upload.array('files', 20), async (req, res) => {
+  try {
+    let payload = {};
+    try { payload = req.body && req.body.payload ? JSON.parse(req.body.payload) : (req.body || {}); }
+    catch (e) { return res.status(400).json({ error: 'Invalid payload JSON' }); }
+
+    const d = payload || {};
+    if (!d.firstName || !d.lastName) return res.status(400).json({ error: 'firstName and lastName are required' });
+    if (!d.dob) return res.status(400).json({ error: 'dob is required' });
+    const serviceLine = (d.serviceLine || 'PHC').toUpperCase();
+    const careTier = normalizeCareTier(d.careTier);
+
+    const users = await getUsers();
+
+    // Optional real portal login; otherwise a placeholder account (no usable login).
+    let email = (d.email || '').toLowerCase().trim();
+    if (email && users.find(u => u.email && u.email.toLowerCase() === email)) {
+      return res.status(400).json({ error: 'A user already exists with this email' });
+    }
+    const clientId = uuidv4();
+    if (!email) email = `offline+${clientId}@placeholder.local`;
+    const randomPw = uuidv4() + uuidv4();
+    const hashedPassword = await bcrypt.hash(randomPw, config.BCRYPT_SALT_ROUNDS);
+
+    // Upload paper-packet scans to Drive (best-effort — no-op if Drive unconfigured in dev).
+    const offlinePacketDriveUrls = [];
+    const driveOk = await googledrive.testConnection().then(r => r && r.connected).catch(() => false);
+    if (driveOk && Array.isArray(req.files)) {
+      for (const file of req.files) {
+        try {
+          const result = await googledrive.uploadOfflinePacketFile(
+            `${d.firstName} ${d.lastName}`.trim(), file.originalname, file.buffer, file.mimetype
+          );
+          const url = result && (result.webViewLink || result.webContentLink);
+          if (url) offlinePacketDriveUrls.push(url);
+        } catch (e) {
+          console.error('Offline packet upload failed (non-fatal):', e.message);
+        }
+      }
+    }
+
+    // Consent checklist → statuses. checklist: { [type]: { status, signedAt } }
+    const checklist = d.consents || {};
+    const applicable = consentDefsForServiceLine(serviceLine);
+    const consents = {};
+    const consentMeta = {};
+    const nowIso = new Date().toISOString();
+    applicable.forEach(def => {
+      const entry = checklist[def.type] || {};
+      const choice = entry.status || 'pending'; // signed_offline | pending | na
+      if (choice === 'signed_offline') {
+        consents[def.type] = 'signed_offline';
+        consentMeta[def.type] = { signedAt: entry.signedAt || nowIso, provenance: 'signed_offline', recordedBy: req.user.id, recordedAt: nowIso };
+      } else if (choice === 'na') {
+        consents[def.type] = 'na';
+      } else {
+        consents[def.type] = 'pending';
+      }
+    });
+
+    const meds = Array.isArray(d.medications) ? d.medications.filter(m => m && (m.name || '').trim()).map(m => ({
+      name: (m.name || '').trim(), dose: (m.dose || '').trim(), route: (m.route || '').trim(),
+      frequency: (m.frequency || '').trim(), prescriber: (m.prescriber || '').trim(), pharmacy: (m.pharmacy || '').trim()
+    })) : [];
+
+    const intake = {
+      firstName: d.firstName, lastName: d.lastName, preferredName: d.preferredName || '',
+      dob: d.dob, age: deriveAge(d.dob), gender: d.gender || '',
+      address: d.address || { line1: '', city: '', state: 'GA', zip: '' },
+      phone: d.phone || '', primaryLanguage: d.primaryLanguage || '', livesWith: d.livesWith || '',
+      serviceLine, careTier,
+      primaryContact: d.primaryContact || {},
+      emergencyContacts: Array.isArray(d.emergencyContacts) ? d.emergencyContacts : [],
+      allergies: d.allergies || '',
+      medications: meds,
+      payer: d.payer || {},
+      submittedAt: nowIso,
+      source: 'legacy_offline'
+    };
+
+    const newClient = {
+      id: clientId,
+      email,
+      name: `${d.firstName} ${d.lastName}`.trim(),
+      preferredName: d.preferredName || '',
+      password: hashedPassword,
+      role: config.ROLES.CLIENT,
+      source: 'legacy_offline',
+      enrollmentStatus: 'intake_complete',
+      serviceLine,
+      careTier,
+      dob: d.dob,
+      phone: d.phone || '',
+      medications: meds,
+      payer: d.payer || {},
+      consents,
+      consentMeta,
+      offlinePacketDriveUrls,
+      careTeam: d.careTeam || { assignedFNPs: [], assignedCaseManager: null, primaryCaregiver: null, backupCaregiver: null },
+      intake,
+      accountStatus: 'active',
+      requirePasswordChange: true,
+      hasPortalLogin: !!d.email,
+      createdAt: nowIso
+    };
+    users.push(newClient);
+    await db.set('users', users);
+    invalidateUsersCache();
+
+    // Audit trail — one entry for creation, plus one per signed-offline consent.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'offline_patient_created', 'enrollment', clientId, {
+      source: 'legacy_offline', serviceLine, careTier, packetFiles: offlinePacketDriveUrls.length
+    });
+    for (const [type, status] of Object.entries(consents)) {
+      if (status === 'signed_offline') {
+        await logActivity(req.user.id, req.user.name || req.user.email, 'consent_recorded_offline', 'consent', type, { clientId, signedAt: consentMeta[type] && consentMeta[type].signedAt });
+      }
+    }
+
+    res.json({ message: 'Offline patient created', clientId, offlinePacketDriveUrls, enrollmentStatus: newClient.enrollmentStatus });
+  } catch (error) {
+    console.error('GFC offline onboarding error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -11524,6 +12028,12 @@ app.get('/admin', (req, res) => {
   res.sendFile(__dirname + '/public/admin-hub.html');
 });
 
+// Staff enrollment-submissions view (Session 3.3, Scope A). Page is served to
+// any logged-in staff; the API routes it calls enforce role access.
+app.get('/admin/enrollment', (req, res) => {
+  res.sendFile(__dirname + '/public/admin-enrollment.html');
+});
+
 // Admin hub login endpoint (same as regular admin login)
 app.post('/api/auth/admin-login', async (req, res) => {
   try {
@@ -11861,6 +12371,16 @@ app.listen(PORT, () => {
       }
     } catch (err) {
       console.error('Service report doc fix failed:', err.message);
+    }
+  })();
+
+  // One-shot care-tier enum migration (Session 3.3, Scope C).
+  // Gated by CARE_TIER_MIGRATION_APPLIED — safe/idempotent to leave in place.
+  (async () => {
+    try {
+      await migrateCareTierEnum();
+    } catch (err) {
+      console.error('Care-tier migration failed (non-fatal):', err.message);
     }
   })();
 

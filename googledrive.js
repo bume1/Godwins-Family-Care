@@ -375,6 +375,40 @@ async function uploadProviderROIFile(folderName, fileName, fileBuffer, mimeType)
   }
 }
 
+// ── Offline patient onboarding — paper packet scans (Session 3.3, Scope B) ──
+// Uploaded when staff use "Add offline-onboarded patient" for the 7 legacy
+// paper-packet clients. Per-client subfolder inside a root-level named folder.
+async function uploadOfflinePacketFile(clientName, fileName, fileBuffer, mimeType) {
+  try {
+    const drive = await getDriveClient();
+    const { Readable } = require('stream');
+
+    const rootFolderId = await findOrCreateFolder('GFC Offline Intake Packets', null);
+    const clientFolderId = await findOrCreateFolder(clientName || 'Unnamed Client', rootFolderId);
+
+    const response = await drive.files.create({
+      resource: { name: fileName, parents: [clientFolderId] },
+      media: { mimeType: mimeType || 'application/octet-stream', body: Readable.from([fileBuffer]) },
+      fields: 'id, name, webViewLink, webContentLink, thumbnailLink'
+    });
+
+    // PHI (paper intake packet scan): no anyone-link grant unless explicitly enabled.
+    await maybeGrantAnyoneLink(drive, response.data.id);
+
+    console.log(`✅ Uploaded offline intake packet to Google Drive: ${response.data.name}`);
+    return {
+      fileId: response.data.id,
+      fileName: response.data.name,
+      webViewLink: response.data.webViewLink,
+      webContentLink: response.data.webContentLink,
+      thumbnailLink: response.data.thumbnailLink
+    };
+  } catch (error) {
+    console.error('Error uploading offline intake packet to Google Drive:', error.message);
+    throw error;
+  }
+}
+
 module.exports = {
   testConnection,
   findOrCreateFolder,
@@ -384,6 +418,7 @@ module.exports = {
   uploadServiceReportPDF,
   uploadServiceReportAttachment,
   uploadProviderROIFile,
+  uploadOfflinePacketFile,
   getSheetsClient,
   getDriveClient
 };
