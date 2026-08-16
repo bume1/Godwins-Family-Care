@@ -199,6 +199,10 @@ const ROI_ADMIN_EMAIL = process.env.ROI_ADMIN_EMAIL || 'admin@godwinsfamilycarel
 // the parallel-run sheet writer and the one-time legacy importer. Empty in dev.
 const ROI_LEGACY_SHEET_ID = process.env.ROI_LEGACY_SHEET_ID || '';
 const ROI_LEGACY_SHEET_TAB = process.env.ROI_LEGACY_SHEET_TAB || 'Assessments & Intakes';
+// One-shot careTier enum migration (1/2/3 → A1/A2/A3/A4/B, Session 3.3 Scope C).
+// Runs on every boot until this is 'true' — server.js reads process.env directly
+// (see migrateCareTierEnum). Set to true in your env once the migration has run.
+// const CARE_TIER_MIGRATION_APPLIED = process.env.CARE_TIER_MIGRATION_APPLIED === 'true';
 
 // ---- Default Admin (initial setup only) ----
 const DEFAULT_ADMIN = Object.freeze({

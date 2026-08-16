@@ -14,7 +14,7 @@ Each session ends in a PR you review and merge. **Companion to** `GFC_App_Build_
 | 0 | Infra — AWS + OpenEMR + BAAs (**OpenEMR live, configurations in progress**) | Shared | 🟡 In progress — see `GFC_App_Build_v2.md` §15 for config items still open |
 | 1 | Repo prep · rebrand · role model | Shared | ✅ Done (PR #2, #3) |
 | 2 | Strip lab features · deactivate tracker · brand cleanup | Shared | ✅ Done (PR #5, 2026-06-10; cleanup follow-ups completed 07/2026) |
-| 3 | Client portal + gated intake (both service paths) | Shared | 🔵 In progress — 3.1/3.2 built (PR #6, #7); 3.2 field-parity build + 3.4 Transfer-of-Care ROI merged (PR #13); 3.5 reconciliation (fixture removal + live wiring + desktop pass) merged (PR #15); **3.3 (staff enrollment view + offline onboarding + care-tier migration) not complete — prompt ready** |
+| 3 | Client portal + gated intake (both service paths) | Shared | 🔵 In progress — 3.1/3.2 built (PR #6, #7); 3.2 field-parity build + 3.4 Transfer-of-Care ROI merged (PR #13); 3.5 reconciliation (fixture removal + live wiring + desktop pass) merged (PR #15); **3.3 (staff enrollment view + offline onboarding + care-tier migration) built — not yet merged** |
 | 4 | **Clinical / In-Home Primary Care portal + OpenEMR** | Clinical | ⬜ Next priority |
 | 5 | **Clinical HIPAA go-live** (app → AWS boundary, MFA, audit, BAAs) | Clinical | ⬜ Planned |
 | 6 | Caregiver app | PHCP | ⬜ Planned |
@@ -37,7 +37,7 @@ Each session ends in a PR you review and merge. **Companion to** `GFC_App_Build_
 
 **Session 2 — Strip + deactivate + brand cleanup.** ✅ Done (PR #5). Lab modules removed, tracker deactivated, brand strings fixed. Cleanup follow-up: the dormant `service-portal.html` validation components were removed (PR #11); the lab HubSpot connector was **kept dormant, not removed** (intentional — reactivate on CRM upgrade; see CLAUDE.md). Ref: `strip-list.md` + `strip-list-DECISIONS.md`.
 
-**Session 3 — Client portal + gated intake.** Shared front door for BOTH service paths (the intake branches PHC vs IHPC consents). 3.1 portal + gate (built, PR #6), 3.2 intake + consents (built, PR #7; full legacy field-parity build merged in PR #13), **3.3 staff enrollment-submissions view + offline patient onboarding + care-tier code migration (prompt ready: `GFC_Session3.3_ClaudeCode_Prompt.md` — not built)**, 3.4 Transfer-of-Care Provider ROI (built, merged in PR #13), 3.5 reconciliation — fixture-data removal, live per-client wiring, client-portal desktop layout (built, merged in PR #15; drift findings in `DRIFT_REPORT_2026-08-15.md`). Dev/test data only. Ref: `client-prototype-full.html`, `phcp-portal-prototype.html`, intake spec (`template-gfc-intake-3.php`), client schema. Session 3.4 additionally references the source-form pair `source-forms/gfc_roi_upload.gs` and `source-forms/template-gfc-roi-upload.php` and adds the `roiTransfer` consent status + `priorProviders` field group to the client schema.
+**Session 3 — Client portal + gated intake.** Shared front door for BOTH service paths (the intake branches PHC vs IHPC consents). 3.1 portal + gate (built, PR #6), 3.2 intake + consents (built, PR #7; full legacy field-parity build merged in PR #13), **3.3 staff enrollment-submissions view + offline patient onboarding + care-tier code migration (built per `GFC_Session3.3_ClaudeCode_Prompt.md` — not yet merged)**, 3.4 Transfer-of-Care Provider ROI (built, merged in PR #13), 3.5 reconciliation — fixture-data removal, live per-client wiring, client-portal desktop layout (built, merged in PR #15; drift findings in `DRIFT_REPORT_2026-08-15.md`). Dev/test data only. Ref: `client-prototype-full.html`, `phcp-portal-prototype.html`, intake spec (`template-gfc-intake-3.php`), client schema. Session 3.4 additionally references the source-form pair `source-forms/gfc_roi_upload.gs` and `source-forms/template-gfc-roi-upload.php` and adds the `roiTransfer` consent status + `priorProviders` field group to the client schema.
 
 **Session 4 — Clinical / In-Home Primary Care (PRIORITY).** OpenEMR integration (FHIR/OAuth2). Architecture: one patient record in OpenEMR, two role-scoped views over it — the clinician charts from a clinician-scoped view of the patient's chart (write), the patient sees a filtered read of the same record. **Visual build targets: `clinical-emr-prototype-v1.html` (desktop), `clinical-emr-mobile-prototype-v1.html` (mobile), `patient-portal-prototype-v2.html` (patient read).** Three sub-PRs:
 
@@ -66,6 +66,6 @@ Each session ends in a PR you review and merge. **Companion to** `GFC_App_Build_
 ---
 
 ## Rough timeline
-- **This week:** finish Session 3 (3.3 remaining; 3.4 + 3.5 done), build Session 4 (clinical) + Session 5 (clinical go-live).
+- **This week:** merge Session 3.3 (built, PR pending; 3.4 + 3.5 done), build Session 4 (clinical) + Session 5 (clinical go-live).
 - **1–2 weeks:** first clinical clients live.
 - **Following weeks:** Sessions 6–10 (PHCP segment + shared), then 11–12.

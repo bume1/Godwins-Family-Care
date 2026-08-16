@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Godwins Family Care — Enrollment Submissions</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            primary: { 50: '#e8f0f4', 100: '#c5d9e3', 200: '#9fc0d0', 300: '#6ea3bb', 400: '#3d86a6', 500: '#033D50', 600: '#02334a', 700: '#022A38', 800: '#011f2a', 900: '#01141c' },
+            accent: '#C9A44A',
+            success: { 50: '#ecfdf5', 500: '#10b981', 600: '#059669' },
+            warning: { 50: '#fffbeb', 500: '#f59e0b', 600: '#d97706' },
+            danger: { 50: '#fef2f2', 500: '#ef4444', 600: '#dc2626' }
+          },
+          fontFamily: {
+            serif: ['"Cormorant Garamond"', 'Georgia', 'serif'],
+            sans: ['"DM Sans"', '"Inter"', 'system-ui', 'sans-serif']
+          }
+        }
+      }
+    }
+  </script>
+  <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
+  <link rel="stylesheet" href="/css/gfc-tokens.css">
+  <style>
+    * { font-family: 'DM Sans', system-ui, sans-serif; }
+    body { background: #f8fafc; }
+    .card { background: white; border-radius: 0.75rem; box-shadow: 0 1px 3px rgba(0,0,0,0.05), 0 1px 2px rgba(0,0,0,0.1); border: 1px solid rgba(0,0,0,0.04); }
+    .chip { border-radius: 999px; padding: 6px 14px; font-size: 12.5px; font-weight: 600; cursor: pointer; border: 1.5px solid transparent; transition: all .15s; white-space: nowrap; }
+    .chip.active { background: #033D50; color: white; }
+    .chip:not(.active) { background: white; color: #033D50; border-color: #e4e4e7; }
+    .chip:not(.active):hover { border-color: #033D50; }
+    .btn { border-radius: 0.6rem; padding: 9px 18px; font-size: 13.5px; font-weight: 600; cursor: pointer; transition: all .15s; border: none; }
+    .btn-primary { background: #033D50; color: white; }
+    .btn-primary:hover:not(:disabled) { background: #022A38; }
+    .btn-primary:disabled { background: #9aabb3; cursor: not-allowed; }
+    .btn-gold { background: #C9A44A; color: #033D50; }
+    .btn-gold:hover:not(:disabled) { background: #b8933d; }
+    .btn-ghost { background: transparent; color: #033D50; border: 1.5px solid #d8dfe3; }
+    .btn-ghost:hover { border-color: #033D50; }
+    .btn-danger { background: #fef2f2; color: #dc2626; }
+    .btn-danger:hover { background: #fee2e2; }
+    .input { border: 1.5px solid #e4e4e7; border-radius: 0.6rem; padding: 9px 12px; font-size: 13.5px; width: 100%; outline: none; transition: all .15s; }
+    .input:focus { border-color: #033D50; box-shadow: 0 0 0 3px rgba(3,61,80,0.08); }
+    .label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: #5a7080; display: block; margin-bottom: 5px; }
+    .badge { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; padding: 3px 9px; border-radius: 4px; display: inline-block; }
+    table.list th { text-align: left; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: #5a7080; padding: 10px 14px; border-bottom: 1.5px solid #e4e4e7; }
+    table.list td { padding: 12px 14px; font-size: 13.5px; border-bottom: 1px solid #f0f0f0; }
+    table.list tr:hover td { background: #fafafa; cursor: pointer; }
+  </style>
+</head>
+<body class="min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useCallback } = React;
+    const API_URL = window.location.origin;
+
+    const getToken = () => localStorage.getItem('admin_token') || localStorage.getItem('unified_token');
+    const getStoredUser = () => {
+      try {
+        const raw = localStorage.getItem('admin_user') || localStorage.getItem('unified_user');
+        return raw ? JSON.parse(raw) : null;
+      } catch { return null; }
+    };
+
+    const handleResponse = async (response) => {
+      if (!response.ok) {
+        let data = null;
+        try { data = await response.json(); } catch {}
+        if (response.status === 401) {
+          localStorage.removeItem('admin_token'); localStorage.removeItem('admin_user');
+          throw Object.assign(new Error((data && data.error) || 'Session expired'), { code: 'AUTH', status: 401 });
+        }
+        const err = new Error((data && data.error) || `HTTP error ${response.status}`);
+        err.status = response.status;
+        err.data = data;
+        throw err;
+      }
+      return response.json();
+    };
+
+    const authedFetch = (path, opts = {}) => {
+      const token = getToken();
+      const headers = Object.assign({ 'Authorization': `Bearer ${token}` }, opts.headers || {});
+      return fetch(`${API_URL}${path}`, Object.assign({}, opts, { headers })).then(handleResponse);
+    };
+
+    const api = {
+      login: (email, password) =>
+        fetch(`${API_URL}/api/auth/login`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password })
+        }).then(handleResponse),
+      list: (params) => authedFetch(`/api/gfc/admin/enrollment/list?${new URLSearchParams(params)}`),
+      detail: (id) => authedFetch(`/api/gfc/admin/enrollment/${id}`),
+      review: (id) => authedFetch(`/api/gfc/admin/enrollment/${id}/review`, { method: 'POST' }),
+      followUp: (id, items) => authedFetch(`/api/gfc/admin/enrollment/${id}/follow-up`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items })
+      }),
+      approve: (id) => authedFetch(`/api/gfc/admin/enrollment/${id}/approve`, { method: 'POST' }),
+      createOffline: (formData) => {
+        const token = getToken();
+        return fetch(`${API_URL}/api/gfc/admin/enrollment/offline`, {
+          method: 'POST', headers: { 'Authorization': `Bearer ${token}` }, body: formData
+        }).then(handleResponse);
+      }
+    };
+
+    // ── Login screen (shared shape with admin-hub, minimal) ─────────────
+    const LoginScreen = ({ onLogin }) => {
+      const [email, setEmail] = useState('');
+      const [password, setPassword] = useState('');
+      const [err, setErr] = useState('');
+      const [busy, setBusy] = useState(false);
+      const submit = (e) => {
+        e.preventDefault();
+        setBusy(true); setErr('');
+        api.login(email, password).then(result => {
+          localStorage.setItem('admin_token', result.token);
+          localStorage.setItem('admin_user', JSON.stringify(result.user));
+          onLogin(result.token, result.user);
+        }).catch(e => setErr(e.message)).finally(() => setBusy(false));
+      };
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-primary-500 px-4">
+          <form onSubmit={submit} className="card p-8 w-full max-w-sm">
+            <h1 className="font-serif text-2xl text-primary-500 font-semibold mb-1">Enrollment Submissions</h1>
+            <p className="text-sm text-gray-500 mb-6">Staff sign-in required.</p>
+            {err && <div className="bg-danger-50 text-danger-600 text-sm rounded-lg px-3 py-2 mb-4">{err}</div>}
+            <label className="label">Email</label>
+            <input className="input mb-4" type="email" value={email} onChange={e => setEmail(e.target.value)} required autoFocus />
+            <label className="label">Password</label>
+            <input className="input mb-6" type="password" value={password} onChange={e => setPassword(e.target.value)} required />
+            <button className="btn btn-primary w-full" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
+          </form>
+        </div>
+      );
+    };
+
+    const STAFF_ROLES = ['admin', 'user', 'caseManager'];
+    const isStaff = (user) => !!user && (STAFF_ROLES.includes(user.role) || user.isManager || user.hasClientPortalAdminAccess);
+    const isAdminRole = (user) => !!user && user.role === 'admin';
+
+    const FILTERS = [
+      { key: 'all', label: 'All' },
+      { key: 'intake_pending', label: 'Intake pending' },
+      { key: 'ready_for_review', label: 'Ready for review' },
+      { key: 'enrolled', label: 'Enrolled' },
+      { key: 'needs_followup', label: 'Needs follow-up' }
+    ];
+
+    const STATE_BADGE = {
+      intake_pending: 'bg-gray-100 text-gray-600',
+      ready_for_review: 'bg-warning-50 text-warning-600',
+      enrolled: 'bg-success-50 text-success-600',
+      needs_followup: 'bg-danger-50 text-danger-600'
+    };
+    const STATE_LABEL = {
+      intake_pending: 'Intake pending',
+      ready_for_review: 'Ready for review',
+      enrolled: 'Enrolled',
+      needs_followup: 'Needs follow-up'
+    };
+
+    // ── List view ─────────────────────────────────────────────────────
+    const ListView = ({ user, onOpen, onAddOffline }) => {
+      const [filter, setFilter] = useState('all');
+      const [sort, setSort] = useState('submitted_desc');
+      const [q, setQ] = useState('');
+      const [page, setPage] = useState(1);
+      const [data, setData] = useState({ clients: [], counts: {}, totalPages: 1, total: 0 });
+      const [loading, setLoading] = useState(true);
+      const [err, setErr] = useState('');
+
+      const load = useCallback(() => {
+        setLoading(true); setErr('');
+        api.list({ filter, sort, q, page }).then(setData).catch(e => setErr(e.message)).finally(() => setLoading(false));
+      }, [filter, sort, q, page]);
+
+      useEffect(() => { load(); }, [load]);
+      useEffect(() => { setPage(1); }, [filter, sort, q]);
+
+      return (
+        <div>
+          <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
+            <div>
+              <h1 className="font-serif text-3xl text-primary-500 font-semibold">Enrollment submissions</h1>
+              <p className="text-sm text-gray-500 mt-1">Review intake, request follow-up, and approve enrollment.</p>
+            </div>
+            {isAdminRole(user) && (
+              <button className="btn btn-gold" onClick={onAddOffline}>+ Add offline-onboarded patient</button>
+            )}
+          </div>
+
+          <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
+            <div className="flex gap-2 flex-wrap">
+              {FILTERS.map(f => (
+                <button key={f.key} className={`chip ${filter === f.key ? 'active' : ''}`} onClick={() => setFilter(f.key)}>
+                  {f.label}{data.counts[f.key] != null ? ` (${data.counts[f.key]})` : ''}
+                </button>
+              ))}
+            </div>
+            <div className="flex gap-2 items-center">
+              <input className="input" style={{ width: 220 }} placeholder="Search name or DOB…" value={q} onChange={e => setQ(e.target.value)} />
+              <select className="input" style={{ width: 160 }} value={sort} onChange={e => setSort(e.target.value)}>
+                <option value="submitted_desc">Newest first</option>
+                <option value="submitted_asc">Oldest first</option>
+                <option value="name">Name</option>
+                <option value="service_line">Service line</option>
+              </select>
+            </div>
+          </div>
+
+          {err && <div className="bg-danger-50 text-danger-600 text-sm rounded-lg px-3 py-2 mb-4">{err}</div>}
+
+          <div className="card overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="list w-full">
+                <thead>
+                  <tr>
+                    <th>Name</th><th>DOB</th><th>Service line</th><th>Care tier</th>
+                    <th>Status</th><th>Completion</th><th>Submitted</th><th>Source</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {loading && <tr><td colSpan="8" className="text-center text-gray-400 py-10">Loading…</td></tr>}
+                  {!loading && data.clients.length === 0 && <tr><td colSpan="8" className="text-center text-gray-400 py-10">No submissions match this filter.</td></tr>}
+                  {!loading && data.clients.map(c => (
+                    <tr key={c.id} onClick={() => onOpen(c.id)}>
+                      <td className="font-medium text-primary-500">{c.name}</td>
+                      <td>{c.dob || '—'}</td>
+                      <td>{c.serviceLine || '—'}</td>
+                      <td>{c.careTierLabel || '—'}</td>
+                      <td><span className={`badge ${STATE_BADGE[c.reviewState] || 'bg-gray-100 text-gray-600'}`}>{STATE_LABEL[c.reviewState] || c.reviewState}</span></td>
+                      <td>
+                        <div className="flex items-center gap-2">
+                          <div style={{ width: 60, height: 6, background: '#eee', borderRadius: 4, overflow: 'hidden' }}>
+                            <div style={{ width: `${c.completionPct}%`, height: '100%', background: c.completionPct >= 100 ? '#10b981' : '#C9A44A' }} />
+                          </div>
+                          <span className="text-xs text-gray-500">{c.completion.satisfied}/{c.completion.total}</span>
+                        </div>
+                      </td>
+                      <td>{c.submittedAt ? new Date(c.submittedAt).toLocaleDateString() : '—'}</td>
+                      <td><span className="badge bg-gray-100 text-gray-600">{c.source === 'offline' ? 'Offline' : 'In-app'}</span></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {data.totalPages > 1 && (
+            <div className="flex items-center justify-center gap-3 mt-4">
+              <button className="btn btn-ghost" disabled={page <= 1} onClick={() => setPage(p => p - 1)}>Previous</button>
+              <span className="text-sm text-gray-500">Page {page} of {data.totalPages}</span>
+              <button className="btn btn-ghost" disabled={page >= data.totalPages} onClick={() => setPage(p => p + 1)}>Next</button>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    // ── Detail view ───────────────────────────────────────────────────
+    const Section = ({ title, children }) => (
+      <div className="card p-5 mb-4">
+        <h3 className="font-semibold text-primary-500 mb-3 text-sm uppercase tracking-wide">{title}</h3>
+        {children}
+      </div>
+    );
+
+    const DetailView = ({ clientId, user, onBack }) => {
+      const [client, setClient] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [err, setErr] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [followUpItems, setFollowUpItems] = useState([]);
+      const [showFollowUp, setShowFollowUp] = useState(false);
+      const [approveErr, setApproveErr] = useState(null);
+
+      const load = useCallback(() => {
+        setLoading(true); setErr('');
+        api.detail(clientId).then(d => setClient(d.client)).catch(e => setErr(e.message)).finally(() => setLoading(false));
+      }, [clientId]);
+      useEffect(() => { load(); }, [load]);
+
+      const doReview = () => { setBusy(true); api.review(clientId).then(load).catch(e => setErr(e.message)).finally(() => setBusy(false)); };
+      const doApprove = () => {
+        setBusy(true); setApproveErr(null);
+        api.approve(clientId).then(load).catch(e => {
+          if (e.status === 409 && e.data) setApproveErr(e.data);
+          else setErr(e.message);
+        }).finally(() => setBusy(false));
+      };
+      const submitFollowUp = () => {
+        if (!followUpItems.length) return;
+        setBusy(true);
+        api.followUp(clientId, followUpItems).then(() => { setShowFollowUp(false); setFollowUpItems([]); load(); }).catch(e => setErr(e.message)).finally(() => setBusy(false));
+      };
+      const toggleFollowUpItem = (key) => setFollowUpItems(items => items.includes(key) ? items.filter(i => i !== key) : [...items, key]);
+
+      if (loading) return <div className="text-center text-gray-400 py-16">Loading…</div>;
+      if (err) return <div className="bg-danger-50 text-danger-600 text-sm rounded-lg px-4 py-3">{err}</div>;
+      if (!client) return null;
+
+      return (
+        <div>
+          <button className="btn btn-ghost mb-4" onClick={onBack}>← Back to list</button>
+          <div className="flex items-start justify-between flex-wrap gap-4 mb-6">
+            <div>
+              <h1 className="font-serif text-3xl text-primary-500 font-semibold">{client.name}</h1>
+              <div className="flex items-center gap-2 mt-2 flex-wrap">
+                <span className={`badge ${STATE_BADGE[client.reviewState] || 'bg-gray-100 text-gray-600'}`}>{STATE_LABEL[client.reviewState] || client.reviewState}</span>
+                <span className="badge bg-gray-100 text-gray-600">{client.serviceLine || 'Service line —'}</span>
+                <span className="badge bg-gray-100 text-gray-600">{client.careTierLabel || 'Care tier —'}</span>
+                <span className="badge bg-gray-100 text-gray-600">{client.source === 'offline' ? 'Offline-onboarded' : 'In-app'}</span>
+              </div>
+            </div>
+            <div className="flex gap-2 flex-wrap">
+              <button className="btn btn-ghost" disabled={busy} onClick={doReview}>Mark as reviewed</button>
+              <button className="btn btn-ghost" disabled={busy} onClick={() => setShowFollowUp(v => !v)}>Request follow-up</button>
+              {isAdminRole(user) && <button className="btn btn-primary" disabled={busy} onClick={doApprove}>Approve enrollment</button>}
+            </div>
+          </div>
+
+          {approveErr && (
+            <div className="bg-danger-50 text-danger-600 text-sm rounded-lg px-4 py-3 mb-4">
+              <strong>Cannot approve — missing items:</strong>
+              <ul className="list-disc ml-5 mt-1">
+                {(approveErr.missingConsents || []).map(m => <li key={m}>{m}</li>)}
+                {(approveErr.missingFields || []).map(m => <li key={m}>{m}</li>)}
+              </ul>
+            </div>
+          )}
+
+          {client.review && (
+            <div className="text-xs text-gray-500 mb-4">Reviewed by {client.review.reviewerName} on {new Date(client.review.reviewedAt).toLocaleString()}</div>
+          )}
+          {client.followUp && (
+            <div className="bg-warning-50 text-warning-600 text-sm rounded-lg px-4 py-3 mb-4">
+              <strong>Follow-up requested</strong> by {client.followUp.requestedByName} on {new Date(client.followUp.requestedAt).toLocaleDateString()}:
+              <ul className="list-disc ml-5 mt-1">{(client.followUp.itemLabels || []).map(l => <li key={l}>{l}</li>)}</ul>
+            </div>
+          )}
+
+          {showFollowUp && (
+            <Section title="Request follow-up — select outstanding items">
+              <div className="grid grid-cols-2 gap-2">
+                {client.missing.consents.concat(client.missing.fields).map(label => (
+                  <label key={label} className="flex items-center gap-2 text-sm">
+                    <input type="checkbox" checked={followUpItems.includes(label)} onChange={() => toggleFollowUpItem(label)} />
+                    {label}
+                  </label>
+                ))}
+                {client.missing.consents.length === 0 && client.missing.fields.length === 0 && (
+                  <span className="text-sm text-gray-500">No outstanding items detected — enrollment appears complete.</span>
+                )}
+              </div>
+              <button className="btn btn-primary mt-3" disabled={busy || !followUpItems.length} onClick={submitFollowUp}>Send follow-up notice</button>
+            </Section>
+          )}
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <Section title="Client">
+              <dl className="text-sm space-y-1.5">
+                <div className="flex justify-between"><dt className="text-gray-500">Date of birth</dt><dd>{client.dob || '—'}{client.age != null ? ` (age ${client.age})` : ''}</dd></div>
+                <div className="flex justify-between"><dt className="text-gray-500">Email</dt><dd>{client.email || '—'}</dd></div>
+                <div className="flex justify-between"><dt className="text-gray-500">Gender</dt><dd>{(client.intake || {}).gender || '—'}</dd></div>
+                <div className="flex justify-between"><dt className="text-gray-500">Primary language</dt><dd>{(client.intake || {}).primaryLanguage || '—'}</dd></div>
+                <div className="flex justify-between"><dt className="text-gray-500">Phone</dt><dd>{(client.intake || {}).phone || '—'}</dd></div>
+              </dl>
+            </Section>
+
+            <Section title="Primary contact">
+              {client.intake.primaryContact && client.intake.primaryContact.name ? (
+                <dl className="text-sm space-y-1.5">
+                  <div className="flex justify-between"><dt className="text-gray-500">Name</dt><dd>{client.intake.primaryContact.name}</dd></div>
+                  <div className="flex justify-between"><dt className="text-gray-500">Relationship</dt><dd>{client.intake.primaryContact.relationship || '—'}</dd></div>
+                  <div className="flex justify-between"><dt className="text-gray-500">Phone</dt><dd>{client.intake.primaryContact.phone || '—'}</dd></div>
+                  <div className="flex justify-between"><dt className="text-gray-500">Email</dt><dd>{client.intake.primaryContact.email || '—'}</dd></div>
+                </dl>
+              ) : <span className="text-sm text-gray-400">Not on file</span>}
+            </Section>
+
+            <Section title="Consents">
+              <div className="space-y-2">
+                {client.consents.map(c => (
+                  <div key={c.type} className="flex items-center justify-between text-sm border-b border-gray-100 pb-2 last:border-0 last:pb-0">
+                    <div>
+                      <div className="font-medium">{c.title}{c.required && <span className="text-danger-500"> *</span>}</div>
+                      {c.signedAt && <div className="text-xs text-gray-400">{new Date(c.signedAt).toLocaleString()}</div>}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      {c.provenance && <span className="badge bg-gray-100 text-gray-500">{c.provenance === 'signed_offline' ? 'Paper' : 'In-app'}</span>}
+                      <span className={`badge ${c.satisfied ? 'bg-success-50 text-success-600' : c.status === 'na' ? 'bg-gray-100 text-gray-500' : 'bg-warning-50 text-warning-600'}`}>
+                        {c.satisfied ? 'Signed' : c.status === 'na' ? 'N/A' : 'Pending'}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Section>
+
+            <Section title="Medications">
+              {client.medications.length ? (
+                <div className="space-y-2 text-sm">
+                  {client.medications.map((m, i) => (
+                    <div key={i} className="border-b border-gray-100 pb-1.5 last:border-0">
+                      <strong>{m.name}</strong> — {[m.dose, m.route, m.frequency].filter(Boolean).join(' · ') || '—'}
+                    </div>
+                  ))}
+                </div>
+              ) : <span className="text-sm text-gray-400">None on file</span>}
+            </Section>
+
+            <Section title="Payer / insurance">
+              {client.payer && Object.keys(client.payer).length ? (
+                <dl className="text-sm space-y-1.5">
+                  {Object.entries(client.payer).filter(([, v]) => v).map(([k, v]) => (
+                    <div key={k} className="flex justify-between"><dt className="text-gray-500 capitalize">{k.replace(/([A-Z])/g, ' $1')}</dt><dd>{String(v)}</dd></div>
+                  ))}
+                </dl>
+              ) : <span className="text-sm text-gray-400">Not on file</span>}
+            </Section>
+
+            <Section title="Files">
+              <div className="text-sm space-y-1.5">
+                <div>Advance directive: {client.files.advanceDirective ? <a className="text-primary-500 underline" href={client.files.advanceDirective} target="_blank" rel="noreferrer">View</a> : '—'}</div>
+                <div>Insurance card: {client.files.insuranceCard ? <a className="text-primary-500 underline" href={client.files.insuranceCard} target="_blank" rel="noreferrer">View</a> : '—'}</div>
+                <div>Enrollment packet: {client.files.enrollmentPacket && client.files.enrollmentPacket.url ? <a className="text-primary-500 underline" href={client.files.enrollmentPacket.url} target="_blank" rel="noreferrer">View</a> : '—'}</div>
+                {client.files.offlinePacketUrls.length > 0 && (
+                  <div>
+                    Offline packet scans:
+                    <ul className="list-disc ml-5 mt-1">
+                      {client.files.offlinePacketUrls.map((u, i) => <li key={i}><a className="text-primary-500 underline" href={u} target="_blank" rel="noreferrer">Scan {i + 1}</a></li>)}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            </Section>
+          </div>
+        </div>
+      );
+    };
+
+    // ── Add offline-onboarded patient (full page, admin only, Scope B2) ──
+    const emptyOffline = {
+      firstName: '', lastName: '', preferredName: '', dob: '', gender: '',
+      address: { line1: '', city: '', state: 'GA', zip: '' },
+      phone: '', primaryLanguage: '', livesWith: '',
+      serviceLine: 'PHC', careTier: 'A1',
+      primaryContact: { name: '', relationship: '', phone: '', email: '', preferredChannel: '' },
+      emergencyContacts: [{ name: '', relationship: '', phone: '' }],
+      allergies: '', medications: [{ name: '', dose: '', route: '', frequency: '', prescriber: '', pharmacy: '' }],
+      payer: { type: '' }, email: ''
+    };
+
+    const CARE_TIERS = [
+      ['A1', 'A1 · Essential ADL'], ['A2', 'A2 · Comprehensive ADL & IADL'],
+      ['A3', 'A3 · IADL-Forward Support'], ['A4', 'A4 · Behavioral Support & Cognitive Wellness'],
+      ['B', 'Track B · Skilled Nursing']
+    ];
+
+    const CONSENT_DEFS_BY_LINE = {
+      PHC: [
+        ['npp', 'HIPAA Notice of Privacy Practices'], ['roiFamily', 'Release of Information — Family'],
+        ['roiProvider', 'Release of Information — Providers'], ['serviceAgreement', 'Service Agreement'],
+        ['billOfRights', 'Patient Bill of Rights & Self-Determination'],
+        ['emergencyFinancial', 'Emergency Treatment & Financial Responsibility'],
+        ['crisisProtocol', 'Emergency & Crisis Protocol (911/988)'],
+        ['financialAgreement', 'Financial Agreement'], ['pcaScope', 'Personal Care Aide Scope Acknowledgment']
+      ],
+      IHPC: [
+        ['npp', 'HIPAA Notice of Privacy Practices'], ['roiFamily', 'Release of Information — Family'],
+        ['roiProvider', 'Release of Information — Providers'], ['serviceAgreement', 'Service Agreement'],
+        ['billOfRights', 'Patient Bill of Rights & Self-Determination'],
+        ['emergencyFinancial', 'Emergency Treatment & Financial Responsibility'],
+        ['crisisProtocol', 'Emergency & Crisis Protocol (911/988)'],
+        ['consentToTreat', 'Consent to Medical Treatment'], ['assignmentOfBenefits', 'Assignment of Medicare / Insurance Benefits'],
+        ['practiceNpp', 'Medical Practice Notice of Privacy Practices']
+      ]
+    };
+    CONSENT_DEFS_BY_LINE.BOTH = [...new Map([...CONSENT_DEFS_BY_LINE.PHC, ...CONSENT_DEFS_BY_LINE.IHPC]).entries()];
+
+    const OfflineOnboardForm = ({ onDone, onCancel }) => {
+      const [form, setForm] = useState(emptyOffline);
+      const [consents, setConsents] = useState({});
+      const [files, setFiles] = useState([]);
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+
+      const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+      const setNested = (k, k2, v) => setForm(f => ({ ...f, [k]: { ...f[k], [k2]: v } }));
+      const consentDefs = CONSENT_DEFS_BY_LINE[form.serviceLine] || CONSENT_DEFS_BY_LINE.PHC;
+
+      const setConsentChoice = (type, status) => setConsents(c => ({ ...c, [type]: { ...(c[type] || {}), status } }));
+      const setConsentDate = (type, signedAt) => setConsents(c => ({ ...c, [type]: { ...(c[type] || {}), signedAt } }));
+
+      const addMed = () => setForm(f => ({ ...f, medications: [...f.medications, { name: '', dose: '', route: '', frequency: '', prescriber: '', pharmacy: '' }] }));
+      const setMed = (i, k, v) => setForm(f => { const m = [...f.medications]; m[i] = { ...m[i], [k]: v }; return { ...f, medications: m }; });
+      const addEC = () => setForm(f => ({ ...f, emergencyContacts: [...f.emergencyContacts, { name: '', relationship: '', phone: '' }] }));
+      const setEC = (i, k, v) => setForm(f => { const e = [...f.emergencyContacts]; e[i] = { ...e[i], [k]: v }; return { ...f, emergencyContacts: e }; });
+
+      const submit = () => {
+        if (!form.firstName || !form.lastName || !form.dob) { setErr('First name, last name, and date of birth are required.'); return; }
+        setBusy(true); setErr('');
+        const fd = new FormData();
+        fd.append('payload', JSON.stringify({ ...form, consents }));
+        files.forEach(f => fd.append('files', f));
+        api.createOffline(fd).then(res => onDone(res.clientId)).catch(e => setErr(e.message)).finally(() => setBusy(false));
+      };
+
+      return (
+        <div>
+          <button className="btn btn-ghost mb-4" onClick={onCancel}>← Back to list</button>
+          <h1 className="font-serif text-3xl text-primary-500 font-semibold mb-1">Add offline-onboarded patient</h1>
+          <p className="text-sm text-gray-500 mb-6">For the legacy paper-packet clients. Test data only.</p>
+          {err && <div className="bg-danger-50 text-danger-600 text-sm rounded-lg px-4 py-3 mb-4">{err}</div>}
+
+          <Section title="1 · File upload — paper packet scans">
+            <input type="file" multiple accept=".pdf,.jpg,.jpeg,.png" onChange={e => setFiles(Array.from(e.target.files || []))} />
+            <p className="text-xs text-gray-400 mt-2">PDF or image, 10 MB per file. Uploaded to the "GFC Offline Intake Packets" Drive folder.</p>
+            {files.length > 0 && <p className="text-xs text-gray-600 mt-1">{files.length} file(s) selected.</p>}
+          </Section>
+
+          <Section title="2 · Structured data entry">
+            <div className="grid grid-cols-3 gap-3 mb-3">
+              <div><label className="label">First name *</label><input className="input" value={form.firstName} onChange={e => set('firstName', e.target.value)} /></div>
+              <div><label className="label">Last name *</label><input className="input" value={form.lastName} onChange={e => set('lastName', e.target.value)} /></div>
+              <div><label className="label">Preferred name</label><input className="input" value={form.preferredName} onChange={e => set('preferredName', e.target.value)} /></div>
+              <div><label className="label">Date of birth *</label><input className="input" type="date" value={form.dob} onChange={e => set('dob', e.target.value)} /></div>
+              <div><label className="label">Gender</label><input className="input" value={form.gender} onChange={e => set('gender', e.target.value)} /></div>
+              <div><label className="label">Portal email (optional)</label><input className="input" type="email" value={form.email} onChange={e => set('email', e.target.value)} placeholder="Leave blank for no portal login" /></div>
+              <div><label className="label">Phone</label><input className="input" value={form.phone} onChange={e => set('phone', e.target.value)} /></div>
+              <div><label className="label">Primary language</label><input className="input" value={form.primaryLanguage} onChange={e => set('primaryLanguage', e.target.value)} /></div>
+              <div><label className="label">Lives with</label><input className="input" value={form.livesWith} onChange={e => set('livesWith', e.target.value)} /></div>
+            </div>
+            <div className="grid grid-cols-4 gap-3 mb-3">
+              <div><label className="label">Address line 1</label><input className="input" value={form.address.line1} onChange={e => setNested('address', 'line1', e.target.value)} /></div>
+              <div><label className="label">City</label><input className="input" value={form.address.city} onChange={e => setNested('address', 'city', e.target.value)} /></div>
+              <div><label className="label">State</label><input className="input" value={form.address.state} onChange={e => setNested('address', 'state', e.target.value)} /></div>
+              <div><label className="label">Zip</label><input className="input" value={form.address.zip} onChange={e => setNested('address', 'zip', e.target.value)} /></div>
+            </div>
+            <div className="grid grid-cols-2 gap-3 mb-3">
+              <div>
+                <label className="label">Service line</label>
+                <select className="input" value={form.serviceLine} onChange={e => set('serviceLine', e.target.value)}>
+                  <option value="PHC">Private Home Care</option><option value="IHPC">In-Home Primary Care</option><option value="BOTH">Both</option>
+                </select>
+              </div>
+              <div>
+                <label className="label">Care tier</label>
+                <select className="input" value={form.careTier} onChange={e => set('careTier', e.target.value)}>
+                  {CARE_TIERS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                </select>
+              </div>
+            </div>
+
+            <p className="lbl font-semibold text-sm mt-4 mb-2">Primary contact</p>
+            <div className="grid grid-cols-4 gap-3 mb-3">
+              <input className="input" placeholder="Name" value={form.primaryContact.name} onChange={e => setNested('primaryContact', 'name', e.target.value)} />
+              <input className="input" placeholder="Relationship" value={form.primaryContact.relationship} onChange={e => setNested('primaryContact', 'relationship', e.target.value)} />
+              <input className="input" placeholder="Phone" value={form.primaryContact.phone} onChange={e => setNested('primaryContact', 'phone', e.target.value)} />
+              <input className="input" placeholder="Email" value={form.primaryContact.email} onChange={e => setNested('primaryContact', 'email', e.target.value)} />
+            </div>
+
+            <p className="lbl font-semibold text-sm mt-4 mb-2">Emergency contacts (at least one)</p>
+            {form.emergencyContacts.map((e, i) => (
+              <div className="grid grid-cols-3 gap-3 mb-2" key={i}>
+                <input className="input" placeholder="Name" value={e.name} onChange={ev => setEC(i, 'name', ev.target.value)} />
+                <input className="input" placeholder="Relationship" value={e.relationship} onChange={ev => setEC(i, 'relationship', ev.target.value)} />
+                <input className="input" placeholder="Phone" value={e.phone} onChange={ev => setEC(i, 'phone', ev.target.value)} />
+              </div>
+            ))}
+            <button className="btn btn-ghost text-sm mt-1" onClick={addEC}>+ Add another emergency contact</button>
+
+            <p className="lbl font-semibold text-sm mt-5 mb-2">Allergies</p>
+            <textarea className="input" rows="2" value={form.allergies} onChange={e => set('allergies', e.target.value)} placeholder="Or 'none known'" />
+
+            <p className="lbl font-semibold text-sm mt-5 mb-2">Medications</p>
+            {form.medications.map((m, i) => (
+              <div className="grid grid-cols-3 gap-3 mb-2" key={i}>
+                <input className="input" placeholder="Name" value={m.name} onChange={e => setMed(i, 'name', e.target.value)} />
+                <input className="input" placeholder="Dose" value={m.dose} onChange={e => setMed(i, 'dose', e.target.value)} />
+                <input className="input" placeholder="Frequency" value={m.frequency} onChange={e => setMed(i, 'frequency', e.target.value)} />
+              </div>
+            ))}
+            <button className="btn btn-ghost text-sm mt-1" onClick={addMed}>+ Add another medication</button>
+
+            <p className="lbl font-semibold text-sm mt-5 mb-2">Payer</p>
+            <input className="input" placeholder="Payer type (e.g. Private pay, Medicaid, LTC insurance)" value={form.payer.type} onChange={e => setNested('payer', 'type', e.target.value)} />
+          </Section>
+
+          <Section title="3 · Consent checklist">
+            <div className="space-y-3">
+              {consentDefs.map(([type, title]) => {
+                const entry = consents[type] || {};
+                return (
+                  <div key={type} className="border-b border-gray-100 pb-3 last:border-0">
+                    <div className="font-medium text-sm mb-1.5">{title}</div>
+                    <div className="flex items-center gap-4 text-sm flex-wrap">
+                      {['signed_offline', 'pending', 'na'].map(opt => (
+                        <label key={opt} className="flex items-center gap-1.5">
+                          <input type="radio" name={`consent-${type}`} checked={(entry.status || 'pending') === opt} onChange={() => setConsentChoice(type, opt)} />
+                          {opt === 'signed_offline' ? 'Signed on paper' : opt === 'pending' ? 'Not on paper — will request in-app' : 'N/A'}
+                        </label>
+                      ))}
+                      {entry.status === 'signed_offline' && (
+                        <input className="input" style={{ width: 160 }} type="date" value={entry.signedAt || ''} onChange={e => setConsentDate(type, e.target.value)} placeholder="Date signed" />
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </Section>
+
+          <Section title="4 · Confirm and create">
+            <p className="text-sm text-gray-600 mb-4">
+              Will create <strong>{form.firstName} {form.lastName}</strong> ({form.serviceLine}, {form.careTier}) with source <code>legacy_offline</code> and enrollment status <code>intake_complete</code>.
+              {' '}{Object.values(consents).filter(c => c.status === 'signed_offline').length} consent(s) marked signed on paper.
+            </p>
+            <button className="btn btn-primary" disabled={busy} onClick={submit}>{busy ? 'Creating…' : 'Create client record'}</button>
+          </Section>
+        </div>
+      );
+    };
+
+    // ── App shell ─────────────────────────────────────────────────────
+    const App = () => {
+      const [token, setToken] = useState(getToken);
+      const [user, setUser] = useState(getStoredUser);
+      const [view, setView] = useState({ page: 'list' });
+
+      if (!token || !user) return <LoginScreen onLogin={(t, u) => { setToken(t); setUser(u); }} />;
+      if (!isStaff(user)) {
+        return (
+          <div className="min-h-screen flex items-center justify-center px-4">
+            <div className="card p-8 max-w-sm text-center">
+              <h1 className="font-serif text-xl text-primary-500 font-semibold mb-2">Access restricted</h1>
+              <p className="text-sm text-gray-500">This area is for enrollment staff (admin, clinical, or case manager roles) only.</p>
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div className="max-w-6xl mx-auto px-4 lg:px-8 py-8">
+          {view.page === 'list' && (
+            <ListView user={user} onOpen={id => setView({ page: 'detail', id })} onAddOffline={() => setView({ page: 'offline' })} />
+          )}
+          {view.page === 'detail' && (
+            <DetailView clientId={view.id} user={user} onBack={() => setView({ page: 'list' })} />
+          )}
+          {view.page === 'offline' && (
+            <OfflineOnboardForm onCancel={() => setView({ page: 'list' })} onDone={id => setView({ page: 'detail', id })} />
+          )}
+        </div>
+      );
+    };
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
