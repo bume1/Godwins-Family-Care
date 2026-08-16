@@ -30,7 +30,7 @@ Merged to main (PR #15):
 | 3.2 | Gated enrollment intake + consents (+ full intake field-parity build) | ✅ Done (parity build merged in #13) | #7 |
 | 3.3 | Staff enrollment view + offline onboarding + care-tier migration | 📄 Prompt ready | — |
 | 3.4 | Transfer-of-Care Provider ROI | ✅ Done | #13 |
-| 3.5 | Reconciliation — fixture removal, live data wiring, desktop pass | ✅ Done | — |
+| 3.5 | Reconciliation — fixture removal, live data wiring, desktop pass | ✅ Done | #15 |
 | 4 | Clinical portal + OpenEMR (4.1 clinician workspace, 4.2 clinician scheduling, 4.3 patient portal clinical read) | ⬜ Next priority | — |
 | 5 | Clinical HIPAA go-live | ⬜ Planned | — |
 | 6 | Caregiver app (mobile, tier-branched visit log) | ⬜ Planned | — |
@@ -159,6 +159,7 @@ Before beginning any session's work, check the session status table above for an
 2. Update the session status table row for the session you just built (flip ⬜ to ✅, add the PR number).
 3. Add a bullet under "Recent decisions" for anything locked in this session that future sessions need to know.
 4. Update "Current session focus" to point at the next session (per `docs/GFC_SESSION_PLAN.md`).
-5. Commit the `CLAUDE.md` change with the rest of the session's PR.
+5. Also update the session status row in `docs/GFC_SESSION_PLAN.md` — the plan and this file must never disagree.
+6. Commit the `CLAUDE.md` (and `docs/GFC_SESSION_PLAN.md`) change with the rest of the session's PR.
 
 This keeps the running status current without a separate process. If you skip it, the next session starts blind.
