@@ -1,5 +1,5 @@
 # GFC Care Platform — running status
-_Last updated: 2026-08-15_
+_Last updated: 2026-08-15 (post-#15 merge sync)_
 
 This file is auto-loaded at the start of every Claude Code session. Read it first for current state. Details live in `docs/`.
 
@@ -7,9 +7,9 @@ This file is auto-loaded at the start of every Claude Code session. Read it firs
 
 ## Current session focus
 
-**Session 3.5 (reconciliation) built → Session 4 (Clinical / In-Home Primary Care + OpenEMR) is next priority.**
+**Session 3.5 merged (PR #15). Remaining before Session 4: run 3.3 (prompt ready) and answer the DRIFT_REPORT DECISION items. Session 4 (Clinical + OpenEMR) is next priority.**
 
-On branch `claude/new-session-dxkmip` (PR pending):
+Merged to main (PR #15):
 - **3.5 — ✅ built.** Reconciliation per `docs/GFC_Session3.5_ClaudeCode_Prompt.md`: all prototype/fixture data removed from the live portal (care plan, visits, messages now real per-client data with branded empty states), client→admin message send persists to a new `gfc_messages` store, desktop layout for the client portal, family→client linkage fixed in the admin UI. Full findings + DECISION items for Bianca: `docs/DRIFT_REPORT_2026-08-15.md`.
 - **3.3 — 📄 prompt ready, not yet built** (`docs/GFC_Session3.3_ClaudeCode_Prompt.md`): staff enrollment view + offline onboarding + care-tier migration.
 
@@ -30,7 +30,7 @@ On branch `claude/new-session-dxkmip` (PR pending):
 | 3.2 | Gated enrollment intake + consents (+ full intake field-parity build) | ✅ Done (parity build merged in #13) | #7 |
 | 3.3 | Staff enrollment view + offline onboarding + care-tier migration | 📄 Prompt ready | — |
 | 3.4 | Transfer-of-Care Provider ROI | ✅ Done | #13 |
-| 3.5 | Reconciliation — fixture removal, live data wiring, desktop pass | ✅ Built on branch `claude/new-session-dxkmip` (PR pending) | — |
+| 3.5 | Reconciliation — fixture removal, live data wiring, desktop pass | ✅ Done | — |
 | 4 | Clinical portal + OpenEMR (4.1 clinician workspace, 4.2 clinician scheduling, 4.3 patient portal clinical read) | ⬜ Next priority | — |
 | 5 | Clinical HIPAA go-live | ⬜ Planned | — |
 | 6 | Caregiver app (mobile, tier-branched visit log) | ⬜ Planned | — |
