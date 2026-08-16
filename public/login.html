@@ -669,6 +669,18 @@
       });
       const [showPasswordChange, setShowPasswordChange] = useState(false);
 
+      // Clients and family skip the Portal Hub entirely — they have exactly one
+      // destination, so send them straight into the care portal. Staff keep the
+      // hub (they pick between Admin Hub / Service Portal / Client Portal Admin).
+      const isClientOrFamily = user && (user.role === 'client' || user.role === 'family');
+      const passwordGateOpen = user && (user.requirePasswordChange || showPasswordChange);
+      useEffect(() => {
+        if (!token || !user || passwordGateOpen || !isClientOrFamily) return;
+        localStorage.setItem('portal_token', token);
+        localStorage.setItem('portal_user', JSON.stringify(user));
+        window.location.replace(user.role === 'client' && user.slug ? `/portal/${user.slug}` : '/portal');
+      }, [token, user, passwordGateOpen]);
+
       const handleLogin = (newToken, newUser) => {
         setToken(newToken);
         setUser(newUser);
@@ -709,6 +721,18 @@
             {/* Show dimmed portal hub behind if password change was initiated voluntarily */}
             {!user.requirePasswordChange && <div className="opacity-50 pointer-events-none"><PortalHub user={user} token={token} onLogout={handleLogout} /></div>}
           </>
+        );
+      }
+
+      // Redirect in flight for client/family — show a brief loading state, not the hub.
+      if (isClientOrFamily) {
+        return (
+          <div className="min-h-screen flex items-center justify-center">
+            <div className="text-center">
+              <div className="inline-block animate-spin rounded-full h-12 w-12 border-4 border-primary-500 border-t-transparent"></div>
+              <p className="mt-4 text-gray-600">Taking you to your portal…</p>
+            </div>
+          </div>
         );
       }
 
