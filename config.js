@@ -204,6 +204,37 @@ const ROI_LEGACY_SHEET_TAB = process.env.ROI_LEGACY_SHEET_TAB || 'Assessments & 
 // (see migrateCareTierEnum). Set to true in your env once the migration has run.
 // const CARE_TIER_MIGRATION_APPLIED = process.env.CARE_TIER_MIGRATION_APPLIED === 'true';
 
+// ---- OpenEMR FHIR integration (Session 4.1) ----
+// One patient record lives in OpenEMR; the app is a front end over it.
+// Reads via FHIR R4, clinical writes via the standard REST API (approved
+// transport deviation — OpenEMR 7.0.4 FHIR is read-only for clinical
+// resources). Auth: password grant with a dedicated API user (dev window;
+// migrate to authorization_code at Session 5 go-live). Credentials come from
+// env/secrets ONLY — never stored anywhere else.
+const OPENEMR = Object.freeze({
+  BASE_URL: process.env.OPENEMR_BASE_URL || '',
+  SITE: process.env.OPENEMR_SITE || 'default',
+  CLIENT_ID: process.env.OPENEMR_CLIENT_ID || '',
+  CLIENT_SECRET: process.env.OPENEMR_CLIENT_SECRET || '',
+  API_USERNAME: process.env.OPENEMR_API_USERNAME || '',
+  API_PASSWORD: process.env.OPENEMR_API_PASSWORD || '',
+  // Least-privilege scope set for 4.1: FHIR reads + Patient.write for the
+  // link/create step, standard-API writes for H&P, med-rec, problems, docs.
+  SCOPES: process.env.OPENEMR_SCOPES || [
+    'openid', 'offline_access', 'api:oemr', 'api:fhir',
+    'user/Patient.read', 'user/Patient.write', 'user/Encounter.read', 'user/Condition.read',
+    'user/AllergyIntolerance.read', 'user/Medication.read', 'user/MedicationRequest.read',
+    'user/CarePlan.read', 'user/DocumentReference.read', 'user/Binary.read', 'user/Observation.read',
+    'user/Practitioner.read', 'user/Organization.read', 'user/Coverage.read', 'user/Goal.read',
+    'user/Procedure.read', 'user/DiagnosticReport.read',
+    'user/patient.read', 'user/patient.write', 'user/encounter.read', 'user/encounter.write',
+    'user/vital.read', 'user/vital.write', 'user/medical_problem.read', 'user/medical_problem.write',
+    'user/medication.read', 'user/medication.write', 'user/allergy.read', 'user/allergy.write',
+    'user/soap_note.read', 'user/soap_note.write', 'user/document.read', 'user/document.write',
+    'user/facility.read', 'user/practitioner.read', 'user/insurance.read'
+  ].join(' ')
+});
+
 // ---- Default Admin (initial setup only) ----
 const DEFAULT_ADMIN = Object.freeze({
   EMAIL: process.env.DEFAULT_ADMIN_EMAIL || 'admin@godwinsfamilycarell.com',
@@ -288,6 +319,8 @@ module.exports = {
   ROI_ADMIN_EMAIL,
   ROI_LEGACY_SHEET_ID,
   ROI_LEGACY_SHEET_TAB,
+  // OpenEMR FHIR integration (Session 4.1)
+  OPENEMR,
   // Public config
   getPublicConfig
 };
