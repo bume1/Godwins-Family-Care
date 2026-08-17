@@ -242,8 +242,24 @@ const forActor = (actor) => {
 
     // ---- Standard-API clinical writes ----
     // OpenEMR wraps write responses as {validationErrors, internalErrors, data}.
+    // The encounter POST requires pc_catid/facility/pos fields (verified on the
+    // dev instance); defaults are env-overridable and pos_code 12 = Home, which
+    // is what a home-visit practice wants.
     async createEncounter(puuid, fields) {
-      return apiWrite('POST', `patient/${encodeURIComponent(puuid)}/encounter`, fields, 'encounter', puuid);
+      const body = {
+        pc_catid: config.OPENEMR.ENCOUNTER_CATEGORY,
+        facility_id: config.OPENEMR.FACILITY_ID,
+        billing_facility: config.OPENEMR.FACILITY_ID,
+        sensitivity: 'normal',
+        pos_code: config.OPENEMR.POS_CODE,
+        provider_id: config.OPENEMR.PROVIDER_ID,
+        ...fields
+      };
+      const row = await apiWrite('POST', `patient/${encodeURIComponent(puuid)}/encounter`, body, 'encounter', puuid);
+      if (!row || (Array.isArray(row) && !row.length)) {
+        throw new OpenEmrError('OpenEMR rejected the encounter (empty payload — check required fields)', 422, row);
+      }
+      return row;
     },
     async addVitals(puuid, encounterUuid, vitals) {
       return apiWrite('POST', `patient/${encodeURIComponent(puuid)}/encounter/${encodeURIComponent(encounterUuid)}/vital`, vitals, 'vital', puuid);

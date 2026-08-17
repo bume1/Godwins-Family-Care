@@ -5741,9 +5741,19 @@ app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireCli
     const emr = openemr.forActor(req.user);
     const puuid = client.openEmrPatientId;
     const enc = await emr.createEncounter(puuid, built.encounter);
-    const encounterUuid = enc && (enc.uuid || enc.encounter_uuid || enc.id);
+    const encounterUuid = enc && (enc.euuid || enc.uuid || enc.encounter_uuid || enc.id);
     if (!encounterUuid) return res.status(502).json({ error: 'OpenEMR did not return an encounter id' });
-    await emr.addVitals(puuid, encounterUuid, built.vitals);
+    // The structured note is the primary record (both-arm BPs are serialized
+    // into it verbatim). The vitals FORM write is best-effort: this OpenEMR
+    // build's vitals REST endpoint can fail on a service bug (authUserId
+    // null); when it does, the visit still stands and we surface the warning.
+    const warnings = [];
+    try {
+      await emr.addVitals(puuid, encounterUuid, built.vitals);
+    } catch (e) {
+      console.error('Vitals form write failed (readings preserved in note):', e.message);
+      warnings.push(`Vitals form write failed (${e.message.slice(0, 120)}) — readings are preserved in the encounter note`);
+    }
     await emr.addSoapNote(puuid, encounterUuid, built.soapNote);
 
     const at = new Date().toISOString();
@@ -5757,8 +5767,8 @@ app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireCli
     if (triage.track) users[idx].careTier = triage.track;
     await db.set('users', users);
     invalidateUsersCache();
-    await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_hp_documented', 'client', client.id, { encounterUuid, track: triage.track || null });
-    res.json({ message: 'Initial visit documented to OpenEMR', encounterUuid, at });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_hp_documented', 'client', client.id, { encounterUuid, track: triage.track || null, warnings: warnings.length });
+    res.json({ message: 'Initial visit documented to OpenEMR', encounterUuid, at, warnings });
   } catch (error) {
     console.error('Clinical H&P error:', error);
     res.status(502).json({ error: `OpenEMR write failed: ${error.message}` });

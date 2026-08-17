@@ -218,6 +218,13 @@ const OPENEMR = Object.freeze({
   CLIENT_SECRET: process.env.OPENEMR_CLIENT_SECRET || '',
   API_USERNAME: process.env.OPENEMR_API_USERNAME || '',
   API_PASSWORD: process.env.OPENEMR_API_PASSWORD || '',
+  // Encounter defaults (verified required by the dev instance's encounter
+  // POST). pos_code 12 = Home (home-visit practice). Override per environment
+  // once practice/facility setup (§15) is finalized.
+  FACILITY_ID: process.env.OPENEMR_FACILITY_ID || '3',
+  ENCOUNTER_CATEGORY: process.env.OPENEMR_ENCOUNTER_CATEGORY || '5',
+  POS_CODE: process.env.OPENEMR_POS_CODE || '12',
+  PROVIDER_ID: process.env.OPENEMR_PROVIDER_ID || '1',
   // Least-privilege scope set for 4.1: FHIR reads + Patient.write for the
   // link/create step, standard-API writes for H&P, med-rec, problems, docs.
   SCOPES: process.env.OPENEMR_SCOPES || [
