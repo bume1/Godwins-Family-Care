@@ -238,7 +238,11 @@ const OPENEMR = Object.freeze({
     'user/vital.read', 'user/vital.write', 'user/medical_problem.read', 'user/medical_problem.write',
     'user/medication.read', 'user/medication.write', 'user/allergy.read', 'user/allergy.write',
     'user/soap_note.read', 'user/soap_note.write', 'user/document.read', 'user/document.write',
-    'user/facility.read', 'user/practitioner.read', 'user/insurance.read'
+    'user/facility.read', 'user/practitioner.read', 'user/insurance.read',
+    // Session 4.2 (clinician scheduling). OpenEMR binds scopes at client
+    // registration and cannot widen them afterwards, so these require the
+    // re-registered "GFC Care Platform (server) v2" client.
+    'user/appointment.read', 'user/appointment.write', 'user/Appointment.read', 'user/list.read'
   ].join(' ')
 });
 
