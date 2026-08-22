@@ -15,7 +15,7 @@ Each session ends in a PR you review and merge. **Companion to** `GFC_App_Build_
 | 1 | Repo prep · rebrand · role model | Shared | ✅ Done (PR #2, #3) |
 | 2 | Strip lab features · deactivate tracker · brand cleanup | Shared | ✅ Done (PR #5, 2026-06-10; cleanup follow-ups completed 07/2026) |
 | 3 | Client portal + gated intake (both service paths) | Shared | ✅ Done — 3.1/3.2 (PR #6, #7), 3.2 field-parity + 3.4 Transfer-of-Care ROI (PR #13), 3.5 reconciliation (PR #15), 3.3 staff enrollment view + offline onboarding + care-tier migration (PR #16) |
-| 4 | **Clinical / In-Home Primary Care portal + OpenEMR** | Clinical | 🟡 In progress — **4.1 clinician workspace ✅ built · PR pending**; 4.2 scheduling + 4.3 patient clinical read ⬜ next |
+| 4 | **Clinical / In-Home Primary Care portal + OpenEMR** | Clinical | 🟡 In progress — **4.1 clinician workspace ✅ Done (PR #19)**; 4.2 scheduling + 4.3 patient clinical read ⬜ next |
 | 5 | **Clinical HIPAA go-live** (app → AWS boundary, MFA, audit, BAAs, **+ OpenEMR auth migration to authorization_code**) | Clinical | ⬜ Planned |
 | 6 | Caregiver app | PHCP | ⬜ Planned |
 | 7 | Scheduling · availability · time tracking | PHCP | ⬜ Planned |
