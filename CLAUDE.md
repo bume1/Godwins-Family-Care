@@ -1,5 +1,5 @@
 # GFC Care Platform — running status
-_Last updated: 2026-08-17 (Session 4.1 built · PR pending)_
+_Last updated: 2026-08-22 (Session 4.1 merged, PR #19)_
 
 This file is auto-loaded at the start of every Claude Code session. Read it first for current state. Details live in `docs/`.
 
@@ -7,9 +7,9 @@ This file is auto-loaded at the start of every Claude Code session. Read it firs
 
 ## Current session focus
 
-**Session 4.1 (clinician workspace + OpenEMR write) — ✅ built · PR pending. Next: Session 4.2 (clinician scheduling, OpenEMR-tied), then 4.3 (patient portal clinical read).**
+**Session 4.1 (clinician workspace + OpenEMR write) — ✅ done, merged as PR #19. Next: Session 4.2 (clinician scheduling, OpenEMR-tied), then 4.3 (patient portal clinical read).**
 
-- **4.1 — ✅ built (PR pending).** Clinician workspace at `/clinical` (`public/clinical.html`), OpenEMR FHIR/REST client (`openemr.js`), pure clinical helpers (`clinicalRepository.js`), routes under `/api/clinical/*` all API-layer gated by `requireClinicalStaff` (Admin or `hasClinicalAccess`). Care-plan authoring writes `client.carePlan` **versioned starting at 1** (the 3.5 contract — portal + co-sign now unblocked); co-sign completion emits the **signed care-plan PDF with both signatures** (RN author + client co-sign) to Drive + client record + OpenEMR Documents. Clinical enrollment checklist (v2 §6) drives IHPC ACTIVATED. Details in "Recent decisions."
+- **4.1 — ✅ done (merged 2026-08-22, PR #19).** Clinician workspace at `/clinical` (`public/clinical.html`), OpenEMR FHIR/REST client (`openemr.js`), pure clinical helpers (`clinicalRepository.js`), routes under `/api/clinical/*` all API-layer gated by `requireClinicalStaff` (Admin or `hasClinicalAccess`). Care-plan authoring writes `client.carePlan` **versioned starting at 1** (the 3.5 contract — portal + co-sign now unblocked); co-sign completion emits the **signed care-plan PDF with both signatures** (RN author + client co-sign) to Drive + client record + OpenEMR Documents. Clinical enrollment checklist (v2 §6) drives IHPC ACTIVATED. Details in "Recent decisions."
 - **Write verification complete (2026-08-18):** client swap + `gfc-app-api` ACL fix landed; full H&P chain proven end-to-end through `openemr.js` (encounter → note → FHIR read-back), plus problem/allergy/medication writes. Two **EMR-server-side defects** remain (app degrades gracefully on both): the vitals REST endpoint 500s (`authUserId` null in VitalsCalculatedService — readings are preserved verbatim in the encounter note; warning surfaced to the clinician) and document upload 500s for every file/category (`getResponseForPayload ... bool given` — likely `sites/default/documents` not writable by the web server). Both are for the EMR maintainer, not app code; re-test uploads after the server fix.
 
 **4.2/4.3 build targets:** `docs/prototype/clinical-emr-prototype-v1.html` (desktop), `clinical-emr-mobile-prototype-v1.html` (mobile), `patient-portal-prototype-v2.html` (patient read). 4.3's clinical read reuses `openemr.js` scoped to the logged-in patient's `openEmrPatientId` (403 until linked + clinical line + consent-to-treat per schema §6).
@@ -28,7 +28,7 @@ This file is auto-loaded at the start of every Claude Code session. Read it firs
 | 3.3 | Staff enrollment view + offline onboarding + care-tier migration | ✅ Done | #16 |
 | 3.4 | Transfer-of-Care Provider ROI | ✅ Done | #13 |
 | 3.5 | Reconciliation — fixture removal, live data wiring, desktop pass | ✅ Done | #15 |
-| 4.1 | Clinician workspace (OpenEMR write) | ✅ built · PR pending | — (pending) |
+| 4.1 | Clinician workspace (OpenEMR write) | ✅ Done | #19 |
 | 4.2 | Clinician scheduling (OpenEMR-tied) | ⬜ Next priority | — |
 | 4.3 | Patient portal clinical read | ⬜ Planned (fast-follow) | — |
 | 5 | Clinical HIPAA go-live (+ OpenEMR auth migration to authorization_code) | ⬜ Planned | — |
@@ -46,7 +46,7 @@ This file is auto-loaded at the start of every Claude Code session. Read it firs
 
 ## Recent decisions
 
-**08/2026 — Session 4.1 built (branch `claude/clinician-care-plan-auth-ra1t7k`, PR pending).** Clinician workspace + OpenEMR write per the Session 4.1 prompt. Locked in:
+**08/2026 — Session 4.1 built & merged (PR #19, branch `claude/clinician-care-plan-auth-ra1t7k`).** Clinician workspace + OpenEMR write per the Session 4.1 prompt. Locked in:
 - **Session 0 gate:** Bianca approved proceeding into Session 4.1 with the OpenEMR preflight serving as the §15 config check (Session 0 remains 🟡; its open items are now precisely enumerated below).
 - **OpenEMR auth (dev window) — Option B approved:** OAuth2 **password grant** with a dedicated `gfc-app-api` OpenEMR user + confidential client, tokens held server-side only (`openemr.js`; browser never sees them). A correctly-scoped client **"GFC Care Platform (server)"** was dynamically registered (the original client had 9 read-only scopes bound at registration, which OpenEMR cannot widen) — 38 scopes granted, least-privilege for 4.1. **Migration to authorization_code + refresh_token is Session 5 scope** (recorded in `GFC_SESSION_PLAN.md` §Session 5), after which the password-grant global gets disabled.
 - **Transport deviation approved:** OpenEMR 7.0.4's FHIR API is read-only for clinical resources, so **reads go via FHIR R4** (Patient, Condition, MedicationRequest, AllergyIntolerance, Encounter, CarePlan, DocumentReference, Observation) and **clinical writes via the standard REST API** (`encounter`, `vital`, `soap_note`, `medical_problem`, `medication`, `allergy`, `document`); Patient create/update stays FHIR. The one-record-in-OpenEMR rule stands — the app stores only `client.openEmrPatientId`, `client.carePlan`, and activity entries. Instance quirks encoded in `openemr.js`: `medical_problem.begdate` plain date, `allergy.begdate` datetime, medication endpoints keyed by numeric pid (resolved+cached from uuid), med-list reads via FHIR MedicationRequest (the standard-API list GET 500s on uuid-less rows).
