@@ -1,0 +1,765 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Godwins Family Care — Clinical Workspace</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.1.0/dist/tabler-icons.min.css">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            primary: { DEFAULT: '#033D50', 50: '#e8f0f4', 100: '#c5d9e3', 500: '#033D50', 600: '#02334a', 700: '#022A38' },
+            accent: '#C9A44A',
+            cream: '#FAF7F2', creamdeep: '#efe9db'
+          },
+          fontFamily: {
+            serif: ['"Cormorant Garamond"', 'Georgia', 'serif'],
+            sans: ['"DM Sans"', 'system-ui', 'sans-serif']
+          }
+        }
+      }
+    }
+  </script>
+  <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
+  <style>
+    * { font-family: 'DM Sans', system-ui, sans-serif; }
+    body { background: #efe9db; color: #2b2b28; }
+    .serif { font-family: 'Cormorant Garamond', Georgia, serif; }
+    .card { background: #fff; border: 1px solid #e5ddcb; border-radius: 12px; }
+    .card-h { display:flex; align-items:center; justify-content:space-between; padding: 12px 16px; border-bottom: 1px solid #eee9dc; }
+    .card-h h2 { font-family: 'Cormorant Garamond', serif; font-size: 17px; color: #033D50; font-weight: 600; }
+    .lblu { font-size: 10px; letter-spacing: 1.2px; text-transform: uppercase; color: #7a746a; font-weight: 600; }
+    .inp { width:100%; border:1px solid #e5ddcb; border-radius:8px; padding:8px 10px; font-size:13px; background:#fff; }
+    .inp:focus { outline:2px solid #C9A44A55; border-color:#C9A44A; }
+    .btn { display:inline-flex; align-items:center; gap:6px; border-radius:8px; padding:8px 14px; font-size:13px; font-weight:600; cursor:pointer; border:1px solid #033D50; background:#033D50; color:#fff; }
+    .btn:disabled { opacity:.5; cursor:not-allowed; }
+    .btn.gold { background:#C9A44A; border-color:#C9A44A; color:#033D50; }
+    .btn.ghost { background:#fff; color:#033D50; }
+    .chip { border-radius:999px; padding:2px 9px; font-size:10.5px; font-weight:700; }
+    .prefill { background:#FDF6E7; border:1px dashed #C9A44A; }
+    .prefill-badge { font-size:9.5px; color:#9a6a1e; font-weight:700; letter-spacing:.4px; }
+    .tabbtn { padding:9px 14px; font-size:13px; font-weight:600; color:#7a746a; border-bottom:2.5px solid transparent; cursor:pointer; white-space:nowrap; }
+    .tabbtn.on { color:#033D50; border-color:#C9A44A; }
+    ::-webkit-scrollbar { width:8px; height:8px; } ::-webkit-scrollbar-thumb { background:#d8d0bd; border-radius:8px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+    const API_URL = window.location.origin;
+
+    const getToken = () => localStorage.getItem('admin_token') || localStorage.getItem('unified_token');
+    const handleResponse = async (response) => {
+      if (!response.ok) {
+        let data = null;
+        try { data = await response.json(); } catch {}
+        if (response.status === 401) {
+          localStorage.removeItem('admin_token'); localStorage.removeItem('admin_user');
+          throw Object.assign(new Error((data && data.error) || 'Session expired'), { code: 'AUTH', status: 401 });
+        }
+        const err = new Error((data && data.error) || `HTTP error ${response.status}`);
+        err.status = response.status; err.data = data;
+        throw err;
+      }
+      return response.json();
+    };
+    const authedFetch = (path, opts = {}) => {
+      const headers = Object.assign({ 'Authorization': `Bearer ${getToken()}` },
+        opts.body && !(opts.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}, opts.headers || {});
+      return fetch(`${API_URL}${path}`, Object.assign({}, opts, { headers })).then(handleResponse);
+    };
+    const api = {
+      login: (email, password) => fetch(`${API_URL}/api/auth/login`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password })
+      }).then(handleResponse),
+      status: () => authedFetch('/api/clinical/status'),
+      patients: (q) => authedFetch(`/api/clinical/patients${q ? `?q=${encodeURIComponent(q)}` : ''}`),
+      link: (id, body) => authedFetch(`/api/clinical/patients/${id}/link`, { method: 'POST', body: JSON.stringify(body || {}) }),
+      chart: (id) => authedFetch(`/api/clinical/patients/${id}/chart`),
+      visit: (id, body) => authedFetch(`/api/clinical/patients/${id}/visit`, { method: 'POST', body: JSON.stringify(body) }),
+      medrec: (id) => authedFetch(`/api/clinical/patients/${id}/medrec`),
+      medrecSave: (id, decisions) => authedFetch(`/api/clinical/patients/${id}/medrec`, { method: 'POST', body: JSON.stringify({ decisions }) }),
+      addProblem: (id, body) => authedFetch(`/api/clinical/patients/${id}/problems`, { method: 'POST', body: JSON.stringify(body) }),
+      carePlan: (id) => authedFetch(`/api/clinical/patients/${id}/care-plan`),
+      saveCarePlan: (id, body) => authedFetch(`/api/clinical/patients/${id}/care-plan`, { method: 'POST', body: JSON.stringify(body) }),
+      checklist: (id) => authedFetch(`/api/clinical/patients/${id}/checklist`),
+      markStep: (id, step, done) => authedFetch(`/api/clinical/patients/${id}/checklist/${step}`, { method: 'POST', body: JSON.stringify({ done }) }),
+      activate: (id) => authedFetch(`/api/clinical/patients/${id}/activate`, { method: 'POST' })
+    };
+
+    const fmtDate = (iso) => iso ? new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
+    const fmtTs = (iso) => iso ? new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
+    const initials = (n) => String(n || '').split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join('') || 'GF';
+
+    // ── Drawn signature pad (same mechanism as the 3.4 ROI / portal co-sign) ──
+    const SignaturePad = ({ padRef }) => {
+      const canvasRef = useRef(null);
+      const state = useRef({ drawing: false, empty: true });
+      useEffect(() => {
+        const canvas = canvasRef.current; if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        const ratio = window.devicePixelRatio || 1;
+        const w = canvas.offsetWidth || 400;
+        canvas.width = w * ratio; canvas.height = 130 * ratio;
+        ctx.scale(ratio, ratio);
+        ctx.strokeStyle = '#033D50'; ctx.lineWidth = 2; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        state.current = { drawing: false, empty: true };
+        const pos = (e) => { const r = canvas.getBoundingClientRect(); const s = e.touches ? e.touches[0] : e; return { x: s.clientX - r.left, y: s.clientY - r.top }; };
+        const down = (e) => { state.current.drawing = true; const p = pos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); };
+        const move = (e) => { if (!state.current.drawing) return; e.preventDefault && e.preventDefault(); const p = pos(e); ctx.lineTo(p.x, p.y); ctx.stroke(); state.current.empty = false; };
+        const up = () => { state.current.drawing = false; };
+        canvas.addEventListener('mousedown', down); canvas.addEventListener('mousemove', move);
+        canvas.addEventListener('mouseup', up); canvas.addEventListener('mouseleave', up);
+        canvas.addEventListener('touchstart', down, { passive: false });
+        canvas.addEventListener('touchmove', move, { passive: false });
+        canvas.addEventListener('touchend', up);
+        padRef.current = {
+          isEmpty: () => state.current.empty,
+          toDataURL: () => canvas.toDataURL('image/png'),
+          clear: () => { ctx.clearRect(0, 0, canvas.width, canvas.height); state.current.empty = true; }
+        };
+        return () => {
+          canvas.removeEventListener('mousedown', down); canvas.removeEventListener('mousemove', move);
+          canvas.removeEventListener('mouseup', up); canvas.removeEventListener('mouseleave', up);
+          canvas.removeEventListener('touchstart', down); canvas.removeEventListener('touchmove', move);
+          canvas.removeEventListener('touchend', up);
+        };
+      }, []);
+      return (
+        <div>
+          <canvas ref={canvasRef} style={{ width: '100%', height: 130, background: '#FAF7F2', border: '1px solid #e5ddcb', borderRadius: 8, touchAction: 'none' }} />
+          <button type="button" className="text-xs text-primary underline mt-1" onClick={() => padRef.current && padRef.current.clear()}>Clear signature</button>
+        </div>
+      );
+    };
+
+    // ── Pre-filled field wrapper: visibly marked until clinician-confirmed ──
+    const Prefilled = ({ fieldKey, confirmed, onConfirm, children }) => {
+      const isConfirmed = confirmed.includes(fieldKey);
+      return (
+        <div className={`rounded-lg p-2 ${isConfirmed ? '' : 'prefill'}`}>
+          {children}
+          {!isConfirmed && (
+            <button type="button" className="prefill-badge mt-1 flex items-center gap-1" onClick={() => onConfirm(fieldKey)}>
+              <i className="ti ti-alert-circle" /> FROM INTAKE — TAP TO CONFIRM
+            </button>
+          )}
+          {isConfirmed && <span className="text-[9.5px] text-emerald-700 font-bold flex items-center gap-1 mt-1"><i className="ti ti-circle-check" /> CONFIRMED</span>}
+        </div>
+      );
+    };
+
+    const Field = ({ label, children, className }) => (
+      <label className={`block ${className || ''}`}>
+        <span className="lblu block mb-1">{label}</span>
+        {children}
+      </label>
+    );
+
+    const Login = ({ onLogin }) => {
+      const [email, setEmail] = useState(''); const [password, setPassword] = useState('');
+      const [err, setErr] = useState(''); const [busy, setBusy] = useState(false);
+      const submit = (e) => {
+        e.preventDefault(); setBusy(true); setErr('');
+        api.login(email, password).then(r => {
+          localStorage.setItem('admin_token', r.token);
+          localStorage.setItem('admin_user', JSON.stringify(r.user));
+          onLogin(r.user);
+        }).catch(e => { setErr(e.message); setBusy(false); });
+      };
+      return (
+        <div className="min-h-screen flex items-center justify-center p-6">
+          <form onSubmit={submit} className="card p-8 w-full max-w-sm">
+            <img src="/brand/logo-mark-transparent.png" alt="" className="h-12 mb-3" />
+            <h1 className="serif text-2xl text-primary font-semibold mb-1">Clinical Workspace</h1>
+            <p className="text-xs text-stone-500 mb-5">Authorized clinical staff only. All access is logged.</p>
+            <Field label="Email"><input className="inp" type="email" value={email} onChange={e => setEmail(e.target.value)} required /></Field>
+            <div className="h-3" />
+            <Field label="Password"><input className="inp" type="password" value={password} onChange={e => setPassword(e.target.value)} required /></Field>
+            {err && <p className="text-red-600 text-xs mt-3">{err}</p>}
+            <button className="btn w-full justify-center mt-5" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
+          </form>
+        </div>
+      );
+    };
+
+    // ── Chart summary tab ──
+    const SummaryTab = ({ chart, patient, onLink, linking }) => {
+      const d = chart && chart.demographics;
+      if (!chart) return <p className="text-sm text-stone-500 p-4">Loading chart…</p>;
+      const Sec = ({ title, data, render, icon }) => (
+        <div className="card mb-4">
+          <div className="card-h"><h2><i className={`ti ${icon} mr-1 text-accent`} />{title}</h2>
+            {data && !data.ok && <span className="chip bg-red-50 text-red-700">EMR read failed</span>}
+          </div>
+          <div className="p-4 text-sm">
+            {!chart.linked && <p className="text-stone-400 text-xs">Link this patient to OpenEMR to read live data.</p>}
+            {chart.linked && data && data.ok && data.rows.length === 0 && <p className="text-stone-400 text-xs">Nothing on file in OpenEMR.</p>}
+            {chart.linked && data && data.ok && data.rows.map((r, i) => render(r, i))}
+            {chart.linked && data && !data.ok && <p className="text-red-600 text-xs">{data.error}</p>}
+          </div>
+        </div>
+      );
+      const emr = chart.emr || {};
+      const row = (main, sub, right) => (
+        <div className="flex items-start justify-between py-1.5 border-b border-stone-100 last:border-0">
+          <div><div className="font-semibold text-[13px]">{main}</div>{sub && <div className="text-xs text-stone-500">{sub}</div>}</div>
+          {right && <span className="chip bg-primary-50 text-primary">{right}</span>}
+        </div>
+      );
+      return (
+        <div>
+          {!chart.linked && (
+            <div className="card p-4 mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="font-semibold text-sm text-primary">Not linked to OpenEMR yet</div>
+                <div className="text-xs text-stone-500">Create the OpenEMR patient record from the app demographics, or link an existing chart.</div>
+              </div>
+              <button className="btn gold" disabled={linking} onClick={() => onLink()}>{linking ? 'Linking…' : 'Create & link OpenEMR patient'}</button>
+            </div>
+          )}
+          <div className="grid md:grid-cols-2 gap-0 md:gap-4">
+            <div>
+              <Sec title="Problem list" icon="ti-list-details" data={emr.problems}
+                render={(r, i) => <div key={i}>{row(r.title, [r.code, r.onset && `since ${fmtDate(r.onset)}`].filter(Boolean).join(' · '), r.status)}</div>} />
+              <Sec title="Medications" icon="ti-pill" data={emr.medications}
+                render={(r, i) => <div key={i}>{row(r.title, r.instructions || (r.authoredOn && fmtDate(r.authoredOn)), r.status)}</div>} />
+              <Sec title="Allergies" icon="ti-alert-triangle" data={emr.allergies}
+                render={(r, i) => <div key={i}>{row(r.title, r.criticality && `criticality: ${r.criticality}`, r.status)}</div>} />
+            </div>
+            <div>
+              <Sec title="Encounters" icon="ti-stethoscope" data={emr.encounters}
+                render={(r, i) => <div key={i}>{row(r.type, [r.provider, r.start && fmtTs(r.start)].filter(Boolean).join(' · '), r.status)}</div>} />
+              <Sec title="Vitals (recent)" icon="ti-heart-rate-monitor" data={emr.vitals}
+                render={(r, i) => <div key={i}>{row(r.name, r.at && fmtTs(r.at), r.value)}</div>} />
+              <Sec title="Documents" icon="ti-files" data={emr.documents}
+                render={(r, i) => <div key={i}>{row(r.description, [r.contentType, r.date && fmtDate(r.date)].filter(Boolean).join(' · '))}</div>} />
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // ── H&P documentation tab (intake spec §2C) ──
+    const HpTab = ({ patient, chart, onDone }) => {
+      const pf = (chart && chart.intakePrefill) || {};
+      const [confirmed, setConfirmed] = useState([]);
+      const confirm = (k) => setConfirmed(c => c.includes(k) ? c : [...c, k]);
+      const [f, setF] = useState({
+        chiefConcern: pf.chiefConcern || '',
+        subjective: '', assessment: '', plan: '',
+        vitals: { bpRightSys: '', bpRightDia: '', bpLeftSys: '', bpLeftDia: '', hr: '', temp: '', rr: '', spo2: '', weight: '', height: '' },
+        systemsExam: { general: '', cardiovascular: '', respiratory: '', lungSounds: '', neuro: '', gi: '', gu: '', musculoskeletal: '' },
+        skinWound: { findings: '', woundPresent: 'no', woundLocation: '', woundMeasurements: '' },
+        painAssessment: { breathing: '', negativeVocalization: '', facialExpression: '', bodyLanguage: '', consolability: '', totalScore: '' },
+        homeHazards: { smokeDetectors: '', coDetectors: '', grabBars: '', nonSkidSurfaces: '', runningWater: '', secondaryExit: '', notes: '' },
+        triage: { track: '', rationale: '' }
+      });
+      const set = (path, v) => setF(prev => {
+        const [a, b] = path.split('.');
+        if (!b) return { ...prev, [a]: v };
+        return { ...prev, [a]: { ...prev[a], [b]: v } };
+      });
+      const [busy, setBusy] = useState(false); const [msg, setMsg] = useState(null);
+      const submit = () => {
+        setBusy(true); setMsg(null);
+        api.visit(patient.id, { ...f, confirmedFields: confirmed })
+          .then(r => { setMsg({ ok: true, text: `${r.message} (${fmtTs(r.at)})` }); onDone && onDone(); })
+          .catch(e => setMsg({ ok: false, text: e.message }))
+          .finally(() => setBusy(false));
+      };
+      const V = ({ k, label, w }) => (
+        <Field label={label} className={w || ''}>
+          <input className="inp" value={f.vitals[k]} onChange={e => set(`vitals.${k}`, e.target.value)} />
+        </Field>
+      );
+      const T = ({ path, label, rows }) => (
+        <Field label={label}>
+          <textarea className="inp" rows={rows || 2} value={path.split('.').reduce((o, k) => o[k], f)} onChange={e => set(path, e.target.value)} />
+        </Field>
+      );
+      const painFields = ['breathing', 'negativeVocalization', 'facialExpression', 'bodyLanguage', 'consolability'];
+      const hazardFields = [['smokeDetectors', 'Smoke detectors'], ['coDetectors', 'CO detectors'], ['grabBars', 'Grab bars'], ['nonSkidSurfaces', 'Non-skid surfaces'], ['runningWater', 'Running water'], ['secondaryExit', 'Secondary exit']];
+      return (
+        <div className="max-w-3xl">
+          <div className="card mb-4">
+            <div className="card-h"><h2>Initial Visit · History &amp; Physical</h2></div>
+            <div className="p-4 grid gap-4">
+              <Prefilled fieldKey="chiefConcern" confirmed={confirmed} onConfirm={confirm}>
+                <T path="chiefConcern" label="Chief concern" />
+              </Prefilled>
+              {(pf.conditions || []).length > 0 && (
+                <Prefilled fieldKey="conditions" confirmed={confirmed} onConfirm={confirm}>
+                  <span className="lblu block mb-1">Family-reported conditions (intake)</span>
+                  <div className="flex flex-wrap gap-1.5">{pf.conditions.map((c, i) => <span key={i} className="chip bg-primary-50 text-primary">{c}</span>)}</div>
+                </Prefilled>
+              )}
+              <T path="subjective" label="Subjective / history" rows={3} />
+            </div>
+          </div>
+
+          <div className="card mb-4">
+            <div className="card-h"><h2>Vitals</h2><span className="text-[10.5px] text-stone-500">BP required in both arms (§2C)</span></div>
+            <div className="p-4 grid grid-cols-2 md:grid-cols-4 gap-3">
+              <V k="bpRightSys" label="BP right — sys" /><V k="bpRightDia" label="BP right — dia" />
+              <V k="bpLeftSys" label="BP left — sys" /><V k="bpLeftDia" label="BP left — dia" />
+              <V k="hr" label="Heart rate" /><V k="temp" label="Temp (°F)" /><V k="rr" label="Resp rate" /><V k="spo2" label="SpO₂ (%)" />
+              <V k="weight" label="Weight (lb)" /><V k="height" label="Height (in)" />
+            </div>
+          </div>
+
+          <div className="card mb-4">
+            <div className="card-h"><h2>Systems exam</h2></div>
+            <div className="p-4 grid md:grid-cols-2 gap-3">
+              {Object.keys(f.systemsExam).map(k => (
+                <T key={k} path={`systemsExam.${k}`} label={k === 'lungSounds' ? 'Lung sounds' : k.charAt(0).toUpperCase() + k.slice(1)} />
+              ))}
+            </div>
+          </div>
+
+          <div className="card mb-4">
+            <div className="card-h"><h2>Skin &amp; wound</h2></div>
+            <div className="p-4 grid gap-3">
+              <T path="skinWound.findings" label="Skin findings" />
+              <Field label="Wound present?">
+                <select className="inp" value={f.skinWound.woundPresent} onChange={e => set('skinWound.woundPresent', e.target.value)}>
+                  <option value="no">No</option><option value="yes">Yes</option>
+                </select>
+              </Field>
+              {f.skinWound.woundPresent === 'yes' && (
+                <div className="grid md:grid-cols-2 gap-3">
+                  <T path="skinWound.woundLocation" label="Location" />
+                  <T path="skinWound.woundMeasurements" label="Measurements (L × W × D cm)" />
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="card mb-4">
+            <div className="card-h"><h2>Pain assessment (PAINAD-style)</h2><span className="text-[10.5px] text-stone-500">0–2 each</span></div>
+            <div className="p-4 grid grid-cols-2 md:grid-cols-3 gap-3">
+              {painFields.map(k => (
+                <Field key={k} label={k.replace(/([A-Z])/g, ' $1')}>
+                  <select className="inp" value={f.painAssessment[k]} onChange={e => set(`painAssessment.${k}`, e.target.value)}>
+                    <option value="">—</option><option>0</option><option>1</option><option>2</option>
+                  </select>
+                </Field>
+              ))}
+              <Field label="Total score">
+                <input className="inp" readOnly value={painFields.reduce((s, k) => s + (parseInt(f.painAssessment[k], 10) || 0), 0)} />
+              </Field>
+            </div>
+          </div>
+
+          <div className="card mb-4">
+            <div className="card-h"><h2>Home-hazard inventory</h2></div>
+            <div className="p-4">
+              {(pf.homeSafetyFlags || []).length > 0 && (
+                <Prefilled fieldKey="homeSafetyFlags" confirmed={confirmed} onConfirm={confirm}>
+                  <span className="lblu block mb-1">Intake staff-safety flags</span>
+                  <div className="flex flex-wrap gap-1.5">{pf.homeSafetyFlags.map((c, i) => <span key={i} className="chip bg-amber-50 text-amber-800">{c}</span>)}</div>
+                </Prefilled>
+              )}
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mt-3">
+                {hazardFields.map(([k, label]) => (
+                  <Field key={k} label={label}>
+                    <select className="inp" value={f.homeHazards[k]} onChange={e => set(`homeHazards.${k}`, e.target.value)}>
+                      <option value="">—</option><option value="present_working">Present / working</option>
+                      <option value="present_not_working">Present, not working</option><option value="absent">Absent</option>
+                      <option value="na">N/A</option>
+                    </select>
+                  </Field>
+                ))}
+              </div>
+              <div className="mt-3"><T path="homeHazards.notes" label="Hazard notes" /></div>
+            </div>
+          </div>
+
+          <div className="card mb-4">
+            <div className="card-h"><h2>Assessment, plan &amp; RN triage</h2></div>
+            <div className="p-4 grid gap-3">
+              <T path="assessment" label="Assessment" rows={3} />
+              <T path="plan" label="Plan" rows={3} />
+              <div className="grid md:grid-cols-2 gap-3">
+                <Field label="Track assignment (RN triage)">
+                  <select className="inp" value={f.triage.track} onChange={e => set('triage.track', e.target.value)}>
+                    <option value="">— keep current ({patient.careTier || 'unset'})</option>
+                    <option value="A1">A1 — Essential ADL</option><option value="A2">A2 — Comprehensive ADL &amp; IADL</option>
+                    <option value="A3">A3 — IADL-Forward Support</option><option value="A4">A4 — Behavioral &amp; Cognitive</option>
+                    <option value="B">B — Skilled Nursing</option>
+                  </select>
+                </Field>
+                <T path="triage.rationale" label="Triage rationale" />
+              </div>
+            </div>
+          </div>
+
+          {msg && <p className={`text-sm mb-3 ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
+          <button className="btn" disabled={busy} onClick={submit}>
+            <i className="ti ti-writing-sign" />{busy ? 'Writing to OpenEMR…' : 'Sign & write to chart (Encounter + vitals + note)'}
+          </button>
+        </div>
+      );
+    };
+
+    // ── Medication reconciliation tab ──
+    const MedRecTab = ({ patient }) => {
+      const [data, setData] = useState(null);
+      const [decisions, setDecisions] = useState({});
+      const [busy, setBusy] = useState(false); const [msg, setMsg] = useState(null);
+      const load = useCallback(() => { api.medrec(patient.id).then(setData).catch(e => setMsg({ ok: false, text: e.message })); }, [patient.id]);
+      useEffect(load, [load]);
+      if (!data) return <p className="text-sm text-stone-500 p-4">Loading…</p>;
+      const { matched, familyOnly, emrOnly } = data.view;
+      const decide = (key, action, med, emrUuid) => setDecisions(d => ({ ...d, [key]: { action, med, emrUuid } }));
+      const rows = [
+        ...matched.map((m, i) => ({ key: `m${i}`, label: m.family.name || m.family.title, sub: `${m.family.dose || ''} ${m.family.frequency || ''}`.trim(), src: 'Both', med: m.family, emrUuid: m.emr.uuid || m.emr.id })),
+        ...familyOnly.map((m, i) => ({ key: `f${i}`, label: m.name || m.title, sub: `${m.dose || ''} ${m.frequency || ''}`.trim(), src: 'Family-reported only', med: m })),
+        ...emrOnly.map((m, i) => ({ key: `e${i}`, label: m.title || m.name, sub: m.comments || '', src: 'OpenEMR only', med: { name: m.title || m.name }, emrUuid: m.uuid || m.id }))
+      ];
+      const save = () => {
+        const list = rows.map(r => decisions[r.key] ? { ...decisions[r.key] } : { action: 'keep', med: r.med, emrUuid: r.emrUuid });
+        setBusy(true); setMsg(null);
+        api.medrecSave(patient.id, list)
+          .then(r => { setMsg({ ok: true, text: `${r.message}. EMR writes: ${r.emrResults.filter(x => x.ok).length}/${r.emrResults.length}` }); load(); })
+          .catch(e => setMsg({ ok: false, text: e.message }))
+          .finally(() => setBusy(false));
+      };
+      return (
+        <div className="max-w-3xl">
+          <div className="card">
+            <div className="card-h"><h2>Medication reconciliation</h2>
+              {!data.emrOk && <span className="chip bg-amber-50 text-amber-800">EMR list unavailable</span>}
+            </div>
+            <div className="p-4">
+              {rows.length === 0 && <p className="text-sm text-stone-400">No medications reported anywhere.</p>}
+              {rows.map(r => {
+                const d = decisions[r.key];
+                return (
+                  <div key={r.key} className="flex flex-wrap items-center justify-between gap-2 py-2.5 border-b border-stone-100 last:border-0">
+                    <div>
+                      <div className="font-semibold text-[13px]">{r.label}</div>
+                      <div className="text-xs text-stone-500">{r.sub} <span className="chip bg-primary-50 text-primary ml-1">{r.src}</span></div>
+                    </div>
+                    <div className="flex gap-1.5">
+                      {['keep', 'add', 'discontinue'].map(a => (
+                        <button key={a}
+                          className={`chip border ${d && d.action === a ? 'bg-primary text-white border-primary' : 'bg-white text-primary border-stone-200'}`}
+                          onClick={() => decide(r.key, a, r.med, r.emrUuid)}>
+                          {a}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+              {msg && <p className={`text-sm mt-3 ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
+              <button className="btn mt-4" disabled={busy || rows.length === 0} onClick={save}>
+                {busy ? 'Saving…' : 'Resolve — write to OpenEMR & update app rows'}
+              </button>
+              <p className="text-[11px] text-stone-400 mt-2">Unmarked rows default to "keep". "Add" writes to OpenEMR; "discontinue" end-dates the OpenEMR row and removes it from the app's structured list.</p>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // ── Care-plan authoring tab (Scope C) ──
+    const CarePlanTab = ({ patient, onSaved }) => {
+      const [existing, setExisting] = useState(null);
+      const padRef = useRef(null);
+      const [f, setF] = useState({ problems: '', goals: '', eachVisit: '', visitFrequency: '', visitDays: [], visitTimes: '', duration: '', chargePlanNote: '', effectiveDate: '', targetDate: '' });
+      const [busy, setBusy] = useState(false); const [msg, setMsg] = useState(null);
+      useEffect(() => { api.carePlan(patient.id).then(setExisting).catch(() => {}); }, [patient.id]);
+      const cp = existing && existing.carePlan;
+      const coSigned = cp && existing.coSign && existing.coSign[`v${cp.version}`];
+      const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+      const lines = (s) => s.split('\n').map(x => x.trim()).filter(Boolean);
+      const save = () => {
+        if (!padRef.current || padRef.current.isEmpty()) { setMsg({ ok: false, text: 'Draw your author signature before saving.' }); return; }
+        setBusy(true); setMsg(null);
+        api.saveCarePlan(patient.id, {
+          problems: lines(f.problems), goals: lines(f.goals), eachVisit: lines(f.eachVisit),
+          visitFrequency: f.visitFrequency, visitDays: f.visitDays, visitTimes: f.visitTimes,
+          duration: f.duration, chargePlanNote: f.chargePlanNote,
+          effectiveDate: f.effectiveDate || null, targetDate: f.targetDate || null,
+          rnSignatureImageB64: padRef.current.toDataURL()
+        }).then(r => {
+          setMsg({ ok: true, text: r.message + (r.emrDocumented ? ' · authored PDF filed to OpenEMR' : '') });
+          api.carePlan(patient.id).then(setExisting).catch(() => {});
+          onSaved && onSaved();
+        }).catch(e => setMsg({ ok: false, text: e.message })).finally(() => setBusy(false));
+      };
+      return (
+        <div className="max-w-3xl">
+          {cp && (
+            <div className="card mb-4">
+              <div className="card-h"><h2>Current plan — v{cp.version}</h2>
+                <span className={`chip ${coSigned ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-800'}`}>
+                  {coSigned ? `Co-signed ${fmtTs(coSigned.at)}` : 'Awaiting client co-signature'}
+                </span>
+              </div>
+              <div className="p-4 text-sm grid gap-1">
+                <div><b>Authored:</b> {fmtTs(cp.authoredAt)} by {cp.authoredBy}</div>
+                <div><b>Goals:</b> {(cp.goals || []).join(' · ')}</div>
+                <div><b>Schedule:</b> {cp.visitSchedule || '—'} {cp.duration && `· ${cp.duration}`}</div>
+                {existing.docs && existing.docs[`v${cp.version}`] && existing.docs[`v${cp.version}`].signed && (
+                  <div><b>Signed PDF:</b>{' '}
+                    {existing.docs[`v${cp.version}`].signed.driveUrl
+                      ? <a className="text-primary underline" href={existing.docs[`v${cp.version}`].signed.driveUrl} target="_blank" rel="noreferrer">on Drive</a>
+                      : 'stored'}
+                    {existing.docs[`v${cp.version}`].signed.emrDocumented && ' · filed to OpenEMR'}
+                  </div>
+                )}
+                {(existing.history || []).length > 1 && (
+                  <div className="text-xs text-stone-500 mt-1">History: {existing.history.map(h => `v${h.version} (${fmtDate(h.authoredAt)})`).join(' · ')}</div>
+                )}
+              </div>
+            </div>
+          )}
+          <div className="card">
+            <div className="card-h"><h2>{cp ? `Author new version (v${cp.version + 1})` : 'Author care plan (v1)'}</h2></div>
+            <div className="p-4 grid gap-4">
+              <Field label="Problems addressed (one per line)"><textarea className="inp" rows={3} value={f.problems} onChange={e => setF({ ...f, problems: e.target.value })} /></Field>
+              <Field label="Goals & objectives (one per line)"><textarea className="inp" rows={3} value={f.goals} onChange={e => setF({ ...f, goals: e.target.value })} /></Field>
+              <Field label="Task list — each visit (one per line)"><textarea className="inp" rows={3} value={f.eachVisit} onChange={e => setF({ ...f, eachVisit: e.target.value })} /></Field>
+              <div className="grid md:grid-cols-2 gap-3">
+                <Field label="Visit frequency"><input className="inp" placeholder="e.g. 2 visits / week" value={f.visitFrequency} onChange={e => setF({ ...f, visitFrequency: e.target.value })} /></Field>
+                <Field label="Times"><input className="inp" placeholder="e.g. mornings 9–11a" value={f.visitTimes} onChange={e => setF({ ...f, visitTimes: e.target.value })} /></Field>
+              </div>
+              <Field label="Days">
+                <div className="flex flex-wrap gap-1.5">
+                  {days.map(d => (
+                    <button key={d} type="button"
+                      className={`chip border ${f.visitDays.includes(d) ? 'bg-primary text-white border-primary' : 'bg-white text-primary border-stone-200'}`}
+                      onClick={() => setF({ ...f, visitDays: f.visitDays.includes(d) ? f.visitDays.filter(x => x !== d) : [...f.visitDays, d] })}>
+                      {d}
+                    </button>
+                  ))}
+                </div>
+              </Field>
+              <div className="grid md:grid-cols-3 gap-3">
+                <Field label="Duration"><input className="inp" placeholder="e.g. 90 days, reassess" value={f.duration} onChange={e => setF({ ...f, duration: e.target.value })} /></Field>
+                <Field label="Effective date"><input className="inp" type="date" value={f.effectiveDate} onChange={e => setF({ ...f, effectiveDate: e.target.value })} /></Field>
+                <Field label="Target date"><input className="inp" type="date" value={f.targetDate} onChange={e => setF({ ...f, targetDate: e.target.value })} /></Field>
+              </div>
+              <Field label="Charge-plan note"><textarea className="inp" rows={2} value={f.chargePlanNote} onChange={e => setF({ ...f, chargePlanNote: e.target.value })} /></Field>
+              <div>
+                <span className="lblu block mb-1">RN / clinician author signature (drawn)</span>
+                <SignaturePad padRef={padRef} />
+              </div>
+              {msg && <p className={`text-sm ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
+              <button className="btn" disabled={busy} onClick={save}>
+                <i className="ti ti-writing-sign" />{busy ? 'Saving…' : (cp ? `Sign & save v${cp.version + 1}` : 'Sign & save v1 — unlocks the client portal plan')}
+              </button>
+              <p className="text-[11px] text-stone-400">Saving writes the versioned plan to the client record (portal + co-sign unlock) and files the authored PDF to OpenEMR. The final signed PDF — with both signatures — is emitted when the client co-signs in their portal.</p>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // ── Enrollment checklist tab (Scope E) ──
+    const ChecklistTab = ({ patient, onActivated }) => {
+      const [data, setData] = useState(null);
+      const [busy, setBusy] = useState(''); const [msg, setMsg] = useState(null);
+      const load = useCallback(() => { api.checklist(patient.id).then(setData).catch(e => setMsg({ ok: false, text: e.message })); }, [patient.id]);
+      useEffect(load, [load]);
+      if (!data) return <p className="text-sm text-stone-500 p-4">Loading…</p>;
+      const mark = (key, done) => {
+        setBusy(key);
+        api.markStep(patient.id, key, done).then(load).catch(e => setMsg({ ok: false, text: e.message })).finally(() => setBusy(''));
+      };
+      const activate = () => {
+        setBusy('activate'); setMsg(null);
+        api.activate(patient.id)
+          .then(r => { setMsg({ ok: true, text: r.message }); load(); onActivated && onActivated(); })
+          .catch(e => setMsg({ ok: false, text: e.data && e.data.missing ? `${e.message}: ${e.data.missing.join(' · ')}` : e.message }))
+          .finally(() => setBusy(''));
+      };
+      return (
+        <div className="max-w-2xl">
+          <div className="card">
+            <div className="card-h"><h2>Clinical enrollment sequence</h2>
+              {data.activated
+                ? <span className="chip bg-emerald-50 text-emerald-700">ACTIVATED {fmtDate(data.activatedAt)}</span>
+                : <span className="chip bg-amber-50 text-amber-800">{data.steps.filter(s => s.done).length}/{data.steps.length} complete</span>}
+            </div>
+            <div className="p-4">
+              {data.steps.map(s => (
+                <div key={s.key} className="flex items-start justify-between gap-3 py-3 border-b border-stone-100 last:border-0">
+                  <div className="flex items-start gap-2.5">
+                    <i className={`ti mt-0.5 text-lg ${s.done ? 'ti-circle-check text-emerald-600' : 'ti-circle text-stone-300'}`} />
+                    <div>
+                      <div className="font-semibold text-[13.5px]">{s.label}</div>
+                      <div className="text-xs text-stone-500">
+                        {s.done ? [s.by, s.at && fmtTs(s.at)].filter(Boolean).join(' · ') || 'Done' : (s.by || 'Pending')}
+                      </div>
+                    </div>
+                  </div>
+                  {s.kind === 'manual' && !data.activated && (
+                    <button className="btn ghost !py-1 !px-2.5 text-xs" disabled={busy === s.key}
+                      onClick={() => mark(s.key, !s.done)}>
+                      {s.done ? 'Un-mark' : 'Mark done'}
+                    </button>
+                  )}
+                </div>
+              ))}
+              {msg && <p className={`text-sm mt-3 ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
+              {!data.activated && (
+                <button className="btn gold mt-4" disabled={!data.allDone || busy === 'activate'} onClick={activate}>
+                  <i className="ti ti-rosette-discount-check" />{busy === 'activate' ? 'Activating…' : 'ACTIVATE IHPC enrollment'}
+                </button>
+              )}
+              <p className="text-[11px] text-stone-400 mt-2">Payer verification is a manual mark until B1 (Availity eligibility) lands. Records/ROI, initial visit, care plan, and consents derive from the record and cannot be hand-set.</p>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // ── App shell ──
+    const App = () => {
+      const [user, setUser] = useState(() => {
+        try { return JSON.parse(localStorage.getItem('admin_user') || 'null'); } catch { return null; }
+      });
+      const [patients, setPatients] = useState(null);
+      const [q, setQ] = useState('');
+      const [sel, setSel] = useState(null);
+      const [chart, setChart] = useState(null);
+      const [tab, setTab] = useState('summary');
+      const [emrStatus, setEmrStatus] = useState(null);
+      const [linking, setLinking] = useState(false);
+      const [err, setErr] = useState('');
+      const [listOpen, setListOpen] = useState(true);
+
+      const loadPatients = useCallback(() => {
+        if (!getToken()) return;
+        api.patients(q).then(r => { setPatients(r.patients); setErr(''); })
+          .catch(e => {
+            if (e.code === 'AUTH') setUser(null);
+            else setErr(e.message);
+          });
+      }, [q]);
+      useEffect(() => { if (user) { loadPatients(); api.status().then(setEmrStatus).catch(() => {}); } }, [user, loadPatients]);
+
+      const openPatient = (p) => {
+        setSel(p); setChart(null); setTab('summary'); setListOpen(false);
+        api.chart(p.id).then(setChart).catch(e => setErr(e.message));
+      };
+      const refreshChart = () => sel && api.chart(sel.id).then(setChart).catch(() => {});
+      const link = () => {
+        setLinking(true);
+        api.link(sel.id, {}).then(() => { refreshChart(); loadPatients(); })
+          .catch(e => setErr(e.message)).finally(() => setLinking(false));
+      };
+
+      if (!user || !getToken()) return <Login onLogin={setUser} />;
+
+      const tabs = [
+        ['summary', 'Chart'], ['visit', 'Initial Visit (H&P)'], ['medrec', 'Med Rec'],
+        ['careplan', 'Care Plan'], ['checklist', 'Enrollment']
+      ];
+      return (
+        <div className="min-h-screen lg:grid lg:grid-cols-[290px_1fr]">
+          {/* Patient list */}
+          <aside className={`bg-white border-r border-stone-200 ${listOpen ? '' : 'hidden'} lg:block`}>
+            <div className="bg-primary text-white px-5 py-4">
+              <img src="/brand/logo-mark-transparent.png" alt="" className="h-10 mb-1.5" />
+              <div className="text-[9px] tracking-[2px] uppercase text-accent font-bold">Clinical Workspace</div>
+            </div>
+            <div className="p-3">
+              <input className="inp" placeholder="Search patients…" value={q}
+                onChange={e => setQ(e.target.value)} onKeyDown={e => e.key === 'Enter' && loadPatients()} />
+            </div>
+            <div className="px-5 pb-1 lblu">IHPC panel{patients ? ` · ${patients.length}` : ''}</div>
+            <div className="overflow-y-auto" style={{ maxHeight: 'calc(100vh - 190px)' }}>
+              {patients === null && <p className="text-xs text-stone-400 px-5 py-3">Loading…</p>}
+              {patients && patients.length === 0 && <p className="text-xs text-stone-400 px-5 py-3">No IHPC clients yet.</p>}
+              {(patients || []).map(p => (
+                <div key={p.id}
+                  className={`flex items-center gap-3 px-5 py-2.5 border-b border-stone-100 cursor-pointer ${sel && sel.id === p.id ? 'bg-cream border-l-4 border-l-accent' : ''}`}
+                  onClick={() => openPatient(p)}>
+                  <div className="w-9 h-9 rounded-full bg-creamdeep text-primary flex items-center justify-center font-bold text-[13px] border border-stone-200">{initials(p.name)}</div>
+                  <div className="min-w-0">
+                    <div className="font-semibold text-[13.5px] truncate">{p.name}</div>
+                    <div className="text-[11.5px] text-stone-500">
+                      {[p.careTier, p.serviceLine, p.activatedAt ? 'Active' : (p.openEmrPatientId ? 'Linked' : 'Not linked')].filter(Boolean).join(' · ')}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </aside>
+
+          {/* Chart */}
+          <main className={`${listOpen ? 'hidden' : ''} lg:block`}>
+            <div className="bg-white border-b border-stone-200 px-4 lg:px-7 py-3 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <button className="lg:hidden btn ghost !px-2.5 !py-1.5" onClick={() => setListOpen(true)}><i className="ti ti-users" /></button>
+                <div className="serif text-lg text-primary font-semibold">Patient Chart</div>
+              </div>
+              <div className="flex items-center gap-2 text-[11.5px] text-stone-500 bg-cream border border-stone-200 px-3 py-1.5 rounded-full">
+                <span className={`w-2 h-2 rounded-full ${emrStatus && emrStatus.connected ? 'bg-emerald-500' : 'bg-red-500'}`} />
+                {emrStatus === null ? 'OpenEMR…' : emrStatus.connected ? 'OpenEMR connected' : (emrStatus.configured ? 'OpenEMR unreachable' : 'OpenEMR not configured')}
+              </div>
+            </div>
+            {err && <p className="text-red-600 text-sm px-7 pt-3">{err}</p>}
+            {!sel && <div className="p-10 text-stone-400 text-sm">Select a patient to open their chart.</div>}
+            {sel && (
+              <div>
+                <div className="bg-white border-b border-stone-200 px-4 lg:px-7 pt-4">
+                  <div className="flex items-center gap-4 pb-3">
+                    <div className="w-12 h-12 rounded-full bg-accent text-primary flex items-center justify-center font-bold border border-stone-200">{initials(sel.name)}</div>
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="serif text-xl text-primary font-semibold">{sel.name}</span>
+                        <span className="chip bg-primary text-white">{sel.serviceLine}</span>
+                        {sel.activatedAt && <span className="chip bg-emerald-50 text-emerald-700">ACTIVATED</span>}
+                      </div>
+                      <div className="text-xs text-stone-500 flex gap-3 flex-wrap mt-0.5">
+                        <span>DOB <b>{chart && chart.demographics.dob ? chart.demographics.dob : '—'}</b></span>
+                        <span>Track <b>{(chart && chart.demographics.careTierLabel) || sel.careTierLabel || sel.careTier || '—'}</b></span>
+                        <span>OpenEMR <b>{(chart && chart.demographics.openEmrPatientId) ? `${chart.demographics.openEmrPatientId.slice(0, 8)}…` : 'not linked'}</b></span>
+                        {chart && chart.demographics.payerType && <span>Payer <b>{chart.demographics.payerType}</b></span>}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex overflow-x-auto -mb-px">
+                    {tabs.map(([k, label]) => (
+                      <div key={k} className={`tabbtn ${tab === k ? 'on' : ''}`} onClick={() => setTab(k)}>{label}</div>
+                    ))}
+                  </div>
+                </div>
+                <div className="p-4 lg:p-7">
+                  {tab === 'summary' && <SummaryTab chart={chart} patient={sel} onLink={link} linking={linking} />}
+                  {tab === 'visit' && (chart ? <HpTab patient={sel} chart={chart} onDone={() => { refreshChart(); loadPatients(); }} /> : <p className="text-sm text-stone-500">Loading…</p>)}
+                  {tab === 'medrec' && <MedRecTab patient={sel} />}
+                  {tab === 'careplan' && <CarePlanTab patient={sel} onSaved={loadPatients} />}
+                  {tab === 'checklist' && <ChecklistTab patient={sel} onActivated={loadPatients} />}
+                </div>
+              </div>
+            )}
+            <footer className="px-7 py-4 text-[10.5px] text-stone-400">
+              Authorized users only. This system contains protected health information; all access is logged.
+            </footer>
+          </main>
+        </div>
+      );
+    };
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

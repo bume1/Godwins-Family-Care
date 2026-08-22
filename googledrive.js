@@ -409,6 +409,38 @@ async function uploadOfflinePacketFile(clientName, fileName, fileBuffer, mimeTyp
   }
 }
 
+// Care-plan PDFs (Session 4.1): authored + signed versions, one folder per
+// client under "GFC Care Plans". PHI — no anyone-link grant (same gate as the
+// other PHI uploads).
+async function uploadCarePlanFile(clientName, fileName, pdfBuffer) {
+  try {
+    const drive = await getDriveClient();
+    const { Readable } = require('stream');
+
+    const rootFolderId = await findOrCreateFolder('GFC Care Plans', null);
+    const clientFolderId = await findOrCreateFolder(clientName || 'Unnamed Client', rootFolderId);
+
+    const response = await drive.files.create({
+      resource: { name: fileName, parents: [clientFolderId] },
+      media: { mimeType: 'application/pdf', body: Readable.from([pdfBuffer]) },
+      fields: 'id, name, webViewLink, webContentLink'
+    });
+
+    await maybeGrantAnyoneLink(drive, response.data.id);
+
+    console.log(`✅ Uploaded care-plan PDF to Google Drive: ${response.data.name}`);
+    return {
+      fileId: response.data.id,
+      fileName: response.data.name,
+      webViewLink: response.data.webViewLink,
+      webContentLink: response.data.webContentLink
+    };
+  } catch (error) {
+    console.error('Error uploading care-plan PDF to Google Drive:', error.message);
+    throw error;
+  }
+}
+
 module.exports = {
   testConnection,
   findOrCreateFolder,
@@ -419,6 +451,7 @@ module.exports = {
   uploadServiceReportAttachment,
   uploadProviderROIFile,
   uploadOfflinePacketFile,
+  uploadCarePlanFile,
   getSheetsClient,
   getDriveClient
 };

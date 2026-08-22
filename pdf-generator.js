@@ -951,10 +951,163 @@ async function generateProviderROIPDF(d) {
   });
 }
 
+// ============================================================
+// Care Plan / Service Plan PDF (Session 4.1, spec §4.3 signed-PDF rule)
+//
+// One document, its OWN signatures respectively: the RN author signature and
+// the client (or representative) co-signature — each rendered as the captured
+// signature image + printed name + timestamp + IP verification hash. Emitted
+// in two states:
+//   - authored  (RN signed, client line blank, "PENDING CLIENT CO-SIGNATURE")
+//   - signed    (both signatures populated — the final legal artifact)
+// Brand: navy/gold/cream per ROI_COLORS (the 3.4 reference pattern).
+// ============================================================
+async function generateCarePlanPDF(d) {
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ size: 'LETTER', margin: 44, bufferPages: true });
+      const chunks = [];
+      doc.on('data', c => chunks.push(c));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+
+      const L = 44, R = 612 - 44, W = R - L;
+      const plan = d.plan || {};
+      const fmt = (iso) => iso ? new Date(iso).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) : '—';
+      const fmtTs = (iso) => iso ? new Date(iso).toLocaleString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
+      let y = 40;
+
+      const section = (num, label) => {
+        if (y > 690) { doc.addPage(); y = 44; }
+        y += 6;
+        doc.rect(L, y, W, 17).fill(ROI_COLORS.navy);
+        doc.fontSize(9).fillColor(ROI_COLORS.gold).font('Helvetica-Bold').text(String(num), L + 8, y + 4.5);
+        doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(8.5)
+          .text(label.toUpperCase(), L + 22, y + 5, { characterSpacing: 0.6 });
+        y += 24;
+        doc.fillColor(ROI_COLORS.ink);
+      };
+      const bullets = (items) => {
+        for (const it of (items || [])) {
+          if (y > 720) { doc.addPage(); y = 44; }
+          doc.circle(L + 4, y + 5, 1.8).fill(ROI_COLORS.goldRule);
+          doc.fontSize(9.5).fillColor(ROI_COLORS.ink).font('Helvetica').text(String(it), L + 14, y, { width: W - 14 });
+          y += Math.max(14, doc.heightOfString(String(it), { width: W - 14 }) + 4);
+        }
+      };
+      const fieldRow = (fields) => {
+        if (y > 715) { doc.addPage(); y = 44; }
+        const gap = 16;
+        const colW = (W - gap * (fields.length - 1)) / fields.length;
+        fields.forEach((f, i) => {
+          const x = L + i * (colW + gap);
+          doc.fontSize(7).fillColor(ROI_COLORS.muted).font('Helvetica').text((f.label || '').toUpperCase(), x, y, { width: colW, characterSpacing: 0.4 });
+          doc.fontSize(10.5).fillColor(ROI_COLORS.ink).font('Helvetica').text(f.value || ' ', x, y + 10, { width: colW });
+          doc.moveTo(x, y + 26).lineTo(x + colW, y + 26).strokeColor(ROI_COLORS.line).lineWidth(0.7).stroke();
+        });
+        y += 36;
+      };
+      // One signature block: image + printed name + timestamp + IP hash.
+      const signatureBlock = (label, sig) => {
+        if (y > 640) { doc.addPage(); y = 44; }
+        const top = y;
+        doc.fontSize(7).fillColor(ROI_COLORS.muted).font('Helvetica').text(label.toUpperCase(), L, top);
+        const img = sig && sig.signatureImage;
+        if (typeof img === 'string' && img.startsWith('data:image')) {
+          try {
+            const buf = Buffer.from(img.slice(img.indexOf(',') + 1), 'base64');
+            doc.image(buf, L, top + 10, { fit: [240, 46] });
+          } catch (e) { /* non-fatal: leave signature area blank */ }
+        } else if (sig && sig.pending) {
+          doc.fontSize(9).fillColor(ROI_COLORS.muted).font('Helvetica-Oblique')
+            .text('Pending signature', L, top + 26);
+        }
+        doc.moveTo(L, top + 58).lineTo(L + 300, top + 58).strokeColor(ROI_COLORS.line).lineWidth(0.7).stroke();
+        doc.fontSize(7).fillColor(ROI_COLORS.muted).font('Helvetica').text('SIGNED (DATE & TIME)', L + 330, top);
+        doc.fontSize(10).fillColor(ROI_COLORS.ink).font('Helvetica').text(sig && sig.at ? fmtTs(sig.at) : ' ', L + 330, top + 12);
+        doc.moveTo(L + 330, top + 58).lineTo(R, top + 58).strokeColor(ROI_COLORS.line).lineWidth(0.7).stroke();
+        y = top + 66;
+        fieldRow([
+          { label: 'Printed name', value: (sig && sig.name) || '' },
+          { label: 'IP verification (hashed)', value: sig && sig.ipHash ? String(sig.ipHash).slice(0, 16) : '' }
+        ]);
+      };
+
+      // ── Header ──
+      doc.fontSize(13).fillColor(ROI_COLORS.navy).font('Helvetica-Bold').text(ROI_ORG.name, L, y);
+      doc.fontSize(8).fillColor(ROI_COLORS.muted).font('Helvetica')
+        .text(`${ROI_ORG.address}   Tel ${ROI_ORG.tel}   Fax ${ROI_ORG.fax}`, L, y + 17, { width: W, align: 'right' });
+      y += 30;
+      doc.rect(L, y, W, 2).fill(ROI_COLORS.goldRule);
+      y += 12;
+      doc.fontSize(21).fillColor(ROI_COLORS.navy).font('Times-Bold').text('Care Plan / Service Plan', L, y);
+      y += 28;
+      doc.fontSize(9).fillColor(ROI_COLORS.muted).font('Times-Italic')
+        .text(`Version ${plan.version ?? '—'} · authored ${fmt(plan.authoredAt)}${plan.authoredBy ? ` · ${plan.authoredBy}` : ''}`, L, y, { width: W });
+      y += 16;
+      if (d.state === 'authored') {
+        doc.rect(L, y, W, 20).fillAndStroke('#FDF6E7', ROI_COLORS.goldRule);
+        doc.fontSize(9).fillColor('#9a6a1e').font('Helvetica-Bold')
+          .text('PENDING CLIENT CO-SIGNATURE — not yet in effect', L + 10, y + 6);
+        y += 30;
+      }
+
+      // ── 1 Patient ──
+      section(1, 'Patient');
+      fieldRow([{ label: 'Patient name', value: d.patientName }, { label: 'Date of birth', value: d.patientDOB }]);
+      fieldRow([{ label: 'Care track', value: d.careTierLabel || d.careTier || '' }, { label: 'Service line', value: d.serviceLine || '' }]);
+
+      // ── 2 Problems ──
+      section(2, 'Problems addressed');
+      bullets(plan.problems);
+
+      // ── 3 Goals ──
+      section(3, 'Goals & objectives');
+      bullets(plan.goals);
+
+      // ── 4 Tasks ──
+      if ((plan.eachVisit || []).length) {
+        section(4, 'Task list — each visit');
+        bullets(plan.eachVisit);
+      }
+
+      // ── 5 Visits & duration ──
+      section(5, 'Visit schedule & duration');
+      fieldRow([{ label: 'Frequency', value: plan.visitFrequency }, { label: 'Days', value: (plan.visitDays || []).join(', ') }]);
+      fieldRow([{ label: 'Times', value: plan.visitTimes }, { label: 'Duration', value: plan.duration }]);
+      fieldRow([{ label: 'Effective date', value: fmt(plan.effectiveDate) }, { label: 'Target date', value: fmt(plan.targetDate) }]);
+      if (plan.chargePlanNote) {
+        doc.fontSize(7).fillColor(ROI_COLORS.muted).font('Helvetica').text('CHARGE PLAN', L, y);
+        doc.fontSize(9.5).fillColor(ROI_COLORS.ink).font('Helvetica').text(plan.chargePlanNote, L, y + 10, { width: W });
+        y += doc.heightOfString(plan.chargePlanNote, { width: W }) + 20;
+      }
+
+      // ── 6 Signatures — THIS document's signatures, respectively ──
+      section(6, 'Signatures');
+      doc.fontSize(8.5).fillColor(ROI_COLORS.ink).font('Helvetica')
+        .text('This care plan was developed with the client and family and is reviewed periodically. It takes effect when signed by the authoring clinician and co-signed by the client or authorized representative.', L, y, { width: W });
+      y += doc.heightOfString('This care plan was developed with the client and family and is reviewed periodically. It takes effect when signed by the authoring clinician and co-signed by the client or authorized representative.', { width: W }) + 8;
+      signatureBlock('RN / Clinician author signature', d.rnSignature);
+      signatureBlock('Client or authorized representative co-signature',
+        d.clientSignature || { pending: true });
+
+      // ── Footer ──
+      const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+      doc.fontSize(7.5).fillColor(ROI_COLORS.muted).font('Helvetica-Oblique')
+        .text(`${ROI_ORG.name}  ·  Care Plan v${plan.version ?? '—'}  ·  Generated ${today}`, L, Math.min(y + 8, 760), { width: W });
+
+      doc.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
 module.exports = {
   generateServiceReportPDF,
   generateServiceReportWithAttachments,
   generateEnrollmentPacketPDF,
   generateProviderROIPDF,
+  generateCarePlanPDF,
   ROI_CATEGORY_LABELS
 };
