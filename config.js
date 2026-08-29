@@ -225,20 +225,25 @@ const OPENEMR = Object.freeze({
   ENCOUNTER_CATEGORY: process.env.OPENEMR_ENCOUNTER_CATEGORY || '5',
   POS_CODE: process.env.OPENEMR_POS_CODE || '12',
   PROVIDER_ID: process.env.OPENEMR_PROVIDER_ID || '1',
-  // Least-privilege scope set for 4.1: FHIR reads + Patient.write for the
-  // link/create step, standard-API writes for H&P, med-rec, problems, docs.
+  // Least-privilege scope set for 4.1/4.2: FHIR reads + Patient.write for the
+  // link/create step, standard-API writes for H&P, med-rec, problems, docs,
+  // and (4.2) appointments. The registered OAuth client must carry every scope
+  // here — OpenEMR cannot widen a client's grant after registration, so adding
+  // a scope means registering a successor client and swapping env credentials
+  // (done 08/2026 for the appointment scopes: "GFC Care Platform (server) v2").
   SCOPES: process.env.OPENEMR_SCOPES || [
     'openid', 'offline_access', 'api:oemr', 'api:fhir',
     'user/Patient.read', 'user/Patient.write', 'user/Encounter.read', 'user/Condition.read',
     'user/AllergyIntolerance.read', 'user/Medication.read', 'user/MedicationRequest.read',
     'user/CarePlan.read', 'user/DocumentReference.read', 'user/Binary.read', 'user/Observation.read',
     'user/Practitioner.read', 'user/Organization.read', 'user/Coverage.read', 'user/Goal.read',
-    'user/Procedure.read', 'user/DiagnosticReport.read',
+    'user/Procedure.read', 'user/DiagnosticReport.read', 'user/Appointment.read',
     'user/patient.read', 'user/patient.write', 'user/encounter.read', 'user/encounter.write',
     'user/vital.read', 'user/vital.write', 'user/medical_problem.read', 'user/medical_problem.write',
     'user/medication.read', 'user/medication.write', 'user/allergy.read', 'user/allergy.write',
     'user/soap_note.read', 'user/soap_note.write', 'user/document.read', 'user/document.write',
-    'user/facility.read', 'user/practitioner.read', 'user/insurance.read'
+    'user/facility.read', 'user/practitioner.read', 'user/insurance.read',
+    'user/appointment.read', 'user/appointment.write'
   ].join(' ')
 });
 

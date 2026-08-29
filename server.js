@@ -1828,6 +1828,9 @@ const authenticateToken = async (req, res, next) => {
         // Clinical (FNP/RN) access — gates the clinician workspace (Session 4.1)
         hasClinicalAccess: freshUser.hasClinicalAccess || false,
         licenseLevel: freshUser.licenseLevel || null,
+        // OpenEMR provider (numeric pc_aid) this clinician's calendar maps to
+        // (Session 4.2 scheduling; set by an admin in the user form)
+        openEmrProviderId: freshUser.openEmrProviderId || null,
         // Managers automatically get client portal admin access
         hasClientPortalAdminAccess: freshUser.hasClientPortalAdminAccess || isManager || false,
         // Vendor-specific: clients they can service
@@ -2250,7 +2253,8 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       hasServicePortalAccess, hasAdminHubAccess, hasImplementationsAccess, hasClientPortalAdminAccess,
       isManager, assignedClients, hubspotCompanyId, hubspotDealId, hubspotContactId, projectAccessLevels,
       existingPortalSlug, phone, sendWelcomeEmail: shouldSendWelcome = true,
-      licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId
+      licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
+      openEmrProviderId
     } = req.body;
 
     // Managers can only create client users
@@ -2282,6 +2286,8 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       // GFC extended fields
       hasClinicalAccess: hasClinicalAccess || false,
       licenseLevel: licenseLevel || null,
+      // OpenEMR provider mapping for clinician calendars (Session 4.2)
+      openEmrProviderId: openEmrProviderId || null,
       createdAt: new Date().toISOString(),
       // Account status — active accounts receive notifications, inactive do not
       accountStatus: 'active',
@@ -2911,7 +2917,16 @@ app.get('/api/users', authenticateToken, async (req, res) => {
       // HubSpot record IDs for client-level uploads
       hubspotCompanyId: u.hubspotCompanyId || '',
       hubspotDealId: u.hubspotDealId || '',
-      hubspotContactId: u.hubspotContactId || ''
+      hubspotContactId: u.hubspotContactId || '',
+      // GFC extended fields — the admin-hub edit form round-trips the whole
+      // formData, so anything missing here would be silently wiped on save.
+      phone: u.phone || '',
+      licenseLevel: u.licenseLevel || '',
+      hasClinicalAccess: u.hasClinicalAccess || false,
+      enrollmentStatus: u.enrollmentStatus || null,
+      careTeam: u.careTeam || null,
+      familyOfClientId: u.familyOfClientId || null,
+      openEmrProviderId: u.openEmrProviderId || null
     }));
     res.json(safeUsers);
   } catch (error) {
@@ -2927,7 +2942,8 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
       practiceName, isNewClient, logo, hubspotCompanyId, hubspotDealId, hubspotContactId,
       hasServicePortalAccess, hasAdminHubAccess, hasImplementationsAccess, hasClientPortalAdminAccess,
       isManager, assignedClients, phone, accountStatus, emailUnsubscribed,
-      licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId
+      licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
+      openEmrProviderId
     } = req.body;
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === userId);
@@ -2977,6 +2993,8 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
     // Family / authorized contact → linked client (user id); drives the
     // ROI-family portal gate (resolveGfcClientRecord).
     if (familyOfClientId !== undefined) users[idx].familyOfClientId = familyOfClientId || null;
+    // Clinician → OpenEMR provider mapping (numeric pc_aid; Session 4.2 calendars)
+    if (openEmrProviderId !== undefined) users[idx].openEmrProviderId = openEmrProviderId || null;
 
     // Account active status (no separate isActive - handled by accountStatus above)
 
@@ -5740,9 +5758,18 @@ app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireCli
 
     const emr = openemr.forActor(req.user);
     const puuid = client.openEmrPatientId;
+    // Session 4.2: an H&P opened from a calendar appointment links the
+    // resulting Encounter to it (appointment_encounters pointer).
+    let linkedAppointment = null;
+    if (req.body && req.body.appointmentEid) {
+      linkedAppointment = (await emr.getPatientAppointmentRows(puuid))
+        .find(r => String(r.pc_eid) === String(req.body.appointmentEid));
+      if (!linkedAppointment) return res.status(400).json({ error: 'That appointment does not belong to this patient', code: 'APPT_PATIENT_MISMATCH' });
+    }
     const enc = await emr.createEncounter(puuid, built.encounter);
     const encounterUuid = enc && (enc.euuid || enc.uuid || enc.encounter_uuid || enc.id);
     if (!encounterUuid) return res.status(502).json({ error: 'OpenEMR did not return an encounter id' });
+    if (linkedAppointment) await linkAppointmentEncounter(linkedAppointment.pc_eid, client.id, encounterUuid, req.user);
     // The structured note is the primary record (both-arm BPs are serialized
     // into it verbatim). The vitals FORM write is best-effort: this OpenEMR
     // build's vitals REST endpoint can fail on a service bug (authUserId
@@ -5767,7 +5794,7 @@ app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireCli
     if (triage.track) users[idx].careTier = triage.track;
     await db.set('users', users);
     invalidateUsersCache();
-    await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_hp_documented', 'client', client.id, { encounterUuid, track: triage.track || null, warnings: warnings.length });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_hp_documented', 'client', client.id, { encounterUuid, track: triage.track || null, warnings: warnings.length, appointmentEid: linkedAppointment ? String(linkedAppointment.pc_eid) : null });
     res.json({ message: 'Initial visit documented to OpenEMR', encounterUuid, at, warnings });
   } catch (error) {
     console.error('Clinical H&P error:', error);
@@ -6044,6 +6071,438 @@ app.post('/api/clinical/patients/:clientId/activate', authenticateToken, require
   } catch (error) {
     console.error('Clinical activate error:', error);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================
+// CLINICAL SCHEDULING (Session 4.2) — OpenEMR-tied appointments
+//
+// OpenEMR is the source of truth for provider availability and booked
+// appointments; the app NEVER keeps a second appointment ledger. The only
+// app-side rows are linkage pointers (appointment_encounters: which OpenEMR
+// appointment produced which Encounter). 7.0.4's API is create/delete only,
+// so reschedule/cancel/no-show use the tombstone swap (approved 08/2026):
+// replacements are posted first, the superseded row removed last, and the
+// original slot survives as a cancelled row — nothing ever leaves the
+// calendar. PHCP caregiver shifts (Session 7) are a separate system by
+// design — do not couple this to the app/RDS shift store.
+// ============================================================
+
+const APPT_DEFAULTS = () => ({
+  categoryId: config.OPENEMR.ENCOUNTER_CATEGORY,
+  facilityId: config.OPENEMR.FACILITY_ID
+});
+
+// Linkage pointers ONLY (per the 4.2 no-duplication rule):
+// { eid, clientId, encounterUuid, byId, byName, at }
+const getAppointmentLinkage = async () => (await db.get('appointment_encounters')) || [];
+const linkAppointmentEncounter = async (eid, clientId, encounterUuid, actor) => {
+  const rows = await getAppointmentLinkage();
+  rows.push({ eid: String(eid), clientId, encounterUuid, byId: actor.id, byName: actor.name, at: new Date().toISOString() });
+  await db.set('appointment_encounters', rows);
+};
+// A swap changes the OpenEMR eid; the pointer follows the surviving row.
+const migrateAppointmentLinkage = async (oldEid, newEid) => {
+  const rows = await getAppointmentLinkage();
+  let changed = false;
+  for (const r of rows) {
+    if (String(r.eid) === String(oldEid)) { r.eid = String(newEid); r.movedFromEid = String(oldEid); changed = true; }
+  }
+  if (changed) await db.set('appointment_encounters', rows);
+};
+const linkageByEid = (rows) => {
+  const map = new Map();
+  for (const r of rows) if (r && r.eid) map.set(String(r.eid), r.encounterUuid);
+  return map;
+};
+
+// Admin sees/books every provider; a clinician is locked to their own
+// OpenEMR provider mapping (openEmrProviderId, set by an admin).
+const resolveProviderScope = (reqUser, requestedProviderId) => {
+  if (reqUser.role === config.ROLES.ADMIN) {
+    return { providerId: requestedProviderId ? String(requestedProviderId) : null, all: !requestedProviderId };
+  }
+  if (!reqUser.openEmrProviderId) {
+    return { error: 'Your account is not mapped to an OpenEMR provider yet — ask an admin to set it in your user profile.', code: 'PROVIDER_NOT_MAPPED' };
+  }
+  const own = String(reqUser.openEmrProviderId);
+  if (requestedProviderId && String(requestedProviderId) !== own) {
+    return { error: 'Clinicians can only view and book their own calendar.', code: 'PROVIDER_SCOPE' };
+  }
+  return { providerId: own, locked: true };
+};
+
+// puuid → app client (for calendar rows → chart navigation). Pointer data only.
+const clinicalClientsByPuuid = async () => {
+  const users = await getUsers();
+  const map = new Map();
+  for (const u of users) {
+    if (u.role === config.ROLES.CLIENT && u.openEmrPatientId) {
+      map.set(String(u.openEmrPatientId), { clientId: u.id, name: u.name });
+    }
+  }
+  return map;
+};
+
+const summarizeCalendarRows = async (rows, emrRowsFilter) => {
+  const [linkRows, clientMap] = await Promise.all([getAppointmentLinkage(), clinicalClientsByPuuid()]);
+  const links = linkageByEid(linkRows);
+  return rows.filter(emrRowsFilter || (() => true)).map(r => {
+    const s = clinicalRepo.summarizeAppointmentRow(r, links.get(String(r.pc_eid)) || null);
+    const app = r.puuid ? clientMap.get(String(r.puuid)) : null;
+    return { ...s, clientId: app ? app.clientId : null };
+  }).sort((a, b) => `${a.date} ${a.startTime}`.localeCompare(`${b.date} ${b.startTime}`));
+};
+
+// Load one appointment by eid from the live calendar and enforce the caller's
+// provider scope on it. The list row locates it (and carries pid/puuid); the
+// single-row GET hydrates the fields the list omits (pc_hometext, pc_duration,
+// pc_room — a 7.0.4 quirk) so tombstone swaps preserve the record verbatim.
+const loadAppointmentForMutation = async (emr, eid, reqUser) => {
+  const rows = await emr.listAppointmentRows();
+  const listRow = rows.find(r => String(r.pc_eid) === String(eid));
+  if (!listRow) return { status: 404, error: 'No OpenEMR appointment with that id (it may have been superseded — refresh the calendar)', code: 'APPT_NOT_FOUND' };
+  if (reqUser.role !== config.ROLES.ADMIN && String(listRow.pc_aid) !== String(reqUser.openEmrProviderId || '')) {
+    return { status: 403, error: 'Clinicians can only change appointments on their own calendar.', code: 'PROVIDER_SCOPE' };
+  }
+  if (listRow.pc_apptstatus === clinicalRepo.APPT_STATUS.cancelled) {
+    return { status: 409, error: 'This appointment is already cancelled.', code: 'APPT_ALREADY_CANCELLED' };
+  }
+  const full = await emr.getAppointmentRow(listRow.puuid, eid);
+  return { row: { ...listRow, ...(full || {}) }, rows };
+};
+
+// GET /api/clinical/providers — OpenEMR practitioner list (numeric ids drive
+// pc_aid) + the caller's own mapping, for pickers and calendar filters.
+// KNOWN EMR-SERVER-SIDE GAP (§15 open item, verified 08/2026): the dev
+// instance's gfc-app-api ACL covers clinical sections only, so BOTH
+// practitioner endpoints 403 ("Organization policy does not have permit
+// access resource"). Until the EMR maintainer widens the ACL group, we
+// degrade to a fallback list built from mapped app clinicians + the numeric
+// provider ids visible on the live calendar — names come from app users.
+app.get('/api/clinical/providers', authenticateToken, requireClinicalStaff, async (req, res) => {
+  try {
+    if (!openemr.isConfigured()) return res.status(503).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
+    const emr = openemr.forActor(req.user);
+    let providers = null; let degraded = false; let notice = null;
+    try {
+      const rows = await emr.getPractitionerRows();
+      providers = rows.map(p => ({
+        id: String(p.id),
+        name: [p.fname, p.mname, p.lname].filter(Boolean).join(' ') || p.username || `Provider ${p.id}`,
+        npi: p.npi || null
+      }));
+    } catch (e) {
+      degraded = true;
+      notice = 'OpenEMR provider directory unavailable (EMR ACL — §15 open item); showing providers known to the app.';
+      const byId = new Map();
+      const users = await getUsers();
+      for (const u of users) {
+        if (u.openEmrProviderId) byId.set(String(u.openEmrProviderId), { id: String(u.openEmrProviderId), name: u.name, npi: null });
+      }
+      try {
+        for (const r of await emr.listAppointmentRows()) {
+          if (r && r.pc_aid != null && !byId.has(String(r.pc_aid))) {
+            byId.set(String(r.pc_aid), { id: String(r.pc_aid), name: `Provider ${r.pc_aid}`, npi: r.pce_aid_npi || null });
+          }
+        }
+      } catch { /* calendar also unreachable — fall through with what we have */ }
+      if (config.OPENEMR.PROVIDER_ID && !byId.has(String(config.OPENEMR.PROVIDER_ID))) {
+        byId.set(String(config.OPENEMR.PROVIDER_ID), { id: String(config.OPENEMR.PROVIDER_ID), name: `Provider ${config.OPENEMR.PROVIDER_ID} (default)`, npi: null });
+      }
+      providers = [...byId.values()].sort((a, b) => Number(a.id) - Number(b.id));
+    }
+    res.json({
+      providers,
+      degraded, notice,
+      myProviderId: req.user.openEmrProviderId ? String(req.user.openEmrProviderId) : null,
+      isAdmin: req.user.role === config.ROLES.ADMIN
+    });
+  } catch (error) {
+    console.error('Clinical providers error:', error);
+    res.status(502).json({ error: `OpenEMR error: ${error.message}` });
+  }
+});
+
+// GET /api/clinical/appointments?providerId=&from=&to= — calendar feed read
+// LIVE from OpenEMR. Admin: unified view (optional provider filter);
+// clinician: own calendar only.
+app.get('/api/clinical/appointments', authenticateToken, requireClinicalStaff, async (req, res) => {
+  try {
+    if (!openemr.isConfigured()) return res.status(503).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
+    const scope = resolveProviderScope(req.user, req.query.providerId);
+    if (scope.error) return res.status(409).json({ error: scope.error, code: scope.code });
+    const { from, to } = req.query;
+    const rows = await openemr.forActor(req.user).listAppointmentRows();
+    const appointments = await summarizeCalendarRows(rows, r =>
+      (!scope.providerId || String(r.pc_aid) === scope.providerId) &&
+      (!from || String(r.pc_eventDate) >= String(from)) &&
+      (!to || String(r.pc_eventDate) <= String(to)));
+    res.json({ appointments, providerId: scope.providerId, locked: !!scope.locked });
+  } catch (error) {
+    console.error('Clinical appointments list error:', error);
+    res.status(502).json({ error: `OpenEMR error: ${error.message}` });
+  }
+});
+
+// GET /api/clinical/patients/:clientId/appointments — the chart's appointment
+// list: upcoming + past, each marked documented / no-show / cancelled /
+// not-yet-documented from the linkage pointers.
+app.get('/api/clinical/patients/:clientId/appointments', authenticateToken, requireClinicalStaff, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    if (!client.openEmrPatientId || !openemr.isConfigured()) return res.json({ appointments: [], linked: !!client.openEmrPatientId });
+    const emr = openemr.forActor(req.user);
+    const rows = await emr.getPatientAppointmentRows(client.openEmrPatientId);
+    // Hydrate each row — the list omits pc_hometext/pc_duration (7.0.4 quirk),
+    // and the chart shows location + notes. Patient volumes keep this small.
+    const full = await Promise.all(rows.map(r =>
+      emr.getAppointmentRow(client.openEmrPatientId, r.pc_eid).catch(() => null)));
+    const appointments = await summarizeCalendarRows(rows.map((r, i) => ({ ...r, ...(full[i] || {}) })));
+    res.json({ appointments, linked: true });
+  } catch (error) {
+    console.error('Clinical patient appointments error:', error);
+    res.status(502).json({ error: `OpenEMR error: ${error.message}` });
+  }
+});
+
+// GET /api/clinical/appointments/:eid — one appointment, hydrated with the
+// fields the list endpoints omit (notes/location), for the detail view.
+app.get('/api/clinical/appointments/:eid', authenticateToken, requireClinicalStaff, async (req, res) => {
+  try {
+    if (!openemr.isConfigured()) return res.status(503).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
+    const emr = openemr.forActor(req.user);
+    const rows = await emr.listAppointmentRows();
+    const listRow = rows.find(r => String(r.pc_eid) === String(req.params.eid));
+    if (!listRow) return res.status(404).json({ error: 'No OpenEMR appointment with that id', code: 'APPT_NOT_FOUND' });
+    if (req.user.role !== config.ROLES.ADMIN && String(listRow.pc_aid) !== String(req.user.openEmrProviderId || '')) {
+      return res.status(403).json({ error: 'Clinicians can only view appointments on their own calendar.', code: 'PROVIDER_SCOPE' });
+    }
+    const full = await emr.getAppointmentRow(listRow.puuid, listRow.pc_eid).catch(() => null);
+    const [appointment] = await summarizeCalendarRows([{ ...listRow, ...(full || {}) }]);
+    res.json({ appointment });
+  } catch (error) {
+    console.error('Clinical appointment detail error:', error);
+    res.status(502).json({ error: `OpenEMR error: ${error.message}` });
+  }
+});
+
+// POST /api/clinical/patients/:clientId/appointments — create on the
+// provider's OpenEMR calendar. Double-booking is rejected against the LIVE
+// OpenEMR list (the availability authority) with a specific 409.
+app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, requireClinicalStaff, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    if (!client.openEmrPatientId) return res.status(409).json({ error: 'Link this client to an OpenEMR patient before scheduling', code: 'EMR_NOT_LINKED' });
+    if (!openemr.isConfigured()) return res.status(503).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
+
+    const body = req.body || {};
+    const scope = resolveProviderScope(req.user, body.providerId);
+    if (scope.error) return res.status(scope.code === 'PROVIDER_SCOPE' ? 403 : 409).json({ error: scope.error, code: scope.code });
+    const providerId = scope.providerId || String(body.providerId || '');
+    const built = clinicalRepo.buildAppointmentFields({ ...body, providerId }, APPT_DEFAULTS());
+    if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+
+    const emr = openemr.forActor(req.user);
+    const rows = await emr.listAppointmentRows();
+    const conflict = clinicalRepo.findAppointmentConflict(rows, {
+      providerId, date: body.date, startTime: body.startTime, durationMinutes: built.minutes
+    });
+    if (conflict) {
+      return res.status(409).json({
+        error: `That slot is already booked: ${conflict.pc_title || 'appointment'} ${String(conflict.pc_startTime).slice(0, 5)}–${String(conflict.pc_endTime).slice(0, 5)} on ${conflict.pc_eventDate}${conflict.fname ? ` with ${conflict.fname} ${conflict.lname}` : ''}. Pick a different time or provider.`,
+        code: 'APPOINTMENT_CONFLICT',
+        conflictEid: String(conflict.pc_eid)
+      });
+    }
+
+    const eid = await emr.createAppointmentRow(client.openEmrPatientId, built.fields);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'appointment_created', 'client', client.id, {
+      role: req.user.role, appointmentEid: eid, providerId,
+      date: body.date, startTime: body.startTime, durationMinutes: built.minutes, location: built.location
+    });
+    // Read-back proves the round-trip (acceptance requirement); the single-row
+    // GET carries the full record (list rows omit notes/location on 7.0.4).
+    const readBack = await emr.getAppointmentRow(client.openEmrPatientId, eid).catch(() => null);
+    res.json({
+      message: 'Appointment created in OpenEMR',
+      appointment: readBack ? clinicalRepo.summarizeAppointmentRow(readBack, null) : { eid }
+    });
+  } catch (error) {
+    console.error('Clinical appointment create error:', error);
+    res.status(502).json({ error: `OpenEMR write failed: ${error.message}` });
+  }
+});
+
+// POST /api/clinical/appointments/:eid/reschedule — tombstone swap: new slot
+// row + cancelled tombstone preserving the old slot, then remove the
+// superseded row. Conflict-checked against the live calendar first.
+app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requireClinicalStaff, async (req, res) => {
+  try {
+    if (!openemr.isConfigured()) return res.status(503).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
+    const body = req.body || {};
+    const emr = openemr.forActor(req.user);
+    const loaded = await loadAppointmentForMutation(emr, req.params.eid, req.user);
+    if (loaded.error) return res.status(loaded.status).json({ error: loaded.error, code: loaded.code });
+    const { row, rows } = loaded;
+
+    const dec = clinicalRepo.decodeAppointmentNotes(row.pc_hometext);
+    const providerId = (req.user.role === config.ROLES.ADMIN && body.providerId) ? String(body.providerId) : String(row.pc_aid);
+    const built = clinicalRepo.buildAppointmentFields({
+      date: body.date, startTime: body.startTime,
+      durationMinutes: body.durationMinutes || clinicalRepo.rowDurationMinutes(row),
+      providerId, categoryId: row.pc_catid,
+      title: body.title || row.pc_title,
+      location: body.location || dec.location || 'home',
+      notes: body.notes !== undefined ? body.notes : dec.notes
+    }, { categoryId: row.pc_catid, facilityId: row.pc_facility });
+    if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+
+    const conflict = clinicalRepo.findAppointmentConflict(rows, {
+      providerId, date: body.date, startTime: body.startTime,
+      durationMinutes: built.minutes, ignoreEids: [row.pc_eid]
+    });
+    if (conflict) {
+      return res.status(409).json({
+        error: `That slot is already booked: ${conflict.pc_title || 'appointment'} ${String(conflict.pc_startTime).slice(0, 5)}–${String(conflict.pc_endTime).slice(0, 5)} on ${conflict.pc_eventDate}${conflict.fname ? ` with ${conflict.fname} ${conflict.lname}` : ''}. Pick a different time or provider.`,
+        code: 'APPOINTMENT_CONFLICT', conflictEid: String(conflict.pc_eid)
+      });
+    }
+
+    const { newRow, tombstone } = clinicalRepo.buildReschedulePayloads(row, built, { byName: req.user.name });
+    const swap = await emr.swapAppointment(row.puuid, row.pc_eid, [newRow, tombstone]);
+    const [newEid, tombstoneEid] = swap.newEids;
+    await migrateAppointmentLinkage(row.pc_eid, newEid);
+
+    const clientMap = await clinicalClientsByPuuid();
+    const appClient = clientMap.get(String(row.puuid)) || null;
+    await logActivity(req.user.id, req.user.name || req.user.email, 'appointment_rescheduled', 'client', appClient ? appClient.clientId : null, {
+      role: req.user.role, appointmentEid: newEid, previousEid: String(row.pc_eid), tombstoneEid,
+      from: `${row.pc_eventDate} ${String(row.pc_startTime).slice(0, 5)}`, to: `${body.date} ${body.startTime}`,
+      providerId, supersededRowRemoved: swap.deleted
+    });
+    res.json({
+      message: 'Appointment rescheduled in OpenEMR (original slot preserved as a cancelled entry)',
+      appointmentEid: newEid, tombstoneEid,
+      warnings: swap.deleted ? [] : [`The superseded row could not be removed (${swap.deleteError}) — it is still visible on the calendar; retry the cancel on it.`]
+    });
+  } catch (error) {
+    console.error('Clinical appointment reschedule error:', error);
+    res.status(502).json({ error: `OpenEMR write failed: ${error.message}` });
+  }
+});
+
+// POST /api/clinical/appointments/:eid/cancel — reason REQUIRED; the slot
+// becomes a cancelled row (status 'x') with the reason on it. Never a bare
+// hard delete.
+app.post('/api/clinical/appointments/:eid/cancel', authenticateToken, requireClinicalStaff, async (req, res) => {
+  try {
+    if (!openemr.isConfigured()) return res.status(503).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
+    const reason = String((req.body || {}).reason || '').trim();
+    if (!reason) return res.status(400).json({ error: 'A cancellation reason is required', code: 'CANCEL_REASON_REQUIRED' });
+    const emr = openemr.forActor(req.user);
+    const loaded = await loadAppointmentForMutation(emr, req.params.eid, req.user);
+    if (loaded.error) return res.status(loaded.status).json({ error: loaded.error, code: loaded.code });
+    const { row } = loaded;
+
+    const tombstone = clinicalRepo.buildCancelTombstone(row, { reason: reason.slice(0, 500), byName: req.user.name });
+    const swap = await emr.swapAppointment(row.puuid, row.pc_eid, [tombstone]);
+    const [tombstoneEid] = swap.newEids;
+    await migrateAppointmentLinkage(row.pc_eid, tombstoneEid);
+
+    const clientMap = await clinicalClientsByPuuid();
+    const appClient = clientMap.get(String(row.puuid)) || null;
+    await logActivity(req.user.id, req.user.name || req.user.email, 'appointment_cancelled', 'client', appClient ? appClient.clientId : null, {
+      role: req.user.role, appointmentEid: tombstoneEid, previousEid: String(row.pc_eid),
+      reason: reason.slice(0, 500), slot: `${row.pc_eventDate} ${String(row.pc_startTime).slice(0, 5)}`,
+      supersededRowRemoved: swap.deleted
+    });
+    res.json({
+      message: 'Appointment cancelled — it stays on the calendar as a cancelled entry with the reason',
+      appointmentEid: tombstoneEid,
+      warnings: swap.deleted ? [] : [`The superseded row could not be removed (${swap.deleteError}) — it is still visible on the calendar.`]
+    });
+  } catch (error) {
+    console.error('Clinical appointment cancel error:', error);
+    res.status(502).json({ error: `OpenEMR write failed: ${error.message}` });
+  }
+});
+
+// POST /api/clinical/appointments/:eid/no-show — same swap, status '?'; the
+// chart list shows it as no-show (Scope B).
+app.post('/api/clinical/appointments/:eid/no-show', authenticateToken, requireClinicalStaff, async (req, res) => {
+  try {
+    if (!openemr.isConfigured()) return res.status(503).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
+    const emr = openemr.forActor(req.user);
+    const loaded = await loadAppointmentForMutation(emr, req.params.eid, req.user);
+    if (loaded.error) return res.status(loaded.status).json({ error: loaded.error, code: loaded.code });
+    const { row } = loaded;
+
+    const swapRow = clinicalRepo.buildStatusSwap(row, clinicalRepo.APPT_STATUS.noShow, { byName: req.user.name });
+    const swap = await emr.swapAppointment(row.puuid, row.pc_eid, [swapRow]);
+    const [newEid] = swap.newEids;
+    await migrateAppointmentLinkage(row.pc_eid, newEid);
+
+    const clientMap = await clinicalClientsByPuuid();
+    const appClient = clientMap.get(String(row.puuid)) || null;
+    await logActivity(req.user.id, req.user.name || req.user.email, 'appointment_marked_no_show', 'client', appClient ? appClient.clientId : null, {
+      role: req.user.role, appointmentEid: newEid, previousEid: String(row.pc_eid),
+      slot: `${row.pc_eventDate} ${String(row.pc_startTime).slice(0, 5)}`, supersededRowRemoved: swap.deleted
+    });
+    res.json({
+      message: 'Appointment marked as no-show',
+      appointmentEid: newEid,
+      warnings: swap.deleted ? [] : [`The superseded row could not be removed (${swap.deleteError}) — it is still visible on the calendar.`]
+    });
+  } catch (error) {
+    console.error('Clinical appointment no-show error:', error);
+    res.status(502).json({ error: `OpenEMR write failed: ${error.message}` });
+  }
+});
+
+// POST /api/clinical/patients/:clientId/encounters — a follow-up visit
+// documented from an appointment (Scope B): Encounter + SOAP note in OpenEMR,
+// linkage pointer app-side. (The initial H&P route also accepts
+// appointmentEid and links the same way.)
+app.post('/api/clinical/patients/:clientId/encounters', authenticateToken, requireClinicalStaff, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    if (!client.openEmrPatientId) return res.status(409).json({ error: 'Link this client to an OpenEMR patient before documenting a visit', code: 'EMR_NOT_LINKED' });
+    const body = req.body || {};
+    if (!String(body.reason || '').trim()) return res.status(400).json({ error: 'A visit reason is required', code: 'ENCOUNTER_NO_REASON' });
+
+    const emr = openemr.forActor(req.user);
+    let appointment = null;
+    if (body.appointmentEid) {
+      appointment = (await emr.getPatientAppointmentRows(client.openEmrPatientId))
+        .find(r => String(r.pc_eid) === String(body.appointmentEid));
+      if (!appointment) return res.status(400).json({ error: 'That appointment does not belong to this patient', code: 'APPT_PATIENT_MISMATCH' });
+    }
+    const enc = await emr.createEncounter(client.openEmrPatientId, {
+      date: (appointment && appointment.pc_eventDate) || body.date || new Date().toISOString().slice(0, 10),
+      reason: String(body.reason).slice(0, 250),
+      class_code: 'HH'
+    });
+    const encounterUuid = enc && (enc.euuid || enc.uuid || enc.encounter_uuid || enc.id);
+    if (!encounterUuid) return res.status(502).json({ error: 'OpenEMR did not return an encounter id' });
+    await emr.addSoapNote(client.openEmrPatientId, encounterUuid, {
+      subjective: String(body.subjective || '').slice(0, 8000),
+      objective: String(body.objective || '').slice(0, 16000),
+      assessment: String(body.assessment || '').slice(0, 8000),
+      plan: [String(body.plan || '').trim(), req.user.name ? `Documented by ${req.user.name}` : '']
+        .filter(Boolean).join('\n').slice(0, 8000)
+    });
+    if (appointment) await linkAppointmentEncounter(appointment.pc_eid, client.id, encounterUuid, req.user);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_followup_documented', 'client', client.id, {
+      role: req.user.role, encounterUuid, appointmentEid: appointment ? String(appointment.pc_eid) : null
+    });
+    res.json({ message: 'Visit documented to OpenEMR', encounterUuid, linkedAppointmentEid: appointment ? String(appointment.pc_eid) : null });
+  } catch (error) {
+    console.error('Clinical follow-up encounter error:', error);
+    res.status(502).json({ error: `OpenEMR write failed: ${error.message}` });
   }
 });
 
