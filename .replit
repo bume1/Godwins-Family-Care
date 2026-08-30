@@ -43,6 +43,8 @@ externalPort = 3000
 
 [userenv.shared]
 PORT = "5000"
+OPENEMR_CLIENT_ID = "dlHHtxPDc1gS-_hKVxhYvC4MPFLmLGY7G1x-khy8ZjQ"
+OPENEMR_CLIENT_SECRET = "wNBD1IFK0j7SaGe2LesgxeqIO2gKipt4pt8vOn1WV0VLkB93__20jKzYsqvisw-5fIgN4oxinddexd393MRsDA"
 
 [deployment]
 deploymentTarget = "autoscale"
