@@ -4,6 +4,40 @@
 
 ---
 
+### Version 3.5.0 - August 16, 2026
+
+#### New Features
+- Add files via upload
+- Add files via upload
+- Add files via upload
+- Add files via upload
+- Add files via upload
+
+#### Bug Fixes
+- Session 3 audit remediation: fix P0/P1 bugs + parity + pre-live hardening
+
+#### Documentation
+- flip 3.3 to merged (PR #16) + add post-merge backfill step
+- status audit 2026-08-16 — confirm Session 3.3 merged (PR #16)
+- sync session plan + CLAUDE.md to actual build state
+- add prerequisite gate — sessions may not skip earlier pending sessions without explicit approval
+- sync CLAUDE.md — Session 3.5 merged via PR #15
+- record signed-PDF-per-document requirement for Session 4
+
+#### Changes
+- Session 3.3: Staff enrollment view + offline onboarding + care-tier migration
+- Session 3.5 follow-ups: brand banner photos, hide dormant Impl checkbox, docs-accuracy sweep
+- Session 3.5: Reconciliation — live data wiring + desktop pass
+- Care plan: co-sign via drawn signature pad (same as provider ROI)
+- Care plan: per-patient data, no baked-in demo values
+- Apply Session 3 prototype visuals to the client portal
+- Reconcile CLAUDE.md after main merge; align portal tokens to updated prototype
+- Delete public/thrive365-logo.webp
+- Intake field parity: full WordPress field set, structured backend
+- Session 3.4 follow-up: enrollment nudge + medical-team → priorProviders
+- Session 3.4: Provider Transfer-of-Care ROI
+
+
 ### Version 3.4.0 - July 14, 2026
 
 #### New Features
