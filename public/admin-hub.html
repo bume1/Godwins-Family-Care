@@ -911,6 +911,7 @@
         licenseLevel: '', hasClinicalAccess: false, enrollmentStatus: 'intake_pending',
         careTeam: { assignedFNPs: [], assignedCaseManager: '', primaryCaregiver: '', backupCaregiver: '' },
         familyOfClientId: '', // family role: the client (user id) this contact is linked to
+        familyIsPoa: false, // family role: designated Power of Attorney (client-equivalent portal access)
         openEmrProviderId: '' // clinician: OpenEMR provider (numeric id) their calendar maps to (4.2)
       };
       const [formData, setFormData] = useState(defaultFormData);
@@ -996,6 +997,7 @@
           enrollmentStatus: user.enrollmentStatus || 'intake_pending',
           careTeam: user.careTeam || { assignedFNPs: [], assignedCaseManager: '', primaryCaregiver: '', backupCaregiver: '' },
           familyOfClientId: user.familyOfClientId || '',
+          familyIsPoa: user.familyIsPoa || false,
           openEmrProviderId: user.openEmrProviderId || ''
         });
         setShowForm(true);
@@ -1409,6 +1411,15 @@
                             <option key={u.id} value={u.id}>{u.name || u.practiceName || u.email}</option>
                           ))}
                         </select>
+                      </div>
+                      <div className="mt-3 flex items-start gap-3 p-3 bg-amber-50 rounded-lg">
+                        <input type="checkbox" id="familyIsPoa" checked={formData.familyIsPoa || false}
+                          onChange={(e) => setFormData({ ...formData, familyIsPoa: e.target.checked })}
+                          className="w-5 h-5 mt-0.5 rounded border-gray-300 text-amber-600 focus:ring-amber-500" />
+                        <div>
+                          <label htmlFor="familyIsPoa" className="text-sm font-medium text-gray-700">Designated Power of Attorney</label>
+                          <p className="text-xs text-gray-500 mt-0.5">Only check after verifying the POA document on file. Grants this contact client-equivalent portal access — care plan and clinical details, and (once enabled in the portal) acting on the client's behalf. All POA activity is logged under their own name.</p>
+                        </div>
                       </div>
                     </div>
                   )}

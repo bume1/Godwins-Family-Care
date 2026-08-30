@@ -1845,7 +1845,10 @@ const authenticateToken = async (req, res, next) => {
         consents: freshUser.consents || {},
         careTeam: freshUser.careTeam || null,
         // Family role: the client whose record this family member is authorized to view
-        familyOfClientId: freshUser.familyOfClientId || (freshUser.role === config.ROLES.FAMILY ? (freshUser.assignedClients || [])[0] : null) || null
+        familyOfClientId: freshUser.familyOfClientId || (freshUser.role === config.ROLES.FAMILY ? (freshUser.assignedClients || [])[0] : null) || null,
+        // Designated Power of Attorney (family role) — client-equivalent portal
+        // access; acting gates wired in Session 4.3
+        familyIsPoa: freshUser.familyIsPoa || false
       };
       next();
     } catch (error) {
@@ -2254,7 +2257,7 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       isManager, assignedClients, hubspotCompanyId, hubspotDealId, hubspotContactId, projectAccessLevels,
       existingPortalSlug, phone, sendWelcomeEmail: shouldSendWelcome = true,
       licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
-      openEmrProviderId
+      familyIsPoa, openEmrProviderId
     } = req.body;
 
     // Managers can only create client users
@@ -2357,6 +2360,13 @@ app.post('/api/users', authenticateToken, async (req, res) => {
     // to — drives the ROI-family portal gate (resolveGfcClientRecord).
     if (role === config.ROLES.FAMILY && familyOfClientId !== undefined) {
       newUser.familyOfClientId = familyOfClientId || null;
+    }
+    // Designated Power of Attorney (owner decision 08/2026): admin sets this
+    // only after verifying the POA document on file. Grants client-equivalent
+    // portal access; the acting gates (co-sign, messaging, clinical read) are
+    // wired in Session 4.3 — POA actions always log under the POA's own name.
+    if (role === config.ROLES.FAMILY && familyIsPoa !== undefined) {
+      newUser.familyIsPoa = !!familyIsPoa;
     }
 
     // User/team member fields
@@ -2926,6 +2936,7 @@ app.get('/api/users', authenticateToken, async (req, res) => {
       enrollmentStatus: u.enrollmentStatus || null,
       careTeam: u.careTeam || null,
       familyOfClientId: u.familyOfClientId || null,
+      familyIsPoa: u.familyIsPoa || false,
       openEmrProviderId: u.openEmrProviderId || null
     }));
     res.json(safeUsers);
@@ -2943,7 +2954,7 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
       hasServicePortalAccess, hasAdminHubAccess, hasImplementationsAccess, hasClientPortalAdminAccess,
       isManager, assignedClients, phone, accountStatus, emailUnsubscribed,
       licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
-      openEmrProviderId
+      familyIsPoa, openEmrProviderId
     } = req.body;
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === userId);
@@ -2993,6 +3004,8 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
     // Family / authorized contact → linked client (user id); drives the
     // ROI-family portal gate (resolveGfcClientRecord).
     if (familyOfClientId !== undefined) users[idx].familyOfClientId = familyOfClientId || null;
+    // Designated Power of Attorney (admin-verified; see create route note)
+    if (familyIsPoa !== undefined) users[idx].familyIsPoa = !!familyIsPoa;
     // Clinician → OpenEMR provider mapping (numeric pc_aid; Session 4.2 calendars)
     if (openEmrProviderId !== undefined) users[idx].openEmrProviderId = openEmrProviderId || null;
 
