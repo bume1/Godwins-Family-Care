@@ -113,13 +113,20 @@ Three billing patterns, one app. See §13 for the phase breakdown.
 | Clinical (FNP) | `user` | repurpose |
 | Caregiver (PCA) | `vendor` | repurpose |
 | Client (PHC or IHPC) | `client` | keep |
-| Case Manager | — | add |
-| Family / Authorized Contact | — | add (read-only, ROI-gated) |
+| Case Manager | `caseManager` | added (scope finalized 08/2026, below) |
+| Family / Authorized Contact | `family` | added (read-only, ROI-gated; POA designation below) |
 | **Billing / Coder** | new: `billing` | **add (future)** — billing scope only. No clinical read/write, no scheduling. Sees billing dashboard, claims status, invoices, payments. Not built now; permission scaffold via `hasBillingAccess`. |
 
 The existing permission-flag pattern (`hasXAccess`) and per-request fresh-user lookup support this without re-architecting.
 
-**New fields the roles need:** `caregiver.licenseLevel` (sitter/pca/cna/lpn), `hasClinicalAccess` (FNP), `hasBillingAccess` (Admin now, Owner + Billing/Coder later), `client.enrollmentStatus`, and `client.careTeam` (assignedFNPs, assignedCaseManager, primary/backup caregiver). Escalation routing and provider access both read `careTeam`. All admin-managed.
+**New fields the roles need:** `caregiver.licenseLevel` (sitter/pca/cna/lpn), `hasClinicalAccess` (FNP), `hasBillingAccess` (Admin now, Owner + Billing/Coder later), `client.enrollmentStatus`, `client.careTeam` (assignedFNPs, assignedCaseManager, primary/backup caregiver), `openEmrProviderId` (clinician → OpenEMR provider mapping for the 4.2 scheduling calendar), and `familyIsPoa` (family POA designation, below). Escalation routing and provider access both read `careTeam`. All admin-managed.
+
+**Owner decisions, 08/2026 (finalized with Session 4.2 — supersede anything older in this section):**
+
+- **Portal Hub is Super-Admin only.** Every other user is routed straight to their one destination on login: client → their care portal, family → the ROI-gated family view, Clinical → `/clinical`, Case Manager → the staff enrollment view (interim, until the scoped clinical read lands in 4.3), Caregiver (`vendor`) → the Service Portal (interim, until the Session 6 caregiver app). The hub is the admin's launcher across clinical + PHCP + future billing/IME surfaces.
+- **Case Manager scope.** Clinical side: **read-rights on the clinical docs** — mirror in the app the same scoped read access their special permissions grant them in OpenEMR (`/api/clinical/*` splits into read [admin/clinical/case-manager] vs write [admin/clinical]; mutation UI hidden). PHCP side: **clinician-equivalent views WITHOUT updating**. Plus per-patient enrollment docs (the 3.3 enrollment view). Builds with Session 4.3's scoped read.
+- **Family POA designation (`familyIsPoa`).** Admin sets it in user management ONLY after the Power-of-Attorney document is verified on file. A designated POA gets **client-equivalent portal access** — care plan and clinical details (4.3 read) and acting on the client's behalf (care-plan co-sign, messaging). Every POA signature/action records the POA's own identity — "as POA for <client>" — in the event and on signed PDFs (§ Intake spec 4.3). Non-POA family stays read-only, ROI-gated.
+- **Legacy lab-era flags are NOT GFC roles.** `isManager`, `hasAdminHubAccess`, `hasClientPortalAdminAccess`, `hasImplementationsAccess` survive only as plumbing from the Thrive365 codebase; they all route to the Admin Hub and are retired at the Session 6/7 role migration. Do not build new features against them.
 
 **Billing visibility rule.** Every billing route and every billing UI element checks `hasBillingAccess`. Today the only role with that flag is `admin`. When the Owner and Billing/Coder roles land, the same flag flips on for them without touching any billing route.
 
