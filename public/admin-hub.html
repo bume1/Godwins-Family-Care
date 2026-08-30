@@ -910,7 +910,8 @@
         // GFC extended fields
         licenseLevel: '', hasClinicalAccess: false, enrollmentStatus: 'intake_pending',
         careTeam: { assignedFNPs: [], assignedCaseManager: '', primaryCaregiver: '', backupCaregiver: '' },
-        familyOfClientId: '' // family role: the client (user id) this contact is linked to
+        familyOfClientId: '', // family role: the client (user id) this contact is linked to
+        openEmrProviderId: '' // clinician: OpenEMR provider (numeric id) their calendar maps to (4.2)
       };
       const [formData, setFormData] = useState(defaultFormData);
 
@@ -994,7 +995,8 @@
           hasClinicalAccess: user.hasClinicalAccess || false,
           enrollmentStatus: user.enrollmentStatus || 'intake_pending',
           careTeam: user.careTeam || { assignedFNPs: [], assignedCaseManager: '', primaryCaregiver: '', backupCaregiver: '' },
-          familyOfClientId: user.familyOfClientId || ''
+          familyOfClientId: user.familyOfClientId || '',
+          openEmrProviderId: user.openEmrProviderId || ''
         });
         setShowForm(true);
       };
@@ -1380,6 +1382,16 @@
                           className="w-5 h-5 rounded border-gray-300 text-teal-600 focus:ring-teal-500" />
                         <label htmlFor="hasClinicalAccess" className="text-sm font-medium text-gray-700">Clinical Access (FNP / charting)</label>
                       </div>
+                      {formData.hasClinicalAccess && (
+                        <div className="mt-3">
+                          <label className="block text-sm font-medium text-gray-700 mb-1">OpenEMR Provider ID (calendar mapping)</label>
+                          <input type="text" inputMode="numeric" value={formData.openEmrProviderId}
+                            onChange={(e) => setFormData({ ...formData, openEmrProviderId: e.target.value.replace(/\D/g, '') })}
+                            placeholder="e.g. 1 — numeric id from OpenEMR's provider list"
+                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" />
+                          <p className="text-xs text-gray-500 mt-1">Required for their clinical scheduling calendar (Session 4.2). Find it under /clinical → Schedule → provider list.</p>
+                        </div>
+                      )}
                     </div>
                   )}
 

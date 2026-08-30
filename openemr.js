@@ -301,6 +301,77 @@ const forActor = (actor) => {
         { ...allergy, begdate: toEmrDatetime(allergy.begdate) }, 'allergy', puuid);
     },
 
+    // ---- Appointments (Session 4.2) ----
+    // OpenEMR is the ONLY appointment ledger. 7.0.4 quirks (verified against
+    // the dev instance): every appointment endpoint keys by NUMERIC pid (the
+    // POST rejects uuids with "pid must be for a valid patient"), and the API
+    // is create/delete only — no PUT/PATCH in any shape, FHIR Appointment is
+    // read-only. Reschedule/cancel therefore go through swapAppointment()
+    // below (tombstone swap, approved 08/2026).
+    async getPractitionerRows() {
+      const res = await rawRequest({ method: 'GET', url: apiUrl('practitioner') });
+      const data = expectOk(res, 'read practitioner');
+      logEmrAccess(actor, 'read', 'practitioner', null, {});
+      return unwrapApi(data) || [];
+    },
+    // Whole-calendar read — the conflict check and the admin unified view both
+    // work from this live list (availability is never modeled app-side).
+    async listAppointmentRows() {
+      const res = await rawRequest({ method: 'GET', url: apiUrl('appointment') });
+      const data = expectOk(res, 'read appointment list');
+      logEmrAccess(actor, 'read', 'appointment', null, { scope: 'all' });
+      return unwrapApi(data) || [];
+    },
+    async getPatientAppointmentRows(puuid) {
+      const pid = await resolvePid(puuid);
+      const res = await rawRequest({ method: 'GET', url: apiUrl(`patient/${pid}/appointment`) });
+      const data = expectOk(res, 'read patient appointments');
+      logEmrAccess(actor, 'read', 'appointment', puuid, {});
+      return unwrapApi(data) || [];
+    },
+    // The LIST endpoints omit pc_hometext / pc_duration / pc_room (verified on
+    // 7.0.4) — only this single-row GET returns the full record. Every swap
+    // MUST build from it, or the original notes and location marker are lost.
+    async getAppointmentRow(puuid, eid) {
+      const pid = await resolvePid(puuid);
+      const res = await rawRequest({ method: 'GET', url: apiUrl(`patient/${pid}/appointment/${encodeURIComponent(eid)}`) });
+      const data = expectOk(res, 'read appointment');
+      logEmrAccess(actor, 'read', 'appointment', puuid, { eid: String(eid) });
+      const payload = unwrapApi(data);
+      return Array.isArray(payload) ? payload[0] || null : payload || null;
+    },
+    async createAppointmentRow(puuid, fields) {
+      const pid = await resolvePid(puuid);
+      const row = await apiWrite('POST', `patient/${pid}/appointment`, fields, 'appointment', puuid, 'create appointment');
+      const eid = row && (row.id ?? row.pc_eid);
+      if (eid == null) throw new OpenEmrError('OpenEMR did not return an appointment id', 502, row);
+      return String(eid);
+    },
+    // Tombstone swap: POST every replacement row FIRST (so a mid-swap failure
+    // leaves a visible duplicate, never a lost appointment), then delete the
+    // superseded row LAST. A failed tail-delete is reported as a warning, not
+    // an error — the replacement rows already stand.
+    async swapAppointment(puuid, oldEid, replacements) {
+      const pid = await resolvePid(puuid);
+      const newEids = [];
+      for (const fields of replacements) {
+        const row = await apiWrite('POST', `patient/${pid}/appointment`, fields, 'appointment', puuid, 'create appointment (swap)');
+        const eid = row && (row.id ?? row.pc_eid);
+        if (eid == null) throw new OpenEmrError('OpenEMR did not return an appointment id during swap', 502, row);
+        newEids.push(String(eid));
+      }
+      let deleted = false; let deleteError = null;
+      try {
+        const res = await rawRequest({ method: 'DELETE', url: apiUrl(`patient/${pid}/appointment/${encodeURIComponent(oldEid)}`) });
+        expectOk(res, 'remove superseded appointment');
+        deleted = true;
+      } catch (e) {
+        deleteError = e.message;
+      }
+      logEmrAccess(actor, 'write', 'appointment', puuid, { op: 'swap', oldEid: String(oldEid), newEids, deleted });
+      return { newEids, deleted, deleteError };
+    },
+
     // Signed PDFs and received records → OpenEMR patient Documents. The upload
     // becomes readable through FHIR DocumentReference, which satisfies the
     // "DocumentReference written to OpenEMR" requirement on 7.0.4.

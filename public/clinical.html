@@ -95,12 +95,49 @@
       saveCarePlan: (id, body) => authedFetch(`/api/clinical/patients/${id}/care-plan`, { method: 'POST', body: JSON.stringify(body) }),
       checklist: (id) => authedFetch(`/api/clinical/patients/${id}/checklist`),
       markStep: (id, step, done) => authedFetch(`/api/clinical/patients/${id}/checklist/${step}`, { method: 'POST', body: JSON.stringify({ done }) }),
-      activate: (id) => authedFetch(`/api/clinical/patients/${id}/activate`, { method: 'POST' })
+      activate: (id) => authedFetch(`/api/clinical/patients/${id}/activate`, { method: 'POST' }),
+      // Session 4.2 — scheduling (OpenEMR is the appointment ledger)
+      providers: () => authedFetch('/api/clinical/providers'),
+      appointments: (params) => authedFetch(`/api/clinical/appointments?${new URLSearchParams(params).toString()}`),
+      appointmentDetail: (eid) => authedFetch(`/api/clinical/appointments/${eid}`),
+      patientAppointments: (id) => authedFetch(`/api/clinical/patients/${id}/appointments`),
+      createAppointment: (id, body) => authedFetch(`/api/clinical/patients/${id}/appointments`, { method: 'POST', body: JSON.stringify(body) }),
+      rescheduleAppointment: (eid, body) => authedFetch(`/api/clinical/appointments/${eid}/reschedule`, { method: 'POST', body: JSON.stringify(body) }),
+      cancelAppointment: (eid, reason) => authedFetch(`/api/clinical/appointments/${eid}/cancel`, { method: 'POST', body: JSON.stringify({ reason }) }),
+      markNoShow: (eid) => authedFetch(`/api/clinical/appointments/${eid}/no-show`, { method: 'POST' }),
+      followUp: (id, body) => authedFetch(`/api/clinical/patients/${id}/encounters`, { method: 'POST', body: JSON.stringify(body) })
     };
 
     const fmtDate = (iso) => iso ? new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
     const fmtTs = (iso) => iso ? new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
     const initials = (n) => String(n || '').split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join('') || 'GF';
+
+    // ── Scheduling date/time helpers (wall-clock strings, matching OpenEMR) ──
+    const toYmd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const todayYmd = () => toYmd(new Date());
+    const addDaysYmd = (ymd, n) => { const d = new Date(`${ymd}T12:00:00`); d.setDate(d.getDate() + n); return toYmd(d); };
+    const mondayOf = (ymd) => { const d = new Date(`${ymd}T12:00:00`); return addDaysYmd(ymd, -((d.getDay() + 6) % 7)); };
+    const fmtDayLabel = (ymd) => new Date(`${ymd}T12:00:00`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+    const fmt12h = (hhmm) => {
+      const [h, m] = String(hhmm || '').split(':').map(n => parseInt(n, 10));
+      if (isNaN(h)) return hhmm || '—';
+      const ap = h >= 12 ? 'p' : 'a';
+      return `${((h + 11) % 12) + 1}:${String(m || 0).padStart(2, '0')}${ap}`;
+    };
+    const timeMins = (hhmm) => { const [h, m] = String(hhmm || '0:0').split(':').map(n => parseInt(n, 10) || 0); return h * 60 + m; };
+
+    const APPT_STATE_META = {
+      scheduled: { label: 'Scheduled', chip: 'bg-primary-50 text-primary' },
+      needs_documentation: { label: 'Not yet documented', chip: 'bg-amber-50 text-amber-800' },
+      documented: { label: 'Documented', chip: 'bg-emerald-50 text-emerald-700' },
+      no_show: { label: 'No-show', chip: 'bg-red-50 text-red-700' },
+      cancelled: { label: 'Cancelled', chip: 'bg-stone-100 text-stone-500' }
+    };
+    const StateChip = ({ state }) => {
+      const m = APPT_STATE_META[state] || APPT_STATE_META.scheduled;
+      return <span className={`chip ${m.chip}`}>{m.label}</span>;
+    };
+    const LOCATION_LABELS = { home: 'Home visit', telehealth: 'Telehealth', office: 'Office' };
 
     // ── Drawn signature pad (same mechanism as the 3.4 ROI / portal co-sign) ──
     const SignaturePad = ({ padRef }) => {
@@ -252,7 +289,9 @@
     };
 
     // ── H&P documentation tab (intake spec §2C) ──
-    const HpTab = ({ patient, chart, onDone }) => {
+    // appointmentEid (4.2): set when the visit is opened from a calendar
+    // appointment — the resulting Encounter links back to it.
+    const HpTab = ({ patient, chart, appointmentEid, onDone }) => {
       const pf = (chart && chart.intakePrefill) || {};
       const [confirmed, setConfirmed] = useState([]);
       const confirm = (k) => setConfirmed(c => c.includes(k) ? c : [...c, k]);
@@ -274,7 +313,7 @@
       const [busy, setBusy] = useState(false); const [msg, setMsg] = useState(null);
       const submit = () => {
         setBusy(true); setMsg(null);
-        api.visit(patient.id, { ...f, confirmedFields: confirmed })
+        api.visit(patient.id, { ...f, confirmedFields: confirmed, appointmentEid: appointmentEid || undefined })
           .then(r => { setMsg({ ok: true, text: `${r.message} (${fmtTs(r.at)})` }); onDone && onDone(); })
           .catch(e => setMsg({ ok: false, text: e.message }))
           .finally(() => setBusy(false));
@@ -293,6 +332,12 @@
       const hazardFields = [['smokeDetectors', 'Smoke detectors'], ['coDetectors', 'CO detectors'], ['grabBars', 'Grab bars'], ['nonSkidSurfaces', 'Non-skid surfaces'], ['runningWater', 'Running water'], ['secondaryExit', 'Secondary exit']];
       return (
         <div className="max-w-3xl">
+          {appointmentEid && (
+            <div className="card p-3 mb-4 flex items-center gap-2 text-sm text-primary">
+              <i className="ti ti-calendar-check text-accent" />
+              Documenting from a scheduled appointment — the Encounter will be linked to it on the chart.
+            </div>
+          )}
           <div className="card mb-4">
             <div className="card-h"><h2>Initial Visit · History &amp; Physical</h2></div>
             <div className="p-4 grid gap-4">
@@ -629,6 +674,442 @@
       );
     };
 
+    // ── Session 4.2 — Clinical scheduling (OpenEMR-tied) ──
+    // OpenEMR is the appointment ledger; every view below renders its LIVE
+    // rows. Cancelled slots stay visible (tombstone swap — never a hard
+    // delete); double-booking is rejected server-side against OpenEMR.
+
+    const DURATIONS = [15, 30, 45, 60, 90, 120];
+
+    // Create / reschedule form. On 409 APPOINTMENT_CONFLICT the server's
+    // specific message (which slot, with whom) is shown verbatim.
+    const AppointmentModal = ({ mode, appt, patients, providersData, defaultDate, defaultProviderId, onClose, onSaved }) => {
+      const isRes = mode === 'reschedule';
+      const linkable = (patients || []).filter(p => p.openEmrPatientId);
+      const [f, setF] = useState({
+        clientId: isRes ? (appt.clientId || '') : (linkable.length === 1 ? linkable[0].id : ''),
+        providerId: isRes ? appt.providerId : (defaultProviderId || (providersData && providersData.myProviderId) || ''),
+        date: isRes ? appt.date : (defaultDate || todayYmd()),
+        startTime: isRes ? appt.startTime : '09:00',
+        durationMinutes: isRes ? (appt.durationMinutes || 30) : 30,
+        title: isRes ? appt.title : 'Clinical visit',
+        location: (isRes && appt.location) || 'home',
+        notes: (isRes && appt.notes) || ''
+      });
+      const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+      const canPickProvider = providersData && providersData.isAdmin;
+      const submit = () => {
+        setErr('');
+        if (!isRes && !f.clientId) { setErr('Pick a patient.'); return; }
+        setBusy(true);
+        const body = { providerId: f.providerId, date: f.date, startTime: f.startTime,
+          durationMinutes: Number(f.durationMinutes), title: f.title, location: f.location, notes: f.notes };
+        (isRes ? api.rescheduleAppointment(appt.eid, body) : api.createAppointment(f.clientId, body))
+          .then(r => onSaved(r))
+          .catch(e => { setErr(e.message); setBusy(false); });
+      };
+      return (
+        <div className="fixed inset-0 bg-black/40 z-40 flex items-start justify-center p-4 overflow-y-auto" onClick={onClose}>
+          <div className="card w-full max-w-lg mt-10" onClick={e => e.stopPropagation()}>
+            <div className="card-h"><h2>{isRes ? `Reschedule — ${appt.patientName || 'appointment'}` : 'New appointment'}</h2>
+              <button className="text-stone-400" onClick={onClose}><i className="ti ti-x" /></button>
+            </div>
+            <div className="p-4 grid gap-3">
+              {!isRes && (
+                <Field label="Patient (IHPC, linked to OpenEMR)">
+                  <select className="inp" value={f.clientId} onChange={e => setF({ ...f, clientId: e.target.value })}>
+                    <option value="">— select —</option>
+                    {linkable.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                  {linkable.length === 0 && <p className="text-xs text-amber-700 mt-1">No linked patients yet — link a patient to OpenEMR from their chart first.</p>}
+                </Field>
+              )}
+              <Field label="Provider">
+                {canPickProvider ? (
+                  <select className="inp" value={f.providerId} onChange={e => setF({ ...f, providerId: e.target.value })}>
+                    <option value="">— select —</option>
+                    {(providersData.providers || []).map(p => <option key={p.id} value={p.id}>{p.name} (id {p.id})</option>)}
+                  </select>
+                ) : (
+                  <input className="inp" disabled value={(providersData && (providersData.providers || []).filter(p => p.id === f.providerId).map(p => p.name)[0]) || `Provider ${f.providerId || '—'}`} />
+                )}
+              </Field>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                <Field label="Date"><input className="inp" type="date" value={f.date} onChange={e => setF({ ...f, date: e.target.value })} /></Field>
+                <Field label="Start"><input className="inp" type="time" value={f.startTime} onChange={e => setF({ ...f, startTime: e.target.value })} /></Field>
+                <Field label="Duration">
+                  <select className="inp" value={f.durationMinutes} onChange={e => setF({ ...f, durationMinutes: e.target.value })}>
+                    {DURATIONS.map(d => <option key={d} value={d}>{d} min</option>)}
+                  </select>
+                </Field>
+              </div>
+              <div className="grid md:grid-cols-2 gap-3">
+                <Field label="Visit type / title"><input className="inp" value={f.title} onChange={e => setF({ ...f, title: e.target.value })} placeholder="e.g. Initial H&P, Follow-up" /></Field>
+                <Field label="Location">
+                  <select className="inp" value={f.location} onChange={e => setF({ ...f, location: e.target.value })}>
+                    <option value="home">Home visit</option><option value="telehealth">Telehealth</option><option value="office">Office</option>
+                  </select>
+                </Field>
+              </div>
+              <Field label="Notes"><textarea className="inp" rows={2} value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} /></Field>
+              {err && <p className="text-red-600 text-sm">{err}</p>}
+              <div className="flex gap-2 justify-end">
+                <button className="btn ghost" onClick={onClose}>Close</button>
+                <button className="btn" disabled={busy} onClick={submit}>
+                  {busy ? 'Saving to OpenEMR…' : (isRes ? 'Reschedule' : 'Book appointment')}
+                </button>
+              </div>
+              {isRes && <p className="text-[11px] text-stone-400">The original slot stays on the calendar as a cancelled entry — nothing is deleted.</p>}
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // Detail + actions for one appointment (calendar block or chart row).
+    const AppointmentDetail = ({ appt: apptProp, providers, onClose, onChanged, onOpenChart, onReschedule, onDocument }) => {
+      const [cancelOpen, setCancelOpen] = useState(false);
+      const [reason, setReason] = useState('');
+      const [busy, setBusy] = useState(''); const [err, setErr] = useState('');
+      // The calendar list omits notes/location (7.0.4 list quirk) — hydrate.
+      const [hydrated, setHydrated] = useState(null);
+      useEffect(() => {
+        setHydrated(null);
+        api.appointmentDetail(apptProp.eid)
+          .then(r => setHydrated(r.appointment))
+          .catch(() => {});
+      }, [apptProp.eid]);
+      const appt = hydrated ? { ...apptProp, ...hydrated, clientId: hydrated.clientId || apptProp.clientId } : apptProp;
+      const provider = (providers || []).filter(p => p.id === appt.providerId).map(p => p.name)[0] || `Provider ${appt.providerId}`;
+      const active = appt.state !== 'cancelled';
+      const run = (label, fn) => { setBusy(label); setErr('');
+        fn().then(r => onChanged(r)).catch(e => { setErr(e.message); setBusy(''); }); };
+      return (
+        <div className="fixed inset-0 bg-black/40 z-40 flex items-start justify-center p-4 overflow-y-auto" onClick={onClose}>
+          <div className="card w-full max-w-md mt-10" onClick={e => e.stopPropagation()}>
+            <div className="card-h"><h2>{appt.title}</h2><StateChip state={appt.state} /></div>
+            <div className="p-4 text-sm grid gap-1.5">
+              <div><b>{appt.patientName || 'Patient'}</b>{appt.clientId ? '' : ' (not an app client)'}</div>
+              <div>{fmtDayLabel(appt.date)} · {fmt12h(appt.startTime)}–{fmt12h(appt.endTime)} ({appt.durationMinutes} min)</div>
+              <div className="text-stone-500">{provider} · {LOCATION_LABELS[appt.location] || 'Home visit'}</div>
+              {appt.encounterUuid && <div className="text-emerald-700 text-xs">Encounter documented: {String(appt.encounterUuid).slice(0, 8)}…</div>}
+              {appt.notes && <div className="text-xs text-stone-500 whitespace-pre-wrap border-t border-stone-100 pt-1.5 mt-1">{appt.notes}</div>}
+              {err && <p className="text-red-600 text-xs">{err}</p>}
+              {active && !cancelOpen && (
+                <div className="flex flex-wrap gap-2 mt-2">
+                  {!appt.encounterUuid && appt.clientId && onDocument &&
+                    <button className="btn gold !py-1.5" onClick={() => onDocument(appt)}><i className="ti ti-stethoscope" />Document visit</button>}
+                  {onReschedule && <button className="btn ghost !py-1.5" onClick={() => onReschedule(appt)}><i className="ti ti-calendar-time" />Reschedule</button>}
+                  <button className="btn ghost !py-1.5" onClick={() => setCancelOpen(true)}><i className="ti ti-calendar-cancel" />Cancel…</button>
+                  {['needs_documentation', 'scheduled'].includes(appt.state) &&
+                    <button className="btn ghost !py-1.5" disabled={busy === 'noshow'} onClick={() => run('noshow', () => api.markNoShow(appt.eid))}>
+                      <i className="ti ti-user-x" />{busy === 'noshow' ? '…' : 'No-show'}</button>}
+                  {appt.clientId && onOpenChart &&
+                    <button className="btn ghost !py-1.5" onClick={() => onOpenChart(appt.clientId)}><i className="ti ti-folder-open" />Open chart</button>}
+                </div>
+              )}
+              {cancelOpen && (
+                <div className="mt-2 grid gap-2">
+                  <Field label="Cancellation reason (required — kept on the calendar entry)">
+                    <textarea className="inp" rows={2} value={reason} onChange={e => setReason(e.target.value)} />
+                  </Field>
+                  <div className="flex gap-2 justify-end">
+                    <button className="btn ghost !py-1.5" onClick={() => setCancelOpen(false)}>Back</button>
+                    <button className="btn !py-1.5" disabled={!reason.trim() || busy === 'cancel'}
+                      onClick={() => run('cancel', () => api.cancelAppointment(appt.eid, reason.trim()))}>
+                      {busy === 'cancel' ? 'Cancelling…' : 'Confirm cancellation'}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // Greedy lane assignment so overlapping blocks (e.g. an active row next to
+    // a cancelled tombstone in the same slot) render side by side.
+    const laneify = (appts) => {
+      const sorted = [...appts].sort((a, b) => timeMins(a.startTime) - timeMins(b.startTime));
+      const laneEnds = [];
+      const out = sorted.map(a => {
+        const start = timeMins(a.startTime); const end = timeMins(a.endTime || a.startTime) || start + 30;
+        let lane = laneEnds.findIndex(e => e <= start);
+        if (lane === -1) { lane = laneEnds.length; laneEnds.push(end); } else laneEnds[lane] = end;
+        return { ...a, _lane: lane };
+      });
+      const lanes = Math.max(1, laneEnds.length);
+      return out.map(a => ({ ...a, _lanes: lanes }));
+    };
+
+    const GRID_START = 7 * 60, GRID_END = 19 * 60, PX_PER_MIN = 0.8;
+
+    const DayColumn = ({ ymd, appts, onPick }) => {
+      const dayAppts = laneify(appts.filter(a => a.date === ymd));
+      const hours = []; for (let h = 7; h < 19; h++) hours.push(h);
+      return (
+        <div className="flex-1 min-w-[130px] border-l border-stone-200 relative" style={{ height: (GRID_END - GRID_START) * PX_PER_MIN }}>
+          {hours.map(h => (
+            <div key={h} className="absolute w-full border-t border-stone-100 text-[9px] text-stone-300 pl-1"
+              style={{ top: (h * 60 - GRID_START) * PX_PER_MIN }}>{((h + 11) % 12) + 1}{h >= 12 ? 'p' : 'a'}</div>
+          ))}
+          {dayAppts.map(a => {
+            const top = Math.max(0, (timeMins(a.startTime) - GRID_START) * PX_PER_MIN);
+            const height = Math.max(18, (Math.max(15, a.durationMinutes || 30)) * PX_PER_MIN);
+            const cancelled = a.state === 'cancelled';
+            const colors = cancelled ? 'bg-stone-100 border-stone-300 text-stone-400'
+              : a.state === 'documented' ? 'bg-emerald-50 border-emerald-500 text-emerald-900'
+              : a.state === 'no_show' ? 'bg-red-50 border-red-400 text-red-800'
+              : a.state === 'needs_documentation' ? 'bg-amber-50 border-amber-500 text-amber-900'
+              : 'bg-primary-50 border-primary text-primary-700';
+            return (
+              <div key={a.eid}
+                className={`absolute rounded-md border-l-4 px-1.5 py-0.5 text-[10.5px] leading-tight cursor-pointer overflow-hidden ${colors}`}
+                style={{ top, height, left: `${(a._lane / a._lanes) * 100}%`, width: `${100 / a._lanes}%` }}
+                onClick={() => onPick(a)} title={`${a.title} — ${a.patientName || ''}`}>
+                <div className={`font-bold truncate ${cancelled ? 'line-through' : ''}`}>{fmt12h(a.startTime)} {a.patientName || a.title}</div>
+                <div className="truncate">{a.title}{a.location === 'telehealth' ? ' · 📹' : ''}</div>
+              </div>
+            );
+          })}
+        </div>
+      );
+    };
+
+    const ScheduleView = ({ user, patients, onOpenChart, onDocument }) => {
+      const [providersData, setProvidersData] = useState(null);
+      const [mode, setMode] = useState('week');
+      const [anchor, setAnchor] = useState(todayYmd());
+      const [providerFilter, setProviderFilter] = useState('');
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState(null);
+      const [picked, setPicked] = useState(null);
+      const [modal, setModal] = useState(null); // {mode, appt?}
+
+      useEffect(() => { api.providers().then(setProvidersData).catch(e => setErr({ message: e.message, code: e.data && e.data.code })); }, []);
+      const from = mode === 'day' ? anchor : mondayOf(anchor);
+      const to = mode === 'day' ? anchor : addDaysYmd(mondayOf(anchor), 6);
+      const load = useCallback(() => {
+        const params = { from, to };
+        if (providerFilter) params.providerId = providerFilter;
+        api.appointments(params).then(r => { setData(r); setErr(null); })
+          .catch(e => { setData(null); setErr({ message: e.message, code: e.data && e.data.code }); });
+      }, [from, to, providerFilter]);
+      useEffect(load, [load]);
+
+      const days = mode === 'day' ? [anchor] : [0, 1, 2, 3, 4, 5, 6].map(i => addDaysYmd(from, i));
+      const appts = (data && data.appointments) || [];
+      const changed = () => { setPicked(null); setModal(null); load(); };
+      const isAdmin = providersData && providersData.isAdmin;
+
+      if (err && err.code === 'PROVIDER_NOT_MAPPED') {
+        return (
+          <div className="p-6 lg:p-10 max-w-xl">
+            <div className="card p-6 text-center">
+              <i className="ti ti-calendar-question text-4xl text-accent" />
+              <h2 className="serif text-xl text-primary font-semibold mt-2">Calendar not connected yet</h2>
+              <p className="text-sm text-stone-500 mt-2">{err.message}</p>
+            </div>
+          </div>
+        );
+      }
+      return (
+        <div className="p-4 lg:p-7">
+          <div className="flex flex-wrap items-center gap-2 mb-4">
+            <div className="flex rounded-lg border border-stone-200 overflow-hidden">
+              <button className={`px-3 py-1.5 text-xs font-semibold ${mode === 'day' ? 'bg-primary text-white' : 'bg-white text-primary'}`} onClick={() => setMode('day')}>Day</button>
+              <button className={`px-3 py-1.5 text-xs font-semibold ${mode === 'week' ? 'bg-primary text-white' : 'bg-white text-primary'}`} onClick={() => setMode('week')}>Week</button>
+            </div>
+            <div className="flex items-center gap-1">
+              <button className="btn ghost !px-2 !py-1.5" onClick={() => setAnchor(addDaysYmd(anchor, mode === 'day' ? -1 : -7))}><i className="ti ti-chevron-left" /></button>
+              <button className="btn ghost !px-2.5 !py-1.5 text-xs" onClick={() => setAnchor(todayYmd())}>Today</button>
+              <button className="btn ghost !px-2 !py-1.5" onClick={() => setAnchor(addDaysYmd(anchor, mode === 'day' ? 1 : 7))}><i className="ti ti-chevron-right" /></button>
+            </div>
+            <div className="serif text-lg text-primary font-semibold">
+              {mode === 'day' ? fmtDayLabel(anchor) : `${fmtDayLabel(from)} – ${fmtDayLabel(to)}`}
+            </div>
+            <div className="ml-auto flex items-center gap-2">
+              {isAdmin && (
+                <select className="inp !w-auto text-xs" value={providerFilter} onChange={e => setProviderFilter(e.target.value)}>
+                  <option value="">All providers</option>
+                  {(providersData.providers || []).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+              )}
+              {!isAdmin && providersData && (
+                <span className="chip bg-primary-50 text-primary">
+                  {(providersData.providers || []).filter(p => p.id === providersData.myProviderId).map(p => p.name)[0] || 'My calendar'}
+                </span>
+              )}
+              <button className="btn gold" onClick={() => setModal({ mode: 'create' })}><i className="ti ti-calendar-plus" />New appointment</button>
+            </div>
+          </div>
+
+          {providersData && providersData.degraded && (
+            <p className="text-[11px] text-amber-700 mb-2"><i className="ti ti-alert-triangle mr-1" />{providersData.notice}</p>
+          )}
+          {err && <p className="text-red-600 text-sm mb-3">{err.message}</p>}
+          {!err && data === null && <p className="text-sm text-stone-500">Loading calendar from OpenEMR…</p>}
+          {data !== null && (
+            <div className="card overflow-x-auto">
+              <div className="flex border-b border-stone-200 bg-cream sticky top-0">
+                <div className="w-0" />
+                {days.map(d => (
+                  <div key={d} className={`flex-1 min-w-[130px] text-center py-2 text-xs font-bold ${d === todayYmd() ? 'text-accent' : 'text-primary'}`}>{fmtDayLabel(d)}</div>
+                ))}
+              </div>
+              <div className="flex">
+                {days.map(d => <DayColumn key={d} ymd={d} appts={appts} onPick={setPicked} />)}
+              </div>
+              {appts.length === 0 && (
+                <div className="text-center py-8 border-t border-stone-100">
+                  <i className="ti ti-calendar-smile text-3xl text-accent" />
+                  <p className="text-sm text-stone-500 mt-1">No appointments {mode === 'day' ? 'this day' : 'this week'}{providerFilter ? ' for this provider' : ''}.</p>
+                  <p className="text-xs text-stone-400">Book one with “New appointment” — it goes straight onto the OpenEMR calendar.</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {picked && (
+            <AppointmentDetail appt={picked} providers={providersData && providersData.providers}
+              onClose={() => setPicked(null)} onChanged={changed}
+              onOpenChart={onOpenChart}
+              onReschedule={(a) => { setPicked(null); setModal({ mode: 'reschedule', appt: a }); }}
+              onDocument={(a) => { setPicked(null); onDocument(a); }} />
+          )}
+          {modal && (
+            <AppointmentModal mode={modal.mode} appt={modal.appt} patients={patients}
+              providersData={providersData} defaultDate={anchor}
+              defaultProviderId={providerFilter || (providersData && providersData.myProviderId)}
+              onClose={() => setModal(null)} onSaved={changed} />
+          )}
+        </div>
+      );
+    };
+
+    // Follow-up visit documented from an appointment → Encounter + note in
+    // OpenEMR, linked back to the appointment.
+    const FollowUpModal = ({ patient, appt, onClose, onSaved }) => {
+      const [f, setF] = useState({ reason: appt ? appt.title : '', subjective: '', objective: '', assessment: '', plan: '' });
+      const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+      const submit = () => {
+        setBusy(true); setErr('');
+        api.followUp(patient.id, { ...f, appointmentEid: appt ? appt.eid : undefined })
+          .then(r => onSaved(r)).catch(e => { setErr(e.message); setBusy(false); });
+      };
+      return (
+        <div className="fixed inset-0 bg-black/40 z-40 flex items-start justify-center p-4 overflow-y-auto" onClick={onClose}>
+          <div className="card w-full max-w-lg mt-10" onClick={e => e.stopPropagation()}>
+            <div className="card-h"><h2>Document follow-up visit</h2><button className="text-stone-400" onClick={onClose}><i className="ti ti-x" /></button></div>
+            <div className="p-4 grid gap-3">
+              {appt && <p className="text-xs text-stone-500">From appointment: {fmtDayLabel(appt.date)} {fmt12h(appt.startTime)} — the Encounter links back to it.</p>}
+              <Field label="Visit reason"><input className="inp" value={f.reason} onChange={e => setF({ ...f, reason: e.target.value })} /></Field>
+              <Field label="Subjective"><textarea className="inp" rows={2} value={f.subjective} onChange={e => setF({ ...f, subjective: e.target.value })} /></Field>
+              <Field label="Objective"><textarea className="inp" rows={2} value={f.objective} onChange={e => setF({ ...f, objective: e.target.value })} /></Field>
+              <Field label="Assessment"><textarea className="inp" rows={2} value={f.assessment} onChange={e => setF({ ...f, assessment: e.target.value })} /></Field>
+              <Field label="Plan"><textarea className="inp" rows={2} value={f.plan} onChange={e => setF({ ...f, plan: e.target.value })} /></Field>
+              {err && <p className="text-red-600 text-sm">{err}</p>}
+              <div className="flex gap-2 justify-end">
+                <button className="btn ghost" onClick={onClose}>Close</button>
+                <button className="btn" disabled={busy || !f.reason.trim()} onClick={submit}>{busy ? 'Writing to OpenEMR…' : 'Sign & write encounter'}</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // Chart tab: this patient's upcoming + past appointments with
+    // documented / no-show / not-yet-documented state (Scope B).
+    const ApptsTab = ({ patient, patients, onDocumentHp }) => {
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState('');
+      const [providersData, setProvidersData] = useState(null);
+      const [picked, setPicked] = useState(null);
+      const [modal, setModal] = useState(null);
+      const [followUp, setFollowUp] = useState(null); // appt | 'plain'
+      const load = useCallback(() => {
+        api.patientAppointments(patient.id).then(r => { setData(r); setErr(''); }).catch(e => setErr(e.message));
+      }, [patient.id]);
+      useEffect(load, [load]);
+      useEffect(() => { api.providers().then(setProvidersData).catch(() => {}); }, []);
+      if (err) return <p className="text-red-600 text-sm p-4">{err}</p>;
+      if (!data) return <p className="text-sm text-stone-500 p-4">Loading appointments from OpenEMR…</p>;
+      const today = todayYmd();
+      const upcoming = data.appointments.filter(a => a.date >= today && a.state === 'scheduled');
+      const past = data.appointments.filter(a => !(a.date >= today && a.state === 'scheduled')).reverse();
+      const changed = () => { setPicked(null); setModal(null); setFollowUp(null); load(); };
+      const documentFrom = (a) => {
+        if (!patient.initialVisitAt) onDocumentHp(a.eid);
+        else setFollowUp(a);
+      };
+      const Row = ({ a }) => (
+        <div className="flex flex-wrap items-center justify-between gap-2 py-2.5 border-b border-stone-100 last:border-0">
+          <div className="cursor-pointer" onClick={() => setPicked(a)}>
+            <div className={`font-semibold text-[13px] ${a.state === 'cancelled' ? 'line-through text-stone-400' : ''}`}>
+              {fmtDayLabel(a.date)} · {fmt12h(a.startTime)}–{fmt12h(a.endTime)} — {a.title}
+            </div>
+            <div className="text-xs text-stone-500">{LOCATION_LABELS[a.location] || 'Home visit'}{a.notes ? ` · ${a.notes.slice(0, 60)}` : ''}</div>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <StateChip state={a.state} />
+            {!a.encounterUuid && a.state !== 'cancelled' && a.state !== 'no_show' &&
+              <button className="btn gold !py-1 !px-2.5 text-xs" onClick={() => documentFrom(a)}>Document</button>}
+          </div>
+        </div>
+      );
+      return (
+        <div className="max-w-3xl">
+          {!data.linked && (
+            <div className="card p-5 text-center">
+              <i className="ti ti-calendar-off text-3xl text-accent" />
+              <p className="text-sm text-stone-500 mt-1">Link this patient to OpenEMR to schedule clinical visits.</p>
+            </div>
+          )}
+          {data.linked && (
+            <div>
+              <div className="card mb-4">
+                <div className="card-h"><h2>Upcoming</h2>
+                  <button className="btn gold !py-1.5" onClick={() => setModal({ mode: 'create' })}><i className="ti ti-calendar-plus" />New appointment</button>
+                </div>
+                <div className="p-4">
+                  {upcoming.length === 0 && <p className="text-sm text-stone-400">Nothing scheduled. Book the next visit — it goes straight onto the OpenEMR calendar.</p>}
+                  {upcoming.map(a => <Row key={a.eid} a={a} />)}
+                </div>
+              </div>
+              <div className="card">
+                <div className="card-h"><h2>Past &amp; other</h2>
+                  <button className="btn ghost !py-1.5 text-xs" onClick={() => setFollowUp('plain')}>Document unscheduled visit</button>
+                </div>
+                <div className="p-4">
+                  {past.length === 0 && <p className="text-sm text-stone-400">No appointment history yet.</p>}
+                  {past.map(a => <Row key={a.eid} a={a} />)}
+                </div>
+              </div>
+            </div>
+          )}
+          {picked && (
+            <AppointmentDetail appt={{ ...picked, clientId: patient.id }} providers={providersData && providersData.providers}
+              onClose={() => setPicked(null)} onChanged={changed}
+              onReschedule={(a) => { setPicked(null); setModal({ mode: 'reschedule', appt: a }); }}
+              onDocument={(a) => { setPicked(null); documentFrom(a); }} />
+          )}
+          {modal && (
+            <AppointmentModal mode={modal.mode} appt={modal.appt}
+              patients={(patients || []).filter(p => p.id === patient.id)}
+              providersData={providersData} defaultDate={todayYmd()}
+              defaultProviderId={providersData && providersData.myProviderId}
+              onClose={() => setModal(null)} onSaved={changed} />
+          )}
+          {followUp && (
+            <FollowUpModal patient={patient} appt={followUp === 'plain' ? null : followUp}
+              onClose={() => setFollowUp(null)} onSaved={changed} />
+          )}
+        </div>
+      );
+    };
+
     // ── App shell ──
     const App = () => {
       const [user, setUser] = useState(() => {
@@ -643,6 +1124,8 @@
       const [linking, setLinking] = useState(false);
       const [err, setErr] = useState('');
       const [listOpen, setListOpen] = useState(true);
+      const [view, setView] = useState('charts'); // 'charts' | 'schedule' (4.2)
+      const [hpApptEid, setHpApptEid] = useState(null); // H&P opened from an appointment
 
       const loadPatients = useCallback(() => {
         if (!getToken()) return;
@@ -654,9 +1137,21 @@
       }, [q]);
       useEffect(() => { if (user) { loadPatients(); api.status().then(setEmrStatus).catch(() => {}); } }, [user, loadPatients]);
 
-      const openPatient = (p) => {
-        setSel(p); setChart(null); setTab('summary'); setListOpen(false);
+      const openPatient = (p, opts) => {
+        setSel(p); setChart(null); setTab((opts && opts.tab) || 'summary'); setListOpen(false);
+        setView('charts'); setHpApptEid((opts && opts.appointmentEid) || null);
         api.chart(p.id).then(setChart).catch(e => setErr(e.message));
+      };
+      // Calendar → chart navigation (4.2): open the chart, or jump straight
+      // into documentation (H&P for a first visit, Appointments tab otherwise).
+      const openChartById = (clientId, opts) => {
+        const p = (patients || []).find(x => x.id === clientId);
+        if (p) openPatient(p, opts);
+      };
+      const documentFromSchedule = (appt) => {
+        const p = (patients || []).find(x => x.id === appt.clientId);
+        if (!p) return;
+        openPatient(p, p.initialVisitAt ? { tab: 'appts' } : { tab: 'visit', appointmentEid: appt.eid });
       };
       const refreshChart = () => sel && api.chart(sel.id).then(setChart).catch(() => {});
       const link = () => {
@@ -668,8 +1163,8 @@
       if (!user || !getToken()) return <Login onLogin={setUser} />;
 
       const tabs = [
-        ['summary', 'Chart'], ['visit', 'Initial Visit (H&P)'], ['medrec', 'Med Rec'],
-        ['careplan', 'Care Plan'], ['checklist', 'Enrollment']
+        ['summary', 'Chart'], ['appts', 'Appointments'], ['visit', 'Initial Visit (H&P)'],
+        ['medrec', 'Med Rec'], ['careplan', 'Care Plan'], ['checklist', 'Enrollment']
       ];
       return (
         <div className="min-h-screen lg:grid lg:grid-cols-[290px_1fr]">
@@ -708,7 +1203,13 @@
             <div className="bg-white border-b border-stone-200 px-4 lg:px-7 py-3 flex items-center justify-between gap-3">
               <div className="flex items-center gap-3">
                 <button className="lg:hidden btn ghost !px-2.5 !py-1.5" onClick={() => setListOpen(true)}><i className="ti ti-users" /></button>
-                <div className="serif text-lg text-primary font-semibold">Patient Chart</div>
+                <div className="serif text-lg text-primary font-semibold">{view === 'schedule' ? 'Schedule' : 'Patient Chart'}</div>
+                <div className="flex rounded-lg border border-stone-200 overflow-hidden ml-1">
+                  <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'charts' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
+                    onClick={() => setView('charts')}><i className="ti ti-folder-open mr-1" />Charts</button>
+                  <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'schedule' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
+                    onClick={() => { setView('schedule'); setListOpen(false); }}><i className="ti ti-calendar-week mr-1" />Schedule</button>
+                </div>
               </div>
               <div className="flex items-center gap-2 text-[11.5px] text-stone-500 bg-cream border border-stone-200 px-3 py-1.5 rounded-full">
                 <span className={`w-2 h-2 rounded-full ${emrStatus && emrStatus.connected ? 'bg-emerald-500' : 'bg-red-500'}`} />
@@ -716,8 +1217,13 @@
               </div>
             </div>
             {err && <p className="text-red-600 text-sm px-7 pt-3">{err}</p>}
-            {!sel && <div className="p-10 text-stone-400 text-sm">Select a patient to open their chart.</div>}
-            {sel && (
+            {view === 'schedule' && (
+              <ScheduleView user={user} patients={patients || []}
+                onOpenChart={(clientId) => openChartById(clientId)}
+                onDocument={documentFromSchedule} />
+            )}
+            {view === 'charts' && !sel && <div className="p-10 text-stone-400 text-sm">Select a patient to open their chart, or switch to Schedule for the calendar.</div>}
+            {view === 'charts' && sel && (
               <div>
                 <div className="bg-white border-b border-stone-200 px-4 lg:px-7 pt-4">
                   <div className="flex items-center gap-4 pb-3">
@@ -744,7 +1250,8 @@
                 </div>
                 <div className="p-4 lg:p-7">
                   {tab === 'summary' && <SummaryTab chart={chart} patient={sel} onLink={link} linking={linking} />}
-                  {tab === 'visit' && (chart ? <HpTab patient={sel} chart={chart} onDone={() => { refreshChart(); loadPatients(); }} /> : <p className="text-sm text-stone-500">Loading…</p>)}
+                  {tab === 'appts' && <ApptsTab patient={sel} patients={patients || []} onDocumentHp={(eid) => { setHpApptEid(eid); setTab('visit'); }} />}
+                  {tab === 'visit' && (chart ? <HpTab patient={sel} chart={chart} appointmentEid={hpApptEid} onDone={() => { setHpApptEid(null); refreshChart(); loadPatients(); }} /> : <p className="text-sm text-stone-500">Loading…</p>)}
                   {tab === 'medrec' && <MedRecTab patient={sel} />}
                   {tab === 'careplan' && <CarePlanTab patient={sel} onSaved={loadPatients} />}
                   {tab === 'checklist' && <ChecklistTab patient={sel} onActivated={loadPatients} />}
