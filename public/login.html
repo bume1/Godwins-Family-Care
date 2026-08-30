@@ -62,6 +62,7 @@
       service: <svg className="w-7 h-7" fill="none" stroke="currentColor" strokeWidth="1.75" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M11.42 15.17L17.25 21A2.652 2.652 0 0021 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 11-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 004.486-6.336l-3.276 3.277a3.004 3.004 0 01-2.25-2.25l3.276-3.276a4.5 4.5 0 00-6.336 4.486c.091 1.076-.071 2.264-.904 2.95l-.102.085m-1.745 1.437L5.909 7.5H4.5L2.25 3.75l1.5-1.5L7.5 4.5v1.409l4.26 4.26m-1.745 1.437l1.745-1.437m6.615 8.206L15.75 15.75M4.867 19.125h.008v.008h-.008v-.008z"/></svg>,
       clientPortal: <svg className="w-7 h-7" fill="none" stroke="currentColor" strokeWidth="1.75" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z"/></svg>,
       portal: <svg className="w-7 h-7" fill="none" stroke="currentColor" strokeWidth="1.75" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12l8.954-8.955c.44-.439 1.152-.439 1.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75M8.25 21h8.25"/></svg>,
+      clinical: <svg className="w-7 h-7" fill="none" stroke="currentColor" strokeWidth="1.75" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M21 8.25c0-2.485-2.099-4.5-4.688-4.5-1.935 0-3.597 1.126-4.312 2.733-.715-1.607-2.377-2.733-4.313-2.733C5.1 3.75 3 5.765 3 8.25c0 7.22 9 12 9 12s9-4.78 9-12z"/><path strokeLinecap="round" strokeLinejoin="round" d="M7.5 12h2.25l1.5-3 1.5 4.5 1.5-1.5h2.25"/></svg>,
       logout: <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="1.75" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15M12 9l-3 3m0 0l3 3m-3-3h12.75"/></svg>,
       beaker: <svg className="w-7 h-7" fill="none" stroke="currentColor" strokeWidth="1.75" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23.693L5 14.5m14.8.8l1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0112 21c-2.773 0-5.491-.235-8.135-.687-1.718-.293-2.3-2.379-1.067-3.61L5 14.5"/></svg>,
     };
@@ -339,6 +340,18 @@
       }
 
       // Implementations/Launch tracker deactivated (Session 2): nav tile hidden; tracker code retained.
+
+      // Clinical Workspace — clinicians (hasClinicalAccess) and super admins (4.1/4.2)
+      if (isAdmin || user.hasClinicalAccess) {
+        availablePortals.push({
+          id: 'clinical',
+          name: 'Clinical Workspace',
+          description: 'IHPC charting, scheduling, and clinical enrollment (OpenEMR)',
+          icon: Icons.clinical,
+          color: 'from-teal-600 to-primary-700',
+          path: '/clinical'
+        });
+      }
 
       // Service Portal - super admins, users with hasServicePortalAccess, or vendors (NOT managers)
       if (isAdmin || user.hasServicePortalAccess || isVendor) {
@@ -669,17 +682,34 @@
       });
       const [showPasswordChange, setShowPasswordChange] = useState(false);
 
-      // Clients and family skip the Portal Hub entirely — they have exactly one
-      // destination, so send them straight into the care portal. Staff keep the
-      // hub (they pick between Admin Hub / Service Portal / Client Portal Admin).
-      const isClientOrFamily = user && (user.role === 'client' || user.role === 'family');
+      // The Portal Hub is SUPER-ADMIN ONLY (owner decision, 08/2026): every
+      // other user lands directly in their one destination on login — clients/
+      // family in the care portal, clinicians in /clinical, managers in the
+      // admin hub, vendors in the service portal. A user with several access
+      // flags goes to the highest-priority one below (the destination apps
+      // have their own navigation). Only a user with NO access at all still
+      // sees the hub's "no portals" card, since there is nowhere to send them.
+      const directDestination = (u) => {
+        if (!u || u.role === 'admin') return null; // Super Admin keeps the hub
+        if (u.role === 'client' || u.role === 'family') return (u.role === 'client' && u.slug) ? `/portal/${u.slug}` : '/portal';
+        if (u.hasClinicalAccess) return '/clinical';
+        if (u.isManager || u.hasAdminHubAccess) return '/admin';
+        if (u.hasClientPortalAdminAccess) return '/portal';
+        if (u.role === 'vendor' || u.hasServicePortalAccess) return '/service-portal';
+        return null; // no access anywhere → hub renders its empty state
+      };
+      const destination = directDestination(user);
       const passwordGateOpen = user && (user.requirePasswordChange || showPasswordChange);
       useEffect(() => {
-        if (!token || !user || passwordGateOpen || !isClientOrFamily) return;
+        if (!token || !user || passwordGateOpen || !destination) return;
+        // Same token handoff the hub tiles perform (destination apps read
+        // portal_* or admin_* keys).
         localStorage.setItem('portal_token', token);
         localStorage.setItem('portal_user', JSON.stringify(user));
-        window.location.replace(user.role === 'client' && user.slug ? `/portal/${user.slug}` : '/portal');
-      }, [token, user, passwordGateOpen]);
+        localStorage.setItem('admin_token', token);
+        localStorage.setItem('admin_user', JSON.stringify(user));
+        window.location.replace(destination);
+      }, [token, user, passwordGateOpen, destination]);
 
       const handleLogin = (newToken, newUser) => {
         setToken(newToken);
@@ -724,8 +754,9 @@
         );
       }
 
-      // Redirect in flight for client/family — show a brief loading state, not the hub.
-      if (isClientOrFamily) {
+      // Redirect in flight for every non-admin — show a brief loading state,
+      // never the hub.
+      if (destination) {
         return (
           <div className="min-h-screen flex items-center justify-center">
             <div className="text-center">
