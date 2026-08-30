@@ -2538,6 +2538,14 @@ app.post('/api/auth/login', async (req, res) => {
       hasClientPortalAdminAccess: user.hasClientPortalAdminAccess || isManager || false,
       assignedProjects: user.assignedProjects || [],
       assignedClients: user.assignedClients || [],
+      // GFC role fields — the login page's directDestination() routes on
+      // these, so they MUST be in the login response (their absence sent
+      // clinicians to an empty Portal Hub).
+      hasClinicalAccess: user.hasClinicalAccess || false,
+      licenseLevel: user.licenseLevel || null,
+      openEmrProviderId: user.openEmrProviderId || null,
+      familyOfClientId: user.familyOfClientId || null,
+      familyIsPoa: user.familyIsPoa || false,
       // Password reset flag
       requirePasswordChange: user.requirePasswordChange || false
     };
