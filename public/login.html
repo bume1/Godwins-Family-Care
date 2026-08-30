@@ -689,12 +689,21 @@
       // flags goes to the highest-priority one below (the destination apps
       // have their own navigation). Only a user with NO access at all still
       // sees the hub's "no portals" card, since there is nowhere to send them.
+      // Finalized role → destination matrix (owner, 08/2026; v2 §4 role model):
+      // clients/family → care portal (family unlocks via the client's signed
+      // roiFamily consent); Clinical (FNP) → /clinical; Case Manager →
+      // /admin/enrollment (interim landing until the view-only clinical read
+      // lands with Session 4.3); Caregivers (repo role 'vendor', converted at
+      // Session 6) → service portal until the caregiver app replaces it.
+      // isManager / hasAdminHubAccess / hasClientPortalAdminAccess are LEGACY
+      // lab-era flags — no distinct GFC role; they all just land in /admin and
+      // are slated for retirement at the Session 6/7 role migration.
       const directDestination = (u) => {
         if (!u || u.role === 'admin') return null; // Super Admin keeps the hub
         if (u.role === 'client' || u.role === 'family') return (u.role === 'client' && u.slug) ? `/portal/${u.slug}` : '/portal';
         if (u.hasClinicalAccess) return '/clinical';
-        if (u.isManager || u.hasAdminHubAccess) return '/admin';
-        if (u.hasClientPortalAdminAccess) return '/portal';
+        if (u.role === 'caseManager') return '/admin/enrollment';
+        if (u.isManager || u.hasAdminHubAccess || u.hasClientPortalAdminAccess) return '/admin';
         if (u.role === 'vendor' || u.hasServicePortalAccess) return '/service-portal';
         return null; // no access anywhere → hub renders its empty state
       };
