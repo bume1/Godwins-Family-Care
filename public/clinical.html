@@ -233,6 +233,8 @@
 
     // ── Chart summary tab ──
     const SummaryTab = ({ chart, patient, onLink, linking }) => {
+      const [showLinkExisting, setShowLinkExisting] = useState(false);
+      const [existingId, setExistingId] = useState('');
       const d = chart && chart.demographics;
       if (!chart) return <p className="text-sm text-stone-500 p-4">Loading chart…</p>;
       const Sec = ({ title, data, render, icon }) => (
@@ -258,12 +260,36 @@
       return (
         <div>
           {!chart.linked && (
-            <div className="card p-4 mb-4 flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <div className="font-semibold text-sm text-primary">Not linked to OpenEMR yet</div>
-                <div className="text-xs text-stone-500">Create the OpenEMR patient record from the app demographics, or link an existing chart.</div>
+            <div className="card p-4 mb-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="font-semibold text-sm text-primary">Not linked to OpenEMR yet</div>
+                  <div className="text-xs text-stone-500">Create the OpenEMR patient record from the app demographics, or link a chart that already exists in the EMR.</div>
+                </div>
+                <button className="btn gold" disabled={linking} onClick={() => onLink()}>{linking ? 'Linking…' : 'Create & link OpenEMR patient'}</button>
               </div>
-              <button className="btn gold" disabled={linking} onClick={() => onLink()}>{linking ? 'Linking…' : 'Create & link OpenEMR patient'}</button>
+              {/* Link an EXISTING EMR chart — the path for patients already in
+                  OpenEMR (legacy records, or a chart created directly there).
+                  Prevents a duplicate chart for the same person. */}
+              <div className="border-t border-stone-100 mt-3 pt-3">
+                {!showLinkExisting ? (
+                  <button className="text-xs text-primary underline" onClick={() => setShowLinkExisting(true)}>
+                    Already in OpenEMR? Link an existing patient instead
+                  </button>
+                ) : (
+                  <div className="flex flex-wrap items-end gap-2">
+                    <Field label="OpenEMR patient UUID" className="flex-1 min-w-[260px]">
+                      <input className="inp font-mono text-xs" placeholder="e.g. a284d5c2-670e-4a62-aa95-2d1aa629003c"
+                        value={existingId} onChange={e => setExistingId(e.target.value.trim())} />
+                    </Field>
+                    <button className="btn" disabled={linking || !existingId} onClick={() => onLink({ openEmrPatientId: existingId })}>
+                      {linking ? 'Linking…' : 'Link'}
+                    </button>
+                    <button className="btn ghost" onClick={() => { setShowLinkExisting(false); setExistingId(''); }}>Cancel</button>
+                    <p className="text-[11px] text-stone-400 w-full">Find the UUID in OpenEMR on the patient's record (or ask an admin). The link is verified against the EMR before it is saved.</p>
+                  </div>
+                )}
+              </div>
             </div>
           )}
           <div className="grid md:grid-cols-2 gap-0 md:gap-4">
@@ -1162,9 +1188,9 @@
         openPatient(p, p.initialVisitAt ? { tab: 'appts' } : { tab: 'visit', appointmentEid: appt.eid });
       };
       const refreshChart = () => sel && api.chart(sel.id).then(setChart).catch(() => {});
-      const link = () => {
-        setLinking(true);
-        api.link(sel.id, {}).then(() => { refreshChart(); loadPatients(); })
+      const link = (body) => {
+        setLinking(true); setErr('');
+        api.link(sel.id, body || {}).then(() => { refreshChart(); loadPatients(); })
           .catch(e => setErr(e.message)).finally(() => setLinking(false));
       };
 

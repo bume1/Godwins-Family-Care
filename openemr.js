@@ -244,9 +244,20 @@ const forActor = (actor) => {
     async createPatient(fhirPatient) {
       const res = await rawRequest({ method: 'POST', url: fhirUrl('Patient'), body: fhirPatient });
       const data = expectOk(res, 'create Patient');
-      const puuid = data && data.id;
+      // 7.0.4 quirk (verified live): the FHIR Patient POST does NOT echo the
+      // created resource — it returns {"pid":N,"uuid":"..."}. Accept that, the
+      // spec-shaped {id}, and the standard-API {data:{...}} wrapper, so the
+      // link step works regardless of which shape the instance returns.
+      const body = (data && typeof data === 'object' && data.data && typeof data.data === 'object') ? data.data : data;
+      const puuid = body && (body.uuid || body.id || null);
+      if (!puuid) {
+        throw new OpenEmrError(
+          `OpenEMR created the patient but returned no id (response keys: ${body && typeof body === 'object' ? Object.keys(body).join(', ') || 'none' : typeof body})`,
+          res.status, data);
+      }
       logEmrAccess(actor, 'write', 'Patient', puuid, { op: 'create' });
-      return data;
+      // Normalize so callers can always read `.id` (the FHIR-shaped contract).
+      return { ...body, id: puuid };
     },
 
     // ---- Standard-API clinical writes ----
