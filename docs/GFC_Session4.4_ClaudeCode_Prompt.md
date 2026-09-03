@@ -58,12 +58,36 @@ Shorter than the 4.1 H&P: subjective, objective (incl. vitals fields),
 assessment, plan. Writes encounter + soap_note through the same 4.1 path.
 Vitals continue to be preserved verbatim in the note (server defect).
 
-B. ICD-10 coded diagnoses
+B. ICD-10 coded diagnoses (spec §7 — source of truth)
 Problem list and visit assessment capture selectable ICD-10 codes (search
 by code or description) rather than free text. Codes attach to the
-encounter and feed the billing route. Ship a seeded working set relevant
-to home-based primary care with search over it; make the source
-swappable for a fuller code set later.
+encounter and feed the billing route.
+
+OpenEMR is the source of truth for BOTH code sets. The app proxies
+OpenEMR's code search and writes selections back — it does NOT maintain
+its own code list. If the ICD-10 set is not yet loaded into this OpenEMR
+instance, report that as a setup step (CMS publishes it free; OpenEMR has
+a code loader) rather than shipping a hardcoded list in app config.
+
+CPT: the AMA holds copyright and OpenEMR does not ship the set. GFC
+hand-enters the codes it bills into OpenEMR's fee schedule — the home
+visit E/M range 99341-99345 (new) and 99347-99350 (established). The app
+reads those from OpenEMR. Do not embed CPT descriptors in app code.
+
+B2. Coding assist T1 + T2 (spec §8 — build both now)
+- T1 problem-list carry-forward: opening a follow-up encounter
+  pre-selects the patient's active OpenEMR problems as candidate
+  encounter diagnoses; clinician unchecks what wasn't addressed.
+- T2 usage-ranked favorites: record which codes each clinician selects
+  and rank that clinician's picker by their own frequency, most recent
+  first. Per-clinician, not global.
+- GUARDRAIL (applies to both, and to any future tier): the system
+  proposes, the clinician disposes. Nothing is auto-selected onto a
+  claim; every suggestion is overridable; no auto-submit.
+- Do NOT build T3 (E/M level suggestion) or T4 (note-to-code inference)
+  in this session. T3 is blocked on the billing consultant confirming
+  documentation thresholds — implementing E/M thresholds from memory is
+  an audit risk.
 
 C. Prescription recording
 Record new prescriptions and refills to OpenEMR (/prescription or the
@@ -106,6 +130,8 @@ decision in CLAUDE.md.
 DO NOT
 - Build an HL7/Quest interface or e-prescribing transmission.
 - Build claims, eligibility, statements, or Stripe (Track D).
+- Build E/M level auto-suggestion (T3) or note-to-code inference (T4).
+- Maintain any ICD-10 or CPT list inside the app — OpenEMR owns both.
 - Attempt client-side workarounds for the vitals or document 500s.
 - Change 4.1/4.2 behavior beyond what this scope requires.
 - Enter real PHI. Test data only.
@@ -124,6 +150,11 @@ ACCEPTANCE
   its own signer and timestamp.
 - The note header and encounter record show the acting clinician's name
   and NPI.
+- Opening a follow-up on a patient with active problems pre-selects them
+  as candidate diagnoses, and unchecking one keeps it off the encounter.
+- After several coded encounters, that clinician's code picker shows
+  their own most-used codes first.
+- Code search results come from OpenEMR, not from a list inside the app.
 - Non-clinical roles get 403 on every new route. All writes hit
   logActivity().
 - App boots; 3.x, 4.1, 4.2 flows unaffected.
