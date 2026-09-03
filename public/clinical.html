@@ -1237,10 +1237,20 @@
             {emrStatus && !emrStatus.connected && (
               <div className="bg-amber-50 border-b border-amber-200 px-4 lg:px-7 py-2 text-[12px] text-amber-900">
                 {!emrStatus.configured ? (
-                  <span>
-                    <b>OpenEMR is not configured.</b> Missing environment {(emrStatus.missing || []).length === 1 ? 'variable' : 'variables'}:{' '}
-                    <code className="font-mono">{(emrStatus.missing || []).join(', ') || 'unknown'}</code>. Add {(emrStatus.missing || []).length === 1 ? 'it' : 'them'} to the app's secrets and restart the server.
-                  </span>
+                  (emrStatus.missing || []).length ? (
+                    <span>
+                      <b>OpenEMR is not configured.</b> Missing environment {emrStatus.missing.length === 1 ? 'variable' : 'variables'}:{' '}
+                      <code className="font-mono">{emrStatus.missing.join(', ')}</code>. Add {emrStatus.missing.length === 1 ? 'it' : 'them'} to the app's secrets, then STOP and RUN the app (a page reload is not enough — secrets load at server start).
+                    </span>
+                  ) : (
+                    // No `missing` list means the SERVER is running code older than
+                    // this page (files on disk updated, process not restarted) —
+                    // env vars are only read at process start either way.
+                    <span>
+                      <b>OpenEMR is not configured, and the server is running an older build than this page.</b>{' '}
+                      Stop and Run the app (not just a page reload) so it picks up both the current code and the secrets. If it still shows this afterwards, the OpenEMR secrets are not set on the running server.
+                    </span>
+                  )
                 ) : (
                   <span><b>OpenEMR is configured but unreachable.</b> {emrStatus.error || 'The EMR did not respond.'}</span>
                 )}
