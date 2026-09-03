@@ -32,8 +32,17 @@ const fhirUrl = (path) => `${BASE_URL}/apis/${SITE}/fhir/${path.replace(/^\/+/, 
 const apiUrl = (path) => `${BASE_URL}/apis/${SITE}/api/${path.replace(/^\/+/, '')}`;
 const tokenUrl = () => `${BASE_URL}/oauth2/${SITE}/token`;
 
-const isConfigured = () => !!(BASE_URL && config.OPENEMR.CLIENT_ID && config.OPENEMR.CLIENT_SECRET &&
-  config.OPENEMR.API_USERNAME && config.OPENEMR.API_PASSWORD);
+const REQUIRED_ENV = [
+  ['OPENEMR_BASE_URL', () => BASE_URL],
+  ['OPENEMR_CLIENT_ID', () => config.OPENEMR.CLIENT_ID],
+  ['OPENEMR_CLIENT_SECRET', () => config.OPENEMR.CLIENT_SECRET],
+  ['OPENEMR_API_USERNAME', () => config.OPENEMR.API_USERNAME],
+  ['OPENEMR_API_PASSWORD', () => config.OPENEMR.API_PASSWORD]
+];
+// Which required env vars are absent/blank. NAMES ONLY — never values, so this
+// is safe to surface in the UI for setup diagnostics.
+const missingConfig = () => REQUIRED_ENV.filter(([, read]) => !String(read() || '').trim()).map(([name]) => name);
+const isConfigured = () => missingConfig().length === 0;
 
 // ---- Activity logging (injected by server.js to avoid a require cycle) ----
 let activityLogger = null;
@@ -389,7 +398,8 @@ const forActor = (actor) => {
 
 // Connectivity probe for the workspace sync indicator + preflight.
 const getStatus = async () => {
-  if (!isConfigured()) return { configured: false, connected: false };
+  const missing = missingConfig();
+  if (missing.length) return { configured: false, connected: false, missing };
   try {
     await getAccessToken();
     return { configured: true, connected: true, baseUrl: BASE_URL };
@@ -400,6 +410,7 @@ const getStatus = async () => {
 
 module.exports = {
   isConfigured,
+  missingConfig,
   setActivityLogger,
   forActor,
   getStatus,

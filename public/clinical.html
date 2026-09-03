@@ -1137,6 +1137,14 @@
       }, [q]);
       useEffect(() => { if (user) { loadPatients(); api.status().then(setEmrStatus).catch(() => {}); } }, [user, loadPatients]);
 
+      // Clear every stored credential key the portals share, so signing out of
+      // the workspace really signs out (not just this tab's view).
+      const signOut = () => {
+        ['admin_token', 'admin_user', 'unified_token', 'unified_user', 'portal_token', 'portal_user']
+          .forEach(k => localStorage.removeItem(k));
+        window.location.href = '/login';
+      };
+
       const openPatient = (p, opts) => {
         setSel(p); setChart(null); setTab((opts && opts.tab) || 'summary'); setListOpen(false);
         setView('charts'); setHpApptEid((opts && opts.appointmentEid) || null);
@@ -1211,11 +1219,33 @@
                     onClick={() => { setView('schedule'); setListOpen(false); }}><i className="ti ti-calendar-week mr-1" />Schedule</button>
                 </div>
               </div>
-              <div className="flex items-center gap-2 text-[11.5px] text-stone-500 bg-cream border border-stone-200 px-3 py-1.5 rounded-full">
-                <span className={`w-2 h-2 rounded-full ${emrStatus && emrStatus.connected ? 'bg-emerald-500' : 'bg-red-500'}`} />
-                {emrStatus === null ? 'OpenEMR…' : emrStatus.connected ? 'OpenEMR connected' : (emrStatus.configured ? 'OpenEMR unreachable' : 'OpenEMR not configured')}
+              <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 text-[11.5px] text-stone-500 bg-cream border border-stone-200 px-3 py-1.5 rounded-full">
+                  <span className={`w-2 h-2 rounded-full ${emrStatus && emrStatus.connected ? 'bg-emerald-500' : 'bg-red-500'}`} />
+                  {emrStatus === null ? 'OpenEMR…' : emrStatus.connected ? 'OpenEMR connected' : (emrStatus.configured ? 'OpenEMR unreachable' : 'OpenEMR not configured')}
+                </div>
+                <div className="flex items-center gap-2 pl-1 border-l border-stone-200">
+                  <span className="text-[11.5px] text-stone-500 hidden sm:inline">{user.name}</span>
+                  <button className="btn ghost !py-1.5 !px-2.5 text-xs" onClick={signOut} title="Sign out">
+                    <i className="ti ti-logout" /><span className="hidden sm:inline">Sign out</span>
+                  </button>
+                </div>
               </div>
             </div>
+            {/* Setup diagnostics: names the exact blocker so an admin can fix it
+                without opening dev tools. Never renders secret VALUES. */}
+            {emrStatus && !emrStatus.connected && (
+              <div className="bg-amber-50 border-b border-amber-200 px-4 lg:px-7 py-2 text-[12px] text-amber-900">
+                {!emrStatus.configured ? (
+                  <span>
+                    <b>OpenEMR is not configured.</b> Missing environment {(emrStatus.missing || []).length === 1 ? 'variable' : 'variables'}:{' '}
+                    <code className="font-mono">{(emrStatus.missing || []).join(', ') || 'unknown'}</code>. Add {(emrStatus.missing || []).length === 1 ? 'it' : 'them'} to the app's secrets and restart the server.
+                  </span>
+                ) : (
+                  <span><b>OpenEMR is configured but unreachable.</b> {emrStatus.error || 'The EMR did not respond.'}</span>
+                )}
+              </div>
+            )}
             {err && <p className="text-red-600 text-sm px-7 pt-3">{err}</p>}
             {view === 'schedule' && (
               <ScheduleView user={user} patients={patients || []}
