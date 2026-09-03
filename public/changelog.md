@@ -4,6 +4,36 @@
 
 ---
 
+### Version 3.6.0 - September 3, 2026
+
+#### New Features
+- Add family Power of Attorney designation; refine case-manager scope decision
+
+#### Bug Fixes
+- login response was missing the GFC role fields, stranding clinicians on the hub
+
+#### Improvements
+- Update Replit configuration settings
+
+#### Documentation
+- sync v2 §4 role model + session-plan timeline with finalized 08/2026 owner decisions
+- rewrite 4.3 prompt against merged 4.1/4.2 state — POA acting gates, case-manager scoped read, Drive-served care-plan PDF, tombstone exclusion, provider-name fallback
+- backfill Session 4.2 merge (PR #22) per CLAUDE.md step 7
+- backfill Session 4.1 as merged (PR #19); align 4.2 prompt with 4.1 transport + known EMR defects
+- root-cause the two OpenEMR server defects; correct the document diagnosis
+- backfill Session 4.1 merge (PR #19) per CLAUDE.md step 7
+- Session 4 prompts — 4.1 clinician workspace (OpenEMR write), 4.2 clinician scheduling, 4.3 patient clinical read
+
+#### Changes
+- Finalize login destination matrix per v2 §4 role model (owner decisions)
+- Portal Hub is super-admin only; route everyone else straight to their portal
+- Session 4.2: Clinician scheduling (OpenEMR-tied)
+- Session 4.1: write-chain verification fixes from live preflight
+- Session 4.1: encounter defaults + vitals best-effort (live write-chain findings)
+- Session 4.1: Clinician workspace (OpenEMR write)
+- Skip the Portal Hub for client and family logins
+
+
 ### Version 3.5.0 - August 16, 2026
 
 #### New Features
