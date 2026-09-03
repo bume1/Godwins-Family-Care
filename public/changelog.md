@@ -4,6 +4,12 @@
 
 ---
 
+### Version 3.7.0 - September 3, 2026
+
+#### New Features
+- Add clinical sign-out button and self-diagnosing OpenEMR status
+
+
 ### Version 3.6.0 - September 3, 2026
 
 #### New Features
