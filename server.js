@@ -5625,8 +5625,12 @@ const clientToFhirPatient = (client) => {
 };
 
 // GET /api/clinical/status — OpenEMR connectivity for the sync indicator.
+// Process start time answers the recurring "is this server running the code I
+// just pulled?" question without shell access — a start time older than the
+// deploy means the process was never restarted.
+const SERVER_STARTED_AT = new Date().toISOString();
 app.get('/api/clinical/status', authenticateToken, requireClinicalStaff, async (req, res) => {
-  res.json(await openemr.getStatus());
+  res.json({ ...(await openemr.getStatus()), serverStartedAt: SERVER_STARTED_AT });
 });
 
 // GET /api/clinical/patients — IHPC/both clients with link + activation state.
@@ -5679,8 +5683,11 @@ app.post('/api/clinical/patients/:clientId/link', authenticateToken, requireClin
       await emr.getPatient(puuid);
     } else {
       const created = await emr.createPatient(clientToFhirPatient(client));
+      // openemr.createPatient() normalizes 7.0.4's {pid,uuid} response and
+      // throws a specific error if the id is genuinely absent, so a bare
+      // "no id" case cannot reach here. Kept as a typed guard only.
       puuid = created && created.id;
-      if (!puuid) return res.status(502).json({ error: 'OpenEMR did not return a patient id' });
+      if (!puuid) return res.status(502).json({ error: 'OpenEMR created the patient but returned no usable id', code: 'EMR_NO_PATIENT_ID' });
     }
     users[idx].openEmrPatientId = puuid;
     await db.set('users', users);
