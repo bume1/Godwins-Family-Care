@@ -1,7 +1,7 @@
 # GFC Clinical Completeness Spec v1
 ## OpenEMR clinician-workflow capability coverage in the GFC app
 
-**Date:** 2026-09-03
+**Date:** 2026-09-03 · **rev 1.1** (adds §7 code source-of-truth and §8 coding assist)
 **Purpose:** Enumerate every OpenEMR front-end capability pertinent to an FNP's home-based primary care workflow, state what the GFC clinical portal covers today, and define what must exist for the portal to carry a full clinical visit end to end.
 **Owner decisions encoded here:** billing is completed in OpenEMR's back end for now, but the **note → billing route must be accounted for in the app**. Quest HL7 lab interface is deferred (months out); lab ordering must still be capturable. Session 4.1 (PR #19) and 4.2 (PR #22) are merged.
 
@@ -92,3 +92,44 @@ follow-up SOAP form · ICD-10 coded problems · prescription recording · order 
 **P1 next:** results review + acknowledgment · clinical inbox · vitals re-test after EMR fix · document upload re-test after EMR fix · Session 4.3 patient read.
 
 **P2 later:** immunizations · outbound referrals · Quest HL7 · e-prescribing.
+
+
+---
+
+## 7. Code sets — source of truth (decided 2026-09-03)
+
+**ICD-10-CM (diagnoses).** Federal, free, identical in all states, reissued every October 1 by CMS/NCHS. There is no Georgia-specific ICD-10 list. Load the CMS code set into OpenEMR via its code loader; the app searches it through OpenEMR. Georgia specificity, where it matters, comes from **Palmetto GBA** (the Medicare contractor for GA) Local Coverage Determinations, which define which diagnoses support medical necessity for home-visit services — a consultant input, not a data feed.
+
+**CPT (services).** The AMA holds CPT copyright; no EMR may redistribute the code set, and OpenEMR does not ship it. GFC does **not** need a license for its use case: the practice hand-enters the small set of codes it actually bills into OpenEMR's fee schedule. Working set is the home-visit E/M range — 99341–99345 (new patient), 99347–99350 (established) — plus care-management HCPCS codes if and when those start.
+
+**Rule: OpenEMR is the source of truth for both sets. The app never maintains its own code list.** It reads codes from OpenEMR and writes selections back. A second list in the app would drift, and the codes in the chart would stop matching the codes on the claim.
+
+**Consequence for the build:** code search endpoints in the app proxy OpenEMR. If a needed code is missing, it gets added in OpenEMR, not in app config.
+
+---
+
+## 8. Coding assist (automation) — tiers
+
+Standard EMRs offer coding suggestions. The equivalent here, in build order. **Guardrail across all tiers: the system proposes, the clinician disposes.** Nothing is auto-selected onto a claim, every suggestion is overridable, and the note must independently support whatever level is billed. "The software chose it" is not an audit defense.
+
+**T1 — Problem-list carry-forward. (P0, build now.)**
+Opening a follow-up encounter pre-selects the patient's active problems from OpenEMR as candidate encounter diagnoses; the clinician unchecks what wasn't addressed. For a chronic-disease home panel this covers most visits. Cheapest, highest-yield item in this document.
+
+**T2 — Usage-ranked favorites. (P0, build now.)**
+The app records which ICD-10 and CPT codes each clinician actually selects and ranks their picker by that clinician's own frequency, most-recent first. Seeded from a starter set; self-tuning after ~20 visits. Per-clinician, not global.
+
+**T3 — E/M level suggestion. (P1 — build after Dianne confirms thresholds.)**
+Under the 2021+ E/M rules a level is supported by either total time or medical decision-making complexity. Time is deterministic and the app already knows encounter start/stop, so it can surface "42 minutes documented — supports 99349" with the rule shown. MDM-based suggestion (problems addressed, data reviewed, risk) is rule-based and can follow. **Do not implement the thresholds from memory — they come from the billing consultant.**
+
+**T4 — Note-to-code inference. (P2 — after real usage.)**
+Propose ICD-10 candidates from the assessment text. Build only after several weeks of real notes and confirmed code choices exist to validate suggestions against. Same guardrail: proposals only, never committed without confirmation.
+
+---
+
+## 9. Open items for the billing consultant (Dianne)
+
+1. Confirm the CPT set GFC bills for home-based primary care under Bethel's NPI (E/M range; any care-management codes now or later).
+2. Build the starter ICD-10 favorites list from GFC's actual panel, informed by Palmetto GBA coverage determinations for home visits.
+3. Confirm documentation requirements per E/M level — what the note must contain to support 99348 vs 99350. **Blocks T3.**
+4. Confirm whether an FNP in Georgia bills these independently under her own NPI or requires physician linkage.
+5. From `GFC_Billing_Spec_Input_Checklist.md` (currently only in the desktop GFCLLC folder, not in this repo): refund/adjustment policy, and whether GFC uses an accounting system the app should feed.
