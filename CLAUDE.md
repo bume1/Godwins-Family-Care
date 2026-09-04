@@ -1,5 +1,5 @@
 # GFC Care Platform — running status
-_Last updated: 2026-08-30 (Session 4.2 merged, PR #22)_
+_Last updated: 2026-09-04 (Session 4.4 prompt + clinical completeness spec landed on main)_
 
 This file is auto-loaded at the start of every Claude Code session. Read it first for current state. Details live in `docs/`.
 
@@ -7,7 +7,9 @@ This file is auto-loaded at the start of every Claude Code session. Read it firs
 
 ## Current session focus
 
-**Session 4.2 (clinician scheduling, OpenEMR-tied) — ✅ merged (PR #22). Next: Session 4.3 (patient portal clinical read).**
+**Next: Session 4.4 — clinical completeness P0** (coding · orders · prescriptions · sign-and-close · note→billing route). Sessions 4.1 (PR #19) and 4.2 (PR #22) are merged. **4.3 (patient portal clinical read) now follows 4.4**, per the build order in `docs/GFC_Clinical_Completeness_Spec_v1.md` §6.
+
+- **4.4 — ⬜ Next.** Spec: `docs/GFC_Clinical_Completeness_Spec_v1.md` (rev 1.1); prompt: `docs/GFC_Session4.4_ClaudeCode_Prompt.md`. Build the §6 **P0 bundle**: follow-up SOAP form · ICD-10-coded diagnoses · prescription recording (no transmission) · lab/imaging order capture (no HL7) · encounter coding → OpenEMR billing/fee-sheet route (§2, normative) · sign-and-close with addenda (§3, normative) · attribution interim (§4) · confirm the appointment OAuth client swap is deployed. Coding assist **T1 (problem-list carry-forward) and T2 (per-clinician usage-ranked favorites) are in scope; T3/T4 are not** — T3 is blocked on the billing consultant confirming E/M documentation thresholds. Prerequisite PR #27 (EMR status diagnostics) merged 2026-09-04.
 
 - **4.2 — ✅ Done (PR #22).** Clinical scheduling inside `/clinical`: OpenEMR is the ONLY appointment ledger (no app-side copy beyond `appointment_encounters` linkage pointers). Create/reschedule/cancel/no-show against the provider's OpenEMR calendar, double-booking rejected against the live calendar, provider day/week views + admin unified view, patient-chart appointment list with documented / no-show / not-yet-documented states, and appointment→Encounter linkage from both the H&P and a new follow-up route. Reschedule/cancel use the **tombstone swap** (approved by Bianca 08/2026 — see "Recent decisions"). **ACTION for deploy:** swap `OPENEMR_CLIENT_ID`/`OPENEMR_CLIENT_SECRET` in the deployed env to the new appointment-scoped OAuth client Bianca enabled on 2026-08-29 (the old 4.1 client has no appointment scopes; it stays enabled until the swap is verified, then disable it — and delete the never-enabled duplicate "GFC Care Platform (server) v2" client id `SQNsx…`).
 
@@ -32,7 +34,8 @@ This file is auto-loaded at the start of every Claude Code session. Read it firs
 | 3.5 | Reconciliation — fixture removal, live data wiring, desktop pass | ✅ Done | #15 |
 | 4.1 | Clinician workspace (OpenEMR write) | ✅ Done | #19 |
 | 4.2 | Clinician scheduling (OpenEMR-tied) | ✅ Done | #22 |
-| 4.3 | Patient portal clinical read | ⬜ Next priority | — |
+| 4.4 | Clinical completeness P0 (coding · orders · Rx · sign-and-close · billing route) | ⬜ **Next priority** | — |
+| 4.3 | Patient portal clinical read (+ POA acting gates · case-manager scoped read) | ⬜ Planned — after 4.4 | — |
 | 5 | Clinical HIPAA go-live (+ OpenEMR auth migration to authorization_code) | ⬜ Planned | — |
 | 6 | Caregiver app (mobile, tier-branched visit log) | ⬜ Planned | — |
 | 7 | Scheduling · availability · time tracking (PHCP) | ⬜ Planned | — |
@@ -47,6 +50,16 @@ This file is auto-loaded at the start of every Claude Code session. Read it firs
 ---
 
 ## Recent decisions
+
+**09/2026 — Clinical completeness scoped; Session 4.4 inserted ahead of 4.3.** Two owner-authored docs landed on main: `docs/GFC_Clinical_Completeness_Spec_v1.md` (rev 1.1) and `docs/GFC_Session4.4_ClaudeCode_Prompt.md`. They settle the questions left open at the end of 4.2:
+- **Build order changed:** the P0 completeness bundle (Session 4.4) comes BEFORE 4.3. 4.3 moves into the P1 set with results review, the clinical inbox, and the vitals/document re-tests (spec §6).
+- **Billing stays in OpenEMR's back end**, but the **note→billing route is app scope** (spec §2, normative): ICD-10-coded diagnoses, CPT/HCPCS service capture, dx↔procedure linkage, a write to OpenEMR's fee-sheet/billing table for the encounter, rendering provider = signing clinician, billing provider = the config value `gfc_payer_credentialing.billing_npi_used` (never hardcoded), and a coded/not-coded state per encounter. If the REST API exposes no billing write on this instance, the §2.4 interim applies — a structured machine-parseable block in the note PLUS an app-side `encounter_billing` record, reported plainly, never a silent stub.
+- **OpenEMR owns both code sets; the app never keeps its own list** (spec §7). ICD-10-CM is federal and free (CMS/NCHS, reissued each Oct 1 — no Georgia-specific list; GA specificity comes from Palmetto GBA coverage determinations, a consultant input). CPT is AMA-copyrighted and not shipped by OpenEMR — GFC hand-enters the small set it bills (home-visit E/M 99341–99345 new, 99347–99350 established) into OpenEMR's fee schedule. App code-search endpoints proxy OpenEMR; a missing code is added in OpenEMR, not in app config.
+- **Coding assist tiers (spec §8), guardrail "the system proposes, the clinician disposes":** T1 problem-list carry-forward and T2 per-clinician usage-ranked favorites are **4.4 scope**; **T3 (E/M level suggestion) is blocked on the billing consultant confirming documentation thresholds** — implementing them from memory is an audit risk — and T4 (note-to-code inference) waits for real notes to validate against.
+- **Encounter sign-and-close is normative (spec §3):** attestation with timestamp + signing clinician; blocked until the encounter has a note, ≥1 diagnosis code and ≥1 service code; closed encounters read-only, corrections as **addenda** with their own signer and timestamp — never a silent edit.
+- **Quest HL7 lab interface is DEFERRED by owner decision** (months out: account setup, interface spec, message testing, certification). Orders are captured in the chart with manually advanced status; transmission stays manual. **E-prescribing (Surescripts) is likewise out of scope** — the app records the Rx so the chart is complete; transmission continues as today. Do not build or scaffold either.
+- **Attribution (spec §4):** every clinical write currently authenticates as the `gfc-app-api` service account, so OpenEMR attributes all activity to it. Tolerable for test use only. Before any real patient encounter, either per-user OpenEMR accounts with authorization_code auth (Session 5) or, as the documented interim for 4.4, the app stamps the acting clinician's name and NPI into the note header and encounter record.
+- Session 5 planning is **paused by owner direction (2026-09-04)** — these two docs cover the ground the Session 5 prompt would have; revisit after 4.4.
 
 **08/2026 (late) — Session 4.2 built & merged (PR #22, branch `claude/clinician-scheduling-k6bd56`).** Clinician scheduling, OpenEMR-tied, per the Session 4.2 prompt. Locked in:
 - **Appointment scopes required a new OAuth client.** The 4.1 client's grant had no appointment scopes and OpenEMR cannot widen a registered client (the 4.1 finding), so a successor client with the 4.1 set **plus `user/appointment.read` / `user/appointment.write` / `user/Appointment.read`** was registered and **enabled by Bianca 2026-08-29** (client id `dlHHtxPDc1gS-_hKVxhYvC4MPFLmLGY7G1x-khy8ZjQ`). `config.js` SCOPES now includes the appointment scopes. Deployed env still needs the `OPENEMR_CLIENT_ID`/`OPENEMR_CLIENT_SECRET` swap; then disable the old 4.1 client and delete the never-enabled duplicate registration `SQNsxClgNw…` ("GFC Care Platform (server) v2").
@@ -155,6 +168,7 @@ Read these before starting any session. Where the code and the spec disagree, th
 
 - `docs/GFC_App_Build_v2.md` — master architecture, tracks, roles, HIPAA rules, billing overview (§13), IME scope (§14), OpenEMR config items (§15)
 - `docs/GFC_SESSION_PLAN.md` — session order, status, timeline
+- `docs/GFC_Clinical_Completeness_Spec_v1.md` — OpenEMR clinician-capability coverage, note→billing route (§2), sign-and-close (§3), attribution (§4), code source of truth (§7), coding-assist tiers (§8)
 - `docs/GFC_Intake_and_Packet_Spec_v1.md` — intake stages, consent taxonomy (including Transfer-of-Care ROI in §4.2)
 - `docs/GFC_Client_Care_Profile_Schema_v1.md` — client data model (includes `priorProviders`, `consents.roiTransfer`, expanded `payer` block, careTier A1–A4/B enum)
 - `docs/GFC_Caregiver_Profile_Schema_v1.md` — caregiver data model
