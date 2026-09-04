@@ -128,3 +128,86 @@ OpenEMR binds scopes **at registration** and cannot widen them afterwards, so Se
 `user/list.read`. As in 4.1, the app can register the client dynamically, but an OpenEMR
 administrator must **enable** it under Administration → System → API Clients before it can
 issue tokens.
+
+---
+
+## Session 4.4 preflight findings (2026-09-04) — API surface gaps and two more quirks
+
+_Probed against the same instance (OpenEMR 7.0.4, `gfc-app-api`, TEST PatientOne) with the
+4.2 appointment-scoped client. Cross-checked against the 7.0.4 route table
+(`apis/routes/_rest_routes_standard.inc.php`)._
+
+### Gap 1 — No write API for prescriptions, orders, billing, or encounter sign/close
+
+| Need (spec §2/§3) | 7.0.4 standard API | Result |
+|---|---|---|
+| Prescription write | `GET /api/prescription`, `GET /api/prescription/:uuid` only | **No POST.** GET also 401s — `user/prescription.read` is not on the client |
+| Procedure / lab order write | `GET /api/procedure`, `GET /api/procedure/:uuid` only | **No POST.** GET 401s likewise |
+| Billing / fee-sheet row | none — `/api/billing`, `/api/fee_sheet`, `.../encounter/:e/billing` all 404 | **No route at all** |
+| Encounter sign / close | no concept in either API | — |
+| Encounter update (`billing_note`, etc.) | `PUT /api/patient/:puuid/encounter/:euuid` exists | **500** — `EncounterService::updateEncounter` returns the string "You are not authorized to see this encounter." (the `sensitivities` ACL check fails for `gfc-app-api`) and the controller crashes on the string. Server-side ACL item. |
+| Code-table search (ICD-10 / CPT) | none — `/api/code*` 404; `FHIR ValueSet` serves `list_options` + appointment categories only (checked `FhirValueSetService.php`) | **No code search anywhere in the API** |
+
+**App behavior (spec §2.4 interim, in place):** the app keeps `encounter_billing`,
+`prescriptions`, `clinical_orders`, `encounter_attestations`, `encounter_addenda` and
+writes a machine-parseable **GFC structured note** (a second `soap_note` row) onto the
+encounter, regenerated on every change. `billing_note` and a clinician stamp are set on the
+encounter **at create** (the POST accepts them; the PUT does not work). Back-office staff
+key the charge from the structured note / Billing note until a billing write exists.
+
+**For the maintainer:** (a) widen the `gfc-app-api` ACL group to include `sensitivities`
+so the encounter PUT works; (b) when the Session 5 client is registered, add
+`user/prescription.read`, `user/procedure.read`, `user/list.read`, `user/ValueSet.read`,
+`user/drug.read`; (c) confirm the **ICD-10-CM code set is loaded** (Administration →
+Other → External Data Loads) — see Quirk 2.
+
+### Quirk 1 — `soap_note` / `vital` routes key by NUMERIC pid + encounter id (app fix landed)
+
+`POST /api/patient/:pid/encounter/:eid/soap_note` takes the **numeric** `pid` and `eid`
+(no uuid translation in `EncounterRestController`). Passing uuids — which the 4.1 build did —
+is silently coerced to `pid 0 / encounter 0`, so **every note written by 4.1 landed
+orphaned** (visible as `pid: 0` rows with no encounter). Fixed in `openemr.js` this session:
+ids are resolved before every note/vital call. The orphaned 4.1 test notes remain on the
+dev instance (TEST DATA); pre-4.4 encounters therefore show "no narrative note" in the app
+and cannot be signed until re-documented.
+
+Related: the note **list** query (`EncounterService::getSoapNotes`) joins `forms` to
+`form_soap` on `form_id` **without a `formdir` filter**, so a non-SOAP form row on an
+encounter whose `form_id` collides with another encounter's `form_soap.id` leaks that other
+note into the list (reproduced live: encounter 21 listed encounter 20's note). The app now
+reads its notes by the `sid` it recorded and treats the list as a hint only. Also: the
+validator answers **HTTP 200 with a validation map** (e.g. `{"plan":{"LengthBetween::TOO_SHORT":…}}`)
+when a section is under 2 characters — no note is written; the app now detects the missing
+`sid` and refuses instead of reporting success.
+
+### Quirk 2 — FHIR Condition read-back drops the ICD-10 code
+
+`POST /api/patient/:puuid/medical_problem` with `diagnosis: "ICD10:E11.9"` succeeds, but
+`GET /fhir/Condition?patient=…` returns the problem with `code.text` (the title) only and
+**no `coding`**; `GET /api/patient/:puuid/medical_problem` (list and single) returns an
+empty `data` array for the same patient. `BaseService::addCoding()` never drops an entry
+(it returns the code even with an empty description), so either the `diagnosis` column is
+not being read back on this build or the FHIR mapper skips codes it cannot describe — the
+latter would mean **ICD-10-CM is not loaded** into the `codes` table. Cannot be told apart
+from the API; please check the code-set load and the FHIR Condition output.
+
+**App behavior meanwhile:** the T1 carry-forward lists the OpenEMR problem, flags it as
+needing a code, and fills the code back in from the app's own prior encounter records for
+that problem uuid once it has been coded once (`mergeCandidateSources`). A code typed in
+full is accepted on format; OpenEMR resolves the description on read-back once the set is
+loaded. The app never keeps a code list.
+
+### Quirk 3 — Encounter lists return every row twice
+
+Both `GET /fhir/Encounter?patient=…` and `GET /api/patient/:puuid/encounter` return each
+encounter **twice** for TEST PatientOne (24 rows for 12 encounters, eids `26,26,25,25,…`),
+a join duplication on the server. The app's FHIR bundle flattener now dedupes by
+resourceType/id, which also fixes the doubled rows in the 4.1 chart's encounter section.
+
+### Verified OK this session
+Token + 41 scopes incl. `user/appointment.read/write` (the 4.2 client swap is live for this
+env); FHIR reads; appointment list; `POST encounter` accepting `billing_note`; numeric-id
+`soap_note` POST/PUT/GET-by-sid; `medication` POST (used as the in-chart copy of an Rx);
+whole-instance `GET /fhir/Encounter` for the coding queue. Vitals still 500 unconditionally
+(Defect 1 unchanged, also with numeric ids). `GET /fhir/Encounter/{id}` (single) 403s on the
+org-policy ACL while the search works.

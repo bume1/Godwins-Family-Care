@@ -57,7 +57,7 @@ const logEmrAccess = (actor, action, resource, patientId, details) => {
 };
 
 // ---- Token management (server-side only) ----
-let tokenState = { accessToken: null, refreshToken: null, expiresAt: 0 };
+let tokenState = { accessToken: null, refreshToken: null, expiresAt: 0, grantedScopes: [] };
 let authInFlight = null;
 
 const requestToken = async (form) => {
@@ -82,7 +82,11 @@ const requestToken = async (form) => {
     accessToken: data.access_token,
     refreshToken: data.refresh_token || tokenState.refreshToken,
     // Refresh 60s before actual expiry
-    expiresAt: Date.now() + (Math.max(120, data.expires_in || 3600) - 60) * 1000
+    expiresAt: Date.now() + (Math.max(120, data.expires_in || 3600) - 60) * 1000,
+    // Granted scope set (names only) — surfaced by getStatus() so the
+    // workspace can tell whether the deployed client carries the 4.2
+    // appointment scopes (the OAuth client swap is a P0 deploy step).
+    grantedScopes: String(data.scope || '').split(/\s+/).filter(Boolean)
   };
   return tokenState.accessToken;
 };
@@ -119,7 +123,7 @@ const getAccessToken = async () => {
 };
 
 // Drop the cached token (e.g. after a 401) so the next call re-authenticates.
-const invalidateToken = () => { tokenState = { accessToken: null, refreshToken: null, expiresAt: 0 }; };
+const invalidateToken = () => { tokenState = { accessToken: null, refreshToken: null, expiresAt: 0, grantedScopes: [] }; };
 
 // ---- Low-level request with one automatic re-auth on 401 ----
 // Returns { status, data } — data parsed as JSON when possible.
@@ -163,9 +167,20 @@ const expectOk = (res, what) => {
 // Standard-API responses wrap payloads as { validationErrors, internalErrors, data }.
 const unwrapApi = (payload) => (payload && typeof payload === 'object' && 'data' in payload) ? payload.data : payload;
 
-// Flatten a FHIR searchset Bundle to its resources.
-const bundleResources = (bundle) =>
-  ((bundle && bundle.entry) || []).map(e => e.resource).filter(Boolean);
+// Flatten a FHIR searchset Bundle to its resources. Deduped by
+// resourceType/id: this 7.0.4 instance returns every Encounter twice in both
+// the FHIR search and the standard-API list (a join duplication, verified live
+// 2026-09-04), and a search bundle never legitimately repeats a resource.
+const bundleResources = (bundle) => {
+  const seen = new Set();
+  return ((bundle && bundle.entry) || []).map(e => e.resource).filter(r => {
+    if (!r) return false;
+    const key = `${r.resourceType || ''}/${r.id || ''}`;
+    if (r.id && seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
 
 // OpenEMR 7.0.4 endpoint quirks (verified against the dev instance):
 //  - medical_problem.begdate: plain YYYY-MM-DD
@@ -175,6 +190,12 @@ const toEmrDatetime = (d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d || '')) ? `${d}
 
 // uuid → numeric pid cache (a pointer, not clinical data; in-memory only)
 const pidCache = new Map();
+// encounter uuid → numeric eid cache (same nature). The soap_note and vital
+// routes key by NUMERIC pid + eid (verified against the 7.0.4 route table and
+// live 2026-09-04: passing uuids is silently coerced to pid 0 / encounter 0,
+// which ORPHANS the note from the encounter — the 4.1 note writes had been
+// landing that way). Every note/vital call below resolves ids first.
+const eidCache = new Map();
 
 // ============================================================
 // Actor-bound client: every route builds one per request so all
@@ -202,6 +223,23 @@ const forActor = (actor) => {
     if (pid == null) throw new OpenEmrError('Could not resolve OpenEMR pid for patient uuid', 404, null);
     pidCache.set(puuid, pid);
     return pid;
+  };
+  // Standard-API encounter row (has eid, reason, billing_note, provider_id…).
+  const getEncounterRow = async (puuid, euuid) => {
+    const res = await rawRequest({ method: 'GET', url: apiUrl(`patient/${encodeURIComponent(puuid)}/encounter/${encodeURIComponent(euuid)}`) });
+    const data = expectOk(res, 'read encounter');
+    logEmrAccess(actor, 'read', 'encounter', puuid, { euuid });
+    const payload = unwrapApi(data);
+    const row = Array.isArray(payload) ? payload[0] || null : payload || null;
+    if (row && row.eid != null) eidCache.set(euuid, row.eid);
+    return row;
+  };
+  const resolveEid = async (puuid, euuid) => {
+    if (/^\d+$/.test(String(euuid))) return Number(euuid);
+    if (eidCache.has(euuid)) return eidCache.get(euuid);
+    const row = await getEncounterRow(puuid, euuid);
+    if (!row || row.eid == null) throw new OpenEmrError('Could not resolve OpenEMR encounter id for encounter uuid', 404, null);
+    return row.eid;
   };
 
   return {
@@ -279,13 +317,77 @@ const forActor = (actor) => {
       if (!row || (Array.isArray(row) && !row.length)) {
         throw new OpenEmrError('OpenEMR rejected the encounter (empty payload — check required fields)', 422, row);
       }
+      // The create response carries both ids; remember the numeric one so the
+      // note/vital writes that follow need no extra round-trip.
+      if (row.euuid && row.eid != null) eidCache.set(row.euuid, row.eid);
       return row;
     },
+    getEncounterRow,
+    resolveEid,
+    // Vitals + SOAP notes key by NUMERIC pid/eid (see eidCache note above).
     async addVitals(puuid, encounterUuid, vitals) {
-      return apiWrite('POST', `patient/${encodeURIComponent(puuid)}/encounter/${encodeURIComponent(encounterUuid)}/vital`, vitals, 'vital', puuid);
+      const [pid, eid] = await Promise.all([resolvePid(puuid), resolveEid(puuid, encounterUuid)]);
+      return apiWrite('POST', `patient/${pid}/encounter/${eid}/vital`, vitals, 'vital', puuid);
     },
+    // Returns { sid, fid } — sid is the form_soap row id needed to update the
+    // note later (the GFC structured note is regenerated in place).
     async addSoapNote(puuid, encounterUuid, note) {
-      return apiWrite('POST', `patient/${encodeURIComponent(puuid)}/encounter/${encodeURIComponent(encounterUuid)}/soap_note`, note, 'soap_note', puuid);
+      const [pid, eid] = await Promise.all([resolvePid(puuid), resolveEid(puuid, encounterUuid)]);
+      const res = await rawRequest({ method: 'POST', url: apiUrl(`patient/${pid}/encounter/${eid}/soap_note`), body: note });
+      const data = expectOk(res, 'write soap_note');
+      logEmrAccess(actor, 'write', 'soap_note', puuid, { eid });
+      const body = unwrapApi(data) || {};
+      // 7.0.4 answers HTTP 200 with a validation map (e.g. {"plan":{"LengthBetween::TOO_SHORT":…}})
+      // when a section fails validation — no sid means NO note was written.
+      if (body.sid == null) {
+        throw new OpenEmrError(`OpenEMR rejected the SOAP note (${JSON.stringify(body).slice(0, 200)})`, 422, body);
+      }
+      return { sid: String(body.sid), fid: body.fid != null ? String(body.fid) : null };
+    },
+    async updateSoapNote(puuid, encounterUuid, sid, note) {
+      const [pid, eid] = await Promise.all([resolvePid(puuid), resolveEid(puuid, encounterUuid)]);
+      return apiWrite('PUT', `patient/${pid}/encounter/${eid}/soap_note/${encodeURIComponent(sid)}`, note, 'soap_note', puuid, 'update soap_note');
+    },
+    // One SOAP-note row by its form_soap id — the precise read (the single-row
+    // query filters on encounter AND id).
+    async getSoapNote(puuid, encounterUuid, sid) {
+      const [pid, eid] = await Promise.all([resolvePid(puuid), resolveEid(puuid, encounterUuid)]);
+      const res = await rawRequest({ method: 'GET', url: apiUrl(`patient/${pid}/encounter/${eid}/soap_note/${encodeURIComponent(sid)}`) });
+      if (res.status === 404) return null;
+      const data = expectOk(res, 'read soap_note');
+      logEmrAccess(actor, 'read', 'soap_note', puuid, { eid, sid: String(sid) });
+      const row = unwrapApi(data);
+      return Array.isArray(row) ? row[0] || null : row || null;
+    },
+    // All SOAP-note rows on an encounter. CAUTION (7.0.4 quirk, verified live
+    // 2026-09-04): the list query joins `forms` to `form_soap` on form_id
+    // WITHOUT a formdir filter, so a non-SOAP form row on this encounter whose
+    // form_id collides with another encounter's form_soap id leaks that other
+    // note into the list (and rows can duplicate). Callers must prefer the
+    // sids they recorded (getSoapNote) and treat this list as a hint only.
+    async getSoapNotes(puuid, encounterUuid) {
+      const [pid, eid] = await Promise.all([resolvePid(puuid), resolveEid(puuid, encounterUuid)]);
+      const res = await rawRequest({ method: 'GET', url: apiUrl(`patient/${pid}/encounter/${eid}/soap_note`) });
+      if (res.status === 404) return []; // 7.0.4 answers 404 (empty body) when the encounter has no notes yet
+      const data = expectOk(res, 'read soap_note');
+      logEmrAccess(actor, 'read', 'soap_note', puuid, { eid });
+      const rows = unwrapApi(data);
+      const seen = new Map();
+      for (const r of Array.isArray(rows) ? rows : []) if (r && r.id != null && !seen.has(String(r.id))) seen.set(String(r.id), r);
+      return [...seen.values()];
+    },
+    // Whole-instance encounter feed (FHIR search without a patient filter) for
+    // the staff coding queue — one call instead of one per patient.
+    async getAllEncounters(maxPages = 10) {
+      const out = [];
+      let path = 'Encounter?_count=200';
+      for (let i = 0; i < maxPages && path; i++) {
+        const bundle = await fhirGet(path, 'Encounter', null, 'search Encounter (all)');
+        out.push(...bundleResources(bundle));
+        const next = ((bundle && bundle.link) || []).find(l => l.relation === 'next');
+        path = next && next.url ? next.url.replace(/^.*\/fhir\//, '') : null;
+      }
+      return out;
     },
     async addProblem(puuid, problem) {
       return apiWrite('POST', `patient/${encodeURIComponent(puuid)}/medical_problem`, problem, 'medical_problem', puuid);
@@ -413,7 +515,13 @@ const getStatus = async () => {
   if (missing.length) return { configured: false, connected: false, missing };
   try {
     await getAccessToken();
-    return { configured: true, connected: true, baseUrl: BASE_URL };
+    const granted = tokenState.grantedScopes || [];
+    return {
+      configured: true, connected: true, baseUrl: BASE_URL,
+      grantedScopeCount: granted.length,
+      // 4.2 appointment client swap deployed? (P0 deploy step, spec §1 #15)
+      appointmentScopes: granted.includes('user/appointment.read') && granted.includes('user/appointment.write')
+    };
   } catch (err) {
     return { configured: true, connected: false, baseUrl: BASE_URL, error: err.message };
   }

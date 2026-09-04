@@ -105,7 +105,22 @@
       rescheduleAppointment: (eid, body) => authedFetch(`/api/clinical/appointments/${eid}/reschedule`, { method: 'POST', body: JSON.stringify(body) }),
       cancelAppointment: (eid, reason) => authedFetch(`/api/clinical/appointments/${eid}/cancel`, { method: 'POST', body: JSON.stringify({ reason }) }),
       markNoShow: (eid) => authedFetch(`/api/clinical/appointments/${eid}/no-show`, { method: 'POST' }),
-      followUp: (id, body) => authedFetch(`/api/clinical/patients/${id}/encounters`, { method: 'POST', body: JSON.stringify(body) })
+      followUp: (id, body) => authedFetch(`/api/clinical/patients/${id}/encounters`, { method: 'POST', body: JSON.stringify(body) }),
+      // Session 4.4 — clinical completeness P0
+      dxCandidates: (id) => authedFetch(`/api/clinical/patients/${id}/dx-candidates`),
+      settings: () => authedFetch('/api/clinical/settings'),
+      saveSettings: (body) => authedFetch('/api/clinical/settings', { method: 'PUT', body: JSON.stringify(body) }),
+      codeSearch: (params) => authedFetch(`/api/clinical/codes/search?${new URLSearchParams(params).toString()}`),
+      encounters: (id) => authedFetch(`/api/clinical/patients/${id}/encounters`),
+      encounterDetail: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}`),
+      saveCoding: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/coding`, { method: 'PUT', body: JSON.stringify(body) }),
+      addRx: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/prescriptions`, { method: 'POST', body: JSON.stringify(body) }),
+      addOrder: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/orders`, { method: 'POST', body: JSON.stringify(body) }),
+      orderStatus: (orderId, status, note) => authedFetch(`/api/clinical/orders/${orderId}/status`, { method: 'POST', body: JSON.stringify({ status, note }) }),
+      sign: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/sign`, { method: 'POST', body: JSON.stringify({ attest: true }) }),
+      addAddendum: (id, euuid, text) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/addenda`, { method: 'POST', body: JSON.stringify({ text }) }),
+      resync: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/resync`, { method: 'POST' }),
+      queue: (state) => authedFetch(`/api/clinical/encounters/queue?state=${encodeURIComponent(state || 'open')}`)
     };
 
     const fmtDate = (iso) => iso ? new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
@@ -1014,41 +1029,9 @@
       );
     };
 
-    // Follow-up visit documented from an appointment → Encounter + note in
-    // OpenEMR, linked back to the appointment.
-    const FollowUpModal = ({ patient, appt, onClose, onSaved }) => {
-      const [f, setF] = useState({ reason: appt ? appt.title : '', subjective: '', objective: '', assessment: '', plan: '' });
-      const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
-      const submit = () => {
-        setBusy(true); setErr('');
-        api.followUp(patient.id, { ...f, appointmentEid: appt ? appt.eid : undefined })
-          .then(r => onSaved(r)).catch(e => { setErr(e.message); setBusy(false); });
-      };
-      return (
-        <div className="fixed inset-0 bg-black/40 z-40 flex items-start justify-center p-4 overflow-y-auto" onClick={onClose}>
-          <div className="card w-full max-w-lg mt-10" onClick={e => e.stopPropagation()}>
-            <div className="card-h"><h2>Document follow-up visit</h2><button className="text-stone-400" onClick={onClose}><i className="ti ti-x" /></button></div>
-            <div className="p-4 grid gap-3">
-              {appt && <p className="text-xs text-stone-500">From appointment: {fmtDayLabel(appt.date)} {fmt12h(appt.startTime)} — the Encounter links back to it.</p>}
-              <Field label="Visit reason"><input className="inp" value={f.reason} onChange={e => setF({ ...f, reason: e.target.value })} /></Field>
-              <Field label="Subjective"><textarea className="inp" rows={2} value={f.subjective} onChange={e => setF({ ...f, subjective: e.target.value })} /></Field>
-              <Field label="Objective"><textarea className="inp" rows={2} value={f.objective} onChange={e => setF({ ...f, objective: e.target.value })} /></Field>
-              <Field label="Assessment"><textarea className="inp" rows={2} value={f.assessment} onChange={e => setF({ ...f, assessment: e.target.value })} /></Field>
-              <Field label="Plan"><textarea className="inp" rows={2} value={f.plan} onChange={e => setF({ ...f, plan: e.target.value })} /></Field>
-              {err && <p className="text-red-600 text-sm">{err}</p>}
-              <div className="flex gap-2 justify-end">
-                <button className="btn ghost" onClick={onClose}>Close</button>
-                <button className="btn" disabled={busy || !f.reason.trim()} onClick={submit}>{busy ? 'Writing to OpenEMR…' : 'Sign & write encounter'}</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      );
-    };
-
     // Chart tab: this patient's upcoming + past appointments with
     // documented / no-show / not-yet-documented state (Scope B).
-    const ApptsTab = ({ patient, patients, onDocumentHp }) => {
+    const ApptsTab = ({ patient, patients, chart, onDocumentHp, onEncounterCreated }) => {
       const [data, setData] = useState(null);
       const [err, setErr] = useState('');
       const [providersData, setProvidersData] = useState(null);
@@ -1129,9 +1112,600 @@
               onClose={() => setModal(null)} onSaved={changed} />
           )}
           {followUp && (
-            <FollowUpModal patient={patient} appt={followUp === 'plain' ? null : followUp}
-              onClose={() => setFollowUp(null)} onSaved={changed} />
+            <FollowUpModal patient={patient} chart={chart} appt={followUp === 'plain' ? null : followUp}
+              onClose={() => setFollowUp(null)} onSaved={(r) => { changed(); onEncounterCreated && onEncounterCreated(r.encounterUuid); }} />
           )}
+        </div>
+      );
+    };
+
+    // ── Session 4.4 — Clinical completeness P0 ──
+    // Coding · orders · prescriptions · sign-and-close · note→billing route.
+    // OpenEMR 7.0.4 has no write API for any of these (preflight 2026-09-04),
+    // so the app keeps the records and mirrors them into a GFC structured note
+    // on the encounter (spec §2.4 interim). Guardrail for the coding assist:
+    // the system proposes, the clinician disposes — nothing lands on a record
+    // without a click, nothing auto-submits.
+
+    const ENC_STATE_META = {
+      not_coded: { label: 'Not coded', chip: 'bg-amber-50 text-amber-800' },
+      coded: { label: 'Coded', chip: 'bg-primary-50 text-primary' },
+      signed: { label: 'Signed & closed', chip: 'bg-emerald-50 text-emerald-700' }
+    };
+    const EncStateChip = ({ state }) => {
+      const m = ENC_STATE_META[state] || ENC_STATE_META.not_coded;
+      return <span className={`chip ${m.chip}`}>{m.label}</span>;
+    };
+    const SOURCE_META = {
+      problem_list: { label: 'Problem list (OpenEMR)', chip: 'bg-emerald-50 text-emerald-700' },
+      prior_encounter: { label: 'Prior encounter', chip: 'bg-emerald-50 text-emerald-700' },
+      favorite: { label: 'My favorites', chip: 'bg-primary-50 text-primary' },
+      practice: { label: 'Practice fee schedule', chip: 'bg-primary-50 text-primary' },
+      typed: { label: 'Typed — OpenEMR resolves on read-back', chip: 'bg-amber-50 text-amber-800' },
+      manual: { label: 'Entered', chip: 'bg-stone-100 text-stone-600' }
+    };
+    const SourceChip = ({ source }) => {
+      const m = SOURCE_META[source] || SOURCE_META.manual;
+      return <span className={`chip ${m.chip}`}>{m.label}</span>;
+    };
+    const npiLabel = (p) => p ? `${p.name || '—'}${p.licenseLevel ? `, ${p.licenseLevel}` : ''} · ${p.npi ? `NPI ${p.npi}` : 'NPI not on file'}` : '—';
+
+    // Code picker: results come ONLY from OpenEMR-sourced data (this patient's
+    // problem list, the clinician's own prior picks, the practice favorites).
+    // A full code typed in is accepted on format and flagged until OpenEMR
+    // resolves it. The app holds no code list (spec §7).
+    const CodePicker = ({ set, clientId, exclude, onPick, placeholder }) => {
+      const [q, setQ] = useState('');
+      const [res, setRes] = useState(null);
+      const [busy, setBusy] = useState(false);
+      useEffect(() => {
+        let alive = true;
+        setBusy(true);
+        const t = setTimeout(() => {
+          api.codeSearch({ set, q, clientId: clientId || '' })
+            .then(r => { if (alive) setRes(r); })
+            .catch(e => { if (alive) setRes({ results: [], error: e.message }); })
+            .finally(() => alive && setBusy(false));
+        }, 220);
+        return () => { alive = false; clearTimeout(t); };
+      }, [set, q, clientId]);
+      const rows = ((res && res.results) || []).filter(r => !(exclude || []).includes(r.code));
+      return (
+        <div className="border border-stone-200 rounded-lg p-2 bg-cream">
+          <input className="inp" placeholder={placeholder || (set === 'ICD10' ? 'Search code or description, or type a full ICD-10 code (e.g. E11.9)' : 'Type a CPT/HCPCS code (e.g. 99348)')}
+            value={q} onChange={e => setQ(e.target.value)} />
+          <div className="max-h-44 overflow-y-auto mt-1.5">
+            {busy && !res && <p className="text-xs text-stone-400 px-1">Searching…</p>}
+            {res && res.error && <p className="text-xs text-red-600 px-1">{res.error}</p>}
+            {res && !rows.length && !busy && <p className="text-xs text-stone-400 px-1">{q ? 'No match. Type the full code to add it.' : 'Start typing, or pick from your favorites below.'}</p>}
+            {rows.map(r => (
+              <button key={r.code} type="button" className="w-full text-left flex items-center justify-between gap-2 px-2 py-1.5 rounded hover:bg-white" onClick={() => { onPick(r); setQ(''); }}>
+                <span className="text-[13px]"><b className="font-mono">{r.code}</b> {r.description || r.label || ''}</span>
+                <SourceChip source={r.source} />
+              </button>
+            ))}
+          </div>
+          {res && res.notice && <p className="text-[10px] text-stone-400 px-1 mt-1">{res.notice}</p>}
+        </div>
+      );
+    };
+
+    // Encounter diagnoses editor (+ T1 carry-forward candidates as proposals).
+    const DxEditor = ({ diagnoses, setDiagnoses, candidates, clientId, readOnly, addToProblemList, setAddToProblemList }) => {
+      const has = (code) => diagnoses.some(d => d.code === code);
+      const add = (r) => { if (!has(r.code)) setDiagnoses([...diagnoses, { code: r.code, description: r.description || '', source: r.source === 'typed' ? 'manual' : r.source, problemUuid: r.problemUuid || null, primary: diagnoses.length === 0 }]); };
+      const remove = (code) => setDiagnoses(diagnoses.filter(d => d.code !== code).map((d, i, a) => ({ ...d, primary: a.some(x => x.primary) ? d.primary : i === 0 })));
+      const setPrimary = (code) => setDiagnoses(diagnoses.map(d => ({ ...d, primary: d.code === code })));
+      const pending = (candidates || []).filter(c => c.code && !has(c.code));
+      const uncoded = (candidates || []).filter(c => !c.code);
+      return (
+        <div className="grid gap-2">
+          {diagnoses.length === 0 && <p className="text-xs text-stone-400">No diagnoses on this encounter yet.</p>}
+          {diagnoses.map(d => (
+            <div key={d.code} className="flex flex-wrap items-center justify-between gap-2 py-1.5 border-b border-stone-100">
+              <div className="text-[13px]"><b className="font-mono">{d.code}</b> {d.description || <span className="text-stone-400">(description from OpenEMR on read-back)</span>}
+                <span className="ml-1"><SourceChip source={d.source} /></span>
+                {d.primary && <span className="chip bg-accent text-primary ml-1">PRIMARY</span>}
+              </div>
+              {!readOnly && (
+                <div className="flex items-center gap-2 text-xs">
+                  {!d.primary && <button type="button" className="text-primary underline" onClick={() => setPrimary(d.code)}>Make primary</button>}
+                  {d.source === 'manual' && setAddToProblemList && (
+                    <label className="flex items-center gap-1 text-stone-500">
+                      <input type="checkbox" checked={(addToProblemList || []).includes(d.code)}
+                        onChange={e => setAddToProblemList(e.target.checked ? [...(addToProblemList || []), d.code] : (addToProblemList || []).filter(c => c !== d.code))} />
+                      add to problem list
+                    </label>
+                  )}
+                  <button type="button" className="text-red-600" onClick={() => remove(d.code)}><i className="ti ti-x" /></button>
+                </div>
+              )}
+            </div>
+          ))}
+          {!readOnly && pending.length > 0 && (
+            <div className="prefill rounded-lg p-2">
+              <div className="prefill-badge mb-1"><i className="ti ti-bulb" /> FROM THE OPENEMR PROBLEM LIST — proposed, tap to include</div>
+              <div className="flex flex-wrap gap-1.5">
+                {pending.map(c => (
+                  <button key={c.code} type="button" className="chip border bg-white text-primary border-stone-200" onClick={() => add(c)}>
+                    + {c.code} {c.description}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {!readOnly && uncoded.length > 0 && (
+            <p className="text-[11px] text-amber-700"><i className="ti ti-alert-triangle mr-1" />
+              {uncoded.length} problem{uncoded.length > 1 ? 's' : ''} on the OpenEMR list ha{uncoded.length > 1 ? 've' : 's'} no ICD-10 code ({uncoded.map(u => u.description).join(', ')}) — code {uncoded.length > 1 ? 'them' : 'it'} below to bill against {uncoded.length > 1 ? 'them' : 'it'}.
+            </p>
+          )}
+          {!readOnly && <CodePicker set="ICD10" clientId={clientId} exclude={diagnoses.map(d => d.code)} onPick={add} />}
+        </div>
+      );
+    };
+
+    // Service (CPT/HCPCS) editor: each line must link to ≥1 encounter diagnosis.
+    const SvcEditor = ({ services, setServices, diagnoses, practiceFavorites, favorites, readOnly }) => {
+      const has = (code) => services.some(s => s.code === code);
+      const add = (r) => { if (!has(r.code)) setServices([...services, { code: r.code, codeType: r.codeType, label: r.label || r.description || '', units: 1, dxLinks: diagnoses.map(d => d.code), modifiers: [] }]); };
+      const update = (code, patch) => setServices(services.map(s => s.code === code ? { ...s, ...patch } : s));
+      const remove = (code) => setServices(services.filter(s => s.code !== code));
+      const favCodes = new Set((favorites || []).map(f => f.code));
+      const quick = [...(favorites || []).map(f => ({ ...f, source: 'favorite' })), ...(practiceFavorites || []).filter(f => !favCodes.has(f.code)).map(f => ({ ...f, source: 'practice' }))];
+      return (
+        <div className="grid gap-2">
+          {services.length === 0 && <p className="text-xs text-stone-400">No service codes on this encounter yet.</p>}
+          {services.map(s => (
+            <div key={s.code} className="py-1.5 border-b border-stone-100">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-[13px]"><b className="font-mono">{s.code}</b> <span className="text-stone-500">{s.codeType}</span> {s.label}</div>
+                {!readOnly && (
+                  <div className="flex items-center gap-2 text-xs">
+                    <label className="flex items-center gap-1">units <input className="inp !w-14 !py-0.5" value={s.units} onChange={e => update(s.code, { units: e.target.value.replace(/\D/g, '') || 1 })} /></label>
+                    <label className="flex items-center gap-1">mod <input className="inp !w-20 !py-0.5" placeholder="25" value={(s.modifiers || []).join(',')} onChange={e => update(s.code, { modifiers: e.target.value.split(',').map(x => x.trim()).filter(Boolean) })} /></label>
+                    <button type="button" className="text-red-600" onClick={() => remove(s.code)}><i className="ti ti-x" /></button>
+                  </div>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5 mt-1 text-[11px] text-stone-500">
+                Linked dx:
+                {diagnoses.length === 0 && <span className="text-amber-700">add a diagnosis first</span>}
+                {diagnoses.map(d => (
+                  <label key={d.code} className={`chip border cursor-pointer ${(s.dxLinks || []).includes(d.code) ? 'bg-primary text-white border-primary' : 'bg-white text-primary border-stone-200'}`}>
+                    <input type="checkbox" className="hidden" disabled={readOnly} checked={(s.dxLinks || []).includes(d.code)}
+                      onChange={e => update(s.code, { dxLinks: e.target.checked ? [...(s.dxLinks || []), d.code] : (s.dxLinks || []).filter(c => c !== d.code) })} />
+                    {d.code}
+                  </label>
+                ))}
+                {!(s.dxLinks || []).length && diagnoses.length > 0 && <span className="text-red-600">must link to at least one</span>}
+              </div>
+            </div>
+          ))}
+          {!readOnly && (
+            <div>
+              <div className="lblu mb-1">Quick pick — your most-used first, then the practice fee schedule</div>
+              <div className="flex flex-wrap gap-1.5 mb-2">
+                {quick.filter(f => !has(f.code)).map(f => (
+                  <button key={f.code} type="button" className={`chip border ${f.source === 'favorite' ? 'bg-primary-50 text-primary border-primary' : 'bg-white text-primary border-stone-200'}`} onClick={() => add(f)} title={f.source === 'favorite' ? `used ${f.count}×` : 'practice favorite'}>
+                    + {f.code}{f.label ? ` · ${f.label}` : ''}
+                  </button>
+                ))}
+                {quick.length === 0 && <span className="text-xs text-stone-400">No favorites yet — an admin can seed the practice list in Settings.</span>}
+              </div>
+              <CodePicker set="SERVICE" exclude={services.map(s => s.code)} onPick={add} />
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    // Follow-up visit (Scope A): short SOAP + vitals + T1 diagnoses + quick
+    // service pick → Encounter + narrative note + GFC structured note.
+    const FollowUpModal = ({ patient, chart, appt, onClose, onSaved }) => {
+      const [cands, setCands] = useState([]);
+      const [f, setF] = useState({ reason: appt ? appt.title : 'Follow-up visit', date: appt ? appt.date : todayYmd(), subjective: '', objective: '', assessment: '', plan: '',
+        vitals: { bpSys: '', bpDia: '', hr: '', temp: '', rr: '', spo2: '', weight: '', height: '', pain: '' } });
+      const [diagnoses, setDiagnoses] = useState([]);
+      const [services, setServices] = useState([]);
+      const [settings, setSettings] = useState(null);
+      const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+      useEffect(() => { api.settings().then(setSettings).catch(() => {}); }, []);
+      // T1: the server proposes the patient's active coded problems; they arrive
+      // pre-selected and the clinician unchecks what wasn't addressed.
+      useEffect(() => {
+        api.dxCandidates(patient.id).then(r => {
+          setCands(r.candidates || []);
+          setDiagnoses(prev => prev.length ? prev : (r.candidates || []).filter(c => c.preselected)
+            .map((c, i) => ({ code: c.code, description: c.description, source: c.source, problemUuid: c.problemUuid, primary: i === 0 })));
+        }).catch(() => {});
+      }, [patient.id]);
+      const setV = (k, v) => setF(p => ({ ...p, vitals: { ...p.vitals, [k]: v } }));
+      const submit = () => {
+        setBusy(true); setErr('');
+        api.followUp(patient.id, { ...f, diagnoses, services, appointmentEid: appt ? appt.eid : undefined })
+          .then(r => onSaved(r)).catch(e => { setErr(e.message); setBusy(false); });
+      };
+      const V = ({ k, label }) => <Field label={label}><input className="inp" value={f.vitals[k]} onChange={e => setV(k, e.target.value)} /></Field>;
+      return (
+        <div className="fixed inset-0 bg-black/40 z-40 flex items-start justify-center p-4 overflow-y-auto" onClick={onClose}>
+          <div className="card w-full max-w-2xl mt-6 mb-10" onClick={e => e.stopPropagation()}>
+            <div className="card-h"><h2>Document follow-up visit</h2><button className="text-stone-400" onClick={onClose}><i className="ti ti-x" /></button></div>
+            <div className="p-4 grid gap-3">
+              {appt && <p className="text-xs text-stone-500">From appointment: {fmtDayLabel(appt.date)} {fmt12h(appt.startTime)} — the Encounter links back to it.</p>}
+              <div className="grid md:grid-cols-[1fr_160px] gap-3">
+                <Field label="Visit reason"><input className="inp" value={f.reason} onChange={e => setF({ ...f, reason: e.target.value })} /></Field>
+                <Field label="Visit date"><input className="inp" type="date" value={f.date} onChange={e => setF({ ...f, date: e.target.value })} /></Field>
+              </div>
+              <Field label="Subjective"><textarea className="inp" rows={2} value={f.subjective} onChange={e => setF({ ...f, subjective: e.target.value })} /></Field>
+              <div>
+                <span className="lblu block mb-1">Vitals (optional — preserved verbatim in the note)</span>
+                <div className="grid grid-cols-3 md:grid-cols-5 gap-2">
+                  <V k="bpSys" label="BP sys" /><V k="bpDia" label="BP dia" /><V k="hr" label="HR" /><V k="temp" label="Temp °F" /><V k="rr" label="RR" />
+                  <V k="spo2" label="SpO₂ %" /><V k="weight" label="Wt lb" /><V k="height" label="Ht in" /><V k="pain" label="Pain /10" />
+                </div>
+              </div>
+              <Field label="Objective"><textarea className="inp" rows={2} value={f.objective} onChange={e => setF({ ...f, objective: e.target.value })} /></Field>
+              <Field label="Assessment"><textarea className="inp" rows={2} value={f.assessment} onChange={e => setF({ ...f, assessment: e.target.value })} /></Field>
+              <Field label="Plan"><textarea className="inp" rows={2} value={f.plan} onChange={e => setF({ ...f, plan: e.target.value })} /></Field>
+              <div className="border-t border-stone-100 pt-3">
+                <span className="lblu block mb-1">Encounter diagnoses (ICD-10) — active problems pre-selected; uncheck what wasn't addressed</span>
+                <DxEditor diagnoses={diagnoses} setDiagnoses={setDiagnoses} candidates={cands} clientId={patient.id} />
+              </div>
+              <div className="border-t border-stone-100 pt-3">
+                <span className="lblu block mb-1">Service code (CPT/HCPCS) — optional now, required before signing</span>
+                <SvcEditor services={services} setServices={setServices} diagnoses={diagnoses}
+                  practiceFavorites={settings && settings.serviceCodeFavorites} favorites={[]} />
+              </div>
+              {err && <p className="text-red-600 text-sm">{err}</p>}
+              <div className="flex gap-2 justify-end">
+                <button className="btn ghost" onClick={onClose}>Close</button>
+                <button className="btn" disabled={busy || !f.reason.trim()} onClick={submit}>{busy ? 'Writing to OpenEMR…' : 'Write encounter & note'}</button>
+              </div>
+              <p className="text-[11px] text-stone-400">Writes the Encounter and your narrative SOAP note to OpenEMR (stamped with your name and NPI), then opens the encounter so you can add prescriptions and orders and sign it.</p>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const RxForm = ({ routes, onSave, busy }) => {
+      const [f, setF] = useState({ kind: 'new', drug: '', dose: '', route: 'oral', frequency: '', quantity: '', refills: '0', date: todayYmd(), instructions: '' });
+      return (
+        <div className="grid gap-2 border-t border-stone-100 pt-3">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            <Field label="Type"><select className="inp" value={f.kind} onChange={e => setF({ ...f, kind: e.target.value })}><option value="new">New Rx</option><option value="refill">Refill</option></select></Field>
+            <Field label="Drug" className="col-span-2"><input className="inp" value={f.drug} onChange={e => setF({ ...f, drug: e.target.value })} /></Field>
+            <Field label="Dose"><input className="inp" placeholder="500 mg" value={f.dose} onChange={e => setF({ ...f, dose: e.target.value })} /></Field>
+            <Field label="Route"><select className="inp" value={f.route} onChange={e => setF({ ...f, route: e.target.value })}>{(routes || ['oral']).map(r => <option key={r} value={r}>{r}</option>)}</select></Field>
+            <Field label="Frequency"><input className="inp" placeholder="BID" value={f.frequency} onChange={e => setF({ ...f, frequency: e.target.value })} /></Field>
+            <Field label="Quantity"><input className="inp" inputMode="numeric" value={f.quantity} onChange={e => setF({ ...f, quantity: e.target.value.replace(/\D/g, '') })} /></Field>
+            <Field label="Refills"><input className="inp" inputMode="numeric" value={f.refills} onChange={e => setF({ ...f, refills: e.target.value.replace(/\D/g, '') })} /></Field>
+            <Field label="Date"><input className="inp" type="date" value={f.date} onChange={e => setF({ ...f, date: e.target.value })} /></Field>
+            <Field label="Instructions" className="col-span-2 md:col-span-3"><input className="inp" value={f.instructions} onChange={e => setF({ ...f, instructions: e.target.value })} /></Field>
+          </div>
+          <div className="flex justify-end"><button className="btn !py-1.5" disabled={busy || !f.drug || !f.dose || !f.frequency || !f.quantity} onClick={() => onSave(f)}>{busy ? 'Recording…' : 'Record prescription'}</button></div>
+        </div>
+      );
+    };
+
+    const OrderForm = ({ diagnoses, types, priorities, onSave, busy }) => {
+      const [f, setF] = useState({ orderType: 'lab', tests: '', priority: 'routine', diagnosisCodes: diagnoses.map(d => d.code), notes: '' });
+      const toggleDx = (c) => setF(p => ({ ...p, diagnosisCodes: p.diagnosisCodes.includes(c) ? p.diagnosisCodes.filter(x => x !== c) : [...p.diagnosisCodes, c] }));
+      return (
+        <div className="grid gap-2 border-t border-stone-100 pt-3">
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Order type"><select className="inp" value={f.orderType} onChange={e => setF({ ...f, orderType: e.target.value })}>{(types || []).map(t => <option key={t} value={t}>{t}</option>)}</select></Field>
+            <Field label="Priority"><select className="inp" value={f.priority} onChange={e => setF({ ...f, priority: e.target.value })}>{(priorities || []).map(t => <option key={t} value={t}>{t}</option>)}</select></Field>
+          </div>
+          <Field label="Tests / studies (one per line)"><textarea className="inp" rows={2} value={f.tests} onChange={e => setF({ ...f, tests: e.target.value })} /></Field>
+          <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-stone-500">Linked dx:
+            {diagnoses.length === 0 && <span className="text-amber-700">add an encounter diagnosis first</span>}
+            {diagnoses.map(d => (
+              <button key={d.code} type="button" className={`chip border ${f.diagnosisCodes.includes(d.code) ? 'bg-primary text-white border-primary' : 'bg-white text-primary border-stone-200'}`} onClick={() => toggleDx(d.code)}>{d.code}</button>
+            ))}
+          </div>
+          <Field label="Notes"><input className="inp" value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} /></Field>
+          <div className="flex justify-end"><button className="btn !py-1.5" disabled={busy || !f.tests.trim() || !f.diagnosisCodes.length} onClick={() => onSave({ ...f, tests: f.tests.split('\n').map(s => s.trim()).filter(Boolean) })}>{busy ? 'Recording…' : 'Record order'}</button></div>
+        </div>
+      );
+    };
+
+    // The encounter panel: coding, Rx, orders, sign & close, addenda.
+    const EncounterPanel = ({ patient, euuid, onBack, onChanged }) => {
+      const [d, setD] = useState(null);
+      const [err, setErr] = useState('');
+      const [busy, setBusy] = useState('');
+      const [msg, setMsg] = useState(null);
+      const [diagnoses, setDiagnoses] = useState([]);
+      const [services, setServices] = useState([]);
+      const [addToProblemList, setAddToProblemList] = useState([]);
+      const [attest, setAttest] = useState(false);
+      const [addendum, setAddendum] = useState('');
+      const [showRx, setShowRx] = useState(false); const [showOrder, setShowOrder] = useState(false);
+      const load = useCallback(() => {
+        api.encounterDetail(patient.id, euuid).then(r => {
+          setD(r); setErr('');
+          setDiagnoses(r.record.diagnoses || []); setServices(r.record.services || []); setAddToProblemList([]);
+        }).catch(e => setErr(e.message));
+      }, [patient.id, euuid]);
+      useEffect(load, [load]);
+      const run = (label, fn, okText) => {
+        setBusy(label); setMsg(null);
+        return fn().then(r => {
+          setMsg({ ok: true, text: `${okText || r.message}${r.warnings && r.warnings.length ? ` — ${r.warnings.join(' · ')}` : ''}` });
+          load(); onChanged && onChanged(); return r;
+        }).catch(e => setMsg({ ok: false, text: e.data && e.data.missing ? `${e.message}` : e.message })).finally(() => setBusy(''));
+      };
+      if (err) return <div className="card p-4"><p className="text-red-600 text-sm">{err}</p><button className="btn ghost mt-2" onClick={onBack}>Back</button></div>;
+      if (!d) return <p className="text-sm text-stone-500 p-4">Loading encounter from OpenEMR…</p>;
+      const closed = d.closed;
+      const dirty = JSON.stringify(diagnoses) !== JSON.stringify(d.record.diagnoses || []) || JSON.stringify(services) !== JSON.stringify(d.record.services || []);
+      const ORDER_LABEL = { ordered: 'Ordered', sent: 'Sent', resulted: 'Resulted', cancelled: 'Cancelled' };
+      return (
+        <div className="max-w-4xl">
+          <button className="text-xs text-primary underline mb-2" onClick={onBack}><i className="ti ti-arrow-left" /> All encounters</button>
+          <div className="card mb-4">
+            <div className="card-h"><h2>{d.encounter.reason || 'Encounter'}</h2><EncStateChip state={d.state} /></div>
+            <div className="p-4 text-sm grid gap-1">
+              <div className="flex flex-wrap gap-4 text-xs text-stone-500">
+                <span>Date <b>{d.encounter.date || '—'}</b></span>
+                <span>OpenEMR encounter <b>#{d.encounter.eid || '—'}</b></span>
+                <span>Rendering clinician <b>{npiLabel(d.record.renderingProvider)}</b></span>
+                <span>Billing provider NPI <b>{d.billingNpiUsed || <span className="text-red-600">not configured (Settings)</span>}</b></span>
+              </div>
+              {d.encounter.billingNote && <div className="text-xs text-stone-500">OpenEMR billing note: {d.encounter.billingNote}</div>}
+              {closed && (
+                <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-2.5 text-xs text-emerald-900 mt-1">
+                  <b>Signed & closed {fmtTs(d.attestation.signedAt)} by {npiLabel(d.attestation.signedBy)}.</b> This encounter is read-only. Corrections go in as addenda below, each with its own signer and timestamp.
+                </div>
+              )}
+              {(d.warnings || []).map((w, i) => <p key={i} className="text-xs text-amber-700"><i className="ti ti-alert-triangle mr-1" />{w}</p>)}
+              {d.record.structuredNoteError && !closed && (
+                <button className="btn ghost !py-1 !px-2.5 text-xs w-fit" disabled={busy === 'resync'} onClick={() => run('resync', () => api.resync(patient.id, euuid))}>Retry EMR sync</button>
+              )}
+            </div>
+          </div>
+
+          <div className="card mb-4">
+            <div className="card-h"><h2>Narrative note{d.narrativeNotes.length > 1 ? 's' : ''}</h2><span className="text-[10.5px] text-stone-500">as written to OpenEMR — never edited by the app</span></div>
+            <div className="p-4 text-sm grid gap-3">
+              {d.notesError && <p className="text-xs text-red-600">{d.notesError}</p>}
+              {!d.notesError && d.narrativeNotes.length === 0 && <p className="text-xs text-amber-700">No narrative note found on this encounter in OpenEMR — signing requires one.</p>}
+              {d.narrativeNotes.map(n => (
+                <div key={n.id} className="grid gap-1.5 text-xs">
+                  {[['S', n.subjective], ['O', n.objective], ['A', n.assessment], ['P', n.plan]].map(([k, v]) => v ? <div key={k}><b className="text-primary">{k}</b> <span className="whitespace-pre-wrap">{v}</span></div> : null)}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="card mb-4">
+            <div className="card-h"><h2>Coding — diagnoses &amp; services</h2>
+              <span className={`chip ${d.record.codingStatus === 'coded' ? 'bg-primary-50 text-primary' : 'bg-amber-50 text-amber-800'}`}>{d.record.codingStatus === 'coded' ? 'CODED' : 'NOT CODED'}</span>
+            </div>
+            <div className="p-4 grid gap-4">
+              <div>
+                <span className="lblu block mb-1">Diagnoses (ICD-10-CM)</span>
+                <DxEditor diagnoses={diagnoses} setDiagnoses={setDiagnoses} candidates={d.candidates} clientId={patient.id} readOnly={closed}
+                  addToProblemList={addToProblemList} setAddToProblemList={setAddToProblemList} />
+                {d.candidatesError && <p className="text-[11px] text-amber-700 mt-1">Problem list unavailable: {d.candidatesError}</p>}
+              </div>
+              <div>
+                <span className="lblu block mb-1">Services (CPT / HCPCS) — each linked to ≥1 diagnosis</span>
+                <SvcEditor services={services} setServices={setServices} diagnoses={diagnoses} readOnly={closed}
+                  practiceFavorites={d.favorites.practiceServices} favorites={d.favorites.services} />
+              </div>
+              {!closed && (
+                <div className="flex items-center gap-3">
+                  <button className="btn" disabled={busy === 'coding' || !dirty} onClick={() => run('coding', () => api.saveCoding(patient.id, euuid, { diagnoses, services, addToProblemList }))}>
+                    <i className="ti ti-device-floppy" />{busy === 'coding' ? 'Saving…' : 'Save coding'}
+                  </button>
+                  {dirty && <span className="text-xs text-amber-700">Unsaved changes</span>}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="grid md:grid-cols-2 gap-4 mb-4">
+            <div className="card">
+              <div className="card-h"><h2>Prescriptions</h2>{!closed && <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={() => setShowRx(v => !v)}>{showRx ? 'Close' : '+ Record Rx'}</button>}</div>
+              <div className="p-4 text-sm">
+                {d.prescriptions.length === 0 && <p className="text-xs text-stone-400">None recorded on this encounter.</p>}
+                {d.prescriptions.map(r => (
+                  <div key={r.id} className="py-1.5 border-b border-stone-100 last:border-0">
+                    <div className="font-semibold text-[13px]">{r.drug} {r.dose} · {r.route} · {r.frequency} <span className="chip bg-stone-100 text-stone-600 ml-1">{r.kind}</span></div>
+                    <div className="text-xs text-stone-500">qty {r.quantity} · refills {r.refills} · {r.date} · {npiLabel(r.prescriber)}{r.emrMedicationId ? ' · on the OpenEMR med list' : (r.emrWriteError ? ' · OpenEMR med-list write failed' : '')} · <b>not transmitted</b></div>
+                    {r.instructions && <div className="text-xs text-stone-500">{r.instructions}</div>}
+                  </div>
+                ))}
+                {showRx && !closed && <RxForm routes={d.rxRoutes} busy={busy === 'rx'} onSave={(f) => run('rx', () => api.addRx(patient.id, euuid, f)).then(() => setShowRx(false))} />}
+                <p className="text-[10.5px] text-stone-400 mt-2">Record only — e-prescribing is out of scope; transmission continues as today.</p>
+              </div>
+            </div>
+            <div className="card">
+              <div className="card-h"><h2>Orders</h2>{!closed && <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={() => setShowOrder(v => !v)}>{showOrder ? 'Close' : '+ Record order'}</button>}</div>
+              <div className="p-4 text-sm">
+                {d.orders.length === 0 && <p className="text-xs text-stone-400">None recorded on this encounter.</p>}
+                {d.orders.map(o => (
+                  <div key={o.id} className="py-1.5 border-b border-stone-100 last:border-0">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="font-semibold text-[13px]">{o.orderType} · {o.priority} — {o.tests.join(', ')}</div>
+                      <span className={`chip ${o.status === 'resulted' ? 'bg-emerald-50 text-emerald-700' : o.status === 'cancelled' ? 'bg-stone-100 text-stone-500' : 'bg-primary-50 text-primary'}`}>{ORDER_LABEL[o.status] || o.status}</span>
+                    </div>
+                    <div className="text-xs text-stone-500">dx {o.diagnosisCodes.join(', ')} · {npiLabel(o.orderingClinician)} · {fmtTs(o.createdAt)}</div>
+                    <div className="flex flex-wrap gap-1.5 mt-1">
+                      {(d.orderTransitions[o.status] || []).map(n => (
+                        <button key={n} className="chip border bg-white text-primary border-stone-200" disabled={busy === `o${o.id}`}
+                          onClick={() => run(`o${o.id}`, () => api.orderStatus(o.id, n))}>mark {ORDER_LABEL[n].toLowerCase()}</button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+                {showOrder && !closed && <OrderForm diagnoses={diagnoses} types={d.orderTypes} priorities={d.orderPriorities} busy={busy === 'order'} onSave={(f) => run('order', () => api.addOrder(patient.id, euuid, f)).then(() => setShowOrder(false))} />}
+                <p className="text-[10.5px] text-stone-400 mt-2">Transmission is manual (Quest portal / requisition); advance the status here as it moves. Status can still be advanced after the encounter is signed.</p>
+              </div>
+            </div>
+          </div>
+
+          {!closed && (
+            <div className="card mb-4">
+              <div className="card-h"><h2>Sign &amp; close encounter</h2>
+                <span className={`chip ${d.signReadiness.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-800'}`}>{d.signReadiness.ok ? 'Ready to sign' : `${d.signReadiness.missing.length} blocker${d.signReadiness.missing.length > 1 ? 's' : ''}`}</span>
+              </div>
+              <div className="p-4 grid gap-3 text-sm">
+                {!d.signReadiness.ok && <p className="text-xs text-amber-700">{d.signReadiness.message}{dirty ? ' Save your coding changes first.' : ''}</p>}
+                <label className="flex items-start gap-2 text-xs">
+                  <input type="checkbox" className="mt-0.5" checked={attest} onChange={e => setAttest(e.target.checked)} />
+                  <span>I attest that this encounter documentation is accurate and complete, that I personally performed or directly supervised the services recorded, and that the diagnoses and service codes are supported by the note. Signing as <b>{npiLabel(d.me)}</b>.</span>
+                </label>
+                {!d.me.npi && <p className="text-[11px] text-amber-700"><i className="ti ti-alert-triangle mr-1" />Your NPI is not on file — an admin can add it in your user profile. Signing is allowed for test use and will be flagged.</p>}
+                <button className="btn gold w-fit" disabled={!attest || !d.signReadiness.ok || dirty || busy === 'sign'} onClick={() => run('sign', () => api.sign(patient.id, euuid))}>
+                  <i className="ti ti-writing-sign" />{busy === 'sign' ? 'Signing…' : 'Sign & close encounter'}
+                </button>
+                <p className="text-[10.5px] text-stone-400">Records the attestation with your name, NPI and timestamp, makes you the rendering provider on the charge, and writes the GFC structured coding/attestation note to the OpenEMR encounter for back-office billing.</p>
+              </div>
+            </div>
+          )}
+
+          {closed && (
+            <div className="card mb-4">
+              <div className="card-h"><h2>Attestation &amp; addenda</h2></div>
+              <div className="p-4 grid gap-3 text-sm">
+                <div className="text-xs text-stone-600 whitespace-pre-wrap border border-stone-100 rounded-lg p-2.5 bg-cream">{d.attestation.attestationText}<br /><b>{npiLabel(d.attestation.signedBy)} · {fmtTs(d.attestation.signedAt)}</b></div>
+                {d.addenda.length === 0 && <p className="text-xs text-stone-400">No addenda.</p>}
+                {d.addenda.map(a => (
+                  <div key={a.id} className="border-l-4 border-accent pl-3 py-1">
+                    <div className="text-xs text-stone-500">Addendum · {fmtTs(a.at)} · {npiLabel(a.by)}</div>
+                    <div className="text-[13px] whitespace-pre-wrap">{a.text}</div>
+                  </div>
+                ))}
+                <Field label="Add an addendum (signed as you, timestamped now)"><textarea className="inp" rows={2} value={addendum} onChange={e => setAddendum(e.target.value)} /></Field>
+                <button className="btn w-fit" disabled={addendum.trim().length < 3 || busy === 'addendum'} onClick={() => run('addendum', () => api.addAddendum(patient.id, euuid, addendum)).then(() => setAddendum(''))}>
+                  {busy === 'addendum' ? 'Recording…' : 'Sign addendum'}
+                </button>
+              </div>
+            </div>
+          )}
+          {msg && <p className={`text-sm mb-3 ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
+        </div>
+      );
+    };
+
+    // Chart tab: this patient's encounters with coded / signed state.
+    const EncountersTab = ({ patient, chart, initialEuuid, onOpened }) => {
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState('');
+      const [open, setOpen] = useState(initialEuuid || null);
+      const [followUp, setFollowUp] = useState(false);
+      const load = useCallback(() => { api.encounters(patient.id).then(r => { setData(r); setErr(''); }).catch(e => setErr(e.message)); }, [patient.id]);
+      useEffect(load, [load]);
+      useEffect(() => { if (initialEuuid) { setOpen(initialEuuid); onOpened && onOpened(); } }, [initialEuuid]);
+      if (open) return <EncounterPanel patient={patient} euuid={open} onBack={() => { setOpen(null); load(); }} onChanged={load} />;
+      if (err) return <p className="text-red-600 text-sm p-4">{err}</p>;
+      if (!data) return <p className="text-sm text-stone-500 p-4">Loading encounters from OpenEMR…</p>;
+      return (
+        <div className="max-w-3xl">
+          {!data.linked && <div className="card p-5 text-center"><i className="ti ti-stethoscope-off text-3xl text-accent" /><p className="text-sm text-stone-500 mt-1">Link this patient to OpenEMR to document visits.</p></div>}
+          {data.linked && (
+            <div className="card">
+              <div className="card-h"><h2>Encounters</h2>
+                <button className="btn gold !py-1.5" onClick={() => setFollowUp(true)}><i className="ti ti-stethoscope" />Document follow-up visit</button>
+              </div>
+              <div className="p-4">
+                {data.emrError && <p className="text-xs text-amber-700 mb-2">OpenEMR encounter list unavailable ({data.emrError}) — showing what the app has recorded.</p>}
+                {data.encounters.length === 0 && <p className="text-sm text-stone-400">No encounters yet. The initial H&amp;P lives on its own tab; follow-ups start here.</p>}
+                {data.encounters.map(e => (
+                  <div key={e.id} className="flex flex-wrap items-center justify-between gap-2 py-2.5 border-b border-stone-100 last:border-0 cursor-pointer" onClick={() => setOpen(e.id)}>
+                    <div>
+                      <div className="font-semibold text-[13px]">{e.start ? fmtDate(e.start) : '—'} — {e.reason || e.type}</div>
+                      <div className="text-xs text-stone-500">
+                        {[e.renderingProvider ? npiLabel(e.renderingProvider) : e.provider, `${e.diagnosisCount} dx · ${e.serviceCount} svc · ${e.prescriptionCount} Rx · ${e.orderCount} orders`, e.signedAt && `signed ${fmtTs(e.signedAt)} by ${e.signedBy}`].filter(Boolean).join(' · ')}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      {e.structuredNoteError && <span className="chip bg-red-50 text-red-700" title={e.structuredNoteError}>EMR sync failed</span>}
+                      <EncStateChip state={e.state} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {followUp && <FollowUpModal patient={patient} chart={chart} appt={null} onClose={() => setFollowUp(false)} onSaved={(r) => { setFollowUp(false); load(); setOpen(r.encounterUuid); }} />}
+        </div>
+      );
+    };
+
+    // Admin: billing identity (spec §2.5) + practice service-code favorites.
+    const SettingsCard = () => {
+      const [s, setS] = useState(null);
+      const [f, setF] = useState(null);
+      const [busy, setBusy] = useState(false); const [msg, setMsg] = useState(null);
+      useEffect(() => { api.settings().then(r => { setS(r); setF({ billingNpiUsed: r.billingNpiUsed || '', billingProviderName: r.billingProviderName || '', favorites: (r.serviceCodeFavorites || []).map(x => `${x.code} | ${x.label || ''}`).join('\n') }); }).catch(e => setMsg({ ok: false, text: e.message })); }, []);
+      if (!s || !f) return null;
+      const save = () => {
+        setBusy(true); setMsg(null);
+        api.saveSettings({
+          billingNpiUsed: f.billingNpiUsed, billingProviderName: f.billingProviderName,
+          serviceCodeFavorites: f.favorites.split('\n').map(l => l.trim()).filter(Boolean).map(l => { const [code, ...rest] = l.split('|'); return { code: code.trim(), label: rest.join('|').trim() }; })
+        }).then(r => setMsg({ ok: true, text: r.message })).catch(e => setMsg({ ok: false, text: e.message })).finally(() => setBusy(false));
+      };
+      return (
+        <div className="card mb-4">
+          <div className="card-h"><h2>Billing settings</h2><span className="text-[10.5px] text-stone-500">gfc_payer_credentialing.billing_npi_used · admin only</span></div>
+          <div className="p-4 grid gap-3 text-sm">
+            <div className="grid md:grid-cols-2 gap-3">
+              <Field label={`Billing provider NPI (${s.billingNpiSource === 'record' ? 'set here' : s.billingNpiSource === 'env_seed' ? 'seeded from env' : 'NOT SET — signing is blocked'})`}>
+                <input className="inp font-mono" maxLength={10} disabled={!s.isAdmin} value={f.billingNpiUsed} onChange={e => setF({ ...f, billingNpiUsed: e.target.value.replace(/\D/g, '') })} />
+              </Field>
+              <Field label="Billing provider name"><input className="inp" disabled={!s.isAdmin} value={f.billingProviderName} onChange={e => setF({ ...f, billingProviderName: e.target.value })} /></Field>
+            </div>
+            <Field label="Practice service-code favorites — one per line: CODE | label (codes must exist in OpenEMR's fee schedule; the AMA descriptors stay in OpenEMR)">
+              <textarea className="inp font-mono text-xs" rows={6} disabled={!s.isAdmin} value={f.favorites} onChange={e => setF({ ...f, favorites: e.target.value })} />
+            </Field>
+            {msg && <p className={`text-xs ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
+            {s.isAdmin && <button className="btn w-fit" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save settings'}</button>}
+            <p className="text-[10.5px] text-stone-400">The billing provider is the NPI every coded encounter bills under (currently Bethel Godwins's individual NPI; flip it here when the organizational Medicare enrollment lands). Never hardcoded. The rendering provider is always the signing clinician.</p>
+          </div>
+        </div>
+      );
+    };
+
+    // Staff coding queue (spec §2.6): every encounter that isn't coded/signed.
+    const CodingQueueView = ({ onOpenEncounter }) => {
+      const [filter, setFilter] = useState('open');
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState('');
+      useEffect(() => { setData(null); api.queue(filter).then(r => { setData(r); setErr(''); }).catch(e => setErr(e.message)); }, [filter]);
+      return (
+        <div className="p-4 lg:p-7">
+          <SettingsCard />
+          <div className="card">
+            <div className="card-h"><h2>Coding queue</h2>
+              <div className="flex gap-1.5">
+                {[['open', 'Open'], ['not_coded', 'Not coded'], ['coded', 'Coded, unsigned'], ['signed', 'Signed'], ['all', 'All']].map(([k, l]) => (
+                  <button key={k} className={`chip border ${filter === k ? 'bg-primary text-white border-primary' : 'bg-white text-primary border-stone-200'}`} onClick={() => setFilter(k)}>
+                    {l}{data && data.counts && k in data.counts ? ` ${data.counts[k]}` : ''}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="p-4">
+              {err && <p className="text-red-600 text-sm">{err}</p>}
+              {!err && !data && <p className="text-sm text-stone-500">Loading encounters from OpenEMR…</p>}
+              {data && data.degraded && <p className="text-xs text-amber-700 mb-2">OpenEMR encounter feed unavailable{data.emrError ? ` (${data.emrError})` : ''} — showing encounters the app has recorded.</p>}
+              {data && data.encounters.length === 0 && <p className="text-sm text-stone-400">Nothing here.</p>}
+              {data && data.encounters.map(e => (
+                <div key={e.encounterUuid} className="flex flex-wrap items-center justify-between gap-2 py-2.5 border-b border-stone-100 last:border-0 cursor-pointer" onClick={() => onOpenEncounter(e.clientId, e.encounterUuid)}>
+                  <div>
+                    <div className="font-semibold text-[13px]">{e.patientName || 'Patient'} — {e.reason}</div>
+                    <div className="text-xs text-stone-500">{[e.date && fmtDate(e.date), e.renderingProvider ? npiLabel(e.renderingProvider) : e.provider, `${e.diagnosisCount} dx · ${e.serviceCount} svc`, e.signedAt && `signed ${fmtTs(e.signedAt)}`].filter(Boolean).join(' · ')}</div>
+                  </div>
+                  <EncStateChip state={e.state} />
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       );
     };
@@ -1150,8 +1724,9 @@
       const [linking, setLinking] = useState(false);
       const [err, setErr] = useState('');
       const [listOpen, setListOpen] = useState(true);
-      const [view, setView] = useState('charts'); // 'charts' | 'schedule' (4.2)
+      const [view, setView] = useState('charts'); // 'charts' | 'schedule' (4.2) | 'queue' (4.4)
       const [hpApptEid, setHpApptEid] = useState(null); // H&P opened from an appointment
+      const [encTarget, setEncTarget] = useState(null); // encounter to open on the Encounters tab (4.4)
 
       const loadPatients = useCallback(() => {
         if (!getToken()) return;
@@ -1174,6 +1749,7 @@
       const openPatient = (p, opts) => {
         setSel(p); setChart(null); setTab((opts && opts.tab) || 'summary'); setListOpen(false);
         setView('charts'); setHpApptEid((opts && opts.appointmentEid) || null);
+        setEncTarget((opts && opts.encounterUuid) || null);
         api.chart(p.id).then(setChart).catch(e => setErr(e.message));
       };
       // Calendar → chart navigation (4.2): open the chart, or jump straight
@@ -1197,7 +1773,7 @@
       if (!user || !getToken()) return <Login onLogin={setUser} />;
 
       const tabs = [
-        ['summary', 'Chart'], ['appts', 'Appointments'], ['visit', 'Initial Visit (H&P)'],
+        ['summary', 'Chart'], ['appts', 'Appointments'], ['encounters', 'Encounters'], ['visit', 'Initial Visit (H&P)'],
         ['medrec', 'Med Rec'], ['careplan', 'Care Plan'], ['checklist', 'Enrollment']
       ];
       return (
@@ -1237,12 +1813,14 @@
             <div className="bg-white border-b border-stone-200 px-4 lg:px-7 py-3 flex items-center justify-between gap-3">
               <div className="flex items-center gap-3">
                 <button className="lg:hidden btn ghost !px-2.5 !py-1.5" onClick={() => setListOpen(true)}><i className="ti ti-users" /></button>
-                <div className="serif text-lg text-primary font-semibold">{view === 'schedule' ? 'Schedule' : 'Patient Chart'}</div>
+                <div className="serif text-lg text-primary font-semibold">{view === 'schedule' ? 'Schedule' : view === 'queue' ? 'Coding Queue' : 'Patient Chart'}</div>
                 <div className="flex rounded-lg border border-stone-200 overflow-hidden ml-1">
                   <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'charts' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
                     onClick={() => setView('charts')}><i className="ti ti-folder-open mr-1" />Charts</button>
                   <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'schedule' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
                     onClick={() => { setView('schedule'); setListOpen(false); }}><i className="ti ti-calendar-week mr-1" />Schedule</button>
+                  <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'queue' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
+                    onClick={() => { setView('queue'); setListOpen(false); }}><i className="ti ti-receipt mr-1" />Coding queue</button>
                 </div>
               </div>
               <div className="flex items-center gap-2">
@@ -1287,7 +1865,22 @@
                 )}
               </div>
             )}
+            {/* 4.4 deploy diagnostics: the appointment-scoped OAuth client swap
+                (P0 deploy step) and the billing NPI (spec §2.5). */}
+            {emrStatus && emrStatus.connected && emrStatus.appointmentScopes === false && (
+              <div className="bg-amber-50 border-b border-amber-200 px-4 lg:px-7 py-2 text-[12px] text-amber-900">
+                <b>Appointment OAuth client swap not deployed.</b> The token OpenEMR issued to this server carries no appointment scopes, so scheduling will 401. Swap <code className="font-mono">OPENEMR_CLIENT_ID</code>/<code className="font-mono">OPENEMR_CLIENT_SECRET</code> to the appointment-scoped client (enabled 2026-08-29), then stop and run the app.
+              </div>
+            )}
+            {emrStatus && emrStatus.billingNpiConfigured === false && (
+              <div className="bg-amber-50 border-b border-amber-200 px-4 lg:px-7 py-2 text-[12px] text-amber-900">
+                <b>Billing provider NPI not configured.</b> Encounters cannot be signed until an admin sets it under Coding queue → Billing settings (or seeds <code className="font-mono">GFC_BILLING_NPI_USED</code> in the env).
+              </div>
+            )}
             {err && <p className="text-red-600 text-sm px-7 pt-3">{err}</p>}
+            {view === 'queue' && (
+              <CodingQueueView onOpenEncounter={(clientId, euuid) => openChartById(clientId, { tab: 'encounters', encounterUuid: euuid })} />
+            )}
             {view === 'schedule' && (
               <ScheduleView user={user} patients={patients || []}
                 onOpenChart={(clientId) => openChartById(clientId)}
@@ -1321,7 +1914,9 @@
                 </div>
                 <div className="p-4 lg:p-7">
                   {tab === 'summary' && <SummaryTab chart={chart} patient={sel} onLink={link} linking={linking} />}
-                  {tab === 'appts' && <ApptsTab patient={sel} patients={patients || []} onDocumentHp={(eid) => { setHpApptEid(eid); setTab('visit'); }} />}
+                  {tab === 'appts' && <ApptsTab patient={sel} patients={patients || []} chart={chart} onDocumentHp={(eid) => { setHpApptEid(eid); setTab('visit'); }}
+                    onEncounterCreated={(euuid) => { setEncTarget(euuid); setTab('encounters'); }} />}
+                  {tab === 'encounters' && <EncountersTab patient={sel} chart={chart} initialEuuid={encTarget} onOpened={() => setEncTarget(null)} />}
                   {tab === 'visit' && (chart ? <HpTab patient={sel} chart={chart} appointmentEid={hpApptEid} onDone={() => { setHpApptEid(null); refreshChart(); loadPatients(); }} /> : <p className="text-sm text-stone-500">Loading…</p>)}
                   {tab === 'medrec' && <MedRecTab patient={sel} />}
                   {tab === 'careplan' && <CarePlanTab patient={sel} onSaved={loadPatients} />}

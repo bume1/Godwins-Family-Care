@@ -272,6 +272,13 @@ const logActivity = async (userId, userName, action, entityType, entityId, detai
 // (user, role, patientId, resource, action) — Session 4.1 requirement.
 openemr.setActivityLogger(logActivity);
 
+// An NPI is exactly 10 digits; anything else is stored as null (never a
+// partial value that could be stamped onto a chart).
+const normalizeNpi = (v) => {
+  const digits = String(v || '').replace(/\D/g, '');
+  return digits.length === 10 ? digits : null;
+};
+
 // ============================================================
 // NOTIFICATION QUEUE SYSTEM (Feature 1)
 // ============================================================
@@ -1831,6 +1838,10 @@ const authenticateToken = async (req, res, next) => {
         // OpenEMR provider (numeric pc_aid) this clinician's calendar maps to
         // (Session 4.2 scheduling; set by an admin in the user form)
         openEmrProviderId: freshUser.openEmrProviderId || null,
+        // Clinician NPI — stamped as attribution on every clinical write
+        // (Session 4.4 §4 interim: the EMR sees the service account, the
+        // chart must still say who did the work)
+        npi: freshUser.npi || null,
         // Managers automatically get client portal admin access
         hasClientPortalAdminAccess: freshUser.hasClientPortalAdminAccess || isManager || false,
         // Vendor-specific: clients they can service
@@ -2257,7 +2268,7 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       isManager, assignedClients, hubspotCompanyId, hubspotDealId, hubspotContactId, projectAccessLevels,
       existingPortalSlug, phone, sendWelcomeEmail: shouldSendWelcome = true,
       licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
-      familyIsPoa, openEmrProviderId
+      familyIsPoa, openEmrProviderId, npi
     } = req.body;
 
     // Managers can only create client users
@@ -2291,6 +2302,8 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       licenseLevel: licenseLevel || null,
       // OpenEMR provider mapping for clinician calendars (Session 4.2)
       openEmrProviderId: openEmrProviderId || null,
+      // Clinician NPI for attribution stamps (Session 4.4)
+      npi: normalizeNpi(npi),
       createdAt: new Date().toISOString(),
       // Account status — active accounts receive notifications, inactive do not
       accountStatus: 'active',
@@ -2945,7 +2958,8 @@ app.get('/api/users', authenticateToken, async (req, res) => {
       careTeam: u.careTeam || null,
       familyOfClientId: u.familyOfClientId || null,
       familyIsPoa: u.familyIsPoa || false,
-      openEmrProviderId: u.openEmrProviderId || null
+      openEmrProviderId: u.openEmrProviderId || null,
+      npi: u.npi || null
     }));
     res.json(safeUsers);
   } catch (error) {
@@ -2962,7 +2976,7 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
       hasServicePortalAccess, hasAdminHubAccess, hasImplementationsAccess, hasClientPortalAdminAccess,
       isManager, assignedClients, phone, accountStatus, emailUnsubscribed,
       licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
-      familyIsPoa, openEmrProviderId
+      familyIsPoa, openEmrProviderId, npi
     } = req.body;
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === userId);
@@ -3016,6 +3030,8 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
     if (familyIsPoa !== undefined) users[idx].familyIsPoa = !!familyIsPoa;
     // Clinician → OpenEMR provider mapping (numeric pc_aid; Session 4.2 calendars)
     if (openEmrProviderId !== undefined) users[idx].openEmrProviderId = openEmrProviderId || null;
+    // Clinician NPI (Session 4.4 attribution stamps); 10 digits or cleared
+    if (npi !== undefined) users[idx].npi = normalizeNpi(npi);
 
     // Account active status (no separate isActive - handled by accountStatus above)
 
@@ -5630,7 +5646,14 @@ const clientToFhirPatient = (client) => {
 // deploy means the process was never restarted.
 const SERVER_STARTED_AT = new Date().toISOString();
 app.get('/api/clinical/status', authenticateToken, requireClinicalStaff, async (req, res) => {
-  res.json({ ...(await openemr.getStatus()), serverStartedAt: SERVER_STARTED_AT });
+  const payer = await getPayerCredentialing();
+  res.json({
+    ...(await openemr.getStatus()), serverStartedAt: SERVER_STARTED_AT,
+    // Session 4.4 deploy diagnostics: billing NPI (spec §2.5) + the caller's
+    // own NPI for attribution (spec §4). Never hardcoded — both are config.
+    billingNpiConfigured: !!payer.billing_npi_used,
+    myNpi: req.user.npi || null
+  });
 });
 
 // GET /api/clinical/patients — IHPC/both clients with link + activation state.
@@ -5779,6 +5802,14 @@ app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireCli
 
     const built = clinicalRepo.buildHpWrites(req.body || {}, req.user.name);
     if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+    // Session 4.4 attribution interim (spec §4): the encounter record and the
+    // note header name the acting clinician + NPI (the EMR sees only the
+    // gfc-app-api service account).
+    const actor = actorFromReq(req);
+    const plainReason = built.encounter.reason;
+    built.encounter.reason = `${plainReason.slice(0, 180)} — ${clinicalRepo.actorStamp(actor)}`.slice(0, 250);
+    built.encounter.billing_note = `Rendering clinician: ${clinicalRepo.actorStamp(actor)}. Coding is recorded by the GFC Care Platform (see the GFC structured note on this encounter).`.slice(0, 500);
+    built.soapNote.subjective = [clinicalRepo.buildAttributionHeader(actor, OPENEMR_SERVICE_ACCOUNT), built.soapNote.subjective].filter(Boolean).join('\n\n');
     const triage = (req.body && req.body.triage) || {};
     if (triage.track && !clinicalRepo.VALID_TRACKS.includes(triage.track)) {
       return res.status(400).json({ error: `Track must be one of ${clinicalRepo.VALID_TRACKS.join(', ')}` });
@@ -5809,7 +5840,22 @@ app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireCli
       console.error('Vitals form write failed (readings preserved in note):', e.message);
       warnings.push(`Vitals form write failed (${e.message.slice(0, 120)}) — readings are preserved in the encounter note`);
     }
-    await emr.addSoapNote(puuid, encounterUuid, built.soapNote);
+    const narrative = await emr.addSoapNote(puuid, encounterUuid, built.soapNote);
+    // Session 4.4: the H&P encounter gets its encounter_billing record (so it
+    // can be coded + signed like any visit) and the GFC structured note.
+    {
+      const payer = await getPayerCredentialing();
+      const billingRows = await loadRows('encounter_billing');
+      const record = clinicalRepo.buildEncounterBillingRecord({
+        id: uuidv4(), clientId: client.id, puuid, encounterUuid, encounterEid: enc.eid,
+        reason: plainReason, date: built.encounter.date, actor, billingNpi: payer.billing_npi_used, narrativeNoteSid: narrative.sid
+      });
+      billingRows.push(record);
+      await db.set('encounter_billing', billingRows);
+      const syncWarning = await syncStructuredNote(emr, client, record);
+      if (syncWarning) warnings.push(syncWarning);
+      await saveBillingRecord(billingRows, record);
+    }
 
     const at = new Date().toISOString();
     users[idx].clinicalInitialVisit = {
@@ -6490,47 +6536,726 @@ app.post('/api/clinical/appointments/:eid/no-show', authenticateToken, requireCl
   }
 });
 
-// POST /api/clinical/patients/:clientId/encounters — a follow-up visit
-// documented from an appointment (Scope B): Encounter + SOAP note in OpenEMR,
-// linkage pointer app-side. (The initial H&P route also accepts
-// appointmentEid and links the same way.)
+// ============================================================
+// CLINICAL COMPLETENESS P0 (Session 4.4) — coding · orders · Rx ·
+// sign-and-close · note→billing route
+//
+// Spec: docs/GFC_Clinical_Completeness_Spec_v1.md (§2 billing route, §3 sign
+// & close, §4 attribution are normative). Preflight against the dev instance
+// (2026-09-04, route table + live probes) found that OpenEMR 7.0.4 exposes NO
+// write for prescriptions, procedure orders, billing/fee-sheet rows, or an
+// encounter sign/close, NO code-table search, and its encounter PUT is
+// ACL-blocked for the API user. So the spec §2.4 interim applies across the
+// board: the app keeps the records (encounter_billing, prescriptions,
+// clinical_orders, encounter_attestations, encounter_addenda — all KV
+// collections keyed for RDS migration) AND writes a machine-parseable GFC
+// structured note (a second soap_note row) onto the encounter, regenerated on
+// every change. The clinician's narrative note is never rewritten. Nothing is
+// silently stubbed: every EMR write that fails is returned as a warning and
+// the record flags it for a retry.
+//
+// Attribution interim (§4): every note header, encounter reason, billing
+// note and app-side record carries the acting clinician's name, credential
+// and NPI, because the EMR sees only the gfc-app-api service account.
+//
+// Coding assist guardrail (§8): the system proposes, the clinician disposes.
+// T1 carry-forward pre-selects candidates in the UI only; T2 favorites only
+// reorder the picker. Nothing is written to a record without a clinician
+// action, and there is no auto-submit.
+// ============================================================
+
+const OPENEMR_SERVICE_ACCOUNT = config.OPENEMR.API_USERNAME || 'gfc-app-api';
+const loadRows = async (name) => (await db.get(name)) || [];
+
+// Org-level billing identity — spec §2.5: the billing provider on every charge
+// is `gfc_payer_credentialing.billing_npi_used`, never a literal. The env value
+// only seeds the record; the admin edits it in the workspace settings.
+const getPayerCredentialing = async () => {
+  const stored = (await db.get('gfc_payer_credentialing')) || {};
+  const fromRecord = clinicalRepo.normalizeNpiValue(stored.billing_npi_used);
+  const fromEnv = clinicalRepo.normalizeNpiValue(config.GFC_BILLING_NPI_USED);
+  return {
+    billing_npi_used: fromRecord || fromEnv || null,
+    billing_provider_name: stored.billing_provider_name || config.GFC_BILLING_PROVIDER_NAME || null,
+    source: fromRecord ? 'record' : (fromEnv ? 'env_seed' : 'unset'),
+    updatedAt: stored.updatedAt || null,
+    updatedBy: stored.updatedBy || null
+  };
+};
+const getClinicalSettings = async () => {
+  const stored = (await db.get('clinical_settings')) || {};
+  const favorites = Array.isArray(stored.serviceCodeFavorites)
+    ? clinicalRepo.sanitizeServiceFavorites(stored.serviceCodeFavorites)
+    : [...clinicalRepo.DEFAULT_SERVICE_CODE_FAVORITES];
+  return { serviceCodeFavorites: favorites, favoritesSource: Array.isArray(stored.serviceCodeFavorites) ? 'record' : 'default' };
+};
+
+// The acting clinician as stamped onto records (name, credential, NPI).
+const actorFromReq = (req) => ({
+  id: req.user.id, name: req.user.name, licenseLevel: req.user.licenseLevel || null,
+  npi: req.user.npi || null, openEmrProviderId: req.user.openEmrProviderId || null, role: req.user.role, email: req.user.email
+});
+
+const forEncounter = (rows, encounterUuid) => rows.filter(r => r && r.encounterUuid === String(encounterUuid));
+const findBillingRecord = (rows, encounterUuid) => rows.find(r => r && r.encounterUuid === String(encounterUuid)) || null;
+
+// One encounter_billing record per OpenEMR encounter. Created by the visit
+// routes; created lazily here for encounters that pre-date 4.4 (or were made
+// directly in OpenEMR) so they can still be coded and signed.
+const ensureBillingRecord = async (emr, client, encounterUuid, actor) => {
+  const rows = await loadRows('encounter_billing');
+  const existing = findBillingRecord(rows, encounterUuid);
+  if (existing) return { rows, record: existing, created: false };
+  const emrRow = await emr.getEncounterRow(client.openEmrPatientId, encounterUuid);
+  if (!emrRow) return { rows, record: null, error: 'No OpenEMR encounter with that id for this patient', status: 404 };
+  const payer = await getPayerCredentialing();
+  const record = clinicalRepo.buildEncounterBillingRecord({
+    id: uuidv4(), clientId: client.id, puuid: client.openEmrPatientId,
+    encounterUuid, encounterEid: emrRow.eid, reason: emrRow.reason, date: String(emrRow.date || '').slice(0, 10),
+    actor, billingNpi: payer.billing_npi_used, narrativeNoteSid: null
+  });
+  rows.push(record);
+  await db.set('encounter_billing', rows);
+  return { rows, record, created: true };
+};
+const saveBillingRecord = async (rows, record) => {
+  const idx = rows.findIndex(r => r && r.id === record.id);
+  if (idx === -1) rows.push(record); else rows[idx] = record;
+  await db.set('encounter_billing', rows);
+};
+
+const loadEncounterSideRecords = async (encounterUuid) => {
+  const [rx, orders, attestations, addenda] = await Promise.all([
+    loadRows('prescriptions'), loadRows('clinical_orders'), loadRows('encounter_attestations'), loadRows('encounter_addenda')
+  ]);
+  return {
+    prescriptions: forEncounter(rx, encounterUuid).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))),
+    orders: forEncounter(orders, encounterUuid).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))),
+    attestation: forEncounter(attestations, encounterUuid)[0] || null,
+    addenda: forEncounter(addenda, encounterUuid).sort((a, b) => String(a.at).localeCompare(String(b.at)))
+  };
+};
+
+// Regenerate the GFC structured note on the encounter from the app-side
+// records (create once, then update in place). Best-effort by design: the
+// app-side record is the system of record for the interim; a failed EMR write
+// is surfaced as a warning and stored on the record for a retry.
+const syncStructuredNote = async (emr, client, record) => {
+  const side = await loadEncounterSideRecords(record.encounterUuid);
+  const note = clinicalRepo.buildStructuredNote({ record, ...side });
+  try {
+    if (record.structuredNoteSid) {
+      await emr.updateSoapNote(client.openEmrPatientId, record.encounterUuid, record.structuredNoteSid, note);
+    } else {
+      const r = await emr.addSoapNote(client.openEmrPatientId, record.encounterUuid, note);
+      record.structuredNoteSid = r.sid;
+    }
+    record.structuredNoteSyncedAt = new Date().toISOString();
+    record.structuredNoteError = null;
+    return null;
+  } catch (e) {
+    console.error('Structured note sync failed:', e.message);
+    record.structuredNoteError = e.message.slice(0, 300);
+    return `The GFC structured note could not be written to OpenEMR (${e.message.slice(0, 120)}). The app-side record is saved; use "Retry EMR sync" on the encounter.`;
+  }
+};
+
+// T2: count a code selection for this clinician (per-user, never global).
+const recordUsageFor = async (actor, set, items) => {
+  if (!items || !items.length) return;
+  let rows = await loadRows('clinical_code_usage');
+  const at = new Date().toISOString();
+  for (const it of items) rows = clinicalRepo.recordCodeUsage(rows, { userId: actor.id, set, code: it.code, description: it.description || it.label, at });
+  await db.set('clinical_code_usage', rows);
+};
+
+const encounterStateOf = (record, attestation) => clinicalRepo.deriveEncounterState(record, attestation);
+
+// T1 candidates: live OpenEMR problem list, with codes the FHIR read-back drops
+// filled in from this patient's prior app encounter records (see
+// clinicalRepository.mergeCandidateSources). Proposals only.
+const loadDxCandidates = async (emr, client, excludeEncounterUuid) => {
+  let problems = []; let error = null;
+  try { problems = (await emr.getProblems(client.openEmrPatientId)).map(clinicalRepo.summarizeCondition); }
+  catch (e) { error = e.message; }
+  const prior = (await loadRows('encounter_billing')).filter(r => r && r.clientId === client.id && r.encounterUuid !== String(excludeEncounterUuid || ''));
+  return { candidates: clinicalRepo.mergeCandidateSources(clinicalRepo.buildCandidateDiagnoses(problems), prior), error };
+};
+
+// Common loader: clinical client + linked check + billing record + closed state.
+const loadEncounterContext = async (req, res, { createRecord = true } = {}) => {
+  const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
+  if (!client) { res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' }); return null; }
+  if (!client.openEmrPatientId) { res.status(409).json({ error: 'Link this client to an OpenEMR patient first', code: 'EMR_NOT_LINKED' }); return null; }
+  const emr = openemr.forActor(req.user);
+  const actor = actorFromReq(req);
+  const encounterUuid = String(req.params.euuid || '');
+  let rows = await loadRows('encounter_billing');
+  let record = findBillingRecord(rows, encounterUuid);
+  if (!record && createRecord) {
+    const ensured = await ensureBillingRecord(emr, client, encounterUuid, actor);
+    if (ensured.error) { res.status(ensured.status).json({ error: ensured.error, code: 'ENCOUNTER_NOT_FOUND' }); return null; }
+    rows = ensured.rows; record = ensured.record;
+  }
+  const side = await loadEncounterSideRecords(encounterUuid);
+  return { users, idx, client, emr, actor, encounterUuid, rows, record, ...side, closed: clinicalRepo.isEncounterClosed(side.attestation) };
+};
+const refuseIfClosed = (ctx, res) => {
+  if (ctx.closed) {
+    res.status(409).json({ error: `This encounter was signed and closed ${ctx.attestation.signedAt} by ${ctx.attestation.signedBy.name}. It is read-only — record a correction as an addendum.`, code: 'ENCOUNTER_CLOSED' });
+    return true;
+  }
+  return false;
+};
+
+// ── Settings ──────────────────────────────────────────────────────────────
+// GET: billing identity + service-code favorites (+ the caller's own NPI so
+// the UI can warn before a real encounter). PUT (admin only): edit them.
+app.get('/api/clinical/settings', authenticateToken, requireClinicalStaff, async (req, res) => {
+  try {
+    const [payer, settings] = await Promise.all([getPayerCredentialing(), getClinicalSettings()]);
+    res.json({
+      billingNpiUsed: payer.billing_npi_used, billingProviderName: payer.billing_provider_name, billingNpiSource: payer.source,
+      billingUpdatedAt: payer.updatedAt, billingUpdatedBy: payer.updatedBy,
+      serviceCodeFavorites: settings.serviceCodeFavorites, favoritesSource: settings.favoritesSource,
+      me: { name: req.user.name, npi: req.user.npi || null, licenseLevel: req.user.licenseLevel || null, openEmrProviderId: req.user.openEmrProviderId || null },
+      isAdmin: req.user.role === config.ROLES.ADMIN,
+      serviceAccount: OPENEMR_SERVICE_ACCOUNT
+    });
+  } catch (error) {
+    console.error('Clinical settings read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+app.put('/api/clinical/settings', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const changed = {};
+    if (body.billingNpiUsed !== undefined || body.billingProviderName !== undefined) {
+      const stored = (await db.get('gfc_payer_credentialing')) || {};
+      if (body.billingNpiUsed !== undefined) {
+        const npi = clinicalRepo.normalizeNpiValue(body.billingNpiUsed);
+        if (body.billingNpiUsed && !npi) return res.status(400).json({ error: 'Billing NPI must be exactly 10 digits', code: 'BAD_NPI' });
+        stored.billing_npi_used = npi;
+        changed.billingNpiUsed = npi;
+      }
+      if (body.billingProviderName !== undefined) {
+        stored.billing_provider_name = String(body.billingProviderName || '').trim().slice(0, 120) || null;
+        changed.billingProviderName = stored.billing_provider_name;
+      }
+      stored.updatedAt = new Date().toISOString();
+      stored.updatedBy = req.user.name;
+      await db.set('gfc_payer_credentialing', stored);
+    }
+    if (body.serviceCodeFavorites !== undefined) {
+      if (!Array.isArray(body.serviceCodeFavorites)) return res.status(400).json({ error: 'serviceCodeFavorites must be an array of {code,label}' });
+      const bad = body.serviceCodeFavorites.find(f => !clinicalRepo.classifyServiceCode(f && f.code));
+      if (bad) return res.status(400).json({ error: `"${bad && bad.code}" is not a valid CPT/HCPCS code format`, code: 'SVC_BAD_CODE' });
+      const stored = (await db.get('clinical_settings')) || {};
+      stored.serviceCodeFavorites = clinicalRepo.sanitizeServiceFavorites(body.serviceCodeFavorites);
+      stored.updatedAt = new Date().toISOString(); stored.updatedBy = req.user.name;
+      await db.set('clinical_settings', stored);
+      changed.serviceCodeFavorites = stored.serviceCodeFavorites.length;
+    }
+    await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_settings_updated', 'settings', 'clinical', changed);
+    res.json({ message: 'Clinical settings saved', changed });
+  } catch (error) {
+    console.error('Clinical settings write error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Code search (spec §7: OpenEMR owns the code sets; the app keeps no list) ─
+// OpenEMR 7.0.4 has NO code-table search in either API (FHIR ValueSet serves
+// list_options only — verified 2026-09-04), so the picker is fed ONLY from
+// OpenEMR-sourced data: this patient's OpenEMR problem list (T1), the
+// clinician's own prior selections (T2, every one of which was written to
+// OpenEMR), and — for services — the practice favorites mirroring OpenEMR's
+// fee schedule. A code typed in full is accepted on FORMAT and OpenEMR
+// resolves it on read-back; the response says plainly where results came from.
+app.get('/api/clinical/codes/search', authenticateToken, requireClinicalStaff, async (req, res) => {
+  try {
+    const set = String(req.query.set || 'ICD10').toUpperCase() === 'SERVICE' ? 'SERVICE' : 'ICD10';
+    const q = String(req.query.q || '').trim();
+    const ql = q.toLowerCase();
+    const usage = await loadRows('clinical_code_usage');
+    const results = []; const seen = new Set();
+    const push = (r) => { if (r.code && !seen.has(r.code)) { seen.add(r.code); results.push(r); } };
+    const matches = (r) => !ql || String(r.code).toLowerCase().startsWith(ql.replace(/\./g, '')) || String(r.code).toLowerCase().startsWith(ql) || String(r.description || r.label || '').toLowerCase().includes(ql);
+    const sources = {};
+    if (set === 'ICD10') {
+      if (req.query.clientId) {
+        const { client } = await loadClinicalClient(String(req.query.clientId));
+        if (client && client.openEmrPatientId && openemr.isConfigured()) {
+          const { candidates, error } = await loadDxCandidates(openemr.forActor(req.user), client, null);
+          const coded = candidates.filter(c => c.code);
+          sources.problemList = coded.filter(c => c.source === 'problem_list').length;
+          sources.priorEncounters = coded.filter(c => c.source === 'prior_encounter').length;
+          if (error) sources.problemListError = error.slice(0, 120);
+          coded.filter(matches).forEach(c => push({ code: c.code, description: c.description, source: c.source, problemUuid: c.problemUuid }));
+        }
+      }
+      const favs = clinicalRepo.rankFavorites(usage, req.user.id, 'ICD10', 30);
+      sources.favorites = favs.length;
+      favs.filter(matches).forEach(f => push({ code: f.code, description: f.description, source: 'favorite', count: f.count }));
+      const typed = clinicalRepo.normalizeIcd10(q);
+      if (typed && !seen.has(typed)) push({ code: typed, description: '', source: 'typed', unverified: true });
+    } else {
+      const settings = await getClinicalSettings();
+      const favs = [...clinicalRepo.rankFavorites(usage, req.user.id, 'CPT4', 30), ...clinicalRepo.rankFavorites(usage, req.user.id, 'HCPCS', 30)];
+      sources.favorites = favs.length;
+      const practice = new Map(settings.serviceCodeFavorites.map(f => [f.code, f]));
+      favs.filter(matches).forEach(f => push({ code: f.code, codeType: clinicalRepo.classifyServiceCode(f.code).codeType, label: (practice.get(f.code) || {}).label || f.description || '', source: 'favorite', count: f.count }));
+      sources.practiceFavorites = settings.serviceCodeFavorites.length;
+      settings.serviceCodeFavorites.filter(matches).forEach(f => push({ ...f, source: 'practice' }));
+      const typed = clinicalRepo.classifyServiceCode(q);
+      if (typed && !seen.has(typed.code)) push({ ...typed, label: '', source: 'typed', unverified: true });
+    }
+    res.json({
+      set, q, results, sources,
+      notice: 'OpenEMR 7.0.4 exposes no code-table search API. Results come from OpenEMR-sourced data only (this patient\'s problem list, your own prior selections, the practice favorites). A code typed in full is checked for format here and resolved by OpenEMR on read-back; if OpenEMR shows no description for it, the ICD-10 load needs checking in OpenEMR (Administration → External Data Loads).'
+    });
+  } catch (error) {
+    console.error('Code search error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// T1 candidates for the follow-up form (before an encounter exists).
+app.get('/api/clinical/patients/:clientId/dx-candidates', authenticateToken, requireClinicalStaff, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    if (!client.openEmrPatientId || !openemr.isConfigured()) return res.json({ candidates: [], error: null });
+    res.json(await loadDxCandidates(openemr.forActor(req.user), client, null));
+  } catch (error) {
+    console.error('Dx candidates error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Follow-up visit (Scope A) — replaces the 4.2 route ────────────────────
+// Shorter SOAP form (S / O incl. vitals / A / P) → Encounter + narrative note
+// in OpenEMR (attribution stamped, §4), the app-side encounter_billing record,
+// optional T1-selected diagnoses and services, and the GFC structured note.
 app.post('/api/clinical/patients/:clientId/encounters', authenticateToken, requireClinicalStaff, async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
     if (!client.openEmrPatientId) return res.status(409).json({ error: 'Link this client to an OpenEMR patient before documenting a visit', code: 'EMR_NOT_LINKED' });
     const body = req.body || {};
-    if (!String(body.reason || '').trim()) return res.status(400).json({ error: 'A visit reason is required', code: 'ENCOUNTER_NO_REASON' });
+    const actor = actorFromReq(req);
+    const built = clinicalRepo.buildFollowUpWrites(body, actor, { serviceAccount: OPENEMR_SERVICE_ACCOUNT });
+    if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+    // Validate coding BEFORE any EMR write so a bad code never leaves a half-documented visit
+    const dx = clinicalRepo.buildEncounterDiagnoses(body.diagnoses || []);
+    if (dx.error) return res.status(400).json({ error: dx.error, code: dx.code });
+    const svc = clinicalRepo.buildEncounterServices(body.services || [], dx.diagnoses);
+    if (svc.error) return res.status(400).json({ error: svc.error, code: svc.code });
 
     const emr = openemr.forActor(req.user);
+    const puuid = client.openEmrPatientId;
     let appointment = null;
     if (body.appointmentEid) {
-      appointment = (await emr.getPatientAppointmentRows(client.openEmrPatientId))
-        .find(r => String(r.pc_eid) === String(body.appointmentEid));
+      appointment = (await emr.getPatientAppointmentRows(puuid)).find(r => String(r.pc_eid) === String(body.appointmentEid));
       if (!appointment) return res.status(400).json({ error: 'That appointment does not belong to this patient', code: 'APPT_PATIENT_MISMATCH' });
+      if (!body.date) built.encounter.date = appointment.pc_eventDate;
     }
-    const enc = await emr.createEncounter(client.openEmrPatientId, {
-      date: (appointment && appointment.pc_eventDate) || body.date || new Date().toISOString().slice(0, 10),
-      reason: String(body.reason).slice(0, 250),
-      class_code: 'HH'
-    });
+    const enc = await emr.createEncounter(puuid, built.encounter);
     const encounterUuid = enc && (enc.euuid || enc.uuid || enc.encounter_uuid || enc.id);
     if (!encounterUuid) return res.status(502).json({ error: 'OpenEMR did not return an encounter id' });
-    await emr.addSoapNote(client.openEmrPatientId, encounterUuid, {
-      subjective: String(body.subjective || '').slice(0, 8000),
-      objective: String(body.objective || '').slice(0, 16000),
-      assessment: String(body.assessment || '').slice(0, 8000),
-      plan: [String(body.plan || '').trim(), req.user.name ? `Documented by ${req.user.name}` : '']
-        .filter(Boolean).join('\n').slice(0, 8000)
-    });
+    const warnings = [];
+    if (built.vitals) {
+      try { await emr.addVitals(puuid, encounterUuid, built.vitals); }
+      catch (e) { warnings.push(`Vitals form write failed (${e.message.slice(0, 120)}) — readings are preserved verbatim in the note`); }
+    }
+    const narrative = await emr.addSoapNote(puuid, encounterUuid, built.soapNote);
     if (appointment) await linkAppointmentEncounter(appointment.pc_eid, client.id, encounterUuid, req.user);
-    await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_followup_documented', 'client', client.id, {
-      role: req.user.role, encounterUuid, appointmentEid: appointment ? String(appointment.pc_eid) : null
+
+    const payer = await getPayerCredentialing();
+    const rows = await loadRows('encounter_billing');
+    let record = clinicalRepo.buildEncounterBillingRecord({
+      id: uuidv4(), clientId: client.id, puuid, encounterUuid, encounterEid: enc.eid,
+      reason: built.reason, date: built.encounter.date, actor, billingNpi: payer.billing_npi_used, narrativeNoteSid: narrative.sid
     });
-    res.json({ message: 'Visit documented to OpenEMR', encounterUuid, linkedAppointmentEid: appointment ? String(appointment.pc_eid) : null });
+    if (dx.diagnoses.length || svc.services.length) {
+      const coded = clinicalRepo.applyCoding(record, { diagnoses: dx.diagnoses, services: svc.services }, actor, payer.billing_npi_used);
+      record = coded.record;
+      await recordUsageFor(actor, 'ICD10', dx.diagnoses);
+      await recordUsageFor(actor, 'CPT4', svc.services.filter(s => s.codeType === 'CPT4'));
+      await recordUsageFor(actor, 'HCPCS', svc.services.filter(s => s.codeType === 'HCPCS'));
+    }
+    rows.push(record);
+    await db.set('encounter_billing', rows);
+    const syncWarning = await syncStructuredNote(emr, client, record);
+    if (syncWarning) warnings.push(syncWarning);
+    await saveBillingRecord(rows, record);
+
+    await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_followup_documented', 'client', client.id, {
+      role: req.user.role, encounterUuid, appointmentEid: appointment ? String(appointment.pc_eid) : null,
+      diagnoses: record.diagnoses.map(d => d.code), services: record.services.map(s => s.code), clinicianNpi: actor.npi || null, warnings: warnings.length
+    });
+    res.json({ message: 'Visit documented to OpenEMR', encounterUuid, encounterEid: enc.eid != null ? String(enc.eid) : null, record, state: encounterStateOf(record, null), warnings, linkedAppointmentEid: appointment ? String(appointment.pc_eid) : null });
   } catch (error) {
     console.error('Clinical follow-up encounter error:', error);
     res.status(502).json({ error: `OpenEMR write failed: ${error.message}` });
+  }
+});
+
+// ── Encounter list for a chart: OpenEMR encounters + coding/sign state ────
+app.get('/api/clinical/patients/:clientId/encounters', authenticateToken, requireClinicalStaff, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    if (!client.openEmrPatientId) return res.json({ linked: false, encounters: [] });
+    const [records, attestations, rx, orders] = await Promise.all([loadRows('encounter_billing'), loadRows('encounter_attestations'), loadRows('prescriptions'), loadRows('clinical_orders')]);
+    let emrRows = null; let emrError = null;
+    try { emrRows = (await openemr.forActor(req.user).getEncounters(client.openEmrPatientId)).map(clinicalRepo.summarizeEncounter); }
+    catch (e) { emrError = e.message; }
+    const byUuid = new Map();
+    for (const r of records) if (r.clientId === client.id) byUuid.set(r.encounterUuid, r);
+    const list = (emrRows || [...byUuid.values()].map(r => ({ id: r.encounterUuid, type: r.reason, status: null, start: r.date, provider: null }))).map(e => {
+      const record = byUuid.get(String(e.id)) || null;
+      const att = attestations.find(a => a.encounterUuid === String(e.id)) || null;
+      return {
+        ...e,
+        reason: record ? record.reason : e.type,
+        state: encounterStateOf(record, att),
+        coded: !!(record && record.codingStatus === 'coded'),
+        signedAt: att ? att.signedAt : null, signedBy: att ? att.signedBy.name : null,
+        diagnosisCount: record ? record.diagnoses.length : 0, serviceCount: record ? record.services.length : 0,
+        prescriptionCount: rx.filter(p => p.encounterUuid === String(e.id)).length,
+        orderCount: orders.filter(o => o.encounterUuid === String(e.id)).length,
+        renderingProvider: record ? record.renderingProvider : null,
+        structuredNoteError: record ? record.structuredNoteError || null : null
+      };
+    }).sort((a, b) => String(b.start || '').localeCompare(String(a.start || '')));
+    res.json({ linked: true, encounters: list, emrError });
+  } catch (error) {
+    console.error('Clinical encounter list error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Encounter detail: everything the encounter panel needs in one read ────
+app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken, requireClinicalStaff, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res);
+    if (!ctx) return;
+    const { client, emr, record, encounterUuid } = ctx;
+    const [emrRowR, notesR, cands, settings, payer, usage] = await Promise.all([
+      emr.getEncounterRow(client.openEmrPatientId, encounterUuid).then(v => ({ ok: true, v })).catch(e => ({ ok: false, e })),
+      emr.getSoapNotes(client.openEmrPatientId, encounterUuid).then(v => ({ ok: true, v })).catch(e => ({ ok: false, e })),
+      loadDxCandidates(emr, client, encounterUuid),
+      getClinicalSettings(), getPayerCredentialing(), loadRows('clinical_code_usage')
+    ]);
+    const emrRow = emrRowR.ok ? emrRowR.v : null;
+    // The narrative note is read by the sid the app recorded at write time.
+    // The list endpoint is only a fallback for encounters documented before
+    // 4.4 (it can leak rows from other encounters — see openemr.getSoapNotes),
+    // and the GFC structured note is always excluded from it.
+    let narrative = [];
+    let notesError = notesR.ok ? null : notesR.e.message;
+    if (record.narrativeNoteSid) {
+      try {
+        const n = await emr.getSoapNote(client.openEmrPatientId, encounterUuid, record.narrativeNoteSid);
+        if (n) narrative = [n];
+      } catch (e) { notesError = e.message; }
+    }
+    if (!narrative.length && notesR.ok) {
+      narrative = notesR.v.filter(n => String(n.id) !== String(record.structuredNoteSid || '') && !/^\[GFC STRUCTURED RECORD/.test(String(n.subjective || '')));
+    }
+    const hasNote = narrative.length > 0;
+    // T1 candidates (proposals only) — see loadDxCandidates
+    const candidates = cands.candidates;
+    const attestationWarnings = ctx.attestation ? ctx.attestation.warnings || [] : [];
+    res.json({
+      encounter: emrRow ? {
+        uuid: encounterUuid, eid: emrRow.eid != null ? String(emrRow.eid) : record.encounterEid, date: String(emrRow.date || '').slice(0, 10),
+        reason: emrRow.reason, billingNote: emrRow.billing_note || null, providerId: emrRow.provider_id != null ? String(emrRow.provider_id) : null,
+        facility: emrRow.facility_name || null, classCode: emrRow.class_code || null
+      } : { uuid: encounterUuid, eid: record.encounterEid, date: record.date, reason: record.reason, emrError: emrRowR.e && emrRowR.e.message },
+      narrativeNotes: narrative.map(n => ({ id: String(n.id), date: n.date, subjective: n.subjective, objective: n.objective, assessment: n.assessment, plan: n.plan })),
+      notesError,
+      record, state: encounterStateOf(record, ctx.attestation), closed: ctx.closed,
+      prescriptions: ctx.prescriptions, orders: ctx.orders, attestation: ctx.attestation, addenda: ctx.addenda,
+      signReadiness: clinicalRepo.checkSignReadiness({ hasNote, record, billingNpi: payer.billing_npi_used }),
+      candidates, candidatesError: cands.error,
+      favorites: {
+        icd10: clinicalRepo.rankFavorites(usage, req.user.id, 'ICD10', 15),
+        services: [...clinicalRepo.rankFavorites(usage, req.user.id, 'CPT4', 15), ...clinicalRepo.rankFavorites(usage, req.user.id, 'HCPCS', 15)],
+        practiceServices: settings.serviceCodeFavorites
+      },
+      billingNpiUsed: payer.billing_npi_used, billingNpiSource: payer.source,
+      me: { name: req.user.name, npi: req.user.npi || null, licenseLevel: req.user.licenseLevel || null },
+      warnings: [...attestationWarnings, ...(record.structuredNoteError ? [`GFC structured note not synced to OpenEMR: ${record.structuredNoteError}`] : [])],
+      orderTypes: clinicalRepo.ORDER_TYPES, orderPriorities: clinicalRepo.ORDER_PRIORITIES, orderStatuses: clinicalRepo.ORDER_STATUSES, orderTransitions: clinicalRepo.ORDER_TRANSITIONS,
+      rxRoutes: clinicalRepo.RX_ROUTES
+    });
+  } catch (error) {
+    console.error('Clinical encounter detail error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Coding (Scope B/E): replace the encounter's diagnoses + services ──────
+// 409 ENCOUNTER_CLOSED after sign. New manual diagnoses can also be added to
+// the OpenEMR problem list (addToProblemList: [codes]) — an explicit choice,
+// never automatic.
+app.put('/api/clinical/patients/:clientId/encounters/:euuid/coding', authenticateToken, requireClinicalStaff, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res);
+    if (!ctx || refuseIfClosed(ctx, res)) return;
+    const body = req.body || {};
+    const payer = await getPayerCredentialing();
+    const before = ctx.record;
+    const coded = clinicalRepo.applyCoding(before, { diagnoses: body.diagnoses || [], services: body.services || [] }, ctx.actor, payer.billing_npi_used);
+    if (coded.error) return res.status(400).json({ error: coded.error, code: coded.code });
+    const record = coded.record;
+    // T2: count only codes newly added on this save (re-saving the same set does not inflate)
+    const prevDx = new Set(before.diagnoses.map(d => d.code)); const prevSvc = new Set(before.services.map(s => s.code));
+    await recordUsageFor(ctx.actor, 'ICD10', record.diagnoses.filter(d => !prevDx.has(d.code)));
+    await recordUsageFor(ctx.actor, 'CPT4', record.services.filter(s => s.codeType === 'CPT4' && !prevSvc.has(s.code)));
+    await recordUsageFor(ctx.actor, 'HCPCS', record.services.filter(s => s.codeType === 'HCPCS' && !prevSvc.has(s.code)));
+    const warnings = [];
+    const problemAdds = [];
+    for (const code of Array.isArray(body.addToProblemList) ? body.addToProblemList : []) {
+      const d = record.diagnoses.find(x => x.code === clinicalRepo.normalizeIcd10(code));
+      if (!d) continue;
+      try {
+        const row = await ctx.emr.addProblem(ctx.client.openEmrPatientId, { title: (d.description || d.code).slice(0, 250), begdate: record.date || new Date().toISOString().slice(0, 10), diagnosis: `ICD10:${d.code}` });
+        d.problemUuid = row && row.uuid ? String(row.uuid) : d.problemUuid; d.source = 'problem_list';
+        problemAdds.push(d.code);
+      } catch (e) { warnings.push(`Could not add ${d.code} to the OpenEMR problem list: ${e.message.slice(0, 120)}`); }
+    }
+    const syncWarning = await syncStructuredNote(ctx.emr, ctx.client, record);
+    if (syncWarning) warnings.push(syncWarning);
+    await saveBillingRecord(ctx.rows, record);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'encounter_coded', 'client', ctx.client.id, {
+      encounterUuid: ctx.encounterUuid, status: record.codingStatus, diagnoses: record.diagnoses.map(d => d.code), services: record.services.map(s => s.code), problemAdds, clinicianNpi: ctx.actor.npi || null
+    });
+    res.json({ message: record.codingStatus === 'coded' ? 'Encounter coded' : 'Coding saved (not yet complete)', record, state: encounterStateOf(record, null), coding: clinicalRepo.deriveCodingStatus(record), warnings });
+  } catch (error) {
+    console.error('Clinical coding error:', error);
+    res.status(502).json({ error: `Coding save failed: ${error.message}` });
+  }
+});
+
+// ── Prescriptions (Scope C) — record only; transmission stays as today ───
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/prescriptions', authenticateToken, requireClinicalStaff, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res);
+    if (!ctx || refuseIfClosed(ctx, res)) return;
+    const built = clinicalRepo.buildPrescription({ id: uuidv4(), clientId: ctx.client.id, puuid: ctx.client.openEmrPatientId, encounterUuid: ctx.encounterUuid, input: req.body, actor: ctx.actor });
+    if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+    const rx = built.prescription;
+    const warnings = [];
+    // In-chart copy: OpenEMR 7.0.4's only Rx write is the medication list row
+    try {
+      const row = await ctx.emr.addMedication(ctx.client.openEmrPatientId, clinicalRepo.prescriptionToMedicationRow(rx));
+      // 7.0.4's medication POST answers with the list row id (uuid on some builds)
+      rx.emrMedicationId = row && (row.uuid || row.id) != null ? String(row.uuid || row.id) : null;
+    } catch (e) { warnings.push(`OpenEMR medication-list write failed (${e.message.slice(0, 120)}) — the prescription is recorded in the app and in the structured note`); rx.emrWriteError = e.message.slice(0, 300); }
+    const rows = await loadRows('prescriptions');
+    rows.push(rx);
+    await db.set('prescriptions', rows);
+    const syncWarning = await syncStructuredNote(ctx.emr, ctx.client, ctx.record);
+    if (syncWarning) warnings.push(syncWarning);
+    await saveBillingRecord(ctx.rows, ctx.record);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'prescription_recorded', 'client', ctx.client.id, { encounterUuid: ctx.encounterUuid, prescriptionId: rx.id, kind: rx.kind, drug: rx.drug, prescriberNpi: ctx.actor.npi || null, transmission: 'none' });
+    res.json({ message: 'Prescription recorded (not transmitted)', prescription: rx, warnings });
+  } catch (error) {
+    console.error('Clinical prescription error:', error);
+    res.status(502).json({ error: `Prescription save failed: ${error.message}` });
+  }
+});
+
+// ── Orders (Scope D) — labs / imaging / procedures; no HL7 ───────────────
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authenticateToken, requireClinicalStaff, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res);
+    if (!ctx || refuseIfClosed(ctx, res)) return;
+    const built = clinicalRepo.buildOrder({ id: uuidv4(), clientId: ctx.client.id, puuid: ctx.client.openEmrPatientId, encounterUuid: ctx.encounterUuid, input: req.body, actor: ctx.actor, encounterDiagnoses: ctx.record.diagnoses });
+    if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+    const rows = await loadRows('clinical_orders');
+    rows.push(built.order);
+    await db.set('clinical_orders', rows);
+    const warnings = [];
+    const syncWarning = await syncStructuredNote(ctx.emr, ctx.client, ctx.record);
+    if (syncWarning) warnings.push(syncWarning);
+    await saveBillingRecord(ctx.rows, ctx.record);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'order_recorded', 'client', ctx.client.id, { encounterUuid: ctx.encounterUuid, orderId: built.order.id, orderType: built.order.orderType, tests: built.order.tests, orderingNpi: ctx.actor.npi || null, transmission: 'manual' });
+    res.json({ message: 'Order recorded (transmission is manual)', order: built.order, warnings });
+  } catch (error) {
+    console.error('Clinical order error:', error);
+    res.status(502).json({ error: `Order save failed: ${error.message}` });
+  }
+});
+// Status advance is an operational step (sent / resulted / cancelled), so it
+// stays allowed after the encounter is closed; every step is who/when-stamped.
+app.post('/api/clinical/orders/:orderId/status', authenticateToken, requireClinicalStaff, async (req, res) => {
+  try {
+    const rows = await loadRows('clinical_orders');
+    const idx = rows.findIndex(o => o && o.id === req.params.orderId);
+    if (idx === -1) return res.status(404).json({ error: 'Order not found', code: 'ORDER_NOT_FOUND' });
+    const next = clinicalRepo.advanceOrderStatus(rows[idx], String((req.body || {}).status || ''), actorFromReq(req), (req.body || {}).note);
+    if (next.error) return res.status(next.code === 'ORDER_BAD_TRANSITION' ? 409 : 400).json({ error: next.error, code: next.code });
+    rows[idx] = next.order;
+    await db.set('clinical_orders', rows);
+    const warnings = [];
+    const { client } = await loadClinicalClient(next.order.clientId);
+    if (client && client.openEmrPatientId && openemr.isConfigured()) {
+      const billing = await loadRows('encounter_billing');
+      const record = findBillingRecord(billing, next.order.encounterUuid);
+      if (record) {
+        const w = await syncStructuredNote(openemr.forActor(req.user), client, record);
+        if (w) warnings.push(w);
+        await saveBillingRecord(billing, record);
+      }
+    }
+    await logActivity(req.user.id, req.user.name || req.user.email, 'order_status_advanced', 'client', next.order.clientId, { orderId: next.order.id, encounterUuid: next.order.encounterUuid, status: next.order.status });
+    res.json({ message: `Order marked ${next.order.status}`, order: next.order, warnings });
+  } catch (error) {
+    console.error('Order status error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+app.get('/api/clinical/patients/:clientId/orders', authenticateToken, requireClinicalStaff, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    const [orders, rx] = await Promise.all([loadRows('clinical_orders'), loadRows('prescriptions')]);
+    res.json({
+      orders: orders.filter(o => o && o.clientId === client.id).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
+      prescriptions: rx.filter(p => p && p.clientId === client.id).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
+      orderTransitions: clinicalRepo.ORDER_TRANSITIONS
+    });
+  } catch (error) {
+    console.error('Clinical orders list error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Sign & close (Scope F, spec §3 normative) ─────────────────────────────
+// Refused with a specific code until the encounter has a note, ≥1 diagnosis,
+// ≥1 service (each linked) and a configured billing NPI. The signer becomes
+// the rendering provider on the charge. Closed = read-only; addenda only.
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticateToken, requireClinicalStaff, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res);
+    if (!ctx) return;
+    if (ctx.closed) return res.status(409).json({ error: `Already signed and closed ${ctx.attestation.signedAt} by ${ctx.attestation.signedBy.name}`, code: 'ENCOUNTER_CLOSED' });
+    if (!(req.body || {}).attest) return res.status(400).json({ error: 'You must confirm the attestation statement to sign', code: 'SIGN_NO_ATTEST' });
+    const payer = await getPayerCredentialing();
+    let hasNote = false;
+    try {
+      if (ctx.record.narrativeNoteSid) hasNote = !!(await ctx.emr.getSoapNote(ctx.client.openEmrPatientId, ctx.encounterUuid, ctx.record.narrativeNoteSid));
+      if (!hasNote) {
+        hasNote = (await ctx.emr.getSoapNotes(ctx.client.openEmrPatientId, ctx.encounterUuid))
+          .some(n => String(n.id) !== String(ctx.record.structuredNoteSid || '') && !/^\[GFC STRUCTURED RECORD/.test(String(n.subjective || '')));
+      }
+    } catch { hasNote = false; }
+    const ready = clinicalRepo.checkSignReadiness({ hasNote, record: ctx.record, billingNpi: payer.billing_npi_used });
+    if (!ready.ok) return res.status(409).json({ error: ready.message, code: ready.codes[0], codes: ready.codes, missing: ready.missing });
+    const attestation = clinicalRepo.buildAttestation({ id: uuidv4(), record: ctx.record, actor: ctx.actor, billingNpi: payer.billing_npi_used, narrativeNoteSid: ctx.record.narrativeNoteSid });
+    const atts = await loadRows('encounter_attestations');
+    atts.push(attestation);
+    await db.set('encounter_attestations', atts);
+    // Rendering provider on the charge = signing clinician (spec §2.5)
+    const record = { ...ctx.record, renderingProvider: attestation.signedBy, billingProviderNpi: payer.billing_npi_used, closedAt: attestation.signedAt, updatedAt: attestation.signedAt };
+    const warnings = [...attestation.warnings];
+    const syncWarning = await syncStructuredNote(ctx.emr, ctx.client, record);
+    if (syncWarning) warnings.push(syncWarning);
+    await saveBillingRecord(ctx.rows, record);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'encounter_signed', 'client', ctx.client.id, {
+      encounterUuid: ctx.encounterUuid, attestationId: attestation.id, signedByNpi: attestation.signedBy.npi, billingProviderNpi: payer.billing_npi_used,
+      diagnoses: attestation.diagnosisCodes, services: attestation.serviceCodes
+    });
+    res.json({ message: 'Encounter signed and closed', attestation, record, state: 'signed', warnings });
+  } catch (error) {
+    console.error('Encounter sign error:', error);
+    res.status(502).json({ error: `Sign failed: ${error.message}` });
+  }
+});
+
+// ── Addenda: the only way to change a closed encounter ────────────────────
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/addenda', authenticateToken, requireClinicalStaff, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res);
+    if (!ctx) return;
+    if (!ctx.closed) return res.status(409).json({ error: 'Addenda apply to signed encounters only — this encounter is still open; edit its coding directly', code: 'ENCOUNTER_NOT_CLOSED' });
+    const built = clinicalRepo.buildAddendum({ id: uuidv4(), encounterUuid: ctx.encounterUuid, clientId: ctx.client.id, text: (req.body || {}).text, actor: ctx.actor });
+    if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+    const rows = await loadRows('encounter_addenda');
+    rows.push(built.addendum);
+    await db.set('encounter_addenda', rows);
+    const warnings = [];
+    const syncWarning = await syncStructuredNote(ctx.emr, ctx.client, ctx.record);
+    if (syncWarning) warnings.push(syncWarning);
+    await saveBillingRecord(ctx.rows, ctx.record);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'encounter_addendum', 'client', ctx.client.id, { encounterUuid: ctx.encounterUuid, addendumId: built.addendum.id, byNpi: ctx.actor.npi || null });
+    res.json({ message: 'Addendum recorded', addendum: built.addendum, warnings });
+  } catch (error) {
+    console.error('Encounter addendum error:', error);
+    res.status(502).json({ error: `Addendum failed: ${error.message}` });
+  }
+});
+
+// Retry the structured-note write after an EMR failure (no record change).
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/resync', authenticateToken, requireClinicalStaff, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res);
+    if (!ctx) return;
+    const warning = await syncStructuredNote(ctx.emr, ctx.client, ctx.record);
+    await saveBillingRecord(ctx.rows, ctx.record);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'encounter_note_resync', 'client', ctx.client.id, { encounterUuid: ctx.encounterUuid, ok: !warning });
+    if (warning) return res.status(502).json({ error: warning, code: 'EMR_SYNC_FAILED' });
+    res.json({ message: 'GFC structured note synced to OpenEMR', structuredNoteSid: ctx.record.structuredNoteSid });
+  } catch (error) {
+    console.error('Encounter resync error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Staff coding queue (spec §2.6): every encounter that is not yet coded /
+// signed, across the panel, from OpenEMR's whole-instance encounter feed ───
+app.get('/api/clinical/encounters/queue', authenticateToken, requireClinicalStaff, async (req, res) => {
+  try {
+    const filter = ['not_coded', 'coded', 'signed', 'open', 'all'].includes(String(req.query.state)) ? String(req.query.state) : 'open';
+    const [records, attestations, clientMap] = await Promise.all([loadRows('encounter_billing'), loadRows('encounter_attestations'), clinicalClientsByPuuid()]);
+    let emrRows = null; let emrError = null;
+    if (openemr.isConfigured()) {
+      try { emrRows = await openemr.forActor(req.user).getAllEncounters(); } catch (e) { emrError = e.message; }
+    }
+    const recByUuid = new Map(records.map(r => [r.encounterUuid, r]));
+    const attByUuid = new Map(attestations.map(a => [a.encounterUuid, a]));
+    const rows = [];
+    if (emrRows) {
+      for (const r of emrRows) {
+        const puuid = String(((r.subject || {}).reference || '')).replace(/^Patient\//, '');
+        const app = clientMap.get(puuid);
+        if (!app) continue; // encounters for patients not linked to an app client stay out of the app queue
+        const s = clinicalRepo.summarizeEncounter(r);
+        const record = recByUuid.get(String(r.id)) || null;
+        const att = attByUuid.get(String(r.id)) || null;
+        rows.push({ encounterUuid: String(r.id), clientId: app.clientId, patientName: app.name, date: s.start, reason: record ? record.reason : s.type, provider: s.provider,
+          state: encounterStateOf(record, att), diagnosisCount: record ? record.diagnoses.length : 0, serviceCount: record ? record.services.length : 0,
+          renderingProvider: record ? record.renderingProvider : null, signedAt: att ? att.signedAt : null });
+      }
+    } else {
+      // EMR feed unavailable — degrade to what the app already knows
+      for (const record of records) {
+        const att = attByUuid.get(record.encounterUuid) || null;
+        rows.push({ encounterUuid: record.encounterUuid, clientId: record.clientId, patientName: null, date: record.date, reason: record.reason, provider: null,
+          state: encounterStateOf(record, att), diagnosisCount: record.diagnoses.length, serviceCount: record.services.length, renderingProvider: record.renderingProvider, signedAt: att ? att.signedAt : null });
+      }
+    }
+    const filtered = rows.filter(r => filter === 'all' ? true : filter === 'open' ? r.state !== 'signed' : r.state === filter)
+      .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+    res.json({ filter, encounters: filtered, counts: { not_coded: rows.filter(r => r.state === 'not_coded').length, coded: rows.filter(r => r.state === 'coded').length, signed: rows.filter(r => r.state === 'signed').length }, emrError, degraded: !emrRows });
+  } catch (error) {
+    console.error('Coding queue error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 

@@ -247,6 +247,16 @@ const OPENEMR = Object.freeze({
   ].join(' ')
 });
 
+// ---- Billing provider identity (Session 4.4 — spec §2.5, v2 §13) ----
+// The BILLING provider NPI on every coded encounter is the org-level config
+// value `gfc_payer_credentialing.billing_npi_used` (currently Bethel Godwins's
+// individual NPI; flips to the organizational NPI when GFC's Medicare
+// enrollment lands). It lives in the KV `gfc_payer_credentialing` record
+// (admin-editable in the clinical workspace); this env value only SEEDS it
+// when the record is empty. Never hardcoded anywhere in app code.
+const GFC_BILLING_NPI_USED = process.env.GFC_BILLING_NPI_USED || '';
+const GFC_BILLING_PROVIDER_NAME = process.env.GFC_BILLING_PROVIDER_NAME || '';
+
 // ---- Default Admin (initial setup only) ----
 const DEFAULT_ADMIN = Object.freeze({
   EMAIL: process.env.DEFAULT_ADMIN_EMAIL || 'admin@godwinsfamilycarell.com',
@@ -333,6 +343,9 @@ module.exports = {
   ROI_LEGACY_SHEET_TAB,
   // OpenEMR FHIR integration (Session 4.1)
   OPENEMR,
+  // Billing provider identity seed (Session 4.4)
+  GFC_BILLING_NPI_USED,
+  GFC_BILLING_PROVIDER_NAME,
   // Public config
   getPublicConfig
 };
