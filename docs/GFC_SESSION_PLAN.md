@@ -15,7 +15,7 @@ Each session ends in a PR you review and merge. **Companion to** `GFC_App_Build_
 | 1 | Repo prep · rebrand · role model | Shared | ✅ Done (PR #2, #3) |
 | 2 | Strip lab features · deactivate tracker · brand cleanup | Shared | ✅ Done (PR #5, 2026-06-10; cleanup follow-ups completed 07/2026) |
 | 3 | Client portal + gated intake (both service paths) | Shared | ✅ Done — 3.1/3.2 (PR #6, #7), 3.2 field-parity + 3.4 Transfer-of-Care ROI (PR #13), 3.5 reconciliation (PR #15), 3.3 staff enrollment view + offline onboarding + care-tier migration (PR #16) |
-| 4 | **Clinical / In-Home Primary Care portal + OpenEMR** | Clinical | 🟡 In progress — **4.1 clinician workspace ✅ Done (PR #19)**; **4.2 scheduling ✅ Done (PR #22)**; **4.4 clinical completeness P0 ✅ Done (PR #29)**; 4.3 patient clinical read ⬜ next (with the P1 set) |
+| 4 | **Clinical / In-Home Primary Care portal + OpenEMR** | Clinical | 🟡 In progress — **4.1 clinician workspace ✅ Done (PR #19)**; **4.2 scheduling ✅ Done (PR #22)**; **4.4 clinical completeness P0 ✅ Done (PR #29)**; next per `CLAUDE.md` (owner direction 2026-09-05): OpenEMR 8.4 upgrade → route patch → config → 4.5 (wire native writes) → 4.3 patient clinical read ⬜ |
 | 5 | **Clinical HIPAA go-live** (app → AWS boundary, MFA, audit, BAAs, **+ OpenEMR auth migration to authorization_code**) | Clinical | ⬜ Planned |
 | 6 | Caregiver app | PHCP | ⬜ Planned |
 | 7 | Scheduling · availability · time tracking | PHCP | ⬜ Planned |
@@ -67,6 +67,6 @@ Each session ends in a PR you review and merge. **Companion to** `GFC_App_Build_
 ---
 
 ## Rough timeline
-- **Now (updated 2026-09-05):** Sessions 1–4.4 merged (4.1 PR #19, 4.2 PR #22, 4.4 PR #29). Next: the P1 set — results review, clinical inbox, vitals/document re-tests after the EMR fixes, and Session 4.3 (patient clinical read + POA gates + case-manager read) — then Session 5 (clinical go-live: AWS boundary, auth migration, audit). Session 5 prompt work is paused by owner direction 2026-09-04.
+- **Now (updated 2026-09-05):** Sessions 1–4.4 merged (4.1 PR #19, 4.2 PR #22, 4.4 PR #29). Next, per the owner's 2026-09-05 direction in `CLAUDE.md` and `docs/GFC_Release_Runway.pdf`: OpenEMR 8.4 upgrade → bounded route patch (orders + fee-sheet writes stay app-driven) → OpenEMR configuration per Billing Guide v3.0 → Session 4.5 (wire the app to 8.4's native writes, retire the app-side workarounds) → Session 4.3 (patient clinical read + POA gates + case-manager read) — then Session 5 (clinical go-live: AWS boundary, auth migration, audit). Session 5 prompt work is paused by owner direction 2026-09-04.
 - **After that:** first clinical clients live; then Sessions 6–8 (caregiver app, PHCP scheduling, matching).
 - **Following weeks:** Sessions 6–10 (PHCP segment + shared), then 11–12.
