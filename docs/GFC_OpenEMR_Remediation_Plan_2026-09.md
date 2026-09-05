@@ -97,6 +97,6 @@ These are capabilities 7.0.4 simply does not expose. No configuration fixes them
 
 ## Doc alignment items
 
-- `GFC_OpenEMR_Deploy_Setup_Guide_v2.pdf` — referenced by `GFC_App_Build_v2.md` §6 (Appendix D compatibility matrix) but **not in this repo**. It lives in the desktop GFCLLC docs folder. Add it, so sessions stop rediscovering the API surface empirically.
+- `GFC_OpenEMR_Deploy_Setup_Guide_v2.pdf` — referenced by `GFC_App_Build_v2.md` §6 (Appendix D compatibility matrix) but **not in this repo**, and the desktop copy predates significant changes to the deployment. **Do not import it as-is.** Either update it first, or drop the §6 reference so sessions stop citing a document they cannot read. Session 4.4's live preflight (recorded in `OPENEMR_SERVER_DEFECTS_2026-08.md`) is currently the more accurate account of the API surface — treat that as authoritative until the guide is refreshed.
 - **v2 §5.4 document routing rule** (received clinical records → OpenEMR document area) was never carried into a session prompt. It is blocked by B1. Add it explicitly to the P1 set so it is deferred deliberately rather than forgotten.
 - `GFC_Billing_Spec_Input_Checklist.md` — desktop only, not in this repo. Four must-have answers still open; the billing consultant can close several.
