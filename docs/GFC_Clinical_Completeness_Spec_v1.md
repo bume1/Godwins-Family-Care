@@ -1,7 +1,7 @@
 # GFC Clinical Completeness Spec v1
 ## OpenEMR clinician-workflow capability coverage in the GFC app
 
-**Date:** 2026-09-03 · **rev 1.1** (adds §7 code source-of-truth and §8 coding assist)
+**Date:** 2026-09-03 · **rev 1.2** (adds §7 code source-of-truth, §8 coding assist, §10 AI scope)
 **Purpose:** Enumerate every OpenEMR front-end capability pertinent to an FNP's home-based primary care workflow, state what the GFC clinical portal covers today, and define what must exist for the portal to carry a full clinical visit end to end.
 **Owner decisions encoded here:** billing is completed in OpenEMR's back end for now, but the **note → billing route must be accounted for in the app**. Quest HL7 lab interface is deferred (months out); lab ordering must still be capturable. Session 4.1 (PR #19) and 4.2 (PR #22) are merged.
 
@@ -133,3 +133,39 @@ Propose ICD-10 candidates from the assessment text. Build only after several wee
 3. Confirm documentation requirements per E/M level — what the note must contain to support 99348 vs 99350. **Blocks T3.**
 4. Confirm whether an FNP in Georgia bills these independently under her own NPI or requires physician linkage.
 5. From `GFC_Billing_Spec_Input_Checklist.md` (currently only in the desktop GFCLLC folder, not in this repo): refund/adjustment policy, and whether GFC uses an accounting system the app should feed.
+
+
+---
+
+## 10. AI-assisted capability — scope and boundaries (decided 2026-09-05)
+
+Owner decision: two AI features are in scope. Everything else on the capability matrix stays human. Timing is **after the Tuesday 09/08 release**, once 8.4 is stable and Sessions 4.5 and 4.3 have landed — real visits should inform the note structure before it is automated.
+
+### 10.1 In scope
+
+**A. Dictation → structured note (H&P and SOAP).** The clinician dictates during or after the visit; the app produces a draft in the existing note fields, not free text. The open encounter's visit type selects the structure — H&P per intake spec §2C for initial visits, the 4.4 follow-up SOAP for established ones.
+
+**B. ICD-10 proposal from assessment text.** Same pass as A. While the model is drafting the assessment it proposes diagnosis codes for what it read. Candidates are **validated against OpenEMR's loaded code set** — a code that does not resolve there cannot surface. The clinician confirms every one. This is a translation task, not a judgment call, and carries low risk.
+
+### 10.2 CPT — not an AI feature
+
+A CPT is what was done, not what the patient has, so it is never derived from a diagnosis. For home visits the code is the E/M level, set by either total time or medical decision-making complexity.
+
+- **Time path — build this, no model involved.** The app already records encounter start and stop. "42 minutes documented, which falls in the 99349 band" is a lookup table, deterministic, with no hallucination surface. Blocked only on the billing consultant confirming the bands (§9 item 3).
+- **MDM-complexity path — deferred.** A model inferring decision-making complexity from the note is the same feature as upcoding assistance depending on how the prompt is written. If built later, the **billing consultant reviews the prompt itself**, not only the thresholds.
+
+### 10.3 Boundaries that apply to every AI feature
+
+- **Inside the BAA boundary only.** AWS Transcribe Medical for speech, Claude on Amazon Bedrock for structuring — both under the existing AWS BAA. **Zero data retention configured explicitly**, and a documented check that no prompt path can route outside the boundary. Belongs in the Session 5 HIPAA work regardless of what ships.
+- **Audio handling.** Recorded locally when connectivity is poor (home visits — reuse the offline queue pattern from the visit log), uploaded to S3 inside the boundary, transcribed, then **deleted**. Audio is PHI.
+- **Propose, never commit.** Nothing an AI produces is saved to the record without a clinician acting on it. No auto-selection onto a claim, no auto-signing.
+- **Unverified until touched.** Every dictated section and every proposed code renders as visibly unverified until the clinician has edited or confirmed it — the same pattern 4.1 uses for intake pre-fill. *A fluent wrong sentence is more dangerous than a blank field, because the error reads as plausibly as the rest of the note.* Visual marking is what forces review across each section before signing.
+- **Attribution unchanged.** The signed note is the clinician's legal record under her attestation. AI drafting does not change who is accountable for its contents.
+- **Audit every call.** One `logActivity()` entry per model invocation: user, role, patientId, feature, and whether the output was accepted, edited, or discarded. The accept/edit/discard signal is also how the feature gets evaluated over time.
+- **No PHI in logs**, prompts, or error traces that leave the boundary.
+
+### 10.4 Explicitly out of scope
+
+Prescriptions and orders stay fully human — no drafting, no suggestion. Drug-interaction checking is regulated clinical decision support and must come from a drug database, never a language model. No AI selects a code, an E/M level, or a service on its own. Inbound-document classification, results extraction, and the clinical inbox are **deferred until there is document volume to justify them** — the document endpoint is also blocked until the 8.4 upgrade lands.
+
+**Build prompt:** `GFC_SessionAI.1_ClaudeCode_Prompt.md`.
