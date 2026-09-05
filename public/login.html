@@ -702,7 +702,9 @@
         if (!u || u.role === 'admin') return null; // Super Admin keeps the hub
         if (u.role === 'client' || u.role === 'family') return (u.role === 'client' && u.slug) ? `/portal/${u.slug}` : '/portal';
         if (u.hasClinicalAccess) return '/clinical';
-        if (u.role === 'caseManager') return '/admin/enrollment';
+        // Case managers land on the scoped clinical read (Session 4.3) —
+        // the enrollment view is one click away from the workspace header.
+        if (u.role === 'caseManager') return '/clinical';
         if (u.isManager || u.hasAdminHubAccess || u.hasClientPortalAdminAccess) return '/admin';
         if (u.role === 'vendor' || u.hasServicePortalAccess) return '/service-portal';
         return null; // no access anywhere → hub renders its empty state

@@ -18,6 +18,8 @@ const roiRepo = require('./roiRepository');           // Transfer-of-Care ROI da
 const legacySync = require('./legacySync');            // ROI parallel-run legacy sync (Session 3.4)
 const openemr = require('./openemr');                  // OpenEMR FHIR/REST front-end client (Session 4.1)
 const clinicalRepo = require('./clinicalRepository');  // clinical workspace pure helpers (Session 4.1)
+// Session 4.3 — patient/family/POA clinical read rules + the case-manager read/write split
+const patientRead = require('./patientReadRepository');
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -2031,12 +2033,31 @@ const requireAdmin = (req, res, next) => {
 // Alias for clarity - Super Admin only routes
 const requireSuperAdmin = requireAdmin;
 
-// Clinical workspace access (Session 4.1) — Clinical staff via hasClinicalAccess,
-// or Admin. Enforced at the API layer on EVERY clinical route; non-clinical
-// roles (client, family, vendor, case manager without the flag) get 403.
-const requireClinicalStaff = (req, res, next) => {
-  if (req.user.role === config.ROLES.ADMIN || req.user.hasClinicalAccess) {
-    return next();
+// Clinical workspace access (Session 4.1, split in 4.3) — enforced at the
+// API layer on EVERY /api/clinical route, never only in the UI.
+//   READ  routes: Admin, Clinical (hasClinicalAccess), Case Manager
+//   WRITE routes: Admin, Clinical — case managers get 403 CLINICAL_READ_ONLY
+// The one rule lives in patientReadRepository (canClinicalRead/canClinicalWrite)
+// and test/patient_clinical_read.test.js fails the build if any /api/clinical
+// route is registered without the right guard. Every case-manager read is
+// audited here (user, role, patientId, resource) — the scoped read mirrors
+// their OpenEMR permissions and must leave the same trail.
+const requireClinicalRead = (req, res, next) => {
+  if (!patientRead.canClinicalRead(req.user)) {
+    return res.status(403).json({ error: 'Clinical access required.', code: 'CLINICAL_ONLY' });
+  }
+  if (req.user.role === config.ROLES.CASE_MANAGER) {
+    Promise.resolve(logActivity(req.user.id, req.user.name || req.user.email, 'case_manager_clinical_read', 'client',
+      (req.params && req.params.clientId) || null,
+      { role: req.user.role, actingFor: null, patientId: (req.params && req.params.clientId) || null, resource: req.path, method: req.method }))
+      .catch(err => console.error('Case-manager read audit failed:', err.message));
+  }
+  return next();
+};
+const requireClinicalWrite = (req, res, next) => {
+  if (patientRead.canClinicalWrite(req.user)) return next();
+  if (req.user.role === config.ROLES.CASE_MANAGER) {
+    return res.status(403).json({ error: 'Case managers have read-only clinical access.', code: 'CLINICAL_READ_ONLY' });
   }
   return res.status(403).json({ error: 'Clinical access required.', code: 'CLINICAL_ONLY' });
 };
@@ -5310,12 +5331,26 @@ app.get('/api/gfc/me', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'No client record on file' });
     }
     const snapshot = buildEnrollmentSnapshot(client);
+    // 4.3: POA identity + whether the clinical sections are available to THIS
+    // login (flags and reason codes only — the sections themselves are served
+    // by /api/gfc/clinical/summary behind the full gate).
+    const acting = patientRead.buildActingIdentity(req.user, client);
+    const access = patientRead.evaluateClinicalReadAccess({ reqUser: req.user, client, isConsentSatisfied, isClinicalServiceLine });
     res.json({
       role: req.user.role,
       isFamily: req.user.role === config.ROLES.FAMILY,
+      isPoa: acting.isPoa,
+      actingFor: acting.actingFor,
+      actingAs: acting.isPoa ? acting.signerName : null,
       name: req.user.name,
       clientName: client.preferredName || client.name,
+      clientFullName: client.name,
       slug: client.slug || null,
+      clinicalRead: access.ok
+        ? { available: true, audience: access.audience, sections: access.sections }
+        : { available: false, audience: null, code: access.code, reason: access.error },
+      // Sharing settings are the client's (or POA's) to see and edit
+      sharing: (req.user.role === config.ROLES.CLIENT || acting.isPoa) ? patientRead.normalizeSharing(client.sharing) : undefined,
       ...snapshot
     });
   } catch (error) {
@@ -5331,9 +5366,30 @@ app.get('/api/gfc/care-plan', authenticateToken, requireEnrolledClient, async (r
     const client = await resolveGfcClientRecord(req.user);
     if (!client) return res.status(404).json({ error: 'No client record on file' });
     const visits = await getClientVisits(client);
+    // 4.3 sharing rule: the client and a designated POA see the full plan;
+    // non-POA family see the summary level only when the client shares it.
+    const acting = patientRead.buildActingIdentity(req.user, client);
+    const audience = req.user.role === config.ROLES.CLIENT ? 'patient' : (acting.isPoa ? 'poa' : 'family');
+    const level = patientRead.sectionsFor(audience, client.sharing).carePlan;
+    let carePlan = buildClientCarePlan(client);
+    if (carePlan) {
+      const coSign = (client.carePlanCoSign || {})[`v${carePlan.version}`] || null;
+      carePlan.coSignedBy = coSign ? coSign.name : null;
+      // The signed PDF is served from the app's Drive reference (never OpenEMR Documents)
+      carePlan.signedPdf = coSign ? { available: true, url: '/api/gfc/clinical/care-plan.pdf', version: carePlan.version } : { available: false };
+      carePlan = level === 'none' ? null : patientRead.filterRow('carePlan', level, carePlan);
+    }
+    if (req.user.role !== config.ROLES.CLIENT) {
+      await logActivity(req.user.id, req.user.name || req.user.email, 'patient_clinical_read', 'client', client.id,
+        { role: req.user.role, audience, actingFor: acting.actingFor, patientId: client.openEmrPatientId || null, resource: 'care_plan', level });
+    }
     res.json({
       greetingName: gfcGreetingName(client),
-      carePlan: buildClientCarePlan(client),
+      carePlan,
+      carePlanShared: level !== 'none',
+      audience,
+      isPoa: acting.isPoa,
+      actingAs: acting.isPoa ? acting.signerName : null,
       careTier: normalizeCareTier(client.careTier),
       careTierLabel: careTierLabelFor(client.careTier),
       upcomingVisits: visits.upcoming,
@@ -5370,19 +5426,22 @@ app.get('/api/gfc/messages', authenticateToken, requireEnrolledClient, async (re
   }
 });
 
-// POST /api/gfc/messages — gated, client only (family is read-only). Basic
-// client→admin message send, persisted to the gfc_messages store. Minimal by
-// design: routing/replies/notifications arrive with the Session 9 module.
+// POST /api/gfc/messages — gated: the client, or a designated POA acting on
+// the client's behalf (4.3 acting gate — recorded as "<POA> as POA for
+// <client>"). Non-POA family stays read-only. Basic client→admin message send,
+// persisted to the gfc_messages store. Minimal by design: routing/replies/
+// notifications arrive with the Session 9 module.
 app.post('/api/gfc/messages', authenticateToken, requireEnrolledClient, async (req, res) => {
   try {
-    if (req.user.role !== config.ROLES.CLIENT) {
-      return res.status(403).json({ error: 'Only the client may send messages' });
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const acting = patientRead.buildActingIdentity(req.user, client);
+    if (req.user.role !== config.ROLES.CLIENT && !acting.isPoa) {
+      return res.status(403).json({ error: 'Only the client (or their designated Power of Attorney) may send messages', code: 'FAMILY_READ_ONLY' });
     }
     const body = req.body && typeof req.body.body === 'string' ? req.body.body.trim() : '';
     if (!body) return res.status(400).json({ error: 'Message text is required' });
     if (body.length > 4000) return res.status(413).json({ error: 'Message is too long (4000 characters max)' });
-    const client = await resolveGfcClientRecord(req.user);
-    if (!client) return res.status(404).json({ error: 'No client record on file' });
 
     const messages = (await db.get('gfc_messages')) || [];
     const message = {
@@ -5390,15 +5449,18 @@ app.post('/api/gfc/messages', authenticateToken, requireEnrolledClient, async (r
       client_id: client.id,
       channel: 'admin',
       direction: 'out',
-      fromName: client.preferredName || client.name || 'Client',
-      fromRole: 'Client',
+      fromName: acting.isPoa ? acting.signerName : (client.preferredName || client.name || 'Client'),
+      fromRole: acting.isPoa ? 'POA' : 'Client',
+      fromUserId: req.user.id,
+      actingFor: acting.actingFor,
       body,
       sentAt: new Date().toISOString(),
       readAt: null
     };
     messages.push(message);
     await db.set('gfc_messages', messages);
-    await logActivity(req.user.id, req.user.name || req.user.email, 'gfc_message_sent', 'message', message.id, { channel: 'admin' });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'gfc_message_sent', 'message', message.id,
+      { channel: 'admin', role: req.user.role, actingFor: acting.actingFor, signer: message.fromName });
     res.json({ message: 'Message sent', sent: { id: message.id, sentAt: message.sentAt } });
   } catch (error) {
     console.error('GFC message send error:', error);
@@ -5540,8 +5602,12 @@ app.post('/api/gfc/care-plan/cosign', authenticateToken, requireEnrolledClient, 
     }
     const client = await resolveGfcClientRecord(req.user);
     if (!client) return res.status(404).json({ error: 'No client record on file' });
-    // Family (read-only) may not co-sign — only the client.
-    if (req.user.role !== config.ROLES.CLIENT) return res.status(403).json({ error: 'Only the client may co-sign the care plan' });
+    // The client co-signs, or their designated POA acting on their behalf
+    // (4.3 acting gate). Non-POA family (read-only) may not.
+    const acting = patientRead.buildActingIdentity(req.user, client);
+    if (req.user.role !== config.ROLES.CLIENT && !acting.isPoa) {
+      return res.status(403).json({ error: 'Only the client (or their designated Power of Attorney) may co-sign the care plan', code: 'FAMILY_READ_ONLY' });
+    }
 
     // No real plan on file → nothing to co-sign (the sample-plan path is gone;
     // Session 3.5). The UI hides the pad in this state, so this is a backstop.
@@ -5559,36 +5625,41 @@ app.post('/api/gfc/care-plan/cosign', authenticateToken, requireEnrolledClient, 
       });
     }
 
-    const { users, idx } = await loadClientForMutation(req.user.id);
+    const { users, idx } = await loadClientForMutation(client.id);
     if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
     const at = new Date().toISOString();
     const ipHash = roiRepo.hashIp(req.headers['x-forwarded-for'] || req.socket?.remoteAddress, JWT_SECRET);
-    const signerName = users[idx].preferredName || users[idx].name || 'Client';
+    // Spec §4.3: a POA signs under their OWN name — "<POA> as POA for <client>" —
+    // in the event record and on the PDF. The client's name is never shown as
+    // the signer when a POA signed.
+    const signerName = acting.isPoa ? acting.signerName : (users[idx].preferredName || users[idx].name || 'Client');
+    const signer = { at, name: signerName, ipHash, signerRole: acting.signerRole, signerUserId: req.user.id, actingFor: acting.actingFor };
 
     // Append-only co-signature history — the legal artifact (incl. the signature
     // image) lives in a side collection, never overwritten, and kept OUT of the
     // hot-path `users` blob that every authenticated request loads.
     const coSignEvents = (await db.get('care_plan_cosign_events')) || [];
-    coSignEvents.push({ id: uuidv4(), client_id: client.id, version: currentVersion, at, name: signerName, ipHash, signatureImage: signatureImageB64 });
+    coSignEvents.push({ id: uuidv4(), client_id: client.id, version: currentVersion, ...signer, signatureImage: signatureImageB64 });
     await db.set('care_plan_cosign_events', coSignEvents);
 
     // Lightweight "latest co-sign per version" pointer on the client (NO image)
     // drives the care-plan GET's coSignedAt.
     users[idx].carePlanCoSign = {
       ...(users[idx].carePlanCoSign || {}),
-      [`v${currentVersion}`]: { at, name: signerName, ipHash }
+      [`v${currentVersion}`]: signer
     };
     await db.set('users', users);
     invalidateUsersCache();
-    await logActivity(req.user.id, req.user.name || req.user.email, 'care_plan_cosigned', 'care_plan', `v${currentVersion}`, {});
+    await logActivity(req.user.id, req.user.name || req.user.email, 'care_plan_cosigned', 'care_plan', `v${currentVersion}`,
+      { clientId: client.id, role: req.user.role, actingFor: acting.actingFor, signer: signerName, signerRole: acting.signerRole });
 
     // The co-signature completes the document → emit the signed PDF with BOTH
-    // signatures (RN author + client co-sign), per spec §4.3. Best-effort: a
+    // signatures (RN author + client/POA co-sign), per spec §4.3. Best-effort: a
     // storage failure never voids the completed co-signature.
     const signedPdf = await emitSignedCarePlanPdf(client.id, currentVersion,
-      { at, name: signerName, ipHash, signatureImage: signatureImageB64 }, req.user);
+      { ...signer, signatureImage: signatureImageB64 }, req.user);
 
-    res.json({ message: 'Care plan co-signed', version: currentVersion, coSignedAt: at, signedPdf });
+    res.json({ message: acting.isPoa ? `Care plan co-signed as ${signerName}` : 'Care plan co-signed', version: currentVersion, coSignedAt: at, signedBy: signerName, signedPdf });
   } catch (error) {
     console.error('GFC care-plan cosign error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -5596,9 +5667,246 @@ app.post('/api/gfc/care-plan/cosign', authenticateToken, requireEnrolledClient, 
 });
 
 // ============================================================
+// PATIENT CLINICAL READ (Session 4.3) — /api/gfc/clinical/*, /api/gfc/sharing
+//
+// ARCHITECTURE RULE: read-only, filtered, scoped. The patient is resolved
+// from the authenticated session's client record (resolveGfcClientRecord →
+// client.openEmrPatientId) — NEVER from a request parameter; none of these
+// routes take an id. Reads go through openemr.js (FHIR); there is NO write
+// path to OpenEMR from any patient-, family-, or POA-facing route. The
+// sharing-rule filter (patientReadRepository.FILTER_MAP) is applied
+// server-side to every row. Every read writes to logActivity() with user,
+// role, actingFor (client id when a POA reads), patientId and resource.
+// ============================================================
+
+// Gate + audience for the patient-facing clinical routes. 403 with a specific
+// code until the client is linked, on a clinical service line, and consent to
+// treat is on file (schema §6); family additionally behind ROI-family + the
+// client's sharing settings; POA = client-equivalent.
+const resolvePatientClinicalContext = async (req, res) => {
+  const client = await resolveGfcClientRecord(req.user);
+  const access = patientRead.evaluateClinicalReadAccess({ reqUser: req.user, client, isConsentSatisfied, isClinicalServiceLine });
+  if (!access.ok) { res.status(access.status).json({ error: access.error, code: access.code }); return null; }
+  return { client, ...access, acting: patientRead.buildActingIdentity(req.user, client) };
+};
+const logPatientClinicalRead = (req, ctx, resource, details) =>
+  logActivity(req.user.id, req.user.name || req.user.email, 'patient_clinical_read', 'client', ctx.client.id, {
+    role: req.user.role, audience: ctx.audience, actingFor: ctx.acting.actingFor,
+    patientId: ctx.client.openEmrPatientId || null, resource, ...(details || {})
+  });
+
+// Provider display names known to the app (clinician users mapped to an
+// OpenEMR provider id). FHIR Practitioner 403s on this instance (§15), so the
+// name comes from here or from the app-side visit stamp — never an id.
+const providerNameMap = async () => {
+  const users = await getUsers();
+  const map = new Map();
+  for (const u of users) {
+    if (u.openEmrProviderId) map.set(String(u.openEmrProviderId), u.licenseLevel ? `${u.name}, ${u.licenseLevel}` : u.name);
+  }
+  return map;
+};
+
+// GET /api/gfc/clinical/summary — the curated read, one round trip: visit
+// summaries, medications, allergies, problem list, live upcoming appointments,
+// and vitals (from the encounter note; OMITTED when nothing presentable).
+app.get('/api/gfc/clinical/summary', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const ctx = await resolvePatientClinicalContext(req, res);
+    if (!ctx) return;
+    const { client, audience, sections, acting } = ctx;
+    const want = (k) => sections[k] && sections[k] !== 'none';
+    const out = {
+      audience, sections, isPoa: acting.isPoa, actingAs: acting.isPoa ? acting.signerName : null,
+      clientName: client.preferredName || client.name,
+      emrConfigured: openemr.isConfigured(), degraded: []
+    };
+    if (!openemr.isConfigured()) {
+      await logPatientClinicalRead(req, ctx, 'clinical_summary', { emrConfigured: false });
+      return res.json(out);
+    }
+    const emr = openemr.forActor(req.user);
+    const puuid = client.openEmrPatientId;
+    const settle = (p) => p.then(v => ({ ok: true, v })).catch(e => ({ ok: false, error: e.message }));
+    const [problemsR, allergiesR, medsR, encountersR, apptsR, providers] = await Promise.all([
+      want('problems') ? settle(emr.getProblems(puuid)) : null,
+      want('allergies') ? settle(emr.getAllergies(puuid)) : null,
+      want('medications') ? settle(emr.getMedicationRequests(puuid)) : null,
+      (want('visits') || want('vitals')) ? settle(emr.getEncounters(puuid)) : null,
+      want('appointments') ? settle(emr.getPatientAppointmentRows(puuid)) : null,
+      providerNameMap()
+    ]);
+    const degrade = (r, name) => { if (r && !r.ok) out.degraded.push(name); return r && r.ok ? r.v : null; };
+
+    if (want('problems')) {
+      const rows = degrade(problemsR, 'problems');
+      out.problems = patientRead.filterRows('problem', sections.problems, (rows || []).map(clinicalRepo.summarizeCondition).map(patientRead.summarizeProblemForPatient));
+    }
+    if (want('allergies')) {
+      const rows = degrade(allergiesR, 'allergies');
+      out.allergies = patientRead.filterRows('allergy', sections.allergies, (rows || []).map(clinicalRepo.summarizeAllergy).map(patientRead.summarizeAllergyForPatient));
+    }
+    if (want('medications')) {
+      const rows = degrade(medsR, 'medications');
+      out.medications = patientRead.filterRows('medication', sections.medications,
+        (rows || []).map(clinicalRepo.summarizeMedicationRequest).filter(m => !['stopped', 'cancelled', 'entered-in-error'].includes(String(m.status || '')))
+          .map(patientRead.summarizeMedicationForPatient));
+    }
+
+    // Visits: OpenEMR's encounter list joined to the app-side 4.4 records
+    // (coded diagnoses, Rx, orders, attestation, clinician stamp). The
+    // narrative note is never read here.
+    let mineRecords = [];
+    if (want('visits') || want('vitals')) {
+      const [records, atts, rx, orders] = await Promise.all([loadRows('encounter_billing'), loadRows('encounter_attestations'), loadRows('prescriptions'), loadRows('clinical_orders')]);
+      mineRecords = records.filter(r => r && r.clientId === client.id);
+      if (want('visits')) {
+        const emrRows = degrade(encountersR, 'visits');
+        const byUuid = new Map(mineRecords.map(r => [String(r.encounterUuid), r]));
+        const emrById = new Map((emrRows || []).map(clinicalRepo.summarizeEncounter).map(e => [String(e.id), e]));
+        const ids = [...new Set([...emrById.keys(), ...byUuid.keys()])];
+        const hp = client.clinicalInitialVisit || null;
+        const visits = ids.map(id => patientRead.buildVisitSummary({
+          encounterUuid: id, encounter: emrById.get(id) || null, record: byUuid.get(id) || null,
+          attestation: atts.find(a => a && a.encounterUuid === id) || null,
+          prescriptions: rx.filter(p => p && p.encounterUuid === id),
+          orders: orders.filter(o => o && o.encounterUuid === id),
+          providerFallbackName: hp && hp.encounterUuid === id ? hp.byName : null
+        })).filter(v => v.date).sort((a, b) => String(b.date).localeCompare(String(a.date)));
+        out.visits = patientRead.filterRows('visit', sections.visits, visits);
+      }
+    }
+
+    // Vitals: the vitals REST endpoint 500s on this instance, so readings live
+    // verbatim in the encounter note. Read the latest narrative note BY SID
+    // (server-side only), parse the numbers, and omit the section entirely
+    // when there is nothing presentable — never an empty panel.
+    if (want('vitals')) {
+      const withNote = mineRecords.filter(r => r.narrativeNoteSid).sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+      for (const r of withNote.slice(0, 3)) {
+        try {
+          const note = await emr.getSoapNote(puuid, r.encounterUuid, r.narrativeNoteSid);
+          const parsed = note ? patientRead.parseVitalsFromNote(note.objective, r.date) : null;
+          if (parsed) { out.vitals = patientRead.filterRow('vital', sections.vitals, parsed); break; }
+        } catch (e) { out.degraded.push('vitals'); break; }
+      }
+    }
+
+    // Upcoming appointments: LIVE rows only. Reschedules/cancels leave
+    // tombstones ('x') and no-shows ('?') on the calendar — the patient never
+    // sees those. The list endpoint omits pc_hometext (location marker), so
+    // the few upcoming rows are hydrated individually.
+    if (want('appointments')) {
+      const rows = degrade(apptsR, 'appointments');
+      const summaries = rows ? await summarizeCalendarRows(rows) : [];
+      const upcoming = patientRead.selectUpcomingAppointments(summaries);
+      const hydrated = await Promise.all(upcoming.map(a => emr.getAppointmentRow(puuid, a.eid).catch(() => null)));
+      const merged = upcoming.map((a, i) => hydrated[i] ? { ...a, ...clinicalRepo.summarizeAppointmentRow({ ...hydrated[i] }, a.encounterUuid) } : a);
+      out.appointments = patientRead.filterRows('appointment', sections.appointments,
+        merged.map(a => patientRead.summarizeAppointmentForPatient(a, providers.get(String(a.providerId)) || null)));
+    }
+
+    await logPatientClinicalRead(req, ctx, 'clinical_summary', {
+      sections: Object.keys(sections).filter(want), degraded: out.degraded,
+      counts: { visits: (out.visits || []).length, medications: (out.medications || []).length, appointments: (out.appointments || []).length }
+    });
+    res.json(out);
+  } catch (error) {
+    console.error('Patient clinical summary error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/gfc/clinical/care-plan.pdf — the SIGNED care plan (both
+// signatures). Served from the Drive reference on client.carePlanDocs — never
+// from OpenEMR Documents (server defect). When the Drive copy is not
+// retrievable (Drive not configured in dev, or the file missing), the same
+// PDF is regenerated from the app-side signature records (care_plan_versions
+// + care_plan_cosign_events), which carry both signatures. Accepts ?token=
+// for downloads like the enrollment packet. The care plan is the client's own
+// app-side document, so this is gated by enrollment + the sharing level, not
+// by the OpenEMR link.
+app.get('/api/gfc/clinical/care-plan.pdf', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const acting = patientRead.buildActingIdentity(req.user, client);
+    const audience = req.user.role === config.ROLES.CLIENT ? 'patient' : (acting.isPoa ? 'poa' : 'family');
+    if (patientRead.sectionsFor(audience, client.sharing).carePlan === 'none') {
+      return res.status(403).json({ error: 'The care plan is not shared with family members.', code: 'CARE_PLAN_NOT_SHARED' });
+    }
+    const version = resolveCarePlanVersion(client);
+    if (version == null) return res.status(404).json({ error: 'No care plan is on file yet.', code: 'NO_CARE_PLAN' });
+    const coSign = (client.carePlanCoSign || {})[`v${version}`];
+    if (!coSign) return res.status(409).json({ error: 'The signed care plan is available once it has been co-signed.', code: 'CARE_PLAN_NOT_SIGNED' });
+
+    const doc = ((client.carePlanDocs || {})[`v${version}`] || {}).signed || null;
+    let buffer = null; let source = null;
+    if (doc && doc.driveFileId) {
+      try { buffer = await googledrive.downloadFileBuffer(doc.driveFileId); source = 'drive'; }
+      catch (e) { console.error('Signed care-plan Drive download failed (regenerating from app records):', e.message); }
+    }
+    if (!buffer) {
+      const [versionRows, coSignEvents] = await Promise.all([db.get('care_plan_versions'), db.get('care_plan_cosign_events')]);
+      const vrow = (versionRows || []).find(r => r && r.client_id === client.id && String(r.version) === String(version)) || null;
+      const ev = (coSignEvents || []).filter(e => e && e.client_id === client.id && String(e.version) === String(version)).sort((a, b) => String(b.at).localeCompare(String(a.at)))[0] || null;
+      const plan = vrow ? vrow.plan : client.carePlan;
+      buffer = await pdfGenerator.generateCarePlanPDF({
+        state: 'signed',
+        patientName: client.name,
+        patientDOB: (client.intake && client.intake.dob) || client.dob || '',
+        careTier: normalizeCareTier(client.careTier),
+        careTierLabel: careTierLabelFor(client.careTier),
+        serviceLine: client.serviceLine || '',
+        plan,
+        rnSignature: vrow ? vrow.rnSignature : null,
+        clientSignature: ev ? { at: ev.at, name: ev.name, ipHash: ev.ipHash, signatureImage: ev.signatureImage, signerRole: ev.signerRole } : { pending: true }
+      });
+      source = 'regenerated';
+    }
+    await logActivity(req.user.id, req.user.name || req.user.email, 'patient_clinical_read', 'client', client.id,
+      { role: req.user.role, audience, actingFor: acting.actingFor, patientId: client.openEmrPatientId || null, resource: 'care_plan_pdf', version, source });
+    const lastName = (client.name || 'Client').trim().split(/\s+/).slice(-1)[0];
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="CarePlan_${lastName}_v${version}_signed.pdf"`);
+    res.setHeader('X-GFC-PDF-Source', source);
+    res.send(buffer);
+  } catch (error) {
+    console.error('Signed care-plan PDF error:', error);
+    res.status(500).json({ error: 'Failed to load the signed care plan' });
+  }
+});
+
+// PUT /api/gfc/sharing — what NON-POA family may see (scope C defaults live in
+// patientReadRepository.SHARING_DEFAULTS). The client sets it, or their POA
+// acting for them (stamped). Family cannot widen their own access.
+app.put('/api/gfc/sharing', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const acting = patientRead.buildActingIdentity(req.user, client);
+    if (req.user.role !== config.ROLES.CLIENT && !acting.isPoa) {
+      return res.status(403).json({ error: 'Only the client (or their designated Power of Attorney) can change sharing settings', code: 'FAMILY_READ_ONLY' });
+    }
+    const sharing = patientRead.normalizeSharing((req.body && req.body.sharing) || req.body);
+    const { users, idx } = await loadClientForMutation(client.id);
+    if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
+    users[idx].sharing = { ...sharing, updatedAt: new Date().toISOString(), updatedBy: acting.isPoa ? acting.signerName : (client.preferredName || client.name) };
+    await db.set('users', users);
+    invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'gfc_sharing_updated', 'client', client.id,
+      { role: req.user.role, actingFor: acting.actingFor, sharing });
+    res.json({ message: 'Sharing settings saved', sharing });
+  } catch (error) {
+    console.error('GFC sharing update error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================
 // CLINICIAN WORKSPACE (Session 4.1) — /api/clinical/*
 //
-// Role-gated at the API layer: requireClinicalStaff (Clinical via
+// Role-gated at the API layer: requireClinicalRead / requireClinicalWrite (Clinical via
 // hasClinicalAccess, or Admin). One patient record lives in OpenEMR — these
 // routes render and edit it via openemr.js (FHIR reads, standard-REST
 // clinical writes). App-side clinical pointers only: client.openEmrPatientId,
@@ -5645,9 +5953,12 @@ const clientToFhirPatient = (client) => {
 // just pulled?" question without shell access — a start time older than the
 // deploy means the process was never restarted.
 const SERVER_STARTED_AT = new Date().toISOString();
-app.get('/api/clinical/status', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.get('/api/clinical/status', authenticateToken, requireClinicalRead, async (req, res) => {
   const payer = await getPayerCredentialing();
   res.json({
+    // 4.3: the API enforces the read/write split; this only tells the UI
+    // which controls to render (case managers: read views, mutation UI hidden)
+    access: { canRead: true, canWrite: patientRead.canClinicalWrite(req.user), role: req.user.role },
     ...(await openemr.getStatus()), serverStartedAt: SERVER_STARTED_AT,
     // Session 4.4 deploy diagnostics: billing NPI (spec §2.5) + the caller's
     // own NPI for attribution (spec §4). Never hardcoded — both are config.
@@ -5657,7 +5968,7 @@ app.get('/api/clinical/status', authenticateToken, requireClinicalStaff, async (
 });
 
 // GET /api/clinical/patients — IHPC/both clients with link + activation state.
-app.get('/api/clinical/patients', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.get('/api/clinical/patients', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     const q = String(req.query.q || '').toLowerCase().trim();
     const users = await getUsers();
@@ -5689,7 +6000,7 @@ app.get('/api/clinical/patients', authenticateToken, requireClinicalStaff, async
 // POST /api/clinical/patients/:clientId/link — create the OpenEMR Patient from
 // the app record (mode:'create') or link an existing one ({openEmrPatientId}).
 // Writes client.openEmrPatientId on first link (schema §6 lifecycle).
-app.post('/api/clinical/patients/:clientId/link', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/link', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
     const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -5727,7 +6038,7 @@ app.post('/api/clinical/patients/:clientId/link', authenticateToken, requireClin
 // GET /api/clinical/patients/:clientId/chart — demographics from the app
 // record; problems, allergies, meds, encounters, care plan, documents, vitals
 // read LIVE from OpenEMR (never cached into the KV store).
-app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -5794,7 +6105,7 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
 // visit (H&P) per intake spec §2C → Encounter + vitals + structured SOAP note
 // written to OpenEMR. Records the checklist stamp and (optionally) the RN
 // Track assignment on the app record.
-app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
     const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -5880,7 +6191,7 @@ app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireCli
 // reconciliation: family-reported rows (app) side-by-side with OpenEMR's
 // medication list; the clinician's resolution writes to OpenEMR and updates
 // the app's structured med rows.
-app.get('/api/clinical/patients/:clientId/medrec', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.get('/api/clinical/patients/:clientId/medrec', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -5906,7 +6217,7 @@ app.get('/api/clinical/patients/:clientId/medrec', authenticateToken, requireCli
   }
 });
 
-app.post('/api/clinical/patients/:clientId/medrec', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/medrec', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
     const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -5951,7 +6262,7 @@ app.post('/api/clinical/patients/:clientId/medrec', authenticateToken, requireCl
 
 // POST /api/clinical/patients/:clientId/problems — problem-list management →
 // OpenEMR Condition (medical_problem) writes.
-app.post('/api/clinical/patients/:clientId/problems', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/problems', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -5980,7 +6291,7 @@ app.post('/api/clinical/patients/:clientId/problems', authenticateToken, require
 // 1 — unblocks the portal view + co-sign), retains the prior version, stores
 // the RN's drawn signature in the append-only care_plan_versions collection,
 // and writes the authored care-plan PDF to OpenEMR Documents.
-app.get('/api/clinical/patients/:clientId/care-plan', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.get('/api/clinical/patients/:clientId/care-plan', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -5999,7 +6310,7 @@ app.get('/api/clinical/patients/:clientId/care-plan', authenticateToken, require
   }
 });
 
-app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
     const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -6073,7 +6384,7 @@ app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requir
 // Per-patient checklist driving IHPC activation. Derived steps compute from
 // the record; manual steps (payer verification, NPA confirmation) are
 // who/when-stamped by staff. ACTIVATED only when every step is done.
-app.get('/api/clinical/patients/:clientId/checklist', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.get('/api/clinical/patients/:clientId/checklist', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -6090,7 +6401,7 @@ app.get('/api/clinical/patients/:clientId/checklist', authenticateToken, require
   }
 });
 
-app.post('/api/clinical/patients/:clientId/checklist/:stepKey', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/checklist/:stepKey', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
     const { stepKey } = req.params;
     if (!clinicalRepo.MANUAL_CHECKLIST_STEPS.includes(stepKey)) {
@@ -6117,7 +6428,7 @@ app.post('/api/clinical/patients/:clientId/checklist/:stepKey', authenticateToke
   }
 });
 
-app.post('/api/clinical/patients/:clientId/activate', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/activate', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
     const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -6193,7 +6504,10 @@ const linkageByEid = (rows) => {
 // Admin sees/books every provider; a clinician is locked to their own
 // OpenEMR provider mapping (openEmrProviderId, set by an admin).
 const resolveProviderScope = (reqUser, requestedProviderId) => {
-  if (reqUser.role === config.ROLES.ADMIN) {
+  // Admin: unified view. Case manager (4.3 scoped READ — every appointment
+  // write route is requireClinicalWrite, so this widens nothing): the same
+  // unified read view, since they own no calendar of their own.
+  if (reqUser.role === config.ROLES.ADMIN || reqUser.role === config.ROLES.CASE_MANAGER) {
     return { providerId: requestedProviderId ? String(requestedProviderId) : null, all: !requestedProviderId };
   }
   if (!reqUser.openEmrProviderId) {
@@ -6254,7 +6568,7 @@ const loadAppointmentForMutation = async (emr, eid, reqUser) => {
 // access resource"). Until the EMR maintainer widens the ACL group, we
 // degrade to a fallback list built from mapped app clinicians + the numeric
 // provider ids visible on the live calendar — names come from app users.
-app.get('/api/clinical/providers', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.get('/api/clinical/providers', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     if (!openemr.isConfigured()) return res.status(503).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
     const emr = openemr.forActor(req.user);
@@ -6290,7 +6604,8 @@ app.get('/api/clinical/providers', authenticateToken, requireClinicalStaff, asyn
       providers,
       degraded, notice,
       myProviderId: req.user.openEmrProviderId ? String(req.user.openEmrProviderId) : null,
-      isAdmin: req.user.role === config.ROLES.ADMIN
+      // unified (all-provider) view: admin, and the case manager's read-only calendar (4.3)
+      isAdmin: req.user.role === config.ROLES.ADMIN || req.user.role === config.ROLES.CASE_MANAGER
     });
   } catch (error) {
     console.error('Clinical providers error:', error);
@@ -6301,7 +6616,7 @@ app.get('/api/clinical/providers', authenticateToken, requireClinicalStaff, asyn
 // GET /api/clinical/appointments?providerId=&from=&to= — calendar feed read
 // LIVE from OpenEMR. Admin: unified view (optional provider filter);
 // clinician: own calendar only.
-app.get('/api/clinical/appointments', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.get('/api/clinical/appointments', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     if (!openemr.isConfigured()) return res.status(503).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
     const scope = resolveProviderScope(req.user, req.query.providerId);
@@ -6322,7 +6637,7 @@ app.get('/api/clinical/appointments', authenticateToken, requireClinicalStaff, a
 // GET /api/clinical/patients/:clientId/appointments — the chart's appointment
 // list: upcoming + past, each marked documented / no-show / cancelled /
 // not-yet-documented from the linkage pointers.
-app.get('/api/clinical/patients/:clientId/appointments', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.get('/api/clinical/patients/:clientId/appointments', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -6343,14 +6658,14 @@ app.get('/api/clinical/patients/:clientId/appointments', authenticateToken, requ
 
 // GET /api/clinical/appointments/:eid — one appointment, hydrated with the
 // fields the list endpoints omit (notes/location), for the detail view.
-app.get('/api/clinical/appointments/:eid', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.get('/api/clinical/appointments/:eid', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     if (!openemr.isConfigured()) return res.status(503).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
     const emr = openemr.forActor(req.user);
     const rows = await emr.listAppointmentRows();
     const listRow = rows.find(r => String(r.pc_eid) === String(req.params.eid));
     if (!listRow) return res.status(404).json({ error: 'No OpenEMR appointment with that id', code: 'APPT_NOT_FOUND' });
-    if (req.user.role !== config.ROLES.ADMIN && String(listRow.pc_aid) !== String(req.user.openEmrProviderId || '')) {
+    if (![config.ROLES.ADMIN, config.ROLES.CASE_MANAGER].includes(req.user.role) && String(listRow.pc_aid) !== String(req.user.openEmrProviderId || '')) {
       return res.status(403).json({ error: 'Clinicians can only view appointments on their own calendar.', code: 'PROVIDER_SCOPE' });
     }
     const full = await emr.getAppointmentRow(listRow.puuid, listRow.pc_eid).catch(() => null);
@@ -6365,7 +6680,7 @@ app.get('/api/clinical/appointments/:eid', authenticateToken, requireClinicalSta
 // POST /api/clinical/patients/:clientId/appointments — create on the
 // provider's OpenEMR calendar. Double-booking is rejected against the LIVE
 // OpenEMR list (the availability authority) with a specific 409.
-app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -6413,7 +6728,7 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
 // POST /api/clinical/appointments/:eid/reschedule — tombstone swap: new slot
 // row + cancelled tombstone preserving the old slot, then remove the
 // superseded row. Conflict-checked against the live calendar first.
-app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
     if (!openemr.isConfigured()) return res.status(503).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
     const body = req.body || {};
@@ -6471,7 +6786,7 @@ app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requir
 // POST /api/clinical/appointments/:eid/cancel — reason REQUIRED; the slot
 // becomes a cancelled row (status 'x') with the reason on it. Never a bare
 // hard delete.
-app.post('/api/clinical/appointments/:eid/cancel', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.post('/api/clinical/appointments/:eid/cancel', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
     if (!openemr.isConfigured()) return res.status(503).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
     const reason = String((req.body || {}).reason || '').trim();
@@ -6506,7 +6821,7 @@ app.post('/api/clinical/appointments/:eid/cancel', authenticateToken, requireCli
 
 // POST /api/clinical/appointments/:eid/no-show — same swap, status '?'; the
 // chart list shows it as no-show (Scope B).
-app.post('/api/clinical/appointments/:eid/no-show', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.post('/api/clinical/appointments/:eid/no-show', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
     if (!openemr.isConfigured()) return res.status(503).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
     const emr = openemr.forActor(req.user);
@@ -6711,7 +7026,7 @@ const refuseIfClosed = (ctx, res) => {
 // ── Settings ──────────────────────────────────────────────────────────────
 // GET: billing identity + service-code favorites (+ the caller's own NPI so
 // the UI can warn before a real encounter). PUT (admin only): edit them.
-app.get('/api/clinical/settings', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.get('/api/clinical/settings', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     const [payer, settings] = await Promise.all([getPayerCredentialing(), getClinicalSettings()]);
     res.json({
@@ -6773,7 +7088,7 @@ app.put('/api/clinical/settings', authenticateToken, requireAdmin, async (req, r
 // OpenEMR), and — for services — the practice favorites mirroring OpenEMR's
 // fee schedule. A code typed in full is accepted on FORMAT and OpenEMR
 // resolves it on read-back; the response says plainly where results came from.
-app.get('/api/clinical/codes/search', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.get('/api/clinical/codes/search', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     const set = String(req.query.set || 'ICD10').toUpperCase() === 'SERVICE' ? 'SERVICE' : 'ICD10';
     const q = String(req.query.q || '').trim();
@@ -6822,7 +7137,7 @@ app.get('/api/clinical/codes/search', authenticateToken, requireClinicalStaff, a
 });
 
 // T1 candidates for the follow-up form (before an encounter exists).
-app.get('/api/clinical/patients/:clientId/dx-candidates', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.get('/api/clinical/patients/:clientId/dx-candidates', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -6838,7 +7153,7 @@ app.get('/api/clinical/patients/:clientId/dx-candidates', authenticateToken, req
 // Shorter SOAP form (S / O incl. vitals / A / P) → Encounter + narrative note
 // in OpenEMR (attribution stamped, §4), the app-side encounter_billing record,
 // optional T1-selected diagnoses and services, and the GFC structured note.
-app.post('/api/clinical/patients/:clientId/encounters', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/encounters', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -6903,7 +7218,7 @@ app.post('/api/clinical/patients/:clientId/encounters', authenticateToken, requi
 });
 
 // ── Encounter list for a chart: OpenEMR encounters + coding/sign state ────
-app.get('/api/clinical/patients/:clientId/encounters', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.get('/api/clinical/patients/:clientId/encounters', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -6938,7 +7253,7 @@ app.get('/api/clinical/patients/:clientId/encounters', authenticateToken, requir
 });
 
 // ── Encounter detail: everything the encounter panel needs in one read ────
-app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res);
     if (!ctx) return;
@@ -7002,7 +7317,7 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
 // 409 ENCOUNTER_CLOSED after sign. New manual diagnoses can also be added to
 // the OpenEMR problem list (addToProblemList: [codes]) — an explicit choice,
 // never automatic.
-app.put('/api/clinical/patients/:clientId/encounters/:euuid/coding', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.put('/api/clinical/patients/:clientId/encounters/:euuid/coding', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res);
     if (!ctx || refuseIfClosed(ctx, res)) return;
@@ -7012,6 +7327,14 @@ app.put('/api/clinical/patients/:clientId/encounters/:euuid/coding', authenticat
     const coded = clinicalRepo.applyCoding(before, { diagnoses: body.diagnoses || [], services: body.services || [] }, ctx.actor, payer.billing_npi_used);
     if (coded.error) return res.status(400).json({ error: coded.error, code: coded.code });
     const record = coded.record;
+    // 4.3: optional patient-facing summary + follow-up instructions — the only
+    // visit text a patient ever sees (never the narrative note). Clinician-authored.
+    if ('patientSummary' in body || 'followUpInstructions' in body) {
+      Object.assign(record, patientRead.buildPatientFacingFields({
+        patientSummary: 'patientSummary' in body ? body.patientSummary : record.patientSummary,
+        followUpInstructions: 'followUpInstructions' in body ? body.followUpInstructions : record.followUpInstructions
+      }));
+    }
     // T2: count only codes newly added on this save (re-saving the same set does not inflate)
     const prevDx = new Set(before.diagnoses.map(d => d.code)); const prevSvc = new Set(before.services.map(s => s.code));
     await recordUsageFor(ctx.actor, 'ICD10', record.diagnoses.filter(d => !prevDx.has(d.code)));
@@ -7042,7 +7365,7 @@ app.put('/api/clinical/patients/:clientId/encounters/:euuid/coding', authenticat
 });
 
 // ── Prescriptions (Scope C) — record only; transmission stays as today ───
-app.post('/api/clinical/patients/:clientId/encounters/:euuid/prescriptions', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/prescriptions', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res);
     if (!ctx || refuseIfClosed(ctx, res)) return;
@@ -7071,7 +7394,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/prescriptions', aut
 });
 
 // ── Orders (Scope D) — labs / imaging / procedures; no HL7 ───────────────
-app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res);
     if (!ctx || refuseIfClosed(ctx, res)) return;
@@ -7093,7 +7416,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authentica
 });
 // Status advance is an operational step (sent / resulted / cancelled), so it
 // stays allowed after the encounter is closed; every step is who/when-stamped.
-app.post('/api/clinical/orders/:orderId/status', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.post('/api/clinical/orders/:orderId/status', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
     const rows = await loadRows('clinical_orders');
     const idx = rows.findIndex(o => o && o.id === req.params.orderId);
@@ -7120,7 +7443,7 @@ app.post('/api/clinical/orders/:orderId/status', authenticateToken, requireClini
     res.status(500).json({ error: 'Server error' });
   }
 });
-app.get('/api/clinical/patients/:clientId/orders', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.get('/api/clinical/patients/:clientId/orders', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -7140,7 +7463,7 @@ app.get('/api/clinical/patients/:clientId/orders', authenticateToken, requireCli
 // Refused with a specific code until the encounter has a note, ≥1 diagnosis,
 // ≥1 service (each linked) and a configured billing NPI. The signer becomes
 // the rendering provider on the charge. Closed = read-only; addenda only.
-app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res);
     if (!ctx) return;
@@ -7179,7 +7502,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
 });
 
 // ── Addenda: the only way to change a closed encounter ────────────────────
-app.post('/api/clinical/patients/:clientId/encounters/:euuid/addenda', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/addenda', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res);
     if (!ctx) return;
@@ -7202,7 +7525,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/addenda', authentic
 });
 
 // Retry the structured-note write after an EMR failure (no record change).
-app.post('/api/clinical/patients/:clientId/encounters/:euuid/resync', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/resync', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res);
     if (!ctx) return;
@@ -7219,7 +7542,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/resync', authentica
 
 // ── Staff coding queue (spec §2.6): every encounter that is not yet coded /
 // signed, across the panel, from OpenEMR's whole-instance encounter feed ───
-app.get('/api/clinical/encounters/queue', authenticateToken, requireClinicalStaff, async (req, res) => {
+app.get('/api/clinical/encounters/queue', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     const filter = ['not_coded', 'coded', 'signed', 'open', 'all'].includes(String(req.query.state)) ? String(req.query.state) : 'open';
     const [records, attestations, clientMap] = await Promise.all([loadRows('encounter_billing'), loadRows('encounter_attestations'), clinicalClientsByPuuid()]);
@@ -13864,7 +14187,7 @@ app.get('/admin/enrollment', (req, res) => {
 });
 
 // Clinician workspace (Session 4.1). Page shell is public; every
-// /api/clinical/* route it calls enforces requireClinicalStaff.
+// /api/clinical/* route it calls enforces requireClinicalRead / requireClinicalWrite.
 app.get('/clinical', (req, res) => {
   res.sendFile(__dirname + '/public/clinical.html');
 });

@@ -140,7 +140,18 @@
     .gfc .doc span{font-size:12px;color:var(--mut);}
     .gfc .doc .sgn{margin-left:auto;display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:600;color:var(--teal);}
     /* family read-only banner */
-    .gfc .ro{display:inline-flex;align-items:center;gap:6px;background:rgba(3,61,80,.06);color:var(--navy);font-size:11.5px;font-weight:600;border-radius:20px;padding:6px 12px;margin-bottom:14px;}
+    .gfc .ro{display:inline-flex;align-items:center;gap:6px;background:rgba(3,61,80,.06);color:var(--navy);font-size:11.5px;font-weight:600;border-radius:20px;padding:6px 12px;margin-bottom:14px;margin-right:8px;}
+    /* Session 4.3 — My Health */
+    .gfc .shr{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line);cursor:pointer;}
+    .gfc .shr:last-of-type{border-bottom:none;}
+    .gfc .shr b{display:block;font-size:14px;color:var(--navy);font-weight:600;}
+    .gfc .shr span{font-size:12px;color:var(--mut);}
+    .gfc .shr input[type=checkbox]{width:20px;height:20px;accent-color:var(--navy);flex:0 0 auto;margin:0;}
+    .gfc .vgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+    .gfc .vgrid div{background:var(--cream);border-radius:11px;padding:10px 12px;}
+    .gfc .vgrid span{display:block;font-size:11px;letter-spacing:.6px;text-transform:uppercase;color:var(--mut);font-weight:600;}
+    .gfc .vgrid b{display:block;font-size:17px;color:var(--navy);margin-top:2px;}
+    .gfc .vgrid em{display:block;font-size:11px;color:var(--mut);font-style:normal;margin-top:2px;}
     /* bottom tab nav */
     .gfc-tabs{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;background:#fff;border-top:1px solid var(--line2);display:flex;z-index:30;box-shadow:0 -4px 16px rgba(3,61,80,.06);}
     .gfc-tabs button{flex:1;background:none;border:none;padding:10px 4px 14px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:3px;color:var(--mut);font-size:10.5px;font-weight:600;letter-spacing:.3px;}
@@ -404,6 +415,19 @@
           method: 'POST',
           headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ version, signatureImageB64 })
+        }).then(handleResponse).catch(asError),
+
+      // ---- Patient clinical read (Session 4.3) — no ids: the server scopes to the session ----
+      getGfcClinicalSummary: (token) =>
+        fetch(`${API_URL}/api/gfc/clinical/summary`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(asError),
+
+      saveGfcSharing: (token, sharing) =>
+        fetch(`${API_URL}/api/gfc/sharing`, {
+          method: 'PUT',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sharing })
         }).then(handleResponse).catch(asError),
 
     };
@@ -4496,8 +4520,9 @@
       );
     };
 
-    const GfcDashboard = ({ data, onNavigate, me }) => {
+    const GfcDashboard = ({ data, onNavigate, me, clinical }) => {
       const cp = data.carePlan;                       // null until an RN authors the real plan (Session 4)
+      const nextClinical = clinical && !clinical.error && (clinical.appointments || [])[0]; // 4.3: live OpenEMR row, never a tombstone
       const pc = (cp && cp.primaryCaregiver) || {};
       const upcoming = data.upcomingVisits || [];
       const unread = (data.messages?.messages || []).filter(m => m.unread).length;
@@ -4529,6 +4554,15 @@
               </React.Fragment>
             )}
           </div>
+          {nextClinical && (
+            <React.Fragment>
+              <p className="lbl">Your next clinical visit</p>
+              <div className="visit hl" onClick={() => onNavigate('health')} style={{ cursor: 'pointer' }}>
+                <span className="vt">{prettyDate(nextClinical.date)}<br />{fmtClock(nextClinical.startTime)}</span>
+                <div className="vm"><b>{nextClinical.title}</b><span>{nextClinical.provider} · {nextClinical.location}</span></div>
+              </div>
+            </React.Fragment>
+          )}
           <p className="lbl">Upcoming visits</p>
           {upcoming.length === 0 && <p className="sub" style={{ marginTop: 0 }}>No visits scheduled yet — your care coordinator will reach out to set up your schedule.</p>}
           {upcoming.slice(0, 2).map(v => (
@@ -4540,6 +4574,9 @@
           <div className="tiles" style={{ marginTop: 14 }}>
             <button className="tile" onClick={() => onNavigate('messages')}>{unread > 0 && <span className="badge">{unread}</span>}<i className="ti ti-message" /><span className="tl">Messages</span><span className="ts">Care team</span></button>
             <button className="tile" onClick={() => onNavigate('documents')}><i className="ti ti-file-text" /><span className="tl">Documents</span><span className="ts">Consents signed</span></button>
+            {clinical && !clinical.error && (
+              <button className="tile" onClick={() => onNavigate('health')}><i className="ti ti-heart-rate-monitor" /><span className="tl">My Health</span><span className="ts">From your clinical record</span></button>
+            )}
           </div>
           {roiFamilySigned && (
             <div className="card" style={{ marginTop: 14, background: 'var(--cream)', border: '1px solid var(--line2)', boxShadow: 'none' }}>
@@ -4560,6 +4597,7 @@
       const teamColors = ['var(--gold)', '#9FE1CB', '#CECBF6'];
       const teamTextColors = ['var(--navy)', '#0f6e56', '#3c3489'];
       const [coSigned, setCoSigned] = useState(!!cp.coSignedAt);
+      const [signedBy, setSignedBy] = useState(cp.coSignedBy || null); // "<POA> as POA for <client>" when a POA signed
       const [coSignBusy, setCoSignBusy] = useState(false);
       const [coSignErr, setCoSignErr] = useState('');
       // Canvas signature pad — same drawn-signature mechanism as the provider ROI.
@@ -4607,11 +4645,25 @@
         setCoSignBusy(false);
         if (res.error) { setCoSignErr(res.error); return; }
         setCoSigned(true);
+        setSignedBy(res.signedBy || null);
       };
+      const openSignedPdf = () => cp.signedPdf && cp.signedPdf.url && openPdfSecurely(`${API_URL}${cp.signedPdf.url}`, token);
       return (
         <div className="gfc-body">
           {readOnly && <span className="ro"><i className="ti ti-eye" />Family view · read-only</span>}
-          {!hasPlan && (
+          {data.isPoa && <span className="ro"><i className="ti ti-user-shield" />Acting as {data.actingAs}</span>}
+          {!hasPlan && data.carePlanShared === false && (
+            <div className="card" style={{ marginTop: 0 }}>
+              <div className="prow">
+                <Avatar initials="GF" size={34} />
+                <div>
+                  <div style={{ fontSize: 14.5, fontWeight: 600, color: 'var(--navy)' }}>The care plan isn't shared with family accounts</div>
+                  <div style={{ fontSize: 12.5, color: 'var(--mut)', marginTop: 2 }}>{data.greetingName} can change this under My Health → Sharing in their portal.</div>
+                </div>
+              </div>
+            </div>
+          )}
+          {!hasPlan && data.carePlanShared !== false && (
             <div className="card" style={{ marginTop: 0 }}>
               <div className="prow">
                 <Avatar initials="GF" size={34} />
@@ -4620,6 +4672,13 @@
                   <div style={{ fontSize: 12.5, color: 'var(--mut)', marginTop: 2 }}>Your nurse will write your personalized plan and review it with you{readOnly ? '' : ' — you’ll co-sign it right here'}.</div>
                 </div>
               </div>
+            </div>
+          )}
+          {hasPlan && cp.signedPdf && cp.signedPdf.available && (
+            <div className="doc" onClick={openSignedPdf} style={{ cursor: 'pointer', marginBottom: 12 }}>
+              <i className="ti ti-file-certificate" />
+              <div><b>Signed care plan (PDF)</b><span>Version {cp.version} · both signatures · stored in HIPAA Google Drive</span></div>
+              <i className="ti ti-download" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
             </div>
           )}
           {hasPlan && (cp.version != null) && (
@@ -4645,8 +4704,10 @@
             <React.Fragment>
               <p className="lbl">Visit schedule</p>
               <div className="card" style={{ margin: 0 }}>
-                <div style={{ fontSize: 14.5, fontWeight: 600, color: 'var(--navy)' }}>{cp.visitSchedule.days} · {cp.visitSchedule.hours}</div>
-                {cp.visitSchedule.caregiver && <div style={{ fontSize: 12.5, color: 'var(--mut)', marginTop: 2 }}>{cp.visitSchedule.caregiver}</div>}
+                {/* 4.1 stores visitSchedule as the RN's summary string; the older prototype shape was an object */}
+                <div style={{ fontSize: 14.5, fontWeight: 600, color: 'var(--navy)' }}>{typeof cp.visitSchedule === 'string' ? cp.visitSchedule : `${cp.visitSchedule.days || ''} · ${cp.visitSchedule.hours || ''}`}</div>
+                {cp.duration && <div style={{ fontSize: 12.5, color: 'var(--mut)', marginTop: 2 }}>{cp.duration}</div>}
+                {typeof cp.visitSchedule === 'object' && cp.visitSchedule.caregiver && <div style={{ fontSize: 12.5, color: 'var(--mut)', marginTop: 2 }}>{cp.visitSchedule.caregiver}</div>}
               </div>
             </React.Fragment>
           )}
@@ -4694,8 +4755,9 @@
               <div className="card" style={{ margin: 0 }}>
                 {coSigned ? (
                   <React.Fragment>
-                    <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: 22, fontWeight: 600, color: 'var(--navy)', borderBottom: '1px solid var(--line2)', paddingBottom: 8, marginBottom: 8 }}>{data.greetingName}</div>
-                    <div className="goal" style={{ margin: 0 }}><i className="ti ti-circle-check" style={{ color: 'var(--teal)' }} />You co-signed care plan v{cp.version} · versions are retained.</div>
+                    <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: 22, fontWeight: 600, color: 'var(--navy)', borderBottom: '1px solid var(--line2)', paddingBottom: 8, marginBottom: 8 }}>{signedBy || data.greetingName}</div>
+                    <div className="goal" style={{ margin: 0 }}><i className="ti ti-circle-check" style={{ color: 'var(--teal)' }} />{signedBy && signedBy.includes(' as POA for ') ? `Co-signed by ${signedBy}` : `You co-signed care plan v${cp.version}`} · versions are retained.</div>
+                    {(cp.signedPdf && cp.signedPdf.available) || signedBy ? <button className="btn ghost" style={{ marginTop: 12 }} onClick={openSignedPdf}><i className="ti ti-download" style={{ verticalAlign: -2 }} /> Download the signed care plan</button> : null}
                   </React.Fragment>
                 ) : (
                   <React.Fragment>
@@ -4704,7 +4766,8 @@
                       <canvas ref={sigCanvasRef} style={{ display: 'block', width: '100%', height: 130, touchAction: 'none' }} />
                       <button type="button" onClick={clearSig} style={{ position: 'absolute', top: 6, right: 8, background: 'none', border: 'none', color: 'var(--mut)', fontSize: 12, cursor: 'pointer' }}>Clear</button>
                     </div>
-                    <div style={{ fontSize: 11.5, color: 'var(--mut)', margin: '6px 0 10px' }}>Draw your signature above — {data.greetingName}</div>
+                    <div style={{ fontSize: 11.5, color: 'var(--mut)', margin: '6px 0 10px' }}>Draw your signature above — {data.actingAs || data.greetingName}</div>
+                    {data.isPoa && <div style={{ fontSize: 11.5, color: 'var(--mut)', margin: '0 0 10px' }}>You are signing as the designated Power of Attorney. The record and the signed PDF will read "{data.actingAs}".</div>}
                     <button className="btn" disabled={coSignBusy || cp.version == null} onClick={handleCoSign}>{coSignBusy ? 'Signing…' : `Co-sign care plan v${cp.version}`}</button>
                     {coSignErr && <div className="err">{coSignErr}</div>}
                   </React.Fragment>
@@ -4722,7 +4785,7 @@
       );
     };
 
-    const GfcMessages = ({ messages, readOnly, token, onSent }) => {
+    const GfcMessages = ({ messages, readOnly, token, onSent, actingAs }) => {
       const rows = messages?.messages || [];
       const [draft, setDraft] = useState('');
       const [busy, setBusy] = useState(false);
@@ -4749,6 +4812,7 @@
       return (
         <div className="gfc-body">
           {readOnly && <span className="ro"><i className="ti ti-eye" />Family view · read-only</span>}
+          {actingAs && <span className="ro"><i className="ti ti-user-shield" />Acting as {actingAs}</span>}
           {rows.length === 0 && (
             <div className="card" style={{ marginTop: 0 }}>
               <div className="prow">
@@ -4763,7 +4827,7 @@
           {rows.map(m => (
             <div className="thread" key={m.id}>
               <Avatar initials={m.initials} bg={roleColor(m)} color={roleText(m)} />
-              <div className="tm"><div className="tn">{m.direction === 'out' ? 'You' : m.from}{m.fromRole && m.direction !== 'out' ? ` · ${m.fromRole}` : ''}</div><div className="tp">{m.body}</div></div>
+              <div className="tm"><div className="tn">{m.direction === 'out' ? (m.fromRole === 'POA' ? m.from : 'You') : m.from}{m.fromRole && m.direction !== 'out' ? ` · ${m.fromRole}` : ''}</div><div className="tp">{m.body}</div></div>
               <div style={{ textAlign: 'right' }}><div className="tt">{when(m.sentAt)}</div>{m.unread && <div className="un" />}</div>
             </div>
           ))}
@@ -5155,6 +5219,228 @@
       );
     };
 
+    // ── Session 4.3 — My Health: the patient's curated clinical read ──
+    // Everything here arrives ALREADY filtered server-side (the FILTER_MAP in
+    // patientReadRepository); the UI never decides what a family member may
+    // see. Sections the server omitted (vitals with nothing presentable, a
+    // family member's closed sections) simply do not render — never an empty
+    // panel. Branded empty states; no sample content anywhere (3.5 rule).
+    const fmtClock = (t) => {
+      if (!t) return '';
+      const [h, m] = String(t).split(':').map(Number);
+      if (isNaN(h)) return t;
+      return `${((h + 11) % 12) + 1}:${String(m || 0).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+    };
+    const HealthEmpty = ({ title, sub }) => (
+      <div className="card" style={{ margin: 0 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--navy)' }}>{title}</div>
+        <div style={{ fontSize: 12.5, color: 'var(--mut)', marginTop: 2 }}>{sub}</div>
+      </div>
+    );
+
+    // What NON-POA family may see — the client (or their POA) controls it.
+    const GfcSharingCard = ({ me, token, onSaved }) => {
+      const [s, setS] = useState(me.sharing || {});
+      const [busy, setBusy] = useState(false);
+      const [msg, setMsg] = useState('');
+      const Row = ({ k, label, sub }) => (
+        <label className="shr">
+          <div><b>{label}</b>{sub && <span>{sub}</span>}</div>
+          <input type="checkbox" checked={!!s[k]} onChange={e => setS({ ...s, [k]: e.target.checked })} />
+        </label>
+      );
+      const save = async () => {
+        setBusy(true); setMsg('');
+        const r = await api.saveGfcSharing(token, s);
+        setBusy(false);
+        if (r.error) { setMsg(r.error); return; }
+        setMsg('Saved.');
+        onSaved && onSaved(r.sharing);
+      };
+      return (
+        <div className="card" style={{ margin: 0 }}>
+          <div style={{ fontSize: 14.5, fontWeight: 600, color: 'var(--navy)' }}>What family members can see</div>
+          <div style={{ fontSize: 12.5, color: 'var(--mut)', marginTop: 2, marginBottom: 6 }}>
+            Applies to family accounts linked to {me.isPoa ? me.clientName : 'you'}, not to a designated Power of Attorney. Family access also requires the signed family Release of Information.
+          </div>
+          <Row k="carePlan" label="Care plan summary" sub="Goals and visit schedule" />
+          <label className="shr">
+            <div><b>Visit summaries</b><span>How much of each visit to share</span></div>
+            <select value={s.visitSummaries || 'summary'} onChange={e => setS({ ...s, visitSummaries: e.target.value })} style={{ width: 'auto', margin: 0 }}>
+              <option value="none">Nothing</option>
+              <option value="summary">Date, provider, reason</option>
+              <option value="full">Full summary</option>
+            </select>
+          </label>
+          <Row k="appointments" label="Upcoming visits" sub="Date, time, who is coming" />
+          <Row k="medications" label="Medications" sub="Current list and instructions" />
+          <Row k="allergies" label="Allergies" />
+          <Row k="problems" label="Conditions" sub="Problem list" />
+          <Row k="vitals" label="Vitals" sub="Latest readings from a visit" />
+          <button className="btn" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save sharing settings'}</button>
+          {msg && (msg === 'Saved.' ? <p className="micro"><i className="ti ti-check" />Saved</p> : <div className="err">{msg}</div>)}
+        </div>
+      );
+    };
+
+    const GfcHealth = ({ clinical, me, token, readOnly, onSharingSaved }) => {
+      const [openVisit, setOpenVisit] = useState(null);
+      if (!clinical) {
+        return <div className="gfc-body" style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}><div className="gfc-spin" /></div>;
+      }
+      if (clinical.error) {
+        return (
+          <div className="gfc-body">
+            <div className="lockcard"><i className="ti ti-lock" /><div><b>Clinical information isn't available yet</b><span>{clinical.error}</span></div></div>
+          </div>
+        );
+      }
+      const sec = clinical.sections || {};
+      const has = (k) => sec[k] && sec[k] !== 'none';
+      const appts = clinical.appointments || [];
+      const visits = clinical.visits || [];
+      const meds = clinical.medications || [];
+      const allergies = clinical.allergies || [];
+      const problems = clinical.problems || [];
+      const vitals = clinical.vitals || null;
+      const degraded = clinical.degraded || [];
+      const vitalRows = vitals ? [
+        ['Blood pressure', vitals.bloodPressure, vitals.bloodPressureNote], ['Heart rate', vitals.heartRate && `${vitals.heartRate} bpm`],
+        ['Temperature', vitals.temperature && `${vitals.temperature} °F`], ['Breathing rate', vitals.respiration && `${vitals.respiration} /min`],
+        ['Oxygen', vitals.oxygen && `${vitals.oxygen}%`], ['Weight', vitals.weight && `${vitals.weight} lb`],
+        ['Height', vitals.height && `${vitals.height} in`], ['Pain', vitals.pain && `${vitals.pain} / 10`]
+      ].filter(r => r[1]) : [];
+      return (
+        <div className="gfc-body">
+          {readOnly && <span className="ro"><i className="ti ti-eye" />Family view · read-only</span>}
+          {clinical.isPoa && <span className="ro"><i className="ti ti-user-shield" />Acting as {clinical.actingAs}</span>}
+          {degraded.length > 0 && (
+            <div className="card" style={{ marginTop: 0, background: 'var(--cream)', boxShadow: 'none' }}>
+              <div style={{ fontSize: 12.5, color: 'var(--ink)', lineHeight: 1.5 }}><b style={{ color: 'var(--navy)' }}>Some sections couldn't load from your clinical record right now</b> ({degraded.join(', ')}). Please try again in a few minutes.</div>
+            </div>
+          )}
+
+          {has('appointments') && (
+            <React.Fragment>
+              <p className="lbl" style={{ marginTop: 0 }}>Upcoming visits</p>
+              {appts.length === 0 && <HealthEmpty title="No upcoming visits scheduled" sub="Your care team will reach out to book the next one." />}
+              {appts.map(a => (
+                <div className="visit hl" key={a.id}>
+                  <span className="vt">{prettyDate(a.date)}<br />{fmtClock(a.startTime)}</span>
+                  <div className="vm"><b>{a.title}</b><span>{a.provider} · {a.location}{a.durationMinutes ? ` · ${a.durationMinutes} min` : ''}</span></div>
+                </div>
+              ))}
+            </React.Fragment>
+          )}
+
+          {has('visits') && (
+            <React.Fragment>
+              <p className="lbl">Visit summaries</p>
+              {visits.length === 0 && <HealthEmpty title="No visit summaries yet" sub="After each visit, a plain-language summary appears here once your clinician finishes the note." />}
+              {visits.map(v => {
+                const expandable = 'summary' in v;
+                const open = openVisit === v.id;
+                return (
+                  <div className="card" key={v.id} style={{ margin: '0 0 10px', cursor: expandable ? 'pointer' : 'default' }} onClick={() => expandable && setOpenVisit(open ? null : v.id)}>
+                    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
+                      <div>
+                        <div style={{ fontSize: 14.5, fontWeight: 600, color: 'var(--navy)' }}>{prettyDate(v.date)} — {v.reason}</div>
+                        <div style={{ fontSize: 12.5, color: 'var(--mut)', marginTop: 2 }}>{v.provider}</div>
+                      </div>
+                      <span className="pill" style={{ marginTop: 0, whiteSpace: 'nowrap' }}>{v.status === 'complete' ? 'Note complete' : 'In progress'}</span>
+                    </div>
+                    {expandable && open && (
+                      <div style={{ marginTop: 10, fontSize: 13.5, color: 'var(--ink)', lineHeight: 1.55 }}>
+                        <div>{v.summary}</div>
+                        {v.followUp && <div style={{ marginTop: 8 }}><b style={{ color: 'var(--navy)' }}>Follow-up:</b> {v.followUp}</div>}
+                        {(v.newPrescriptions || []).length > 0 && (
+                          <div style={{ marginTop: 8 }}>
+                            <b style={{ color: 'var(--navy)' }}>Prescriptions recorded</b>
+                            {v.newPrescriptions.map((r, i) => <div className="goal" key={i} style={{ padding: '6px 0' }}><i className="ti ti-pill" />{r.name}{r.instructions ? ` · ${r.instructions}` : ''}</div>)}
+                          </div>
+                        )}
+                        {(v.testsOrdered || []).length > 0 && (
+                          <div style={{ marginTop: 8 }}>
+                            <b style={{ color: 'var(--navy)' }}>Tests ordered</b>
+                            {v.testsOrdered.map((t, i) => <div className="goal" key={i} style={{ padding: '6px 0' }}><i className="ti ti-test-pipe" />{t.type}{t.tests.length ? ` (${t.tests.join(', ')})` : ''} · {t.status}</div>)}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {expandable && <div style={{ fontSize: 11.5, color: 'var(--goldd)', marginTop: 6, fontWeight: 600 }}>{open ? 'Hide details' : 'Read summary'}</div>}
+                  </div>
+                );
+              })}
+            </React.Fragment>
+          )}
+
+          {has('medications') && (
+            <React.Fragment>
+              <p className="lbl">Current medications</p>
+              {meds.length === 0 && <HealthEmpty title="No medications on your clinical record yet" sub="Your clinician reviews your medications at each visit." />}
+              {meds.length > 0 && (
+                <div className="card" style={{ margin: 0 }}>
+                  {meds.map(m => (
+                    <div className="goal" key={m.id} style={{ alignItems: 'flex-start' }}>
+                      <i className="ti ti-pill" />
+                      <div style={{ flex: 1 }}><div>{m.name}</div>{m.instructions && <div style={{ fontSize: 12.5, color: 'var(--mut)' }}>{m.instructions}</div>}</div>
+                      {m.status && <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '.05em', color: 'var(--goldd)', textTransform: 'uppercase' }}>{m.status}</span>}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </React.Fragment>
+          )}
+
+          {has('allergies') && (
+            <React.Fragment>
+              <p className="lbl">Allergies</p>
+              {allergies.length === 0 && <HealthEmpty title="No allergies recorded" sub="Tell your clinician about any reactions you've had." />}
+              {allergies.length > 0 && (
+                <div className="card" style={{ margin: 0 }}>
+                  {allergies.map(a => <div className="goal" key={a.id}><i className="ti ti-alert-triangle" style={{ color: '#B5462E' }} />{a.name}{a.severity ? ` · ${a.severity}` : ''}</div>)}
+                </div>
+              )}
+            </React.Fragment>
+          )}
+
+          {has('problems') && (
+            <React.Fragment>
+              <p className="lbl">Conditions we're managing</p>
+              {problems.length === 0 && <HealthEmpty title="No conditions listed yet" sub="Your clinician builds this list with you at your visits." />}
+              {problems.length > 0 && (
+                <div className="card" style={{ margin: 0 }}>
+                  {problems.map(p => <div className="goal" key={p.id}><i className="ti ti-list-details" />{p.name}{p.since ? <span style={{ fontSize: 12, color: 'var(--mut)', marginLeft: 'auto' }}>since {prettyDate(p.since)}</span> : null}</div>)}
+                </div>
+              )}
+            </React.Fragment>
+          )}
+
+          {vitals && vitalRows.length > 0 && (
+            <React.Fragment>
+              <p className="lbl">Latest vitals</p>
+              <div className="card" style={{ margin: 0 }}>
+                <div style={{ fontSize: 12.5, color: 'var(--mut)', marginBottom: 6 }}>From your visit{vitals.date ? ` on ${prettyDate(vitals.date)}` : ''}</div>
+                <div className="vgrid">
+                  {vitalRows.map(([label, value, note]) => (
+                    <div key={label}><span>{label}</span><b>{value}</b>{note && <em>{note}</em>}</div>
+                  ))}
+                </div>
+              </div>
+            </React.Fragment>
+          )}
+
+          {!readOnly && me && me.sharing && (
+            <React.Fragment>
+              <p className="lbl">Sharing</p>
+              <GfcSharingCard me={me} token={token} onSaved={onSharingSaved} />
+            </React.Fragment>
+          )}
+          <p className="micro"><i className="ti ti-shield-lock" />Synced from your clinical record · read-only · all access is logged</p>
+        </div>
+      );
+    };
+
     const GfcClientPortal = ({ token, user }) => {
       const [me, setMe] = useState(null);
       const [loading, setLoading] = useState(true);
@@ -5166,6 +5452,7 @@
       const [data, setData] = useState(null);          // care-plan + visits
       const [messages, setMessages] = useState(null);
       const [docs, setDocs] = useState(null);
+      const [clinical, setClinical] = useState(null);  // 4.3 curated clinical read (clinical-line clients only)
 
       const reloadMe = async () => {
         const result = await api.getGfcMe(token);
@@ -5187,6 +5474,11 @@
       }, [token]);
 
       const isFamily = me?.isFamily;
+      const isPoa = !!(me && me.isPoa);
+      // Non-POA family is read-only; a designated POA acts as the client (4.3)
+      const readOnly = !!isFamily && !isPoa;
+      // Server decides: linked + clinical line + consent to treat (+ ROI/sharing for family)
+      const clinicalAvailable = !!(me && me.clinicalRead && me.clinicalRead.available);
       const locked = me && (isFamily ? !me.roiFamilySigned : me.enrollmentStatus === 'intake_pending');
 
       // Step 2: once unlocked, load portal data (these endpoints are gated server-side).
@@ -5203,9 +5495,13 @@
           if (!cp.error) { cp.messages = msg.error ? null : msg; setData(cp); }
           if (!msg.error) setMessages(msg);
           if (!dc.error) setDocs(dc);
+          if (clinicalAvailable) {
+            const cl = await api.getGfcClinicalSummary(token);
+            if (!cancelled) setClinical(cl);
+          }
         })();
         return () => { cancelled = true; };
-      }, [me, locked, token]);
+      }, [me, locked, token, clinicalAvailable]);
 
       if (loading) {
         return (
@@ -5278,10 +5574,13 @@
       }
 
       // UNLOCKED portal.
-      const titles = { home: 'My Care', care: 'Care Plan', messages: 'Messages', documents: 'Documents' };
+      const titles = { home: 'My Care', care: 'Care Plan', health: 'My Health', messages: 'Messages', documents: 'Documents' };
+      // The Health tab exists ONLY for clinical-line clients the server cleared
+      // (PHC-only clients never see a clinical section — schema §6).
       const tabs = [
         { id: 'home', icon: 'ti-home', label: 'Home' },
         { id: 'care', icon: 'ti-clipboard-heart', label: 'Care' },
+        ...(clinicalAvailable ? [{ id: 'health', icon: 'ti-heart-rate-monitor', label: 'Health' }] : []),
         { id: 'messages', icon: 'ti-message', label: 'Messages' },
         { id: 'documents', icon: 'ti-file-text', label: 'Documents' }
       ];
@@ -5291,12 +5590,14 @@
             <span className="ttl">{titles[view]}</span>
             <button onClick={gfcLogout} title="Sign out"><i className="ti ti-logout" /></button>
           </div>
-          {view === 'home' && data && <GfcDashboard data={data} onNavigate={setView} me={me} />}
-          {view === 'care' && data && <GfcCarePlan data={data} readOnly={isFamily} token={token} />}
-          {view === 'messages' && <GfcMessages messages={messages} readOnly={isFamily} token={token}
+          {view === 'home' && data && <GfcDashboard data={data} onNavigate={setView} me={me} clinical={clinicalAvailable ? clinical : null} />}
+          {view === 'care' && data && <GfcCarePlan data={data} readOnly={readOnly} token={token} />}
+          {view === 'health' && clinicalAvailable && <GfcHealth clinical={clinical} me={me} token={token} readOnly={readOnly}
+            onSharingSaved={(sharing) => setMe(m => m ? { ...m, sharing } : m)} />}
+          {view === 'messages' && <GfcMessages messages={messages} readOnly={readOnly} token={token} actingAs={me && me.actingAs}
             onSent={async () => { const msg = await api.getGfcMessages(token); if (!msg.error) { setMessages(msg); setData(d => d ? { ...d, messages: msg } : d); } }} />}
-          {view === 'documents' && <GfcDocuments docs={docs} readOnly={isFamily} token={token} onOpenTransferRoi={() => setShowTransferRoi(true)} />}
-          {!data && view !== 'messages' && view !== 'documents' && (
+          {view === 'documents' && <GfcDocuments docs={docs} readOnly={readOnly} token={token} onOpenTransferRoi={() => setShowTransferRoi(true)} />}
+          {!data && view !== 'messages' && view !== 'documents' && view !== 'health' && (
             <div className="gfc-body" style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}><div className="gfc-spin" /></div>
           )}
           <nav className="gfc-tabs">
