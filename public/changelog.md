@@ -4,6 +4,30 @@
 
 ---
 
+### Version 3.7.2 - September 6, 2026
+
+#### Documentation
+- AI scope in completeness spec (rev 1.2) + Session AI.1 prompt (dictation to note + ICD-10 proposal)
+- consolidate to one operating document — Release Runway PDF
+- OpenEMR 8.4 upgrade plan + read-vs-write linking strategy
+- backfill Session 4.4 merge (PR #29) into CLAUDE.md and session plan
+- OpenEMR master checklist (deployment through deposits) + add deploy setup guide v2.3
+- add OpenEMR Billing & Configuration Guide v3.0 and Billing Segment App Integration Spec
+- don't import the stale deploy guide — 4.4 preflight findings are the authoritative API-surface account
+- OpenEMR remediation plan — config fixes, our-fork patches (document + vitals), API-gap decision, realigned capability expectations
+- mark the PR #27 prerequisite satisfied
+- track Session 4.4 in the running status, plan, and architecture docs
+- 4.4 prompt — OpenEMR-owned code sets, coding assist T1/T2 in scope, T3/T4 explicitly deferred
+- clinical completeness spec rev 1.1 — code source of truth (ICD-10 free/CMS, CPT hand-entered, OpenEMR authoritative) + coding assist tiers + consultant open items
+- Session 4.4 prompt — clinical completeness P0 build set
+- clinical completeness spec v1 — OpenEMR clinician capability coverage, note-to-billing route, P0 build set
+
+#### Changes
+- Session 4.3: patient portal clinical read + POA acting gates + case-manager read
+- Session 4.4: Clinical completeness P0 — coding, orders, Rx, sign-and-close, billing route
+- Show server process start time; retire the misleading "no patient id" message
+
+
 ### Version 3.7.1 - September 3, 2026
 
 #### Bug Fixes
