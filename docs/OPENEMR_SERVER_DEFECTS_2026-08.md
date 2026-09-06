@@ -251,45 +251,71 @@ Test artifacts left on TEST PatientOne (labeled): vitals row vid 16 on eid 7, pr
 
 ---
 
-## Phase 6B acceptance (2026-09-06) — BLOCKED on one ACL grant
+## Phase 6B acceptance (2026-09-06) — Gap 1 closing; routes live, one fix pending rebuild
 
-The patch is installed on the live instance (derived image `gfc/openemr:8.4.0-p1`, route-map wrapper). **The routes exist and are correctly guarded**, but the acceptance test cannot pass until the app's service account is granted one ACL.
+The patch is installed on the live instance as derived image `gfc/openemr:8.4.0-p1`
+(route-map wrapper, no diff, built from `docker-compose.yml` so no `docker compose pull`
+can revert it). Acceptance ran end to end against a TEST encounter with the app's own
+token: **14 of 15 assertions passed on the first run.** The one failure was a defect in
+our own controller (below), fixed but **not yet deployed** — it needs one rebuild on the box
+before the charge path is trustworthy.
 
-**Evidence, same token, same run:**
-
-| Call | Result |
+| Assertion | Result |
 |---|---|
-| `GET /api/codes` (no token) | **401** — route exists, auth required |
-| `GET …/encounter/28/billing` (no token) | **401** — route exists |
-| `GET /fhir/Patient`, `/fhir/Encounter` | 200 — token valid (47 scopes) |
-| `GET /api/patient/1/encounter/28/soap_note` (stock, `encounters`/`notes`) | 200 |
-| `GET /api/facility` (stock) | 200 |
-| `GET /api/user` (stock, `admin`/`users`) | 401 — app user has no admin ACL, correct |
-| **`GET …/billing`, `POST …/billing`, `POST …/order`, `GET /api/codes` (ours, `encounters`/`coding_a`)** | **401** |
+| `POST …/encounter/{eid}/billing` | 201, row in `billing` |
+| `GET …/encounter/{eid}/billing` | 200, row reads back |
+| code / modifier / units / fee / rendering provider stored | correct |
+| diagnosis pointers in X12 `justify` format | **FAILED** — stored `ICD10\|Array:ICD10\|Array:`. Fixed in the controller; verified locally (9/9 shape cases, and `Claim::diagIndexArray()`'s own parse yields E11.9, I10). Awaiting rebuild to re-prove live. |
+| `POST …/encounter/{eid}/order` | 201, `procedure_order` + `procedure_order_code` rows |
+| `GET …/encounter/{eid}/order` | 200, order codes attached |
+| bad encounter id | clean JSON 400 `{"validationErrors":{"encounter":["No such encounter for this patient"]}}` — the `die()` in `BillingUtilities::addBilling()` is guarded, never reached |
+| `GET /api/codes?type=ICD10&search=…` | 200 (0 rows — code tables not loaded yet, below) |
 
-So: not a scope problem (the token carries 47 and stock standard-API routes answer), not a routing problem (401, not 404), not a patch problem. The `gfc-app-api` user's ACL group holds `encounters`/`notes` but not `encounters`/`coding_a`.
+### Two corrections to the record
 
-**`encounters`/`coding_a` is a stock OpenEMR ACL**, documented in `src/Common/Acl/AclMain.php`:
+**1. The 401s were a SCOPE failure, not an ACL failure. The earlier entry in this file
+was wrong and cost an install cycle.**
 
-```
- * Section "encounters" (Encounter Information):
- *   coding      Coding - my encounters (write,wsome optional)
- *   coding_a    Coding - any encounters (write,wsome optional)
-```
+OpenEMR's standard API derives the required scope from the route path:
+`HttpRestRouteHandler::checkSecurity()` takes the resource from the last path segment
+and the permission from the HTTP method, then `AuthorizationListener::onRestApiSecurityCheck()`
+requires `user/<resource>.<permission>` on the access token. So
+`POST …/encounter/{eid}/billing` demands `user/billing.c`, which no client held and which
+the server would not even accept at registration (`invalid_scope … Check the user/billing.read
+scope`). The patch now registers five scopes at build time (`gfc-add-scopes.php`):
+`user/billing.read/.write`, `user/order.read/.write`, `user/codes.read`. A **v4 client**
+carrying all 54 scopes was registered and enabled; the routes answered immediately.
 
-It is what the Superbill, the Encounters Report, and the encounter-history coding column check. It is the correct guard for a charge write, and matches Master Setup Guide v4 §8.5, which specifies **Fee Sheet: Write** for `gfc-app-api`. The patch is not being weakened to match the current configuration — an ACL that lets any note-writer post charges would defeat §8.5's separation.
+How to tell the two layers apart next time, from the message alone:
 
-### The fix — OWNER, one grant (Phase 8.6 class)
+- ACL refusal → `"Organization policy does not have permit access resource"`
+- scope refusal → `"Unauthorized"`
 
-Administration → ACL → the `gfc-app-api` user's group → section **Encounters** → enable **"Coding - any encounters" (`coding_a`)**, write. Then re-run the acceptance test.
+The `encounters`/`coding_a` ACL grant the owner made is still correct and still required —
+it is the second gate, and it is what keeps a note-writer from posting charges per Master
+Setup Guide v4 §8.5. It simply was not the thing returning 401.
 
-Group this with the other outstanding Phase 8.6 items, all on the same screen:
-- `sensitivities` (already recorded)
-- org-level read for FHIR **DocumentReference** and **Coverage** (both still 403)
-- **`encounters`/`coding_a`** (this item)
+**`docs/GFC_Release_Runway.pdf` (commit `b0d81db`) records the wrong diagnosis and needs
+regenerating.**
 
-Plus the separate ICD-10-CM load (Administration → Other → External Data Loads), which is why `GET /api/codes` will return 0 results even once the ACL is granted, and why FHIR Condition still comes back uncoded.
+**2. A real defect in the controller, found by the acceptance run.**
 
-### Session 4.5 impact
+The first run stored `justify` as `"ICD10|Array:ICD10|Array:"`. The app sends diagnoses as
+objects (`{code_type, code}`); casting one straight to string yields the literal `Array`.
+The charge looked correct in Billing Manager and would have carried broken diagnosis
+pointers onto the claim — the kind of thing found on a denial, not in the UI. The controller
+now accepts both the object and bare-string shapes with `is_scalar` guards. **This fix
+requires one rebuild on the box** (`docker compose build --pull && docker compose up -d`)
+before the charge path is trustworthy.
 
-4.5 can be written against these routes, but **its charge-write and order-write paths cannot be proven against the live EMR until this grant is made.** Until then the 6B routes answer 401 for the app, so sign-and-close will not reach Billing Manager. Gap 1 stays open.
+### Still open, separately
+
+- **Billing facility is not a charge field and never was.** `addBilling()` has no such
+  parameter and the `billing` table no such column; it lives on
+  `form_encounter.billing_facility`. The per-visit facility picker is Session 4.5 scope.
+- **ICD-10-CM is not loaded** (Administration → Other → External Data Loads). This does
+  **not** affect the charge write — `billing.justify` is free text and the app supplies the
+  codes. It affects three things only: `GET /api/codes` returns 0 rows, FHIR `Condition`
+  reads back uncoded, and OpenEMR's own Fee Sheet diagnosis picker is empty.
+- Org-level read for FHIR **DocumentReference** and **Coverage** (both still 403), and
+  `sensitivities` — Phase 8.6 items on the same ACL screen.

@@ -112,20 +112,41 @@ class GfcChargeRestController
         // entries, each optionally "TYPE|CODE" — Claim::diagIndexArray() splits
         // on ":" then on "|" and strips the type label. Accept a diagnoses array
         // (preferred) or a pre-built justify string.
+        // Two accepted shapes, because the app sends objects and a hand-rolled
+        // call may send bare codes:
+        //     ["E11.9", "I10"]
+        //     [{"code_type": "ICD10", "code": "E11.9"}, {"code": "I10"}]
+        // Casting an entry straight to string turned an object into the literal
+        // "Array", producing justify "ICD10|Array:" — a charge that looks fine
+        // in Billing Manager and carries broken diagnosis pointers onto the
+        // claim. Caught by the Phase 6B acceptance test on 2026-09-06.
         $justify = '';
         if (!empty($data['diagnoses']) && is_array($data['diagnoses'])) {
             $parts = [];
             foreach ($data['diagnoses'] as $dx) {
-                $dx = trim((string)$dx);
-                if ($dx !== '') {
-                    $parts[] = 'ICD10|' . $dx;
+                if (is_array($dx)) {
+                    $code = $dx['code'] ?? '';
+                    $type = $dx['code_type'] ?? 'ICD10';
+                } else {
+                    $code = $dx;
+                    $type = 'ICD10';
                 }
+                // Never let a non-scalar reach a string cast.
+                if (!is_scalar($code) || !is_scalar($type)) {
+                    continue;
+                }
+                $code = trim((string)$code);
+                $type = strtoupper(trim((string)$type));
+                if ($code === '') {
+                    continue;
+                }
+                $parts[] = ($type !== '' ? $type : 'ICD10') . '|' . $code;
             }
             if (!empty($parts)) {
                 $justify = implode(':', $parts) . ':';
             }
         } elseif (!empty($data['justify'])) {
-            $justify = (string)$data['justify'];
+            $justify = is_scalar($data['justify']) ? (string)$data['justify'] : '';
         }
 
         $codeText = trim((string)($data['code_text'] ?? ''));
