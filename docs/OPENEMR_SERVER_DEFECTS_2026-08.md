@@ -211,3 +211,29 @@ env); FHIR reads; appointment list; `POST encounter` accepting `billing_note`; n
 whole-instance `GET /fhir/Encounter` for the coding queue. Vitals still 500 unconditionally
 (Defect 1 unchanged, also with numeric ids). `GET /fhir/Encounter/{id}` (single) 403s on the
 org-policy ACL while the search works.
+
+---
+
+## 8.4 upgrade record (2026-09-05) — what changed, what is verified, what is still open
+
+The live instance was upgraded in place per Master Setup Guide v4 Phase 6A (steps 1–4 by the owner; step 5 by the app team). Test data only.
+
+**Verified live on 2026-09-05 (v2 client, password grant):**
+- `GET /apis/default/api/version` → `{"v_major":8,"v_minor":4,"v_patch":0,"v_database":543,"v_acl":13}`. Schema upgrades 8.2.0 → 8.3.0 → 8.4.0 completed cleanly; Connectors settings and both APIs survived the image change.
+- `.well-known/openid-configuration` advertises **226 scopes** (7.0.4 advertised fewer). Every one of the app's 43 `config.js` scopes is still supported. Grant types: `authorization_code`, `password`, `refresh_token`.
+- **`user/prescription.write` exists** on 8.4 (the guide flagged its spelling as unconfirmed — it is exactly that string). `user/prescription.read`, `user/procedure.read`, `user/list.read`, `user/ValueSet.read`, `user/drug.read` all exist.
+- **`user/procedure.write` does NOT exist** on 8.4. The Phase 6B order route therefore cannot be guarded by it; per the guide's own fallback rule it goes under `user/encounter.write`. Other write scopes 8.4 advertises that the app does not request: `user/Practitioner.write`, `user/Organization.write`, `user/facility.write`, `user/insurance.write`, `user/insurance_company.write`, `user/message.write`, `user/practitioner.write`, `user/surgery.write`, `user/transaction.write`, `user/dental_issue.write`.
+- **Scope over-request is tolerated:** asking the v2 client for the 49-scope set returns a token granted only the subset it holds (HTTP 200, 42 scopes). The `config.js` list can therefore carry the 8.4 additions before the deployed credentials are swapped.
+- The v2 client (`dlHHtxPDc1gS…`) still authenticates on 8.4 with its 41-scope grant.
+
+**v3 client registered (Phase 6A step 5 / 9.3):** dynamic registration at `/oauth2/default/registration`, `application_type=private`, `client_name="GFC Care Platform (server) v3 8.4"`, `token_endpoint_auth_method=client_secret_post`, `redirect_uris=["https://app.godwinsfamilycarellc.com/oauth/callback"]`, scope = the 43 current + the 6 additions above. Registered on the first attempt; all **49 scopes echoed back, none stripped**. Client id begins `EBZL0Xzvw-`. Secret handed to the owner for Secrets Manager only; never in the repo. Capability statement saved at `docs/openemr/capability-8.4.json` (34 FHIR resources).
+
+**Not yet verified (needs the v3 client enabled + credentials swapped, then the Part VII.4 walk):**
+- `POST /api/prescription` exists and accepts a record (Gap 1 row 1).
+- Vitals `POST …/vital` no longer 500s (Defect 1) — re-enable the native write in Session 4.5.
+- Document `POST/GET …/document` no longer 500s (Defect 2) — re-enable the OpenEMR copy in Session 4.5.
+- Encounter PUT after the `sensitivities` ACL grant (Phase 8.6); FHIR Practitioner/Organization/Coverage after the org-level read grant.
+- Whether 8.4 added an appointment update route (the tombstone swap stays until proven).
+- FHIR Condition coding after the ICD-10-CM load (Quirk 2), encounter-list duplication (Quirk 3), the `soap_note` numeric-id and 200-with-map quirks (Quirk 1).
+
+**Still no API route on 8.4** for fee-sheet charges or procedure-order creation — Phase 6B stands as written.

@@ -243,7 +243,15 @@ const OPENEMR = Object.freeze({
     'user/medication.read', 'user/medication.write', 'user/allergy.read', 'user/allergy.write',
     'user/soap_note.read', 'user/soap_note.write', 'user/document.read', 'user/document.write',
     'user/facility.read', 'user/practitioner.read', 'user/insurance.read',
-    'user/appointment.read', 'user/appointment.write'
+    'user/appointment.read', 'user/appointment.write',
+    // 8.4 additions (Master Setup Guide v4 §9.3) — registered on the v3 client
+    // "GFC Care Platform (server) v3 8.4" on 2026-09-05. A client that lacks a
+    // requested scope is simply granted the subset it holds (verified on 8.4),
+    // so this list is safe to deploy ahead of the credential swap.
+    // `user/procedure.write` is NOT defined on 8.4 — the 6B order route must
+    // sit under `user/encounter.write` instead.
+    'user/prescription.read', 'user/prescription.write', 'user/procedure.read',
+    'user/list.read', 'user/ValueSet.read', 'user/drug.read'
   ].join(' ')
 });
 
