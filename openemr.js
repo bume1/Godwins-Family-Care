@@ -535,11 +535,38 @@ const getStatus = async () => {
   try {
     await getAccessToken();
     const granted = tokenState.grantedScopes || [];
+    const requested = String(config.OPENEMR.SCOPES || '').split(/\s+/).filter(Boolean);
+    // A token carries the INTERSECTION of what this app requests and what the
+    // deployed OAuth client was registered with, and OpenEMR reports no error
+    // for the shortfall — it simply issues a narrower token. That is how the
+    // August v2 client stayed deployed through the 8.4 upgrade while the
+    // workspace showed a green "OpenEMR connected": every route the app had
+    // always used still worked, and only the NEW ones 401'd.
+    //
+    // So report the shortfall by name. `missingScopes` is the exact list an
+    // admin needs to recognise a stale client, and the two booleans below name
+    // the capability each shortfall costs.
+    // `api:oemr` / `api:fhir` are never echoed back in the granted set on 8.4
+    // even though both API surfaces demonstrably work (verified live
+    // 2026-09-06), so listing them as missing would be noise that trains an
+    // admin to ignore this banner. Everything else absent here is really absent.
+    const NOT_ECHOED = new Set(['api:oemr', 'api:fhir']);
+    const missingScopes = requested.filter(sc => !granted.includes(sc) && !NOT_ECHOED.has(sc));
+    const has = (...names) => names.every(n => granted.includes(n));
     return {
       configured: true, connected: true, baseUrl: BASE_URL,
       grantedScopeCount: granted.length,
+      requestedScopeCount: requested.length,
+      missingScopes,
       // 4.2 appointment client swap deployed? (P0 deploy step, spec §1 #15)
-      appointmentScopes: granted.includes('user/appointment.read') && granted.includes('user/appointment.write')
+      appointmentScopes: has('user/appointment.read', 'user/appointment.write'),
+      // 8.4 native writes (Session 4.5 scope A) — prescriptions above all.
+      nativeWriteScopes: has('user/prescription.read', 'user/prescription.write'),
+      // Phase 6B patched routes (charges, orders, code search). Without these
+      // the app cannot write a fee-sheet charge, so sign-and-close never
+      // reaches Billing Manager.
+      billingRouteScopes: has('user/billing.read', 'user/billing.write',
+        'user/order.read', 'user/order.write', 'user/codes.read')
     };
   } catch (err) {
     return { configured: true, connected: false, baseUrl: BASE_URL, error: err.message };
