@@ -22,10 +22,34 @@ Plus the reads and the status update that go with them: `GET …/billing`,
 `DELETE …/billing/{id}` (voids, never hard-deletes), `GET …/order`,
 `PUT …/order/{orderId}`.
 
-**No new OAuth scope, so the v3 client does not need re-registering.** Standard
-`/api/` routes on 8.4 are gated by an ACL check, not by a per-route scope, and
-the server's API scope list is a hardcoded array in source. These routes use the
-same ACL the Fee Sheet and diagnosis screens use, `encounters` / `coding_a`.
+### These routes need new OAuth scopes, and therefore a new client
+
+An earlier version of this file said no new scope was needed. **That was wrong**,
+and it cost an install cycle. The correction:
+
+OpenEMR's standard API derives the required scope **from the route path**.
+`HttpRestRouteHandler::checkSecurity()` takes the resource from the last path
+segment and the permission from the HTTP method, so
+`POST .../encounter/{eid}/billing` demands `user/billing.c`. That is why the
+app's note writes work (it holds `user/soap_note.write`) and why these routes
+returned 401 "Unauthorized" — refused at the scope layer, before the ACL check
+ever ran. An ACL failure reads "Organization policy does not have permit access
+resource"; the wording is how you tell the two apart.
+
+The server confirms it directly: registering a client with `user/billing.read`
+is rejected with `invalid_scope … Check the user/billing.read scope`.
+
+So the build registers five scopes (step 4): `user/billing.read/.write`,
+`user/order.read/.write`, `user/codes.read`. `write` covers create, update and
+delete; `read` covers read and search.
+
+**Because scopes bind at registration, a new OAuth client is required** — the v3
+client cannot be widened. The app team registers it after this build; an
+administrator enables it under Administration → System → API Clients.
+
+The routes are *additionally* ACL-gated on `encounters` / `coding_a`, the same
+permission the Superbill and Encounters Report use, so a token that cannot code
+an encounter in the UI cannot code one through the API either.
 
 ---
 
@@ -33,7 +57,7 @@ same ACL the Fee Sheet and diagnosis screens use, `encounters` / `coding_a`.
 
 OpenEMR runs from a Docker image: a sealed package of the application as its
 makers published it. You cannot edit a sealed package, so the patch is applied
-by **building a new image** from the official one plus our three files, tagged
+by **building a new image** from the official one plus our four files, tagged
 `gfc/openemr:8.4.0-p1`.
 
 The patch is **not a diff**, and needs no `patch` tool. OpenEMR's route map is a
@@ -61,7 +85,7 @@ correct command.
 
 ## Step 1 — Put the patch files on the server
 
-Four files. Pull them straight from the repo:
+Five files. Pull them straight from the repo:
 
 ```
 sudo mkdir -p /opt/openemr/gfc-patch/src/RestControllers /opt/openemr/gfc-patch/apis/routes
@@ -71,6 +95,7 @@ sudo curl -fsSL -o Dockerfile "$B/Dockerfile"
 sudo curl -fsSL -o src/RestControllers/GfcChargeRestController.php "$B/src/RestControllers/GfcChargeRestController.php"
 sudo curl -fsSL -o apis/routes/_rest_routes_standard.inc.php "$B/apis/routes/_rest_routes_standard.inc.php"
 sudo curl -fsSL -o apis/routes/_rest_routes_gfc.inc.php "$B/apis/routes/_rest_routes_gfc.inc.php"
+sudo curl -fsSL -o gfc-add-scopes.php "$B/gfc-add-scopes.php"
 ```
 
 If the repo has been made private, `curl` needs a token: add
@@ -82,14 +107,15 @@ Then verify the files are exactly what was published:
 
 ```
 cd /opt/openemr/gfc-patch && sha256sum -c <<'SUMS'
-2ec7ad22d29fe984845fce4e4489674f73e79fd80d7bb91f9aff7d4b4200323b  Dockerfile
+70bf5e1a1eaf323986187a1fa634a1a1a95ad486666669adf23d531023a339c1  Dockerfile
 cb5b3f4746c228e07c86d5ea6dbfa2d034b8bbeef7962c0564f52d372339eb40  apis/routes/_rest_routes_standard.inc.php
 a3515a22b7d6a4cea94884045c2a141a634a59979535d8447ae551bc35e3ec11  apis/routes/_rest_routes_gfc.inc.php
+0333542b8c9e054711f50f7b31dbe9cec40c70f3479698b0ac31a8eb95a76d66  gfc-add-scopes.php
 36a636a31cc22b6270e94d31fd6e6f41704174357168069deb29c5e809ecf142  src/RestControllers/GfcChargeRestController.php
 SUMS
 ```
 
-Four `OK` lines means the files are intact. Anything else, stop.
+Five `OK` lines means the files are intact. Anything else, stop.
 
 ## Step 2 — Back up the compose file
 
@@ -138,11 +164,12 @@ cd /opt/openemr && sudo docker compose up -d --build && sudo docker compose logs
 ```
 
 The build takes two to five minutes. It **checks that OpenEMR's route map is
-where we expect, refuses to build on an already-patched base, and syntax-checks
-all four files** (ours plus the preserved upstream map). If any of that fails the
+where we expect, refuses to build on an already-patched base, registers the
+scopes the routes need, and syntax-checks all five files** (ours plus the
+preserved upstream map plus the scope list). If any of that fails the
 build stops, and nothing is deployed.
 
-No schema upgrade runs this time. It is the same 8.4 code plus three files. Wait
+No schema upgrade runs this time. It is the same 8.4 code plus four files. Wait
 for Apache to settle, then Ctrl+C.
 
 ## Step 5 — Confirm it is live
