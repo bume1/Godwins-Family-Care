@@ -404,6 +404,7 @@ const forActor = (actor) => {
     async getMedicationRows(puuid) {
       const pid = await resolvePid(puuid);
       const res = await rawRequest({ method: 'GET', url: apiUrl(`patient/${pid}/medication`) });
+      if (res.status === 404) return []; // empty med list answers 404 (see getPatientAppointmentRows)
       const data = expectOk(res, 'read medication');
       logEmrAccess(actor, 'read', 'medication', puuid, {});
       return unwrapApi(data) || [];
@@ -447,6 +448,12 @@ const forActor = (actor) => {
     async getPatientAppointmentRows(puuid) {
       const pid = await resolvePid(puuid);
       const res = await rawRequest({ method: 'GET', url: apiUrl(`patient/${pid}/appointment`) });
+      // 404 = "this patient has no appointments", not an error (verified live
+      // 2026-09-06 on 8.4: pid 11 with an empty calendar answers 404 with an
+      // empty body, the same quirk already handled for soap_note). Without this
+      // guard a newly linked patient's Appointments tab renders a red "OpenEMR
+      // error … (HTTP 404)" where the empty state belongs.
+      if (res.status === 404) return [];
       const data = expectOk(res, 'read patient appointments');
       logEmrAccess(actor, 'read', 'appointment', puuid, {});
       return unwrapApi(data) || [];
