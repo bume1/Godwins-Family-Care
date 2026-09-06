@@ -441,7 +441,18 @@ async function uploadCarePlanFile(clientName, fileName, pdfBuffer) {
   }
 }
 
+// Read a stored file's bytes back (Session 4.3: the patient's signed
+// care-plan PDF is served from the Drive reference on client.carePlanDocs,
+// never from OpenEMR Documents). The service token reads it; the file stays
+// private (no anyone-link needed).
+async function downloadFileBuffer(fileId) {
+  const drive = await getDriveClient();
+  const res = await drive.files.get({ fileId, alt: 'media' }, { responseType: 'arraybuffer' });
+  return Buffer.from(res.data);
+}
+
 module.exports = {
+  downloadFileBuffer,
   testConnection,
   findOrCreateFolder,
   uploadHtmlFile,
