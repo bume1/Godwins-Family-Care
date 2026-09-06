@@ -66,15 +66,30 @@ RUN set -eu; \
 COPY apis/routes/_rest_routes_standard.inc.php ${OE}/apis/routes/_rest_routes_standard.inc.php
 COPY apis/routes/_rest_routes_gfc.inc.php ${OE}/apis/routes/_rest_routes_gfc.inc.php
 
-# 4. Syntax-check everything we placed, plus the preserved upstream map, so a
-#    broken file cannot reach a running container.
+# 4. Register the standard-API scopes these routes need.
+#
+#    OpenEMR derives the required OAuth scope from the route path, so
+#    POST .../encounter/{eid}/billing demands `user/billing.c`. Without the
+#    scope in the server's list the request is refused at the scope layer with
+#    401 "Unauthorized", before the ACL check runs — and a client registration
+#    carrying it is rejected with `invalid_scope`. See gfc-add-scopes.php for
+#    the full reasoning; it is anchored on a single line and fails loudly if
+#    OpenEMR has restructured the list.
+COPY gfc-add-scopes.php /tmp/gfc-add-scopes.php
+RUN set -eu; \
+    php /tmp/gfc-add-scopes.php ${OE}/src/Common/Auth/OpenIDConnect/Entities/ServerScopeListEntity.php; \
+    rm -f /tmp/gfc-add-scopes.php
+
+# 5. Syntax-check everything we placed or edited, plus the preserved upstream
+#    map, so a broken file cannot reach a running container.
 RUN set -eu; \
     cd ${OE}; \
     php -l src/RestControllers/GfcChargeRestController.php; \
     php -l apis/routes/_rest_routes_standard.inc.php; \
     php -l apis/routes/_rest_routes_gfc.inc.php; \
     php -l apis/routes/_rest_routes_standard.upstream.inc.php; \
-    echo "GFC 8.4.0-p1: route map wrapped, all files syntax-clean."
+    php -l src/Common/Auth/OpenIDConnect/Entities/ServerScopeListEntity.php; \
+    echo "GFC 8.4.0-p1: route map wrapped, scopes registered, all files syntax-clean."
 
 LABEL org.godwinsfamilycare.patch="8.4.0-p1" \
       org.godwinsfamilycare.patch.routes="fee-sheet charge, procedure order, code search" \
