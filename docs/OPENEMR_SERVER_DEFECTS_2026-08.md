@@ -379,3 +379,77 @@ Session 4.5 can now be proven against the live EMR: sign-and-close reaches Billi
   reads back uncoded, and OpenEMR's own Fee Sheet diagnosis picker is empty.
 - Org-level read for FHIR **DocumentReference** and **Coverage** (both still 403), and
   `sensitivities` — Phase 8.6 items on the same ACL screen.
+
+---
+
+## Session 4.5 preflight (2026-09-06) — ❌ **BLOCKED: the deployed OAuth client is still the August v2 one**
+
+Session 4.5 stopped at preflight item 1 and wrote no native-write or 6B code. The server is
+fine; the credential swap named as the session's prerequisite was never done.
+
+**Evidence.** The deployed `OPENEMR_CLIENT_ID` is `dlHHtxPDc1gS-_hKVxhYvC4MPFLmLGY7G1x-khy8ZjQ`
+— the Session 4.2 appointment client registered in August, recorded verbatim under the 08/2026
+entry in `CLAUDE.md`. Not the v3 client (47 scopes), and not the v4 client (54).
+
+| Check | Expected | Actual |
+|---|---|---|
+| Granted scopes | 54 (v4) | **42** |
+| `user/billing.*`, `user/order.*`, `user/codes.read` | granted | **none granted** |
+| `user/prescription.*`, `user/procedure.read`, `user/drug.read`, `user/ValueSet.read` | granted | **none granted** |
+| `/api/version` | 8.4.0, db 543 | ✅ 8.4.0, db 543 |
+| Unauthenticated `GET /api/codes` | 401 (route present) | ✅ 401 — **the 6B patch is installed and healthy** |
+
+**Which layer refused us: the SCOPE layer, not the ACL.** Every 6B route and
+`/api/prescription` answered `401 {"message":"Unauthorized"}`. An ACL refusal reads
+`Organization policy does not have permit access resource` — and we did see exactly that
+wording on DocumentReference and Coverage, which confirms the two layers are distinguishable
+here and that we are reading them correctly.
+
+**Two things are required, not one.** The app was requesting 49 scopes; a token carries the
+*intersection* of requested and registered. Swapping the env to the v4 client alone would
+still have left the 6B routes at 401. Both the env swap and the 54-scope list (commit
+`838e067`) are needed.
+
+### Preflight items that DID pass, against the current credentials
+
+| Item | Result |
+|---|---|
+| Vitals `POST` (defect 1, was an unconditional 500 on 7.0.4) | ✅ **fixed on 8.4** — HTTP 201 `{"vid":17,"fid":43}`, and the FHIR `Observation` vital-signs bundle grew 138 → 154 |
+| Encounter `PUT` with `user` + `group` | ✅ succeeds |
+| Encounter `PUT` without them | ⚠️ HTTP **200** carrying `validationErrors` for the two missing keys — no row written. Same trap as the `soap_note` 200-with-validation-map; status code alone is not proof of a write |
+| FHIR Condition / MedicationRequest / Practitioner reads | ✅ 200 |
+| FHIR DocumentReference / Coverage | ❌ 403 ACL — unchanged, Phase 8.6 |
+| Encounter duplication | ❌ unchanged — 28 rows for 14 encounters; the app-side dedupe is still load-bearing |
+
+### Three app-side defects this preflight exposed (fixed in this branch)
+
+1. **The document route now rejects the patient uuid.** `POST /api/patient/{uuid}/document`
+   answers `400 {"validationErrors":{"pid":["Invalid pid"]}}` on 8.4; the numeric-pid form
+   returns 200. Both call sites swallow the error, so the authored and co-signed care-plan
+   PDFs had silently stopped filing into OpenEMR. The Drive copy is written first and was
+   unaffected, which is why nothing looked wrong. Fixed in `efc0823`.
+   Read-back remains unproven: the route returns a bare `true` rather than a document id, the
+   standard-API document list 404s, and DocumentReference 403s. The patient-facing care-plan
+   PDF stays on the Drive reference.
+2. **A 404 on the appointment and medication lists means "empty", not "broken".** A linked
+   patient with an empty calendar answers 404 with an empty body — the quirk already handled
+   for `soap_note`. Both were raised as errors, so every newly linked patient's Appointments
+   tab showed a red `OpenEMR error … (HTTP 404)` in place of an empty state. Fixed in `b251af9`.
+3. **A narrowed token was indistinguishable from a healthy one in the UI.** This is why the
+   stale client survived the upgrade. OpenEMR reports a scope shortfall by issuing a smaller
+   token, not an error, so every route the app already used kept working and the workspace
+   showed a green "OpenEMR connected". The status probe now reports requested vs granted,
+   the missing scopes by name, and per-capability booleans, and the workspace banners it.
+   Fixed in `6d180fd`.
+
+### Not a defect, but worth an owner's eye
+
+- **Eight duplicate `Demo Client` patient records** exist on the dev instance
+  (`a2a76cc8`, `a2a76cd5`, `a2a76f11`, `a2a76f1c`, `a2a76f25`, `a2a77014`, `a2a77078`, plus
+  `TEST LINKPROBE` / `TEST LINKFIX`). Consistent with repeated link attempts each creating a
+  new patient. TEST DATA, so harmless now, but the link step should be checked for
+  idempotency before real patients are enrolled.
+- **The billing NPI is still unset**, so sign-and-close is blocked by design. Session 4.5's
+  charge write cannot be proven end to end until an admin sets it under
+  Coding queue → Billing settings. This is independent of the credential swap — both are
+  needed before 4.5 acceptance can run.
