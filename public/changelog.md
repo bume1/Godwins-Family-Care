@@ -4,6 +4,15 @@
 
 ---
 
+### Version 3.7.1 - September 3, 2026
+
+#### Bug Fixes
+- Fix patient link: read OpenEMR's actual create-Patient response shape
+
+#### Changes
+- Distinguish "stale server process" from "missing secrets" in the EMR banner
+
+
 ### Version 3.7.0 - September 3, 2026
 
 #### New Features
