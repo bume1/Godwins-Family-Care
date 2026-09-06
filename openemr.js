@@ -494,13 +494,25 @@ const forActor = (actor) => {
       return { newEids, deleted, deleteError };
     },
 
-    // Signed PDFs and received records → OpenEMR patient Documents. The upload
-    // becomes readable through FHIR DocumentReference, which satisfies the
-    // "DocumentReference written to OpenEMR" requirement on 7.0.4.
+    // Signed PDFs and received records → OpenEMR patient Documents.
+    //
+    // 8.4 CHANGE (verified live 2026-09-06): this route is keyed by NUMERIC pid.
+    // Passing the patient uuid — which is what 4.1 did, and what worked on
+    // 7.0.4 — now returns 400 {"validationErrors":{"pid":["Invalid pid"]}}. Both
+    // call sites swallow the error, so on 8.4 the care-plan PDFs had simply
+    // stopped filing into OpenEMR (emrDocumented:false) with nothing surfaced.
+    // The Drive copy is unaffected, which is why it went unnoticed.
+    //
+    // Read-back is still UNPROVEN: the route answers a bare `true` rather than a
+    // document id, the standard-API document list 404s, and FHIR
+    // DocumentReference 403s at the ACL layer (org-level read grant pending).
+    // The patient-facing care-plan PDF therefore continues to be served from the
+    // Drive reference on client.carePlanDocs — never from OpenEMR Documents.
     async uploadPatientDocument(puuid, fileName, buffer, mimeType, categoryPath) {
+      const pid = await resolvePid(puuid);
       const fd = new FormData(); // global (Node 18+)
       fd.append('document', new Blob([buffer], { type: mimeType || 'application/pdf' }), fileName);
-      const path = `patient/${encodeURIComponent(puuid)}/document?path=${encodeURIComponent(categoryPath || '/Medical Record')}`;
+      const path = `patient/${pid}/document?path=${encodeURIComponent(categoryPath || '/Medical Record')}`;
       const res = await rawRequest({ method: 'POST', url: apiUrl(path), formData: fd });
       const data = expectOk(res, 'upload document');
       logEmrAccess(actor, 'write', 'document', puuid, { fileName });
