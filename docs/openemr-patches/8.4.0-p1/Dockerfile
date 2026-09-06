@@ -6,13 +6,20 @@
 # gfc/openemr:8.4.0-p1. The derived image is cleaner and the compose tag
 # change is one line."
 #
-# Build on the EC2 box (see INSTALL.md), then change one line in
-# /opt/openemr/docker-compose.yml:
+# This is referenced from /opt/openemr/docker-compose.yml as a build context, so
+# the stock image name never appears in the compose file and no stray
+# `docker compose pull` can quietly put unpatched OpenEMR back (see INSTALL.md):
+#     build:
+#       context: /opt/openemr/gfc-patch
 #     image: gfc/openemr:8.4.0-p1
 #
-# Re-run the build after every `docker compose pull` of a new upstream 8.4.x
-# (control C-10, monthly). If the upstream route file changes, apply.sh will
-# say so instead of silently producing a broken image.
+# The monthly routine (control C-10) is then one command, which refreshes the
+# base image and re-applies this patch on top of it:
+#     docker compose build --pull && docker compose up -d
+#
+# If a newer upstream 8.4.x moves the route file, the `patch` step below fails
+# and the build stops. That is deliberate: a loud failure before deploy beats a
+# half-applied patch in production.
 
 FROM openemr/openemr:8.4.0
 
