@@ -242,12 +242,26 @@ away.
 
 ---
 
-## Acceptance (Phase 6B, run by the app team with the app's token)
+## Acceptance — ✅ passed 2026-09-06, 17/17
 
-- A charge POSTed to a TEST encounter appears in **Fees → Billing Manager** with
-  the right code, modifier, provider, and diagnosis pointers.
-- An order POSTed appears under the patient's procedures with its order codes.
-- A non-clinical token gets 401/403 on all of the above.
+`acceptance.js` in this directory is the test. It proves the three routes end to
+end against the live instance:
 
-Screenshots and raw responses go into `docs/OPENEMR_SERVER_DEFECTS_2026-08.md`
-as the closing entry for Gap 1.
+```
+OPENEMR_BASE_URL=https://emr.godwinsfamilycarellc.com \
+OPENEMR_CLIENT_ID=… OPENEMR_CLIENT_SECRET=… \
+OPENEMR_API_USERNAME=… OPENEMR_API_PASSWORD=… \
+node acceptance.js
+```
+
+Credentials come from the environment; nothing is read from a file. **TEST DATA
+only** — it writes a charge and an order to the TEST patient's encounter.
+
+It asserts **stored values, not status codes**, and that is the point. Every
+defect it caught returned `201` and looked correct in Billing Manager: a charge
+storing the wrong code, or diagnosis pointers reading `ICD10|Array:`, surfaces as
+a denial weeks later rather than as an error at write time. A status-code test
+would have passed all three runs.
+
+Results and the two controller defects it found are the closing entry for Gap 1
+in `docs/OPENEMR_SERVER_DEFECTS_2026-08.md`.

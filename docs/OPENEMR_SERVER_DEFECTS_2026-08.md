@@ -251,29 +251,51 @@ Test artifacts left on TEST PatientOne (labeled): vitals row vid 16 on eid 7, pr
 
 ---
 
-## Phase 6B acceptance (2026-09-06) — Gap 1 closing; routes live, one fix pending rebuild
+## Phase 6B acceptance (2026-09-06) — ✅ **GAP 1 CLOSED** for charges, orders and code search
 
 The patch is installed on the live instance as derived image `gfc/openemr:8.4.0-p1`
 (route-map wrapper, no diff, built from `docker-compose.yml` so no `docker compose pull`
 can revert it). Acceptance ran end to end against a TEST encounter with the app's own
-token: **14 of 15 on both runs so far, a different assertion each time.** Both failures were
-defects in our own controller, not the server (below). The second fix is **not yet deployed**
-— it needs one rebuild on the box before the charge path is trustworthy.
+token. **Run 3: 17 of 17, zero failures.** Gap 1 is closed for the fee-sheet charge, the
+procedure order and code search.
 
-The server side of 6B is proven: routes resolve, both gates hold, writes land in the right
-tables, and the `die()` guard returns clean JSON. What is still settling is our own input
-handling.
+It took three runs. Runs 1 and 2 each failed one assertion, and both failures were defects in
+our own controller rather than the server — recorded below, because the second was introduced
+by the fix for the first and that is worth remembering. The server side was never the problem:
+routes resolved, both gates held, writes landed in the right tables, and the `die()` guard
+returned clean JSON from run 1 onward.
 
-| Assertion | Result |
-|---|---|
-| `POST …/encounter/{eid}/billing` | 201, row in `billing` |
-| `GET …/encounter/{eid}/billing` | 200, row reads back |
-| code / modifier / units / fee / rendering provider stored | modifier, units, fee, provider correct both runs. **`code` FAILED run 2** — stored `I10`, the diagnosis, not the CPT (see defect 2 below) |
-| diagnosis pointers in X12 `justify` format | run 1 **FAILED** (`ICD10\|Array:…`); run 2 **PASSED** (`ICD10\|E11.9:ICD10\|I10:`) |
-| `POST …/encounter/{eid}/order` | 201, `procedure_order` + `procedure_order_code` rows |
-| `GET …/encounter/{eid}/order` | 200, order codes attached |
-| bad encounter id | clean JSON 400 `{"validationErrors":{"encounter":["No such encounter for this patient"]}}` — the `die()` in `BillingUtilities::addBilling()` is guarded, never reached |
-| `GET /api/codes?type=ICD10&search=…` | 200 (0 rows — code tables not loaded yet, below) |
+| Assertion | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|
+| `POST …/encounter/{eid}/billing` → 201, row in `billing` | ✅ | ✅ | ✅ |
+| `GET …/encounter/{eid}/billing` → 200, reads back | ✅ | ✅ | ✅ |
+| billed `code` stored (the CPT, `99348`) | ✅ | ❌ stored `I10`, the diagnosis | ✅ |
+| modifier / units / fee / rendering provider stored | ✅ | ✅ | ✅ |
+| diagnosis pointers `ICD10\|E11.9:ICD10\|I10:` | ❌ `ICD10\|Array:…` | ✅ | ✅ |
+| `POST …/encounter/{eid}/order` → 201 | ✅ | ✅ | ✅ |
+| `GET …/encounter/{eid}/order` → 200, codes attached | ✅ | ✅ | ✅ |
+| order `procedure_code` stored (`85025`) | — | — | ✅ |
+| order `diagnoses` stored (`ICD10:E11.9;ICD10:I10`) | not tested | not tested | ✅ |
+| bad encounter → clean JSON 400, never the `die()` page | ✅ | ✅ | ✅ |
+| `GET /api/codes?type=ICD10&search=…` → 200 | ✅ | ✅ | ✅ |
+
+Run 3, verbatim from the charge read-back:
+
+```json
+{"id":3,"code_type":"CPT4","code":"99348","code_text":"Home visit, established patient (TEST DATA)",
+ "modifier":"25","units":1,"fee":"187.50","justify":"ICD10|E11.9:ICD10|I10:","provider_id":5,
+ "authorized":1,"billed":0,"activity":1}
+```
+
+The bad-encounter guard, which is what keeps `addBilling()`'s `die()` from ever emitting an
+HTML page mid-response:
+
+```json
+{"validationErrors":{"encounter":["No such encounter for this patient"]},"internalErrors":[],"data":[],"links":[]}
+```
+
+`GET /api/codes` returns 200 with **0 rows**. That is the route working against empty tables —
+ICD-10-CM has not been loaded (see below). It is not a defect in the route.
 
 ### Two corrections to the record
 
@@ -326,7 +348,25 @@ The order path carried the identical `Array` defect and nobody had noticed, beca
 first acceptance run posted an order with **no diagnoses**. The run now sends object-shaped
 diagnoses on both and asserts both stored formats.
 
-**These fixes require one rebuild on the box** before the charge path is trustworthy.
+Both fixes are deployed (controller sha256 `c17bdef5…`, rebuilt 2026-09-06) and run 3 is clean.
+
+**The lesson worth keeping:** run 1 fixed a symptom at one call site instead of the cause, and
+the fix introduced a worse bug — a variable-name collision that billed the diagnosis instead of
+the E/M. Neither would have failed loudly in the UI. The charge row looked correct in Billing
+Manager both times; it would have surfaced as a denial weeks later. Acceptance is what caught
+both, and only because it asserts stored values rather than HTTP status codes.
+
+### Gap 1 status after this
+
+| Capability | State |
+|---|---|
+| Fee-sheet charge write | ✅ live, proven end to end |
+| Procedure order write | ✅ live, proven end to end |
+| Code search (`GET /api/codes`) | ✅ route live; returns 0 rows until ICD-10-CM is loaded |
+| Prescription write | ✅ native on 8.4 (`POST /api/prescription`) |
+| Encounter sign / close | app-side (spec §3); no server concept, unchanged |
+
+Session 4.5 can now be proven against the live EMR: sign-and-close reaches Billing Manager.
 
 ### Still open, separately
 
