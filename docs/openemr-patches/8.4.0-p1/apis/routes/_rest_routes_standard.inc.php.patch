@@ -1,0 +1,71 @@
+--- a/apis/routes/_rest_routes_standard.inc.php
++++ b/apis/routes/_rest_routes_standard.inc.php
+@@ -40,6 +40,11 @@
+ use OpenEMR\RestControllers\PractitionerRestController;
+ use OpenEMR\RestControllers\PrescriptionRestController;
+ use OpenEMR\RestControllers\ProcedureRestController;
++// GFC bounded patch 8.4.0-p1 — fee-sheet charge + procedure order write routes.
++// require_once keeps the class resolvable regardless of whether the vendor
++// autoloader was dumped with an optimized classmap.
++require_once __DIR__ . '/../../src/RestControllers/GfcChargeRestController.php';
++use OpenEMR\RestControllers\GfcChargeRestController;
+ use OpenEMR\RestControllers\ProductRegistrationRestController;
+ use OpenEMR\RestControllers\RestControllerHelper;
+ use OpenEMR\RestControllers\TransactionRestController;
+@@ -48,6 +53,56 @@
+ use OpenEMR\Services\Search\SearchQueryConfig;
+ 
+ return [
++    // ---- GFC bounded patch 8.4.0-p1 -------------------------------------
++    // Write paths OpenEMR's own screens have but the REST API does not.
++    // Guarded by the same ACL those screens use (encounters/coding_a) and by
++    // NO new OAuth scope, so the registered client needs no re-registration.
++    "POST /api/patient/:pid/encounter/:eid/billing" => function ($pid, $eid, HttpRestRequest $request) {
++        RestConfig::request_authorization_check($request, "encounters", "coding_a");
++        $data = (array) (json_decode(file_get_contents("php://input"), true));
++        $result = (new GfcChargeRestController())->postCharge($pid, $eid, $data);
++        return RestControllerHelper::createProcessingResultResponse($request, $result, 201);
++    },
++
++    "GET /api/patient/:pid/encounter/:eid/billing" => function ($pid, $eid, HttpRestRequest $request) {
++        RestConfig::request_authorization_check($request, "encounters", "coding_a");
++        $result = (new GfcChargeRestController())->getCharges($pid, $eid);
++        return RestControllerHelper::createProcessingResultResponse($request, $result, 200, true);
++    },
++
++    "DELETE /api/patient/:pid/encounter/:eid/billing/:id" => function ($pid, $eid, $id, HttpRestRequest $request) {
++        RestConfig::request_authorization_check($request, "encounters", "coding_a");
++        $result = (new GfcChargeRestController())->voidCharge($pid, $eid, $id);
++        return RestControllerHelper::createProcessingResultResponse($request, $result, 200);
++    },
++
++    "POST /api/patient/:pid/encounter/:eid/order" => function ($pid, $eid, HttpRestRequest $request) {
++        RestConfig::request_authorization_check($request, "encounters", "coding_a");
++        $data = (array) (json_decode(file_get_contents("php://input"), true));
++        $result = (new GfcChargeRestController())->postOrder($pid, $eid, $data);
++        return RestControllerHelper::createProcessingResultResponse($request, $result, 201);
++    },
++
++    "GET /api/patient/:pid/encounter/:eid/order" => function ($pid, $eid, HttpRestRequest $request) {
++        RestConfig::request_authorization_check($request, "encounters", "coding_a");
++        $result = (new GfcChargeRestController())->getOrders($pid, $eid);
++        return RestControllerHelper::createProcessingResultResponse($request, $result, 200, true);
++    },
++
++    "PUT /api/patient/:pid/encounter/:eid/order/:orderId" => function ($pid, $eid, $orderId, HttpRestRequest $request) {
++        RestConfig::request_authorization_check($request, "encounters", "coding_a");
++        $data = (array) (json_decode(file_get_contents("php://input"), true));
++        $result = (new GfcChargeRestController())->putOrderStatus($pid, $eid, $orderId, $data);
++        return RestControllerHelper::createProcessingResultResponse($request, $result, 200);
++    },
++
++    "GET /api/codes" => function (HttpRestRequest $request) {
++        RestConfig::request_authorization_check($request, "encounters", "coding_a");
++        $result = (new GfcChargeRestController())->searchCodes($request->query->all());
++        return RestControllerHelper::createProcessingResultResponse($request, $result, 200, true);
++    },
++    // ---- end GFC bounded patch ------------------------------------------
++
+     "GET /api/facility" => function (HttpRestRequest $request) {
+         RestConfig::request_authorization_check($request, "admin", "users");
+         $return = (new FacilityRestController())->getAll($request, $request->query->all());
