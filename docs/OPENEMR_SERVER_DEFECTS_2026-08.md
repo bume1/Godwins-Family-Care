@@ -228,12 +228,23 @@ The live instance was upgraded in place per Master Setup Guide v4 Phase 6A (step
 
 **v3 client registered (Phase 6A step 5 / 9.3):** dynamic registration at `/oauth2/default/registration`, `application_type=private`, `client_name="GFC Care Platform (server) v3 8.4"`, `token_endpoint_auth_method=client_secret_post`, `redirect_uris=["https://app.godwinsfamilycarellc.com/oauth/callback"]`, scope = the 43 current + the 6 additions above. Registered on the first attempt; all **49 scopes echoed back, none stripped**. Client id begins `EBZL0Xzvw-`. Secret handed to the owner for Secrets Manager only; never in the repo. Capability statement saved at `docs/openemr/capability-8.4.json` (34 FHIR resources).
 
-**Not yet verified (needs the v3 client enabled + credentials swapped, then the Part VII.4 walk):**
-- `POST /api/prescription` exists and accepts a record (Gap 1 row 1).
-- Vitals `POST …/vital` no longer 500s (Defect 1) — re-enable the native write in Session 4.5.
-- Document `POST/GET …/document` no longer 500s (Defect 2) — re-enable the OpenEMR copy in Session 4.5.
-- Encounter PUT after the `sensitivities` ACL grant (Phase 8.6); FHIR Practitioner/Organization/Coverage after the org-level read grant.
-- Whether 8.4 added an appointment update route (the tombstone swap stays until proven).
-- FHIR Condition coding after the ICD-10-CM load (Quirk 2), encounter-list duplication (Quirk 3), the `soap_note` numeric-id and 200-with-map quirks (Quirk 1).
+### 8.4 preflight results (2026-09-06, v3 client enabled, TEST PatientOne pid 1 / encounter eid 7)
 
-**Still no API route on 8.4** for fee-sheet charges or procedure-order creation — Phase 6B stands as written.
+Token: the v3 client returns **47 granted scopes** (the two `api:*` meta scopes are never echoed; 41 → 47 is the sync-indicator change). `openemr.getStatus()` with the v3 credentials: `connected: true, grantedScopeCount: 47, appointmentScopes: true`.
+
+| Guide VII.4 row | 7.0.4 state | 8.4 result (verified live) | App action |
+|---|---|---|---|
+| **Vitals** `POST patient/{pid}/encounter/{eid}/vital` | 500 unconditionally (Defect 1) | **FIXED.** 201 `{"vid":16,"fid":41}`; row readable at `…/vital/16` (carries `euuid`, `date`); surfaces in FHIR Observation as the vital-signs panel + component rows. List GET `…/vital` returned an empty array for the encounter — read by vid or via FHIR Observation. | 4.5: re-enable the native write; keep the both-arm BP text in the note by design |
+| **Documents** `…/document` | 500 SQL-bind bug (Defect 2) | **500 gone. Route re-keyed on 8.4:** `/api/patient/{pid}/document` takes the **numeric pid** (uuid → 400 `Invalid pid`; swagger confirms `{pid}`). `POST` multipart (`document` field, `?path=/Test`) → 200 `true` (no id returned). **Read-back not yet proven:** `GET …/document?path=…` returned 404 for `/Test`, `/Medical Record`, empty and absent `path`; FHIR `DocumentReference` returns **403** on both the v2 and v3 clients (so it is an ACL/policy item, not a scope item). Where the probe file landed is unconfirmed. | 4.5: switch the document path from `puuid` to `pid` (`openemr.js:503`), re-enable the OpenEMR copy only after a read-back path is proven. **Owner (Phase 8.6):** add DocumentReference (and Coverage) to the org-level read grant, then re-probe. |
+| **Prescription** `POST /api/prescription` | no write route (Gap 1 row 1) | **CLOSED.** 201 `{"id":1,"uuid":"a2ad5540-…"}` with body `{patient_id, drug, dosage, quantity, provider_id}` (that is the whole schema: no route/frequency/refills/sig fields — pack the sig into `dosage` or keep the medication-list row for the structured sig). The record **surfaces in FHIR `MedicationRequest`** for the patient; `GET /api/prescription` lists it alongside `lists`-table medications. Scope `user/prescription.write` is the guard. | 4.5: switch to the native POST; confirm read-back through MedicationRequest (proven) before retiring the app-side `prescriptions` store |
+| **Encounter PUT** `patient/{puuid}/encounter/{euuid}` | 500 on the `sensitivities` ACL | **WORKS without the ACL change.** 8.4 requires two extra body fields, `user` and `group` (200 with a validation map naming them otherwise); with `{reason, user, group}` the PUT returns 200 and the updated row. The 7.0.4 crash did not reproduce. | The app does not PUT encounters today. When 4.5 adds the per-visit facility/POS change, send `user` + `group`. The `sensitivities` grant may still be wanted for reads; no longer blocks the PUT. |
+| **Providers** FHIR `Practitioner`, `Organization` | 403 org-policy ACL | **FIXED** (200, totals 1 and 2) on both the v2 and v3 clients. | 4.5: keep the degraded fallback code path, but it should no longer trigger |
+| FHIR `Coverage` | 403 | still **403** on both clients | Owner (Phase 8.6): org-level read grant. B-series reads coverage. |
+| **Appointments** update route | none | **Still none.** Swagger for `/api/patient/{pid}/appointment/{eid}` lists only GET and DELETE. | Tombstone swap stays |
+| **Orders** `POST /api/procedure` | GET-only | still **404 Route not found** on POST | Phase 6B route stands; guard under `user/encounter.write` (no `user/procedure.write` on 8.4) |
+| **Fee-sheet charge** | no route | no route | Phase 6B route stands |
+| **FHIR Condition coding** | text only (Quirk 2) | 3 problems, **0 with coding** — the code table is still empty | Owner (Phase 8.6): ICD-10-CM load, then re-probe |
+| **Encounter list duplication** (Quirk 3) | every row twice | **persists** on 8.4 (28 rows, 14 unique) | dedupe stays |
+| Encounter row shape | — | 8.4 rows also carry `provider_uuid`, `provider_username`, `facility_uuid`, `billing_facility_uuid` (null/ids) | useful for the 4.5 per-visit facility picker and signer→provider mapping |
+
+Test artifacts left on TEST PatientOne (labeled): vitals row vid 16 on eid 7, prescription "TEST DATA amoxicillin", one text document "probe-84-TEST.txt" whose category is unconfirmed.
