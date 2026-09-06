@@ -256,16 +256,20 @@ Test artifacts left on TEST PatientOne (labeled): vitals row vid 16 on eid 7, pr
 The patch is installed on the live instance as derived image `gfc/openemr:8.4.0-p1`
 (route-map wrapper, no diff, built from `docker-compose.yml` so no `docker compose pull`
 can revert it). Acceptance ran end to end against a TEST encounter with the app's own
-token: **14 of 15 assertions passed on the first run.** The one failure was a defect in
-our own controller (below), fixed but **not yet deployed** — it needs one rebuild on the box
-before the charge path is trustworthy.
+token: **14 of 15 on both runs so far, a different assertion each time.** Both failures were
+defects in our own controller, not the server (below). The second fix is **not yet deployed**
+— it needs one rebuild on the box before the charge path is trustworthy.
+
+The server side of 6B is proven: routes resolve, both gates hold, writes land in the right
+tables, and the `die()` guard returns clean JSON. What is still settling is our own input
+handling.
 
 | Assertion | Result |
 |---|---|
 | `POST …/encounter/{eid}/billing` | 201, row in `billing` |
 | `GET …/encounter/{eid}/billing` | 200, row reads back |
-| code / modifier / units / fee / rendering provider stored | correct |
-| diagnosis pointers in X12 `justify` format | **FAILED** — stored `ICD10\|Array:ICD10\|Array:`. Fixed in the controller; verified locally (9/9 shape cases, and `Claim::diagIndexArray()`'s own parse yields E11.9, I10). Awaiting rebuild to re-prove live. |
+| code / modifier / units / fee / rendering provider stored | modifier, units, fee, provider correct both runs. **`code` FAILED run 2** — stored `I10`, the diagnosis, not the CPT (see defect 2 below) |
+| diagnosis pointers in X12 `justify` format | run 1 **FAILED** (`ICD10\|Array:…`); run 2 **PASSED** (`ICD10\|E11.9:ICD10\|I10:`) |
 | `POST …/encounter/{eid}/order` | 201, `procedure_order` + `procedure_order_code` rows |
 | `GET …/encounter/{eid}/order` | 200, order codes attached |
 | bad encounter id | clean JSON 400 `{"validationErrors":{"encounter":["No such encounter for this patient"]}}` — the `die()` in `BillingUtilities::addBilling()` is guarded, never reached |
@@ -298,15 +302,31 @@ Setup Guide v4 §8.5. It simply was not the thing returning 401.
 **`docs/GFC_Release_Runway.pdf` (commit `b0d81db`) records the wrong diagnosis and needs
 regenerating.**
 
-**2. A real defect in the controller, found by the acceptance run.**
+**2. Two defects in the controller, both found by acceptance, both ours.**
 
-The first run stored `justify` as `"ICD10|Array:ICD10|Array:"`. The app sends diagnoses as
-objects (`{code_type, code}`); casting one straight to string yields the literal `Array`.
-The charge looked correct in Billing Manager and would have carried broken diagnosis
-pointers onto the claim — the kind of thing found on a denial, not in the UI. The controller
-now accepts both the object and bare-string shapes with `is_scalar` guards. **This fix
-requires one rebuild on the box** (`docker compose build --pull && docker compose up -d`)
-before the charge path is trustworthy.
+*Run 1* stored `justify` as `"ICD10|Array:ICD10|Array:"`. The app sends diagnoses as objects
+(`{code_type, code}`); casting one straight to string yields the literal `Array`. The charge
+looked correct in Billing Manager and would have carried broken diagnosis pointers onto the
+claim — found on a denial, not in the UI.
+
+*Run 2*, after that fix, stored the charge's `code` as `I10` — the last **diagnosis** — with
+`code_type` still `CPT4`. The fix's loop had reused the variable name `$code`, which already
+held the CPT being billed, so it overwrote the home-visit E/M before `addBilling()` ran.
+Worse than the first defect: it bills the wrong code entirely.
+
+Both are now one shared helper, `normalizeDiagnoses()`, because the charge path and the order
+path read the same input into two different output formats:
+
+| Column | Format | Read by |
+|---|---|---|
+| `billing.justify` | `ICD10\|E11.9:ICD10\|I10:` | `Claim::diagIndexArray()` |
+| `procedure_order_code.diagnoses` | `ICD10:E11.9;ICD10:I10` | procedure order form |
+
+The order path carried the identical `Array` defect and nobody had noticed, because the
+first acceptance run posted an order with **no diagnoses**. The run now sends object-shaped
+diagnoses on both and asserts both stored formats.
+
+**These fixes require one rebuild on the box** before the charge path is trustworthy.
 
 ### Still open, separately
 

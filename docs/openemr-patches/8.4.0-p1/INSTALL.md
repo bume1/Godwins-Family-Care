@@ -111,7 +111,7 @@ cd /opt/openemr/gfc-patch && sha256sum -c <<'SUMS'
 cb5b3f4746c228e07c86d5ea6dbfa2d034b8bbeef7962c0564f52d372339eb40  apis/routes/_rest_routes_standard.inc.php
 a3515a22b7d6a4cea94884045c2a141a634a59979535d8447ae551bc35e3ec11  apis/routes/_rest_routes_gfc.inc.php
 0333542b8c9e054711f50f7b31dbe9cec40c70f3479698b0ac31a8eb95a76d66  gfc-add-scopes.php
-374afd6265b8b69659cc5f6e1be59832f426c114be34aefc186ad18721a249f7  src/RestControllers/GfcChargeRestController.php
+c17bdef5fcf50926b208d5043720ea1be2ebb6b10edb179cb296ab652e51f0bf  src/RestControllers/GfcChargeRestController.php
 SUMS
 ```
 

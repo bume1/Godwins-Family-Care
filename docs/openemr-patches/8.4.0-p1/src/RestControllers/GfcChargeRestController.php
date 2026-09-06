@@ -112,39 +112,19 @@ class GfcChargeRestController
         // entries, each optionally "TYPE|CODE" — Claim::diagIndexArray() splits
         // on ":" then on "|" and strips the type label. Accept a diagnoses array
         // (preferred) or a pre-built justify string.
-        // Two accepted shapes, because the app sends objects and a hand-rolled
-        // call may send bare codes:
-        //     ["E11.9", "I10"]
-        //     [{"code_type": "ICD10", "code": "E11.9"}, {"code": "I10"}]
-        // Casting an entry straight to string turned an object into the literal
-        // "Array", producing justify "ICD10|Array:" — a charge that looks fine
-        // in Billing Manager and carries broken diagnosis pointers onto the
-        // claim. Caught by the Phase 6B acceptance test on 2026-09-06.
+        // X12 diagnosis pointers, the format Claim::diagIndexArray() parses:
+        //     ICD10|E11.9:ICD10|I10:
+        // Note this is NOT the format procedure_order_code.diagnoses uses; see
+        // normalizeDiagnoses(), which both callers share so the two formats
+        // cannot drift apart in how they read their input.
         $justify = '';
-        if (!empty($data['diagnoses']) && is_array($data['diagnoses'])) {
+        $dxList = self::normalizeDiagnoses($data['diagnoses'] ?? null);
+        if (!empty($dxList)) {
             $parts = [];
-            foreach ($data['diagnoses'] as $dx) {
-                if (is_array($dx)) {
-                    $code = $dx['code'] ?? '';
-                    $type = $dx['code_type'] ?? 'ICD10';
-                } else {
-                    $code = $dx;
-                    $type = 'ICD10';
-                }
-                // Never let a non-scalar reach a string cast.
-                if (!is_scalar($code) || !is_scalar($type)) {
-                    continue;
-                }
-                $code = trim((string)$code);
-                $type = strtoupper(trim((string)$type));
-                if ($code === '') {
-                    continue;
-                }
-                $parts[] = ($type !== '' ? $type : 'ICD10') . '|' . $code;
+            foreach ($dxList as $dxEntry) {
+                $parts[] = $dxEntry['type'] . '|' . $dxEntry['code'];
             }
-            if (!empty($parts)) {
-                $justify = implode(':', $parts) . ':';
-            }
+            $justify = implode(':', $parts) . ':';
         } elseif (!empty($data['justify'])) {
             $justify = is_scalar($data['justify']) ? (string)$data['justify'] : '';
         }
@@ -320,18 +300,19 @@ class GfcChargeRestController
         foreach ($codes as $entry) {
             $seq++;
             $entry = (array)$entry;
+            // procedure_order_code.diagnoses is "ICD10:E11.9;ICD10:I10" —
+            // a different separator set from the charge's X12 justify, but the
+            // same input shapes, so it reads them through the same helper.
             $dx = '';
-            if (!empty($entry['diagnoses']) && is_array($entry['diagnoses'])) {
+            $orderDxList = self::normalizeDiagnoses($entry['diagnoses'] ?? null);
+            if (!empty($orderDxList)) {
                 $parts = [];
-                foreach ($entry['diagnoses'] as $one) {
-                    $one = trim((string)$one);
-                    if ($one !== '') {
-                        $parts[] = 'ICD10:' . $one;
-                    }
+                foreach ($orderDxList as $dxEntry) {
+                    $parts[] = $dxEntry['type'] . ':' . $dxEntry['code'];
                 }
                 $dx = implode(';', $parts);
-            } elseif (!empty($entry['diagnoses'])) {
-                $dx = (string)$entry['diagnoses'];
+            } elseif (!empty($entry['diagnoses']) && is_scalar($entry['diagnoses'])) {
+                $dx = trim((string)$entry['diagnoses']);
             }
 
             sqlStatement(
@@ -478,5 +459,63 @@ class GfcChargeRestController
         }
         $order['codes'] = $codes;
         return $order;
+    }
+
+    /**
+     * Normalise a diagnosis list to [['type' => 'ICD10', 'code' => 'E11.9'], ...].
+     *
+     * Callers accept two shapes, because the app sends objects and a hand-rolled
+     * call may send bare codes:
+     *
+     *     ["E11.9", "I10"]
+     *     [{"code_type": "ICD10", "code": "E11.9"}, {"code": "I10"}]
+     *
+     * Casting an entry straight to string turns an object into the literal
+     * "Array". On the charge that produced justify "ICD10|Array:" — a row that
+     * looks correct in Billing Manager and carries broken diagnosis pointers
+     * onto the claim, so it surfaces as a denial rather than an error. The order
+     * path had the same defect against procedure_order_code.diagnoses. Both were
+     * found by the Phase 6B acceptance test on 2026-09-06; this helper exists so
+     * there is one place to get it right rather than two to keep in step.
+     *
+     * Deliberately NOT named $code/$type internally: the charge path holds the
+     * CPT being billed in $code, and the first fix reused that name in its loop
+     * and billed the last diagnosis instead of the E/M code.
+     *
+     * Entries that are empty or non-scalar are dropped rather than coerced.
+     *
+     * @param mixed $raw
+     * @return array<int, array{type: string, code: string}>
+     */
+    private static function normalizeDiagnoses($raw): array
+    {
+        if (empty($raw) || !is_array($raw)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($raw as $dx) {
+            if (is_array($dx)) {
+                $dxCode = $dx['code'] ?? '';
+                $dxType = $dx['code_type'] ?? 'ICD10';
+            } else {
+                $dxCode = $dx;
+                $dxType = 'ICD10';
+            }
+            if (!is_scalar($dxCode) || !is_scalar($dxType)) {
+                continue;
+            }
+            $dxCode = trim((string)$dxCode);
+            $dxType = strtoupper(trim((string)$dxType));
+            if ($dxCode === '') {
+                continue;
+            }
+            $out[] = [
+                'type' => $dxType !== '' ? $dxType : 'ICD10',
+                'code' => $dxCode,
+            ];
+        }
+
+        return $out;
     }
 }
