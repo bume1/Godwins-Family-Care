@@ -1031,6 +1031,14 @@ async function generateCarePlanPDF(d) {
           { label: 'Printed name', value: (sig && sig.name) || '' },
           { label: 'IP verification (hashed)', value: sig && sig.ipHash ? String(sig.ipHash).slice(0, 16) : '' }
         ]);
+        // Session 4.3 (spec §4.3): a designated POA signs under their OWN name
+        // ("<POA> as POA for <client>", already the printed name above) and the
+        // block says so — the client is never presented as the signer.
+        if (sig && sig.signerRole === 'poa') {
+          doc.fontSize(8).fillColor(ROI_COLORS.muted).font('Helvetica-Oblique')
+            .text('Signed by the client\'s designated Power of Attorney (POA designation verified on file by Godwins Family Care).', L, y - 6, { width: W });
+          y += 10;
+        }
       };
 
       // ── Header ──

@@ -197,9 +197,15 @@
               <h1 className="font-serif text-3xl text-primary-500 font-semibold">Enrollment submissions</h1>
               <p className="text-sm text-gray-500 mt-1">Review intake, request follow-up, and approve enrollment.</p>
             </div>
-            {isAdminRole(user) && (
-              <button className="btn btn-gold" onClick={onAddOffline}>+ Add offline-onboarded patient</button>
-            )}
+            <div className="flex items-center gap-2 flex-wrap">
+              {/* Clinical charts: read-only for case managers (Session 4.3 scoped read) */}
+              {user && (user.role === 'admin' || user.role === 'caseManager' || user.hasClinicalAccess) && (
+                <a className="btn btn-primary" href="/clinical" style={{ textDecoration: 'none' }}>Clinical charts{user.role === 'caseManager' ? ' (read-only)' : ''}</a>
+              )}
+              {isAdminRole(user) && (
+                <button className="btn btn-gold" onClick={onAddOffline}>+ Add offline-onboarded patient</button>
+              )}
+            </div>
           </div>
 
           <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
