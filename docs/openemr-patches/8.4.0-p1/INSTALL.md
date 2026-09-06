@@ -33,8 +33,16 @@ same ACL the Fee Sheet and diagnosis screens use, `encounters` / `coding_a`.
 
 OpenEMR runs from a Docker image: a sealed package of the application as its
 makers published it. You cannot edit a sealed package, so the patch is applied
-by **building a new image** from the official one plus our two files, tagged
+by **building a new image** from the official one plus our three files, tagged
 `gfc/openemr:8.4.0-p1`.
+
+The patch is **not a diff**, and needs no `patch` tool. OpenEMR's route map is a
+PHP file that returns an array. The build renames that file aside, keeping it
+byte-for-byte, and drops in a small wrapper that includes it and merges our
+routes on top. Upstream can rewrite the contents of its route map however it
+likes and our routes still load, because nothing of theirs is edited. A diff
+would have gone stale the first time upstream touched that file for any
+unrelated reason.
 
 The build is wired into `docker-compose.yml` itself rather than run as a
 separate step. That matters for one specific reason:
@@ -53,30 +61,35 @@ correct command.
 
 ## Step 1 — Put the patch files on the server
 
-```
-sudo mkdir -p /opt/openemr/gfc-patch && cd /opt/openemr/gfc-patch
-```
-
-You need three files here. Pull them straight from the repo branch:
+Four files. Pull them straight from the repo:
 
 ```
-sudo curl -fsSL -o Dockerfile \
-  https://raw.githubusercontent.com/bume1/Godwins-Family-Care/main/docs/openemr-patches/8.4.0-p1/Dockerfile
-sudo mkdir -p src/RestControllers apis/routes
-sudo curl -fsSL -o src/RestControllers/GfcChargeRestController.php \
-  https://raw.githubusercontent.com/bume1/Godwins-Family-Care/main/docs/openemr-patches/8.4.0-p1/src/RestControllers/GfcChargeRestController.php
-sudo curl -fsSL -o apis/routes/_rest_routes_standard.inc.php.patch \
-  https://raw.githubusercontent.com/bume1/Godwins-Family-Care/main/docs/openemr-patches/8.4.0-p1/apis/routes/_rest_routes_standard.inc.php.patch
+sudo mkdir -p /opt/openemr/gfc-patch/src/RestControllers /opt/openemr/gfc-patch/apis/routes
+cd /opt/openemr/gfc-patch
+B=https://raw.githubusercontent.com/bume1/Godwins-Family-Care/main/docs/openemr-patches/8.4.0-p1
+sudo curl -fsSL -o Dockerfile "$B/Dockerfile"
+sudo curl -fsSL -o src/RestControllers/GfcChargeRestController.php "$B/src/RestControllers/GfcChargeRestController.php"
+sudo curl -fsSL -o apis/routes/_rest_routes_standard.inc.php "$B/apis/routes/_rest_routes_standard.inc.php"
+sudo curl -fsSL -o apis/routes/_rest_routes_gfc.inc.php "$B/apis/routes/_rest_routes_gfc.inc.php"
 ```
 
-If the repo is private and curl returns 404, copy the three files across with
-`scp` using the break-glass key, or paste them in with `sudo nano`.
+If the repo has been made private, `curl` needs a token: add
+`-H "Authorization: Bearer $GH"` to each line and fetch from
+`https://api.github.com/repos/bume1/Godwins-Family-Care/contents/docs/openemr-patches/8.4.0-p1/<path>`
+with `-H "Accept: application/vnd.github.raw"`.
 
-Confirm all three arrived:
+Then verify the files are exactly what was published:
 
 ```
-find /opt/openemr/gfc-patch -type f
+cd /opt/openemr/gfc-patch && sha256sum -c <<'SUMS'
+2ec7ad22d29fe984845fce4e4489674f73e79fd80d7bb91f9aff7d4b4200323b  Dockerfile
+cb5b3f4746c228e07c86d5ea6dbfa2d034b8bbeef7962c0564f52d372339eb40  apis/routes/_rest_routes_standard.inc.php
+a3515a22b7d6a4cea94884045c2a141a634a59979535d8447ae551bc35e3ec11  apis/routes/_rest_routes_gfc.inc.php
+36a636a31cc22b6270e94d31fd6e6f41704174357168069deb29c5e809ecf142  src/RestControllers/GfcChargeRestController.php
+SUMS
 ```
+
+Four `OK` lines means the files are intact. Anything else, stop.
 
 ## Step 2 — Back up the compose file
 
@@ -124,11 +137,12 @@ cd /opt/openemr && sudo docker compose config | grep -A3 -E "build:|image:"
 cd /opt/openemr && sudo docker compose up -d --build && sudo docker compose logs -f
 ```
 
-The build takes two to five minutes. It **applies the patch and then
-syntax-checks both files**, so if a future upstream image has moved the route
-file, the build fails here rather than producing a broken EMR.
+The build takes two to five minutes. It **checks that OpenEMR's route map is
+where we expect, refuses to build on an already-patched base, and syntax-checks
+all four files** (ours plus the preserved upstream map). If any of that fails the
+build stops, and nothing is deployed.
 
-No schema upgrade runs this time. It is the same 8.4 code plus two files. Wait
+No schema upgrade runs this time. It is the same 8.4 code plus three files. Wait
 for Apache to settle, then Ctrl+C.
 
 ## Step 5 — Confirm it is live
@@ -186,12 +200,13 @@ Same effort as the command it replaces. Nothing to remember beyond using this
 line instead of the old one, which is why it belongs in the monthly checklist
 verbatim rather than as a note to "also rebuild."
 
-**If the build fails**, that is the patch protecting you. It means a newer
-OpenEMR has rearranged the route file and our change no longer fits where it
-expects to go. Nothing has been deployed at that point. Bring it to the app team
-to regenerate the diff. Do not force it, and do not work around it by copying the
-whole file over the new one — that would silently discard whatever upstream
-changed.
+**If the build fails**, that is the patch protecting you. Because this wraps
+OpenEMR's route map rather than editing it, an ordinary upstream change to that
+file will not trip it. A failure means something structural: the route map was
+renamed or removed, or OpenEMR changed how it loads routes. Nothing has been
+deployed at that point. Bring it to the app team. Do not force it, and do not
+work around it by copying files over the new ones, which would silently discard
+whatever upstream changed.
 
 **The permanent exit.** Once this patch has run clean for a month, offer it to
 the OpenEMR project (Appendix D). These are gaps other practices hit too. If it
