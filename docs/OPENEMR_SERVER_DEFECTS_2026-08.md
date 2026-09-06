@@ -248,3 +248,48 @@ Token: the v3 client returns **47 granted scopes** (the two `api:*` meta scopes 
 | Encounter row shape | — | 8.4 rows also carry `provider_uuid`, `provider_username`, `facility_uuid`, `billing_facility_uuid` (null/ids) | useful for the 4.5 per-visit facility picker and signer→provider mapping |
 
 Test artifacts left on TEST PatientOne (labeled): vitals row vid 16 on eid 7, prescription "TEST DATA amoxicillin", one text document "probe-84-TEST.txt" whose category is unconfirmed.
+
+---
+
+## Phase 6B acceptance (2026-09-06) — BLOCKED on one ACL grant
+
+The patch is installed on the live instance (derived image `gfc/openemr:8.4.0-p1`, route-map wrapper). **The routes exist and are correctly guarded**, but the acceptance test cannot pass until the app's service account is granted one ACL.
+
+**Evidence, same token, same run:**
+
+| Call | Result |
+|---|---|
+| `GET /api/codes` (no token) | **401** — route exists, auth required |
+| `GET …/encounter/28/billing` (no token) | **401** — route exists |
+| `GET /fhir/Patient`, `/fhir/Encounter` | 200 — token valid (47 scopes) |
+| `GET /api/patient/1/encounter/28/soap_note` (stock, `encounters`/`notes`) | 200 |
+| `GET /api/facility` (stock) | 200 |
+| `GET /api/user` (stock, `admin`/`users`) | 401 — app user has no admin ACL, correct |
+| **`GET …/billing`, `POST …/billing`, `POST …/order`, `GET /api/codes` (ours, `encounters`/`coding_a`)** | **401** |
+
+So: not a scope problem (the token carries 47 and stock standard-API routes answer), not a routing problem (401, not 404), not a patch problem. The `gfc-app-api` user's ACL group holds `encounters`/`notes` but not `encounters`/`coding_a`.
+
+**`encounters`/`coding_a` is a stock OpenEMR ACL**, documented in `src/Common/Acl/AclMain.php`:
+
+```
+ * Section "encounters" (Encounter Information):
+ *   coding      Coding - my encounters (write,wsome optional)
+ *   coding_a    Coding - any encounters (write,wsome optional)
+```
+
+It is what the Superbill, the Encounters Report, and the encounter-history coding column check. It is the correct guard for a charge write, and matches Master Setup Guide v4 §8.5, which specifies **Fee Sheet: Write** for `gfc-app-api`. The patch is not being weakened to match the current configuration — an ACL that lets any note-writer post charges would defeat §8.5's separation.
+
+### The fix — OWNER, one grant (Phase 8.6 class)
+
+Administration → ACL → the `gfc-app-api` user's group → section **Encounters** → enable **"Coding - any encounters" (`coding_a`)**, write. Then re-run the acceptance test.
+
+Group this with the other outstanding Phase 8.6 items, all on the same screen:
+- `sensitivities` (already recorded)
+- org-level read for FHIR **DocumentReference** and **Coverage** (both still 403)
+- **`encounters`/`coding_a`** (this item)
+
+Plus the separate ICD-10-CM load (Administration → Other → External Data Loads), which is why `GET /api/codes` will return 0 results even once the ACL is granted, and why FHIR Condition still comes back uncoded.
+
+### Session 4.5 impact
+
+4.5 can be written against these routes, but **its charge-write and order-write paths cannot be proven against the live EMR until this grant is made.** Until then the 6B routes answer 401 for the app, so sign-and-close will not reach Billing Manager. Gap 1 stays open.
