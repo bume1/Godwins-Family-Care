@@ -453,3 +453,32 @@ still have left the 6B routes at 401. Both the env swap and the 54-scope list (c
   charge write cannot be proven end to end until an admin sets it under
   Coding queue → Billing settings. This is independent of the credential swap — both are
   needed before 4.5 acceptance can run.
+
+### Correction to Master Setup Guide v4.1 §8.6 — the org-level read list is incomplete
+
+§8.6 step 1 tells the owner to "grant org-level read so `/fhir/Practitioner`,
+`/fhir/Organization`, and `/fhir/Coverage` stop returning 403." Verified against the live
+instance on 2026-09-06, that list is now wrong in both directions:
+
+- **Practitioner and Organization no longer need it.** Both return 200 on 8.4 without any ACL
+  change (the upgrade fixed them). Anyone working the guide literally will see them already
+  passing and conclude the grant is done.
+- **DocumentReference is missing from the list and still 403s.** It is the one the clinician
+  actually sees, as the red banner on the chart's Documents card.
+
+So the grant is still required, but for **Coverage, DocumentReference, and `sensitivities`** —
+not for the three resources the guide names. Grant org-level read at the group level rather
+than working the guide's resource list item by item.
+
+One command confirms it, before and after:
+
+```
+node -e 'const o=require("./openemr.js");const e=o.forActor({id:"p",name:"p",role:"admin"});
+const u="a284d5c2-670e-4a62-aa95-2d1aa629003c";
+Promise.allSettled([e.getDocumentReferences(u),e.getPractitioners()]).then(r=>
+r.forEach((x,i)=>console.log(["DocumentReference","Practitioner"][i], x.status==="fulfilled"?"200 OK":x.reason.status)));'
+```
+
+Today it prints `DocumentReference 403` / `Practitioner 200 OK`. Both 200 means the grant landed.
+
+Regenerate §8.6 with the corrected list when the guide is next revised.
