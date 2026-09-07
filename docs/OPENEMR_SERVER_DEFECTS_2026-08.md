@@ -505,3 +505,59 @@ v2 client (42 granted scopes, not 54). The owner reported the secrets as "correc
 valid credentials, which is exactly the failure mode: OpenEMR issues a working token for the old
 client without complaint, so a check that only asks "are these valid?" passes. The values must be
 **replaced** with the v4 client's, not verified.
+
+### CORRECTION 2026-09-08 — the v4 client swap WAS deployed; the build sandbox was stale
+
+The 4.5 preflight above reported the deployed client as the August v2 one. That reading was
+taken from the **build sandbox's** environment, which held `dlHHtxPDc1gS…`. The Replit
+deployment holds `mRVhrg5HB…` — the v4 client — and has all along. The sandbox and the
+deployment do not share a secrets store, and nothing in the earlier probe distinguished them.
+
+Re-run against the v4 client id, everything the session was blocked on passes:
+
+| Check | Result |
+|---|---|
+| Granted scopes | **52** (the 2 absent are `api:oemr` / `api:fhir`, never echoed on 8.4) |
+| `user/billing.read/.write`, `user/order.read/.write`, `user/codes.read` | all **granted** |
+| `user/prescription.read/.write` | both **granted** |
+| `GET …/encounter/28/billing` | **200**, 4 rows |
+| `GET …/encounter/28/order` | **200**, 4 rows |
+| `GET /api/codes` | **200**, 0 rows (ICD-10 not loaded — data gap, not a defect) |
+| `GET /api/prescription` | **200**, 7 rows |
+
+Session 4.5 is unblocked. **Lesson for the next session: verify the client id in the environment
+you are actually testing from, and compare it against the deployed one before concluding a
+credential swap did not happen.** The scope-shortfall diagnostic added in this branch reports the
+truth for whichever environment it runs in — read it from the deployed app, not the sandbox.
+
+### ⚠️ SECURITY — `client_secret` is not validated on the password grant
+
+Found while confirming the client id. Verified on the live instance, five controls:
+
+| Request | Result |
+|---|---|
+| v4 client id + correct secret | token issued |
+| v4 client id + **deliberately wrong secret** | **token issued** |
+| v4 client id + **empty secret** | **token issued** |
+| non-existent client id | refused, `invalid_client` |
+| v4 client id + wrong API-user password | refused, `invalid_grant` |
+
+So on `grant_type=password` this instance authenticates on **client_id existence plus the API
+user's password only**. The client secret contributes nothing. Anyone holding the `gfc-app-api`
+password and any enabled client id can mint a token carrying that client's full scope set,
+without the secret.
+
+Consequences, in order:
+
+1. **Every enabled OAuth client is a live credential**, and disabling the superseded ones (v2, v3,
+   and the never-enabled `SQNsx…` duplicate) is a real access control, not tidying. While v2 stays
+   enabled, a stale `OPENEMR_CLIENT_ID` keeps working silently — which is exactly how the
+   confusion above arose. Disable them and a stale id fails loudly instead.
+2. **The `gfc-app-api` password is the whole perimeter** during the dev window. It must be long,
+   unique and held only in the secrets store.
+3. This is a further argument for the Session 5 migration to `authorization_code` + per-user auth
+   and disabling the password-grant global, which the Master Setup Guide already schedules (9.4).
+
+TEST DATA only today, so no PHI exposure. Confirm the behaviour with the EMR maintainer before
+HIPAA go-live; it may be an OpenEMR password-grant characteristic rather than a misconfiguration,
+but either way the control above (disable superseded clients) applies.
