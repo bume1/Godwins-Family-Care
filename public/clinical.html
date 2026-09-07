@@ -263,13 +263,23 @@
       const Sec = ({ title, data, render, icon }) => (
         <div className="card mb-4">
           <div className="card-h"><h2><i className={`ti ${icon} mr-1 text-accent`} />{title}</h2>
-            {data && !data.ok && <span className="chip bg-red-50 text-red-700">EMR read failed</span>}
+            {/* A pending org-level read grant is a setup step, not a fault —
+                badge it differently so a real failure still stands out. */}
+            {data && !data.ok && data.permissionPending && <span className="chip bg-amber-50 text-amber-800">Not enabled yet</span>}
+            {data && !data.ok && !data.permissionPending && <span className="chip bg-red-50 text-red-700">EMR read failed</span>}
           </div>
           <div className="p-4 text-sm">
             {!chart.linked && <p className="text-stone-400 text-xs">Link this patient to OpenEMR to read live data.</p>}
             {chart.linked && data && data.ok && data.rows.length === 0 && <p className="text-stone-400 text-xs">Nothing on file in OpenEMR.</p>}
             {chart.linked && data && data.ok && data.rows.map((r, i) => render(r, i))}
-            {chart.linked && data && !data.ok && <p className="text-red-600 text-xs">{data.error}</p>}
+            {chart.linked && data && !data.ok && data.permissionPending && (
+              <p className="text-amber-800 text-xs">
+                OpenEMR has not granted this app org-level read access to {title.toLowerCase()} yet.
+                An administrator enables it under Administration → Access → the <code className="font-mono">gfc-app-api</code> group.
+                Nothing is wrong with this patient's record.
+              </p>
+            )}
+            {chart.linked && data && !data.ok && !data.permissionPending && <p className="text-red-600 text-xs">{data.error}</p>}
           </div>
         </div>
       );
