@@ -87,3 +87,29 @@ test('the FHIR bundle dedupe is still in place (8.4 still returns encounters twi
   assert.match(openemrSrc, /const bundleResources = \(bundle\) => \{[\s\S]*?seen\.has\(key\)/,
     'verified live 2026-09-06: 28 rows for 14 encounters');
 });
+
+// ---- An expired session must send the user to login, not paint red text ----
+test('auth failures carry codes a client can act on, distinct from permission 403s', () => {
+  const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+  for (const c of ['AUTH_MISSING', 'AUTH_EXPIRED', 'AUTH_INVALID', 'AUTH_INACTIVE']) {
+    assert.ok(server.includes(c), `authenticateToken must emit ${c}`);
+  }
+  // A permission denial is a signed-in user being told no — it must NOT carry
+  // an auth code, or the client would log them out for asking.
+  const readOnly = server.slice(server.indexOf('CLINICAL_READ_ONLY') - 200, server.indexOf('CLINICAL_READ_ONLY') + 60);
+  assert.doesNotMatch(readOnly, /AUTH_(EXPIRED|INVALID|MISSING|INACTIVE)/,
+    'CLINICAL_READ_ONLY must stay distinguishable from an auth failure');
+});
+
+test('the client treats an auth-coded 403 as session expiry', () => {
+  const html = fs.readFileSync(path.join(root, 'public', 'clinical.html'), 'utf8');
+  assert.match(html, /AUTH_MISSING'?,\s*'AUTH_EXPIRED'?,\s*'AUTH_INVALID'?,\s*'AUTH_INACTIVE'/,
+    'handleResponse must key on the auth codes — the server answers a bad JWT with 403, not 401');
+  assert.match(html, /isAuthFailure/);
+});
+
+test('an unknown EMR status is not painted as a failed one', () => {
+  const html = fs.readFileSync(path.join(root, 'public', 'clinical.html'), 'utf8');
+  assert.match(html, /emrStatus === null \? 'bg-stone-300'/,
+    'a status that has not answered yet must read neutral, not red');
+});

@@ -1807,16 +1807,26 @@ const authenticateToken = async (req, res, next) => {
   if (!token && req.query.token) {
     token = req.query.token;
   }
-  if (!token) return res.status(401).json({ error: 'Access denied' });
+  // AUTH_EXPIRED / AUTH_INVALID are the codes a client keys off to send the
+  // user back to the login screen. They must stay distinguishable from a
+  // PERMISSION 403 (a case manager attempting a write, say) — those users are
+  // signed in correctly and must never be logged out for asking.
+  if (!token) return res.status(401).json({ error: 'Access denied', code: 'AUTH_MISSING' });
   jwt.verify(token, JWT_SECRET, async (err, tokenUser) => {
-    if (err) return res.status(403).json({ error: 'Invalid token' });
+    if (err) {
+      const expired = err.name === 'TokenExpiredError';
+      return res.status(403).json({
+        error: expired ? 'Your session has expired. Please sign in again.' : 'Invalid token',
+        code: expired ? 'AUTH_EXPIRED' : 'AUTH_INVALID'
+      });
+    }
     try {
       // Fetch fresh user data from database to get current role and permissions
       const users = await getUsers();
       const freshUser = users.find(u => u.id === tokenUser.id);
-      if (!freshUser) return res.status(403).json({ error: 'User not found' });
+      if (!freshUser) return res.status(403).json({ error: 'User not found', code: 'AUTH_INVALID' });
       // Block inactive accounts
-      if (freshUser.accountStatus === 'inactive') return res.status(403).json({ error: 'Account is inactive. Please contact an administrator.' });
+      if (freshUser.accountStatus === 'inactive') return res.status(403).json({ error: 'Account is inactive. Please contact an administrator.', code: 'AUTH_INACTIVE' });
       // Use fresh data for all user properties to ensure permission changes take effect immediately
       // Determine if user is a manager (has limited admin access)
       const isManager = freshUser.isManager || false;
