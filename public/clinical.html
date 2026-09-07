@@ -263,13 +263,23 @@
       const Sec = ({ title, data, render, icon }) => (
         <div className="card mb-4">
           <div className="card-h"><h2><i className={`ti ${icon} mr-1 text-accent`} />{title}</h2>
-            {data && !data.ok && <span className="chip bg-red-50 text-red-700">EMR read failed</span>}
+            {/* A pending org-level read grant is a setup step, not a fault —
+                badge it differently so a real failure still stands out. */}
+            {data && !data.ok && data.permissionPending && <span className="chip bg-amber-50 text-amber-800">Not enabled yet</span>}
+            {data && !data.ok && !data.permissionPending && <span className="chip bg-red-50 text-red-700">EMR read failed</span>}
           </div>
           <div className="p-4 text-sm">
             {!chart.linked && <p className="text-stone-400 text-xs">Link this patient to OpenEMR to read live data.</p>}
             {chart.linked && data && data.ok && data.rows.length === 0 && <p className="text-stone-400 text-xs">Nothing on file in OpenEMR.</p>}
             {chart.linked && data && data.ok && data.rows.map((r, i) => render(r, i))}
-            {chart.linked && data && !data.ok && <p className="text-red-600 text-xs">{data.error}</p>}
+            {chart.linked && data && !data.ok && data.permissionPending && (
+              <p className="text-amber-800 text-xs">
+                OpenEMR has not granted this app org-level read access to {title.toLowerCase()} yet.
+                An administrator enables it under Administration → Access → the <code className="font-mono">gfc-app-api</code> group.
+                Nothing is wrong with this patient's record.
+              </p>
+            )}
+            {chart.linked && data && !data.ok && !data.permissionPending && <p className="text-red-600 text-xs">{data.error}</p>}
           </div>
         </div>
       );
@@ -1916,6 +1926,26 @@
             {emrStatus && emrStatus.connected && emrStatus.appointmentScopes === false && (
               <div className="bg-amber-50 border-b border-amber-200 px-4 lg:px-7 py-2 text-[12px] text-amber-900">
                 <b>Appointment OAuth client swap not deployed.</b> The token OpenEMR issued to this server carries no appointment scopes, so scheduling will 401. Swap <code className="font-mono">OPENEMR_CLIENT_ID</code>/<code className="font-mono">OPENEMR_CLIENT_SECRET</code> to the appointment-scoped client (enabled 2026-08-29), then stop and run the app.
+              </div>
+            )}
+            {/* 4.5 deploy diagnostics: the 8.4 / Phase 6B OAuth client swap.
+                A token carries only the scopes the DEPLOYED client was
+                registered with, and OpenEMR reports the shortfall as a narrower
+                token rather than an error — so the indicator above reads a
+                healthy green while every new route 401s "Unauthorized". Name the
+                shortfall here or nobody finds out until a write fails. */}
+            {emrStatus && emrStatus.connected && (emrStatus.billingRouteScopes === false || emrStatus.nativeWriteScopes === false) && (
+              <div className="bg-amber-50 border-b border-amber-200 px-4 lg:px-7 py-2 text-[12px] text-amber-900">
+                <b>OpenEMR client is out of date for 8.4.</b> The token this server holds carries{' '}
+                <b>{emrStatus.grantedScopeCount} of {emrStatus.requestedScopeCount}</b> scopes, so{' '}
+                {[emrStatus.billingRouteScopes === false && 'charges, orders and code search',
+                  emrStatus.nativeWriteScopes === false && 'prescription writes']
+                  .filter(Boolean).join(' and ')}{' '}
+                will fail with 401. Swap <code className="font-mono">OPENEMR_CLIENT_ID</code>/<code className="font-mono">OPENEMR_CLIENT_SECRET</code>{' '}
+                to the v4 client (54 scopes), then stop and run the app.
+                {(emrStatus.missingScopes || []).length > 0 && (
+                  <> Missing: <code className="font-mono">{emrStatus.missingScopes.join(', ')}</code>.</>
+                )}
               </div>
             )}
             {emrStatus && emrStatus.billingNpiConfigured === false && (

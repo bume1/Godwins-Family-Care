@@ -251,7 +251,16 @@ const OPENEMR = Object.freeze({
     // `user/procedure.write` is NOT defined on 8.4 — the 6B order route must
     // sit under `user/encounter.write` instead.
     'user/prescription.read', 'user/prescription.write', 'user/procedure.read',
-    'user/list.read', 'user/ValueSet.read', 'user/drug.read'
+    'user/list.read', 'user/ValueSet.read', 'user/drug.read',
+    // Phase 6B additions (docs/openemr-patches/8.4.0-p1). OpenEMR derives the
+    // required scope from the ROUTE PATH, so `POST .../encounter/{eid}/billing`
+    // demands `user/billing.c` — the patched routes are unreachable without
+    // these five, no matter which client is deployed. The v4 client
+    // "GFC Care Platform (server) v4" carries 54 scopes; a token is granted the
+    // INTERSECTION of what is requested here and what the client holds, so the
+    // deployed credential swap and this list are BOTH required.
+    'user/billing.read', 'user/billing.write',
+    'user/order.read', 'user/order.write', 'user/codes.read'
   ].join(' ')
 });
 

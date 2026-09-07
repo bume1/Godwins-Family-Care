@@ -6080,9 +6080,21 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
       emr.getEncounters(puuid), emr.getCarePlans(puuid), emr.getDocumentReferences(puuid),
       emr.getVitalObservations(puuid)
     ]);
-    const take = (r, mapFn) => r.status === 'fulfilled'
-      ? { ok: true, rows: r.value.map(mapFn) }
-      : { ok: false, error: r.reason && r.reason.message };
+    // A 403 here is not a failure of this app — it is the org-level FHIR read
+    // grant that is still pending on the EMR (DocumentReference and Coverage,
+    // Phase 8.6). Flag it separately so the chart can say "not available yet"
+    // instead of showing a red "EMR read failed" that sends a clinician
+    // looking for a bug we did not write. Every other failure stays an error.
+    const take = (r, mapFn) => {
+      if (r.status === 'fulfilled') return { ok: true, rows: r.value.map(mapFn) };
+      const status = r.reason && r.reason.status;
+      return {
+        ok: false,
+        status: status || null,
+        permissionPending: status === 403,
+        error: r.reason && r.reason.message
+      };
+    };
     res.json({
       demographics, intakePrefill, linked: true,
       emr: {
