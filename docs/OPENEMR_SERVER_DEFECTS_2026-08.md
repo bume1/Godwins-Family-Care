@@ -482,3 +482,26 @@ r.forEach((x,i)=>console.log(["DocumentReference","Practitioner"][i], x.status==
 Today it prints `DocumentReference 403` / `Practitioner 200 OK`. Both 200 means the grant landed.
 
 Regenerate §8.6 with the corrected list when the guide is next revised.
+
+### ✅ Phase 8.6 org-level read grant — CLOSED 2026-09-08 (owner action)
+
+The owner widened the `gfc-app-api` ACL group. Verified live immediately after, on the same
+credentials that were returning 403 an hour earlier:
+
+| Resource | Before | After |
+|---|---|---|
+| FHIR `DocumentReference` | 403 ACL | **200** |
+| FHIR `Coverage` | 403 ACL | **200** |
+| FHIR `Encounter/{id}` | 403 org-policy ACL | **400** (bad id — the ACL layer is cleared) |
+| FHIR `Practitioner` | 200 | 200 (1 row) |
+| FHIR `Condition` | 200 | 200 (3 rows) |
+
+The red "EMR read failed" banner on the chart's Documents card is resolved at the source. The
+`permissionPending` presentation added in this branch stays in place: it costs nothing now and
+correctly distinguishes a future permission gap from a genuine fault.
+
+**Still open, and unrelated to the ACL:** the deployed `OPENEMR_CLIENT_ID` is *still* the August
+v2 client (42 granted scopes, not 54). The owner reported the secrets as "correct" — they are
+valid credentials, which is exactly the failure mode: OpenEMR issues a working token for the old
+client without complaint, so a check that only asks "are these valid?" passes. The values must be
+**replaced** with the v4 client's, not verified.
