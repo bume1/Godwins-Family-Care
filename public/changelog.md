@@ -4,6 +4,30 @@
 
 ---
 
+### Version 3.7.3 - September 6, 2026
+
+#### Bug Fixes
+- 6B patch: fix diagnosis pointers, record acceptance results
+
+#### Documentation
+- Session 4.5 prompt — native 8.4 writes + 6B routes, workarounds retired
+- Release Runway rev 2 — narrowed to the app track, corrected scope-vs-ACL diagnosis
+- record Phase 6B as built and installed in the running status
+- release runway — add A4, the four ACL grants blocking the new routes
+- backfill Session 4.3 merge (PR #31) into CLAUDE.md and session plan
+
+#### Changes
+- 6B acceptance passes 17/17 -- Gap 1 closed
+- 6B patch: stop the diagnosis loop clobbering the billed CPT
+- 6B patch: register the standard-API scopes the routes need (the real 401 cause)
+- Phase 6B acceptance: routes live and correctly guarded, blocked on one ACL grant
+- 6B patch: replace the route diff with a route-map wrapper (fixes build failure)
+- 6B patch: wire the build into compose so a monthly pull cannot revert it
+- OpenEMR 8.4 Phase 6B: bounded route patch for fee-sheet charges and orders
+- OpenEMR 8.4 preflight results (v3 client): vitals, prescription, encounter PUT, provider reads verified
+- OpenEMR 8.4: register v3 OAuth client scopes, file Master Setup Guide v4, record upgrade findings
+
+
 ### Version 3.7.2 - September 6, 2026
 
 #### Documentation
