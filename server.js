@@ -6984,7 +6984,10 @@ const loadEncounterSideRecords = async (encounterUuid) => {
 // is surfaced as a warning and stored on the record for a retry.
 const syncStructuredNote = async (emr, client, record) => {
   const side = await loadEncounterSideRecords(record.encounterUuid);
-  const note = clinicalRepo.buildStructuredNote({ record, ...side });
+  // 4.5: only the attestation and addenda go in the note now. Coding, orders
+  // and prescriptions are native OpenEMR records — passing them here would
+  // recreate the duplicate this session removed.
+  const note = clinicalRepo.buildStructuredNote({ attestation: side.attestation, addenda: side.addenda });
   try {
     if (record.structuredNoteSid) {
       await emr.updateSoapNote(client.openEmrPatientId, record.encounterUuid, record.structuredNoteSid, note);

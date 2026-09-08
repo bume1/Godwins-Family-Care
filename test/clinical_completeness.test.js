@@ -249,36 +249,36 @@ test('T2: usage ranking is per clinician (never global), most used then most rec
 });
 
 // ---- 7. Structured note round-trip ----
-test('the GFC structured note renders every record and parses back losslessly', () => {
+test('the structured note is the sign-and-close record only (4.5)', () => {
+  // 4.5 retired [GFC CODING], [GFC ORDERS] and [GFC RX]: on 8.4 all three are
+  // native OpenEMR records, and a second copy in a note is a second record
+  // that can disagree. ATTESTATION and ADDENDA stay, because OpenEMR has no
+  // encounter sign/close concept at all — the note IS the attestation record.
   const coded = R.applyCoding(baseRecord(), { diagnoses: DX, services: SVC }, FNP, BILLING_NPI).record;
-  const dx = coded.diagnoses;
-  const rx = R.buildPrescription({ id: 'rx-1', clientId: 'c', puuid: 'p', encounterUuid: 'enc-uuid', input: { drug: 'Metformin', dose: '500 mg', route: 'oral', frequency: 'BID', quantity: 60, refills: 3, date: '2026-09-04' }, actor: FNP }).prescription;
-  const order = R.buildOrder({ id: 'o-1', clientId: 'c', puuid: 'p', encounterUuid: 'enc-uuid', input: { orderType: 'lab', tests: ['A1c', 'BMP'], diagnosisCodes: ['E11.9'] }, actor: FNP, encounterDiagnoses: dx, at: '2026-09-04T10:00:00.000Z' }).order;
-  const open = R.buildStructuredNote({ record: coded, prescriptions: [rx], orders: [order], attestation: null, addenda: [] });
+  const open = R.buildStructuredNote({ attestation: null, addenda: [] });
   assert.match(open.plan, /Encounter OPEN/);
   const att = R.buildAttestation({ id: 'att-1', record: coded, actor: FNP, at: '2026-09-04T12:00:00.000Z', billingNpi: BILLING_NPI });
   const add = R.buildAddendum({ id: 'a-1', encounterUuid: 'enc-uuid', clientId: 'c', text: 'Line one\nLine two', actor: RN, at: '2026-09-05T09:00:00.000Z' }).addendum;
-  const note = R.buildStructuredNote({ record: coded, prescriptions: [rx], orders: [order], attestation: att, addenda: [add] });
+  const note = R.buildStructuredNote({ attestation: att, addenda: [add] });
+  // OpenEMR's SOAP validator needs >= 2 chars per section it receives.
   for (const k of ['subjective', 'objective', 'assessment', 'plan']) assert.ok(note[k].length >= 2);
+
   const parsed = R.parseGfcBlocks([note.objective, note.assessment, note.plan].join('\n\n'));
-  assert.deepEqual(Object.keys(parsed).sort(), ['ADDENDA', 'ATTESTATION', 'CODING', 'ORDERS', 'RX']);
-  const coding = parsed.CODING.records;
-  assert.deepEqual(coding.find(r => r.key === 'status').parts, ['coded']);
-  assert.deepEqual(coding.find(r => r.key === 'billing_provider_npi').parts, [BILLING_NPI]);
-  assert.deepEqual(coding.find(r => r.key === 'rendering_provider').parts, ['Bethel Godwins', 'NPI 1234567893']);
-  assert.deepEqual(coding.filter(r => r.key === 'dx').map(r => r.parts[1]), ['E11.9', 'I10']);
-  assert.deepEqual(coding.filter(r => r.key === 'svc').map(r => r.parts), [['99348', 'CPT4', 'units 1', 'dx E11.9,I10', 'mod none']]);
-  assert.deepEqual(parsed.RX.records[0].parts.slice(0, 5), ['new', 'Metformin', '500 mg', 'oral', 'BID']);
-  assert.equal(parsed.RX.records[0].parts.at(-1), 'record only, not transmitted');
-  assert.deepEqual(parsed.ORDERS.records[0].parts.slice(0, 6), ['o-1', 'lab', 'routine', 'A1c; BMP', 'dx E11.9', 'status ordered']);
+  assert.deepEqual(Object.keys(parsed).sort(), ['ADDENDA', 'ATTESTATION'],
+    'only the two blocks that have no native OpenEMR home may remain');
   assert.deepEqual(parsed.ATTESTATION.records.find(r => r.key === 'signed_by').parts, ['Bethel Godwins', 'NPI 1234567893']);
   assert.deepEqual(parsed.ATTESTATION.records.find(r => r.key === 'signed_at').parts, ['2026-09-04T12:00:00.000Z']);
   assert.deepEqual(parsed.ADDENDA.records[0].parts, ['a-1', '2026-09-05T09:00:00.000Z', 'Test Nurse', 'NPI none']);
   assert.equal(parsed.ADDENDA.records[0].text, 'Line one\nLine two');
-  // a stray "|" in free text never breaks the column grammar
-  const weird = R.applyCoding(baseRecord(), { diagnoses: [{ code: 'I10', description: 'HTN | stage 2' }], services: [{ code: '99347', dxLinks: ['I10'] }] }, FNP, BILLING_NPI).record;
-  assert.deepEqual(R.parseGfcBlocks(R.renderCodingBlock(weird)).CODING.records.find(r => r.key === 'dx').parts, ['1', 'I10', 'HTN/stage 2', 'primary']);
+
+  const whole = JSON.stringify(note);
+  for (const gone of ['[GFC CODING', '[GFC RX', '[GFC ORDERS']) {
+    assert.ok(!whole.includes(gone), `${gone}] must not be regenerated — OpenEMR owns it now`);
+  }
+  // The note must not still claim 7.0.4 cannot do these writes.
+  assert.doesNotMatch(note.subjective, /7\.0\.4/);
 });
+
 
 // ---- 6b. T1 fallback: codes the EMR read-back drops come from prior encounters ----
 test('T1 merge: uncoded OpenEMR problems regain their code via the app\'s prior encounter records; other prior codes are offered unchecked', () => {
