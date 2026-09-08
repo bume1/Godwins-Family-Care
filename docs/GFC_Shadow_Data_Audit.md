@@ -17,8 +17,8 @@ nowhere in OpenEMR. Five of them are new, found by writing to the live server an
 rather than by reading code. Three are silent: the app reports success and nothing lands.
 
 **Four were fixed at the owner's direction in the same PR as this audit** and re-proven live
-(`scripts/verify_shadow_data_fixes.js`, stored values only). **Three are now fully closed**; G5 is
-mitigated and carries a genuine instance dependency (the empty drug option lists). **Nine remain
+(`scripts/verify_shadow_data_fixes.js`, stored values only). **Four are now fully closed**; G5 is
+mitigated and carries a genuine instance dependency (the empty option lists). **Eight remain
 open.**
 
 | # | Gap | Severity | New? | Status after this PR |
@@ -26,7 +26,7 @@ open.**
 | G1 | The care plan, all versions, both signatures | **Critical** | | Open, blocked on G2 |
 | G2 | No document the app files is retrievable from OpenEMR | **Critical** | **New** | Open, server-side |
 | G3 | Every order files with no test name and no diagnosis | **Critical** | **New** | **✅ Closed** — dx link and test name both store |
-| G4 | Allergies are never written to OpenEMR at all | **Critical** | **New** | Open |
+| G4 | Allergies are never written to OpenEMR at all | **Critical** | **New** | **✅ Closed** — plus two further defects it was hiding |
 | G5 | Prescription route, frequency and date are dropped | High | **New** | **Mitigated** — date fixed; route and frequency now reach the note, structured fields blocked on empty option lists |
 | G6 | Prescriptions carry no link to the encounter | Medium | **New** | **✅ Closed** |
 | G7 | The encounter's provider is a config constant, not the clinician | High | **New** | **✅ Closed** |
@@ -231,9 +231,31 @@ the app.
 An allergy list is not optional clinical content. A chart that prescribes without one is a patient
 safety problem before it is a records problem.
 
-**What closes it:** wire the H&P allergy capture to `addAllergy`, the way the problem list is
-already wired. **Not in 4.5's scope.** This has been open since 4.1 and nobody noticed because the
-method existed.
+**✅ CLOSED 2026-09-08 — and wiring it up exposed two more defects underneath.**
+
+`POST /api/clinical/patients/:clientId/allergies` now writes an allergy to the chart, modelled on
+the problem-list route. Building it surfaced two things no amount of code reading would have found,
+because the method had never once been called against 8.4:
+
+1. **The write could not have worked anyway.** `addAllergy` ran `begdate` through `toEmrDatetime`,
+   per a 7.0.4-era note. The 8.4 allergy route **rejects** `"2026-09-08 00:00:00"` with
+   `begdate must be a valid date` while **storing** the value back in exactly that format. The
+   shape it emits is not the shape it accepts.
+2. **The refusal was silent.** It answers **HTTP 200** with a `validationErrors` map and
+   `data: []`, which `unwrapApi` turns into an empty array, so nothing threw. The fourth instance
+   of this same trap, after the soap_note write, the encounter PUT, and the document upload.
+
+3. **Every allergy already in the chart displayed as "Unknown".** A free-text allergen comes back
+   from FHIR with `code` set to the data-absent-reason "Unknown" and the real allergen only in the
+   narrative `text.div`. `summarizeAllergy` read `code`, so the clinician's allergy panel showed
+   "Unknown" for all four rows on the test patient. That one was user-visible and had been live
+   since 4.1.
+
+Now: plain-date `begdate`, the body checked rather than the status code, and the allergen resolved
+from the narrative when it is uncoded. Severity and reaction ride in the comment because OpenEMR's
+`severity_ale` and `reaction` option lists are **also empty** on this instance (0 rows, verified
+live) — the same instance data gap as `drug_route`. Proven live, 7/7, and folded into
+`scripts/verify_shadow_data_fixes.js`.
 
 ### G5 — Prescription route, frequency and date are dropped. High. New.
 
@@ -501,7 +523,8 @@ Judged by what each unlocks, not by effort.
 2. ~~**G3 and G7**~~ and ~~**G5 and G6**~~ — **done 2026-09-08**, in this PR. Only G5's structured
    route and frequency are still owed, and that is the instance seeding `drug_route` and
    `drug_interval`, not a code change.
-3. **G4, allergies.** Small, and a patient safety issue rather than only a records issue.
+3. ~~**G4, allergies.**~~ **done 2026-09-08** — and it was hiding a dead write path, a fourth silent
+   HTTP-200 failure, and a chart that showed every allergy as "Unknown".
 4. **G13, attribution.** Session 5. Nothing else on this list matters as much for defensibility, and
    nothing else takes as long.
 5. **G10, G11, G12**, the remaining clinical content. Cheap individually, none of them urgent.

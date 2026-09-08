@@ -414,3 +414,38 @@ test('G7: the encounter provider is the acting clinician, not a config constant'
   assert.match(line, /actor\s*&&\s*actor\.openEmrProviderId/,
     'the encounter provider must come from the acting clinician; a bare config default puts the wrong provider on every claim');
 });
+
+test('G4: an uncoded allergy renders as its allergen, never "Unknown"', () => {
+  // OpenEMR returns a free-text allergen with code = the data-absent-reason
+  // "Unknown" and the real name only in the narrative text.div. Reading `code`
+  // alone made every allergy in the chart read "Unknown". Shape taken verbatim
+  // from a live FHIR read 2026-09-08.
+  const live = {
+    id: 'a2b34c0a',
+    text: { status: 'additional', div: "<div xmlns='http://www.w3.org/1999/xhtml'>Penicillin</div>" },
+    clinicalStatus: { coding: [{ code: 'active', display: 'Active' }] },
+    code: { coding: [{ system: 'http://terminology.hl7.org/CodeSystem/data-absent-reason', code: 'unknown', display: 'Unknown' }] }
+  };
+  assert.equal(R.summarizeAllergy(live).title, 'Penicillin');
+  assert.notEqual(R.summarizeAllergy(live).title, 'Unknown');
+
+  // A properly coded allergen still wins over the narrative.
+  const coded = { ...live, code: { text: 'Amoxicillin', coding: [{ system: 'http://www.nlm.nih.gov/research/umls/rxnorm', code: '723' }] } };
+  assert.equal(R.summarizeAllergy(coded).title, 'Amoxicillin');
+
+  // Nothing at all is still not a crash and still not a blank row.
+  assert.equal(R.summarizeAllergy({ id: 'x' }).title, 'Unspecified allergy');
+});
+
+test('G4: the allergy write sends a plain date and refuses a silent no-op', () => {
+  // Two live findings pinned at the source. The allergy route rejects
+  // "YYYY-MM-DD 00:00:00" as an invalid date while STORING it back as one, and
+  // it reports that refusal as HTTP 200 with a validationErrors map, so a write
+  // that lands nothing looks identical to one that succeeds.
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'openemr.js'), 'utf8');
+  const fn = src.slice(src.indexOf('async addAllergy('), src.indexOf('async addAllergy(') + 1400);
+  assert.ok(!/toEmrDatetime\(\s*allergy\.begdate/.test(fn),
+    'begdate must NOT go through toEmrDatetime — the allergy route rejects a datetime');
+  assert.match(fn, /slice\(0,\s*10\)/, 'begdate must be trimmed to a plain date');
+  assert.match(fn, /validationErrors/, 'the allergy write must check the body, not the status code');
+});

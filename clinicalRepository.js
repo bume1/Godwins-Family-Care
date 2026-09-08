@@ -182,9 +182,24 @@ const summarizeCondition = (r) => ({
   status: codeableText(r.clinicalStatus) || 'unknown',
   onset: r.onsetDateTime || null
 });
+// An allergen entered as free text (which is every allergy this practice
+// records, since OpenEMR has no RxNorm allergen picker configured) comes back
+// from FHIR with `code` set to the data-absent-reason "Unknown" and the actual
+// allergen ONLY in the narrative `text.div`. Reading `code` alone rendered
+// every allergy in the chart as "Unknown" — including the ones that were there
+// before this session. Verified live 2026-09-08 on all four rows.
+const NARRATIVE_ABSENT = /data-absent-reason/;
+const narrativeText = (r) => String(((r && r.text) || {}).div || '')
+  .replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+const allergenName = (r) => {
+  const coded = codeableText(r && r.code);
+  const absent = ((((r && r.code) || {}).coding || [])[0] || {}).system || '';
+  if (coded && !NARRATIVE_ABSENT.test(absent)) return coded;
+  return narrativeText(r) || coded || 'Unspecified allergy';
+};
 const summarizeAllergy = (r) => ({
   id: r.id,
-  title: codeableText(r.code),
+  title: allergenName(r),
   criticality: r.criticality || null,
   status: codeableText(r.clinicalStatus) || 'active'
 });

@@ -435,9 +435,33 @@ const forActor = (actor) => {
       return apiWrite('PUT', `patient/${pid}/medication/${encodeURIComponent(medUuid)}`,
         { ...med, begdate: toEmrDatetime(med.begdate), enddate: toEmrDatetime(med.enddate) }, 'medication', puuid);
     },
+    // BEGDATE IS A PLAIN DATE HERE, not a datetime. This route rejects
+    // "YYYY-MM-DD 00:00:00" with `begdate must be a valid date` while storing
+    // the value back as a datetime, so the shape it emits is not the shape it
+    // accepts. The old code ran begdate through toEmrDatetime (per a 7.0.4-era
+    // note) and every allergy write was refused.
+    //
+    // And it was refused SILENTLY: the route answers HTTP 200 with a
+    // validationErrors map and `data: []`, which unwrapApi turns into an empty
+    // array and nothing throws. Same trap as the soap_note and encounter PUT
+    // writes, so this checks the body rather than the status code.
+    // Verified live 2026-09-08: datetime refused, plain date accepted and
+    // readable back as FHIR AllergyIntolerance.
     async addAllergy(puuid, allergy) {
-      return apiWrite('POST', `patient/${encodeURIComponent(puuid)}/allergy`,
-        { ...allergy, begdate: toEmrDatetime(allergy.begdate) }, 'allergy', puuid);
+      const body = { ...allergy };
+      if (body.begdate) body.begdate = String(body.begdate).slice(0, 10);
+      const res = await rawRequest({ method: 'POST', url: apiUrl(`patient/${encodeURIComponent(puuid)}/allergy`), body });
+      const data = expectOk(res, 'write allergy');
+      const invalid = data && data.validationErrors;
+      if (invalid && (Array.isArray(invalid) ? invalid.length : Object.keys(invalid).length)) {
+        throw new OpenEmrError(`OpenEMR rejected the allergy: ${JSON.stringify(invalid)}`, 422, data);
+      }
+      const row = unwrapApi(data);
+      if (!row || (Array.isArray(row) && !row.length)) {
+        throw new OpenEmrError('OpenEMR accepted the allergy request but wrote no row', 422, data);
+      }
+      logEmrAccess(actor, 'write', 'allergy', puuid, {});
+      return row;
     },
 
     // ---- Appointments (Session 4.2) ----

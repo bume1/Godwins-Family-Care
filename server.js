@@ -6422,6 +6422,49 @@ app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requir
   }
 });
 
+// POST /api/clinical/patients/:clientId/allergies — allergy → OpenEMR
+// AllergyIntolerance (the `lists` allergy rows).
+//
+// This route did not exist. `openemr.addAllergy()` was written in 4.1, unit
+// tested, and never called from anywhere, so an allergy a clinician learned
+// about reached the chart only if someone retyped it in OpenEMR by hand. An
+// allergy list is patient safety before it is paperwork, and prescribing
+// against a chart that has none is the risk that matters. Shadow-data audit
+// G4, 2026-09-08.
+app.post('/api/clinical/patients/:clientId/allergies', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    if (!client.openEmrPatientId) return res.status(409).json({ error: 'Link this client to an OpenEMR patient first', code: 'EMR_NOT_LINKED' });
+    const { allergen, reaction, severity, onsetDate, comments } = req.body || {};
+    const title = String(allergen || '').trim();
+    if (!title) return res.status(400).json({ error: 'The allergen is required', code: 'ALLERGY_NO_ALLERGEN' });
+    // OpenEMR's severity_ale and reaction option lists are EMPTY on this
+    // instance (0 rows, verified live), so neither can resolve to an id and
+    // both would be dropped. They are clinical content, so they ride in the
+    // comment, which does persist — the same belt-and-braces the prescription
+    // sig uses while drug_route is unseeded.
+    const detail = [
+      reaction ? `Reaction: ${String(reaction).trim()}` : null,
+      severity ? `Severity: ${String(severity).trim()}` : null,
+      String(comments || '').trim() || null,
+      `Recorded by ${clinicalRepo.actorStamp(actorFromReq(req))} via the GFC Care Platform`
+    ].filter(Boolean).join('. ');
+    const allergy = {
+      title: title.slice(0, 250),
+      begdate: /^\d{4}-\d{2}-\d{2}$/.test(String(onsetDate || '')) ? onsetDate : new Date().toISOString().slice(0, 10),
+      comments: detail.slice(0, 2000)
+    };
+    const row = await openemr.forActor(req.user).addAllergy(client.openEmrPatientId, allergy);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'allergy_added', 'client', client.id,
+      { allergen: allergy.title, reaction: reaction || null, severity: severity || null, emrAllergyId: (row && (row.uuid || row.id)) || null });
+    res.json({ message: 'Allergy added to the chart', allergy: row });
+  } catch (error) {
+    console.error('Clinical allergy add error:', error);
+    res.status(502).json({ error: `Allergy could not be added: ${error.message}` });
+  }
+});
+
 // ── Clinical enrollment sequence (v2 §6 — Scope E) ──────────────────────
 // Per-patient checklist driving IHPC activation. Derived steps compute from
 // the record; manual steps (payer verification, NPA confirmation) are

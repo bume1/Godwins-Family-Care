@@ -10,6 +10,7 @@
 //   G5 — the prescription carries a date, and route + frequency reach the chart
 //   G6 — the prescription is linked to its encounter
 //   G7 — the encounter names the acting clinician, not the config default
+//   G4 — an allergy reaches the chart at all, and reads back as its allergen
 //
 // TEST DATA only — it writes one encounter, one order and one prescription to
 // the TEST patient.
@@ -17,7 +18,7 @@
 //   OPENEMR_BASE_URL=… OPENEMR_CLIENT_ID=… OPENEMR_CLIENT_SECRET=… \
 //   OPENEMR_API_USERNAME=… OPENEMR_API_PASSWORD=… node scripts/verify_shadow_data_fixes.js
 //
-// Result on 2026-09-08 against the live instance: 16/16.
+// Result on 2026-09-08 against the live instance: 23/23.
 const o = require('../openemr.js');
 const R = require('../clinicalRepository.js');
 const U = 'a284d5c2-670e-4a62-aa95-2d1aa629003c'; // TEST PatientOne
@@ -92,6 +93,32 @@ const ok = (c, l, x) => { c ? (pass++, console.log('  PASS  ' + l)) : (fail++, c
   ok(/once daily/i.test(rxBack.note || ''), 'G5 frequency reached the chart (note, while drug_interval is unseeded)', { note: rxBack.note });
   ok(/NPI 1902310568/.test(rxBack.note || ''), 'G5 prescriber stamp survived', { note: rxBack.note });
   ok(String(rxBack.euuid || '') === String(euuid), 'G6 STORED prescription is linked to its encounter', { got: rxBack.euuid, want: euuid });
+
+  // ---- G4: allergies -------------------------------------------------------
+  // `addAllergy` existed since 4.1 and was called from nowhere, so the chart
+  // carried only what someone typed into OpenEMR by hand. It also could not
+  // have worked: the route rejects a datetime begdate and reports the refusal
+  // as HTTP 200 with an empty data array.
+  const allergyTag = 'ALLERGY-' + Date.now();
+  const beforeAllergies = (await e.getAllergies(U)).length;
+  const allergyRow = await e.addAllergy(U, {
+    title: `Penicillin ${allergyTag}`, begdate: today,
+    comments: 'Reaction: hives. Severity: moderate. Recorded via the GFC Care Platform'
+  });
+  ok(!!(allergyRow && (allergyRow.uuid || allergyRow.id)), 'G4 allergy write returns a real row', allergyRow);
+  const allergies = await e.getAllergies(U);
+  ok(allergies.length === beforeAllergies + 1, 'G4 STORED: the allergy count grew by one',
+    { before: beforeAllergies, after: allergies.length });
+  const savedAllergy = allergies.find(a => JSON.stringify(a).includes(allergyTag));
+  ok(!!savedAllergy, 'G4 the allergy reads back as FHIR AllergyIntolerance');
+  ok(R.summarizeAllergy(savedAllergy).title.includes('Penicillin'),
+    'G4 the chart shows the allergen, not "Unknown"', savedAllergy && R.summarizeAllergy(savedAllergy));
+  ok(!allergies.map(a => R.summarizeAllergy(a).title).includes('Unknown'),
+    'G4 no allergy on this patient renders as "Unknown"', allergies.map(a => R.summarizeAllergy(a).title));
+  let allergyThrew = false;
+  try { await e.addAllergy(U, { title: `ShouldFail ${allergyTag}`, begdate: 'not-a-date' }); }
+  catch { allergyThrew = true; }
+  ok(allergyThrew, 'G4 an invalid allergy write throws instead of silently writing nothing');
 
   console.log(`\n${pass}/${pass + fail} passed${fail ? ` — ${fail} FAILED` : ''}`);
   console.log(`encounter ${euuid} (TEST DATA, tagged ${TAG})`);

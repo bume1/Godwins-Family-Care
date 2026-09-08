@@ -747,3 +747,37 @@ defect is isolated to `code_text` handling in the order controller and nothing e
 clinician. Encounters created before it carry the configured default (provider 1) and do not match
 the rendering provider on their own charges. These are all TEST DATA, so no correction is needed;
 worth knowing when reading older rows.
+
+
+---
+
+## Allergy route findings (2026-09-08) — instance data gap, plus a shape quirk
+
+Found while wiring the allergy write (shadow-data audit G4). Neither is a defect in the
+installation; both change what the app must send.
+
+### The allergy route rejects the datetime it stores
+
+`POST /apis/default/api/patient/{pUUID}/allergy` refuses `begdate: "2026-09-08 00:00:00"` with
+`{"begdate":{"DateTime::INVALID_VALUE":"begdate must be a valid date"}}` and accepts
+`begdate: "2026-09-08"`. The stored row then reads back as `"2026-09-08 00:00:00"`. So the format it
+emits is not the format it accepts. The app now sends a plain date.
+
+Worth noting for the maintainer only because the refusal arrives as **HTTP 200** with a
+`validationErrors` map and `data: []`. Every caller must check the body.
+
+### Data gap — the allergy option lists are empty
+
+`api/list/severity_ale` and `api/list/reaction` both return **0 rows**, the same as `drug_route` and
+`drug_interval`. So an allergy's severity and reaction cannot be stored structurally. The app writes
+both into the allergy's free-text comment meanwhile.
+
+**Action:** seed `severity_ale` and `reaction` alongside the drug lists and the ICD-10 load.
+
+### Free-text allergens carry the name only in the narrative
+
+A FHIR `AllergyIntolerance` for a free-text allergen returns
+`code.coding[0].system = ".../data-absent-reason"`, `code = "unknown"`, with the real allergen in
+`text.div`. Any consumer reading `code` alone displays "Unknown". Not a defect — it is correct FHIR
+for an uncoded allergen — but it is why the app's chart showed "Unknown" for every allergy until
+2026-09-08. Seeding an RxNorm allergen list in OpenEMR would make these properly coded.
