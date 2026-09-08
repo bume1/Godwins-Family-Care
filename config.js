@@ -225,6 +225,11 @@ const OPENEMR = Object.freeze({
   ENCOUNTER_CATEGORY: process.env.OPENEMR_ENCOUNTER_CATEGORY || '5',
   POS_CODE: process.env.OPENEMR_POS_CODE || '12',
   PROVIDER_ID: process.env.OPENEMR_PROVIDER_ID || '1',
+  // 8.4 requires `user` and `group` in the encounter PUT body. Without them it
+  // answers HTTP 200 with a validationErrors map and writes nothing (verified
+  // live 2026-09-06). `group` is OpenEMR's authorisation group name, which is
+  // "Default" on a single-facility install.
+  ENCOUNTER_GROUP: process.env.OPENEMR_ENCOUNTER_GROUP || 'Default',
   // Least-privilege scope set for 4.1/4.2: FHIR reads + Patient.write for the
   // link/create step, standard-API writes for H&P, med-rec, problems, docs,
   // and (4.2) appointments. The registered OAuth client must carry every scope

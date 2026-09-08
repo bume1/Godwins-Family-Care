@@ -1,5 +1,5 @@
 # GFC Care Platform — running status
-_Last updated: 2026-09-06_
+_Last updated: 2026-09-08_
 
 This file is auto-loaded at the start of every Claude Code session. Read it first for current state. Details live in `docs/`.
 
@@ -46,7 +46,7 @@ This file is auto-loaded at the start of every Claude Code session. Read it firs
 | 4.2 | Clinician scheduling (OpenEMR-tied) | ✅ Done | #22 |
 | 4.4 | Clinical completeness P0 (coding · orders · Rx · sign-and-close · billing route) | ✅ Done | #29 |
 | 4.3 | Patient portal clinical read (+ POA acting gates · case-manager scoped read) | ✅ Done (live EMR preflight still owed) | #31 |
-| 4.5 | Native 8.4 writes · Phase 6B routes · retire workarounds | ⛔ **Blocked at preflight** — deployed OAuth client is still the August v2 (42 scopes, not 54) | — (pending) |
+| 4.5 | Native 8.4 writes · Phase 6B routes · retire workarounds | 🟡 **Preflight 18/18 PASS 2026-09-08** — build in progress. Blockers cleared: ACL grant done, v4 client confirmed deployed | #41 (preflight + defect fixes only) |
 | 5 | Clinical HIPAA go-live (+ OpenEMR auth migration to authorization_code) | ⬜ Planned | — |
 | 6 | Caregiver app (mobile, tier-branched visit log) | ⬜ Planned | — |
 | 7 | Scheduling · availability · time tracking (PHCP) | ⬜ Planned | — |
