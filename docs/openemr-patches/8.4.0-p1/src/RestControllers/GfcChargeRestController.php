@@ -395,12 +395,26 @@ class GfcChargeRestController
 
     /**
      * GET /api/codes?type=ICD10&search=…
-     * Search the loaded code tables. Removes the app's last coding workaround —
-     * until the ICD-10-CM load runs this returns an empty list, which is the
-     * correct answer for an empty table.
+     *
+     * Searches through OpenEMR's own main_code_set_search(), which is what the
+     * Fee Sheet itself calls (interface/forms/fee_sheet/new.php). That matters:
+     * an earlier version of this method ran its own
+     * `FROM codes c JOIN code_types ct` query, which reads ONLY the manually
+     * entered `codes` table. OpenEMR's External Data Loads writes ICD-10 into a
+     * separate external table (icd10_dx_order_code), so that query returned an
+     * empty list whether or not the code set had been loaded — and the empty
+     * list was read as "the load has not run" when in fact it had. A search
+     * result can never be evidence about a load; only a resolved code is.
+     *
+     * Deferring to main_code_set_search() also means every external code set
+     * OpenEMR supports works here for free, and the query keeps working when
+     * upstream changes the table layout.
      */
     public function searchCodes(array $query): ProcessingResult
     {
+        require_once(__DIR__ . '/../../custom/code_types.inc.php');
+        global $code_types;
+
         $result = new ProcessingResult();
         $search = trim((string)($query['search'] ?? ''));
         if (strlen($search) < 2) {
@@ -412,27 +426,66 @@ class GfcChargeRestController
             $limit = 25;
         }
 
-        $params = [];
-        $typeClause = '';
+        // Resolve the code type(s) to search. An unknown type is rejected here
+        // rather than passed through: code_set_search() calls HelpfulDie() when
+        // a type maps to an external table that is not installed, which would
+        // take down the request instead of returning an error.
         $type = strtoupper(trim((string)($query['type'] ?? '')));
         if ($type !== '') {
-            $typeClause = " AND ct.ct_key = ? ";
-            $params[] = $type;
+            if (empty($code_types[$type]) || empty($code_types[$type]['active'])) {
+                $result->setValidationMessages(['type' => [
+                    'Unknown or inactive code type. Active types: '
+                    . implode(', ', collect_codetypes('active', 'array'))
+                ]]);
+                return $result;
+            }
+            $searchTypes = $type;
+        } else {
+            // No type given: the diagnosis and procedure sets, which are the
+            // only ones this route exists to serve. Deliberately NOT every
+            // active type — multiple_code_set_search() UNIONs one subquery per
+            // type, and code_set_search() adds an extra column for valueset
+            // tables, so a mixed set can produce a UNION with mismatched
+            // columns. Both callers pass an explicit type anyway.
+            $searchTypes = array_values(array_unique(array_merge(
+                collect_codetypes('diagnosis', 'array'),
+                collect_codetypes('procedure', 'array')
+            )));
+            if (empty($searchTypes)) {
+                $result->setData([]);
+                return $result;
+            }
         }
-
-        $like = '%' . $search . '%';
-        $sql = "SELECT c.code, c.code_text, ct.ct_key AS code_type, c.modifier, c.active "
-            . "FROM codes c JOIN code_types ct ON ct.ct_id = c.code_type "
-            . "WHERE c.active = 1 AND (c.code LIKE ? OR c.code_text LIKE ?) " . $typeClause
-            . "ORDER BY (c.code = ?) DESC, c.code LIMIT " . $limit;
-        array_unshift($params, $like, $like);
-        $params[] = $search;
 
         $rows = [];
-        $statement = sqlStatement($sql, $params);
-        while ($row = sqlFetchArray($statement)) {
-            $rows[] = $row;
+        $res = main_code_set_search($searchTypes, $search, $limit);
+        if (!empty($res)) {
+            while ($row = sqlFetchArray($res)) {
+                // An external code with no row in `codes` has NULL modifier and
+                // NULL active — that is a code the practice has never edited,
+                // not an inactive one, so it normalises to an active code with
+                // no modifier. code_type_name is the ct_key string ('ICD10'),
+                // which is what this route has always returned as code_type.
+                $rows[] = [
+                    'code' => $row['code'],
+                    'code_text' => $row['code_text'] ?? '',
+                    'code_type' => $row['code_type_name'] ?? $type,
+                    'modifier' => $row['modifier'] ?? '',
+                    'active' => isset($row['active']) ? (int)$row['active'] : 1,
+                ];
+            }
         }
+
+        // Float an exact code match to the top, as the previous hand-written
+        // ORDER BY did. main_code_set_search() has its own ordering, so this is
+        // applied after the fetch rather than in the query.
+        $needle = strtoupper($search);
+        usort($rows, static function ($a, $b) use ($needle) {
+            $ax = strtoupper((string)$a['code']) === $needle ? 0 : 1;
+            $bx = strtoupper((string)$b['code']) === $needle ? 0 : 1;
+            return $ax <=> $bx;
+        });
+
         $result->setData($rows);
         return $result;
     }

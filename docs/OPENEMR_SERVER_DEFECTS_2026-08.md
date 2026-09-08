@@ -389,16 +389,21 @@ Session 4.5 can now be proven against the live EMR: sign-and-close reaches Billi
   external table, which that query never touches. So the route returns 0 rows whether or
   not the load has run, and **a 0-row result from it proves nothing about the load.**
 
-  Two consequences, both open:
-  1. **`GET /api/codes` is defective for ICD-10**, and the fix is in the 6B patch
-     (`GfcChargeRestController::searchCodes`), not in the app. Prefer OpenEMR's own
-     `main_code_set_search()` over hand-writing a UNION, so every external code set is
-     handled and the query survives upstream changes. Confirm the external table name
-     against the installed 8.4 source before writing it. Installing the fix means
-     rebuilding the derived image and redeploying.
-  2. **The app tells the clinician the wrong thing.** The empty-result notice reads as
-     "the ICD-10 load has not run", which is now false. It must not claim a data state
-     it cannot actually observe.
+  Two consequences. **Both are fixed in code; one still needs a server rebuild.**
+  1. **`GET /api/codes` was defective for ICD-10.** Fixed in the 6B patch —
+     `GfcChargeRestController::searchCodes` now calls OpenEMR's own
+     `main_code_set_search()` (`custom/code_types.inc.php`), which is the function the
+     Fee Sheet calls at `interface/forms/fee_sheet/new.php:1218`. That reaches every
+     external code set and survives upstream table changes. The external table is
+     `icd10_dx_order_code`, confirmed against the 8.4 source. **Owner action: one
+     `docker compose build --pull && docker compose up -d` on the EMR box** — see the
+     2026-09-08 section of the patch INSTALL.md. Until that runs, code search stays
+     empty on the deployed instance.
+  2. **The app was telling clinicians the wrong thing.** Fixed in `server.js`:
+     `searchEmrCodes` no longer returns a `loaded` flag, `codeTableLoaded` is gone, and
+     the notice describes the search that ran instead of asserting a load state the
+     route cannot observe. Guarded by three tests in `test/openemr_84_alignment.test.js`,
+     each mutation-checked against the unfixed code.
 
   What the load does NOT change: it never affected the charge write (`billing.justify` is
   free text and the app supplies the codes), and **FHIR `Condition` still reads back as

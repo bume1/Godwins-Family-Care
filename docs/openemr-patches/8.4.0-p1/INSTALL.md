@@ -242,6 +242,44 @@ away.
 
 ---
 
+## Update 2026-09-08 — code search rewritten, needs one rebuild
+
+`GET /api/codes` was returning an empty list for every ICD-10 term even though
+the ICD-10-CM set had been loaded. The route ran its own
+`FROM codes c JOIN code_types ct` query, which reads the **manually entered
+`codes` table only**. OpenEMR's External Data Loads writes ICD-10 into a
+separate external table (`icd10_dx_order_code`), so that query could never see
+a loaded code set — it returned zero rows whether or not the load had run, and
+the empty result was read as "the load has not run" when in fact it had.
+
+`searchCodes()` now calls OpenEMR's own `main_code_set_search()`, which is the
+function the Fee Sheet itself calls (`interface/forms/fee_sheet/new.php`). Every
+external code set works as a result, and the query keeps working when upstream
+changes the table layout.
+
+**This is a code change to a file already on the server, so it needs a rebuild:**
+
+```
+cd /opt/openemr && sudo docker compose build --pull && sudo docker compose up -d
+```
+
+Then confirm the route now returns real rows, with the app's token:
+
+```
+OPENEMR_CLIENT_ID=… OPENEMR_CLIENT_SECRET=… OPENEMR_API_USERNAME=… OPENEMR_API_PASSWORD=… \
+  node scripts/verify_84_transport.js
+```
+
+A direct check of the fix itself: search `E11` with `type=ICD10` and expect
+E11.9 "Type 2 diabetes mellitus without complications" in the results. Before
+the rebuild that search returns nothing; after it, rows. **Assert on the rows,
+not on the 200** — the old route also answered 200.
+
+Nothing else changes: no schema, no scopes, no new files. Rollback is the same
+step-3 restore as before.
+
+---
+
 ## Acceptance — ✅ passed 2026-09-06, 17/17
 
 `acceptance.js` in this directory is the test. It proves the three routes end to
