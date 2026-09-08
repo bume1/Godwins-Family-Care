@@ -377,6 +377,16 @@ Session 4.5 can now be proven against the live EMR: sign-and-close reaches Billi
   **not** affect the charge write — `billing.justify` is free text and the app supplies the
   codes. It affects three things only: `GET /api/codes` returns 0 rows, FHIR `Condition`
   reads back uncoded, and OpenEMR's own Fee Sheet diagnosis picker is empty.
+  **Re-verified 2026-09-08 (post-8.4, post-ACL-grant): still not loaded.** The token is
+  healthy (52 granted scopes, `user/codes.read` present, `missingScopes` empty), so a
+  0-row result is a data state, not a permission or transport failure. The `codes` table
+  is not literally empty — an untyped `GET /api/codes?search=10` returns 17 rows, all of
+  them the **CVX vaccine and NCI-CONCEPT-ID rows OpenEMR ships with the install**. There
+  is **not one ICD-10 or CPT/HCPCS row in it**. That distinction matters when probing: a
+  typed search proves the load has not run, an untyped search proves the route works. The
+  same table backs OpenEMR's own Fee Sheet diagnosis picker, so that picker returns
+  nothing for a provider until the load runs — CPT is a separate hand-entry (AMA
+  copyright; OpenEMR ships none) into the fee schedule.
 - Org-level read for FHIR **DocumentReference** and **Coverage** (both still 403), and
   `sensitivities` — Phase 8.6 items on the same ACL screen.
 
