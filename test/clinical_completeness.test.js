@@ -175,10 +175,22 @@ test('prescriptions are validated, stamped with the prescriber, and marked not t
   assert.equal(rx.kind, 'refill');
   assert.equal(rx.transmission, 'none');
   assert.equal(rx.prescriber.npi, FNP.npi);
-  const row = R.prescriptionToMedicationRow(rx);
-  assert.equal(row.begdate, '2026-09-04');
-  assert.match(row.title, /Metformin 500 mg oral BID — qty 60, refills 3 \(refill via GFC\)/);
-  assert.ok(row.title.length <= 255);
+  // 4.5: 8.4 takes a real prescription row. The 7.0.4 workaround — a
+  // medication-list row with the sig packed into its title — is retired.
+  const row = R.prescriptionToEmrRow(rx);
+  assert.equal(row.drug, 'Metformin');
+  assert.equal(row.dosage, '500 mg');
+  assert.equal(row.quantity, '60');
+  assert.equal(row.route, 'oral');
+  assert.equal(row.interval, 'BID');
+  assert.equal(row.refills, 3);
+  assert.equal(row.start_date, '2026-09-04');
+  // OpenEMR attributes every API write to the service account, so the
+  // prescriber must be stamped or it is unrecoverable from the EMR side.
+  assert.match(row.note, /Prescriber: .*NPI/);
+  assert.match(row.note, /Refill/);
+  assert.ok(row.note.length <= 255);
+  assert.ok(!('title' in row), 'the packed-title workaround must be gone');
 });
 test('orders require an encounter diagnosis and advance through gated statuses', () => {
   const dx = R.buildEncounterDiagnoses(DX).diagnoses;

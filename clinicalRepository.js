@@ -809,12 +809,28 @@ const buildPrescription = ({ id, clientId, puuid, encounterUuid, input, actor, a
     }
   };
 };
-// The only Rx write OpenEMR 7.0.4 accepts is the medication LIST row
-// (title/begdate/enddate/diagnosis), so the sig is packed into the title and
-// the full structured Rx stays app-side + in the structured note.
-const prescriptionToMedicationRow = (rx) => ({
-  title: `${rx.drug} ${rx.dose} ${rx.route} ${rx.frequency} — qty ${rx.quantity}, refills ${rx.refills} (${rx.kind === 'refill' ? 'refill' : 'Rx'} via GFC)`.slice(0, 255),
-  begdate: rx.date
+// 4.5: 8.4 has a real prescription write, so the Rx becomes a first-class
+// prescription row instead of a medication-list row with the sig packed into
+// its title (the 7.0.4 workaround, retired). `patient_id` is added by the
+// transport, which resolves the numeric pid.
+//
+// `note` carries the acting clinician's name and NPI: OpenEMR attributes every
+// API write to the gfc-app-api service account, so without this stamp the
+// prescriber is unrecoverable from the EMR side (attribution interim, spec §4,
+// until Session 5 per-user auth).
+const prescriptionToEmrRow = (rx) => ({
+  drug: String(rx.drug || '').slice(0, 150),
+  dosage: `${rx.dose}`.slice(0, 100),
+  quantity: String(rx.quantity),
+  route: rx.route || null,
+  interval: String(rx.frequency || '').slice(0, 100),
+  refills: rx.refills,
+  start_date: rx.date,
+  note: [
+    rx.instructions ? `Sig: ${rx.instructions}` : null,
+    rx.kind === 'refill' ? 'Refill' : 'New Rx',
+    `Prescriber: ${(rx.prescriber && rx.prescriber.name) || 'unknown'} (NPI ${(rx.prescriber && rx.prescriber.npi) || 'none'})`
+  ].filter(Boolean).join(' | ').slice(0, 255)
 });
 
 // ---- Order capture (Scope D — labs / imaging / procedures; no HL7) ----
@@ -1076,7 +1092,7 @@ module.exports = {
   RX_ROUTES,
   RX_KINDS,
   buildPrescription,
-  prescriptionToMedicationRow,
+  prescriptionToEmrRow,
   ORDER_TYPES,
   ORDER_PRIORITIES,
   ORDER_STATUSES,

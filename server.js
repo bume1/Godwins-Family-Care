@@ -6162,16 +6162,21 @@ app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireCli
     const encounterUuid = enc && (enc.euuid || enc.uuid || enc.encounter_uuid || enc.id);
     if (!encounterUuid) return res.status(502).json({ error: 'OpenEMR did not return an encounter id' });
     if (linkedAppointment) await linkAppointmentEncounter(linkedAppointment.pc_eid, client.id, encounterUuid, req.user);
-    // The structured note is the primary record (both-arm BPs are serialized
-    // into it verbatim). The vitals FORM write is best-effort: this OpenEMR
-    // build's vitals REST endpoint can fail on a service bug (authUserId
-    // null); when it does, the visit still stands and we surface the warning.
+    // 4.5: the structured vitals ROW is now the primary record. The 7.0.4
+    // defect this was written around (VitalsCalculatedService::$authUserId
+    // null, an unconditional 500) is fixed on 8.4 — verified live: POST
+    // returns 201 and the FHIR Observation bundle grows. The note copy stays
+    // as belt-and-braces, and because both-arm BPs are only representable
+    // there, but a failure here is now UNEXPECTED rather than routine, so it
+    // is logged and surfaced as such. The visit still stands either way.
     const warnings = [];
+    let vitalsRowWritten = false;
     try {
       await emr.addVitals(puuid, encounterUuid, built.vitals);
+      vitalsRowWritten = true;
     } catch (e) {
-      console.error('Vitals form write failed (readings preserved in note):', e.message);
-      warnings.push(`Vitals form write failed (${e.message.slice(0, 120)}) — readings are preserved in the encounter note`);
+      console.error('Vitals row write FAILED on 8.4 (unexpected — readings preserved in note):', e.message);
+      warnings.push(`Vitals did not save to the chart's vitals form (${e.message.slice(0, 120)}). The readings are preserved in the encounter note, but this should not happen on 8.4 — tell an administrator.`);
     }
     const narrative = await emr.addSoapNote(puuid, encounterUuid, built.soapNote);
     // Session 4.4: the H&P encounter gets its encounter_billing record (so it
@@ -6202,7 +6207,7 @@ app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireCli
     await db.set('users', users);
     invalidateUsersCache();
     await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_hp_documented', 'client', client.id, { encounterUuid, track: triage.track || null, warnings: warnings.length, appointmentEid: linkedAppointment ? String(linkedAppointment.pc_eid) : null });
-    res.json({ message: 'Initial visit documented to OpenEMR', encounterUuid, at, warnings });
+    res.json({ message: 'Initial visit documented to OpenEMR', encounterUuid, at, warnings, vitalsRowWritten });
   } catch (error) {
     console.error('Clinical H&P error:', error);
     res.status(502).json({ error: `OpenEMR write failed: ${error.message}` });
@@ -7202,9 +7207,15 @@ app.post('/api/clinical/patients/:clientId/encounters', authenticateToken, requi
     const encounterUuid = enc && (enc.euuid || enc.uuid || enc.encounter_uuid || enc.id);
     if (!encounterUuid) return res.status(502).json({ error: 'OpenEMR did not return an encounter id' });
     const warnings = [];
+    let vitalsRowWritten = false;
     if (built.vitals) {
-      try { await emr.addVitals(puuid, encounterUuid, built.vitals); }
-      catch (e) { warnings.push(`Vitals form write failed (${e.message.slice(0, 120)}) — readings are preserved verbatim in the note`); }
+      // See the H&P route: on 8.4 the structured row is primary and a failure
+      // here is unexpected, not the routine 7.0.4 500.
+      try { await emr.addVitals(puuid, encounterUuid, built.vitals); vitalsRowWritten = true; }
+      catch (e) {
+        console.error('Vitals row write FAILED on 8.4 (unexpected):', e.message);
+        warnings.push(`Vitals did not save to the chart's vitals form (${e.message.slice(0, 120)}). The readings are preserved in the note, but this should not happen on 8.4 — tell an administrator.`);
+      }
     }
     const narrative = await emr.addSoapNote(puuid, encounterUuid, built.soapNote);
     if (appointment) await linkAppointmentEncounter(appointment.pc_eid, client.id, encounterUuid, req.user);
@@ -7232,7 +7243,7 @@ app.post('/api/clinical/patients/:clientId/encounters', authenticateToken, requi
       role: req.user.role, encounterUuid, appointmentEid: appointment ? String(appointment.pc_eid) : null,
       diagnoses: record.diagnoses.map(d => d.code), services: record.services.map(s => s.code), clinicianNpi: actor.npi || null, warnings: warnings.length
     });
-    res.json({ message: 'Visit documented to OpenEMR', encounterUuid, encounterEid: enc.eid != null ? String(enc.eid) : null, record, state: encounterStateOf(record, null), warnings, linkedAppointmentEid: appointment ? String(appointment.pc_eid) : null });
+    res.json({ message: 'Visit documented to OpenEMR', encounterUuid, encounterEid: enc.eid != null ? String(enc.eid) : null, record, state: encounterStateOf(record, null), warnings, vitalsRowWritten, linkedAppointmentEid: appointment ? String(appointment.pc_eid) : null });
   } catch (error) {
     console.error('Clinical follow-up encounter error:', error);
     res.status(502).json({ error: `OpenEMR write failed: ${error.message}` });
@@ -7395,12 +7406,13 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/prescriptions', aut
     if (built.error) return res.status(400).json({ error: built.error, code: built.code });
     const rx = built.prescription;
     const warnings = [];
-    // In-chart copy: OpenEMR 7.0.4's only Rx write is the medication list row
+    // 4.5: the native 8.4 prescription write. The 7.0.4 workaround (a
+    // medication-list row with the sig packed into its title) is retired —
+    // this is a real prescription row and surfaces in FHIR MedicationRequest.
     try {
-      const row = await ctx.emr.addMedication(ctx.client.openEmrPatientId, clinicalRepo.prescriptionToMedicationRow(rx));
-      // 7.0.4's medication POST answers with the list row id (uuid on some builds)
-      rx.emrMedicationId = row && (row.uuid || row.id) != null ? String(row.uuid || row.id) : null;
-    } catch (e) { warnings.push(`OpenEMR medication-list write failed (${e.message.slice(0, 120)}) — the prescription is recorded in the app and in the structured note`); rx.emrWriteError = e.message.slice(0, 300); }
+      const row = await ctx.emr.createPrescription(ctx.client.openEmrPatientId, clinicalRepo.prescriptionToEmrRow(rx));
+      rx.emrPrescriptionId = row && (row.uuid || row.id) != null ? String(row.uuid || row.id) : null;
+    } catch (e) { warnings.push(`OpenEMR prescription write failed (${e.message.slice(0, 120)}) — the prescription is recorded in the app and in the structured note`); rx.emrWriteError = e.message.slice(0, 300); }
     const rows = await loadRows('prescriptions');
     rows.push(rx);
     await db.set('prescriptions', rows);
