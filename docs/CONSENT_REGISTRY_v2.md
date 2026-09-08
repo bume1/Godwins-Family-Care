@@ -144,27 +144,28 @@ gap surfaces at intake rather than at the kitchen table.
 
 ---
 
-## Session 4.7 — legacy packet filing (proposed, not built)
+## Filing the seven legacy packets — how, and why not with AI yet
 
-Grandfathering by evidence needs a path that does not exist yet: upload a scanned packet, split and
-classify it into the fourteen consent buckets, let an admin confirm, then record `signed_offline`
-with the signing date off the page.
+Grandfathering by evidence needs a path to file the packet. **One already exists and works today:**
+"Add offline-onboarded patient" in `/admin/enrollment` takes a per-consent status and a per-consent
+signing date, uploads the packet scan to Drive, and records who keyed it and when. Seven clients at
+ten documents each is an afternoon's work with no new code.
 
-**Two things gate it.**
+**AI classification is deferred by `GFC_Clinical_Completeness_Spec_v1.md` §10.4** — "inbound-document
+classification, results extraction, and the clinical inbox are deferred until there is document
+volume to justify them." Seventy pages, once, is not that volume. Two further constraints from §10.3
+apply whenever it is built:
 
-**PHI and the model provider.** The repo has no LLM integration today, and no OCR. Classification by
-a hosted model means scanned client packets — signatures, diagnoses, addresses — leave the BAA
-boundary. That needs a signed BAA with the provider and zero-retention terms before a single real
-packet is uploaded. Until then the flow runs on synthetic scans only, consistent with the standing
-TEST DATA rule.
+- **Inside the BAA boundary only.** Claude on Amazon Bedrock under the existing AWS BAA, IAM role
+  rather than keys, zero data retention configured explicitly. No third-party model API. That
+  boundary is Session 5 work, so no hosted classification can touch a real packet before then.
+- **One engine, not scattered calls.** `GFC_SessionAI.1_ClaudeCode_Prompt.md` specifies a single
+  server-side module taking (input, output schema, purpose) with audit logging and boundary
+  enforcement built in. A packet classifier is a caller of that engine, never its own model call.
+- **Propose, never commit.** Classification would offer a bucket, page range and confidence for an
+  admin to confirm in the checklist that already exists. Nothing writes `signed_offline` on a
+  model's say-so.
 
-**A deterministic pass may be enough.** The packet is ten known documents with fixed titles. Title
-matching over extracted text classifies a clean scan with no model call and no PHI leaving the
-boundary. A model earns its place on the messy cases: a skewed phone photo, a handwritten margin
-note, a page out of order. Recommended shape is deterministic first, model as the fallback that
-handles what matching could not, so the common case never leaves the boundary.
-
-**Never auto-record.** Classification proposes a bucket, a page range and a confidence; an admin
-confirms in the offline-onboarding checklist that already exists; only then does the write happen,
-with provenance recording that it was machine-proposed and human-confirmed. Same guardrail the
-coding assist already runs under: the system proposes, the person disposes.
+Where the volume actually arrives is the Transfer-of-Care ROI: records coming back from prior
+providers, continuously, for every new client. That is the case that will justify a classifier —
+not the seven legacy packets.
