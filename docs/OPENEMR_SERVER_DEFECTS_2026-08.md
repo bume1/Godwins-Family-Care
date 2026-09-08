@@ -599,3 +599,100 @@ Location** on that record once the private-residence record exists.
 once DCH confirms); assign each patient to their facility; uncheck Service Location on the
 org record. No app change is required for a new facility — add it in OpenEMR with its POS and
 assign patients to it.
+
+---
+
+## Shadow-data audit findings (2026-09-08) — three server-side items
+
+_Found by the shadow-data audit pass 1, `docs/GFC_Shadow_Data_Audit.md`. Probes ran live against
+8.4.0 (database 543) on the v4 client, patient TEST PatientOne, encounter eid 32. TEST DATA only.
+The audit also found four app-side defects; those are recorded in the audit document, not here._
+
+### Defect 3 — Documents file with HTTP 200 but are readable by nothing
+
+**Endpoints:**
+- `POST /apis/default/api/patient/{pid}/document?path=/Medical%20Record` returns **200**, body `true`.
+- `GET /apis/default/fhir/DocumentReference?patient={uuid}` returns **200**, `total: 0`.
+- `GET /apis/default/fhir/DocumentReference` unfiltered returns **200**, `total: 0` for the whole instance.
+- `GET /apis/default/api/patient/1/document` returns **404 Route not found**. There is no standard-API read route.
+
+This is with the Phase 8.6 org-level ACL grant in place. `DocumentReference` no longer 403s, it
+simply reports nothing exists. Care-plan PDFs have been filed across several sessions.
+
+**Why it matters.** This is the only route the app has for putting a PDF in the chart, and it is
+the mechanism blocking the care plan, the consents and the Transfer-of-Care ROI from reaching the
+medical record at all. The write gives the app no way to detect failure: the only signal is a 200.
+
+**What the maintainer needs to check, in order:**
+1. In the OpenEMR UI, open TEST PatientOne's Documents and look for `ShadowAudit_SHADOWAUDIT-1788890606538.pdf`
+   and the `CarePlan_*.pdf` files under `/Medical Record`.
+2. If they are there, the files are stored and the FHIR `DocumentReference` provider is not
+   surfacing them. Server fix, and the missing standard-API read route should be added too.
+3. If they are not there, the upload is a silent write failure and the route should return an error
+   rather than `true`.
+
+**App behaviour meanwhile:** the app treats the 200 as success and records `emrDocumented: true`.
+That is wrong and the app should assert read-back instead. Recorded as G2 in the audit.
+
+### Defect 4 — Phase 6B order route drops `code_text`
+
+**Endpoint:** `POST /apis/default/api/patient/{pUUID}/encounter/{eUUID}/order`
+
+Sending a correctly shaped payload:
+
+```json
+{"codes":[{"code":"85025","code_text":"CBC with differential",
+           "diagnoses":[{"code_type":"ICD10","code":"I10"}]}]}
+```
+
+reads back as:
+
+```json
+{"procedure_order_seq":1,"procedure_code":"85025","procedure_name":"",
+ "procedure_order_title":"","diagnoses":"ICD10:I10"}
+```
+
+`procedure_code` and `diagnoses` persist. **`code_text` is accepted and never stored** — both
+`procedure_name` and `procedure_order_title` come back empty. So an order carries a code but no
+human-readable test name, and an order for anything without a code carries nothing at all.
+
+**Fix direction:** in the 6B order controller, write `code_text` into `procedure_order_code.procedure_name`
+(and `procedure_order_title` where appropriate) alongside `procedure_code`.
+
+**Scope note:** this sits in our own patch, `docs/openemr-patches/8.4.0-p1/`, not in upstream
+OpenEMR. It is ours to fix. The 6B acceptance run passed 17/17 because it asserted the codes and
+the diagnosis pointers, which do store, and never asserted the name.
+
+### Not a defect — no audit-log surface exists in the API
+
+Recorded because it shapes what a records request can produce. Every audit surface is unavailable:
+
+```
+GET api/log          -> 404 Route not found
+GET api/audit        -> 404 Route not found
+GET fhir/AuditEvent  -> 404 Route not found
+GET fhir/Provenance  -> 401 Unauthorized
+```
+
+OpenEMR's `log` table can therefore only be reached through the UI or the database. Combined with
+every app write authenticating as `gfc-app-api`, an accounting of disclosures cannot be produced
+from OpenEMR through the API for any patient. Not a defect in the installation, and a hard
+constraint on go-live. See the attribution section of `docs/GFC_Shadow_Data_Audit.md`.
+
+### Confirmed still open this pass
+
+- **ICD-10-CM is not loaded.** FHIR `Condition` returns 3 rows for TEST PatientOne, **0 carrying a
+  code**. `GET /api/codes` answers 200 with 0 rows. Data gap, not a defect, unchanged.
+- **Only two facilities exist** (ids 3 and 4, both POS **11**). No private-residence record (POS 12),
+  no Hickory Log, no telehealth record. Until Phase 8.3 runs, `resolveEncounterFacility()` has
+  nothing correct to resolve to for a home visit.
+- **Encounter duplication:** FHIR `Encounter` returned 14 rows, all 14 unique, for TEST PatientOne
+  this pass. The app-side dedupe stays regardless.
+
+### Verified working this pass
+
+Charge write and read-back with the correct CPT and diagnosis separation (`code:"99348"`,
+`justify:"ICD10|I10:"`, `provider_id:5`); vitals row accepted, 185 FHIR Observations; SOAP note
+write, update and read-by-sid; native prescription write surfacing in FHIR MedicationRequest;
+encounter PUT with `user` + `group`; FHIR `Practitioner` readable (1 row, Bethel Godwins, NPI
+1902310568); `api/facility` readable.
