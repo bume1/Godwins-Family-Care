@@ -237,15 +237,26 @@ const OPENEMR = Object.freeze({
   // the office POS, return 201, look right in Billing Manager, and surface as
   // a denial much later. Phase 8.3 sets SERVICE_FACILITY_ID to the F1 record —
   // owner-walked, see the 4.5 prompt Scope D.
+  // The BILLING facility: GFC's business address on the claim. This one is
+  // legitimately a global — it is the practice, not the patient.
   FACILITY_ID: process.env.OPENEMR_FACILITY_ID || '3',
-  SERVICE_FACILITY_ID: process.env.OPENEMR_SERVICE_FACILITY_ID || process.env.OPENEMR_FACILITY_ID || '3',
   BILLING_FACILITY_ID: process.env.OPENEMR_BILLING_FACILITY_ID || process.env.OPENEMR_FACILITY_ID || '3',
+  // The SERVICE facility is NOT a global. It comes from the patient's facility
+  // assignment (clinicalRepository.resolveEncounterFacility) because each
+  // patient lives somewhere fixed. A global here is what would silently put
+  // POS 12 on Hickory Log claims the day that facility goes live.
+  //
+  // This is the telehealth facility record only — the one exception, because
+  // the same patient can be seen in person one week and by video the next. It
+  // carries POS 10 and is selected by the appointment's location, never by a
+  // clinician. Leave unset until the record exists in OpenEMR.
+  TELEHEALTH_FACILITY_ID: process.env.OPENEMR_TELEHEALTH_FACILITY_ID || '',
   ENCOUNTER_CATEGORY: process.env.OPENEMR_ENCOUNTER_CATEGORY || '5',
-  // POS on the claim describes WHERE CARE HAPPENED, not the business address:
-  // 12 private residence, 13/14 assisted living / group home, 10 telehealth.
-  // It belongs to the SERVICE facility. It is NOT inherited from the billing
-  // facility record — that one is correctly POS 11 (Office) because it is an
-  // office where no care is delivered.
+  // RETIRED as an encounter default (owner spec 2026-09-08). POS is a property
+  // of the FACILITY record, set once, and reaches the encounter through the
+  // patient's facility assignment. It is never a global and never a clinician's
+  // choice. Kept only as a last-resort seed for instances with no facility data
+  // at all; nothing in the encounter path reads it.
   POS_CODE: process.env.OPENEMR_POS_CODE || '12',
   PROVIDER_ID: process.env.OPENEMR_PROVIDER_ID || '1',
   // 8.4 requires `user` and `group` in the encounter PUT body. Without them it

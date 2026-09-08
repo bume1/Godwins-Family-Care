@@ -726,20 +726,30 @@ const SIGN_BLOCKER_CODES = {
   diagnosis: 'SIGN_NO_DIAGNOSIS',
   service: 'SIGN_NO_SERVICE',
   service_dx_link: 'SIGN_UNLINKED_SERVICE',
-  billing_npi: 'SIGN_NO_BILLING_NPI'
+  billing_npi: 'SIGN_NO_BILLING_NPI',
+  // A signed encounter becomes a claim, and a claim needs a real place of
+  // service. Documenting the visit is never blocked; billing it is.
+  facility_pos: 'SIGN_NO_FACILITY_POS'
 };
 const SIGN_BLOCKER_LABELS = {
   note: 'a documented note',
   diagnosis: 'at least one ICD-10 diagnosis',
   service: 'at least one CPT/HCPCS service code',
   service_dx_link: 'every service linked to a diagnosis',
-  billing_npi: 'the billing provider NPI configured in settings'
+  billing_npi: 'the billing provider NPI configured in settings',
+  facility_pos: "a place of service — this patient has no OpenEMR facility assigned, or their facility has no POS code on its record. An admin fixes it on the patient or the facility, not here"
 };
-const checkSignReadiness = ({ hasNote, record, billingNpi }) => {
+// `posCode` is the place of service the encounter actually carries, derived
+// from the patient's facility. Documenting a visit is never blocked on it —
+// care happens whether or not an admin has finished the facility setup — but
+// SIGNING is, because a signed encounter becomes a claim and a claim with an
+// unverified POS is the silent error this whole change exists to prevent.
+const checkSignReadiness = ({ hasNote, record, billingNpi, posCode }) => {
   const missing = [];
   if (!hasNote) missing.push('note');
   missing.push(...deriveCodingStatus(record).missing);
   if (!normalizeNpiValue(billingNpi)) missing.push('billing_npi');
+  if (!String(posCode || '').trim()) missing.push('facility_pos');
   return {
     ok: missing.length === 0,
     missing,
@@ -839,6 +849,65 @@ const prescriptionToEmrRow = (rx) => ({
     `Prescriber: ${(rx.prescriber && rx.prescriber.name) || 'unknown'} (NPI ${(rx.prescriber && rx.prescriber.npi) || 'none'})`
   ].filter(Boolean).join(' | ').slice(0, 255)
 });
+
+// ---- Facility and POS resolution (Session 4.5, owner spec 2026-09-08) ----
+//
+// POS IS A PROPERTY OF THE FACILITY RECORD, SET ONCE. A clinician never sees or
+// chooses a POS number, and it is never a per-visit dropdown.
+//
+// What connects a visit to the right POS is THE PATIENT. Each patient lives
+// somewhere fixed, so each patient record is assigned to a facility: a Hickory
+// Log resident to the Hickory Log record (POS 13/14), an Ellijay client to the
+// private-residence record (POS 12). The encounter inherits both the facility
+// and its POS from that assignment.
+//
+// WHAT THIS REPLACES, AND WHY IT MATTERS: the app used to stamp every encounter
+// with one hardcoded facility and POS 12 from its own settings, regardless of
+// who the patient was. That is correct only while every patient is a private
+// residence. The moment Hickory Log goes live it breaks silently — POS 12 on
+// claims that should read 13 or 14. So the global default is never a fallback
+// here: a patient with no facility assignment is reported, not defaulted.
+//
+// Telehealth is the ONE legitimate per-visit variation, because the same
+// patient can be seen in person one week and by video the next. It keys off the
+// appointment's location marker (4.2's `[GFC location=telehealth]`), not off a
+// dropdown a clinician has to remember.
+const FACILITY_UNASSIGNED = 'FACILITY_NOT_ASSIGNED';
+const resolveEncounterFacility = ({ patientFacilityId, telehealthFacilityId, appointmentLocation, facilities }) => {
+  const byId = new Map((facilities || []).map(f => [String(f.id), f]));
+  const isTelehealth = String(appointmentLocation || '').toLowerCase() === 'telehealth';
+
+  // Telehealth overrides the patient's usual place, when a telehealth facility
+  // record exists to carry POS 10. Without one, fall through to the patient's
+  // facility and say so rather than inventing a code.
+  if (isTelehealth && telehealthFacilityId && byId.has(String(telehealthFacilityId))) {
+    const f = byId.get(String(telehealthFacilityId));
+    return { facilityId: String(f.id), posCode: f.pos_code ? String(f.pos_code) : null,
+      facilityName: f.name || null, source: 'telehealth_appointment',
+      warning: f.pos_code ? null : `The telehealth facility "${f.name || f.id}" has no POS on its record in OpenEMR.` };
+  }
+
+  if (!patientFacilityId) {
+    return { facilityId: null, posCode: null, facilityName: null, source: 'unassigned',
+      error: FACILITY_UNASSIGNED,
+      warning: 'This patient is not assigned to an OpenEMR facility, so the place of service on their claim cannot be derived. An admin assigns it on the patient record.' };
+  }
+  const f = byId.get(String(patientFacilityId));
+  if (!f) {
+    return { facilityId: String(patientFacilityId), posCode: null, facilityName: null, source: 'patient_stale',
+      error: FACILITY_UNASSIGNED,
+      warning: `This patient is assigned to OpenEMR facility ${patientFacilityId}, which no longer exists. An admin re-assigns it.` };
+  }
+  return {
+    facilityId: String(f.id),
+    posCode: f.pos_code ? String(f.pos_code) : null,
+    facilityName: f.name || null,
+    source: isTelehealth ? 'patient_facility_no_telehealth_record' : 'patient_facility',
+    warning: f.pos_code
+      ? (isTelehealth ? 'This visit is telehealth but no telehealth facility record exists, so the patient\'s usual place of service was used. Add a telehealth facility (POS 10) in OpenEMR.' : null)
+      : `Facility "${f.name || f.id}" has no place-of-service code on its record in OpenEMR. An admin sets it on the facility, not here.`
+  };
+};
 
 // ---- Phase 6B charge payloads (Session 4.5) ----
 //
@@ -1162,6 +1231,8 @@ module.exports = {
   RX_KINDS,
   buildPrescription,
   prescriptionToEmrRow,
+  resolveEncounterFacility,
+  FACILITY_UNASSIGNED,
   buildChargePayloads,
   buildOrderPayload,
   orderStatusToEmr,

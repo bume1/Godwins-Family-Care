@@ -121,16 +121,28 @@ test('coding state flips to coded only with ≥1 dx and ≥1 linked svc; billing
 // ---- 4. Sign & close ----
 test('signing is refused with a specific code for each missing element', () => {
   const rec = baseRecord();
-  assert.deepEqual(R.checkSignReadiness({ hasNote: false, record: rec, billingNpi: BILLING_NPI }).codes, ['SIGN_NO_NOTE', 'SIGN_NO_DIAGNOSIS', 'SIGN_NO_SERVICE']);
+  // POS is supplied in every case below except the one testing its absence:
+  // a signed encounter becomes a claim, so it needs a real place of service.
+  const POS = '12';
+  assert.deepEqual(R.checkSignReadiness({ hasNote: false, record: rec, billingNpi: BILLING_NPI, posCode: POS }).codes, ['SIGN_NO_NOTE', 'SIGN_NO_DIAGNOSIS', 'SIGN_NO_SERVICE']);
   const dxOnly = R.applyCoding(rec, { diagnoses: DX, services: [] }, FNP, BILLING_NPI).record;
-  assert.deepEqual(R.checkSignReadiness({ hasNote: true, record: dxOnly, billingNpi: BILLING_NPI }).codes, ['SIGN_NO_SERVICE']);
+  assert.deepEqual(R.checkSignReadiness({ hasNote: true, record: dxOnly, billingNpi: BILLING_NPI, posCode: POS }).codes, ['SIGN_NO_SERVICE']);
   const coded = R.applyCoding(rec, { diagnoses: DX, services: SVC }, FNP, BILLING_NPI).record;
-  assert.deepEqual(R.checkSignReadiness({ hasNote: true, record: coded, billingNpi: null }).codes, ['SIGN_NO_BILLING_NPI']);
-  const ready = R.checkSignReadiness({ hasNote: true, record: coded, billingNpi: BILLING_NPI });
+  assert.deepEqual(R.checkSignReadiness({ hasNote: true, record: coded, billingNpi: null, posCode: POS }).codes, ['SIGN_NO_BILLING_NPI']);
+
+  // No derived POS: the visit is documented, but it must not become a claim.
+  // This is the silent Hickory Log failure, caught at the last safe moment.
+  const noPos = R.checkSignReadiness({ hasNote: true, record: coded, billingNpi: BILLING_NPI });
+  assert.deepEqual(noPos.codes, ['SIGN_NO_FACILITY_POS']);
+  assert.match(noPos.message, /place of service/i);
+  assert.match(noPos.message, /admin fixes it on the patient or the facility, not here/i);
+
+  const ready = R.checkSignReadiness({ hasNote: true, record: coded, billingNpi: BILLING_NPI, posCode: POS });
   assert.equal(ready.ok, true);
   assert.equal(ready.message, null);
-  assert.match(R.checkSignReadiness({ hasNote: true, record: rec, billingNpi: BILLING_NPI }).message, /at least one ICD-10 diagnosis/);
+  assert.match(R.checkSignReadiness({ hasNote: true, record: rec, billingNpi: BILLING_NPI, posCode: POS }).message, /at least one ICD-10 diagnosis/);
 });
+
 test('attestation records signer, NPI and timestamp; closes the encounter; warns when the signer has no NPI', () => {
   const coded = R.applyCoding(baseRecord(), { diagnoses: DX, services: SVC }, FNP, BILLING_NPI).record;
   const att = R.buildAttestation({ id: 'att-1', record: coded, actor: FNP, at: '2026-09-04T12:00:00.000Z', billingNpi: BILLING_NPI });

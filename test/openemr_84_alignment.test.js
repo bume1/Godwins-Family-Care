@@ -199,22 +199,89 @@ test('the billing-facility route writes form_encounter and verifies the read-bac
   assert.doesNotMatch(route, /postCharge/, 'the facility must never touch a charge');
 });
 
-// ---- Service facility vs billing facility ----
-// Owner ruling 2026-09-08: the claim's POS describes WHERE CARE HAPPENED, so it
-// comes from the SERVICE facility. The billing record is GFC's business address
-// (POS 11 Office) and stays that way — nothing clinical happens there.
-// The encounter POST carries both fields and they were filled from one config
-// value, which is how every home visit would have inherited the office POS.
-test('the encounter separates service facility from billing facility', () => {
+// ---- Facility and POS derive from the PATIENT, never a global ----
+// Owner spec 2026-09-08: POS is a property of the facility record, set once.
+// The patient's facility assignment selects it. A clinician never sees or picks
+// a POS. The global default is the actual defect: it puts POS 12 on a Hickory
+// Log claim, silently, the day that facility goes live.
+test('createEncounter defaults neither facility_id nor pos_code', () => {
   const src = fs.readFileSync(path.join(root, 'openemr.js'), 'utf8');
-  const fn = src.slice(src.indexOf('async createEncounter'), src.indexOf('async createEncounter') + 1200);
-  assert.match(fn, /facility_id: config\.OPENEMR\.SERVICE_FACILITY_ID/,
-    'facility_id is the SERVICE facility — it drives the claim POS');
-  assert.match(fn, /billing_facility: config\.OPENEMR\.BILLING_FACILITY_ID/,
-    'billing_facility is the business address');
-  assert.doesNotMatch(fn, /facility_id: config\.OPENEMR\.FACILITY_ID/,
-    'the two must not be filled from one value again');
-  const cfg = require(path.join(root, 'config.js')).OPENEMR;
-  assert.ok(cfg.SERVICE_FACILITY_ID, 'SERVICE_FACILITY_ID must exist');
-  assert.ok(cfg.BILLING_FACILITY_ID, 'BILLING_FACILITY_ID must exist');
+  const fn = src.slice(src.indexOf('async createEncounter'), src.indexOf('async createEncounter') + 1400);
+  assert.doesNotMatch(fn, /facility_id:\s*config\./,
+    'facility_id must come from the patient, resolved by the caller — never config');
+  assert.doesNotMatch(fn, /pos_code:\s*config\./,
+    'pos_code must come from the facility record — never config');
+  // The business address IS legitimately global: it is the practice.
+  assert.match(fn, /billing_facility: config\.OPENEMR\.BILLING_FACILITY_ID/);
+});
+
+test('POS follows the patient facility, and telehealth is the only per-visit variation', () => {
+  const F = [{ id: 3, name: 'Vinings', pos_code: '11' },
+             { id: 5, name: 'Private residence', pos_code: '12' },
+             { id: 6, name: 'Hickory Log', pos_code: '13' },
+             { id: 7, name: 'Telehealth', pos_code: '10' }];
+  const go = (o) => R.resolveEncounterFacility({ facilities: F, ...o });
+
+  assert.equal(go({ patientFacilityId: 5 }).posCode, '12', 'private residence bills 12');
+  assert.equal(go({ patientFacilityId: 6 }).posCode, '13', 'Hickory Log bills 13, not the old global 12');
+  assert.equal(go({ patientFacilityId: 3 }).posCode, '11', 'an office visit bills 11');
+
+  // Telehealth keys off the appointment, not a dropdown.
+  const tele = go({ patientFacilityId: 6, telehealthFacilityId: 7, appointmentLocation: 'telehealth' });
+  assert.equal(tele.posCode, '10');
+  assert.equal(tele.source, 'telehealth_appointment');
+
+  // No telehealth record yet: use the patient's place and SAY SO. Never invent 10.
+  const noTele = go({ patientFacilityId: 6, appointmentLocation: 'telehealth' });
+  assert.equal(noTele.posCode, '13');
+  assert.match(noTele.warning, /no telehealth facility record/i);
+});
+
+test('an unassigned patient is reported, never silently defaulted', () => {
+  // This is the whole point: silence is the defect being removed.
+  const F = [{ id: 5, name: 'Private residence', pos_code: '12' }];
+  const none = R.resolveEncounterFacility({ facilities: F });
+  assert.equal(none.posCode, null, 'no POS may be invented for an unassigned patient');
+  assert.equal(none.error, R.FACILITY_UNASSIGNED);
+  assert.match(none.warning, /not assigned to an OpenEMR facility/i);
+
+  const stale = R.resolveEncounterFacility({ patientFacilityId: 99, facilities: F });
+  assert.equal(stale.posCode, null);
+  assert.equal(stale.error, R.FACILITY_UNASSIGNED);
+
+  // A facility with no POS on its record is an OpenEMR data gap, and the fix is
+  // on the facility — not a code typed in the app.
+  const noPos = R.resolveEncounterFacility({ patientFacilityId: 8, facilities: [{ id: 8, name: 'New ALF' }] });
+  assert.equal(noPos.posCode, null);
+  assert.match(noPos.warning, /no place-of-service code on its record/i);
+});
+
+test('signing is gated on a derived place of service', () => {
+  const src = fs.readFileSync(path.join(root, 'clinicalRepository.js'), 'utf8');
+  assert.match(src, /facility_pos: 'SIGN_NO_FACILITY_POS'/,
+    'a signed encounter becomes a claim, and a claim needs a real POS');
+});
+
+test('the facility assignment is per-patient, admin-set, and never a clinician choice', () => {
+  const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+  const route = server.slice(server.indexOf("patients/:clientId/facility'"), server.indexOf("patients/:clientId/facility'") + 2600);
+  assert.match(route, /requireAdmin/, 'assignment is an admin action, not a clinician one');
+  assert.match(route, /openEmrFacilityId/);
+  // The POS is read off OpenEMR's facility record; it is never typed here.
+  assert.doesNotMatch(route, /pos_code\s*=/, 'the app must never set a POS itself');
+  assert.match(route, /Set it on the facility/, 'a missing POS is fixed on the facility, not in the app');
+});
+
+test('encounter creation resolves the place from the patient, at every site', () => {
+  const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+  const creates = server.split('createEncounter(puuid, built.encounter)');
+  assert.equal(creates.length, 3, 'expected exactly two encounter-create sites');
+  // Each site must resolve the place immediately before creating.
+  for (const before of creates.slice(0, 2)) {
+    const tail = before.slice(-700);
+    assert.match(tail, /resolveFacilityForVisit\(emr, client/,
+      'every encounter create must derive facility and POS from the patient');
+  }
+  // Telehealth comes off the appointment, never a dropdown.
+  assert.match(server, /decodeAppointmentNotes\(appointment\.pc_hometext\)\.location/);
 });

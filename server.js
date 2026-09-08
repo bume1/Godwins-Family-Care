@@ -5995,6 +5995,9 @@ app.get('/api/clinical/patients', authenticateToken, requireClinicalRead, async 
         careTierLabel: careTierLabelFor(u.careTier),
         enrollmentStatus: u.enrollmentStatus || 'intake_pending',
         openEmrPatientId: u.openEmrPatientId || null,
+        // Where this patient is seen. Drives the encounter's facility and the
+        // POS on their claim; surfaced so an admin can see who is unassigned.
+        openEmrFacilityId: u.openEmrFacilityId || null,
         initialVisitAt: (u.clinicalInitialVisit && u.clinicalInitialVisit.at) || null,
         carePlanVersion: (u.carePlan && u.carePlan.version) || null,
         activatedAt: (u.clinicalEnrollment && u.clinicalEnrollment.activatedAt) || null
@@ -6158,6 +6161,12 @@ app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireCli
         .find(r => String(r.pc_eid) === String(req.body.appointmentEid));
       if (!linkedAppointment) return res.status(400).json({ error: 'That appointment does not belong to this patient', code: 'APPT_PATIENT_MISMATCH' });
     }
+    // Facility + POS come from the PATIENT's facility assignment, never a
+    // global default and never a clinician's pick.
+    const place = await resolveFacilityForVisit(emr, client, null);
+    if (place.facilityId) built.encounter.facility_id = place.facilityId;
+    if (place.posCode) built.encounter.pos_code = place.posCode;
+    const placeWarning = place.warning || null;
     const enc = await emr.createEncounter(puuid, built.encounter);
     const encounterUuid = enc && (enc.euuid || enc.uuid || enc.encounter_uuid || enc.id);
     if (!encounterUuid) return res.status(502).json({ error: 'OpenEMR did not return an encounter id' });
@@ -6170,6 +6179,7 @@ app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireCli
     // there, but a failure here is now UNEXPECTED rather than routine, so it
     // is logged and surfaced as such. The visit still stands either way.
     const warnings = [];
+    if (placeWarning) warnings.push(placeWarning);
     let vitalsRowWritten = false;
     try {
       await emr.addVitals(puuid, encounterUuid, built.vitals);
@@ -7028,6 +7038,26 @@ const loadDxCandidates = async (emr, client, excludeEncounterUuid) => {
 };
 
 // Common loader: clinical client + linked check + billing record + closed state.
+// Resolve WHERE CARE HAPPENED and its POS for an encounter, from the PATIENT's
+// facility assignment (owner spec 2026-09-08). Never from a global setting and
+// never from a clinician-facing picker: POS is a property of the facility
+// record, and the patient's assignment is what selects it. Telehealth is the one
+// per-visit variation and keys off the appointment's location marker.
+const resolveFacilityForVisit = async (emr, client, appointmentLocation) => {
+  let facilities = [];
+  try { facilities = await emr.getFacilities(); }
+  catch (e) {
+    return { facilityId: null, posCode: null, facilityName: null, source: 'unavailable',
+      error: 'FACILITY_LOOKUP_FAILED',
+      warning: `OpenEMR's facility list could not be read (${e.message.slice(0, 120)}), so the place of service could not be derived.` };
+  }
+  return clinicalRepo.resolveEncounterFacility({
+    patientFacilityId: client.openEmrFacilityId || null,
+    telehealthFacilityId: config.OPENEMR.TELEHEALTH_FACILITY_ID || null,
+    appointmentLocation, facilities
+  });
+};
+
 const loadEncounterContext = async (req, res, { createRecord = true } = {}) => {
   const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
   if (!client) { res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' }); return null; }
@@ -7235,10 +7265,17 @@ app.post('/api/clinical/patients/:clientId/encounters', authenticateToken, requi
       if (!appointment) return res.status(400).json({ error: 'That appointment does not belong to this patient', code: 'APPT_PATIENT_MISMATCH' });
       if (!body.date) built.encounter.date = appointment.pc_eventDate;
     }
+    // Facility + POS come from the PATIENT's facility assignment, never a
+    // global default and never a clinician's pick.
+    const place = await resolveFacilityForVisit(emr, client, appointment ? clinicalRepo.decodeAppointmentNotes(appointment.pc_hometext).location : null);
+    if (place.facilityId) built.encounter.facility_id = place.facilityId;
+    if (place.posCode) built.encounter.pos_code = place.posCode;
+    const placeWarning = place.warning || null;
     const enc = await emr.createEncounter(puuid, built.encounter);
     const encounterUuid = enc && (enc.euuid || enc.uuid || enc.encounter_uuid || enc.id);
     if (!encounterUuid) return res.status(502).json({ error: 'OpenEMR did not return an encounter id' });
     const warnings = [];
+    if (placeWarning) warnings.push(placeWarning);
     let vitalsRowWritten = false;
     if (built.vitals) {
       // See the H&P route: on 8.4 the structured row is primary and a failure
@@ -7353,13 +7390,17 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
       encounter: emrRow ? {
         uuid: encounterUuid, eid: emrRow.eid != null ? String(emrRow.eid) : record.encounterEid, date: String(emrRow.date || '').slice(0, 10),
         reason: emrRow.reason, billingNote: emrRow.billing_note || null, providerId: emrRow.provider_id != null ? String(emrRow.provider_id) : null,
-        facility: emrRow.facility_name || null, classCode: emrRow.class_code || null
+        facility: emrRow.facility_name || null, classCode: emrRow.class_code || null,
+        // Where care happened and the POS it carries. Derived from the
+        // patient's facility assignment — shown, never edited here.
+        facilityId: emrRow.facility_id != null ? String(emrRow.facility_id) : null,
+        posCode: emrRow.pos_code != null ? String(emrRow.pos_code) : null
       } : { uuid: encounterUuid, eid: record.encounterEid, date: record.date, reason: record.reason, emrError: emrRowR.e && emrRowR.e.message },
       narrativeNotes: narrative.map(n => ({ id: String(n.id), date: n.date, subjective: n.subjective, objective: n.objective, assessment: n.assessment, plan: n.plan })),
       notesError,
       record, state: encounterStateOf(record, ctx.attestation), closed: ctx.closed,
       prescriptions: ctx.prescriptions, orders: ctx.orders, attestation: ctx.attestation, addenda: ctx.addenda,
-      signReadiness: clinicalRepo.checkSignReadiness({ hasNote, record, billingNpi: payer.billing_npi_used }),
+      signReadiness: clinicalRepo.checkSignReadiness({ hasNote, record, billingNpi: payer.billing_npi_used, posCode: emrRow && emrRow.pos_code }),
       candidates, candidatesError: cands.error,
       favorites: {
         icd10: clinicalRepo.rankFavorites(usage, req.user.id, 'ICD10', 15),
@@ -7573,7 +7614,12 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
           .some(n => String(n.id) !== String(ctx.record.structuredNoteSid || '') && !/^\[GFC STRUCTURED RECORD/.test(String(n.subjective || '')));
       }
     } catch { hasNote = false; }
-    const ready = clinicalRepo.checkSignReadiness({ hasNote, record: ctx.record, billingNpi: payer.billing_npi_used });
+    // Read the POS from the encounter OpenEMR actually holds, not from what we
+    // believe we sent. This is the value that reaches the claim.
+    let encPos = null;
+    try { const encRow = await ctx.emr.getEncounterRow(ctx.client.openEmrPatientId, ctx.encounterUuid); encPos = encRow && encRow.pos_code; }
+    catch { encPos = null; }
+    const ready = clinicalRepo.checkSignReadiness({ hasNote, record: ctx.record, billingNpi: payer.billing_npi_used, posCode: encPos });
     if (!ready.ok) return res.status(409).json({ error: ready.message, code: ready.codes[0], codes: ready.codes, missing: ready.missing });
     const attestation = clinicalRepo.buildAttestation({ id: uuidv4(), record: ctx.record, actor: ctx.actor, billingNpi: payer.billing_npi_used, narrativeNoteSid: ctx.record.narrativeNoteSid });
     const atts = await loadRows('encounter_attestations');
@@ -7630,6 +7676,52 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
   } catch (error) {
     console.error('Encounter sign error:', error);
     res.status(502).json({ error: `Sign failed: ${error.message}` });
+  }
+});
+
+// ── The patient's facility assignment (Session 4.5, owner spec) ───────────
+// Each patient lives somewhere fixed, so each patient is assigned to an
+// OpenEMR facility: a Hickory Log resident to the Hickory Log record, an
+// Ellijay client to the private-residence record. Their encounters inherit
+// that facility and its POS. This is set ONCE per patient by an admin, not per
+// visit by a clinician — a clinician never sees a POS code at all.
+//
+// OpenEMR 8.4's patient record carries no facility field (verified live), so
+// the assignment is stored app-side as a pointer, the same way
+// client.openEmrPatientId is. The POS itself always comes from OpenEMR's
+// facility record, never from here.
+app.put('/api/clinical/patients/:clientId/facility', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    const raw = String((req.body || {}).facilityId ?? '').trim();
+    if (raw === '') {
+      users[idx].openEmrFacilityId = null;
+      await db.set('users', users);
+      await logActivity(req.user.id, req.user.name || req.user.email, 'patient_facility_cleared', 'client', client.id, {});
+      return res.json({ message: 'Facility assignment cleared. Visits for this patient cannot be signed until one is set.', facility: null });
+    }
+    if (!/^\d+$/.test(raw)) return res.status(400).json({ error: 'A numeric OpenEMR facility id is required', code: 'BAD_FACILITY' });
+    const facilities = await openemr.forActor(req.user).getFacilities();
+    const chosen = facilities.find(f => String(f.id) === raw);
+    if (!chosen) return res.status(400).json({ error: 'That facility does not exist in OpenEMR', code: 'UNKNOWN_FACILITY' });
+    users[idx].openEmrFacilityId = raw;
+    await db.set('users', users);
+    // Surfaced, not settable here: if the facility has no POS on its record,
+    // the fix belongs on the facility in OpenEMR.
+    const posWarning = chosen.pos_code ? null
+      : `"${chosen.name || raw}" has no place-of-service code on its record in OpenEMR. Set it on the facility (Administration → Facilities) or visits for this patient cannot be signed.`;
+    await logActivity(req.user.id, req.user.name || req.user.email, 'patient_facility_assigned', 'client', client.id, {
+      facilityId: raw, facilityName: chosen.name || null, posCode: chosen.pos_code || null
+    });
+    res.json({
+      message: `${client.name || 'Patient'} is assigned to ${chosen.name || raw}`,
+      facility: { id: raw, name: chosen.name || null, posCode: chosen.pos_code || null },
+      warnings: posWarning ? [posWarning] : []
+    });
+  } catch (error) {
+    console.error('Patient facility assignment error:', error);
+    res.status(502).json({ error: `Facility assignment failed: ${error.message}` });
   }
 });
 

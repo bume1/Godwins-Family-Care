@@ -306,16 +306,13 @@ const forActor = (actor) => {
     async createEncounter(puuid, fields) {
       const body = {
         pc_catid: config.OPENEMR.ENCOUNTER_CATEGORY,
-        // WHERE CARE HAPPENED vs the BUSINESS ADDRESS — two different
-        // facilities. They resolve to the same id today only because the F1
-        // private-residence service facility does not exist yet (Phase 8.3).
-        // facility_id is what drives the claim's POS; getting it pointed at
-        // the billing record is how every home visit quietly bills as an
-        // office visit.
-        facility_id: config.OPENEMR.SERVICE_FACILITY_ID,
+        // facility_id (WHERE CARE HAPPENED) and pos_code are NOT defaulted
+        // here. They are resolved from the PATIENT's facility assignment by the
+        // caller and arrive in `fields`. A global default is exactly what puts
+        // POS 12 on a Hickory Log claim, silently, the day that facility opens.
+        // billing_facility is the practice's business address, which IS global.
         billing_facility: config.OPENEMR.BILLING_FACILITY_ID,
         sensitivity: 'normal',
-        pos_code: config.OPENEMR.POS_CODE,
         provider_id: config.OPENEMR.PROVIDER_ID,
         ...fields
       };
