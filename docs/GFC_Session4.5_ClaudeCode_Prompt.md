@@ -112,8 +112,29 @@ C. Retire the workarounds — SEPARATE COMMITS, AFTER B IS PROVEN LIVE
 
 D. Per-visit billing facility picker
 - Writes form_encounter.billing_facility.
+- The picker is sourced from OpenEMR's own facility list (GET /api/facility),
+  never a hardcoded or app-side list. Offer the facilities OpenEMR marks
+  billing_location=1. GFC currently has two: Vinings (id 3) and Buckhead (id 4).
+- POS is inherited from the chosen facility's record (facility.pos_code)
+  rather than carried as a separate app setting.
 - It is NOT a charge field: addBilling() has no such parameter and the
   billing table has no such column. Do not add it to the charge payload.
+
+  ⚠️ BEFORE IMPLEMENTING THE POS INHERITANCE, READ THIS. Verified live
+  2026-09-08: BOTH facility records carry pos_code "11" (Office). The app
+  currently sends pos_code "12" (Home) on every encounter, which is correct for
+  a home-visit practice. Inheriting POS from the facility as configured today
+  would code every home visit as an office visit — a billing error that returns
+  201 and surfaces later as a denial or an audit finding, which is exactly the
+  failure mode this session's acceptance rules exist to catch.
+  Resolve the data before wiring the behaviour. Either:
+    (a) correct pos_code to 12 on both facility records in OpenEMR
+        (Administration → Facilities), then inherit — preferred, since it makes
+        OpenEMR's own record correct for anyone reading it; or
+    (b) keep POS as the app-level config and drop the inheritance; or
+    (c) inherit as the default and let the clinician override per visit, which
+        is the most flexible and the most to build.
+  Do not implement inheritance while the facilities still read 11.
 
 E. Session 4.3 live preflight
 - 4.3 merged (PR #31) but was proven against a mock, because the build

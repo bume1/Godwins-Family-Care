@@ -561,3 +561,31 @@ Consequences, in order:
 TEST DATA only today, so no PHI exposure. Confirm the behaviour with the EMR maintainer before
 HIPAA go-live; it may be an OpenEMR password-grant characteristic rather than a misconfiguration,
 but either way the control above (disable superseded clients) applies.
+
+### Configuration conflict — facility `pos_code` is 11 (Office) on a home-visit practice
+
+Found 2026-09-08 while scoping per-visit facility selection. Both facility records
+return `pos_code: "11"`:
+
+| id | Facility | pos_code | billing_location |
+|---|---|---|---|
+| 3 | Godwins Family Care, LLC - Vinings | **11** (Office) | 1 |
+| 4 | Godwins Family Care, LLC - Buckhead | **11** (Office) | 1 |
+
+The app sends `pos_code` **12** (Home) on every encounter, from `config.OPENEMR.POS_CODE`.
+That is the correct code for a home-visit practice and is what is being billed today, so
+nothing is currently wrong on the claim.
+
+The conflict matters the moment anything inherits POS from the facility record — which
+Session 4.5's Scope D was asked to do. Inheriting as configured would code every home visit
+as an office visit. It would return 201, look correct in Billing Manager, and surface as a
+denial or an audit finding much later: the same shape as the CPT/diagnosis swap that took
+Phase 6B three runs.
+
+**4.5 shipped the facility picker WITHOUT POS inheritance**, deliberately, for that reason.
+Scope D writes `form_encounter.billing_facility` only and leaves `pos_code` on the app config.
+
+**Owner decision needed.** Preferred fix is to set `pos_code` to 12 on both facility records
+(Administration → Facilities), which also makes OpenEMR's own record correct for anyone
+reading it directly, and only then wire the inheritance. Details and the alternatives are in
+`docs/GFC_Session4.5_ClaudeCode_Prompt.md` Scope D.
