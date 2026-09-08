@@ -53,7 +53,7 @@ Severity: **FIX-NOW** = mechanical, fixed in this PR. **DECISION** = needs Bianc
 ## 5. DECISION items for Bianca
 
 1. **Banner photography.** ✅ **ANSWERED (Bianca, 08/15):** lab photos removed; banners now use brand photography from `docs/design-system/assets/` — `team-bethel.webp` on the Admin Hub + Portal Hub, `photo-couple-walking.jpg` on the client-portal admin view + Service Portal. `public/banners/README.md` updated.
-2. **Client→admin messages, staff side.** ⏳ **OPEN.** Client-sent messages persist to the `gfc_messages` store, but no staff view reads them until the Session 9 messaging module. Until then, is "admin sees them in the KV store only" acceptable, or do you want a minimal admin-hub inbox tile ahead of Session 9?
+2. **Client→admin messages, staff side.** ✅ **RESOLVED (Bianca, 08/16): defer to Session 9.** Client-sent messages persist to the `gfc_messages` store; surfacing them to staff is the Session 9 messaging module's job. No interim admin-hub inbox tile is built (that would pull Session 9 scope forward). Interim state: messages are safely stored and auditable in the KV store; staff visibility lands with Session 9.
 3. **`hasImplementationsAccess` flag.** ✅ **ANSWERED (Bianca, 08/15):** checkbox (and the "Impl" badge in the user list) hidden. The flag itself stays on user records for future tracker repurposing.
 
 ## 6. Acceptance verification (this PR)
