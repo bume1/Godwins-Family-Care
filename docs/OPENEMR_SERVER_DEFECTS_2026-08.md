@@ -373,20 +373,44 @@ Session 4.5 can now be proven against the live EMR: sign-and-close reaches Billi
 - **Billing facility is not a charge field and never was.** `addBilling()` has no such
   parameter and the `billing` table no such column; it lives on
   `form_encounter.billing_facility`. The per-visit facility picker is Session 4.5 scope.
-- **ICD-10-CM is not loaded** (Administration → Other → External Data Loads). This does
-  **not** affect the charge write — `billing.justify` is free text and the app supplies the
-  codes. It affects three things only: `GET /api/codes` returns 0 rows, FHIR `Condition`
-  reads back uncoded, and OpenEMR's own Fee Sheet diagnosis picker is empty.
-  **Re-verified 2026-09-08 (post-8.4, post-ACL-grant): still not loaded.** The token is
-  healthy (52 granted scopes, `user/codes.read` present, `missingScopes` empty), so a
-  0-row result is a data state, not a permission or transport failure. The `codes` table
-  is not literally empty — an untyped `GET /api/codes?search=10` returns 17 rows, all of
-  them the **CVX vaccine and NCI-CONCEPT-ID rows OpenEMR ships with the install**. There
-  is **not one ICD-10 or CPT/HCPCS row in it**. That distinction matters when probing: a
-  typed search proves the load has not run, an untyped search proves the route works. The
-  same table backs OpenEMR's own Fee Sheet diagnosis picker, so that picker returns
-  nothing for a provider until the load runs — CPT is a separate hand-entry (AMA
-  copyright; OpenEMR ships none) into the fee schedule.
+- **ICD-10-CM IS LOADED as of 2026-09-08** (owner ran Administration → Other → External
+  Data Loads). Proven live, not inferred: a fresh `POST …/medical_problem` with
+  `diagnosis: "ICD10:E11.9"` reads back from the standard API as
+  `{"code":"E11.9","description":"Type 2 diabetes mellitus without complications",
+  "code_type":"ICD10","system":"http://hl7.org/fhir/sid/icd-10"}`. OpenEMR could only
+  resolve that description from the loaded table.
+
+  **CORRECTION — an earlier entry here (and an earlier reading the same day) said the
+  load had not run. That was wrong, and the reason it was wrong matters more than the
+  error.** The probe used was `GET /api/codes?type=ICD10&search=E11` → 0 rows. That route
+  is the Phase 6B one, and its SQL is
+  `FROM codes c JOIN code_types ct ON ct.ct_id = c.code_type` — the **manually entered
+  `codes` table only**. OpenEMR's External Data Loads writes ICD-10 into its own separate
+  external table, which that query never touches. So the route returns 0 rows whether or
+  not the load has run, and **a 0-row result from it proves nothing about the load.**
+
+  Two consequences, both open:
+  1. **`GET /api/codes` is defective for ICD-10**, and the fix is in the 6B patch
+     (`GfcChargeRestController::searchCodes`), not in the app. Prefer OpenEMR's own
+     `main_code_set_search()` over hand-writing a UNION, so every external code set is
+     handled and the query survives upstream changes. Confirm the external table name
+     against the installed 8.4 source before writing it. Installing the fix means
+     rebuilding the derived image and redeploying.
+  2. **The app tells the clinician the wrong thing.** The empty-result notice reads as
+     "the ICD-10 load has not run", which is now false. It must not claim a data state
+     it cannot actually observe.
+
+  What the load does NOT change: it never affected the charge write (`billing.justify` is
+  free text and the app supplies the codes), and **FHIR `Condition` still reads back as
+  `{"text": …}` with no coding.** That second point finally settles Quirk 2 below, which
+  this document recorded as undecidable without the load: the standard API returns the
+  coding and FHIR does not, so the code is stored correctly and **OpenEMR's FHIR Condition
+  mapper drops it.** A mapper limitation, not a missing load.
+
+  CPT/HCPCS remain absent and are a separate hand-entry into the fee schedule (AMA
+  copyright; OpenEMR ships none). An untyped `GET /api/codes?search=10` returns 17 rows,
+  all CVX vaccine and NCI-CONCEPT-ID entries shipped with the install — useful only as
+  proof that the route itself executes.
 - Org-level read for FHIR **DocumentReference** and **Coverage** (both still 403), and
   `sensitivities` — Phase 8.6 items on the same ACL screen.
 
