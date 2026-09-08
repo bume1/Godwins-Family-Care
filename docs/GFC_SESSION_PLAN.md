@@ -64,6 +64,10 @@ Each session ends in a PR you review and merge. **Companion to** `GFC_App_Build_
 
 **Session 12 — Audit log UI + final review.**
 
+**Queued side tracks (post-release, gated behind Session 5).** Additive clinical work with paste-ready prompts, deliberately sequenced after the release path — not numbered sessions:
+- **AI.1 — Dictation → structured note + ICD-10 proposal** (`GFC_SessionAI.1_ClaudeCode_Prompt.md`). Needs the AWS BAA boundary (Bedrock zero-data-retention, Transcribe Medical, in-boundary S3) from Session 5, plus 4.5 merged and ≥2 weeks of real visits. The model never writes to OpenEMR; it drafts into the existing 4.1/4.4 forms, unverified-until-touched.
+- **CDS.1 — Clinical reminders** (`GFC_SessionCDS.1_ClaudeCode_Prompt.md`). Hybrid: Phase 1 care-plan-derived reminders (provider banner + patient Health-tab card, one object rendered two ways, filtered through the 4.3 sharing model) is buildable against test data now; Phase 2 surfaces OpenEMR's native Clinical Decision Rules via a bounded route (Phase-6B pattern), install gated on the ICD-10 load + CDR rules configured + credential swap. Rules are always clinician-authored or mirrored from OpenEMR — never invented in code.
+
 ---
 
 ## Rough timeline
