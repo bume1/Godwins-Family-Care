@@ -123,9 +123,48 @@ gap surfaces at intake rather than at the kitchen table.
    substitute for the attorney pass Intake Spec §6 still lists as open. Worth naming specifically:
    the pre-4.6 `emergencyFinancial` had a private home care provider taking consent to medical
    treatment.
-2. **Private Home Care Provider licence number.** The paper agreement asserts DCH licensure under
-   `PHCP013073`. It renders in the in-app service agreement today, sourced from `ORG.phcpLicense` in
-   `public/consent-text.js` — a one-line change if the answer is no.
-3. **Reaffirmation scope.** The migration flags every dual-lane client to sign the clinical
-   agreement, including the seven legacy paper patients. Grandfathering them is a one-line filter in
-   `migrateConsentLaneSplit()` if that is preferred.
+2. **Private Home Care Provider licence number — DECIDED 2026-09-08: it renders.**
+   `PHCP013073`, sourced from `ORG.phcpLicense` in `public/consent-text.js`, prints in the Home Care
+   Service Agreement's Parties clause. No further action.
+
+3. **Reaffirmation scope — DECIDED 2026-09-08: the seven legacy paper patients are grandfathered,
+   by evidence rather than by exemption.** They are resolved by filing the packet they already
+   signed — an upload that classifies each page into its consent bucket and records `signed_offline`
+   per document — not by asking them to sign again and not by a blanket skip in the migration. The
+   `consentReaffirmRequired` flag stays as the work queue for that filing and clears per consent as
+   evidence lands.
+
+   **The one thing paper cannot resolve.** The In-Home Primary Care Services Agreement did not
+   exist in the pre-09/2026 packet, so a legacy IHPC or dual-lane patient has no paper copy of it to
+   file. Parsing will correctly find nothing. That consent stays outstanding until it is signed —
+   recording it as grandfathered would assert a signature that does not exist on any document.
+   Everything they did sign is grandfathered by the filing.
+
+   The upload-and-classify flow is its own build (proposed Session 4.7); see the note below.
+
+---
+
+## Session 4.7 — legacy packet filing (proposed, not built)
+
+Grandfathering by evidence needs a path that does not exist yet: upload a scanned packet, split and
+classify it into the fourteen consent buckets, let an admin confirm, then record `signed_offline`
+with the signing date off the page.
+
+**Two things gate it.**
+
+**PHI and the model provider.** The repo has no LLM integration today, and no OCR. Classification by
+a hosted model means scanned client packets — signatures, diagnoses, addresses — leave the BAA
+boundary. That needs a signed BAA with the provider and zero-retention terms before a single real
+packet is uploaded. Until then the flow runs on synthetic scans only, consistent with the standing
+TEST DATA rule.
+
+**A deterministic pass may be enough.** The packet is ten known documents with fixed titles. Title
+matching over extracted text classifies a clean scan with no model call and no PHI leaving the
+boundary. A model earns its place on the messy cases: a skewed phone photo, a handwritten margin
+note, a page out of order. Recommended shape is deterministic first, model as the fallback that
+handles what matching could not, so the common case never leaves the boundary.
+
+**Never auto-record.** Classification proposes a bucket, a page range and a confidence; an admin
+confirms in the offline-onboarding checklist that already exists; only then does the write happen,
+with provenance recording that it was machine-proposed and human-confirmed. Same guardrail the
+coding assist already runs under: the system proposes, the person disposes.

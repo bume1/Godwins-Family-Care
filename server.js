@@ -5181,7 +5181,14 @@ async function migrateConsentLaneSplit() {
         signedAgainst: (meta.serviceAgreement && meta.serviceAgreement.version) || consentText.LEGACY_VERSION,
         consents: ['ihpcServiceAgreement'],
         titles: [consentText.titleFor('ihpcServiceAgreement')],
-        note: 'Signed the pre-4.6 combined Service Agreement, which described both service lines. The In-Home Primary Care Services Agreement is a separate document and must be signed.'
+        // Owner decision 2026-09-08: the seven legacy paper patients are
+        // GRANDFATHERED — resolved by filing the paper packet they already
+        // signed, not by asking them to sign again. The flag is the work queue
+        // for that filing; it clears when the evidence is on file, or when the
+        // consent is signed in-app. What paper cannot resolve is a document
+        // that was never in the old packet.
+        note: 'Signed the pre-4.6 combined Service Agreement, which described both service lines. Resolve by filing the signed paper packet against this client (records signed_offline per document), or by signing the In-Home Primary Care Services Agreement in-app. Note the clinical agreement did not exist in the pre-09/2026 packet, so there is no paper copy of it to file.',
+        resolution: ['file_paper_packet', 'sign_in_app']
       };
       if (u.enrollmentStatus === 'enrolled') u.reviewStatus = 'needs_followup';
       flagged.push({ id: u.id, name: u.name || u.email, serviceLine: line, enrollmentStatus: u.enrollmentStatus || 'intake_pending', source: u.source || 'in_app' });
