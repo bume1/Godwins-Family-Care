@@ -120,21 +120,34 @@ D. Per-visit billing facility picker
 - It is NOT a charge field: addBilling() has no such parameter and the
   billing table has no such column. Do not add it to the charge payload.
 
-  ⚠️ BEFORE IMPLEMENTING THE POS INHERITANCE, READ THIS. Verified live
-  2026-09-08: BOTH facility records carry pos_code "11" (Office). The app
-  currently sends pos_code "12" (Home) on every encounter, which is correct for
-  a home-visit practice. Inheriting POS from the facility as configured today
-  would code every home visit as an office visit — a billing error that returns
-  201 and surfaces later as a denial or an audit finding, which is exactly the
-  failure mode this session's acceptance rules exist to catch.
-  Resolve the data before wiring the behaviour. Either:
-    (a) correct pos_code to 12 on both facility records in OpenEMR
-        (Administration → Facilities), then inherit — preferred, since it makes
-        OpenEMR's own record correct for anyone reading it; or
-    (b) keep POS as the app-level config and drop the inheritance; or
-    (c) inherit as the default and let the clinician override per visit, which
-        is the most flexible and the most to build.
-  Do not implement inheritance while the facilities still read 11.
+  ⚠️ POS DOES NOT COME FROM THE BILLING FACILITY. Owner ruling 2026-09-08,
+  and it corrects an earlier note in this file that said to set the org
+  record's pos_code to 12. Do not do that.
+
+  The two facilities are different things:
+    - The BILLING facility is GFC's business address (id 3, POS 11 Office).
+      Nothing clinical happens there. 11 is the honest descriptor for that
+      record, and it stays 11.
+    - The SERVICE facility is where care actually happened, and it is what the
+      claim's POS must describe: F1 private residence = 12, Hickory Log = 13 or
+      14 once DCH confirms, telehealth = 10.
+
+  So "POS inherited from the facility" means inherited from the SERVICE
+  facility record, never from the billing record.
+
+  THE TRAP, and it is already in the code as of 4.5: the encounter carries both
+  `facility_id` (service — drives POS) and `billing_facility` (business
+  address), and both were being filled from one config value pointing at id 3.
+  4.5 split them into OPENEMR_SERVICE_FACILITY_ID and
+  OPENEMR_BILLING_FACILITY_ID, still defaulting to 3 so nothing changed
+  behaviourally, precisely so Phase 8.3 is a config change rather than a hunt.
+
+  PHASE 8.3 MUST DO THIS. When the F1 private-residence record is created,
+  check which id the org record has and which id F1 gets, then point
+  OPENEMR_SERVICE_FACILITY_ID at F1. If it stays pointed at the billing record,
+  every home visit inherits the office POS and every claim is wrong in the same
+  quiet way — 201, correct-looking in Billing Manager, denied months later.
+  Owner is walking this at 8.3.
 
 E. Session 4.3 live preflight
 - 4.3 merged (PR #31) but was proven against a mock, because the build

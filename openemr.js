@@ -306,8 +306,14 @@ const forActor = (actor) => {
     async createEncounter(puuid, fields) {
       const body = {
         pc_catid: config.OPENEMR.ENCOUNTER_CATEGORY,
-        facility_id: config.OPENEMR.FACILITY_ID,
-        billing_facility: config.OPENEMR.FACILITY_ID,
+        // WHERE CARE HAPPENED vs the BUSINESS ADDRESS — two different
+        // facilities. They resolve to the same id today only because the F1
+        // private-residence service facility does not exist yet (Phase 8.3).
+        // facility_id is what drives the claim's POS; getting it pointed at
+        // the billing record is how every home visit quietly bills as an
+        // office visit.
+        facility_id: config.OPENEMR.SERVICE_FACILITY_ID,
+        billing_facility: config.OPENEMR.BILLING_FACILITY_ID,
         sensitivity: 'normal',
         pos_code: config.OPENEMR.POS_CODE,
         provider_id: config.OPENEMR.PROVIDER_ID,

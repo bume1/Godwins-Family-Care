@@ -221,8 +221,31 @@ const OPENEMR = Object.freeze({
   // Encounter defaults (verified required by the dev instance's encounter
   // POST). pos_code 12 = Home (home-visit practice). Override per environment
   // once practice/facility setup (§15) is finalized.
+  // Two DIFFERENT facilities, deliberately separate even though they default
+  // to the same id today.
+  //
+  //   SERVICE_FACILITY_ID  — WHERE CARE HAPPENS. Drives the encounter's
+  //     facility_id and therefore the POS that lands on the claim. For a
+  //     home-visit practice this must become the F1 private-residence record
+  //     (POS 12) once it exists; Hickory Log will be its own (13 or 14, pending
+  //     DCH); telehealth is 10.
+  //   BILLING_FACILITY_ID  — the BUSINESS ADDRESS on the claim. GFC's org
+  //     record (id 3, POS 11 Office). Nothing clinical happens there, and 11 is
+  //     the honest descriptor for that record.
+  //
+  // Conflating them is a silent billing error: every home visit would inherit
+  // the office POS, return 201, look right in Billing Manager, and surface as
+  // a denial much later. Phase 8.3 sets SERVICE_FACILITY_ID to the F1 record —
+  // owner-walked, see the 4.5 prompt Scope D.
   FACILITY_ID: process.env.OPENEMR_FACILITY_ID || '3',
+  SERVICE_FACILITY_ID: process.env.OPENEMR_SERVICE_FACILITY_ID || process.env.OPENEMR_FACILITY_ID || '3',
+  BILLING_FACILITY_ID: process.env.OPENEMR_BILLING_FACILITY_ID || process.env.OPENEMR_FACILITY_ID || '3',
   ENCOUNTER_CATEGORY: process.env.OPENEMR_ENCOUNTER_CATEGORY || '5',
+  // POS on the claim describes WHERE CARE HAPPENED, not the business address:
+  // 12 private residence, 13/14 assisted living / group home, 10 telehealth.
+  // It belongs to the SERVICE facility. It is NOT inherited from the billing
+  // facility record — that one is correctly POS 11 (Office) because it is an
+  // office where no care is delivered.
   POS_CODE: process.env.OPENEMR_POS_CODE || '12',
   PROVIDER_ID: process.env.OPENEMR_PROVIDER_ID || '1',
   // 8.4 requires `user` and `group` in the encounter PUT body. Without them it

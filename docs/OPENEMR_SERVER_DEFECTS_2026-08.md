@@ -562,30 +562,37 @@ TEST DATA only today, so no PHI exposure. Confirm the behaviour with the EMR mai
 HIPAA go-live; it may be an OpenEMR password-grant characteristic rather than a misconfiguration,
 but either way the control above (disable superseded clients) applies.
 
-### Configuration conflict — facility `pos_code` is 11 (Office) on a home-visit practice
+### Facility POS — CORRECTED by owner ruling 2026-09-08
 
-Found 2026-09-08 while scoping per-visit facility selection. Both facility records
-return `pos_code: "11"`:
+An earlier entry here recommended setting `pos_code` to 12 on both facility records.
+**That was wrong and is withdrawn.** The owner's ruling:
 
-| id | Facility | pos_code | billing_location |
-|---|---|---|---|
-| 3 | Godwins Family Care, LLC - Vinings | **11** (Office) | 1 |
-| 4 | Godwins Family Care, LLC - Buckhead | **11** (Office) | 1 |
+Facility ids 3 and 4 are GFC's **business address** records. Nothing clinical happens there,
+so `pos_code` **11 (Office) is correct and stays**. Making them say 12 would make OpenEMR's
+own record dishonest.
 
-The app sends `pos_code` **12** (Home) on every encounter, from `config.OPENEMR.POS_CODE`.
-That is the correct code for a home-visit practice and is what is being billed today, so
-nothing is currently wrong on the claim.
+The POS that lands on a **claim** describes where care happened, and comes from the
+**service** facility:
 
-The conflict matters the moment anything inherits POS from the facility record — which
-Session 4.5's Scope D was asked to do. Inheriting as configured would code every home visit
-as an office visit. It would return 201, look correct in Billing Manager, and surface as a
-denial or an audit finding much later: the same shape as the CPT/diagnosis swap that took
-Phase 6B three runs.
+| Setting | POS |
+|---|---|
+| F1 private residence | **12** |
+| Hickory Log | **13 or 14** — pending DCH confirmation |
+| Telehealth | **10** |
+| The business address record itself | 11 (never on a home-visit claim) |
 
-**4.5 shipped the facility picker WITHOUT POS inheritance**, deliberately, for that reason.
-Scope D writes `form_encounter.billing_facility` only and leaves `pos_code` on the app config.
+**The live trap, which was already in the code.** The encounter POST carries two different
+facility fields — `facility_id` (the SERVICE facility, which drives the claim's POS) and
+`billing_facility` (the business address) — and both were filled from a single config value
+pointing at id 3. Every encounter has therefore been created pointed at the billing record.
+It is harmless today only because `pos_code` is sent explicitly as 12 and the F1 record does
+not exist yet.
 
-**Owner decision needed.** Preferred fix is to set `pos_code` to 12 on both facility records
-(Administration → Facilities), which also makes OpenEMR's own record correct for anyone
-reading it directly, and only then wire the inheritance. Details and the alternatives are in
-`docs/GFC_Session4.5_ClaudeCode_Prompt.md` Scope D.
+Session 4.5 split them into `OPENEMR_SERVICE_FACILITY_ID` and `OPENEMR_BILLING_FACILITY_ID`,
+both still defaulting to 3, so behaviour is unchanged and Phase 8.3 becomes a config change
+rather than a code hunt.
+
+**Phase 8.3 action.** When the F1 private-residence record is created, note which id the org
+record holds and which id F1 gets, then point `OPENEMR_SERVICE_FACILITY_ID` at F1. If it
+stays on the billing record, every home visit inherits the office POS and every claim is
+wrong quietly. Owner is walking this at 8.3.

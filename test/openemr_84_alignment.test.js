@@ -198,3 +198,23 @@ test('the billing-facility route writes form_encounter and verifies the read-bac
   assert.match(route, /FACILITY_NOT_STORED/, 'the route must assert the stored value, not the status code');
   assert.doesNotMatch(route, /postCharge/, 'the facility must never touch a charge');
 });
+
+// ---- Service facility vs billing facility ----
+// Owner ruling 2026-09-08: the claim's POS describes WHERE CARE HAPPENED, so it
+// comes from the SERVICE facility. The billing record is GFC's business address
+// (POS 11 Office) and stays that way — nothing clinical happens there.
+// The encounter POST carries both fields and they were filled from one config
+// value, which is how every home visit would have inherited the office POS.
+test('the encounter separates service facility from billing facility', () => {
+  const src = fs.readFileSync(path.join(root, 'openemr.js'), 'utf8');
+  const fn = src.slice(src.indexOf('async createEncounter'), src.indexOf('async createEncounter') + 1200);
+  assert.match(fn, /facility_id: config\.OPENEMR\.SERVICE_FACILITY_ID/,
+    'facility_id is the SERVICE facility — it drives the claim POS');
+  assert.match(fn, /billing_facility: config\.OPENEMR\.BILLING_FACILITY_ID/,
+    'billing_facility is the business address');
+  assert.doesNotMatch(fn, /facility_id: config\.OPENEMR\.FACILITY_ID/,
+    'the two must not be filled from one value again');
+  const cfg = require(path.join(root, 'config.js')).OPENEMR;
+  assert.ok(cfg.SERVICE_FACILITY_ID, 'SERVICE_FACILITY_ID must exist');
+  assert.ok(cfg.BILLING_FACILITY_ID, 'BILLING_FACILITY_ID must exist');
+});
