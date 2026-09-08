@@ -591,10 +591,17 @@ const buildFollowUpWrites = (form, actor, opts) => {
     // Encounter record attribution (spec §4): the reason line names the clinician
     reason: `${reason.slice(0, 180)} — ${stamp}`.slice(0, 250),
     class_code: 'HH',
-    // Lands in OpenEMR's billing view for back-office staff (set at create —
-    // the encounter PUT is ACL-blocked on this instance)
+    // Lands in OpenEMR's billing view for back-office staff. Still set at
+    // create, but no longer ONLY settable there: 4.5 can change it afterwards
+    // through the encounter PUT, which works on 8.4 with `user` + `group`.
     billing_note: `Rendering clinician: ${stamp}. Coding is recorded by the GFC Care Platform (see the GFC structured note on this encounter).`.slice(0, 500)
   };
+  // Scope D: per-visit billing facility on form_encounter. Omitted when the
+  // clinician did not choose one, so the transport's instance default applies.
+  // Never a charge field — see buildChargePayloads.
+  if (/^\d+$/.test(String(form.billingFacilityId || ''))) {
+    encounter.billing_facility = String(form.billingFacilityId);
+  }
   const header = buildAttributionHeader(actor, opts && opts.serviceAccount);
   // OpenEMR's SOAP validator requires ≥2 characters per section it receives.
   const soapNote = {
@@ -719,20 +726,30 @@ const SIGN_BLOCKER_CODES = {
   diagnosis: 'SIGN_NO_DIAGNOSIS',
   service: 'SIGN_NO_SERVICE',
   service_dx_link: 'SIGN_UNLINKED_SERVICE',
-  billing_npi: 'SIGN_NO_BILLING_NPI'
+  billing_npi: 'SIGN_NO_BILLING_NPI',
+  // A signed encounter becomes a claim, and a claim needs a real place of
+  // service. Documenting the visit is never blocked; billing it is.
+  facility_pos: 'SIGN_NO_FACILITY_POS'
 };
 const SIGN_BLOCKER_LABELS = {
   note: 'a documented note',
   diagnosis: 'at least one ICD-10 diagnosis',
   service: 'at least one CPT/HCPCS service code',
   service_dx_link: 'every service linked to a diagnosis',
-  billing_npi: 'the billing provider NPI configured in settings'
+  billing_npi: 'the billing provider NPI configured in settings',
+  facility_pos: "a place of service — this patient has no OpenEMR facility assigned, or their facility has no POS code on its record. An admin fixes it on the patient or the facility, not here"
 };
-const checkSignReadiness = ({ hasNote, record, billingNpi }) => {
+// `posCode` is the place of service the encounter actually carries, derived
+// from the patient's facility. Documenting a visit is never blocked on it —
+// care happens whether or not an admin has finished the facility setup — but
+// SIGNING is, because a signed encounter becomes a claim and a claim with an
+// unverified POS is the silent error this whole change exists to prevent.
+const checkSignReadiness = ({ hasNote, record, billingNpi, posCode }) => {
   const missing = [];
   if (!hasNote) missing.push('note');
   missing.push(...deriveCodingStatus(record).missing);
   if (!normalizeNpiValue(billingNpi)) missing.push('billing_npi');
+  if (!String(posCode || '').trim()) missing.push('facility_pos');
   return {
     ok: missing.length === 0,
     missing,
@@ -809,12 +826,148 @@ const buildPrescription = ({ id, clientId, puuid, encounterUuid, input, actor, a
     }
   };
 };
-// The only Rx write OpenEMR 7.0.4 accepts is the medication LIST row
-// (title/begdate/enddate/diagnosis), so the sig is packed into the title and
-// the full structured Rx stays app-side + in the structured note.
-const prescriptionToMedicationRow = (rx) => ({
-  title: `${rx.drug} ${rx.dose} ${rx.route} ${rx.frequency} — qty ${rx.quantity}, refills ${rx.refills} (${rx.kind === 'refill' ? 'refill' : 'Rx'} via GFC)`.slice(0, 255),
-  begdate: rx.date
+// 4.5: 8.4 has a real prescription write, so the Rx becomes a first-class
+// prescription row instead of a medication-list row with the sig packed into
+// its title (the 7.0.4 workaround, retired). `patient_id` is added by the
+// transport, which resolves the numeric pid.
+//
+// `note` carries the acting clinician's name and NPI: OpenEMR attributes every
+// API write to the gfc-app-api service account, so without this stamp the
+// prescriber is unrecoverable from the EMR side (attribution interim, spec §4,
+// until Session 5 per-user auth).
+const prescriptionToEmrRow = (rx) => ({
+  drug: String(rx.drug || '').slice(0, 150),
+  dosage: `${rx.dose}`.slice(0, 100),
+  quantity: String(rx.quantity),
+  route: rx.route || null,
+  interval: String(rx.frequency || '').slice(0, 100),
+  refills: rx.refills,
+  start_date: rx.date,
+  note: [
+    rx.instructions ? `Sig: ${rx.instructions}` : null,
+    rx.kind === 'refill' ? 'Refill' : 'New Rx',
+    `Prescriber: ${(rx.prescriber && rx.prescriber.name) || 'unknown'} (NPI ${(rx.prescriber && rx.prescriber.npi) || 'none'})`
+  ].filter(Boolean).join(' | ').slice(0, 255)
+});
+
+// ---- Facility and POS resolution (Session 4.5, owner spec 2026-09-08) ----
+//
+// POS IS A PROPERTY OF THE FACILITY RECORD, SET ONCE. A clinician never sees or
+// chooses a POS number, and it is never a per-visit dropdown.
+//
+// What connects a visit to the right POS is THE PATIENT. Each patient lives
+// somewhere fixed, so each patient record is assigned to a facility: a Hickory
+// Log resident to the Hickory Log record (POS 13/14), an Ellijay client to the
+// private-residence record (POS 12). The encounter inherits both the facility
+// and its POS from that assignment.
+//
+// WHAT THIS REPLACES, AND WHY IT MATTERS: the app used to stamp every encounter
+// with one hardcoded facility and POS 12 from its own settings, regardless of
+// who the patient was. That is correct only while every patient is a private
+// residence. The moment Hickory Log goes live it breaks silently — POS 12 on
+// claims that should read 13 or 14. So the global default is never a fallback
+// here: a patient with no facility assignment is reported, not defaulted.
+//
+// Telehealth is the ONE legitimate per-visit variation, because the same
+// patient can be seen in person one week and by video the next. It keys off the
+// appointment's location marker (4.2's `[GFC location=telehealth]`), not off a
+// dropdown a clinician has to remember.
+const FACILITY_UNASSIGNED = 'FACILITY_NOT_ASSIGNED';
+const resolveEncounterFacility = ({ patientFacilityId, telehealthFacilityId, appointmentLocation, facilities }) => {
+  const byId = new Map((facilities || []).map(f => [String(f.id), f]));
+  const isTelehealth = String(appointmentLocation || '').toLowerCase() === 'telehealth';
+
+  // Telehealth overrides the patient's usual place, when a telehealth facility
+  // record exists to carry POS 10. Without one, fall through to the patient's
+  // facility and say so rather than inventing a code.
+  if (isTelehealth && telehealthFacilityId && byId.has(String(telehealthFacilityId))) {
+    const f = byId.get(String(telehealthFacilityId));
+    return { facilityId: String(f.id), posCode: f.pos_code ? String(f.pos_code) : null,
+      facilityName: f.name || null, source: 'telehealth_appointment',
+      warning: f.pos_code ? null : `The telehealth facility "${f.name || f.id}" has no POS on its record in OpenEMR.` };
+  }
+
+  if (!patientFacilityId) {
+    return { facilityId: null, posCode: null, facilityName: null, source: 'unassigned',
+      error: FACILITY_UNASSIGNED,
+      warning: 'This patient is not assigned to an OpenEMR facility, so the place of service on their claim cannot be derived. An admin assigns it on the patient record.' };
+  }
+  const f = byId.get(String(patientFacilityId));
+  if (!f) {
+    return { facilityId: String(patientFacilityId), posCode: null, facilityName: null, source: 'patient_stale',
+      error: FACILITY_UNASSIGNED,
+      warning: `This patient is assigned to OpenEMR facility ${patientFacilityId}, which no longer exists. An admin re-assigns it.` };
+  }
+  return {
+    facilityId: String(f.id),
+    posCode: f.pos_code ? String(f.pos_code) : null,
+    facilityName: f.name || null,
+    source: isTelehealth ? 'patient_facility_no_telehealth_record' : 'patient_facility',
+    warning: f.pos_code
+      ? (isTelehealth ? 'This visit is telehealth but no telehealth facility record exists, so the patient\'s usual place of service was used. Add a telehealth facility (POS 10) in OpenEMR.' : null)
+      : `Facility "${f.name || f.id}" has no place-of-service code on its record in OpenEMR. An admin sets it on the facility, not here.`
+  };
+};
+
+// ---- Phase 6B charge payloads (Session 4.5) ----
+//
+// One charge line per service code, each carrying the encounter's diagnosis
+// pointers. The controller stores them X12-shaped ("ICD10|E11.9:ICD10|I10:").
+//
+// THE FAILURE THIS GUARDS AGAINST: Phase 6B's acceptance took three runs, and
+// the second defect was introduced by the fix for the first — a loop reused
+// the variable holding the CPT, so the charge billed the diagnosis code. It
+// returned 201 and looked correct in Billing Manager; it would have surfaced
+// weeks later as a denial. So `code` is read from the SERVICE and `diagnoses`
+// only ever from the diagnosis list, and buildChargePayloads is pure and unit
+// tested for exactly that separation.
+//
+// billing_facility is deliberately absent: addBilling() has no such parameter
+// and the billing table no such column. It lives on form_encounter (Scope D).
+const buildChargePayloads = (record, { providerId } = {}) => {
+  const diagnoses = (record && record.diagnoses) || [];
+  const services = (record && record.services) || [];
+  const dxPointers = diagnoses.map(d => ({ code_type: 'ICD10', code: d.code }));
+  return services.map(svc => ({
+    code_type: svc.codeType === 'HCPCS' ? 'HCPCS' : 'CPT4',
+    code: svc.code,                       // NEVER a diagnosis code
+    code_text: String(svc.description || svc.label || '').slice(0, 255),
+    units: svc.units && svc.units > 0 ? svc.units : 1,
+    modifier: svc.modifier || '',
+    provider_id: providerId != null ? Number(providerId) : undefined,
+    // Link only the diagnoses this service was coded against, when the
+    // clinician linked them; otherwise every encounter diagnosis.
+    diagnoses: (Array.isArray(svc.linkedDiagnoses) && svc.linkedDiagnoses.length
+      ? svc.linkedDiagnoses.map(c => ({ code_type: 'ICD10', code: c }))
+      : dxPointers),
+    authorized: 1
+  }));
+};
+
+// The app's order lifecycle is ordered → sent → resulted (or cancelled); the
+// 6B route's procedure_order table uses OpenEMR's own vocabulary. Map at the
+// boundary rather than bending either side.
+const ORDER_STATUS_TO_EMR = Object.freeze({
+  ordered: 'pending', sent: 'routed', resulted: 'complete', cancelled: 'canceled'
+});
+const orderStatusToEmr = (s) => ORDER_STATUS_TO_EMR[String(s || '').toLowerCase()] || 'pending';
+
+// A 6B order payload from an app order record.
+const buildOrderPayload = (order, { providerId } = {}) => ({
+  provider_id: providerId != null ? Number(providerId) : undefined,
+  order_status: orderStatusToEmr(order && order.status),
+  order_priority: (order && order.priority) === 'stat' ? 'high'
+    : (order && order.priority) === 'urgent' ? 'high' : 'normal',
+  procedure_order_type: (order && order.orderType) === 'imaging' ? 'radiology'
+    : (order && order.orderType) === 'procedure' ? 'procedure' : 'laboratory_test',
+  date_ordered: (order && order.date) || undefined,
+  clinical_hx: String((order && order.clinicalHistory) || '').slice(0, 255) || undefined,
+  patient_instructions: String((order && order.instructions) || '').slice(0, 255) || undefined,
+  codes: ((order && order.tests) || []).map(t => ({
+    code: t.code || undefined,
+    code_text: String(t.name || t.description || '').slice(0, 255),
+    diagnoses: ((order && order.diagnoses) || []).map(c => ({ code_type: 'ICD10', code: c }))
+  }))
 });
 
 // ---- Order capture (Scope D — labs / imaging / procedures; no HL7) ----
@@ -960,21 +1113,6 @@ const renderBlock = (name, lines) => [`[GFC ${name} v${GFC_BLOCK_VERSION}]`, ...
 const cell = (v) => String(v == null ? '' : v).replace(/\s*\|\s*/g, '/').replace(/\r?\n/g, ' ').trim();
 const providerCell = (p) => `${cell(p && p.name) || 'unknown'} | NPI ${(p && p.npi) || 'none'}`;
 
-const renderCodingBlock = (record) => {
-  const status = deriveCodingStatus(record);
-  return renderBlock('CODING', [
-    `encounter: ${cell(record.encounterUuid)}`,
-    `status: ${status.coded ? 'coded' : 'not_coded'}`,
-    `rendering_provider: ${providerCell(record.renderingProvider)}`,
-    `billing_provider_npi: ${record.billingProviderNpi || 'not_configured'}`,
-    ...(record.diagnoses || []).map((d, i) => `dx: ${i + 1} | ${d.code} | ${cell(d.description)} | ${d.primary ? 'primary' : 'secondary'}`),
-    ...(record.services || []).map(s => `svc: ${s.code} | ${s.codeType} | units ${s.units} | dx ${s.dxLinks.join(',')} | mod ${(s.modifiers || []).join(',') || 'none'}`)
-  ]);
-};
-const renderRxBlock = (prescriptions) => renderBlock('RX', (prescriptions || []).map(r =>
-  `rx: ${r.kind} | ${cell(r.drug)} | ${cell(r.dose)} | ${r.route} | ${cell(r.frequency)} | qty ${r.quantity} | refills ${r.refills} | ${r.date} | ${providerCell(r.prescriber)} | record only, not transmitted`));
-const renderOrdersBlock = (orders) => renderBlock('ORDERS', (orders || []).map(o =>
-  `order: ${o.id} | ${o.orderType} | ${o.priority} | ${cell(o.tests.join('; '))} | dx ${o.diagnosisCodes.join(',')} | status ${o.status} | ${providerCell(o.orderingClinician)} | ${o.createdAt}`));
 const renderAttestationBlock = (att) => renderBlock('ATTESTATION', [
   `signed_at: ${att.signedAt}`,
   `signed_by: ${providerCell(att.signedBy)}`,
@@ -988,13 +1126,29 @@ const renderAddendaBlock = (addenda) => renderBlock('ADDENDA', (addenda || []).f
   `  ${String(a.text || '').replace(/\r?\n/g, '\n  ')}`
 ]));
 
-const buildStructuredNote = ({ record, prescriptions, orders, attestation, addenda }) => ({
-  subjective: '[GFC STRUCTURED RECORD v1] Generated by the GFC Care Platform from its encounter records (coding, prescriptions, orders, attestation). OpenEMR 7.0.4 exposes no billing, prescription, order or sign write API, so this note is the in-chart copy (spec §2.4 interim). The clinician\'s narrative is the separate SOAP note on this encounter. Do not edit this note by hand — it is regenerated on every change.',
-  objective: [
-    (prescriptions || []).length ? renderRxBlock(prescriptions) : 'No prescriptions recorded on this encounter.',
-    (orders || []).length ? renderOrdersBlock(orders) : 'No orders recorded on this encounter.'
-  ].join('\n\n'),
-  assessment: renderCodingBlock(record),
+// Session 4.5: the structured note is now ONLY the sign-and-close record.
+//
+// The [GFC CODING], [GFC ORDERS] and [GFC RX] blocks are retired. They existed
+// because OpenEMR 7.0.4 had no billing, order or prescription write API, so the
+// note was the only in-chart copy (spec §2.4 interim). On 8.4 all three are
+// native: charges are in the billing table via the Phase 6B route, orders in
+// procedure_order, prescriptions in prescriptions. Keeping a second copy in a
+// note would mean two records that can disagree — and the note is the one no
+// biller reads.
+//
+// [GFC ATTESTATION] and [GFC ADDENDA] STAY. Sign-and-close is still app-side
+// because 8.4 has no encounter sign/close concept at all, so the note remains
+// the only place the attestation and its addenda exist inside the chart. That
+// is not a workaround; it is the record.
+//
+// Removing [GFC RX] goes one step past the letter of the 4.5 brief, which named
+// CODING and ORDERS. Prescriptions became native in Scope A of the same
+// session, so leaving RX would have left exactly the duplicate the brief is
+// removing elsewhere. Flagged rather than done quietly.
+const buildStructuredNote = ({ attestation, addenda }) => ({
+  subjective: '[GFC STRUCTURED RECORD v2] The sign-and-close record for this encounter, written by the GFC Care Platform. OpenEMR has no encounter sign/close concept, so the attestation and any addenda live here. Coding, orders and prescriptions are NOT here — they are native OpenEMR records (billing, procedure_order, prescriptions). The clinician\'s narrative is the separate SOAP note on this encounter. Do not edit this note by hand — it is regenerated on every change.',
+  objective: 'Coding, orders and prescriptions are recorded natively in OpenEMR — see the Fee Sheet, Procedure Orders and the medication list. This note carries the attestation only.',
+  assessment: 'See the encounter diagnoses and services on the Fee Sheet.',
   plan: [
     attestation ? renderAttestationBlock(attestation) : 'Encounter OPEN — not yet signed and closed.',
     (addenda || []).length ? renderAddendaBlock(addenda) : null
@@ -1076,7 +1230,12 @@ module.exports = {
   RX_ROUTES,
   RX_KINDS,
   buildPrescription,
-  prescriptionToMedicationRow,
+  prescriptionToEmrRow,
+  resolveEncounterFacility,
+  FACILITY_UNASSIGNED,
+  buildChargePayloads,
+  buildOrderPayload,
+  orderStatusToEmr,
   ORDER_TYPES,
   ORDER_PRIORITIES,
   ORDER_STATUSES,
@@ -1089,6 +1248,5 @@ module.exports = {
   recordCodeUsage,
   rankFavorites,
   buildStructuredNote,
-  renderCodingBlock,
   parseGfcBlocks
 };

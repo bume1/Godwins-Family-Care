@@ -110,10 +110,39 @@ C. Retire the workarounds — SEPARATE COMMITS, AFTER B IS PROVEN LIVE
 - Do NOT combine adding a native write and removing its workaround in one
   commit. Add, prove live, then remove. A failure must be attributable.
 
-D. Per-visit billing facility picker
-- Writes form_encounter.billing_facility.
-- It is NOT a charge field: addBilling() has no such parameter and the
-  billing table has no such column. Do not add it to the charge payload.
+D. Facility and POS derive from the PATIENT — never a global, never a picker
+- POS is a property of the FACILITY record, set once. Hickory Log's record
+  carries 13 or 14; the private-residence record carries 12; telehealth carries
+  10. A clinician never sees or chooses a POS number.
+- What connects a visit to the right one is THE PATIENT. Each patient record is
+  assigned to a facility, because each patient lives somewhere fixed. A Hickory
+  Log resident is attached to the Hickory Log record; an Ellijay client to the
+  private-residence record. The encounter inherits the facility and its POS from
+  that assignment. The clinician sees a place name at most, usually not even
+  that.
+- THE DEFECT THIS REPLACES: the app stamped every encounter with one hardcoded
+  facility and POS 12 from OPENEMR_FACILITY_ID / OPENEMR_POS_CODE, regardless of
+  who the patient was. That works while every patient is a private residence and
+  breaks the moment Hickory Log goes live — silently, with 12 on claims that
+  should read 13 or 14. Facility and POS must come from the patient's assigned
+  OpenEMR facility, never from a global setting and never from a clinician-facing
+  picker.
+- Telehealth is the ONE legitimate per-visit variation, since the same patient
+  can be seen in person one week and by video the next. Drive it off the
+  APPOINTMENT TYPE (4.2 already stores `[GFC location=telehealth]` on the
+  appointment), not off a dropdown a clinician has to remember.
+- A patient with no facility assignment, or a facility with no POS on its
+  record, is REPORTED, never defaulted. Documenting the visit is not blocked —
+  care happens regardless — but signing is, because a signed encounter becomes a
+  claim: `SIGN_NO_FACILITY_POS`.
+- On the org record: leave POS blank if OpenEMR allows it, otherwise 11. The
+  real protection is that no encounter is ever assigned to that record, which is
+  enforced by unchecking Service Location on it once the private-residence
+  record exists in 8.3.
+- Separately, the encounter's `billing_facility` (the practice's business
+  address on the claim) is legitimately global and stays so. It is NOT a charge
+  field: addBilling() has no such parameter and the billing table no such
+  column. Do not add it to the charge payload.
 
 E. Session 4.3 live preflight
 - 4.3 merged (PR #31) but was proven against a mock, because the build

@@ -70,9 +70,20 @@
       if (!response.ok) {
         let data = null;
         try { data = await response.json(); } catch {}
-        if (response.status === 401) {
+        // The server answers an expired or invalid JWT with 403, not 401, so
+        // keying only on 401 left a stale session rendering the raw string
+        // "Invalid token" in red across the page with no hint to sign in again.
+        // Key on the auth CODES instead: a permission 403 (CLINICAL_READ_ONLY
+        // and friends) belongs to a correctly signed-in user and must not log
+        // them out.
+        const authCode = data && data.code;
+        const isAuthFailure = response.status === 401
+          || ['AUTH_MISSING', 'AUTH_EXPIRED', 'AUTH_INVALID', 'AUTH_INACTIVE'].includes(authCode);
+        if (isAuthFailure) {
           localStorage.removeItem('admin_token'); localStorage.removeItem('admin_user');
-          throw Object.assign(new Error((data && data.error) || 'Session expired'), { code: 'AUTH', status: 401 });
+          throw Object.assign(
+            new Error((data && data.error) || 'Your session has expired. Please sign in again.'),
+            { code: 'AUTH', authCode: authCode || null, status: response.status });
         }
         const err = new Error((data && data.error) || `HTTP error ${response.status}`);
         err.status = response.status; err.data = data;
@@ -1877,7 +1888,7 @@
               </div>
               <div className="flex items-center gap-2">
                 <div className="flex items-center gap-2 text-[11.5px] text-stone-500 bg-cream border border-stone-200 px-3 py-1.5 rounded-full">
-                  <span className={`w-2 h-2 rounded-full ${emrStatus && emrStatus.connected ? 'bg-emerald-500' : 'bg-red-500'}`} />
+                  <span className={`w-2 h-2 rounded-full ${emrStatus === null ? 'bg-stone-300' : emrStatus.connected ? 'bg-emerald-500' : 'bg-red-500'}`} />
                   {emrStatus === null ? 'OpenEMR…' : emrStatus.connected ? 'OpenEMR connected' : (emrStatus.configured ? 'OpenEMR unreachable' : 'OpenEMR not configured')}
                 </div>
                 {emrStatus && emrStatus.serverStartedAt && (

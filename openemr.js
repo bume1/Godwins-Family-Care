@@ -306,10 +306,13 @@ const forActor = (actor) => {
     async createEncounter(puuid, fields) {
       const body = {
         pc_catid: config.OPENEMR.ENCOUNTER_CATEGORY,
-        facility_id: config.OPENEMR.FACILITY_ID,
-        billing_facility: config.OPENEMR.FACILITY_ID,
+        // facility_id (WHERE CARE HAPPENED) and pos_code are NOT defaulted
+        // here. They are resolved from the PATIENT's facility assignment by the
+        // caller and arrive in `fields`. A global default is exactly what puts
+        // POS 12 on a Hickory Log claim, silently, the day that facility opens.
+        // billing_facility is the practice's business address, which IS global.
+        billing_facility: config.OPENEMR.BILLING_FACILITY_ID,
         sensitivity: 'normal',
-        pos_code: config.OPENEMR.POS_CODE,
         provider_id: config.OPENEMR.PROVIDER_ID,
         ...fields
       };
@@ -499,6 +502,134 @@ const forActor = (actor) => {
       }
       logEmrAccess(actor, 'write', 'appointment', puuid, { op: 'swap', oldEid: String(oldEid), newEids, deleted });
       return { newEids, deleted, deleteError };
+    },
+
+    // ============================================================
+    // Session 4.5 — native 8.4 writes and the Phase 6B patched routes
+    //
+    // Everything below was confirmed against the live 8.4 instance on
+    // 2026-09-08 with the v4 client (52 granted scopes). The 6B routes come
+    // from docs/openemr-patches/8.4.0-p1 and, like soap_note and vital, key on
+    // NUMERIC pid and encounter id — never uuids.
+    // ============================================================
+
+    // POST /api/prescription. Verified live: there is no
+    // /api/patient/{pid}/prescription route (404); the top-level route takes
+    // `patient_id` in the BODY. Replaces the 4.4 workaround that packed a sig
+    // into a medication-list row title because 7.0.4 had no Rx write.
+    async createPrescription(puuid, rx) {
+      const pid = await resolvePid(puuid);
+      const row = await apiWrite('POST', 'prescription', { ...rx, patient_id: pid },
+        'prescription', puuid, 'create prescription');
+      return row;
+    },
+    async getPrescriptions(puuid) {
+      const res = await rawRequest({ method: 'GET', url: apiUrl('prescription') });
+      if (res.status === 404) return [];
+      const data = expectOk(res, 'read prescription');
+      logEmrAccess(actor, 'read', 'prescription', puuid, {});
+      const rows = unwrapApi(data) || [];
+      // The route is instance-wide; scope to this patient by uuid.
+      return rows.filter(r => !puuid || String(r.puuid || '') === String(puuid));
+    },
+
+    // PUT an encounter. 8.4 REQUIRES `user` and `group` in the body: without
+    // them it answers HTTP 200 carrying a validationErrors map and writes
+    // NOTHING — the same trap as the soap_note write, so the body is checked
+    // here rather than the status code. Lets 4.5 change fields (billing
+    // facility, POS, reason) after create instead of only at create time.
+    async updateEncounter(puuid, encounterUuid, fields) {
+      const res = await rawRequest({
+        method: 'PUT', url: apiUrl(`patient/${encodeURIComponent(puuid)}/encounter/${encodeURIComponent(encounterUuid)}`),
+        body: { user: config.OPENEMR.API_USERNAME, group: config.OPENEMR.ENCOUNTER_GROUP, ...fields }
+      });
+      const data = expectOk(res, 'update encounter');
+      const body = data && typeof data === 'object' ? data : {};
+      const ve = body.validationErrors;
+      const hasErrors = Array.isArray(ve) ? ve.length > 0 : !!(ve && Object.keys(ve).length);
+      if (hasErrors) {
+        throw new OpenEmrError(`OpenEMR rejected the encounter update (${JSON.stringify(ve).slice(0, 200)})`, 422, body);
+      }
+      logEmrAccess(actor, 'write', 'encounter', puuid, { euuid: encounterUuid, fields: Object.keys(fields || {}) });
+      return unwrapApi(data);
+    },
+
+    // Facilities that may be selected as an encounter's BILLING facility.
+    // `billing_location` marks the ones OpenEMR itself allows for billing.
+    async getFacilities() {
+      const res = await rawRequest({ method: 'GET', url: apiUrl('facility') });
+      if (res.status === 404) return [];
+      const data = expectOk(res, 'read facilities');
+      logEmrAccess(actor, 'read', 'facility', null, {});
+      return unwrapApi(data) || [];
+    },
+
+    // ---- Phase 6B: fee-sheet charges ----
+    // The charge write is what makes sign-and-close reach Billing Manager.
+    // `diagnoses` accepts {code, code_type} objects or bare code strings; the
+    // controller normalizes both. Stored `justify` comes back X12-shaped
+    // ("ICD10|E11.9:ICD10|I10:").
+    async postCharge(puuid, encounterUuid, charge) {
+      const [pid, eid] = await Promise.all([resolvePid(puuid), resolveEid(puuid, encounterUuid)]);
+      const row = await apiWrite('POST', `patient/${pid}/encounter/${eid}/billing`, charge, 'billing', puuid, 'write charge');
+      return Array.isArray(row) ? row[0] || null : row;
+    },
+    async getCharges(puuid, encounterUuid) {
+      const [pid, eid] = await Promise.all([resolvePid(puuid), resolveEid(puuid, encounterUuid)]);
+      const res = await rawRequest({ method: 'GET', url: apiUrl(`patient/${pid}/encounter/${eid}/billing`) });
+      if (res.status === 404) return [];
+      const data = expectOk(res, 'read charges');
+      logEmrAccess(actor, 'read', 'billing', puuid, { eid });
+      return unwrapApi(data) || [];
+    },
+    // Void, never hard delete: the controller sets activity = 0 so the audit
+    // trail survives. A voided row therefore drops out of getCharges (which
+    // filters activity = 1) — absence from the active list IS the void.
+    async voidCharge(puuid, encounterUuid, chargeId) {
+      const [pid, eid] = await Promise.all([resolvePid(puuid), resolveEid(puuid, encounterUuid)]);
+      const row = await apiWrite('DELETE', `patient/${pid}/encounter/${eid}/billing/${encodeURIComponent(chargeId)}`,
+        undefined, 'billing', puuid, 'void charge');
+      return Array.isArray(row) ? row[0] || null : row;
+    },
+
+    // ---- Phase 6B: procedure orders ----
+    // `user/procedure.write` does not exist on 8.4, so orders go through this
+    // patched route rather than a stock one.
+    async postOrder(puuid, encounterUuid, order) {
+      const [pid, eid] = await Promise.all([resolvePid(puuid), resolveEid(puuid, encounterUuid)]);
+      const row = await apiWrite('POST', `patient/${pid}/encounter/${eid}/order`, order, 'order', puuid, 'write order');
+      return Array.isArray(row) ? row[0] || null : row;
+    },
+    async getOrders(puuid, encounterUuid) {
+      const [pid, eid] = await Promise.all([resolvePid(puuid), resolveEid(puuid, encounterUuid)]);
+      const res = await rawRequest({ method: 'GET', url: apiUrl(`patient/${pid}/encounter/${eid}/order`) });
+      if (res.status === 404) return [];
+      const data = expectOk(res, 'read orders');
+      logEmrAccess(actor, 'read', 'order', puuid, { eid });
+      return unwrapApi(data) || [];
+    },
+    async updateOrderStatus(puuid, encounterUuid, orderId, orderStatus) {
+      const [pid, eid] = await Promise.all([resolvePid(puuid), resolveEid(puuid, encounterUuid)]);
+      const row = await apiWrite('PUT', `patient/${pid}/encounter/${eid}/order/${encodeURIComponent(orderId)}`,
+        { order_status: orderStatus }, 'order', puuid, 'update order status');
+      return Array.isArray(row) ? row[0] || null : row;
+    },
+
+    // ---- Phase 6B: code-table search ----
+    // Returns [] when the code table is empty. That is the correct answer for
+    // an unloaded table, NOT an error: until the ICD-10-CM load runs this is
+    // 200 with zero rows, and the caller keeps its T1/T2 sources.
+    async searchCodes({ type, search, limit } = {}) {
+      const term = String(search || '').trim();
+      if (term.length < 2) return [];
+      const q = new URLSearchParams({ search: term });
+      if (type) q.set('type', String(type).toUpperCase());
+      if (limit) q.set('limit', String(limit));
+      const res = await rawRequest({ method: 'GET', url: apiUrl(`codes?${q.toString()}`) });
+      if (res.status === 404) return [];
+      const data = expectOk(res, 'search codes');
+      logEmrAccess(actor, 'read', 'codes', null, { type: type || 'any' });
+      return unwrapApi(data) || [];
     },
 
     // Signed PDFs and received records → OpenEMR patient Documents.

@@ -561,3 +561,41 @@ Consequences, in order:
 TEST DATA only today, so no PHI exposure. Confirm the behaviour with the EMR maintainer before
 HIPAA go-live; it may be an OpenEMR password-grant characteristic rather than a misconfiguration,
 but either way the control above (disable superseded clients) applies.
+
+### Facility and POS — owner spec 2026-09-08 (supersedes two earlier notes here)
+
+Two earlier entries in this file were wrong and are withdrawn: one recommended setting
+`pos_code` to 12 on the org facility records, the other framed those records as pure
+business addresses. The owner's spec:
+
+**POS is a property of the facility record, set once.** Hickory Log's record carries 13 or
+14 (pending DCH), the private-residence record carries 12, telehealth carries 10, an office
+is 11. A clinician never sees or chooses a POS number.
+
+**The patient selects it.** Each patient lives somewhere fixed, so each patient record is
+assigned to a facility — a Hickory Log resident to the Hickory Log record, an Ellijay client
+to the private-residence record — and the encounter inherits the facility and its POS from
+that assignment.
+
+**The app-side defect this removes.** The app stamped every encounter with one hardcoded
+facility and POS 12 from `OPENEMR_FACILITY_ID` / `OPENEMR_POS_CODE`, regardless of who the
+patient was. Correct only while every patient is a private residence; the day Hickory Log
+goes live it silently puts 12 on claims that should read 13 or 14.
+
+**What 4.5 built.** `client.openEmrFacilityId` (an app-side pointer, because OpenEMR 8.4's
+patient record carries no facility field — verified live), an admin-only assignment route,
+and `resolveEncounterFacility()` which reads facility and POS from the patient's assignment
+at every encounter-create site. The globals are gone from the encounter path; build-enforced.
+Telehealth is the one per-visit variation and keys off 4.2's `[GFC location=telehealth]`
+appointment marker. An unassigned patient, or a facility with no POS on its record, is
+reported and blocks **signing** (`SIGN_NO_FACILITY_POS`) but never blocks documenting the
+visit — care happens regardless; claims are what need a verified POS.
+
+**On the org record (ids 3 and 4).** Leave POS blank if OpenEMR allows it, otherwise 11. The
+real protection is that no encounter is ever assigned to it, enforced by **unchecking Service
+Location** on that record once the private-residence record exists.
+
+**Phase 8.3 actions.** Create the private-residence record (POS 12) and Hickory Log (13 or 14
+once DCH confirms); assign each patient to their facility; uncheck Service Location on the
+org record. No app change is required for a new facility — add it in OpenEMR with its POS and
+assign patients to it.
