@@ -679,6 +679,24 @@ every app write authenticating as `gfc-app-api`, an accounting of disclosures ca
 from OpenEMR through the API for any patient. Not a defect in the installation, and a hard
 constraint on go-live. See the attribution section of `docs/GFC_Shadow_Data_Audit.md`.
 
+### Data gap — the drug option lists are empty (blocks structured Rx route + frequency)
+
+`GET /apis/default/api/list/drug_route`, `.../drug_interval` and `.../drug_units` all return
+**200 with 0 rows**. OpenEMR resolves a prescription's route and interval against these lists, so
+with nothing to resolve to, `route_id` stores null and `interval_id` stores `"0"` no matter what the
+app sends. Same class of gap as the ICD-10 load: a data gap, not a defect.
+
+**Consequence:** a prescription in OpenEMR carries drug, dose and quantity in their own columns but
+no structured route and no structured frequency.
+
+**App behaviour meanwhile (shipped 2026-09-08):** route and frequency are written into the
+prescription's free-text `note`, which does persist, so the sig always reaches the chart. The
+structured fields are still sent, so they begin storing the day these lists are seeded with no app
+change. Recorded as G5 in the audit.
+
+**Action:** seed `drug_route` and `drug_interval` (and `drug_units`) in OpenEMR's list editor,
+alongside the ICD-10-CM load.
+
 ### Confirmed still open this pass
 
 - **ICD-10-CM is not loaded.** FHIR `Condition` returns 3 rows for TEST PatientOne, **0 carrying a
@@ -696,3 +714,25 @@ Charge write and read-back with the correct CPT and diagnosis separation (`code:
 write, update and read-by-sid; native prescription write surfacing in FHIR MedicationRequest;
 encounter PUT with `user` + `group`; FHIR `Practitioner` readable (1 row, Bethel Godwins, NPI
 1902310568); `api/facility` readable.
+
+
+---
+
+## Follow-up 2026-09-08 — the four app-side audit defects are fixed
+
+Recorded here because two of them change what the maintainer needs to look at.
+
+Fixed in the app and re-proven live (`scripts/verify_shadow_data_fixes.js`, 17/17, stored values
+only): the order payload now carries the test name and the diagnosis link; the prescription sends
+`date_added` and is linked to its encounter; the encounter carries the acting clinician as
+`provider_id`.
+
+**What that means for Defect 4 (the 6B order route).** The app is no longer the reason a test name
+is missing. It now sends `code_text: "CBC with differential"` and the route still stores
+`procedure_name: ""`. The diagnosis link, sent the same way, stores correctly as `ICD10:I10`. So the
+defect is isolated to `code_text` handling in the order controller and nothing else masks it.
+
+**What it means for the encounter provider.** Encounters created from 2026-09-08 carry the real
+clinician. Encounters created before it carry the configured default (provider 1) and do not match
+the rendering provider on their own charges. These are all TEST DATA, so no correction is needed;
+worth knowing when reading older rows.

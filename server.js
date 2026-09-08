@@ -6180,6 +6180,11 @@ app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireCli
     // is logged and surfaced as such. The visit still stands either way.
     const warnings = [];
     if (placeWarning) warnings.push(placeWarning);
+    // The encounter's provider is the acting clinician (see createEncounter).
+    // When they have no OpenEMR provider id the transport falls back to the
+    // configured default so the visit still documents — say so rather than let
+    // the chart quietly name someone else.
+    if (!req.user.openEmrProviderId) warnings.push(NO_PROVIDER_ID_WARNING);
     let vitalsRowWritten = false;
     try {
       await emr.addVitals(puuid, encounterUuid, built.vitals);
@@ -6942,6 +6947,10 @@ const getClinicalSettings = async () => {
   return { serviceCodeFavorites: favorites, favoritesSource: Array.isArray(stored.serviceCodeFavorites) ? 'record' : 'default' };
 };
 
+// Shown when the acting clinician has no OpenEMR provider id, so the encounter
+// falls back to the configured default provider instead of naming them.
+const NO_PROVIDER_ID_WARNING = 'This visit was filed under the practice default provider, not you: your user record has no OpenEMR provider id. An admin sets it in Admin hub \u2192 Users. Charges will not post at sign-and-close until it is set.';
+
 // The acting clinician as stamped onto records (name, credential, NPI).
 const actorFromReq = (req) => ({
   id: req.user.id, name: req.user.name, licenseLevel: req.user.licenseLevel || null,
@@ -7276,6 +7285,11 @@ app.post('/api/clinical/patients/:clientId/encounters', authenticateToken, requi
     if (!encounterUuid) return res.status(502).json({ error: 'OpenEMR did not return an encounter id' });
     const warnings = [];
     if (placeWarning) warnings.push(placeWarning);
+    // The encounter's provider is the acting clinician (see createEncounter).
+    // When they have no OpenEMR provider id the transport falls back to the
+    // configured default so the visit still documents — say so rather than let
+    // the chart quietly name someone else.
+    if (!req.user.openEmrProviderId) warnings.push(NO_PROVIDER_ID_WARNING);
     let vitalsRowWritten = false;
     if (built.vitals) {
       // See the H&P route: on 8.4 the structured row is primary and a failure
@@ -7483,7 +7497,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/prescriptions', aut
     // medication-list row with the sig packed into its title) is retired —
     // this is a real prescription row and surfaces in FHIR MedicationRequest.
     try {
-      const row = await ctx.emr.createPrescription(ctx.client.openEmrPatientId, clinicalRepo.prescriptionToEmrRow(rx));
+      const row = await ctx.emr.createPrescription(ctx.client.openEmrPatientId, clinicalRepo.prescriptionToEmrRow(rx), ctx.encounterUuid);
       rx.emrPrescriptionId = row && (row.uuid || row.id) != null ? String(row.uuid || row.id) : null;
     } catch (e) { warnings.push(`OpenEMR prescription write failed (${e.message.slice(0, 120)}) — the prescription is recorded in the app and in the structured note`); rx.emrWriteError = e.message.slice(0, 300); }
     const rows = await loadRows('prescriptions');

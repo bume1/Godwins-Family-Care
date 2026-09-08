@@ -16,25 +16,37 @@ chart for any patient from OpenEMR by itself?**
 nowhere in OpenEMR. Five of them are new, found by writing to the live server and reading it back
 rather than by reading code. Three are silent: the app reports success and nothing lands.
 
-| # | Gap | Severity | New? | In 4.5's scope? |
+**Four were fixed at the owner's direction in the same PR as this audit** and re-proven live
+(`scripts/verify_shadow_data_fixes.js`, 17/17, stored values only). **Two are fully closed, two are
+mitigated** and still carry a server or instance dependency that is not the app's to fix. **Nine
+remain open.**
+
+| # | Gap | Severity | New? | Status after this PR |
 |---|---|---|---|---|
-| G1 | The care plan, all versions, both signatures | **Critical** | | No |
-| G2 | No document the app files is retrievable from OpenEMR | **Critical** | **New** | Partly, unresolved |
-| G3 | Every order files with no test name and no diagnosis | **Critical** | **New** | Yes, 4.5 defect |
-| G4 | Allergies are never written to OpenEMR at all | **Critical** | **New** | No |
-| G5 | Prescription route, frequency and date are dropped | High | **New** | Yes, 4.5 defect |
-| G6 | Prescriptions carry no link to the encounter | Medium | **New** | Yes, 4.5 defect |
-| G7 | The encounter's provider is a config constant, not the clinician | High | **New** | Should be |
-| G8 | Consents: treat, assignment of benefits, NPP, ROI-family | **Critical** | | No |
-| G9 | Transfer-of-Care ROI, per-provider authorizations, PDFs | High | | No |
-| G10 | The clinical intake record | High | | No |
-| G11 | The RN's care-tier / track determination | Medium | | No |
-| G12 | Patient-facing visit summary and follow-up instructions | Medium | | No |
-| G13 | The only audit trail naming a human being is app-side | **Critical** | | No, Session 5 |
+| G1 | The care plan, all versions, both signatures | **Critical** | | Open, blocked on G2 |
+| G2 | No document the app files is retrievable from OpenEMR | **Critical** | **New** | Open, server-side |
+| G3 | Every order files with no test name and no diagnosis | **Critical** | **New** | **Mitigated** — dx link now stores; the name is blocked on the 6B defect |
+| G4 | Allergies are never written to OpenEMR at all | **Critical** | **New** | Open |
+| G5 | Prescription route, frequency and date are dropped | High | **New** | **Mitigated** — date fixed; route and frequency now reach the note, structured fields blocked on empty option lists |
+| G6 | Prescriptions carry no link to the encounter | Medium | **New** | **✅ Closed** |
+| G7 | The encounter's provider is a config constant, not the clinician | High | **New** | **✅ Closed** |
+| G8 | Consents: treat, assignment of benefits, NPP, ROI-family | **Critical** | | Open |
+| G9 | Transfer-of-Care ROI, per-provider authorizations, PDFs | High | | Open |
+| G10 | The clinical intake record | High | | Open |
+| G11 | The RN's care-tier / track determination | Medium | | Open |
+| G12 | Patient-facing visit summary and follow-up instructions | Medium | | Open |
+| G13 | The only audit trail naming a human being is app-side | **Critical** | | Open, Session 5 |
 
 **The one-sentence version:** OpenEMR holds the visit, the note, the vitals and the charge, and it
 holds them correctly. It does not hold the plan of care, the consents, the allergies, or any
 document, and it cannot say who did any of it.
+
+**What the four fixes changed.** An order now carries its diagnosis link, a prescription carries a
+date and its encounter, route and frequency survive into the chart, and an encounter names the
+clinician who saw the patient instead of a config constant. Each is pinned by a unit test confirmed
+to fail when the old behaviour is put back. The two that remain mitigated rather than closed both
+wait on someone else: the 6B order route must store `code_text`, and the instance must seed its
+`drug_route` and `drug_interval` option lists.
 
 ---
 
@@ -193,10 +205,15 @@ loses the human-readable test name.
 
 Both are new. Filed in `OPENEMR_SERVER_DEFECTS_2026-08.md`.
 
-**What closes it:** the app fix is small and contained, in `buildOrderPayload` with a unit test that
-fails if `code_text` or `diagnoses` goes out empty. The 6B fix is a patch change in the order
-controller. **Yes, in 4.5's scope.** Scope B built this write. It should not merge as it stands,
-because it produces an order record that looks fine in the app and is empty in the chart.
+**FIXED (app side) 2026-09-08.** `buildOrderPayload` now reads string entries correctly and reads
+`order.diagnosisCodes`, and tolerates object entries so a future coded-test picker needs no change.
+Proven live: the order's code row now stores `diagnoses: "ICD10:I10"` where it stored `""` before.
+Pinned by a unit test confirmed to fail when the old mapping is put back.
+
+**STILL OPEN (server side).** `procedure_name` remains empty because the 6B route accepts
+`code_text` and never stores it. The app now sends the right value; the patch must store it. Until
+then an order in OpenEMR carries a code and a diagnosis but no readable test name. Filed as Defect 4
+in `OPENEMR_SERVER_DEFECTS_2026-08.md`.
 
 ### G4 — Allergies are never written to OpenEMR. Critical. New.
 
@@ -230,10 +247,19 @@ typed instructions. The structured frequency is gone either way.
 
 A prescription record without a route, a frequency or a date is not a prescription record.
 
-**What closes it:** map route and interval to OpenEMR's `list_options` ids at the transport
-boundary, and send the date in the field the table actually reads. **Yes, in 4.5's scope.** Scope A
-built this write and retired the 7.0.4 workaround that packed the full sig into a title. The
-workaround carried more information than its replacement does.
+**FIXED (the date) 2026-09-08.** The field is `date_added`, not `start_date`; `start_date` is
+accepted and silently discarded. Verified live both ways. `date_added` now stores.
+
+**MITIGATED (route and frequency).** These cannot be stored structurally on this instance:
+`drug_route`, `drug_interval` and `drug_units` are **empty option lists, 0 rows each** (verified
+live), so there is no id for a value to resolve to. That is an instance data gap like the ICD-10
+load, not something the app can fix by sending a different shape. So route and frequency now ride in
+the `note`, which is free text and does persist, and the structured fields are still sent so they
+start working the day the lists are seeded. The note is assembled sig-first and trimmed from the sig
+end, because the prescriber stamp is the attribution and must survive truncation intact. Pinned by a
+unit test.
+
+**What fully closes it:** seed `drug_route` and `drug_interval` in OpenEMR.
 
 ### G6 — Prescriptions carry no link to the encounter. Medium. New.
 
@@ -241,9 +267,9 @@ workaround carried more information than its replacement does.
 `requester`. From OpenEMR alone there is no way to say which visit a prescription came from or who
 wrote it, other than reading the prescriber's name out of a free-text note.
 
-**What closes it:** pass the encounter id on the prescription write if 8.4's route accepts one, and
-confirm by read-back. If it does not, that is a server gap to file. **Yes, in 4.5's scope**, same
-write.
+**✅ CLOSED 2026-09-08.** 8.4's prescription route does accept a link, under `encounter`, and it
+wants the **numeric eid** — passing the uuid does not link. `createPrescription` now resolves the eid
+and sends it. Proven live: `euuid` comes back as the encounter's uuid where it was `null` before.
 
 ### G7 — The encounter's provider is a config constant, not the clinician. High. New.
 
@@ -260,10 +286,13 @@ Verified on the same visit signed by Bethel (provider 5):
 One visit, two different providers inside the same chart. The charge is right. The encounter it
 hangs off is wrong, and it is wrong identically for every clinician and every patient.
 
-**What closes it:** set `provider_id` from the acting clinician's `openEmrProviderId`, the value
-already resolved and already used for the charge and the order. Assert the stored value on read-back.
-**Should be in 4.5's scope.** 4.5 owns the encounter write and already threads the provider id
-through the two writes either side of it.
+**✅ CLOSED 2026-09-08.** `createEncounter` now takes `provider_id` from the actor the transport
+client was built for, falling back to the config value only when the clinician has no provider id on
+file. Resolved in the transport rather than at each call site so a route added later cannot
+reintroduce it by forgetting to pass one, and the fallback is no longer silent: both encounter-create
+routes now warn the clinician that the visit was filed under the practice default and that charges
+will not post until an admin sets their provider id. Proven live: the encounter comes back
+`provider_id: 5` where it came back `1` before. Pinned by a unit test asserting the source line.
 
 ### G8 — Consents are nowhere in OpenEMR. Critical.
 
@@ -464,13 +493,13 @@ Judged by what each unlocks, not by effort.
 
 1. **G2, document read-back.** Unlocks G1, G8 and G9. Highest leverage on the list. Needs the EMR
    maintainer to check the OpenEMR UI first.
-2. **G3 and G7**, both 4.5 defects, both small, both currently producing wrong data silently. These
-   should land before 4.5 merges.
-3. **G5 and G6**, the prescription write, same 4.5 scope.
-4. **G4, allergies.** Small, and a patient safety issue rather than only a records issue.
-5. **G13, attribution.** Session 5. Nothing else on this list matters as much for defensibility, and
+2. ~~**G3 and G7**~~ and ~~**G5 and G6**~~ — **done 2026-09-08**, in this PR. What is left of G3 and
+   G5 is not ours: the 6B route must store `code_text`, and the instance must seed `drug_route` and
+   `drug_interval`. Both are one-line asks of the EMR maintainer.
+3. **G4, allergies.** Small, and a patient safety issue rather than only a records issue.
+4. **G13, attribution.** Session 5. Nothing else on this list matters as much for defensibility, and
    nothing else takes as long.
-6. **G10, G11, G12**, the remaining clinical content. Cheap individually, none of them urgent.
+5. **G10, G11, G12**, the remaining clinical content. Cheap individually, none of them urgent.
 
 Two items outside this audit's scope that block the same finish line: the ICD-10-CM load, which is
 why the problem list is uncoded, and the billing NPI, which is why sign-and-close has never been
@@ -480,13 +509,17 @@ proven end to end through a real signature.
 
 ## Pass 2
 
-Re-run after 4.5 merges. Same patient, same method, and confirm specifically:
+Re-run after 4.5 merges. Same patient, same method. Four items were fixed in this PR and are
+re-runnable now via `scripts/verify_shadow_data_fixes.js`; pass 2 re-confirms them and settles the
+rest:
 
 - [ ] G2: a document filed by the app is retrievable via FHIR `DocumentReference`
-- [ ] G3: an order read back carries the test name and the diagnosis link
-- [ ] G5: a prescription read back carries route, frequency and date
-- [ ] G6: a prescription read back carries its encounter
-- [ ] G7: `form_encounter.provider_id` equals the signing clinician's OpenEMR provider id
+- [x] G3 (app): an order read back carries the diagnosis link — closed 2026-09-08
+- [ ] G3 (server): an order read back carries the test name — waits on the 6B `code_text` fix
+- [x] G5 (date): a prescription read back carries its date — closed 2026-09-08
+- [ ] G5 (structured): route and frequency store in their own columns — waits on the option lists being seeded
+- [x] G6: a prescription read back carries its encounter — closed 2026-09-08
+- [x] G7: `form_encounter.provider_id` equals the acting clinician — closed 2026-09-08
 - [ ] G1: whether a signed care plan is retrievable from OpenEMR
 - [ ] Re-count the gaps and update the number at the top of this file
 

@@ -313,7 +313,20 @@ const forActor = (actor) => {
         // billing_facility is the practice's business address, which IS global.
         billing_facility: config.OPENEMR.BILLING_FACILITY_ID,
         sensitivity: 'normal',
-        provider_id: config.OPENEMR.PROVIDER_ID,
+        // The encounter's provider is the CLINICIAN WHO SAW THE PATIENT, taken
+        // from the actor this client was built for. It used to be
+        // config.OPENEMR.PROVIDER_ID unconditionally, which meant every
+        // encounter for every patient carried the same id: a visit signed by
+        // one clinician read provider 1 on the encounter and the correct
+        // provider on its own charge, so the chart disagreed with the claim it
+        // produced (shadow-data audit, 2026-09-08, G7).
+        //
+        // Resolved here rather than at each call site so a route added later
+        // cannot reintroduce it by forgetting to pass one. The config value is
+        // a last resort only: documenting a visit is never blocked on admin
+        // setup, and sign-and-close already refuses to post charges (with a
+        // named warning) when the clinician has no provider id on file.
+        provider_id: (actor && actor.openEmrProviderId) || config.OPENEMR.PROVIDER_ID,
         ...fields
       };
       const row = await apiWrite('POST', `patient/${encodeURIComponent(puuid)}/encounter`, body, 'encounter', puuid);
@@ -517,9 +530,17 @@ const forActor = (actor) => {
     // /api/patient/{pid}/prescription route (404); the top-level route takes
     // `patient_id` in the BODY. Replaces the 4.4 workaround that packed a sig
     // into a medication-list row title because 7.0.4 had no Rx write.
-    async createPrescription(puuid, rx) {
+    // `encounterUuid` is optional but should always be passed from a visit:
+    // without it the row stores euuid null and there is no way to tell from
+    // OpenEMR which visit a prescription came from, or (since FHIR
+    // MedicationRequest carries no requester either) who wrote it beyond the
+    // name in the note (shadow-data audit, 2026-09-08, G6). The route wants
+    // the NUMERIC eid under `encounter`; passing the uuid does not link.
+    async createPrescription(puuid, rx, encounterUuid) {
       const pid = await resolvePid(puuid);
-      const row = await apiWrite('POST', 'prescription', { ...rx, patient_id: pid },
+      const body = { ...rx, patient_id: pid };
+      if (encounterUuid) body.encounter = await resolveEid(puuid, encounterUuid);
+      const row = await apiWrite('POST', 'prescription', body,
         'prescription', puuid, 'create prescription');
       return row;
     },
