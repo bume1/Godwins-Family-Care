@@ -833,6 +833,67 @@ const prescriptionToEmrRow = (rx) => ({
   ].filter(Boolean).join(' | ').slice(0, 255)
 });
 
+// ---- Phase 6B charge payloads (Session 4.5) ----
+//
+// One charge line per service code, each carrying the encounter's diagnosis
+// pointers. The controller stores them X12-shaped ("ICD10|E11.9:ICD10|I10:").
+//
+// THE FAILURE THIS GUARDS AGAINST: Phase 6B's acceptance took three runs, and
+// the second defect was introduced by the fix for the first — a loop reused
+// the variable holding the CPT, so the charge billed the diagnosis code. It
+// returned 201 and looked correct in Billing Manager; it would have surfaced
+// weeks later as a denial. So `code` is read from the SERVICE and `diagnoses`
+// only ever from the diagnosis list, and buildChargePayloads is pure and unit
+// tested for exactly that separation.
+//
+// billing_facility is deliberately absent: addBilling() has no such parameter
+// and the billing table no such column. It lives on form_encounter (Scope D).
+const buildChargePayloads = (record, { providerId } = {}) => {
+  const diagnoses = (record && record.diagnoses) || [];
+  const services = (record && record.services) || [];
+  const dxPointers = diagnoses.map(d => ({ code_type: 'ICD10', code: d.code }));
+  return services.map(svc => ({
+    code_type: svc.codeType === 'HCPCS' ? 'HCPCS' : 'CPT4',
+    code: svc.code,                       // NEVER a diagnosis code
+    code_text: String(svc.description || svc.label || '').slice(0, 255),
+    units: svc.units && svc.units > 0 ? svc.units : 1,
+    modifier: svc.modifier || '',
+    provider_id: providerId != null ? Number(providerId) : undefined,
+    // Link only the diagnoses this service was coded against, when the
+    // clinician linked them; otherwise every encounter diagnosis.
+    diagnoses: (Array.isArray(svc.linkedDiagnoses) && svc.linkedDiagnoses.length
+      ? svc.linkedDiagnoses.map(c => ({ code_type: 'ICD10', code: c }))
+      : dxPointers),
+    authorized: 1
+  }));
+};
+
+// The app's order lifecycle is ordered → sent → resulted (or cancelled); the
+// 6B route's procedure_order table uses OpenEMR's own vocabulary. Map at the
+// boundary rather than bending either side.
+const ORDER_STATUS_TO_EMR = Object.freeze({
+  ordered: 'pending', sent: 'routed', resulted: 'complete', cancelled: 'canceled'
+});
+const orderStatusToEmr = (s) => ORDER_STATUS_TO_EMR[String(s || '').toLowerCase()] || 'pending';
+
+// A 6B order payload from an app order record.
+const buildOrderPayload = (order, { providerId } = {}) => ({
+  provider_id: providerId != null ? Number(providerId) : undefined,
+  order_status: orderStatusToEmr(order && order.status),
+  order_priority: (order && order.priority) === 'stat' ? 'high'
+    : (order && order.priority) === 'urgent' ? 'high' : 'normal',
+  procedure_order_type: (order && order.orderType) === 'imaging' ? 'radiology'
+    : (order && order.orderType) === 'procedure' ? 'procedure' : 'laboratory_test',
+  date_ordered: (order && order.date) || undefined,
+  clinical_hx: String((order && order.clinicalHistory) || '').slice(0, 255) || undefined,
+  patient_instructions: String((order && order.instructions) || '').slice(0, 255) || undefined,
+  codes: ((order && order.tests) || []).map(t => ({
+    code: t.code || undefined,
+    code_text: String(t.name || t.description || '').slice(0, 255),
+    diagnoses: ((order && order.diagnoses) || []).map(c => ({ code_type: 'ICD10', code: c }))
+  }))
+});
+
 // ---- Order capture (Scope D — labs / imaging / procedures; no HL7) ----
 const ORDER_TYPES = ['lab', 'imaging', 'procedure'];
 const ORDER_PRIORITIES = ['routine', 'urgent', 'stat'];
@@ -1093,6 +1154,9 @@ module.exports = {
   RX_KINDS,
   buildPrescription,
   prescriptionToEmrRow,
+  buildChargePayloads,
+  buildOrderPayload,
+  orderStatusToEmr,
   ORDER_TYPES,
   ORDER_PRIORITIES,
   ORDER_STATUSES,

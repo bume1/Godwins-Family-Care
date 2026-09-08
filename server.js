@@ -7115,6 +7115,19 @@ app.put('/api/clinical/settings', authenticateToken, requireAdmin, async (req, r
 // OpenEMR), and — for services — the practice favorites mirroring OpenEMR's
 // fee schedule. A code typed in full is accepted on FORMAT and OpenEMR
 // resolves it on read-back; the response says plainly where results came from.
+// Phase 6B code-table search. Zero rows is the CORRECT answer for a table that
+// has not been loaded — never an error — so this reports `loaded` separately
+// and never throws into the caller's search.
+const searchEmrCodes = async (reqUser, type, q) => {
+  const term = String(q || '').trim();
+  if (term.length < 2 || !openemr.isConfigured()) return { rows: [], loaded: false, error: null };
+  try {
+    const rows = await openemr.forActor(reqUser).searchCodes({ type, search: term, limit: 25 });
+    return { rows, loaded: rows.length > 0, error: null };
+  } catch (e) {
+    return { rows: [], loaded: false, error: e.message.slice(0, 140) };
+  }
+};
 app.get('/api/clinical/codes/search', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     const set = String(req.query.set || 'ICD10').toUpperCase() === 'SERVICE' ? 'SERVICE' : 'ICD10';
@@ -7140,6 +7153,14 @@ app.get('/api/clinical/codes/search', authenticateToken, requireClinicalRead, as
       const favs = clinicalRepo.rankFavorites(usage, req.user.id, 'ICD10', 30);
       sources.favorites = favs.length;
       favs.filter(matches).forEach(f => push({ code: f.code, description: f.description, source: 'favorite', count: f.count }));
+      // Session 4.5 / Phase 6B: OpenEMR's own code table. Zero rows means the
+      // ICD-10-CM load has not run — a data gap, not a failure — so T1 and T2
+      // above stay as sources and the clinician is told which it is.
+      const tbl = await searchEmrCodes(req.user, 'ICD10', q);
+      sources.codeTable = tbl.rows.length;
+      sources.codeTableLoaded = tbl.loaded;
+      if (tbl.error) sources.codeTableError = tbl.error;
+      tbl.rows.forEach(r => push({ code: r.code, description: r.code_text || '', source: 'openemr' }));
       const typed = clinicalRepo.normalizeIcd10(q);
       if (typed && !seen.has(typed)) push({ code: typed, description: '', source: 'typed', unverified: true });
     } else {
@@ -7150,12 +7171,20 @@ app.get('/api/clinical/codes/search', authenticateToken, requireClinicalRead, as
       favs.filter(matches).forEach(f => push({ code: f.code, codeType: clinicalRepo.classifyServiceCode(f.code).codeType, label: (practice.get(f.code) || {}).label || f.description || '', source: 'favorite', count: f.count }));
       sources.practiceFavorites = settings.serviceCodeFavorites.length;
       settings.serviceCodeFavorites.filter(matches).forEach(f => push({ ...f, source: 'practice' }));
+      for (const t of ['CPT4', 'HCPCS']) {
+        const tbl = await searchEmrCodes(req.user, t, q);
+        sources[`codeTable${t}`] = tbl.rows.length;
+        sources.codeTableLoaded = (sources.codeTableLoaded || false) || tbl.loaded;
+        tbl.rows.forEach(r => push({ code: r.code, codeType: t, label: r.code_text || '', source: 'openemr' }));
+      }
       const typed = clinicalRepo.classifyServiceCode(q);
       if (typed && !seen.has(typed.code)) push({ ...typed, label: '', source: 'typed', unverified: true });
     }
     res.json({
       set, q, results, sources,
-      notice: 'OpenEMR 7.0.4 exposes no code-table search API. Results come from OpenEMR-sourced data only (this patient\'s problem list, your own prior selections, the practice favorites). A code typed in full is checked for format here and resolved by OpenEMR on read-back; if OpenEMR shows no description for it, the ICD-10 load needs checking in OpenEMR (Administration → External Data Loads).'
+      notice: sources.codeTableLoaded
+        ? 'Results come from OpenEMR only — its code tables, this patient\'s problem list, your own prior selections, and the practice favorites. The app keeps no code list of its own.'
+        : 'OpenEMR\'s code table returned nothing, which means the ICD-10-CM set has not been loaded yet (Administration → Other → External Data Loads). Searching still works from this patient\'s problem list, your own prior selections and the practice favorites; a code typed in full is format-checked here and resolved by OpenEMR on read-back.'
     });
   } catch (error) {
     console.error('Code search error:', error);
@@ -7434,10 +7463,27 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authentica
     if (!ctx || refuseIfClosed(ctx, res)) return;
     const built = clinicalRepo.buildOrder({ id: uuidv4(), clientId: ctx.client.id, puuid: ctx.client.openEmrPatientId, encounterUuid: ctx.encounterUuid, input: req.body, actor: ctx.actor, encounterDiagnoses: ctx.record.diagnoses });
     if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+    const warnings = [];
+    // Session 4.5 / Phase 6B: the order now lands in OpenEMR's procedure_order
+    // table and on the encounter, not only in the app. user/procedure.write
+    // does not exist on 8.4, so this goes through the patched route.
+    const providerId = ctx.actor.openEmrProviderId || null;
+    if (!providerId) {
+      warnings.push('The order is recorded in the chart but was not filed in OpenEMR: this clinician has no OpenEMR provider id on file. An admin sets it on the user record.');
+      built.order.emrOrderError = 'NO_OPENEMR_PROVIDER_ID';
+    } else {
+      try {
+        const row = await ctx.emr.postOrder(ctx.client.openEmrPatientId, ctx.encounterUuid,
+          clinicalRepo.buildOrderPayload(built.order, { providerId }));
+        built.order.emrOrderId = row && row.procedure_order_id != null ? String(row.procedure_order_id) : null;
+      } catch (e) {
+        warnings.push(`The order is recorded in the chart but did not file in OpenEMR (${e.message.slice(0, 140)}).`);
+        built.order.emrOrderError = e.message.slice(0, 300);
+      }
+    }
     const rows = await loadRows('clinical_orders');
     rows.push(built.order);
     await db.set('clinical_orders', rows);
-    const warnings = [];
     const syncWarning = await syncStructuredNote(ctx.emr, ctx.client, ctx.record);
     if (syncWarning) warnings.push(syncWarning);
     await saveBillingRecord(ctx.rows, ctx.record);
@@ -7458,9 +7504,21 @@ app.post('/api/clinical/orders/:orderId/status', authenticateToken, requireClini
     const next = clinicalRepo.advanceOrderStatus(rows[idx], String((req.body || {}).status || ''), actorFromReq(req), (req.body || {}).note);
     if (next.error) return res.status(next.code === 'ORDER_BAD_TRANSITION' ? 409 : 400).json({ error: next.error, code: next.code });
     rows[idx] = next.order;
-    await db.set('clinical_orders', rows);
     const warnings = [];
     const { client } = await loadClinicalClient(next.order.clientId);
+    // Keep OpenEMR's copy in step. The app owns the ordered → sent → resulted
+    // workflow; procedure_order uses OpenEMR's own vocabulary, so the mapping
+    // happens at the boundary (orderStatusToEmr).
+    if (next.order.emrOrderId && client && client.openEmrPatientId && openemr.isConfigured()) {
+      try {
+        await openemr.forActor(req.user).updateOrderStatus(
+          client.openEmrPatientId, next.order.encounterUuid, next.order.emrOrderId,
+          clinicalRepo.orderStatusToEmr(next.order.status));
+      } catch (e) {
+        warnings.push(`Status updated in the chart but OpenEMR's copy did not follow (${e.message.slice(0, 140)}).`);
+      }
+    }
+    await db.set('clinical_orders', rows);
     if (client && client.openEmrPatientId && openemr.isConfigured()) {
       const billing = await loadRows('encounter_billing');
       const record = findBillingRecord(billing, next.order.encounterUuid);
@@ -7521,17 +7579,137 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
     // Rendering provider on the charge = signing clinician (spec §2.5)
     const record = { ...ctx.record, renderingProvider: attestation.signedBy, billingProviderNpi: payer.billing_npi_used, closedAt: attestation.signedAt, updatedAt: attestation.signedAt };
     const warnings = [...attestation.warnings];
+
+    // ── Session 4.5 / Phase 6B: the charge write ──────────────────────────
+    // THIS is what makes sign-and-close land in Billing Manager. Rendering
+    // provider is the signing clinician; the BILLING provider stays the config
+    // value gfc_payer_credentialing.billing_npi_used (spec §2.5), never a
+    // literal — it is already stamped on the record above and on the
+    // attestation, and is what checkSignReadiness gates on.
+    //
+    // A charge failure must never void a completed signature: the attestation
+    // is already persisted. It is surfaced as a warning and the encounter is
+    // marked so the coding queue can show the charge did not post.
+    const providerId = (attestation.signedBy && attestation.signedBy.openEmrProviderId) || null;
+    if (!providerId) {
+      warnings.push('Charges were not posted to Billing Manager: this clinician has no OpenEMR provider id on file. An admin sets it on the user record (Admin hub → Users → OpenEMR provider id), then use Re-post charges on this encounter.');
+      record.chargesPosted = false;
+      record.chargeError = 'NO_OPENEMR_PROVIDER_ID';
+    } else {
+      const payloads = clinicalRepo.buildChargePayloads(record, { providerId });
+      const posted = [];
+      try {
+        for (const payload of payloads) {
+          const row = await ctx.emr.postCharge(ctx.client.openEmrPatientId, ctx.encounterUuid, payload);
+          posted.push({ id: row && row.id != null ? String(row.id) : null, code: payload.code, codeType: payload.code_type });
+        }
+        record.chargesPosted = true;
+        record.chargeError = null;
+        record.postedCharges = posted;
+        record.chargesPostedAt = new Date().toISOString();
+      } catch (e) {
+        // Partial posts are recorded so a re-post does not double-bill.
+        record.chargesPosted = false;
+        record.chargeError = e.message.slice(0, 300);
+        record.postedCharges = posted;
+        warnings.push(`Charges did not post to Billing Manager (${e.message.slice(0, 140)}). The encounter is signed; use Re-post charges once the cause is fixed.${posted.length ? ` ${posted.length} of ${payloads.length} line(s) did post — a re-post skips those.` : ''}`);
+      }
+    }
     const syncWarning = await syncStructuredNote(ctx.emr, ctx.client, record);
     if (syncWarning) warnings.push(syncWarning);
     await saveBillingRecord(ctx.rows, record);
     await logActivity(req.user.id, req.user.name || req.user.email, 'encounter_signed', 'client', ctx.client.id, {
       encounterUuid: ctx.encounterUuid, attestationId: attestation.id, signedByNpi: attestation.signedBy.npi, billingProviderNpi: payer.billing_npi_used,
-      diagnoses: attestation.diagnosisCodes, services: attestation.serviceCodes
+      diagnoses: attestation.diagnosisCodes, services: attestation.serviceCodes,
+      chargesPosted: !!record.chargesPosted, postedChargeIds: (record.postedCharges || []).map(c => c.id), chargeError: record.chargeError || null
     });
-    res.json({ message: 'Encounter signed and closed', attestation, record, state: 'signed', warnings });
+    res.json({ message: record.chargesPosted ? 'Encounter signed and closed; charges posted' : 'Encounter signed and closed', attestation, record, state: 'signed', chargesPosted: !!record.chargesPosted, postedCharges: record.postedCharges || [], warnings });
   } catch (error) {
     console.error('Encounter sign error:', error);
     res.status(502).json({ error: `Sign failed: ${error.message}` });
+  }
+});
+
+// ── Charges on an encounter (Phase 6B) ────────────────────────────────────
+// Read straight from OpenEMR's billing table — the app keeps no charge ledger
+// of its own. What Billing Manager shows IS the answer.
+app.get('/api/clinical/patients/:clientId/encounters/:euuid/charges', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res, { createRecord: false });
+    if (!ctx) return;
+    const rows = await ctx.emr.getCharges(ctx.client.openEmrPatientId, ctx.encounterUuid);
+    // `record` may be absent here (createRecord:false) — a read must never
+    // manufacture a billing record as a side effect.
+    res.json({ charges: rows, encounterUuid: ctx.encounterUuid, chargesPosted: !!(ctx.record && ctx.record.chargesPosted) });
+  } catch (error) {
+    console.error('Charge read error:', error);
+    res.status(502).json({ error: `Charge read failed: ${error.message}` });
+  }
+});
+// Void a charge line. Never a hard delete: the 6B controller sets activity = 0
+// so the audit trail survives, which is why the voided row simply leaves the
+// active list rather than reporting as removed.
+app.delete('/api/clinical/patients/:clientId/encounters/:euuid/charges/:chargeId', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res);
+    if (!ctx) return;
+    const reason = String((req.body || {}).reason || '').trim();
+    if (!reason) return res.status(400).json({ error: 'A reason is required to void a charge', code: 'VOID_NO_REASON' });
+    let voided;
+    try {
+      voided = await ctx.emr.voidCharge(ctx.client.openEmrPatientId, ctx.encounterUuid, req.params.chargeId);
+    } catch (e) {
+      const already = /No such active charge/i.test(e.message || '');
+      return res.status(already ? 409 : 502).json({
+        error: already ? 'That charge is not active on this encounter — it may already be voided or billed.' : `Void failed: ${e.message}`,
+        code: already ? 'CHARGE_NOT_ACTIVE' : 'CHARGE_VOID_FAILED'
+      });
+    }
+    // Drop it from the record's posted list so a re-post can replace it.
+    const record = { ...ctx.record, postedCharges: (ctx.record.postedCharges || []).filter(c => String(c.id) !== String(req.params.chargeId)) };
+    await saveBillingRecord(ctx.rows, record);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'charge_voided', 'client', ctx.client.id, {
+      encounterUuid: ctx.encounterUuid, chargeId: String(req.params.chargeId), reason, activity: voided && voided.activity
+    });
+    res.json({ message: 'Charge voided', chargeId: String(req.params.chargeId), voided, record });
+  } catch (error) {
+    console.error('Charge void error:', error);
+    res.status(502).json({ error: `Void failed: ${error.message}` });
+  }
+});
+// Re-post charges for an encounter whose sign-time post failed (no provider
+// id, EMR down). Skips lines already posted so it cannot double-bill.
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/charges/repost', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res);
+    if (!ctx) return;
+    if (!ctx.closed) return res.status(409).json({ error: 'Charges post at sign-and-close. Sign this encounter first.', code: 'ENCOUNTER_NOT_SIGNED' });
+    const providerId = (ctx.record.renderingProvider && ctx.record.renderingProvider.openEmrProviderId) || ctx.actor.openEmrProviderId || null;
+    if (!providerId) return res.status(409).json({ error: 'No OpenEMR provider id on file for the signing clinician. An admin sets it on the user record, then re-post.', code: 'NO_OPENEMR_PROVIDER_ID' });
+    const alreadyPosted = new Set((ctx.record.postedCharges || []).map(c => `${c.codeType}:${c.code}`));
+    const payloads = clinicalRepo.buildChargePayloads(ctx.record, { providerId })
+      .filter(p => !alreadyPosted.has(`${p.code_type}:${p.code}`));
+    if (!payloads.length) return res.json({ message: 'Every charge line for this encounter is already posted', posted: [], record: ctx.record });
+    const posted = [...(ctx.record.postedCharges || [])];
+    try {
+      for (const payload of payloads) {
+        const row = await ctx.emr.postCharge(ctx.client.openEmrPatientId, ctx.encounterUuid, payload);
+        posted.push({ id: row && row.id != null ? String(row.id) : null, code: payload.code, codeType: payload.code_type });
+      }
+    } catch (e) {
+      const record = { ...ctx.record, postedCharges: posted, chargesPosted: false, chargeError: e.message.slice(0, 300) };
+      await saveBillingRecord(ctx.rows, record);
+      return res.status(502).json({ error: `Re-post failed after ${posted.length - (ctx.record.postedCharges || []).length} line(s): ${e.message}`, code: 'CHARGE_POST_FAILED', record });
+    }
+    const record = { ...ctx.record, postedCharges: posted, chargesPosted: true, chargeError: null, chargesPostedAt: new Date().toISOString() };
+    await saveBillingRecord(ctx.rows, record);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'charges_reposted', 'client', ctx.client.id, {
+      encounterUuid: ctx.encounterUuid, posted: payloads.map(p => p.code), providerId: String(providerId)
+    });
+    res.json({ message: `Posted ${payloads.length} charge line(s) to Billing Manager`, posted, record });
+  } catch (error) {
+    console.error('Charge repost error:', error);
+    res.status(502).json({ error: `Re-post failed: ${error.message}` });
   }
 });
 

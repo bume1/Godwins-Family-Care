@@ -113,3 +113,65 @@ test('an unknown EMR status is not painted as a failed one', () => {
   assert.match(html, /emrStatus === null \? 'bg-stone-300'/,
     'a status that has not answered yet must read neutral, not red');
 });
+
+// ---- Scope B: the charge payload must never swap CPT and ICD ----
+// Phase 6B's second defect was introduced by the fix for its first: a loop
+// reused the variable holding the CPT, so the charge billed the diagnosis. It
+// returned 201 and looked right in Billing Manager. Pin the separation.
+const R = require('../clinicalRepository.js');
+const CHARGE_REC = {
+  diagnoses: [{ code: 'E11.9' }, { code: 'I10' }],
+  services: [{ code: '99348', codeType: 'CPT4', description: 'Home visit' },
+             { code: 'G0180', codeType: 'HCPCS', description: 'Cert' }]
+};
+
+test('buildChargePayloads bills the service code, never a diagnosis', () => {
+  const p = R.buildChargePayloads(CHARGE_REC, { providerId: 5 });
+  assert.equal(p.length, 2, 'one line per service');
+  assert.deepEqual(p.map(x => x.code), ['99348', 'G0180']);
+  assert.deepEqual(p.map(x => x.code_type), ['CPT4', 'HCPCS']);
+  for (const line of p) {
+    const dx = line.diagnoses.map(d => d.code);
+    assert.deepEqual(dx, ['E11.9', 'I10'], 'diagnoses are the ICD codes');
+    assert.ok(!dx.includes(line.code), 'the billed code must never appear as its own diagnosis');
+    assert.ok(!dx.some(c => ['99348', 'G0180'].includes(c)), 'no service code may leak into diagnoses');
+    assert.ok(line.diagnoses.every(d => d.code_type === 'ICD10'));
+  }
+});
+
+test('a service linked to specific diagnoses bills only those', () => {
+  const rec = { ...CHARGE_REC, services: [{ code: '99348', codeType: 'CPT4', linkedDiagnoses: ['I10'] }] };
+  const [line] = R.buildChargePayloads(rec, { providerId: 5 });
+  assert.deepEqual(line.diagnoses.map(d => d.code), ['I10']);
+  assert.equal(line.code, '99348');
+});
+
+test('billing_facility is never on a charge payload', () => {
+  // addBilling() has no such parameter and the billing table no such column;
+  // it belongs on form_encounter. Build-enforced so nobody "helpfully" adds it.
+  for (const line of R.buildChargePayloads(CHARGE_REC, { providerId: 5 })) {
+    assert.ok(!('billing_facility' in line), 'billing_facility must stay off the charge');
+  }
+  const src = fs.readFileSync(path.join(root, 'clinicalRepository.js'), 'utf8');
+  const fn = src.slice(src.indexOf('const buildChargePayloads'), src.indexOf('const ORDER_STATUS_TO_EMR'));
+  assert.doesNotMatch(fn, /billing_facility\s*:/, 'no billing_facility key in the charge builder');
+});
+
+test('order status maps app vocabulary to OpenEMR vocabulary', () => {
+  assert.equal(R.orderStatusToEmr('ordered'), 'pending');
+  assert.equal(R.orderStatusToEmr('sent'), 'routed');
+  assert.equal(R.orderStatusToEmr('resulted'), 'complete');
+  assert.equal(R.orderStatusToEmr('cancelled'), 'canceled');
+  assert.equal(R.orderStatusToEmr('nonsense'), 'pending', 'unknown falls back to the safe start state');
+});
+
+test('charges post at sign-and-close with the signing clinician as rendering provider', () => {
+  const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+  const sign = server.slice(server.indexOf("encounters/:euuid/sign'"), server.indexOf("encounters/:euuid/sign'") + 6000);
+  assert.match(sign, /buildChargePayloads/, 'sign-and-close must post charges');
+  assert.match(sign, /attestation\.signedBy && attestation\.signedBy\.openEmrProviderId/,
+    'rendering provider is the signing clinician');
+  assert.match(sign, /billing_npi_used/, 'billing provider stays the config value');
+  // A charge failure must never void a signature that already succeeded.
+  assert.match(sign, /chargesPosted = false/);
+});
