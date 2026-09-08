@@ -20,6 +20,10 @@ const openemr = require('./openemr');                  // OpenEMR FHIR/REST fron
 const clinicalRepo = require('./clinicalRepository');  // clinical workspace pure helpers (Session 4.1)
 // Session 4.3 — patient/family/POA clinical read rules + the case-manager read/write split
 const patientRead = require('./patientReadRepository');
+const consentText = require('./public/consent-text'); // approved consent bodies, versioned (Session 4.6)
+const consentRegistry = require('./consentRegistry'); // THE consent registry: lanes, statuses, provenance (4.6)
+const consentRender = require('./consentRender');     // consent data blocks resolved from the client record (4.6)
+const zipWriter = require('./zipWriter');             // dependency-free ZIP for the signed-consent packet (4.6)
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -125,8 +129,14 @@ app.get('/thrive365labslaunch', (req, res) => {
 });
 // Note: Specific sub-routes (login, home, :slug, :slug-internal) are defined at the end of the file
 
-// Initialize admin user on startup
-(async () => {
+// Initialize admin user on startup.
+//
+// Held as a promise so the boot-time DATA MIGRATIONS can wait for it. Both read
+// the whole `users` blob, mutate it, and write it back; run concurrently, the
+// later write silently discards the earlier one. That is how the Session 4.6
+// consent migration came to log its corrections and persist none of them — it
+// finished first and the admin initializer overwrote the record a moment later.
+const adminInitReady = (async () => {
   try {
     let users = await db.get('users') || [];
     let changed = false;
@@ -2186,56 +2196,30 @@ const requireClientForIntake = (req, res, next) => {
   return res.status(403).json({ error: 'Only the client can complete enrollment intake.' });
 };
 
-// ============== GFC ENROLLMENT INTAKE (Stage 2) — consent definitions ==============
-// Branched consent set per GFC_Intake_and_Packet_Spec_v1.md §4.2.
-// NOTE: the rewritten consent language below is a WORKING DRAFT, pending
-// counsel / Georgia licensure review before HIPAA-live. Do not treat as final.
-// Each consent status is one of: signed | signed_offline | pending | na.
-// A requirement is SATISFIED by either `signed` (e-signed in-app) or
-// `signed_offline` (signed on paper, offline onboarding — Scope B1). See
-// isConsentSatisfied() — the enrollment gate treats the two identically.
-const GFC_CONSENT_DEFS = [
-  // Both service lines
-  { type: 'npp',                scope: 'both', required: true,  title: 'HIPAA Notice of Privacy Practices' },
-  { type: 'roiFamily',          scope: 'both', required: true,  title: 'Release of Information — Family' },
-  { type: 'roiProvider',        scope: 'both', required: true,  title: 'Release of Information — Providers' },
-  { type: 'serviceAgreement',   scope: 'both', required: true,  title: 'Service Agreement' },
-  { type: 'billOfRights',       scope: 'both', required: true,  title: 'Patient Bill of Rights & Self-Determination' },
-  { type: 'emergencyFinancial', scope: 'both', required: true,  title: 'Emergency Treatment & Financial Responsibility' },
-  { type: 'crisisProtocol',     scope: 'both', required: true,  title: 'Emergency & Crisis Protocol (911/988)' },
-  { type: 'monitoring',         scope: 'both', required: false, title: 'Continuous Monitoring Opt-In', inactive: true },
-  // Private Home Care only
-  { type: 'financialAgreement', scope: 'phc',  required: true,  title: 'Financial Agreement (rates, billing, cancellation)' },
-  { type: 'pcaScope',           scope: 'phc',  required: true,  title: 'Personal Care Aide Scope Acknowledgment' },
-  // In-Home Primary Care only
-  { type: 'consentToTreat',     scope: 'ihpc', required: true,  title: 'Consent to Medical Treatment' },
-  { type: 'assignmentOfBenefits', scope: 'ihpc', required: true, title: 'Assignment of Medicare / Insurance Benefits' },
-  { type: 'practiceNpp',        scope: 'ihpc', required: true,  title: 'Medical Practice Notice of Privacy Practices' }
-];
+// ============== GFC ENROLLMENT INTAKE (Stage 2) — consent registry ==============
+// THE registry lives in consentRegistry.js so the lane rules, the status
+// vocabulary and the provenance rule are directly testable and cannot be
+// restated anywhere else. Bound to local names here because they are used
+// throughout this file.
+const {
+  GFC_CONSENT_DEFS,
+  consentDefsForServiceLine,
+  requiredConsentTypes,
+  CONSENT_SATISFIED_STATUSES,
+  CONSENT_STATUSES,
+  isConsentSatisfied,
+  consentRecordHasProvenance,
+  clientIpFrom,
+  ipChainFrom,
+  buildConsentSignature: buildConsentSignatureRaw,
+  applyServiceLineChange,
+  CONSENT_REVIEW_BANNER
+} = consentRegistry;
 
-// Which consent definitions apply to a given service line.
-const consentDefsForServiceLine = (serviceLine) => {
-  const line = (serviceLine || 'PHC').toUpperCase();
-  return GFC_CONSENT_DEFS.filter(d => {
-    if (d.scope === 'both') return true;
-    if (d.scope === 'phc') return line === 'PHC' || line === 'BOTH';
-    if (d.scope === 'ihpc') return line === 'IHPC' || line === 'BOTH';
-    return false;
-  });
-};
-const requiredConsentTypes = (serviceLine) =>
-  consentDefsForServiceLine(serviceLine).filter(d => d.required).map(d => d.type);
-
-// Consent status vocabulary (Session 3.3, Scope B1):
-//   signed         — e-signed in-app during Stage-2 intake
-//   signed_offline — signed on paper before the app existed (offline onboarding);
-//                    satisfies the enrollment gate identically to `signed`, kept
-//                    distinct only so the audit trail preserves how it was captured
-//   pending        — required but not yet satisfied
-//   na             — not applicable / opted out (inactive consents)
-// Both `signed` and `signed_offline` satisfy every enrollment requirement.
-const CONSENT_SATISFIED_STATUSES = ['signed', 'signed_offline'];
-const isConsentSatisfied = (status) => CONSENT_SATISFIED_STATUSES.includes(status);
+// The signature builder needs this app's IP hasher and secret; everything else
+// about it (the refusal to write a record without provenance) lives in the module.
+const buildConsentSignature = (args) =>
+  buildConsentSignatureRaw({ ...args, hashIp: (raw) => roiRepo.hashIp(raw, JWT_SECRET) });
 
 // Uploads require authentication - registered here after authenticateToken is defined
 app.use('/uploads', authenticateToken, express.static('uploads', staticOptions));
@@ -5139,6 +5123,116 @@ async function migrateCareTierEnum() {
   return { skipped: false, rewritten, unexpected: unexpected.length };
 }
 
+// ============================================================
+// One-shot consent migration (Session 4.6, Scopes A + E1).
+//
+// TWO THINGS, both audits rather than rewrites. Nothing is silently re-scoped
+// and no signature is ever erased — a signature is a fact.
+//
+// 1. THE LANE SPLIT. `serviceAgreement` used to be scope 'both', so every IHPC
+//    and BOTH client signed a combined body describing home care and primary
+//    care in one document. Those signatures stand for what they covered, but
+//    they do not establish a provider-patient relationship, name a
+//    collaborating physician, or set clinical termination terms. Every affected
+//    client is FLAGGED to re-sign the new clinical agreement — never quietly
+//    marked as already satisfied. The enrollment gate does the enforcing: with
+//    `ihpcServiceAgreement` now required and pending, they cannot pass until
+//    they sign it.
+//
+// 2. THE PROVENANCE AUDIT. Scope E1 found `monitoring` recorded as 'signed'
+//    with no timestamp and no IP, because the old handler wrote 'signed' for an
+//    inactive consent and skipped the signature block entirely. Any record in
+//    that state is corrected to the honest status ('optin_recorded' for the
+//    inactive consent it always was) and every other provenance-free record is
+//    reported. A consent that claims a signature it cannot evidence is worse
+//    than a pending one.
+//
+// Gated by CONSENT_LANE_SPLIT_MIGRATION_APPLIED (default false/unset) so it runs
+// exactly once. Writes scripts/consent_lane_split_migration.log — the migration
+// log the session deliverables call for.
+const CONSENT_MIGRATION_LOG = path.join(__dirname, 'scripts', 'consent_lane_split_migration.log');
+
+async function migrateConsentLaneSplit() {
+  if (String(process.env.CONSENT_LANE_SPLIT_MIGRATION_APPLIED).toLowerCase() === 'true') {
+    return { skipped: true };
+  }
+  const users = await getUsers();
+  const at = new Date().toISOString();
+  const flagged = [];
+  const provenanceFixed = [];
+  const provenanceReported = [];
+  let dirty = false;
+
+  users.forEach(u => {
+    if (u.role !== config.ROLES.CLIENT) return;
+    const line = String(u.serviceLine || (u.intake && u.intake.serviceLine) || 'PHC').toUpperCase();
+    const consents = u.consents || {};
+    const meta = u.consentMeta || {};
+
+    // ---- 1. lane split ----
+    if ((line === 'IHPC' || line === 'BOTH') && isConsentSatisfied(consents.serviceAgreement)
+        && !isConsentSatisfied(consents.ihpcServiceAgreement)) {
+      u.consents = { ...consents, ihpcServiceAgreement: 'pending' };
+      u.consentReaffirmRequired = {
+        reason: 'service_agreement_lane_split',
+        at,
+        serviceLine: line,
+        // What they signed, and what it did not cover.
+        signedAgainst: (meta.serviceAgreement && meta.serviceAgreement.version) || consentText.LEGACY_VERSION,
+        consents: ['ihpcServiceAgreement'],
+        titles: [consentText.titleFor('ihpcServiceAgreement')],
+        note: 'Signed the pre-4.6 combined Service Agreement, which described both service lines. The In-Home Primary Care Services Agreement is a separate document and must be signed.'
+      };
+      if (u.enrollmentStatus === 'enrolled') u.reviewStatus = 'needs_followup';
+      flagged.push({ id: u.id, name: u.name || u.email, serviceLine: line, enrollmentStatus: u.enrollmentStatus || 'intake_pending', source: u.source || 'in_app' });
+      dirty = true;
+    }
+
+    // ---- 2. provenance audit ----
+    Object.keys(u.consents || {}).forEach(type => {
+      const status = (u.consents || {})[type];
+      const m = meta[type];
+      if (consentRecordHasProvenance(status, m)) return;
+      const def = GFC_CONSENT_DEFS.find(d => d.type === type);
+      if (def && def.inactive && status === 'signed') {
+        // The named cause (Scope F4). It was never a signature.
+        u.consents[type] = 'optin_recorded';
+        u.consentMeta = { ...(u.consentMeta || {}), [type]: { ...(m || {}), recordedAt: (m && m.signedAt) || at, inactive: true, provenance: 'migrated_4_6', migratedFrom: 'signed' } };
+        provenanceFixed.push({ id: u.id, type, from: 'signed', to: 'optin_recorded' });
+        dirty = true;
+      } else {
+        // Reported, never guessed at. An executed consent with no evidence is a
+        // finding for a human, not something a migration should paper over.
+        provenanceReported.push({ id: u.id, name: u.name || u.email, type, status });
+      }
+    });
+  });
+
+  if (dirty) { await db.set('users', users); invalidateUsersCache(); }
+
+  const lines = [
+    `[${at}] Session 4.6 consent migration — lane split + provenance audit`,
+    `  clients flagged consent_reaffirm_required: ${flagged.length}`,
+    ...flagged.map(f => `    ${f.id}  ${f.name}  serviceLine=${f.serviceLine}  status=${f.enrollmentStatus}  source=${f.source}  -> must sign ihpcServiceAgreement`),
+    `  inactive consents corrected from 'signed' to 'optin_recorded': ${provenanceFixed.length}`,
+    ...provenanceFixed.map(f => `    ${f.id}  ${f.type}  ${f.from} -> ${f.to}`),
+    `  consent records still missing timestamp or IP (REVIEW BY HAND, nothing changed): ${provenanceReported.length}`,
+    ...provenanceReported.map(f => `    ${f.id}  ${f.name}  ${f.type}  status=${f.status}`),
+    `  Set CONSENT_LANE_SPLIT_MIGRATION_APPLIED=true once this has run.`
+  ];
+  try {
+    // `fs` at the top of this file is the promises API; the log write is a
+    // one-shot boot-time append, so use the sync surface directly.
+    const fsSync = require('fs');
+    fsSync.mkdirSync(path.dirname(CONSENT_MIGRATION_LOG), { recursive: true });
+    fsSync.appendFileSync(CONSENT_MIGRATION_LOG, lines.join('\n') + '\n');
+  } catch (e) {
+    console.error('Consent migration log write failed (non-fatal):', e.message);
+  }
+  lines.forEach(l => console.log('🔧 ' + l));
+  return { skipped: false, flagged, provenanceFixed, provenanceReported };
+}
+
 // Build a display-ready snapshot of the gate-relevant enrollment state.
 const buildEnrollmentSnapshot = (client) => {
   const consents = client.consents || {};
@@ -5508,7 +5602,10 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
         label: consentLabels[k] || k,
         status: consents[k],
         signedAt: (client.consentMeta && client.consentMeta[k] && client.consentMeta[k].signedAt) || null,
-        signerName: (client.consentMeta && client.consentMeta[k] && client.consentMeta[k].typedName) || null
+        signerName: (client.consentMeta && client.consentMeta[k] && client.consentMeta[k].typedName) || null,
+        bodyVersion: (client.consentMeta && client.consentMeta[k] && client.consentMeta[k].version) || null,
+        // Scope C — the client can now download the document they signed.
+        copyUrl: `/api/gfc/consents/${k}.pdf`
       }));
 
     // Documents shared with this client via the existing client-documents store (Drive-backed).
@@ -5525,10 +5622,122 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
       generated: true
     } : null;
 
-    res.json({ signedConsents, documents: clientDocs, enrollmentPacket });
+    res.json({
+      signedConsents, documents: clientDocs, enrollmentPacket,
+      // Every executed consent in one download.
+      consentPacketZip: hasSignedConsents ? { title: 'All signed consents', url: '/api/gfc/enrollment-packet.zip' } : null
+    });
   } catch (error) {
     console.error('GFC documents error:', error);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// A client may download a document THEY signed at any point, including before
+// enrollment is complete. `requireEnrolledClient` is the wrong gate here: a
+// client who has just acknowledged the Notice of Privacy Practices halfway
+// through intake is entitled to a copy of it on request (45 CFR 164.520), and
+// making them finish enrollment first would be an odd place to draw the line on
+// a document they have already executed.
+//
+// Client only, and only their own record — a consent copy is the signer's
+// document, so family and POA logins do not reach it here.
+const requireClientForOwnConsents = (req, res, next) => {
+  if (req.user.role === config.ROLES.CLIENT) return next();
+  return res.status(403).json({ error: 'Only the client can download their own signed documents.', code: 'CONSENT_COPY_CLIENT_ONLY' });
+};
+
+// ---- Signed-copy generation (Session 4.6, Scope C) ------------------------
+// A client must be able to be handed a copy of what they signed. For the Notice
+// of Privacy Practices that is a regulatory entitlement (45 CFR 164.520), not a
+// convenience. Both helpers render each consent AT THE VERSION STORED ON ITS
+// RECORD, so a later edit to the wording never rewrites an old signature's copy.
+
+const consentFileSlug = (client) =>
+  String(client.slug || consentRender.clientName(client) || client.id).replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'client';
+
+// Which consents this client actually executed. `pending` is not a document,
+// and an inactive opt-in is a preference rather than an executed consent — but
+// it IS part of the record, so it is included and labelled as what it is.
+const executedConsentTypes = (client) => {
+  const consents = client.consents || {};
+  const serviceLine = client.serviceLine || (client.intake && client.intake.serviceLine) || 'PHC';
+  return consentDefsForServiceLine(serviceLine)
+    .filter(d => ['signed', 'signed_offline', 'optin_recorded', 'na'].includes(consents[d.type]))
+    .map(d => d.type);
+};
+
+async function renderConsentPdf(client, consentType, opts = {}) {
+  const serviceLine = client.serviceLine || (client.intake && client.intake.serviceLine) || 'PHC';
+  const def = consentDefsForServiceLine(serviceLine).find(d => d.type === consentType);
+  if (!def) return { error: `Consent "${consentType}" does not apply to this client's service line.`, code: 'CONSENT_NOT_IN_LANE', status: 404 };
+  const status = (client.consents || {})[consentType];
+  if (!status || status === 'pending') {
+    return { error: 'That consent has not been executed, so there is no copy to produce.', code: 'CONSENT_NOT_EXECUTED', status: 404 };
+  }
+  const meta = (client.consentMeta || {})[consentType] || {};
+  const pdf = await pdfGenerator.generateConsentPDF(client, consentType, {
+    def, status, meta, internal: opts.audience === 'staff'
+  });
+  return { pdf, fileName: `${def.title.replace(/[^A-Za-z0-9]+/g, '-')}-${consentFileSlug(client)}.pdf`, status, version: meta.version || def.bodyVersion };
+}
+
+async function buildEnrollmentPacketZip(client, opts = {}) {
+  const types = executedConsentTypes(client);
+  if (!types.length) {
+    return { error: 'No executed consents on file yet, so there is nothing to package.', code: 'NO_EXECUTED_CONSENTS', status: 404 };
+  }
+  const entries = [];
+  // The summary first, so the archive opens with the cover sheet.
+  entries.push({
+    name: '00 - Enrollment summary.pdf',
+    data: await pdfGenerator.generateEnrollmentPacketPDF(client, { internal: opts.audience === 'staff' })
+  });
+  let n = 1;
+  for (const type of types) {
+    const out = await renderConsentPdf(client, type, opts);
+    if (out.error) continue;
+    const num = String(n++).padStart(2, '0');
+    entries.push({ name: `${num} - ${out.fileName}`, data: out.pdf });
+  }
+  return {
+    zip: zipWriter.createZip(entries),
+    fileName: `Godwins-Family-Care-consents-${consentFileSlug(client)}.zip`,
+    included: types
+  };
+}
+
+// GET /api/gfc/consents/:type.pdf — the client's own copy of one consent.
+app.get('/api/gfc/consents/:type.pdf', authenticateToken, requireClientForOwnConsents, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const out = await renderConsentPdf(client, req.params.type, { audience: 'client' });
+    if (out.error) return res.status(out.status).json({ error: out.error, code: out.code });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'consent_copy_downloaded', 'consent', req.params.type, { clientId: client.id, audience: 'client' });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${out.fileName}"`);
+    res.send(out.pdf);
+  } catch (error) {
+    console.error('GFC consent PDF error:', error);
+    res.status(500).json({ error: 'Failed to generate the consent copy' });
+  }
+});
+
+// GET /api/gfc/enrollment-packet.zip — every consent this client executed.
+app.get('/api/gfc/enrollment-packet.zip', authenticateToken, requireClientForOwnConsents, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const out = await buildEnrollmentPacketZip(client, { audience: 'client' });
+    if (out.error) return res.status(out.status).json({ error: out.error, code: out.code });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'enrollment_packet_downloaded', 'enrollment', client.id, { consents: out.included, audience: 'client' });
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${out.fileName}"`);
+    res.send(out.zip);
+  } catch (error) {
+    console.error('GFC packet ZIP error:', error);
+    res.status(500).json({ error: 'Failed to build your consent packet' });
   }
 });
 
@@ -5638,7 +5847,7 @@ app.post('/api/gfc/care-plan/cosign', authenticateToken, requireEnrolledClient, 
     const { users, idx } = await loadClientForMutation(client.id);
     if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
     const at = new Date().toISOString();
-    const ipHash = roiRepo.hashIp(req.headers['x-forwarded-for'] || req.socket?.remoteAddress, JWT_SECRET);
+    const ipHash = roiRepo.hashIp(clientIpFrom(req), JWT_SECRET);
     // Spec §4.3: a POA signs under their OWN name — "<POA> as POA for <client>" —
     // in the event record and on the PDF. The client's name is never shown as
     // the signer when a POA signed.
@@ -6364,7 +6573,7 @@ app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requir
     const built = clinicalRepo.buildCarePlanVersion(client.carePlan, req.body || {}, { name: req.user.name, id: req.user.id, at });
     if (built.error) return res.status(400).json({ error: built.error, code: built.code });
     const plan = built.plan;
-    const ipHash = roiRepo.hashIp(req.headers['x-forwarded-for'] || req.socket?.remoteAddress, JWT_SECRET);
+    const ipHash = roiRepo.hashIp(clientIpFrom(req), JWT_SECRET);
 
     // Append-only version history — the RN signature image lives here, out of
     // the hot-path users blob. Prior versions are never overwritten.
@@ -8182,6 +8391,58 @@ const loadClientForMutation = async (userId) => {
   return { users, idx };
 };
 
+// Scope E4 — reject the data-entry errors that made a demo packet unreviewable.
+//
+// The reviewed packet showed a date of birth of 2026-07-01 rendering as "age 0"
+// and a primary contact of "test (n)", the relationship having been keyed as a
+// single character. There is no seed script in this repo — those records were
+// hand-entered — so the fix is at the door rather than in a fixture: a client
+// record that cannot produce a sensible packet should not be creatable.
+const validateClientCoreFields = (intake) => {
+  const errors = {};
+  const dob = intake && intake.dob;
+  if (dob) {
+    const d = new Date(dob);
+    if (isNaN(d.getTime())) {
+      errors.dob = 'Enter the date of birth as a real date.';
+    } else if (d.getTime() > Date.now()) {
+      errors.dob = 'Date of birth cannot be in the future.';
+    } else {
+      const age = deriveAge(dob);
+      if (age == null || age < 1) errors.dob = 'That date of birth gives an age under one year. Check the year.';
+      else if (age > 120) errors.dob = 'That date of birth gives an age over 120. Check the year.';
+    }
+  }
+  const rel = intake && intake.primaryContact && intake.primaryContact.relationship;
+  if (rel && String(rel).trim().length < 2) {
+    errors.primaryContactRelationship = 'Write the relationship out — "Daughter", "Spouse", "Case manager".';
+  }
+  (Array.isArray(intake && intake.emergencyContacts) ? intake.emergencyContacts : []).forEach((c, i) => {
+    if (c && c.relationship && String(c.relationship).trim().length < 2) {
+      errors[`emergencyContacts.${i}.relationship`] = 'Write the relationship out.';
+    }
+  });
+  return errors;
+};
+
+// Decorate the registry for one client: presentability (a consent whose body
+// renders a value the client record does not have MUST NOT be shown or signed —
+// Scope B2), the resolved data blocks, and the body version a signature will be
+// stamped with.
+function decorateConsentDefs(client, serviceLine) {
+  return consentDefsForServiceLine(serviceLine).map(def => {
+    const pres = consentRender.presentability(consentText, def.type, client);
+    return {
+      ...def,
+      presentable: def.inactive ? true : pres.presentable,
+      blockedCode: pres.code,
+      blockedMessage: pres.message,
+      // Rendered from the client record, never re-asked.
+      renderData: consentRender.resolveForConsent(consentText, def.type, client)
+    };
+  });
+}
+
 // GET /api/gfc/intake — return the saved intake draft + consent state so the
 // flow can resume, plus the branched consent definitions for the service line.
 app.get('/api/gfc/intake', authenticateToken, requireClientForIntake, async (req, res) => {
@@ -8195,7 +8456,10 @@ app.get('/api/gfc/intake', authenticateToken, requireClientForIntake, async (req
       intake: client.intake || {},
       consents: client.consents || {},
       consentMeta: client.consentMeta || {},
-      consentDefs: consentDefsForServiceLine(serviceLine),
+      // The registry, decorated per client: whether each consent can be shown
+      // at all right now, and the client-record values its body renders (the
+      // one-pass rule — a consent confirms a value, it never re-collects it).
+      consentDefs: decorateConsentDefs(client, serviceLine),
       requiredConsents: requiredConsentTypes(serviceLine)
     });
   } catch (error) {
@@ -8261,7 +8525,9 @@ app.post('/api/gfc/intake', authenticateToken, requireClientForIntake, async (re
       updatedAt: new Date().toISOString()
     };
     users[idx].intake = merged;
-    if (serviceLine) users[idx].serviceLine = serviceLine;
+    // A lane change recomputes the consent set — never a bare field assignment
+    // (Scope F3). `serviceLineChange` is reported back so the wizard can say so.
+    const serviceLineChange = serviceLine ? applyServiceLineChange(users[idx], serviceLine, req.user) : null;
     // ── Schema mirror ──────────────────────────────────────────────
     // The intake wizard captures every legacy WordPress field in its native
     // structure; here we map the matching/billing-relevant pieces up onto the
@@ -8272,55 +8538,124 @@ app.post('/api/gfc/intake', authenticateToken, requireClientForIntake, async (re
 
     await db.set('users', users);
     invalidateUsersCache();
-    res.json({ message: 'Intake saved', intake: merged, age: merged.age });
+    if (serviceLineChange) {
+      await logActivity(req.user.id, req.user.name || req.user.email, 'service_line_changed', 'enrollment', users[idx].id, {
+        from: serviceLineChange.from, to: serviceLineChange.to,
+        newlyRequiredConsents: serviceLineChange.newlyRequired,
+        noLongerRequiredConsents: serviceLineChange.noLongerRequired
+      });
+    }
+    res.json({ message: 'Intake saved', intake: merged, age: merged.age, serviceLineChange });
   } catch (error) {
     console.error('GFC save intake error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// POST /api/gfc/consents — e-sign a single consent (typed name + ack checkbox).
-// Stores a consent STATUS PER TYPE + server timestamp + IP (§4.3). The portal
-// gate reads consents.roiFamily.
+// POST /api/gfc/consents — e-sign a single consent.
+//
+// Stores a status per type plus a signature record carrying the typed name, the
+// server timestamp, the hashed client IP, the BODY VERSION as presented, and any
+// elections the body asked for (Intake Spec §4.3, Scope C). Four things this
+// endpoint refuses to do, each of them a defect found in a live packet:
+//   - sign a consent that does not apply to the client's service line
+//   - sign a consent flagged inactive (Scope E1)
+//   - sign a consent whose body cannot be fully rendered, e.g. a financial
+//     agreement with no agreed rate in it (Scope B2)
+//   - write any record without a timestamp and a client IP (Scope E1/F4)
+// The portal gate reads consents.roiFamily.
 app.post('/api/gfc/consents', authenticateToken, requireClientForIntake, async (req, res) => {
   try {
-    const { type, typedName, acknowledged, optOut } = req.body || {};
+    const { type, typedName, acknowledged, optOut, choices } = req.body || {};
     if (!type) return res.status(400).json({ error: 'consent type is required' });
 
     const { users, idx } = await loadClientForMutation(req.user.id);
     if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
+    const client = users[idx];
 
-    const serviceLine = users[idx].serviceLine || 'PHC';
+    const serviceLine = client.serviceLine || 'PHC';
     const def = consentDefsForServiceLine(serviceLine).find(d => d.type === type);
-    if (!def) return res.status(400).json({ error: `Consent "${type}" does not apply to this service line` });
+    if (!def) return res.status(400).json({ error: `Consent "${type}" does not apply to this service line`, code: 'CONSENT_NOT_IN_LANE' });
 
-    // The monitoring opt-in is inactive (Track C) — record the choice, do not require a signature.
     if (def.inactive) {
-      users[idx].consents = { ...(users[idx].consents || {}), [type]: optOut ? 'na' : 'signed' };
-      users[idx].monitoringOptIn = !optOut;
-    } else {
-      if (!typedName || !typedName.trim()) return res.status(400).json({ error: 'Typed signature name is required' });
-      if (!acknowledged) return res.status(400).json({ error: 'You must check the acknowledgment box to sign' });
-      users[idx].consents = { ...(users[idx].consents || {}), [type]: 'signed' };
-      users[idx].consentMeta = {
-        ...(users[idx].consentMeta || {}),
+      // Scope E1/F4. This consent is not live, so nothing is executed: no
+      // signature is taken and the status is NEVER 'signed'. The preference is
+      // recorded with its own provenance so no consent record exists without one.
+      const recordedAt = new Date().toISOString();
+      client.consents = { ...(client.consents || {}), [type]: optOut ? 'na' : 'optin_recorded' };
+      client.consentMeta = {
+        ...(client.consentMeta || {}),
         [type]: {
-          typedName: typedName.trim(),
-          acknowledged: true,
-          signedAt: new Date().toISOString(),
-          // Store only a salted hash of the signer IP (consistent with the ROI /
-          // care-plan paths) — never the raw address, which is retained PII.
-          ipHash: roiRepo.hashIp(req.headers['x-forwarded-for'] || req.socket?.remoteAddress, JWT_SECRET),
-          // Working-draft consent text version — bump when language is revised.
-          version: 'draft-1'
+          recordedAt,
+          ipHash: roiRepo.hashIp(clientIpFrom(req), JWT_SECRET),
+          version: def.bodyVersion,
+          inactive: true,
+          provenance: 'in_app_preference'
         }
       };
+      client.monitoringOptIn = !optOut;
+      users[idx] = client;
+      await db.set('users', users);
+      invalidateUsersCache();
+      await logActivity(req.user.id, req.user.name || req.user.email, 'consent_preference_recorded', 'consent', type, { serviceLine, optOut: !!optOut });
+      return res.json({ message: 'Preference recorded', type, status: client.consents[type], signed: false });
     }
+
+    // A body the client cannot fully see is a body they cannot meaningfully sign.
+    const pres = consentRender.presentability(consentText, type, client);
+    if (!pres.presentable) {
+      return res.status(409).json({ error: pres.message, code: pres.code || 'CONSENT_NOT_PRESENTABLE', consentType: type });
+    }
+
+    if (!typedName || !typedName.trim()) return res.status(400).json({ error: 'Typed signature name is required' });
+    if (!acknowledged) return res.status(400).json({ error: 'You must check the acknowledgment box to sign' });
+
+    // Elections the body asks for are stored as their own fields on the consent
+    // record — telehealth and students on consentToTreat, the photo release on
+    // pcaScope, resuscitation status on emergencyFinancial. Buried inside a
+    // signature nobody could later tell what the client actually chose.
+    const required = consentText.choicesFor(type);
+    const supplied = choices && typeof choices === 'object' ? choices : {};
+    const answers = {};
+    for (const c of required) {
+      const value = supplied[c.key];
+      const valid = c.options.some(o => o.value === value);
+      if (!valid) {
+        if (c.required) {
+          return res.status(400).json({
+            error: `Choose an option for "${c.label}" before signing.`,
+            code: 'CONSENT_CHOICE_REQUIRED', consentType: type, choiceKey: c.key,
+            options: c.options
+          });
+        }
+        continue;
+      }
+      answers[c.key] = value;
+    }
+
+    let signature;
+    try {
+      signature = buildConsentSignature({ type, typedName, req, bodyVersion: def.bodyVersion, choices: answers });
+    } catch (e) {
+      console.error('Consent provenance error:', e.message);
+      return res.status(500).json({ error: 'Could not record the signature provenance. Nothing was saved.', code: e.code || 'CONSENT_PROVENANCE_MISSING' });
+    }
+
+    client.consents = { ...(client.consents || {}), [type]: 'signed' };
+    client.consentMeta = { ...(client.consentMeta || {}), [type]: signature };
+    // A consent the client has now signed clears its own line on the admin flag.
+    if (client.consentActionRequired && Array.isArray(client.consentActionRequired.consents)) {
+      const left = client.consentActionRequired.consents.filter(t => t !== type);
+      client.consentActionRequired = left.length ? { ...client.consentActionRequired, consents: left, titles: left.map(t => (GFC_CONSENT_DEFS.find(d => d.type === t) || {}).title || t) } : null;
+    }
+    users[idx] = client;
 
     await db.set('users', users);
     invalidateUsersCache();
-    await logActivity(req.user.id, req.user.name || req.user.email, 'consent_signed', 'consent', type, { serviceLine });
-    res.json({ message: 'Consent recorded', type, status: users[idx].consents[type] });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'consent_signed', 'consent', type, {
+      serviceLine, bodyVersion: signature.version, choices: answers
+    });
+    res.json({ message: 'Consent recorded', type, status: client.consents[type], signed: true, bodyVersion: signature.version });
   } catch (error) {
     console.error('GFC consent error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -8395,6 +8730,10 @@ app.post('/api/gfc/intake/submit', authenticateToken, requireClientForIntake, as
 
     // Minimal required intake fields (DOB once + a primary contact).
     const intake = client.intake || {};
+    const fieldErrors = validateClientCoreFields(intake);
+    if (Object.keys(fieldErrors).length) {
+      return res.status(400).json({ error: 'Some intake details need correcting.', code: 'INTAKE_INVALID', fieldErrors });
+    }
     const missingFields = [];
     if (!intake.dob) missingFields.push('dob');
     if (!(intake.primaryContact && intake.primaryContact.name)) missingFields.push('primaryContact.name');
@@ -8449,20 +8788,91 @@ const requireEnrollmentStaff = (req, res, next) => {
 };
 
 // Required structured intake fields for a complete submission (intake spec §2A).
-// Each reads from client.intake first, then falls back to the mirrored top-level
-// client fields the intake flow copies up.
+//
+// LANE-AWARE (Scope G2/G3). Every entry declares the lanes it counts for.
+// `careTier` used to be counted globally: it is the Track A/B home care enum, so
+// an IHPC-only patient will never legitimately have one and their completion
+// could never reach 100% — a permanent false gap on the checklist.
+//
+// The second half of this list is the fields the CONSENT BODIES render (Scope B).
+// Without them, enrollment reads complete while a consent that depends on the
+// value is unsignable, and the gap surfaces at the kitchen table instead of at
+// intake. Each reads from client.intake first, then falls back to the mirrored
+// top-level client fields the intake flow copies up.
+const ALL_LANES = ['PHC', 'IHPC', 'BOTH'];
+const PHC_LANES = ['PHC', 'BOTH'];
+const IHPC_LANES = ['IHPC', 'BOTH'];
+
 const ENROLLMENT_REQUIRED_FIELDS = [
-  { key: 'name',             label: 'Name',              present: (c, i) => !!(c.name || (i.firstName && i.lastName)) },
-  { key: 'dob',              label: 'Date of birth',     present: (c, i) => !!(i.dob || c.dob) },
-  { key: 'gender',           label: 'Gender',            present: (c, i) => !!i.gender },
-  { key: 'address',          label: 'Address',           present: (c, i) => !!(i.address && (i.address.line1 || i.address.city)) },
-  { key: 'phone',            label: 'Phone',             present: (c, i) => !!(i.phone || c.phone) },
-  { key: 'primaryLanguage',  label: 'Primary language',  present: (c, i) => !!i.primaryLanguage },
-  { key: 'serviceLine',      label: 'Service line',      present: (c, i) => !!(c.serviceLine || i.serviceLine) },
-  { key: 'careTier',         label: 'Care tier',         present: (c) => !!normalizeCareTier(c.careTier) },
-  { key: 'primaryContact',   label: 'Primary contact',   present: (c, i) => !!(i.primaryContact && i.primaryContact.name) },
-  { key: 'emergencyContact', label: 'Emergency contact', present: (c, i) => Array.isArray(i.emergencyContacts) && i.emergencyContacts.some(e => e && e.name) }
+  // ── Identity and contact — every lane ──
+  { key: 'name',             label: 'Name',              lanes: ALL_LANES, present: (c, i) => !!(c.name || (i.firstName && i.lastName)) },
+  { key: 'dob',              label: 'Date of birth',     lanes: ALL_LANES, present: (c, i) => !!(i.dob || c.dob) },
+  { key: 'gender',           label: 'Gender',            lanes: ALL_LANES, present: (c, i) => !!i.gender },
+  { key: 'address',          label: 'Address',           lanes: ALL_LANES, present: (c, i) => !!(i.address && (i.address.line1 || i.address.city)) },
+  { key: 'phone',            label: 'Phone',             lanes: ALL_LANES, present: (c, i) => !!(i.phone || c.phone) },
+  { key: 'primaryLanguage',  label: 'Primary language',  lanes: ALL_LANES, present: (c, i) => !!i.primaryLanguage },
+  { key: 'serviceLine',      label: 'Service line',      lanes: ALL_LANES, present: (c, i) => !!(c.serviceLine || i.serviceLine) },
+  { key: 'primaryContact',   label: 'Primary contact',   lanes: ALL_LANES, present: (c, i) => !!(i.primaryContact && i.primaryContact.name) },
+  { key: 'emergencyContact', label: 'Emergency contact', lanes: ALL_LANES, present: (c, i) => Array.isArray(i.emergencyContacts) && i.emergencyContacts.some(e => e && e.name) },
+  // Track A/B placement is a home care concept only.
+  { key: 'careTier',         label: 'Care tier',         lanes: PHC_LANES, present: (c) => !!normalizeCareTier(c.careTier) },
+
+  // ── Fields the consent bodies render ──
+  // financialAgreement and the home care Service Agreement both print the rate
+  // table. Without it neither is presentable at all, so it belongs on the
+  // checklist rather than surfacing as a block at signing time.
+  { key: 'agreedRate',       label: 'Agreed rate and daily minimum', lanes: PHC_LANES,
+    consentTypes: ['financialAgreement', 'serviceAgreement'],
+    present: (c) => consentRender.hasRateAgreement(c) },
+  // crisisProtocol prints the call order; the notify-first contact heads it.
+  { key: 'crisisNotify',     label: 'Notify-first crisis contact', lanes: ALL_LANES,
+    consentTypes: ['crisisProtocol'],
+    present: (c, i) => !!(i.crisisNotify && String(i.crisisNotify).trim()) },
+  // emergencyFinancial and pcaScope both print the directive status.
+  { key: 'advanceDirective', label: 'Advance directive status', lanes: ALL_LANES,
+    consentTypes: ['emergencyFinancial', 'pcaScope'],
+    present: (c, i) => !!((i.advanceDirective && i.advanceDirective.status) || (c.advanceDirective && c.advanceDirective.status)) },
+  // The face sheet the caregiver carries, and the emergency block of pcaScope.
+  { key: 'allergies',        label: 'Allergies (or "none")', lanes: ALL_LANES,
+    consentTypes: ['pcaScope'],
+    present: (c, i) => !!(i.allergies || c.allergies) },
+  { key: 'pharmacy',         label: 'Preferred pharmacy', lanes: ALL_LANES,
+    consentTypes: ['pcaScope'],
+    present: (c, i) => !!(i.medicalTeam && i.medicalTeam.preferredPharmacy) },
+  { key: 'pcp',              label: 'Primary care provider', lanes: ALL_LANES,
+    consentTypes: ['pcaScope', 'crisisProtocol'],
+    present: (c, i) => !!(i.medicalTeam && (i.medicalTeam.pcpName || i.medicalTeam.pcpPractice)) },
+  { key: 'preferredHospital', label: 'Preferred hospital', lanes: ALL_LANES,
+    consentTypes: ['pcaScope', 'crisisProtocol'],
+    present: (c, i) => !!(i.medicalTeam && i.medicalTeam.preferredHospital) },
+  // LTC claim support — counted only where the client actually holds a policy.
+  { key: 'ltcPolicy',        label: 'Long term care carrier and policy number', lanes: PHC_LANES,
+    consentTypes: ['financialAgreement', 'serviceAgreement'],
+    applies: (c, i) => {
+      const type = (c.payer && c.payer.type) || (i.payer && i.payer.type) || '';
+      return /ltc/i.test(String(type)) || !!(i.ltc && (i.ltc.carrier || i.ltc.policyNum));
+    },
+    present: (c, i) => !!(i.ltc && i.ltc.carrier && i.ltc.policyNum) },
+  // assignmentOfBenefits and the IHPC agreement both print the coverage block.
+  { key: 'coverage',         label: 'Insurance coverage on file', lanes: IHPC_LANES,
+    consentTypes: ['assignmentOfBenefits', 'ihpcServiceAgreement'],
+    present: (c, i) => {
+      const payer = c.payer || i.payer || {};
+      const ids = Array.isArray(payer.insuranceIds) ? payer.insuranceIds : [];
+      return !!(payer.type || ids.some(x => x && x.carrier));
+    } }
 ];
+
+// The checklist entries that apply to one client — lane first, then any
+// per-client condition (a client with no LTC policy is not missing one).
+const enrollmentFieldsFor = (client, intake, serviceLine) => {
+  const line = String(serviceLine || 'PHC').toUpperCase();
+  return ENROLLMENT_REQUIRED_FIELDS.filter(f => {
+    if (!f.lanes.includes(line)) return false;
+    if (typeof f.applies === 'function') { try { return !!f.applies(client, intake); } catch { return false; } }
+    return true;
+  });
+};
 
 // Intake completion = (required consents satisfied + required fields present) / total.
 const computeEnrollmentCompletion = (client) => {
@@ -8472,9 +8882,10 @@ const computeEnrollmentCompletion = (client) => {
   const requiredConsents = requiredConsentTypes(serviceLine);
   const safe = (fn) => { try { return !!fn(); } catch { return false; } };
 
+  const applicableFields = enrollmentFieldsFor(client, intake, serviceLine);
   const missingConsents = requiredConsents.filter(t => !isConsentSatisfied(consents[t]));
-  const missingFields = ENROLLMENT_REQUIRED_FIELDS.filter(f => !safe(() => f.present(client, intake)));
-  const total = requiredConsents.length + ENROLLMENT_REQUIRED_FIELDS.length;
+  const missingFields = applicableFields.filter(f => !safe(() => f.present(client, intake)));
+  const total = requiredConsents.length + applicableFields.length;
   const satisfied = total - missingConsents.length - missingFields.length;
   return {
     total, satisfied,
@@ -8482,7 +8893,14 @@ const computeEnrollmentCompletion = (client) => {
     missingConsents,
     missingFieldKeys: missingFields.map(f => f.key),
     missingConsentLabels: missingConsents.map(t => (GFC_CONSENT_DEFS.find(x => x.type === t) || {}).title || t),
-    missingFieldLabels: missingFields.map(f => f.label)
+    missingFieldLabels: missingFields.map(f => f.label),
+    // Which consent each missing field blocks, so admin sees the consequence
+    // ("no rate on file" -> "Financial Agreement cannot be signed") rather than
+    // a bare field name.
+    missingFieldBlocks: missingFields.filter(f => f.consentTypes).map(f => ({
+      key: f.key, label: f.label,
+      blocks: f.consentTypes.map(t => (GFC_CONSENT_DEFS.find(x => x.type === t) || {}).title || t)
+    }))
   };
 };
 
@@ -8539,14 +8957,35 @@ const enrollmentDetail = (client) => {
     intake,
     consents: defs.map(d => {
       const status = consents[d.type] || 'pending';
+      const meta = consentMeta[d.type] || null;
+      const pres = consentRender.presentability(consentText, d.type, client);
       return {
         type: d.type, title: d.title, required: !!d.required, inactive: !!d.inactive,
+        // Which lane this consent belongs to — Scope D's "which consents are
+        // outstanding and which lane each belongs to".
+        scope: d.scope,
+        laneLabel: d.scope === 'phc' ? 'Private Home Care' : (d.scope === 'ihpc' ? 'In-Home Primary Care' : 'Both lanes'),
+        paperSource: d.paperSource,
         status,
         satisfied: isConsentSatisfied(status),
+        outstanding: !!d.required && !isConsentSatisfied(status),
         // Provenance badge for the detail view (in_app | signed_offline).
         provenance: status === 'signed_offline' ? 'signed_offline' : (status === 'signed' ? 'in_app' : null),
-        signedAt: (consentMeta[d.type] && consentMeta[d.type].signedAt) || null,
-        meta: consentMeta[d.type] || null
+        signedAt: (meta && meta.signedAt) || null,
+        recordedAt: (meta && meta.recordedAt) || null,
+        // The body version the client actually signed against (Scope C).
+        bodyVersion: (meta && meta.version) || null,
+        currentBodyVersion: d.bodyVersion,
+        bodySuperseded: !!(meta && meta.version && meta.version !== d.bodyVersion),
+        choices: (meta && meta.choices) || null,
+        // A consent record with no timestamp / no IP is the Scope E1 defect.
+        provenanceComplete: consentRecordHasProvenance(status, meta),
+        presentable: d.inactive ? true : pres.presentable,
+        blockedCode: pres.code,
+        blockedMessage: pres.message,
+        signedCopyUrl: (status === 'signed' || status === 'signed_offline')
+          ? `/api/gfc/admin/enrollment/${client.id}/consent/${d.type}.pdf` : null,
+        meta
       };
     }),
     medications: Array.isArray(intake.medications) ? intake.medications : (Array.isArray(client.medications) ? client.medications : []),
@@ -8560,7 +8999,19 @@ const enrollmentDetail = (client) => {
     },
     review: client.enrollmentReview || null,
     followUp: client.enrollmentFollowUp || null,
-    missing: { consents: comp.missingConsentLabels, fields: comp.missingFieldLabels }
+    missing: { consents: comp.missingConsentLabels, fields: comp.missingFieldLabels, fieldBlocks: comp.missingFieldBlocks },
+    // The agreed rate, and whether it is the thing blocking a consent (Scope B2).
+    rateAgreement: client.rateAgreement || null,
+    rateSet: consentRender.hasRateAgreement(client),
+    // Scope A migration + Scope F3 lane change: consents this client must
+    // (re-)sign, and why. Surfaced here so admin sees it without being told.
+    consentActionRequired: client.consentActionRequired || null,
+    consentReaffirmRequired: client.consentReaffirmRequired || null,
+    serviceLineHistory: client.serviceLineHistory || [],
+    // Internal review status. Scope E2: this belongs in the admin view, never
+    // on the client's own copy of what they signed.
+    reviewBanner: CONSENT_REVIEW_BANNER,
+    packetZipUrl: `/api/gfc/admin/enrollment/${client.id}/enrollment-packet.zip`
   };
 };
 
@@ -8764,6 +9215,10 @@ app.post('/api/gfc/admin/enrollment/offline', authenticateToken, requireAdmin, u
     const d = payload || {};
     if (!d.firstName || !d.lastName) return res.status(400).json({ error: 'firstName and lastName are required' });
     if (!d.dob) return res.status(400).json({ error: 'dob is required' });
+    const offlineFieldErrors = validateClientCoreFields(d);
+    if (Object.keys(offlineFieldErrors).length) {
+      return res.status(400).json({ error: 'Some client details need correcting.', code: 'INTAKE_INVALID', fieldErrors: offlineFieldErrors });
+    }
     const serviceLine = (d.serviceLine || 'PHC').toUpperCase();
     const careTier = normalizeCareTier(d.careTier);
 
@@ -8796,20 +9251,52 @@ app.post('/api/gfc/admin/enrollment/offline', authenticateToken, requireAdmin, u
       }
     }
 
-    // Consent checklist → statuses. checklist: { [type]: { status, signedAt } }
+    // Consent checklist → statuses, PER TYPE (Scope D). A client may have signed
+    // eight of nine paper documents, so this is never a blanket flag. The
+    // checklist comes from the server registry the admin form now renders from,
+    // so a type the registry does not carry is rejected rather than stored.
+    // checklist: { [type]: { status, signedAt, choices } }
     const checklist = d.consents || {};
     const applicable = consentDefsForServiceLine(serviceLine);
+    const applicableTypes = applicable.map(def => def.type);
+    const unknownTypes = Object.keys(checklist).filter(t => !applicableTypes.includes(t));
+    if (unknownTypes.length) {
+      return res.status(400).json({
+        error: `Consent type(s) not in the ${serviceLine} registry: ${unknownTypes.join(', ')}`,
+        code: 'CONSENT_NOT_IN_LANE', unknownTypes
+      });
+    }
     const consents = {};
     const consentMeta = {};
     const nowIso = new Date().toISOString();
+    const recordedBy = { recordedBy: req.user.id, recordedByName: req.user.name || req.user.email, recordedAt: nowIso };
     applicable.forEach(def => {
       const entry = checklist[def.type] || {};
-      const choice = entry.status || 'pending'; // signed_offline | pending | na
+      const choice = entry.status || 'pending'; // signed_offline | pending | na | optin_recorded
       if (choice === 'signed_offline') {
+        if (def.inactive) {
+          // An inactive consent was never on the paper packet and cannot have
+          // been signed on it. Record the preference honestly instead.
+          consents[def.type] = 'optin_recorded';
+          consentMeta[def.type] = { ...recordedBy, version: def.bodyVersion, inactive: true, provenance: 'offline_preference' };
+          return;
+        }
         consents[def.type] = 'signed_offline';
-        consentMeta[def.type] = { signedAt: entry.signedAt || nowIso, provenance: 'signed_offline', recordedBy: req.user.id, recordedAt: nowIso };
+        consentMeta[def.type] = {
+          ...recordedBy,
+          signedAt: entry.signedAt || nowIso,
+          provenance: 'signed_offline',
+          // Which body the paper packet carried. Offline packets from 09/2026
+          // forward are the same approved text the app now renders.
+          version: entry.version || def.bodyVersion,
+          choices: (entry.choices && typeof entry.choices === 'object') ? entry.choices : {}
+        };
       } else if (choice === 'na') {
         consents[def.type] = 'na';
+        consentMeta[def.type] = { ...recordedBy, provenance: 'offline_not_applicable' };
+      } else if (choice === 'optin_recorded') {
+        consents[def.type] = 'optin_recorded';
+        consentMeta[def.type] = { ...recordedBy, version: def.bodyVersion, inactive: !!def.inactive, provenance: 'offline_preference' };
       } else {
         consents[def.type] = 'pending';
       }
@@ -8827,7 +9314,16 @@ app.post('/api/gfc/admin/enrollment/offline', authenticateToken, requireAdmin, u
       phone: d.phone || '', primaryLanguage: d.primaryLanguage || '', livesWith: d.livesWith || '',
       serviceLine, careTier,
       primaryContact: d.primaryContact || {},
+      responsibleParty: d.responsibleParty || {},
       emergencyContacts: Array.isArray(d.emergencyContacts) ? d.emergencyContacts : [],
+      // Face-sheet fields the consent bodies render (Scope G1/G2) — the paper
+      // form collects them, so the keyed record carries them too.
+      crisisNotify: d.crisisNotify || '',
+      medicalTeam: d.medicalTeam || {},
+      advanceDirective: d.advanceDirective || {},
+      entryInstructions: d.entryInstructions || '',
+      homeSafetyNotes: d.homeSafetyNotes || '',
+      ltc: d.ltc || {},
       allergies: d.allergies || '',
       medications: meds,
       payer: d.payer || {},
@@ -8852,6 +9348,16 @@ app.post('/api/gfc/admin/enrollment/offline', authenticateToken, requireAdmin, u
       payer: d.payer || {},
       consents,
       consentMeta,
+      // The agreed rate off the paper Financial Agreement (Scope B2). Without
+      // it neither PHC money document is presentable in-app.
+      rateAgreement: (Number(d.hourlyRate) > 0 && Number(d.dailyMinimumHours) > 0) ? {
+        hourlyRate: Number(d.hourlyRate),
+        dailyMinimumHours: Number(d.dailyMinimumHours),
+        includedServices: null, holidayTreatment: null, errandFuel: null, invoiceCadence: null,
+        cancellationWindowHours: 24, rateChangeNoticeDays: 30,
+        effectiveDate: d.rateEffectiveDate || null,
+        setById: req.user.id, setByName: req.user.name || req.user.email, setAt: nowIso
+      } : null,
       offlinePacketDriveUrls,
       careTeam: d.careTeam || { assignedFNPs: [], assignedCaseManager: null, primaryCaregiver: null, backupCaregiver: null },
       intake,
@@ -8869,15 +9375,128 @@ app.post('/api/gfc/admin/enrollment/offline', authenticateToken, requireAdmin, u
       source: 'legacy_offline', serviceLine, careTier, packetFiles: offlinePacketDriveUrls.length
     });
     for (const [type, status] of Object.entries(consents)) {
-      if (status === 'signed_offline') {
-        await logActivity(req.user.id, req.user.name || req.user.email, 'consent_recorded_offline', 'consent', type, { clientId, signedAt: consentMeta[type] && consentMeta[type].signedAt });
-      }
+      if (status === 'pending') continue;
+      await logActivity(req.user.id, req.user.name || req.user.email, 'consent_recorded_offline', 'consent', type, {
+        clientId, status, signedAt: (consentMeta[type] && consentMeta[type].signedAt) || null
+      });
     }
 
     res.json({ message: 'Offline patient created', clientId, offlinePacketDriveUrls, enrollmentStatus: newClient.enrollmentStatus });
   } catch (error) {
     console.error('GFC offline onboarding error:', error);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/gfc/admin/enrollment/meta/consent-registry — THE registry, served.
+//
+// Scope F1: public/admin-enrollment.html used to hardcode its own
+// CONSENT_DEFS_BY_LINE, and the two had already drifted — `monitoring` existed
+// in the server registry and in neither client array, so offline onboarding
+// could not record the monitoring choice at all. There is now one list, and the
+// admin form renders whatever the server sends. Adding a consent server-side
+// can no longer leave the admin form behind.
+app.get('/api/gfc/admin/enrollment/meta/consent-registry', authenticateToken, requireEnrollmentStaff, (req, res) => {
+  const serviceLine = String(req.query.serviceLine || '').toUpperCase();
+  const defs = serviceLine ? consentDefsForServiceLine(serviceLine) : GFC_CONSENT_DEFS;
+  res.json({
+    serviceLine: serviceLine || 'ALL',
+    consentDefs: defs,
+    requiredConsents: serviceLine ? requiredConsentTypes(serviceLine) : GFC_CONSENT_DEFS.filter(d => d.required).map(d => d.type),
+    statuses: CONSENT_STATUSES,
+    satisfiedStatuses: CONSENT_SATISFIED_STATUSES,
+    bodyVersion: consentText.CURRENT_VERSION,
+    reviewBanner: CONSENT_REVIEW_BANNER
+  });
+});
+
+// PUT /api/gfc/admin/enrollment/:clientId/rate — set the agreed rate (Scope B2).
+//
+// The financial agreement and the home care service agreement both PRINT this
+// table. Until it exists neither consent is presentable, by design: a client
+// signing a financial agreement with no price in it is the defect, not the
+// blocked signature.
+app.put('/api/gfc/admin/enrollment/:clientId/rate', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const hourlyRate = Number(b.hourlyRate);
+    const dailyMinimumHours = Number(b.dailyMinimumHours);
+    if (!isFinite(hourlyRate) || hourlyRate <= 0) return res.status(400).json({ error: 'hourlyRate must be a positive number', code: 'RATE_INVALID' });
+    if (!isFinite(dailyMinimumHours) || dailyMinimumHours <= 0) return res.status(400).json({ error: 'dailyMinimumHours must be a positive number', code: 'RATE_INVALID' });
+
+    const users = await getUsers();
+    const idx = users.findIndex(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (idx === -1) return res.status(404).json({ error: 'Client not found' });
+
+    const prior = users[idx].rateAgreement || null;
+    users[idx].rateAgreement = {
+      hourlyRate, dailyMinimumHours,
+      includedServices: (b.includedServices || '').trim() || null,
+      holidayTreatment: (b.holidayTreatment || '').trim() || null,
+      errandFuel: (b.errandFuel || '').trim() || null,
+      invoiceCadence: (b.invoiceCadence || '').trim() || null,
+      cancellationWindowHours: Number(b.cancellationWindowHours) > 0 ? Number(b.cancellationWindowHours) : 24,
+      rateChangeNoticeDays: Number(b.rateChangeNoticeDays) > 0 ? Number(b.rateChangeNoticeDays) : 30,
+      effectiveDate: b.effectiveDate || null,
+      setById: req.user.id, setByName: req.user.name || req.user.email, setAt: new Date().toISOString()
+    };
+    // A rate change after the client already signed against the old figures is
+    // not a silent edit — the agreement they hold no longer matches the record.
+    const signedAgainstOldRate = prior && ['financialAgreement', 'serviceAgreement']
+      .filter(t => isConsentSatisfied((users[idx].consents || {})[t]))
+      .filter(() => Number(prior.hourlyRate) !== hourlyRate || Number(prior.dailyMinimumHours) !== dailyMinimumHours);
+    if (signedAgainstOldRate && signedAgainstOldRate.length) {
+      users[idx].consentActionRequired = {
+        reason: 'rate_changed', at: new Date().toISOString(),
+        consents: signedAgainstOldRate,
+        titles: signedAgainstOldRate.map(t => (GFC_CONSENT_DEFS.find(d => d.type === t) || {}).title || t)
+      };
+    }
+    await db.set('users', users);
+    invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'client_rate_set', 'enrollment', users[idx].id, {
+      hourlyRate, dailyMinimumHours, hadPriorRate: !!prior
+    });
+    res.json({ message: 'Rate agreement saved', rateAgreement: users[idx].rateAgreement, rateSet: true });
+  } catch (error) {
+    console.error('GFC rate set error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/gfc/admin/enrollment/:clientId/consent/:type.pdf — one executed consent.
+app.get('/api/gfc/admin/enrollment/:clientId/consent/:type.pdf', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+    const out = await renderConsentPdf(client, req.params.type, { audience: 'staff' });
+    if (out.error) return res.status(out.status).json({ error: out.error, code: out.code });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'consent_copy_downloaded', 'consent', req.params.type, { clientId: client.id });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${out.fileName}"`);
+    res.send(out.pdf);
+  } catch (error) {
+    console.error('GFC admin consent PDF error:', error);
+    res.status(500).json({ error: 'Failed to generate the consent copy' });
+  }
+});
+
+// GET /api/gfc/admin/enrollment/:clientId/enrollment-packet.zip — every executed consent.
+app.get('/api/gfc/admin/enrollment/:clientId/enrollment-packet.zip', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+    const out = await buildEnrollmentPacketZip(client, { audience: 'staff' });
+    if (out.error) return res.status(out.status).json({ error: out.error, code: out.code });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'enrollment_packet_downloaded', 'enrollment', client.id, { consents: out.included });
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${out.fileName}"`);
+    res.send(out.zip);
+  } catch (error) {
+    console.error('GFC admin packet ZIP error:', error);
+    res.status(500).json({ error: 'Failed to build the enrollment packet' });
   }
 });
 
@@ -9013,7 +9632,7 @@ app.post('/api/gfc/transfer-roi/upload', authenticateToken, requireClientForInta
     if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
     const client = users[idx];
 
-    const ipHash = roiRepo.hashIp(req.headers['x-forwarded-for'] || req.socket?.remoteAddress, JWT_SECRET);
+    const ipHash = roiRepo.hashIp(clientIpFrom(req), JWT_SECRET);
     const event = await roiStore.insertConsentEvent({
       client_id: client.id,
       printed_name: client.preferredName || client.name || 'Client',
@@ -9083,7 +9702,7 @@ app.post('/api/gfc/transfer-roi/submit', authenticateToken, requireClientForInta
     if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
     const client = users[idx];
 
-    const ipHash = roiRepo.hashIp(req.headers['x-forwarded-for'] || req.socket?.remoteAddress, JWT_SECRET);
+    const ipHash = roiRepo.hashIp(clientIpFrom(req), JWT_SECRET);
 
     // Parent consent_event. includes_protected_info defaults FALSE and is only
     // true when the client explicitly opted in (42 CFR Part 2).
@@ -14896,11 +15515,25 @@ app.listen(PORT, () => {
 
   // One-shot care-tier enum migration (Session 3.3, Scope C).
   // Gated by CARE_TIER_MIGRATION_APPLIED — safe/idempotent to leave in place.
+  // Sequential, and after the admin initializer — see adminInitReady. Two
+  // concurrent read-modify-writes of the `users` blob lose one of them.
+  //
+  // One-shot consent lane-split + provenance migration (Session 4.6, Scopes A/E1).
+  // Gated by CONSENT_LANE_SPLIT_MIGRATION_APPLIED.
+  //
+  // ONE chain, in order. Every step here does a read-modify-write of the whole
+  // `users` blob, so anything running in parallel loses a write.
   (async () => {
     try {
+      await adminInitReady;
       await migrateCareTierEnum();
     } catch (err) {
       console.error('Care-tier migration failed (non-fatal):', err.message);
+    }
+    try {
+      await migrateConsentLaneSplit();
+    } catch (err) {
+      console.error('Consent lane-split migration failed (non-fatal):', err.message);
     }
   })();
 
