@@ -372,6 +372,17 @@ test('G3: an order payload carries the test name and the diagnosis link', () => 
     { ...built.order, tests: [{ code: '85025', name: 'CBC with differential' }] }, { providerId: 5 });
   assert.equal(coded.codes[0].code, '85025');
   assert.equal(coded.codes[0].code_text, 'CBC with differential');
+
+  // The test name must go out under ALL THREE keys. The 6B controller's charge
+  // half reads `code_text` but its order half reads `name`/`title`, so sending
+  // only code_text stored a blank procedure_name. That was first written up as
+  // a server defect; it is our own two halves disagreeing on a field name.
+  // Proven live both ways 2026-09-08.
+  for (const c of payload.codes) {
+    assert.equal(c.name, c.code_text, 'the order half of the 6B controller reads `name`');
+    assert.equal(c.title, c.code_text, 'the order half of the 6B controller reads `title`');
+    assert.ok(c.name, 'a blank name stores a nameless order row');
+  }
 });
 
 test('G5: the prescriber stamp survives note truncation, the sig is what gets trimmed', () => {

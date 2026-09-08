@@ -634,7 +634,7 @@ medical record at all. The write gives the app no way to detect failure: the onl
 **App behaviour meanwhile:** the app treats the 200 as success and records `emrDocumented: true`.
 That is wrong and the app should assert read-back instead. Recorded as G2 in the audit.
 
-### Defect 4 — Phase 6B order route drops `code_text`
+### ~~Defect 4 — Phase 6B order route drops `code_text`~~ — **WITHDRAWN 2026-09-08, this was ours**
 
 **Endpoint:** `POST /apis/default/api/patient/{pUUID}/encounter/{eUUID}/order`
 
@@ -660,7 +660,18 @@ human-readable test name, and an order for anything without a code carries nothi
 (and `procedure_order_title` where appropriate) alongside `procedure_code`.
 
 **Scope note:** this sits in our own patch, `docs/openemr-patches/8.4.0-p1/`, not in upstream
-OpenEMR. It is ours to fix. The 6B acceptance run passed 17/17 because it asserted the codes and
+OpenEMR. It is ours to fix.
+
+**CORRECTION 2026-09-08 — not a defect at all, and nothing for the maintainer to do.**
+The controller is fine. `GfcChargeRestController::postOrder()` reads the test name from
+`$entry['name']` / `$entry['title']`; the app was sending it as `code_text` only, which is what
+the CHARGE half of the same controller reads. Two halves of our own code using different words for
+the same field. Verified live both ways: `code_text` alone stores `procedure_name: ""`, while
+`name` + `title` stores `"CBC with differential"` on the same installed patch.
+
+Fixed app-side (`buildOrderPayload` now sends all three keys), so it works against the patch as
+already installed with **no OpenEMR rebuild or redeploy**. Pinned by a unit test confirmed to fail
+when the keys are dropped. The earlier entry above sent this to the EMR maintainer in error. The 6B acceptance run passed 17/17 because it asserted the codes and
 the diagnosis pointers, which do store, and never asserted the name.
 
 ### Not a defect — no audit-log surface exists in the API

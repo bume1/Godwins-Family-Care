@@ -17,15 +17,15 @@ nowhere in OpenEMR. Five of them are new, found by writing to the live server an
 rather than by reading code. Three are silent: the app reports success and nothing lands.
 
 **Four were fixed at the owner's direction in the same PR as this audit** and re-proven live
-(`scripts/verify_shadow_data_fixes.js`, 17/17, stored values only). **Two are fully closed, two are
-mitigated** and still carry a server or instance dependency that is not the app's to fix. **Nine
-remain open.**
+(`scripts/verify_shadow_data_fixes.js`, stored values only). **Three are now fully closed**; G5 is
+mitigated and carries a genuine instance dependency (the empty drug option lists). **Nine remain
+open.**
 
 | # | Gap | Severity | New? | Status after this PR |
 |---|---|---|---|---|
 | G1 | The care plan, all versions, both signatures | **Critical** | | Open, blocked on G2 |
 | G2 | No document the app files is retrievable from OpenEMR | **Critical** | **New** | Open, server-side |
-| G3 | Every order files with no test name and no diagnosis | **Critical** | **New** | **Mitigated** — dx link now stores; the name is blocked on the 6B defect |
+| G3 | Every order files with no test name and no diagnosis | **Critical** | **New** | **✅ Closed** — dx link and test name both store |
 | G4 | Allergies are never written to OpenEMR at all | **Critical** | **New** | Open |
 | G5 | Prescription route, frequency and date are dropped | High | **New** | **Mitigated** — date fixed; route and frequency now reach the note, structured fields blocked on empty option lists |
 | G6 | Prescriptions carry no link to the encounter | Medium | **New** | **✅ Closed** |
@@ -210,10 +210,15 @@ Both are new. Filed in `OPENEMR_SERVER_DEFECTS_2026-08.md`.
 Proven live: the order's code row now stores `diagnoses: "ICD10:I10"` where it stored `""` before.
 Pinned by a unit test confirmed to fail when the old mapping is put back.
 
-**STILL OPEN (server side).** `procedure_name` remains empty because the 6B route accepts
-`code_text` and never stores it. The app now sends the right value; the patch must store it. Until
-then an order in OpenEMR carries a code and a diagnosis but no readable test name. Filed as Defect 4
-in `OPENEMR_SERVER_DEFECTS_2026-08.md`.
+**✅ FULLY CLOSED 2026-09-08.** The remaining blank `procedure_name` was **not** a server defect,
+and the entry that said so has been withdrawn. Our own 6B controller reads the test name from
+`name`/`title` while the app sent `code_text`, which is what the same controller's CHARGE half
+reads. The app now sends all three keys, so the name lands against the patch as already installed
+with no OpenEMR redeploy. Proven live: `procedure_name: "CBC with differential"`,
+`diagnoses: "ICD10:I10"`.
+
+The lesson is the audit's own: two halves of one system agreeing on a field name is not something a
+status code can tell you. Only the read-back could.
 
 ### G4 — Allergies are never written to OpenEMR. Critical. New.
 
@@ -493,9 +498,9 @@ Judged by what each unlocks, not by effort.
 
 1. **G2, document read-back.** Unlocks G1, G8 and G9. Highest leverage on the list. Needs the EMR
    maintainer to check the OpenEMR UI first.
-2. ~~**G3 and G7**~~ and ~~**G5 and G6**~~ — **done 2026-09-08**, in this PR. What is left of G3 and
-   G5 is not ours: the 6B route must store `code_text`, and the instance must seed `drug_route` and
-   `drug_interval`. Both are one-line asks of the EMR maintainer.
+2. ~~**G3 and G7**~~ and ~~**G5 and G6**~~ — **done 2026-09-08**, in this PR. Only G5's structured
+   route and frequency are still owed, and that is the instance seeding `drug_route` and
+   `drug_interval`, not a code change.
 3. **G4, allergies.** Small, and a patient safety issue rather than only a records issue.
 4. **G13, attribution.** Session 5. Nothing else on this list matters as much for defensibility, and
    nothing else takes as long.
@@ -514,8 +519,7 @@ re-runnable now via `scripts/verify_shadow_data_fixes.js`; pass 2 re-confirms th
 rest:
 
 - [ ] G2: a document filed by the app is retrievable via FHIR `DocumentReference`
-- [x] G3 (app): an order read back carries the diagnosis link — closed 2026-09-08
-- [ ] G3 (server): an order read back carries the test name — waits on the 6B `code_text` fix
+- [x] G3: an order read back carries the diagnosis link AND the test name — closed 2026-09-08
 - [x] G5 (date): a prescription read back carries its date — closed 2026-09-08
 - [ ] G5 (structured): route and frequency store in their own columns — waits on the option lists being seeded
 - [x] G6: a prescription read back carries its encounter — closed 2026-09-08

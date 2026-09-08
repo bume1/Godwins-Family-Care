@@ -993,9 +993,20 @@ const buildOrderPayload = (order, { providerId } = {}) => ({
   codes: ((order && order.tests) || []).map(t => {
     const isObj = t && typeof t === 'object';
     const name = isObj ? String(t.name || t.description || '') : String(t || '');
+    // NAME/TITLE vs CODE_TEXT: the 6B controller's charge half reads
+    // `code_text`, but its ORDER half reads `name` and `title`
+    // (GfcChargeRestController::postOrder → procedure_order_code). Sending only
+    // code_text stored a blank test name, which was first misread as a server
+    // defect; it is our own two halves disagreeing on a field name. All three
+    // go out so the name lands on the patch as installed, with no OpenEMR
+    // rebuild, and keeps landing if the controller is later made to prefer
+    // code_text like its charge half does. Proven live both ways 2026-09-08.
+    const label = name.slice(0, 255);
     return {
       code: (isObj && t.code) ? String(t.code) : undefined,
-      code_text: name.slice(0, 255),
+      code_text: label,
+      name: label,
+      title: label,
       diagnoses: ((order && order.diagnosisCodes) || []).map(c => ({ code_type: 'ICD10', code: c }))
     };
   })
