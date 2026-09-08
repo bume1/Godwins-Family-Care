@@ -5,6 +5,8 @@
 
 const PDFDocument = require('pdfkit');
 const { PDFDocument: PDFLib } = require('pdf-lib');
+const consentText = require('./public/consent-text');   // approved consent bodies, versioned (Session 4.6)
+const consentRender = require('./consentRender');       // client-record values a body renders (4.6)
 
 /**
  * Fetch a URL with a timeout so hung external requests (e.g. dead Google Drive
@@ -605,23 +607,14 @@ async function generateServiceReportWithAttachments(reportData, technicianName) 
 // GFC brand colors for the enrollment packet.
 const GFC_COLORS = { navy: '#033D50', gold: '#C9A44A', ink: '#1B2A33', muted: '#4F6470', line: '#E1D9C9' };
 
-// Human-readable consent labels for the packet.
-const GFC_CONSENT_LABELS = {
-  npp: 'HIPAA Notice of Privacy Practices',
-  roiFamily: 'Release of Information — Family',
-  roiProvider: 'Release of Information — Providers',
-  roiTransfer: 'Transfer-of-Care Authorization (record release)',
-  serviceAgreement: 'Service Agreement',
-  billOfRights: 'Patient Bill of Rights & Self-Determination',
-  emergencyFinancial: 'Emergency Treatment & Financial Responsibility',
-  crisisProtocol: 'Emergency & Crisis Protocol (911/988)',
-  monitoring: 'Continuous Monitoring Opt-In',
-  financialAgreement: 'Financial Agreement (Private Home Care)',
-  pcaScope: 'Personal Care Aide Scope Acknowledgment',
-  consentToTreat: 'Consent to Medical Treatment',
-  assignmentOfBenefits: 'Assignment of Benefits',
-  practiceNpp: 'Medical Practice Notice of Privacy Practices'
-};
+// Human-readable consent labels. Sourced from public/consent-text.js so the
+// packet can never disagree with the registry (this was a second hand-kept map
+// until Session 4.6). `roiTransfer` is the Transfer-of-Care ROI, which is its
+// own document rather than a registry entry.
+const GFC_CONSENT_LABELS = consentText.types().reduce((acc, t) => {
+  acc[t] = consentText.titleFor(t);
+  return acc;
+}, { roiTransfer: 'Transfer-of-Care Authorization (record release)' });
 
 /**
  * Generate the client's Enrollment Packet PDF — an in-portal copy of the Stage 2
@@ -636,7 +629,7 @@ const GFC_CONSENT_LABELS = {
  * @param {Object} client - the client user record (intake, consents, consentMeta)
  * @returns {Promise<Buffer>}
  */
-async function generateEnrollmentPacketPDF(client) {
+async function generateEnrollmentPacketPDF(client, options = {}) {
   return new Promise((resolve, reject) => {
     try {
       const doc = new PDFDocument({ size: 'LETTER', margin: 50, bufferPages: true });
@@ -658,8 +651,15 @@ async function generateEnrollmentPacketPDF(client) {
 
       doc.fontSize(9).fillColor(GFC_COLORS.muted).font('Helvetica');
       doc.text(`Generated ${new Date().toLocaleString('en-US')}`, 50, 92, { align: 'right', width: 512 });
-      doc.fontSize(8).fillColor(GFC_COLORS.muted)
-        .text('Working draft — consent language pending counsel/licensure review. Test data until HIPAA-live.', 50, 92, { width: 380 });
+      // Scope E2: the internal review banner ("working draft — pending counsel
+      // review") used to print here, on the CLIENT'S OWN COPY of what they
+      // signed. Our review workflow is an internal fact and it undermines the
+      // document the client is holding. It renders in the admin view only now.
+      // `internal: true` is passed by staff-facing callers.
+      if (options && options.internal) {
+        doc.fontSize(8).fillColor(GFC_COLORS.muted)
+          .text('INTERNAL COPY — consent bodies ported from the approved 09/2026 paper packets; counsel and licensure review still open. Test data until HIPAA-live.', 50, 92, { width: 380 });
+      }
 
       let y = 120;
       const heading = (t) => {
@@ -695,23 +695,262 @@ async function generateEnrollmentPacketPDF(client) {
 
       // Signed consents
       y += 6; heading('Signed Consents');
-      const signedKeys = Object.keys(consents).filter(k => consents[k] === 'signed' || consents[k] === 'na');
-      if (!signedKeys.length) {
+      const listedKeys = Object.keys(consents).filter(k => consents[k] && consents[k] !== 'pending');
+      if (!listedKeys.length) {
         row('—', 'No consents on file.');
       } else {
-        signedKeys.forEach(k => {
+        listedKeys.forEach(k => {
           if (y > 720) { doc.addPage(); y = 50; }
           const m = meta[k] || {};
-          const status = consents[k] === 'na' ? 'Declined' : 'Signed';
+          const status = consents[k];
           doc.fontSize(10).fillColor(GFC_COLORS.navy).font('Helvetica-Bold').text(GFC_CONSENT_LABELS[k] || k, 50, y, { width: 512 });
           y += 15;
-          const detail = consents[k] === 'na'
-            ? 'Opt-out recorded'
-            : `${status} by ${m.typedName || name}${m.signedAt ? ` on ${new Date(m.signedAt).toLocaleString('en-US')}` : ''}${m.ip ? `  ·  IP ${m.ip}` : ''}`;
+          // Every executed consent carries a signer, a timestamp and a hashed
+          // client IP. Scope E1 found one recorded as "Signed" with neither,
+          // because an inactive opt-in was being written as a signature; the
+          // status vocabulary now keeps the two apart, and this line reports
+          // whichever it actually is rather than calling both "Signed".
+          let detail;
+          if (status === 'na') detail = 'Declined / not applicable — opt-out recorded' + (m.recordedAt ? ` on ${new Date(m.recordedAt).toLocaleString('en-US')}` : '');
+          else if (status === 'optin_recorded') detail = 'Preference recorded — this option is not live, so nothing was signed' + (m.recordedAt ? ` (${new Date(m.recordedAt).toLocaleString('en-US')})` : '');
+          else if (status === 'signed_offline') detail = `Signed on paper${m.signedAt ? ` on ${new Date(m.signedAt).toLocaleDateString('en-US')}` : ''} · recorded by staff`;
+          else detail = `Signed by ${m.typedName || name}${m.signedAt ? ` on ${new Date(m.signedAt).toLocaleString('en-US')}` : ''}${m.ipHash ? `  ·  verification ${String(m.ipHash).slice(0, 12)}` : ''}`;
           doc.fontSize(8.5).fillColor(GFC_COLORS.muted).font('Helvetica').text(detail, 50, y, { width: 512 });
-          y += 20;
+          y += 12;
+          if (m.version) {
+            doc.fontSize(7.5).fillColor(GFC_COLORS.muted).font('Helvetica').text(`Document version ${m.version}`, 50, y, { width: 512 });
+            y += 11;
+          }
+          y += 8;
         });
       }
+
+      doc.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+// ============================================================
+// Executed-consent PDF (Session 4.6, Scope C)
+//
+// Before this existed, `pdf-generator.js` produced an enrollment summary, the
+// provider ROI and the care plan — and nothing for any of the fourteen
+// consents. A client could not be handed a copy of what they signed. For the
+// Notice of Privacy Practices that is a regulatory problem (45 CFR 164.520
+// entitles the individual to a paper copy on request), not a nicety.
+//
+// The body is rendered AT THE VERSION STORED ON THE CONSENT RECORD, so a copy
+// reproduces what the client actually saw. Editing the current text later never
+// rewrites an old signature's document.
+// ============================================================
+
+// Split a body line on **bold** runs so the emphasis in the approved wording
+// survives into the PDF instead of printing literal asterisks.
+function renderRichText(doc, text, x, width, opts = {}) {
+  const size = opts.size || 9.5;
+  const color = opts.color || GFC_COLORS.ink;
+  const parts = String(text == null ? '' : text).split(/(\*\*[^*]+\*\*)/g).filter(t => t !== '');
+  doc.fontSize(size).fillColor(color);
+  parts.forEach((part, i) => {
+    const bold = /^\*\*[^*]+\*\*$/.test(part);
+    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica');
+    doc.text(bold ? part.slice(2, -2) : part, i === 0 ? x : undefined, i === 0 ? doc.y : undefined, {
+      width, continued: i < parts.length - 1, lineGap: opts.lineGap == null ? 1.5 : opts.lineGap
+    });
+  });
+  doc.font('Helvetica');
+}
+
+/**
+ * Render one consent body (block list) into an open pdfkit document.
+ * Shared by the single-consent PDF and any caller that wants the body inline.
+ */
+function renderConsentBody(doc, blocks, renderData, geom) {
+  const { left, width } = geom;
+  const space = (n) => { doc.y += n; };
+  const pageBreakIfNeeded = (need) => {
+    if (doc.y + (need || 60) > doc.page.height - doc.page.margins.bottom) doc.addPage();
+  };
+
+  blocks.forEach(b => {
+    pageBreakIfNeeded(48);
+    if (b.t === 'h') {
+      space(8);
+      doc.fontSize(11).fillColor(GFC_COLORS.navy).font('Helvetica-Bold').text(b.text, left, doc.y, { width });
+      space(3);
+    } else if (b.t === 'sub') {
+      space(6);
+      doc.fontSize(9.5).fillColor(GFC_COLORS.navy).font('Helvetica-Oblique').text(b.text, left, doc.y, { width });
+      doc.font('Helvetica');
+      space(2);
+    } else if (b.t === 'p') {
+      doc.x = left;
+      renderRichText(doc, b.text, left, width);
+      space(5);
+    } else if (b.t === 'ul') {
+      (b.items || []).forEach(item => {
+        pageBreakIfNeeded(30);
+        doc.fontSize(9.5).fillColor(GFC_COLORS.gold).font('Helvetica-Bold').text('•', left, doc.y, { width: 10, continued: false });
+        const bulletY = doc.y - doc.currentLineHeight();
+        doc.y = bulletY;
+        doc.x = left + 12;
+        renderRichText(doc, item, left + 12, width - 12);
+        space(2);
+      });
+      space(4);
+    } else if (b.t === 'note') {
+      space(4);
+      doc.fontSize(8.5).fillColor(GFC_COLORS.muted).font('Helvetica-Oblique').text(b.text, left, doc.y, { width });
+      doc.font('Helvetica');
+      space(5);
+    } else if (b.t === 'choice') {
+      // The election as recorded. A blank box on a signed copy would be worse
+      // than useless — it is the one part of the page a reader checks.
+      pageBreakIfNeeded(50);
+      space(4);
+      doc.fontSize(9).fillColor(GFC_COLORS.navy).font('Helvetica-Bold').text(b.label, left, doc.y, { width });
+      space(2);
+      const chosen = (renderData && renderData.__choices && renderData.__choices[b.key]) || null;
+      (b.options || []).forEach(o => {
+        const on = chosen === o.value;
+        doc.fontSize(9).fillColor(on ? GFC_COLORS.ink : GFC_COLORS.muted).font(on ? 'Helvetica-Bold' : 'Helvetica')
+          .text((on ? '[X]  ' : '[  ]  ') + o.label, left + 10, doc.y, { width: width - 10 });
+        space(1);
+      });
+      if (!chosen) {
+        doc.fontSize(8).fillColor(GFC_COLORS.muted).font('Helvetica-Oblique').text('No election recorded.', left + 10, doc.y, { width: width - 10 });
+        doc.font('Helvetica');
+      }
+      space(6);
+    } else if (b.t === 'data') {
+      // Values RENDERED from the client record — the one-pass rule (Scope G4).
+      const resolved = (renderData && renderData[b.source]) || { rows: [] };
+      pageBreakIfNeeded(50);
+      space(4);
+      if (b.label) {
+        doc.fontSize(9).fillColor(GFC_COLORS.navy).font('Helvetica-Bold').text(b.label, left, doc.y, { width });
+        space(3);
+      }
+      if (resolved.blocked) {
+        doc.fontSize(9).fillColor('#B5462E').font('Helvetica-Oblique').text(resolved.message || 'Not on file.', left + 10, doc.y, { width: width - 10 });
+        doc.font('Helvetica');
+      } else if (!resolved.rows || !resolved.rows.length) {
+        doc.fontSize(9).fillColor(GFC_COLORS.muted).font('Helvetica-Oblique').text('Not recorded.', left + 10, doc.y, { width: width - 10 });
+        doc.font('Helvetica');
+      } else {
+        resolved.rows.forEach(r => {
+          pageBreakIfNeeded(26);
+          const rowY = doc.y;
+          doc.fontSize(8.5).fillColor(GFC_COLORS.muted).font('Helvetica-Bold').text(r.label, left + 10, rowY, { width: 150 });
+          const labelBottom = doc.y;
+          doc.fontSize(9).fillColor(GFC_COLORS.ink).font('Helvetica').text(r.value, left + 168, rowY, { width: width - 178 });
+          doc.y = Math.max(labelBottom, doc.y) + 2;
+        });
+      }
+      space(6);
+    }
+  });
+}
+
+/**
+ * Generate the executed copy of ONE consent for one client.
+ *
+ * @param {Object} client                 the client user record
+ * @param {string} consentType            a key in the consent registry
+ * @param {Object} opts
+ * @param {Object} opts.def               the registry entry (title, scope, required)
+ * @param {string} opts.status            signed | signed_offline | optin_recorded | na | pending
+ * @param {Object} opts.meta              the consent record (typedName, signedAt, ipHash, version, choices)
+ * @param {boolean} opts.internal         staff copy — prints the internal review banner
+ * @returns {Promise<Buffer>}
+ */
+async function generateConsentPDF(client, consentType, opts = {}) {
+  return new Promise((resolve, reject) => {
+    try {
+      const def = opts.def || {};
+      const meta = opts.meta || {};
+      const status = opts.status || 'pending';
+      // The version AS PRESENTED AT SIGNING. Never the current text for a
+      // consent signed against an earlier one.
+      const version = meta.version || consentText.currentVersion(consentType) || consentText.CURRENT_VERSION;
+      const blocks = consentText.bodyFor(consentType, version);
+      const title = def.title || consentText.titleFor(consentType);
+      const clientLabel = consentRender.clientName(client) || 'Client';
+
+      const renderData = consentRender.resolveForConsent(consentText, consentType, client);
+      renderData.__choices = meta.choices || {};
+
+      const doc = new PDFDocument({ size: 'LETTER', margin: 50, bufferPages: true });
+      const chunks = [];
+      doc.on('data', c => chunks.push(c));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+
+      const L = 50, W = 512;
+
+      doc.fontSize(17).fillColor(GFC_COLORS.navy).font('Helvetica-Bold').text('Godwins Family Care', L, 40);
+      doc.fontSize(11.5).fillColor(GFC_COLORS.gold).font('Helvetica-Bold').text(title, L, 63, { width: W });
+      doc.moveTo(L, 84).lineTo(L + W, 84).strokeColor(GFC_COLORS.gold).lineWidth(2).stroke();
+
+      doc.fontSize(8.5).fillColor(GFC_COLORS.muted).font('Helvetica');
+      doc.text(`${clientLabel}${(client.intake && client.intake.dob) || client.dob ? `  ·  DOB ${(client.intake && client.intake.dob) || client.dob}` : ''}`, L, 92, { width: W * 0.6 });
+      doc.text(`Document version ${version}`, L, 92, { width: W, align: 'right' });
+      if (opts.internal) {
+        doc.fontSize(7.5).fillColor(GFC_COLORS.muted).font('Helvetica-Oblique')
+          .text('INTERNAL COPY — counsel and licensure review still open. Test data until HIPAA-live.', L, 104, { width: W });
+        doc.font('Helvetica');
+      }
+
+      doc.y = opts.internal ? 122 : 114;
+      doc.x = L;
+      renderConsentBody(doc, blocks, renderData, { left: L, width: W });
+
+      // ---- signature block ----
+      if (doc.y + 130 > doc.page.height - doc.page.margins.bottom) doc.addPage();
+      doc.y += 14;
+      doc.moveTo(L, doc.y).lineTo(L + W, doc.y).strokeColor(GFC_COLORS.line).lineWidth(1).stroke();
+      doc.y += 12;
+      doc.fontSize(11).fillColor(GFC_COLORS.navy).font('Helvetica-Bold').text('Signature', L, doc.y, { width: W });
+      doc.y += 6;
+
+      const sigRow = (label, value) => {
+        const y0 = doc.y;
+        doc.fontSize(8.5).fillColor(GFC_COLORS.muted).font('Helvetica-Bold').text(label, L, y0, { width: 150 });
+        const b1 = doc.y;
+        doc.fontSize(9.5).fillColor(GFC_COLORS.ink).font('Helvetica').text(value, L + 158, y0, { width: W - 158 });
+        doc.y = Math.max(b1, doc.y) + 4;
+      };
+
+      if (status === 'signed') {
+        sigRow('Electronically signed by', meta.typedName || clientLabel);
+        sigRow('Signed', meta.signedAt ? new Date(meta.signedAt).toLocaleString('en-US') : 'Not recorded');
+        // The raw address is never retained; a truncated salted hash is enough
+        // to tie this signature to its capture without holding PII.
+        sigRow('Signer verification', meta.ipHash ? String(meta.ipHash).slice(0, 24) : 'Not recorded');
+        sigRow('Method', 'Typed name and acknowledgment, captured in the client portal');
+      } else if (status === 'signed_offline') {
+        sigRow('Signed on paper', meta.signedAt ? new Date(meta.signedAt).toLocaleDateString('en-US') : 'Date not recorded');
+        sigRow('Recorded by', meta.recordedByName || meta.recordedBy || 'Godwins Family Care staff');
+        sigRow('Method', 'Wet signature on the paper packet; the original is on file');
+      } else if (status === 'optin_recorded' || status === 'na') {
+        sigRow('Status', status === 'na' ? 'Declined / not applicable' : 'Preference recorded');
+        sigRow('Recorded', meta.recordedAt ? new Date(meta.recordedAt).toLocaleString('en-US') : 'Not recorded');
+        sigRow('Method', 'Preference only — this option is not live, so no consent was executed and no signature was taken');
+      } else {
+        sigRow('Status', 'Not signed');
+      }
+
+      Object.keys(meta.choices || {}).forEach(k => {
+        const c = consentText.choicesFor(consentType).find(x => x.key === k);
+        const opt = c && (c.options || []).find(o => o.value === meta.choices[k]);
+        if (c) sigRow(c.label, (opt && opt.label) || meta.choices[k]);
+      });
+
+      doc.y += 10;
+      doc.fontSize(7.5).fillColor(GFC_COLORS.muted).font('Helvetica')
+        .text(`${consentText.ORG.name} · ${consentText.ORG.address} · ${consentText.ORG.phone}. Generated ${new Date().toLocaleString('en-US')}. This is your copy of the document you signed; keep it with your records.`, L, doc.y, { width: W });
 
       doc.end();
     } catch (err) {
@@ -1115,6 +1354,8 @@ module.exports = {
   generateServiceReportPDF,
   generateServiceReportWithAttachments,
   generateEnrollmentPacketPDF,
+  generateConsentPDF,
+  renderConsentBody,
   generateProviderROIPDF,
   generateCarePlanPDF,
   ROI_CATEGORY_LABELS
