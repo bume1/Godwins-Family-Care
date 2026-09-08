@@ -5679,14 +5679,18 @@ async function renderConsentPdf(client, consentType, opts = {}) {
   const def = consentDefsForServiceLine(serviceLine).find(d => d.type === consentType);
   if (!def) return { error: `Consent "${consentType}" does not apply to this client's service line.`, code: 'CONSENT_NOT_IN_LANE', status: 404 };
   const status = (client.consents || {})[consentType];
-  if (!status || status === 'pending') {
+  // `blank` renders the document unsigned, to be carried to the client and
+  // signed by hand — the only path that works for a homebound client who will
+  // not be logging into a portal.
+  if (!opts.blank && (!status || status === 'pending')) {
     return { error: 'That consent has not been executed, so there is no copy to produce.', code: 'CONSENT_NOT_EXECUTED', status: 404 };
   }
   const meta = (client.consentMeta || {})[consentType] || {};
   const pdf = await pdfGenerator.generateConsentPDF(client, consentType, {
-    def, status, meta, internal: opts.audience === 'staff'
+    def, status, meta, blank: !!opts.blank, internal: !opts.blank && opts.audience === 'staff'
   });
-  return { pdf, fileName: `${def.title.replace(/[^A-Za-z0-9]+/g, '-')}-${consentFileSlug(client)}.pdf`, status, version: meta.version || def.bodyVersion };
+  const prefix = opts.blank ? 'FOR-SIGNATURE-' : '';
+  return { pdf, fileName: `${prefix}${def.title.replace(/[^A-Za-z0-9]+/g, '-')}-${consentFileSlug(client)}.pdf`, status, version: meta.version || def.bodyVersion };
 }
 
 async function buildEnrollmentPacketZip(client, opts = {}) {
@@ -8992,6 +8996,11 @@ const enrollmentDetail = (client) => {
         blockedMessage: pres.message,
         signedCopyUrl: (status === 'signed' || status === 'signed_offline')
           ? `/api/gfc/admin/enrollment/${client.id}/consent/${d.type}.pdf` : null,
+        // Print it, get it signed at the visit, scan it back. The path that
+        // completes for a homebound client who will not use a portal.
+        blankCopyUrl: d.inactive ? null : `/api/gfc/admin/enrollment/${client.id}/consent/${d.type}/blank.pdf`,
+        recordOfflineUrl: d.inactive ? null : `/api/gfc/admin/enrollment/${client.id}/consent/${d.type}/offline`,
+        scanUrl: (meta && meta.scanUrl) || null,
         meta
       };
     }),
@@ -9486,6 +9495,126 @@ app.get('/api/gfc/admin/enrollment/:clientId/consent/:type.pdf', authenticateTok
   } catch (error) {
     console.error('GFC admin consent PDF error:', error);
     res.status(500).json({ error: 'Failed to generate the consent copy' });
+  }
+});
+
+// GET /api/gfc/admin/enrollment/:clientId/consent/:type/blank.pdf
+//
+// The document, unsigned, to carry to a home visit. Most of the clients who
+// need this are homebound and will not be logging into a portal to e-sign;
+// printing it, getting a wet signature at the kitchen table and scanning it
+// back is the path that actually completes for them.
+app.get('/api/gfc/admin/enrollment/:clientId/consent/:type/blank.pdf', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+    const out = await renderConsentPdf(client, req.params.type, { audience: 'staff', blank: true });
+    if (out.error) return res.status(out.status).json({ error: out.error, code: out.code });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'consent_blank_printed', 'consent', req.params.type, { clientId: client.id });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${out.fileName}"`);
+    res.send(out.pdf);
+  } catch (error) {
+    console.error('GFC blank consent PDF error:', error);
+    res.status(500).json({ error: 'Failed to generate the consent for signature' });
+  }
+});
+
+// POST /api/gfc/admin/enrollment/:clientId/consent/:type/offline
+//
+// Record a consent signed ON PAPER by a client who already exists. Multipart:
+// `file` (the scan) + `signedAt`.
+//
+// THE GAP THIS CLOSES: `signed_offline` could only ever be written while
+// CREATING a client through offline onboarding. For a client already on file —
+// which is every legacy paper patient — there was no staff path at all, so the
+// only way to satisfy a consent was for the client to log in and e-sign it
+// themselves. That is not a plan for a homebound caseload.
+//
+// The scan is the evidence and it is REQUIRED. A paper consent recorded with no
+// document behind it is the same provenance-free record Scope E1 found, just
+// entered by a different hand.
+app.post('/api/gfc/admin/enrollment/:clientId/consent/:type/offline', authenticateToken, requireEnrollmentStaff, uploadLimiter, upload.single('file'), async (req, res) => {
+  try {
+    const type = req.params.type;
+    const users = await getUsers();
+    const idx = users.findIndex(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (idx === -1) return res.status(404).json({ error: 'Client not found' });
+    const client = users[idx];
+
+    const serviceLine = client.serviceLine || (client.intake && client.intake.serviceLine) || 'PHC';
+    const def = consentDefsForServiceLine(serviceLine).find(d => d.type === type);
+    if (!def) return res.status(400).json({ error: `Consent "${type}" does not apply to this client's service line`, code: 'CONSENT_NOT_IN_LANE' });
+    if (def.inactive) return res.status(400).json({ error: 'That option is not live, so there is nothing to sign on paper.', code: 'CONSENT_INACTIVE' });
+
+    if (!req.file || !req.file.buffer || !req.file.buffer.length) {
+      return res.status(400).json({ error: 'Attach the scan of the signed document. A paper consent is recorded from the document, never from the checkbox alone.', code: 'CONSENT_SCAN_REQUIRED' });
+    }
+    const signedAt = (req.body && req.body.signedAt) || '';
+    if (!signedAt) return res.status(400).json({ error: 'Enter the date the client signed it.', code: 'CONSENT_SIGNED_DATE_REQUIRED' });
+    const signedDate = new Date(signedAt);
+    if (isNaN(signedDate.getTime()) || signedDate.getTime() > Date.now()) {
+      return res.status(400).json({ error: 'The signing date must be a real date, and not in the future.', code: 'CONSENT_SIGNED_DATE_INVALID' });
+    }
+
+    // File the scan to HIPAA Drive. Best-effort in dev (no-op when Drive is
+    // unconfigured), but the record always says whether a copy landed.
+    let scanUrl = null;
+    try {
+      const driveOk = await googledrive.testConnection().then(r => r && (r.success || r.connected)).catch(() => false);
+      if (driveOk) {
+        const result = await googledrive.uploadOfflinePacketFile(
+          consentRender.clientName(client) || client.id,
+          `${def.title.replace(/[^A-Za-z0-9]+/g, '-')}-signed-${signedAt}-${req.file.originalname}`,
+          req.file.buffer, req.file.mimetype
+        );
+        scanUrl = (result && (result.webViewLink || result.webContentLink)) || null;
+      }
+    } catch (e) {
+      console.error('Signed-consent scan upload failed (non-fatal):', e.message);
+    }
+
+    const nowIso = new Date().toISOString();
+    client.consents = { ...(client.consents || {}), [type]: 'signed_offline' };
+    client.consentMeta = {
+      ...(client.consentMeta || {}),
+      [type]: {
+        signedAt: signedDate.toISOString(),
+        provenance: 'signed_offline',
+        recordedBy: req.user.id,
+        recordedByName: req.user.name || req.user.email,
+        recordedAt: nowIso,
+        // What the client physically signed. A blank printed today carries the
+        // current body; anything older is named explicitly by the recorder.
+        version: (req.body && req.body.version) || def.bodyVersion,
+        scanUrl,
+        scanFileName: req.file.originalname,
+        scanFiled: !!scanUrl
+      }
+    };
+    // Clears its line on both admin flags — this consent is now satisfied.
+    ['consentActionRequired', 'consentReaffirmRequired'].forEach(key => {
+      const flag = client[key];
+      if (!flag || !Array.isArray(flag.consents)) return;
+      const left = flag.consents.filter(t => t !== type);
+      client[key] = left.length
+        ? { ...flag, consents: left, titles: left.map(t => (GFC_CONSENT_DEFS.find(d => d.type === t) || {}).title || t) }
+        : null;
+    });
+    users[idx] = client;
+    await db.set('users', users);
+    invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'consent_recorded_offline', 'consent', type, {
+      clientId: client.id, signedAt: signedDate.toISOString(), scanFiled: !!scanUrl
+    });
+    res.json({
+      message: 'Paper signature recorded', type, status: 'signed_offline',
+      signedAt: signedDate.toISOString(), scanFiled: !!scanUrl, scanUrl
+    });
+  } catch (error) {
+    console.error('GFC record offline consent error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 

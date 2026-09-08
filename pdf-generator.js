@@ -880,7 +880,8 @@ async function generateConsentPDF(client, consentType, opts = {}) {
       const clientLabel = consentRender.clientName(client) || 'Client';
 
       const renderData = consentRender.resolveForConsent(consentText, consentType, client);
-      renderData.__choices = meta.choices || {};
+      // A blank copy shows every election unmarked, for the client to tick by hand.
+      renderData.__choices = opts.blank ? {} : (meta.choices || {});
 
       const doc = new PDFDocument({ size: 'LETTER', margin: 50, bufferPages: true });
       const chunks = [];
@@ -897,13 +898,17 @@ async function generateConsentPDF(client, consentType, opts = {}) {
       doc.fontSize(8.5).fillColor(GFC_COLORS.muted).font('Helvetica');
       doc.text(`${clientLabel}${(client.intake && client.intake.dob) || client.dob ? `  ·  DOB ${(client.intake && client.intake.dob) || client.dob}` : ''}`, L, 92, { width: W * 0.6 });
       doc.text(`Document version ${version}`, L, 92, { width: W, align: 'right' });
-      if (opts.internal) {
+      if (opts.blank) {
+        doc.fontSize(8).fillColor(GFC_COLORS.gold).font('Helvetica-Bold')
+          .text('FOR SIGNATURE — this copy is not yet signed', L, 104, { width: W });
+        doc.font('Helvetica');
+      } else if (opts.internal) {
         doc.fontSize(7.5).fillColor(GFC_COLORS.muted).font('Helvetica-Oblique')
           .text('INTERNAL COPY — counsel and licensure review still open. Test data until HIPAA-live.', L, 104, { width: W });
         doc.font('Helvetica');
       }
 
-      doc.y = opts.internal ? 122 : 114;
+      doc.y = (opts.internal || opts.blank) ? 122 : 114;
       doc.x = L;
       renderConsentBody(doc, blocks, renderData, { left: L, width: W });
 
@@ -923,7 +928,28 @@ async function generateConsentPDF(client, consentType, opts = {}) {
         doc.y = Math.max(b1, doc.y) + 4;
       };
 
-      if (status === 'signed') {
+      if (opts.blank) {
+        // A copy to carry to the client and sign by hand. Ruled lines, not an
+        // executed block: nothing here may read as though it has been signed.
+        // Staff scan it back in and the scan is what records the consent.
+        doc.fontSize(8.5).fillColor(GFC_COLORS.muted).font('Helvetica')
+          .text('Sign below. Return the signed copy to Godwins Family Care; it is filed against your record and you keep a copy.', L, doc.y, { width: W });
+        doc.y += 16;
+        const rule = (label, x, width) => {
+          const yLine = doc.y + 20;
+          doc.moveTo(x, yLine).lineTo(x + width, yLine).strokeColor(GFC_COLORS.line).lineWidth(1).stroke();
+          doc.fontSize(8).fillColor(GFC_COLORS.muted).font('Helvetica').text(label, x, yLine + 4, { width });
+        };
+        rule('Signature of client or authorized representative', L, 300);
+        rule('Date', L + 320, 192);
+        doc.y += 46;
+        rule('Printed name', L, 300);
+        rule('Relationship, if signing for the client', L + 320, 192);
+        doc.y += 46;
+        rule('Recorded by (Godwins Family Care staff)', L, 300);
+        rule('Date recorded', L + 320, 192);
+        doc.y += 40;
+      } else if (status === 'signed') {
         sigRow('Electronically signed by', meta.typedName || clientLabel);
         sigRow('Signed', meta.signedAt ? new Date(meta.signedAt).toLocaleString('en-US') : 'Not recorded');
         // The raw address is never retained; a truncated salted hash is enough
@@ -942,7 +968,11 @@ async function generateConsentPDF(client, consentType, opts = {}) {
         sigRow('Status', 'Not signed');
       }
 
-      Object.keys(meta.choices || {}).forEach(k => {
+      // A blank copy never restates an election as made: the client ticks it by
+      // hand on the page. Printing "I consent to telehealth visits" under a
+      // signature line nobody has signed yet is exactly the wrong thing to hand
+      // someone.
+      Object.keys(opts.blank ? {} : (meta.choices || {})).forEach(k => {
         const c = consentText.choicesFor(consentType).find(x => x.key === k);
         const opt = c && (c.options || []).find(o => o.value === meta.choices[k]);
         if (c) sigRow(c.label, (opt && opt.label) || meta.choices[k]);
@@ -950,7 +980,9 @@ async function generateConsentPDF(client, consentType, opts = {}) {
 
       doc.y += 10;
       doc.fontSize(7.5).fillColor(GFC_COLORS.muted).font('Helvetica')
-        .text(`${consentText.ORG.name} · ${consentText.ORG.address} · ${consentText.ORG.phone}. Generated ${new Date().toLocaleString('en-US')}. This is your copy of the document you signed; keep it with your records.`, L, doc.y, { width: W });
+        .text(`${consentText.ORG.name} · ${consentText.ORG.address} · ${consentText.ORG.phone}. Generated ${new Date().toLocaleString('en-US')}. ` + (opts.blank
+          ? 'Document version ' + version + '. Once signed and returned, this consent is recorded against your file and a copy is available in your portal.'
+          : 'This is your copy of the document you signed; keep it with your records.'), L, doc.y, { width: W });
 
       doc.end();
     } catch (err) {

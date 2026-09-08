@@ -4,6 +4,106 @@
 
 ---
 
+### Version 3.1.0 - September 8, 2026
+
+#### New Features
+- Add the native 8.4 write and Phase 6B transport, proven live 23/23
+
+#### Bug Fixes
+- 6B patch: fix diagnosis pointers, record acceptance results
+
+#### Documentation
+- correct the packet-filing note against spec §10.4
+- record Session 4.6 per the running instruction
+- record facility-sourced picker and the POS inheritance conflict
+- pre-production clinical audit (Session 4.5 juncture)
+- record Session 4.5 as built per the running instruction
+- correct the stale-client finding, and record a password-grant security issue
+- Phase 8.6 org-level read grant closed; credential swap still open
+- correct the Master Setup Guide §8.6 org-level read list
+- record 4.5 as blocked at preflight in the running status and plan
+- record the 4.5 preflight block and the three defects it exposed
+- Session 4.5 prompt — native 8.4 writes + 6B routes, workarounds retired
+- Release Runway rev 2 — narrowed to the app track, corrected scope-vs-ACL diagnosis
+- record Phase 6B as built and installed in the running status
+- release runway — add A4, the four ACL grants blocking the new routes
+
+#### Changes
+- Record the owner's two decisions: licence renders, legacy patients grandfathered
+- Prove it: 37 unit tests and a 48-check acceptance run over the real routes
+- Render the real consent bodies, and stop the admin form keeping its own list
+- Generate the client's copy of what they signed
+- Split the Service Agreement by lane and close the holes around it
+- One source of truth for the consent text, the registry, and the rules
+- Facility and POS derive from the patient, never a global or a clinician pick
+- Separate the service facility from the billing facility on an encounter
+- Scope C: retire the structured-note workaround blocks
+- Scope E: run Session 4.3's owed live preflight against the real EMR
+- Scope D: per-visit billing facility on form_encounter
+- Scope B: charges, voids, orders and code search through the Phase 6B routes
+- Scope A: move prescriptions and vitals onto 8.4's native writes
+- Send an expired session to the login screen instead of red "Invalid token"
+- Show a pending EMR read grant as a setup step, not a red failure
+- Surface an OAuth scope shortfall instead of a green "OpenEMR connected"
+- Treat a 404 on the appointment and medication lists as an empty list
+- Key the document upload by numeric pid (8.4 rejects the uuid)
+- Request the five Phase 6B scopes so the credential swap can take effect
+- 6B acceptance passes 17/17 -- Gap 1 closed
+- 6B patch: stop the diagnosis loop clobbering the billed CPT
+- 6B patch: register the standard-API scopes the routes need (the real 401 cause)
+- Phase 6B acceptance: routes live and correctly guarded, blocked on one ACL grant
+
+
+### Version 3.1.0 - September 8, 2026
+
+#### New Features
+- Add the native 8.4 write and Phase 6B transport, proven live 23/23
+
+#### Bug Fixes
+- 6B patch: fix diagnosis pointers, record acceptance results
+
+#### Documentation
+- correct the packet-filing note against spec §10.4
+- record Session 4.6 per the running instruction
+- record facility-sourced picker and the POS inheritance conflict
+- pre-production clinical audit (Session 4.5 juncture)
+- record Session 4.5 as built per the running instruction
+- correct the stale-client finding, and record a password-grant security issue
+- Phase 8.6 org-level read grant closed; credential swap still open
+- correct the Master Setup Guide §8.6 org-level read list
+- record 4.5 as blocked at preflight in the running status and plan
+- record the 4.5 preflight block and the three defects it exposed
+- Session 4.5 prompt — native 8.4 writes + 6B routes, workarounds retired
+- Release Runway rev 2 — narrowed to the app track, corrected scope-vs-ACL diagnosis
+- record Phase 6B as built and installed in the running status
+- release runway — add A4, the four ACL grants blocking the new routes
+
+#### Changes
+- Record the owner's two decisions: licence renders, legacy patients grandfathered
+- Prove it: 37 unit tests and a 48-check acceptance run over the real routes
+- Render the real consent bodies, and stop the admin form keeping its own list
+- Generate the client's copy of what they signed
+- Split the Service Agreement by lane and close the holes around it
+- One source of truth for the consent text, the registry, and the rules
+- Facility and POS derive from the patient, never a global or a clinician pick
+- Separate the service facility from the billing facility on an encounter
+- Scope C: retire the structured-note workaround blocks
+- Scope E: run Session 4.3's owed live preflight against the real EMR
+- Scope D: per-visit billing facility on form_encounter
+- Scope B: charges, voids, orders and code search through the Phase 6B routes
+- Scope A: move prescriptions and vitals onto 8.4's native writes
+- Send an expired session to the login screen instead of red "Invalid token"
+- Show a pending EMR read grant as a setup step, not a red failure
+- Surface an OAuth scope shortfall instead of a green "OpenEMR connected"
+- Treat a 404 on the appointment and medication lists as an empty list
+- Key the document upload by numeric pid (8.4 rejects the uuid)
+- Request the five Phase 6B scopes so the credential swap can take effect
+- 6B acceptance passes 17/17 -- Gap 1 closed
+- 6B patch: stop the diagnosis loop clobbering the billed CPT
+- 6B patch: register the standard-API scopes the routes need (the real 401 cause)
+- Phase 6B acceptance: routes live and correctly guarded, blocked on one ACL grant
+
+
 ### Version 3.7.3 - September 6, 2026
 
 #### Bug Fixes

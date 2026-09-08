@@ -119,7 +119,15 @@
       consentRegistry: (serviceLine) => authedFetch(`/api/gfc/admin/enrollment/meta/consent-registry?serviceLine=${encodeURIComponent(serviceLine || '')}`),
       setRate: (id, body) => authedFetch(`/api/gfc/admin/enrollment/${id}/rate`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
-      })
+      }),
+      // Record a consent the client signed on paper. Multipart — the scan is
+      // the evidence and the server requires it.
+      recordOfflineConsent: (url, formData) => {
+        const token = getToken();
+        return fetch(`${API_URL}${url}`, {
+          method: 'POST', headers: { 'Authorization': `Bearer ${token}` }, body: formData
+        }).then(handleResponse);
+      }
     };
 
     // ── Login screen (shared shape with admin-hub, minimal) ─────────────
@@ -289,6 +297,63 @@
         {children}
       </div>
     );
+
+    // Print it, sign it at the visit, scan it back — the path that completes for
+    // a homebound client. Until this existed, `signed_offline` could only be
+    // written while CREATING a client, so an existing client's only route to a
+    // satisfied consent was logging into the portal and e-signing it themselves.
+    const RecordPaperSignature = ({ consent, onDone }) => {
+      const [open, setOpen] = useState(false);
+      const [signedAt, setSignedAt] = useState('');
+      const [file, setFile] = useState(null);
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+
+      const submit = () => {
+        if (!file) { setErr('Attach the scan of the signed document.'); return; }
+        if (!signedAt) { setErr('Enter the date the client signed it.'); return; }
+        setBusy(true); setErr('');
+        const fd = new FormData();
+        fd.append('file', file);
+        fd.append('signedAt', signedAt);
+        api.recordOfflineConsent(consent.recordOfflineUrl, fd)
+          .then(() => { setOpen(false); setFile(null); setSignedAt(''); onDone(); })
+          .catch(e => setErr(e.message))
+          .finally(() => setBusy(false));
+      };
+
+      if (!consent.recordOfflineUrl) return null;
+      return (
+        <div className="mt-1">
+          {!open && (
+            <div className="flex items-center gap-3 text-xs">
+              <a className="text-primary-500 underline" href={consent.blankCopyUrl} target="_blank" rel="noreferrer">Print for signature</a>
+              <button className="text-primary-500 underline" onClick={() => setOpen(true)}>Record paper signature</button>
+            </div>
+          )}
+          {open && (
+            <div className="border border-gray-200 rounded-lg p-3 mt-2">
+              {err && <div className="bg-danger-50 text-danger-600 text-xs rounded px-3 py-2 mb-2">{err}</div>}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="label">Date the client signed *</label>
+                  <input className="input" type="date" value={signedAt} onChange={e => setSignedAt(e.target.value)} />
+                </div>
+                <div>
+                  <label className="label">Scan of the signed document *</label>
+                  <input type="file" accept=".pdf,.jpg,.jpeg,.png" onChange={e => setFile((e.target.files || [])[0] || null)} />
+                </div>
+              </div>
+              <p className="text-xs text-gray-400 mt-2">The scan is filed to HIPAA Drive against this client and is what evidences the consent. Your name and the time are recorded with it.</p>
+              <div className="flex gap-2 mt-3">
+                <button className="btn btn-primary text-sm" disabled={busy} onClick={submit}>{busy ? 'Recording…' : 'Record as signed'}</button>
+                <button className="btn btn-ghost text-sm" disabled={busy} onClick={() => { setOpen(false); setErr(''); }}>Cancel</button>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    };
 
     // The agreed rate (Scope B2). Both Private Home Care money documents PRINT
     // this table, so until it exists neither is presentable and the client is
@@ -522,6 +587,8 @@
                       {/* Scope E1 — a consent claiming a signature it cannot evidence. */}
                       {!c.provenanceComplete && <div className="text-xs text-danger-600">No timestamp or IP on this record — review by hand.</div>}
                       {!c.presentable && <div className="text-xs text-danger-600">{c.blockedMessage}</div>}
+                      {c.scanUrl && <div className="text-xs"><a className="text-primary-500 underline" href={c.scanUrl} target="_blank" rel="noreferrer">signed scan on file</a></div>}
+                      {!c.satisfied && <RecordPaperSignature consent={c} onDone={load} />}
                     </div>
                     <div className="flex items-center gap-1.5 shrink-0">
                       {c.provenance && <span className="badge bg-gray-100 text-gray-500">{c.provenance === 'signed_offline' ? 'Paper' : 'In-app'}</span>}

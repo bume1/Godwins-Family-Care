@@ -250,13 +250,81 @@ async function main() {
     check('copy: it is a ZIP', zip.buffer && zip.buffer.readUInt32LE(0) === 0x04034b50);
     check('copy: every download is audited', activity().some(a => a.action === 'consent_copy_downloaded'));
 
+    // ---- 8b. the legacy-patient path: print, sign on paper, scan back ----
+    // The seven legacy patients are all on the clinical line and none of them
+    // has an In-Home Primary Care Services Agreement, because it did not exist
+    // in the old packet. They are homebound; e-signing in a portal is not the
+    // path that completes for them.
+    const blank = await api('GET', '/api/gfc/admin/enrollment/c-legacy-ihpc/consent/ihpcServiceAgreement/blank.pdf', { token: adminToken });
+    eq('paper path: an UNSIGNED consent can be printed for signature', blank.status, 200);
+    check('paper path: it is a PDF', blank.buffer && blank.buffer.slice(0, 5).toString() === '%PDF-');
+    check('paper path: printing is audited', activity().some(a => a.action === 'consent_blank_printed'));
+
+    // The scan is the evidence, and it is required.
+    const noScan = await (async () => {
+      const fd = new FormData();
+      fd.append('signedAt', '2026-09-08');
+      const r = await fetch(`${BASE}/api/gfc/admin/enrollment/c-legacy-ihpc/consent/ihpcServiceAgreement/offline`, {
+        method: 'POST', headers: { Authorization: `Bearer ${adminToken}` }, body: fd
+      });
+      return { status: r.status, body: await r.json() };
+    })();
+    eq('paper path: refused without the scan', noScan.body.code, 'CONSENT_SCAN_REQUIRED');
+    eq('paper path: and nothing was written', client('c-legacy-ihpc').consents.ihpcServiceAgreement, 'pending');
+
+    const futureDate = await (async () => {
+      const fd = new FormData();
+      fd.append('signedAt', '2099-01-01');
+      fd.append('file', new Blob([Buffer.from('%PDF-1.4 scan')], { type: 'application/pdf' }), 'signed.pdf');
+      const r = await fetch(`${BASE}/api/gfc/admin/enrollment/c-legacy-ihpc/consent/ihpcServiceAgreement/offline`, {
+        method: 'POST', headers: { Authorization: `Bearer ${adminToken}` }, body: fd
+      });
+      return { status: r.status, body: await r.json() };
+    })();
+    eq('paper path: a future signing date is refused', futureDate.body.code, 'CONSENT_SIGNED_DATE_INVALID');
+
+    const recorded = await (async () => {
+      const fd = new FormData();
+      fd.append('signedAt', '2026-09-08');
+      fd.append('file', new Blob([Buffer.from('%PDF-1.4 scan')], { type: 'application/pdf' }), 'signed.pdf');
+      const r = await fetch(`${BASE}/api/gfc/admin/enrollment/c-legacy-ihpc/consent/ihpcServiceAgreement/offline`, {
+        method: 'POST', headers: { Authorization: `Bearer ${adminToken}` }, body: fd
+      });
+      return { status: r.status, body: await r.json() };
+    })();
+    eq('paper path: recorded as signed on paper', recorded.body.status, 'signed_offline');
+    const legacyAfter = client('c-legacy-ihpc');
+    eq('paper path: the consent is stored satisfied', legacyAfter.consents.ihpcServiceAgreement, 'signed_offline');
+    const pmeta = legacyAfter.consentMeta.ihpcServiceAgreement;
+    eq('paper path: the client signing date is what was entered', String(pmeta.signedAt).slice(0, 10), '2026-09-08');
+    check('paper path: who keyed it and when is recorded', !!(pmeta.recordedBy && pmeta.recordedByName && pmeta.recordedAt));
+    check('paper path: the scan filename is on the record', pmeta.scanFileName === 'signed.pdf');
+    eq('paper path: stamped with the body version', pmeta.version, '2026-09-packet-v2');
+    // Grandfathering resolves the flag as evidence lands, one consent at a time.
+    eq('paper path: the re-signature flag is cleared', legacyAfter.consentReaffirmRequired, null);
+    check('paper path: the record is audited', activity().some(a => a.action === 'consent_recorded_offline' && a.entityId === 'ihpcServiceAgreement'));
+    // And now there is a copy to hand back.
+    const legacyCopy = await api('GET', '/api/gfc/admin/enrollment/c-legacy-ihpc/consent/ihpcServiceAgreement.pdf', { token: adminToken });
+    eq('paper path: the executed copy is servable afterwards', legacyCopy.status, 200);
+
+    const inactivePaper = await (async () => {
+      const fd = new FormData();
+      fd.append('signedAt', '2026-09-08');
+      fd.append('file', new Blob([Buffer.from('%PDF-1.4 scan')], { type: 'application/pdf' }), 'signed.pdf');
+      const r = await fetch(`${BASE}/api/gfc/admin/enrollment/c-legacy-ihpc/consent/monitoring/offline`, {
+        method: 'POST', headers: { Authorization: `Bearer ${adminToken}` }, body: fd
+      });
+      return { status: r.status, body: await r.json() };
+    })();
+    eq('paper path: an inactive consent cannot be signed on paper either', inactivePaper.body.code, 'CONSENT_INACTIVE');
+
     // ---- 9. the enrollment checklist is lane-aware ----
     const detail = await api('GET', '/api/gfc/admin/enrollment/c-legacy-ihpc', { token: adminToken });
     const fields = detail.body.client.missing.fields;
     check('checklist: careTier is not counted against an IHPC-only patient',
       !fields.includes('Care tier'), JSON.stringify(fields));
-    check('checklist: the outstanding clinical agreement is named',
-      detail.body.client.missing.consents.includes('In-Home Primary Care Services Agreement'),
+    check('checklist: the clinical agreement is no longer outstanding once filed on paper',
+      !detail.body.client.missing.consents.includes('In-Home Primary Care Services Agreement'),
       JSON.stringify(detail.body.client.missing.consents));
     check('checklist: the internal review banner is on the STAFF payload',
       !!detail.body.client.reviewBanner);

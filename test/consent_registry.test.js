@@ -451,3 +451,59 @@ test('the internal review banner never renders on a client-facing packet', () =>
   const portalSrc = fs.readFileSync(path.join(root, 'public', 'portal.html'), 'utf8');
   assert.equal(/Working draft — pending counsel/.test(portalSrc), false, 'and off the client portal too');
 });
+
+// ── The paper path for a client who already exists ───────────────────
+
+test('a blank copy renders the body unsigned, with no election pre-marked', async () => {
+  // The seven legacy patients are homebound and on the clinical line. Printing
+  // the agreement, signing it at the visit and scanning it back is the path
+  // that completes for them; e-signing in a portal is not.
+  const pdf = require('../pdf-generator');
+  const client = baseClient({ serviceLine: 'IHPC' });
+  const buf = await pdf.generateConsentPDF(client, 'ihpcServiceAgreement', {
+    status: 'pending', meta: {}, blank: true
+  });
+  assert.equal(buf.slice(0, 5).toString(), '%PDF-');
+
+  // A blank copy must never carry an election as chosen — the client ticks it
+  // by hand — so a meta.choices left on the record cannot leak into the print.
+  const withChoices = await pdf.generateConsentPDF(client, 'consentToTreat', {
+    status: 'pending', meta: { choices: { telehealth: 'consent', students: 'consent' } }, blank: true
+  });
+  const unmarked = await pdf.generateConsentPDF(client, 'consentToTreat', {
+    status: 'pending', meta: {}, blank: true
+  });
+  assert.equal(withChoices.length, unmarked.length,
+    'a blank copy renders identically whether or not elections are on the record');
+});
+
+test('recording a paper signature requires the scan, a real past date, and an active consent', () => {
+  // Build-enforced: the route is what the seven legacy patients depend on, and
+  // a paper consent recorded with nothing behind it is the same
+  // provenance-free record Scope E1 found, entered by a different hand.
+  const route = serverSrc.slice(
+    serverSrc.indexOf("app.post('/api/gfc/admin/enrollment/:clientId/consent/:type/offline'"),
+    serverSrc.indexOf("// GET /api/gfc/admin/enrollment/:clientId/enrollment-packet.zip")
+  );
+  assert.ok(route.length > 500, 'found the record-paper-signature route');
+  assert.ok(route.includes('requireEnrollmentStaff'), 'staff-gated at the API layer');
+  assert.ok(route.includes('CONSENT_SCAN_REQUIRED'), 'the scan is the evidence and is required');
+  assert.ok(route.includes('CONSENT_SIGNED_DATE_REQUIRED'));
+  assert.ok(route.includes('CONSENT_SIGNED_DATE_INVALID'), 'a future signing date is refused');
+  assert.ok(route.includes('CONSENT_INACTIVE'), 'an inactive consent cannot be signed on paper either');
+  assert.ok(route.includes('CONSENT_NOT_IN_LANE'), 'lane separation holds on the paper path too');
+  assert.ok(route.includes('recordedByName') && route.includes('recordedAt'),
+    'who keyed it and when is part of the record');
+  assert.ok(route.includes("consentReaffirmRequired"),
+    'grandfathering clears its flag as evidence lands, one consent at a time');
+});
+
+test('signed_offline can now be written for a client who already exists', () => {
+  // Before this, the ONLY site writing signed_offline was the endpoint that
+  // CREATES a client through offline onboarding — useless for seven patients
+  // who are already on file.
+  const createPath = serverSrc.indexOf("app.post('/api/gfc/admin/enrollment/offline'");
+  const existingPath = serverSrc.indexOf("app.post('/api/gfc/admin/enrollment/:clientId/consent/:type/offline'");
+  assert.ok(createPath > 0 && existingPath > 0, 'both paths exist');
+  assert.notEqual(createPath, existingPath);
+});

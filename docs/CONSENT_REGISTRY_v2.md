@@ -166,6 +166,27 @@ apply whenever it is built:
   admin to confirm in the checklist that already exists. Nothing writes `signed_offline` on a
   model's say-so.
 
+### The path that actually completes for the seven
+
+All seven legacy patients are on the clinical line (owner, 2026-09-08). Every one of them signed the
+pre-4.6 combined Service Agreement and none has an In-Home Primary Care Services Agreement, because
+that document did not exist in the old packet. **Filing paper recovers their other consents and zero
+clinical agreements.** All seven still need that one signature, and they are homebound: e-signing in
+a portal is not the path that completes for them.
+
+So the consent set carries a paper path for a client who ALREADY EXISTS:
+
+- `GET  …/enrollment/:clientId/consent/:type/blank.pdf` — the document unsigned, with ruled signature
+  lines, to carry to a home visit. No election is pre-marked; the client ticks them by hand.
+- `POST …/enrollment/:clientId/consent/:type/offline` — staff record the signed copy. The **scan is
+  required** (a paper consent recorded with nothing behind it is the same provenance-free record
+  Scope E1 found, entered by a different hand), the signing date must be real and not in the future,
+  and who keyed it and when is stored alongside. Writes `signed_offline`, files the scan to HIPAA
+  Drive, and clears that consent's line on the reaffirm flag.
+
+Before this, `signed_offline` was only ever written by the endpoint that **creates** a client through
+offline onboarding — which is useless for seven patients already on file.
+
 Where the volume actually arrives is the Transfer-of-Care ROI: records coming back from prior
 providers, continuously, for every new client. That is the case that will justify a classifier —
 not the seven legacy packets.
