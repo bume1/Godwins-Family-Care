@@ -591,10 +591,17 @@ const buildFollowUpWrites = (form, actor, opts) => {
     // Encounter record attribution (spec §4): the reason line names the clinician
     reason: `${reason.slice(0, 180)} — ${stamp}`.slice(0, 250),
     class_code: 'HH',
-    // Lands in OpenEMR's billing view for back-office staff (set at create —
-    // the encounter PUT is ACL-blocked on this instance)
+    // Lands in OpenEMR's billing view for back-office staff. Still set at
+    // create, but no longer ONLY settable there: 4.5 can change it afterwards
+    // through the encounter PUT, which works on 8.4 with `user` + `group`.
     billing_note: `Rendering clinician: ${stamp}. Coding is recorded by the GFC Care Platform (see the GFC structured note on this encounter).`.slice(0, 500)
   };
+  // Scope D: per-visit billing facility on form_encounter. Omitted when the
+  // clinician did not choose one, so the transport's instance default applies.
+  // Never a charge field — see buildChargePayloads.
+  if (/^\d+$/.test(String(form.billingFacilityId || ''))) {
+    encounter.billing_facility = String(form.billingFacilityId);
+  }
   const header = buildAttributionHeader(actor, opts && opts.serviceAccount);
   // OpenEMR's SOAP validator requires ≥2 characters per section it receives.
   const soapNote = {

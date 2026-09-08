@@ -7630,6 +7630,61 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
   }
 });
 
+// ── Billing facility (Session 4.5 Scope D) ────────────────────────────────
+// Per-visit billing facility lives on form_encounter.billing_facility. It is
+// NOT a charge field: addBilling() has no such parameter and the billing table
+// no such column, so it never goes near a charge payload (build-enforced in
+// test/openemr_84_alignment.test.js).
+app.get('/api/clinical/facilities', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    if (!openemr.isConfigured()) return res.json({ facilities: [], degraded: true, reason: 'OpenEMR is not configured' });
+    const rows = await openemr.forActor(req.user).getFacilities();
+    res.json({
+      facilities: rows.map(f => ({
+        id: String(f.id), name: f.name || '(unnamed facility)',
+        billingLocation: f.billing_location === '1' || f.billing_location === 1 || f.billing_location === true,
+        city: f.city || null, state: f.state || null
+      })),
+      defaultId: String(config.OPENEMR.FACILITY_ID)
+    });
+  } catch (error) {
+    console.error('Facility list error:', error);
+    res.status(502).json({ error: `Facility read failed: ${error.message}` });
+  }
+});
+// Change the billing facility on an existing encounter. Before 4.5 the
+// facility could only be set at create time, because 7.0.4's encounter PUT
+// 500'd; on 8.4 it works once `user` and `group` are in the body (the
+// transport adds them). A closed encounter is read-only.
+app.put('/api/clinical/patients/:clientId/encounters/:euuid/billing-facility', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res);
+    if (!ctx || refuseIfClosed(ctx, res)) return;
+    const facilityId = String((req.body || {}).facilityId || '').trim();
+    if (!/^\d+$/.test(facilityId)) return res.status(400).json({ error: 'A numeric OpenEMR facility id is required', code: 'BAD_FACILITY' });
+    const facilities = await ctx.emr.getFacilities();
+    const chosen = facilities.find(f => String(f.id) === facilityId);
+    if (!chosen) return res.status(400).json({ error: 'That facility does not exist in OpenEMR', code: 'UNKNOWN_FACILITY' });
+    // Written to form_encounter, never to a charge.
+    const updated = await ctx.emr.updateEncounter(ctx.client.openEmrPatientId, ctx.encounterUuid, { billing_facility: facilityId });
+    const stored = updated && (Array.isArray(updated) ? updated[0] : updated);
+    const landed = stored && String(stored.billing_facility) === facilityId;
+    if (!landed) {
+      return res.status(502).json({
+        error: `OpenEMR accepted the update but the billing facility reads back as ${stored ? stored.billing_facility : 'unknown'}, not ${facilityId}`,
+        code: 'FACILITY_NOT_STORED'
+      });
+    }
+    await logActivity(req.user.id, req.user.name || req.user.email, 'encounter_billing_facility_set', 'client', ctx.client.id, {
+      encounterUuid: ctx.encounterUuid, facilityId, facilityName: chosen.name || null
+    });
+    res.json({ message: `Billing facility set to ${chosen.name || facilityId}`, billingFacility: { id: facilityId, name: chosen.name || null }, encounter: stored });
+  } catch (error) {
+    console.error('Billing facility error:', error);
+    res.status(502).json({ error: `Billing facility update failed: ${error.message}` });
+  }
+});
+
 // ── Charges on an encounter (Phase 6B) ────────────────────────────────────
 // Read straight from OpenEMR's billing table — the app keeps no charge ledger
 // of its own. What Billing Manager shows IS the answer.

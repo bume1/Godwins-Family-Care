@@ -175,3 +175,26 @@ test('charges post at sign-and-close with the signing clinician as rendering pro
   // A charge failure must never void a signature that already succeeded.
   assert.match(sign, /chargesPosted = false/);
 });
+
+// ---- Scope D: per-visit billing facility ----
+test('a visit may carry a billing facility, and omits the key when none is picked', () => {
+  const actor = { id: 'u', name: 'Bethel Godwins', licenseLevel: 'FNP', npi: '1902310568' };
+  const form = { reason: 'Follow-up', subjective: 'S', objective: 'O', assessment: 'A', plan: 'P' };
+  const picked = R.buildFollowUpWrites({ ...form, billingFacilityId: '4' }, actor, {});
+  assert.equal(picked.encounter.billing_facility, '4');
+  const none = R.buildFollowUpWrites(form, actor, {});
+  assert.ok(!('billing_facility' in none.encounter),
+    'with no pick the key is omitted so the instance default applies');
+  const junk = R.buildFollowUpWrites({ ...form, billingFacilityId: 'not-a-number' }, actor, {});
+  assert.ok(!('billing_facility' in junk.encounter), 'a non-numeric id is ignored, not passed through');
+});
+
+test('the billing-facility route writes form_encounter and verifies the read-back', () => {
+  const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+  const route = server.slice(server.indexOf("billing-facility'"), server.indexOf("billing-facility'") + 3000);
+  assert.match(route, /updateEncounter\(/, 'it must go through the encounter PUT');
+  assert.match(route, /billing_facility: facilityId/);
+  // OpenEMR can answer 200 without storing; the route must read back.
+  assert.match(route, /FACILITY_NOT_STORED/, 'the route must assert the stored value, not the status code');
+  assert.doesNotMatch(route, /postCharge/, 'the facility must never touch a charge');
+});

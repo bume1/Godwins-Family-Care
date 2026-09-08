@@ -551,6 +551,16 @@ const forActor = (actor) => {
       return unwrapApi(data);
     },
 
+    // Facilities that may be selected as an encounter's BILLING facility.
+    // `billing_location` marks the ones OpenEMR itself allows for billing.
+    async getFacilities() {
+      const res = await rawRequest({ method: 'GET', url: apiUrl('facility') });
+      if (res.status === 404) return [];
+      const data = expectOk(res, 'read facilities');
+      logEmrAccess(actor, 'read', 'facility', null, {});
+      return unwrapApi(data) || [];
+    },
+
     // ---- Phase 6B: fee-sheet charges ----
     // The charge write is what makes sign-and-close reach Billing Manager.
     // `diagnoses` accepts {code, code_type} objects or bare code strings; the
