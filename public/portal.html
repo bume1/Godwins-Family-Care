@@ -5239,16 +5239,18 @@
     );
 
     // What NON-POA family may see — the client (or their POA) controls it.
+    // Module scope: nested inside GfcSharingCard this was a new component on
+    // every toggle, remounting each checkbox and dropping keyboard focus.
+    const SharingRow = ({ k, label, sub, s, setS }) => (
+      <label className="shr">
+        <div><b>{label}</b>{sub && <span>{sub}</span>}</div>
+        <input type="checkbox" checked={!!s[k]} onChange={e => setS({ ...s, [k]: e.target.checked })} />
+      </label>
+    );
     const GfcSharingCard = ({ me, token, onSaved }) => {
       const [s, setS] = useState(me.sharing || {});
       const [busy, setBusy] = useState(false);
       const [msg, setMsg] = useState('');
-      const Row = ({ k, label, sub }) => (
-        <label className="shr">
-          <div><b>{label}</b>{sub && <span>{sub}</span>}</div>
-          <input type="checkbox" checked={!!s[k]} onChange={e => setS({ ...s, [k]: e.target.checked })} />
-        </label>
-      );
       const save = async () => {
         setBusy(true); setMsg('');
         const r = await api.saveGfcSharing(token, s);
@@ -5263,7 +5265,7 @@
           <div style={{ fontSize: 12.5, color: 'var(--mut)', marginTop: 2, marginBottom: 6 }}>
             Applies to family accounts linked to {me.isPoa ? me.clientName : 'you'}, not to a designated Power of Attorney. Family access also requires the signed family Release of Information.
           </div>
-          <Row k="carePlan" label="Care plan summary" sub="Goals and visit schedule" />
+          <SharingRow s={s} setS={setS} k="carePlan" label="Care plan summary" sub="Goals and visit schedule" />
           <label className="shr">
             <div><b>Visit summaries</b><span>How much of each visit to share</span></div>
             <select value={s.visitSummaries || 'summary'} onChange={e => setS({ ...s, visitSummaries: e.target.value })} style={{ width: 'auto', margin: 0 }}>
@@ -5272,11 +5274,11 @@
               <option value="full">Full summary</option>
             </select>
           </label>
-          <Row k="appointments" label="Upcoming visits" sub="Date, time, who is coming" />
-          <Row k="medications" label="Medications" sub="Current list and instructions" />
-          <Row k="allergies" label="Allergies" />
-          <Row k="problems" label="Conditions" sub="Problem list" />
-          <Row k="vitals" label="Vitals" sub="Latest readings from a visit" />
+          <SharingRow s={s} setS={setS} k="appointments" label="Upcoming visits" sub="Date, time, who is coming" />
+          <SharingRow s={s} setS={setS} k="medications" label="Medications" sub="Current list and instructions" />
+          <SharingRow s={s} setS={setS} k="allergies" label="Allergies" />
+          <SharingRow s={s} setS={setS} k="problems" label="Conditions" sub="Problem list" />
+          <SharingRow s={s} setS={setS} k="vitals" label="Vitals" sub="Latest readings from a visit" />
           <button className="btn" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save sharing settings'}</button>
           {msg && (msg === 'Saved.' ? <p className="micro"><i className="ti ti-check" />Saved</p> : <div className="err">{msg}</div>)}
         </div>
