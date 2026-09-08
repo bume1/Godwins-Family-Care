@@ -224,6 +224,9 @@
 <body class="bg-gray-50 min-h-screen">
   <div id="root"></div>
   
+  <!-- The approved consent bodies, shared with the server and the PDF generator.
+       One text, three readers — see the header of public/consent-text.js. -->
+  <script src="/consent-text.js"></script>
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
     
@@ -274,7 +277,9 @@
     const asError = (err) => ({ error: (err && err.message) || 'Network error', ...((err && err.data) || {}) });
 
     // Helper to download a PDF via Authorization header instead of token in URL
-    const openPdfSecurely = async (url, token) => {
+    // `kind` defaults to 'pdf' (open in a new tab). Pass 'zip' for an archive —
+    // a browser cannot display one, so it is saved rather than opened.
+    const openPdfSecurely = async (url, token, kind) => {
       try {
         const response = await fetch(url, {
           headers: { 'Authorization': `Bearer ${token}` }
@@ -282,12 +287,21 @@
         if (!response.ok) throw new Error(`HTTP error ${response.status}`);
         const blob = await response.blob();
         const blobUrl = URL.createObjectURL(blob);
-        window.open(blobUrl, '_blank');
+        if (kind === 'zip') {
+          const a = document.createElement('a');
+          a.href = blobUrl;
+          a.download = (url.split('/').pop() || 'download.zip').split('?')[0];
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+        } else {
+          window.open(blobUrl, '_blank');
+        }
         // Revoke after a delay to allow the browser to load it
         setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
       } catch (err) {
-        console.error('PDF download failed:', err);
-        alert('Failed to download PDF. Please try again.');
+        console.error('Download failed:', err);
+        alert('Failed to download. Please try again.');
       }
     };
 
@@ -3780,8 +3794,8 @@
     // DOB collected once (age derived), full insurance IDs, branched e-signed
     // consent set with a status stored per type.
     //
-    // NOTE: the consent language below is a WORKING DRAFT pending counsel /
-    // Georgia licensure review before HIPAA-live. TEST DATA ONLY.
+    // Consent bodies come from public/consent-text.js — the approved 09/2026
+    // paper-packet wording, versioned so a signed copy reproduces what was shown.
     // ============================================================
 
     // Small field helpers ----------------------------------------------------
@@ -3828,31 +3842,94 @@
       </div>
     );
 
-    // Consent body text (working draft — counsel/licensure review pending) ----
-    const CONSENT_BODY = {
-      npp: (<React.Fragment><h4>Notice of Privacy Practices</h4><p>This notice describes how medical information about you may be used and disclosed and how you can get access to this information. We are required by law to maintain the privacy of your protected health information and to provide you with this notice of our legal duties and privacy practices.</p><p>By acknowledging below, you confirm you have received and had the opportunity to review our HIPAA Notice of Privacy Practices.</p></React.Fragment>),
-      roiFamily: (<React.Fragment><h4>Release of Information — Family / Authorized Contacts</h4><p>I authorize Godwins Family Care LLC to share relevant health and care information with the family members and authorized contacts I designate, for the purpose of coordinating care and ensuring client safety. <b>This authorization is what unlocks the family portal</b>; it may be revoked in writing at any time.</p></React.Fragment>),
-      roiProvider: (<React.Fragment><h4>Release of Information — Providers</h4><p>I authorize Godwins Family Care LLC to exchange relevant health information with the client's medical providers, pharmacies, and other treating clinicians for the purpose of coordinating care. This authorization does not extend to any party not involved in the client's care.</p></React.Fragment>),
-      serviceAgreement: (<React.Fragment><h4>Service Agreement</h4><p><b>Godwins Family Care LLC</b> delivers care through two service lines. <b>Private Home Care</b> provides non-medical personal care and companionship, including assistance with activities of daily living and medication reminders, and, where ordered, skilled nursing delivered by licensed nurses under the oversight of our family nurse practitioner or supervising physician. <b>In-Home Primary Care</b> provides medical visits, assessment, prescribing, and chronic disease management led by a nurse practitioner.</p><p>Personal care aides provide reminders and support and observe and report changes in condition. They do not administer medication or make clinical decisions. Skilled nursing and medical services are provided only by appropriately licensed clinicians and only as set out in your care plan.</p><p>Your care plan is developed with you, your family, and your care team, and is reviewed periodically. Please report any change in condition or care needs promptly so the plan can be updated.</p></React.Fragment>),
-      billOfRights: (<React.Fragment><h4>Patient Bill of Rights & Self-Determination</h4><p>You have the right to be treated with dignity and respect; to participate in your care planning; to be informed of your care and any changes; to voice grievances without retaliation; and to make decisions about your care, including the right to accept or refuse treatment. Georgia residents may contact the state licensing and complaint line for concerns about care.</p></React.Fragment>),
-      emergencyFinancial: (<React.Fragment><h4>Emergency Treatment & Financial Responsibility</h4><p>In a medical emergency, I authorize emergency treatment and transport as needed. I understand that I (or the responsible party) am financially responsible for the cost of emergency transport and treatment that is not otherwise covered by insurance or other benefits.</p></React.Fragment>),
-      crisisProtocol: (<React.Fragment><h4>Emergency & Crisis Protocol (911 / 988)</h4><p>In the event of a medical or behavioral emergency, Godwins Family Care caregivers are authorized to call 911 or 988 (Suicide & Crisis Lifeline) as appropriate, and will immediately notify the primary family contact. Caregivers follow established safety protocols and document all incidents.</p></React.Fragment>),
-      monitoring: (<React.Fragment><h4>Continuous Monitoring Opt-In <span className="ok-badge">Coming soon</span></h4><p>Optional. In a future release, Godwins Family Care may offer consent-gated in-home remote monitoring (activity and, where shared, video) viewable by your care team and, where you allow it, your family. This option is <b>inactive</b> today — recording your preference here does not start any monitoring.</p></React.Fragment>),
-      financialAgreement: (<React.Fragment><h4>Financial Agreement (Private Home Care)</h4><p>I understand the rates, billing cycle, and cancellation policy for personal care services as provided by Godwins Family Care, and I agree to be responsible for charges as set out in my care plan and service schedule.</p></React.Fragment>),
-      pcaScope: (<React.Fragment><h4>Personal Care Aide Scope Acknowledgment</h4><p>I understand that personal care aides provide reminders, support, and observation, and that they do <b>not</b> administer medication or make clinical decisions. Skilled and medical tasks are performed only by appropriately licensed clinicians as ordered in the care plan.</p></React.Fragment>),
-      consentToTreat: (<React.Fragment><h4>Consent to Medical Treatment (In-Home Primary Care)</h4><p>I consent to medical evaluation and treatment provided by the nurse practitioner and clinical team of Godwins Family Care's In-Home Primary Care service, consistent with the plan of care.</p></React.Fragment>),
-      assignmentOfBenefits: (<React.Fragment><h4>Assignment of Benefits</h4><p>I assign to Godwins Family Care LLC the right to receive payment of Medicare and/or insurance benefits otherwise payable to me for services rendered, and authorize the release of information necessary to process these claims.</p></React.Fragment>),
-      practiceNpp: (<React.Fragment><h4>Medical Practice Notice of Privacy Practices</h4><p>I acknowledge receipt of the In-Home Primary Care practice's Notice of Privacy Practices, describing how my medical information may be used and disclosed by the medical practice.</p></React.Fragment>)
+    // ── Consent bodies ─────────────────────────────────────────────
+    // The text lives in public/consent-text.js (window.GFC_CONSENT_TEXT), ported
+    // verbatim from the two approved 09/2026 paper packets and versioned, so the
+    // portal, the server and the PDF generator all render the same words. This
+    // file used to carry fourteen one-paragraph placeholder stubs.
+    const CONSENT_TEXT = window.GFC_CONSENT_TEXT || { bodyFor: () => [], choicesFor: () => [], titleFor: (t) => t };
+
+    // **bold** runs in the approved wording survive into the page.
+    const richText = (text) => String(text == null ? '' : text)
+      .split(/(\*\*[^*]+\*\*)/g).filter(t => t !== '')
+      .map((part, i) => /^\*\*[^*]+\*\*$/.test(part)
+        ? <b key={i}>{part.slice(2, -2)}</b>
+        : <React.Fragment key={i}>{part}</React.Fragment>);
+
+    // Values RENDERED from the client's own record — never re-collected. This is
+    // the one-pass rule: the paper packet consolidated twelve repetitions of the
+    // same fields behind one face sheet, and a consent here confirms a value
+    // rather than asking for it again.
+    const ConsentData = ({ block, resolved }) => {
+      const r = resolved || { rows: [] };
+      return (
+        <div className="card" style={{ background: 'var(--gfc-cream,#FAF7F2)', marginTop: 8, marginBottom: 8 }}>
+          {block.label && <div style={{ fontWeight: 600, color: 'var(--navy)', fontSize: 12.5, marginBottom: 6 }}>{block.label}</div>}
+          {r.blocked
+            ? <div className="err" style={{ marginTop: 0 }}>{r.message}</div>
+            : (!r.rows || !r.rows.length)
+              ? <div className="sub" style={{ marginTop: 0 }}>Not recorded yet.</div>
+              : r.rows.map((row, i) => (
+                  <div key={i} style={{ display: 'flex', gap: 10, fontSize: 12.5, padding: '3px 0' }}>
+                    <span style={{ color: 'var(--mut)', minWidth: 140, fontWeight: 600 }}>{row.label}</span>
+                    <span style={{ color: 'var(--ink)' }}>{row.value}</span>
+                  </div>
+                ))}
+        </div>
+      );
     };
 
-    // One consent card with typed-name + acknowledgment e-signature.
+    const ConsentBody = ({ type, renderData, choiceValues, onChoice, readOnly }) => {
+      const blocks = CONSENT_TEXT.bodyFor(type);
+      return (
+        <React.Fragment>
+          {blocks.map((b, i) => {
+            if (b.t === 'h') return <h4 key={i} style={{ marginTop: 12 }}>{b.text}</h4>;
+            if (b.t === 'sub') return <p key={i} style={{ fontStyle: 'italic', color: 'var(--navy)', marginTop: 8, marginBottom: 2, fontWeight: 600 }}>{b.text}</p>;
+            if (b.t === 'p') return <p key={i}>{richText(b.text)}</p>;
+            if (b.t === 'note') return <p key={i} className="sub" style={{ fontStyle: 'italic' }}>{b.text}</p>;
+            if (b.t === 'ul') return <ul key={i} style={{ paddingLeft: 18, margin: '6px 0' }}>{(b.items || []).map((it, j) => <li key={j} style={{ marginBottom: 4 }}>{richText(it)}</li>)}</ul>;
+            if (b.t === 'data') return <ConsentData key={i} block={b} resolved={(renderData || {})[b.source]} />;
+            if (b.t === 'choice') {
+              // Elections are their own fields on the consent record, not
+              // something buried inside the signature where nobody could later
+              // tell what the client actually chose.
+              const value = (choiceValues || {})[b.key];
+              return (
+                <div key={i} className="fld" style={{ marginTop: 10 }}>
+                  <label>{b.label}{b.required ? ' *' : ''}</label>
+                  {(b.options || []).map(o => (
+                    <div key={o.value} className={`check ${value === o.value ? 'on' : ''}`}
+                      onClick={() => { if (!readOnly && onChoice) onChoice(b.key, o.value); }}>
+                      <span className="box">{value === o.value && <i className="ti ti-check" />}</span>{o.label}
+                    </div>
+                  ))}
+                </div>
+              );
+            }
+            return null;
+          })}
+        </React.Fragment>
+      );
+    };
+
+    // One consent card: the full body, any elections, then the typed-name
+    // e-signature. A consent the server has marked un-presentable (today: a
+    // financial agreement with no agreed rate in it) shows what is missing and
+    // offers no signature control at all.
     const ConsentCard = ({ def, status, meta, onSign, signedName }) => {
       const [name, setName] = useState((meta && meta.typedName) || signedName || '');
       const [ack, setAck] = useState(false);
       const [busy, setBusy] = useState(false);
       const [err, setErr] = useState('');
-      const signed = status === 'signed' || status === 'na';
+      const [choiceValues, setChoiceValues] = useState((meta && meta.choices) || {});
+      const signed = status === 'signed' || status === 'signed_offline' || status === 'na' || status === 'optin_recorded';
       const inactive = def.inactive;
+      const blocked = !inactive && def.presentable === false;
+
+      const statusLabel = status === 'na' ? 'Declined'
+        : status === 'optin_recorded' ? 'Preference recorded'
+        : status === 'signed_offline' ? 'Signed on paper' : 'Signed';
 
       const handleSign = async (optOut) => {
         setErr('');
@@ -3861,7 +3938,7 @@
           if (!ack) { setErr('Check the acknowledgment box to sign.'); return; }
         }
         setBusy(true);
-        const res = await onSign(def.type, { typedName: name.trim(), acknowledged: ack, optOut });
+        const res = await onSign(def.type, { typedName: name.trim(), acknowledged: ack, optOut, choices: choiceValues });
         setBusy(false);
         if (res && res.error) setErr(res.error);
       };
@@ -3871,16 +3948,29 @@
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
             <div style={{ fontWeight: 600, color: 'var(--navy)', fontSize: 14.5 }}>{def.title}</div>
             {signed
-              ? <span className="ok-badge"><i className="ti ti-circle-check" />{status === 'na' ? 'Declined' : 'Signed'}</span>
+              ? <span className="ok-badge"><i className="ti ti-circle-check" />{statusLabel}</span>
               : (def.required ? <span style={{ fontSize: 11, color: 'var(--goldd)', fontWeight: 600 }}>REQUIRED</span> : <span style={{ fontSize: 11, color: 'var(--mut)', fontWeight: 600 }}>OPTIONAL</span>)}
           </div>
-          <div className="consentbox" style={{ marginTop: 10 }}>{CONSENT_BODY[def.type]}</div>
-          {!signed && (
+          <div className="consentbox" style={{ marginTop: 10 }}>
+            <ConsentBody type={def.type} renderData={def.renderData} choiceValues={choiceValues}
+              readOnly={signed || blocked}
+              onChoice={(k, v) => setChoiceValues(c => ({ ...c, [k]: v }))} />
+          </div>
+          {signed && (
+            <div className="micro" style={{ justifyContent: 'flex-start', marginTop: 8 }}>
+              <i className="ti ti-download" />
+              <a href={`/api/gfc/consents/${def.type}.pdf`} target="_blank" rel="noreferrer">Download a copy of this document</a>
+            </div>
+          )}
+          {blocked && (
+            <div className="err">{def.blockedMessage || 'This document is not ready to sign yet. Your care team has been notified.'}</div>
+          )}
+          {!signed && !blocked && (
             <React.Fragment>
               {inactive ? (
                 <div className="intake-foot">
                   <button className="btn ghost" disabled={busy} onClick={() => handleSign(true)} style={{ marginTop: 0 }}>Not now</button>
-                  <button className="btn" disabled={busy} onClick={() => handleSign(false)} style={{ marginTop: 0 }}>Opt in</button>
+                  <button className="btn" disabled={busy} onClick={() => handleSign(false)} style={{ marginTop: 0 }}>Tell me when it launches</button>
                 </div>
               ) : (
                 <div className="sig">
@@ -4043,7 +4133,11 @@
       // requiredConsents is [] and .every() is trivially true. Require defs to be
       // present before treating consents as satisfied.
       const consentsLoaded = consentDefs.length > 0;
-      const requiredSigned = consentsLoaded && requiredConsents.every(t => consents[t] === 'signed');
+      // signed_offline (paper) satisfies a requirement identically to an in-app
+      // signature — the same rule the server's isConsentSatisfied() applies.
+      const consentSatisfied = (t) => consents[t] === 'signed' || consents[t] === 'signed_offline';
+      const requiredSigned = consentsLoaded && requiredConsents.every(consentSatisfied);
+      const signedRequiredCount = requiredConsents.filter(consentSatisfied).length;
 
       // Persist the data steps as a draft when advancing.
       const saveDraft = async () => {
@@ -4075,6 +4169,12 @@
         const res = await api.signGfcConsent(token, { type, ...payload });
         if (!res.error) {
           setConsents(c => ({ ...c, [type]: res.status }));
+          // Re-read so the card shows the stored elections and the body version
+          // the signature was actually stamped with.
+          try {
+            const r = await api.getGfcIntake(token);
+            if (!r.error) { setConsentMeta(r.consentMeta || {}); setConsentDefs(r.consentDefs || []); }
+          } catch (_) { /* the sign itself succeeded; a stale card is cosmetic */ }
         }
         return res;
       };
@@ -4437,8 +4537,7 @@
               <SelectField label="Call 911 in a medical emergency?" value={form.auth911} onChange={v => set('auth911', v)} options={IO.auth911} />
               <TextField label="Who should we notify first in a crisis?" value={form.crisisNotify} onChange={v => set('crisisNotify', v)} placeholder="Name & phone" />
               <p className="lbl">Signatures</p>
-              <p className="sub">Branched for your service line. Each is e-signed with a typed name and timestamp. <b>{requiredConsents.filter(t => consents[t] === 'signed').length}/{requiredConsents.length}</b> required signed.</p>
-              <p className="micro" style={{ justifyContent: 'flex-start', marginTop: 6 }}><i className="ti ti-info-circle" />Working draft — pending counsel/licensure review.</p>
+              <p className="sub">Branched for your service line. Each is e-signed with a typed name and timestamp, and you can download a copy of anything you sign. <b>{signedRequiredCount}/{requiredConsents.length}</b> required signed.</p>
               {activeConsentDefs.map(def => (
                 <React.Fragment key={def.type}>
                   {def.type === 'roiFamily' && (
@@ -4462,7 +4561,7 @@
                 <div className="goal"><i className={`ti ${form.dob ? 'ti-circle-check' : 'ti-circle'}`} style={{ color: form.dob ? 'var(--teal)' : 'var(--mut)' }} />Date of birth {form.dob ? `(age ${ageFromDob(form.dob)})` : '— missing'}</div>
                 <div className="goal"><i className={`ti ${form.primaryContact?.name ? 'ti-circle-check' : 'ti-circle'}`} style={{ color: form.primaryContact?.name ? 'var(--teal)' : 'var(--mut)' }} />Primary contact {form.primaryContact?.name || '— missing'}</div>
                 <div className="goal"><i className="ti ti-circle-check" style={{ color: 'var(--teal)' }} />{(form.medications || []).filter(m => m.name).length} medication(s) listed</div>
-                <div className="goal"><i className={`ti ${requiredSigned ? 'ti-circle-check' : 'ti-alert-circle'}`} style={{ color: requiredSigned ? 'var(--teal)' : 'var(--gfc-danger,#B5462E)' }} />Required consents {requiredSigned ? 'all signed' : `(${requiredConsents.filter(t => consents[t] === 'signed').length}/${requiredConsents.length})`}</div>
+                <div className="goal"><i className={`ti ${requiredSigned ? 'ti-circle-check' : 'ti-alert-circle'}`} style={{ color: requiredSigned ? 'var(--teal)' : 'var(--gfc-danger,#B5462E)' }} />Required consents {requiredSigned ? 'all signed' : `(${signedRequiredCount}/${requiredConsents.length})`}</div>
               </div>
               {!consentsLoaded && <div className="err">We couldn't load your consent forms. Please refresh the page and try again.</div>}
               {consentsLoaded && !requiredSigned && <div className="err">Please sign all required consents before submitting (go back to Consents).</div>}
@@ -5160,6 +5259,7 @@
       const signed = docs?.signedConsents || [];
       const files = docs?.documents || [];
       const packet = docs?.enrollmentPacket || null;
+      const packetZip = docs?.consentPacketZip || null;
       const openPacket = () => {
         if (!packet) return;
         // Drive-hosted copy opens directly; on-demand PDF uses the auth-header download helper.
@@ -5191,17 +5291,28 @@
           )}
           <p className="lbl" style={{ marginTop: packet ? undefined : 0 }}>Signed consents</p>
           {signed.length === 0 && <p className="sub">No consents on file yet.</p>}
+          {packetZip && (
+            <div className="doc" onClick={() => openPdfSecurely(`${API_URL}${packetZip.url}`, token, 'zip')} style={{ cursor: 'pointer' }}>
+              <i className="ti ti-file-zip" />
+              <div><b>{packetZip.title}</b><span>Every document you signed, in one download</span></div>
+              <i className="ti ti-download" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
+            </div>
+          )}
           {signed.map(s => {
-            // Each signed consent is a filed PDF (opens the signed enrollment packet,
-            // which contains the consent + its e-signature metadata).
-            const openConsentPdf = () => { if (!packet) return; packet.url && packet.url.startsWith('http') ? window.open(packet.url, '_blank') : openPdfSecurely(`${API_URL}${packet.url}`, token); };
-            const sub = s.status === 'na' ? 'Opt-out recorded'
+            // Each executed consent now has its OWN copy — the document as
+            // presented at signing, at the version it was signed against. Before
+            // Session 4.6 this row opened the whole enrollment packet, because no
+            // per-consent generator existed.
+            const openConsentPdf = () => openPdfSecurely(`${API_URL}${s.copyUrl}`, token);
+            const sub = s.status === 'na' ? 'Declined / not applicable'
+              : s.status === 'optin_recorded' ? 'Preference recorded — not a signed consent'
+              : s.status === 'signed_offline' ? `Signed on paper${s.signedAt ? ` ${prettyDate(s.signedAt)}` : ''}`
               : `Signed ${s.signedAt ? prettyDate(s.signedAt) : ''}${s.signerName ? ` · ${s.signerName}` : ''}`.trim();
             return (
-              <div className="doc" key={s.key} onClick={s.status === 'signed' ? openConsentPdf : undefined} style={{ cursor: s.status === 'signed' ? 'pointer' : 'default' }}>
+              <div className="doc" key={s.key} onClick={openConsentPdf} style={{ cursor: 'pointer' }}>
                 <i className="ti ti-file-certificate" />
                 <div><b>{s.label}</b><span>{sub}</span></div>
-                {s.status === 'signed' && <span style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 700, letterSpacing: '.06em', color: 'var(--goldd)' }}>PDF</span>}
+                <span style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 700, letterSpacing: '.06em', color: 'var(--goldd)' }}>PDF</span>
               </div>
             );
           })}
