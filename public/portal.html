@@ -209,6 +209,10 @@
     .gfc .consentbox b,.gfc .consentbox strong{color:var(--navy);}
     .gfc .consentbox h4{font-size:13.5px;color:var(--navy);margin:0 0 6px;}
     .gfc .consentbox p{margin:0 0 9px;}
+    .gfc .consentbox h5{font-size:12.5px;color:var(--navy);margin:12px 0 5px;font-weight:600;letter-spacing:.01em;}
+    .gfc .consentbox ul{margin:0 0 9px;padding-left:18px;}
+    .gfc .consentbox li{margin:0 0 5px;}
+    .gfc .consentmissing{background:#fff6f6;border:1px solid #f0c9c9;border-radius:13px;padding:14px 16px;font-size:13px;color:#8d2b2b;line-height:1.6;}
     .gfc .sig{margin-top:14px;background:#fff;border:1px solid var(--line2);border-radius:12px;padding:14px;}
     .gfc .sig .sigline{font-family:'Cormorant Garamond',serif;font-style:italic;font-size:22px;color:var(--navy);border:none;border-bottom:1.5px solid var(--line2);border-radius:0;padding:0 0 6px;box-shadow:none;width:100%;background:none;}
     .gfc .sig .sigline:focus{box-shadow:none;border-bottom-color:var(--navy);}
@@ -3829,20 +3833,355 @@
     );
 
     // Consent body text (working draft — counsel/licensure review pending) ----
+    // Consent body text — the approved wording from
+    // docs/GFC_Consent_Source_Text_v2_1.md, which is the authority where this and
+    // it differ. Ported rather than composed; do not reword legal language here.
+    //
+    // WHAT IS DELIBERATELY NOT PORTED: the packet mechanics. "Packet 1 of 2",
+    // "this packet is signed in one sitting", "Take this packet away and decide in
+    // your own time", the signing checklists and the "Already Signed — Do Not Sign
+    // Again" tables are instructions for handling a stack of paper. The app knows
+    // what is signed. The one paper instruction with force behind it — do not sign
+    // the medical packet on the same visit as home care — is not a sentence here;
+    // it is the `stage` split in GFC_CONSENT_DEFS.
+    //
+    // WHAT IS KEPT that reads like packet chrome but is not: the "you are under no
+    // obligation, your home care does not change if you decline" language in
+    // ihpcServiceAgreement. That is the anti-tying statement separating a licensed
+    // home care agency from a medical practice, and it belongs in the record.
+    //
+    // CROSS-REFERENCES ARE BY NAME, NEVER BY DOCUMENT NUMBER. The paper packet
+    // renumbered from ten documents to nine, and both the source text and the
+    // packet PDF still carry stale numbers in places (the PDF's own Section C
+    // points at "Document 5, Authorization to Obtain Medical Records", which is
+    // Document 6). A client in the app sees titled consents, not numbers.
     const CONSENT_BODY = {
-      npp: (<React.Fragment><h4>Notice of Privacy Practices</h4><p>This notice describes how medical information about you may be used and disclosed and how you can get access to this information. We are required by law to maintain the privacy of your protected health information and to provide you with this notice of our legal duties and privacy practices.</p><p>By acknowledging below, you confirm you have received and had the opportunity to review our HIPAA Notice of Privacy Practices.</p></React.Fragment>),
-      roiFamily: (<React.Fragment><h4>Release of Information — Family / Authorized Contacts</h4><p>I authorize Godwins Family Care LLC to share relevant health and care information with the family members and authorized contacts I designate, for the purpose of coordinating care and ensuring client safety. <b>This authorization is what unlocks the family portal</b>; it may be revoked in writing at any time.</p></React.Fragment>),
-      roiProvider: (<React.Fragment><h4>Release of Information — Providers</h4><p>I authorize Godwins Family Care LLC to exchange relevant health information with the client's medical providers, pharmacies, and other treating clinicians for the purpose of coordinating care. This authorization does not extend to any party not involved in the client's care.</p></React.Fragment>),
-      serviceAgreement: (<React.Fragment><h4>Service Agreement</h4><p><b>Godwins Family Care LLC</b> delivers care through two service lines. <b>Private Home Care</b> provides non-medical personal care and companionship, including assistance with activities of daily living and medication reminders, and, where ordered, skilled nursing delivered by licensed nurses under the oversight of our family nurse practitioner or supervising physician. <b>In-Home Primary Care</b> provides medical visits, assessment, prescribing, and chronic disease management led by a nurse practitioner.</p><p>Personal care aides provide reminders and support and observe and report changes in condition. They do not administer medication or make clinical decisions. Skilled nursing and medical services are provided only by appropriately licensed clinicians and only as set out in your care plan.</p><p>Your care plan is developed with you, your family, and your care team, and is reviewed periodically. Please report any change in condition or care needs promptly so the plan can be updated.</p></React.Fragment>),
-      billOfRights: (<React.Fragment><h4>Patient Bill of Rights & Self-Determination</h4><p>You have the right to be treated with dignity and respect; to participate in your care planning; to be informed of your care and any changes; to voice grievances without retaliation; and to make decisions about your care, including the right to accept or refuse treatment. Georgia residents may contact the state licensing and complaint line for concerns about care.</p></React.Fragment>),
-      emergencyFinancial: (<React.Fragment><h4>Emergency Treatment & Financial Responsibility</h4><p>In a medical emergency, I authorize emergency treatment and transport as needed. I understand that I (or the responsible party) am financially responsible for the cost of emergency transport and treatment that is not otherwise covered by insurance or other benefits.</p></React.Fragment>),
-      crisisProtocol: (<React.Fragment><h4>Emergency & Crisis Protocol (911 / 988)</h4><p>In the event of a medical or behavioral emergency, Godwins Family Care caregivers are authorized to call 911 or 988 (Suicide & Crisis Lifeline) as appropriate, and will immediately notify the primary family contact. Caregivers follow established safety protocols and document all incidents.</p></React.Fragment>),
-      monitoring: (<React.Fragment><h4>Continuous Monitoring Opt-In <span className="ok-badge">Coming soon</span></h4><p>Optional. In a future release, Godwins Family Care may offer consent-gated in-home remote monitoring (activity and, where shared, video) viewable by your care team and, where you allow it, your family. This option is <b>inactive</b> today — recording your preference here does not start any monitoring.</p></React.Fragment>),
-      financialAgreement: (<React.Fragment><h4>Financial Agreement (Private Home Care)</h4><p>I understand the rates, billing cycle, and cancellation policy for personal care services as provided by Godwins Family Care, and I agree to be responsible for charges as set out in my care plan and service schedule.</p></React.Fragment>),
-      pcaScope: (<React.Fragment><h4>Personal Care Aide Scope Acknowledgment</h4><p>I understand that personal care aides provide reminders, support, and observation, and that they do <b>not</b> administer medication or make clinical decisions. Skilled and medical tasks are performed only by appropriately licensed clinicians as ordered in the care plan.</p></React.Fragment>),
-      consentToTreat: (<React.Fragment><h4>Consent to Medical Treatment (In-Home Primary Care)</h4><p>I consent to medical evaluation and treatment provided by the nurse practitioner and clinical team of Godwins Family Care's In-Home Primary Care service, consistent with the plan of care.</p></React.Fragment>),
-      assignmentOfBenefits: (<React.Fragment><h4>Assignment of Benefits</h4><p>I assign to Godwins Family Care LLC the right to receive payment of Medicare and/or insurance benefits otherwise payable to me for services rendered, and authorize the release of information necessary to process these claims.</p></React.Fragment>),
-      practiceNpp: (<React.Fragment><h4>Medical Practice Notice of Privacy Practices</h4><p>I acknowledge receipt of the In-Home Primary Care practice's Notice of Privacy Practices, describing how my medical information may be used and disclosed by the medical practice.</p></React.Fragment>)
+      serviceAgreement: (<React.Fragment>
+        <h4>Service Agreement</h4>
+        <p>This agreement sets out the <b>non-medical</b> personal home care services Godwins Family Care LLC will provide, what they cost, and how either of us may change or end them. It is not an agreement for medical care. Please read it and ask about anything that is not clear before signing.</p>
+        <h5>1. Parties</h5>
+        <p>Godwins Family Care LLC, a Georgia limited liability company licensed by the Georgia Department of Community Health, Healthcare Facility Regulation Division, as a Private Home Care Provider under license number <b>PHCP013073</b>, in effect as of the date of this agreement. Your details are recorded once on your Client Information Face Sheet.</p>
+        <h5>2. What Your Caregiver Will Do</h5>
+        <p><b>Track A2, Comprehensive Home Care.</b> Non-medical personal care and companion services delivered in your residence. This is the full scope of what a Godwins Family Care caregiver is trained and authorized to do for you. Your plan of care records which of these you have asked for.</p>
+        <p><b>Bathing and hygiene.</b> Bathing and showering, standby assistance while you bathe so you do not fall, bed and sponge bathing, washing and styling hair, shaving, skin care and lotion, nail filing and hand and foot care, oral care and denture care, perineal care.</p>
+        <p><b>Dressing and grooming.</b> Choosing clothing, dressing and undressing, fastening buttons and zippers, putting on and removing compression stockings, applying braces, splints, or a prosthesis, and help with glasses, hearing aids, and dentures.</p>
+        <p><b>Toileting and continence.</b> Getting to and from the toilet, bedside commode, bedpan and urinal, changing incontinence briefs and pads, cleaning and changing after an accident, and emptying an external urinary drainage bag where your plan of care includes it.</p>
+        <p><b>Mobility and transfers.</b> Walking assistance, gait belt use, help with a cane, walker, or wheelchair, transfers between bed, chair, toilet, and car, turning and repositioning to protect the skin, range of motion movement as instructed, and fall prevention throughout the home.</p>
+        <p><b>Eating and nutrition.</b> Planning and preparing meals and snacks, following a special diet, cutting food, feeding assistance, encouraging fluids, watching what you are actually eating and drinking, and cleaning up afterward.</p>
+        <p><b>Medication support — reminders only.</b> Reminding you when a dose is due, reading a label aloud, opening a container, bringing you your pre-filled pill organizer and a glass of water, picking up refills, and reporting a missed or doubled dose to Godwins Family Care the same day.</p>
+        <p><b>Home and housekeeping.</b> Light housekeeping, vacuuming, sweeping and mopping, dusting, cleaning the kitchen and bathroom, washing dishes, making the bed and changing linens, laundry and folding, taking out trash, tidying, and clearing trip hazards from walkways.</p>
+        <p><b>Errands and transportation.</b> Grocery shopping with you or for you, pharmacy pickup, post office and bank trips, driving you to appointments, staying with you at the appointment, and helping you in and out of the car.</p>
+        <p><b>Companionship.</b> Conversation, reading aloud, sorting and answering mail, games, hobbies, walks, attending church or community activities with you, setting up video calls with family, and gentle cues for the day, date, and routine.</p>
+        <p><b>Household support.</b> Feeding and letting out pets, watering plants, answering the door and phone as you direct, checking that smoke and carbon monoxide detectors are working, and reporting anything in the home that needs repair.</p>
+        <p><b>Observation and reporting.</b> A written note at every visit, and same-day reporting to Godwins Family Care of any change in your condition, mood, appetite, sleep, skin, mobility, or safety, and of any fall. Changes are escalated to you, your responsible party, and, where you have authorized it, your medical providers.</p>
+        <p><b>Supervision.</b> Care is delivered under the supervision of Godwins Family Care. A supervisory visit is conducted at the outset and at regular intervals thereafter, and your plan of care is reviewed and updated as your needs change.</p>
+        <p><b>What a caregiver does not do.</b> These services are non-medical. A caregiver does not administer or fill medication, give injections, test blood sugar or give insulin, perform wound or ostomy care, insert or change a catheter, manage tube feeding, take clinical measurements as a medical assessment, provide physical or occupational therapy, or make any clinical decision or diagnosis. A caregiver also does not perform heavy cleaning such as moving furniture, washing exterior windows, or yard work, does not lift alone beyond what is safe, does not care for other members of the household, and does not manage your money, accounts, or bill paying. If you need any of these, tell us and we will help you arrange it with a licensed clinician or the right provider under a separate agreement.</p>
+        <h5>3. Rates and Minimums</h5>
+        <p><b>Caregiver travel.</b> Travel between the caregiver's home and your residence is not billed to you and is not your responsibility.</p>
+        <p><b>Rate changes.</b> Godwins Family Care will give at least thirty days written notice before any rate change. You may end this agreement without penalty if a rate change is not acceptable.</p>
+        <h5>4. Schedule</h5>
+        <p>The schedule is agreed at the start of service and may be adjusted in writing by mutual agreement. Service is scheduled in blocks of at least four hours on any day care is provided.</p>
+        <h5>5. Billing and Payment</h5>
+        <p><b>Invoicing.</b> Godwins Family Care invoices every two weeks for hours worked. Invoices are due within fourteen days of the invoice date.</p>
+        <p><b>Long term care insurance.</b> Where you hold a long term care insurance policy, Godwins Family Care will provide the documentation the carrier requires, including invoices, visit records, and caregiver time verification, and will assist with the claim. You remain responsible for payment of all invoices. Amounts the carrier declines, delays, or pays below the invoiced total remain your responsibility.</p>
+        <p><b>Late payment.</b> Accounts more than thirty days past due may result in suspension of service after written notice. Godwins Family Care will give reasonable notice and will not suspend care without first attempting to reach you and your responsible party.</p>
+        <h5>6. Scheduling, Cancellation, and Coverage</h5>
+        <p><b>Cancellation by the client.</b> Please give at least twenty four hours notice to cancel or change a scheduled visit. Visits cancelled with less than twenty four hours notice may be billed at the four hour daily minimum.</p>
+        <p><b>Coverage and continuity.</b> Godwins Family Care is responsible for staffing every scheduled visit. If the assigned caregiver is unavailable, Godwins Family Care will arrange a qualified substitute and notify you in advance whenever possible.</p>
+        <p><b>Caregiver matching.</b> You will meet a proposed caregiver before service begins and may decline the match at any time and request a different caregiver. Godwins Family Care will make reasonable efforts to maintain caregiver continuity.</p>
+        <p><b>Access to the home.</b> You agree to provide safe access to the residence and a safe working environment, including working smoke detectors, and to disclose any known hazard, firearm in the home, or animal that could affect caregiver safety.</p>
+        <h5>7. Our Caregivers</h5>
+        <p><b>Employment and screening.</b> All caregivers are W2 employees of Godwins Family Care, not independent contractors. Each completes a criminal background check including fingerprint-based screening, abuse registry screening, exclusion list screening, reference and work history verification, tuberculosis screening, drug screening, and orientation and competency validation before providing care.</p>
+        <p><b>Insurance.</b> Godwins Family Care carries general liability, professional liability, and workers compensation coverage on its caregivers. You are not the employer of the caregiver and have no payroll, tax, or workers compensation obligation.</p>
+        <p><b>Direct hiring.</b> You agree not to employ or engage, directly or through any other agency, any caregiver introduced by Godwins Family Care, during service and for twelve months after service ends. Recruiting, screening, training, and insuring caregivers is a substantial cost, and this provision protects that investment. If you wish to hire a caregiver directly, please raise it with Godwins Family Care and a release may be arranged.</p>
+        <p><b>Gifts, money, and property.</b> Caregivers may not accept gifts, loans, tips, or money from clients or families, may not be named in a client's will or given power of attorney, and may not use a client's vehicle, credit card, or accounts except as expressly authorized in writing for approved errands.</p>
+        <p><b>Concerns.</b> Any concern about a caregiver or the care provided should be reported to Godwins Family Care at 404-913-6705 or admin@godwinsfamilycarellc.com. Concerns are investigated promptly and you will receive a response.</p>
+        <h5>8. Term and Termination</h5>
+        <p>This agreement begins on the start date of service and continues until ended by either party. You may end it at any time, for any reason, with fourteen days written notice, and are responsible for services provided through the end date.</p>
+        <p>Godwins Family Care may end this agreement with fourteen days written notice, and may end service immediately, without the notice period, where a caregiver's safety is at risk, where care needs exceed what may lawfully be provided under a private home care provider license, or where the account is materially past due after written notice. Where Godwins Family Care ends service, it will provide reasonable assistance in identifying alternative care resources.</p>
+        <h5>9. General Terms</h5>
+        <p><b>Scope of the agreement, and what it is not.</b> This agreement covers non-medical private home care only. It is not an agreement for medical or clinical care and creates no provider-patient relationship.</p>
+        <p>It does not include and does not obligate you to accept in-home primary care, nursing visits, medical treatment, prescribing, care coordination or chronic care management billed to Medicare or any other health plan, or any other clinical service. Each of those is a separate service under a separate written agreement with its own consents, and you are free to choose any provider for any of them. <b>Declining medical care from Godwins Family Care has no effect on the home care provided under this agreement, and accepting home care is never a condition of receiving medical care.</b></p>
+        <p><b>Records and privacy.</b> Godwins Family Care maintains a record of services provided. Your information is handled in accordance with the Notice of Privacy Practices provided with this agreement.</p>
+        <p><b>Governing law and entire agreement.</b> This agreement is governed by the laws of the State of Georgia. It is the entire agreement between the parties on this subject and replaces any prior understanding. Changes must be in writing and signed by both parties. If any provision is held unenforceable, the rest remains in effect.</p>
+        <p><b>Non-discrimination.</b> Godwins Family Care provides services without regard to race, color, religion, sex, sexual orientation, gender identity, national origin, age, disability, or veteran status.</p>
+      </React.Fragment>),
+
+      ihpcServiceAgreement: (<React.Fragment>
+        <h4>In-Home Primary Care Services Agreement</h4>
+        <p>This agreement sets out the <b>medical</b> care Godwins Family Care will provide in your home, who provides it, and what it costs. It is separate from your home care agreement and does not replace it.</p>
+        <p><b>You are under no obligation to sign it.</b> Your home care does not change, pause, or cost more if you decline, and you are free to receive medical care from any provider you choose.</p>
+        <h5>1. Who Provides Your Care</h5>
+        <p>Your care is delivered by a board-certified family nurse practitioner licensed in Georgia, working with a collaborating physician as Georgia law requires. You will be told the name and credentials of anyone who comes to your home before the visit.</p>
+        <h5>2. What In-Home Primary Care Includes</h5>
+        <p><b>Medical visits in your home.</b> History and physical examination, vital signs, review of your conditions, and a written assessment and plan at every visit. Visits are scheduled; you are not seen on demand.</p>
+        <p><b>Diagnosis and treatment.</b> Evaluating new symptoms, diagnosing acute and chronic conditions, ordering and interpreting laboratory work and imaging, and treating what can safely be treated at home.</p>
+        <p><b>Prescribing and medication management.</b> Writing and renewing prescriptions, reviewing everything you take for interactions and duplication, simplifying a complicated regimen, and coordinating with your pharmacy.</p>
+        <p><b>Chronic disease management.</b> Regular management of conditions such as high blood pressure, diabetes, heart failure, COPD, arthritis, and cognitive change, with a schedule of follow-up matched to how you are doing.</p>
+        <p><b>Preventive care.</b> Vaccinations, screening recommendations appropriate to your age and health, fall risk assessment, and advance care planning conversations if you want them.</p>
+        <p><b>Referrals and coordination.</b> Referrals to specialists, coordination with your cardiologist or other physicians, hospital follow-up after a discharge, and orders for home health, therapy, or equipment where you qualify.</p>
+        <p><b>What this service is not.</b> It is not emergency care and not a substitute for 911. It is not twenty four hour coverage; the practice keeps business hours with an on-call line after hours. It is not Medicare home health, which is a separate benefit requiring a separate order and agency. It is not personal care, bathing, housekeeping, or companionship, which is your home care service under a separate agreement. And it does not require you to keep home care with Godwins Family Care, or to use us at all.</p>
+        <h5>3. Visits, Scheduling, and After Hours</h5>
+        <p><b>Visit frequency.</b> Set with you based on your conditions and reviewed at each visit. Most patients are seen monthly to quarterly, with additional visits when something changes.</p>
+        <p><b>Between visits.</b> Call 404-913-6705 during business hours for questions, medication problems, or a new symptom. After hours the line reaches on-call. If the problem is urgent and you cannot reach us, call 911 or go to the emergency department. Do not wait for a return call.</p>
+        <p><b>Missed visits.</b> Please give twenty four hours notice if you need to reschedule. Repeated missed visits without notice may end this agreement.</p>
+        <h5>4. Cost</h5>
+        <p>Visits are billed to Medicare or your health plan. What you owe depends on your coverage: a deductible that has not been met, a coinsurance or copay amount, and anything your plan does not cover. Your Assignment of Benefits and Financial Responsibility sets this out in full.</p>
+        <p>You will be told in advance, in writing, before any service that your plan is not expected to cover. You are never billed for a service you were not warned about.</p>
+        <h5>5. Records and Communication</h5>
+        <p>Your medical record is kept in the practice's electronic health record. You may request a copy at any time. How the practice uses and protects your information is described in the Medical Practice Notice of Privacy Practices, which is separate from the home care agency notice you already received.</p>
+        <h5>6. Ending This Agreement</h5>
+        <p>You may end medical care at any time, for any reason, with no effect on your home care. Godwins Family Care may end this agreement with thirty days written notice, during which urgent needs are still covered, and will provide your records and reasonable help finding another provider.</p>
+        <p><b>Ending this agreement does not end your home care. Ending your home care does not end this agreement. They are independent.</b></p>
+      </React.Fragment>),
+
+      financialAgreement: (<React.Fragment>
+        <h4>Financial Agreement</h4>
+        <p>Rates, billing, and cancellation, stated plainly and on one page. This repeats the money terms from your Service Agreement so nothing about cost is buried.</p>
+        <h5>1. What You Pay</h5>
+        <p>Your agreed rate and any minimums are recorded on your rate schedule and on your Client Information Face Sheet.</p>
+        <h5>2. How You Are Billed</h5>
+        <p><b>Invoices.</b> Every two weeks, for hours actually worked. Payment is due within fourteen days of the invoice date.</p>
+        <p><b>Cancellations.</b> Please give at least twenty four hours notice to cancel or change a visit. A visit cancelled with less notice may be billed at the four hour daily minimum.</p>
+        <p><b>Rate changes.</b> At least thirty days written notice before any change. If a new rate does not work for you, you may end service without penalty.</p>
+        <p><b>Past due accounts.</b> An account more than thirty days past due may result in suspension of service after written notice. We will try to reach you and your responsible party before any service is suspended.</p>
+        <h5>3. Long Term Care Insurance</h5>
+        <p>If you hold a long term care policy, we will give your carrier everything it asks for: invoices, visit records, caregiver time verification, and your plan of care. We will help you with the claim.</p>
+        <p>What we cannot do is guarantee what the carrier pays. You remain responsible for every invoice. Anything the carrier declines, delays, or pays below the invoiced amount is still yours to pay.</p>
+      </React.Fragment>),
+
+      billOfRights: (<React.Fragment>
+        <h4>Patient Bill of Rights &amp; Self-Determination</h4>
+        <p>These rights belong to you. Nothing in any agreement with Godwins Family Care limits them.</p>
+        <h5>Your Rights</h5>
+        <ul>
+          <li>To be treated with dignity, respect, and consideration, and to have your property treated with respect.</li>
+          <li>To receive care without discrimination of any kind.</li>
+          <li>To be free from verbal, physical, sexual, mental, and financial abuse, neglect, and exploitation.</li>
+          <li>To be told, before care begins, what services will be provided, who will provide them, and what they will cost.</li>
+          <li>To take part in planning your care, and to be told in advance of any change to your plan of care.</li>
+          <li>To refuse any service, treatment, or caregiver, and to be told what refusing may mean for your care.</li>
+          <li>To request a different caregiver at any time, for any reason.</li>
+          <li>To privacy in your home and confidentiality of your personal and health information.</li>
+          <li>To voice a complaint or concern without fear of retaliation, discrimination, or loss of service.</li>
+          <li>To be told the name and qualifications of anyone providing your care.</li>
+          <li>To have your property and residence respected, and to be free from solicitation for money, gifts, or loans.</li>
+          <li>To reasonable notice before services are reduced or ended.</li>
+          <li>To choose any provider you wish. Accepting home care from Godwins Family Care does not require you to use Godwins Family Care for any medical service.</li>
+          <li>To formulate an advance directive and to have it honored to the extent permitted by law.</li>
+          <li>To review your service record on request.</li>
+        </ul>
+        <h5>Your Responsibilities</h5>
+        <ul>
+          <li>To give accurate information about your health, medications, and living situation, and to tell us when things change.</li>
+          <li>To take part in your plan of care and tell us when something is not working.</li>
+          <li>To provide a safe home environment for your caregiver, including disclosing hazards, firearms, and animals.</li>
+          <li>To treat your caregiver with respect and to refrain from asking a caregiver to perform tasks outside the plan of care.</li>
+          <li>To give at least twenty four hours notice when cancelling or changing a scheduled visit.</li>
+          <li>To meet the financial obligations set out in your service agreement.</li>
+          <li>To tell us promptly about any concern with your care.</li>
+        </ul>
+        <h5>How to Raise a Concern</h5>
+        <p>Call Godwins Family Care at <b>404-913-6705</b> or email <b>admin@godwinsfamilycarellc.com</b>. We will acknowledge your concern, look into it, and respond. Raising a concern will never affect the care you receive.</p>
+        <p>You also have the right to contact the State of Georgia directly at any time, without first contacting us.</p>
+      </React.Fragment>),
+
+      npp: (<React.Fragment>
+        <h4>HIPAA Notice of Privacy Practices</h4>
+        <p>This notice describes how information about you may be used and disclosed, and how you can get access to this information. Please review it carefully.</p>
+        <p><b>This notice covers the home care agency.</b> It describes the privacy practices of the Godwins Family Care <b>private home care</b> agency. If you also receive In-Home Primary Care from our nurse practitioner, that medical practice issues its own separate Notice of Privacy Practices, which you would receive and acknowledge separately.</p>
+        <h5>Our Commitment</h5>
+        <p>Godwins Family Care LLC is required by law to protect the privacy of your health information, to give you this notice describing our legal duties and privacy practices, and to follow the terms of the notice currently in effect.</p>
+        <h5>How We May Use and Disclose Your Information</h5>
+        <p><b>For your treatment and care.</b> We share your information with the caregivers and staff involved in your care, and with your physicians, nurse practitioners, pharmacies, and other providers, so that your care is coordinated and safe.</p>
+        <p><b>For payment.</b> We use your information to bill and receive payment, including submitting documentation to your long term care insurance carrier or another payer you have authorized.</p>
+        <p><b>For our operations.</b> We use your information to supervise caregivers, review quality of care, train staff, and run the business of the agency.</p>
+        <p><b>To family and others involved in your care.</b> Unless you object, we may share information relevant to your care with a family member, representative, or other person you have identified.</p>
+        <p><b>As required by law.</b> We may disclose information when required by law, including to health oversight agencies, for public health activities, in response to a court order, and to report suspected abuse, neglect, or exploitation. Georgia law requires our staff to report suspected abuse, neglect, or exploitation of an adult.</p>
+        <p><b>To prevent a serious threat.</b> We may disclose information when necessary to prevent a serious threat to your health or safety or to the health or safety of another person.</p>
+        <p><b>Uses that require your written authorization.</b> Most uses and disclosures not described above require your written authorization, including any marketing use and any sale of your information. We do not sell your information. You may revoke an authorization at any time in writing, and the revocation applies going forward.</p>
+        <h5>Your Rights Regarding Your Information</h5>
+        <ul>
+          <li>To inspect and receive a copy of your record, in paper or electronic form.</li>
+          <li>To ask us to correct information you believe is incorrect or incomplete.</li>
+          <li>To receive a list of certain disclosures we have made of your information.</li>
+          <li>To request that we limit how we use or share your information. We will consider every request and will accommodate reasonable ones.</li>
+          <li>To ask that we contact you in a specific way or at a specific address.</li>
+          <li>To receive a paper copy of this notice at any time, even if you agreed to receive it electronically.</li>
+          <li>To be notified if a breach occurs that compromises the privacy or security of your information.</li>
+          <li>To file a complaint if you believe your privacy rights have been violated. You will not be penalized or retaliated against for filing a complaint.</li>
+        </ul>
+        <h5>Complaints and Contact</h5>
+        <p>To exercise any right above, or to file a complaint, contact the Privacy Officer at Godwins Family Care LLC, 4300 Paces Ferry Rd SE, Suite 500, Atlanta, GA 30339, telephone 404-913-6705, email admin@godwinsfamilycarellc.com.</p>
+        <p>You may also file a complaint with the Secretary of the U.S. Department of Health and Human Services, Office for Civil Rights. We will not retaliate against you for filing a complaint.</p>
+        <p>We reserve the right to change this notice and to make the revised notice effective for information we already hold as well as information we receive in the future. A current copy will be provided on request.</p>
+      </React.Fragment>),
+
+      pcaScope: (<React.Fragment>
+        <h4>Personal Care Aide Scope Acknowledgment</h4>
+        <p><b>Consent to personal home care.</b> I consent to receive <b>non-medical</b> personal home care services from Godwins Family Care LLC as described in the Home Care Service Agreement and my plan of care. I understand this is not consent to medical treatment and that no medical service is being provided under this packet. I understand these services are non-medical, that caregivers do not administer medication or perform skilled nursing tasks, and that I may refuse any service at any time.</p>
+        <p><b>Personal care aide scope.</b> I understand that a personal care aide provides reminders and support and observes and reports changes in my condition. An aide does not administer medication, perform any skilled nursing task, or make clinical decisions. If I need a service outside this scope, Godwins Family Care will tell me and will help me arrange it with a licensed clinician.</p>
+        <p><b>Long term care insurance claim assistance.</b> I authorize Godwins Family Care to communicate with my long term care insurance carrier and to provide the invoices, visit records, caregiver time verification, and plan of care documentation the carrier requires to process my claim. I understand that I remain responsible for payment of all invoices regardless of what the carrier pays.</p>
+        <p><b>Advance directive.</b> You have the right to make decisions about your medical care, including the right to accept or refuse treatment and to create an advance directive. Godwins Family Care does not require you to have one. Your advance directive status is recorded once on your Client Information Face Sheet.</p>
+        <p><b>Emergency information.</b> Emergency contacts, primary care provider, preferred hospital, pharmacy, and allergies are recorded on your Client Information Face Sheet, which forms part of this consent. Please confirm they are correct rather than writing them again.</p>
+      </React.Fragment>),
+
+      roiFamily: (<React.Fragment>
+        <h4>Release of Information — Family</h4>
+        <p>I authorize Godwins Family Care to exchange information about my care with the people and organizations I identify, for the purpose of coordinating my care. This authorization remains in effect until I revoke it in writing.</p>
+        <p><b>This authorization is what unlocks the family portal.</b> The people you name here are the people who may see your care information.</p>
+        <p>To authorize release of medical records from a specific provider or facility, complete the Release of Information — Providers instead. That is a different form and covers a different thing.</p>
+      </React.Fragment>),
+
+      roiProvider: (<React.Fragment>
+        <h4>Release of Information — Providers</h4>
+        <p>This form authorizes one provider or facility to release your records to Godwins Family Care. Complete one for each provider. This authorization is voluntary and is not a condition of receiving care.</p>
+        <p><b>Why the home care agency asks for records.</b> Records requested under this form are used to build a safe <b>home care</b> plan: to know your diagnoses, allergies, mobility limits, fall risk, and diet so your caregiver supports you correctly. This is not a request for medical treatment and does not enroll you in medical care.</p>
+        <h5>Release To</h5>
+        <p><b>Godwins Family Care LLC</b>, 4300 Paces Ferry Rd SE, Suite 500, Atlanta, GA 30339. Telephone 404-913-6705, fax 678-692-7445.</p>
+        <h5>Information to Be Released</h5>
+        <p>You choose which records to release: history and physical, progress and office notes, discharge summary, medication list, laboratory results, imaging reports, immunization record, consultation reports, therapy notes, functional or ADL assessment, advance directive or POLST, face sheet and demographics, or the entire record.</p>
+        <h5>Specially Protected Records</h5>
+        <p>Some records carry extra federal protection and are released only if you say so specifically: mental or behavioral health, substance use treatment under 42 CFR Part 2, HIV or AIDS related, genetic testing, and sexually transmitted infection records.</p>
+        <h5>Purpose, Expiration, and Your Rights</h5>
+        <p><b>Purpose.</b> To coordinate my home care and plan of care with Godwins Family Care, and to support a long term care insurance claim where applicable.</p>
+        <p><b>Expiration.</b> This authorization expires one year from the date signed, unless I write a different date or event.</p>
+        <p><b>Right to revoke.</b> I may revoke this authorization at any time by writing to Godwins Family Care at the address above. Revoking it does not undo anything already done in reliance on it.</p>
+        <p><b>Redisclosure.</b> Information released under this authorization may no longer be protected by federal privacy law once received, and could be redisclosed by the recipient. Records protected under 42 CFR Part 2 may not be redisclosed without my further written permission.</p>
+        <p><b>Voluntary.</b> Signing this form is voluntary. Godwins Family Care will not condition my treatment, payment, enrollment, or eligibility for benefits on whether I sign it.</p>
+        <p><b>Copy.</b> I am entitled to a copy of this signed authorization.</p>
+      </React.Fragment>),
+
+      emergencyFinancial: (<React.Fragment>
+        <h4>Emergency Response and Financial Responsibility</h4>
+        <p>This document covers two things: what your caregiver does in an emergency, and who pays for what.</p>
+        <p><b>This is not a consent to medical treatment.</b> Signing this does not authorize Godwins Family Care to examine, diagnose, or treat you. Our caregivers are <b>not</b> clinicians and provide no medical care. This form authorizes one thing only: that in an emergency your caregiver may call 911 and give responders the information they need to help you.</p>
+        <h5>1. Authorization to Summon Emergency Help</h5>
+        <p>If I appear to be experiencing a medical emergency and I am unable to make or communicate a decision, I authorize Godwins Family Care staff to call 911, to allow emergency responders access to my home, and to give responders the health information they need to treat me safely, including my medications, allergies, conditions, and any advance directive on file.</p>
+        <p>I understand that Godwins Family Care caregivers are not emergency responders and do not provide medical treatment of any kind. Their role is to summon help, keep me safe until help arrives, and notify my emergency contacts. Any treatment I receive is provided by the emergency responders, the hospital, or my own medical providers, and my consent to that treatment is given to them, not to Godwins Family Care.</p>
+        <h5>2. Advance Directive and Resuscitation Status</h5>
+        <p>Godwins Family Care caregivers follow emergency responder direction. A do-not-resuscitate order is honored by emergency responders only where a valid Georgia order is present in the home and produced at the time. Your resuscitation status and any directive on file are recorded on your Client Information Face Sheet.</p>
+        <h5>3. Financial Responsibility for Emergency Care</h5>
+        <p>I understand that ambulance transport, emergency department care, hospital care, and any treatment provided by emergency responders or a hospital are billed by those providers, not by Godwins Family Care, and that I or my insurance am responsible for those charges. Godwins Family Care does not bill for, collect for, or control the cost of emergency services.</p>
+        <h5>4. Financial Responsibility for Home Care Services</h5>
+        <p>I am responsible for payment of all Godwins Family Care invoices at the rates set out in the Home Care Service Agreement. Where a long term care insurance carrier or other payer is involved, I understand that Godwins Family Care will assist with the claim but that the carrier's decision is between the carrier and me. Amounts a carrier declines, delays, or pays below the invoiced total remain my responsibility.</p>
+        <h5>5. Responsible Party Guarantee, If Applicable</h5>
+        <p>Where someone other than the client accepts financial responsibility, that responsible party agrees to pay Godwins Family Care invoices that the client does not pay when due.</p>
+      </React.Fragment>),
+
+      crisisProtocol: (<React.Fragment>
+        <h4>Emergency &amp; Crisis Protocol (911/988)</h4>
+        <p>What your caregiver will do, and who they will call. Keep this where you can find it.</p>
+        <h5>1. Medical Emergency</h5>
+        <p>Signs include chest pain, difficulty breathing, sudden weakness or trouble speaking, a fall with injury or a head strike, uncontrolled bleeding, seizure, or loss of consciousness.</p>
+        <ul>
+          <li>The caregiver calls <b>911</b> first and stays with the client.</li>
+          <li>The caregiver calls Godwins Family Care at <b>404-913-6705</b>.</li>
+          <li>Godwins Family Care notifies the emergency contact and, where authorized, the client's medical providers.</li>
+          <li>The caregiver does not move a client after a fall with suspected injury and does not administer medication.</li>
+        </ul>
+        <h5>2. Urgent but Not an Emergency</h5>
+        <p>A change in condition that needs attention today but is not life threatening: new confusion, fever, refusal to eat or drink, a fall without apparent injury, a medication the client cannot locate, or a sudden change in mood or behavior.</p>
+        <ul>
+          <li>The caregiver calls Godwins Family Care at <b>404-913-6705</b> the same day.</li>
+          <li>Godwins Family Care contacts the client's primary care provider and the emergency contact.</li>
+        </ul>
+        <h5>3. Mental Health or Emotional Crisis</h5>
+        <p>Thoughts of self-harm, severe distress, or a crisis affecting the client's safety. The caregiver stays with the client where it is safe to do so, calls 988 or 911 as the situation requires, and notifies Godwins Family Care.</p>
+        <h5>4. Fire, Weather, Power Loss, or Evacuation</h5>
+        <ul>
+          <li>The caregiver gets the client to safety first, then calls 911 if needed.</li>
+          <li>The caregiver calls Godwins Family Care so the family can be notified and coverage arranged.</li>
+          <li>The client is asked to keep a two-day supply of essential medication and a working flashlight in a known place.</li>
+        </ul>
+        <h5>5. No Answer at the Door</h5>
+        <p>If the caregiver arrives and cannot reach the client, the caregiver calls the client, then the emergency contact, then Godwins Family Care. Where there is reason to believe the client is inside and in distress, the caregiver calls 911 for a welfare check.</p>
+        <h5>6. Who We Call, and In What Order</h5>
+        <p>The call order, preferred hospital, primary care provider, entry instructions for responders, and pets in the home are recorded on your Client Information Face Sheet. Your caregiver carries that order. Please confirm it is correct today, and tell us whenever it changes.</p>
+      </React.Fragment>),
+
+      consentToTreat: (<React.Fragment>
+        <h4>Consent to Medical Treatment</h4>
+        <p>You may refuse any part of this and still receive care.</p>
+        <h5>A. Consent to Evaluation and Treatment</h5>
+        <p>I consent to medical evaluation and treatment by the Godwins Family Care nurse practitioner and collaborating physician, in my home. I understand this includes taking my history, physical examination, vital signs, and developing and carrying out a plan of care with me.</p>
+        <h5>B. Procedures and Testing</h5>
+        <p>I consent to routine services performed in the home as part of my care: drawing blood and collecting specimens, point of care testing such as blood sugar or urine testing, electrocardiogram, wound assessment and dressing, vaccinations and injections that are ordered for me, and ordering laboratory work and imaging performed elsewhere.</p>
+        <p>Anything beyond routine will be explained to me first, including why it is recommended, what it involves, the risks, and what happens if I decline.</p>
+        <h5>C. Prescribing and Medication Management</h5>
+        <p>I consent to the nurse practitioner prescribing, adjusting, and discontinuing my medications, reviewing everything I take, and communicating with my pharmacy and my other prescribers. I agree to tell the practice about every medication and supplement I take, including anything prescribed by another provider.</p>
+        <h5>D. Telehealth — optional</h5>
+        <p>I consent to some visits being conducted by video or telephone where clinically appropriate. I understand a telehealth visit has limits, that the provider may require an in-person visit instead, and that I may ask for an in-person visit at any time. You may decline telehealth and receive in-person visits only.</p>
+        <h5>E. Students and Trainees — optional</h5>
+        <p>Optional and entirely voluntary. Declining has no effect on your care. Godwins Family Care hosts nursing and medical students under direct supervision. I consent to a supervised student being present and taking part in my care.</p>
+        <h5>F. What I Understand</h5>
+        <ul>
+          <li>No one has guaranteed me any particular result. Medicine involves judgment, and outcomes cannot be promised.</li>
+          <li>I may refuse any examination, test, treatment, or medication, at any time, and I will be told what refusing may mean for my health.</li>
+          <li>I may ask for a second opinion or transfer my care to another provider at any time.</li>
+          <li>This consent stays in effect for my ongoing care until I revoke it in writing.</li>
+          <li>This is not emergency care. In an emergency I call 911.</li>
+        </ul>
+      </React.Fragment>),
+
+      assignmentOfBenefits: (<React.Fragment>
+        <h4>Assignment of Benefits and Financial Responsibility</h4>
+        <p>This lets Godwins Family Care bill Medicare or your health plan directly, and sets out what you owe.</p>
+        <h5>1. Assignment of Benefits</h5>
+        <p>I assign to Godwins Family Care LLC all benefits payable to me under Medicare and any other health plan for services the practice provides, and I direct that payment be made directly to Godwins Family Care rather than to me. This assignment applies to current and future claims until I revoke it in writing.</p>
+        <h5>2. Authorization to Release Information for Claims</h5>
+        <p>I authorize Godwins Family Care to release the medical information necessary to determine benefits and process claims to the Centers for Medicare and Medicaid Services, my health plan, and their agents. This includes the diagnosis and service records a claim requires.</p>
+        <h5>3. What You Owe</h5>
+        <p>Assigning your benefits does not mean nothing is owed. You remain responsible for:</p>
+        <ul>
+          <li>Any deductible you have not yet met for the year.</li>
+          <li>Your coinsurance or copay, which for Medicare Part B is typically twenty percent of the approved amount unless a supplemental plan covers it.</li>
+          <li>Services your plan does not cover, but only where you were told in advance and in writing and chose to proceed.</li>
+          <li>Charges your plan denies because coverage lapsed, information was not provided, or the plan's requirements were not met.</li>
+        </ul>
+        <p>Statements are sent after your plan processes the claim. Balances are due within thirty days of the statement date. If a balance is difficult, call the office before it goes past due and a payment arrangement can usually be made.</p>
+        <h5>4. Advance Notice of Non-Covered Services</h5>
+        <p>If the practice believes Medicare will not pay for something recommended, you will be given a written notice before it is provided, explaining what it is, why it may not be covered, and the estimated cost. You then decide whether to proceed. You are never held responsible for a non-covered service you were not warned about in advance.</p>
+        <h5>5. Responsible Party, If Applicable</h5>
+        <p>Where someone other than the patient accepts financial responsibility for balances after insurance, that person is recorded on your Client Information Face Sheet.</p>
+      </React.Fragment>),
+
+      practiceNpp: (<React.Fragment>
+        <h4>Medical Practice Notice of Privacy Practices</h4>
+        <p>This notice describes how medical information about you may be used and disclosed by the In-Home Primary Care practice, and how you can get access to it. Please review it carefully.</p>
+        <p><b>Why you are receiving a second privacy notice.</b> You already received a Notice of Privacy Practices from the Godwins Family Care <b>home care agency</b>. This one is different. It covers the <b>medical practice</b>, which keeps a clinical record, bills health plans, and exchanges information with other treating providers. Both notices apply to you, each to its own service.</p>
+        <h5>Our Commitment</h5>
+        <p>The practice is required by law to protect the privacy of your protected health information, to give you this notice of our legal duties and privacy practices, and to follow the terms of the notice currently in effect.</p>
+        <h5>How We Use and Disclose Your Information</h5>
+        <p><b>Treatment.</b> We share your information with the clinicians involved in your care and with specialists, hospitals, laboratories, imaging centers, pharmacies, home health agencies, and other providers treating you, so that your care is coordinated and safe. This includes sharing with the Godwins Family Care home care agency where it affects your safety at home.</p>
+        <p><b>Payment.</b> We use and disclose your information to bill and receive payment from Medicare, your health plan, and any secondary payer, including submitting diagnoses, service records, and documentation supporting a claim.</p>
+        <p><b>Health care operations.</b> We use your information to review quality of care, evaluate clinician performance, train students and staff, conduct audits, and run the practice.</p>
+        <p><b>Appointment reminders and health information.</b> We may contact you to remind you of a visit, to follow up on a result, or to tell you about a treatment alternative or health service that may benefit you.</p>
+        <p><b>Family and others involved in your care.</b> Unless you object, we may share information relevant to your care with a family member, representative, or other person you have identified, and with anyone you have authorized on a release of information.</p>
+        <p><b>As required by law.</b> We disclose information when the law requires it, including to public health authorities, health oversight agencies, in response to a court order or subpoena, for reporting suspected abuse, neglect, or exploitation of an adult as Georgia law requires, and to report certain communicable diseases and vital events.</p>
+        <p><b>To prevent a serious threat.</b> We may disclose information when necessary to prevent a serious threat to your health or safety or that of another person.</p>
+        <p><b>Uses requiring your written authorization.</b> Psychotherapy notes, any marketing use, and any sale of your information require your written authorization. We do not sell your information. You may revoke an authorization in writing at any time, effective going forward.</p>
+        <h5>Your Rights</h5>
+        <ul>
+          <li>To inspect and receive a copy of your medical record, in paper or electronic form.</li>
+          <li>To ask us to amend information you believe is incorrect or incomplete.</li>
+          <li>To receive an accounting of certain disclosures we have made.</li>
+          <li>To request a restriction on how we use or share your information. We must honor a request to withhold information from your health plan about a service you paid for in full yourself.</li>
+          <li>To ask that we contact you in a specific way or at a specific address.</li>
+          <li>To receive a paper copy of this notice at any time.</li>
+          <li>To be notified if a breach compromises the privacy or security of your information.</li>
+          <li>To file a complaint without any penalty or retaliation.</li>
+        </ul>
+        <h5>Complaints and Contact</h5>
+        <p>To exercise any right above, or to file a complaint, contact the Privacy Officer at Godwins Family Care LLC, 4300 Paces Ferry Rd SE, Suite 500, Atlanta, GA 30339, telephone 404-913-6705, email admin@godwinsfamilycarellc.com.</p>
+        <p>You may also file a complaint with the Secretary of the U.S. Department of Health and Human Services, Office for Civil Rights. We will not retaliate against you for filing a complaint.</p>
+        <p>We reserve the right to change this notice and to make the revised notice effective for information we already hold as well as information we receive in the future. A current copy will be provided on request.</p>
+      </React.Fragment>),
+
+      monitoring: (<React.Fragment>
+        <h4>Continuous Monitoring Opt-In <span className="ok-badge">Coming soon</span></h4>
+        <p>Optional. In a future release, Godwins Family Care may offer consent-gated in-home remote monitoring (activity and, where shared, video) viewable by your care team and, where you allow it, your family. This option is <b>inactive</b> today, and cannot be signed. Nothing is being recorded and nothing starts by leaving this here.</p>
+      </React.Fragment>)
     };
 
     // One consent card with typed-name + acknowledgment e-signature.
@@ -3853,6 +4192,13 @@
       const [err, setErr] = useState('');
       const signed = status === 'signed' || status === 'na';
       const inactive = def.inactive;
+      // A consent with no ported body must never be signable. Without this the
+      // card renders an empty box and a working signature block under it, so a
+      // client can sign a blank agreement and the enrollment gate counts it
+      // satisfied — the failure is invisible on both sides. test/consent_registry
+      // also fails the build if any registry entry has no body, so this branch
+      // should be unreachable in a shipped build; it is the belt to that brace.
+      const hasBody = !!CONSENT_BODY[def.type];
 
       const handleSign = async (optOut) => {
         setErr('');
@@ -3874,14 +4220,23 @@
               ? <span className="ok-badge"><i className="ti ti-circle-check" />{status === 'na' ? 'Declined' : 'Signed'}</span>
               : (def.required ? <span style={{ fontSize: 11, color: 'var(--goldd)', fontWeight: 600 }}>REQUIRED</span> : <span style={{ fontSize: 11, color: 'var(--mut)', fontWeight: 600 }}>OPTIONAL</span>)}
           </div>
-          <div className="consentbox" style={{ marginTop: 10 }}>{CONSENT_BODY[def.type]}</div>
-          {!signed && (
+          {hasBody
+            ? <div className="consentbox" style={{ marginTop: 10 }}>{CONSENT_BODY[def.type]}</div>
+            : (<div className="consentmissing" style={{ marginTop: 10 }}>
+                <b>This document is not available to sign yet.</b> Its text has not been loaded into the
+                app, so there is nothing here for you to read. Signing has been disabled. Please contact
+                Godwins Family Care at 404-913-6705 and we will sort it out.
+              </div>)}
+          {!signed && hasBody && (
             <React.Fragment>
               {inactive ? (
-                <div className="intake-foot">
-                  <button className="btn ghost" disabled={busy} onClick={() => handleSign(true)} style={{ marginTop: 0 }}>Not now</button>
-                  <button className="btn" disabled={busy} onClick={() => handleSign(false)} style={{ marginTop: 0 }}>Opt in</button>
-                </div>
+                // Inactive means the service does not exist yet, so there is
+                // nothing to consent TO. Recording a preference against it would
+                // put a signed consent in the record for a service that has never
+                // run. Shown, explained, not signable.
+                <p className="micro" style={{ justifyContent: 'flex-start', marginTop: 8 }}>
+                  <i className="ti ti-lock" />Not available to sign while this service is inactive.
+                </p>
               ) : (
                 <div className="sig">
                   <input className="sigline" placeholder="Type your full name to sign" value={name} onChange={e => setName(e.target.value)} />
@@ -4438,7 +4793,6 @@
               <TextField label="Who should we notify first in a crisis?" value={form.crisisNotify} onChange={v => set('crisisNotify', v)} placeholder="Name & phone" />
               <p className="lbl">Signatures</p>
               <p className="sub">Branched for your service line. Each is e-signed with a typed name and timestamp. <b>{requiredConsents.filter(t => consents[t] === 'signed').length}/{requiredConsents.length}</b> required signed.</p>
-              <p className="micro" style={{ justifyContent: 'flex-start', marginTop: 6 }}><i className="ti ti-info-circle" />Working draft — pending counsel/licensure review.</p>
               {activeConsentDefs.map(def => (
                 <React.Fragment key={def.type}>
                   {def.type === 'roiFamily' && (

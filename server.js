@@ -2194,24 +2194,40 @@ const requireClientForIntake = (req, res, next) => {
 // A requirement is SATISFIED by either `signed` (e-signed in-app) or
 // `signed_offline` (signed on paper, offline onboarding — Scope B1). See
 // isConsentSatisfied() — the enrollment gate treats the two identically.
+// The consent registry. Fourteen records, per docs/GFC_Consent_Source_Text_v2_1.md,
+// which is the approved body text and the authority where this list and it differ.
+//
+// `stage` decides WHEN a record may be signed, and it exists because of a rule the
+// paper packets carry and the app previously did not: the In-Home Primary Care
+// packet is headed "Packet 2 of 2 — do not sign this on the same visit as home
+// care". A BOTH client used to be shown all thirteen applicable records on one
+// screen, in one sitting, which is exactly what that instruction forbids. The
+// sentence is paper workflow and is not ported; the protection behind it is, as a
+// staged flow. A single-line client has one stage and sees no difference.
+//
+//   homecare — the Private Home Care packet, and the shared records it captures
+//   medical  — the In-Home Primary Care packet, signed as a separate, later step
 const GFC_CONSENT_DEFS = [
-  // Both service lines
-  { type: 'npp',                scope: 'both', required: true,  title: 'HIPAA Notice of Privacy Practices' },
-  { type: 'roiFamily',          scope: 'both', required: true,  title: 'Release of Information — Family' },
-  { type: 'roiProvider',        scope: 'both', required: true,  title: 'Release of Information — Providers' },
-  { type: 'serviceAgreement',   scope: 'both', required: true,  title: 'Service Agreement' },
-  { type: 'billOfRights',       scope: 'both', required: true,  title: 'Patient Bill of Rights & Self-Determination' },
-  { type: 'emergencyFinancial', scope: 'both', required: true,  title: 'Emergency Treatment & Financial Responsibility' },
-  { type: 'crisisProtocol',     scope: 'both', required: true,  title: 'Emergency & Crisis Protocol (911/988)' },
-  { type: 'monitoring',         scope: 'both', required: false, title: 'Continuous Monitoring Opt-In', inactive: true },
-  // Private Home Care only
-  { type: 'financialAgreement', scope: 'phc',  required: true,  title: 'Financial Agreement (rates, billing, cancellation)' },
-  { type: 'pcaScope',           scope: 'phc',  required: true,  title: 'Personal Care Aide Scope Acknowledgment' },
-  // In-Home Primary Care only
-  { type: 'consentToTreat',     scope: 'ihpc', required: true,  title: 'Consent to Medical Treatment' },
-  { type: 'assignmentOfBenefits', scope: 'ihpc', required: true, title: 'Assignment of Medicare / Insurance Benefits' },
-  { type: 'practiceNpp',        scope: 'ihpc', required: true,  title: 'Medical Practice Notice of Privacy Practices' }
+  // Shared — signed once, on the home care packet, and carried forward.
+  { type: 'npp',                  scope: 'both', stage: 'homecare', required: true,  title: 'HIPAA Notice of Privacy Practices' },
+  { type: 'roiFamily',            scope: 'both', stage: 'homecare', required: true,  title: 'Release of Information — Family' },
+  { type: 'roiProvider',          scope: 'both', stage: 'homecare', required: true,  title: 'Release of Information — Providers' },
+  { type: 'billOfRights',         scope: 'both', stage: 'homecare', required: true,  title: 'Patient Bill of Rights & Self-Determination' },
+  { type: 'emergencyFinancial',   scope: 'both', stage: 'homecare', required: true,  title: 'Emergency Response and Financial Responsibility' },
+  { type: 'crisisProtocol',       scope: 'both', stage: 'homecare', required: true,  title: 'Emergency & Crisis Protocol (911/988)' },
+  { type: 'monitoring',           scope: 'both', stage: 'homecare', required: false, title: 'Continuous Monitoring Opt-In', inactive: true },
+  // Private Home Care only. serviceAgreement was scoped `both`; its body is now
+  // home care only and an IHPC patient signs ihpcServiceAgreement instead.
+  { type: 'serviceAgreement',     scope: 'phc',  stage: 'homecare', required: true,  title: 'Service Agreement' },
+  { type: 'financialAgreement',   scope: 'phc',  stage: 'homecare', required: true,  title: 'Financial Agreement (rates, billing, cancellation)' },
+  { type: 'pcaScope',             scope: 'phc',  stage: 'homecare', required: true,  title: 'Personal Care Aide Scope Acknowledgment' },
+  // In-Home Primary Care only — the four documents of the medical packet.
+  { type: 'ihpcServiceAgreement', scope: 'ihpc', stage: 'medical',  required: true,  title: 'In-Home Primary Care Services Agreement' },
+  { type: 'consentToTreat',       scope: 'ihpc', stage: 'medical',  required: true,  title: 'Consent to Medical Treatment' },
+  { type: 'assignmentOfBenefits', scope: 'ihpc', stage: 'medical',  required: true,  title: 'Assignment of Benefits and Financial Responsibility' },
+  { type: 'practiceNpp',          scope: 'ihpc', stage: 'medical',  required: true,  title: 'Medical Practice Notice of Privacy Practices' }
 ];
+const CONSENT_STAGES = ['homecare', 'medical'];
 
 // Which consent definitions apply to a given service line.
 const consentDefsForServiceLine = (serviceLine) => {
