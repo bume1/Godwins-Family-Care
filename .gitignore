@@ -18,3 +18,6 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+# One-shot migration output (Session 4.6) — a run record, not source
+scripts/consent_lane_split_migration.log
