@@ -24,6 +24,7 @@ const consentText = require('./public/consent-text'); // approved consent bodies
 const consentRegistry = require('./consentRegistry'); // THE consent registry: lanes, statuses, provenance (4.6)
 const consentRender = require('./consentRender');     // consent data blocks resolved from the client record (4.6)
 const zipWriter = require('./zipWriter');             // dependency-free ZIP for the signed-consent packet (4.6)
+const caregiverRoutes = require('./routes/caregiver'); // caregiver app: visit log + escalation (Session 6)
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -2220,6 +2221,10 @@ const {
 // about it (the refusal to write a record without provenance) lives in the module.
 const buildConsentSignature = (args) =>
   buildConsentSignatureRaw({ ...args, hashIp: (raw) => roiRepo.hashIp(raw, JWT_SECRET) });
+
+// Caregiver app (Session 6) — page shell + /api/caregiver/*. Every route inside
+// enforces its own access (caregiver / review staff / admin) at the API layer.
+app.use(caregiverRoutes({ db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4 }));
 
 // Uploads require authentication - registered here after authenticateToken is defined
 app.use('/uploads', authenticateToken, express.static('uploads', staticOptions));
