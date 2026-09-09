@@ -6400,6 +6400,11 @@ app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireCli
     // is logged and surfaced as such. The visit still stands either way.
     const warnings = [];
     if (placeWarning) warnings.push(placeWarning);
+    // The encounter's provider is the acting clinician (see createEncounter).
+    // When they have no OpenEMR provider id the transport falls back to the
+    // configured default so the visit still documents — say so rather than let
+    // the chart quietly name someone else.
+    if (!req.user.openEmrProviderId) warnings.push(NO_PROVIDER_ID_WARNING);
     let vitalsRowWritten = false;
     try {
       await emr.addVitals(puuid, encounterUuid, built.vitals);
@@ -6634,6 +6639,49 @@ app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requir
   } catch (error) {
     console.error('Clinical care-plan save error:', error);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/clinical/patients/:clientId/allergies — allergy → OpenEMR
+// AllergyIntolerance (the `lists` allergy rows).
+//
+// This route did not exist. `openemr.addAllergy()` was written in 4.1, unit
+// tested, and never called from anywhere, so an allergy a clinician learned
+// about reached the chart only if someone retyped it in OpenEMR by hand. An
+// allergy list is patient safety before it is paperwork, and prescribing
+// against a chart that has none is the risk that matters. Shadow-data audit
+// G4, 2026-09-08.
+app.post('/api/clinical/patients/:clientId/allergies', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    if (!client.openEmrPatientId) return res.status(409).json({ error: 'Link this client to an OpenEMR patient first', code: 'EMR_NOT_LINKED' });
+    const { allergen, reaction, severity, onsetDate, comments } = req.body || {};
+    const title = String(allergen || '').trim();
+    if (!title) return res.status(400).json({ error: 'The allergen is required', code: 'ALLERGY_NO_ALLERGEN' });
+    // OpenEMR's severity_ale and reaction option lists are EMPTY on this
+    // instance (0 rows, verified live), so neither can resolve to an id and
+    // both would be dropped. They are clinical content, so they ride in the
+    // comment, which does persist — the same belt-and-braces the prescription
+    // sig uses while drug_route is unseeded.
+    const detail = [
+      reaction ? `Reaction: ${String(reaction).trim()}` : null,
+      severity ? `Severity: ${String(severity).trim()}` : null,
+      String(comments || '').trim() || null,
+      `Recorded by ${clinicalRepo.actorStamp(actorFromReq(req))} via the GFC Care Platform`
+    ].filter(Boolean).join('. ');
+    const allergy = {
+      title: title.slice(0, 250),
+      begdate: /^\d{4}-\d{2}-\d{2}$/.test(String(onsetDate || '')) ? onsetDate : new Date().toISOString().slice(0, 10),
+      comments: detail.slice(0, 2000)
+    };
+    const row = await openemr.forActor(req.user).addAllergy(client.openEmrPatientId, allergy);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'allergy_added', 'client', client.id,
+      { allergen: allergy.title, reaction: reaction || null, severity: severity || null, emrAllergyId: (row && (row.uuid || row.id)) || null });
+    res.json({ message: 'Allergy added to the chart', allergy: row });
+  } catch (error) {
+    console.error('Clinical allergy add error:', error);
+    res.status(502).json({ error: `Allergy could not be added: ${error.message}` });
   }
 });
 
@@ -7162,6 +7210,10 @@ const getClinicalSettings = async () => {
   return { serviceCodeFavorites: favorites, favoritesSource: Array.isArray(stored.serviceCodeFavorites) ? 'record' : 'default' };
 };
 
+// Shown when the acting clinician has no OpenEMR provider id, so the encounter
+// falls back to the configured default provider instead of naming them.
+const NO_PROVIDER_ID_WARNING = 'This visit was filed under the practice default provider, not you: your user record has no OpenEMR provider id. An admin sets it in Admin hub \u2192 Users. Charges will not post at sign-and-close until it is set.';
+
 // The acting clinician as stamped onto records (name, credential, NPI).
 const actorFromReq = (req) => ({
   id: req.user.id, name: req.user.name, licenseLevel: req.user.licenseLevel || null,
@@ -7496,6 +7548,11 @@ app.post('/api/clinical/patients/:clientId/encounters', authenticateToken, requi
     if (!encounterUuid) return res.status(502).json({ error: 'OpenEMR did not return an encounter id' });
     const warnings = [];
     if (placeWarning) warnings.push(placeWarning);
+    // The encounter's provider is the acting clinician (see createEncounter).
+    // When they have no OpenEMR provider id the transport falls back to the
+    // configured default so the visit still documents — say so rather than let
+    // the chart quietly name someone else.
+    if (!req.user.openEmrProviderId) warnings.push(NO_PROVIDER_ID_WARNING);
     let vitalsRowWritten = false;
     if (built.vitals) {
       // See the H&P route: on 8.4 the structured row is primary and a failure
@@ -7703,7 +7760,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/prescriptions', aut
     // medication-list row with the sig packed into its title) is retired —
     // this is a real prescription row and surfaces in FHIR MedicationRequest.
     try {
-      const row = await ctx.emr.createPrescription(ctx.client.openEmrPatientId, clinicalRepo.prescriptionToEmrRow(rx));
+      const row = await ctx.emr.createPrescription(ctx.client.openEmrPatientId, clinicalRepo.prescriptionToEmrRow(rx), ctx.encounterUuid);
       rx.emrPrescriptionId = row && (row.uuid || row.id) != null ? String(row.uuid || row.id) : null;
     } catch (e) { warnings.push(`OpenEMR prescription write failed (${e.message.slice(0, 120)}) — the prescription is recorded in the app and in the structured note`); rx.emrWriteError = e.message.slice(0, 300); }
     const rows = await loadRows('prescriptions');
