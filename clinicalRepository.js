@@ -375,8 +375,15 @@ const buildAppointmentFields = (input, defaults) => {
       pc_apptstatus: APPT_STATUS.none,
       pc_eventDate: i.date,
       pc_startTime: i.startTime.slice(0, 5),
-      pc_facility: String((defaults && defaults.facilityId) || '3'),
-      pc_billing_location: String((defaults && defaults.facilityId) || '3'),
+      // pc_facility (WHERE the visit happens) and pc_billing_location (WHICH
+      // ENTITY bills) are deliberately NOT set here. They come from two
+      // different sources — the patient's facility assignment and OpenEMR's
+      // business entity — and resolving either needs a live read, so the route
+      // sets them. This builder used to fill both from one `defaults.facilityId`
+      // with a hardcoded '3' behind it, which is how every appointment came to
+      // carry the office as its service location. Omitting them means a route
+      // that forgets fails loudly at OpenEMR instead of quietly booking a home
+      // visit into the office.
       pc_aid: providerId
     },
     minutes, location, title
@@ -403,7 +410,7 @@ const findAppointmentConflict = (rows, { providerId, date, startTime, durationMi
 
 // Copy the fields OpenEMR's appointment POST accepts out of a read-back row,
 // so swap replacements preserve the original slot verbatim.
-const rowToPostFields = (row) => ({
+const rowToPostFields = (row, billingFacilityId) => ({
   pc_catid: String(row.pc_catid || '5'),
   pc_title: String(row.pc_title || 'Clinical visit'),
   pc_duration: String(rowDurationMinutes(row) * 60),
@@ -411,15 +418,20 @@ const rowToPostFields = (row) => ({
   pc_apptstatus: String(row.pc_apptstatus || APPT_STATUS.none),
   pc_eventDate: String(row.pc_eventDate),
   pc_startTime: String(row.pc_startTime || '').slice(0, 5),
-  pc_facility: String(row.pc_facility || '3'),
-  pc_billing_location: String(row.pc_billing_location || row.pc_facility || '3'),
+  // A swap preserves the original row verbatim, so the service facility is
+  // copied as-is. The BILLING entity is re-stamped from `billingFacilityId`
+  // instead of being copied, because rows booked before the split carry the
+  // service facility in this field; inheriting it would carry that error
+  // forward into every reschedule. Neither falls back to a literal id.
+  pc_facility: row.pc_facility ? String(row.pc_facility) : '',
+  pc_billing_location: String(billingFacilityId || row.pc_billing_location || ''),
   pc_aid: String(row.pc_aid || '')
 });
 
 // Cancelled tombstone preserving the superseded slot. Reason is REQUIRED for a
 // cancellation (never for the internal reschedule/no-show supersede note).
-const buildCancelTombstone = (row, { reason, byName, at, supersededByNote }) => {
-  const base = rowToPostFields(row);
+const buildCancelTombstone = (row, { reason, byName, at, supersededByNote, billingFacilityId }) => {
+  const base = rowToPostFields(row, billingFacilityId);
   const stamp = supersededByNote
     ? `[${(at || new Date().toISOString())}] ${supersededByNote}`
     : `[CANCELLED ${(at || new Date().toISOString())}${byName ? ` by ${byName}` : ''}] Reason: ${reason}`;
@@ -431,7 +443,7 @@ const buildCancelTombstone = (row, { reason, byName, at, supersededByNote }) => 
 };
 
 // Reschedule payloads: the new active row + the tombstone for the old slot.
-const buildReschedulePayloads = (row, built, { byName, at }) => {
+const buildReschedulePayloads = (row, built, { byName, at, billingFacilityId }) => {
   const when = at || new Date().toISOString();
   const newRow = {
     ...built.fields,
@@ -441,14 +453,15 @@ const buildReschedulePayloads = (row, built, { byName, at }) => {
     ].filter(Boolean).join('\n').slice(0, 4000)
   };
   const tombstone = buildCancelTombstone(row, {
-    at: when, supersededByNote: `Rescheduled to ${built.fields.pc_eventDate} ${built.fields.pc_startTime}${byName ? ` by ${byName}` : ''}`
+    at: when, billingFacilityId,
+    supersededByNote: `Rescheduled to ${built.fields.pc_eventDate} ${built.fields.pc_startTime}${byName ? ` by ${byName}` : ''}`
   });
   return { newRow, tombstone };
 };
 
 // Status swap payload (no-show today; the slot itself is preserved).
-const buildStatusSwap = (row, status, { byName, at }) => ({
-  ...rowToPostFields(row),
+const buildStatusSwap = (row, status, { byName, at, billingFacilityId }) => ({
+  ...rowToPostFields(row, billingFacilityId),
   pc_apptstatus: status,
   pc_hometext: [String(row.pc_hometext || ''),
     `[${at || new Date().toISOString()}] Marked ${status === APPT_STATUS.noShow ? 'no-show' : status}${byName ? ` by ${byName}` : ''}`
@@ -906,6 +919,79 @@ const prescriptionToEmrRow = (rx) => {
 // patient can be seen in person one week and by video the next. It keys off the
 // appointment's location marker (4.2's `[GFC location=telehealth]`), not off a
 // dropdown a clinician has to remember.
+// The BILLING facility — the business entity on the claim. This is the other
+// half of the pair, and the two must never come from one source.
+//
+// THE DEFECT THIS CLOSES (owner report, 2026-09-09). Service location and
+// billing entity were both derived from a single setting, so they always
+// matched. For a practice whose care happens in people's homes that is exactly
+// backwards: the service location moves with the patient, the billing entity
+// never moves. Encounters were split in 4.5, but APPOINTMENTS were not —
+// buildAppointmentFields set `pc_facility` and `pc_billing_location` from the
+// same `defaults.facilityId`, each falling back to a hardcoded '3'. Every
+// appointment ever booked carries the office as its service location.
+//
+// Resolved from OpenEMR rather than from config, because OpenEMR already
+// records which facility is the business entity and a config value can drift
+// from it silently. Order: the primary business entity, then a lone billing
+// location, then an explicit configured id. A configured id that DISAGREES
+// with OpenEMR is reported, never silently preferred — that disagreement is a
+// wrong address on a claim.
+const BILLING_FACILITY_UNRESOLVED = 'BILLING_FACILITY_UNRESOLVED';
+const isFlagOn = (v) => v === 1 || v === '1' || v === true;
+const resolveBillingFacility = ({ facilities, configuredId }) => {
+  const rows = facilities || [];
+  const cfg = configuredId ? String(configuredId) : null;
+  const byId = new Map(rows.map(f => [String(f.id), f]));
+  const primary = rows.filter(f => isFlagOn(f.primary_business_entity));
+  const billing = rows.filter(f => isFlagOn(f.billing_location));
+  const openEmrPick = primary.length === 1 ? primary[0]
+    : (primary.length === 0 && billing.length === 1 ? billing[0] : null);
+
+  // AN EXPLICIT CONFIGURED ID WINS. It is a deliberate decision by the practice
+  // about who bills, and OpenEMR's primary-business-entity flag is not always
+  // set to reflect it — on this instance OpenEMR flags 4 (Buckhead) while the
+  // owner's decision (2026-09-09) is 3 (Vinings). Deferring to OpenEMR there
+  // would put the wrong address on every claim.
+  //
+  // But it is never silent: a disagreement is reported every time, because the
+  // durable fix is to make OpenEMR say the same thing, and a warning nobody
+  // ever sees is how the two drift apart again.
+  if (cfg && byId.has(cfg)) {
+    const f = byId.get(cfg);
+    const disagrees = openEmrPick && String(openEmrPick.id) !== cfg;
+    return {
+      facilityId: cfg, facilityName: f.name || null, source: 'configured',
+      warning: disagrees
+        ? `Billing to the configured facility ${cfg} ("${f.name || cfg}"), but OpenEMR marks ${openEmrPick.id} ("${openEmrPick.name || openEmrPick.id}") as its primary business entity. The configured value is used because it is a deliberate decision; mark ${cfg} as the primary business entity in OpenEMR so the two agree.`
+        : (!openEmrPick && billing.length > 1
+          ? `OpenEMR flags ${billing.length} facilities as billing locations (${billing.map(x => x.id).join(', ')}) and names no single business entity, so the configured id ${cfg} was used. An admin should mark exactly one as primary.`
+          : null)
+    };
+  }
+
+  // A configured id that names a facility which does not exist is a mistake
+  // worth surfacing, not something to quietly route around.
+  const staleWarning = (cfg && !byId.has(cfg))
+    ? `The configured billing facility ${cfg} does not exist in OpenEMR, so OpenEMR's own business entity was used instead. An admin should correct the setting.`
+    : null;
+
+  if (openEmrPick) {
+    const id = String(openEmrPick.id);
+    return {
+      facilityId: id, facilityName: openEmrPick.name || null,
+      source: primary.length === 1 ? 'primary_business_entity' : 'sole_billing_location',
+      warning: staleWarning
+    };
+  }
+  return {
+    facilityId: null, facilityName: null, source: 'unresolved',
+    error: BILLING_FACILITY_UNRESOLVED,
+    warning: staleWarning
+      || 'The billing facility could not be determined: OpenEMR names no single business entity and no billing facility is configured. An admin marks the GFC LLC record as the primary business entity in OpenEMR.'
+  };
+};
+
 const FACILITY_UNASSIGNED = 'FACILITY_NOT_ASSIGNED';
 const resolveEncounterFacility = ({ patientFacilityId, telehealthFacilityId, appointmentLocation, facilities }) => {
   const byId = new Map((facilities || []).map(f => [String(f.id), f]));
@@ -1233,6 +1319,118 @@ const parseGfcBlocks = (text) => {
   return out;
 };
 
+// ---- Patient-link duplicate guard (identity safety) ----
+// The link step used to POST a new OpenEMR Patient unconditionally, so every
+// retry minted another chart for the same person (the eight duplicate "Demo
+// Client" rows found on the dev instance). These helpers let the route look
+// for an existing chart FIRST and hand candidates back for a human to confirm.
+//
+// Deliberately NOT auto-linking: two different people can share a surname and
+// a date of birth, and a wrong link writes clinical data into someone else's
+// record. The system proposes, the clinician disposes.
+
+// Fold case, accents and punctuation so "O'Brien" matches "OBrien" and "Jose"
+// matches "Jose" with an accent. Separators are dropped rather than spaced, so
+// "Smith-Jones" and "SmithJones" are the same surname for matching.
+const normNamePart = (s) => String(s == null ? '' : s)
+  .normalize('NFD').replace(/[̀-ͯ]/g, '')
+  .toLowerCase().replace(/[^a-z0-9]/g, '');
+
+// A birthDate is only usable for matching when it is a real YYYY-MM-DD.
+const normBirthDate = (s) => {
+  const t = String(s == null ? '' : s).trim().slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(t) ? t : '';
+};
+
+// Identity key for an app client, derived the way clientToFhirPatient() derives
+// the record it would create — so the search looks for exactly the patient the
+// create would otherwise have made.
+const patientMatchKey = (client) => {
+  const intake = (client && client.intake) || {};
+  const parts = String((client && client.name) || '').trim().split(/\s+/).filter(Boolean);
+  const family = intake.lastName || parts.slice(-1)[0] || '';
+  const given = intake.firstName || parts.slice(0, -1).join(' ') || (parts.length === 1 ? parts[0] : '');
+  return {
+    family: normNamePart(family),
+    given: normNamePart(given),
+    birthDate: normBirthDate(intake.dob || (client && client.dob))
+  };
+};
+
+// Comparable identity out of a FHIR Patient resource. FHIR allows several name
+// entries; prefer the official one, else the first.
+const fhirPatientIdentity = (resource) => {
+  const names = Array.isArray(resource && resource.name) ? resource.name : [];
+  const pick = names.find(n => n && n.use === 'official') || names[0] || {};
+  const givenRaw = Array.isArray(pick.given) ? pick.given.filter(Boolean).join(' ') : pick.given;
+  return {
+    id: (resource && (resource.id || resource.uuid)) || null,
+    family: normNamePart(pick.family),
+    given: normNamePart(givenRaw),
+    birthDate: normBirthDate(resource && resource.birthDate),
+    displayName: [givenRaw, pick.family].filter(Boolean).join(' ').trim() || null,
+    displayBirthDate: (resource && resource.birthDate) || null
+  };
+};
+
+// Confidence of one candidate against the key. The surname must always match —
+// a shared first name and date of birth alone is not a patient match.
+//   exact    — surname, given name and date of birth all agree
+//   probable — surname and date of birth agree, given name differs (nickname,
+//              middle name carried in the given field, name change)
+//   possible — surname and given name agree but one side carries no date of
+//              birth, so the strongest identifier is simply absent
+// A surname match with two KNOWN and DIFFERENT dates of birth is not a
+// candidate at all — that is a different person.
+const MATCH_CONFIDENCE = { exact: 'exact', probable: 'probable', possible: 'possible' };
+const CONFIDENCE_RANK = { exact: 0, probable: 1, possible: 2 };
+
+const scorePatientMatch = (candidate, key) => {
+  if (!candidate || !key || !candidate.family || !key.family) return null;
+  if (candidate.family !== key.family) return null;
+  const bothHaveDob = !!candidate.birthDate && !!key.birthDate;
+  const dobAgrees = bothHaveDob && candidate.birthDate === key.birthDate;
+  const givenAgrees = !!candidate.given && candidate.given === key.given;
+  if (bothHaveDob && !dobAgrees) return null;
+  if (dobAgrees && givenAgrees) return MATCH_CONFIDENCE.exact;
+  if (dobAgrees) return MATCH_CONFIDENCE.probable;
+  if (givenAgrees) return MATCH_CONFIDENCE.possible;
+  return null;
+};
+
+// Candidates for the key, strongest first. `linkedIds` are OpenEMR ids already
+// claimed by another app client — still returned, but flagged, because linking
+// to one would point two app records at a single chart.
+const findExistingPatientMatches = (resources, key, linkedIds) => {
+  const claimed = linkedIds instanceof Set ? linkedIds : new Set((linkedIds || []).map(String));
+  return (Array.isArray(resources) ? resources : [])
+    .map(r => {
+      const identity = fhirPatientIdentity(r);
+      const confidence = scorePatientMatch(identity, key);
+      if (!confidence || !identity.id) return null;
+      return {
+        openEmrPatientId: String(identity.id),
+        name: identity.displayName,
+        birthDate: identity.displayBirthDate,
+        confidence,
+        alreadyLinkedToAnotherClient: claimed.has(String(identity.id))
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => (CONFIDENCE_RANK[a.confidence] - CONFIDENCE_RANK[b.confidence])
+      || a.openEmrPatientId.localeCompare(b.openEmrPatientId));
+};
+
+// FHIR Patient search params for the key. Searching on surname (plus birthdate
+// when known) keeps the net wide enough to catch nickname and middle-name
+// variants that an exact given-name search would miss.
+const patientSearchParams = (key) => {
+  if (!key || !key.family) return null;
+  const params = { family: key.family };
+  if (key.birthDate) params.birthdate = key.birthDate;
+  return params;
+};
+
 module.exports = {
   CARE_PLAN_FIELDS,
   buildCarePlanVersion,
@@ -1290,6 +1488,8 @@ module.exports = {
   prescriptionToEmrRow,
   resolveEncounterFacility,
   FACILITY_UNASSIGNED,
+  resolveBillingFacility,
+  BILLING_FACILITY_UNRESOLVED,
   buildChargePayloads,
   buildOrderPayload,
   orderStatusToEmr,
@@ -1305,5 +1505,11 @@ module.exports = {
   recordCodeUsage,
   rankFavorites,
   buildStructuredNote,
-  parseGfcBlocks
+  parseGfcBlocks,
+  MATCH_CONFIDENCE,
+  patientMatchKey,
+  fhirPatientIdentity,
+  scorePatientMatch,
+  findExistingPatientMatches,
+  patientSearchParams
 };

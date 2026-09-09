@@ -191,6 +191,11 @@ not being read back on this build or the FHIR mapper skips codes it cannot descr
 latter would mean **ICD-10-CM is not loaded** into the `codes` table. Cannot be told apart
 from the API; please check the code-set load and the FHIR Condition output.
 
+> **SETTLED 2026-09-08.** It is the FHIR mapper. With ICD-10-CM loaded, the standard API
+> returns the coding (`E11.9` → "Type 2 diabetes mellitus without complications") while
+> FHIR `Condition` still returns `code.text` only. The code stores correctly; OpenEMR's
+> FHIR mapper drops it. See the ICD-10 entry under "Owner / config items".
+
 **App behavior meanwhile:** the T1 carry-forward lists the OpenEMR problem, flags it as
 needing a code, and fills the code back in from the app's own prior encounter records for
 that problem uuid once it has been coded once (`mergeCandidateSources`). A code typed in
@@ -294,8 +299,13 @@ HTML page mid-response:
 {"validationErrors":{"encounter":["No such encounter for this patient"]},"internalErrors":[],"data":[],"links":[]}
 ```
 
-`GET /api/codes` returns 200 with **0 rows**. That is the route working against empty tables —
-ICD-10-CM has not been loaded (see below). It is not a defect in the route.
+`GET /api/codes` returns 200 with **0 rows**.
+
+> **WRONG, corrected 2026-09-08.** This read the 0 rows as an empty code table and cleared
+> the route. It was the reverse: ICD-10-CM was loaded, and the route was defective — it
+> queried the manually entered `codes` table while the load writes to
+> `icd10_dx_order_code`. A search result is not evidence about a load. See the ICD-10
+> entry under "Owner / config items".
 
 ### Two corrections to the record
 
@@ -373,10 +383,49 @@ Session 4.5 can now be proven against the live EMR: sign-and-close reaches Billi
 - **Billing facility is not a charge field and never was.** `addBilling()` has no such
   parameter and the `billing` table no such column; it lives on
   `form_encounter.billing_facility`. The per-visit facility picker is Session 4.5 scope.
-- **ICD-10-CM is not loaded** (Administration → Other → External Data Loads). This does
-  **not** affect the charge write — `billing.justify` is free text and the app supplies the
-  codes. It affects three things only: `GET /api/codes` returns 0 rows, FHIR `Condition`
-  reads back uncoded, and OpenEMR's own Fee Sheet diagnosis picker is empty.
+- **ICD-10-CM IS LOADED as of 2026-09-08** (owner ran Administration → Other → External
+  Data Loads). Proven live, not inferred: a fresh `POST …/medical_problem` with
+  `diagnosis: "ICD10:E11.9"` reads back from the standard API as
+  `{"code":"E11.9","description":"Type 2 diabetes mellitus without complications",
+  "code_type":"ICD10","system":"http://hl7.org/fhir/sid/icd-10"}`. OpenEMR could only
+  resolve that description from the loaded table.
+
+  **CORRECTION — an earlier entry here (and an earlier reading the same day) said the
+  load had not run. That was wrong, and the reason it was wrong matters more than the
+  error.** The probe used was `GET /api/codes?type=ICD10&search=E11` → 0 rows. That route
+  is the Phase 6B one, and its SQL is
+  `FROM codes c JOIN code_types ct ON ct.ct_id = c.code_type` — the **manually entered
+  `codes` table only**. OpenEMR's External Data Loads writes ICD-10 into its own separate
+  external table, which that query never touches. So the route returns 0 rows whether or
+  not the load has run, and **a 0-row result from it proves nothing about the load.**
+
+  Two consequences. **Both are fixed in code; one still needs a server rebuild.**
+  1. **`GET /api/codes` was defective for ICD-10.** Fixed in the 6B patch —
+     `GfcChargeRestController::searchCodes` now calls OpenEMR's own
+     `main_code_set_search()` (`custom/code_types.inc.php`), which is the function the
+     Fee Sheet calls at `interface/forms/fee_sheet/new.php:1218`. That reaches every
+     external code set and survives upstream table changes. The external table is
+     `icd10_dx_order_code`, confirmed against the 8.4 source. **Owner action: one
+     `docker compose build --pull && docker compose up -d` on the EMR box** — see the
+     2026-09-08 section of the patch INSTALL.md. Until that runs, code search stays
+     empty on the deployed instance.
+  2. **The app was telling clinicians the wrong thing.** Fixed in `server.js`:
+     `searchEmrCodes` no longer returns a `loaded` flag, `codeTableLoaded` is gone, and
+     the notice describes the search that ran instead of asserting a load state the
+     route cannot observe. Guarded by three tests in `test/openemr_84_alignment.test.js`,
+     each mutation-checked against the unfixed code.
+
+  What the load does NOT change: it never affected the charge write (`billing.justify` is
+  free text and the app supplies the codes), and **FHIR `Condition` still reads back as
+  `{"text": …}` with no coding.** That second point finally settles Quirk 2 below, which
+  this document recorded as undecidable without the load: the standard API returns the
+  coding and FHIR does not, so the code is stored correctly and **OpenEMR's FHIR Condition
+  mapper drops it.** A mapper limitation, not a missing load.
+
+  CPT/HCPCS remain absent and are a separate hand-entry into the fee schedule (AMA
+  copyright; OpenEMR ships none). An untyped `GET /api/codes?search=10` returns 17 rows,
+  all CVX vaccine and NCI-CONCEPT-ID entries shipped with the install — useful only as
+  proof that the route itself executes.
 - Org-level read for FHIR **DocumentReference** and **Coverage** (both still 403), and
   `sensitivities` — Phase 8.6 items on the same ACL screen.
 
@@ -591,14 +640,31 @@ appointment marker. An unassigned patient, or a facility with no POS on its reco
 reported and blocks **signing** (`SIGN_NO_FACILITY_POS`) but never blocks documenting the
 visit — care happens regardless; claims are what need a verified POS.
 
-**On the org record (ids 3 and 4).** Leave POS blank if OpenEMR allows it, otherwise 11. The
-real protection is that no encounter is ever assigned to it, enforced by **unchecking Service
-Location** on that record once the private-residence record exists.
+**On ids 3 and 4 (Vinings and Buckhead).** POS 11, Office.
 
-**Phase 8.3 actions.** Create the private-residence record (POS 12) and Hickory Log (13 or 14
-once DCH confirms); assign each patient to their facility; uncheck Service Location on the
-org record. No app change is required for a new facility — add it in OpenEMR with its POS and
-assign patients to it.
+> **SUPERSEDED 2026-09-09 by the owner.** This section previously said to leave them as
+> business-address records and **uncheck Service Location** so no encounter could land on
+> them. That is withdrawn: **patients ARE seen at Vinings and Buckhead**, so both remain
+> service locations and Service Location stays checked. POS 11 is then not a placeholder —
+> it is the correct code for care actually delivered in an office.
+>
+> The protection that mattered is unaffected. It was never the checkbox: it is that the
+> encounter's facility comes from the PATIENT's assignment, so an office POS reaches a claim
+> only for a patient actually assigned to an office.
+
+**Billing entity: facility 3, Vinings** (owner decision, 2026-09-09). OpenEMR's
+`primary_business_entity` flag currently points at **4**, and the app does **not** defer to
+it: an explicitly configured billing facility wins, because the practice decides who bills
+and that flag is not always maintained to match. The disagreement is reported on every
+resolution rather than swallowed. To silence it properly, mark **3** as the primary business
+entity in OpenEMR so the two agree.
+
+**Phase 8.3 — done, with one item outstanding.** Ids 5 "Private Residence" (POS 12) and 6
+"Hickory Log Personal Care Home" (POS 13) exist as of 2026-09-09. **Hickory Log has Service
+Location UNCHECKED** (`service_location=0`), so no encounter can be assigned there and every
+Hickory Log patient would block at signing — check it if care is delivered there. Then assign
+each patient to their facility. No app change is required for a new facility: add it in
+OpenEMR with its POS and assign patients to it.
 
 ---
 
@@ -710,8 +776,11 @@ alongside the ICD-10-CM load.
 
 ### Confirmed still open this pass
 
-- **ICD-10-CM is not loaded.** FHIR `Condition` returns 3 rows for TEST PatientOne, **0 carrying a
-  code**. `GET /api/codes` answers 200 with 0 rows. Data gap, not a defect, unchanged.
+- ~~**ICD-10-CM is not loaded.**~~ **Corrected later the same day — it IS loaded.** Both
+  signals cited here (uncoded FHIR `Condition`, `GET /api/codes` returning 0 rows) turned
+  out to have other causes: OpenEMR's FHIR mapper drops the coding, and the 6B route read
+  the wrong table. Neither could see the load. See the ICD-10 entry under "Owner / config
+  items".
 - **Only two facilities exist** (ids 3 and 4, both POS **11**). No private-residence record (POS 12),
   no Hickory Log, no telehealth record. Until Phase 8.3 runs, `resolveEncounterFacility()` has
   nothing correct to resolve to for a home visit.

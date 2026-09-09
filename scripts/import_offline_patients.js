@@ -24,6 +24,7 @@ const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
 const Database = require('@replit/database');
 const config = require('../config');
+const consentText = require('../public/consent-text'); // the consent registry's titles + body versions (4.6)
 
 const db = new Database();
 const LOG_PATH = path.join(__dirname, 'import_offline_patients.log');
@@ -102,20 +103,40 @@ function rowToClient(row, users) {
     catch { medications = []; }
   }
 
-  const signedOfflineKeys = (row.consentsSignedOffline || '').split('|').map(s => s.trim()).filter(Boolean);
-  const pendingKeys = (row.consentsPending || '').split('|').map(s => s.trim()).filter(Boolean);
+  // Consent statuses are recorded PER TYPE (Scope D), never as a blanket flag —
+  // a legacy paper client may well have signed eight of nine documents. Three
+  // pipe-delimited columns, one per status, and every key is checked against the
+  // consent registry so a typo lands in the log instead of in the record.
+  //   consentsSignedOffline | consentsPending | consentsNa
+  const splitKeys = (v) => String(v || '').split('|').map(x => x.trim()).filter(Boolean);
+  const signedOfflineKeys = splitKeys(row.consentsSignedOffline);
+  const pendingKeys = splitKeys(row.consentsPending);
+  const naKeys = splitKeys(row.consentsNa);
+  const knownTypes = consentText.types();
+  const unknown = [...signedOfflineKeys, ...pendingKeys, ...naKeys].filter(t => !knownTypes.includes(t));
   const consents = {};
   const consentMeta = {};
+  const recordedBy = { recordedBy: 'import_offline_patients.js', recordedAt: nowIso };
   signedOfflineKeys.forEach(type => {
+    if (!knownTypes.includes(type)) return;
     consents[type] = 'signed_offline';
-    consentMeta[type] = { signedAt: nowIso, provenance: 'signed_offline', recordedBy: 'import_offline_patients.js', recordedAt: nowIso };
+    consentMeta[type] = { ...recordedBy, signedAt: row.consentsSignedAt || nowIso, provenance: 'signed_offline', version: consentText.currentVersion(type) };
   });
-  pendingKeys.forEach(type => { if (!consents[type]) consents[type] = 'pending'; });
+  naKeys.forEach(type => {
+    if (!knownTypes.includes(type) || consents[type]) return;
+    consents[type] = 'na';
+    consentMeta[type] = { ...recordedBy, provenance: 'offline_not_applicable' };
+  });
+  pendingKeys.forEach(type => { if (knownTypes.includes(type) && !consents[type]) consents[type] = 'pending'; });
 
   const email = `offline+${clientId}@placeholder.local`;
   const name = `${row.firstName} ${row.lastName}`.trim();
 
+  const hourlyRate = Number(row.hourlyRate);
+  const dailyMinimumHours = Number(row.dailyMinimumHours);
+
   return {
+    unknownConsentTypes: unknown,
     id: clientId,
     email,
     name,
@@ -135,6 +156,15 @@ function rowToClient(row, users) {
     },
     consents,
     consentMeta,
+    // The agreed rate off the paper Financial Agreement. Both PHC money
+    // documents render it, so without it neither is presentable in-app.
+    rateAgreement: (hourlyRate > 0 && dailyMinimumHours > 0) ? {
+      hourlyRate, dailyMinimumHours,
+      includedServices: null, holidayTreatment: null, errandFuel: null, invoiceCadence: null,
+      cancellationWindowHours: 24, rateChangeNoticeDays: 30,
+      effectiveDate: row.rateEffectiveDate || null,
+      setById: null, setByName: 'import_offline_patients.js', setAt: nowIso
+    } : null,
     offlinePacketDriveUrls: row.driveFolderUrl ? [row.driveFolderUrl] : [],
     careTeam: { assignedFNPs: [], assignedCaseManager: null, primaryCaregiver: null, backupCaregiver: null },
     intake: {
@@ -197,6 +227,11 @@ async function main() {
       }
 
       const client = rowToClient(row, users);
+      const { unknownConsentTypes } = client;
+      delete client.unknownConsentTypes;
+      if (unknownConsentTypes.length) {
+        logLine(`row ${rowNum}: WARNING — unrecognised consent type(s) ignored: ${unknownConsentTypes.join(', ')}. Valid types: ${consentText.types().join(', ')}`);
+      }
       const randomPw = uuidv4() + uuidv4();
       client.password = await bcrypt.hash(randomPw, config.BCRYPT_SALT_ROUNDS);
 

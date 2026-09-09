@@ -265,7 +265,7 @@
     };
 
     // ── Chart summary tab ──
-    const SummaryTab = ({ chart, patient, onLink, linking }) => {
+    const SummaryTab = ({ chart, patient, onLink, linking, linkCandidates, onDismissCandidates }) => {
       const canWrite = useCanWrite();
       const [showLinkExisting, setShowLinkExisting] = useState(false);
       const [existingId, setExistingId] = useState('');
@@ -315,6 +315,47 @@
                 </div>
                 <button className="btn gold" disabled={linking} onClick={() => onLink()}>{linking ? 'Linking…' : 'Create & link OpenEMR patient'}</button>
               </div>
+              {/* Duplicate guard: the server refuses to create a second chart
+                  for a patient who already looks present in OpenEMR and hands
+                  the candidates back here. Nothing is linked automatically —
+                  a wrong link writes clinical data into someone else's record. */}
+              {!!(linkCandidates && linkCandidates.length) && (
+                <div className="border-t border-stone-100 mt-3 pt-3">
+                  <div className="text-sm font-semibold text-amber-800">
+                    {linkCandidates.length === 1 ? 'This patient may already be in OpenEMR' : `${linkCandidates.length} possible matches already in OpenEMR`}
+                  </div>
+                  <div className="text-xs text-stone-500 mb-2">
+                    No new chart was created. Link the existing chart if it is the same person — otherwise confirm below.
+                  </div>
+                  <div className="space-y-2">
+                    {linkCandidates.map(c => (
+                      <div key={c.openEmrPatientId} className="flex flex-wrap items-center justify-between gap-2 border border-stone-200 rounded p-2">
+                        <div className="min-w-0">
+                          <div className="text-[13px] font-semibold">{c.name || '(no name on the EMR record)'}</div>
+                          <div className="text-[11px] text-stone-500">
+                            {[c.birthDate ? `DOB ${c.birthDate}` : 'no DOB on file',
+                              `${c.confidence} match`,
+                              `${String(c.openEmrPatientId).slice(0, 8)}…`].join(' · ')}
+                          </div>
+                          {c.alreadyLinkedToAnotherClient && (
+                            <div className="text-[11px] text-red-600">Already linked to a different client record — linking here is blocked.</div>
+                          )}
+                        </div>
+                        <button className="btn" disabled={linking || c.alreadyLinkedToAnotherClient}
+                          onClick={() => onLink({ openEmrPatientId: c.openEmrPatientId })}>
+                          {linking ? 'Linking…' : 'Link this chart'}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="flex flex-wrap gap-2 mt-2">
+                    <button className="btn ghost text-xs" disabled={linking} onClick={() => onLink({ confirmDistinct: true })}>
+                      None of these — create a new chart
+                    </button>
+                    <button className="btn ghost text-xs" disabled={linking} onClick={onDismissCandidates}>Cancel</button>
+                  </div>
+                </div>
+              )}
               {/* Link an EXISTING EMR chart — the path for patients already in
                   OpenEMR (legacy records, or a chart created directly there).
                   Prevents a duplicate chart for the same person. */}
@@ -364,6 +405,21 @@
     // ── H&P documentation tab (intake spec §2C) ──
     // appointmentEid (4.2): set when the visit is opened from a calendar
     // appointment — the resulting Encounter links back to it.
+    // These live at MODULE scope on purpose. A component declared inside
+    // another component's body is a NEW function identity on every render, so
+    // React tears down its subtree and builds a fresh one — destroying the
+    // <input> DOM node and the caret with it. The symptom is a field that
+    // accepts exactly one character and then stops. Keep them out here.
+    const VitalInput = ({ k, label, w, f, set }) => (
+      <Field label={label} className={w || ''}>
+        <input className="inp" value={f.vitals[k]} onChange={e => set(`vitals.${k}`, e.target.value)} />
+      </Field>
+    );
+    const TextArea = ({ path, label, rows, f, set }) => (
+      <Field label={label}>
+        <textarea className="inp" rows={rows || 2} value={path.split('.').reduce((o, k) => o[k], f)} onChange={e => set(path, e.target.value)} />
+      </Field>
+    );
     const HpTab = ({ patient, chart, appointmentEid, onDone }) => {
       const pf = (chart && chart.intakePrefill) || {};
       const [confirmed, setConfirmed] = useState([]);
@@ -391,16 +447,6 @@
           .catch(e => setMsg({ ok: false, text: e.message }))
           .finally(() => setBusy(false));
       };
-      const V = ({ k, label, w }) => (
-        <Field label={label} className={w || ''}>
-          <input className="inp" value={f.vitals[k]} onChange={e => set(`vitals.${k}`, e.target.value)} />
-        </Field>
-      );
-      const T = ({ path, label, rows }) => (
-        <Field label={label}>
-          <textarea className="inp" rows={rows || 2} value={path.split('.').reduce((o, k) => o[k], f)} onChange={e => set(path, e.target.value)} />
-        </Field>
-      );
       const painFields = ['breathing', 'negativeVocalization', 'facialExpression', 'bodyLanguage', 'consolability'];
       const hazardFields = [['smokeDetectors', 'Smoke detectors'], ['coDetectors', 'CO detectors'], ['grabBars', 'Grab bars'], ['nonSkidSurfaces', 'Non-skid surfaces'], ['runningWater', 'Running water'], ['secondaryExit', 'Secondary exit']];
       return (
@@ -415,7 +461,7 @@
             <div className="card-h"><h2>Initial Visit · History &amp; Physical</h2></div>
             <div className="p-4 grid gap-4">
               <Prefilled fieldKey="chiefConcern" confirmed={confirmed} onConfirm={confirm}>
-                <T path="chiefConcern" label="Chief concern" />
+                <TextArea f={f} set={set} path="chiefConcern" label="Chief concern" />
               </Prefilled>
               {(pf.conditions || []).length > 0 && (
                 <Prefilled fieldKey="conditions" confirmed={confirmed} onConfirm={confirm}>
@@ -423,17 +469,17 @@
                   <div className="flex flex-wrap gap-1.5">{pf.conditions.map((c, i) => <span key={i} className="chip bg-primary-50 text-primary">{c}</span>)}</div>
                 </Prefilled>
               )}
-              <T path="subjective" label="Subjective / history" rows={3} />
+              <TextArea f={f} set={set} path="subjective" label="Subjective / history" rows={3} />
             </div>
           </div>
 
           <div className="card mb-4">
             <div className="card-h"><h2>Vitals</h2><span className="text-[10.5px] text-stone-500">BP required in both arms (§2C)</span></div>
             <div className="p-4 grid grid-cols-2 md:grid-cols-4 gap-3">
-              <V k="bpRightSys" label="BP right — sys" /><V k="bpRightDia" label="BP right — dia" />
-              <V k="bpLeftSys" label="BP left — sys" /><V k="bpLeftDia" label="BP left — dia" />
-              <V k="hr" label="Heart rate" /><V k="temp" label="Temp (°F)" /><V k="rr" label="Resp rate" /><V k="spo2" label="SpO₂ (%)" />
-              <V k="weight" label="Weight (lb)" /><V k="height" label="Height (in)" />
+              <VitalInput f={f} set={set} k="bpRightSys" label="BP right — sys" /><VitalInput f={f} set={set} k="bpRightDia" label="BP right — dia" />
+              <VitalInput f={f} set={set} k="bpLeftSys" label="BP left — sys" /><VitalInput f={f} set={set} k="bpLeftDia" label="BP left — dia" />
+              <VitalInput f={f} set={set} k="hr" label="Heart rate" /><VitalInput f={f} set={set} k="temp" label="Temp (°F)" /><VitalInput f={f} set={set} k="rr" label="Resp rate" /><VitalInput f={f} set={set} k="spo2" label="SpO₂ (%)" />
+              <VitalInput f={f} set={set} k="weight" label="Weight (lb)" /><VitalInput f={f} set={set} k="height" label="Height (in)" />
             </div>
           </div>
 
@@ -441,7 +487,7 @@
             <div className="card-h"><h2>Systems exam</h2></div>
             <div className="p-4 grid md:grid-cols-2 gap-3">
               {Object.keys(f.systemsExam).map(k => (
-                <T key={k} path={`systemsExam.${k}`} label={k === 'lungSounds' ? 'Lung sounds' : k.charAt(0).toUpperCase() + k.slice(1)} />
+                <TextArea f={f} set={set} key={k} path={`systemsExam.${k}`} label={k === 'lungSounds' ? 'Lung sounds' : k.charAt(0).toUpperCase() + k.slice(1)} />
               ))}
             </div>
           </div>
@@ -449,7 +495,7 @@
           <div className="card mb-4">
             <div className="card-h"><h2>Skin &amp; wound</h2></div>
             <div className="p-4 grid gap-3">
-              <T path="skinWound.findings" label="Skin findings" />
+              <TextArea f={f} set={set} path="skinWound.findings" label="Skin findings" />
               <Field label="Wound present?">
                 <select className="inp" value={f.skinWound.woundPresent} onChange={e => set('skinWound.woundPresent', e.target.value)}>
                   <option value="no">No</option><option value="yes">Yes</option>
@@ -457,8 +503,8 @@
               </Field>
               {f.skinWound.woundPresent === 'yes' && (
                 <div className="grid md:grid-cols-2 gap-3">
-                  <T path="skinWound.woundLocation" label="Location" />
-                  <T path="skinWound.woundMeasurements" label="Measurements (L × W × D cm)" />
+                  <TextArea f={f} set={set} path="skinWound.woundLocation" label="Location" />
+                  <TextArea f={f} set={set} path="skinWound.woundMeasurements" label="Measurements (L × W × D cm)" />
                 </div>
               )}
             </div>
@@ -500,15 +546,15 @@
                   </Field>
                 ))}
               </div>
-              <div className="mt-3"><T path="homeHazards.notes" label="Hazard notes" /></div>
+              <div className="mt-3"><TextArea f={f} set={set} path="homeHazards.notes" label="Hazard notes" /></div>
             </div>
           </div>
 
           <div className="card mb-4">
             <div className="card-h"><h2>Assessment, plan &amp; RN triage</h2></div>
             <div className="p-4 grid gap-3">
-              <T path="assessment" label="Assessment" rows={3} />
-              <T path="plan" label="Plan" rows={3} />
+              <TextArea f={f} set={set} path="assessment" label="Assessment" rows={3} />
+              <TextArea f={f} set={set} path="plan" label="Plan" rows={3} />
               <div className="grid md:grid-cols-2 gap-3">
                 <Field label="Track assignment (RN triage)">
                   <select className="inp" value={f.triage.track} onChange={e => set('triage.track', e.target.value)}>
@@ -518,7 +564,7 @@
                     <option value="B">B — Skilled Nursing</option>
                   </select>
                 </Field>
-                <T path="triage.rationale" label="Triage rationale" />
+                <TextArea f={f} set={set} path="triage.rationale" label="Triage rationale" />
               </div>
             </div>
           </div>
@@ -1341,6 +1387,12 @@
 
     // Follow-up visit (Scope A): short SOAP + vitals + T1 diagnoses + quick
     // service pick → Encounter + narrative note + GFC structured note.
+    // Module scope, same reason as VitalInput above: nested inside the modal
+    // it was a new component every keystroke, so the field took one character
+    // and then lost the caret.
+    const FollowUpVital = ({ k, label, f, setV }) => (
+      <Field label={label}><input className="inp" value={f.vitals[k]} onChange={e => setV(k, e.target.value)} /></Field>
+    );
     const FollowUpModal = ({ patient, chart, appt, onClose, onSaved }) => {
       const [cands, setCands] = useState([]);
       const [f, setF] = useState({ reason: appt ? appt.title : 'Follow-up visit', date: appt ? appt.date : todayYmd(), subjective: '', objective: '', assessment: '', plan: '',
@@ -1365,7 +1417,6 @@
         api.followUp(patient.id, { ...f, diagnoses, services, appointmentEid: appt ? appt.eid : undefined })
           .then(r => onSaved(r)).catch(e => { setErr(e.message); setBusy(false); });
       };
-      const V = ({ k, label }) => <Field label={label}><input className="inp" value={f.vitals[k]} onChange={e => setV(k, e.target.value)} /></Field>;
       return (
         <div className="fixed inset-0 bg-black/40 z-40 flex items-start justify-center p-4 overflow-y-auto" onClick={onClose}>
           <div className="card w-full max-w-2xl mt-6 mb-10" onClick={e => e.stopPropagation()}>
@@ -1380,8 +1431,8 @@
               <div>
                 <span className="lblu block mb-1">Vitals (optional — preserved verbatim in the note)</span>
                 <div className="grid grid-cols-3 md:grid-cols-5 gap-2">
-                  <V k="bpSys" label="BP sys" /><V k="bpDia" label="BP dia" /><V k="hr" label="HR" /><V k="temp" label="Temp °F" /><V k="rr" label="RR" />
-                  <V k="spo2" label="SpO₂ %" /><V k="weight" label="Wt lb" /><V k="height" label="Ht in" /><V k="pain" label="Pain /10" />
+                  <FollowUpVital f={f} setV={setV} k="bpSys" label="BP sys" /><FollowUpVital f={f} setV={setV} k="bpDia" label="BP dia" /><FollowUpVital f={f} setV={setV} k="hr" label="HR" /><FollowUpVital f={f} setV={setV} k="temp" label="Temp °F" /><FollowUpVital f={f} setV={setV} k="rr" label="RR" />
+                  <FollowUpVital f={f} setV={setV} k="spo2" label="SpO₂ %" /><FollowUpVital f={f} setV={setV} k="weight" label="Wt lb" /><FollowUpVital f={f} setV={setV} k="height" label="Ht in" /><FollowUpVital f={f} setV={setV} k="pain" label="Pain /10" />
                 </div>
               </div>
               <Field label="Objective"><textarea className="inp" rows={2} value={f.objective} onChange={e => setF({ ...f, objective: e.target.value })} /></Field>
@@ -1779,6 +1830,7 @@
       const [tab, setTab] = useState('summary');
       const [emrStatus, setEmrStatus] = useState(null);
       const [linking, setLinking] = useState(false);
+      const [linkCandidates, setLinkCandidates] = useState([]);
       const [err, setErr] = useState('');
       const [listOpen, setListOpen] = useState(true);
       const [view, setView] = useState('charts'); // 'charts' | 'schedule' (4.2) | 'queue' (4.4)
@@ -1805,6 +1857,7 @@
 
       const openPatient = (p, opts) => {
         setSel(p); setChart(null); setTab((opts && opts.tab) || 'summary'); setListOpen(false);
+        setLinkCandidates([]);  // candidates belong to the patient that produced them
         setView('charts'); setHpApptEid((opts && opts.appointmentEid) || null);
         setEncTarget((opts && opts.encounterUuid) || null);
         api.chart(p.id).then(setChart).catch(e => setErr(e.message));
@@ -1823,8 +1876,16 @@
       const refreshChart = () => sel && api.chart(sel.id).then(setChart).catch(() => {});
       const link = (body) => {
         setLinking(true); setErr('');
-        api.link(sel.id, body || {}).then(() => { refreshChart(); loadPatients(); })
-          .catch(e => setErr(e.message)).finally(() => setLinking(false));
+        api.link(sel.id, body || {})
+          .then(() => { setLinkCandidates([]); refreshChart(); loadPatients(); })
+          .catch(e => {
+            // The duplicate guard answers 409 with the matching charts rather
+            // than creating a second one; show them instead of a bare error.
+            const candidates = e.data && e.data.code === 'EMR_PATIENT_EXISTS' ? e.data.candidates : null;
+            if (candidates && candidates.length) setLinkCandidates(candidates);
+            setErr(e.message);
+          })
+          .finally(() => setLinking(false));
       };
 
       if (!user || !getToken()) return <Login onLogin={setUser} />;
@@ -2000,7 +2061,8 @@
                   </div>
                 </div>
                 <div className="p-4 lg:p-7">
-                  {tab === 'summary' && <SummaryTab chart={chart} patient={sel} onLink={link} linking={linking} />}
+                  {tab === 'summary' && <SummaryTab chart={chart} patient={sel} onLink={link} linking={linking}
+                    linkCandidates={linkCandidates} onDismissCandidates={() => { setLinkCandidates([]); setErr(''); }} />}
                   {tab === 'appts' && <ApptsTab patient={sel} patients={patients || []} chart={chart} onDocumentHp={(eid) => { setHpApptEid(eid); setTab('visit'); }}
                     onEncounterCreated={(euuid) => { setEncTarget(euuid); setTab('encounters'); }} />}
                   {tab === 'encounters' && <EncountersTab patient={sel} chart={chart} initialEuuid={encTarget} onOpened={() => setEncTarget(null)} />}
