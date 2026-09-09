@@ -4394,6 +4394,17 @@
       const setEC = (i, k, v) => setForm(f => { const e = [...f.emergencyContacts]; e[i] = { ...(e[i] || {}), [k]: v }; return { ...f, emergencyContacts: e }; });
 
       const activeConsentDefs = consentDefs.length ? consentDefs : [];
+      // The medical packet is signed as its own deliberate step, never in the
+      // same pass as everything else. The paper packets carry this as an
+      // instruction ("Packet 2 of 2 — do not sign this on the same visit as home
+      // care"); that sentence is not ported, this split is what it becomes.
+      // Before it, a BOTH client was shown all thirteen records on one screen.
+      const homecareDefs = activeConsentDefs.filter(d => d.stage !== 'medical');
+      const medicalDefs = activeConsentDefs.filter(d => d.stage === 'medical');
+      const hasMedicalStage = medicalDefs.length > 0;
+      const stageRequired = (defs) => defs.filter(d => d.required).map(d => d.type);
+      const stageSigned = (defs) => stageRequired(defs).every(t => consents[t] === 'signed');
+      const homecareComplete = stageSigned(homecareDefs);
       // Guard against a vacuous "all signed": if the consent defs never loaded,
       // requiredConsents is [] and .every() is trivially true. Require defs to be
       // present before treating consents as satisfied.
@@ -4465,7 +4476,8 @@
         { key: 'function', label: 'Function & safety' },
         { key: 'matching', label: 'Caregiver match' },
         { key: 'insurance', label: 'Insurance' },
-        { key: 'consents', label: 'Consents' },
+        { key: 'consents', label: hasMedicalStage ? 'Consents' : 'Consents' },
+        ...(hasMedicalStage ? [{ key: 'consentsMedical', label: 'Medical consents' }] : []),
         { key: 'review', label: 'Review & submit' }
       ];
       const pct = Math.round(((step + 1) / steps.length) * 100);
@@ -4475,6 +4487,13 @@
         // Validate per step
         if (steps[step].key === 'client' && !form.dob) { setErr('Please enter the client date of birth.'); return; }
         if (steps[step].key === 'contacts' && !(form.primaryContact && form.primaryContact.name)) { setErr('A primary family contact name is required.'); return; }
+        // Packet 1 before packet 2. Leaving the first consent stage with required
+        // records unsigned would let the two be signed together, which is the
+        // thing the staging exists to prevent.
+        if (steps[step].key === 'consents' && hasMedicalStage && !homecareComplete) {
+          setErr('Please sign the consents on this page before moving on to medical care. They are signed as two separate steps on purpose.');
+          return;
+        }
         setBusy(true);
         // Save draft on data steps (not on the consent step which saves per-signature)
         if (steps[step].key !== 'consents' && steps[step].key !== 'review') {
@@ -4792,8 +4811,13 @@
               <SelectField label="Call 911 in a medical emergency?" value={form.auth911} onChange={v => set('auth911', v)} options={IO.auth911} />
               <TextField label="Who should we notify first in a crisis?" value={form.crisisNotify} onChange={v => set('crisisNotify', v)} placeholder="Name & phone" />
               <p className="lbl">Signatures</p>
-              <p className="sub">Branched for your service line. Each is e-signed with a typed name and timestamp. <b>{requiredConsents.filter(t => consents[t] === 'signed').length}/{requiredConsents.length}</b> required signed.</p>
-              {activeConsentDefs.map(def => (
+              <p className="sub">Each is e-signed with a typed name and timestamp. <b>{stageRequired(homecareDefs).filter(t => consents[t] === 'signed').length}/{stageRequired(homecareDefs).length}</b> required signed on this page.</p>
+              {hasMedicalStage && (
+                <p className="micro" style={{ justifyContent: 'flex-start', marginTop: 2 }}>
+                  <i className="ti ti-info-circle" />Your medical care documents are signed separately, on the next page.
+                </p>
+              )}
+              {homecareDefs.map(def => (
                 <React.Fragment key={def.type}>
                   {def.type === 'roiFamily' && (
                     <div className="card" style={{ marginBottom: 8 }}>
@@ -4804,6 +4828,24 @@
                   )}
                   <ConsentCard def={def} status={consents[def.type]} meta={consentMeta[def.type]} signedName={form.primaryContact?.name} onSign={handleSignConsent} />
                 </React.Fragment>
+              ))}
+            </React.Fragment>
+          )}
+
+          {k === 'consentsMedical' && (
+            <React.Fragment>
+              <h2 className="disp">Medical care consents</h2>
+              <p className="sub">These enroll you in medical care: visits, examination, diagnosis, prescribing, and chronic disease management by a nurse practitioner who comes to your home. It is a different service from personal home care, delivered by different people under a different license.</p>
+              <div className="card" style={{ marginBottom: 14, borderColor: 'var(--goldd)' }}>
+                <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.65, color: 'var(--mut)' }}>
+                  <b style={{ color: 'var(--navy)' }}>You are under no obligation to sign these.</b> Your home care does not
+                  change, pause, or cost more if you decline, and you are free to receive medical care from any
+                  provider you choose. Take your time with them.
+                </p>
+              </div>
+              <p className="sub"><b>{stageRequired(medicalDefs).filter(t => consents[t] === 'signed').length}/{stageRequired(medicalDefs).length}</b> required signed on this page.</p>
+              {medicalDefs.map(def => (
+                <ConsentCard key={def.type} def={def} status={consents[def.type]} meta={consentMeta[def.type]} signedName={form.primaryContact?.name} onSign={handleSignConsent} />
               ))}
             </React.Fragment>
           )}
@@ -4819,7 +4861,7 @@
                 <div className="goal"><i className={`ti ${requiredSigned ? 'ti-circle-check' : 'ti-alert-circle'}`} style={{ color: requiredSigned ? 'var(--teal)' : 'var(--gfc-danger,#B5462E)' }} />Required consents {requiredSigned ? 'all signed' : `(${requiredConsents.filter(t => consents[t] === 'signed').length}/${requiredConsents.length})`}</div>
               </div>
               {!consentsLoaded && <div className="err">We couldn't load your consent forms. Please refresh the page and try again.</div>}
-              {consentsLoaded && !requiredSigned && <div className="err">Please sign all required consents before submitting (go back to Consents).</div>}
+              {consentsLoaded && !requiredSigned && <div className="err">Please sign all required consents before submitting (go back to {hasMedicalStage && !stageSigned(medicalDefs) ? 'Medical consents' : 'Consents'}).</div>}
               <button className="btn" disabled={busy || !requiredSigned} onClick={submit}>{busy ? 'Submitting…' : 'Complete enrollment'}</button>
             </React.Fragment>
           )}

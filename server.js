@@ -5501,22 +5501,15 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
     if (!client) return res.status(404).json({ error: 'No client record on file' });
 
     const consents = client.consents || {};
-    const consentLabels = {
-      npp: 'HIPAA Notice of Privacy Practices',
-      roiFamily: 'Release of Information — Family',
-      roiProvider: 'Release of Information — Provider',
-      roiTransfer: 'Transfer-of-Care Authorization (record release)',
-      serviceAgreement: 'Service Agreement',
-      billOfRights: 'Patient Bill of Rights & Self-Determination',
-      emergencyFinancial: 'Emergency Treatment & Financial Responsibility',
-      crisisProtocol: 'Emergency & Crisis Protocol (911/988)',
-      monitoring: 'Continuous Monitoring Opt-In',
-      financialAgreement: 'Financial Agreement (PHC)',
-      pcaScope: 'Personal Care Aide Scope Acknowledgment (PHC)',
-      consentToTreat: 'Consent to Medical Treatment (IHPC)',
-      assignmentOfBenefits: 'Assignment of Benefits (IHPC)',
-      practiceNpp: 'Practice Notice of Privacy Practices (IHPC)'
-    };
+    // Titles come from GFC_CONSENT_DEFS, never a second copy. This map used to
+    // duplicate them and had already drifted: it carried the OLD
+    // emergencyFinancial title (the one that read as a consent to treat) and had
+    // no entry at all for ihpcServiceAgreement, so a signed IHPC agreement would
+    // have listed itself to the client as the raw key `ihpcServiceAgreement`.
+    // roiTransfer is not in the registry — it is the 3.4 per-provider record —
+    // so it keeps an explicit label here.
+    const consentLabels = GFC_CONSENT_DEFS.reduce((m, d) => { m[d.type] = d.title; return m; },
+      { roiTransfer: 'Transfer-of-Care Authorization (record release)' });
     const signedConsents = Object.keys(consents)
       .filter(k => consents[k] && consents[k] !== 'na')
       .map(k => ({

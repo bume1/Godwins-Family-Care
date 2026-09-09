@@ -134,3 +134,48 @@ test('an inactive consent cannot be signed', () => {
 test('the counsel-review disclaimer is gone now that the real text is in', () => {
   assert.doesNotMatch(PORTAL, /Working draft — pending counsel/);
 });
+
+test('the medical packet is its own wizard step, gated behind the first', () => {
+  // A BOTH client used to get all thirteen records on one screen. The paper
+  // packet forbids exactly that ("Packet 1 of 2 — sign this one first").
+  assert.match(PORTAL, /const medicalDefs = activeConsentDefs\.filter\(d => d\.stage === 'medical'\);/);
+  assert.match(PORTAL, /const homecareDefs = activeConsentDefs\.filter\(d => d\.stage !== 'medical'\);/);
+
+  // The extra step only exists when there is a medical packet to sign.
+  assert.match(PORTAL, /\.\.\.\(hasMedicalStage \? \[\{ key: 'consentsMedical'/);
+
+  // And it cannot be reached until the first stage's required records are signed.
+  assert.match(PORTAL, /steps\[step\]\.key === 'consents' && hasMedicalStage && !homecareComplete/);
+
+  // Stage one renders from homecareDefs, never the full set.
+  assert.match(PORTAL, /\{homecareDefs\.map\(def => \(/);
+  assert.doesNotMatch(PORTAL, /\{activeConsentDefs\.map\(def => \(/,
+    'the consents step must render one stage, not every applicable record');
+});
+
+test('the medical stage leads with the voluntariness language', () => {
+  // The one piece of the packet framing that is substantive rather than chrome.
+  const i = PORTAL.indexOf("k === 'consentsMedical'");
+  assert.ok(i > 0, 'the medical stage must exist');
+  const stage = PORTAL.slice(i, i + 2200);
+  assert.match(stage, /under no obligation to sign/i);
+  assert.match(stage, /home care does not\s*\n?\s*change/i);
+});
+
+test('a home-care-only client never sees a second consent stage', () => {
+  // hasMedicalStage is driven by the records themselves, so a PHC client — who
+  // has no ihpc-scoped records — gets one step and notices no change.
+  const phcTypes = ENTRIES.filter(e => e.scope === 'both' || e.scope === 'phc');
+  assert.equal(phcTypes.filter(e => e.stage === 'medical').length, 0);
+  const ihpcTypes = ENTRIES.filter(e => e.scope === 'both' || e.scope === 'ihpc');
+  assert.equal(ihpcTypes.filter(e => e.stage === 'medical').length, 4,
+    'the medical packet is four documents');
+});
+
+test('consent labels shown to the client come from the registry, not a copy', () => {
+  // The duplicate map had already drifted: the old emergencyFinancial title and
+  // no entry at all for ihpcServiceAgreement, which would have listed itself to
+  // the client as a raw key.
+  assert.match(SERVER, /const consentLabels = GFC_CONSENT_DEFS\.reduce/);
+  assert.doesNotMatch(SERVER, /emergencyFinancial: 'Emergency Treatment & Financial Responsibility'/);
+});

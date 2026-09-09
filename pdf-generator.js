@@ -659,7 +659,7 @@ async function generateEnrollmentPacketPDF(client) {
       doc.fontSize(9).fillColor(GFC_COLORS.muted).font('Helvetica');
       doc.text(`Generated ${new Date().toLocaleString('en-US')}`, 50, 92, { align: 'right', width: 512 });
       doc.fontSize(8).fillColor(GFC_COLORS.muted)
-        .text('Working draft — consent language pending counsel/licensure review. Test data until HIPAA-live.', 50, 92, { width: 380 });
+        .text('Test data until HIPAA-live.', 50, 92, { width: 380 });
 
       let y = 120;
       const heading = (t) => {
