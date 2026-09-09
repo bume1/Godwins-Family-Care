@@ -6167,6 +6167,11 @@ app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireCli
     if (place.facilityId) built.encounter.facility_id = place.facilityId;
     if (place.posCode) built.encounter.pos_code = place.posCode;
     const placeWarning = place.warning || null;
+    // The billing entity, from OpenEMR's own business-entity flag rather than
+    // config, so the two cannot drift apart unnoticed.
+    const hpBill = await resolveBillingForVisit(emr);
+    if (hpBill.facilityId) built.encounter.billing_facility = hpBill.facilityId;
+    const billWarning = hpBill.warning || null;
     const enc = await emr.createEncounter(puuid, built.encounter);
     const encounterUuid = enc && (enc.euuid || enc.uuid || enc.encounter_uuid || enc.id);
     if (!encounterUuid) return res.status(502).json({ error: 'OpenEMR did not return an encounter id' });
@@ -6180,6 +6185,7 @@ app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireCli
     // is logged and surfaced as such. The visit still stands either way.
     const warnings = [];
     if (placeWarning) warnings.push(placeWarning);
+    if (billWarning) warnings.push(billWarning);
     // The encounter's provider is the acting clinician (see createEncounter).
     // When they have no OpenEMR provider id the transport falls back to the
     // configured default so the visit still documents — say so rather than let
@@ -6558,10 +6564,38 @@ app.post('/api/clinical/patients/:clientId/activate', authenticateToken, require
 // design — do not couple this to the app/RDS shift store.
 // ============================================================
 
+// Only the visit category is a global. The two facility fields are resolved
+// per booking from two different sources — see resolveBillingForVisit and
+// resolveFacilityForVisit — because a single value for both is what put the
+// office on every home visit.
 const APPT_DEFAULTS = () => ({
-  categoryId: config.OPENEMR.ENCOUNTER_CATEGORY,
-  facilityId: config.OPENEMR.FACILITY_ID
+  categoryId: config.OPENEMR.ENCOUNTER_CATEGORY
 });
+
+// The billing entity on a claim. Read from OpenEMR (which records the primary
+// business entity) rather than config, so the two cannot drift apart silently.
+// Cached briefly: it changes about once a year, and every booking and swap
+// needs it.
+let billingFacilityCache = { at: 0, value: null };
+const BILLING_FACILITY_TTL_MS = 5 * 60 * 1000;
+const resolveBillingForVisit = async (emr) => {
+  const now = Date.now();
+  if (billingFacilityCache.value && (now - billingFacilityCache.at) < BILLING_FACILITY_TTL_MS) {
+    return billingFacilityCache.value;
+  }
+  let facilities = [];
+  try { facilities = await emr.getFacilities(); }
+  catch (e) {
+    return { facilityId: null, facilityName: null, source: 'unavailable',
+      error: 'FACILITY_LOOKUP_FAILED',
+      warning: `OpenEMR's facility list could not be read (${e.message.slice(0, 120)}), so the billing entity could not be determined.` };
+  }
+  const resolved = clinicalRepo.resolveBillingFacility({
+    facilities, configuredId: config.OPENEMR.BILLING_FACILITY_ID || null
+  });
+  billingFacilityCache = { at: now, value: resolved };
+  return resolved;
+};
 
 // Linkage pointers ONLY (per the 4.2 no-duplication rule):
 // { eid, clientId, encounterUuid, byId, byName, at }
@@ -6780,6 +6814,21 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
     if (built.error) return res.status(400).json({ error: built.error, code: built.code });
 
     const emr = openemr.forActor(req.user);
+
+    // The two facility fields, from two sources. `pc_facility` is WHERE the
+    // visit happens, so it follows the patient (telehealth keys off the
+    // appointment's own location marker). `pc_billing_location` is WHICH
+    // ENTITY bills, which never moves. Booking is not blocked when either is
+    // unresolved — the appointment is a calendar entry, and the encounter it
+    // becomes has its own hard block at signing — but the caller is told.
+    const apptWarnings = [];
+    const place = await resolveFacilityForVisit(emr, client, built.location);
+    if (place.facilityId) built.fields.pc_facility = String(place.facilityId);
+    if (place.warning) apptWarnings.push(place.warning);
+    const billTo = await resolveBillingForVisit(emr);
+    if (billTo.facilityId) built.fields.pc_billing_location = String(billTo.facilityId);
+    if (billTo.warning) apptWarnings.push(billTo.warning);
+
     const rows = await emr.listAppointmentRows();
     const conflict = clinicalRepo.findAppointmentConflict(rows, {
       providerId, date: body.date, startTime: body.startTime, durationMinutes: built.minutes
@@ -6802,7 +6851,8 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
     const readBack = await emr.getAppointmentRow(client.openEmrPatientId, eid).catch(() => null);
     res.json({
       message: 'Appointment created in OpenEMR',
-      appointment: readBack ? clinicalRepo.summarizeAppointmentRow(readBack, null) : { eid }
+      appointment: readBack ? clinicalRepo.summarizeAppointmentRow(readBack, null) : { eid },
+      warnings: apptWarnings.length ? apptWarnings : undefined
     });
   } catch (error) {
     console.error('Clinical appointment create error:', error);
@@ -6831,8 +6881,15 @@ app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requir
       title: body.title || row.pc_title,
       location: body.location || dec.location || 'home',
       notes: body.notes !== undefined ? body.notes : dec.notes
-    }, { categoryId: row.pc_catid, facilityId: row.pc_facility });
+    }, { categoryId: row.pc_catid });
     if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+    // A reschedule moves a visit in TIME, not in place, so the service facility
+    // is carried from the original row. The billing entity is re-resolved, not
+    // copied: rows booked before the split carry the service facility in that
+    // field, and copying would carry the error forward.
+    if (row.pc_facility) built.fields.pc_facility = String(row.pc_facility);
+    const rsBill = await resolveBillingForVisit(emr);
+    if (rsBill.facilityId) built.fields.pc_billing_location = String(rsBill.facilityId);
 
     const conflict = clinicalRepo.findAppointmentConflict(rows, {
       providerId, date: body.date, startTime: body.startTime,
@@ -6845,7 +6902,8 @@ app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requir
       });
     }
 
-    const { newRow, tombstone } = clinicalRepo.buildReschedulePayloads(row, built, { byName: req.user.name });
+    const { newRow, tombstone } = clinicalRepo.buildReschedulePayloads(row, built,
+      { byName: req.user.name, billingFacilityId: rsBill.facilityId });
     const swap = await emr.swapAppointment(row.puuid, row.pc_eid, [newRow, tombstone]);
     const [newEid, tombstoneEid] = swap.newEids;
     await migrateAppointmentLinkage(row.pc_eid, newEid);
@@ -6881,7 +6939,9 @@ app.post('/api/clinical/appointments/:eid/cancel', authenticateToken, requireCli
     if (loaded.error) return res.status(loaded.status).json({ error: loaded.error, code: loaded.code });
     const { row } = loaded;
 
-    const tombstone = clinicalRepo.buildCancelTombstone(row, { reason: reason.slice(0, 500), byName: req.user.name });
+    const cxBill = await resolveBillingForVisit(emr);
+    const tombstone = clinicalRepo.buildCancelTombstone(row,
+      { reason: reason.slice(0, 500), byName: req.user.name, billingFacilityId: cxBill.facilityId });
     const swap = await emr.swapAppointment(row.puuid, row.pc_eid, [tombstone]);
     const [tombstoneEid] = swap.newEids;
     await migrateAppointmentLinkage(row.pc_eid, tombstoneEid);
@@ -6914,7 +6974,9 @@ app.post('/api/clinical/appointments/:eid/no-show', authenticateToken, requireCl
     if (loaded.error) return res.status(loaded.status).json({ error: loaded.error, code: loaded.code });
     const { row } = loaded;
 
-    const swapRow = clinicalRepo.buildStatusSwap(row, clinicalRepo.APPT_STATUS.noShow, { byName: req.user.name });
+    const nsBill = await resolveBillingForVisit(emr);
+    const swapRow = clinicalRepo.buildStatusSwap(row, clinicalRepo.APPT_STATUS.noShow,
+      { byName: req.user.name, billingFacilityId: nsBill.facilityId });
     const swap = await emr.swapAppointment(row.puuid, row.pc_eid, [swapRow]);
     const [newEid] = swap.newEids;
     await migrateAppointmentLinkage(row.pc_eid, newEid);
@@ -7340,11 +7402,15 @@ app.post('/api/clinical/patients/:clientId/encounters', authenticateToken, requi
     if (place.facilityId) built.encounter.facility_id = place.facilityId;
     if (place.posCode) built.encounter.pos_code = place.posCode;
     const placeWarning = place.warning || null;
+    // The billing entity — the other half of the pair, and a different source.
+    const fuBill = await resolveBillingForVisit(emr);
+    if (fuBill.facilityId) built.encounter.billing_facility = fuBill.facilityId;
     const enc = await emr.createEncounter(puuid, built.encounter);
     const encounterUuid = enc && (enc.euuid || enc.uuid || enc.encounter_uuid || enc.id);
     if (!encounterUuid) return res.status(502).json({ error: 'OpenEMR did not return an encounter id' });
     const warnings = [];
     if (placeWarning) warnings.push(placeWarning);
+    if (fuBill.warning) warnings.push(fuBill.warning);
     // The encounter's provider is the acting clinician (see createEncounter).
     // When they have no OpenEMR provider id the transport falls back to the
     // configured default so the visit still documents — say so rather than let
@@ -7807,14 +7873,30 @@ app.put('/api/clinical/patients/:clientId/facility', authenticateToken, requireA
 app.get('/api/clinical/facilities', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     if (!openemr.isConfigured()) return res.json({ facilities: [], degraded: true, reason: 'OpenEMR is not configured' });
-    const rows = await openemr.forActor(req.user).getFacilities();
+    const emr = openemr.forActor(req.user);
+    const rows = await emr.getFacilities();
+    const billTo = await resolveBillingForVisit(emr);
     res.json({
       facilities: rows.map(f => ({
         id: String(f.id), name: f.name || '(unnamed facility)',
         billingLocation: f.billing_location === '1' || f.billing_location === 1 || f.billing_location === true,
+        // A facility that is not a service location cannot host an encounter,
+        // so an admin assigning patients needs to see it. Hickory Log shipped
+        // with it unchecked (verified live 2026-09-09), which would block
+        // signing for every patient assigned there.
+        serviceLocation: f.service_location === '1' || f.service_location === 1 || f.service_location === true,
+        posCode: f.pos_code ? String(f.pos_code) : null,
         city: f.city || null, state: f.state || null
       })),
-      defaultId: String(config.OPENEMR.FACILITY_ID)
+      // No `defaultId`. There is no default SERVICE facility — it comes from
+      // the patient — and offering one here is the global that this whole
+      // split exists to remove. The billing entity is reported instead, since
+      // that IS constant, and it is named so an admin can see which record
+      // OpenEMR considers the business entity.
+      billingFacilityId: billTo.facilityId ? String(billTo.facilityId) : null,
+      billingFacilityName: billTo.facilityName || null,
+      billingFacilitySource: billTo.source,
+      billingFacilityWarning: billTo.warning || null
     });
   } catch (error) {
     console.error('Facility list error:', error);

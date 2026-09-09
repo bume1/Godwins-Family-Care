@@ -224,23 +224,35 @@ const OPENEMR = Object.freeze({
   // Two DIFFERENT facilities, deliberately separate even though they default
   // to the same id today.
   //
-  //   SERVICE_FACILITY_ID  — WHERE CARE HAPPENS. Drives the encounter's
-  //     facility_id and therefore the POS that lands on the claim. For a
-  //     home-visit practice this must become the F1 private-residence record
-  //     (POS 12) once it exists; Hickory Log will be its own (13 or 14, pending
-  //     DCH); telehealth is 10.
-  //   BILLING_FACILITY_ID  — the BUSINESS ADDRESS on the claim. GFC's org
-  //     record (id 3, POS 11 Office). Nothing clinical happens there, and 11 is
-  //     the honest descriptor for that record.
+  // Two DIFFERENT facilities, and NEITHER is a plain global any more:
   //
-  // Conflating them is a silent billing error: every home visit would inherit
-  // the office POS, return 201, look right in Billing Manager, and surface as
-  // a denial much later. Phase 8.3 sets SERVICE_FACILITY_ID to the F1 record —
-  // owner-walked, see the 4.5 prompt Scope D.
-  // The BILLING facility: GFC's business address on the claim. This one is
-  // legitimately a global — it is the practice, not the patient.
-  FACILITY_ID: process.env.OPENEMR_FACILITY_ID || '3',
-  BILLING_FACILITY_ID: process.env.OPENEMR_BILLING_FACILITY_ID || process.env.OPENEMR_FACILITY_ID || '3',
+  //   SERVICE facility — WHERE CARE HAPPENS. Drives the encounter's
+  //     facility_id and the POS on the claim. Comes from the PATIENT's facility
+  //     assignment (clinicalRepository.resolveEncounterFacility), because each
+  //     patient lives somewhere fixed: private residence POS 12, Hickory Log
+  //     13, telehealth 10, office 11. There is deliberately no config value for
+  //     it — a global here is what puts POS 12 on a Hickory Log claim.
+  //   BILLING entity — WHO BILLS. Read from OpenEMR's primary-business-entity
+  //     flag (clinicalRepository.resolveBillingFacility). Constant across
+  //     patients, but read from the EMR rather than configured so it cannot
+  //     drift from what OpenEMR itself believes.
+  //
+  // Conflating them is a silent billing error: every home visit inherits the
+  // office POS, returns 201, looks right in Billing Manager, and surfaces as a
+  // denial much later.
+  // BILLING_FACILITY_ID is an OVERRIDE, not the source. The billing entity is
+  // read from OpenEMR, which records which facility is the primary business
+  // entity (clinicalRepository.resolveBillingFacility); this value only breaks
+  // a tie when OpenEMR names none or names several, and a value that disagrees
+  // with OpenEMR is reported rather than silently preferred.
+  //
+  // It deliberately does NOT fall back to OPENEMR_FACILITY_ID. It used to, and
+  // since the deployment sets only that one variable, the service location and
+  // the billing entity came from a single setting and therefore always matched
+  // — which for a practice whose care happens in patients' homes is precisely
+  // wrong (owner report, 2026-09-09). Empty is the correct default: it means
+  // "ask OpenEMR", not "reuse the service facility".
+  BILLING_FACILITY_ID: process.env.OPENEMR_BILLING_FACILITY_ID || '',
   // The SERVICE facility is NOT a global. It comes from the patient's facility
   // assignment (clinicalRepository.resolveEncounterFacility) because each
   // patient lives somewhere fixed. A global here is what would silently put
