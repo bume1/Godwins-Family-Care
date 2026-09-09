@@ -1307,6 +1307,118 @@ const parseGfcBlocks = (text) => {
   return out;
 };
 
+// ---- Patient-link duplicate guard (identity safety) ----
+// The link step used to POST a new OpenEMR Patient unconditionally, so every
+// retry minted another chart for the same person (the eight duplicate "Demo
+// Client" rows found on the dev instance). These helpers let the route look
+// for an existing chart FIRST and hand candidates back for a human to confirm.
+//
+// Deliberately NOT auto-linking: two different people can share a surname and
+// a date of birth, and a wrong link writes clinical data into someone else's
+// record. The system proposes, the clinician disposes.
+
+// Fold case, accents and punctuation so "O'Brien" matches "OBrien" and "Jose"
+// matches "Jose" with an accent. Separators are dropped rather than spaced, so
+// "Smith-Jones" and "SmithJones" are the same surname for matching.
+const normNamePart = (s) => String(s == null ? '' : s)
+  .normalize('NFD').replace(/[̀-ͯ]/g, '')
+  .toLowerCase().replace(/[^a-z0-9]/g, '');
+
+// A birthDate is only usable for matching when it is a real YYYY-MM-DD.
+const normBirthDate = (s) => {
+  const t = String(s == null ? '' : s).trim().slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(t) ? t : '';
+};
+
+// Identity key for an app client, derived the way clientToFhirPatient() derives
+// the record it would create — so the search looks for exactly the patient the
+// create would otherwise have made.
+const patientMatchKey = (client) => {
+  const intake = (client && client.intake) || {};
+  const parts = String((client && client.name) || '').trim().split(/\s+/).filter(Boolean);
+  const family = intake.lastName || parts.slice(-1)[0] || '';
+  const given = intake.firstName || parts.slice(0, -1).join(' ') || (parts.length === 1 ? parts[0] : '');
+  return {
+    family: normNamePart(family),
+    given: normNamePart(given),
+    birthDate: normBirthDate(intake.dob || (client && client.dob))
+  };
+};
+
+// Comparable identity out of a FHIR Patient resource. FHIR allows several name
+// entries; prefer the official one, else the first.
+const fhirPatientIdentity = (resource) => {
+  const names = Array.isArray(resource && resource.name) ? resource.name : [];
+  const pick = names.find(n => n && n.use === 'official') || names[0] || {};
+  const givenRaw = Array.isArray(pick.given) ? pick.given.filter(Boolean).join(' ') : pick.given;
+  return {
+    id: (resource && (resource.id || resource.uuid)) || null,
+    family: normNamePart(pick.family),
+    given: normNamePart(givenRaw),
+    birthDate: normBirthDate(resource && resource.birthDate),
+    displayName: [givenRaw, pick.family].filter(Boolean).join(' ').trim() || null,
+    displayBirthDate: (resource && resource.birthDate) || null
+  };
+};
+
+// Confidence of one candidate against the key. The surname must always match —
+// a shared first name and date of birth alone is not a patient match.
+//   exact    — surname, given name and date of birth all agree
+//   probable — surname and date of birth agree, given name differs (nickname,
+//              middle name carried in the given field, name change)
+//   possible — surname and given name agree but one side carries no date of
+//              birth, so the strongest identifier is simply absent
+// A surname match with two KNOWN and DIFFERENT dates of birth is not a
+// candidate at all — that is a different person.
+const MATCH_CONFIDENCE = { exact: 'exact', probable: 'probable', possible: 'possible' };
+const CONFIDENCE_RANK = { exact: 0, probable: 1, possible: 2 };
+
+const scorePatientMatch = (candidate, key) => {
+  if (!candidate || !key || !candidate.family || !key.family) return null;
+  if (candidate.family !== key.family) return null;
+  const bothHaveDob = !!candidate.birthDate && !!key.birthDate;
+  const dobAgrees = bothHaveDob && candidate.birthDate === key.birthDate;
+  const givenAgrees = !!candidate.given && candidate.given === key.given;
+  if (bothHaveDob && !dobAgrees) return null;
+  if (dobAgrees && givenAgrees) return MATCH_CONFIDENCE.exact;
+  if (dobAgrees) return MATCH_CONFIDENCE.probable;
+  if (givenAgrees) return MATCH_CONFIDENCE.possible;
+  return null;
+};
+
+// Candidates for the key, strongest first. `linkedIds` are OpenEMR ids already
+// claimed by another app client — still returned, but flagged, because linking
+// to one would point two app records at a single chart.
+const findExistingPatientMatches = (resources, key, linkedIds) => {
+  const claimed = linkedIds instanceof Set ? linkedIds : new Set((linkedIds || []).map(String));
+  return (Array.isArray(resources) ? resources : [])
+    .map(r => {
+      const identity = fhirPatientIdentity(r);
+      const confidence = scorePatientMatch(identity, key);
+      if (!confidence || !identity.id) return null;
+      return {
+        openEmrPatientId: String(identity.id),
+        name: identity.displayName,
+        birthDate: identity.displayBirthDate,
+        confidence,
+        alreadyLinkedToAnotherClient: claimed.has(String(identity.id))
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => (CONFIDENCE_RANK[a.confidence] - CONFIDENCE_RANK[b.confidence])
+      || a.openEmrPatientId.localeCompare(b.openEmrPatientId));
+};
+
+// FHIR Patient search params for the key. Searching on surname (plus birthdate
+// when known) keeps the net wide enough to catch nickname and middle-name
+// variants that an exact given-name search would miss.
+const patientSearchParams = (key) => {
+  if (!key || !key.family) return null;
+  const params = { family: key.family };
+  if (key.birthDate) params.birthdate = key.birthDate;
+  return params;
+};
+
 module.exports = {
   CARE_PLAN_FIELDS,
   buildCarePlanVersion,
@@ -1381,5 +1493,11 @@ module.exports = {
   recordCodeUsage,
   rankFavorites,
   buildStructuredNote,
-  parseGfcBlocks
+  parseGfcBlocks,
+  MATCH_CONFIDENCE,
+  patientMatchKey,
+  fhirPatientIdentity,
+  scorePatientMatch,
+  findExistingPatientMatches,
+  patientSearchParams
 };
