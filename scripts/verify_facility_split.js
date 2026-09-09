@@ -11,6 +11,7 @@
 // TEST DATA only. Appointments it creates are cancelled (tombstoned) at the end.
 const o = require('../openemr.js');
 const repo = require('../clinicalRepository.js');
+const config = require('../config.js');
 const e = o.forActor({ id: 'splitprobe', name: 'facility split probe', role: 'admin' });
 const U = 'a284d5c2-670e-4a62-aa95-2d1aa629003c';
 let pass = 0, fail = 0;
@@ -24,11 +25,22 @@ const ok = (c, l, x) => { c ? (pass++, console.log('  PASS  ' + l))
     `billing=${f.billing_location} primary=${f.primary_business_entity}  ${f.name}`));
   console.log('');
 
-  // ---- The billing entity is what OpenEMR says it is ----
-  const bill = repo.resolveBillingFacility({ facilities, configuredId: null });
-  ok(bill.facilityId, 'a billing entity resolves from OpenEMR', bill);
-  ok(bill.source === 'primary_business_entity' || bill.source === 'sole_billing_location',
-    `billing entity comes from OpenEMR's own flag (${bill.source})`, bill);
+  // ---- The billing entity, resolved exactly as the app resolves it ----
+  // Uses the REAL configured value, not null: the app's answer is what matters,
+  // and the owner's decision (facility 3) is expressed through config.
+  const bill = repo.resolveBillingFacility({
+    facilities, configuredId: config.OPENEMR.BILLING_FACILITY_ID || null });
+  ok(bill.facilityId, 'a billing entity resolves', bill);
+  ok(String(bill.facilityId) === String(config.OPENEMR.BILLING_FACILITY_ID),
+    `the configured billing entity (${config.OPENEMR.BILLING_FACILITY_ID}) is what the app uses`, bill);
+  const flagged = facilities.filter(f => String(f.primary_business_entity) === '1');
+  if (flagged.length === 1 && String(flagged[0].id) !== String(bill.facilityId)) {
+    ok(!!bill.warning,
+      `OpenEMR flags ${flagged[0].id} as primary but the practice bills ${bill.facilityId} — the disagreement MUST be reported`, bill);
+  } else {
+    ok(bill.warning === null || bill.warning === undefined,
+      'OpenEMR and the configured billing entity agree, so nothing is reported', bill);
+  }
 
   // ---- Each service facility keeps its OWN pos, and none is the biller ----
   const services = facilities.filter(f => String(f.service_location) === '1');

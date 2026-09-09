@@ -240,19 +240,22 @@ const OPENEMR = Object.freeze({
   // Conflating them is a silent billing error: every home visit inherits the
   // office POS, returns 201, looks right in Billing Manager, and surfaces as a
   // denial much later.
-  // BILLING_FACILITY_ID is an OVERRIDE, not the source. The billing entity is
-  // read from OpenEMR, which records which facility is the primary business
-  // entity (clinicalRepository.resolveBillingFacility); this value only breaks
-  // a tie when OpenEMR names none or names several, and a value that disagrees
-  // with OpenEMR is reported rather than silently preferred.
+  // WHO BILLS. Facility 3, Vinings — the owner's decision, 2026-09-09.
+  //
+  // This wins over OpenEMR's own primary-business-entity flag, which on this
+  // instance points at 4 (Buckhead). The practice decides who bills; OpenEMR's
+  // flag is not always maintained to match, and deferring to it would put the
+  // wrong address on every claim. The disagreement is REPORTED on every
+  // resolution (clinicalRepository.resolveBillingFacility) rather than
+  // swallowed, because the durable fix is to mark 3 primary in OpenEMR so the
+  // two agree — a warning nobody sees is how they drift apart again.
   //
   // It deliberately does NOT fall back to OPENEMR_FACILITY_ID. It used to, and
   // since the deployment sets only that one variable, the service location and
   // the billing entity came from a single setting and therefore always matched
-  // — which for a practice whose care happens in patients' homes is precisely
-  // wrong (owner report, 2026-09-09). Empty is the correct default: it means
-  // "ask OpenEMR", not "reuse the service facility".
-  BILLING_FACILITY_ID: process.env.OPENEMR_BILLING_FACILITY_ID || '',
+  // — precisely wrong for a practice whose care happens in patients' homes
+  // (owner report, 2026-09-09). The two are independent or they are not split.
+  BILLING_FACILITY_ID: process.env.OPENEMR_BILLING_FACILITY_ID || '3',
   // The SERVICE facility is NOT a global. It comes from the patient's facility
   // assignment (clinicalRepository.resolveEncounterFacility) because each
   // patient lives somewhere fixed. A global here is what would silently put

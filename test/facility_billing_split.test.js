@@ -33,19 +33,45 @@ test('billing facility resolves to the primary business entity', () => {
   assert.strictEqual(r.warning, null);
 });
 
-test('a configured id that disagrees with OpenEMR is reported, not silently preferred', () => {
-  // This is the live case: config defaulted to 3, OpenEMR names 4.
+test('an explicit configured id wins over OpenEMR, and the disagreement is reported', () => {
+  // The live case, and the owner's decision (2026-09-09): bill to 3 (Vinings),
+  // while OpenEMR's primary-business-entity flag points at 4 (Buckhead). The
+  // practice decides who bills; deferring to a flag nobody maintains would put
+  // the wrong address on every claim. But it is never silent — the warning is
+  // what eventually gets OpenEMR corrected.
   const r = repo.resolveBillingFacility({ facilities: FACILITIES, configuredId: '3' });
-  assert.strictEqual(r.facilityId, '4', "OpenEMR's own record wins");
-  assert.match(r.warning, /configured billing facility is 3/);
-  assert.match(r.warning, /admin should settle it/);
+  assert.strictEqual(r.facilityId, '3', "the practice's decision wins");
+  assert.strictEqual(r.source, 'configured');
+  assert.match(r.warning, /OpenEMR marks 4/);
+  assert.match(r.warning, /mark 3 as the primary business entity/);
 });
 
-test('ambiguous flags fall to the configured id and say why', () => {
+test('agreement produces no warning', () => {
+  const agreed = FACILITIES.map(f => ({ ...f, primary_business_entity: f.id === '3' ? '1' : '0' }));
+  const r = repo.resolveBillingFacility({ facilities: agreed, configuredId: '3' });
+  assert.strictEqual(r.facilityId, '3');
+  assert.strictEqual(r.warning, null, 'nothing to report once OpenEMR and the setting agree');
+});
+
+test('a configured id naming a facility that does not exist is surfaced', () => {
+  const r = repo.resolveBillingFacility({ facilities: FACILITIES, configuredId: '99' });
+  assert.strictEqual(r.facilityId, '4', "falls back to OpenEMR's own business entity");
+  assert.match(r.warning, /does not exist in OpenEMR/);
+});
+
+test('ambiguous flags with no configured id are reported, never guessed', () => {
+  // Several billing locations and no primary: there is no honest answer, and
+  // guessing puts an address on a claim.
+  const ambiguous = FACILITIES.map(f => ({ ...f, primary_business_entity: '0' }));
+  const r = repo.resolveBillingFacility({ facilities: ambiguous, configuredId: null });
+  assert.strictEqual(r.facilityId, null);
+  assert.strictEqual(r.error, repo.BILLING_FACILITY_UNRESOLVED);
+});
+
+test('ambiguous flags WITH a configured id use it and say why', () => {
   const ambiguous = FACILITIES.map(f => ({ ...f, primary_business_entity: '0' }));
   const r = repo.resolveBillingFacility({ facilities: ambiguous, configuredId: '3' });
   assert.strictEqual(r.facilityId, '3');
-  assert.strictEqual(r.source, 'configured');
   assert.match(r.warning, /2 facilities as billing locations/);
 });
 
@@ -69,7 +95,7 @@ test('service facility follows the patient, and carries that facility POS', () =
   assert.strictEqual(home.posCode, '12');
 
   // The whole point: two patients, two different places, one billing entity.
-  const bill = repo.resolveBillingFacility({ facilities: FACILITIES, configuredId: null });
+  const bill = repo.resolveBillingFacility({ facilities: FACILITIES, configuredId: '3' });
   assert.notStrictEqual(hickory.facilityId, bill.facilityId);
   assert.notStrictEqual(home.facilityId, bill.facilityId);
 });
