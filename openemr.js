@@ -313,7 +313,20 @@ const forActor = (actor) => {
         // billing_facility is the practice's business address, which IS global.
         billing_facility: config.OPENEMR.BILLING_FACILITY_ID,
         sensitivity: 'normal',
-        provider_id: config.OPENEMR.PROVIDER_ID,
+        // The encounter's provider is the CLINICIAN WHO SAW THE PATIENT, taken
+        // from the actor this client was built for. It used to be
+        // config.OPENEMR.PROVIDER_ID unconditionally, which meant every
+        // encounter for every patient carried the same id: a visit signed by
+        // one clinician read provider 1 on the encounter and the correct
+        // provider on its own charge, so the chart disagreed with the claim it
+        // produced (shadow-data audit, 2026-09-08, G7).
+        //
+        // Resolved here rather than at each call site so a route added later
+        // cannot reintroduce it by forgetting to pass one. The config value is
+        // a last resort only: documenting a visit is never blocked on admin
+        // setup, and sign-and-close already refuses to post charges (with a
+        // named warning) when the clinician has no provider id on file.
+        provider_id: (actor && actor.openEmrProviderId) || config.OPENEMR.PROVIDER_ID,
         ...fields
       };
       const row = await apiWrite('POST', `patient/${encodeURIComponent(puuid)}/encounter`, body, 'encounter', puuid);
@@ -422,9 +435,33 @@ const forActor = (actor) => {
       return apiWrite('PUT', `patient/${pid}/medication/${encodeURIComponent(medUuid)}`,
         { ...med, begdate: toEmrDatetime(med.begdate), enddate: toEmrDatetime(med.enddate) }, 'medication', puuid);
     },
+    // BEGDATE IS A PLAIN DATE HERE, not a datetime. This route rejects
+    // "YYYY-MM-DD 00:00:00" with `begdate must be a valid date` while storing
+    // the value back as a datetime, so the shape it emits is not the shape it
+    // accepts. The old code ran begdate through toEmrDatetime (per a 7.0.4-era
+    // note) and every allergy write was refused.
+    //
+    // And it was refused SILENTLY: the route answers HTTP 200 with a
+    // validationErrors map and `data: []`, which unwrapApi turns into an empty
+    // array and nothing throws. Same trap as the soap_note and encounter PUT
+    // writes, so this checks the body rather than the status code.
+    // Verified live 2026-09-08: datetime refused, plain date accepted and
+    // readable back as FHIR AllergyIntolerance.
     async addAllergy(puuid, allergy) {
-      return apiWrite('POST', `patient/${encodeURIComponent(puuid)}/allergy`,
-        { ...allergy, begdate: toEmrDatetime(allergy.begdate) }, 'allergy', puuid);
+      const body = { ...allergy };
+      if (body.begdate) body.begdate = String(body.begdate).slice(0, 10);
+      const res = await rawRequest({ method: 'POST', url: apiUrl(`patient/${encodeURIComponent(puuid)}/allergy`), body });
+      const data = expectOk(res, 'write allergy');
+      const invalid = data && data.validationErrors;
+      if (invalid && (Array.isArray(invalid) ? invalid.length : Object.keys(invalid).length)) {
+        throw new OpenEmrError(`OpenEMR rejected the allergy: ${JSON.stringify(invalid)}`, 422, data);
+      }
+      const row = unwrapApi(data);
+      if (!row || (Array.isArray(row) && !row.length)) {
+        throw new OpenEmrError('OpenEMR accepted the allergy request but wrote no row', 422, data);
+      }
+      logEmrAccess(actor, 'write', 'allergy', puuid, {});
+      return row;
     },
 
     // ---- Appointments (Session 4.2) ----
@@ -517,9 +554,17 @@ const forActor = (actor) => {
     // /api/patient/{pid}/prescription route (404); the top-level route takes
     // `patient_id` in the BODY. Replaces the 4.4 workaround that packed a sig
     // into a medication-list row title because 7.0.4 had no Rx write.
-    async createPrescription(puuid, rx) {
+    // `encounterUuid` is optional but should always be passed from a visit:
+    // without it the row stores euuid null and there is no way to tell from
+    // OpenEMR which visit a prescription came from, or (since FHIR
+    // MedicationRequest carries no requester either) who wrote it beyond the
+    // name in the note (shadow-data audit, 2026-09-08, G6). The route wants
+    // the NUMERIC eid under `encounter`; passing the uuid does not link.
+    async createPrescription(puuid, rx, encounterUuid) {
       const pid = await resolvePid(puuid);
-      const row = await apiWrite('POST', 'prescription', { ...rx, patient_id: pid },
+      const body = { ...rx, patient_id: pid };
+      if (encounterUuid) body.encounter = await resolveEid(puuid, encounterUuid);
+      const row = await apiWrite('POST', 'prescription', body,
         'prescription', puuid, 'create prescription');
       return row;
     },

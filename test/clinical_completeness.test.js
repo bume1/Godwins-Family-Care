@@ -196,7 +196,17 @@ test('prescriptions are validated, stamped with the prescriber, and marked not t
   assert.equal(row.route, 'oral');
   assert.equal(row.interval, 'BID');
   assert.equal(row.refills, 3);
-  assert.equal(row.start_date, '2026-09-04');
+  // Shadow-data audit G5a: the prescriptions table reads `date_added`.
+  // `start_date` is accepted by the route and silently discarded, so every Rx
+  // written with it landed dateless. Verified live both ways 2026-09-08.
+  assert.equal(row.date_added, '2026-09-04');
+  assert.ok(!('start_date' in row), 'start_date is silently discarded by OpenEMR — must not be sent');
+  // G5b: drug_route and drug_interval are EMPTY option lists on this instance,
+  // so route and frequency cannot resolve to an id and the columns store null.
+  // They are clinical content, so the note must carry them regardless. The day
+  // the lists are seeded the structured fields above start working too.
+  assert.match(row.note, /oral/, 'route must survive in the note while drug_route is unseeded');
+  assert.match(row.note, /BID/, 'frequency must survive in the note while drug_interval is unseeded');
   // OpenEMR attributes every API write to the service account, so the
   // prescriber must be stamped or it is unrecoverable from the EMR side.
   assert.match(row.note, /Prescriber: .*NPI/);
@@ -323,4 +333,119 @@ test('bundleResources dedupes the duplicated Encounter rows this instance return
   ] };
   assert.deepEqual(bundleResources(bundle).map(r => `${r.resourceType}/${r.id}`), ['Encounter/e1', 'Encounter/e2', 'Condition/e1']);
   assert.deepEqual(bundleResources(null), []);
+});
+
+// ============================================================
+// Shadow-data audit regression guards (2026-09-08)
+//
+// Each of these failed live BEHIND A 201/200 before the fix. The app looked
+// fine; OpenEMR held a shell. They are pinned here because none of them is
+// visible from the app side, which is exactly why they survived Session 4.5's
+// own verification. See docs/GFC_Shadow_Data_Audit.md.
+// ============================================================
+
+test('G3: an order payload carries the test name and the diagnosis link', () => {
+  // buildOrder stores `tests` as STRINGS and the dx field as `diagnosisCodes`.
+  // The original buildOrderPayload read t.name and order.diagnoses, so both
+  // went out empty and every order filed as a nameless, dx-less shell.
+  const built = R.buildOrder({
+    id: 'o1', clientId: 'c1', puuid: 'p1', encounterUuid: 'e1',
+    input: { orderType: 'lab', tests: ['CBC with differential', 'Basic metabolic panel'], diagnosisCodes: ['I10'] },
+    actor: FNP, encounterDiagnoses: [{ code: 'I10' }]
+  });
+  assert.ok(!built.error, built.error);
+  assert.deepEqual(built.order.tests, ['CBC with differential', 'Basic metabolic panel']);
+
+  const payload = R.buildOrderPayload(built.order, { providerId: 5 });
+  assert.equal(payload.codes.length, 2);
+  assert.equal(payload.codes[0].code_text, 'CBC with differential');
+  assert.equal(payload.codes[1].code_text, 'Basic metabolic panel');
+  for (const c of payload.codes) {
+    assert.ok(c.code_text, 'a test name must never go out blank');
+    assert.deepEqual(c.diagnoses, [{ code_type: 'ICD10', code: 'I10' }]);
+  }
+  // The record has no `diagnoses` key at all — reading it is the original bug.
+  assert.ok(!('diagnoses' in built.order), 'the order dx field is diagnosisCodes; a `diagnoses` key would mask the bug');
+
+  // A coded object entry (a future test picker) must still work.
+  const coded = R.buildOrderPayload(
+    { ...built.order, tests: [{ code: '85025', name: 'CBC with differential' }] }, { providerId: 5 });
+  assert.equal(coded.codes[0].code, '85025');
+  assert.equal(coded.codes[0].code_text, 'CBC with differential');
+
+  // The test name must go out under ALL THREE keys. The 6B controller's charge
+  // half reads `code_text` but its order half reads `name`/`title`, so sending
+  // only code_text stored a blank procedure_name. That was first written up as
+  // a server defect; it is our own two halves disagreeing on a field name.
+  // Proven live both ways 2026-09-08.
+  for (const c of payload.codes) {
+    assert.equal(c.name, c.code_text, 'the order half of the 6B controller reads `name`');
+    assert.equal(c.title, c.code_text, 'the order half of the 6B controller reads `title`');
+    assert.ok(c.name, 'a blank name stores a nameless order row');
+  }
+});
+
+test('G5: the prescriber stamp survives note truncation, the sig is what gets trimmed', () => {
+  // The note is capped at 255. Attribution is the one thing that must not be
+  // lost to a long sig, because OpenEMR attributes the write to the service
+  // account and the note is the only place the prescriber exists.
+  const rx = R.buildPrescription({
+    id: 'r1', clientId: 'c1', puuid: 'p1', encounterUuid: 'e1',
+    input: {
+      drug: 'Lisinopril', dose: '10 mg', route: 'oral', frequency: 'once daily',
+      quantity: 30, refills: 3, date: '2026-09-08', instructions: 'X'.repeat(900)
+    },
+    actor: FNP
+  }).prescription;
+  const row = R.prescriptionToEmrRow(rx);
+  assert.ok(row.note.length <= 255);
+  assert.match(row.note, /Prescriber: .*NPI/, 'the prescriber must survive truncation');
+  assert.match(row.note, /New Rx/);
+  assert.equal(row.date_added, '2026-09-08');
+});
+
+test('G7: the encounter provider is the acting clinician, not a config constant', () => {
+  // Resolved in openemr.js createEncounter from the actor the client was built
+  // for. Asserted here at the source so a refactor that reinstates the
+  // unconditional config default fails the build rather than the next claim.
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'openemr.js'), 'utf8');
+  const line = src.split('\n').find(l => /^\s*provider_id:/.test(l));
+  assert.ok(line, 'createEncounter must set provider_id');
+  assert.match(line, /actor\s*&&\s*actor\.openEmrProviderId/,
+    'the encounter provider must come from the acting clinician; a bare config default puts the wrong provider on every claim');
+});
+
+test('G4: an uncoded allergy renders as its allergen, never "Unknown"', () => {
+  // OpenEMR returns a free-text allergen with code = the data-absent-reason
+  // "Unknown" and the real name only in the narrative text.div. Reading `code`
+  // alone made every allergy in the chart read "Unknown". Shape taken verbatim
+  // from a live FHIR read 2026-09-08.
+  const live = {
+    id: 'a2b34c0a',
+    text: { status: 'additional', div: "<div xmlns='http://www.w3.org/1999/xhtml'>Penicillin</div>" },
+    clinicalStatus: { coding: [{ code: 'active', display: 'Active' }] },
+    code: { coding: [{ system: 'http://terminology.hl7.org/CodeSystem/data-absent-reason', code: 'unknown', display: 'Unknown' }] }
+  };
+  assert.equal(R.summarizeAllergy(live).title, 'Penicillin');
+  assert.notEqual(R.summarizeAllergy(live).title, 'Unknown');
+
+  // A properly coded allergen still wins over the narrative.
+  const coded = { ...live, code: { text: 'Amoxicillin', coding: [{ system: 'http://www.nlm.nih.gov/research/umls/rxnorm', code: '723' }] } };
+  assert.equal(R.summarizeAllergy(coded).title, 'Amoxicillin');
+
+  // Nothing at all is still not a crash and still not a blank row.
+  assert.equal(R.summarizeAllergy({ id: 'x' }).title, 'Unspecified allergy');
+});
+
+test('G4: the allergy write sends a plain date and refuses a silent no-op', () => {
+  // Two live findings pinned at the source. The allergy route rejects
+  // "YYYY-MM-DD 00:00:00" as an invalid date while STORING it back as one, and
+  // it reports that refusal as HTTP 200 with a validationErrors map, so a write
+  // that lands nothing looks identical to one that succeeds.
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'openemr.js'), 'utf8');
+  const fn = src.slice(src.indexOf('async addAllergy('), src.indexOf('async addAllergy(') + 1400);
+  assert.ok(!/toEmrDatetime\(\s*allergy\.begdate/.test(fn),
+    'begdate must NOT go through toEmrDatetime — the allergy route rejects a datetime');
+  assert.match(fn, /slice\(0,\s*10\)/, 'begdate must be trimmed to a plain date');
+  assert.match(fn, /validationErrors/, 'the allergy write must check the body, not the status code');
 });

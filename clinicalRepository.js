@@ -182,9 +182,24 @@ const summarizeCondition = (r) => ({
   status: codeableText(r.clinicalStatus) || 'unknown',
   onset: r.onsetDateTime || null
 });
+// An allergen entered as free text (which is every allergy this practice
+// records, since OpenEMR has no RxNorm allergen picker configured) comes back
+// from FHIR with `code` set to the data-absent-reason "Unknown" and the actual
+// allergen ONLY in the narrative `text.div`. Reading `code` alone rendered
+// every allergy in the chart as "Unknown" — including the ones that were there
+// before this session. Verified live 2026-09-08 on all four rows.
+const NARRATIVE_ABSENT = /data-absent-reason/;
+const narrativeText = (r) => String(((r && r.text) || {}).div || '')
+  .replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+const allergenName = (r) => {
+  const coded = codeableText(r && r.code);
+  const absent = ((((r && r.code) || {}).coding || [])[0] || {}).system || '';
+  if (coded && !NARRATIVE_ABSENT.test(absent)) return coded;
+  return narrativeText(r) || coded || 'Unspecified allergy';
+};
 const summarizeAllergy = (r) => ({
   id: r.id,
-  title: codeableText(r.code),
+  title: allergenName(r),
   criticality: r.criticality || null,
   status: codeableText(r.clinicalStatus) || 'active'
 });
@@ -835,20 +850,39 @@ const buildPrescription = ({ id, clientId, puuid, encounterUuid, input, actor, a
 // API write to the gfc-app-api service account, so without this stamp the
 // prescriber is unrecoverable from the EMR side (attribution interim, spec §4,
 // until Session 5 per-user auth).
-const prescriptionToEmrRow = (rx) => ({
-  drug: String(rx.drug || '').slice(0, 150),
-  dosage: `${rx.dose}`.slice(0, 100),
-  quantity: String(rx.quantity),
-  route: rx.route || null,
-  interval: String(rx.frequency || '').slice(0, 100),
-  refills: rx.refills,
-  start_date: rx.date,
-  note: [
-    rx.instructions ? `Sig: ${rx.instructions}` : null,
-    rx.kind === 'refill' ? 'Refill' : 'New Rx',
-    `Prescriber: ${(rx.prescriber && rx.prescriber.name) || 'unknown'} (NPI ${(rx.prescriber && rx.prescriber.npi) || 'none'})`
-  ].filter(Boolean).join(' | ').slice(0, 255)
-});
+//
+// TWO THINGS THIS GUARDS, both found by the shadow-data audit (2026-09-08):
+//
+// G5a — the date. The prescriptions table reads `date_added`. `start_date` is
+// accepted and silently discarded, so every Rx written before this landed with
+// a null date. Verified live both ways.
+//
+// G5b — route and frequency. OpenEMR resolves both against its `drug_route`
+// and `drug_interval` option lists, and on this instance BOTH LISTS ARE EMPTY
+// (0 rows, verified live), so there is no id for a value to resolve to and the
+// columns store null. That is an instance data gap like the ICD-10 load, not
+// something the app can fix by sending a different shape. The structured
+// fields are still sent, so they start working the day the lists are seeded.
+//
+// Until then route and frequency ride in `note`, which is free text and does
+// persist. A prescription without a route or a frequency is not a prescription,
+// so the sig is assembled first and the note is trimmed from the SIG end: the
+// prescriber stamp is attribution and must survive truncation intact.
+const prescriptionToEmrRow = (rx) => {
+  const tail = ` | ${rx.kind === 'refill' ? 'Refill' : 'New Rx'} | Prescriber: ${(rx.prescriber && rx.prescriber.name) || 'unknown'} (NPI ${(rx.prescriber && rx.prescriber.npi) || 'none'})`;
+  const sig = [rx.dose, rx.route, rx.frequency].filter(Boolean).join(' ');
+  const head = [sig ? `Sig: ${sig}` : null, rx.instructions].filter(Boolean).join('. ');
+  return {
+    drug: String(rx.drug || '').slice(0, 150),
+    dosage: `${rx.dose}`.slice(0, 100),
+    quantity: String(rx.quantity),
+    route: rx.route || null,
+    interval: String(rx.frequency || '').slice(0, 100),
+    refills: rx.refills,
+    date_added: rx.date,
+    note: (head.slice(0, Math.max(0, 255 - tail.length)) + tail).slice(0, 255)
+  };
+};
 
 // ---- Facility and POS resolution (Session 4.5, owner spec 2026-09-08) ----
 //
@@ -963,11 +997,34 @@ const buildOrderPayload = (order, { providerId } = {}) => ({
   date_ordered: (order && order.date) || undefined,
   clinical_hx: String((order && order.clinicalHistory) || '').slice(0, 255) || undefined,
   patient_instructions: String((order && order.instructions) || '').slice(0, 255) || undefined,
-  codes: ((order && order.tests) || []).map(t => ({
-    code: t.code || undefined,
-    code_text: String(t.name || t.description || '').slice(0, 255),
-    diagnoses: ((order && order.diagnoses) || []).map(c => ({ code_type: 'ICD10', code: c }))
-  }))
+  // `order.tests` is an array of STRINGS (buildOrder runs it through
+  // sanitizeStringArray), and the diagnosis field on an order record is
+  // `diagnosisCodes`, not `diagnoses`. Reading `t.name` off a string and
+  // `order.diagnoses` off a record that has no such key both yield undefined,
+  // which is how every order filed with a blank test name and no diagnosis
+  // link while still returning 201 (shadow-data audit, 2026-09-08, G3).
+  // Object entries are tolerated so a future coded-test picker needs no change
+  // here. Unit tested for exactly this in test/clinical_completeness.test.js.
+  codes: ((order && order.tests) || []).map(t => {
+    const isObj = t && typeof t === 'object';
+    const name = isObj ? String(t.name || t.description || '') : String(t || '');
+    // NAME/TITLE vs CODE_TEXT: the 6B controller's charge half reads
+    // `code_text`, but its ORDER half reads `name` and `title`
+    // (GfcChargeRestController::postOrder → procedure_order_code). Sending only
+    // code_text stored a blank test name, which was first misread as a server
+    // defect; it is our own two halves disagreeing on a field name. All three
+    // go out so the name lands on the patch as installed, with no OpenEMR
+    // rebuild, and keeps landing if the controller is later made to prefer
+    // code_text like its charge half does. Proven live both ways 2026-09-08.
+    const label = name.slice(0, 255);
+    return {
+      code: (isObj && t.code) ? String(t.code) : undefined,
+      code_text: label,
+      name: label,
+      title: label,
+      diagnoses: ((order && order.diagnosisCodes) || []).map(c => ({ code_type: 'ICD10', code: c }))
+    };
+  })
 });
 
 // ---- Order capture (Scope D — labs / imaging / procedures; no HL7) ----
