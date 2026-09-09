@@ -200,6 +200,46 @@ const SHIFT_STATUS_TIMESTAMP = Object.freeze({
   open: 'reopened_at'
 });
 
+// ---- License requirement on a shift ----------------------------------------
+// A shift's requirement has three readings and they are NOT the same:
+//   'any'            explicitly open to every license level — a stated intent
+//   a license level  that level or higher (scope is cumulative up the ladder)
+//   anything else    unrecognized, so the shift is invisible to everyone
+//
+// "Open to all" used to be expressed only by leaving the field blank, which
+// meant an admin who never touched the dropdown posted a skilled shift to the
+// whole roster by accident. 'any' makes the permissive case something someone
+// chose. A blank is still read as open — rows already stored carry one — but
+// the admin form no longer has a blank default.
+const LICENSE_REQUIREMENT_ANY = 'any';
+
+function normalizeLicenseRequirement(raw) {
+  const v = String(raw === null || raw === undefined ? '' : raw).trim().toLowerCase();
+  if (v === '' || v === LICENSE_REQUIREMENT_ANY) return { ok: true, level: null };
+  const level = cg.normalizeLevel(v);
+  return level ? { ok: true, level } : { ok: false, level: null };
+}
+
+const shiftRequirement = (shift) =>
+  normalizeLicenseRequirement(shift && (shift.required_license_level !== undefined && shift.required_license_level !== null
+    ? shift.required_license_level
+    : shift.requiredLicenseLevel));
+
+// What the requirement says, in words. Silence is not the same as a stated
+// fact, so an open-to-all shift SAYS it rather than simply omitting a line.
+function shiftLevelLabel(shift) {
+  const r = shiftRequirement(shift);
+  if (!r.ok) return 'Requirement not recognized — nobody can take this shift';
+  if (!r.level) return 'Open to all license levels';
+  if (r.level === 'lpn') return 'LPN only';
+  return `${cg.LICENSE_LABELS[r.level]} and above`;
+}
+
+const isOpenToAllLevels = (shift) => {
+  const r = shiftRequirement(shift);
+  return r.ok && !r.level;
+};
+
 // ---- Open-pool eligibility -------------------------------------------------
 // A caregiver sees an open shift only when their license level meets the
 // requirement AND the shift is open to them. Anything else is invisible —
@@ -210,12 +250,12 @@ function isEligibleForShift(caregiver, shift, client) {
   if (!shift) return false;
 
   const level = cg.normalizeLevel(caregiver.licenseLevel);
-  const required = cg.normalizeLevel(shift.required_license_level || shift.requiredLicenseLevel);
-  // A shift with no stated requirement is open to any caregiver; a shift with
-  // one needs that level or higher. An unrecognized requirement is NOT treated
-  // as "no requirement" — that would open a skilled shift to a sitter.
-  if ((shift.required_license_level || shift.requiredLicenseLevel) && !required) return false;
-  if (required && cg.LEVEL_RANK[level] < cg.LEVEL_RANK[required]) return false;
+  // 'any' (or a legacy blank) is open to every caregiver; a level means that
+  // level or higher. An unrecognized requirement is NOT treated as "no
+  // requirement" — that would open a skilled shift to a sitter.
+  const required = shiftRequirement(shift);
+  if (!required.ok) return false;
+  if (required.level && cg.LEVEL_RANK[level] < cg.LEVEL_RANK[required.level]) return false;
 
   const visibility = shift.pool_visibility || shift.poolVisibility || 'all_eligible';
   if (visibility === 'care_team') {
@@ -230,9 +270,12 @@ function eligibilityReason(caregiver, shift, client) {
   if (!cg.isCaregiver(caregiver)) return 'not a caregiver';
   if (caregiver.accountStatus === 'inactive') return 'account inactive';
   const level = cg.normalizeLevel(caregiver.licenseLevel);
-  const required = cg.normalizeLevel(shift && (shift.required_license_level || shift.requiredLicenseLevel));
-  if (required && cg.LEVEL_RANK[level] < cg.LEVEL_RANK[required]) {
-    return `license level ${cg.LICENSE_LABELS[level]} is below the required ${cg.LICENSE_LABELS[required]}`;
+  const required = shiftRequirement(shift);
+  if (!required.ok) {
+    return 'the shift\'s license requirement is not recognized, so nobody can take it';
+  }
+  if (required.level && cg.LEVEL_RANK[level] < cg.LEVEL_RANK[required.level]) {
+    return `license level ${cg.LICENSE_LABELS[level]} is below the required ${cg.LICENSE_LABELS[required.level]}`;
   }
   const visibility = shift && (shift.pool_visibility || shift.poolVisibility);
   if (visibility === 'care_team' && !(client && cg.isAssignedToCaregiver(caregiver, client))) {
@@ -454,9 +497,12 @@ function validateShift(input) {
   }
   if (!body.clientId) errors.push({ field: 'clientId', code: 'CLIENT_REQUIRED', message: 'Pick a client.' });
 
-  const required = body.requiredLicenseLevel;
-  if (required && !cg.normalizeLevel(required)) {
-    errors.push({ field: 'requiredLicenseLevel', code: 'LICENSE_LEVEL_INVALID', message: `"${required}" is not a license level.` });
+  const required = normalizeLicenseRequirement(body.requiredLicenseLevel);
+  if (!required.ok) {
+    errors.push({
+      field: 'requiredLicenseLevel', code: 'LICENSE_LEVEL_INVALID',
+      message: `"${body.requiredLicenseLevel}" is not a license level. Use a level, or "any" to open the shift to every caregiver.`
+    });
   }
   const visibility = body.poolVisibility || 'all_eligible';
   if (!['all_eligible', 'care_team'].includes(visibility)) {
@@ -470,7 +516,10 @@ function validateShift(input) {
       clientId: body.clientId,
       start: isFinite(start) ? new Date(start).toISOString() : null,
       end: isFinite(end) ? new Date(end).toISOString() : null,
-      requiredLicenseLevel: cg.normalizeLevel(required),
+      // 'any' is stored as null, so eligibility has exactly one shape to read
+      // and no row carries a second spelling of "no requirement".
+      requiredLicenseLevel: required.level,
+      openToAllLevels: required.ok && !required.level,
       poolVisibility: visibility,
       careTier: body.careTier ? String(body.careTier).trim().slice(0, 20) : null,
       notes: String(body.notes || '').trim().slice(0, 2000)
@@ -483,6 +532,7 @@ module.exports = {
   validateAvailability, availabilityCoversShift,
   SHIFT_STATUSES, SHIFT_TRANSITIONS, SHIFT_STATUS_TIMESTAMP,
   canTransitionShift, transitionRefusal, validateShift,
+  LICENSE_REQUIREMENT_ANY, normalizeLicenseRequirement, shiftLevelLabel, isOpenToAllLevels,
   isEligibleForShift, eligibilityReason, shiftsOverlap, findShiftConflict, BLOCKING_STATUSES,
   DEFAULT_GEOFENCE_METERS, DEFAULT_GRACE_MINUTES, distanceMeters, geofenceRadiusFor, clientCoords,
   evaluateGeofence, TIME_LOG_FLAGS, clockInFlags, clockOutFlags, totalMinutes, minutesToHours,

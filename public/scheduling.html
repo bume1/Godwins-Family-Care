@@ -112,27 +112,36 @@ const PostShift = ({ roster, onPosted, setErr, setOk }) => {
   const [date, setDate] = useState(todayPlus(1));
   const [start, setStart] = useState('09:00');
   const [end, setEnd] = useState('13:00');
+  // No blank default. "Open to everyone" is a choice an admin makes, not what
+  // happens when nobody touches the dropdown — a skilled shift silently posted
+  // to the whole roster is exactly the accident this prevents.
   const [level, setLevel] = useState('');
   const [visibility, setVisibility] = useState('all_eligible');
+  const [assignTo, setAssignTo] = useState('');
   const [notes, setNotes] = useState('');
   const [busy, setBusy] = useState(false);
+
+  const RANK = { sitter: 0, pca: 1, cna: 2, lpn: 3 };
+  const canWork = (c) => !level || level === 'any' || RANK[c.licenseLevel] >= RANK[level];
+  const eligible = roster.caregivers.filter(canWork);
 
   const post = async () => {
     setErr(''); setOk(''); setBusy(true);
     try {
-      await api('/api/scheduling/shifts', {
+      const res = await api('/api/scheduling/shifts', {
         method: 'POST',
         body: JSON.stringify({
           clientId,
           start: new Date(`${date}T${start}`).toISOString(),
           end: new Date(`${date}T${end}`).toISOString(),
-          requiredLicenseLevel: level || null,
+          requiredLicenseLevel: level,
           poolVisibility: visibility,
+          assignToCaregiverId: assignTo || null,
           notes
         })
       });
-      setOk('Shift posted to the open pool.');
-      setNotes('');
+      setOk((res && res.message) || 'Shift posted.');
+      setNotes(''); setAssignTo('');
       await onPosted();
     } catch (e) {
       setErr(e.data && e.data.errors ? e.data.errors.map(x => x.message).join(' ') : e.message);
@@ -142,7 +151,10 @@ const PostShift = ({ roster, onPosted, setErr, setOk }) => {
   return (
     <div className="card">
       <h2>Post a shift</h2>
-      <p className="sub">Open shifts are visible only to caregivers whose license level meets the requirement.</p>
+      <p className="sub">
+        Post to the open pool for caregivers to claim, or straight to one caregiver to accept.
+        An open shift is visible only to caregivers whose license level meets the requirement.
+      </p>
       <div className="grid">
         <div>
           <label>Client</label>
@@ -155,9 +167,10 @@ const PostShift = ({ roster, onPosted, setErr, setOk }) => {
         <div><label>Start</label><input type="time" value={start} onChange={e => setStart(e.target.value)} /></div>
         <div><label>End</label><input type="time" value={end} onChange={e => setEnd(e.target.value)} /></div>
         <div>
-          <label>Minimum license level</label>
-          <select value={level} onChange={e => setLevel(e.target.value)}>
-            <option value="">Any caregiver</option>
+          <label>Who can take it</label>
+          <select value={level} onChange={e => { setLevel(e.target.value); setAssignTo(''); }}>
+            <option value="">— Choose —</option>
+            <option value="any">Anyone — all license levels</option>
             <option value="sitter">Sitter and above</option>
             <option value="pca">PCA and above</option>
             <option value="cna">CNA and above</option>
@@ -171,7 +184,28 @@ const PostShift = ({ roster, onPosted, setErr, setOk }) => {
             <option value="care_team">This client's care team only</option>
           </select>
         </div>
+        <div>
+          <label>Post directly to (optional)</label>
+          <select value={assignTo} onChange={e => setAssignTo(e.target.value)} disabled={!level}>
+            <option value="">Open pool — anyone eligible can claim it</option>
+            {eligible.map(c => (
+              <option key={c.id} value={c.id}>{c.name}{c.licenseLabel ? ` — ${c.licenseLabel}` : ''}</option>
+            ))}
+          </select>
+        </div>
       </div>
+      {level === 'any' && (
+        <div className="note">
+          <b>This shift will be open to every license level.</b>
+          A Sitter can claim it alongside a CNA. Set a minimum level instead if the visit needs one.
+        </div>
+      )}
+      {assignTo && (
+        <div className="note">
+          <b>Posting straight to one caregiver.</b>
+          They are offered the shift and it is theirs once they accept. A decline puts it back in the open pool.
+        </div>
+      )}
       <div style={{ marginTop: 11 }}>
         <label>Notes for the caregiver</label>
         <textarea value={notes} onChange={e => setNotes(e.target.value)} maxLength={2000} />
@@ -184,8 +218,8 @@ const PostShift = ({ roster, onPosted, setErr, setOk }) => {
         </div>
       )}
       <div className="btns">
-        <button className="btn gold" disabled={!clientId || busy} onClick={post}>
-          {busy ? 'Posting…' : 'Post shift'}
+        <button className="btn gold" disabled={!clientId || !level || busy} onClick={post}>
+          {busy ? 'Posting…' : (assignTo ? 'Post to caregiver' : 'Post shift')}
         </button>
       </div>
     </div>
@@ -209,7 +243,7 @@ const ShiftRow = ({ s, roster, act }) => {
       <div><b>{fmtRange(s.start, s.end)}</b> <span className={`chip ${s.status}`}>{titleize(s.status)}</span></div>
       <div className="mu">
         {s.clientName}
-        {s.requiredLicenseLevel ? ` · needs ${s.requiredLicenseLevel.toUpperCase()}` : ''}
+        {s.levelRequirementLabel ? ` · ${s.levelRequirementLabel}` : ''}
         {s.caregiverName ? ` · ${s.caregiverName}` : ''}
         {s.poolVisibility === 'care_team' ? ' · care team only' : ''}
       </div>

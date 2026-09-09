@@ -233,7 +233,7 @@
         return '<div class="grow" style="display:block">' +
           '<div class="gwhen">' + esc(fmtRange(s.start, s.end)) + '</div>' +
           '<div class="gmu">' + esc(s.clientName || '') +
-            (s.requiredLicenseLevel ? ' · needs ' + esc(s.requiredLicenseLevel.toUpperCase()) : '') + '</div>' +
+            (s.levelRequirementLabel ? ' · ' + esc(s.levelRequirementLabel) : '') + '</div>' +
           (s.notes ? '<div class="gmu">' + esc(s.notes) + '</div>' : '') +
           '<div class="gbtns"><button class="gbtn gold" data-act="claim" data-id="' + s.id + '">Claim</button></div>' +
         '</div>';

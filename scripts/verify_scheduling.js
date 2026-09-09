@@ -212,18 +212,91 @@ const at = (dayOffset, hhmm) => new Date(`${plusDays(dayOffset)}T${hhmm}:00.000Z
   check('an inverted shift is refused with a field error',
     inverted.status === 400 && inverted.data.errors.some(e => e.code === 'END_BEFORE_START'));
 
+  const anyLevel = await call('POST', '/api/scheduling/shifts', {
+    as: 'admin-1',
+    body: { clientId: 'client-1', start: at(43, '10:00'), end: at(43, '14:00'), requiredLicenseLevel: 'any', notes: 'TEST DATA' }
+  });
+  const anyLevelId = anyLevel.data.shift.id;
+  check('admin posts a shift open to ANY license level', anyLevel.status === 200);
+  check('STORED: "any" is stored as null, not as a second spelling of no requirement',
+    (await stored('shifts', r => r.id === anyLevelId)).required_license_level === null);
+  check('and the shift SAYS it is open to everyone rather than staying silent',
+    anyLevel.data.shift.openToAllLevels === true &&
+    anyLevel.data.shift.levelRequirementLabel === 'Open to all license levels',
+    anyLevel.data.shift.levelRequirementLabel);
+
+  const misspelled = await call('POST', '/api/scheduling/shifts', {
+    as: 'admin-1', body: { clientId: 'client-1', start: at(43, '15:00'), end: at(43, '18:00'), requiredLicenseLevel: 'anyone' }
+  });
+  check('an unrecognized requirement is refused, and the error names the token that works',
+    misspelled.status === 400 &&
+    misspelled.data.errors.some(e => e.code === 'LICENSE_LEVEL_INVALID' && /"any"/.test(e.message)),
+    JSON.stringify(misspelled.data.errors));
+
   const pcaPool = await call('GET', '/api/scheduling/shifts/open', { as: 'pca-1' });
   const pcaIds = pcaPool.data.shifts.map(s => s.id);
   check('a PCA does NOT see the CNA shift in the open pool',
     !pcaIds.includes(skilledId), JSON.stringify(pcaIds));
   check('but does see the unrestricted one', pcaIds.includes(generalId));
+  check('and the any-level one', pcaIds.includes(anyLevelId));
 
   const cnaPool = await call('GET', '/api/scheduling/shifts/open', { as: 'cna-1' });
-  check('a CNA sees both', cnaPool.data.shifts.length === 2);
+  check('a CNA sees all three', cnaPool.data.shifts.length === 3);
 
   const sitterPool = await call('GET', '/api/scheduling/shifts/open', { as: 'sitter-1' });
-  check('a sitter sees only the unrestricted shift',
-    sitterPool.data.shifts.length === 1 && sitterPool.data.shifts[0].id === generalId);
+  const sitterIds = sitterPool.data.shifts.map(s => s.id);
+  check('a sitter sees the unrestricted and any-level shifts, and not the CNA one',
+    sitterIds.length === 2 && sitterIds.includes(generalId) && sitterIds.includes(anyLevelId),
+    JSON.stringify(sitterIds));
+  check('a PCA and a CNA can BOTH take the any-level shift — the point of the option',
+    pcaIds.includes(anyLevelId) && cnaPool.data.shifts.map(s => s.id).includes(anyLevelId));
+
+  // --- Admin posts straight to one caregiver (Pathway B in one step) --------
+  const beforeDirect = (await db.get('shifts')).length;
+  const wrongLevel = await call('POST', '/api/scheduling/shifts', {
+    as: 'admin-1',
+    body: {
+      clientId: 'client-1', start: at(44, '09:00'), end: at(44, '13:00'),
+      requiredLicenseLevel: 'cna', assignToCaregiverId: 'pca-1', notes: 'TEST DATA'
+    }
+  });
+  check('posting a CNA shift straight to a PCA is REFUSED',
+    wrongLevel.status === 409 && wrongLevel.data.code === 'SHIFT_NOT_ELIGIBLE');
+  check('STORED: the refused direct post left NO orphan open shift behind',
+    (await db.get('shifts')).length === beforeDirect, `${(await db.get('shifts')).length} vs ${beforeDirect}`);
+
+  const direct = await call('POST', '/api/scheduling/shifts', {
+    as: 'admin-1',
+    body: {
+      clientId: 'client-1', start: at(44, '09:00'), end: at(44, '13:00'),
+      requiredLicenseLevel: 'cna', assignToCaregiverId: 'cna-1', notes: 'TEST DATA'
+    }
+  });
+  const directId = direct.data.shift.id;
+  check('admin posts a shift straight to a named caregiver', direct.status === 200);
+  const directRow = await stored('shifts', r => r.id === directId);
+  check('STORED: it lands at ASSIGNED, not confirmed — the caregiver still agrees',
+    directRow.status === 'assigned' && directRow.caregiver_id === 'cna-1' && !!directRow.assigned_at,
+    directRow.status);
+  check('and the response says so plainly',
+    /accept/i.test(direct.data.message || '') && /open pool/i.test(direct.data.message || ''),
+    direct.data.message);
+  check('the caregiver is notified of the offer',
+    ((await db.get('pending_notifications')) || []).some(n => n.type === 'shift_assigned' && n.relatedEntityId === directId));
+  check('a directly posted shift never reaches the open pool',
+    !(await call('GET', '/api/scheduling/shifts/open', { as: 'cna-1' })).data.shifts.map(s => s.id).includes(directId));
+
+  const directAccept = await call('POST', `/api/scheduling/shifts/${directId}/accept`, { as: 'cna-1' });
+  check('the caregiver accepts it', directAccept.status === 200);
+  check('STORED: only now is it confirmed',
+    (await stored('shifts', r => r.id === directId)).status === 'confirmed');
+
+  const directToNobody = await call('POST', '/api/scheduling/shifts', {
+    as: 'admin-1',
+    body: { clientId: 'client-1', start: at(45, '09:00'), end: at(45, '13:00'), requiredLicenseLevel: 'any', assignToCaregiverId: 'vendor-legacy' }
+  });
+  check('posting to a vendor with no license level is refused',
+    directToNobody.status === 400 && directToNobody.data.code === 'CAREGIVER_INVALID');
 
   const claimAbove = await call('POST', `/api/scheduling/shifts/${skilledId}/claim`, { as: 'pca-1' });
   check('a PCA claiming the CNA shift is REFUSED at the API, not just hidden',

@@ -149,6 +149,49 @@ test('SAFETY: an UNRECOGNIZED requirement is not read as "no requirement"', () =
   }
 });
 
+test('"any" is an EXPLICIT open-to-all requirement, not a blank field', () => {
+  const anyone = shift({ required_license_level: 'any' });
+  for (const level of cg.LICENSE_LEVELS) {
+    assert.ok(sched.isEligibleForShift(caregiver(level), anyone, client()),
+      `${level} must be able to take a shift posted as open to anyone`);
+  }
+  const { valid, clean } = sched.validateShift({
+    clientId: 'c1', start: '2026-10-01T09:00:00Z', end: '2026-10-01T13:00:00Z', requiredLicenseLevel: 'any'
+  });
+  assert.ok(valid);
+  assert.strictEqual(clean.requiredLicenseLevel, null,
+    '"any" is stored as null so eligibility has exactly one shape to read');
+  assert.strictEqual(clean.openToAllLevels, true);
+});
+
+test('a CNA and a PCA can both take a PCA-and-above shift', () => {
+  const shared = shift({ required_license_level: 'pca' });
+  assert.ok(sched.isEligibleForShift(caregiver('pca'), shared, client()));
+  assert.ok(sched.isEligibleForShift(caregiver('cna'), shared, client()));
+  assert.ok(!sched.isEligibleForShift(caregiver('sitter'), shared, client()),
+    'a sitter is still below the line');
+});
+
+test('SAFETY: "any" is the ONLY open-to-all spelling a validator accepts', () => {
+  const bad = sched.validateShift({
+    clientId: 'c1', start: '2026-10-01T09:00:00Z', end: '2026-10-01T13:00:00Z', requiredLicenseLevel: 'anyone'
+  });
+  assert.ok(!bad.valid);
+  assert.ok(bad.errors.some(e => e.code === 'LICENSE_LEVEL_INVALID'));
+  assert.match(bad.errors[0].message, /"any"/, 'the error names the token that does work');
+});
+
+test('the requirement is STATED, never inferred from a falsy field', () => {
+  assert.strictEqual(sched.shiftLevelLabel(shift()), 'Open to all license levels');
+  assert.strictEqual(sched.shiftLevelLabel(shift({ required_license_level: 'any' })), 'Open to all license levels');
+  assert.strictEqual(sched.shiftLevelLabel(shift({ required_license_level: 'cna' })), 'CNA and above');
+  assert.strictEqual(sched.shiftLevelLabel(shift({ required_license_level: 'lpn' })), 'LPN only');
+  assert.match(sched.shiftLevelLabel(shift({ required_license_level: 'brain_surgeon' })), /not recognized/);
+  assert.strictEqual(sched.isOpenToAllLevels(shift({ required_license_level: 'cna' })), false);
+  assert.strictEqual(sched.isOpenToAllLevels(shift({ required_license_level: 'brain_surgeon' })), false,
+    'an unreadable requirement is not open to all — it is open to nobody');
+});
+
 test('a care-team-only shift is invisible to a caregiver who is not on that team', () => {
   const teamOnly = shift({ pool_visibility: 'care_team' });
   const c = client({ careTeam: { primaryCaregiver: 'cg-pca' } });
@@ -423,6 +466,25 @@ test('the payroll export and every write that changes the board are admin-only',
     const decl = routeSrc.slice(idx, idx + 160);
     assert.ok(decl.includes('requireAdmin'), `${route} must be admin-only`);
   }
+});
+
+test('SAFETY: a direct post lands at ASSIGNED, never confirmed, and checks before it writes', () => {
+  const idx = routeSrc.indexOf("router.post('/api/scheduling/shifts'");
+  assert.ok(idx !== -1);
+  const handler = routeSrc.slice(idx, routeSrc.indexOf("router.get('/api/scheduling/shifts'", idx));
+  assert.ok(handler.includes('assignToCaregiverId'), 'admin can post a shift straight to a caregiver');
+
+  const eligibility = handler.indexOf('isEligibleForShift');
+  const conflict = handler.indexOf('findShiftConflict');
+  const write = handler.indexOf('rows.push(row)');
+  assert.ok(eligibility !== -1 && conflict !== -1 && write !== -1);
+  assert.ok(eligibility < write && conflict < write,
+    'a refused direct post must leave no orphan open shift behind');
+
+  assert.ok(/row\.status = 'assigned'/.test(handler),
+    'a directly posted shift is OFFERED, not confirmed — the caregiver still accepts or declines');
+  assert.ok(!/row\.status = 'confirmed'/.test(handler),
+    'admin schedules the work; the caregiver still agrees to it');
 });
 
 test('there is no route that edits a time log without a reason', () => {

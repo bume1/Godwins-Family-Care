@@ -236,8 +236,17 @@ module.exports = function createSchedulingRoutes(deps) {
   // SHIFTS
   // ==========================================================================
 
-  // POST /api/scheduling/shifts — admin posts an open shift, optionally from a
-  // client request (which the post then resolves).
+  // POST /api/scheduling/shifts — admin posts a shift, optionally from a client
+  // request (which the post then resolves), and optionally straight to a named
+  // caregiver via `assignToCaregiverId`.
+  //
+  // Posting to one caregiver is Pathway B's entry point in ONE step rather than
+  // post-then-assign. It lands the shift at `assigned`, NOT `confirmed`: the
+  // caregiver still accepts or declines, and a decline returns it to the open
+  // pool. Admin schedules the work; the caregiver still agrees to it.
+  //
+  // Eligibility and overlap are checked BEFORE anything is written, so a
+  // refused direct post leaves no orphan open shift behind.
   router.post('/api/scheduling/shifts', authenticateToken, requireAdmin, async (req, res) => {
     try {
       const { valid, errors, clean } = sched.validateShift(req.body);
@@ -245,6 +254,15 @@ module.exports = function createSchedulingRoutes(deps) {
 
       const client = await loadClient(clean.clientId);
       if (!client) return res.status(404).json({ error: 'Client not found.', code: 'CLIENT_NOT_FOUND' });
+
+      const assignToId = String((req.body || {}).assignToCaregiverId || '').trim();
+      let assignee = null;
+      if (assignToId) {
+        assignee = await freshUser(assignToId);
+        if (!assignee || !isSchedulable(assignee)) {
+          return res.status(400).json({ error: 'Pick a caregiver with a license level on file.', code: 'CAREGIVER_INVALID' });
+        }
+      }
 
       const rows = await readRows('shifts');
       const row = {
@@ -266,6 +284,27 @@ module.exports = function createSchedulingRoutes(deps) {
         claimed_at: null, assigned_at: null, confirmed_at: null,
         started_at: null, completed_at: null, cancelled_at: null, reopened_at: null
       };
+
+      if (assignee) {
+        if (!sched.isEligibleForShift(assignee, row, client)) {
+          return res.status(409).json({
+            error: `${assignee.name} cannot take that shift.`, code: 'SHIFT_NOT_ELIGIBLE',
+            reason: sched.eligibilityReason(assignee, row, client)
+          });
+        }
+        const conflict = sched.findShiftConflict(rows, assignee.id, row);
+        if (conflict) {
+          return res.status(409).json({
+            error: `${assignee.name} already holds an overlapping shift.`, code: 'SHIFT_CONFLICT',
+            conflict: { id: conflict.id, start: conflict.start, end: conflict.end, clientName: conflict.client_name }
+          });
+        }
+        row.status = 'assigned';
+        row.assigned_at = nowIso();
+        row.caregiver_id = assignee.id;
+        row.caregiver_name = assignee.name;
+      }
+
       rows.push(row);
       await db.set('shifts', rows);
 
@@ -282,9 +321,35 @@ module.exports = function createSchedulingRoutes(deps) {
       }
 
       await logActivity(req.user.id, row.created_by_name, 'shift_posted', 'shift', row.id,
-        { clientId: client.id, start: row.start, requiredLicenseLevel: row.required_license_level });
+        {
+          clientId: client.id, start: row.start,
+          requiredLicenseLevel: row.required_license_level,
+          openToAllLevels: sched.isOpenToAllLevels(row),
+          assignedTo: assignee ? assignee.id : null
+        });
 
-      res.json({ shift: publicShift(row) });
+      if (assignee) {
+        await logActivity(req.user.id, row.created_by_name, 'shift_assigned', 'shift', row.id,
+          { clientId: client.id, caregiverId: assignee.id, postedDirectly: true });
+        if (assignee.email) {
+          await queueNotification('shift_assigned', assignee.id, assignee.email, assignee.name,
+            {
+              subject: `New shift offered — ${row.client_name}`,
+              body: `You have been offered the ${new Date(row.start).toLocaleString('en-US')} shift for ${row.client_name}. Accept or decline it in your schedule.`,
+              ctaUrl: '/caregiver', ctaLabel: 'Open the caregiver app'
+            },
+            { relatedEntityId: row.id, relatedEntityType: 'shift', createdBy: req.user.id });
+        }
+      }
+
+      res.json({
+        shift: publicShift(row),
+        message: assignee
+          ? `Shift offered to ${assignee.name}. It is theirs once they accept; a decline puts it back in the open pool.`
+          : (sched.isOpenToAllLevels(row)
+            ? 'Shift posted to the open pool, open to all license levels.'
+            : `Shift posted to the open pool — ${sched.shiftLevelLabel(row)}.`)
+      });
     } catch (error) {
       console.error('Shift post error:', error);
       res.status(500).json({ error: 'Server error' });
@@ -921,6 +986,10 @@ module.exports = function createSchedulingRoutes(deps) {
     caregiverId: r.caregiver_id, caregiverName: r.caregiver_name,
     start: r.start, end: r.end,
     requiredLicenseLevel: r.required_license_level,
+    // Stated, never inferred from a falsy field: a shift open to every level
+    // says so in both UIs rather than simply omitting a "needs CNA" line.
+    openToAllLevels: sched.isOpenToAllLevels(r),
+    levelRequirementLabel: sched.shiftLevelLabel(r),
     poolVisibility: r.pool_visibility, careTier: r.care_tier, notes: r.notes,
     status: r.status,
     createdByName: r.created_by_name, createdAt: r.created_at,
