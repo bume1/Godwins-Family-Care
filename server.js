@@ -8663,6 +8663,12 @@ const enrollmentDetail = (client) => {
   const consents = client.consents || {};
   const consentMeta = client.consentMeta || {};
   const defs = consentDefsForServiceLine(serviceLine);
+  // A consent that no longer applies but was signed is still a signed record.
+  // The service-line change keeps it; the detail view has to SHOW it, or the
+  // only trace of a real signature is a KV key nobody looks at.
+  const applicable = new Set(defs.map(d => d.type));
+  const retainedDefs = GFC_CONSENT_DEFS.filter(d =>
+    !applicable.has(d.type) && isConsentSatisfied(consents[d.type]));
   const comp = computeEnrollmentCompletion(client);
   return {
     ...enrollmentListRow(client),
@@ -8674,6 +8680,12 @@ const enrollmentDetail = (client) => {
       const status = consents[d.type] || 'pending';
       return {
         type: d.type, title: d.title, required: !!d.required, inactive: !!d.inactive,
+        // Stage tells staff WHICH visit this record belongs to — the home-care
+        // packet is signed at intake, the medical packet only when the client
+        // is ready to add medical care. Grouping by it in the detail view is
+        // what makes a BOTH client's paperwork legible instead of one long list.
+        stage: d.stage || 'homecare',
+        scope: d.scope || 'ALL',
         status,
         satisfied: isConsentSatisfied(status),
         // Provenance badge for the detail view (in_app | signed_offline).
@@ -8681,7 +8693,14 @@ const enrollmentDetail = (client) => {
         signedAt: (consentMeta[d.type] && consentMeta[d.type].signedAt) || null,
         meta: consentMeta[d.type] || null
       };
-    }),
+    }).concat(retainedDefs.map(d => ({
+      type: d.type, title: d.title, required: false, inactive: !!d.inactive,
+      stage: d.stage || 'homecare', scope: d.scope || 'ALL',
+      status: consents[d.type], satisfied: true, retained: true,
+      provenance: consents[d.type] === 'signed_offline' ? 'signed_offline' : 'in_app',
+      signedAt: (consentMeta[d.type] && consentMeta[d.type].signedAt) || null,
+      meta: consentMeta[d.type] || null
+    }))),
     medications: Array.isArray(intake.medications) ? intake.medications : (Array.isArray(client.medications) ? client.medications : []),
     payer: intake.payer || client.payer || null,
     careTeam: client.careTeam || null,
@@ -8693,6 +8712,7 @@ const enrollmentDetail = (client) => {
     },
     review: client.enrollmentReview || null,
     followUp: client.enrollmentFollowUp || null,
+    serviceLineHistory: Array.isArray(client.serviceLineHistory) ? client.serviceLineHistory : [],
     missing: { consents: comp.missingConsentLabels, fields: comp.missingFieldLabels }
   };
 };
@@ -8762,6 +8782,83 @@ app.get('/api/gfc/admin/enrollment/:clientId', authenticateToken, requireEnrollm
     res.json({ client: enrollmentDetail(client) });
   } catch (error) {
     console.error('GFC enrollment detail error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PUT /api/gfc/admin/enrollment/:clientId/service-line — change an enrolled
+// client's service line, and with it which paperwork they owe.
+//
+// THE GAP THIS CLOSES: serviceLine could be set in exactly two places — the
+// client's own intake wizard, and the offline-onboarding form at the moment a
+// patient is created. No staff member could change it afterwards. That blocks
+// the workflow the paper packets are built around: the medical packet is headed
+// "Sign these only when you are ready to add medical care", i.e. the client
+// starts on home care and adds medical care later, at the kitchen table, with a
+// staff member present. Until now the only way that happened was the client
+// going back into their own wizard and flipping it themselves.
+//
+// WIDENING marks the newly applicable consents `pending` so they surface in the
+// client's portal. NARROWING never deletes a signed record: a signed consent is
+// a signed record, and the fact that it no longer applies does not unsign it.
+// Those are retained and reported, not removed.
+app.put('/api/gfc/admin/enrollment/:clientId/service-line', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const idx = users.findIndex(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (idx === -1) return res.status(404).json({ error: 'Client not found' });
+
+    const line = String((req.body || {}).serviceLine || '').toUpperCase();
+    if (!['PHC', 'IHPC', 'BOTH'].includes(line)) {
+      return res.status(400).json({ error: 'Service line must be PHC, IHPC or BOTH', code: 'BAD_SERVICE_LINE' });
+    }
+    const client = users[idx];
+    const previous = String(client.serviceLine || 'PHC').toUpperCase();
+    if (previous === line) return res.status(200).json({ message: 'No change', serviceLine: line, added: [], retained: [] });
+
+    const before = new Set(consentDefsForServiceLine(previous).map(d => d.type));
+    const applicable = consentDefsForServiceLine(line);
+    const after = new Set(applicable.map(d => d.type));
+    const consents = { ...(client.consents || {}) };
+
+    // Newly applicable and not already on file → pending, so the client sees it.
+    const added = [];
+    for (const def of applicable) {
+      if (!consents[def.type] && !def.inactive) {
+        consents[def.type] = 'pending';
+        added.push(def.type);
+      }
+    }
+    // No longer applicable but already signed → kept, never deleted.
+    const retained = Object.keys(consents)
+      .filter(t => before.has(t) && !after.has(t) && consents[t] && consents[t] !== 'pending');
+    // No longer applicable and never signed → drop the empty obligation so it
+    // stops counting against a gate the client can no longer satisfy.
+    for (const t of Object.keys(consents)) {
+      if (!after.has(t) && consents[t] === 'pending') delete consents[t];
+    }
+
+    users[idx].serviceLine = line;
+    users[idx].consents = consents;
+    users[idx].serviceLineHistory = [...(client.serviceLineHistory || []), {
+      from: previous, to: line, at: new Date().toISOString(),
+      byId: req.user.id, byName: req.user.name || req.user.email,
+      added, retained
+    }];
+    await db.set('users', users);
+    invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'service_line_changed', 'enrollment', client.id,
+      { from: previous, to: line, added, retained });
+
+    res.json({
+      message: added.length
+        ? `Service line set to ${line}. ${added.length} document(s) now await the client's signature.`
+        : `Service line set to ${line}.`,
+      serviceLine: line, previous, added, retained,
+      requiredConsents: requiredConsentTypes(line)
+    });
+  } catch (error) {
+    console.error('GFC service-line change error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });

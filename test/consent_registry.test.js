@@ -222,3 +222,61 @@ test('the PDF text comes from the same source the portal renders', () => {
   const gen = require('fs').readFileSync(require('path').join(__dirname, '..', 'pdf-generator.js'), 'utf8');
   assert.match(gen, /require\('\.\/consentText'\)/);
 });
+
+// ── Staff service-line change ───────────────────────────────────────
+// The medical packet is signed at a later visit than the home-care packet, so
+// somebody on staff has to be able to move a client from PHC to BOTH after
+// enrollment. Before this the only place the line could change was the client's
+// own intake wizard.
+
+test('staff can change a client service line, and only enrollment staff can', () => {
+  assert.match(SERVER, /app\.put\('\/api\/gfc\/admin\/enrollment\/:clientId\/service-line', authenticateToken, requireEnrollmentStaff/);
+  assert.match(SERVER, /code: 'BAD_SERVICE_LINE'/);
+});
+
+test('narrowing the service line never unsigns a signed consent', () => {
+  // A signed consent is a signed record. Dropping it because it no longer
+  // applies would destroy evidence of a real signature.
+  const route = SERVER.slice(
+    SERVER.indexOf("app.put('/api/gfc/admin/enrollment/:clientId/service-line'"),
+    SERVER.indexOf("app.post('/api/gfc/admin/enrollment/:clientId/review'")
+  );
+  assert.ok(route.length > 200, 'the service-line route must exist');
+  // The only delete in the route is guarded on the consent being unsigned.
+  const deletes = [...route.matchAll(/delete consents\[(\w+)\];/g)];
+  assert.equal(deletes.length, 1, 'exactly one delete, and it must be guarded');
+  const line = route.split('\n').find(l => l.includes('delete consents['));
+  assert.match(line, /=== 'pending'/, 'only a never-signed obligation may be dropped');
+  // And the change is recorded, both on the client and in the activity trail.
+  assert.match(route, /serviceLineHistory/);
+  assert.match(route, /'service_line_changed'/);
+});
+
+test('widening the service line queues the newly owed documents', () => {
+  const route = SERVER.slice(
+    SERVER.indexOf("app.put('/api/gfc/admin/enrollment/:clientId/service-line'"),
+    SERVER.indexOf("app.post('/api/gfc/admin/enrollment/:clientId/review'")
+  );
+  assert.match(route, /consents\[def\.type\] = 'pending';/);
+  assert.match(route, /!def\.inactive/, 'a retired record must never be queued for signature');
+});
+
+test('a retained consent stays visible to staff', () => {
+  // Keeping the record but hiding it leaves a real signature traceable only
+  // through a KV key nobody opens.
+  assert.match(SERVER, /const retainedDefs = GFC_CONSENT_DEFS\.filter/);
+  assert.match(SERVER, /retained: true/);
+  const view = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-enrollment.html'), 'utf8');
+  assert.match(view, /Signed previously — no longer required on this service line/);
+});
+
+test('the enrollment view groups consents by the visit they are signed at', () => {
+  const view = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-enrollment.html'), 'utf8');
+  assert.match(view, /stage: 'homecare', label: 'Home-care packet/);
+  assert.match(view, /stage: 'medical',  label: 'Medical packet/);
+  assert.match(view, /api\.setServiceLine/);
+  // The detail payload has to carry the stage for the grouping to mean anything —
+  // on the applicable records AND on the retained ones, or half the list ends up
+  // silently grouped under home care.
+  assert.equal((SERVER.match(/stage: d\.stage \|\| 'homecare'/g) || []).length, 2);
+});
