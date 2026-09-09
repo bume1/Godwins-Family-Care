@@ -694,7 +694,7 @@
       // roiFamily consent); Clinical (FNP) → /clinical; Case Manager →
       // /admin/enrollment (interim landing until the view-only clinical read
       // lands with Session 4.3); Caregivers (repo role 'vendor', converted at
-      // Session 6) → service portal until the caregiver app replaces it.
+      // Session 6) → the caregiver app once a license level is on file.
       // isManager / hasAdminHubAccess / hasClientPortalAdminAccess are LEGACY
       // lab-era flags — no distinct GFC role; they all just land in /admin and
       // are slated for retirement at the Session 6/7 role migration.
@@ -706,6 +706,10 @@
         // the enrollment view is one click away from the workspace header.
         if (u.role === 'caseManager') return '/clinical';
         if (u.isManager || u.hasAdminHubAccess || u.hasClientPortalAdminAccess) return '/admin';
+        // Caregivers (vendor + a license level on file) land in the caregiver
+        // app; the Service Portal stops being their surface (Session 6). A
+        // lab-era vendor with no license level keeps the old destination.
+        if (u.role === 'vendor' && u.licenseLevel) return '/caregiver';
         if (u.role === 'vendor' || u.hasServicePortalAccess) return '/service-portal';
         return null; // no access anywhere → hub renders its empty state
       };
