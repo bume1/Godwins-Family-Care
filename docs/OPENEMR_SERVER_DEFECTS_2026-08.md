@@ -599,3 +599,185 @@ Location** on that record once the private-residence record exists.
 once DCH confirms); assign each patient to their facility; uncheck Service Location on the
 org record. No app change is required for a new facility — add it in OpenEMR with its POS and
 assign patients to it.
+
+---
+
+## Shadow-data audit findings (2026-09-08) — three server-side items
+
+_Found by the shadow-data audit pass 1, `docs/GFC_Shadow_Data_Audit.md`. Probes ran live against
+8.4.0 (database 543) on the v4 client, patient TEST PatientOne, encounter eid 32. TEST DATA only.
+The audit also found four app-side defects; those are recorded in the audit document, not here._
+
+### Defect 3 — Documents file with HTTP 200 but are readable by nothing
+
+**Endpoints:**
+- `POST /apis/default/api/patient/{pid}/document?path=/Medical%20Record` returns **200**, body `true`.
+- `GET /apis/default/fhir/DocumentReference?patient={uuid}` returns **200**, `total: 0`.
+- `GET /apis/default/fhir/DocumentReference` unfiltered returns **200**, `total: 0` for the whole instance.
+- `GET /apis/default/api/patient/1/document` returns **404 Route not found**. There is no standard-API read route.
+
+This is with the Phase 8.6 org-level ACL grant in place. `DocumentReference` no longer 403s, it
+simply reports nothing exists. Care-plan PDFs have been filed across several sessions.
+
+**Why it matters.** This is the only route the app has for putting a PDF in the chart, and it is
+the mechanism blocking the care plan, the consents and the Transfer-of-Care ROI from reaching the
+medical record at all. The write gives the app no way to detect failure: the only signal is a 200.
+
+**What the maintainer needs to check, in order:**
+1. In the OpenEMR UI, open TEST PatientOne's Documents and look for `ShadowAudit_SHADOWAUDIT-1788890606538.pdf`
+   and the `CarePlan_*.pdf` files under `/Medical Record`.
+2. If they are there, the files are stored and the FHIR `DocumentReference` provider is not
+   surfacing them. Server fix, and the missing standard-API read route should be added too.
+3. If they are not there, the upload is a silent write failure and the route should return an error
+   rather than `true`.
+
+**App behaviour meanwhile:** the app treats the 200 as success and records `emrDocumented: true`.
+That is wrong and the app should assert read-back instead. Recorded as G2 in the audit.
+
+### ~~Defect 4 — Phase 6B order route drops `code_text`~~ — **WITHDRAWN 2026-09-08, this was ours**
+
+**Endpoint:** `POST /apis/default/api/patient/{pUUID}/encounter/{eUUID}/order`
+
+Sending a correctly shaped payload:
+
+```json
+{"codes":[{"code":"85025","code_text":"CBC with differential",
+           "diagnoses":[{"code_type":"ICD10","code":"I10"}]}]}
+```
+
+reads back as:
+
+```json
+{"procedure_order_seq":1,"procedure_code":"85025","procedure_name":"",
+ "procedure_order_title":"","diagnoses":"ICD10:I10"}
+```
+
+`procedure_code` and `diagnoses` persist. **`code_text` is accepted and never stored** — both
+`procedure_name` and `procedure_order_title` come back empty. So an order carries a code but no
+human-readable test name, and an order for anything without a code carries nothing at all.
+
+**Fix direction:** in the 6B order controller, write `code_text` into `procedure_order_code.procedure_name`
+(and `procedure_order_title` where appropriate) alongside `procedure_code`.
+
+**Scope note:** this sits in our own patch, `docs/openemr-patches/8.4.0-p1/`, not in upstream
+OpenEMR. It is ours to fix.
+
+**CORRECTION 2026-09-08 — not a defect at all, and nothing for the maintainer to do.**
+The controller is fine. `GfcChargeRestController::postOrder()` reads the test name from
+`$entry['name']` / `$entry['title']`; the app was sending it as `code_text` only, which is what
+the CHARGE half of the same controller reads. Two halves of our own code using different words for
+the same field. Verified live both ways: `code_text` alone stores `procedure_name: ""`, while
+`name` + `title` stores `"CBC with differential"` on the same installed patch.
+
+Fixed app-side (`buildOrderPayload` now sends all three keys), so it works against the patch as
+already installed with **no OpenEMR rebuild or redeploy**. Pinned by a unit test confirmed to fail
+when the keys are dropped. The earlier entry above sent this to the EMR maintainer in error. The 6B acceptance run passed 17/17 because it asserted the codes and
+the diagnosis pointers, which do store, and never asserted the name.
+
+### Not a defect — no audit-log surface exists in the API
+
+Recorded because it shapes what a records request can produce. Every audit surface is unavailable:
+
+```
+GET api/log          -> 404 Route not found
+GET api/audit        -> 404 Route not found
+GET fhir/AuditEvent  -> 404 Route not found
+GET fhir/Provenance  -> 401 Unauthorized
+```
+
+OpenEMR's `log` table can therefore only be reached through the UI or the database. Combined with
+every app write authenticating as `gfc-app-api`, an accounting of disclosures cannot be produced
+from OpenEMR through the API for any patient. Not a defect in the installation, and a hard
+constraint on go-live. See the attribution section of `docs/GFC_Shadow_Data_Audit.md`.
+
+### Data gap — the drug option lists are empty (blocks structured Rx route + frequency)
+
+`GET /apis/default/api/list/drug_route`, `.../drug_interval` and `.../drug_units` all return
+**200 with 0 rows**. OpenEMR resolves a prescription's route and interval against these lists, so
+with nothing to resolve to, `route_id` stores null and `interval_id` stores `"0"` no matter what the
+app sends. Same class of gap as the ICD-10 load: a data gap, not a defect.
+
+**Consequence:** a prescription in OpenEMR carries drug, dose and quantity in their own columns but
+no structured route and no structured frequency.
+
+**App behaviour meanwhile (shipped 2026-09-08):** route and frequency are written into the
+prescription's free-text `note`, which does persist, so the sig always reaches the chart. The
+structured fields are still sent, so they begin storing the day these lists are seeded with no app
+change. Recorded as G5 in the audit.
+
+**Action:** seed `drug_route` and `drug_interval` (and `drug_units`) in OpenEMR's list editor,
+alongside the ICD-10-CM load.
+
+### Confirmed still open this pass
+
+- **ICD-10-CM is not loaded.** FHIR `Condition` returns 3 rows for TEST PatientOne, **0 carrying a
+  code**. `GET /api/codes` answers 200 with 0 rows. Data gap, not a defect, unchanged.
+- **Only two facilities exist** (ids 3 and 4, both POS **11**). No private-residence record (POS 12),
+  no Hickory Log, no telehealth record. Until Phase 8.3 runs, `resolveEncounterFacility()` has
+  nothing correct to resolve to for a home visit.
+- **Encounter duplication:** FHIR `Encounter` returned 14 rows, all 14 unique, for TEST PatientOne
+  this pass. The app-side dedupe stays regardless.
+
+### Verified working this pass
+
+Charge write and read-back with the correct CPT and diagnosis separation (`code:"99348"`,
+`justify:"ICD10|I10:"`, `provider_id:5`); vitals row accepted, 185 FHIR Observations; SOAP note
+write, update and read-by-sid; native prescription write surfacing in FHIR MedicationRequest;
+encounter PUT with `user` + `group`; FHIR `Practitioner` readable (1 row, Bethel Godwins, NPI
+1902310568); `api/facility` readable.
+
+
+---
+
+## Follow-up 2026-09-08 — the four app-side audit defects are fixed
+
+Recorded here because two of them change what the maintainer needs to look at.
+
+Fixed in the app and re-proven live (`scripts/verify_shadow_data_fixes.js`, 17/17, stored values
+only): the order payload now carries the test name and the diagnosis link; the prescription sends
+`date_added` and is linked to its encounter; the encounter carries the acting clinician as
+`provider_id`.
+
+**What that means for Defect 4 (the 6B order route).** The app is no longer the reason a test name
+is missing. It now sends `code_text: "CBC with differential"` and the route still stores
+`procedure_name: ""`. The diagnosis link, sent the same way, stores correctly as `ICD10:I10`. So the
+defect is isolated to `code_text` handling in the order controller and nothing else masks it.
+
+**What it means for the encounter provider.** Encounters created from 2026-09-08 carry the real
+clinician. Encounters created before it carry the configured default (provider 1) and do not match
+the rendering provider on their own charges. These are all TEST DATA, so no correction is needed;
+worth knowing when reading older rows.
+
+
+---
+
+## Allergy route findings (2026-09-08) — instance data gap, plus a shape quirk
+
+Found while wiring the allergy write (shadow-data audit G4). Neither is a defect in the
+installation; both change what the app must send.
+
+### The allergy route rejects the datetime it stores
+
+`POST /apis/default/api/patient/{pUUID}/allergy` refuses `begdate: "2026-09-08 00:00:00"` with
+`{"begdate":{"DateTime::INVALID_VALUE":"begdate must be a valid date"}}` and accepts
+`begdate: "2026-09-08"`. The stored row then reads back as `"2026-09-08 00:00:00"`. So the format it
+emits is not the format it accepts. The app now sends a plain date.
+
+Worth noting for the maintainer only because the refusal arrives as **HTTP 200** with a
+`validationErrors` map and `data: []`. Every caller must check the body.
+
+### Data gap — the allergy option lists are empty
+
+`api/list/severity_ale` and `api/list/reaction` both return **0 rows**, the same as `drug_route` and
+`drug_interval`. So an allergy's severity and reaction cannot be stored structurally. The app writes
+both into the allergy's free-text comment meanwhile.
+
+**Action:** seed `severity_ale` and `reaction` alongside the drug lists and the ICD-10 load.
+
+### Free-text allergens carry the name only in the narrative
+
+A FHIR `AllergyIntolerance` for a free-text allergen returns
+`code.coding[0].system = ".../data-absent-reason"`, `code = "unknown"`, with the real allergen in
+`text.div`. Any consumer reading `code` alone displays "Unknown". Not a defect — it is correct FHIR
+for an uncoded allergen — but it is why the app's chart showed "Unknown" for every allergy until
+2026-09-08. Seeding an RxNorm allergen list in OpenEMR would make these properly coded.
