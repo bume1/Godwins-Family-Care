@@ -280,3 +280,90 @@ test('the enrollment view groups consents by the visit they are signed at', () =
   // silently grouped under home care.
   assert.equal((SERVER.match(/stage: d\.stage \|\| 'homecare'/g) || []).length, 2);
 });
+
+// ── Two-way document exchange ───────────────────────────────────────
+// The app could produce documents and could not receive them. These guard the
+// three properties that would fail quietly if someone "simplified" the code.
+
+test('a document we cannot store is a document we did not receive', () => {
+  // The tempting shortcut is the intake-upload pattern: log the Drive error and
+  // record the row anyway. That produces a checklist saying "received" pointing
+  // at nothing — the same silent-success trap OpenEMR has sprung five times.
+  const route = SERVER.slice(
+    SERVER.indexOf("app.post('/api/gfc/documents/upload'"),
+    SERVER.indexOf("app.get('/api/gfc/documents/uploads/:id/file'")
+  );
+  assert.ok(route.length > 200, 'the upload route must exist');
+  assert.match(route, /code: 'DOCUMENT_STORAGE_UNAVAILABLE'/);
+  // The row is only written after the store succeeded.
+  assert.ok(route.indexOf('DOCUMENT_STORAGE_UNAVAILABLE') < route.indexOf("db.set('client_document_uploads'"),
+    'the failure must short-circuit before anything is recorded');
+});
+
+test('an upload is type-checked by its bytes, not its declared type', () => {
+  const route = SERVER.slice(
+    SERVER.indexOf("app.post('/api/gfc/documents/upload'"),
+    SERVER.indexOf("app.get('/api/gfc/documents/uploads/:id/file'")
+  );
+  assert.match(route, /detectFileType\(buffer\)/);
+  assert.match(route, /code: 'DOCUMENT_KIND_UNKNOWN'/,
+    'a file filed under a kind no checklist reads is a file nobody sees again');
+});
+
+test('the checklist is derived, never stored', () => {
+  // A stored copy goes stale the moment the service line changes. Both the
+  // client view and the staff view call the same builder.
+  assert.match(SERVER, /const buildDocumentChecklist = \(client, uploads, requests\)/);
+  const uses = (SERVER.match(/buildDocumentChecklist\(client, uploads, requests\)/g) || []).length;
+  assert.equal(uses, 2, 'the client and staff views must read the same derivation');
+  assert.ok(!/client_document_checklist/.test(SERVER), 'nothing may persist a checklist');
+});
+
+test('a rejected document is re-requested, with a reason the client can act on', () => {
+  const route = SERVER.slice(
+    SERVER.indexOf("app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review'"),
+    SERVER.indexOf("app.get('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/file'")
+  );
+  assert.match(route, /code: 'REASON_REQUIRED'/);
+  assert.match(route, /status: 'open', note: reason/,
+    'rejecting must reopen the ask, or the client is never told to send another');
+});
+
+test('every reminder is stamped on the record', () => {
+  const route = SERVER.slice(
+    SERVER.indexOf("app.post('/api/gfc/admin/enrollment/:clientId/documents/remind'"),
+    SERVER.indexOf("app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review'")
+  );
+  assert.match(route, /reminders: \[\.\.\.\(r\.reminders \|\| \[\]\), stamp\]/,
+    '"we asked three times" has to be a fact on the record, not a recollection');
+  assert.match(route, /'client_documents_reminded'/);
+});
+
+test('the stored file is served through the app, never a Drive link', () => {
+  // The Drive copy is not link-shared. Routing every read through the app is
+  // what makes it authenticated and audited.
+  assert.match(SERVER, /const serveStoredDocument = async \(res, row, actor\)/);
+  assert.match(SERVER, /'client_document_read'/);
+  const view = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-enrollment.html'), 'utf8');
+  assert.match(view, /const openStoredDoc = async \(path\)/);
+});
+
+test('the portal offers each signed consent as its own file', () => {
+  // Every row on this screen used to open the same enrollment packet, so a
+  // client who signed nine documents could retrieve none of them individually.
+  assert.match(PORTAL, /onClick=\{canOpen \? \(\) => openDoc\(s\.url\) : undefined\}/);
+  assert.ok(!/const openConsentPdf/.test(PORTAL), 'the packet-for-everything handler must be gone');
+});
+
+test('the client portal can send documents back', () => {
+  assert.match(PORTAL, /uploadGfcClientDocument/);
+  assert.match(PORTAL, /const GfcNeededDoc = /);
+  // A rejected file keeps its reason on screen: told only "we still need your
+  // insurance card", a client sends the same blurry photo again.
+  assert.match(PORTAL, /we could not use this: \$\{f\.rejectionReason\}/);
+});
+
+test('no working-draft caveat survives on the consent text', () => {
+  assert.ok(!/WORKING DRAFT/.test(SERVER));
+  assert.ok(!/WORKING DRAFT/.test(PORTAL));
+});

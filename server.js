@@ -2188,8 +2188,6 @@ const requireClientForIntake = (req, res, next) => {
 
 // ============== GFC ENROLLMENT INTAKE (Stage 2) — consent definitions ==============
 // Branched consent set per GFC_Intake_and_Packet_Spec_v1.md §4.2.
-// NOTE: the rewritten consent language below is a WORKING DRAFT, pending
-// counsel / Georgia licensure review before HIPAA-live. Do not treat as final.
 // Each consent status is one of: signed | signed_offline | pending | na.
 // A requirement is SATISFIED by either `signed` (e-signed in-app) or
 // `signed_offline` (signed on paper, offline onboarding — Scope B1). See
@@ -5494,6 +5492,107 @@ app.post('/api/gfc/messages', authenticateToken, requireEnrolledClient, async (r
   }
 });
 
+// ============== TWO-WAY DOCUMENT EXCHANGE ==============
+// Everything above this line moves in one direction: the client signs, and the
+// app files a PDF. The other direction had no home at all. A photo ID, an
+// insurance card, a Power of Attorney, records from a prior hospital — all of it
+// arrived by text message, by email, or in an envelope, and the only record that
+// it arrived was somebody remembering.
+//
+// Two collections, both keyed for the RDS migration:
+//   client_document_uploads  — what the client sent us, one row per file
+//   client_document_requests — what we asked for, one row per ask
+// Neither ever holds bytes. The file lives in HIPAA Drive; the row holds the
+// pointer, and every read of it goes back through the app so it is authenticated
+// and audited.
+//
+// A document the client owes is derived, never stored: the registry below,
+// filtered to their service line, plus any one-off a staff member asked for.
+// That way a service-line change (see the service-line route) silently changes
+// the checklist too, instead of leaving a stale copy behind.
+const GFC_EXPECTED_DOCUMENTS = [
+  { kind: 'photoId',          scope: 'ALL',  required: true,
+    label: 'Photo ID',
+    hint: "A driver's licence, state ID or passport. A clear phone photo is fine." },
+  { kind: 'insuranceCard',    scope: 'ALL',  required: true,
+    label: 'Insurance card — front and back',
+    hint: 'Both sides. Upload them as two files if that is easier.' },
+  { kind: 'poaGuardianship',  scope: 'ALL',  required: false, conditional: 'poa',
+    label: 'Power of Attorney or guardianship papers',
+    hint: 'Only if someone is authorized to make decisions or sign on your behalf.' },
+  { kind: 'advanceDirective', scope: 'ALL',  required: false,
+    label: 'Advance directive or living will',
+    hint: 'If you have one. We keep a copy so your wishes are on file before they are needed.' },
+  { kind: 'dnrPolst',         scope: 'IHPC', required: false,
+    label: 'DNR or POLST form',
+    hint: 'If one has been completed and signed by a physician.' },
+  { kind: 'medicationList',   scope: 'IHPC', required: false,
+    label: 'Current medication list',
+    hint: 'A pharmacy printout or photos of the bottles — whichever you have.' },
+  { kind: 'priorRecords',     scope: 'IHPC', required: false,
+    label: 'Records from a prior provider',
+    hint: 'Discharge paperwork, recent labs, or a visit summary. We can also request these for you with a record release.' }
+];
+
+// Which of the registry applies to a service line. Mirrors consentDefsForServiceLine.
+const expectedDocumentsForServiceLine = (serviceLine) => {
+  const line = (serviceLine || 'PHC').toUpperCase();
+  return GFC_EXPECTED_DOCUMENTS.filter(d =>
+    d.scope === 'ALL' || (line === 'BOTH' ? true : d.scope === line));
+};
+
+// The checklist the client sees and staff track: the applicable registry entries
+// plus any staff-requested one-offs, each carrying its own upload history.
+//
+// A conditional entry (the POA document) only counts as owed once the condition
+// is true, so a client with no representative is never chased for a document
+// that does not exist for them.
+const buildDocumentChecklist = (client, uploads, requests) => {
+  const line = client.serviceLine || (client.intake && client.intake.serviceLine) || 'PHC';
+  const mine = (uploads || []).filter(u => u.clientId === client.id);
+  const asks = (requests || []).filter(r => r.clientId === client.id && r.status === 'open');
+  const hasPoa = !!(client.familyIsPoa || client.hasPoa ||
+    ((client.intake || {}).legalDocs || {}).powerOfAttorney ||
+    ((client.intake || {}).decisionMaker || {}).name);
+
+  const rowFor = (def, ask) => {
+    const files = mine.filter(u => u.kind === def.kind && u.status !== 'rejected');
+    const rejected = mine.filter(u => u.kind === def.kind && u.status === 'rejected');
+    const accepted = files.some(u => u.status === 'accepted');
+    return {
+      kind: def.kind,
+      label: (ask && ask.label) || def.label,
+      hint: (ask && ask.note) || def.hint || '',
+      required: !!def.required,
+      requested: !!ask,
+      requestedAt: ask ? ask.requestedAt : null,
+      requestedBy: ask ? ask.requestedByName : null,
+      dueAt: ask ? ask.dueAt || null : null,
+      remindedAt: ask && (ask.reminders || []).length
+        ? ask.reminders[ask.reminders.length - 1].at : null,
+      // received = we have it; accepted = a person has looked at it.
+      status: accepted ? 'accepted' : (files.length ? 'received' : 'missing'),
+      files: files.concat(rejected).map(u => ({
+        id: u.id, fileName: u.fileName, uploadedAt: u.uploadedAt,
+        status: u.status, rejectionReason: u.rejectionReason || null,
+        url: `/api/gfc/documents/uploads/${u.id}/file`
+      }))
+    };
+  };
+
+  const rows = expectedDocumentsForServiceLine(line)
+    .filter(d => d.conditional !== 'poa' || hasPoa || asks.some(a => a.kind === d.kind))
+    .map(d => rowFor(d, asks.find(a => a.kind === d.kind)));
+
+  // Staff one-offs that are not registry entries get their own rows.
+  const known = new Set(rows.map(r => r.kind));
+  for (const ask of asks) {
+    if (known.has(ask.kind)) continue;
+    rows.push(rowFor({ kind: ask.kind, label: ask.label, required: false }, ask));
+  }
+  return rows;
+};
+
 // /api/gfc/documents — gated. Signed consents + client documents (Drive-backed).
 app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (req, res) => {
   try {
@@ -5542,12 +5641,146 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
       url: '/api/gfc/face-sheet.pdf',
       generated: true
     };
-    res.json({ signedConsents, documents: clientDocs, enrollmentPacket, faceSheet });
+    // The other direction: what we still need FROM them, and what they sent.
+    const uploads = (await db.get('client_document_uploads')) || [];
+    const requests = (await db.get('client_document_requests')) || [];
+    const checklist = buildDocumentChecklist(client, uploads, requests);
+
+    res.json({
+      signedConsents, documents: clientDocs, enrollmentPacket, faceSheet,
+      checklist,
+      outstanding: checklist.filter(r => r.status === 'missing' && (r.required || r.requested)).length,
+      serviceLine: client.serviceLine || 'PHC'
+    });
   } catch (error) {
     console.error('GFC documents error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
+
+
+// POST /api/gfc/documents/upload — the client sends us a file.
+//
+// requireClientForIntake, NOT requireEnrolledClient: most of what we need from a
+// client (ID, insurance card) is needed BEFORE enrollment is approved, and the
+// enrollment gate would lock a pending client out of the one screen that lets
+// them finish.
+//
+// A Drive failure FAILS the upload. The tempting alternative — record the row
+// and log the Drive error — produces a checklist that says "received" pointing
+// at a file that does not exist, which is the same silent-success trap this
+// codebase has now hit five times in OpenEMR. If we cannot store it, we did not
+// receive it.
+app.post('/api/gfc/documents/upload', authenticateToken, requireClientForIntake, async (req, res) => {
+  try {
+    const { kind, fileName, fileDataB64 } = req.body || {};
+    if (!kind || !fileName || !fileDataB64) {
+      return res.status(400).json({ error: 'kind, fileName and fileDataB64 are required' });
+    }
+    let buffer;
+    try {
+      const b64 = fileDataB64.startsWith('data:') ? fileDataB64.slice(fileDataB64.indexOf(',') + 1) : fileDataB64;
+      buffer = Buffer.from(b64, 'base64');
+    } catch (e) { return res.status(400).json({ error: 'File data is not valid base64.' }); }
+    if (!buffer.length) return res.status(400).json({ error: 'File is empty.' });
+    if (buffer.length > config.MAX_FILE_SIZE) return res.status(400).json({ error: 'File exceeds 10 MB limit.' });
+    const sniffedType = detectFileType(buffer);
+    if (!sniffedType) return res.status(400).json({ error: 'Only PDF, JPG, and PNG files are accepted.' });
+
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+
+    // The kind must be something we actually asked for — a registry entry for
+    // their line, or an open staff request. Otherwise an upload lands in a
+    // bucket no checklist reads and nobody ever sees it.
+    const requests = (await db.get('client_document_requests')) || [];
+    const known = new Set(GFC_EXPECTED_DOCUMENTS.map(d => d.kind));
+    const openAsk = requests.find(r => r.clientId === client.id && r.kind === kind && r.status === 'open');
+    if (!known.has(kind) && !openAsk) {
+      return res.status(400).json({ error: 'Unknown document type', code: 'DOCUMENT_KIND_UNKNOWN' });
+    }
+
+    const safeName = `${kind}_${(client.slug || client.id)}_${Date.now()}_${String(fileName).replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+    let stored;
+    try {
+      stored = await googledrive.uploadClientDocumentFile(client.name || 'Client', safeName, buffer, sniffedType);
+    } catch (e) {
+      console.error('[DOCUMENTS] Drive upload failed:', e.message);
+      return res.status(502).json({
+        error: 'We could not store that file. Please try again, or send it to your care team.',
+        code: 'DOCUMENT_STORAGE_UNAVAILABLE'
+      });
+    }
+
+    const row = {
+      id: `doc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      clientId: client.id,
+      kind,
+      fileName: String(fileName).slice(0, 200),
+      storedName: safeName,
+      mimeType: sniffedType,
+      size: buffer.length,
+      driveFileId: stored.fileId,
+      driveUrl: stored.webViewLink || stored.webContentLink || null,
+      uploadedAt: new Date().toISOString(),
+      uploadedById: req.user.id,
+      uploadedByName: req.user.name || req.user.email,
+      status: 'received'
+    };
+    const uploads = (await db.get('client_document_uploads')) || [];
+    await db.set('client_document_uploads', [...uploads, row]);
+
+    // An upload answers the ask. Staff can reopen it by rejecting the file.
+    if (openAsk) {
+      const i = requests.findIndex(r => r.id === openAsk.id);
+      requests[i] = { ...openAsk, status: 'fulfilled', fulfilledAt: row.uploadedAt, fulfilledBy: row.id };
+      await db.set('client_document_requests', requests);
+    }
+
+    await logActivity(req.user.id, row.uploadedByName, 'client_document_uploaded', 'document', client.id, { kind });
+    res.json({ message: 'Document received', document: { id: row.id, kind, fileName: row.fileName, uploadedAt: row.uploadedAt, status: row.status } });
+  } catch (error) {
+    console.error('GFC document upload error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/gfc/documents/uploads/:id/file — the client reads back their own file.
+// Scoped to their own record; the Drive copy is never link-shared.
+app.get('/api/gfc/documents/uploads/:id/file', authenticateToken, requireClientForIntake, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const uploads = (await db.get('client_document_uploads')) || [];
+    const row = uploads.find(u => u.id === req.params.id && u.clientId === client.id);
+    if (!row) return res.status(404).json({ error: 'Document not found' });
+    await serveStoredDocument(res, row, req.user);
+  } catch (error) {
+    console.error('GFC document download error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Shared by the client and staff download routes so one of them cannot quietly
+// grow a different content-type or a different failure mode.
+const serveStoredDocument = async (res, row, actor) => {
+  if (!row.driveFileId) {
+    return res.status(404).json({ error: 'The stored copy of this file is unavailable', code: 'DOCUMENT_FILE_MISSING' });
+  }
+  let buf;
+  try {
+    buf = await googledrive.downloadFileBuffer(row.driveFileId);
+  } catch (e) {
+    console.error('[DOCUMENTS] Drive read failed:', e.message);
+    return res.status(502).json({ error: 'The stored copy could not be read', code: 'DOCUMENT_READ_FAILED' });
+  }
+  if (actor) {
+    await logActivity(actor.id, actor.name || actor.email, 'client_document_read', 'document', row.clientId, { kind: row.kind, documentId: row.id });
+  }
+  res.setHeader('Content-Type', row.mimeType || 'application/octet-stream');
+  res.setHeader('Content-Disposition', `inline; filename="${(row.fileName || 'document').replace(/"/g, '')}"`);
+  res.send(buf);
+};
 
 // GET /api/gfc/consents/:type.pdf — ONE signed consent as its own document.
 //
@@ -8862,6 +9095,209 @@ app.put('/api/gfc/admin/enrollment/:clientId/service-line', authenticateToken, r
     res.status(500).json({ error: 'Server error' });
   }
 });
+
+// ── Staff side of the document exchange ─────────────────────────────
+// The client's half of this is a checklist they can see. The staff half is the
+// half that makes it move: asking for a specific document, chasing it, and
+// saying whether what arrived is usable.
+
+// GET /api/gfc/admin/enrollment/:clientId/documents — the same checklist staff
+// track against, built from the same function the client's portal reads, so the
+// two views cannot disagree about what is outstanding.
+app.get('/api/gfc/admin/enrollment/:clientId/documents', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+    const uploads = (await db.get('client_document_uploads')) || [];
+    const requests = (await db.get('client_document_requests')) || [];
+    const checklist = buildDocumentChecklist(client, uploads, requests);
+    res.json({
+      checklist,
+      outstanding: checklist.filter(r => r.status === 'missing' && (r.required || r.requested)).length,
+      awaitingReview: checklist.filter(r => r.status === 'received').length,
+      catalog: expectedDocumentsForServiceLine(client.serviceLine)
+        .map(d => ({ kind: d.kind, label: d.label })),
+      clientEmail: client.email || null
+    });
+  } catch (error) {
+    console.error('GFC staff documents error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/gfc/admin/enrollment/:clientId/documents/request — ask for files.
+// Items may be registry kinds or a one-off (`custom:<slug>`), so a request for
+// something the registry never anticipated still lands in the same checklist
+// rather than in an email nobody can audit.
+app.post('/api/gfc/admin/enrollment/:clientId/documents/request', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+
+    const items = Array.isArray((req.body || {}).items) ? req.body.items : [];
+    if (!items.length) return res.status(400).json({ error: 'Select at least one document to request' });
+    const dueAt = (req.body || {}).dueAt || null;
+
+    const requests = (await db.get('client_document_requests')) || [];
+    const now = new Date().toISOString();
+    const created = [];
+    for (const raw of items) {
+      const item = raw || {};
+      const registry = GFC_EXPECTED_DOCUMENTS.find(d => d.kind === item.kind);
+      const kind = registry ? registry.kind
+        : `custom:${String(item.label || item.kind || 'document').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40)}`;
+      const label = (item.label || (registry && registry.label) || 'Document').slice(0, 120);
+      // Asking twice for the same thing is one ask, not two rows to chase.
+      if (requests.some(r => r.clientId === client.id && r.kind === kind && r.status === 'open')) continue;
+      const row = {
+        id: `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        clientId: client.id, kind, label,
+        note: String(item.note || '').slice(0, 500),
+        dueAt, status: 'open', requestedAt: now,
+        requestedById: req.user.id, requestedByName: req.user.name || req.user.email,
+        reminders: []
+      };
+      requests.push(row);
+      created.push(row);
+    }
+    if (!created.length) return res.status(200).json({ message: 'Already requested — nothing new to ask for', created: [] });
+    await db.set('client_document_requests', requests);
+
+    const notified = await notifyDocumentRequest(client, created, req.user, false);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'client_documents_requested', 'document', client.id,
+      { kinds: created.map(r => r.kind), notified });
+
+    res.json({
+      message: `Requested ${created.length} document(s)${notified ? ' and emailed the client' : ''}.`,
+      created: created.map(r => ({ id: r.id, kind: r.kind, label: r.label })), notified
+    });
+  } catch (error) {
+    console.error('GFC document request error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/gfc/admin/enrollment/:clientId/documents/remind — chase what is open.
+// Every reminder is stamped on the request, so "we asked three times" is a fact
+// on the record rather than a recollection.
+app.post('/api/gfc/admin/enrollment/:clientId/documents/remind', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+
+    const requests = (await db.get('client_document_requests')) || [];
+    const only = Array.isArray((req.body || {}).requestIds) ? new Set(req.body.requestIds) : null;
+    const open = requests.filter(r => r.clientId === client.id && r.status === 'open' && (!only || only.has(r.id)));
+    if (!open.length) return res.status(400).json({ error: 'Nothing outstanding to remind about', code: 'NOTHING_OUTSTANDING' });
+
+    const now = new Date().toISOString();
+    const stamp = { at: now, byId: req.user.id, byName: req.user.name || req.user.email, channel: 'email' };
+    for (const r of open) {
+      const i = requests.findIndex(x => x.id === r.id);
+      requests[i] = { ...r, reminders: [...(r.reminders || []), stamp] };
+    }
+    await db.set('client_document_requests', requests);
+
+    const notified = await notifyDocumentRequest(client, open, req.user, true);
+    await logActivity(req.user.id, stamp.byName, 'client_documents_reminded', 'document', client.id,
+      { kinds: open.map(r => r.kind), notified });
+
+    res.json({ message: notified ? `Reminder sent for ${open.length} document(s).` : `Reminder recorded for ${open.length} document(s) — no email address on file.`, notified, reminded: open.length });
+  } catch (error) {
+    console.error('GFC document reminder error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/gfc/admin/enrollment/:clientId/documents/:uploadId/review — accept
+// or reject what arrived. Rejecting REOPENS the ask, so an unreadable photo of
+// an insurance card goes back on the client's checklist with the reason on it
+// instead of sitting in a folder marked received.
+app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const decision = String((req.body || {}).decision || '').toLowerCase();
+    if (!['accepted', 'rejected'].includes(decision)) {
+      return res.status(400).json({ error: 'decision must be accepted or rejected', code: 'BAD_DECISION' });
+    }
+    const reason = String((req.body || {}).reason || '').slice(0, 500);
+    if (decision === 'rejected' && !reason) {
+      return res.status(400).json({ error: 'A rejected document needs a reason the client can act on', code: 'REASON_REQUIRED' });
+    }
+    const uploads = (await db.get('client_document_uploads')) || [];
+    const i = uploads.findIndex(u => u.id === req.params.uploadId && u.clientId === req.params.clientId);
+    if (i === -1) return res.status(404).json({ error: 'Document not found' });
+
+    const now = new Date().toISOString();
+    uploads[i] = {
+      ...uploads[i], status: decision, rejectionReason: decision === 'rejected' ? reason : null,
+      reviewedAt: now, reviewedById: req.user.id, reviewedByName: req.user.name || req.user.email
+    };
+    await db.set('client_document_uploads', uploads);
+
+    if (decision === 'rejected') {
+      const requests = (await db.get('client_document_requests')) || [];
+      const j = requests.findIndex(r => r.clientId === uploads[i].clientId && r.kind === uploads[i].kind && r.status === 'fulfilled');
+      if (j !== -1) requests[j] = { ...requests[j], status: 'open', note: reason, reopenedAt: now };
+      await db.set('client_document_requests', requests);
+    }
+
+    await logActivity(req.user.id, req.user.name || req.user.email, 'client_document_reviewed', 'document', uploads[i].clientId,
+      { kind: uploads[i].kind, decision });
+    res.json({ message: decision === 'accepted' ? 'Document accepted.' : 'Document rejected and re-requested.', status: decision });
+  } catch (error) {
+    console.error('GFC document review error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/gfc/admin/enrollment/:clientId/documents/:uploadId/file — staff read.
+app.get('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/file', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const uploads = (await db.get('client_document_uploads')) || [];
+    const row = uploads.find(u => u.id === req.params.uploadId && u.clientId === req.params.clientId);
+    if (!row) return res.status(404).json({ error: 'Document not found' });
+    await serveStoredDocument(res, row, req.user);
+  } catch (error) {
+    console.error('GFC staff document read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// The email that goes with a request or a reminder.
+//
+// The subject names no client and no document — the same rule the admin ROI
+// email follows. A subject line is the part that shows on a lock screen.
+const notifyDocumentRequest = async (client, rows, actor, isReminder) => {
+  if (!client.email) return false;
+  const list = rows.map(r => `  • ${r.label}${r.note ? ` — ${r.note}` : ''}`).join('\n');
+  const due = rows.find(r => r.dueAt);
+  const body = [
+    `Hello${client.name ? ` ${String(client.name).split(' ')[0]}` : ''},`,
+    '',
+    isReminder
+      ? 'A quick reminder — we are still waiting on the following for your file:'
+      : 'We need a few documents to finish setting up your care:',
+    '',
+    list,
+    '',
+    due ? `Please send these by ${new Date(due.dueAt).toLocaleDateString()}.` : '',
+    'You can upload them from the Documents tab in your client portal. A clear phone photo is fine for most of them.',
+    '',
+    'If you have questions, reply to this message and someone from our team will help.',
+    '',
+    'Godwins Family Care'
+  ].filter(l => l !== null).join('\n');
+  try {
+    await sendEmail(client.email, isReminder ? 'A reminder about your documents' : 'Documents needed for your file', body);
+    return true;
+  } catch (e) {
+    console.error('[DOCUMENTS] request email failed (non-fatal):', e.message);
+    return false;
+  }
+};
 
 // POST /api/gfc/admin/enrollment/:clientId/review — record a review (no state change).
 app.post('/api/gfc/admin/enrollment/:clientId/review', authenticateToken, requireEnrollmentStaff, async (req, res) => {

@@ -229,7 +229,7 @@
   <div id="root"></div>
   
   <script type="text/babel">
-    const { useState, useEffect, useRef } = React;
+    const { useState, useEffect, useRef, useCallback } = React;
     
     const API_URL = window.location.origin;
     
@@ -359,6 +359,13 @@
       getGfcDocuments: (token) =>
         fetch(`${API_URL}/api/gfc/documents`, {
           headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(asError),
+
+      uploadGfcClientDocument: (token, payload) =>
+        fetch(`${API_URL}/api/gfc/documents/upload`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
         }).then(handleResponse).catch(asError),
 
       // ---- GFC enrollment intake (Stage 2) ----
@@ -3784,8 +3791,9 @@
     // DOB collected once (age derived), full insurance IDs, branched e-signed
     // consent set with a status stored per type.
     //
-    // NOTE: the consent language below is a WORKING DRAFT pending counsel /
-    // Georgia licensure review before HIPAA-live. TEST DATA ONLY.
+    // Consent text is the approved wording in docs/GFC_Consent_Source_Text_v2_1.md,
+    // rendered from consentText.js so the screen and the signed PDF cannot differ.
+    // TEST DATA ONLY until HIPAA-live.
     // ============================================================
 
     // Small field helpers ----------------------------------------------------
@@ -5552,22 +5560,106 @@
       );
     };
 
-    const GfcDocuments = ({ docs, readOnly, token, onOpenTransferRoi }) => {
+    // One row of "documents we need from you" — the upload half of the exchange.
+    // Rejected files stay visible with their reason: a client who is told only
+    // "we still need your insurance card" sends the same blurry photo again.
+    const GfcNeededDoc = ({ row, token, onUploaded, readOnly }) => {
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      const inputRef = React.useRef(null);
+
+      const pick = async (e) => {
+        const file = (e.target.files || [])[0];
+        e.target.value = '';
+        if (!file) return;
+        setErr('');
+        if (file.size > 10 * 1024 * 1024) { setErr('That file is over 10 MB. Try a photo at a smaller size.'); return; }
+        setBusy(true);
+        try {
+          const b64 = await new Promise((resolve, reject) => {
+            const r = new FileReader(); r.onload = () => resolve(r.result); r.onerror = reject; r.readAsDataURL(file);
+          });
+          const res = await api.uploadGfcClientDocument(token, { kind: row.kind, fileName: file.name, fileDataB64: b64 });
+          if (res.error) setErr(res.error); else await onUploaded();
+        } catch (e2) { setErr('That upload did not go through. Please try again.'); }
+        finally { setBusy(false); }
+      };
+
+      const badge = row.status === 'accepted' ? { t: 'On file', c: 'var(--navy)' }
+        : row.status === 'received' ? { t: 'Received', c: 'var(--goldd)' }
+        : { t: row.required ? 'Needed' : 'Optional', c: 'var(--mut)' };
+
+      return (
+        <div className="doc" style={{ alignItems: 'flex-start' }}>
+          <i className={`ti ${row.status === 'missing' ? 'ti-file-upload' : 'ti-file-check'}`} />
+          <div style={{ flex: 1 }}>
+            <b>{row.label}{row.required && row.status === 'missing' && <span style={{ color: 'var(--goldd)' }}> *</span>}</b>
+            <span>{row.hint}</span>
+            {row.requestedBy && row.status === 'missing' && (
+              <span style={{ color: 'var(--goldd)' }}>
+                Asked for by {row.requestedBy}{row.dueAt ? ` · by ${prettyDate(row.dueAt)}` : ''}
+              </span>
+            )}
+            {(row.files || []).map(f => (
+              <span key={f.id} style={{ color: f.status === 'rejected' ? 'var(--goldd)' : 'var(--mut)' }}>
+                {f.status === 'rejected'
+                  ? `${f.fileName} — we could not use this: ${f.rejectionReason}`
+                  : `${f.fileName} · sent ${prettyDate(f.uploadedAt)}`}
+              </span>
+            ))}
+            {err && <span style={{ color: 'var(--goldd)' }}>{err}</span>}
+            {!readOnly && (
+              <React.Fragment>
+                <input ref={inputRef} type="file" accept="image/png,image/jpeg,application/pdf"
+                  style={{ display: 'none' }} onChange={pick} />
+                <button className="btn ghost" style={{ marginTop: 8, maxWidth: 220 }}
+                  disabled={busy} onClick={() => inputRef.current && inputRef.current.click()}>
+                  {busy ? 'Sending…' : row.files && row.files.length ? 'Send another' : 'Upload'}
+                </button>
+              </React.Fragment>
+            )}
+          </div>
+          <span style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 700, letterSpacing: '.06em', color: badge.c }}>{badge.t}</span>
+        </div>
+      );
+    };
+
+    const GfcDocuments = ({ docs, readOnly, token, onOpenTransferRoi, onRefresh }) => {
       const signed = docs?.signedConsents || [];
       const files = docs?.documents || [];
       const packet = docs?.enrollmentPacket || null;
-      const openPacket = () => {
-        if (!packet) return;
-        // Drive-hosted copy opens directly; on-demand PDF uses the auth-header download helper.
-        if (packet.url && packet.url.startsWith('http')) window.open(packet.url, '_blank');
-        else openPdfSecurely(`${API_URL}${packet.url}`, token);
+      const faceSheet = docs?.faceSheet || null;
+      const checklist = docs?.checklist || [];
+      const openDoc = (url) => {
+        if (!url) return;
+        if (url.startsWith('http')) window.open(url, '_blank');
+        else openPdfSecurely(`${API_URL}${url}`, token);
       };
+      // Needed first, then optional-and-not-yet-sent, then everything on file.
+      const rank = (r) => (r.status === 'missing' ? (r.required || r.requested ? 0 : 1) : 2);
+      const needed = checklist.slice().sort((a, b) => rank(a) - rank(b));
+      const outstanding = checklist.filter(r => r.status === 'missing' && (r.required || r.requested)).length;
+
       return (
         <div className="gfc-body">
           {readOnly && <span className="ro"><i className="ti ti-eye" />Family view · read-only</span>}
+
+          {!readOnly && needed.length > 0 && (
+            <React.Fragment>
+              <p className="lbl" style={{ marginTop: 0 }}>
+                Send us your documents{outstanding ? ` · ${outstanding} still needed` : ''}
+              </p>
+              {outstanding === 0 && <p className="sub">Nothing outstanding — thank you. You can still send anything else here.</p>}
+              {needed.map(r => (
+                <GfcNeededDoc key={r.kind} row={r} token={token} readOnly={readOnly}
+                  onUploaded={onRefresh || (() => {})} />
+              ))}
+            </React.Fragment>
+          )}
+
           {!readOnly && onOpenTransferRoi && (
             <React.Fragment>
-              <p className="lbl" style={{ marginTop: 0 }}>Record release</p>
+              <p className="lbl">Record release</p>
               <div className="doc" onClick={onOpenTransferRoi} style={{ cursor: 'pointer' }}>
                 <i className="ti ti-file-symlink" />
                 <div><b>Authorize record release from prior providers</b><span>Request your records from a prior doctor, specialist, or hospital</span></div>
@@ -5575,32 +5667,42 @@
               </div>
             </React.Fragment>
           )}
+
+          <p className="lbl">Your documents</p>
           {packet && (
-            <React.Fragment>
-              <p className="lbl" style={{ marginTop: 0 }}>Enrollment</p>
-              <div className="doc" onClick={openPacket} style={{ cursor: 'pointer' }}>
-                <i className="ti ti-file-certificate" />
-                <div><b>{packet.title}</b><span>{packet.description}</span></div>
-                <i className="ti ti-download" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
-              </div>
-            </React.Fragment>
+            <div className="doc" onClick={() => openDoc(packet.url)} style={{ cursor: 'pointer' }}>
+              <i className="ti ti-file-certificate" />
+              <div><b>{packet.title}</b><span>{packet.description}</span></div>
+              <i className="ti ti-download" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
+            </div>
           )}
-          <p className="lbl" style={{ marginTop: packet ? undefined : 0 }}>Signed consents</p>
-          {signed.length === 0 && <p className="sub">No consents on file yet.</p>}
+          {faceSheet && (
+            <div className="doc" onClick={() => openDoc(faceSheet.url)} style={{ cursor: 'pointer' }}>
+              <i className="ti ti-id" />
+              <div><b>{faceSheet.title}</b><span>{faceSheet.description}</span></div>
+              <i className="ti ti-download" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
+            </div>
+          )}
+
+          <p className="lbl">Signed documents</p>
+          {signed.length === 0 && <p className="sub">No signed documents on file yet.</p>}
           {signed.map(s => {
-            // Each signed consent is a filed PDF (opens the signed enrollment packet,
-            // which contains the consent + its e-signature metadata).
-            const openConsentPdf = () => { if (!packet) return; packet.url && packet.url.startsWith('http') ? window.open(packet.url, '_blank') : openPdfSecurely(`${API_URL}${packet.url}`, token); };
+            // Its OWN document. This used to open the enrollment packet — every
+            // row on the screen downloaded the same file, so a client who signed
+            // nine documents could retrieve none of them individually.
+            const canOpen = s.status !== 'na' && !!s.url;
             const sub = s.status === 'na' ? 'Opt-out recorded'
               : `Signed ${s.signedAt ? prettyDate(s.signedAt) : ''}${s.signerName ? ` · ${s.signerName}` : ''}`.trim();
             return (
-              <div className="doc" key={s.key} onClick={s.status === 'signed' ? openConsentPdf : undefined} style={{ cursor: s.status === 'signed' ? 'pointer' : 'default' }}>
+              <div className="doc" key={s.key} onClick={canOpen ? () => openDoc(s.url) : undefined}
+                style={{ cursor: canOpen ? 'pointer' : 'default' }}>
                 <i className="ti ti-file-certificate" />
                 <div><b>{s.label}</b><span>{sub}</span></div>
-                {s.status === 'signed' && <span style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 700, letterSpacing: '.06em', color: 'var(--goldd)' }}>PDF</span>}
+                {canOpen && <span style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 700, letterSpacing: '.06em', color: 'var(--goldd)' }}>PDF</span>}
               </div>
             );
           })}
+
           <p className="lbl">From your care team</p>
           {files.length === 0 && <p className="sub">Shared documents from your care team will appear here.</p>}
           {files.map(f => (
@@ -5614,6 +5716,7 @@
         </div>
       );
     };
+
 
     // ── Session 4.3 — My Health: the patient's curated clinical read ──
     // Everything here arrives ALREADY filtered server-side (the FILTER_MAP in
@@ -5877,6 +5980,13 @@
       const clinicalAvailable = !!(me && me.clinicalRead && me.clinicalRead.available);
       const locked = me && (isFamily ? !me.roiFamilySigned : me.enrollmentStatus === 'intake_pending');
 
+      // Re-read the documents payload after an upload, so the checklist reflects
+      // what we now hold rather than what the page loaded with.
+      const refreshDocs = useCallback(async () => {
+        const dc = await api.getGfcDocuments(token);
+        if (!dc.error) setDocs(dc);
+      }, [token]);
+
       // Step 2: once unlocked, load portal data (these endpoints are gated server-side).
       useEffect(() => {
         if (!me || locked) return;
@@ -5992,7 +6102,7 @@
             onSharingSaved={(sharing) => setMe(m => m ? { ...m, sharing } : m)} />}
           {view === 'messages' && <GfcMessages messages={messages} readOnly={readOnly} token={token} actingAs={me && me.actingAs}
             onSent={async () => { const msg = await api.getGfcMessages(token); if (!msg.error) { setMessages(msg); setData(d => d ? { ...d, messages: msg } : d); } }} />}
-          {view === 'documents' && <GfcDocuments docs={docs} readOnly={readOnly} token={token} onOpenTransferRoi={() => setShowTransferRoi(true)} />}
+          {view === 'documents' && <GfcDocuments docs={docs} readOnly={readOnly} token={token} onOpenTransferRoi={() => setShowTransferRoi(true)} onRefresh={refreshDocs} />}
           {!data && view !== 'messages' && view !== 'documents' && view !== 'health' && (
             <div className="gfc-body" style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}><div className="gfc-spin" /></div>
           )}
