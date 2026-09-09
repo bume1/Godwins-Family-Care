@@ -179,3 +179,46 @@ test('consent labels shown to the client come from the registry, not a copy', ()
   assert.match(SERVER, /const consentLabels = GFC_CONSENT_DEFS\.reduce/);
   assert.doesNotMatch(SERVER, /emergencyFinancial: 'Emergency Treatment & Financial Responsibility'/);
 });
+
+test('every consent in the registry has PDF-renderable text', () => {
+  // consentText.js is the single source both the portal and the PDF generator
+  // read. A registry entry missing from it is a document that can be signed on
+  // screen and then cannot be produced afterwards.
+  const { CONSENT_TEXT } = require('../consentText');
+  for (const e of ENTRIES) {
+    assert.ok(Array.isArray(CONSENT_TEXT[e.type]) && CONSENT_TEXT[e.type].length,
+      `${e.type} has no renderable text — a signed copy could never be produced`);
+  }
+  for (const k of Object.keys(CONSENT_TEXT)) {
+    assert.ok(ENTRIES.some(e => e.type === k), `${k} has text but is in no registry entry`);
+  }
+});
+
+test('a signed consent is its own document, not a row in a packet', () => {
+  // 07/2026 requirement: every signable document renders a PDF with its own
+  // captured signature. The only artifact before this was one enrollment packet
+  // listing each consent as a line.
+  assert.match(SERVER, /app\.get\('\/api\/gfc\/consents\/:type\.pdf'/);
+  assert.match(SERVER, /url: `\/api\/gfc\/consents\/\$\{k\}\.pdf`/,
+    'each signed consent must carry its own download url');
+  // An unsigned consent has no signature to carry.
+  assert.match(SERVER, /code: 'CONSENT_NOT_SIGNED'/);
+});
+
+test('the face sheet exists and is generated from the record', () => {
+  // Five consents point at it, and it existed nowhere in the app.
+  assert.match(SERVER, /app\.get\('\/api\/gfc\/face-sheet\.pdf'/);
+  const gen = require('fs').readFileSync(require('path').join(__dirname, '..', 'pdf-generator.js'), 'utf8');
+  assert.match(gen, /async function generateFaceSheetPDF/);
+  assert.match(gen, /async function generateConsentPDF/);
+  // It must refuse to render a document whose text is missing, the same rule
+  // the portal applies before showing a signature block.
+  assert.match(gen, /refusing to generate a document with no body/);
+});
+
+test('the PDF text comes from the same source the portal renders', () => {
+  // Two copies of legal text is a copy that drifts. That is not hypothetical
+  // here: the consent TITLE map had already drifted before this was centralised.
+  const gen = require('fs').readFileSync(require('path').join(__dirname, '..', 'pdf-generator.js'), 'utf8');
+  assert.match(gen, /require\('\.\/consentText'\)/);
+});

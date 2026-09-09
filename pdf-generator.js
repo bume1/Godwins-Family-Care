@@ -788,6 +788,252 @@ const ROI_CATEGORY_LABELS = {
  * @param {string}  d.relationship
  * @returns {Promise<Buffer>}
  */
+// ============================================================
+// Signed consent documents, and the Client Information Face Sheet.
+//
+// Requirement of record (07/2026): "every signable document must render a PDF
+// with all of that document's captured digital signatures populated, per
+// document, respectively". Until now the only artifact was ONE enrollment
+// packet listing every consent as a row, which is a receipt, not a document.
+// A client who signs a Service Agreement gets a Service Agreement.
+//
+// Text comes from consentText.js, the single source the portal also renders,
+// so a signed PDF cannot say something different from what was on screen.
+// ============================================================
+const { CONSENT_TEXT } = require('./consentText');
+
+const CONSENT_ORG = ROI_ORG;
+
+// Shared chrome: branded header, footer, page breaks.
+function gfcDocHeader(doc, title, subtitle) {
+  doc.rect(0, 0, doc.page.width, 92).fill(ROI_COLORS.navy);
+  doc.fillColor('#FFFFFF').font('Helvetica-Bold').fontSize(15).text(CONSENT_ORG.name, 50, 26);
+  doc.font('Helvetica').fontSize(8.5).fillColor(ROI_COLORS.gold)
+    .text(`${CONSENT_ORG.address}  ·  Tel ${CONSENT_ORG.tel}  ·  Fax ${CONSENT_ORG.fax}`, 50, 46);
+  doc.font('Helvetica-Bold').fontSize(12).fillColor('#FFFFFF').text(title, 50, 63, { width: 500 });
+  if (subtitle) doc.font('Helvetica').fontSize(8).fillColor(ROI_COLORS.gold).text(subtitle, 50, 79, { width: 500 });
+  doc.fillColor(ROI_COLORS.ink);
+  return 112;
+}
+// Stamp the footer on every page AFTER the content is laid out. Writing below
+// the bottom margin during the flow makes pdfkit add a page for the overflow,
+// which is what produced footer-only pages in the middle of the document.
+function gfcStampFooters(doc) {
+  const range = doc.bufferedPageRange();
+  for (let i = range.start; i < range.start + range.count; i++) {
+    doc.switchToPage(i);
+    const saved = doc.page.margins.bottom;
+    doc.page.margins.bottom = 0;
+    const y = doc.page.height - 42;
+    doc.moveTo(50, y).lineTo(doc.page.width - 50, y).lineWidth(0.5).strokeColor(ROI_COLORS.goldRule).stroke();
+    doc.font('Helvetica').fontSize(7.5).fillColor(ROI_COLORS.muted)
+      .text(`Care That Sees You. ${CONSENT_ORG.name} · ${CONSENT_ORG.tel}`, 50, y + 7, { width: 500, lineBreak: false });
+    if (range.count > 1) {
+      doc.text(`Page ${i - range.start + 1} of ${range.count}`, 50, y + 7, { width: 512, align: 'right', lineBreak: false });
+    }
+    doc.page.margins.bottom = saved;
+  }
+}
+// Render a "**bold**" run inline. pdfkit has no rich text, so the string is
+// split and each run written with continued:true.
+function gfcRichText(doc, text, opts) {
+  const parts = String(text).split(/\*\*/);
+  parts.forEach((part, i) => {
+    if (!part) return;
+    doc.font(i % 2 ? 'Helvetica-Bold' : 'Helvetica');
+    doc.text(part, { ...opts, continued: i < parts.length - 1 });
+  });
+  if (parts.length % 2 === 0) doc.text('', { continued: false });
+  doc.font('Helvetica');
+}
+function gfcBlocks(doc, blocks, startY) {
+  let y = startY;
+  const L = 50, W = doc.page.width - 100;
+  const room = (need) => {
+    if (y + need < doc.page.height - 60) return;
+    doc.addPage(); y = 56;
+  };
+  for (const [t, v] of blocks) {
+    if (t === 'title') continue; // the title is already in the header
+    if (t === 'h') {
+      room(30);
+      doc.font('Helvetica-Bold').fontSize(10).fillColor(ROI_COLORS.navy).text(String(v).replace(/\*\*/g, ''), L, y + 6, { width: W });
+      y = doc.y + 3;
+    } else if (t === 'ul') {
+      for (const li of v) {
+        room(24);
+        doc.font('Helvetica').fontSize(9).fillColor(ROI_COLORS.ink);
+        doc.text('\u2022', L + 2, y, { width: 10 });
+        doc.y = y;
+        gfcRichText(doc, li, { width: W - 18, indent: 0, align: 'left', lineGap: 1 });
+        doc.x = L;
+        y = doc.y + 3;
+      }
+    } else {
+      room(30);
+      doc.font('Helvetica').fontSize(9).fillColor(ROI_COLORS.ink);
+      doc.x = L; doc.y = y;
+      gfcRichText(doc, v, { width: W, lineGap: 1.2 });
+      doc.x = L;
+      y = doc.y + 6;
+    }
+  }
+  return y;
+}
+
+/**
+ * One signed consent document.
+ * @param {object} o
+ * @param {string} o.key            consent type, e.g. 'emergencyFinancial'
+ * @param {string} o.title          registry title
+ * @param {object} o.client         client record (name, dob, slug)
+ * @param {object} o.meta           consentMeta entry: typedName, signedAt, ipHash
+ * @param {string} o.status         'signed' | 'signed_offline' | 'na'
+ * @param {string} o.serviceLine
+ */
+async function generateConsentPDF(o) {
+  const blocks = CONSENT_TEXT[o.key];
+  // Never render a document whose text we do not have. The same rule the portal
+  // enforces before showing a signature block: no text, no document.
+  if (!blocks || !blocks.length) {
+    throw new Error(`No consent text for "${o.key}" — refusing to generate a document with no body`);
+  }
+  const doc = new PDFDocument({ size: 'LETTER', margin: 50, bufferPages: true });
+  const chunks = [];
+  doc.on('data', c => chunks.push(c));
+  const done = new Promise(res => doc.on('end', res));
+
+  const client = o.client || {};
+  const meta = o.meta || {};
+  const offline = o.status === 'signed_offline';
+  const declined = o.status === 'na';
+
+  let y = gfcDocHeader(doc, o.title || o.key,
+    `${client.name || 'Client'}${client.dob ? '  ·  DOB ' + client.dob : ''}${o.serviceLine ? '  ·  ' + String(o.serviceLine).toUpperCase() : ''}`);
+
+  y = gfcBlocks(doc, blocks, y);
+
+  // ---- signature block -----------------------------------------------------
+  if (y + 130 > doc.page.height - 60) { doc.addPage(); y = 56; }
+  y += 14;
+  doc.moveTo(50, y).lineTo(doc.page.width - 50, y).lineWidth(1).strokeColor(ROI_COLORS.goldRule).stroke();
+  y += 12;
+  doc.font('Helvetica-Bold').fontSize(9).fillColor(ROI_COLORS.navy)
+    .text(declined ? 'DECLINED' : offline ? 'SIGNED ON PAPER' : 'ELECTRONICALLY SIGNED', 50, y);
+  y += 16;
+
+  const row = (label, value) => {
+    doc.font('Helvetica').fontSize(7).fillColor(ROI_COLORS.muted).text(label.toUpperCase(), 50, y, { width: 170, characterSpacing: 0.4 });
+    doc.font('Helvetica').fontSize(9.5).fillColor(ROI_COLORS.ink).text(value || '\u2014', 220, y, { width: 292 });
+    y = Math.max(doc.y, y + 14) + 4;
+  };
+  row('Signed by', meta.typedName || client.name || null);
+  row('Date and time', meta.signedAt ? new Date(meta.signedAt).toLocaleString('en-US') : null);
+  if (offline) row('Provenance', 'Signed on paper before this record was created');
+  // The IP is stored hashed, never in the clear. Printing the hash is what makes
+  // the signature verifiable without exposing the address.
+  if (meta.ipHash) row('Verification', String(meta.ipHash).slice(0, 32));
+  row('Document', `${o.title || o.key} (${o.key})`);
+
+  if (!declined) {
+    y += 4;
+    doc.font('Helvetica-Oblique').fontSize(7.5).fillColor(ROI_COLORS.muted).text(
+      'Signed electronically by typing a full name and affirming an acknowledgment. This record, its timestamp and its verification hash are retained by Godwins Family Care LLC.',
+      50, y, { width: 462 });
+  }
+
+  gfcStampFooters(doc);
+  doc.end();
+  await done;
+  return Buffer.concat(chunks);
+}
+
+/**
+ * Client Information Face Sheet — the at-a-glance record every consent points
+ * at ("recorded once on your Client Information Face Sheet"). It is assembled
+ * from the client record and intake rather than collected again, which is the
+ * whole reason those consents stopped repeating the questions.
+ */
+async function generateFaceSheetPDF(client) {
+  const doc = new PDFDocument({ size: 'LETTER', margin: 50, bufferPages: true });
+  const chunks = [];
+  doc.on('data', c => chunks.push(c));
+  const done = new Promise(res => doc.on('end', res));
+
+  const c = client || {};
+  const i = c.intake || {};
+  const L = 50, W = doc.page.width - 100;
+  let y = gfcDocHeader(doc, 'Client Information Face Sheet',
+    `${c.name || 'Client'}${c.serviceLine ? '  ·  ' + String(c.serviceLine).toUpperCase() : ''}  ·  Generated ${new Date().toLocaleDateString('en-US')}`);
+
+  const section = (t) => {
+    if (y + 60 > doc.page.height - 60) { doc.addPage(); y = 56; }
+    doc.rect(L, y, W, 18).fill(ROI_COLORS.cream);
+    doc.font('Helvetica-Bold').fontSize(9).fillColor(ROI_COLORS.navy).text(t.toUpperCase(), L + 8, y + 5, { characterSpacing: 0.5 });
+    y += 26;
+  };
+  const pair = (label, value) => {
+    if (y + 26 > doc.page.height - 60) { doc.addPage(); y = 56; }
+    doc.font('Helvetica').fontSize(7).fillColor(ROI_COLORS.muted).text(String(label).toUpperCase(), L, y, { width: 150, characterSpacing: 0.3 });
+    doc.font('Helvetica').fontSize(9.5).fillColor(ROI_COLORS.ink).text(value == null || value === '' ? '\u2014' : String(value), L + 158, y, { width: W - 158 });
+    y = Math.max(doc.y, y + 13) + 5;
+  };
+  const listOf = (arr, fn) => (Array.isArray(arr) && arr.length) ? arr.map(fn).filter(Boolean).join('; ') : null;
+
+  section('Client');
+  pair('Full legal name', c.name || i.clientLegalName);
+  pair('Preferred name', c.preferredName || i.preferredName);
+  pair('Date of birth', i.dob || c.dob);
+  pair('Address', i.address || c.address);
+  pair('Phone', i.phone || c.phone);
+  pair('Service line', c.serviceLine);
+  pair('Care tier', c.careTier);
+
+  section('Emergency contacts and call order');
+  const pc = i.primaryContact || {};
+  pair('Primary contact', [pc.name, pc.relationship, pc.phone].filter(Boolean).join(' \u2014 '));
+  const ec = i.emergencyContact || {};
+  pair('Emergency contact', [ec.name, ec.relationship, ec.phone].filter(Boolean).join(' \u2014 '));
+  pair('Notify first in a crisis', i.crisisNotify);
+  pair('Authorized to call 911', i.auth911);
+
+  section('Medical');
+  const mt = i.medicalTeam || {};
+  pair('Primary care provider', mt.pcpName || i.pcpName);
+  pair('Preferred hospital', mt.preferredHospital || i.preferredHospital);
+  pair('Pharmacy', [mt.preferredPharmacy, mt.pharmacyPhone].filter(Boolean).join(' \u2014 '));
+  pair('Allergies', c.allergies || i.allergies);
+  pair('Diagnoses', listOf(i.diagnoses, d => (typeof d === 'string' ? d : d && (d.label || d.code))));
+  pair('Medications', listOf(i.medications, m => m && m.name ? [m.name, m.dose, m.frequency].filter(Boolean).join(' ') : null));
+
+  section('Advance directive and decision making');
+  const ad = i.advanceDirective || {};
+  pair('Advance directive', ad.status || i.advanceDirectiveStatus);
+  pair('Healthcare agent', ad.agentName || i.healthcareAgent);
+  pair('Power of attorney on file', ad.poaOnFile != null ? (ad.poaOnFile ? 'Yes' : 'No') : null);
+
+  section('Home and access');
+  pair('Entry instructions', i.entryInstructions);
+  pair('Pets in the home', i.pets);
+  pair('Home safety notes', listOf(c.homeSafetyFlags, f => f));
+
+  section('Payer');
+  const payer = c.payer || {};
+  pair('Payer type', payer.type);
+  pair('Plan', payer.planName);
+  pair('Billing contact', payer.billingContact);
+
+  y += 6;
+  doc.font('Helvetica-Oblique').fontSize(7.5).fillColor(ROI_COLORS.muted).text(
+    'Assembled from this client\u2019s record. Confirm it is correct rather than writing it again, and tell us whenever it changes.',
+    L, y, { width: W });
+
+  gfcStampFooters(doc);
+  doc.end();
+  await done;
+  return Buffer.concat(chunks);
+}
+
 async function generateProviderROIPDF(d) {
   return new Promise((resolve, reject) => {
     try {
@@ -1117,5 +1363,7 @@ module.exports = {
   generateEnrollmentPacketPDF,
   generateProviderROIPDF,
   generateCarePlanPDF,
+  generateConsentPDF,
+  generateFaceSheetPDF,
   ROI_CATEGORY_LABELS
 };

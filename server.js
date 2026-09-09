@@ -5517,7 +5517,9 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
         label: consentLabels[k] || k,
         status: consents[k],
         signedAt: (client.consentMeta && client.consentMeta[k] && client.consentMeta[k].signedAt) || null,
-        signerName: (client.consentMeta && client.consentMeta[k] && client.consentMeta[k].typedName) || null
+        signerName: (client.consentMeta && client.consentMeta[k] && client.consentMeta[k].typedName) || null,
+        // Its own document, not a row in a packet.
+        url: `/api/gfc/consents/${k}.pdf`
       }));
 
     // Documents shared with this client via the existing client-documents store (Drive-backed).
@@ -5534,10 +5536,75 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
       generated: true
     } : null;
 
-    res.json({ signedConsents, documents: clientDocs, enrollmentPacket });
+    const faceSheet = {
+      title: 'Client Information Face Sheet',
+      description: 'Your contacts, medical team, directive and access details on one page',
+      url: '/api/gfc/face-sheet.pdf',
+      generated: true
+    };
+    res.json({ signedConsents, documents: clientDocs, enrollmentPacket, faceSheet });
   } catch (error) {
     console.error('GFC documents error:', error);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/gfc/consents/:type.pdf — ONE signed consent as its own document.
+//
+// The 07/2026 requirement: every signable document renders a PDF carrying its
+// own captured signature. Until now the only artifact was a single enrollment
+// packet listing each consent as a row — a receipt, not a document. A client who
+// signs a Service Agreement is entitled to a Service Agreement.
+//
+// Text comes from consentText.js, the same source the portal renders, so a
+// signed PDF cannot say something different from what was on the screen.
+app.get('/api/gfc/consents/:type.pdf', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const type = String(req.params.type || '').replace(/\.pdf$/i, '');
+    const def = GFC_CONSENT_DEFS.find(d => d.type === type);
+    if (!def) return res.status(404).json({ error: 'Unknown consent', code: 'CONSENT_UNKNOWN' });
+
+    const status = (client.consents || {})[type];
+    // Only a signed record produces a document. An unsigned consent has no
+    // signature to carry, and rendering one would look like a signed copy.
+    if (!status || status === 'pending') {
+      return res.status(409).json({ error: 'That consent has not been signed yet', code: 'CONSENT_NOT_SIGNED' });
+    }
+    const pdf = await pdfGenerator.generateConsentPDF({
+      key: type, title: def.title, client, serviceLine: client.serviceLine,
+      status, meta: (client.consentMeta || {})[type] || {}
+    });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'consent_document_downloaded', 'consent', type,
+      { clientId: client.id, status });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${type}-${client.slug || client.id}.pdf"`);
+    res.send(pdf);
+  } catch (error) {
+    console.error('Consent PDF error:', error);
+    res.status(500).json({ error: 'Failed to generate the document' });
+  }
+});
+
+// GET /api/gfc/face-sheet.pdf — the Client Information Face Sheet.
+//
+// Every consent points at it ("recorded once on your Client Information Face
+// Sheet") and it did not exist anywhere in the app. It is assembled from the
+// client record and intake rather than collected again, which is the entire
+// reason those consents stopped repeating the questions.
+app.get('/api/gfc/face-sheet.pdf', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const pdf = await pdfGenerator.generateFaceSheetPDF(client);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'face_sheet_downloaded', 'client', client.id, {});
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="face-sheet-${client.slug || client.id}.pdf"`);
+    res.send(pdf);
+  } catch (error) {
+    console.error('Face sheet PDF error:', error);
+    res.status(500).json({ error: 'Failed to generate the face sheet' });
   }
 });
 
