@@ -5335,7 +5335,7 @@ const emitSignedCarePlanPdf = async (clientId, version, clientSignature, actor) 
       console.error('Care-plan PDF Drive upload failed:', e.message);
     }
     let emrDocumented = false;
-    if (client.openEmrPatientId && openemr.isConfigured()) {
+    if (carePlanBelongsInChart(client) && openemr.isConfigured()) {
       try {
         await openemr.forActor(actor).uploadPatientDocument(
           client.openEmrPatientId, fileName, pdfBuffer, 'application/pdf', '/Medical Record');
@@ -5372,6 +5372,122 @@ const emitSignedCarePlanPdf = async (clientId, version, clientSignature, actor) 
   } catch (err) {
     console.error('Signed care-plan PDF emission failed:', err);
     return { stored: false, error: 'PDF emission failed' };
+  }
+};
+
+
+// ── The plan of care and the chart ──────────────────────────────────
+//
+// THE RULE (owner, 2026-09-09): the plan of care LIVES IN THE APP. It reaches
+// the patient's OpenEMR document record only when the client is a CLINICAL
+// patient — either they enrolled on the clinical line, or they were toggled
+// onto it later. A home-care-only client's plan is complete where it is and
+// belongs nowhere else; there is no second plan to build.
+//
+// "Toggled onto it later" is the half that did not work. The plan filed at
+// author time and again at co-sign, and both of those are long over by the time
+// a home care client adds medical care. Nothing ever re-filed. So a client who
+// became a patient in September had a chart with no plan of care in it, the app
+// reported nothing wrong, and the only way to notice was to open the chart and
+// look.
+//
+// Becoming a patient takes TWO steps and they can happen in either order — the
+// service line changes, and a clinician links the chart — so whichever lands
+// SECOND carries the backfill. Both call this.
+const carePlanBelongsInChart = (client) =>
+  isClinicalServiceLine(client && client.serviceLine) && !!(client && client.openEmrPatientId);
+
+// The signed PDF, from the Drive copy when there is one and rebuilt from the
+// app's own records when there is not. Both signatures live in
+// care_plan_versions + care_plan_cosign_events, so a missing Drive file costs
+// nothing. Shared with the patient-facing route so the document a client
+// downloads and the document filed into their chart cannot differ.
+const buildCarePlanPdfForVersion = async (client, version) => {
+  const docRef = ((client.carePlanDocs || {})[`v${version}`] || {}).signed || null;
+  if (docRef && docRef.driveFileId) {
+    try {
+      return { buffer: await googledrive.downloadFileBuffer(docRef.driveFileId), source: 'drive' };
+    } catch (e) {
+      console.error('Signed care-plan Drive download failed (regenerating from app records):', e.message);
+    }
+  }
+  const [versionRows, coSignEvents] = await Promise.all([
+    db.get('care_plan_versions'), db.get('care_plan_cosign_events')
+  ]);
+  const vrow = (versionRows || []).find(r => r && r.client_id === client.id && String(r.version) === String(version)) || null;
+  const ev = (coSignEvents || [])
+    .filter(e => e && e.client_id === client.id && String(e.version) === String(version))
+    .sort((a, b) => String(b.at).localeCompare(String(a.at)))[0] || null;
+  const buffer = await pdfGenerator.generateCarePlanPDF({
+    // A plan that has not been co-signed is filed as authored, not as signed —
+    // the chart must never carry a signature block the client has not signed.
+    state: ev ? 'signed' : 'authored',
+    patientName: client.name,
+    patientDOB: (client.intake && client.intake.dob) || client.dob || '',
+    careTier: normalizeCareTier(client.careTier),
+    careTierLabel: careTierLabelFor(client.careTier),
+    serviceLine: client.serviceLine || '',
+    plan: vrow ? vrow.plan : client.carePlan,
+    rnSignature: vrow ? vrow.rnSignature : null,
+    clientSignature: ev
+      ? { at: ev.at, name: ev.name, ipHash: ev.ipHash, signatureImage: ev.signatureImage, signerRole: ev.signerRole }
+      : { pending: true }
+  });
+  return { buffer, source: 'regenerated' };
+};
+
+// File the current plan of care into the patient's OpenEMR documents.
+//
+// Every outcome is NAMED and returned. A skip is a reason, never a silent
+// no-op: "this client is home care only" and "the upload failed" are different
+// facts and the caller has to be able to tell them apart. Idempotent — a
+// version already filed is not filed twice, so a re-toggle or a re-link cannot
+// stack duplicate PDFs in the chart.
+const fileCarePlanToChart = async (clientId, actor, trigger) => {
+  try {
+    const users = await getUsers();
+    const client = users.find(u => u.id === clientId);
+    if (!client) return { filed: false, reason: 'CLIENT_NOT_FOUND' };
+    if (!isClinicalServiceLine(client.serviceLine)) return { filed: false, reason: 'HOME_CARE_ONLY' };
+    if (!client.openEmrPatientId) return { filed: false, reason: 'NOT_LINKED' };
+    if (!openemr.isConfigured()) return { filed: false, reason: 'EMR_NOT_CONFIGURED' };
+
+    const version = resolveCarePlanVersion(client);
+    if (version == null) return { filed: false, reason: 'NO_CARE_PLAN' };
+
+    const existing = (client.carePlanDocs || {})[`v${version}`] || {};
+    if (existing.chartFiled && existing.chartFiled.emrDocumented) {
+      return { filed: false, reason: 'ALREADY_FILED', version };
+    }
+
+    const { buffer, source } = await buildCarePlanPdfForVersion(client, version);
+    const coSigned = !!(client.carePlanCoSign || {})[`v${version}`];
+    const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const lastName = (client.name || 'Client').trim().split(/\s+/).slice(-1)[0];
+    const fileName = `CarePlan_${lastName}_v${version}_${coSigned ? 'signed' : 'authored'}_${dateStr}.pdf`;
+
+    await openemr.forActor(actor).uploadPatientDocument(
+      client.openEmrPatientId, fileName, buffer, 'application/pdf', '/Medical Record');
+
+    const fresh = await getUsers();
+    const fidx = fresh.findIndex(u => u.id === clientId);
+    if (fidx !== -1) {
+      fresh[fidx].carePlanDocs = {
+        ...(fresh[fidx].carePlanDocs || {}),
+        [`v${version}`]: {
+          ...((fresh[fidx].carePlanDocs || {})[`v${version}`] || {}),
+          chartFiled: { fileName, emrDocumented: true, at: new Date().toISOString(), trigger, source, coSigned }
+        }
+      };
+      await db.set('users', fresh);
+      invalidateUsersCache();
+    }
+    await logActivity(actor.id, actor.name || actor.email, 'care_plan_filed_to_chart', 'care_plan', `v${version}`,
+      { clientId, trigger, fileName, coSigned, source });
+    return { filed: true, version, fileName, coSigned, source };
+  } catch (err) {
+    console.error('Care-plan chart filing failed:', err.message);
+    return { filed: false, reason: 'UPLOAD_FAILED', error: err.message };
   }
 };
 
@@ -6323,30 +6439,9 @@ app.get('/api/gfc/clinical/care-plan.pdf', authenticateToken, requireEnrolledCli
     const coSign = (client.carePlanCoSign || {})[`v${version}`];
     if (!coSign) return res.status(409).json({ error: 'The signed care plan is available once it has been co-signed.', code: 'CARE_PLAN_NOT_SIGNED' });
 
-    const doc = ((client.carePlanDocs || {})[`v${version}`] || {}).signed || null;
-    let buffer = null; let source = null;
-    if (doc && doc.driveFileId) {
-      try { buffer = await googledrive.downloadFileBuffer(doc.driveFileId); source = 'drive'; }
-      catch (e) { console.error('Signed care-plan Drive download failed (regenerating from app records):', e.message); }
-    }
-    if (!buffer) {
-      const [versionRows, coSignEvents] = await Promise.all([db.get('care_plan_versions'), db.get('care_plan_cosign_events')]);
-      const vrow = (versionRows || []).find(r => r && r.client_id === client.id && String(r.version) === String(version)) || null;
-      const ev = (coSignEvents || []).filter(e => e && e.client_id === client.id && String(e.version) === String(version)).sort((a, b) => String(b.at).localeCompare(String(a.at)))[0] || null;
-      const plan = vrow ? vrow.plan : client.carePlan;
-      buffer = await pdfGenerator.generateCarePlanPDF({
-        state: 'signed',
-        patientName: client.name,
-        patientDOB: (client.intake && client.intake.dob) || client.dob || '',
-        careTier: normalizeCareTier(client.careTier),
-        careTierLabel: careTierLabelFor(client.careTier),
-        serviceLine: client.serviceLine || '',
-        plan,
-        rnSignature: vrow ? vrow.rnSignature : null,
-        clientSignature: ev ? { at: ev.at, name: ev.name, ipHash: ev.ipHash, signatureImage: ev.signatureImage, signerRole: ev.signerRole } : { pending: true }
-      });
-      source = 'regenerated';
-    }
+    // Same builder the chart filing uses, so the copy a client downloads and the
+    // copy in their chart cannot say different things.
+    const { buffer, source } = await buildCarePlanPdfForVersion(client, version);
     await logActivity(req.user.id, req.user.name || req.user.email, 'patient_clinical_read', 'client', client.id,
       { role: req.user.role, audience, actingFor: acting.actingFor, patientId: client.openEmrPatientId || null, resource: 'care_plan_pdf', version, source });
     const lastName = (client.name || 'Client').trim().split(/\s+/).slice(-1)[0];
@@ -6567,7 +6662,13 @@ app.post('/api/clinical/patients/:clientId/link', authenticateToken, requireClin
       openEmrPatientId: puuid, created: !(req.body && req.body.openEmrPatientId),
       confirmedDistinct: !!(req.body && req.body.confirmDistinct && !req.body.openEmrPatientId)
     });
-    res.json({ message: 'Linked to OpenEMR', openEmrPatientId: puuid });
+    // The other of the two moments. A client already on the clinical line with a
+    // plan authored before anyone opened a chart for them: this is the first
+    // point at which that plan CAN reach the chart, and nothing downstream
+    // would ever try again.
+    const carePlanFiling = await fileCarePlanToChart(client.id, req.user, 'patient_linked');
+
+    res.json({ message: 'Linked to OpenEMR', openEmrPatientId: puuid, carePlanFiling });
   } catch (error) {
     console.error('Clinical link error:', error);
     const status = error.status === 404 ? 400 : 502;
@@ -6923,8 +7024,11 @@ app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requir
     // OpenEMR-side record: authored care-plan PDF into patient Documents
     // (structured CarePlan resources are read-only on OpenEMR 7.0.4 — the
     // approved transport deviation; the final signed PDF follows at co-sign).
+    // The plan lives in the app. It reaches the chart only for a CLINICAL
+    // patient — stated, not inferred from an EMR id happening to be present.
+    // A home care client's plan stops here, which is correct and not a failure.
     let emrDocumented = false;
-    if (client.openEmrPatientId && openemr.isConfigured()) {
+    if (carePlanBelongsInChart(users[idx]) && openemr.isConfigured()) {
       try {
         const pdfBuffer = await pdfGenerator.generateCarePlanPDF({
           state: 'authored',
@@ -9624,6 +9728,13 @@ app.put('/api/gfc/admin/enrollment/:clientId/service-line', authenticateToken, r
     await logActivity(req.user.id, req.user.name || req.user.email, 'service_line_changed', 'enrollment', client.id,
       { from: change.from, to: change.to, newlyRequired: change.newlyRequired, noLongerRequired: change.noLongerRequired });
 
+    // Adding medical care is one of the two moments a client becomes a patient.
+    // If the chart is already linked, their plan of care belongs in it now — and
+    // nothing else would ever put it there, because authoring and co-signing are
+    // both behind them. Reported either way; a filing failure never fails the
+    // line change, which has already been recorded.
+    const carePlanFiling = await fileCarePlanToChart(client.id, req.user, 'service_line_changed');
+
     res.json({
       message: change.newlyRequired.length
         ? `Service line set to ${line}. ${change.newlyRequired.length} document(s) now await the client's signature.`
@@ -9631,6 +9742,7 @@ app.put('/api/gfc/admin/enrollment/:clientId/service-line', authenticateToken, r
       serviceLine: line, previous,
       newlyRequired: change.newlyRequired,
       noLongerRequired: change.noLongerRequired,
+      carePlanFiling,
       titles: change.newlyRequired.map(t => consentRegistry.titleForType(t)),
       requiredConsents: requiredConsentTypes(line)
     });

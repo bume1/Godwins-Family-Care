@@ -203,3 +203,59 @@ test('the client portal can send documents back', () => {
   assert.match(PORTAL, /uploadGfcClientDocument/);
   assert.match(PORTAL, /const GfcNeededDoc = /);
 });
+
+// ── The plan of care and the chart ──────────────────────────────────
+// Owner rule, 2026-09-09: the plan lives in the app; it reaches the patient's
+// OpenEMR document record only when the client is a clinical patient, whether
+// they enrolled that way or were toggled onto it later.
+
+test('the plan reaches the chart only for a clinical patient', () => {
+  // Stated as a rule, not inferred from an EMR id happening to be present.
+  assert.match(SERVER, /const carePlanBelongsInChart = \(client\) =>\s*\n?\s*isClinicalServiceLine\(client && client\.serviceLine\) && !!\(client && client\.openEmrPatientId\)/);
+  // And it is the gate at BOTH existing filing points — author and co-sign.
+  assert.equal((SERVER.match(/carePlanBelongsInChart\(/g) || []).length, 2,
+    'both existing filing sites — author and co-sign — must ask the same question');
+  // A home care client is a named outcome, never a silent skip.
+  assert.match(SERVER, /reason: 'HOME_CARE_ONLY'/);
+});
+
+test('becoming a patient backfills the plan into the chart', () => {
+  // The gap this closes: filing happened at author time and at co-sign, both of
+  // which are over by the time a home care client adds medical care. Nothing
+  // re-filed, so the chart had no plan of care and nothing said so.
+  const line = SERVER.slice(
+    SERVER.indexOf("app.put('/api/gfc/admin/enrollment/:clientId/service-line'"),
+    SERVER.indexOf("app.post('/api/gfc/admin/enrollment/:clientId/review'")
+  );
+  assert.match(line, /fileCarePlanToChart\(client\.id, req\.user, 'service_line_changed'\)/);
+  const link = SERVER.slice(
+    SERVER.indexOf("app.post('/api/clinical/patients/:clientId/link'"),
+    SERVER.indexOf("app.post('/api/clinical/patients/:clientId/link'") + 6000
+  );
+  assert.match(link, /fileCarePlanToChart\(client\.id, req\.user, 'patient_linked'\)/);
+});
+
+test('filing is idempotent and every outcome is named', () => {
+  const fn = SERVER.slice(
+    SERVER.indexOf('const fileCarePlanToChart ='),
+    SERVER.indexOf("// Visits for a client from the visit_logs")
+  );
+  assert.ok(fn.length > 400, 'the filing helper must exist');
+  // A re-toggle or a re-link must not stack duplicate PDFs in the chart.
+  assert.match(fn, /reason: 'ALREADY_FILED'/);
+  assert.match(fn, /existing\.chartFiled && existing\.chartFiled\.emrDocumented/);
+  // "Home care only" and "the upload failed" are different facts.
+  for (const r of ['HOME_CARE_ONLY', 'NOT_LINKED', 'NO_CARE_PLAN', 'UPLOAD_FAILED']) {
+    assert.ok(fn.includes(`reason: '${r}'`), `${r} must be a named outcome`);
+  }
+  assert.match(fn, /'care_plan_filed_to_chart'/);
+});
+
+test('an un-cosigned plan is filed as authored, never as signed', () => {
+  // The chart must not carry a signature block the client has not signed.
+  const builder = SERVER.slice(
+    SERVER.indexOf('const buildCarePlanPdfForVersion ='),
+    SERVER.indexOf('const fileCarePlanToChart =')
+  );
+  assert.match(builder, /state: ev \? 'signed' : 'authored'/);
+});
