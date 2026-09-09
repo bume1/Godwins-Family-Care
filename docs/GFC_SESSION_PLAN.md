@@ -18,7 +18,7 @@ Each session ends in a PR you review and merge. **Companion to** `GFC_App_Build_
 | 4 | **Clinical / In-Home Primary Care portal + OpenEMR** | Clinical | ✅ Done — **4.1 clinician workspace (PR #19)**; **4.2 scheduling (PR #22)**; **4.4 clinical completeness P0 (PR #29)**; **4.3 patient clinical read + POA gates + case-manager read (PR #31)**; **4.5 native 8.4 writes + 6B routes + patient-driven facility/POS (PR #42, merged 2026-09-08 — 4.3's owed live preflight ran there, 13/13)**. Follow-on per `CLAUDE.md`: OpenEMR configuration (billing NPI, ICD-10-CM load, facility records for 8.3); **4.6 enrollment consent set (PR #46, merged 2026-09-09)** |
 | 5 | **Clinical HIPAA go-live** (app → AWS boundary, MFA, audit, BAAs, **+ OpenEMR auth migration to authorization_code**) | Clinical | ⬜ Planned |
 | 6 | Caregiver app | PHCP | ✅ Done (PR #55, merged 2026-09-09) — 4-tab mobile workspace, tier-branched visit log, escalation. Session 5 skipped by owner approval 2026-09-09 (Session 6 is app-side PHCP and writes nothing to OpenEMR). Mount points for Sessions 7 and 9 stubbed. |
-| 7 | Scheduling · availability · time tracking | PHCP | ✅ Done (PR #56, merged 2026-09-09) — availability (30-day rule), open-shift pool, both matching pathways, GPS time tracking, payroll CSV. Caregiver component ships unmounted for the wiring session. |
+| 7 | Scheduling · availability · time tracking | PHCP | ✅ Done (PR #56) — availability (30-day rule), open-shift pool, both matching pathways, GPS time tracking, payroll CSV. Caregiver component ships unmounted for the wiring session. |
 | 8 | Matching engine | PHCP | ⬜ Planned |
 | 9 | Messaging module (full channel matrix) | Shared | ⬜ Planned |
 | 10 | Family portal | Shared | ⬜ Planned |
