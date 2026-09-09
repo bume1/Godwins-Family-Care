@@ -25,6 +25,7 @@ const consentRegistry = require('./consentRegistry'); // THE consent registry: l
 const consentRender = require('./consentRender');     // consent data blocks resolved from the client record (4.6)
 const zipWriter = require('./zipWriter');             // dependency-free ZIP for the signed-consent packet (4.6)
 const caregiverRoutes = require('./routes/caregiver'); // caregiver app: visit log + escalation (Session 6)
+const schedulingRoutes = require('./routes/scheduling'); // PHCP shifts, availability, time tracking (Session 7)
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -2225,6 +2226,10 @@ const buildConsentSignature = (args) =>
 // Caregiver app (Session 6) — page shell + /api/caregiver/*. Every route inside
 // enforces its own access (caregiver / review staff / admin) at the API layer.
 app.use(caregiverRoutes({ db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4 }));
+
+// PHCP scheduling (Session 7) — page shell + /api/scheduling/*. App-side only;
+// clinical appointments stay in OpenEMR (Session 4.2). Two systems by design.
+app.use(schedulingRoutes({ db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4 }));
 
 // Uploads require authentication - registered here after authenticateToken is defined
 app.use('/uploads', authenticateToken, express.static('uploads', staticOptions));

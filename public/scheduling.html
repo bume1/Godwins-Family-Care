@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Godwins Family Care — Scheduling</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.1.0/dist/tabler-icons.min.css">
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+  <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
+  <style>
+    /* A new page rather than an edit to admin-hub.html: the hub is 220KB and
+       Session 7 runs in parallel with two other sessions, so a separate file
+       is the cleaner merge. The brief allows either. */
+    :root{--navy:#033D50;--navy-d:#022A38;--gold:#F5CD85;--goldd:#C9A44A;
+          --cream:#FAF7F2;--cream-d:#efe9db;--ink:#2b2b28;--mut:#7a746a;
+          --red:#A32D2D;--green:#0f6e56;--line:#e5ddcb}
+    *{box-sizing:border-box;margin:0;padding:0;font-family:'DM Sans',system-ui,sans-serif}
+    body{background:var(--cream-d);color:var(--ink);font-size:15px;line-height:1.5}
+    .serif{font-family:'Cormorant Garamond',Georgia,serif}
+    .hdr{background:var(--navy);color:var(--cream);padding:14px 22px;display:flex;align-items:center;justify-content:space-between;gap:12px;position:sticky;top:0;z-index:30}
+    .hdr .t{font-family:'Cormorant Garamond',serif;font-size:23px;font-weight:600}
+    .hdr a,.hdr button{color:var(--gold);background:none;border:none;font-size:14px;font-weight:600;cursor:pointer;text-decoration:none;font-family:inherit}
+    .wrap{max-width:1180px;margin:0 auto;padding:20px 18px 60px}
+    .tabs{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:18px}
+    .tab{border:1.5px solid #d8cdb8;background:#fff;border-radius:20px;padding:8px 16px;font-size:14px;color:var(--navy);cursor:pointer;font-family:inherit;font-weight:600}
+    .tab.on{background:var(--navy);border-color:var(--navy);color:var(--gold)}
+    .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:14px}
+    .card h2{font-family:'Cormorant Garamond',serif;font-size:20px;color:var(--navy);font-weight:600;margin-bottom:4px}
+    .card .sub{font-size:14px;color:var(--mut);margin-bottom:12px}
+    .row{display:flex;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid #ece6db;flex-wrap:wrap}
+    .row:last-child{border:none}
+    .row b{color:var(--navy);font-weight:600}
+    .mu{color:var(--mut);font-size:14px}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:11px}
+    label{display:block;font-size:11px;letter-spacing:.6px;text-transform:uppercase;color:var(--mut);font-weight:700;margin-bottom:5px}
+    input,select,textarea{width:100%;border:1px solid #ddd3c0;border-radius:8px;padding:10px;font-size:15px;background:#fff;color:var(--ink)}
+    textarea{min-height:70px;resize:vertical}
+    .btn{border-radius:8px;padding:10px 15px;font-size:14px;font-weight:600;cursor:pointer;border:1px solid var(--navy);background:var(--navy);color:#fff;font-family:inherit}
+    .btn.gold{background:var(--goldd);border-color:var(--goldd);color:#fff}
+    .btn.ghost{background:#fff;color:var(--navy)}
+    .btn.danger{background:#fff;border-color:var(--red);color:var(--red)}
+    .btn[disabled]{opacity:.5;cursor:not-allowed}
+    .btns{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+    .chip{display:inline-block;border-radius:12px;padding:3px 10px;font-size:11.5px;font-weight:700}
+    .chip.open{background:#eee8db;color:#8a8378}
+    .chip.claimed,.chip.assigned{background:#fdf3dd;color:#8a6a1e}
+    .chip.confirmed{background:#eef3f0;color:var(--green)}
+    .chip.in_progress{background:var(--navy);color:var(--gold)}
+    .chip.completed{background:#e7edf0;color:var(--navy)}
+    .chip.cancelled{background:#f3eaea;color:var(--red)}
+    .chip.flag{background:#fdeeee;color:var(--red)}
+    .err{background:#fdeeee;border:1px solid #e7bcbc;color:#7d2020;border-radius:9px;padding:11px;font-size:14px;margin-bottom:12px}
+    .ok{background:#f2f8f6;border:1px solid #b8ddd0;color:#0d5744;border-radius:9px;padding:11px;font-size:14px;margin-bottom:12px}
+    .empty{text-align:center;padding:30px;color:var(--mut)}
+    .empty i{display:block;font-size:32px;color:#c8bda6;margin-bottom:8px}
+    .note{background:var(--cream);border:1.5px dashed var(--goldd);border-radius:10px;padding:12px;margin:10px 0;font-size:14px;color:var(--mut)}
+    .note b{color:var(--navy);display:block}
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback } = React;
+const API = window.location.origin;
+
+const getToken = () =>
+  localStorage.getItem('admin_token') || localStorage.getItem('unified_token') || localStorage.getItem('portal_token');
+
+const api = async (path, opts = {}) => {
+  const res = await fetch(API + path, {
+    ...opts,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}`, ...(opts.headers || {}) }
+  });
+  let data = null;
+  try { data = await res.json(); } catch (e) { /* empty */ }
+  if (!res.ok) {
+    const err = new Error((data && data.error) || `Request failed (${res.status})`);
+    err.code = data && data.code; err.status = res.status; err.data = data;
+    throw err;
+  }
+  return data;
+};
+
+const fmtWhen = (iso) => {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }) +
+    ' · ' + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+};
+const fmtRange = (a, b) => {
+  const end = new Date(b);
+  return isNaN(end.getTime()) ? fmtWhen(a)
+    : `${fmtWhen(a)} – ${end.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`;
+};
+const titleize = (s) => String(s || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+const todayPlus = (days) => new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
+
+const Empty = ({ icon, children }) => (
+  <div className="empty"><i className={`ti ti-${icon}`}></i>{children}</div>
+);
+
+// ============================================================================
+// Post a shift
+// ============================================================================
+const PostShift = ({ roster, onPosted, setErr, setOk }) => {
+  const [clientId, setClientId] = useState('');
+  const [date, setDate] = useState(todayPlus(1));
+  const [start, setStart] = useState('09:00');
+  const [end, setEnd] = useState('13:00');
+  // No blank default. "Open to everyone" is a choice an admin makes, not what
+  // happens when nobody touches the dropdown — a skilled shift silently posted
+  // to the whole roster is exactly the accident this prevents.
+  const [level, setLevel] = useState('');
+  const [visibility, setVisibility] = useState('all_eligible');
+  const [assignTo, setAssignTo] = useState('');
+  const [notes, setNotes] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const RANK = { sitter: 0, pca: 1, cna: 2, lpn: 3 };
+  const canWork = (c) => !level || level === 'any' || RANK[c.licenseLevel] >= RANK[level];
+  const eligible = roster.caregivers.filter(canWork);
+
+  const post = async () => {
+    setErr(''); setOk(''); setBusy(true);
+    try {
+      const res = await api('/api/scheduling/shifts', {
+        method: 'POST',
+        body: JSON.stringify({
+          clientId,
+          start: new Date(`${date}T${start}`).toISOString(),
+          end: new Date(`${date}T${end}`).toISOString(),
+          requiredLicenseLevel: level,
+          poolVisibility: visibility,
+          assignToCaregiverId: assignTo || null,
+          notes
+        })
+      });
+      setOk((res && res.message) || 'Shift posted.');
+      setNotes(''); setAssignTo('');
+      await onPosted();
+    } catch (e) {
+      setErr(e.data && e.data.errors ? e.data.errors.map(x => x.message).join(' ') : e.message);
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="card">
+      <h2>Post a shift</h2>
+      <p className="sub">
+        Post to the open pool for caregivers to claim, or straight to one caregiver to accept.
+        An open shift is visible only to caregivers whose license level meets the requirement.
+      </p>
+      <div className="grid">
+        <div>
+          <label>Client</label>
+          <select value={clientId} onChange={e => setClientId(e.target.value)}>
+            <option value="">— Select —</option>
+            {roster.clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </div>
+        <div><label>Date</label><input type="date" value={date} onChange={e => setDate(e.target.value)} /></div>
+        <div><label>Start</label><input type="time" value={start} onChange={e => setStart(e.target.value)} /></div>
+        <div><label>End</label><input type="time" value={end} onChange={e => setEnd(e.target.value)} /></div>
+        <div>
+          <label>Who can take it</label>
+          <select value={level} onChange={e => { setLevel(e.target.value); setAssignTo(''); }}>
+            <option value="">— Choose —</option>
+            <option value="any">Anyone — all license levels</option>
+            <option value="sitter">Sitter and above</option>
+            <option value="pca">PCA and above</option>
+            <option value="cna">CNA and above</option>
+            <option value="lpn">LPN only</option>
+          </select>
+        </div>
+        <div>
+          <label>Visible to</label>
+          <select value={visibility} onChange={e => setVisibility(e.target.value)}>
+            <option value="all_eligible">All eligible caregivers</option>
+            <option value="care_team">This client's care team only</option>
+          </select>
+        </div>
+        <div>
+          <label>Post directly to (optional)</label>
+          <select value={assignTo} onChange={e => setAssignTo(e.target.value)} disabled={!level}>
+            <option value="">Open pool — anyone eligible can claim it</option>
+            {eligible.map(c => (
+              <option key={c.id} value={c.id}>{c.name}{c.licenseLabel ? ` — ${c.licenseLabel}` : ''}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+      {level === 'any' && (
+        <div className="note">
+          <b>This shift will be open to every license level.</b>
+          A Sitter can claim it alongside a CNA. Set a minimum level instead if the visit needs one.
+        </div>
+      )}
+      {assignTo && (
+        <div className="note">
+          <b>Posting straight to one caregiver.</b>
+          They are offered the shift and it is theirs once they accept. A decline puts it back in the open pool.
+        </div>
+      )}
+      <div style={{ marginTop: 11 }}>
+        <label>Notes for the caregiver</label>
+        <textarea value={notes} onChange={e => setNotes(e.target.value)} maxLength={2000} />
+      </div>
+      {clientId && !(roster.clients.find(c => c.id === clientId) || {}).hasCoordinates && (
+        <div className="note">
+          <b>This client has no address coordinates on file.</b>
+          A clock-in for this shift will be recorded and flagged “geofence unverifiable” rather than
+          checked against a radius. Add the coordinates to check it properly.
+        </div>
+      )}
+      <div className="btns">
+        <button className="btn gold" disabled={!clientId || !level || busy} onClick={post}>
+          {busy ? 'Posting…' : (assignTo ? 'Post to caregiver' : 'Post shift')}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
+// Master calendar + lifecycle actions
+// ============================================================================
+const ShiftRow = ({ s, roster, act }) => {
+  const [assignee, setAssignee] = useState('');
+  const [reason, setReason] = useState('');
+  const eligible = roster.caregivers.filter(c => {
+    if (!s.requiredLicenseLevel) return true;
+    const rank = { sitter: 0, pca: 1, cna: 2, lpn: 3 };
+    return rank[c.licenseLevel] >= rank[s.requiredLicenseLevel];
+  });
+
+  return (
+    <div className="row" style={{ display: 'block' }}>
+      <div><b>{fmtRange(s.start, s.end)}</b> <span className={`chip ${s.status}`}>{titleize(s.status)}</span></div>
+      <div className="mu">
+        {s.clientName}
+        {s.levelRequirementLabel ? ` · ${s.levelRequirementLabel}` : ''}
+        {s.caregiverName ? ` · ${s.caregiverName}` : ''}
+        {s.poolVisibility === 'care_team' ? ' · care team only' : ''}
+      </div>
+      {s.releasedFromName && s.status === 'open' && (
+        <div className="mu">Released by {s.releasedFromName}{s.releasedReason ? ` — ${s.releasedReason}` : ''}</div>
+      )}
+      {s.cancelReason && <div className="mu">Cancelled — {s.cancelReason}</div>}
+
+      {s.status === 'claimed' && (
+        <div className="btns">
+          <button className="btn" onClick={() => act(s.id, 'approve')}>Approve claim</button>
+          <button className="btn ghost" onClick={() => act(s.id, 'decline-claim', { reason })}>Decline claim</button>
+        </div>
+      )}
+
+      {s.status === 'open' && (
+        <div className="btns">
+          <select value={assignee} onChange={e => setAssignee(e.target.value)} style={{ maxWidth: 260 }}>
+            <option value="">Assign directly to…</option>
+            {eligible.map(c => (
+              <option key={c.id} value={c.id}>{c.name}{c.licenseLabel ? ` — ${c.licenseLabel}` : ''}</option>
+            ))}
+          </select>
+          <button className="btn" disabled={!assignee} onClick={() => act(s.id, 'assign', { caregiverId: assignee })}>
+            Assign
+          </button>
+        </div>
+      )}
+
+      {['open', 'claimed', 'assigned', 'confirmed'].includes(s.status) && (
+        <div className="btns">
+          <input placeholder="Reason (required to cancel)" value={reason}
+            onChange={e => setReason(e.target.value)} style={{ maxWidth: 300 }} />
+          <button className="btn danger" disabled={!reason.trim()} onClick={() => act(s.id, 'cancel', { reason })}>
+            Cancel shift
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ============================================================================
+// Time logs — flagged review and edits
+// ============================================================================
+const TimeLogRow = ({ l, onEdit }) => {
+  const [open, setOpen] = useState(false);
+  const [clockInAt, setClockInAt] = useState(l.clockInAt ? l.clockInAt.slice(0, 16) : '');
+  const [clockOutAt, setClockOutAt] = useState(l.clockOutAt ? l.clockOutAt.slice(0, 16) : '');
+  const [reason, setReason] = useState('');
+
+  return (
+    <div className="row" style={{ display: 'block' }}>
+      <div>
+        <b>{l.caregiverName}</b> <span className="mu">· {l.clientName}</span>
+        {' '}{(l.flags || []).map(f => <span key={f} className="chip flag" style={{ marginLeft: 4 }}>{titleize(f)}</span>)}
+      </div>
+      <div className="mu">
+        {fmtWhen(l.clockInAt)} → {l.clockOutAt ? fmtWhen(l.clockOutAt) : 'still open'}
+        {l.totalHours !== null && l.totalHours !== undefined ? ` · ${l.totalHours} h` : ''}
+      </div>
+      {l.clockInGeofence && l.clockInGeofence.verdict === 'outside' && (
+        <div className="mu">Clocked in {l.clockInGeofence.distance}m from the address (radius {l.clockInGeofence.radius}m).</div>
+      )}
+      {l.clockInGeofence && l.clockInGeofence.verdict === 'unverifiable' && (
+        <div className="mu">Geofence could not be checked — {titleize(l.clockInGeofence.reason || '')}.</div>
+      )}
+      {l.edited && <div className="mu">Edited by {l.editedByName} — {l.editReason}</div>}
+
+      <div className="btns">
+        <button className="btn ghost" onClick={() => setOpen(!open)}>{open ? 'Close' : 'Correct times'}</button>
+      </div>
+      {open && (
+        <div style={{ marginTop: 10 }}>
+          <div className="grid">
+            <div><label>Clock in</label><input type="datetime-local" value={clockInAt} onChange={e => setClockInAt(e.target.value)} /></div>
+            <div><label>Clock out</label><input type="datetime-local" value={clockOutAt} onChange={e => setClockOutAt(e.target.value)} /></div>
+          </div>
+          <div style={{ marginTop: 9 }}>
+            <label>Reason for the correction (required)</label>
+            <input value={reason} onChange={e => setReason(e.target.value)} placeholder="Caregiver forgot to clock out" />
+          </div>
+          <div className="btns">
+            <button className="btn" disabled={!reason.trim()} onClick={async () => {
+              await onEdit(l.id, {
+                clockInAt: clockInAt ? new Date(clockInAt).toISOString() : undefined,
+                clockOutAt: clockOutAt ? new Date(clockOutAt).toISOString() : null,
+                reason
+              });
+              setOpen(false); setReason('');
+            }}>Save correction</button>
+          </div>
+          <p className="mu" style={{ marginTop: 8 }}>
+            The before and after values are written to the activity log with your name.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ============================================================================
+// App
+// ============================================================================
+const App = () => {
+  const [tab, setTab] = useState('calendar');
+  const [roster, setRoster] = useState({ caregivers: [], clients: [] });
+  const [shifts, setShifts] = useState([]);
+  const [requests, setRequests] = useState([]);
+  const [availability, setAvailability] = useState([]);
+  const [timeLogs, setTimeLogs] = useState([]);
+  const [totals, setTotals] = useState({ hours: null });
+  const [flaggedOnly, setFlaggedOnly] = useState(false);
+  const [from, setFrom] = useState(todayPlus(-14));
+  const [to, setTo] = useState(todayPlus(0));
+  const [err, setErr] = useState('');
+  const [ok, setOk] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [denied, setDenied] = useState(false);
+
+  const refresh = useCallback(async () => {
+    const [r, s, q, a, t] = await Promise.all([
+      api('/api/scheduling/caregivers'),
+      api('/api/scheduling/shifts').catch(() => ({ shifts: [] })),
+      api('/api/scheduling/shift-requests').catch(() => ({ shiftRequests: [] })),
+      api('/api/scheduling/availability').catch(() => ({ availability: [] })),
+      api(`/api/scheduling/time-logs?from=${from}&to=${to}${flaggedOnly ? '&flagged=true' : ''}`).catch(() => ({ timeLogs: [] }))
+    ]);
+    setRoster(r);
+    setShifts(s.shifts || []);
+    setRequests(q.shiftRequests || []);
+    setAvailability(a.availability || []);
+    setTimeLogs(t.timeLogs || []);
+    setTotals({ hours: t.totalHours });
+  }, [from, to, flaggedOnly]);
+
+  useEffect(() => {
+    if (!getToken()) { window.location.replace('/login'); return; }
+    refresh()
+      .catch(e => {
+        if (e.status === 401) { window.location.replace('/login'); return; }
+        if (e.status === 403) { setDenied(true); return; }
+        setErr(e.message);
+      })
+      .finally(() => setLoading(false));
+  }, [refresh]);
+
+  const act = async (id, action, body = {}) => {
+    setErr(''); setOk('');
+    try {
+      await api(`/api/scheduling/shifts/${id}/${action}`, { method: 'POST', body: JSON.stringify(body) });
+      setOk(
+        action === 'approve' ? 'Claim approved. Both the caregiver and the client have been notified.'
+        : action === 'decline-claim' ? 'Claim declined. The shift is back in the open pool.'
+        : action === 'assign' ? 'Assigned. The caregiver accepts or declines it.'
+        : action === 'cancel' ? 'Shift cancelled.' : 'Done.'
+      );
+      await refresh();
+    } catch (e) { setErr(e.message); }
+  };
+
+  const editLog = async (id, body) => {
+    setErr(''); setOk('');
+    try {
+      await api(`/api/scheduling/time-logs/${id}`, { method: 'PUT', body: JSON.stringify(body) });
+      setOk('Correction saved and written to the activity log.');
+      await refresh();
+    } catch (e) { setErr(e.message); }
+  };
+
+  const exportCsv = () => {
+    // The token rides as a query param because this is a file download, the
+    // same pattern the app's other authenticated downloads use.
+    window.location.href = `${API}/api/scheduling/payroll.csv?from=${from}&to=${to}&token=${encodeURIComponent(getToken())}`;
+  };
+
+  if (loading) return <div className="wrap"><div className="empty">Loading…</div></div>;
+
+  if (denied) {
+    return (
+      <div>
+        <div className="hdr"><span className="t">Scheduling</span><a href="/admin">Admin hub</a></div>
+        <div className="wrap"><div className="card">
+          <h2>Administrator access required</h2>
+          <p className="sub">Scheduling is managed by administrators. Caregivers see their own schedule in the caregiver app.</p>
+        </div></div>
+      </div>
+    );
+  }
+
+  const TABS = [
+    { id: 'calendar', label: 'Master calendar' },
+    { id: 'post', label: 'Post a shift' },
+    { id: 'requests', label: `Requests${requests.filter(r => r.status === 'requested').length ? ` (${requests.filter(r => r.status === 'requested').length})` : ''}` },
+    { id: 'availability', label: 'Availability' },
+    { id: 'time', label: 'Time & payroll' }
+  ];
+
+  const pending = shifts.filter(s => s.status === 'claimed');
+
+  return (
+    <div>
+      <div className="hdr">
+        <span className="t">Scheduling</span>
+        <span style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
+          <a href="/admin">Admin hub</a>
+          <a href="/clinical">Clinical</a>
+        </span>
+      </div>
+      <div className="wrap">
+        {err && <div className="err">{err}</div>}
+        {ok && <div className="ok">{ok}</div>}
+
+        <div className="tabs">
+          {TABS.map(t => (
+            <button key={t.id} className={`tab ${tab === t.id ? 'on' : ''}`}
+              onClick={() => { setTab(t.id); setErr(''); setOk(''); }}>{t.label}</button>
+          ))}
+        </div>
+
+        {tab === 'post' && <PostShift roster={roster} onPosted={refresh} setErr={setErr} setOk={setOk} />}
+
+        {tab === 'calendar' && (
+          <div>
+            {pending.length > 0 && (
+              <div className="card">
+                <h2>Claims waiting on you</h2>
+                <p className="sub">A claim does not confirm the shift. Nothing is booked until you approve it.</p>
+                {pending.map(s => <ShiftRow key={s.id} s={s} roster={roster} act={act} />)}
+              </div>
+            )}
+            <div className="card">
+              <h2>Master calendar</h2>
+              <p className="sub">Every PHCP shift. Clinical visits are scheduled separately in the clinical workspace.</p>
+              {shifts.length === 0
+                ? <Empty icon="calendar-off">No shifts posted yet.</Empty>
+                : shifts.map(s => <ShiftRow key={s.id} s={s} roster={roster} act={act} />)}
+            </div>
+          </div>
+        )}
+
+        {tab === 'requests' && (
+          <div className="card">
+            <h2>Client shift requests</h2>
+            <p className="sub">A request becomes a shift when you post it. Post it from the “Post a shift” tab.</p>
+            {requests.length === 0
+              ? <Empty icon="inbox">No requests.</Empty>
+              : requests.map(r => (
+                <div className="row" style={{ display: 'block' }} key={r.id}>
+                  <div><b>{r.client_name || r.clientName}</b> <span className="chip open">{titleize(r.status)}</span></div>
+                  <div className="mu">{r.date} · {r.start}–{r.end} — requested by {r.requested_by_name || r.requestedByName}</div>
+                  {r.care_needs && <div className="mu">{r.care_needs}</div>}
+                </div>
+              ))}
+          </div>
+        )}
+
+        {tab === 'availability' && (
+          <div className="card">
+            <h2>Submitted availability</h2>
+            <p className="sub">Availability is submitted at least 30 days ahead. Post schedules from it.</p>
+            {availability.length === 0
+              ? <Empty icon="calendar-plus">Nothing submitted yet.</Empty>
+              : availability.map(a => (
+                <div className="row" style={{ display: 'block' }} key={a.id}>
+                  <div>
+                    <b>{a.caregiverName}</b>
+                    <span className="mu"> · from {a.effectiveFrom}</span>
+                    {' '}<span className={`chip ${a.status === 'reviewed' ? 'confirmed' : 'open'}`}>{titleize(a.status)}</span>
+                  </div>
+                  <div className="mu">{(a.windows || []).map(w => `${w.day} ${w.start}–${w.end}`).join(' · ')}</div>
+                  {(a.blackoutDates || []).length > 0 && <div className="mu">Unavailable: {a.blackoutDates.join(', ')}</div>}
+                  {a.status !== 'reviewed' && (
+                    <div className="btns">
+                      <button className="btn ghost" onClick={async () => {
+                        await api(`/api/scheduling/availability/${a.id}/review`, { method: 'POST', body: '{}' });
+                        await refresh();
+                      }}>Mark reviewed</button>
+                    </div>
+                  )}
+                </div>
+              ))}
+          </div>
+        )}
+
+        {tab === 'time' && (
+          <div>
+            <div className="card">
+              <h2>Time &amp; payroll</h2>
+              <p className="sub">
+                {totals.hours === null || totals.hours === undefined ? '—' : `${totals.hours} hours`} in this range.
+              </p>
+              <div className="grid">
+                <div><label>From</label><input type="date" value={from} onChange={e => setFrom(e.target.value)} /></div>
+                <div><label>To</label><input type="date" value={to} onChange={e => setTo(e.target.value)} /></div>
+              </div>
+              <div className="btns">
+                <button className={`btn ${flaggedOnly ? '' : 'ghost'}`} onClick={() => setFlaggedOnly(!flaggedOnly)}>
+                  {flaggedOnly ? 'Showing flagged only' : 'Show flagged only'}
+                </button>
+                <button className="btn gold" onClick={exportCsv}>Export payroll CSV</button>
+              </div>
+              <div className="note">
+                <b>The CSV column set is provisional.</b>
+                It carries caregiver, license level, client, scheduled and actual times, hours, flags,
+                edit details and the pay period — and nothing clinical. Confirm the columns your payroll
+                run needs and they change in one place.
+              </div>
+            </div>
+            <div className="card">
+              <h2>Time logs</h2>
+              {timeLogs.length === 0
+                ? <Empty icon="clock-off">Nothing logged in this range.</Empty>
+                : timeLogs.map(l => <TimeLogRow key={l.id} l={l} onEdit={editLog} />)}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
