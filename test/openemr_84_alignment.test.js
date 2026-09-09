@@ -285,3 +285,56 @@ test('encounter creation resolves the place from the patient, at every site', ()
   // Telehealth comes off the appointment, never a dropdown.
   assert.match(server, /decodeAppointmentNotes\(appointment\.pc_hometext\)\.location/);
 });
+
+// ---- Code search must not infer a load state from a search result ----
+//
+// The bug this pins cost a wrong answer to the owner. `GET /api/codes`
+// returning zero rows was read as "the ICD-10-CM set has not been loaded", and
+// the app said so to clinicians. Two unrelated things produce zero rows: a term
+// that matches nothing, and a code set that was never installed. The load HAD
+// run; the search simply could not see it, because the 6B route was querying
+// the manually entered `codes` table while OpenEMR's External Data Loads writes
+// ICD-10 to its own external table. Both halves are guarded here.
+
+const serverSrc = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+
+test('searchEmrCodes reports no load state — a search result is not evidence of one', () => {
+  const fn = serverSrc.slice(serverSrc.indexOf('const searchEmrCodes ='));
+  const body = fn.slice(0, fn.indexOf('\n};'));
+  assert.ok(!/loaded\s*:/.test(body),
+    'searchEmrCodes must not return a `loaded` flag — zero rows means the term ' +
+    'matched nothing, which says nothing about whether the code set is installed');
+  assert.ok(!/rows\.length > 0/.test(body),
+    'row count must not stand in for load state');
+});
+
+test('the clinician-facing notice never claims a code set is unloaded', () => {
+  const route = serverSrc.slice(serverSrc.indexOf("app.get('/api/clinical/codes/search'"));
+  // to the next top-level route — the handler nests plenty of its own `});`
+  const body = route.slice(0, route.indexOf('\napp.', 1));
+  assert.ok(!/has not been loaded|hasn't been loaded|load has not run/i.test(body),
+    'the route cannot observe whether a code set is loaded, so it must not assert it');
+  assert.ok(!/codeTableLoaded/.test(body),
+    'codeTableLoaded was the inference itself — it must stay gone');
+  // It may still point an ADMIN at the loader as a possibility, which is
+  // advice rather than a claim about the current state.
+  // the apostrophe is backslash-escaped in the source string
+  assert.match(body, /No match in OpenEMR\\?'s code tables for this term/,
+    'the notice should describe the search that just ran');
+});
+
+// ---- The 6B route must search OpenEMR's external code tables ----
+test('the 6B code search defers to OpenEMR main_code_set_search', () => {
+  const ctrl = fs.readFileSync(path.join(root,
+    'docs/openemr-patches/8.4.0-p1/src/RestControllers/GfcChargeRestController.php'), 'utf8');
+  const fn = ctrl.slice(ctrl.indexOf('public function searchCodes'));
+  const body = fn.slice(0, fn.indexOf("\n    private function"));
+  assert.match(body, /main_code_set_search\(/,
+    'must use OpenEMR own search, which reads the external code tables the ' +
+    'Fee Sheet reads (interface/forms/fee_sheet/new.php calls the same function)');
+  assert.ok(!/FROM codes c JOIN code_types/.test(body),
+    'the hand-written `codes`-only query never sees an externally loaded code ' +
+    'set, so it returns zero rows whether or not the load has run');
+  assert.match(body, /require_once.*code_types\.inc\.php/,
+    'main_code_set_search lives in custom/code_types.inc.php');
+});

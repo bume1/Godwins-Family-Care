@@ -7200,17 +7200,26 @@ app.put('/api/clinical/settings', authenticateToken, requireAdmin, async (req, r
 // OpenEMR), and — for services — the practice favorites mirroring OpenEMR's
 // fee schedule. A code typed in full is accepted on FORMAT and OpenEMR
 // resolves it on read-back; the response says plainly where results came from.
-// Phase 6B code-table search. Zero rows is the CORRECT answer for a table that
-// has not been loaded — never an error — so this reports `loaded` separately
-// and never throws into the caller's search.
+// Phase 6B code-table search. Zero rows is never an error — a search that
+// matches nothing is an ordinary outcome — so this never throws into the
+// caller's search.
+//
+// It also does NOT report whether a code set is loaded, and must not be made
+// to. An earlier version returned `loaded: rows.length > 0`, which conflated
+// two different things: a term that matched nothing, and a code set that was
+// never installed. Both come back as zero rows. The app told clinicians the
+// ICD-10 set had not been loaded on the strength of that inference, and went on
+// saying it after the load had actually run — the search result had never been
+// evidence either way. Report what was searched and what came back; a load is
+// an admin-side fact this route cannot see.
 const searchEmrCodes = async (reqUser, type, q) => {
   const term = String(q || '').trim();
-  if (term.length < 2 || !openemr.isConfigured()) return { rows: [], loaded: false, error: null };
+  if (term.length < 2 || !openemr.isConfigured()) return { rows: [], error: null };
   try {
     const rows = await openemr.forActor(reqUser).searchCodes({ type, search: term, limit: 25 });
-    return { rows, loaded: rows.length > 0, error: null };
+    return { rows, error: null };
   } catch (e) {
-    return { rows: [], loaded: false, error: e.message.slice(0, 140) };
+    return { rows: [], error: e.message.slice(0, 140) };
   }
 };
 app.get('/api/clinical/codes/search', authenticateToken, requireClinicalRead, async (req, res) => {
@@ -7220,6 +7229,10 @@ app.get('/api/clinical/codes/search', authenticateToken, requireClinicalRead, as
     const ql = q.toLowerCase();
     const usage = await loadRows('clinical_code_usage');
     const results = []; const seen = new Set();
+    // How many rows OpenEMR's own code tables matched for THIS term. Counted
+    // explicitly so the notice below can describe the search without anyone
+    // having to re-derive it from the `sources` map.
+    let emrMatches = 0;
     const push = (r) => { if (r.code && !seen.has(r.code)) { seen.add(r.code); results.push(r); } };
     const matches = (r) => !ql || String(r.code).toLowerCase().startsWith(ql.replace(/\./g, '')) || String(r.code).toLowerCase().startsWith(ql) || String(r.description || r.label || '').toLowerCase().includes(ql);
     const sources = {};
@@ -7238,12 +7251,13 @@ app.get('/api/clinical/codes/search', authenticateToken, requireClinicalRead, as
       const favs = clinicalRepo.rankFavorites(usage, req.user.id, 'ICD10', 30);
       sources.favorites = favs.length;
       favs.filter(matches).forEach(f => push({ code: f.code, description: f.description, source: 'favorite', count: f.count }));
-      // Session 4.5 / Phase 6B: OpenEMR's own code table. Zero rows means the
-      // ICD-10-CM load has not run — a data gap, not a failure — so T1 and T2
-      // above stay as sources and the clinician is told which it is.
+      // Session 4.5 / Phase 6B: OpenEMR's own code table, searched alongside
+      // T1 and T2 rather than instead of them. A zero here means this term
+      // matched nothing in OpenEMR — it says nothing about whether the code
+      // set is loaded, which this route cannot see.
       const tbl = await searchEmrCodes(req.user, 'ICD10', q);
       sources.codeTable = tbl.rows.length;
-      sources.codeTableLoaded = tbl.loaded;
+      emrMatches += tbl.rows.length;
       if (tbl.error) sources.codeTableError = tbl.error;
       tbl.rows.forEach(r => push({ code: r.code, description: r.code_text || '', source: 'openemr' }));
       const typed = clinicalRepo.normalizeIcd10(q);
@@ -7259,7 +7273,7 @@ app.get('/api/clinical/codes/search', authenticateToken, requireClinicalRead, as
       for (const t of ['CPT4', 'HCPCS']) {
         const tbl = await searchEmrCodes(req.user, t, q);
         sources[`codeTable${t}`] = tbl.rows.length;
-        sources.codeTableLoaded = (sources.codeTableLoaded || false) || tbl.loaded;
+        emrMatches += tbl.rows.length;
         tbl.rows.forEach(r => push({ code: r.code, codeType: t, label: r.code_text || '', source: 'openemr' }));
       }
       const typed = clinicalRepo.classifyServiceCode(q);
@@ -7267,9 +7281,12 @@ app.get('/api/clinical/codes/search', authenticateToken, requireClinicalRead, as
     }
     res.json({
       set, q, results, sources,
-      notice: sources.codeTableLoaded
+      // The notice describes THIS search, never the state of a code set. See
+      // searchEmrCodes above for why the app no longer infers the second from
+      // the first.
+      notice: emrMatches > 0
         ? 'Results come from OpenEMR only — its code tables, this patient\'s problem list, your own prior selections, and the practice favorites. The app keeps no code list of its own.'
-        : 'OpenEMR\'s code table returned nothing, which means the ICD-10-CM set has not been loaded yet (Administration → Other → External Data Loads). Searching still works from this patient\'s problem list, your own prior selections and the practice favorites; a code typed in full is format-checked here and resolved by OpenEMR on read-back.'
+        : 'No match in OpenEMR\'s code tables for this term. Results shown come from this patient\'s problem list, your own prior selections and the practice favorites; a code typed in full is format-checked here and resolved by OpenEMR on read-back. If OpenEMR never matches any term, an administrator should check that the code set is installed under Administration → Other → External Data Loads.'
     });
   } catch (error) {
     console.error('Code search error:', error);
