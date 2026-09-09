@@ -1,0 +1,1023 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Godwins Family Care — Caregiver</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.1.0/dist/tabler-icons.min.css">
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+  <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
+  <style>
+    /* Brand tokens — navy #033D50, gold #F5CD85, cream #FAF7F2,
+       Cormorant Garamond + DM Sans. Body text is 16px minimum on every
+       caregiver view: this is used one-handed, outdoors, in a client's home. */
+    :root{
+      --navy:#033D50; --navy-d:#022A38; --gold:#F5CD85; --gold-d:#C9A44A;
+      --cream:#FAF7F2; --cream-d:#efe9db; --ink:#1a2a32; --mut:#41555f;
+      --red:#A32D2D; --green:#0f6e56; --line:#e5ddcb;
+    }
+    *{box-sizing:border-box;margin:0;padding:0}
+    html,body{height:100%}
+    body{
+      font-family:'DM Sans',system-ui,sans-serif; font-size:16px; line-height:1.5;
+      background:var(--cream-d); color:var(--ink);
+      -webkit-font-smoothing:antialiased;
+    }
+    .serif{font-family:'Cormorant Garamond',Georgia,serif}
+    #root{min-height:100%}
+
+    /* Shell: full-bleed on mobile, a centred phone-width column on desktop. */
+    .shell{display:flex;flex-direction:column;min-height:100vh;max-width:520px;margin:0 auto;background:var(--cream);box-shadow:0 0 40px rgba(3,61,80,.10)}
+    @media(min-width:900px){ .shell{max-width:720px} }
+
+    .hdr{background:var(--navy);color:var(--cream);padding:14px 18px;display:flex;align-items:center;justify-content:space-between;gap:10px;position:sticky;top:0;z-index:20}
+    .hdr .ttl{font-family:'Cormorant Garamond',serif;font-size:22px;font-weight:600}
+    .lvl{font-size:12px;letter-spacing:.6px;background:rgba(245,205,133,.16);color:var(--gold);border:1px solid rgba(245,205,133,.5);border-radius:14px;padding:3px 11px;font-weight:500;white-space:nowrap}
+    .hdr button{background:none;border:none;color:var(--gold);font-size:20px;cursor:pointer;padding:4px}
+
+    .main{flex:1;padding:18px 16px 26px}
+    h2.pg{font-family:'Cormorant Garamond',serif;font-size:26px;color:var(--navy);font-weight:600;margin-bottom:2px}
+    .sub{font-size:14px;color:var(--mut);margin-bottom:16px}
+
+    .nav{display:flex;background:#fff;border-top:1px solid var(--line);position:sticky;bottom:0;z-index:20;padding-bottom:env(safe-area-inset-bottom)}
+    .nav button{flex:1;background:none;border:none;text-align:center;padding:10px 0 12px;font-size:12px;color:#9a9388;cursor:pointer;font-family:inherit}
+    .nav button i{display:block;font-size:21px;margin-bottom:3px}
+    .nav button.on{color:var(--navy)} .nav button.on i{color:var(--gold-d)}
+
+    .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:15px 16px;margin-bottom:14px}
+    .card h3{font-family:'Cormorant Garamond',serif;font-size:19px;color:var(--navy);font-weight:600;margin-bottom:6px}
+    .shift{background:var(--navy);border-radius:14px;padding:16px;margin-bottom:14px;color:var(--cream)}
+    .shift .e{font-size:12px;letter-spacing:1.2px;text-transform:uppercase;color:var(--gold);margin-bottom:7px}
+    .shift .nm{font-size:18px;font-weight:500}
+    .shift .mt{font-size:14px;color:rgba(250,247,242,.75);margin-bottom:12px}
+
+    .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px}
+    .qb{border-radius:11px;padding:16px 10px;text-align:center;font-size:15px;font-weight:600;border:1.5px solid;cursor:pointer;font-family:inherit;line-height:1.3}
+    .qb i{display:block;font-size:22px;margin-bottom:6px}
+    .qb.o{background:#fff;border-color:#d8cdb8;color:var(--navy)}
+    .qb.g{background:var(--gold);border-color:var(--gold);color:var(--navy)}
+
+    .btn{width:100%;background:var(--navy);color:var(--cream);border:1px solid var(--navy);border-radius:10px;padding:14px;font-size:16px;font-weight:600;cursor:pointer;font-family:inherit}
+    .btn.gold{background:var(--gold);border-color:var(--gold);color:var(--navy)}
+    .btn.ghost{background:#fff;color:var(--navy)}
+    .btn.danger{background:var(--red);border-color:var(--red);color:#fff}
+    .btn:disabled{opacity:.5;cursor:not-allowed}
+    .btn+.btn{margin-top:9px}
+
+    .grp{font-size:12px;letter-spacing:1.1px;text-transform:uppercase;color:var(--gold-d);margin:18px 0 8px;font-weight:600}
+    .ck{display:flex;align-items:flex-start;gap:11px;padding:11px 2px;font-size:16px;color:var(--navy);border-bottom:1px solid #ece6db;cursor:pointer}
+    .ck:last-child{border:none}
+    .box{width:22px;height:22px;border-radius:6px;border:1.5px solid #c8bda6;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:#fff;margin-top:1px}
+    .box.on{background:var(--navy);border-color:var(--navy);color:var(--gold)}
+    .ck .tx{flex:1}
+    .ck input.note{display:block;width:100%;margin-top:7px;border:1px solid var(--line);border-radius:7px;padding:8px 10px;font-size:15px;font-family:inherit}
+
+    .fld{margin-bottom:13px}
+    .fld label{display:block;font-size:12px;letter-spacing:.5px;text-transform:uppercase;color:var(--mut);margin-bottom:5px;font-weight:600}
+    .inp{width:100%;background:#fff;border:1px solid #ddd3c0;border-radius:9px;padding:12px;font-size:16px;color:var(--ink);font-family:inherit}
+    textarea.inp{min-height:88px;resize:vertical}
+    .vit{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+
+    .chips{display:flex;flex-wrap:wrap;gap:8px}
+    .chip{border:1.5px solid #d8cdb8;background:#fff;border-radius:20px;padding:8px 14px;font-size:15px;color:var(--navy);cursor:pointer;font-family:inherit}
+    .chip.on{background:var(--navy);border-color:var(--navy);color:var(--gold)}
+    .chip.inc.on{background:var(--red);border-color:var(--red);color:#fff}
+
+    .opt{border:1.5px solid #d8cdb8;border-radius:12px;padding:15px;margin-bottom:10px;display:flex;align-items:center;gap:13px;background:#fff;cursor:pointer;width:100%;text-align:left;font-family:inherit}
+    .opt i{font-size:22px;color:var(--navy)}
+    .opt b{font-size:16px;color:var(--navy);font-weight:600;display:block}
+    .opt span{font-size:14px;color:var(--mut);display:block}
+    .opt.sel{background:var(--navy);border-color:var(--navy)}
+    .opt.sel i,.opt.sel b{color:var(--gold)} .opt.sel span{color:rgba(250,247,242,.75)}
+    .opt.urg{border-color:var(--red)} .opt.urg i,.opt.urg b{color:var(--red)}
+    .opt.urg.sel{background:var(--red);border-color:var(--red)} .opt.urg.sel i,.opt.urg.sel b{color:#fff} .opt.urg.sel span{color:rgba(255,255,255,.8)}
+
+    .stat{display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin:8px 0}
+    .st{font-size:12px;font-weight:600;border-radius:12px;padding:4px 10px;background:#eee8db;color:#8a8378}
+    .st.on{background:var(--navy);color:var(--gold)}
+    .st.done{background:var(--green);color:#fff}
+
+    .note{background:var(--cream);border:1.5px dashed var(--gold-d);border-radius:10px;padding:13px;margin:12px 0;display:flex;gap:10px;align-items:flex-start}
+    .note i{color:var(--gold-d);font-size:20px;margin-top:1px}
+    .note b{display:block;font-size:15px;color:var(--navy);font-weight:600}
+    .note span{font-size:14px;color:var(--mut)}
+    .note.warn{border-color:var(--red)} .note.warn i{color:var(--red)}
+    .note.ok{border-style:solid;border-color:var(--green);background:#f2f8f6} .note.ok i{color:var(--green)}
+
+    .empty{text-align:center;padding:34px 18px;color:var(--mut);font-size:15px}
+    .empty i{display:block;font-size:34px;color:#c8bda6;margin-bottom:10px}
+
+    .row{display:flex;justify-content:space-between;gap:10px;padding:12px 0;border-bottom:1px solid #ece6db;font-size:15px}
+    .row:last-child{border:none}
+    .row b{color:var(--navy);font-weight:600}
+    .row .mu{color:var(--mut);font-size:14px}
+
+    /* Mount points for Sessions 7 and 9 — disabled, labeled, no fake interactivity. */
+    .mount{border:1.5px dashed #c8bda6;border-radius:11px;padding:16px;background:#fbf8f2;margin-bottom:12px;opacity:.75}
+    .mount b{display:block;font-size:16px;color:var(--navy);font-weight:600;margin-bottom:3px}
+    .mount span{font-size:14px;color:var(--mut)}
+    .mount i{font-size:20px;color:#a89e8b;float:right}
+
+    .offline{background:var(--red);color:#fff;text-align:center;font-size:14px;padding:8px 12px;font-weight:600}
+    .queued{background:var(--gold);color:var(--navy);text-align:center;font-size:14px;padding:8px 12px;font-weight:600}
+    .back{background:none;border:none;color:var(--navy);font-size:15px;font-weight:600;cursor:pointer;padding:0 0 14px;font-family:inherit;display:flex;align-items:center;gap:6px}
+    .err{background:#fdeeee;border:1px solid #e7bcbc;color:#7d2020;border-radius:9px;padding:12px;font-size:15px;margin-bottom:13px}
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+const API = window.location.origin;
+
+// ============================================================================
+// Auth — the same token handoff every other GFC surface uses.
+// ============================================================================
+const getToken = () =>
+  localStorage.getItem('portal_token') || localStorage.getItem('unified_token') || localStorage.getItem('admin_token');
+
+const api = async (path, opts = {}) => {
+  const res = await fetch(API + path, {
+    ...opts,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}`, ...(opts.headers || {}) }
+  });
+  let data = null;
+  try { data = await res.json(); } catch (e) { /* empty body */ }
+  if (!res.ok) {
+    const err = new Error((data && data.error) || `Request failed (${res.status})`);
+    err.code = data && data.code; err.status = res.status; err.data = data;
+    throw err;
+  }
+  return data;
+};
+
+// ============================================================================
+// Offline queue — ONE queue, reused by every submitting surface here.
+//
+// Visit logs and escalations both buffer through this. A queued item carries a
+// client-generated idempotency key, so replaying it after a reconnect returns
+// the ORIGINAL server row instead of filing a second visit. That is why the
+// key is generated once, when the caregiver taps submit, and stored with the
+// payload — regenerating it on retry would defeat the whole mechanism.
+// ============================================================================
+const QUEUE_KEY = 'gfc_caregiver_queue';
+
+const readQueue = () => {
+  try { return JSON.parse(localStorage.getItem(QUEUE_KEY) || '[]'); } catch (e) { return []; }
+};
+const writeQueue = (rows) => {
+  try { localStorage.setItem(QUEUE_KEY, JSON.stringify(rows)); } catch (e) { /* storage full / private mode */ }
+};
+const enqueue = (item) => { const q = readQueue(); q.push(item); writeQueue(q); return q.length; };
+
+const newIdempotencyKey = () =>
+  `cg-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+// Drains the queue oldest-first, stopping at the first network failure so
+// ordering is preserved. A 4xx is NOT a network failure: the item can never
+// succeed, so it is dropped from the queue and reported rather than retried
+// forever.
+const drainQueue = async (onProgress) => {
+  let q = readQueue();
+  const failures = [];
+  while (q.length) {
+    const item = q[0];
+    try {
+      await api(item.path, { method: 'POST', body: JSON.stringify(item.payload) });
+      q = q.slice(1); writeQueue(q);
+      if (onProgress) onProgress(q.length);
+    } catch (err) {
+      if (err.status && err.status >= 400 && err.status < 500) {
+        failures.push({ item, message: err.message });
+        q = q.slice(1); writeQueue(q);
+        if (onProgress) onProgress(q.length);
+        continue;
+      }
+      break; // offline or server error — keep the item and try again later
+    }
+  }
+  return { remaining: q.length, failures };
+};
+
+// ============================================================================
+// Small shared pieces
+// ============================================================================
+const Empty = ({ icon, children }) => (
+  <div className="empty"><i className={`ti ti-${icon}`}></i>{children}</div>
+);
+
+const Loading = () => <div className="empty">Loading…</div>;
+
+const Err = ({ children }) => children ? <div className="err">{children}</div> : null;
+
+const fmtDate = (iso) => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' · ' +
+         d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+};
+const titleize = (s) => String(s || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+
+// ============================================================================
+// MOUNT POINT — SCHEDULE (Session 7)
+// ============================================================================
+// id: "gfc-mount-schedule"
+// Session 7 replaces the contents of this div with its schedule component.
+//
+// CONTRACT
+//   props: {
+//     caregiverId  : string  — the caregiver's user id
+//     licenseLevel : 'sitter'|'pca'|'cna'|'lpn'
+//     clients      : [{ id, name, careTier, careTierLabel }]  — assigned only
+//     onShiftSelect: (shift) => void   — Home uses this to show today's shift
+//   }
+//   The caregiver's own id comes from GET /api/caregiver/me (`id`), which this
+//   page already fetches once at boot and holds in the `me` state. Do NOT read
+//   it from localStorage: the token is the authority and /me resolves it
+//   server-side against the fresh user record.
+//
+//   Session 7 also owns the GPS clock-in ACTION. Home renders the clock-in
+//   STATE only (see ShiftCard) and leaves the control to this mount. When the
+//   schedule component lands, it should also supply the shift id that the
+//   visit-log POST passes through as `shiftId` — the visit-log route accepts
+//   and stores it, and invents nothing when it is absent.
+// ============================================================================
+const ScheduleMount = () => (
+  <div id="gfc-mount-schedule" className="mount" aria-disabled="true">
+    <i className="ti ti-calendar-event"></i>
+    <b>Schedule</b>
+    <span>Coming with scheduling (Session 7).</span>
+  </div>
+);
+
+// ============================================================================
+// MOUNT POINT — MESSAGING (Session 9)
+// ============================================================================
+// id: "gfc-mount-messaging"
+// Session 9 replaces the contents of this div with its messaging component.
+//
+// CONTRACT
+//   props: {
+//     caregiverId : string  — the caregiver's user id
+//     clientId    : string|null — the client whose thread to open, or null for
+//                   the caregiver's inbox. The Clients tab passes the selected
+//                   client's id; the More tab passes null.
+//     channel     : 'caregiver'  — the channel matrix key this surface uses
+//   }
+//   The caregiver's own id comes from GET /api/caregiver/me (`id`), same as
+//   above. Message routing, storage and the channel matrix are Session 9's;
+//   this session writes no messages and defines no message schema.
+// ============================================================================
+const MessagingMount = ({ label }) => (
+  <div id="gfc-mount-messaging" className="mount" aria-disabled="true">
+    <i className="ti ti-message-circle"></i>
+    <b>{label || 'Messages'}</b>
+    <span>Coming with messaging (Session 9).</span>
+  </div>
+);
+
+// A second messaging affordance appears inside the Clients tab. Only one
+// element may carry the id, so the in-client entry point is a labeled sibling
+// that Session 9 can wire from the same component.
+const MessagingEntry = () => (
+  <div className="mount" data-gfc-mount="messaging-client" aria-disabled="true">
+    <i className="ti ti-message-circle"></i>
+    <b>Message the care team</b>
+    <span>Coming with messaging (Session 9).</span>
+  </div>
+);
+
+// ============================================================================
+// HOME
+// ============================================================================
+const ShiftCard = ({ clients }) => {
+  const first = clients[0];
+  return (
+    <div className="shift">
+      <div className="e">Today</div>
+      <div className="nm">{first ? first.name : 'No client assigned'}</div>
+      <div className="mt">
+        {first
+          ? (first.careTierLabel || first.careTier || 'Care visit')
+          : 'An administrator assigns your clients.'}
+      </div>
+      {/* Clock-in STATE only. Session 7 owns the action and fills the mount
+          below with the real GPS control. Rendering a dead button here would
+          be fake interactivity, so there is none. */}
+      <div style={{ fontSize: 14, color: 'rgba(250,247,242,.72)', display: 'flex', alignItems: 'center', gap: 6 }}>
+        <i className="ti ti-current-location"></i>
+        Clock-in arrives with scheduling.
+      </div>
+    </div>
+  );
+};
+
+const HomeTab = ({ me, clients, onVisitLog, onFlag, escalations }) => {
+  const open = escalations.filter(e => e.status !== 'resolved');
+  return (
+    <div>
+      <h2 className="pg">Hi, {String(me.name || '').split(' ')[0]}</h2>
+      <p className="sub">{me.licenseLabel} · {clients.length} {clients.length === 1 ? 'client' : 'clients'}</p>
+
+      <ShiftCard clients={clients} />
+
+      <div className="grid2">
+        <button className="qb o" onClick={onVisitLog}>
+          <i className="ti ti-clipboard-text"></i>Submit visit log
+        </button>
+        <button className="qb g" onClick={onFlag}>
+          <i className="ti ti-alert-triangle"></i>Flag a concern
+        </button>
+      </div>
+
+      <ScheduleMount />
+
+      {clients.length > 0 && (
+        <div className="card">
+          <h3>Care tier</h3>
+          {clients.map(c => (
+            <div className="row" key={c.id}>
+              <span><b>{c.name}</b><br /><span className="mu">{c.careTierLabel || c.careTier || 'Tier not set'}</span></span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {open.length > 0 && (
+        <div className="card">
+          <h3>Your open concerns</h3>
+          {open.map(e => <EscalationRow key={e.id} e={e} />)}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ============================================================================
+// ESCALATION — two or three taps, auto-routed
+// ============================================================================
+const CONCERNS = [
+  { id: 'clinical', icon: 'stethoscope', label: 'Clinical', hint: 'Goes to the assigned clinician.' },
+  { id: 'behavioral', icon: 'mood-confuzed', label: 'Behavioral', hint: 'Goes to the case manager.' },
+  { id: 'safety_urgent', icon: 'urgent', label: 'Safety — urgent', hint: 'Pages the clinician, case manager and admin.', urgent: true }
+];
+
+const EscalationRow = ({ e }) => {
+  const order = ['raised', 'received', 'acknowledged', 'action_taken', 'resolved'];
+  const at = order.indexOf(e.status);
+  return (
+    <div className="row" style={{ display: 'block' }}>
+      <b>{titleize(e.concernType)} — {e.clientName}</b>
+      <div className="stat">
+        {['Raised', 'Received', 'Acknowledged', 'Action taken', 'Resolved'].map((s, i) => (
+          <span key={s} className={`st ${i === at ? 'on' : ''} ${i < at ? 'done' : ''}`}>{s}</span>
+        ))}
+      </div>
+      {e.notified && e.notified.length > 0 && (
+        <div className="mu">Sent to {e.notified.map(n => n.role ? `${n.name}, ${n.role}` : n.name).join('; ')}</div>
+      )}
+      <div className="mu">{fmtDate(e.raisedAt)}</div>
+    </div>
+  );
+};
+
+const FlagConcern = ({ clients, onDone, onBack, online }) => {
+  const [clientId, setClientId] = useState(clients.length === 1 ? clients[0].id : '');
+  const [type, setType] = useState('');
+  const [description, setDescription] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [sent, setSent] = useState(null);
+
+  const urgent = type === 'safety_urgent';
+  // The one rule the form enforces client-side as well as the server does:
+  // an urgent safety concern needs a line saying what is happening.
+  const blocked = !clientId || !type || (urgent && !description.trim());
+
+  const submit = async () => {
+    setErr(''); setBusy(true);
+    const payload = { clientId, concernType: type, description: description.trim() };
+    try {
+      const res = await api('/api/caregiver/escalations', { method: 'POST', body: JSON.stringify(payload) });
+      setSent(res);
+    } catch (e2) {
+      if (!navigator.onLine || !e2.status) {
+        enqueue({ path: '/api/caregiver/escalations', payload, kind: 'escalation', at: new Date().toISOString() });
+        setSent({ queued: true });
+      } else {
+        setErr(e2.message);
+      }
+    } finally { setBusy(false); }
+  };
+
+  if (sent) {
+    return (
+      <div>
+        <div className="note ok">
+          <i className="ti ti-circle-check"></i>
+          <span>
+            <b>{sent.queued ? 'Saved — it will send when you are back online.' : 'Concern raised.'}</b>
+            {/* Naming the humans is the point. Never replace this with a
+                generic toast: the caregiver needs to know a person has it. */}
+            <span>{sent.queued ? 'Nothing is lost. It sends automatically.' : sent.confirmation}</span>
+          </span>
+        </div>
+        <button className="btn" onClick={onDone}>Done</button>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <button className="back" onClick={onBack}><i className="ti ti-chevron-left"></i>Back</button>
+      <h2 className="pg">Flag a concern</h2>
+      <p className="sub">Pick the type. We route it to the right person.</p>
+      <Err>{err}</Err>
+
+      {clients.length > 1 && (
+        <div className="fld">
+          <label>Client</label>
+          <select className="inp" value={clientId} onChange={e => setClientId(e.target.value)}>
+            <option value="">— Select —</option>
+            {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </div>
+      )}
+
+      {CONCERNS.map(c => (
+        <button key={c.id} className={`opt ${c.urgent ? 'urg' : ''} ${type === c.id ? 'sel' : ''}`} onClick={() => setType(c.id)}>
+          <i className={`ti ti-${c.icon}`}></i>
+          <span><b>{c.label}</b><span>{c.hint}</span></span>
+        </button>
+      ))}
+
+      {type && (
+        <div className="fld" style={{ marginTop: 14 }}>
+          <label>{urgent ? 'What is happening (required)' : 'Anything to add (optional)'}</label>
+          <textarea className="inp" value={description} maxLength={2000}
+            placeholder={urgent ? 'One line is enough — what is happening right now.' : ''}
+            onChange={e => setDescription(e.target.value)} />
+        </div>
+      )}
+
+      {urgent && !description.trim() && (
+        <div className="note warn">
+          <i className="ti ti-alert-triangle"></i>
+          <span><b>An urgent concern needs one line.</b><span>The people paged need to know what they are walking into.</span></span>
+        </div>
+      )}
+
+      {!online && <div className="note"><i className="ti ti-wifi-off"></i><span><b>You are offline.</b><span>This will save and send when you reconnect.</span></span></div>}
+
+      <button className="btn gold" disabled={blocked || busy} onClick={submit}>
+        {busy ? 'Sending…' : 'Send'}
+      </button>
+    </div>
+  );
+};
+
+// ============================================================================
+// VISIT LOG — one form, branched by license level
+//
+// Every field rendered here comes from the server-issued schema. There is no
+// client-side list of tasks and no client-side level check: if the schema did
+// not offer a field, this form cannot show it, and if the browser posted one
+// anyway the server would drop it. Two independent gates, one source.
+// ============================================================================
+const VisitLogForm = ({ me, clients, onDone, onBack, online }) => {
+  const [clientId, setClientId] = useState(clients.length === 1 ? clients[0].id : '');
+  const [schema, setSchema] = useState(me.schema);
+  const [loadingSchema, setLoadingSchema] = useState(false);
+  const [tasks, setTasks] = useState({});
+  const [measurements, setMeasurements] = useState({});
+  const [narratives, setNarratives] = useState({});
+  const [ack, setAck] = useState([]);
+  const [condition, setCondition] = useState([]);
+  const [safety, setSafety] = useState([]);
+  const [satisfaction, setSatisfaction] = useState('');
+  const [visitType, setVisitType] = useState('');
+  const [flagType, setFlagType] = useState('');
+  const [flagDescription, setFlagDescription] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(null);
+
+  // Re-fetch the schema per client: the task checklist narrows to what that
+  // client's care plan authorizes.
+  useEffect(() => {
+    if (!clientId) { setSchema(me.schema); return; }
+    let cancelled = false;
+    setLoadingSchema(true);
+    api(`/api/caregiver/visit-log/schema?clientId=${encodeURIComponent(clientId)}`)
+      .then(r => { if (!cancelled) { setSchema(r.schema); setTasks({}); setMeasurements({}); } })
+      .catch(e => { if (!cancelled) setErr(e.message); })
+      .finally(() => { if (!cancelled) setLoadingSchema(false); });
+    return () => { cancelled = true; };
+  }, [clientId, me.schema]);
+
+  const toggleTask = (id) => setTasks(t => {
+    const next = { ...t };
+    if (next[id]) delete next[id]; else next[id] = { done: true, note: '' };
+    return next;
+  });
+  const setTaskNote = (id, note) => setTasks(t => ({ ...t, [id]: { ...(t[id] || { done: true }), note } }));
+  const toggleIn = (list, set, id) => set(list.includes(id) ? list.filter(x => x !== id) : list.concat(id));
+
+  const incidentPicked = safety.some(id => (schema.safetyConcerns || []).find(c => c.id === id && c.incident));
+  const urgentFlag = flagType === 'safety_urgent';
+  const blocked = !clientId || (urgentFlag && !flagDescription.trim());
+
+  const submit = async () => {
+    setErr(''); setBusy(true);
+    // The key is generated ONCE, here, and travels with the payload. A retry
+    // after a reconnect reuses it, so the server returns the original row
+    // rather than filing the visit a second time.
+    const payload = {
+      idempotencyKey: newIdempotencyKey(),
+      clientId,
+      visitDate: new Date().toISOString().slice(0, 10),
+      visitType: visitType || 'Visit',
+      tasks, measurements, narratives,
+      standingInstructionsAcknowledged: ack,
+      patientCondition: condition,
+      safetyConcerns: safety,
+      satisfaction: satisfaction || null,
+      flagConcernType: flagType || null,
+      flagDescription: flagDescription.trim(),
+      clientSubmittedAt: new Date().toISOString()
+    };
+    try {
+      const res = await api('/api/caregiver/visit-logs', { method: 'POST', body: JSON.stringify(payload) });
+      setDone(res);
+    } catch (e2) {
+      if (!navigator.onLine || !e2.status) {
+        enqueue({ path: '/api/caregiver/visit-logs', payload: { ...payload, submittedOffline: true }, kind: 'visit_log', at: new Date().toISOString() });
+        setDone({ queued: true });
+      } else {
+        setErr(e2.message);
+      }
+    } finally { setBusy(false); }
+  };
+
+  if (done) {
+    return (
+      <div>
+        <div className="note ok">
+          <i className="ti ti-circle-check"></i>
+          <span>
+            <b>{done.queued ? 'Saved — it will file when you are back online.' : (done.message || 'Visit log filed.')}</b>
+            <span>{done.queued ? 'Nothing is lost. It files automatically, once.' : 'This log is final. A clinician adds a review note rather than editing it.'}</span>
+          </span>
+        </div>
+        {done.escalation && (
+          <div className="note"><i className="ti ti-bell"></i>
+            <span><b>Concern raised.</b><span>{done.escalation.confirmation}</span></span></div>
+        )}
+        {done.incidents && done.incidents.length > 0 && (
+          <div className="note warn"><i className="ti ti-file-alert"></i>
+            <span><b>Incident report opened.</b>
+              <span>{done.incidents.map(i => i.label).join(', ')} — filed separately, not just on this log.</span></span></div>
+        )}
+        <button className="btn" onClick={onDone}>Done</button>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <button className="back" onClick={onBack}><i className="ti ti-chevron-left"></i>Back</button>
+      <h2 className="pg">Visit log</h2>
+      <p className="sub">{schema.levelLabel} · filed with the time you submit it</p>
+      <Err>{err}</Err>
+
+      {clients.length > 1 && (
+        <div className="fld">
+          <label>Client</label>
+          <select className="inp" value={clientId} onChange={e => setClientId(e.target.value)}>
+            <option value="">— Select —</option>
+            {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </div>
+      )}
+
+      <div className="fld">
+        <label>Visit type</label>
+        <input className="inp" value={visitType} maxLength={80} placeholder="Personal care"
+          onChange={e => setVisitType(e.target.value)} />
+      </div>
+
+      {loadingSchema ? <Loading /> : (
+        <div>
+          {schema.skilledNote && (
+            <div className="note">
+              <i className="ti ti-clipboard-heart"></i>
+              <span><b>Skilled visit note.</b>
+                <span>This files as Pending Review and goes to the clinician inbox.</span></span>
+            </div>
+          )}
+
+          {(schema.taskGroups || []).map(g => (
+            <div key={g.id}>
+              <div className="grp">{g.label}</div>
+              {g.items.map(item => (
+                <div className="ck" key={item.id}>
+                  <div className="box" onClick={() => toggleTask(item.id)} role="checkbox"
+                    aria-checked={!!tasks[item.id]} tabIndex={0}
+                    onKeyDown={e => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); toggleTask(item.id); } }}>
+                    {tasks[item.id] && <i className="ti ti-check"></i>}
+                  </div>
+                  <div className="tx">
+                    <span onClick={() => toggleTask(item.id)}>{item.label}</span>
+                    {tasks[item.id] && (
+                      <input className="note" placeholder="Detail (optional)" maxLength={500}
+                        value={tasks[item.id].note || ''} onChange={e => setTaskNote(item.id, e.target.value)} />
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ))}
+
+          {(schema.measurements || []).length > 0 && (
+            <div>
+              <div className="grp">Measurements</div>
+              <div className="vit">
+                {schema.measurements.map(f => (
+                  <div className="fld" key={f.id}>
+                    <label>{f.label}</label>
+                    <input className="inp" inputMode="decimal" maxLength={40} value={measurements[f.id] || ''}
+                      onChange={e => setMeasurements(m => ({ ...m, [f.id]: e.target.value }))} />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {(schema.standingInstructions || []).length > 0 && (
+            <div>
+              <div className="grp">Standing instructions — acknowledge what applied</div>
+              <div className="chips">
+                {schema.standingInstructions.map(s => (
+                  <button key={s.id} className={`chip ${ack.includes(s.id) ? 'on' : ''}`}
+                    onClick={() => toggleIn(ack, setAck, s.id)}>{s.label}</button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="grp">Client condition observed</div>
+          <div className="chips">
+            {(schema.patientConditions || []).map(c => (
+              <button key={c.id} className={`chip ${condition.includes(c.id) ? 'on' : ''}`}
+                onClick={() => toggleIn(condition, setCondition, c.id)}>{c.label}</button>
+            ))}
+          </div>
+
+          <div className="grp">Safety concerns</div>
+          <div className="chips">
+            {(schema.safetyConcerns || []).map(c => (
+              <button key={c.id} className={`chip ${c.incident ? 'inc' : ''} ${safety.includes(c.id) ? 'on' : ''}`}
+                onClick={() => toggleIn(safety, setSafety, c.id)}>{c.label}</button>
+            ))}
+          </div>
+          {incidentPicked && (
+            <div className="note warn">
+              <i className="ti ti-file-alert"></i>
+              <span><b>This opens an incident report.</b>
+                <span>A fall or an abuse/neglect concern is filed as its own report, not just a box on this log.</span></span>
+            </div>
+          )}
+
+          {(schema.narratives || []).map(f => (
+            <div className="fld" key={f.id}>
+              <label>{f.label}</label>
+              <textarea className="inp" maxLength={4000} value={narratives[f.id] || ''}
+                onChange={e => setNarratives(n => ({ ...n, [f.id]: e.target.value }))} />
+            </div>
+          ))}
+
+          <div className="fld">
+            <label>Client satisfaction</label>
+            <div className="chips">
+              {(schema.satisfactionValues || []).map(v => (
+                <button key={v} className={`chip ${satisfaction === v ? 'on' : ''}`}
+                  onClick={() => setSatisfaction(satisfaction === v ? '' : v)}>{titleize(v)}</button>
+              ))}
+            </div>
+          </div>
+
+          <div className="grp">Flag a concern with this visit</div>
+          <div className="chips" style={{ marginBottom: 12 }}>
+            {CONCERNS.map(c => (
+              <button key={c.id} className={`chip ${c.urgent ? 'inc' : ''} ${flagType === c.id ? 'on' : ''}`}
+                onClick={() => setFlagType(flagType === c.id ? '' : c.id)}>{c.label}</button>
+            ))}
+          </div>
+          {flagType && (
+            <div className="fld">
+              <label>{urgentFlag ? 'What is happening (required)' : 'Anything to add (optional)'}</label>
+              <textarea className="inp" maxLength={2000} value={flagDescription}
+                onChange={e => setFlagDescription(e.target.value)} />
+            </div>
+          )}
+          {urgentFlag && !flagDescription.trim() && (
+            <div className="note warn"><i className="ti ti-alert-triangle"></i>
+              <span><b>An urgent concern needs one line.</b><span>Say what is happening before you file.</span></span></div>
+          )}
+
+          {!online && <div className="note"><i className="ti ti-wifi-off"></i>
+            <span><b>You are offline.</b><span>This log saves on your phone and files when you reconnect.</span></span></div>}
+
+          <button className="btn gold" disabled={blocked || busy} onClick={submit}>
+            {busy ? 'Filing…' : 'Submit visit log'}
+          </button>
+          <p className="sub" style={{ marginTop: 10, marginBottom: 0 }}>
+            Once submitted this log is final. A clinician adds a review note rather than editing it.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ============================================================================
+// FEED · CLIENTS · MORE
+// ============================================================================
+const FeedTab = ({ items }) => (
+  <div>
+    <h2 className="pg">Feed</h2>
+    <p className="sub">Broadcasts and your concern alerts. Read-only.</p>
+    {items.length === 0
+      ? <Empty icon="news">Nothing new right now.</Empty>
+      : items.map(i => (
+        <div className="card" key={`${i.kind}-${i.id}`}>
+          <h3>{i.title}</h3>
+          <p style={{ fontSize: 15, color: 'var(--mut)' }}>{i.body}</p>
+          <p className="mu" style={{ fontSize: 13, marginTop: 6, color: '#9a9388' }}>{fmtDate(i.at)}</p>
+        </div>
+      ))}
+  </div>
+);
+
+const ClientsTab = ({ clients, detail, onOpen, onClose }) => {
+  if (detail) {
+    const c = detail.client;
+    const plan = c.carePlan;
+    return (
+      <div>
+        <button className="back" onClick={onClose}><i className="ti ti-chevron-left"></i>All clients</button>
+        <h2 className="pg">{c.name}</h2>
+        <p className="sub">{c.careTierLabel || c.careTier || 'Tier not set'}</p>
+
+        <div className="card">
+          <h3>Care plan</h3>
+          {!plan ? <p style={{ fontSize: 15, color: 'var(--mut)' }}>No care plan is on file yet.</p> : (
+            <div>
+              {plan.frequency && <div className="row"><span>Frequency</span><b>{plan.frequency}</b></div>}
+              {plan.duration && <div className="row"><span>Duration</span><b>{plan.duration}</b></div>}
+              {Array.isArray(plan.goals) && plan.goals.length > 0 && (
+                <div style={{ paddingTop: 10 }}>
+                  <div className="grp" style={{ marginTop: 0 }}>Goals</div>
+                  {plan.goals.map((g, i) => <div className="row" key={i}>{typeof g === 'string' ? g : (g.label || g.text || '')}</div>)}
+                </div>
+              )}
+              {Array.isArray(plan.tasks) && plan.tasks.length > 0 && (
+                <div style={{ paddingTop: 10 }}>
+                  <div className="grp" style={{ marginTop: 0 }}>Authorized tasks</div>
+                  {plan.tasks.map((t, i) => <div className="row" key={i}>{typeof t === 'string' ? t : (t.label || t.task || t.name || '')}</div>)}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {c.behavioralProtocols && c.behavioralProtocols.length > 0 && (
+          <div className="card">
+            <h3>Behavioral protocols</h3>
+            {c.behavioralProtocols.map((p, i) => (
+              <div className="row" key={i}>{typeof p === 'string' ? p : (p.label || p.text || '')}</div>
+            ))}
+          </div>
+        )}
+
+        {c.standingInstructions && c.standingInstructions.length > 0 && (
+          <div className="card">
+            <h3>Standing instructions</h3>
+            {c.standingInstructions.map(s => <div className="row" key={s.id}>{s.label}</div>)}
+          </div>
+        )}
+
+        <MessagingEntry />
+      </div>
+    );
+  }
+  return (
+    <div>
+      <h2 className="pg">Clients</h2>
+      <p className="sub">Read-only. Only the clients you are assigned to.</p>
+      {clients.length === 0
+        ? <Empty icon="users">No clients are assigned to you yet.</Empty>
+        : clients.map(c => (
+          <button key={c.id} className="opt" onClick={() => onOpen(c.id)}>
+            <i className="ti ti-user-heart"></i>
+            <span><b>{c.name}</b><span>{c.careTierLabel || c.careTier || 'Tier not set'}</span></span>
+          </button>
+        ))}
+    </div>
+  );
+};
+
+const MoreTab = ({ visitLogs, queued }) => (
+  <div>
+    <h2 className="pg">More</h2>
+    <p className="sub">Your logs, schedule, messages and help.</p>
+
+    <div className="card">
+      <h3>Visit logs</h3>
+      {queued > 0 && (
+        <div className="note"><i className="ti ti-cloud-upload"></i>
+          <span><b>{queued} waiting to send.</b><span>They file automatically when you are back online.</span></span></div>
+      )}
+      {visitLogs.length === 0
+        ? <Empty icon="clipboard">Nothing filed yet.</Empty>
+        : visitLogs.slice(0, 25).map(v => (
+          <div className="row" style={{ display: 'block' }} key={v.id}>
+            <b>{v.visitType} · {v.visitDate}</b>
+            <div className="mu">
+              {titleize(v.status)}
+              {v.submittedOffline ? ' · filed offline' : ''}
+              {v.reviews && v.reviews.length > 0 ? ` · ${v.reviews.length} review note${v.reviews.length > 1 ? 's' : ''}` : ''}
+            </div>
+            {v.reviews && v.reviews.map(r => (
+              <div className="note ok" key={r.id} style={{ marginTop: 8 }}>
+                <i className="ti ti-message-2"></i>
+                <span><b>{r.byName}</b><span>{r.note}</span></span>
+              </div>
+            ))}
+          </div>
+        ))}
+    </div>
+
+    {/* Time history and the open-shift pool are Session 7's; both live behind
+        the schedule mount rather than getting placeholder cards of their own. */}
+    <ScheduleMount />
+    <MessagingMount label="Messages" />
+
+    <div className="card">
+      <h3>Help</h3>
+      <p style={{ fontSize: 15, color: 'var(--mut)' }}>
+        Call the office at {'(770) 800-4000'} for anything urgent that is not a client emergency.
+        For a client emergency, call 911 first, then flag a safety concern here.
+      </p>
+    </div>
+  </div>
+);
+
+// ============================================================================
+// APP
+// ============================================================================
+const App = () => {
+  const [me, setMe] = useState(null);
+  const [clients, setClients] = useState([]);
+  const [visitLogs, setVisitLogs] = useState([]);
+  const [escalations, setEscalations] = useState([]);
+  const [feed, setFeed] = useState([]);
+  const [tab, setTab] = useState('home');
+  const [screen, setScreen] = useState(null);         // 'visitLog' | 'flag' | null
+  const [clientDetail, setClientDetail] = useState(null);
+  const [online, setOnline] = useState(navigator.onLine);
+  const [queued, setQueued] = useState(readQueue().length);
+  const [fatal, setFatal] = useState('');
+  const [loading, setLoading] = useState(true);
+  const draining = useRef(false);
+
+  const refresh = useCallback(async () => {
+    const [c, v, e, f] = await Promise.all([
+      api('/api/caregiver/clients').catch(() => ({ clients: [] })),
+      api('/api/caregiver/visit-logs').catch(() => ({ visitLogs: [] })),
+      api('/api/caregiver/escalations').catch(() => ({ escalations: [] })),
+      api('/api/caregiver/feed').catch(() => ({ items: [] }))
+    ]);
+    setClients(c.clients || []);
+    setVisitLogs(v.visitLogs || []);
+    setEscalations(e.escalations || []);
+    setFeed(f.items || []);
+  }, []);
+
+  useEffect(() => {
+    if (!getToken()) { window.location.replace('/login'); return; }
+    api('/api/caregiver/me')
+      .then(m => { setMe(m); return refresh(); })
+      .catch(err => {
+        if (err.status === 401 || err.code === 'AUTH_EXPIRED' || err.code === 'AUTH_INVALID') {
+          window.location.replace('/login'); return;
+        }
+        setFatal(err.message);
+      })
+      .finally(() => setLoading(false));
+  }, [refresh]);
+
+  // Drain the offline queue on reconnect and on boot. Guarded so two events
+  // firing together cannot run the drain twice and double-post.
+  const runDrain = useCallback(async () => {
+    if (draining.current || !navigator.onLine || readQueue().length === 0) return;
+    draining.current = true;
+    try {
+      const { remaining } = await drainQueue(n => setQueued(n));
+      setQueued(remaining);
+      if (remaining === 0) await refresh();
+    } finally { draining.current = false; }
+  }, [refresh]);
+
+  useEffect(() => {
+    const up = () => { setOnline(true); runDrain(); };
+    const down = () => setOnline(false);
+    window.addEventListener('online', up);
+    window.addEventListener('offline', down);
+    runDrain();
+    return () => { window.removeEventListener('online', up); window.removeEventListener('offline', down); };
+  }, [runDrain]);
+
+  const openClient = async (clientId) => {
+    try { setClientDetail(await api(`/api/caregiver/clients/${encodeURIComponent(clientId)}`)); }
+    catch (e) { setFatal(e.message); }
+  };
+
+  const logout = () => { localStorage.clear(); window.location.replace('/login'); };
+
+  if (loading) return <div className="shell"><div className="main"><Loading /></div></div>;
+
+  if (fatal || !me) {
+    return (
+      <div className="shell">
+        <div className="hdr"><span className="ttl">Caregiver</span></div>
+        <div className="main">
+          <div className="err">{fatal || 'Could not load your account.'}</div>
+          <button className="btn ghost" onClick={logout}>Sign out</button>
+        </div>
+      </div>
+    );
+  }
+
+  const back = () => { setScreen(null); };
+  const doneAndRefresh = async () => { setScreen(null); await refresh(); };
+
+  let content;
+  if (screen === 'visitLog') {
+    content = <VisitLogForm me={me} clients={clients} online={online} onBack={back} onDone={doneAndRefresh} />;
+  } else if (screen === 'flag') {
+    content = <FlagConcern clients={clients} online={online} onBack={back} onDone={doneAndRefresh} />;
+  } else if (tab === 'home') {
+    content = <HomeTab me={me} clients={clients} escalations={escalations}
+      onVisitLog={() => setScreen('visitLog')} onFlag={() => setScreen('flag')} />;
+  } else if (tab === 'feed') {
+    content = <FeedTab items={feed} />;
+  } else if (tab === 'clients') {
+    content = <ClientsTab clients={clients} detail={clientDetail}
+      onOpen={openClient} onClose={() => setClientDetail(null)} />;
+  } else {
+    content = <MoreTab visitLogs={visitLogs} queued={queued} />;
+  }
+
+  const TABS = [
+    { id: 'home', icon: 'home', label: 'Home' },
+    { id: 'feed', icon: 'news', label: 'Feed' },
+    { id: 'clients', icon: 'users', label: 'Clients' },
+    { id: 'more', icon: 'dots', label: 'More' }
+  ];
+
+  return (
+    <div className="shell">
+      <div className="hdr">
+        <span className="ttl">Godwins Family Care</span>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span className="lvl">{me.licenseLabel}</span>
+          <button onClick={logout} title="Sign out"><i className="ti ti-logout"></i></button>
+        </span>
+      </div>
+      {!online && <div className="offline">Offline — your work is saved on this phone.</div>}
+      {online && queued > 0 && <div className="queued">Sending {queued} saved {queued === 1 ? 'item' : 'items'}…</div>}
+      <div className="main">{content}</div>
+      <div className="nav">
+        {TABS.map(t => (
+          <button key={t.id} className={tab === t.id && !screen ? 'on' : ''}
+            onClick={() => { setTab(t.id); setScreen(null); setClientDetail(null); }}>
+            <i className={`ti ti-${t.icon}`}></i>{t.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
