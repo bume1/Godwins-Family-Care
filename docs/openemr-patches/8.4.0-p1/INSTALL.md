@@ -111,7 +111,7 @@ cd /opt/openemr/gfc-patch && sha256sum -c <<'SUMS'
 cb5b3f4746c228e07c86d5ea6dbfa2d034b8bbeef7962c0564f52d372339eb40  apis/routes/_rest_routes_standard.inc.php
 a3515a22b7d6a4cea94884045c2a141a634a59979535d8447ae551bc35e3ec11  apis/routes/_rest_routes_gfc.inc.php
 0333542b8c9e054711f50f7b31dbe9cec40c70f3479698b0ac31a8eb95a76d66  gfc-add-scopes.php
-c17bdef5fcf50926b208d5043720ea1be2ebb6b10edb179cb296ab652e51f0bf  src/RestControllers/GfcChargeRestController.php
+4310e14f6cd63b2d954afbf4ec616b427e2412511483213e096aa006de8ae317  src/RestControllers/GfcChargeRestController.php
 SUMS
 ```
 
@@ -257,11 +257,37 @@ function the Fee Sheet itself calls (`interface/forms/fee_sheet/new.php`). Every
 external code set works as a result, and the query keeps working when upstream
 changes the table layout.
 
-**This is a code change to a file already on the server, so it needs a rebuild:**
+**RE-FETCH THE FILE FIRST, THEN REBUILD. A rebuild alone does nothing.**
+
+This was written as "it needs a rebuild", which is wrong and cost a cycle on
+2026-09-09: the build copies `/opt/openemr/gfc-patch/` into the image, and that
+directory holds the copy fetched in step 1 — the OLD controller. Rebuilding
+without re-fetching rebuilds the old code, succeeds, and changes nothing.
 
 ```
+cd /opt/openemr/gfc-patch
+B=https://raw.githubusercontent.com/bume1/Godwins-Family-Care/main/docs/openemr-patches/8.4.0-p1
+sudo curl -fsSL -o src/RestControllers/GfcChargeRestController.php "$B/src/RestControllers/GfcChargeRestController.php"
+sha256sum src/RestControllers/GfcChargeRestController.php
+#   expect 4310e14f6cd63b2d954afbf4ec616b427e2412511483213e096aa006de8ae317
 cd /opt/openemr && sudo docker compose build --pull && sudo docker compose up -d
 ```
+
+Only the controller changed; the other four files are unchanged.
+
+**Tell the two versions apart without a code set.** Ask for a code type that does
+not exist:
+
+```
+curl -sS -H "Authorization: Bearer $TOKEN" \
+  'https://emr.godwinsfamilycarellc.com/apis/default/api/codes?search=E11&type=ZZBOGUS'
+```
+
+The OLD controller answers `"data":[]` with no validation error — it appends the
+type to a WHERE clause and matches nothing. The NEW one answers a
+`validationErrors` message naming the active code types. That distinction holds
+whether or not any code set is loaded, which matters because "0 rows" is exactly
+the signal that has already been misread once here.
 
 Then confirm the route now returns real rows, with the app's token:
 
