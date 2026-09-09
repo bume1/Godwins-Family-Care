@@ -400,7 +400,21 @@ Session 4.5 can now be proven against the live EMR: sign-and-close reaches Billi
   not the load has run, and **a 0-row result from it proves nothing about the load.**
 
   Two consequences. **Both are fixed in code; one still needs a server rebuild.**
-  1. **`GET /api/codes` was defective for ICD-10.** Fixed in the 6B patch —
+  1. **`GET /api/codes` was defective for ICD-10 — FIXED AND DEPLOYED 2026-09-09.** Live on the
+     instance: `E11` → 25 rows, `I10` → "Essential (primary) hypertension", and description
+     search works ("hypertension" → 25 matches). The version probe confirms the new controller
+     independently of any data: `?type=ZZBOGUS` now returns a `validationErrors` message naming
+     the active code types, where the old one returned an empty list.
+
+     **The first rebuild deployed the OLD file, and that is the lesson.** `/opt/openemr/gfc-patch/`
+     holds a copy fetched at install time; nothing syncs it to the repo, so `docker compose build`
+     alone rebuilds whatever is already there — successfully, and with no visible difference. The
+     instruction here said "it needs a rebuild" and gave no way to check the result, which is what
+     made it silent. The sequence is **re-fetch → verify sha256 → rebuild**, and it is written that
+     way in the patch INSTALL.md now. **CPT/HCPCS still return 0 and that is correct**: AMA
+     copyright, OpenEMR ships none, hand-entered into the fee schedule.
+
+     Original write-up: fixed in the 6B patch —
      `GfcChargeRestController::searchCodes` now calls OpenEMR's own
      `main_code_set_search()` (`custom/code_types.inc.php`), which is the function the
      Fee Sheet calls at `interface/forms/fee_sheet/new.php:1218`. That reaches every
