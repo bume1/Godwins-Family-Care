@@ -16,7 +16,7 @@ chart for any patient from OpenEMR by itself?**
 nowhere in OpenEMR. Five of them are new, found by writing to the live server and reading it back
 rather than by reading code. Three are silent: the app reports success and nothing lands.
 
-**Four were fixed at the owner's direction in the same PR as this audit** and re-proven live
+**Five were fixed at the owner's direction in the same PR as this audit (PR #47, merged 2026-09-09)** and re-proven live
 (`scripts/verify_shadow_data_fixes.js`, stored values only). **Four are now fully closed**; G5 is
 mitigated and carries a genuine instance dependency (the empty option lists). **Eight remain
 open.**
