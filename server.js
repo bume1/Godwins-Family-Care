@@ -6243,12 +6243,63 @@ app.post('/api/clinical/patients/:clientId/link', authenticateToken, requireClin
     if (!openemr.isConfigured()) return res.status(503).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
     const emr = openemr.forActor(req.user);
 
+    // OpenEMR ids already claimed by another app client — linking to one of
+    // these would point two app records at a single chart.
+    const claimedIds = new Set(users
+      .filter(u => u.id !== client.id && u.openEmrPatientId)
+      .map(u => String(u.openEmrPatientId)));
+
     let puuid;
     if (req.body && req.body.openEmrPatientId) {
       // Link an existing EMR patient — verify it exists first.
       puuid = String(req.body.openEmrPatientId);
+      if (claimedIds.has(puuid)) {
+        return res.status(409).json({
+          error: 'That OpenEMR patient is already linked to a different client record',
+          code: 'EMR_PATIENT_CLAIMED', openEmrPatientId: puuid
+        });
+      }
       await emr.getPatient(puuid);
     } else {
+      // Duplicate guard: look for the patient in OpenEMR BEFORE creating one.
+      // Without this, each retry minted another chart for the same person.
+      // Candidates are returned for a clinician to confirm rather than linked
+      // automatically — a wrong link writes clinical data into someone else's
+      // record, and a shared surname + date of birth is not proof of identity.
+      if (!req.body || !req.body.confirmDistinct) {
+        const key = clinicalRepo.patientMatchKey(client);
+        const params = clinicalRepo.patientSearchParams(key);
+        if (!params) {
+          return res.status(409).json({
+            error: 'This client has no surname on file, so OpenEMR cannot be checked for an existing chart. Add the name to the client record first.',
+            code: 'EMR_MATCH_NO_NAME'
+          });
+        }
+        let candidates;
+        try {
+          const found = await emr.searchPatients(params);
+          candidates = clinicalRepo.findExistingPatientMatches(found, key, claimedIds);
+        } catch (searchError) {
+          // Fail closed. Falling through to create on a failed search is
+          // exactly how the duplicates got made; the clinician can still
+          // proceed deliberately with confirmDistinct.
+          console.error('Clinical link duplicate-check error:', searchError);
+          return res.status(502).json({
+            error: `Could not check OpenEMR for an existing chart, so no patient was created: ${searchError.message}`,
+            code: 'EMR_MATCH_CHECK_FAILED'
+          });
+        }
+        if (candidates.length) {
+          await logActivity(req.user.id, req.user.name || req.user.email, 'emr_patient_link_blocked', 'client', client.id,
+            { reason: 'existing_candidates', candidates: candidates.map(c => c.openEmrPatientId) });
+          return res.status(409).json({
+            error: candidates.length === 1
+              ? 'A matching patient already exists in OpenEMR. Link that chart, or confirm this is a different person.'
+              : `${candidates.length} matching patients already exist in OpenEMR. Link the right chart, or confirm this is a different person.`,
+            code: 'EMR_PATIENT_EXISTS', candidates
+          });
+        }
+      }
       const created = await emr.createPatient(clientToFhirPatient(client));
       // openemr.createPatient() normalizes 7.0.4's {pid,uuid} response and
       // throws a specific error if the id is genuinely absent, so a bare
@@ -6259,7 +6310,10 @@ app.post('/api/clinical/patients/:clientId/link', authenticateToken, requireClin
     users[idx].openEmrPatientId = puuid;
     await db.set('users', users);
     invalidateUsersCache();
-    await logActivity(req.user.id, req.user.name || req.user.email, 'emr_patient_linked', 'client', client.id, { openEmrPatientId: puuid, created: !(req.body && req.body.openEmrPatientId) });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'emr_patient_linked', 'client', client.id, {
+      openEmrPatientId: puuid, created: !(req.body && req.body.openEmrPatientId),
+      confirmedDistinct: !!(req.body && req.body.confirmDistinct && !req.body.openEmrPatientId)
+    });
     res.json({ message: 'Linked to OpenEMR', openEmrPatientId: puuid });
   } catch (error) {
     console.error('Clinical link error:', error);
