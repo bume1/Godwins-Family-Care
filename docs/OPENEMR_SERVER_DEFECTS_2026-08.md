@@ -640,14 +640,31 @@ appointment marker. An unassigned patient, or a facility with no POS on its reco
 reported and blocks **signing** (`SIGN_NO_FACILITY_POS`) but never blocks documenting the
 visit — care happens regardless; claims are what need a verified POS.
 
-**On the org record (ids 3 and 4).** Leave POS blank if OpenEMR allows it, otherwise 11. The
-real protection is that no encounter is ever assigned to it, enforced by **unchecking Service
-Location** on that record once the private-residence record exists.
+**On ids 3 and 4 (Vinings and Buckhead).** POS 11, Office.
 
-**Phase 8.3 actions.** Create the private-residence record (POS 12) and Hickory Log (13 or 14
-once DCH confirms); assign each patient to their facility; uncheck Service Location on the
-org record. No app change is required for a new facility — add it in OpenEMR with its POS and
-assign patients to it.
+> **SUPERSEDED 2026-09-09 by the owner.** This section previously said to leave them as
+> business-address records and **uncheck Service Location** so no encounter could land on
+> them. That is withdrawn: **patients ARE seen at Vinings and Buckhead**, so both remain
+> service locations and Service Location stays checked. POS 11 is then not a placeholder —
+> it is the correct code for care actually delivered in an office.
+>
+> The protection that mattered is unaffected. It was never the checkbox: it is that the
+> encounter's facility comes from the PATIENT's assignment, so an office POS reaches a claim
+> only for a patient actually assigned to an office.
+
+**Billing entity: facility 3, Vinings** (owner decision, 2026-09-09). OpenEMR's
+`primary_business_entity` flag currently points at **4**, and the app does **not** defer to
+it: an explicitly configured billing facility wins, because the practice decides who bills
+and that flag is not always maintained to match. The disagreement is reported on every
+resolution rather than swallowed. To silence it properly, mark **3** as the primary business
+entity in OpenEMR so the two agree.
+
+**Phase 8.3 — done, with one item outstanding.** Ids 5 "Private Residence" (POS 12) and 6
+"Hickory Log Personal Care Home" (POS 13) exist as of 2026-09-09. **Hickory Log has Service
+Location UNCHECKED** (`service_location=0`), so no encounter can be assigned there and every
+Hickory Log patient would block at signing — check it if care is delivered there. Then assign
+each patient to their facility. No app change is required for a new facility: add it in
+OpenEMR with its POS and assign patients to it.
 
 ---
 

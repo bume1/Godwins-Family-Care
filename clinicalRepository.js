@@ -942,41 +942,53 @@ const isFlagOn = (v) => v === 1 || v === '1' || v === true;
 const resolveBillingFacility = ({ facilities, configuredId }) => {
   const rows = facilities || [];
   const cfg = configuredId ? String(configuredId) : null;
+  const byId = new Map(rows.map(f => [String(f.id), f]));
   const primary = rows.filter(f => isFlagOn(f.primary_business_entity));
   const billing = rows.filter(f => isFlagOn(f.billing_location));
-
-  const pick = primary.length === 1 ? primary[0]
+  const openEmrPick = primary.length === 1 ? primary[0]
     : (primary.length === 0 && billing.length === 1 ? billing[0] : null);
 
-  if (pick) {
-    const id = String(pick.id);
+  // AN EXPLICIT CONFIGURED ID WINS. It is a deliberate decision by the practice
+  // about who bills, and OpenEMR's primary-business-entity flag is not always
+  // set to reflect it — on this instance OpenEMR flags 4 (Buckhead) while the
+  // owner's decision (2026-09-09) is 3 (Vinings). Deferring to OpenEMR there
+  // would put the wrong address on every claim.
+  //
+  // But it is never silent: a disagreement is reported every time, because the
+  // durable fix is to make OpenEMR say the same thing, and a warning nobody
+  // ever sees is how the two drift apart again.
+  if (cfg && byId.has(cfg)) {
+    const f = byId.get(cfg);
+    const disagrees = openEmrPick && String(openEmrPick.id) !== cfg;
     return {
-      facilityId: id, facilityName: pick.name || null,
-      source: primary.length === 1 ? 'primary_business_entity' : 'sole_billing_location',
-      warning: (cfg && cfg !== id)
-        ? `The configured billing facility is ${cfg}, but OpenEMR records ${id} ("${pick.name || id}") as the business entity. Using OpenEMR's. Whichever is right, the claim carries the other's address until they agree — an admin should settle it.`
-        : null
+      facilityId: cfg, facilityName: f.name || null, source: 'configured',
+      warning: disagrees
+        ? `Billing to the configured facility ${cfg} ("${f.name || cfg}"), but OpenEMR marks ${openEmrPick.id} ("${openEmrPick.name || openEmrPick.id}") as its primary business entity. The configured value is used because it is a deliberate decision; mark ${cfg} as the primary business entity in OpenEMR so the two agree.`
+        : (!openEmrPick && billing.length > 1
+          ? `OpenEMR flags ${billing.length} facilities as billing locations (${billing.map(x => x.id).join(', ')}) and names no single business entity, so the configured id ${cfg} was used. An admin should mark exactly one as primary.`
+          : null)
     };
   }
 
-  // Ambiguous (several primaries, or several billing locations and no primary)
-  // or none at all. An explicit configured id is the tie-breaker; without one
-  // this is reported, never guessed, because guessing puts an address on a
-  // claim.
-  const byId = new Map(rows.map(f => [String(f.id), f]));
-  if (cfg && byId.has(cfg)) {
-    const f = byId.get(cfg);
+  // A configured id that names a facility which does not exist is a mistake
+  // worth surfacing, not something to quietly route around.
+  const staleWarning = (cfg && !byId.has(cfg))
+    ? `The configured billing facility ${cfg} does not exist in OpenEMR, so OpenEMR's own business entity was used instead. An admin should correct the setting.`
+    : null;
+
+  if (openEmrPick) {
+    const id = String(openEmrPick.id);
     return {
-      facilityId: cfg, facilityName: f.name || null, source: 'configured',
-      warning: billing.length > 1
-        ? `OpenEMR flags ${billing.length} facilities as billing locations (${billing.map(x => x.id).join(', ')}) and no single business entity, so the configured id ${cfg} was used. An admin should mark exactly one as the primary business entity.`
-        : null
+      facilityId: id, facilityName: openEmrPick.name || null,
+      source: primary.length === 1 ? 'primary_business_entity' : 'sole_billing_location',
+      warning: staleWarning
     };
   }
   return {
     facilityId: null, facilityName: null, source: 'unresolved',
     error: BILLING_FACILITY_UNRESOLVED,
-    warning: 'The billing facility could not be determined: OpenEMR names no single business entity and no billing facility is configured. An admin marks the GFC LLC record as the primary business entity in OpenEMR.'
+    warning: staleWarning
+      || 'The billing facility could not be determined: OpenEMR names no single business entity and no billing facility is configured. An admin marks the GFC LLC record as the primary business entity in OpenEMR.'
   };
 };
 
