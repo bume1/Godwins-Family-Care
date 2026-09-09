@@ -850,3 +850,48 @@ A FHIR `AllergyIntolerance` for a free-text allergen returns
 `text.div`. Any consumer reading `code` alone displays "Unknown". Not a defect — it is correct FHIR
 for an uncoded allergen — but it is why the app's chart showed "Unknown" for every allergy until
 2026-09-08. Seeding an RxNorm allergen list in OpenEMR would make these properly coded.
+
+---
+
+## Defect 5 — documents go in and nothing comes back (8.4.0, probed 2026-09-09)
+
+**Status: OPEN. Blocks the clinician chart's Documents panel and the audit's G2.**
+
+Every read shape was probed live against TEST PatientOne (pid 1) with the v4
+client (52 granted scopes), immediately after a successful upload:
+
+| Request | Result |
+|---|---|
+| `POST /api/patient/1/document?path=/Medical Record` | **200**, response body is literally `true` — no id, no envelope |
+| `GET /fhir/DocumentReference?patient={uuid}` | 200, **`total: 0`** |
+| `GET /fhir/DocumentReference` (unfiltered) | 200, **`total: 0` instance-wide** |
+| `GET /api/patient/1/document` | 404, empty `text/html` body — no list route |
+| `GET /api/patient/1/documents` | 404 `Route not found` |
+| `GET /api/patient/1/document/{id}` | **500 `OpenEMR is potentially not secure because CSRF key is empty.`** |
+| `GET /api/patient/1/document/categories` | **500**, same CSRF message |
+| `GET /fhir/Binary` | 404 `Route not found` |
+
+Two distinct problems, and the second is the more interesting:
+
+1. **FHIR does not index documents at all.** `total: 0` unfiltered, on an
+   instance that has been accepting uploads since August. This is not an ACL
+   refusal — the Phase 8.6 grant already moved DocumentReference from 403 to
+   200 — it is an empty index.
+2. **The read-by-id route EXISTS and crashes.** `Route not found` (the 404 JSON)
+   and the CSRF 500 are different failures. A 500 naming a CSRF key means the
+   route resolved, the controller ran, and it called a session-token check that
+   has no business running on a bearer-token API request. That is an upstream
+   bug in the document controller, not a configuration this instance can fix.
+
+**The app no longer depends on any of it.** The chart's Documents panel is
+assembled from what the app holds (`clinicalRepository.buildChartDocumentIndex`)
+and merged with whatever FHIR returns — today nothing. An EMR-sourced row is
+listed and marked "Open in OpenEMR" rather than dropped, because dropping it
+would tell a clinician the document does not exist.
+
+**What would close it properly:** two read routes in the Phase 6B patch
+(`GET /api/patient/:pid/documents` and `.../documents/:id`), written against the
+`documents` / `categories_to_documents` tables the way the existing GFC routes
+wrap `BillingUtilities`. That is the only path that also surfaces documents
+added directly in OpenEMR — a fax, an outside record — which the app can never
+see. It needs an EMR rebuild, so it is an owner decision, not a code change.

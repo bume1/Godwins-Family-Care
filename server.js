@@ -6684,6 +6684,107 @@ app.post('/api/clinical/patients/:clientId/link', authenticateToken, requireClin
 // GET /api/clinical/patients/:clientId/chart — demographics from the app
 // record; problems, allergies, meds, encounters, care plan, documents, vitals
 // read LIVE from OpenEMR (never cached into the KV store).
+// GET /api/clinical/patients/:clientId/documents/:docId/file — open one
+// document from the chart's list.
+//
+// One route resolving a composite id (`careplan:2`, `consent:npp`,
+// `roi:<id>`, `upload:<id>`) rather than four parallel routes, so the chart
+// list and the thing it opens cannot drift apart: every row the index emits as
+// `openable` resolves here, and nothing else does.
+//
+// A clinician reading a chart is a clinical READ — case managers included. It
+// is deliberately not gated on enrollment staff: reviewing a chart is not an
+// enrollment task, and the documents are the patient's record.
+app.get('/api/clinical/patients/:clientId/documents/:docId/file', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+
+    const raw = String(req.params.docId || '');
+    const sep = raw.indexOf(':');
+    const kind = sep === -1 ? raw : raw.slice(0, sep);
+    const ref = sep === -1 ? '' : raw.slice(sep + 1);
+
+    const audit = (resource) => logActivity(req.user.id, req.user.name || req.user.email,
+      'chart_document_read', 'document', client.id, { role: req.user.role, docId: raw, resource });
+
+    if (kind === 'careplan') {
+      const version = ref;
+      const rows = (await db.get('care_plan_versions')) || [];
+      if (!rows.some(r => r && r.client_id === client.id && String(r.version) === String(version))) {
+        return res.status(404).json({ error: 'No such care-plan version', code: 'CARE_PLAN_VERSION_UNKNOWN' });
+      }
+      const { buffer, source } = await buildCarePlanPdfForVersion(client, version);
+      await audit(`care_plan_v${version}`);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('X-GFC-PDF-Source', source);
+      res.setHeader('Content-Disposition', `inline; filename="CarePlan_v${version}.pdf"`);
+      return res.send(buffer);
+    }
+
+    if (kind === 'consent') {
+      // Same renderer the client's own copy and the staff copy use — one
+      // document, three readers, so a chart cannot show a fourth version of it.
+      // It already refuses an unexecuted consent and one out of the client's
+      // lane, which is why neither check is repeated here.
+      const out = await renderConsentPdf(client, ref, { audience: 'staff' });
+      if (out.error) return res.status(out.status || 400).json({ error: out.error, code: out.code });
+      await audit(`consent_${ref}`);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="${out.fileName}"`);
+      return res.send(out.pdf);
+    }
+
+    if (kind === 'upload') {
+      const uploads = (await db.get('client_document_uploads')) || [];
+      const row = uploads.find(u => u.id === ref && u.clientId === client.id);
+      if (!row) return res.status(404).json({ error: 'Document not found' });
+      // A rejected upload is not part of the record and the index does not list
+      // it; refuse it here too rather than relying on the list to hide it.
+      if (row.status === 'rejected') return res.status(409).json({ error: 'That document was rejected', code: 'DOCUMENT_REJECTED' });
+      // Audited as a CHART read as well as the document-exchange read
+      // serveStoredDocument writes. Without this, "who opened documents from
+      // this chart" silently misses every client upload.
+      await audit(`upload_${ref}`);
+      return serveStoredDocument(res, row, req.user);
+    }
+
+    if (kind === 'roi') {
+      const events = ((await db.get('consent_events')) || []).filter(e => e && e.client_id === client.id);
+      let auth = null;
+      for (const e of events) {
+        const list = await roiStore.listProviderAuthorizations(e.id);
+        auth = (list || []).find(a => String(a.id) === ref) || auth;
+        if (auth) break;
+      }
+      if (!auth) return res.status(404).json({ error: 'Record release not found' });
+      if (!auth.generated_pdf_drive_url) {
+        return res.status(404).json({ error: 'No stored copy of that record release', code: 'ROI_PDF_MISSING' });
+      }
+      await audit(`roi_${ref}`);
+      // The Drive copy is the filed original; hand back the reference rather
+      // than re-rendering, so what a clinician reads is what the provider got.
+      return res.json({ url: auth.generated_pdf_drive_url, fileName: auth.generated_pdf_file_name || null });
+    }
+
+    if (kind === 'emr') {
+      // Named, not silent. OpenEMR 8.4 on this instance has no working document
+      // read: FHIR DocumentReference returns total 0, there is no list route,
+      // and read-by-id 500s on a CSRF check. Saying so is the honest answer;
+      // pretending the row is missing would be worse.
+      return res.status(501).json({
+        error: 'This instance has no document read API — open it in OpenEMR directly',
+        code: 'EMR_DOCUMENT_READ_UNAVAILABLE'
+      });
+    }
+
+    return res.status(400).json({ error: 'Unknown document reference', code: 'DOCUMENT_REF_UNKNOWN' });
+  } catch (error) {
+    console.error('Chart document read error:', error);
+    res.status(500).json({ error: 'Failed to open that document' });
+  }
+});
+
 app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
@@ -6741,14 +6842,41 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
         error: r.reason && r.reason.message
       };
     };
+    // The chart's document list. OpenEMR takes documents and gives none back on
+    // this instance (probed live: FHIR DocumentReference total 0 instance-wide, no
+    // list route, and the read-by-id route 500s on a CSRF check), so the list is
+    // assembled from what the app holds and merged with whatever the EMR does
+    // return. Every row says where it can be read from.
+    const [planVersions, roiEvents, docUploads] = await Promise.all([
+      db.get('care_plan_versions'), db.get('consent_events'), db.get('client_document_uploads')
+    ]);
+    let roiAuths = [];
+    try {
+      const events = (roiEvents || []).filter(e => e && e.client_id === client.id);
+      const lists = await Promise.all(events.map(e => roiStore.listProviderAuthorizations(e.id)));
+      roiAuths = lists.flat().map(a => ({ ...a, client_id: client.id }));
+    } catch (e) { console.error('Chart ROI lookup failed (non-fatal):', e.message); }
+
+    const chartDocuments = clinicalRepo.buildChartDocumentIndex({
+      client,
+      emrRows: documents.status === 'fulfilled' ? documents.value.map(clinicalRepo.summarizeDocument) : [],
+      carePlanVersions: planVersions || [],
+      roiAuthorizations: roiAuths,
+      clientUploads: docUploads || [],
+      consentDefs: consentDefsForServiceLine(client.serviceLine),
+      consentSatisfied: isConsentSatisfied
+    });
+
     res.json({
       demographics, intakePrefill, linked: true,
+      chartDocuments,
       emr: {
         problems: take(problems, clinicalRepo.summarizeCondition),
         allergies: take(allergies, clinicalRepo.summarizeAllergy),
         medications: take(meds, clinicalRepo.summarizeMedicationRequest),
         encounters: take(encounters, clinicalRepo.summarizeEncounter),
         carePlans: take(carePlans, r => ({ id: r.id, status: r.status, description: r.description || null })),
+        // The EMR half, and then the whole list — see chartDocuments below.
         documents: take(documents, clinicalRepo.summarizeDocument),
         vitals: take(vitals, clinicalRepo.summarizeVitalObservation)
       }
