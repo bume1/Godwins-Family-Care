@@ -1,3 +1,6 @@
+// Session 5.4: every console.* line is scrubbed of PHI before it leaves the
+// process. Installed before anything else can log.
+require('./logScrubber').install(console);
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
@@ -20,6 +23,7 @@ const legacySync = require('./legacySync');            // ROI parallel-run legac
 const openemr = require('./openemr');                  // OpenEMR FHIR/REST front-end client (Session 4.1)
 const emrAuthModule = require('./emrAuth');            // per-user OpenEMR authorization_code + PKCE (Session 5.2)
 const mfa = require('./mfa');                            // TOTP + recovery codes (Session 5.3)
+const { createAuditLog } = require('./auditLog');        // durable append-only audit_log + PHI-route middleware (Session 5.4)
 const { createSessionStore } = require('./sessionStore'); // server-side sessions: idle timeout + revocation (Session 5.3)
 const QRCode = require('qrcode');                        // enrollment QR for the authenticator app (Session 5.3)
 const clinicalRepo = require('./clinicalRepository');  // clinical workspace pure helpers (Session 4.1)
@@ -86,6 +90,10 @@ openemr.setTokenProvider(emrTokenProvider);
 // Session 5.3: server-side sessions. Every JWT names a session row; the auth
 // middleware checks it on every request (revoked → dead, idle → dead).
 const sessions = createSessionStore({ store: db, idleMinutes: config.SESSION_IDLE_MINUTES });
+// Session 5.4: the durable audit log. logActivity() below writes to it on
+// every call, and the PHI-route middleware writes a row for every request
+// under a PHI prefix whatever the handler did. Never truncated.
+const audit = createAuditLog({ store: db, salt: config.JWT_SECRET });
 // Secrets at rest (MFA secrets share the OpenEMR token key). In non-production
 // a key derived from JWT_SECRET keeps local runs working; production refuses
 // to boot without EMR_TOKEN_ENCRYPTION_KEY (config.js), so this fallback can
@@ -121,6 +129,13 @@ if (!process.env.JWT_SECRET) {
 
 app.use(cors());
 app.use(bodyParser.json({ limit: config.BODY_PARSER_LIMIT }));
+// Session 5.4: request context (request id, hashed IP) for every request, and
+// the PHI-access audit row for every request under a PHI prefix. Registered
+// before any route so no route can be added in front of it.
+app.use(audit.contextMiddleware);
+app.use(audit.phiAccessMiddleware);
+// Liveness for the load balancer. Names the adapter, never a secret.
+app.get('/healthz', (req, res) => res.json({ ok: true, store: db.adapter, uptimeSeconds: Math.round(process.uptime()), production: process.env.NODE_ENV === 'production' }));
 
 // Static file options with no-cache headers for development
 const staticOptions = {
@@ -308,19 +323,26 @@ const getTasks = async (projectId) => {
 const ACTIVITY_LOG_MAX = config.ACTIVITY_LOG_MAX_ENTRIES;
 
 const logActivity = async (userId, userName, action, entityType, entityId, details, projectId = null) => {
+  const activity = {
+    id: uuidv4(),
+    userId,
+    userName,
+    action,
+    entityType,
+    entityId,
+    details,
+    projectId,
+    timestamp: new Date().toISOString()
+  };
+  // Session 5.4: the durable row FIRST. The capped blob below is the admin
+  // UI's view; if it fails, the record still exists.
+  try {
+    await audit.record({ id: activity.id, timestamp: activity.timestamp, userId, userName, action, entityType, entityId, details });
+  } catch (err) {
+    console.error('audit_log write failed:', err.message);
+  }
   try {
     const activities = (await db.get('activity_log')) || [];
-    const activity = {
-      id: uuidv4(),
-      userId,
-      userName,
-      action,
-      entityType,
-      entityId,
-      details,
-      projectId,
-      timestamp: new Date().toISOString()
-    };
     activities.unshift(activity);
     // Keep only last ACTIVITY_LOG_MAX activities to prevent unbounded growth
     if (activities.length > ACTIVITY_LOG_MAX) {
@@ -2014,6 +2036,7 @@ const authenticateToken = async (req, res, next) => {
         // access; acting gates wired in Session 4.3
         familyIsPoa: freshUser.familyIsPoa || false
       };
+      audit.bindUser(req.user, req.session);   // 5.4: attribution for every logActivity() downstream
       next();
     } catch (error) {
       console.error('Auth middleware error:', error);
@@ -2734,11 +2757,11 @@ app.post('/api/auth/mfa/verify', async (req, res) => {
       pending.attempts = (pending.attempts || 0) + 1;
       if (pending.attempts >= MFA_MAX_ATTEMPTS) {
         await db.delete(key);
-        await logActivity(user.id, user.name || user.email, 'mfa_locked', 'user', user.id, { reason: 'too many attempts', surface: pending.surface });
+        await logActivity(user.id, user.name || user.email, 'mfa_locked', 'user', user.id, { role: user.role, reason: 'too many attempts', surface: pending.surface });
         return res.status(400).json({ error: 'Too many incorrect codes. Start the sign-in again.', code: 'MFA_TOO_MANY_ATTEMPTS' });
       }
       await db.set(key, pending);
-      await logActivity(user.id, user.name || user.email, 'mfa_failed', 'user', user.id, { reason, attempts: pending.attempts, surface: pending.surface });
+      await logActivity(user.id, user.name || user.email, 'mfa_failed', 'user', user.id, { role: user.role, reason, attempts: pending.attempts, surface: pending.surface });
       return res.status(400).json({ error: 'That code is not right. Check the authenticator app and try again.', code: 'MFA_INVALID_CODE', attemptsLeft: MFA_MAX_ATTEMPTS - pending.attempts });
     };
     const trimmed = String(code).trim();
@@ -2750,7 +2773,7 @@ app.post('/api/auth/mfa/verify', async (req, res) => {
       recoveryCodes = mfa.generateRecoveryCodes();
       users[idx].mfa = { secret: sealSecret(secret), enrolledAt: new Date().toISOString(), lastStep: v.step, recovery: mfa.buildRecoveryRecord(recoveryCodes) };
       await db.set('users', users); invalidateUsersCache();
-      await logActivity(user.id, user.name || user.email, 'mfa_enrolled', 'user', user.id, { surface: pending.surface });
+      await logActivity(user.id, user.name || user.email, 'mfa_enrolled', 'user', user.id, { role: user.role, surface: pending.surface });
     } else if (/^\d{6}$/.test(trimmed.replace(/\s+/g, ''))) {
       const v = mfa.verifyTotp(openSecret(user.mfa.secret), trimmed, { lastStep: user.mfa.lastStep == null ? null : user.mfa.lastStep });
       if (!v.ok) return fail(v.reason);
@@ -2762,7 +2785,7 @@ app.post('/api/auth/mfa/verify', async (req, res) => {
       via = 'recovery';
       users[idx].mfa = { ...user.mfa, recovery: r.record };
       await db.set('users', users); invalidateUsersCache();
-      await logActivity(user.id, user.name || user.email, 'mfa_recovery_code_used', 'user', user.id, { remaining: r.remaining, surface: pending.surface });
+      await logActivity(user.id, user.name || user.email, 'mfa_recovery_code_used', 'user', user.id, { role: user.role, remaining: r.remaining, surface: pending.surface });
     }
     await db.delete(key);
     const token = await issueSession(user, req, { surface: pending.surface, mfaVerified: true });
@@ -2790,7 +2813,7 @@ app.post('/api/auth/mfa/recovery-codes/regenerate', authenticateToken, async (re
     const codes = mfa.generateRecoveryCodes();
     users[idx].mfa = { ...u.mfa, lastStep: v.step, recovery: mfa.buildRecoveryRecord(codes) };
     await db.set('users', users); invalidateUsersCache();
-    await logActivity(u.id, u.name || u.email, 'mfa_recovery_codes_regenerated', 'user', u.id, {});
+    await logActivity(u.id, u.name || u.email, 'mfa_recovery_codes_regenerated', 'user', u.id, { role: u.role });
     res.json({ recoveryCodes: codes });
   } catch (error) { res.status(500).json({ error: 'Server error' }); }
 });
@@ -2815,12 +2838,12 @@ app.post('/api/auth/login', async (req, res) => {
     const users = await getUsers();
     const user = users.find(u => u.email?.toLowerCase() === email.toLowerCase());
     if (!user) {
-      console.log('Login failed: User not found for email:', email);
+      console.log('Login failed: unknown account');
       return res.status(400).json({ error: 'Invalid credentials' });
     }
     const passwordMatch = await bcrypt.compare(password, user.password);
     if (!passwordMatch) {
-      console.log('Login failed: Password mismatch for:', email);
+      console.log('Login failed: password mismatch');
       return res.status(400).json({ error: 'Invalid credentials' });
     }
     // Block inactive accounts from logging in
@@ -2960,7 +2983,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     });
     await db.set('password_reset_requests', resetRequests);
     
-    console.log(`Password reset requested for ${email} - Admin action required`);
+    console.log('Password reset requested - admin action required');
     res.json({ message: 'Your request has been submitted. An administrator will reach out to you shortly to help reset your password.' });
   } catch (error) {
     console.error('Forgot password error:', error);
@@ -3256,6 +3279,18 @@ app.get('/api/users', authenticateToken, async (req, res) => {
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
   }
+});
+
+// Session 5.4 — read the durable audit log (admin). Session 12 builds the UI;
+// this is the verification surface for go-live acceptance: every PHI access
+// must be here. Filters: since, until (ISO), userId, patientId, limit.
+app.get('/api/admin/audit-log', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { since, until, userId, patientId } = req.query;
+    const limit = Math.min(1000, Math.max(1, parseInt(req.query.limit || '200', 10) || 200));
+    const rows = await audit.read({ since, until, userId, patientId, limit });
+    res.json({ rows, count: rows.length, total: await audit.count() });
+  } catch (error) { res.status(500).json({ error: 'Server error' }); }
 });
 
 // Session 5.3 — admin controls. Resetting MFA is the break-glass for a lost
@@ -16893,9 +16928,12 @@ app.get('/:slug', async (req, res, next) => {
 // Global error handling middleware (Gotcha #11)
 // Must be defined after all routes - Express identifies error handlers by 4-argument signature
 app.use((err, req, res, next) => {
-  console.error('Unhandled route error:', err.stack || err.message || err);
+  // 5.4: the request id ties this line to the audit row; the message is
+  // scrubbed by logScrubber; the body is never logged.
+  const ctx = audit.currentContext();
+  console.error(`Unhandled route error [${ctx ? ctx.requestId : '-'}] ${req.method} ${req.path}:`, err.stack || err.message || err);
   if (res.headersSent) return next(err);
-  res.status(500).json({ error: 'An unexpected error occurred' });
+  res.status(500).json({ error: 'An unexpected error occurred', requestId: ctx ? ctx.requestId : undefined });
 });
 
 // Process-level error handlers to prevent crashes from unhandled async errors
@@ -16910,7 +16948,7 @@ process.on('unhandledRejection', (reason, promise) => {
 
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
-  console.log(`🔐 Admin login: ${config.DEFAULT_ADMIN.EMAIL} / ${config.DEFAULT_ADMIN.PASSWORD}`);
+  console.log(`🔐 Default admin account: ${config.DEFAULT_ADMIN.EMAIL} (password from DEFAULT_ADMIN_PASSWORD — never printed)`);
 
   // Which mailer is live, said out loud at boot. A narrowed OAuth token looked
   // exactly like a healthy one in the UI for weeks during the 8.4 upgrade; the
