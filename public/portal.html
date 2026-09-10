@@ -357,6 +357,14 @@
           headers: { 'Authorization': `Bearer ${token}` }
         }).then(handleResponse).catch(asError),
 
+      // The caregiver's confirmed schedule, scoped server-side to this client's
+      // own assigned care only (Session 7 scheduling — separate system from
+      // visit_logs, which is retrospective).
+      getMyUpcomingShifts: (token) =>
+        fetch(`${API_URL}/api/scheduling/my-upcoming-shifts`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(asError),
+
       getGfcVisits: (token) =>
         fetch(`${API_URL}/api/gfc/visits`, {
           headers: { 'Authorization': `Bearer ${token}` }
@@ -4661,18 +4669,32 @@
       );
     };
 
-    const GfcDashboard = ({ data, onNavigate, me, clinical }) => {
+    const GfcDashboard = ({ data, onNavigate, me, clinical, shifts }) => {
       const cp = data.carePlan;                       // null until an RN authors the real plan (Session 4)
       const nextClinical = clinical && !clinical.error && (clinical.appointments || [])[0]; // 4.3: live OpenEMR row, never a tombstone
       const pc = (cp && cp.primaryCaregiver) || {};
-      const upcoming = data.upcomingVisits || [];
+      // The client's own confirmed caregiver schedule (Session 7's shifts, not
+      // visit_logs — visit_logs is written retrospectively when a caregiver
+      // files a completed log, so it never actually carried a future visit).
+      const fmtShiftTime = (iso) => {
+        const d = new Date(iso);
+        return isNaN(d) ? '' : d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+      };
+      const upcoming = (shifts || []).map(s => ({
+        id: s.id,
+        day: prettyDate(s.start),
+        time: `${fmtShiftTime(s.start)} – ${fmtShiftTime(s.end)}`,
+        type: s.status === 'in_progress' ? 'Visit in progress' : 'Scheduled visit',
+        with: s.caregiverName || 'Your caregiver',
+        highlight: s.status === 'in_progress'
+      }));
 
       const roiFamilySigned = me && me.roiFamilySigned;
       const tierLabel = (cp && cp.careTierLabel) || data.careTierLabel;
       return (
         <div className="gfc-body">
           <h2 className="disp">Good morning, {data.greetingName}</h2>
-          <p className="sub">{pc.name ? `${pc.name.split(' ')[0]} arrives at ${(upcoming[0]||{}).time || 'your next visit'}.` : 'Welcome to your care portal.'}</p>
+          <p className="sub">{pc.name ? `${pc.name.split(' ')[0]} arrives at ${((upcoming[0]||{}).time || 'your next visit').split(' – ')[0]}.` : 'Welcome to your care portal.'}</p>
           {me && <EnrollmentPills status={me.enrollmentStatus} />}
           <div className="planhero">
             <div className="pe">Your care plan</div>
@@ -5684,6 +5706,7 @@
       const [data, setData] = useState(null);          // care-plan + visits
       const [docs, setDocs] = useState(null);
       const [clinical, setClinical] = useState(null);  // 4.3 curated clinical read (clinical-line clients only)
+      const [shifts, setShifts] = useState([]);        // this client's own confirmed caregiver schedule (Session 7)
 
       const reloadMe = async () => {
         const result = await api.getGfcMe(token);
@@ -5727,13 +5750,15 @@
           // Messages are no longer fetched here: the Session 9 component owns
           // its own loading, so the portal shell does not hold a second copy
           // of a thread list that can go stale behind it.
-          const [cp, dc] = await Promise.all([
+          const [cp, dc, sh] = await Promise.all([
             api.getGfcCarePlan(token),
-            api.getGfcDocuments(token)
+            api.getGfcDocuments(token),
+            api.getMyUpcomingShifts(token)
           ]);
           if (cancelled) return;
           if (!cp.error) setData(cp);
           if (!dc.error) setDocs(dc);
+          if (!sh.error) setShifts(sh.shifts || []);
           if (clinicalAvailable) {
             const cl = await api.getGfcClinicalSummary(token);
             if (!cancelled) setClinical(cl);
@@ -5829,7 +5854,7 @@
             <span className="ttl">{titles[view]}</span>
             <button onClick={gfcLogout} title="Sign out"><i className="ti ti-logout" /></button>
           </div>
-          {view === 'home' && data && <GfcDashboard data={data} onNavigate={setView} me={me} clinical={clinicalAvailable ? clinical : null} />}
+          {view === 'home' && data && <GfcDashboard data={data} onNavigate={setView} me={me} clinical={clinicalAvailable ? clinical : null} shifts={shifts} />}
           {view === 'care' && data && <GfcCarePlan data={data} readOnly={readOnly} token={token} />}
           {view === 'health' && clinicalAvailable && <GfcHealth clinical={clinical} me={me} token={token} readOnly={readOnly}
             onSharingSaved={(sharing) => setMe(m => m ? { ...m, sharing } : m)} />}

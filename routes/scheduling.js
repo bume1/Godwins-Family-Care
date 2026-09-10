@@ -386,6 +386,44 @@ module.exports = function createSchedulingRoutes(deps) {
     }
   });
 
+  // GET /api/scheduling/my-upcoming-shifts — a client sees their OWN assigned
+  // care only, never another client's, never the caregiver's other patients,
+  // and never the staffing/ops detail (notes, cancel reasons, who posted it)
+  // publicShift() carries for staff. A family login sees the same, scoped to
+  // the client they are linked to. Locked-in schedule only: 'confirmed' and
+  // 'in_progress' — a claim or an admin assignment the caregiver has not yet
+  // accepted is not shown, so a client is never told about a visit that could
+  // still fall through before anyone confirms it.
+  router.get('/api/scheduling/my-upcoming-shifts', authenticateToken, async (req, res) => {
+    try {
+      let clientId = null;
+      if (req.user.role === ROLES.CLIENT) clientId = req.user.id;
+      else if (req.user.role === ROLES.FAMILY) clientId = req.user.familyOfClientId;
+      else return res.status(403).json({ error: 'Only a client or their family can view this schedule.', code: 'SCHEDULE_READ_DENIED' });
+      if (!clientId) return res.json({ shifts: [] });
+
+      const rows = await readRows('shifts');
+      const now = nowIso();
+      const upcoming = rows
+        .filter(r => r && r.client_id === clientId)
+        .filter(r => r.status === 'confirmed' || r.status === 'in_progress')
+        .filter(r => String(r.end) >= now)
+        .sort((a, b) => String(a.start).localeCompare(String(b.start)))
+        .slice(0, 50)
+        .map(r => ({
+          id: r.id,
+          caregiverName: r.caregiver_name,
+          start: r.start,
+          end: r.end,
+          status: r.status
+        }));
+      res.json({ shifts: upcoming });
+    } catch (error) {
+      console.error('Client upcoming-shifts error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   // GET /api/scheduling/shifts/open — the open pool, filtered to what THIS
   // caregiver is eligible for. Ineligible shifts are not returned at all.
   router.get('/api/scheduling/shifts/open', authenticateToken, requireSchedulable, async (req, res) => {
