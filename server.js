@@ -17029,6 +17029,13 @@ app.listen(PORT, () => {
     }
   })();
 
+  // Session 5: housekeeping. Revoked/idle session rows older than 7 days and
+  // abandoned OpenEMR authorization states are deleted; nothing PHI-bearing.
+  setInterval(() => {
+    sessions.sweep().catch(err => console.error('Session sweep failed:', err.message));
+    emrAuth.sweepExpiredState().catch(err => console.error('OAuth state sweep failed:', err.message));
+  }, 6 * 60 * 60 * 1000);
+
   // Start HubSpot ticket polling (webhook workaround)
   initializeTicketPolling();
 

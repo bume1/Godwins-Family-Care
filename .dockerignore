@@ -1,0 +1,9 @@
+node_modules
+.git
+uploads
+scripts/*.log
+scripts/kv_snapshot.*.json
+scripts/migrate_kv_to_postgres.*.json
+docs/prototype
+*.pdf
+.env
