@@ -199,6 +199,6 @@ Bianca is today the only person with full access to both the app and OpenEMR. A 
 
 ## Appendix A — Standing up the app on AWS
 
-**Moved.** This content now lives in the OpenEMR Master Setup Guide as **Phase 6C · Stand up the app on AWS**, where the rest of the AWS build already is. Insert `docs/GFC_Guide_Phase6C.pdf` into the guide after Phase 6B.
+**Moved.** This content now lives in the OpenEMR Master Setup Guide as **Phase 6C · Stand up the app on AWS**, where the rest of the AWS build already is. Insert `docs/GFC_Guide_Phase6C_6D.pdf` into the guide after page 12 (the end of Phase 6B). **Phase 6D** in the same file carries the cutover sequence — snapshots, migration, go/no-go, DNS flip, closing the old doors, test-data purge, rollback and break-glass — written for the person clicking rather than the person coding. Where this runbook and Phase 6D differ, Phase 6D is the one to follow.
 
 Phase 6C satisfies preflight **P1** and **P2** above. Return here when `https://app.godwinsfamilycarellc.com/healthz` answers `{"ok":true,"store":"postgres","production":true}` — the cutover sequence in §4 starts there.
