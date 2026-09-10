@@ -298,9 +298,41 @@ const normalizeNpi = (v) => {
 // NOTIFICATION QUEUE SYSTEM (Feature 1)
 // ============================================================
 
+// Whether a recipient may be emailed at all. `emailUnsubscribed` and an
+// inactive account were honoured ONLY by the lab-era scanner, which checked
+// them at each of its own call sites. Everything that queues directly —
+// Session 7's shift notifications, the welcome email — went out regardless,
+// because the flag was never checked at the choke point. Checking it here
+// means no caller can forget it and no future session has to remember. The
+// portal remains the channel for anyone who has opted out of email.
+const recipientMayBeEmailed = async (recipientUserId, recipientEmail) => {
+  if (!recipientEmail) return { ok: false, reason: 'no email address on file' };
+  if (!recipientUserId) return { ok: true };
+  try {
+    const users = await getUsers();
+    const user = users.find(u => u && u.id === recipientUserId);
+    if (!user) return { ok: true };            // not an app user; caller supplied the address
+    if (user.accountStatus === 'inactive') return { ok: false, reason: 'account is inactive' };
+    if (user.emailUnsubscribed) return { ok: false, reason: 'recipient unsubscribed from email' };
+    return { ok: true };
+  } catch (e) {
+    // A lookup failure must not become a silent send to someone who opted out.
+    console.error('[NOTIFICATIONS] Could not check email eligibility:', e.message);
+    return { ok: false, reason: 'could not verify email preferences' };
+  }
+};
+
 // Create a notification queue entry
 const queueNotification = async (type, recipientUserId, recipientEmail, recipientName, templateData, options = {}) => {
   try {
+    // A skip is reported as a skip, never as a queue failure — `sendWelcomeEmail`
+    // and others log an error on a null return, and "unsubscribed" is not an error.
+    const eligible = await recipientMayBeEmailed(recipientUserId, recipientEmail);
+    if (!eligible.ok) {
+      console.log(`[NOTIFICATIONS] Skipped ${type} for ${recipientEmail || '(no address)'}: ${eligible.reason}`);
+      return { skipped: true, reason: eligible.reason, type };
+    }
+
     const queue = (await db.get('pending_notifications')) || [];
     // Dedup: skip if identical pending or held notification exists
     const isDuplicate = queue.some(n =>
