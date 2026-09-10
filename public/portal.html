@@ -360,18 +360,6 @@
           headers: { 'Authorization': `Bearer ${token}` }
         }).then(handleResponse).catch(asError),
 
-      getGfcMessages: (token) =>
-        fetch(`${API_URL}/api/gfc/messages`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        }).then(handleResponse).catch(asError),
-
-      sendGfcMessage: (token, body) =>
-        fetch(`${API_URL}/api/gfc/messages`, {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ body })
-        }).then(handleResponse).catch(asError),
-
       getGfcDocuments: (token) =>
         fetch(`${API_URL}/api/gfc/documents`, {
           headers: { 'Authorization': `Bearer ${token}` }
@@ -4683,7 +4671,7 @@
       const nextClinical = clinical && !clinical.error && (clinical.appointments || [])[0]; // 4.3: live OpenEMR row, never a tombstone
       const pc = (cp && cp.primaryCaregiver) || {};
       const upcoming = data.upcomingVisits || [];
-      const unread = (data.messages?.messages || []).filter(m => m.unread).length;
+
       const roiFamilySigned = me && me.roiFamilySigned;
       const tierLabel = (cp && cp.careTierLabel) || data.careTierLabel;
       return (
@@ -4730,7 +4718,11 @@
             </div>
           ))}
           <div className="tiles" style={{ marginTop: 14 }}>
-            <button className="tile" onClick={() => onNavigate('messages')}>{unread > 0 && <span className="badge">{unread}</span>}<i className="ti ti-message" /><span className="tl">Messages</span><span className="ts">Care team</span></button>
+            {/* No unread badge here. The Session 9 component owns the count and
+                reports it through onUnread when it is open; a badge wired to a
+                payload this shell no longer fetches would sit at zero forever,
+                which reads as "no messages" rather than as "not counted". */}
+            <button className="tile" onClick={() => onNavigate('messages')}><i className="ti ti-message" /><span className="tl">Messages</span><span className="ts">Care team</span></button>
             <button className="tile" onClick={() => onNavigate('documents')}><i className="ti ti-file-text" /><span className="tl">Documents</span><span className="ts">Consents signed</span></button>
             {clinical && !clinical.error && (
               <button className="tile" onClick={() => onNavigate('health')}><i className="ti ti-heart-rate-monitor" /><span className="tl">My Health</span><span className="ts">From your clinical record</span></button>
@@ -5695,7 +5687,6 @@
       const [showTransferRoi, setShowTransferRoi] = useState(false); // Transfer-of-Care ROI overlay (Session 3.4)
       const [justEnrolled, setJustEnrolled] = useState(false); // one-time nudge right after intake completes (Session 3.4)
       const [data, setData] = useState(null);          // care-plan + visits
-      const [messages, setMessages] = useState(null);
       const [docs, setDocs] = useState(null);
       const [clinical, setClinical] = useState(null);  // 4.3 curated clinical read (clinical-line clients only)
 
@@ -5738,14 +5729,15 @@
         if (!me || locked) return;
         let cancelled = false;
         (async () => {
-          const [cp, msg, dc] = await Promise.all([
+          // Messages are no longer fetched here: the Session 9 component owns
+          // its own loading, so the portal shell does not hold a second copy
+          // of a thread list that can go stale behind it.
+          const [cp, dc] = await Promise.all([
             api.getGfcCarePlan(token),
-            api.getGfcMessages(token),
             api.getGfcDocuments(token)
           ]);
           if (cancelled) return;
-          if (!cp.error) { cp.messages = msg.error ? null : msg; setData(cp); }
-          if (!msg.error) setMessages(msg);
+          if (!cp.error) setData(cp);
           if (!dc.error) setDocs(dc);
           if (clinicalAvailable) {
             const cl = await api.getGfcClinicalSummary(token);

@@ -188,9 +188,27 @@ test('the co-sign route stamps the POA signer role onto the event and the PDF si
   assert.match(pdfSrc, /sig\.signerRole === 'poa'/, 'PDF renders the POA designation line');
 });
 test('the messaging acting gate lets a POA send, non-POA family stays read-only (source guard)', () => {
-  const msg = serverSrc.slice(serverSrc.indexOf("app.post('/api/gfc/messages'"), serverSrc.indexOf("app.get('/api/gfc/documents'"));
-  assert.match(msg, /req\.user\.role !== config\.ROLES\.CLIENT && !acting\.isPoa/);
-  assert.match(msg, /fromName: acting\.isPoa \? acting\.signerName/);
+  // The 3.5 interim send this used to guard was retired in Session 9. The RULE
+  // did not go anywhere — it moved into the messaging module — so the guard is
+  // repointed rather than dropped. 4.3's protection has to survive the move,
+  // or the next refactor quietly loses it.
+  const repo = fs.readFileSync(path.join(__dirname, '..', 'messagingRepository.js'), 'utf8');
+  const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'messaging.js'), 'utf8');
+
+  // A POA is client-equivalent for READING and sends AS themselves for the client.
+  assert.match(repo, /role === ROLE\.CLIENT \|\| \(role === ROLE\.FAMILY && isPoa\)/,
+    'a POA reads what the client reads');
+  assert.match(repo, /as POA for/, 'and their messages are attributed that way');
+
+  // Non-POA family are not client-equivalent: they get the family scope only.
+  assert.match(repo, /FAMILY_SCOPE/, 'non-POA family are held to the family channels');
+
+  // The designation is read from the FRESH user record, never the token.
+  assert.match(route, /const isActingPoa = async[\s\S]*?freshUser\(user\.id\)/,
+    'POA status is resolved fresh, so a revoked designation stops acting immediately');
+
+  // And the interim route is gone, answering 410 rather than vanishing.
+  assert.match(serverSrc, /MESSAGING_MOVED/, 'the retired route explains itself');
 });
 
 // ---- 6. Case manager read/write split ----
