@@ -327,3 +327,52 @@ test('the install guide never treats an unauthenticated 401 as proof a route exi
   // The confirmation reads the container, not an HTTP status.
   assert.match(install, /docker compose exec -T openemr sha256sum/);
 });
+
+test('SHA256SUMS matches the files, and covers everything the build copies', () => {
+  // The manifest is what deploy.sh verifies against before it touches the
+  // server. A stale line here stops a real deploy; a missing one lets an
+  // unverified file through.
+  const crypto = require('crypto');
+  const manifest = fs.readFileSync(path.join(PATCH_DIR, 'SHA256SUMS'), 'utf8');
+  const listed = new Set();
+  for (const line of manifest.trim().split('\n')) {
+    const [sum, file] = line.split(/\s+/);
+    const actual = crypto.createHash('sha256').update(fs.readFileSync(path.join(PATCH_DIR, file))).digest('hex');
+    assert.equal(sum, actual, `${file} is stale in SHA256SUMS`);
+    listed.add(file);
+  }
+  const dockerfile = fs.readFileSync(path.join(PATCH_DIR, 'Dockerfile'), 'utf8');
+  for (const m of dockerfile.matchAll(/^COPY (\S+) /gm)) {
+    assert.ok(listed.has(m[1]), `${m[1]} is built into the image but is not in SHA256SUMS`);
+  }
+  assert.ok(listed.has('Dockerfile'), 'the Dockerfile itself must be verifiable');
+});
+
+test('deploy.sh verifies before it builds, and proves the build inside the container', () => {
+  // The ordering IS the guarantee. Verifying after the build would let a failed
+  // fetch reach a rebuild, which is the exact silent no-op this replaces.
+  const sh = fs.readFileSync(path.join(PATCH_DIR, 'deploy.sh'), 'utf8');
+  assert.match(sh, /^set -eu$/m, 'must stop at the first failure');
+  const verifyAt = sh.indexOf('sha256sum -c SHA256SUMS');
+  const buildAt = sh.indexOf('docker compose build');
+  assert.ok(verifyAt > -1 && buildAt > -1, 'must both verify and build');
+  assert.ok(verifyAt < buildAt, 'the checksum verification must come BEFORE the build');
+  // Fetch by immutable commit sha, never by branch name: raw.githubusercontent
+  // negatively caches a newly added path for minutes (measured 2026-09-10).
+  assert.match(sh, /api\.github\.com\/repos\/\$REPO\/commits\/\$BRANCH/);
+  assert.match(sh, /BASE="https:\/\/raw\.githubusercontent\.com\/\$REPO\/\$SHA\//);
+  // The proof is the container's own bytes, not an HTTP status.
+  assert.match(sh, /docker compose exec -T openemr sha256sum/);
+  assert.ok(!/%\{http_code\}/.test(sh), 'must not verify a deploy with an HTTP status code');
+  // And the preserved upstream route map, without which the wrapper throws.
+  assert.match(sh, /_rest_routes_standard\.upstream\.inc\.php/);
+});
+
+test('the install guide leads with the script that cannot skip a step', () => {
+  const install = fs.readFileSync(path.join(PATCH_DIR, 'INSTALL.md'), 'utf8');
+  assert.match(install, /deploy\.sh/);
+  assert.ok(install.indexOf('deploy.sh') < install.indexOf('## Step 1'),
+    'the one-paste path must come before the manual steps');
+  // The raw-CDN cache is why a fetch can fail for no visible reason.
+  assert.match(install, /negatively\s+caches/i);
+});

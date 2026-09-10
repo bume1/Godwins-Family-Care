@@ -115,6 +115,41 @@ correct command.
 
 ---
 
+## The one-paste way (use this)
+
+Steps 1 to 5 below are the manual sequence, kept because it explains what is
+happening. **`deploy.sh` does all five and cannot skip one:**
+
+```
+curl -fL -o /tmp/gfc-deploy.sh https://raw.githubusercontent.com/bume1/Godwins-Family-Care/main/docs/openemr-patches/8.4.0-p1/deploy.sh
+sudo sh /tmp/gfc-deploy.sh
+```
+
+It stops at the first failure, verifies every file against the published
+`SHA256SUMS` **before** touching the box, and afterwards reads the files back
+**inside the running container** to prove the build actually took. It prints
+`DONE` only if all of that passes. Safe to re-run.
+
+Two failures it exists to prevent, both of which have happened here:
+
+- **A rebuild after a failed fetch.** The build copies `/opt/openemr/gfc-patch/`,
+  so a rebuild that follows a failed download succeeds, changes nothing, and
+  reports success. Cost a cycle on 2026-09-09 and again on 2026-09-10.
+- **A fetch that fails silently.** `raw.githubusercontent.com` **negatively
+  caches a path for a few minutes**: a file that has just landed on a branch
+  answers `404` by branch name while the identical content answers `200` by
+  commit sha. Measured 2026-09-10 — `404` for about two minutes after the push,
+  then `200`, with nothing changing in between. That is what broke the fetch run
+  minutes after PR #48 merged. **`deploy.sh` resolves the branch to a commit sha
+  and fetches by sha**, which is immutable and never stale, and it also means one
+  run installs one exact commit rather than whatever the branch says at the time.
+
+If you are running the steps by hand instead and a fetch fails, **drop the `-s`
+from `curl`** so it tells you why, and wait a couple of minutes if the files
+were only just merged.
+
+---
+
 ## Step 1 — Put the patch files on the server
 
 Six files. Pull them straight from the repo:
