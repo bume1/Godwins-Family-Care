@@ -134,9 +134,20 @@ $gfcOverrideRoutes = [
         return RestControllerHelper::createProcessingResultResponse($request, $result, 200, true);
     },
 
-    "GET /api/patient/:pid/document/:id" => function ($pid, $id, HttpRestRequest $request) {
+    // The parameter is named :did, NOT :id, and that is load-bearing.
+    //
+    // An override only overrides if the key matches upstream's BYTE FOR BYTE.
+    // The first version of this block wrote ":id"; upstream writes ":did"
+    // (apis/routes/_rest_routes_standard.inc.php). Two different keys, both
+    // live, and the router matched upstream's first — so the deployed patch
+    // still answered the CSRF 500 it was written to replace, while looking
+    // installed. Verified live 2026-09-10.
+    //
+    // Before changing any key here, read the key you are overriding out of
+    // upstream's own route map. A key that is nearly right is a no-op.
+    "GET /api/patient/:pid/document/:did" => function ($pid, $did, HttpRestRequest $request) {
         RestConfig::request_authorization_check($request, "patients", "docs");
-        $result = (new GfcDocumentRestController())->getForPatient($pid, $id);
+        $result = (new GfcDocumentRestController())->getForPatient($pid, $did);
         return RestControllerHelper::createProcessingResultResponse($request, $result, 200, true);
     },
 ];

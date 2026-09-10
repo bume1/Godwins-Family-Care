@@ -103,7 +103,7 @@ class GfcDocumentRestController
     }
 
     /**
-     * GET /api/patient/:pid/document/:id
+     * GET /api/patient/:pid/document/:did
      *
      * One document's bytes, base64 in the JSON envelope. Deliberately NOT a raw
      * binary stream: every other route on this API returns the standard

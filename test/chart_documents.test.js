@@ -208,7 +208,7 @@ test('the document routes cost no new OAuth scope, and therefore no new client',
   // another credential swap in the deployed environment. Every one of those
   // has cost this project days already.
   assert.match(ROUTES, /"GET \/api\/patient\/:pid\/document"/);
-  assert.match(ROUTES, /"GET \/api\/patient\/:pid\/document\/:id"/);
+  assert.match(ROUTES, /"GET \/api\/patient\/:pid\/document\/:did"/);
   assert.ok(!/\/api\/patient\/:pid\/documents/.test(ROUTES), 'a plural path would need a scope the server does not have');
   // And the scope it does derive is one the app already asks for.
   const scopes = require(path.join(__dirname, '..', 'config.js')).OPENEMR.SCOPES;
@@ -227,7 +227,16 @@ test('the upload route is left to upstream; only the dead read is taken over', (
   // The overrides half holds the document reads and nothing else.
   const overrides = ROUTES.slice(ROUTES.indexOf('$gfcOverrideRoutes = ['));
   const keys = [...overrides.matchAll(/"([A-Z]+ \/api\/[^"]+)"/g)].map(m => m[1]);
-  assert.deepEqual(keys, ['GET /api/patient/:pid/document', 'GET /api/patient/:pid/document/:id']);
+  // These must match upstream's keys BYTE FOR BYTE. Read out of
+  // openemr/openemr apis/routes/_rest_routes_standard.inc.php on 2026-09-10:
+  //   "GET /api/patient/:pid/document"       => getAllAtPath
+  //   "GET /api/patient/:pid/document/:did"  => downloadFile
+  // The first version wrote ":id". A near-miss is not a weaker override, it is
+  // NO override: both keys go live, the router matches upstream's first, and
+  // the patch installs cleanly while never running. That shipped, and the live
+  // instance kept answering the CSRF 500 it was written to replace.
+  assert.deepEqual(keys, ['GET /api/patient/:pid/document', 'GET /api/patient/:pid/document/:did']);
+  assert.ok(!/document\/:id"/.test(ROUTES), "upstream's parameter is :did — \":id\" overrides nothing");
   // Never the upload. The app depends on it and it works.
   assert.ok(!/"POST \/api\/patient\/:pid\/document"/.test(ROUTES), 'the upload route stays upstream\'s');
 
