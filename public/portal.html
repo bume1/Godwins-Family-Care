@@ -4588,13 +4588,6 @@
             <React.Fragment>
               <h2 className="disp">Medical care consents</h2>
               <p className="sub">These enroll you in medical care: visits, examination, diagnosis, prescribing, and chronic disease management by a nurse practitioner who comes to your home. It is a different service from personal home care, delivered by different people under a different license.</p>
-              <div className="card" style={{ marginBottom: 14, borderColor: 'var(--goldd)' }}>
-                <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.65, color: 'var(--mut)' }}>
-                  <b style={{ color: 'var(--navy)' }}>You are under no obligation to sign these.</b> Your home care does not
-                  change, pause, or cost more if you decline, and you are free to receive medical care from any
-                  provider you choose. Take your time with them.
-                </p>
-              </div>
               <p className="sub"><b>{stageSignedCount(medicalDefs)}/{stageRequired(medicalDefs).length}</b> required signed on this page.</p>
               {medicalDefs.map(def => (
                 <ConsentCard key={def.type} def={def} status={consents[def.type]} meta={consentMeta[def.type]} signedName={form.primaryContact?.name} onSign={handleSignConsent} token={token} />

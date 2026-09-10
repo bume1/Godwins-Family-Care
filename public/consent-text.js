@@ -565,7 +565,7 @@
   const PRACTICE_NPP = [
     p('This notice describes how medical information about you may be used and disclosed by the In-Home Primary Care practice, and how you can get access to it. Please review it carefully.'),
     sub('Why you are receiving a second privacy notice'),
-    p('You already received a Notice of Privacy Practices from the Godwins Family Care **home care agency**. This one is different. It covers the **medical practice**, which keeps a clinical record, bills health plans, and exchanges information with other treating providers. Both notices apply to you, each to its own service.'),
+    p('This one is different. It covers the **medical practice**, which keeps a clinical record, bills health plans, and exchanges information with other treating providers. Both notices apply to you, each to its own service.'),
     h('Our Commitment'),
     p('The practice is required by law to protect the privacy of your protected health information, to give you this notice of our legal duties and privacy practices, and to follow the terms of the notice currently in effect.'),
     h('How We Use and Disclose Your Information'),
