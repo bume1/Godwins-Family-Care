@@ -307,3 +307,23 @@ test('the install checksums match the files actually in the repo', () => {
     assert.ok(seen.has(m[1]), `${m[1]} is built into the image but has no published checksum`);
   }
 });
+
+test('the install guide never treats an unauthenticated 401 as proof a route exists', () => {
+  // Verified live 2026-09-10: OpenEMR runs its auth check BEFORE it matches a
+  // route, so /apis/default/api/definitely-not-a-real-route answers 401 exactly
+  // like a real one. The guide told the operator to read that 401 as "the patch
+  // is live", and it reported a rebuild as successful when the new files had
+  // never reached the server. The confirmation must read the running container.
+  const install = fs.readFileSync(path.join(PATCH_DIR, 'INSTALL.md'), 'utf8');
+  for (const claim of [
+    /`401` is the right answer\.\*\* It means the route exists/,
+    /`401` is the right answer\*\* — the route exists/,
+    /401\) echo "PATCH OK/
+  ]) {
+    assert.ok(!claim.test(install), `INSTALL.md must not claim a 401 proves a route exists: ${claim}`);
+  }
+  // And it must say so explicitly, so nobody reintroduces the check.
+  assert.match(install, /authenticates before it routes/i);
+  // The confirmation reads the container, not an HTTP status.
+  assert.match(install, /docker compose exec -T openemr sha256sum/);
+});

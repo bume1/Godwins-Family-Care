@@ -208,12 +208,27 @@ for Apache to settle, then Ctrl+C.
 
 ## Step 5 — Confirm it is live
 
+**An unauthenticated curl proves NOTHING here, and an earlier version of this
+file said it did.** Verified 2026-09-10: OpenEMR runs its auth check before it
+matches a route, so `/apis/default/api/anything-at-all` returns `401` whether
+that route exists or not. A `401` was read as "the patch is live" and it is not
+evidence either way. That mistake cost a cycle.
+
+Check what is actually inside the running container instead:
+
 ```
-curl -sS -o /dev/null -w '%{http_code}\n' https://emr.godwinsfamilycarellc.com/apis/default/api/codes
+cd /opt/openemr && sudo docker compose exec -T openemr sha256sum \
+  apis/routes/_rest_routes_gfc.inc.php \
+  apis/routes/_rest_routes_standard.inc.php \
+  src/RestControllers/GfcChargeRestController.php \
+  src/RestControllers/GfcDocumentRestController.php
 ```
 
-**`401` is the right answer.** It means the route exists and is asking for a
-token you did not send. A `404` means the patch did not take, so check step 3.
+Compare against the published sums in step 1. This reads the files **inside the
+running container**, so it answers the only question that matters: is the code
+that is serving requests the code we published? A missing file or a sum that
+does not match means the rebuild did not take the new files — go back to the
+re-fetch step.
 
 Then tell the app team, who run the acceptance probes with the app's token.
 
@@ -250,12 +265,19 @@ cd /opt/openemr && sudo docker compose pull && sudo docker compose up -d
 Now, one paste, and it tells you the answer in words:
 
 ```
-cd /opt/openemr && sudo docker compose build --pull && sudo docker compose up -d && sleep 25 && case $(curl -sS -o /dev/null -w '%{http_code}' https://emr.godwinsfamilycarellc.com/apis/default/api/codes) in \
-  401) echo "PATCH OK — charge writes are live" ;; \
-  404) echo "PATCH MISSING — do not bill from the app until this is fixed" ;; \
-  *)   echo "UNEXPECTED — check the EMR before billing" ;; \
-esac
+cd /opt/openemr && sudo docker compose build --pull && sudo docker compose up -d && sleep 25 && \
+if sudo docker compose exec -T openemr test -f src/RestControllers/GfcDocumentRestController.php \
+   && sudo docker compose exec -T openemr grep -q 'api/patient/:pid/document' apis/routes/_rest_routes_gfc.inc.php; then \
+  echo "PATCH OK — the GFC routes are in the running container"; \
+else \
+  echo "PATCH MISSING — do not bill from the app until this is fixed"; \
+fi
 ```
+
+**This checks the container, not an HTTP status.** The previous version of this
+line read a `401` from an unauthenticated request as proof the patch was live.
+It is not: OpenEMR authenticates before it routes, so every path answers `401`
+unauthenticated, including paths that do not exist.
 
 Same effort as the command it replaces. Nothing to remember beyond using this
 line instead of the old one, which is why it belongs in the monthly checklist
@@ -376,17 +398,27 @@ cd /opt/openemr && sudo docker compose build --pull && sudo docker compose up -d
 
 `gfc-add-scopes.php` and `GfcChargeRestController.php` are unchanged.
 
-**Confirm it took**, without a token and without needing any patient data:
+**Confirm it took.** Read the files inside the running container:
 
 ```
-curl -sS -o /dev/null -w '%{http_code}\n' \
-  https://emr.godwinsfamilycarellc.com/apis/default/api/patient/1/document
+cd /opt/openemr && sudo docker compose exec -T openemr sha256sum \
+  apis/routes/_rest_routes_gfc.inc.php \
+  apis/routes/_rest_routes_standard.inc.php \
+  src/RestControllers/GfcChargeRestController.php \
+  src/RestControllers/GfcDocumentRestController.php
 ```
 
-**`401` is the right answer** — the route exists and wants a token you did not
-send. **`404` means the rebuild did not take the new files**, so go back to the
-re-fetch step. Do not read a `404` as "that patient has no documents": an
-unauthenticated request never gets that far.
+Compare against the published sums in step 1. This reads the files **inside the
+running container**, so it answers the only question that matters: is the code
+that is serving requests the code we published? A missing file or a sum that
+does not match means the rebuild did not take the new files — go back to the
+re-fetch step.
+
+**Do not use an unauthenticated curl for this.** An earlier version of this
+section said `401` proved the route existed. It does not — OpenEMR authenticates
+before it routes, so every path answers `401` unauthenticated, a made-up one
+included. Verified 2026-09-10, after that check reported a rebuild as successful
+when the new files had never reached the box.
 
 Then the app team runs `acceptance.js`, which now files a test document and
 reads its bytes back. **It asserts the returned bytes, not the status code** —
