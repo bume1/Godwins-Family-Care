@@ -155,6 +155,23 @@ const NOTIFICATION_LOG_MAX_ENTRIES = parseInt(process.env.NOTIFICATION_LOG_MAX_E
 const NOTIFICATION_MAX_RETRIES = parseInt(process.env.NOTIFICATION_MAX_RETRIES || '3', 10);
 const NOTIFICATION_DAILY_SEND_LIMIT = parseInt(process.env.NOTIFICATION_DAILY_SEND_LIMIT || '500', 10);
 const EMAIL_FROM_ADDRESS = process.env.EMAIL_FROM_ADDRESS || 'no-reply@godwinsfamilycarellc.com';
+const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME || BRAND.COMPANY_NAME;
+
+// ---- Email transport (BAA boundary) ----
+// 'auto' prefers Google Workspace whenever it is configured and falls back to
+// Resend; 'gmail' / 'resend' pin one; 'none' switches sending off.
+//
+// Only Workspace sending is inside the BAA. EMAIL_BAA_DOMAINS is the list of
+// domains the BAA actually covers, and it is checked against the SENDING
+// address rather than trusting the transport's name — a personal @gmail.com
+// mailbox is Google and is not covered, so it must not be able to pass itself
+// off as a PHI-capable sender.
+const EMAIL_TRANSPORT = String(process.env.EMAIL_TRANSPORT || 'auto').trim().toLowerCase();
+const GMAIL_SEND_AS = String(process.env.GMAIL_SEND_AS || '').trim();
+const EMAIL_BAA_DOMAINS = Object.freeze(
+  String(process.env.EMAIL_BAA_DOMAINS || 'godwinsfamilycarellc.com')
+    .split(',').map(d => d.trim().toLowerCase()).filter(Boolean)
+);
 
 // ---- Automated Reminders (Feature 2) ----
 const NOTIFICATION_SCAN_INTERVAL_MINUTES = parseInt(process.env.NOTIFICATION_SCAN_INTERVAL_MINUTES || '30', 10);
@@ -397,6 +414,10 @@ module.exports = {
   NOTIFICATION_MAX_RETRIES,
   NOTIFICATION_DAILY_SEND_LIMIT,
   EMAIL_FROM_ADDRESS,
+  EMAIL_FROM_NAME,
+  EMAIL_TRANSPORT,
+  GMAIL_SEND_AS,
+  EMAIL_BAA_DOMAINS,
   // Automated Reminders (Feature 2)
   NOTIFICATION_SCAN_INTERVAL_MINUTES,
   TASK_DEADLINE_DAYS_BEFORE,

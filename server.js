@@ -14,6 +14,7 @@ const pdfGenerator = require('./pdf-generator');
 const changelogGenerator = require('./changelog-generator');
 const config = require('./config');
 const { sendEmail, sendBulkEmail, sendBatchEmails } = require('./email');
+const emailTransport = require('./email');
 const roiRepo = require('./roiRepository');           // Transfer-of-Care ROI data model (Session 3.4)
 const legacySync = require('./legacySync');            // ROI parallel-run legacy sync (Session 3.4)
 const openemr = require('./openemr');                  // OpenEMR FHIR/REST front-end client (Session 4.1)
@@ -297,9 +298,42 @@ const normalizeNpi = (v) => {
 // NOTIFICATION QUEUE SYSTEM (Feature 1)
 // ============================================================
 
+// Whether a recipient may be emailed at all. `emailUnsubscribed` and an
+// inactive account were honoured ONLY by the lab-era scanner, which checked
+// them at each of its own call sites. Everything that queues directly —
+// Session 7's shift notifications, the appointment notices below, the welcome
+// email — went out regardless, because the flag was never checked at the
+// choke point. Checking it here means no caller can forget it and no future
+// session has to remember. The portal remains the channel for anyone who has
+// opted out of email.
+const recipientMayBeEmailed = async (recipientUserId, recipientEmail) => {
+  if (!recipientEmail) return { ok: false, reason: 'no email address on file' };
+  if (!recipientUserId) return { ok: true };
+  try {
+    const users = await getUsers();
+    const user = users.find(u => u && u.id === recipientUserId);
+    if (!user) return { ok: true };            // not an app user; caller supplied the address
+    if (user.accountStatus === 'inactive') return { ok: false, reason: 'account is inactive' };
+    if (user.emailUnsubscribed) return { ok: false, reason: 'recipient unsubscribed from email' };
+    return { ok: true };
+  } catch (e) {
+    // A lookup failure must not become a silent send to someone who opted out.
+    console.error('[NOTIFICATIONS] Could not check email eligibility:', e.message);
+    return { ok: false, reason: 'could not verify email preferences' };
+  }
+};
+
 // Create a notification queue entry
 const queueNotification = async (type, recipientUserId, recipientEmail, recipientName, templateData, options = {}) => {
   try {
+    // A skip is reported as a skip, never as a queue failure — `sendWelcomeEmail`
+    // and others log an error on a null return, and "unsubscribed" is not an error.
+    const eligible = await recipientMayBeEmailed(recipientUserId, recipientEmail);
+    if (!eligible.ok) {
+      console.log(`[NOTIFICATIONS] Skipped ${type} for ${recipientEmail || '(no address)'}: ${eligible.reason}`);
+      return { skipped: true, reason: eligible.reason, type };
+    }
+
     const queue = (await db.get('pending_notifications')) || [];
     // Dedup: skip if identical pending or held notification exists
     const isDuplicate = queue.some(n =>
@@ -487,28 +521,52 @@ const cancelProjectNotifications = async (projectId, taskIds) => {
 // EMAIL TEMPLATE SYSTEM — Dynamic, admin-editable templates
 // ============================================================
 
+// ---- Email chrome, driven from config.BRAND ----
+// Every wrapper below used to be hardcoded Thrive 365 Labs: the lab logo, the
+// lab name in the heading, and "you have an account with Thrive 365 Labs" in
+// the footer. That chrome wraps EVERY queued notification, so a GFC client
+// confirming a care visit was getting mail branded as a laboratory company.
+// The tokens already existed in config.BRAND and were simply never used here.
+//
+// The header is a text wordmark rather than an <img>. A logo would need a
+// public URL, and the only email-safe asset in public/ is the lab's. A
+// wordmark cannot render as a broken-image box in any client.
+const EMAIL_BRAND = () => ({
+  company: config.BRAND.COMPANY_NAME,
+  primary: config.BRAND.PRIMARY_COLOR,
+  accent: config.BRAND.ACCENT_COLOR
+});
+
+const emailHeaderHtml = () => {
+  const b = EMAIL_BRAND();
+  return `<div style="background-color: #ffffff; padding: 22px 16px 18px; border-radius: 8px 8px 0 0; text-align: center; border-bottom: 3px solid ${b.primary};">
+    <span style="display: inline-block; color: ${b.primary}; font-size: 20px; font-weight: 700; letter-spacing: 0.02em;">${b.company}</span>
+  </div>`;
+};
+
+const emailFooterNote = (context) => {
+  const b = EMAIL_BRAND();
+  return `You are receiving this because you have ${context || 'an account'} with ${b.company}.`;
+};
+
 // Base HTML email wrapper used when a template has no custom htmlBody
-const BASE_HTML_EMAIL_WRAPPER = `
-<div style="font-family: Inter, -apple-system, sans-serif; width: 100%; max-width: 600px; margin: 0 auto; background: #f8fafc;">
-  <div style="background-color: #ffffff; padding: 20px 16px 16px; border-radius: 8px 8px 0 0; text-align: center; border-bottom: 3px solid #045E9F;">
-    <img src="{{appUrl}}/thrive365-logo-email.png" alt="Thrive 365 Labs" style="height: 44px; max-width: 220px; width: 100%; display: block; margin: 0 auto;" />
-  </div>
+const BASE_HTML_EMAIL_WRAPPER = () => `
+<div style="font-family: ${config.BRAND.FONT_FAMILY}, Inter, -apple-system, sans-serif; width: 100%; max-width: 600px; margin: 0 auto; background: #f8fafc;">
+  ${emailHeaderHtml()}
   <div style="background: #ffffff; padding: 24px 16px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px;">
     <div style="color: #374151; line-height: 1.7; font-size: 15px; white-space: pre-wrap; word-break: break-word;">{{content}}</div>
     {{ctaBlock}}
     <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 28px 0 16px;" />
-    <p style="color: #9ca3af; font-size: 12px; margin: 0;">You are receiving this because you have an account with Thrive 365 Labs.</p>
+    <p style="color: #9ca3af; font-size: 12px; margin: 0;">${emailFooterNote('an account')}</p>
     {{unsubscribeBlock}}
   </div>
 </div>`;
 
 // Branded HTML for the welcome email (has credential table — not a standard wrapper)
-const WELCOME_HTML_BODY = `<div style="font-family: Inter, -apple-system, sans-serif; width: 100%; max-width: 600px; margin: 0 auto; background: #f8fafc;">
-  <div style="background-color: #ffffff; padding: 20px 16px 16px; border-radius: 8px 8px 0 0; text-align: center; border-bottom: 3px solid #045E9F;">
-    <img src="{{appUrl}}/thrive365-logo-email.png" alt="Thrive 365 Labs" style="height: 44px; max-width: 220px; width: 100%; display: block; margin: 0 auto;" />
-  </div>
+const WELCOME_HTML_BODY = () => `<div style="font-family: ${config.BRAND.FONT_FAMILY}, Inter, -apple-system, sans-serif; width: 100%; max-width: 600px; margin: 0 auto; background: #f8fafc;">
+  ${emailHeaderHtml()}
   <div style="background: #ffffff; padding: 24px 16px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px;">
-    <h2 style="color: #00205A; margin-top: 0; font-size: 20px;">Welcome to Thrive 365 Labs, {{recipientName}}!</h2>
+    <h2 style="color: ${config.BRAND.PRIMARY_COLOR}; margin-top: 0; font-size: 20px;">Welcome to ${config.BRAND.COMPANY_NAME}, {{recipientName}}!</h2>
     <p style="color: #374151; line-height: 1.7; font-size: 15px;">Your account has been created. Use the credentials below to log in for the first time. You will be prompted to set a new password after your first login.</p>
     <div style="background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 8px; padding: 16px; margin: 24px 0;">
       <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
@@ -523,10 +581,10 @@ const WELCOME_HTML_BODY = `<div style="font-family: Inter, -apple-system, sans-s
       </table>
     </div>
     <p style="margin-top: 20px;">
-      <a href="{{loginUrl}}" style="display: inline-block; background: #045E9F; color: #ffffff; padding: 12px 20px; border-radius: 6px; text-decoration: none; font-weight: 600; font-size: 14px;">Log In Now</a>
+      <a href="{{loginUrl}}" style="display: inline-block; background: ${config.BRAND.PRIMARY_COLOR}; color: #ffffff; padding: 12px 20px; border-radius: 6px; text-decoration: none; font-weight: 600; font-size: 14px;">Log In Now</a>
     </p>
     <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 28px 0 16px;" />
-    <p style="color: #9ca3af; font-size: 12px; margin: 0;">If you did not expect this email, please contact your Thrive 365 Labs administrator.</p>
+    <p style="color: #9ca3af; font-size: 12px; margin: 0;">If you did not expect this email, please contact your ${config.BRAND.COMPANY_NAME} administrator.</p>
   </div>
 </div>`;
 
@@ -542,12 +600,12 @@ function renderTemplate(templateStr, variables) {
 function buildHtmlEmail(body, htmlBody, ctaUrl, ctaLabel, unsubscribeUrl, baseUrl) {
   if (htmlBody) return htmlBody;
   const ctaBlock = (ctaUrl && ctaLabel)
-    ? `<p style="margin-top: 20px;"><a href="${ctaUrl}" style="display: inline-block; background: #045E9F; color: #ffffff; padding: 10px 24px; border-radius: 6px; text-decoration: none; font-weight: 500; font-size: 14px;">${ctaLabel}</a></p>`
+    ? `<p style="margin-top: 20px;"><a href="${ctaUrl}" style="display: inline-block; background: ${config.BRAND.PRIMARY_COLOR}; color: #ffffff; padding: 10px 24px; border-radius: 6px; text-decoration: none; font-weight: 500; font-size: 14px;">${ctaLabel}</a></p>`
     : '';
   const unsubscribeBlock = unsubscribeUrl
     ? `<p style="color: #9ca3af; font-size: 11px; margin: 6px 0 0;"><a href="${unsubscribeUrl}" style="color: #9ca3af; text-decoration: underline;">Unsubscribe from these emails</a></p>`
     : '';
-  return renderTemplate(BASE_HTML_EMAIL_WRAPPER, { content: body, ctaBlock, unsubscribeBlock, appUrl: baseUrl || 'https://godwinsfamilycarellc.com' });
+  return renderTemplate(BASE_HTML_EMAIL_WRAPPER(), { content: body, ctaBlock, unsubscribeBlock, appUrl: baseUrl || 'https://godwinsfamilycarellc.com' });
 }
 
 // ============================================================
@@ -626,7 +684,7 @@ const VARIABLE_POOLS = {
     variables: [
       { key: 'appUrl', label: 'App Base URL', example: 'https://thrive365labs.live' },
       { key: 'currentDate', label: 'Current Date', example: '02/17/2026' },
-      { key: 'companyName', label: 'Company Name', example: 'Thrive 365 Labs' }
+      { key: 'companyName', label: 'Company Name', example: config.BRAND.COMPANY_NAME }
     ]
   }
 };
@@ -693,7 +751,7 @@ function resolveSystemVars(appBaseUrl) {
   return {
     appUrl: appBaseUrl,
     currentDate: new Date().toLocaleDateString(),
-    companyName: 'Thrive 365 Labs'
+    companyName: config.BRAND.COMPANY_NAME
   };
 }
 
@@ -875,17 +933,15 @@ const DEFAULT_EMAIL_TEMPLATES = [
     category: 'announcement',
     subject: '{{priorityTag}}New Announcement: {{title}}',
     body: '{{priorityTag}}{{title}}\n\n{{content}}{{attachmentLine}}',
-    htmlBody: `<div style="font-family: Inter, -apple-system, sans-serif; width: 100%; max-width: 600px; margin: 0 auto;">
-  <div style="background-color: #ffffff; padding: 20px 16px 16px; border-radius: 8px 8px 0 0; text-align: center; border-bottom: 3px solid #045E9F;">
-    <img src="{{appUrl}}/thrive365-logo-email.png" alt="Thrive 365 Labs" style="height: 44px; max-width: 220px; width: 100%; display: block; margin: 0 auto;" />
-  </div>
+    htmlBody: `<div style="font-family: ${config.BRAND.FONT_FAMILY}, Inter, -apple-system, sans-serif; width: 100%; max-width: 600px; margin: 0 auto;">
+  ${emailHeaderHtml()}
   <div style="background: #ffffff; padding: 24px 16px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px;">
     {{priorityBanner}}
-    <h2 style="color: #00205A; margin-top: 0;">{{title}}</h2>
+    <h2 style="color: ${config.BRAND.PRIMARY_COLOR}; margin-top: 0;">{{title}}</h2>
     <div style="color: #374151; line-height: 1.6; white-space: pre-wrap; word-break: break-word;">{{content}}</div>
     {{attachmentBlock}}
     <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 24px 0;" />
-    <p style="color: #9ca3af; font-size: 12px; margin: 0;">You are receiving this because you have a client portal account with Thrive 365 Labs.</p>
+    <p style="color: #9ca3af; font-size: 12px; margin: 0;">${emailFooterNote('a client portal account')}</p>
   </div>
 </div>`,
     variables: [
@@ -904,8 +960,8 @@ const DEFAULT_EMAIL_TEMPLATES = [
     id: 'welcome_email',
     name: 'Welcome Email — New User',
     category: 'automated',
-    subject: 'Welcome to Thrive 365 Labs — Your Account is Ready',
-    body: 'Welcome, {{recipientName}}!\n\nYour account has been created. Use the details below to log in for the first time. You will be prompted to set a new password after your first login.\n\nUsername / Email: {{recipientEmail}}\nTemporary Password: {{temporaryPassword}}\n\nLog in here: {{loginUrl}}\n\nThrive 365 Labs',
+    subject: `Welcome to ${config.BRAND.COMPANY_NAME} — Your Account is Ready`,
+    body: `Welcome, {{recipientName}}!\n\nYour account has been created. Use the details below to log in for the first time. You will be prompted to set a new password after your first login.\n\nUsername / Email: {{recipientEmail}}\nTemporary Password: {{temporaryPassword}}\n\nLog in here: {{loginUrl}}\n\n${config.BRAND.COMPANY_NAME}`,
     htmlBody: null,
     isDefault: true, updatedAt: null, updatedBy: null
   },
@@ -914,7 +970,7 @@ const DEFAULT_EMAIL_TEMPLATES = [
     name: 'Task Attachment — New Document',
     category: 'automated',
     subject: 'New Document Added: {{taskName}}',
-    body: 'A new file "{{fileName}}" has been added to the task "{{taskName}}" in your project "{{projectName}}".\n\nView it in your portal:\n{{portalLink}}\n\nThrive 365 Labs',
+    body: `A new file "{{fileName}}" has been added to the task "{{taskName}}" in your project "{{projectName}}".\n\nView it in your portal:\n{{portalLink}}\n\n${config.BRAND.COMPANY_NAME}`,
     htmlBody: null,
     variables: [
       { key: 'taskName', label: 'Task Name', example: 'Install AU480 Analyzer' },
@@ -980,7 +1036,7 @@ const DEFAULT_EMAIL_TEMPLATES = [
     name: 'Task Assignment — New Assignment',
     category: 'automated',
     subject: 'New Task Assigned: {{taskTitle}} — {{projectName}}',
-    body: 'You have been assigned to "{{taskTitle}}" in project "{{projectName}}".\n\nPhase: {{phase}}\nDue Date: {{dueDate}}\n\nView it here: {{taskLink}}\n\nThrive 365 Labs',
+    body: `You have been assigned to "{{taskTitle}}" in project "{{projectName}}".\n\nPhase: {{phase}}\nDue Date: {{dueDate}}\n\nView it here: {{taskLink}}\n\n${config.BRAND.COMPANY_NAME}`,
     htmlBody: null,
     variables: [
       { key: 'taskTitle', label: 'Task Title', example: 'Install AU480 Analyzer' },
@@ -1044,13 +1100,13 @@ async function sendWelcomeEmail(user, plainPassword) {
       loginUrl,
       appUrl: appBaseUrl,
       currentDate: new Date().toLocaleDateString(),
-      companyName: 'Thrive 365 Labs'
+      companyName: config.BRAND.COMPANY_NAME
     };
     const subject = renderTemplate(tpl.subject, vars);
     const body = renderTemplate(tpl.body, vars);
     const htmlBody = tpl.htmlBody
       ? renderTemplate(tpl.htmlBody, vars)
-      : renderTemplate(WELCOME_HTML_BODY, vars);
+      : renderTemplate(WELCOME_HTML_BODY(), vars);
     const notification = await queueNotification(
       'welcome_email',
       user.id, user.email, user.name,
@@ -2735,7 +2791,7 @@ function renderUnsubscribePageHtml(message, isSuccess) {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Email Preferences - Thrive 365 Labs</title>
+  <title>Email Preferences - ${config.BRAND.COMPANY_NAME}</title>
   <style>
     body { font-family: Inter, -apple-system, sans-serif; background: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
     .card { background: #fff; border-radius: 10px; border: 1px solid #e5e7eb; padding: 40px 32px; max-width: 460px; width: 100%; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
@@ -2749,7 +2805,7 @@ function renderUnsubscribePageHtml(message, isSuccess) {
 </head>
 <body>
   <div class="card">
-    <img class="logo" src="/thrive365-logo.webp" alt="Thrive 365 Labs" />
+    <h1 style="color: ${config.BRAND.PRIMARY_COLOR}; font-size: 20px; margin: 0 0 8px;">${config.BRAND.COMPANY_NAME}</h1>
     <div class="icon">${isSuccess ? '✅' : '❌'}</div>
     <h2>Email Preferences</h2>
     <p>${message}</p>
@@ -15578,21 +15634,21 @@ async function sendPasswordResetEmail(user, token) {
   const resetUrl = `${await getAppBaseUrl()}/password-reset-${token}`;
   const htmlBody = `
     <div style="font-family: Inter, Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-      <div style="background: #045E9F; padding: 24px; border-radius: 8px 8px 0 0; text-align: center;">
-        <h1 style="color: white; margin: 0; font-size: 22px; font-weight: 700;">Thrive 365 Labs</h1>
+      <div style="background: ${config.BRAND.PRIMARY_COLOR}; padding: 24px; border-radius: 8px 8px 0 0; text-align: center;">
+        <h1 style="color: white; margin: 0; font-size: 22px; font-weight: 700;">${config.BRAND.COMPANY_NAME}</h1>
       </div>
       <div style="background: #f9fafb; padding: 32px; border-radius: 0 0 8px 8px; border: 1px solid #e5e7eb; border-top: none;">
         <p style="color: #374151; font-size: 16px; margin-top: 0;">Hi ${user.name},</p>
         <p style="color: #374151; font-size: 16px;">Your password has been reset by an administrator. Click the button below to view your temporary credentials.</p>
         <p style="color: #374151; font-size: 16px;">You will be required to create a new password when you log in.</p>
         <div style="text-align: center; margin: 32px 0;">
-          <a href="${resetUrl}" style="background: #045E9F; color: white; padding: 14px 28px; border-radius: 6px; text-decoration: none; font-size: 16px; font-weight: 600; display: inline-block;">View My Temporary Password</a>
+          <a href="${resetUrl}" style="background: ${config.BRAND.PRIMARY_COLOR}; color: white; padding: 14px 28px; border-radius: 6px; text-decoration: none; font-size: 16px; font-weight: 600; display: inline-block;">View My Temporary Password</a>
         </div>
         <p style="color: #6b7280; font-size: 13px; margin-bottom: 0;">This link expires in 24 hours. If you did not expect this reset, please contact your administrator immediately.</p>
       </div>
     </div>`;
   const plainText = `Hi ${user.name},\n\nYour password has been reset by an administrator.\n\nClick the link below to view your temporary credentials and log in:\n${resetUrl}\n\nThis link expires in 24 hours.`;
-  return sendEmail(user.email, 'Your Thrive 365 Labs Password Has Been Reset', plainText, { htmlBody });
+  return sendEmail(user.email, `Your ${config.BRAND.COMPANY_NAME} Password Has Been Reset`, plainText, { htmlBody });
 }
 
 // Bulk password reset for all users (admin only)
@@ -15737,7 +15793,7 @@ app.post('/api/admin/test-email', authenticateToken, requireAdmin, async (req, r
     const { to, subject, body } = req.body;
     const result = await sendEmail(
       to || req.user.email,
-      subject || 'Test notification from Thrive 365 Labs',
+      subject || `Test notification from ${config.BRAND.COMPANY_NAME}`,
       body || 'This is a test email from your notification system. If you received this, Resend is working.'
     );
     res.json(result);
@@ -16180,7 +16236,7 @@ app.post('/api/admin/email-templates/:id/test-send', authenticateToken, requireA
     const subject = `[TEST] ${renderTemplate(tpl.subject, vars)}`;
     const body = renderTemplate(tpl.body, vars);
     const htmlSrc = tpl.id === 'welcome_email'
-      ? renderTemplate(WELCOME_HTML_BODY, vars)
+      ? renderTemplate(WELCOME_HTML_BODY(), vars)
       : buildHtmlEmail(body, tpl.htmlBody ? renderTemplate(tpl.htmlBody, vars) : null, null, null, null, appBaseUrl);
     const result = await sendEmail(req.user.email, subject, body, { htmlBody: htmlSrc });
     if (!result.success) return res.status(500).json({ error: result.error || 'Send failed' });
@@ -16585,7 +16641,7 @@ app.post('/api/admin/email-templates/:id/preview', authenticateToken, requireAdm
     const subject = renderTemplate(tpl.subject, vars);
     const body = renderTemplate(tpl.body, vars);
     const htmlSrc = tpl.id === 'welcome_email'
-      ? renderTemplate(WELCOME_HTML_BODY, vars)
+      ? renderTemplate(WELCOME_HTML_BODY(), vars)
       : buildHtmlEmail(body, tpl.htmlBody ? renderTemplate(tpl.htmlBody, vars) : null, appBaseUrl, 'View in App', null, appBaseUrl);
     res.json({ subject, body, html: htmlSrc });
   } catch (error) {
@@ -16637,6 +16693,20 @@ process.on('unhandledRejection', (reason, promise) => {
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
   console.log(`🔐 Admin login: ${config.DEFAULT_ADMIN.EMAIL} / ${config.DEFAULT_ADMIN.PASSWORD}`);
+
+  // Which mailer is live, said out loud at boot. A narrowed OAuth token looked
+  // exactly like a healthy one in the UI for weeks during the 8.4 upgrade; the
+  // same trap applies here, where "email works" and "email works and is inside
+  // the BAA" are different facts that look identical from a delivered message.
+  const mail = emailTransport.transportStatus();
+  if (!mail.configured) {
+    console.log(`📧 Email: NOT CONFIGURED — ${mail.reason}`);
+  } else if (mail.baaCovered) {
+    console.log(`📧 Email: ${mail.transport} as ${mail.from} — BAA-covered, PHI permitted`);
+  } else {
+    console.log(`📧 Email: ${mail.transport} as ${mail.from} — NOT BAA-covered, PHI is refused`);
+    console.log(`         ${mail.reason}`);
+  }
 
   // Safety net: reactivate any admin accounts that are inactive (prevent lockout)
   (async () => {
