@@ -7,6 +7,8 @@
 
 **Honesty note (read this first).** Unlike the feature sessions, a large part of Session 5 is **infrastructure and legal work the build sandbox cannot perform or prove** — provisioning AWS hosting, executing BAAs, moving the deployment, creating per-user OpenEMR accounts. The **code** is buildable and unit-testable here; the **boundary and cutover** are owner-run against the real environment. Do not mark go-live "done" from the sandbox, and do not fake any infra step as complete. Where a step is owner/ops, say so and stop.
 
+**Deferred to Session 12 by owner decision 2026-09-09** (its natural home — Session 12 is the audit-log UI and final HIPAA/BAA review): breach-notification / security-incident procedures per §164.308(a)(6), and the 7-year PHI retention + disposal policy. Both belong to the compliance close-out, not the boundary migration.
+
 **This may be split into sub-PRs (5.1–5.5)** for reviewability, exactly as Session 4 was. One PR is acceptable if each part's acceptance is met and the diff stays reviewable.
 
 ---
@@ -70,11 +72,22 @@ SCOPE — build in this order.
   new encrypted-RDS Postgres adapter — selected by env. Route every direct
   `db.*` call through it; no route handler touches @replit/database directly.
 - One-time, idempotent migration script: KV → Postgres, with per-collection
-  row counts and a verify pass (re-run is a no-op). Covers every PHI-bearing
-  collection (users/clients, care_plan_versions, care_plan_cosign_events,
-  consent_events + provider_authorizations + records_categories, gfc_messages,
-  visit_logs, encounter_billing, prescriptions, clinical_orders,
-  appointment_encounters, activity/audit, etc.).
+  row counts and a verify pass (re-run is a no-op).
+- **ENUMERATE COLLECTIONS DYNAMICALLY FROM THE STORE — do not hardcode a list.**
+  Sessions 6, 7, 9 and 10 landed after this prompt was written and added
+  collections (shifts, availability, time_logs, the restructured messages,
+  visit_logs, escalation_events, incident reports, and more). A hardcoded list
+  will silently skip them and leave data behind in KV, discovered only after
+  cutover. Walk the store, and **FAIL LOUDLY** on any collection without an
+  explicit handler rather than skipping it. The known PHI-bearing set includes
+  users/clients, care_plan_versions, care_plan_cosign_events, consent_events +
+  provider_authorizations + records_categories, messages, visit_logs,
+  escalation_events, shifts, availability, time_logs, encounter_billing,
+  prescriptions, clinical_orders, appointment_encounters, activity/audit — but
+  treat that as a floor, not the list.
+- **Refuse to boot on the KV adapter in production.** A startup assertion:
+  if the environment is production and the adapter is KV, exit with a clear
+  error. The dev path stays, but it cannot be reached by accident.
 - Documents/consents stay in Google Drive under the Workspace BAA — not moved
   into the DB. Acceptance: the FULL existing test suite passes against the
   Postgres adapter; the migration round-trips a complete dev dataset.
@@ -111,6 +124,15 @@ SCOPE — build in this order.
   grant, verify. Plus a go-live acceptance checklist mapped to the HIPAA
   Security Rule (access control §164.312(a), audit §164.312(b), person/entity
   auth §164.312(d), transmission security §164.312(e), and BAAs §164.308(b)).
+- **ROLLBACK, written before cutover is attempted.** An RDS snapshot and an EBS
+  snapshot taken immediately before the migration runs; a documented path back
+  to the pre-cutover state; and an explicit go/no-go decision point after the
+  migration verify pass and before DNS flips. Cutover without a written way
+  back is not a cutover, it is a bet.
+- **MFA break-glass, documented.** Bianca is currently the only human with full
+  access to both the app and OpenEMR. Record the recovery-code location and the
+  second-account path so a lost phone does not lock the practice out of its own
+  record system. This is a runbook entry, not code.
 - DO NOT enable real patients until that checklist passes ON THE LIVE BOUNDARY.
 
 DO NOT
@@ -128,7 +150,12 @@ ACCEPTANCE (overall)
 - MFA + idle logout + revocation proven.
 - audit_log populated on every PHI access, with a build-fail guard; scrub test
   passes.
-- Cutover runbook + HIPAA acceptance checklist committed.
+- Cutover runbook + HIPAA acceptance checklist + rollback path + MFA
+  break-glass committed.
+- The migration enumerates collections dynamically and fails loudly on an
+  unhandled one. Prove it: add a throwaway collection and assert the migration
+  refuses rather than skipping.
+- The app refuses to boot on the KV adapter with a production environment.
 - App boots; dev (KV) path unaffected. Nothing touches real PHI until the owner
   runs the live acceptance.
 
