@@ -334,22 +334,27 @@ const buildChartDocumentIndex = (input) => {
     });
   }
 
-  // 5. Whatever OpenEMR does return. Today that is nothing, and it will be
-  //    something the day the EMR read works — this list does not need changing
-  //    for that, which is the point of merging rather than replacing.
+  // 5. What OpenEMR itself holds — a fax, an outside record, anything filed
+  //    straight into the chart. This is the half the app can never know about
+  //    on its own, and the only reason the Phase 6B document routes exist.
+  //
+  //    `emrReadSupported` is FEATURE-DETECTED by the transport, not assumed. It
+  //    is false until the patch is rebuilt and deployed, and the difference
+  //    matters: a row that cannot be opened because the read is not deployed is
+  //    a different fact from one that cannot be opened at all, and a clinician
+  //    who is told the wrong one goes looking for the wrong problem.
+  const emrReadSupported = !!input.emrReadSupported;
   for (const r of emrRows) {
     rows.push({
       id: `emr:${r.id}`,
-      title: r.description || 'Document',
+      title: r.description || r.name || 'Document',
       category: 'In the EMR',
       date: r.date || null,
-      contentType: r.contentType || null,
+      contentType: r.contentType || r.mimetype || null,
       source: CHART_DOC_SOURCE.EMR,
-      // OpenEMR has no working document read on this instance. Say so on the
-      // row rather than rendering a link that fails.
-      openable: false,
+      openable: emrReadSupported,
       inChart: true,
-      note: 'Open in OpenEMR — this instance has no document read API yet'
+      note: emrReadSupported ? null : 'Open in OpenEMR — the document read is not deployed on this instance yet'
     });
   }
 

@@ -54,12 +54,39 @@ gdrive.downloadFileBuffer = async (id) => {
 gdrive.uploadCarePlanFile = async () => { throw new Error('no Drive in this sandbox'); };
 
 // OpenEMR: reproduce the instance faithfully — documents go in, none come back.
+//
+// TWO DEPLOY STATES, because the app has to be right in both. PATCH.deployed
+// false is the instance as it stands today: no document read at all. True is
+// the instance after `docker compose build --pull && docker compose up -d`
+// ships the 8.4.0-p1 document routes. Nothing else about the fixture changes,
+// so any difference in the chart is caused by the deploy and nothing else.
+const PATCH = { deployed: false };
+const EMR_DOCS = [
+  { id: 7, name: 'Cardiology consult 2026-08-30.pdf', category: 'Medical Record', docdate: '2026-08-30', filed_at: '2026-09-01 09:12:00', mimetype: 'application/pdf', size: 4096 },
+  { id: 9, name: 'Faxed hospital discharge.pdf', category: null, docdate: null, filed_at: '2026-09-06 14:02:00', mimetype: 'application/pdf', size: 2048 }
+];
+const EMR_BYTES = Buffer.concat([Buffer.from('%PDF-1.4\nfiled straight into OpenEMR\n'), Buffer.alloc(4096, 32)]);
+
 const openemr = require(path.join(__dirname, '..', 'openemr.js'));
 openemr.isConfigured = () => true;
 openemr.forActor = () => new Proxy({}, {
   get(_t, prop) {
     if (prop === 'getDocumentReferences') return async () => [];   // total 0, as live
     if (prop === 'uploadPatientDocument') return async () => true;  // 200 `true`, as live
+    // The patch routes. Undeployed, both 404 — which the transport reports as
+    // supported:false, never as "this patient has no documents".
+    if (prop === 'listPatientDocuments') {
+      return async () => PATCH.deployed ? { supported: true, rows: EMR_DOCS } : { supported: false, rows: [] };
+    }
+    if (prop === 'getPatientDocument') {
+      return async (_puuid, id) => {
+        if (!PATCH.deployed) return { supported: false, doc: null };
+        const row = EMR_DOCS.find(d => String(d.id) === String(id));
+        // Deployed and no such document: a 400 from the patch, NOT a 404.
+        if (!row) return { supported: true, doc: null };
+        return { supported: true, doc: { name: row.name, mimetype: row.mimetype, buffer: EMR_BYTES } };
+      };
+    }
     if (['getProblems', 'getAllergies', 'getMedicationRequests', 'getEncounters', 'getCarePlans', 'getVitalObservations'].includes(prop)) {
       return async () => [];
     }
@@ -118,7 +145,7 @@ const CLINICIAN = { id: 'clin_1', role: config.ROLES.ADMIN, email: 'rn@test', na
   await new Promise(r => setTimeout(r, 2500));
   const t = tok(CLINICIAN);
 
-  console.log('\n── The chart lists documents even though OpenEMR returns none ──');
+  console.log('\n── STATE 1: the patch is NOT deployed (the instance as it stands today) ──');
   let r = await call('GET', `/api/clinical/patients/${CLIENT.id}/chart`, t);
   check('chart loads', r.status === 200, JSON.stringify(r.body).slice(0, 200));
   check('the FHIR document read is genuinely empty, as on the live instance',
@@ -157,10 +184,39 @@ const CLINICIAN = { id: 'clin_1', role: config.ROLES.ADMIN, email: 'rn@test', na
   r = await call('GET', `/api/clinical/patients/${CLIENT.id}/documents/careplan:1/file`, tok(CLIENT));
   check('a client cannot read the clinical chart document route', r.status === 403, String(r.status));
 
+  console.log('\n── STATE 2: the patch IS deployed — the same chart, one rebuild later ──');
+  PATCH.deployed = true;
+  r = await call('GET', `/api/clinical/patients/${CLIENT.id}/chart`, t);
+  check('chart still loads', r.status === 200, JSON.stringify(r.body).slice(0, 200));
+  const docs2 = r.body.chartDocuments || [];
+  const by2 = Object.fromEntries(docs2.map(d => [d.id, d]));
+  check("the EMR's own documents now appear", !!by2['emr:7'] && !!by2['emr:9'], Object.keys(by2).join(','));
+  check('and they are openable, with no "open it in OpenEMR" note',
+    by2['emr:7'].openable === true && by2['emr:7'].note === null, JSON.stringify(by2['emr:7']));
+  check('an uncategorised document is NOT dropped from the chart', !!by2['emr:9']);
+  check('the app-side rows are untouched by the deploy',
+    !!by2['careplan:1'] && !!by2['consent:npp'] && !!by2['upload:up_ok']);
+  check('nothing the app holds was duplicated by the EMR list',
+    docs2.filter(d => d.id === 'careplan:1').length === 1, String(docs2.filter(d => d.id === 'careplan:1').length));
+
+  r = await call('GET', `/api/clinical/patients/${CLIENT.id}/documents/emr:7/file`, t);
+  check('an EMR document opens', r.status === 200, `${r.status} ${JSON.stringify(r.body).slice(0, 160)}`);
+  check('and returns the stored bytes', Buffer.isBuffer(r.body) && r.body.length === EMR_BYTES.length,
+    String(Buffer.isBuffer(r.body) ? r.body.length : 'not a buffer'));
+
+  r = await call('GET', `/api/clinical/patients/${CLIENT.id}/documents/emr:404/file`, t);
+  check('a document the chart does not have reads as MISSING, not as an undeployed feature',
+    r.status === 404 && r.body.code === 'EMR_DOCUMENT_NOT_FOUND', `${r.status} ${JSON.stringify(r.body)}`);
+
+  r = await call('GET', `/api/clinical/patients/${CLIENT.id}/documents/emr:7/file`, tok(CLIENT));
+  check('a client still cannot read an EMR document through the chart route', r.status === 403, String(r.status));
+
   console.log('\n── The audit trail ──');
   const log = (await new MemDb().get('activity_log')) || [];
   const reads = log.filter(e => e.action === 'chart_document_read');
-  check('every chart document read is audited', reads.length >= 3, String(reads.length));
+  check('every chart document read is audited', reads.length >= 4, String(reads.length));
+  check('including the EMR one', reads.some(e => e.details && String(e.details.resource || '').startsWith('emr_')),
+    JSON.stringify(reads.map(e => e.details && e.details.resource)));
   check('with which document', reads.every(e => e.details && e.details.docId), JSON.stringify(reads.map(e => e.details && e.details.docId)));
 
   console.log(`\n${pass}/${pass + fail} checks passed.`);

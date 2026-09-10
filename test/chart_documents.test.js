@@ -156,3 +156,154 @@ test('the chart panel is not wired to the FHIR document read', () => {
   // An unopenable row renders as text with a pointer to OpenEMR, not a link.
   assert.match(CLINICAL, /Open in OpenEMR/);
 });
+
+// ── The EMR's own documents (Phase 6B patch, 8.4.0-p1) ──────────────
+// The one half the app can never know about on its own: a fax, an outside
+// record, anything filed straight into OpenEMR. Added after the owner confirmed
+// the EMR rebuild path works — the corrected controller deployed on the second
+// attempt and code search is live, so a patch route can now be shipped and
+// verified rather than shipped and hoped over.
+
+test('the EMR read is feature-detected, never assumed', () => {
+  // These routes exist only once the patch is rebuilt and deployed, and the app
+  // has to work either side of that.
+  const off = repo.buildChartDocumentIndex({
+    client: CLIENT, emrRows: [{ id: 7, description: 'Scanned referral' }],
+    carePlanVersions: [], roiAuthorizations: [], clientUploads: [],
+    consentDefs: [], consentSatisfied: () => false
+  });
+  assert.equal(off.find(r => r.id === 'emr:7').openable, false);
+  assert.match(off.find(r => r.id === 'emr:7').note, /not deployed/);
+
+  const on = repo.buildChartDocumentIndex({
+    client: CLIENT, emrReadSupported: true, emrRows: [{ id: 7, description: 'Scanned referral' }],
+    carePlanVersions: [], roiAuthorizations: [], clientUploads: [],
+    consentDefs: [], consentSatisfied: () => false
+  });
+  assert.equal(on.find(r => r.id === 'emr:7').openable, true);
+  assert.equal(on.find(r => r.id === 'emr:7').note, null);
+});
+
+test('"not deployed" and "no documents" are never collapsed', () => {
+  // A 404 on the list route means the patch is not deployed. Treating that as
+  // an empty patient would show a clinician an empty chart and no reason.
+  const oe = fs.readFileSync(path.join(__dirname, '..', 'openemr.js'), 'utf8');
+  assert.match(oe, /if \(res\.status === 404\) return \{ supported: false, rows: \[\] \};/);
+  assert.match(oe, /async listPatientDocuments\(puuid\)/);
+  assert.match(oe, /async getPatientDocument\(puuid, documentId\)/);
+  // Keyed by numeric pid, like every other document route on this instance —
+  // the standard API coerces a uuid to 0, which orphaned Session 4.1's notes.
+  const list = oe.slice(oe.indexOf('async listPatientDocuments(puuid)'));
+  assert.match(list, /const pid = await resolvePid\(puuid\);/);
+  assert.match(list, /apiUrl\(`patient\/\$\{pid\}\/document`\)/);
+});
+
+const PATCH_DIR = path.join(__dirname, '..', 'docs', 'openemr-patches', '8.4.0-p1');
+const ROUTES = fs.readFileSync(path.join(PATCH_DIR, 'apis', 'routes', '_rest_routes_gfc.inc.php'), 'utf8');
+
+test('the document routes cost no new OAuth scope, and therefore no new client', () => {
+  // OpenEMR derives the required scope from the last non-parameter path
+  // segment. A plural /documents would demand `user/documents.read`, which the
+  // server does not define — a new registered scope, a new OAuth client and
+  // another credential swap in the deployed environment. Every one of those
+  // has cost this project days already.
+  assert.match(ROUTES, /"GET \/api\/patient\/:pid\/document"/);
+  assert.match(ROUTES, /"GET \/api\/patient\/:pid\/document\/:id"/);
+  assert.ok(!/\/api\/patient\/:pid\/documents/.test(ROUTES), 'a plural path would need a scope the server does not have');
+  // And the scope it does derive is one the app already asks for.
+  const scopes = require(path.join(__dirname, '..', 'config.js')).OPENEMR.SCOPES;
+  assert.ok(String(scopes).includes('user/document.read'), 'the app must already request the scope these routes derive');
+  // Guarded by the ACL the documents screen itself uses.
+  assert.match(ROUTES, /request_authorization_check\(\$request, "patients", "docs"\)/);
+});
+
+test('the upload route is left to upstream; only the dead read is taken over', () => {
+  // The map returns two sets on purpose: additions lose a key collision to
+  // upstream, overrides win one. Merging them the same way would silently put
+  // GFC routes on top of working upstream ones.
+  assert.match(ROUTES, /\$gfcAddedRoutes = \[/);
+  assert.match(ROUTES, /\$gfcOverrideRoutes = \[/);
+  assert.match(ROUTES, /return \['routes' => \$gfcAddedRoutes, 'overrides' => \$gfcOverrideRoutes\];/);
+  // The overrides half holds the document reads and nothing else.
+  const overrides = ROUTES.slice(ROUTES.indexOf('$gfcOverrideRoutes = ['));
+  const keys = [...overrides.matchAll(/"([A-Z]+ \/api\/[^"]+)"/g)].map(m => m[1]);
+  assert.deepEqual(keys, ['GET /api/patient/:pid/document', 'GET /api/patient/:pid/document/:id']);
+  // Never the upload. The app depends on it and it works.
+  assert.ok(!/"POST \/api\/patient\/:pid\/document"/.test(ROUTES), 'the upload route stays upstream\'s');
+
+  const wrapper = fs.readFileSync(path.join(PATCH_DIR, 'apis', 'routes', '_rest_routes_standard.inc.php'), 'utf8');
+  assert.match(wrapper, /array_merge\(\$gfcOurRoutes\['routes'\], \$gfcStandardRoutes, \$gfcOurRoutes\['overrides'\]\)/);
+});
+
+test('the build ships and syntax-checks the document controller', () => {
+  // The corrected code-search route taught this the hard way: a file that is
+  // not in the image is not deployed, however good it is in the repo.
+  const dockerfile = fs.readFileSync(path.join(PATCH_DIR, 'Dockerfile'), 'utf8');
+  assert.match(dockerfile, /COPY src\/RestControllers\/GfcDocumentRestController\.php/);
+  assert.match(dockerfile, /php -l src\/RestControllers\/GfcDocumentRestController\.php/);
+});
+
+test('the patch controller cannot return another patient\'s document', () => {
+  // The pid is part of the lookup, not decoration.
+  const php = fs.readFileSync(path.join(__dirname, '..', 'docs', 'openemr-patches', '8.4.0-p1', 'src', 'RestControllers', 'GfcDocumentRestController.php'), 'utf8');
+  assert.match(php, /WHERE id = \? AND foreign_id = \?/);
+  // A deleted document is not part of the record.
+  assert.match(php, /\(deleted IS NULL OR deleted = 0\)/);
+  // An unreadable file is reported, never returned as an empty document — a
+  // zero-byte PDF in a chart looks like the record is blank.
+  assert.match(php, /could not be read on the server/);
+  // readBytes returns null, not '', so the caller can tell an unreadable file
+  // from an empty one.
+  assert.match(php, /private function readBytes\(int \$id\): \?string/);
+  assert.ok(!/return '';/.test(php), "readBytes must never return an empty string for 'unreadable'");
+});
+
+test('an EMR document opens through the same one route as everything else', () => {
+  const route = SERVER.slice(
+    SERVER.indexOf("app.get('/api/clinical/patients/:clientId/documents/:docId/file'"),
+    SERVER.indexOf("app.get('/api/clinical/patients/:clientId/chart'")
+  );
+  assert.match(route, /getPatientDocument\(client\.openEmrPatientId, ref\)/);
+  assert.match(route, /code: 'EMR_DOCUMENT_READ_UNAVAILABLE'/);
+  assert.match(route, /audit\(`emr_\$\{ref\}`\)/, 'an EMR document read is audited like every other');
+});
+
+test('a missing EMR document is not reported as a missing feature', () => {
+  // The patch answers "no such document" with a 400 validation message and
+  // "no such route" with a 404. Collapsing them would tell a clinician the
+  // read is undeployed on an instance where it is running fine — the same
+  // mistake as reading an empty code search as an unloaded code set.
+  const oe = fs.readFileSync(path.join(__dirname, '..', 'openemr.js'), 'utf8');
+  const fn = oe.slice(oe.indexOf('async getPatientDocument(puuid, documentId)'));
+  assert.match(fn, /if \(res\.status === 404\) return \{ supported: false, doc: null \};/);
+  assert.match(fn, /if \(res\.status === 400\) return \{ supported: true, doc: null \};/);
+
+  const route = SERVER.slice(
+    SERVER.indexOf("app.get('/api/clinical/patients/:clientId/documents/:docId/file'"),
+    SERVER.indexOf("app.get('/api/clinical/patients/:clientId/chart'")
+  );
+  assert.match(route, /if \(!read\.supported\)[\s\S]{0,700}EMR_DOCUMENT_READ_UNAVAILABLE/);
+  assert.match(route, /if \(!read\.doc\)[\s\S]{0,400}EMR_DOCUMENT_NOT_FOUND/);
+});
+
+test('the install checksums match the files actually in the repo', () => {
+  // The operator's `sha256sum -c` is the gate that stops a half-fetched patch
+  // reaching the EMR. A stale line here stalls a deploy with a checksum
+  // mismatch that looks like a tampered file, which is the worst possible way
+  // to find out the docs drifted.
+  const crypto = require('crypto');
+  const install = fs.readFileSync(path.join(PATCH_DIR, 'INSTALL.md'), 'utf8');
+  const claimed = [...install.matchAll(/^([0-9a-f]{64})\s+(\S+)$/gm)];
+  assert.ok(claimed.length >= 6, 'INSTALL.md must publish a checksum for every patch file');
+  const seen = new Set();
+  for (const [, sum, file] of claimed) {
+    const actual = crypto.createHash('sha256').update(fs.readFileSync(path.join(PATCH_DIR, file))).digest('hex');
+    assert.equal(sum, actual, `${file} checksum in INSTALL.md is stale`);
+    seen.add(file);
+  }
+  // And every file the Dockerfile copies is one of them.
+  const dockerfile = fs.readFileSync(path.join(PATCH_DIR, 'Dockerfile'), 'utf8');
+  for (const m of dockerfile.matchAll(/^COPY (\S+) /gm)) {
+    assert.ok(seen.has(m[1]), `${m[1]} is built into the image but has no published checksum`);
+  }
+});

@@ -6773,14 +6773,27 @@ app.get('/api/clinical/patients/:clientId/documents/:docId/file', authenticateTo
     }
 
     if (kind === 'emr') {
-      // Named, not silent. OpenEMR 8.4 on this instance has no working document
-      // read: FHIR DocumentReference returns total 0, there is no list route,
-      // and read-by-id 500s on a CSRF check. Saying so is the honest answer;
-      // pretending the row is missing would be worse.
-      return res.status(501).json({
-        error: 'This instance has no document read API — open it in OpenEMR directly',
-        code: 'EMR_DOCUMENT_READ_UNAVAILABLE'
-      });
+      if (!client.openEmrPatientId) return res.status(409).json({ error: 'Client is not linked to OpenEMR', code: 'CLINICAL_NOT_LINKED' });
+      const read = await openemr.forActor(req.user).getPatientDocument(client.openEmrPatientId, ref);
+      if (!read.supported) {
+        // Named, not silent. Before the Phase 6B document routes are deployed
+        // there is no read at all, and upstream's own reads are dead on this
+        // instance (FHIR total 0, no list route, read-by-id 500s on a CSRF
+        // check). Pretending the row is missing would be worse than saying so.
+        return res.status(501).json({
+          error: 'The document read is not deployed on this OpenEMR instance — open it in OpenEMR directly',
+          code: 'EMR_DOCUMENT_READ_UNAVAILABLE'
+        });
+      }
+      // The read ran and this patient has no such document. A DIFFERENT FACT
+      // from the one above, and reported as one.
+      if (!read.doc) {
+        return res.status(404).json({ error: 'No such document on this chart', code: 'EMR_DOCUMENT_NOT_FOUND' });
+      }
+      await audit(`emr_${ref}`);
+      res.setHeader('Content-Type', read.doc.mimetype);
+      res.setHeader('Content-Disposition', `inline; filename="${String(read.doc.name).replace(/"/g, '')}"`);
+      return res.send(read.doc.buffer);
     }
 
     return res.status(400).json({ error: 'Unknown document reference', code: 'DOCUMENT_REF_UNKNOWN' });
@@ -6855,6 +6868,17 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
     const [planVersions, roiEvents, docUploads] = await Promise.all([
       db.get('care_plan_versions'), db.get('consent_events'), db.get('client_document_uploads')
     ]);
+
+    // The EMR's own documents, through the Phase 6B patch route. Feature-
+    // detected: before the patch is deployed this answers supported:false, and
+    // the chart falls back to the FHIR read — which returns nothing on this
+    // instance, so the EMR section is simply empty rather than wrong.
+    let emrDocs = { supported: false, rows: [] };
+    try {
+      emrDocs = await emr.listPatientDocuments(puuid);
+    } catch (e) {
+      console.error('Patched document list unavailable (falling back to FHIR):', e.message);
+    }
     let roiAuths = [];
     try {
       const events = (roiEvents || []).filter(e => e && e.client_id === client.id);
@@ -6864,7 +6888,15 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
 
     const chartDocuments = clinicalRepo.buildChartDocumentIndex({
       client,
-      emrRows: documents.status === 'fulfilled' ? documents.value.map(clinicalRepo.summarizeDocument) : [],
+      emrReadSupported: !!emrDocs.supported,
+      emrRows: emrDocs.supported
+        ? emrDocs.rows.map(r => ({
+          id: r.id,
+          description: r.name || r.category || 'Document',
+          date: r.docdate || r.filed_at || null,
+          contentType: r.mimetype || null
+        }))
+        : (documents.status === 'fulfilled' ? documents.value.map(clinicalRepo.summarizeDocument) : []),
       carePlanVersions: planVersions || [],
       roiAuthorizations: roiAuths,
       clientUploads: docUploads || [],

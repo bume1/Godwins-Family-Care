@@ -869,7 +869,8 @@ for an uncoded allergen — but it is why the app's chart showed "Unknown" for e
 
 ## Defect 5 — documents go in and nothing comes back (8.4.0, probed 2026-09-09)
 
-**Status: OPEN. Blocks the clinician chart's Documents panel and the audit's G2.**
+**Status: WORKED AROUND in the Phase 6B patch 2026-09-10; the upstream defects
+themselves remain open and are the report to take to the OpenEMR project.**
 
 Every read shape was probed live against TEST PatientOne (pid 1) with the v4
 client (52 granted scopes), immediately after a successful upload:
@@ -903,9 +904,35 @@ and merged with whatever FHIR returns — today nothing. An EMR-sourced row is
 listed and marked "Open in OpenEMR" rather than dropped, because dropping it
 would tell a clinician the document does not exist.
 
-**What would close it properly:** two read routes in the Phase 6B patch
-(`GET /api/patient/:pid/documents` and `.../documents/:id`), written against the
-`documents` / `categories_to_documents` tables the way the existing GFC routes
-wrap `BillingUtilities`. That is the only path that also surfaces documents
-added directly in OpenEMR — a fax, an outside record — which the app can never
-see. It needs an EMR rebuild, so it is an owner decision, not a code change.
+**Closed on our side 2026-09-10 — the read routes are built.**
+`GfcDocumentRestController` in the Phase 6B patch adds
+`GET /api/patient/:pid/document` (list) and `GET /api/patient/:pid/document/:id`
+(bytes, base64 in the standard envelope), written against the `documents` /
+`categories_to_documents` tables the way the existing GFC routes wrap
+`BillingUtilities`, and reading bytes through OpenEMR's own `\Document` model so
+the storage backend is not reimplemented. This is also the only path that
+surfaces a document added **directly in OpenEMR** — a fax, an outside record —
+which the app can never know about on its own.
+
+Three things worth carrying forward:
+
+- **SINGULAR `/document`, not `/documents`.** OpenEMR derives the required OAuth
+  scope from the last non-parameter path segment, so a plural path would demand
+  `user/documents.read`: a sixth registered scope, a new OAuth client, and
+  another credential swap in the deployed environment. The singular path reuses
+  `user/document.read`, already requested by the app and already on the v4
+  client. **Nothing about the OAuth setup changes.**
+- **The read-by-id deliberately OVERRIDES upstream's**, which is the dead
+  CSRF-500 route above. It is the only upstream key this patch takes over; the
+  route map's default remains "upstream wins", and the override sits in its own
+  listed block. When upstream fixes that route, delete the block.
+- **A missing document answers 400, not 404**, so the app can tell "no such
+  document" from "the route is not deployed". The transport feature-detects on
+  exactly that: a 404 means undeployed, and the chart then lists EMR rows as
+  "Open in OpenEMR" rather than dropping them or claiming the patient has none.
+
+Deploy is a re-fetch then one rebuild (INSTALL.md, "Update 2026-09-10"); no
+schema, no scopes, no OAuth work. **Still open upstream, and worth reporting:**
+FHIR indexes no documents at all (`total: 0` instance-wide), the upload returns
+`true` rather than an id, and the stock read-by-id route runs a browser-session
+CSRF check on a bearer-token request.

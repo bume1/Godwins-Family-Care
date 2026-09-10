@@ -16,10 +16,22 @@
  *
  * Guarded by the SAME ACL the corresponding screens use (encounters/coding_a),
  * so a token that cannot code an encounter in the UI cannot code one through
- * the API either. NO NEW OAUTH SCOPE: standard /api/ routes on 8.4 are gated by
- * RestConfig::request_authorization_check(), not by a per-route scope, and the
- * server's API scope list is a hardcoded array. Introducing a scope name would
- * force a re-registration of the OAuth client, so these routes introduce none.
+ * the API either.
+ *
+ * SCOPES. An earlier version of this header claimed these routes needed none.
+ * That was wrong and it cost an install cycle. OpenEMR derives the required
+ * OAuth scope FROM THE ROUTE PATH — the resource is the last non-parameter
+ * segment — so `POST .../billing` demands `user/billing.c`. The build registers
+ * the five scopes the charge and order routes need (gfc-add-scopes.php), and a
+ * client carrying them had to be registered fresh, because scopes bind at
+ * registration and an existing client cannot be widened.
+ *
+ * That is precisely why the document routes below are SINGULAR. A plural
+ * `/documents` would derive `user/documents.*`, a scope OpenEMR does not have —
+ * which would mean a sixth registered scope, a new OAuth client, and another
+ * credential swap in the deployed environment. `/document` reuses
+ * `user/document.read`, which the app already requests and the deployed v4
+ * client already carries.
  *
  * GfcChargeRestController resolves through composer's PSR-4 map (OpenEMR\ =>
  * src/), which this OpenEMR build does not dump as classmap-authoritative, so
@@ -33,9 +45,10 @@
 use OpenEMR\Common\Http\HttpRestRequest;
 use OpenEMR\RestControllers\Config\RestConfig;
 use OpenEMR\RestControllers\GfcChargeRestController;
+use OpenEMR\RestControllers\GfcDocumentRestController;
 use OpenEMR\RestControllers\RestControllerHelper;
 
-return [
+$gfcAddedRoutes = [
     "POST /api/patient/:pid/encounter/:eid/billing" => function ($pid, $eid, HttpRestRequest $request) {
         RestConfig::request_authorization_check($request, "encounters", "coding_a");
         $data = (array) (json_decode(file_get_contents("php://input"), true));
@@ -80,4 +93,55 @@ return [
         $result = (new GfcChargeRestController())->searchCodes($request->query->all());
         return RestControllerHelper::createProcessingResultResponse($request, $result, 200, true);
     },
+
 ];
+
+/**
+ * OVERRIDES — the ONE place an upstream route key is deliberately taken over.
+ *
+ * The wrapper's default is "upstream wins": a future OpenEMR shipping its own
+ * route at one of our keys is canonical and ours is redundant. That default
+ * stays. This array is the narrow, listed exception, applied last, and every
+ * entry has to justify itself here.
+ *
+ * DOCUMENT READS. OpenEMR 8.4 takes documents and gives none back on this
+ * instance. Probed live 2026-09-09, immediately after a successful upload:
+ *
+ *   POST /api/patient/1/document       200, body literally `true`
+ *   GET  /fhir/DocumentReference       200, total 0 — INSTANCE-WIDE
+ *   GET  /api/patient/1/document       404 — no list route exists
+ *   GET  /api/patient/1/document/{id}  500 "CSRF key is empty"
+ *
+ * Without a read, a clinician reviewing a chart cannot see a single filed
+ * document — every consent, care plan and returned record is write-only.
+ *
+ * The list route collides with nothing (upstream's key is POST, ours is GET).
+ * The read-by-id DOES collide, and takes over a route that is dead: a 500
+ * naming a CSRF key is a session-token check running on a bearer-token API
+ * request, which no configuration can fix. Shadowing a working upstream route
+ * would be wrong; shadowing this one restores the only thing it was for.
+ *
+ * WHEN UPSTREAM FIXES IT, DELETE THIS BLOCK. The rebuild does not notice on its
+ * own — that is the cost of an override, and the reason there is exactly one.
+ *
+ * Both are guarded by patients/docs, the ACL the patient-documents screen uses,
+ * and both reuse `user/document.read` (see the scope note at the top).
+ */
+$gfcOverrideRoutes = [
+    "GET /api/patient/:pid/document" => function ($pid, HttpRestRequest $request) {
+        RestConfig::request_authorization_check($request, "patients", "docs");
+        $result = (new GfcDocumentRestController())->listForPatient($pid);
+        return RestControllerHelper::createProcessingResultResponse($request, $result, 200, true);
+    },
+
+    "GET /api/patient/:pid/document/:id" => function ($pid, $id, HttpRestRequest $request) {
+        RestConfig::request_authorization_check($request, "patients", "docs");
+        $result = (new GfcDocumentRestController())->getForPatient($pid, $id);
+        return RestControllerHelper::createProcessingResultResponse($request, $result, 200, true);
+    },
+];
+
+// Two maps, because they are merged at different points: additions lose a key
+// collision to upstream, overrides win one. The wrapper requires exactly this
+// shape and fails loudly on anything else.
+return ['routes' => $gfcAddedRoutes, 'overrides' => $gfcOverrideRoutes];

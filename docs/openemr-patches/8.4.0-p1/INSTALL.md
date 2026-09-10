@@ -10,17 +10,41 @@ gfc-openemr → Connect → EC2 Instance Connect**. Nothing touches your Mac.
 
 ## What this adds
 
-Three things OpenEMR's own screens can do but its REST API cannot:
+Four things OpenEMR's own screens can do but its REST API cannot:
 
 | Route | What it does |
 |---|---|
 | `POST /api/patient/{pid}/encounter/{eid}/billing` | Writes a fee-sheet charge line (CPT/HCPCS, modifier, units, fee, ICD-10 pointers, rendering provider). **This is what makes the app's sign-and-close land in Billing Manager.** |
 | `POST /api/patient/{pid}/encounter/{eid}/order` | Creates a procedure order plus its order-code rows and files it on the encounter |
 | `GET /api/codes?type=ICD10&search=…` | Searches the loaded code tables — retires the app's last coding workaround |
+| `GET /api/patient/{pid}/document` | Lists the patient's filed documents. **This is what lets a clinician see anything in the chart's Documents panel.** |
 
 Plus the reads and the status update that go with them: `GET …/billing`,
 `DELETE …/billing/{id}` (voids, never hard-deletes), `GET …/order`,
-`PUT …/order/{orderId}`.
+`PUT …/order/{orderId}`, and `GET /api/patient/{pid}/document/{id}` for one
+document's bytes.
+
+### Why the document read had to be added
+
+OpenEMR 8.4 takes documents and gives none back on this instance. Probed live
+on 2026-09-09, immediately after a successful upload:
+
+| Request | Answer |
+|---|---|
+| `POST /api/patient/1/document` | `200`, body literally `true` |
+| `GET /fhir/DocumentReference` | `200`, **total 0 — instance-wide** |
+| `GET /api/patient/1/document` | `404` — no list route exists |
+| `GET /api/patient/1/document/{id}` | `500 "CSRF key is empty"` |
+
+Every consent, care plan and returned record was therefore write-only: filed
+successfully, readable by nobody. The `404` and the `500` are different
+failures — no route versus a route that resolved and then ran a browser-session
+check on a bearer-token request — and neither is fixable by configuration.
+
+The list route is an addition. The read-by-id **deliberately takes over**
+upstream's, which is dead here; it is the only upstream key this patch
+overrides, and the route map says so in full. If a future OpenEMR fixes that
+route, delete the override block.
 
 ### These routes need new OAuth scopes, and therefore a new client
 
@@ -43,6 +67,14 @@ So the build registers five scopes (step 4): `user/billing.read/.write`,
 `user/order.read/.write`, `user/codes.read`. `write` covers create, update and
 delete; `read` covers read and search.
 
+**The document routes add no sixth scope, and that is why they are named
+`/document` and not `/documents`.** A plural path would derive
+`user/documents.read`, which OpenEMR does not define — meaning another
+registered scope, another OAuth client, and another credential swap in the
+deployed environment. The singular path derives `user/document.read`, which the
+app already requests and the deployed v4 client already carries. **Nothing about
+the OAuth setup changes for this update.**
+
 **Because scopes bind at registration, a new OAuth client is required** — the v3
 client cannot be widened. The app team registers it after this build; an
 administrator enables it under Administration → System → API Clients.
@@ -57,7 +89,7 @@ an encounter in the UI cannot code one through the API either.
 
 OpenEMR runs from a Docker image: a sealed package of the application as its
 makers published it. You cannot edit a sealed package, so the patch is applied
-by **building a new image** from the official one plus our four files, tagged
+by **building a new image** from the official one plus our five files, tagged
 `gfc/openemr:8.4.0-p1`.
 
 The patch is **not a diff**, and needs no `patch` tool. OpenEMR's route map is a
@@ -85,7 +117,7 @@ correct command.
 
 ## Step 1 — Put the patch files on the server
 
-Five files. Pull them straight from the repo:
+Six files. Pull them straight from the repo:
 
 ```
 sudo mkdir -p /opt/openemr/gfc-patch/src/RestControllers /opt/openemr/gfc-patch/apis/routes
@@ -93,6 +125,7 @@ cd /opt/openemr/gfc-patch
 B=https://raw.githubusercontent.com/bume1/Godwins-Family-Care/main/docs/openemr-patches/8.4.0-p1
 sudo curl -fsSL -o Dockerfile "$B/Dockerfile"
 sudo curl -fsSL -o src/RestControllers/GfcChargeRestController.php "$B/src/RestControllers/GfcChargeRestController.php"
+sudo curl -fsSL -o src/RestControllers/GfcDocumentRestController.php "$B/src/RestControllers/GfcDocumentRestController.php"
 sudo curl -fsSL -o apis/routes/_rest_routes_standard.inc.php "$B/apis/routes/_rest_routes_standard.inc.php"
 sudo curl -fsSL -o apis/routes/_rest_routes_gfc.inc.php "$B/apis/routes/_rest_routes_gfc.inc.php"
 sudo curl -fsSL -o gfc-add-scopes.php "$B/gfc-add-scopes.php"
@@ -107,15 +140,16 @@ Then verify the files are exactly what was published:
 
 ```
 cd /opt/openemr/gfc-patch && sha256sum -c <<'SUMS'
-70bf5e1a1eaf323986187a1fa634a1a1a95ad486666669adf23d531023a339c1  Dockerfile
-cb5b3f4746c228e07c86d5ea6dbfa2d034b8bbeef7962c0564f52d372339eb40  apis/routes/_rest_routes_standard.inc.php
-a3515a22b7d6a4cea94884045c2a141a634a59979535d8447ae551bc35e3ec11  apis/routes/_rest_routes_gfc.inc.php
+501cdaa64cc0681a6a454401e674ab15ad4614ce792a2bdc1ce0d5e4086d9e3c  Dockerfile
+2dde7b64e4ece3e3ed152ef0f04ae169172b7f0d5d137d42635a3f147b98872d  apis/routes/_rest_routes_standard.inc.php
+1a3a88383eb8f65fdd7549fa10ae4d1694ef207ffcb23bfdb1e362f75858edd3  apis/routes/_rest_routes_gfc.inc.php
 0333542b8c9e054711f50f7b31dbe9cec40c70f3479698b0ac31a8eb95a76d66  gfc-add-scopes.php
 4310e14f6cd63b2d954afbf4ec616b427e2412511483213e096aa006de8ae317  src/RestControllers/GfcChargeRestController.php
+e26781a16569f2c501844098acf19306e4575049a03d1bd992b3c4abdf8919ea  src/RestControllers/GfcDocumentRestController.php
 SUMS
 ```
 
-Five `OK` lines means the files are intact. Anything else, stop.
+Six `OK` lines means the files are intact. Anything else, stop.
 
 ## Step 2 — Back up the compose file
 
@@ -165,11 +199,11 @@ cd /opt/openemr && sudo docker compose up -d --build && sudo docker compose logs
 
 The build takes two to five minutes. It **checks that OpenEMR's route map is
 where we expect, refuses to build on an already-patched base, registers the
-scopes the routes need, and syntax-checks all five files** (ours plus the
+scopes the routes need, and syntax-checks all six files** (ours plus the
 preserved upstream map plus the scope list). If any of that fails the
 build stops, and nothing is deployed.
 
-No schema upgrade runs this time. It is the same 8.4 code plus four files. Wait
+No schema upgrade runs this time. It is the same 8.4 code plus five files. Wait
 for Apache to settle, then Ctrl+C.
 
 ## Step 5 — Confirm it is live
@@ -268,6 +302,7 @@ without re-fetching rebuilds the old code, succeeds, and changes nothing.
 cd /opt/openemr/gfc-patch
 B=https://raw.githubusercontent.com/bume1/Godwins-Family-Care/main/docs/openemr-patches/8.4.0-p1
 sudo curl -fsSL -o src/RestControllers/GfcChargeRestController.php "$B/src/RestControllers/GfcChargeRestController.php"
+sudo curl -fsSL -o src/RestControllers/GfcDocumentRestController.php "$B/src/RestControllers/GfcDocumentRestController.php"
 sha256sum src/RestControllers/GfcChargeRestController.php
 #   expect 4310e14f6cd63b2d954afbf4ec616b427e2412511483213e096aa006de8ae317
 cd /opt/openemr && sudo docker compose build --pull && sudo docker compose up -d
@@ -303,6 +338,60 @@ not on the 200** — the old route also answered 200.
 
 Nothing else changes: no schema, no scopes, no new files. Rollback is the same
 step-3 restore as before.
+
+---
+
+## Update 2026-09-10 — document read added, needs a re-fetch and one rebuild
+
+**What changed:** one new file and two edited ones. A clinician reviewing a
+chart could not open a single filed document, because OpenEMR 8.4 accepts
+uploads and offers no working way to read them back (the table under "Why the
+document read had to be added" above). The patch now adds
+`GET /api/patient/{pid}/document` and `GET /api/patient/{pid}/document/{id}`.
+
+**No OAuth change.** No new scope, no new client, no credential swap. The routes
+reuse `user/document.read`, which the deployed v4 client already carries.
+
+**RE-FETCH FIRST, THEN REBUILD.** The build copies `/opt/openemr/gfc-patch/`
+into the image, so a rebuild without a re-fetch rebuilds the old files,
+succeeds, and changes nothing. That mistake cost a cycle on 2026-09-09.
+
+```
+cd /opt/openemr/gfc-patch
+B=https://raw.githubusercontent.com/bume1/Godwins-Family-Care/main/docs/openemr-patches/8.4.0-p1
+sudo curl -fsSL -o src/RestControllers/GfcDocumentRestController.php "$B/src/RestControllers/GfcDocumentRestController.php"
+sudo curl -fsSL -o apis/routes/_rest_routes_gfc.inc.php "$B/apis/routes/_rest_routes_gfc.inc.php"
+sudo curl -fsSL -o apis/routes/_rest_routes_standard.inc.php "$B/apis/routes/_rest_routes_standard.inc.php"
+sudo curl -fsSL -o Dockerfile "$B/Dockerfile"
+
+sha256sum -c <<'SUMS'
+501cdaa64cc0681a6a454401e674ab15ad4614ce792a2bdc1ce0d5e4086d9e3c  Dockerfile
+2dde7b64e4ece3e3ed152ef0f04ae169172b7f0d5d137d42635a3f147b98872d  apis/routes/_rest_routes_standard.inc.php
+1a3a88383eb8f65fdd7549fa10ae4d1694ef207ffcb23bfdb1e362f75858edd3  apis/routes/_rest_routes_gfc.inc.php
+e26781a16569f2c501844098acf19306e4575049a03d1bd992b3c4abdf8919ea  src/RestControllers/GfcDocumentRestController.php
+SUMS
+
+cd /opt/openemr && sudo docker compose build --pull && sudo docker compose up -d
+```
+
+`gfc-add-scopes.php` and `GfcChargeRestController.php` are unchanged.
+
+**Confirm it took**, without a token and without needing any patient data:
+
+```
+curl -sS -o /dev/null -w '%{http_code}\n' \
+  https://emr.godwinsfamilycarellc.com/apis/default/api/patient/1/document
+```
+
+**`401` is the right answer** — the route exists and wants a token you did not
+send. **`404` means the rebuild did not take the new files**, so go back to the
+re-fetch step. Do not read a `404` as "that patient has no documents": an
+unauthenticated request never gets that far.
+
+Then the app team runs `acceptance.js`, which now files a test document and
+reads its bytes back. **It asserts the returned bytes, not the status code** —
+the whole reason this was invisible for weeks is that the upload answered `200`
+and stored something nobody could open.
 
 ---
 
