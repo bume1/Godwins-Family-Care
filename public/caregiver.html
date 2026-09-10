@@ -15,6 +15,8 @@
        build step. Loaded here so window.GFCCaregiverSchedule exists before the
        app renders; ScheduleTab below mounts it. -->
   <script src="/components/caregiver-schedule.js"></script>
+  <!-- Session 9's messaging component, wired in the same session it was built. -->
+  <script src="/components/gfc-messaging.js"></script>
   <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
   <style>
     /* Brand tokens — navy #033D50, gold #F5CD85, cream #FAF7F2,
@@ -293,45 +295,66 @@ const ScheduleTab = ({ me, onChanged }) => {
 };
 
 // ============================================================================
-// MOUNT POINT — MESSAGING (Session 9)
+// MESSAGING — Session 9's component, mounted here (wired 2026-09-10)
 // ============================================================================
-// id: "gfc-mount-messaging"
-// Session 9 replaces the contents of this div with its messaging component.
+// id: "gfc-mount-messaging" — the placeholder Session 6 left, now filled.
 //
-// CONTRACT
-//   props: {
-//     caregiverId : string  — the caregiver's user id
-//     clientId    : string|null — the client whose thread to open, or null for
-//                   the caregiver's inbox. The Clients tab passes the selected
-//                   client's id; the More tab passes null.
-//     channel     : 'caregiver'  — the channel matrix key this surface uses
-//   }
-//   The caregiver's own id comes from GET /api/caregiver/me (`id`), same as
-//   above. Message routing, storage and the channel matrix are Session 9's;
-//   this session writes no messages and defines no message schema.
+// CONTRACT, as the component ships (public/components/gfc-messaging.js):
+//   window.GFCMessaging.mount('gfc-mount-messaging', {
+//     userId    : string   — from GET /api/caregiver/me (`id`)
+//     role      : string   — display only
+//     authToken : string   — what actually authorizes
+//   })
+//   window.GFCMessaging.unmount('gfc-mount-messaging')
+//
+// A caregiver's channels are Direct (their assigned client), Operations (the
+// office) and Behavioral Escalation (the case manager). The server decides
+// that from the token; this page passes no scope and could not widen it if it
+// tried. Direct is disabled with its reason when no client is assigned, rather
+// than hidden — the same rule the schedule follows.
+//
+// Session 6's original comment here described props (`clientId`, `channel`)
+// that were never built. The component is the authority, the same correction
+// the schedule wiring made an hour earlier: a contract written on both sides
+// of a parallel build is two contracts until someone runs them together.
 // ============================================================================
-const MessagingMount = ({ label }) => (
-  <div id="gfc-mount-messaging" className="mount" aria-disabled="true">
+const MessagingMount = ({ me, label }) => {
+  useEffect(() => {
+    const lib = window.GFCMessaging;
+    const token = getToken();
+    if (!lib || !token) return undefined;
+    lib.mount('gfc-mount-messaging', {
+      userId: me && me.id,
+      role: 'vendor',
+      authToken: token
+    });
+    return () => lib.unmount('gfc-mount-messaging');
+  }, [me]);
+
+  if (!window.GFCMessaging) {
+    return (
+      <div className="mount" aria-disabled="true">
+        <i className="ti ti-message-off"></i>
+        <b>{label || 'Messages'}</b>
+        <span>Messages did not load. Pull down to refresh, or sign in again.</span>
+      </div>
+    );
+  }
+  return <div id="gfc-mount-messaging"></div>;
+};
+
+// The Clients tab keeps its own entry point to messaging. Only one element may
+// carry the mount id, so this is a labeled sibling that routes to the More tab
+// rather than a second mount — two mounts over one id is the failure the
+// schedule wiring had to design around.
+const MessagingEntry = ({ onOpen }) => (
+  <button className="mount" onClick={onOpen} style={{ cursor: 'pointer', width: '100%', font: 'inherit' }}>
     <i className="ti ti-message-circle"></i>
-    <b>{label || 'Messages'}</b>
-    <span>Coming with messaging (Session 9).</span>
-  </div>
+    <b>Messages</b>
+    <span>Message the office, the case manager, or your client.</span>
+  </button>
 );
 
-// A second messaging affordance appears inside the Clients tab. Only one
-// element may carry the id, so the in-client entry point is a labeled sibling
-// that Session 9 can wire from the same component.
-const MessagingEntry = () => (
-  <div className="mount" data-gfc-mount="messaging-client" aria-disabled="true">
-    <i className="ti ti-message-circle"></i>
-    <b>Message the care team</b>
-    <span>Coming with messaging (Session 9).</span>
-  </div>
-);
-
-// ============================================================================
-// HOME
-// ============================================================================
 const ShiftCard = ({ clients, onSchedule }) => {
   const first = clients[0];
   return (
@@ -799,7 +822,7 @@ const FeedTab = ({ items }) => (
   </div>
 );
 
-const ClientsTab = ({ clients, detail, onOpen, onClose }) => {
+const ClientsTab = ({ clients, detail, onOpen, onClose, onMessages }) => {
   if (detail) {
     const c = detail.client;
     const plan = c.carePlan;
@@ -847,7 +870,7 @@ const ClientsTab = ({ clients, detail, onOpen, onClose }) => {
           </div>
         )}
 
-        <MessagingEntry />
+        <MessagingEntry onOpen={onMessages} />
       </div>
     );
   }
@@ -867,7 +890,7 @@ const ClientsTab = ({ clients, detail, onOpen, onClose }) => {
   );
 };
 
-const MoreTab = ({ visitLogs, queued }) => (
+const MoreTab = ({ visitLogs, queued, me }) => (
   <div>
     <h2 className="pg">More</h2>
     <p className="sub">Your logs, schedule, messages and help.</p>
@@ -901,7 +924,7 @@ const MoreTab = ({ visitLogs, queued }) => (
     {/* Shifts, the open pool, availability and time history all live in the
         Schedule tab now that Session 7's component is wired in. Duplicating
         the mount here would put the same id in the DOM twice. */}
-    <MessagingMount label="Messages" />
+    <MessagingMount me={me} label="Messages" />
 
     <div className="card">
       <h3>Help</h3>
@@ -1017,9 +1040,10 @@ const App = () => {
     content = <FeedTab items={feed} />;
   } else if (tab === 'clients') {
     content = <ClientsTab clients={clients} detail={clientDetail}
-      onOpen={openClient} onClose={() => setClientDetail(null)} />;
+      onOpen={openClient} onClose={() => setClientDetail(null)}
+      onMessages={() => { setClientDetail(null); setTab('more'); }} />;
   } else {
-    content = <MoreTab visitLogs={visitLogs} queued={queued} />;
+    content = <MoreTab visitLogs={visitLogs} queued={queued} me={me} />;
   }
 
   // Schedule earns a tab rather than living under More: clocking in is the

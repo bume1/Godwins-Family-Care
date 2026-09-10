@@ -12,6 +12,8 @@
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+  <!-- Session 9 messaging: the same thread component every portal mounts. -->
+  <script src="/components/gfc-messaging.js"></script>
   <script>
     tailwind.config = {
       theme: {
@@ -1908,6 +1910,33 @@
     };
 
     // ── App shell ──
+    // ── Messages (Session 9) ──
+    // At MODULE scope on purpose. A component defined inside another is a new
+    // component identity on every parent render, so React unmounts and
+    // remounts it and the caret jumps out of any field inside — the failure
+    // test/react_input_focus.test.js exists to catch.
+    // a filter on what is already permitted, never the permission itself.
+    const MessagesTab = ({ patient }) => {
+      const el = `gfc-messaging-clinical`;
+      React.useEffect(() => {
+        const lib = window.GFCMessaging;
+        const token = getToken();
+        if (!lib || !token || !patient) return undefined;
+        lib.mount(el, {
+          userId: (JSON.parse(localStorage.getItem('admin_user') || 'null') || {}).id,
+          role: 'clinical',
+          scopeClientId: patient.id,
+          authToken: token
+        });
+        return () => lib.unmount(el);
+      }, [patient && patient.id]);
+
+      if (!window.GFCMessaging) {
+        return <p className="text-sm text-stone-500">Messages did not load. Refresh the page.</p>;
+      }
+      return <div id={el} />;
+    };
+
     const App = () => {
       const [user, setUser] = useState(() => {
         try { return JSON.parse(localStorage.getItem('admin_user') || 'null'); } catch { return null; }
@@ -1986,7 +2015,8 @@
       const tabs = [
         ['summary', 'Chart'], ['appts', 'Appointments'], ['encounters', 'Encounters'],
         ...(canWrite ? [['visit', 'Initial Visit (H&P)']] : []),
-        ['medrec', 'Med Rec'], ['careplan', 'Care Plan'], ['checklist', 'Enrollment']
+        ['medrec', 'Med Rec'], ['careplan', 'Care Plan'], ['checklist', 'Enrollment'],
+        ['messages', 'Messages']
       ];
       return (
         <AccessContext.Provider value={access}>
@@ -2159,6 +2189,7 @@
                   {tab === 'medrec' && <MedRecTab patient={sel} />}
                   {tab === 'careplan' && <CarePlanTab patient={sel} onSaved={loadPatients} />}
                   {tab === 'checklist' && <ChecklistTab patient={sel} onActivated={loadPatients} />}
+                  {tab === 'messages' && <MessagesTab patient={sel} />}
                 </div>
               </div>
             )}

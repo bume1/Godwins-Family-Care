@@ -13,6 +13,8 @@
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+  <!-- Session 9 messaging: one shared thread component across every portal. -->
+  <script src="/components/gfc-messaging.js"></script>
   <script>
     tailwind.config = {
       theme: {
@@ -4941,62 +4943,40 @@
       );
     };
 
-    const GfcMessages = ({ messages, readOnly, token, onSent, actingAs }) => {
-      const rows = messages?.messages || [];
-      const [draft, setDraft] = useState('');
-      const [busy, setBusy] = useState(false);
-      const [err, setErr] = useState('');
-      const send = async () => {
-        const body = draft.trim();
-        if (!body || busy) return;
-        setErr(''); setBusy(true);
-        const res = await api.sendGfcMessage(token, body);
-        setBusy(false);
-        if (res.error) { setErr(res.error); return; }
-        setDraft('');
-        onSent && onSent();
-      };
-      const roleColor = (m) => m.direction === 'out' ? 'var(--gold)' : 'var(--navy)';
-      const roleText = (m) => m.direction === 'out' ? 'var(--navy)' : 'var(--cream)';
-      const when = (iso) => {
-        if (!iso) return '';
-        const d = new Date(iso);
-        if (isNaN(d.getTime())) return '';
-        const today = d.toDateString() === new Date().toDateString();
-        return today ? d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : prettyDate(iso);
-      };
+    // ── Messages (Session 9) ──
+    // The interim 3.5 panel is replaced by the shared thread component, which
+    // portal.html, clinical.html, admin-hub.html and the caregiver app all
+    // mount. One component means one messaging surface: a second copy here
+    // would be a second set of rules to keep in step with the server's.
+    //
+    // `readOnly` is no longer this panel's decision. Non-POA family are not
+    // locked out of messaging — they have their own channels (Family Portal,
+    // Support) — and which ones they may open is answered by the server, not
+    // by a prop. What they may not do is act as the client, and that is the
+    // POA gate, enforced server-side.
+    const GfcMessages = ({ token, me, actingAs }) => {
+      useEffect(() => {
+        const lib = window.GFCMessaging;
+        if (!lib || !token) return undefined;
+        lib.mount('gfc-messaging-portal', {
+          userId: me && me.id,
+          role: me && me.role,
+          authToken: token
+        });
+        return () => lib.unmount('gfc-messaging-portal');
+      }, [token, me]);
+
+      if (!window.GFCMessaging) {
+        return (
+          <div className="gfc-body">
+            <div className="card"><div className="tp">Messages did not load. Pull down to refresh, or sign in again.</div></div>
+          </div>
+        );
+      }
       return (
         <div className="gfc-body">
-          {readOnly && <span className="ro"><i className="ti ti-eye" />Family view · read-only</span>}
           {actingAs && <span className="ro"><i className="ti ti-user-shield" />Acting as {actingAs}</span>}
-          {rows.length === 0 && (
-            <div className="card" style={{ marginTop: 0 }}>
-              <div className="prow">
-                <Avatar initials="GF" size={34} />
-                <div>
-                  <div style={{ fontSize: 14.5, fontWeight: 600, color: 'var(--navy)' }}>No messages yet</div>
-                  <div style={{ fontSize: 12.5, color: 'var(--mut)', marginTop: 2 }}>{readOnly ? 'Messages with the care team will appear here.' : 'Send a message below and our team will get back to you.'}</div>
-                </div>
-              </div>
-            </div>
-          )}
-          {rows.map(m => (
-            <div className="thread" key={m.id}>
-              <Avatar initials={m.initials} bg={roleColor(m)} color={roleText(m)} />
-              <div className="tm"><div className="tn">{m.direction === 'out' ? (m.fromRole === 'POA' ? m.from : 'You') : m.from}{m.fromRole && m.direction !== 'out' ? ` · ${m.fromRole}` : ''}</div><div className="tp">{m.body}</div></div>
-              <div style={{ textAlign: 'right' }}><div className="tt">{when(m.sentAt)}</div>{m.unread && <div className="un" />}</div>
-            </div>
-          ))}
-          {!readOnly && (
-            <div className="card" style={{ marginTop: 14 }}>
-              <textarea value={draft} onChange={e => setDraft(e.target.value)} placeholder="Write a message to your care team…" maxLength={4000} style={{ minHeight: 64 }} />
-              <button className="btn" style={{ marginTop: 10 }} disabled={busy || !draft.trim()} onClick={send}>{busy ? 'Sending…' : 'Send to care team'}</button>
-              {err && <div className="err">{err}</div>}
-            </div>
-          )}
-          <div className="card" style={{ marginTop: 14, background: 'rgba(3,61,80,.04)', border: 'none', boxShadow: 'none', fontSize: 12, color: 'var(--mut)', textAlign: 'center' }}>
-            Messages go to the Godwins Family Care team. Direct caregiver and clinical channels open in a later session.
-          </div>
+          <div id="gfc-messaging-portal"></div>
         </div>
       );
     };
@@ -5866,8 +5846,7 @@
           {view === 'care' && data && <GfcCarePlan data={data} readOnly={readOnly} token={token} />}
           {view === 'health' && clinicalAvailable && <GfcHealth clinical={clinical} me={me} token={token} readOnly={readOnly}
             onSharingSaved={(sharing) => setMe(m => m ? { ...m, sharing } : m)} />}
-          {view === 'messages' && <GfcMessages messages={messages} readOnly={readOnly} token={token} actingAs={me && me.actingAs}
-            onSent={async () => { const msg = await api.getGfcMessages(token); if (!msg.error) { setMessages(msg); setData(d => d ? { ...d, messages: msg } : d); } }} />}
+          {view === 'messages' && <GfcMessages token={token} me={me} actingAs={me && me.actingAs} />}
           {view === 'documents' && <GfcDocuments docs={docs} readOnly={readOnly} token={token} onOpenTransferRoi={() => setShowTransferRoi(true)} onRefresh={refreshDocs} />}
           {!data && view !== 'messages' && view !== 'documents' && view !== 'health' && (
             <div className="gfc-body" style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}><div className="gfc-spin" /></div>

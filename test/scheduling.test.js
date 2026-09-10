@@ -609,21 +609,18 @@ test('the component documents its mount contract', () => {
   assert.ok(/SHIPPED UNMOUNTED/.test(componentSrc), 'and say plainly that it is not mounted');
 });
 
-test('the wiring touches Session 7 only — Session 9 is still untouched', () => {
-  // The schedule half is now deliberately wired (see above). The messaging
-  // half is not, and must not be: Session 9 owns its store and its routes.
-  assert.ok(!/gfc_messages|\/api\/gfc\/messages|\/api\/messages/.test(routeSrc + repoSrc),
-    'Session 9 owns the message store and its routes');
-  assert.ok(!/db\.set\(\s*['"]gfc_messages/.test(routeSrc),
-    'scheduling must never write to the message store');
-  assert.ok(/id="gfc-mount-messaging"/.test(caregiverPageSrc) && /aria-disabled="true"/.test(
-    caregiverPageSrc.slice(caregiverPageSrc.indexOf('id="gfc-mount-messaging"') - 200,
-      caregiverPageSrc.indexOf('id="gfc-mount-messaging"') + 200)),
-    'the messaging mount point is still a disabled placeholder waiting for Session 9');
-  // And the page still calls no scheduling route directly: the component does.
-  const babel = caregiverPageSrc.slice(caregiverPageSrc.indexOf('<script type="text/babel">'));
-  assert.ok(!/api\(\s*['"`]\/api\/scheduling/.test(babel),
-    'the page delegates every scheduling call to the component');
+test('scheduling stays out of messaging\'s store, and messaging out of scheduling\'s', () => {
+  // Session 9 is now built and wired too, so the old "Session 9 is untouched"
+  // invariant is superseded. What still has to hold is that the two modules
+  // do not reach into each other: one store, one owner.
+  assert.ok(!/message_threads|db\.set\(\s*['"]messages/.test(routeSrc + repoSrc),
+    'scheduling must never write to the messaging store');
+  const msgRouteSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'messaging.js'), 'utf8');
+  assert.ok(!/db\.set\(\s*['"](shifts|time_logs|caregiver_availability)/.test(msgRouteSrc),
+    'messaging must never write to the scheduling store');
+  // Both legitimately append to Session 6's ONE escalation store — that is
+  // deliberate, so a case manager has one inbox rather than two.
+  assert.ok(/escalation_events/.test(msgRouteSrc), 'messaging raises into Session 6\'s escalation store');
 });
 
 test('scheduling rides the existing notification queue and activity log', () => {

@@ -20,7 +20,7 @@ Each session ends in a PR you review and merge. **Companion to** `GFC_App_Build_
 | 6 | Caregiver app | PHCP | ✅ Done (PR #55, merged 2026-09-09) — 4-tab mobile workspace, tier-branched visit log, escalation. Session 5 skipped by owner approval 2026-09-09 (Session 6 is app-side PHCP and writes nothing to OpenEMR). Session 7's mount point is now filled (PR #66); **only Session 9's messaging mount remains stubbed**. |
 | 7 | Scheduling · availability · time tracking | PHCP | ✅ Done (PR #56) — availability (30-day rule), open-shift pool, both matching pathways, GPS time tracking, payroll CSV. Caregiver component **wired into the caregiver app 2026-09-10 (PR #66)** as its own Schedule tab. |
 | 8 | Matching engine | PHCP | ⬜ Planned — **its prerequisite is met**: Session 7 supplies the caregiver availability rows it matches against |
-| 9 | Messaging module (full channel matrix) | Shared | ⬜ Planned — its mount point and contract wait in the caregiver app's More tab (`gfc-mount-messaging`, build-enforced to stay a disabled placeholder until this session runs) |
+| 9 | Messaging module (full channel matrix) | Shared | ✅ built · PR pending — channel matrix, visibility at the query layer, POA attribution, escalation into Session 6's store, 3.5 migrated. **Built and wired in one session**: mounted in the client portal, clinician workspace, admin hub and caregiver app. |
 | 10 | Family portal | Shared | ⬜ Planned |
 | 11 | RPM / Continuous Care monitoring (scaffold → later) | Shared | ⬜ Planned |
 | 12 | Audit log UI + final HIPAA / BAA review | Shared | ⬜ Planned |
@@ -56,7 +56,7 @@ Each session ends in a PR you review and merge. **Companion to** `GFC_App_Build_
 
 **Session 8 — Matching engine (PHCP).** Two-stage caregiver↔client matching. Ref: matching spec + schemas + staff Care Match screen in `phcp-portal-prototype.html`.
 
-**Session 9 — Messaging module.** Full structured channel matrix with role-based visibility + escalation events.
+**Session 9 — Messaging module.** ✅ built · PR pending. Full structured channel matrix with role-based visibility + escalation events. New files: `messagingRepository.js`, `routes/messaging.js`, `public/components/gfc-messaging.js`, `test/messaging.test.js`, `scripts/verify_messaging.js`. Mounted in `portal.html`, `clinical.html`, `admin-hub.html` and `caregiver.html` (the brief deferred the caregiver mount to a follow-up; the owner asked for built and wired together).
 
 **Session 10 — Family portal.** Read-only, ROI-gated, monitoring feed. Ref: family care-feed screens in `phcp-portal-prototype.html`.
 
