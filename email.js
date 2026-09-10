@@ -51,6 +51,15 @@ function loadServiceAccount() {
       : Buffer.from(String(raw).trim(), 'base64').toString('utf8');
     const parsed = JSON.parse(text);
     if (!parsed.client_email || !parsed.private_key) return null;
+    // The single most common Workspace setup failure. A service-account key
+    // holds its PEM with escaped newlines; JSON.parse turns those into real
+    // ones, but a value that has been through a shell, a CI variable or a
+    // hosting panel's "secrets" box can arrive with the backslash-n intact.
+    // The JWT library then fails with an opaque error about the key format,
+    // which reads like a bad key rather than a mangled one.
+    if (parsed.private_key.includes('\\n')) {
+      parsed.private_key = parsed.private_key.replace(/\\n/g, '\n');
+    }
     return parsed;
   } catch (e) {
     console.error('[EMAIL] GOOGLE_SERVICE_ACCOUNT_KEY is set but could not be parsed:', e.message);
@@ -310,6 +319,30 @@ function phiRefusal(options) {
   };
 }
 
+// Google's setup failures are real but their messages do not say what to fix.
+// These two account for almost every failed first attempt, and guessing at
+// them costs an afternoon.
+function setupHintFor(error) {
+  const msg = String((error && error.message) || '');
+  if (/unauthorized_client|not authorized|access_denied/i.test(msg)) {
+    return 'Domain-wide delegation is probably not granted. In Workspace admin → Security → ' +
+           'Access and data control → API controls → Domain-wide delegation, add the service ' +
+           "account's Unique ID with the scope https://www.googleapis.com/auth/gmail.send " +
+           '(the scope must match exactly). Changes can take a few minutes to apply.';
+  }
+  if (/invalid_grant|Precondition check failed|bad request/i.test(msg)) {
+    return `GMAIL_SEND_AS (${config.GMAIL_SEND_AS || 'unset'}) must be a real, active mailbox on the ` +
+           'Workspace domain. Delegation impersonates an actual account, so an alias-only or ' +
+           'non-existent address fails here. Also check the server clock is correct.';
+  }
+  if (/DECODER routines|PEM|private key/i.test(msg)) {
+    return 'The service-account private key did not parse. Try setting GOOGLE_SERVICE_ACCOUNT_KEY ' +
+           'to the base64 of the whole JSON file instead of the raw JSON — hosting panels often ' +
+           'mangle multi-line values.';
+  }
+  return null;
+}
+
 /**
  * Send one message.
  *
@@ -343,8 +376,9 @@ async function sendEmail(to, subject, body, options = {}) {
     console.log(`[EMAIL] Sent via ${result.transport}${result.id ? ` (${result.id})` : ''}`);
     return result;
   } catch (error) {
-    console.error(`[EMAIL] Send failed on ${t.name}:`, error.message);
-    return { success: false, error: error.message, transport: t.name };
+    const hint = setupHintFor(error);
+    console.error(`[EMAIL] Send failed on ${t.name}:`, error.message, hint ? `\n  → ${hint}` : '');
+    return { success: false, error: error.message, hint: hint || undefined, transport: t.name };
   }
 }
 
@@ -458,5 +492,6 @@ module.exports = {
   sendEmail, sendBulkEmail, sendBatchEmails,
   transportStatus, resetTransportCache,
   // exported for tests
-  buildMimeMessage, isBaaSender, sanitizeHeader, encodeHeaderValue, _setGmailClientForTests
+  buildMimeMessage, isBaaSender, sanitizeHeader, encodeHeaderValue, _setGmailClientForTests,
+  loadServiceAccount, setupHintFor
 };

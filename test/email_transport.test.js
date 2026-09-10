@@ -434,6 +434,67 @@ test('with no transport configured every send reports failure and nothing is que
 });
 
 // ===========================================================================
+// 3b. The two setup failures that eat an afternoon
+// ===========================================================================
+
+test('a private key whose newlines survived as literal backslash-n is repaired, not rejected', () => {
+  // A service-account PEM arrives escaped inside the JSON. JSON.parse normally
+  // turns those into real newlines, but a value that has been through a shell
+  // or a hosting panel's secrets box can keep the backslash. The JWT library
+  // then complains about the key format, which reads like a bad key rather
+  // than a mangled one.
+  const mangled = JSON.stringify({
+    client_email: 'gfc-mailer@example-project.iam.gserviceaccount.com',
+    private_key: '-----BEGIN PRIVATE KEY-----\\nMIIabc\\n-----END PRIVATE KEY-----\\n'
+  });
+  withEnv({ GOOGLE_SERVICE_ACCOUNT_KEY: mangled, GMAIL_SEND_AS: 'no-reply@godwinsfamilycarellc.com' }, (email) => {
+    assert.strictEqual(email.transportStatus().transport, 'gmail');
+    // The key itself is what has to be right. Transport status alone does not
+    // touch it, so asserting only on that proves nothing about the repair.
+    const sa = email.loadServiceAccount();
+    assert.ok(!sa.private_key.includes('\\n'), 'literal backslash-n survived into the key');
+    assert.strictEqual((sa.private_key.match(/\n/g) || []).length, 3,
+      'the key should have three real newlines after repair');
+  });
+});
+
+test('a delegation failure explains that delegation is missing', async () => {
+  await withEnv(GMAIL_ENV, async (email) => {
+    email._setGmailClientForTests({
+      users: { messages: { send: async () => { throw new Error('unauthorized_client: Client is unauthorized to retrieve access tokens using this method.'); } } }
+    });
+    const r = await email.sendEmail('c@example.com', 's', 'b');
+    assert.strictEqual(r.success, false);
+    assert.match(r.hint, /Domain-wide delegation/);
+    assert.match(r.hint, /gmail\.send/);
+  });
+});
+
+test('a bad send-as mailbox explains that the mailbox must be real', async () => {
+  await withEnv(GMAIL_ENV, async (email) => {
+    email._setGmailClientForTests({
+      users: { messages: { send: async () => { throw new Error('invalid_grant: Invalid email or User ID'); } } }
+    });
+    const r = await email.sendEmail('c@example.com', 's', 'b');
+    assert.strictEqual(r.success, false);
+    assert.match(r.hint, /real, active mailbox/);
+    // The hint names the address actually configured, so it can be compared.
+    assert.match(r.hint, /no-reply@godwinsfamilycarellc\.com/);
+  });
+});
+
+test('an ordinary send failure gets no invented hint', async () => {
+  await withEnv(GMAIL_ENV, async (email) => {
+    email._setGmailClientForTests({
+      users: { messages: { send: async () => { throw new Error('Backend Error'); } } }
+    });
+    const r = await email.sendEmail('c@example.com', 's', 'b');
+    assert.strictEqual(r.success, false);
+    assert.strictEqual(r.hint, undefined);
+  });
+});
+
+// ===========================================================================
 // 4. The PHI gate
 // ===========================================================================
 
