@@ -93,7 +93,7 @@ The app prints the adapter at boot (`🗄️ Data store: postgres (production, i
 **T-1 — freeze.** Announce a write freeze window. Confirm §1 and §2 items 1–6 done.
 
 **T-0**
-1. **Snapshots first (rollback artefacts).** RDS manual snapshot `gfc-app-precutover-<date>`; EBS snapshot of the OpenEMR box; `node scripts/export_kv_snapshot.js` on the current Replit deployment, file kept inside the boundary.
+1. **Snapshots first (rollback artefacts).** RDS manual snapshot `gfc-app-precutover-<date>`; EBS snapshot of the OpenEMR box; `node scripts/export_kv_snapshot.js` on the current Replit deployment. **Store the file in S3 in the BAA account with server-side encryption, or on the app host's encrypted volume — never on a laptop or in the repo.**
 2. Deploy the image with the §3 environment. `healthz` must answer `store:"postgres", production:true`. If it does not boot, read the log: every refusal names its reason.
 3. `node scripts/migrate_kv_to_postgres.js --from-file <snapshot> --dry-run` → the report lists every collection with row counts and the PHI flag. **An `UnhandledCollectionError` stops here**: add the handler to `COLLECTION_REGISTRY` (or record an explicit `--ignore`) and rerun. Nothing has been copied.
 4. `node scripts/migrate_kv_to_postgres.js --from-file <snapshot>` → `DONE … VERIFY: n/n matched`. Keep the JSON report with the snapshots.
@@ -102,9 +102,10 @@ The app prints the adapter at boot (`🗄️ Data store: postgres (production, i
 7. Flip DNS for `app.godwinsfamilycarellc.com` to the ALB. TTL was lowered at T-1.
 8. **Everyone signs in again.** Every pre-cutover token is dead by design (no session id). Admin, clinical and case-manager users enrol MFA at that first login and are shown recovery codes once. Clinicians click **Sign in to OpenEMR** in the workspace.
 9. Run `BASE_URL=https://app.godwinsfamilycarellc.com ADMIN_EMAIL=… ADMIN_PASSWORD=… MFA_SECRET=… node scripts/verify_session5.js` (a dedicated verification admin account, not Bianca's). Run `scripts/verify_emr_authcode.js` as one real clinician.
-10. **Decommission Replit.** Stop the deployment; delete its secrets; leave the KV store read-only for 7 days (it is the last copy of pre-cutover data outside the snapshot), then delete it. The marketing site stays on Replit — it holds no PHI.
+10. **Decommission Replit.** Stop the deployment; delete its secrets; leave the KV store read-only for 7 days (it is the last copy of pre-cutover data outside the snapshot), then delete it. **The KV store holds TEST DATA ONLY** — every session before this one was test-data-only by rule, so the 7-day window is not a PHI exposure. If real PHI is ever found there it is purged immediately, not on a schedule, and the event is recorded as a security incident. The marketing site stays on Replit — it holds no PHI.
 11. OpenEMR: password grant OFF, superseded clients disabled, `gfc-app-api` disabled (§2 items 3–5). Re-run `verify_emr_authcode.js`: it must report the password grant disabled.
-12. Re-check §8. Record the date and the two probe outputs. **Only then** does TEST DATA ONLY lift, by the owner's decision.
+12. **PURGE TEST DATA — both systems, before any real patient exists.** Every acceptance run from Session 4.1 through 6B left named test records behind. In OpenEMR: delete TEST PatientOne and every test patient, their encounters, notes, orders and **fee-sheet charges**. In the app: delete the corresponding client records, visit logs, consent events and encounter_billing rows. A test encounter carrying a CPT code is one claim batch away from going out the door — this is a billing-integrity step, not tidying. Record what was purged and by whom.
+13. Re-check §8. Record the date and the two probe outputs. **Only then** does TEST DATA ONLY lift, by the owner's decision.
 
 ---
 
@@ -167,6 +168,10 @@ Bianca is today the only person with full access to both the app and OpenEMR. A 
 | §164.308(b) Business associate contracts | AWS, Google Workspace on file; Availity before claims | Signed copies | ☐ |
 | §164.310 Physical safeguards | AWS data-centre controls under the BAA; no PHI on Replit | Replit decommissioned (§4 step 10) | ☐ |
 | §164.308(a)(7) Contingency plan | Snapshots + restore drill (P6, §6) | Dated drill note | ☐ |
+| §164.308(a)(1)(ii)(A) **Risk analysis** | A documented assessment of risks to ePHI across the app, OpenEMR, Drive and the vendors. **Not yet written.** This is the single most-cited failure in OCR enforcement — more than encryption, more than audit | Dated risk-analysis document on file | ☐ **owner, before go-live** |
+| §164.308(a)(5)(i) **Security awareness training** | Workforce training + a signed acknowledgment. Two people, one afternoon | Dated training record per person | ☐ owner |
+| §164.308(a)(7)(ii)(C) **Emergency mode operation** | What a clinician does when the app is unreachable mid-visit — paper fallback and how it re-enters the record. Real for home-based care, not theoretical | Written one-page procedure | ☐ owner |
+| §164.312(a)(1) **Accepted risk — `?token=` downloads** | File-download links carry an auth token in the query string. It now names a revocable session, so a leaked URL dies with the session, but the token still lands in browser history and any intermediary log. **Accepted for go-live; review date Session 12** | Named in the risk analysis above | ⚠ accepted |
 | §164.308(a)(6) Security incident procedures · §164.316 retention (7 y) and disposal | **Deferred to Session 12 by owner decision 2026-09-09** | — | deferred |
 
 ---
@@ -189,3 +194,157 @@ Bianca is today the only person with full access to both the app and OpenEMR. A 
 - **Row-level tables for the hot collections** (users, shifts, messages) are a later refactor. The Postgres adapter keeps the blob-per-collection shape so ~800 call sites moved without a behaviour change; the audit log is the one collection that became a real table now, because a blob cannot be append-only.
 - **The `?token=` download pattern** (auth token in a query string for file downloads) remains; it now names a revocable session, so a leaked URL dies with the session, but the pattern itself is on the Session 12 list.
 - **Breach-notification procedure and the 7-year retention/disposal policy** are Session 12 (owner decision 2026-09-09).
+
+---
+
+## Appendix A — Standing up the app on AWS (satisfies P1 and P2)
+
+_Added 2026-09-10. This was the documentation gap: the OpenEMR guide covers OpenEMR, and §1 above treats the app's host and database as prerequisites without saying how to create them. This appendix closes it._
+
+**This is a second, independent stack alongside OpenEMR — not a change to it.** The OpenEMR box, its MySQL database, its security groups and the `emr` DNS record all stay exactly as they are. You are building the app's own set beside them. Same steps you already ran for OpenEMR, different names and a different database engine (the app needs Postgres; OpenEMR runs MySQL, so sharing is not an option).
+
+**Why not run the app on the OpenEMR box:** it is a t3.small already running OpenEMR plus MySQL. Adding a Node process makes both slower, and worse, couples their fate — a restart for one takes the other down with it. Bethel should not lose charting because the app needed a bounce.
+
+**Added cost:** roughly $30–35/month (EC2 ~$15, RDS ~$13, storage and Elastic IP a few dollars).
+
+### A1. Security groups (10 min)
+
+EC2 → Security Groups → Create, twice.
+
+- **`gfc-app-web`** — inbound: HTTPS 443 from Anywhere-IPv4; HTTP 80 from Anywhere-IPv4 (Let's Encrypt's HTTP-01 challenge needs it); SSH 22 from **My IP** only.
+- **`gfc-app-db`** — inbound: PostgreSQL 5432, source = the `gfc-app-web` group (start typing the name and select it). **Not Anywhere.** The database is never reachable from the internet.
+
+### A2. RDS Postgres (20 min + ~10 min build)
+
+RDS → Create database → **Standard create** → **PostgreSQL**, latest 16.x.
+
+- Templates: Production · Availability: **Single DB instance**
+- Identifier `gfc-app-db` · master username `appadmin` · password → password manager
+- Instance: **db.t4g.micro** · Storage 20 GB gp3, autoscaling on, max 100
+- Connectivity: do **not** connect to an EC2 compute resource · Public access **No** · security group **`gfc-app-db`**
+- Additional configuration: **leave "Initial database name" BLANK** (the app creates its own; pre-creating it makes the first boot fail) · backup retention 30 days · **backup window off clinic hours** · Encryption **enabled** · **Deletion protection on**
+
+Create, then start A3 while it builds. When it reads *Available*, copy the **endpoint** — that is the host part of `DATABASE_URL`.
+
+### A3. The app server (20 min)
+
+EC2 → Launch instance.
+
+- Name `gfc-app` · Ubuntu Server 24.04 LTS (64-bit x86) · **t3.small**
+- Key pair: reuse `gfc-emr-key` · Firewall: select existing → **`gfc-app-web`**
+- Storage 20 GB gp3 → Advanced → **Encrypted: Yes**
+
+Launch. Then **EC2 → Elastic IPs → Allocate → Associate** with `gfc-app`. Without this the address changes on every restart and the domain breaks.
+
+### A4. DNS (10 min + propagation)
+
+Wherever `godwinsfamilycarellc.com`'s DNS lives — the same place the `emr` record was added.
+
+- Type **A** · Host/Name **`app`** · Value: the Elastic IP · TTL: default (lower it to 300 the day before cutover)
+
+**Verify at dnschecker.org before continuing.** The certificate step in A5 fails if DNS has not propagated.
+
+### A5. Run the app (30 min)
+
+EC2 → Instances → `gfc-app` → **Connect** → **EC2 Instance Connect**. Browser terminal, same as the OpenEMR build. Nothing touches your Mac.
+
+**Install Docker:**
+```
+sudo apt-get update && sudo apt-get -y upgrade
+sudo apt-get -y install docker.io docker-compose-v2 git
+sudo systemctl enable --now docker
+sudo usermod -aG docker ubuntu && newgrp docker
+```
+
+**Get the code:**
+```
+sudo mkdir -p /opt/gfc && sudo chown ubuntu:ubuntu /opt/gfc && cd /opt/gfc
+git clone https://github.com/bume1/Godwins-Family-Care.git app
+cd app
+```
+(Private repo — use a deploy key or a fine-grained PAT with Contents:read.)
+
+**Write the Caddy config.** Caddy is the reverse proxy and it obtains and renews the Let's Encrypt certificate automatically. An AWS load balancer does the same job for about $16/month; at this scale Caddy is the better trade.
+```
+cat > /opt/gfc/app/Caddyfile <<'EOF'
+app.godwinsfamilycarellc.com {
+    reverse_proxy app:3000
+}
+EOF
+```
+
+**Write the compose file:**
+```
+cat > /opt/gfc/app/compose.yaml <<'EOF'
+services:
+  app:
+    build: .
+    restart: always
+    env_file: /opt/gfc/app.env
+    expose: ["3000"]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: always
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [app]
+
+volumes:
+  caddy_data:
+  caddy_config:
+EOF
+```
+
+**Create the environment file** (values per §3 above). Keep it outside the repo directory so a `git pull` can never touch it:
+```
+umask 077
+cat > /opt/gfc/app.env <<'EOF'
+NODE_ENV=production
+DATA_STORE=postgres
+DATABASE_URL=postgresql://appadmin:<PASSWORD>@<RDS-ENDPOINT>:5432/gfc?sslmode=verify-full
+JWT_SECRET=<64+ random chars>
+EMR_TOKEN_ENCRYPTION_KEY=<64 hex chars>
+OPENEMR_BASE_URL=https://emr.godwinsfamilycarellc.com
+OPENEMR_SITE=default
+OPENEMR_CLIENT_ID=<v4 client id>
+OPENEMR_CLIENT_SECRET=<v4 client secret>
+OPENEMR_REDIRECT_URI=https://app.godwinsfamilycarellc.com/oauth/callback
+EOF
+sudo chown root:root /opt/gfc/app.env && sudo chmod 600 /opt/gfc/app.env
+```
+
+Generate the two keys with:
+```
+node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"   # JWT_SECRET
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"          # EMR_TOKEN_ENCRYPTION_KEY
+```
+
+**Secrets note.** §2 item 10 specifies AWS Secrets Manager. A root-owned `600` file on an encrypted volume inside the boundary is a defensible interim and is what these commands do. Secrets Manager with an instance IAM role is the stronger posture and the intended end state — record this as a known deviation with a review date if you go live on the file.
+
+**Launch:**
+```
+cd /opt/gfc/app
+docker compose up -d --build
+docker compose logs -f
+```
+
+First build takes a few minutes. Watch for the boot line naming the adapter: `🗄️ Data store: postgres (production, inside the BAA boundary)`. **If it refuses to boot, read the message — every refusal names its own reason** (missing `DATABASE_URL`, `MFA_ENFORCE=false`, wrong adapter for production). That is the guard working, not a failure.
+
+Then confirm from your own browser:
+```
+https://app.godwinsfamilycarellc.com/healthz
+```
+Expected: `{"ok":true,"store":"postgres","production":true}` with a valid padlock and no warning.
+
+### A6. Operations
+
+- **Monthly patch** (alongside the OpenEMR routine): `cd /opt/gfc/app && git pull && docker compose up -d --build`
+- **Backups:** RDS automated backups cover the data. Add an EBS lifecycle snapshot policy for the `gfc-app` volume, daily, 14-day retention — same as the OpenEMR box.
+- **Cost alarm:** raise the existing budget from $80 to ~$140 to cover both stacks.
+- **CloudWatch:** create a log group for the app with a retention period. Logs are scrubbed, but keep them inside the account regardless.
+
+**When `/healthz` answers correctly, P1 and P2 are satisfied and the cutover sequence in §4 begins.**
