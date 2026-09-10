@@ -4,7 +4,7 @@
 
 ---
 
-### Version 3.1.0 - September 10, 2026
+### Version 3.8.0 - September 10, 2026
 
 #### New Features
 - documents can now travel both ways
