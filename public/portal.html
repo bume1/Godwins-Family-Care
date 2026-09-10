@@ -171,8 +171,10 @@
     @media (min-width:1024px){
       .gfc{padding:36px 24px;}
       .gfc-shell{min-height:calc(100vh - 72px);border-radius:18px;overflow:hidden;box-shadow:0 24px 60px -16px rgba(3,61,80,.25);}
-      /* Pre-unlock flows (gate, intake, record release): wider, still centered */
-      .gfc-shell:not(.desktopnav){max-width:600px;}
+      /* Pre-unlock flows (gate, intake, record release): wider, still centered.
+         Fluid rather than a fixed cap, so it scales with the actual window/device
+         width instead of stopping at one fixed size on every desktop screen. */
+      .gfc-shell:not(.desktopnav){width:88vw;max-width:820px;}
       /* Unlocked portal: side-nav + content grid */
       .gfc-shell.desktopnav{max-width:1080px;display:grid;grid-template-columns:232px minmax(0,1fr);grid-template-rows:auto 1fr;}
       .gfc-shell.desktopnav .gfc-hdr{grid-column:1 / -1;grid-row:1;position:static;padding:18px 28px;}
@@ -3918,7 +3920,7 @@
     // e-signature. A consent the server has marked un-presentable (today: a
     // financial agreement with no agreed rate in it) shows what is missing and
     // offers no signature control at all.
-    const ConsentCard = ({ def, status, meta, onSign, signedName }) => {
+    const ConsentCard = ({ def, status, meta, onSign, signedName, token }) => {
       const [name, setName] = useState((meta && meta.typedName) || signedName || '');
       const [ack, setAck] = useState(false);
       const [busy, setBusy] = useState(false);
@@ -3960,7 +3962,7 @@
           {signed && (
             <div className="micro" style={{ justifyContent: 'flex-start', marginTop: 8 }}>
               <i className="ti ti-download" />
-              <a href={`/api/gfc/consents/${def.type}.pdf`} target="_blank" rel="noreferrer">Download a copy of this document</a>
+              <a href="#" onClick={(e) => { e.preventDefault(); openPdfSecurely(`${API_URL}/api/gfc/consents/${def.type}.pdf`, token); }}>Download a copy of this document</a>
             </div>
           )}
           {blocked && (
@@ -4576,7 +4578,7 @@
                       <TextField label="Any restrictions on information sharing?" value={(form.roiFamilyDetail || {}).restrictions} onChange={v => setNested('roiFamilyDetail', 'restrictions', v)} placeholder="Optional" />
                     </div>
                   )}
-                  <ConsentCard def={def} status={consents[def.type]} meta={consentMeta[def.type]} signedName={form.primaryContact?.name} onSign={handleSignConsent} />
+                  <ConsentCard def={def} status={consents[def.type]} meta={consentMeta[def.type]} signedName={form.primaryContact?.name} onSign={handleSignConsent} token={token} />
                 </React.Fragment>
               ))}
             </React.Fragment>
@@ -4595,7 +4597,7 @@
               </div>
               <p className="sub"><b>{stageSignedCount(medicalDefs)}/{stageRequired(medicalDefs).length}</b> required signed on this page.</p>
               {medicalDefs.map(def => (
-                <ConsentCard key={def.type} def={def} status={consents[def.type]} meta={consentMeta[def.type]} signedName={form.primaryContact?.name} onSign={handleSignConsent} />
+                <ConsentCard key={def.type} def={def} status={consents[def.type]} meta={consentMeta[def.type]} signedName={form.primaryContact?.name} onSign={handleSignConsent} token={token} />
               ))}
             </React.Fragment>
           )}
