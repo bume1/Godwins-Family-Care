@@ -18,6 +18,7 @@ const emailTransport = require('./email');
 const roiRepo = require('./roiRepository');           // Transfer-of-Care ROI data model (Session 3.4)
 const legacySync = require('./legacySync');            // ROI parallel-run legacy sync (Session 3.4)
 const openemr = require('./openemr');                  // OpenEMR FHIR/REST front-end client (Session 4.1)
+const emrAuthModule = require('./emrAuth');            // per-user OpenEMR authorization_code + PKCE (Session 5.2)
 const clinicalRepo = require('./clinicalRepository');  // clinical workspace pure helpers (Session 4.1)
 // Session 4.3 — patient/family/POA clinical read rules + the case-manager read/write split
 const patientRead = require('./patientReadRepository');
@@ -69,6 +70,13 @@ console.log(`🗄️  Data store: ${db.adapter}${_storeSafety.production ? ' (pr
 // (consent_events / consent_provider_authorizations / consent_records_categories)
 // bound to the same db, keyed for a later RDS migration.
 const roiStore = roiRepo.createRepository(db);
+// Session 5.2: per-user OpenEMR tokens. openemr.js asks this provider for the
+// ACTING user's own access token on every call; there is no shared token.
+const emrAuth = emrAuthModule.createEmrAuth({ store: db, config });
+const emrTokenProvider = (actor) => emrAuth.getAccessTokenFor(actor && actor.id);
+emrTokenProvider.invalidate = (actor) => emrAuth.invalidateAccessToken(actor && actor.id);
+emrTokenProvider.statusFor = (actor) => emrAuth.statusFor(actor && actor.id);
+openemr.setTokenProvider(emrTokenProvider);
 const PORT = config.PORT;
 
 // HubSpot ticket polling timer reference
@@ -1933,9 +1941,9 @@ const authenticateToken = async (req, res, next) => {
         // OpenEMR provider (numeric pc_aid) this clinician's calendar maps to
         // (Session 4.2 scheduling; set by an admin in the user form)
         openEmrProviderId: freshUser.openEmrProviderId || null,
-        // Clinician NPI — stamped as attribution on every clinical write
-        // (Session 4.4 §4 interim: the EMR sees the service account, the
-        // chart must still say who did the work)
+        // Clinician NPI — heads every note and is the rendering provider on
+        // every charge (Session 4.4 §4; the EMR write itself is per-user
+        // since Session 5.2)
         npi: freshUser.npi || null,
         // Managers automatically get client portal admin access
         hasClientPortalAdminAccess: freshUser.hasClientPortalAdminAccess || isManager || false,
@@ -6572,13 +6580,62 @@ const clientToFhirPatient = (client) => {
 // just pulled?" question without shell access — a start time older than the
 // deploy means the process was never restarted.
 const SERVER_STARTED_AT = new Date().toISOString();
+// ============================================================
+// Session 5.2 — per-user OpenEMR sign-in (authorization_code + PKCE)
+//
+// GET  /api/emr/connect            → { url } the clinician's browser goes to
+// GET  /oauth/callback              ← OpenEMR redirects here; state binds it
+//                                     to the app user who started it
+// POST /api/emr/disconnect         → forget this user's tokens
+// (Under /api/emr, not /api/clinical: signing in to OpenEMR is not a clinical
+// mutation, and a read-only case manager must be able to do it too.)
+//
+// The callback carries no app JWT (it is a browser redirect from OpenEMR),
+// so the single-use `state` row IS the binding: it names the app user who
+// began the flow and the PKCE verifier only this server holds. The browser
+// never sees a token; it is redirected back to the workspace with a result
+// code only.
+// ============================================================
+app.get('/api/emr/connect', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const { url } = await emrAuth.beginAuthorization(req.user);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'emr_connect_started', 'openemr:oauth', req.user.id, { role: req.user.role });
+    res.json({ url });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message, code: err.code || 'EMR_CONNECT_FAILED', missing: err.missing });
+  }
+});
+app.get('/oauth/callback', async (req, res) => {
+  const back = (q) => res.redirect(`/clinical?${new URLSearchParams(q).toString()}`);
+  try {
+    const result = await emrAuth.completeAuthorization({
+      state: req.query.state, code: req.query.code, error: req.query.error, errorDescription: req.query.error_description
+    });
+    await logActivity(result.userId, null, 'emr_connected', 'openemr:oauth', result.userId,
+      { emrUsername: result.emrUser && result.emrUser.username, scopes: result.scopes.length, hasRefreshToken: result.hasRefreshToken });
+    return back({ emr: 'connected' });
+  } catch (err) {
+    console.error('OpenEMR callback failed:', err.code || err.message);
+    return back({ emr: 'error', reason: err.code || 'EMR_AUTH_FAILED' });
+  }
+});
+app.post('/api/emr/disconnect', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const had = await emrAuth.disconnect(req.user.id);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'emr_disconnected', 'openemr:oauth', req.user.id, { role: req.user.role, had });
+    res.json({ ok: true, disconnected: had });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not disconnect', code: 'EMR_DISCONNECT_FAILED' });
+  }
+});
+
 app.get('/api/clinical/status', authenticateToken, requireClinicalRead, async (req, res) => {
   const payer = await getPayerCredentialing();
   res.json({
     // 4.3: the API enforces the read/write split; this only tells the UI
     // which controls to render (case managers: read views, mutation UI hidden)
     access: { canRead: true, canWrite: patientRead.canClinicalWrite(req.user), role: req.user.role },
-    ...(await openemr.getStatus()), serverStartedAt: SERVER_STARTED_AT,
+    ...(await openemr.getStatus(req.user)), serverStartedAt: SERVER_STARTED_AT,
     // Session 4.4 deploy diagnostics: billing NPI (spec §2.5) + the caller's
     // own NPI for attribution (spec §4). Never hardcoded — both are config.
     billingNpiConfigured: !!payer.billing_npi_used,
@@ -6967,14 +7024,14 @@ app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireCli
 
     const built = clinicalRepo.buildHpWrites(req.body || {}, req.user.name);
     if (built.error) return res.status(400).json({ error: built.error, code: built.code });
-    // Session 4.4 attribution interim (spec §4): the encounter record and the
-    // note header name the acting clinician + NPI (the EMR sees only the
-    // gfc-app-api service account).
+    // The encounter record and the note header name the acting clinician +
+    // NPI (an author line). Since Session 5.2 the write itself runs under the
+    // clinician's own OpenEMR user, so OpenEMR attributes it natively too.
     const actor = actorFromReq(req);
     const plainReason = built.encounter.reason;
     built.encounter.reason = `${plainReason.slice(0, 180)} — ${clinicalRepo.actorStamp(actor)}`.slice(0, 250);
     built.encounter.billing_note = `Rendering clinician: ${clinicalRepo.actorStamp(actor)}. Coding is recorded by the GFC Care Platform (see the GFC structured note on this encounter).`.slice(0, 500);
-    built.soapNote.subjective = [clinicalRepo.buildAttributionHeader(actor, OPENEMR_SERVICE_ACCOUNT), built.soapNote.subjective].filter(Boolean).join('\n\n');
+    built.soapNote.subjective = [clinicalRepo.buildAttributionHeader(actor), built.soapNote.subjective].filter(Boolean).join('\n\n');
     const triage = (req.body && req.body.triage) || {};
     if (triage.track && !clinicalRepo.VALID_TRACKS.includes(triage.track)) {
       return res.status(400).json({ error: `Track must be one of ${clinicalRepo.VALID_TRACKS.join(', ')}` });
@@ -7848,9 +7905,10 @@ app.post('/api/clinical/appointments/:eid/no-show', authenticateToken, requireCl
 // silently stubbed: every EMR write that fails is returned as a warning and
 // the record flags it for a retry.
 //
-// Attribution interim (§4): every note header, encounter reason, billing
-// note and app-side record carries the acting clinician's name, credential
-// and NPI, because the EMR sees only the gfc-app-api service account.
+// Author line (§4): every note header, encounter reason, billing note and
+// app-side record carries the acting clinician's name, credential and NPI.
+// The write itself runs under the clinician's own OpenEMR user (Session 5.2),
+// so this is an author line, not an attribution workaround.
 //
 // Coding assist guardrail (§8): the system proposes, the clinician disposes.
 // T1 carry-forward pre-selects candidates in the UI only; T2 favorites only
@@ -7858,7 +7916,6 @@ app.post('/api/clinical/appointments/:eid/no-show', authenticateToken, requireCl
 // action, and there is no auto-submit.
 // ============================================================
 
-const OPENEMR_SERVICE_ACCOUNT = config.OPENEMR.API_USERNAME || 'gfc-app-api';
 const loadRows = async (name) => (await db.get(name)) || [];
 
 // Org-level billing identity — spec §2.5: the billing provider on every charge
@@ -8041,7 +8098,6 @@ app.get('/api/clinical/settings', authenticateToken, requireClinicalRead, async 
       serviceCodeFavorites: settings.serviceCodeFavorites, favoritesSource: settings.favoritesSource,
       me: { name: req.user.name, npi: req.user.npi || null, licenseLevel: req.user.licenseLevel || null, openEmrProviderId: req.user.openEmrProviderId || null },
       isAdmin: req.user.role === config.ROLES.ADMIN,
-      serviceAccount: OPENEMR_SERVICE_ACCOUNT
     });
   } catch (error) {
     console.error('Clinical settings read error:', error);
@@ -8212,7 +8268,7 @@ app.post('/api/clinical/patients/:clientId/encounters', authenticateToken, requi
     if (!client.openEmrPatientId) return res.status(409).json({ error: 'Link this client to an OpenEMR patient before documenting a visit', code: 'EMR_NOT_LINKED' });
     const body = req.body || {};
     const actor = actorFromReq(req);
-    const built = clinicalRepo.buildFollowUpWrites(body, actor, { serviceAccount: OPENEMR_SERVICE_ACCOUNT });
+    const built = clinicalRepo.buildFollowUpWrites(body, actor, {});
     if (built.error) return res.status(400).json({ error: built.error, code: built.code });
     // Validate coding BEFORE any EMR write so a bad code never leaves a half-documented visit
     const dx = clinicalRepo.buildEncounterDiagnoses(body.diagnoses || []);

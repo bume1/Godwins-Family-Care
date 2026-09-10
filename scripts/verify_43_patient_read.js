@@ -2,6 +2,9 @@
 // MOCK 7.0.4 because the sandbox could not reach the EMR during the upgrade.
 // These are the reads the patient Health tab actually makes.
 const o = require('../openemr.js');
+// Session 5.2: no password grant — the probe runs as a real OpenEMR user.
+// Obtain a token with `node scripts/emr_login.js`, then export OPENEMR_PROBE_ACCESS_TOKEN.
+require('./lib/probe_emr_auth').installProbeToken(o);
 const P = require('../patientReadRepository.js');
 const e=o.forActor({id:'e',name:'4.3 preflight',role:'admin'});
 const U='a284d5c2-670e-4a62-aa95-2d1aa629003c';

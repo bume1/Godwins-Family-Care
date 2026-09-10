@@ -712,11 +712,14 @@ const sanitizeServiceFavorites = (list) => {
   return out.slice(0, 60);
 };
 
-// ---- Attribution interim (spec §4) ----
-// Every EMR write authenticates as the gfc-app-api service account, so the
-// chart must carry the acting clinician itself: name, credential and NPI go
-// into the note header, the encounter reason/billing note, and every
-// app-side record. Session 5 replaces this with per-user OpenEMR auth.
+// ---- Author line (spec §4, interim RETIRED in Session 5.2) ----
+// Every EMR write now runs under the acting clinician's OWN OpenEMR user
+// (authorization_code, emrAuth.js), so OpenEMR attributes it natively and the
+// note no longer has to explain that "the EMR sees a service account". The
+// clinician's name, credential and NPI still head the note — a note names its
+// author, and the NPI is required content on a prescription — but it is an
+// author line, not an attribution workaround. The service-account clause and
+// the OPENEMR_SERVICE_ACCOUNT constant are gone (build-enforced).
 const actorStamp = (actor) => {
   const name = (actor && actor.name) || 'Unknown clinician';
   const cred = actor && actor.licenseLevel ? `, ${actor.licenseLevel}` : '';
@@ -730,9 +733,8 @@ const actorRecord = (actor) => ({
   npi: normalizeNpiValue(actor && actor.npi),
   openEmrProviderId: actor && actor.openEmrProviderId ? String(actor.openEmrProviderId) : null
 });
-const buildAttributionHeader = (actor, serviceAccount) =>
-  `[GFC CLINICIAN] ${actorStamp(actor)} — documented via the GFC Care Platform` +
-  (serviceAccount ? ` (EMR write attributed to service account "${serviceAccount}"; see spec §4)` : '');
+const buildAttributionHeader = (actor) =>
+  `[GFC CLINICIAN] ${actorStamp(actor)} — documented via the GFC Care Platform`;
 
 // ---- Follow-up visit (Scope A): shorter SOAP form → Encounter + note ----
 // Vitals are optional on a follow-up and, because the OpenEMR vitals REST
@@ -773,7 +775,7 @@ const buildFollowUpWrites = (form, actor, opts) => {
   if (/^\d+$/.test(String(form.billingFacilityId || ''))) {
     encounter.billing_facility = String(form.billingFacilityId);
   }
-  const header = buildAttributionHeader(actor, opts && opts.serviceAccount);
+  const header = buildAttributionHeader(actor);
   // OpenEMR's SOAP validator requires ≥2 characters per section it receives.
   const soapNote = {
     subjective: [header, soapSection(form.subjective, 8000)].filter(Boolean).join('\n\n'),

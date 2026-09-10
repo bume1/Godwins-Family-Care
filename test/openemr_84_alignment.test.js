@@ -62,8 +62,12 @@ test('getStatus reports the scope shortfall by capability, not just connectivity
     assert.match(g, new RegExp(key), `getStatus must surface ${key}`);
   }
   // The whole point: a narrowed token still connects, so `connected` alone
-  // cannot be the signal.
-  assert.match(g, /user\/billing\.write/, 'the billing-route check must name the 6B scopes');
+  // cannot be the signal. Since Session 5.2 the token is the USER's, so the
+  // capability check lives in emrAuth.statusFor and getStatus forwards it.
+  const emrAuthSrc = fs.readFileSync(path.join(root, 'emrAuth.js'), 'utf8');
+  const sf = emrAuthSrc.slice(emrAuthSrc.indexOf('const statusFor'));
+  assert.match(sf, /user\/billing\.write/, 'the billing-route check must name the 6B scopes');
+  assert.match(g, /tokenProvider\.statusFor\(actor\)/, 'getStatus reports the acting user\'s own grant');
 });
 
 test('the workspace renders a stale-client banner keyed to those capabilities', () => {
