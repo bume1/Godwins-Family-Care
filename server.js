@@ -5849,8 +5849,17 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
         signerName: (client.consentMeta && client.consentMeta[k] && client.consentMeta[k].typedName) || null,
         bodyVersion: (client.consentMeta && client.consentMeta[k] && client.consentMeta[k].version) || null,
         // Scope C — the client can now download the document they signed.
-        copyUrl: `/api/gfc/consents/${k}.pdf`
+        copyUrl: `/api/gfc/consents/${k}.pdf`,
+        // For a paper signature, the copy above is a RE-RENDERED PDF from the
+        // stored text and metadata — it never carried the actual scan. This is
+        // the original file staff uploaded, when Drive filing succeeded.
+        scanUrl: (client.consentMeta && client.consentMeta[k] && client.consentMeta[k].scanUrl) || null
       }));
+
+    // The paper intake packet, when this client was created through offline
+    // onboarding. Filenames were never kept, only the Drive links.
+    const offlinePacketFiles = (Array.isArray(client.offlinePacketDriveUrls) ? client.offlinePacketDriveUrls : [])
+      .map((url, i) => ({ id: `offline-packet-${i}`, title: `Intake packet scan ${i + 1}`, url }));
 
     // Documents shared with this client via the existing client-documents store (Drive-backed).
     const allDocs = (await db.get('client_documents')) || [];
@@ -5878,7 +5887,7 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
     const checklist = buildDocumentChecklist(client, uploads, requests);
 
     res.json({
-      signedConsents, documents: clientDocs, enrollmentPacket, faceSheet,
+      signedConsents, documents: clientDocs, enrollmentPacket, faceSheet, offlinePacketFiles,
       // Every executed consent in one download.
       consentPacketZip: hasSignedConsents ? { title: 'All signed consents', url: '/api/gfc/enrollment-packet.zip' } : null,
       checklist,
