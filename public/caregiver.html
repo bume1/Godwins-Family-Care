@@ -11,6 +11,10 @@
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+  <!-- Session 7's schedule component. Plain DOM, no second copy of React, no
+       build step. Loaded here so window.GFCCaregiverSchedule exists before the
+       app renders; ScheduleTab below mounts it. -->
+  <script src="/components/caregiver-schedule.js"></script>
   <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
   <style>
     /* Brand tokens — navy #033D50, gold #F5CD85, cream #FAF7F2,
@@ -44,6 +48,7 @@
     h2.pg{font-family:'Cormorant Garamond',serif;font-size:26px;color:var(--navy);font-weight:600;margin-bottom:2px}
     .sub{font-size:14px;color:var(--mut);margin-bottom:16px}
 
+    .shiftlink{display:flex;align-items:center;gap:7px;background:rgba(250,247,242,.14);border:1px solid rgba(250,247,242,.3);color:var(--cream);border-radius:9px;padding:10px 13px;font-size:15px;font-weight:600;font-family:inherit;cursor:pointer;width:100%;justify-content:center;margin-top:4px}
     .nav{display:flex;background:#fff;border-top:1px solid var(--line);position:sticky;bottom:0;z-index:20;padding-bottom:env(safe-area-inset-bottom)}
     .nav button{flex:1;background:none;border:none;text-align:center;padding:10px 0 12px;font-size:12px;color:#9a9388;cursor:pointer;font-family:inherit}
     .nav button i{display:block;font-size:21px;margin-bottom:3px}
@@ -226,36 +231,66 @@ const fmtDate = (iso) => {
 const titleize = (s) => String(s || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 
 // ============================================================================
-// MOUNT POINT — SCHEDULE (Session 7)
+// SCHEDULE — Session 7's component, mounted here (wiring session, 2026-09-10)
 // ============================================================================
-// id: "gfc-mount-schedule"
-// Session 7 replaces the contents of this div with its schedule component.
+// id: "gfc-mount-schedule" — the placeholder Session 6 left, now filled.
 //
-// CONTRACT
-//   props: {
-//     caregiverId  : string  — the caregiver's user id
-//     licenseLevel : 'sitter'|'pca'|'cna'|'lpn'
-//     clients      : [{ id, name, careTier, careTierLabel }]  — assigned only
-//     onShiftSelect: (shift) => void   — Home uses this to show today's shift
-//   }
-//   The caregiver's own id comes from GET /api/caregiver/me (`id`), which this
-//   page already fetches once at boot and holds in the `me` state. Do NOT read
-//   it from localStorage: the token is the authority and /me resolves it
-//   server-side against the fresh user record.
+// CONTRACT, as the component actually ships (public/components/
+// caregiver-schedule.js). The earlier comment here described props that were
+// never built — Session 6 and Session 7 wrote their halves in parallel and
+// nobody reconciled them until this session. The component is the authority:
 //
-//   Session 7 also owns the GPS clock-in ACTION. Home renders the clock-in
-//   STATE only (see ShiftCard) and leaves the control to this mount. When the
-//   schedule component lands, it should also supply the shift id that the
-//   visit-log POST passes through as `shiftId` — the visit-log route accepts
-//   and stores it, and invents nothing when it is absent.
+//   window.GFCCaregiverSchedule.mount('gfc-mount-schedule', {
+//     caregiverId : string   — from GET /api/caregiver/me (`id`)
+//     authToken   : string   — the bearer token this page already holds
+//     onChange    : fn       — optional; fires after any action that changes
+//                              the board, so the host can refresh alongside it
+//   })
+//   window.GFCCaregiverSchedule.unmount('gfc-mount-schedule')
+//
+// `caregiverId` is for display only. Every scheduling route resolves the
+// caregiver from the TOKEN server-side, so passing someone else's id still
+// reads your own rows. Never read the id from localStorage.
+//
+// The component owns the GPS clock-in action, its own sub-tabs (schedule,
+// offers, open pool, availability, time history) and its own styling. Home
+// renders the clock-in STATE only and sends the caregiver here for the
+// control — see ShiftCard.
+//
+// Unmount on teardown matters: the component keys its instance state by
+// element id, so leaving a stale instance behind would have the next mount
+// render into a dead node.
 // ============================================================================
-const ScheduleMount = () => (
-  <div id="gfc-mount-schedule" className="mount" aria-disabled="true">
-    <i className="ti ti-calendar-event"></i>
-    <b>Schedule</b>
-    <span>Coming with scheduling (Session 7).</span>
-  </div>
-);
+const ScheduleTab = ({ me, onChanged }) => {
+  useEffect(() => {
+    const lib = window.GFCCaregiverSchedule;
+    const token = getToken();
+    if (!lib || !token) return undefined;
+    lib.mount('gfc-mount-schedule', {
+      caregiverId: me && me.id,
+      authToken: token,
+      onChange: onChanged
+    });
+    return () => lib.unmount('gfc-mount-schedule');
+  }, [me, onChanged]);
+
+  if (!window.GFCCaregiverSchedule) {
+    return (
+      <div className="mount" aria-disabled="true">
+        <i className="ti ti-calendar-off"></i>
+        <b>Schedule unavailable</b>
+        <span>The schedule did not load. Pull down to refresh, or sign in again.</span>
+      </div>
+    );
+  }
+  return (
+    <div>
+      <h2 className="pg">Schedule</h2>
+      <p className="sub">Your shifts, the open pool, clock in and out, and your hours.</p>
+      <div id="gfc-mount-schedule"></div>
+    </div>
+  );
+};
 
 // ============================================================================
 // MOUNT POINT — MESSAGING (Session 9)
@@ -297,7 +332,7 @@ const MessagingEntry = () => (
 // ============================================================================
 // HOME
 // ============================================================================
-const ShiftCard = ({ clients }) => {
+const ShiftCard = ({ clients, onSchedule }) => {
   const first = clients[0];
   return (
     <div className="shift">
@@ -308,25 +343,25 @@ const ShiftCard = ({ clients }) => {
           ? (first.careTierLabel || first.careTier || 'Care visit')
           : 'An administrator assigns your clients.'}
       </div>
-      {/* Clock-in STATE only. Session 7 owns the action and fills the mount
-          below with the real GPS control. Rendering a dead button here would
-          be fake interactivity, so there is none. */}
-      <div style={{ fontSize: 14, color: 'rgba(250,247,242,.72)', display: 'flex', alignItems: 'center', gap: 6 }}>
+      {/* Clock-in STATE only. Session 7's component owns the ACTION, so this
+          sends the caregiver to it rather than duplicating the GPS control —
+          two clock-in buttons over one API is how a double clock-in happens. */}
+      <button className="shiftlink" onClick={onSchedule}>
         <i className="ti ti-current-location"></i>
-        Clock-in arrives with scheduling.
-      </div>
+        Clock in and see today's shift
+      </button>
     </div>
   );
 };
 
-const HomeTab = ({ me, clients, onVisitLog, onFlag, escalations }) => {
+const HomeTab = ({ me, clients, onVisitLog, onFlag, onSchedule, escalations }) => {
   const open = escalations.filter(e => e.status !== 'resolved');
   return (
     <div>
       <h2 className="pg">Hi, {String(me.name || '').split(' ')[0]}</h2>
       <p className="sub">{me.licenseLabel} · {clients.length} {clients.length === 1 ? 'client' : 'clients'}</p>
 
-      <ShiftCard clients={clients} />
+      <ShiftCard clients={clients} onSchedule={onSchedule} />
 
       <div className="grid2">
         <button className="qb o" onClick={onVisitLog}>
@@ -336,8 +371,6 @@ const HomeTab = ({ me, clients, onVisitLog, onFlag, escalations }) => {
           <i className="ti ti-alert-triangle"></i>Flag a concern
         </button>
       </div>
-
-      <ScheduleMount />
 
       {clients.length > 0 && (
         <div className="card">
@@ -865,9 +898,9 @@ const MoreTab = ({ visitLogs, queued }) => (
         ))}
     </div>
 
-    {/* Time history and the open-shift pool are Session 7's; both live behind
-        the schedule mount rather than getting placeholder cards of their own. */}
-    <ScheduleMount />
+    {/* Shifts, the open pool, availability and time history all live in the
+        Schedule tab now that Session 7's component is wired in. Duplicating
+        the mount here would put the same id in the DOM twice. */}
     <MessagingMount label="Messages" />
 
     <div className="card">
@@ -976,7 +1009,10 @@ const App = () => {
     content = <FlagConcern clients={clients} online={online} onBack={back} onDone={doneAndRefresh} />;
   } else if (tab === 'home') {
     content = <HomeTab me={me} clients={clients} escalations={escalations}
-      onVisitLog={() => setScreen('visitLog')} onFlag={() => setScreen('flag')} />;
+      onVisitLog={() => setScreen('visitLog')} onFlag={() => setScreen('flag')}
+      onSchedule={() => setTab('schedule')} />;
+  } else if (tab === 'schedule') {
+    content = <ScheduleTab me={me} onChanged={refresh} />;
   } else if (tab === 'feed') {
     content = <FeedTab items={feed} />;
   } else if (tab === 'clients') {
@@ -986,8 +1022,11 @@ const App = () => {
     content = <MoreTab visitLogs={visitLogs} queued={queued} />;
   }
 
+  // Schedule earns a tab rather than living under More: clocking in is the
+  // most frequent thing a caregiver does, and it should be one tap away.
   const TABS = [
     { id: 'home', icon: 'home', label: 'Home' },
+    { id: 'schedule', icon: 'calendar-event', label: 'Schedule' },
     { id: 'feed', icon: 'news', label: 'Feed' },
     { id: 'clients', icon: 'users', label: 'Clients' },
     { id: 'more', icon: 'dots', label: 'More' }
