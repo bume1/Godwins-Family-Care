@@ -869,8 +869,9 @@ for an uncoded allergen — but it is why the app's chart showed "Unknown" for e
 
 ## Defect 5 — documents go in and nothing comes back (8.4.0, probed 2026-09-09)
 
-**Status: WORKED AROUND in the Phase 6B patch 2026-09-10; the upstream defects
-themselves remain open and are the report to take to the OpenEMR project.**
+**Status: CLOSED on our side 2026-09-10 — the Phase 6B patch is deployed and
+verified live, 29/29, reading stored bytes back. The upstream defects themselves
+remain open and are the report to take to the OpenEMR project.**
 
 Every read shape was probed live against TEST PatientOne (pid 1) with the v4
 client (52 granted scopes), immediately after a successful upload:
@@ -931,7 +932,31 @@ Three things worth carrying forward:
   exactly that: a 404 means undeployed, and the chart then lists EMR rows as
   "Open in OpenEMR" rather than dropping them or claiming the patient has none.
 
-Deploy is a re-fetch then one rebuild (INSTALL.md, "Update 2026-09-10"); no
+**Deployed and verified 2026-09-10.** Every document on TEST PatientOne lists
+and opens — six pre-existing, back to 2026-08-18, plus one filed during the run
+— each read back with its stored bytes, matching size and name, and a real
+`%PDF-` header. A missing id reports NOT FOUND, not "undeployed". The upload
+route still resolves to upstream's.
+
+**It took three rebuilds, and every failure was ours. The three rules they
+bought, in the order they were learned:**
+
+1. **A `404` from `raw.githubusercontent.com` is not proof a file is missing.**
+   It negatively caches a path for minutes — `404` by branch name while the same
+   content answers `200` by commit sha. `deploy.sh` now fetches by sha.
+2. **A `401` from an unauthenticated request is not proof a route exists.**
+   OpenEMR authenticates before it routes; a made-up path answers `401` too. The
+   confirmation step now reads the files inside the running container.
+3. **A verified deploy is not proof the code runs.** Our override key wrote
+   `:id`; upstream's is `:did`. Two different keys, both live, upstream's matched
+   first — so every checksum passed on a patch that was doing nothing. **An
+   override only overrides if the key matches byte for byte.**
+
+All three are the ICD-10 lesson at a different layer: **verify the behaviour,
+not the artifact.**
+
+Deploy is now one command (`deploy.sh`), which fetches by sha, verifies the
+manifest before touching the box, rebuilds, and reads the container back; no
 schema, no scopes, no OAuth work. **Still open upstream, and worth reporting:**
 FHIR indexes no documents at all (`total: 0` instance-wide), the upload returns
 `true` rather than an id, and the stock read-by-id route runs a browser-session
