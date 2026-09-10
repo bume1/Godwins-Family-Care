@@ -991,6 +991,130 @@ async function generateConsentPDF(client, consentType, opts = {}) {
   });
 }
 
+
+// ============================================================
+// Client Information Face Sheet
+//
+// Five consents point at it — "recorded once on your Client Information Face
+// Sheet" — and it existed nowhere in the app. It is ASSEMBLED from the client
+// record and the intake rather than collected again, which is the entire reason
+// those consents stopped repeating the questions.
+//
+// Its own header and footer helpers rather than the consent PDF's: a face sheet
+// is a reference card, not an executed document, and it carries no signature
+// block, no version pin and no "this is your copy of what you signed" line.
+// ============================================================
+function faceSheetHeader(doc, title, subtitle) {
+  doc.rect(0, 0, doc.page.width, 92).fill(GFC_COLORS.navy);
+  doc.fillColor('#FFFFFF').font('Helvetica-Bold').fontSize(15).text(consentText.ORG.name, 50, 26);
+  doc.font('Helvetica').fontSize(8.5).fillColor(GFC_COLORS.gold)
+    .text(`${consentText.ORG.address}  ·  Tel ${consentText.ORG.phone}  ·  Fax ${consentText.ORG.fax}`, 50, 46);
+  doc.font('Helvetica-Bold').fontSize(12).fillColor('#FFFFFF').text(title, 50, 63, { width: 500 });
+  if (subtitle) doc.font('Helvetica').fontSize(8).fillColor(GFC_COLORS.gold).text(subtitle, 50, 79, { width: 500 });
+  doc.fillColor(GFC_COLORS.ink);
+  return 112;
+}
+
+// Stamp the footer on every page AFTER the content is laid out. Writing below
+// the bottom margin during the flow makes pdfkit add a page for the overflow,
+// which is what produced footer-only pages in the middle of the document.
+function faceSheetFooters(doc) {
+  const range = doc.bufferedPageRange();
+  for (let i = range.start; i < range.start + range.count; i++) {
+    doc.switchToPage(i);
+    const saved = doc.page.margins.bottom;
+    doc.page.margins.bottom = 0;
+    const y = doc.page.height - 42;
+    doc.moveTo(50, y).lineTo(doc.page.width - 50, y).lineWidth(0.5).strokeColor(GFC_COLORS.gold).stroke();
+    doc.font('Helvetica').fontSize(7.5).fillColor(GFC_COLORS.muted)
+      .text(`Care That Sees You. ${consentText.ORG.name} · ${consentText.ORG.phone}`, 50, y + 7, { width: 500, lineBreak: false });
+    if (range.count > 1) {
+      doc.text(`Page ${i - range.start + 1} of ${range.count}`, 50, y + 7, { width: 512, align: 'right', lineBreak: false });
+    }
+    doc.page.margins.bottom = saved;
+  }
+}
+
+async function generateFaceSheetPDF(client) {
+  const doc = new PDFDocument({ size: 'LETTER', margin: 50, bufferPages: true });
+  const chunks = [];
+  doc.on('data', c => chunks.push(c));
+  const done = new Promise(res => doc.on('end', res));
+
+  const c = client || {};
+  const i = c.intake || {};
+  const L = 50, W = doc.page.width - 100;
+  let y = faceSheetHeader(doc, 'Client Information Face Sheet',
+    `${c.name || 'Client'}${c.serviceLine ? '  ·  ' + String(c.serviceLine).toUpperCase() : ''}  ·  Generated ${new Date().toLocaleDateString('en-US')}`);
+
+  const section = (t) => {
+    if (y + 60 > doc.page.height - 60) { doc.addPage(); y = 56; }
+    doc.rect(L, y, W, 18).fill('#FAF7F2');
+    doc.font('Helvetica-Bold').fontSize(9).fillColor(GFC_COLORS.navy).text(t.toUpperCase(), L + 8, y + 5, { characterSpacing: 0.5 });
+    y += 26;
+  };
+  const pair = (label, value) => {
+    if (y + 26 > doc.page.height - 60) { doc.addPage(); y = 56; }
+    doc.font('Helvetica').fontSize(7).fillColor(GFC_COLORS.muted).text(String(label).toUpperCase(), L, y, { width: 150, characterSpacing: 0.3 });
+    doc.font('Helvetica').fontSize(9.5).fillColor(GFC_COLORS.ink).text(value == null || value === '' ? '\u2014' : String(value), L + 158, y, { width: W - 158 });
+    y = Math.max(doc.y, y + 13) + 5;
+  };
+  const listOf = (arr, fn) => (Array.isArray(arr) && arr.length) ? arr.map(fn).filter(Boolean).join('; ') : null;
+
+  section('Client');
+  pair('Full legal name', c.name || i.clientLegalName);
+  pair('Preferred name', c.preferredName || i.preferredName);
+  pair('Date of birth', i.dob || c.dob);
+  pair('Address', i.address || c.address);
+  pair('Phone', i.phone || c.phone);
+  pair('Service line', c.serviceLine);
+  pair('Care tier', c.careTier);
+
+  section('Emergency contacts and call order');
+  const pc = i.primaryContact || {};
+  pair('Primary contact', [pc.name, pc.relationship, pc.phone].filter(Boolean).join(' \u2014 '));
+  const ec = i.emergencyContact || {};
+  pair('Emergency contact', [ec.name, ec.relationship, ec.phone].filter(Boolean).join(' \u2014 '));
+  pair('Notify first in a crisis', i.crisisNotify);
+  pair('Authorized to call 911', i.auth911);
+
+  section('Medical');
+  const mt = i.medicalTeam || {};
+  pair('Primary care provider', mt.pcpName || i.pcpName);
+  pair('Preferred hospital', mt.preferredHospital || i.preferredHospital);
+  pair('Pharmacy', [mt.preferredPharmacy, mt.pharmacyPhone].filter(Boolean).join(' \u2014 '));
+  pair('Allergies', c.allergies || i.allergies);
+  pair('Diagnoses', listOf(i.diagnoses, d => (typeof d === 'string' ? d : d && (d.label || d.code))));
+  pair('Medications', listOf(i.medications, m => m && m.name ? [m.name, m.dose, m.frequency].filter(Boolean).join(' ') : null));
+
+  section('Advance directive and decision making');
+  const ad = i.advanceDirective || {};
+  pair('Advance directive', ad.status || i.advanceDirectiveStatus);
+  pair('Healthcare agent', ad.agentName || i.healthcareAgent);
+  pair('Power of attorney on file', ad.poaOnFile != null ? (ad.poaOnFile ? 'Yes' : 'No') : null);
+
+  section('Home and access');
+  pair('Entry instructions', i.entryInstructions);
+  pair('Pets in the home', i.pets);
+  pair('Home safety notes', listOf(c.homeSafetyFlags, f => f));
+
+  section('Payer');
+  const payer = c.payer || {};
+  pair('Payer type', payer.type);
+  pair('Plan', payer.planName);
+  pair('Billing contact', payer.billingContact);
+
+  y += 6;
+  doc.font('Helvetica-Oblique').fontSize(7.5).fillColor(GFC_COLORS.muted).text(
+    'Assembled from this client\u2019s record. Confirm it is correct rather than writing it again, and tell us whenever it changes.',
+    L, y, { width: W });
+
+  faceSheetFooters(doc);
+  doc.end();
+  await done;
+  return Buffer.concat(chunks);
+}
+
 // ============================================================
 // Transfer-of-Care Provider ROI PDF (Session 3.4)
 //
@@ -1387,6 +1511,7 @@ module.exports = {
   generateServiceReportWithAttachments,
   generateEnrollmentPacketPDF,
   generateConsentPDF,
+  generateFaceSheetPDF,
   renderConsentBody,
   generateProviderROIPDF,
   generateCarePlanPDF,

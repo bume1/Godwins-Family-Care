@@ -864,3 +864,75 @@ A FHIR `AllergyIntolerance` for a free-text allergen returns
 `text.div`. Any consumer reading `code` alone displays "Unknown". Not a defect — it is correct FHIR
 for an uncoded allergen — but it is why the app's chart showed "Unknown" for every allergy until
 2026-09-08. Seeding an RxNorm allergen list in OpenEMR would make these properly coded.
+
+---
+
+## Defect 5 — documents go in and nothing comes back (8.4.0, probed 2026-09-09)
+
+**Status: WORKED AROUND in the Phase 6B patch 2026-09-10; the upstream defects
+themselves remain open and are the report to take to the OpenEMR project.**
+
+Every read shape was probed live against TEST PatientOne (pid 1) with the v4
+client (52 granted scopes), immediately after a successful upload:
+
+| Request | Result |
+|---|---|
+| `POST /api/patient/1/document?path=/Medical Record` | **200**, response body is literally `true` — no id, no envelope |
+| `GET /fhir/DocumentReference?patient={uuid}` | 200, **`total: 0`** |
+| `GET /fhir/DocumentReference` (unfiltered) | 200, **`total: 0` instance-wide** |
+| `GET /api/patient/1/document` | 404, empty `text/html` body — no list route |
+| `GET /api/patient/1/documents` | 404 `Route not found` |
+| `GET /api/patient/1/document/{id}` | **500 `OpenEMR is potentially not secure because CSRF key is empty.`** |
+| `GET /api/patient/1/document/categories` | **500**, same CSRF message |
+| `GET /fhir/Binary` | 404 `Route not found` |
+
+Two distinct problems, and the second is the more interesting:
+
+1. **FHIR does not index documents at all.** `total: 0` unfiltered, on an
+   instance that has been accepting uploads since August. This is not an ACL
+   refusal — the Phase 8.6 grant already moved DocumentReference from 403 to
+   200 — it is an empty index.
+2. **The read-by-id route EXISTS and crashes.** `Route not found` (the 404 JSON)
+   and the CSRF 500 are different failures. A 500 naming a CSRF key means the
+   route resolved, the controller ran, and it called a session-token check that
+   has no business running on a bearer-token API request. That is an upstream
+   bug in the document controller, not a configuration this instance can fix.
+
+**The app no longer depends on any of it.** The chart's Documents panel is
+assembled from what the app holds (`clinicalRepository.buildChartDocumentIndex`)
+and merged with whatever FHIR returns — today nothing. An EMR-sourced row is
+listed and marked "Open in OpenEMR" rather than dropped, because dropping it
+would tell a clinician the document does not exist.
+
+**Closed on our side 2026-09-10 — the read routes are built.**
+`GfcDocumentRestController` in the Phase 6B patch adds
+`GET /api/patient/:pid/document` (list) and `GET /api/patient/:pid/document/:id`
+(bytes, base64 in the standard envelope), written against the `documents` /
+`categories_to_documents` tables the way the existing GFC routes wrap
+`BillingUtilities`, and reading bytes through OpenEMR's own `\Document` model so
+the storage backend is not reimplemented. This is also the only path that
+surfaces a document added **directly in OpenEMR** — a fax, an outside record —
+which the app can never know about on its own.
+
+Three things worth carrying forward:
+
+- **SINGULAR `/document`, not `/documents`.** OpenEMR derives the required OAuth
+  scope from the last non-parameter path segment, so a plural path would demand
+  `user/documents.read`: a sixth registered scope, a new OAuth client, and
+  another credential swap in the deployed environment. The singular path reuses
+  `user/document.read`, already requested by the app and already on the v4
+  client. **Nothing about the OAuth setup changes.**
+- **The read-by-id deliberately OVERRIDES upstream's**, which is the dead
+  CSRF-500 route above. It is the only upstream key this patch takes over; the
+  route map's default remains "upstream wins", and the override sits in its own
+  listed block. When upstream fixes that route, delete the block.
+- **A missing document answers 400, not 404**, so the app can tell "no such
+  document" from "the route is not deployed". The transport feature-detects on
+  exactly that: a 404 means undeployed, and the chart then lists EMR rows as
+  "Open in OpenEMR" rather than dropping them or claiming the patient has none.
+
+Deploy is a re-fetch then one rebuild (INSTALL.md, "Update 2026-09-10"); no
+schema, no scopes, no OAuth work. **Still open upstream, and worth reporting:**
+FHIR indexes no documents at all (`total: 0` instance-wide), the upload returns
+`true` rather than an id, and the stock read-by-id route runs a browser-session
+CSRF check on a bearer-token request.

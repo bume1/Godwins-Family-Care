@@ -108,6 +108,17 @@
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items })
       }),
       approve: (id) => authedFetch(`/api/gfc/admin/enrollment/${id}/approve`, { method: 'POST' }),
+      setServiceLine: (id, serviceLine) => authedFetch(`/api/gfc/admin/enrollment/${id}/service-line`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ serviceLine })
+      }),
+      documents: (id) => authedFetch(`/api/gfc/admin/enrollment/${id}/documents`),
+      requestDocuments: (id, items, dueAt) => authedFetch(`/api/gfc/admin/enrollment/${id}/documents/request`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items, dueAt })
+      }),
+      remindDocuments: (id) => authedFetch(`/api/gfc/admin/enrollment/${id}/documents/remind`, { method: 'POST' }),
+      reviewDocument: (id, uploadId, decision, reason) => authedFetch(`/api/gfc/admin/enrollment/${id}/documents/${uploadId}/review`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision, reason })
+      }),
       createOffline: (formData) => {
         const token = getToken();
         return fetch(`${API_URL}/api/gfc/admin/enrollment/offline`, {
@@ -298,6 +309,152 @@
       </div>
     );
 
+    // Open a stored client document through the app, never a Drive link: the
+    // Drive copy is not link-shared, and routing it here is what puts the read
+    // in the activity trail.
+    const openStoredDoc = async (path) => {
+      try {
+        const res = await fetch(`${API_URL}${path}`, { headers: { 'Authorization': `Bearer ${getToken()}` } });
+        if (!res.ok) { alert('That file could not be opened.'); return; }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        window.open(url, '_blank');
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+      } catch (e) { alert('That file could not be opened.'); }
+    };
+
+    // The staff half of the two-way exchange: what we asked for, what arrived,
+    // and whether it is usable. Same checklist the client sees, built by the
+    // same server function, so the two views cannot drift apart.
+    const DocumentExchange = ({ clientId }) => {
+      const [state, setState] = useState(null);
+      const [err, setErr] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [note, setNote] = useState('');
+      const [picked, setPicked] = useState([]);
+      const [asking, setAsking] = useState(false);
+      const [dueAt, setDueAt] = useState('');
+      const [customLabel, setCustomLabel] = useState('');
+
+      const load = useCallback(() => {
+        api.documents(clientId).then(setState).catch(e => setErr(e.message));
+      }, [clientId]);
+      useEffect(() => { load(); }, [load]);
+
+      const toggle = (kind) => setPicked(p => p.includes(kind) ? p.filter(k => k !== kind) : [...p, kind]);
+
+      const sendRequest = () => {
+        const items = picked.map(kind => ({ kind, note }));
+        if (customLabel.trim()) items.push({ label: customLabel.trim(), note });
+        if (!items.length) return;
+        setBusy(true); setErr('');
+        api.requestDocuments(clientId, items, dueAt || null)
+          .then(() => { setPicked([]); setNote(''); setCustomLabel(''); setDueAt(''); setAsking(false); load(); })
+          .catch(e => setErr(e.message)).finally(() => setBusy(false));
+      };
+
+      const remind = () => {
+        setBusy(true); setErr('');
+        api.remindDocuments(clientId).then(r => { alert(r.message); load(); })
+          .catch(e => setErr(e.message)).finally(() => setBusy(false));
+      };
+
+      const review = (uploadId, decision) => {
+        let reason = '';
+        if (decision === 'rejected') {
+          reason = window.prompt('Why can this not be used? The client sees this wording.') || '';
+          if (!reason.trim()) return;
+        }
+        setBusy(true); setErr('');
+        api.reviewDocument(clientId, uploadId, decision, reason).then(load)
+          .catch(e => setErr(e.message)).finally(() => setBusy(false));
+      };
+
+      if (!state) return <Section title="Documents from the client"><span className="text-sm text-gray-400">{err || 'Loading…'}</span></Section>;
+
+      const rows = state.checklist || [];
+      const outstanding = state.outstanding || 0;
+
+      return (
+        <Section title={`Documents from the client${outstanding ? ` — ${outstanding} outstanding` : ''}`}>
+          {err && <div className="bg-danger-50 text-danger-600 text-sm rounded-lg px-4 py-2 mb-3">{err}</div>}
+          <div className="flex gap-2 mb-3 flex-wrap">
+            <button className="btn btn-ghost" disabled={busy} onClick={() => setAsking(v => !v)}>Request documents</button>
+            <button className="btn btn-ghost" disabled={busy || !outstanding} onClick={remind}>Send reminder</button>
+          </div>
+
+          {asking && (
+            <div className="border border-gray-200 rounded-lg p-3 mb-4">
+              <div className="grid grid-cols-2 gap-2">
+                {(state.catalog || []).map(c => (
+                  <label key={c.kind} className="flex items-center gap-2 text-sm">
+                    <input type="checkbox" checked={picked.includes(c.kind)} onChange={() => toggle(c.kind)} />
+                    {c.label}
+                  </label>
+                ))}
+              </div>
+              <input className="input mt-3" placeholder="Something else — name it (optional)"
+                value={customLabel} onChange={e => setCustomLabel(e.target.value)} />
+              <input className="input mt-2" placeholder="Note to the client (optional)"
+                value={note} onChange={e => setNote(e.target.value)} />
+              <label className="block text-xs text-gray-500 mt-2">Needed by (optional)
+                <input type="date" className="input mt-1" value={dueAt} onChange={e => setDueAt(e.target.value)} />
+              </label>
+              <button className="btn btn-primary mt-3" disabled={busy || (!picked.length && !customLabel.trim())} onClick={sendRequest}>
+                Send request
+              </button>
+              <p className="text-xs text-gray-500 mt-2">
+                The client gets one email and the items appear on their portal checklist.
+              </p>
+            </div>
+          )}
+
+          <div className="space-y-3">
+            {rows.length === 0 && <span className="text-sm text-gray-400">Nothing on this client's list.</span>}
+            {rows.map(r => (
+              <div key={r.kind} className="border-b border-gray-100 pb-3 last:border-0 last:pb-0">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-medium">
+                      {r.label}{r.required && <span className="text-danger-500"> *</span>}
+                    </div>
+                    <div className="text-xs text-gray-500">
+                      {r.requestedAt
+                        ? `Requested by ${r.requestedBy} on ${new Date(r.requestedAt).toLocaleDateString()}`
+                        : r.required ? 'Standard requirement' : 'Optional'}
+                      {r.remindedAt && ` · last reminded ${new Date(r.remindedAt).toLocaleDateString()}`}
+                      {r.dueAt && ` · due ${new Date(r.dueAt).toLocaleDateString()}`}
+                    </div>
+                  </div>
+                  <span className={`badge ${r.status === 'accepted' ? 'bg-success-50 text-success-600' : r.status === 'received' ? 'bg-warning-50 text-warning-600' : 'bg-gray-100 text-gray-500'}`}>
+                    {r.status === 'accepted' ? 'Accepted' : r.status === 'received' ? 'Awaiting review' : 'Not received'}
+                  </span>
+                </div>
+                {(r.files || []).map(f => (
+                  <div key={f.id} className="flex items-center gap-2 mt-2 text-xs">
+                    <button className="text-primary-500 underline" onClick={() => openStoredDoc(`/api/gfc/admin/enrollment/${clientId}/documents/${f.id}/file`)}>
+                      {f.fileName}
+                    </button>
+                    <span className="text-gray-400">{new Date(f.uploadedAt).toLocaleDateString()}</span>
+                    {f.status === 'rejected'
+                      ? <span className="text-danger-500">Rejected — {f.rejectionReason}</span>
+                      : f.status === 'accepted'
+                        ? <span className="text-success-600">Accepted</span>
+                        : (
+                          <span className="flex gap-2">
+                            <button className="text-success-600" disabled={busy} onClick={() => review(f.id, 'accepted')}>Accept</button>
+                            <button className="text-danger-500" disabled={busy} onClick={() => review(f.id, 'rejected')}>Reject</button>
+                          </span>
+                        )}
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        </Section>
+      );
+    };
+
     // Print it, sign it at the visit, scan it back — the path that completes for
     // a homebound client. Until this existed, `signed_offline` could only be
     // written while CREATING a client, so an existing client's only route to a
@@ -424,6 +581,36 @@
         </div>
       );
     };
+    // One consent row. Main's markup, lifted into a component so the staged
+    // grouping below can reuse it instead of keeping a second, thinner copy.
+    const ConsentRow = ({ c, onDone }) => (
+        <div className="flex items-center justify-between text-sm border-b border-gray-100 pb-2 last:border-0 last:pb-0">
+          <div>
+            <div className="font-medium">
+              {c.title}{c.required && <span className="text-danger-500"> *</span>}
+              {c.signedCopyUrl && <a className="text-primary-500 underline ml-2 text-xs" href={c.signedCopyUrl} target="_blank" rel="noreferrer">copy</a>}
+            </div>
+            <div className="text-xs text-gray-400">
+              {c.laneLabel}
+              {c.signedAt && ` · ${new Date(c.signedAt).toLocaleString()}`}
+              {c.recordedAt && !c.signedAt && ` · recorded ${new Date(c.recordedAt).toLocaleString()}`}
+              {c.bodyVersion && ` · v${c.bodyVersion}`}
+            </div>
+            {c.bodySuperseded && <div className="text-xs text-warning-600">Signed against a superseded version of this document.</div>}
+            {/* Scope E1 — a consent claiming a signature it cannot evidence. */}
+            {!c.provenanceComplete && <div className="text-xs text-danger-600">No timestamp or IP on this record — review by hand.</div>}
+            {!c.presentable && <div className="text-xs text-danger-600">{c.blockedMessage}</div>}
+            {c.scanUrl && <div className="text-xs"><a className="text-primary-500 underline" href={c.scanUrl} target="_blank" rel="noreferrer">signed scan on file</a></div>}
+            {!c.satisfied && <RecordPaperSignature consent={c} onDone={onDone} />}
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {c.provenance && <span className="badge bg-gray-100 text-gray-500">{c.provenance === 'signed_offline' ? 'Paper' : 'In-app'}</span>}
+            <span className={`badge ${c.satisfied ? 'bg-success-50 text-success-600' : (c.status === 'na' || c.status === 'optin_recorded') ? 'bg-gray-100 text-gray-500' : 'bg-warning-50 text-warning-600'}`}>
+              {c.satisfied ? 'Signed' : c.status === 'na' ? 'N/A' : c.status === 'optin_recorded' ? 'Opted in' : 'Pending'}
+            </span>
+          </div>
+      </div>
+    );
 
     const DetailView = ({ clientId, user, onBack }) => {
       const [client, setClient] = useState(null);
@@ -433,6 +620,9 @@
       const [followUpItems, setFollowUpItems] = useState([]);
       const [showFollowUp, setShowFollowUp] = useState(false);
       const [approveErr, setApproveErr] = useState(null);
+      const [lineOpen, setLineOpen] = useState(false);
+      const [lineChoice, setLineChoice] = useState('');
+      const [lineResult, setLineResult] = useState(null);
 
       const load = useCallback(() => {
         setLoading(true); setErr('');
@@ -455,6 +645,15 @@
       };
       const toggleFollowUpItem = (key) => setFollowUpItems(items => items.includes(key) ? items.filter(i => i !== key) : [...items, key]);
 
+      const submitServiceLine = () => {
+        if (!lineChoice || lineChoice === client.serviceLineResolved) return;
+        setBusy(true); setLineResult(null);
+        api.setServiceLine(clientId, lineChoice)
+          .then(r => { setLineResult(r); setLineOpen(false); load(); })
+          .catch(e => setErr(e.message))
+          .finally(() => setBusy(false));
+      };
+
       if (loading) return <div className="text-center text-gray-400 py-16">Loading…</div>;
       if (err) return <div className="bg-danger-50 text-danger-600 text-sm rounded-lg px-4 py-3">{err}</div>;
       if (!client) return null;
@@ -475,6 +674,7 @@
             <div className="flex gap-2 flex-wrap">
               <button className="btn btn-ghost" disabled={busy} onClick={doReview}>Mark as reviewed</button>
               <button className="btn btn-ghost" disabled={busy} onClick={() => setShowFollowUp(v => !v)}>Request follow-up</button>
+              <button className="btn btn-ghost" disabled={busy} onClick={() => { setLineChoice(client.serviceLineResolved || 'PHC'); setLineOpen(v => !v); }}>Change service line</button>
               {isAdminRole(user) && <button className="btn btn-primary" disabled={busy} onClick={doApprove}>Approve enrollment</button>}
             </div>
           </div>
@@ -516,6 +716,56 @@
               <strong>Follow-up requested</strong> by {client.followUp.requestedByName} on {new Date(client.followUp.requestedAt).toLocaleDateString()}:
               <ul className="list-disc ml-5 mt-1">{(client.followUp.itemLabels || []).map(l => <li key={l}>{l}</li>)}</ul>
             </div>
+          )}
+
+          {lineResult && (
+            <div className="bg-success-50 text-success-600 text-sm rounded-lg px-4 py-3 mb-4">
+              <strong>{lineResult.message}</strong>
+              {!!(lineResult.added || []).length && (
+                <div className="mt-1">Now awaiting signature: {lineResult.added.length} document(s). The client sees them at their next portal login.</div>
+              )}
+              {!!(lineResult.retained || []).length && (
+                <div className="mt-1">Kept on file (signed, no longer required): {lineResult.retained.length} document(s).</div>
+              )}
+            </div>
+          )}
+
+          {lineOpen && (
+            <Section title="Change service line">
+              <p className="text-sm text-gray-500 mb-3">
+                The service line decides which paperwork this client owes. Home care and
+                medical care are signed at different visits, so adding medical care here
+                queues the medical packet rather than reopening what is already signed.
+                A document already signed is never unsigned by this change.
+              </p>
+              <div className="space-y-2">
+                {[
+                  { value: 'PHC',  label: 'Home care only (PHC)',  hint: 'Personal care services. Home-care packet only.' },
+                  { value: 'IHPC', label: 'Medical care only (IHPC)', hint: 'In-home primary care. Medical packet only.' },
+                  { value: 'BOTH', label: 'Both', hint: 'Home-care packet first, then the medical packet at a later visit.' }
+                ].map(opt => (
+                  <label key={opt.value} className={`flex items-start gap-2 text-sm border rounded-lg px-3 py-2 cursor-pointer ${lineChoice === opt.value ? 'border-primary-500 bg-primary-50' : 'border-gray-200'}`}>
+                    <input type="radio" name="serviceLine" className="mt-1" checked={lineChoice === opt.value} onChange={() => setLineChoice(opt.value)} />
+                    <span>
+                      <span className="font-medium">{opt.label}</span>
+                      {client.serviceLineResolved === opt.value && <span className="badge bg-gray-100 text-gray-500 ml-2">Current</span>}
+                      <span className="block text-xs text-gray-500">{opt.hint}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+              <button className="btn btn-primary mt-3" disabled={busy || !lineChoice || lineChoice === client.serviceLineResolved} onClick={submitServiceLine}>
+                Save service line
+              </button>
+              {!!(client.serviceLineHistory || []).length && (
+                <div className="text-xs text-gray-500 mt-4">
+                  <div className="font-medium text-gray-600 mb-1">History</div>
+                  {client.serviceLineHistory.slice().reverse().map((h, i) => (
+                    <div key={i}>{h.from} → {h.to} by {h.byName} on {new Date(h.at).toLocaleDateString()}</div>
+                  ))}
+                </div>
+              )}
+            </Section>
           )}
 
           {showFollowUp && (
@@ -569,36 +819,42 @@
                   : client.consents.filter(c => c.outstanding).map(c => `${c.title} (${c.laneLabel})`).join(' · ')}
                 {client.packetZipUrl && <span> · <a className="text-primary-500 underline" href={client.packetZipUrl}>download all signed copies</a></span>}
               </p>
-              <div className="space-y-2">
-                {client.consents.map(c => (
-                  <div key={c.type} className="flex items-center justify-between text-sm border-b border-gray-100 pb-2 last:border-0 last:pb-0">
-                    <div>
-                      <div className="font-medium">
-                        {c.title}{c.required && <span className="text-danger-500"> *</span>}
-                        {c.signedCopyUrl && <a className="text-primary-500 underline ml-2 text-xs" href={c.signedCopyUrl} target="_blank" rel="noreferrer">copy</a>}
+              {(() => {
+                // Grouped by the visit each packet is signed at, so a BOTH
+                // client's list reads as two packets and not one long column.
+                const groups = [
+                  { stage: 'homecare', label: 'Home-care packet — signed at intake' },
+                  { stage: 'medical',  label: 'Medical packet — signed when medical care is added' }
+                ];
+                const rows = client.consents || [];
+                const retained = rows.filter(c => c.retained);
+                return (
+                  <div className="space-y-4">
+                    {groups.map(g => {
+                      const items = rows.filter(c => !c.retained && (c.stage || 'homecare') === g.stage);
+                      if (!items.length) return null;
+                      const done = items.filter(c => c.satisfied || c.status === 'na').length;
+                      return (
+                        <div key={g.stage}>
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="text-xs uppercase tracking-wide text-gray-500 font-medium">{g.label}</div>
+                            <span className="badge bg-gray-100 text-gray-500">{done}/{items.length}</span>
+                          </div>
+                          <div className="space-y-2">{items.map(c => <ConsentRow key={c.type} c={c} onDone={load} />)}</div>
+                        </div>
+                      );
+                    })}
+                    {!!retained.length && (
+                      <div>
+                        <div className="text-xs uppercase tracking-wide text-gray-500 font-medium mb-2">
+                          Signed previously — no longer required on this service line
+                        </div>
+                        <div className="space-y-2">{retained.map(c => <ConsentRow key={c.type} c={c} onDone={load} />)}</div>
                       </div>
-                      <div className="text-xs text-gray-400">
-                        {c.laneLabel}
-                        {c.signedAt && ` · ${new Date(c.signedAt).toLocaleString()}`}
-                        {c.recordedAt && !c.signedAt && ` · recorded ${new Date(c.recordedAt).toLocaleString()}`}
-                        {c.bodyVersion && ` · v${c.bodyVersion}`}
-                      </div>
-                      {c.bodySuperseded && <div className="text-xs text-warning-600">Signed against a superseded version of this document.</div>}
-                      {/* Scope E1 — a consent claiming a signature it cannot evidence. */}
-                      {!c.provenanceComplete && <div className="text-xs text-danger-600">No timestamp or IP on this record — review by hand.</div>}
-                      {!c.presentable && <div className="text-xs text-danger-600">{c.blockedMessage}</div>}
-                      {c.scanUrl && <div className="text-xs"><a className="text-primary-500 underline" href={c.scanUrl} target="_blank" rel="noreferrer">signed scan on file</a></div>}
-                      {!c.satisfied && <RecordPaperSignature consent={c} onDone={load} />}
-                    </div>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      {c.provenance && <span className="badge bg-gray-100 text-gray-500">{c.provenance === 'signed_offline' ? 'Paper' : 'In-app'}</span>}
-                      <span className={`badge ${c.satisfied ? 'bg-success-50 text-success-600' : (c.status === 'na' || c.status === 'optin_recorded') ? 'bg-gray-100 text-gray-500' : 'bg-warning-50 text-warning-600'}`}>
-                        {c.satisfied ? 'Signed' : c.status === 'na' ? 'N/A' : c.status === 'optin_recorded' ? 'Opted in' : 'Pending'}
-                      </span>
-                    </div>
+                    )}
                   </div>
-                ))}
-              </div>
+                );
+              })()}
             </Section>
 
             {/* Scope B2 — the agreed rate the home care money documents print. */}
@@ -643,6 +899,10 @@
                 )}
               </div>
             </Section>
+
+            <div className="lg:col-span-2">
+              <DocumentExchange clientId={clientId} />
+            </div>
           </div>
         </div>
       );

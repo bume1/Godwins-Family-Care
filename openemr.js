@@ -686,11 +686,14 @@ const forActor = (actor) => {
     // stopped filing into OpenEMR (emrDocumented:false) with nothing surfaced.
     // The Drive copy is unaffected, which is why it went unnoticed.
     //
-    // Read-back is still UNPROVEN: the route answers a bare `true` rather than a
-    // document id, the standard-API document list 404s, and FHIR
-    // DocumentReference 403s at the ACL layer (org-level read grant pending).
-    // The patient-facing care-plan PDF therefore continues to be served from the
-    // Drive reference on client.carePlanDocs — never from OpenEMR Documents.
+    // The upload still answers a bare `true` rather than a document id, so
+    // nothing here can address what it just filed. READ-BACK now goes through
+    // the Phase 6B patch's document routes (see listPatientDocuments below);
+    // upstream's own reads are all dead on this instance — FHIR
+    // DocumentReference answers total 0, there is no list route, and read-by-id
+    // 500s on a CSRF check. The patient-facing care-plan PDF continues to be
+    // served from the Drive reference on client.carePlanDocs regardless: a
+    // patient's own copy should not depend on the EMR being reachable.
     async uploadPatientDocument(puuid, fileName, buffer, mimeType, categoryPath) {
       const pid = await resolvePid(puuid);
       const fd = new FormData(); // global (Node 18+)
@@ -700,6 +703,60 @@ const forActor = (actor) => {
       const data = expectOk(res, 'upload document');
       logEmrAccess(actor, 'write', 'document', puuid, { fileName });
       return unwrapApi(data);
+    },
+
+    // ── Document reads (Phase 6B patch, 8.4.0-p1) ────────────────────
+    //
+    // FEATURE-DETECTED, not assumed. These routes only exist once the patch is
+    // rebuilt and deployed, and the app has to work either side of that: before
+    // the deploy the chart shows what the app itself holds, after it the EMR's
+    // own documents join the list. A 404 here therefore means "not deployed
+    // yet", which is a different fact from "this patient has no documents", and
+    // the two are never collapsed — `supported:false` says which.
+    //
+    // Keyed by NUMERIC pid, like every other document route on this instance.
+    // SINGULAR `document`, not `documents`: OpenEMR derives the required OAuth
+    // scope from the last path segment, so a plural path would demand
+    // `user/documents.read` — a scope the server does not define, which would
+    // mean a new registered scope, a new OAuth client and another credential
+    // swap in the deployed environment. The singular path reuses
+    // `user/document.read`, already requested here and already on the v4 client.
+    async listPatientDocuments(puuid) {
+      const pid = await resolvePid(puuid);
+      const res = await rawRequest({ method: 'GET', url: apiUrl(`patient/${pid}/document`) });
+      if (res.status === 404) return { supported: false, rows: [] };
+      const data = expectOk(res, 'list patient documents');
+      logEmrAccess(actor, 'read', 'document', puuid, {});
+      return { supported: true, rows: unwrapApi(data) || [] };
+    },
+
+    // Returns { supported, doc } — never a bare null, because "the read is not
+    // deployed" and "this patient has no such document" are DIFFERENT FACTS and
+    // collapsing them is the mistake that cost this repo a week over the ICD-10
+    // load (an empty result read as a missing code set). The patch answers a
+    // missing document with a 400 validation message, so:
+    //   404 → the route does not exist  → supported:false
+    //   400 → the route ran, no such doc → supported:true, doc:null
+    // The bytes arrive base64 in the JSON envelope — deliberate, so the route
+    // uses the same response path as every other one rather than hand-managing
+    // headers for a binary stream.
+    async getPatientDocument(puuid, documentId) {
+      const pid = await resolvePid(puuid);
+      const res = await rawRequest({ method: 'GET', url: apiUrl(`patient/${pid}/document/${encodeURIComponent(documentId)}`) });
+      if (res.status === 404) return { supported: false, doc: null };
+      if (res.status === 400) return { supported: true, doc: null };
+      const data = expectOk(res, 'read patient document');
+      const row = (unwrapApi(data) || [])[0];
+      if (!row || !row.data) return { supported: true, doc: null };
+      logEmrAccess(actor, 'read', 'document', puuid, { documentId });
+      return {
+        supported: true,
+        doc: {
+          name: row.name || `document-${documentId}`,
+          mimetype: row.mimetype || 'application/octet-stream',
+          buffer: Buffer.from(row.data, 'base64')
+        }
+      };
     }
   };
 };

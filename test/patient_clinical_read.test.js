@@ -264,7 +264,19 @@ test('every patient / POA / case-manager read path writes to logActivity with ac
   const pdf = serverSrc.slice(serverSrc.indexOf("app.get('/api/gfc/clinical/care-plan.pdf'"), serverSrc.indexOf("app.put('/api/gfc/sharing'"));
   assert.match(pdf, /'patient_clinical_read'[\s\S]*resource: 'care_plan_pdf'/);
   assert.doesNotMatch(pdf, /getDocumentReferences|uploadPatientDocument/, 'the PDF is never read from OpenEMR Documents');
-  assert.match(pdf, /googledrive\.downloadFileBuffer/);
+  // The Drive read moved into buildCarePlanPdfForVersion, shared with the chart
+  // filing so the copy a client downloads and the copy in their chart cannot
+  // differ. The property is unchanged and now checked on both halves: the route
+  // delegates, and the thing it delegates to reads Drive and never OpenEMR.
+  assert.match(pdf, /buildCarePlanPdfForVersion\(client, version\)/);
+  const builder = serverSrc.slice(
+    serverSrc.indexOf('const buildCarePlanPdfForVersion ='),
+    serverSrc.indexOf('const fileCarePlanToChart =')
+  );
+  assert.ok(builder.length > 200, 'the shared care-plan PDF builder must exist');
+  assert.match(builder, /googledrive\.downloadFileBuffer/);
+  assert.doesNotMatch(builder, /getDocumentReferences|uploadPatientDocument|openemr\./,
+    'the builder must never source a patient-facing document from OpenEMR');
 });
 test('no patient-, family- or POA-facing route reaches an OpenEMR write method', () => {
   const start = serverSrc.indexOf('// PATIENT CLINICAL READ (Session 4.3)');

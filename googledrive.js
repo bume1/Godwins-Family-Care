@@ -441,6 +441,34 @@ async function uploadCarePlanFile(clientName, fileName, pdfBuffer) {
   }
 }
 
+// Client-supplied documents (the two-way exchange): a photo ID, an insurance
+// card, a POA document, records from a prior provider. One folder per client
+// under "GFC Client Documents". PHI — no anyone-link grant, and the caller
+// downloads through the app so access is authenticated and audited.
+async function uploadClientDocumentFile(clientName, fileName, fileBuffer, mimeType) {
+  const drive = await getDriveClient();
+  const { Readable } = require('stream');
+
+  const rootFolderId = await findOrCreateFolder('GFC Client Documents', null);
+  const clientFolderId = await findOrCreateFolder(clientName || 'Unnamed Client', rootFolderId);
+
+  const response = await drive.files.create({
+    resource: { name: fileName, parents: [clientFolderId] },
+    media: { mimeType: mimeType || 'application/octet-stream', body: Readable.from([fileBuffer]) },
+    fields: 'id, name, webViewLink, webContentLink'
+  });
+
+  await maybeGrantAnyoneLink(drive, response.data.id);
+
+  console.log(`✅ Uploaded client document to Google Drive: ${response.data.name}`);
+  return {
+    fileId: response.data.id,
+    fileName: response.data.name,
+    webViewLink: response.data.webViewLink,
+    webContentLink: response.data.webContentLink
+  };
+}
+
 // Read a stored file's bytes back (Session 4.3: the patient's signed
 // care-plan PDF is served from the Drive reference on client.carePlanDocs,
 // never from OpenEMR Documents). The service token reads it; the file stays
@@ -463,6 +491,7 @@ module.exports = {
   uploadProviderROIFile,
   uploadOfflinePacketFile,
   uploadCarePlanFile,
+  uploadClientDocumentFile,
   getSheetsClient,
   getDriveClient
 };

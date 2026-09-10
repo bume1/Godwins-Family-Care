@@ -36,25 +36,41 @@ const consentText = require('./public/consent-text');
 // relationship. A BOTH client signs two agreements. That is correct, not
 // duplication.
 //
+//
+// STAGE is a second axis, and it is not scope. Scope says which LANE a record
+// belongs to; stage says which VISIT it is signed at. The In-Home Primary Care
+// packet is headed "Packet 2 of 2 — do not sign this on the same visit as home
+// care", and a BOTH client was being shown all thirteen applicable records on
+// one screen in one sitting, which is exactly what that instruction forbids.
+// The sentence itself is paper workflow and is not ported; the protection
+// behind it is, as a staged flow. A single-line client has one stage and sees
+// no difference.
+//
+//   homecare — the Private Home Care packet, and the shared records it captures
+//   medical  — the In-Home Primary Care packet, signed as a separate, later step
+//
+// Every ihpc-scoped record is staged medical and nothing else is — that is the
+// invariant, and it is asserted rather than left to whoever edits this list.
+//
 // Each consent status is one of: signed | signed_offline | optin_recorded | pending | na.
 const GFC_CONSENT_DEFS = [
-  // Both service lines
-  { type: 'npp',                  scope: 'both', required: true },
-  { type: 'roiFamily',            scope: 'both', required: true },
-  { type: 'roiProvider',          scope: 'both', required: true },
-  { type: 'billOfRights',         scope: 'both', required: true },
-  { type: 'emergencyFinancial',   scope: 'both', required: true },
-  { type: 'crisisProtocol',       scope: 'both', required: true },
-  { type: 'monitoring',           scope: 'both', required: false, inactive: true },
+  // Both service lines — signed once, on the home care packet, carried forward
+  { type: 'npp',                  scope: 'both', stage: 'homecare', required: true },
+  { type: 'roiFamily',            scope: 'both', stage: 'homecare', required: true },
+  { type: 'roiProvider',          scope: 'both', stage: 'homecare', required: true },
+  { type: 'billOfRights',         scope: 'both', stage: 'homecare', required: true },
+  { type: 'emergencyFinancial',   scope: 'both', stage: 'homecare', required: true },
+  { type: 'crisisProtocol',       scope: 'both', stage: 'homecare', required: true },
+  { type: 'monitoring',           scope: 'both', stage: 'homecare', required: false, inactive: true },
   // Private Home Care only
-  { type: 'serviceAgreement',     scope: 'phc',  required: true },
-  { type: 'financialAgreement',   scope: 'phc',  required: true },
-  { type: 'pcaScope',             scope: 'phc',  required: true },
-  // In-Home Primary Care only
-  { type: 'ihpcServiceAgreement', scope: 'ihpc', required: true },
-  { type: 'consentToTreat',       scope: 'ihpc', required: true },
-  { type: 'assignmentOfBenefits', scope: 'ihpc', required: true },
-  { type: 'practiceNpp',          scope: 'ihpc', required: true }
+  { type: 'serviceAgreement',     scope: 'phc',  stage: 'homecare', required: true },
+  { type: 'financialAgreement',   scope: 'phc',  stage: 'homecare', required: true },
+  { type: 'pcaScope',             scope: 'phc',  stage: 'homecare', required: true },
+  // In-Home Primary Care only — the four documents of the medical packet
+  { type: 'ihpcServiceAgreement', scope: 'ihpc', stage: 'medical',  required: true },
+  { type: 'consentToTreat',       scope: 'ihpc', stage: 'medical',  required: true },
+  { type: 'assignmentOfBenefits', scope: 'ihpc', stage: 'medical',  required: true },
+  { type: 'practiceNpp',          scope: 'ihpc', stage: 'medical',  required: true }
 ].map(d => ({
   ...d,
   title: consentText.titleFor(d.type),
@@ -74,6 +90,17 @@ const consentDefsForServiceLine = (serviceLine) => {
 };
 const requiredConsentTypes = (serviceLine) =>
   consentDefsForServiceLine(serviceLine).filter(d => d.required).map(d => d.type);
+
+// The two signing stages, in the order they are signed.
+const CONSENT_STAGES = ['homecare', 'medical'];
+const consentDefsForStage = (serviceLine, stage) =>
+  consentDefsForServiceLine(serviceLine).filter(d => (d.stage || 'homecare') === stage);
+// A stage is complete when every required, active record in it is satisfied.
+// An inactive record can never be satisfied, so it must never hold a stage open.
+const stageComplete = (serviceLine, stage, consents) =>
+  consentDefsForStage(serviceLine, stage)
+    .filter(d => d.required && !d.inactive)
+    .every(d => isConsentSatisfied((consents || {})[d.type]));
 
 // Consent status vocabulary:
 //   signed          — e-signed in-app: typed name + acknowledgment + server
@@ -215,6 +242,9 @@ module.exports = {
   GFC_CONSENT_DEFS,
   consentDefsForServiceLine,
   requiredConsentTypes,
+  CONSENT_STAGES,
+  consentDefsForStage,
+  stageComplete,
   CONSENT_SATISFIED_STATUSES,
   CONSENT_STATUSES,
   isConsentSatisfied,

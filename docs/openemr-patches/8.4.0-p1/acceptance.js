@@ -1,5 +1,6 @@
-// Phase 6B acceptance. Proves the three patched routes end to end against a live
-// OpenEMR 8.4 instance carrying the 8.4.0-p1 image.
+// Phase 6B acceptance. Proves the patched routes end to end against a live
+// OpenEMR 8.4 instance carrying the 8.4.0-p1 image: the fee-sheet charge, the
+// procedure order, the code search, and the document read.
 //
 // It asserts STORED VALUES, not HTTP status codes. That distinction is the whole
 // point: every defect this caught returned 201 and looked correct in Billing
@@ -113,8 +114,62 @@ const ok = (cond, label, extra) => { cond ? (pass++, console.log(`  PASS  ${labe
 
   console.log('\n--- 6. code search ---');
   const cs = await api('GET', '/api/codes?type=ICD10&search=E11');
-  console.log(`  HTTP ${cs.status}  results: ${(cs.j?.data || []).length}  (ICD-10 not loaded yet, so 0 is expected)`);
+  const crows = cs.j?.data || [];
+  console.log(`  HTTP ${cs.status}  results: ${crows.length}  ${JSON.stringify(crows[0] || {}).slice(0, 200)}`);
   ok(cs.status === 200, 'code search returns 200');
+  // Assert on ROWS, never on the 200. The old controller also answered 200 and
+  // returned nothing, and that empty result was read as "the code set is not
+  // loaded" when it had been loaded all along.
+  ok(crows.length > 0, 'code search returns real rows (ICD-10-CM loaded 2026-09-08)', String(crows.length));
+  ok(crows.some(r => String(r.code || r.code_text || '').includes('E11')), 'and they match the search term',
+    JSON.stringify(crows.slice(0, 2)));
+  // The version probe that works with no code set at all: the old controller
+  // matched nothing for a bogus type, the new one refuses it by name.
+  const bogus = await api('GET', '/api/codes?type=ZZBOGUS&search=E11');
+  ok(!!bogus.j?.validationErrors, 'an unknown code type is refused by name, not answered with an empty list',
+    JSON.stringify(bogus.j).slice(0, 200));
+
+  console.log('\n--- 7. document read (the routes added 2026-09-10) ---');
+  // Upload first, so there is something to read back. Before these routes
+  // existed, OpenEMR took documents and gave none back: FHIR DocumentReference
+  // answered total 0 instance-wide, there was no list route, and read-by-id
+  // 500'd on a CSRF check. A clinician reviewing a chart saw nothing.
+  const pdf = Buffer.concat([Buffer.from('%PDF-1.4\n% GFC acceptance (TEST DATA)\n'), Buffer.alloc(1024, 32)]);
+  const fd = new FormData();
+  fd.append('document', new Blob([pdf], { type: 'application/pdf' }), `gfc-acceptance-${Date.now()}.pdf`);
+  const up = await fetch(`${base}/apis/${site}/api/patient/${pid}/document?path=${encodeURIComponent('/Medical Record')}`,
+    { method: 'POST', headers: { authorization: H.authorization }, body: fd });
+  console.log(`  upload HTTP ${up.status}`);
+  ok(up.status >= 200 && up.status < 300, 'document upload accepted');
+
+  const list = await api('GET', `/api/patient/${pid}/document`);
+  const drows = list.j?.data || [];
+  console.log(`  list HTTP ${list.status}  documents: ${drows.length}  ${JSON.stringify(drows[0] || {}).slice(0, 240)}`);
+  ok(list.status === 200, 'document list returns 200 (404 here means the patch is not deployed)');
+  ok(drows.length > 0, 'the document just filed is readable back', String(drows.length));
+  const newestDoc = drows[0] || {};
+  ok(!!newestDoc.name, 'the row carries a name', JSON.stringify(newestDoc));
+  // docdate and filed_at answer different questions; conflating them loses one.
+  ok('docdate' in newestDoc && 'filed_at' in newestDoc, 'and both dates, kept separate', JSON.stringify(Object.keys(newestDoc)));
+
+  const docRead = await api('GET', `/api/patient/${pid}/document/${newestDoc.id}`);
+  const drow = (docRead.j?.data || [])[0] || {};
+  console.log(`  read HTTP ${docRead.status}  ${JSON.stringify({ ...drow, data: drow.data ? `<${String(drow.data).length} b64 chars>` : null }).slice(0, 240)}`);
+  ok(docRead.status === 200, 'document read returns 200');
+  // STORED BYTES, not a status code. An unreadable file must be reported, never
+  // returned as an empty document — a zero-byte PDF looks like a blank record.
+  ok(!!drow.data, 'the read returns bytes', JSON.stringify(drow).slice(0, 200));
+  const back = Buffer.from(String(drow.data || ''), 'base64');
+  ok(back.length > 0 && back.subarray(0, 5).toString() === '%PDF-', 'and they are a real PDF', back.subarray(0, 12).toString());
+
+  // The pid is part of the lookup, not decoration.
+  const foreign = await api('GET', `/api/patient/${Number(pid) + 99999}/document/${newestDoc.id}`);
+  ok(!(foreign.j?.data || [])[0]?.data, "a document cannot be read out from under another patient's pid",
+    JSON.stringify(foreign.j).slice(0, 200));
+  // And a missing document is reported as missing, not as a missing feature.
+  const missing = await api('GET', `/api/patient/${pid}/document/999999999`);
+  ok(missing.status !== 404, 'a missing document is a 400 validation message, not a 404 (which would read as "route not deployed")',
+    `HTTP ${missing.status}`);
 
   console.log(`\n================  ${pass} passed, ${fail} failed  ================`);
   process.exit(fail ? 1 : 0);

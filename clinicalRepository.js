@@ -224,6 +224,149 @@ const summarizeDocument = (r) => ({
   contentType: ((((r.content || [])[0] || {}).attachment) || {}).contentType || null,
   url: ((((r.content || [])[0] || {}).attachment) || {}).url || null
 });
+
+// ── The chart's document list ───────────────────────────────────────
+//
+// THE PROBLEM THIS SOLVES: a clinician reviewing a chart could see no
+// documents at all. Probed live on 8.4 (2026-09-09):
+//
+//   POST patient/{pid}/document          → 200, body literally `true` (no id)
+//   FHIR DocumentReference?patient=...   → 200, total 0 — instance-wide, even
+//                                          immediately after a successful upload
+//   GET  patient/{pid}/document          → 404 (no list route exists)
+//   GET  patient/{pid}/document/{id}     → 500 "CSRF key is empty" — the route
+//                                          EXISTS and crashes on a session check
+//                                          that has no business running on an
+//                                          API request
+//
+// So OpenEMR takes documents and gives none back. Until the EMR side grows a
+// working read, the chart is assembled from what the APP knows it holds — and
+// that is most of the chart: every care plan, consent, record release and
+// client upload passed through this app on its way in.
+//
+// Each row says WHERE it can be read from, because that is a real difference a
+// clinician needs to see. `openable: false` on an EMR row is not a bug in this
+// list; it is the EMR read gap, named on the row rather than hidden by omitting
+// it. Omitting it would tell the clinician the document does not exist.
+const CHART_DOC_SOURCE = { APP: 'app', EMR: 'emr' };
+
+const buildChartDocumentIndex = (input) => {
+  const {
+    client = {}, emrRows = [], carePlanVersions = [], roiAuthorizations = [],
+    clientUploads = [], consentDefs = [], consentSatisfied = () => false
+  } = input || {};
+
+  const rows = [];
+  const consents = client.consents || {};
+  const consentMeta = client.consentMeta || {};
+  const planDocs = client.carePlanDocs || {};
+  const coSign = client.carePlanCoSign || {};
+
+  // 1. Care plans — every authored version, not only the current one. A prior
+  //    version is the plan that was in force at the time and a reviewer needs it.
+  for (const v of carePlanVersions) {
+    if (!v || v.client_id !== client.id) continue;
+    const signed = !!coSign[`v${v.version}`];
+    rows.push({
+      id: `careplan:${v.version}`,
+      title: `Plan of care — version ${v.version}${signed ? ' (signed)' : ' (awaiting co-signature)'}`,
+      category: 'Plan of care',
+      date: (coSign[`v${v.version}`] || {}).at || v.createdAt || null,
+      contentType: 'application/pdf',
+      source: CHART_DOC_SOURCE.APP,
+      openable: true,
+      // Whether this version also reached the OpenEMR chart, so a reviewer can
+      // tell the app's copy from the filed one.
+      inChart: !!((planDocs[`v${v.version}`] || {}).chartFiled || {}).emrDocumented
+    });
+  }
+
+  // 2. Executed consents — the enrollment paperwork, regenerated on demand at
+  //    the body version each was signed against.
+  for (const def of consentDefs) {
+    const status = consents[def.type];
+    if (!consentSatisfied(status)) continue;
+    const meta = consentMeta[def.type] || {};
+    rows.push({
+      id: `consent:${def.type}`,
+      title: def.title || def.type,
+      category: 'Consent',
+      date: meta.signedAt || null,
+      contentType: 'application/pdf',
+      source: CHART_DOC_SOURCE.APP,
+      openable: true,
+      inChart: false,
+      note: status === 'signed_offline' ? 'Signed on paper' : null
+    });
+  }
+
+  // 3. Transfer-of-Care record releases — one per prior provider.
+  for (const a of roiAuthorizations) {
+    if (!a || a.client_id !== client.id) continue;
+    rows.push({
+      id: `roi:${a.id}`,
+      title: `Record release — ${a.provider_name || 'prior provider'}`,
+      category: 'Record release',
+      date: a.created_at || a.signed_at || null,
+      contentType: 'application/pdf',
+      source: CHART_DOC_SOURCE.APP,
+      openable: !!a.generated_pdf_drive_url,
+      inChart: false,
+      note: a.generated_pdf_drive_url ? null : 'No stored copy on file'
+    });
+  }
+
+  // 4. What the client sent us — ID, insurance card, POA, records from a prior
+  //    provider. A rejected upload is deliberately excluded: it is not evidence
+  //    of anything and showing it in a chart would mislead.
+  for (const u of clientUploads) {
+    if (!u || u.clientId !== client.id || u.status === 'rejected') continue;
+    rows.push({
+      id: `upload:${u.id}`,
+      title: u.fileName || 'Client document',
+      category: 'From the client',
+      date: u.uploadedAt || null,
+      contentType: u.mimeType || null,
+      source: CHART_DOC_SOURCE.APP,
+      openable: true,
+      inChart: false,
+      note: u.status === 'accepted' ? null : 'Not yet reviewed'
+    });
+  }
+
+  // 5. What OpenEMR itself holds — a fax, an outside record, anything filed
+  //    straight into the chart. This is the half the app can never know about
+  //    on its own, and the only reason the Phase 6B document routes exist.
+  //
+  //    `emrReadSupported` is FEATURE-DETECTED by the transport, not assumed. It
+  //    is false until the patch is rebuilt and deployed, and the difference
+  //    matters: a row that cannot be opened because the read is not deployed is
+  //    a different fact from one that cannot be opened at all, and a clinician
+  //    who is told the wrong one goes looking for the wrong problem.
+  const emrReadSupported = !!input.emrReadSupported;
+  for (const r of emrRows) {
+    rows.push({
+      id: `emr:${r.id}`,
+      title: r.description || r.name || 'Document',
+      category: 'In the EMR',
+      date: r.date || null,
+      contentType: r.contentType || r.mimetype || null,
+      source: CHART_DOC_SOURCE.EMR,
+      openable: emrReadSupported,
+      inChart: true,
+      note: emrReadSupported ? null : 'Open in OpenEMR — the document read is not deployed on this instance yet'
+    });
+  }
+
+  // Newest first; undated rows last rather than sorted as epoch zero.
+  return rows.sort((a, b) => {
+    if (!a.date && !b.date) return 0;
+    if (!a.date) return 1;
+    if (!b.date) return -1;
+    return String(b.date).localeCompare(String(a.date));
+  });
+};
+
 const summarizeVitalObservation = (r) => {
   const val = r.valueQuantity
     ? `${r.valueQuantity.value}${r.valueQuantity.unit ? ' ' + r.valueQuantity.unit : ''}`
@@ -1444,6 +1587,8 @@ module.exports = {
   summarizeMedicationRequest,
   summarizeEncounter,
   summarizeDocument,
+  buildChartDocumentIndex,
+  CHART_DOC_SOURCE,
   summarizeVitalObservation,
   buildHpWrites,
   VALID_TRACKS,

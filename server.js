@@ -5350,7 +5350,7 @@ const emitSignedCarePlanPdf = async (clientId, version, clientSignature, actor) 
       console.error('Care-plan PDF Drive upload failed:', e.message);
     }
     let emrDocumented = false;
-    if (client.openEmrPatientId && openemr.isConfigured()) {
+    if (carePlanBelongsInChart(client) && openemr.isConfigured()) {
       try {
         await openemr.forActor(actor).uploadPatientDocument(
           client.openEmrPatientId, fileName, pdfBuffer, 'application/pdf', '/Medical Record');
@@ -5387,6 +5387,122 @@ const emitSignedCarePlanPdf = async (clientId, version, clientSignature, actor) 
   } catch (err) {
     console.error('Signed care-plan PDF emission failed:', err);
     return { stored: false, error: 'PDF emission failed' };
+  }
+};
+
+
+// ── The plan of care and the chart ──────────────────────────────────
+//
+// THE RULE (owner, 2026-09-09): the plan of care LIVES IN THE APP. It reaches
+// the patient's OpenEMR document record only when the client is a CLINICAL
+// patient — either they enrolled on the clinical line, or they were toggled
+// onto it later. A home-care-only client's plan is complete where it is and
+// belongs nowhere else; there is no second plan to build.
+//
+// "Toggled onto it later" is the half that did not work. The plan filed at
+// author time and again at co-sign, and both of those are long over by the time
+// a home care client adds medical care. Nothing ever re-filed. So a client who
+// became a patient in September had a chart with no plan of care in it, the app
+// reported nothing wrong, and the only way to notice was to open the chart and
+// look.
+//
+// Becoming a patient takes TWO steps and they can happen in either order — the
+// service line changes, and a clinician links the chart — so whichever lands
+// SECOND carries the backfill. Both call this.
+const carePlanBelongsInChart = (client) =>
+  isClinicalServiceLine(client && client.serviceLine) && !!(client && client.openEmrPatientId);
+
+// The signed PDF, from the Drive copy when there is one and rebuilt from the
+// app's own records when there is not. Both signatures live in
+// care_plan_versions + care_plan_cosign_events, so a missing Drive file costs
+// nothing. Shared with the patient-facing route so the document a client
+// downloads and the document filed into their chart cannot differ.
+const buildCarePlanPdfForVersion = async (client, version) => {
+  const docRef = ((client.carePlanDocs || {})[`v${version}`] || {}).signed || null;
+  if (docRef && docRef.driveFileId) {
+    try {
+      return { buffer: await googledrive.downloadFileBuffer(docRef.driveFileId), source: 'drive' };
+    } catch (e) {
+      console.error('Signed care-plan Drive download failed (regenerating from app records):', e.message);
+    }
+  }
+  const [versionRows, coSignEvents] = await Promise.all([
+    db.get('care_plan_versions'), db.get('care_plan_cosign_events')
+  ]);
+  const vrow = (versionRows || []).find(r => r && r.client_id === client.id && String(r.version) === String(version)) || null;
+  const ev = (coSignEvents || [])
+    .filter(e => e && e.client_id === client.id && String(e.version) === String(version))
+    .sort((a, b) => String(b.at).localeCompare(String(a.at)))[0] || null;
+  const buffer = await pdfGenerator.generateCarePlanPDF({
+    // A plan that has not been co-signed is filed as authored, not as signed —
+    // the chart must never carry a signature block the client has not signed.
+    state: ev ? 'signed' : 'authored',
+    patientName: client.name,
+    patientDOB: (client.intake && client.intake.dob) || client.dob || '',
+    careTier: normalizeCareTier(client.careTier),
+    careTierLabel: careTierLabelFor(client.careTier),
+    serviceLine: client.serviceLine || '',
+    plan: vrow ? vrow.plan : client.carePlan,
+    rnSignature: vrow ? vrow.rnSignature : null,
+    clientSignature: ev
+      ? { at: ev.at, name: ev.name, ipHash: ev.ipHash, signatureImage: ev.signatureImage, signerRole: ev.signerRole }
+      : { pending: true }
+  });
+  return { buffer, source: 'regenerated' };
+};
+
+// File the current plan of care into the patient's OpenEMR documents.
+//
+// Every outcome is NAMED and returned. A skip is a reason, never a silent
+// no-op: "this client is home care only" and "the upload failed" are different
+// facts and the caller has to be able to tell them apart. Idempotent — a
+// version already filed is not filed twice, so a re-toggle or a re-link cannot
+// stack duplicate PDFs in the chart.
+const fileCarePlanToChart = async (clientId, actor, trigger) => {
+  try {
+    const users = await getUsers();
+    const client = users.find(u => u.id === clientId);
+    if (!client) return { filed: false, reason: 'CLIENT_NOT_FOUND' };
+    if (!isClinicalServiceLine(client.serviceLine)) return { filed: false, reason: 'HOME_CARE_ONLY' };
+    if (!client.openEmrPatientId) return { filed: false, reason: 'NOT_LINKED' };
+    if (!openemr.isConfigured()) return { filed: false, reason: 'EMR_NOT_CONFIGURED' };
+
+    const version = resolveCarePlanVersion(client);
+    if (version == null) return { filed: false, reason: 'NO_CARE_PLAN' };
+
+    const existing = (client.carePlanDocs || {})[`v${version}`] || {};
+    if (existing.chartFiled && existing.chartFiled.emrDocumented) {
+      return { filed: false, reason: 'ALREADY_FILED', version };
+    }
+
+    const { buffer, source } = await buildCarePlanPdfForVersion(client, version);
+    const coSigned = !!(client.carePlanCoSign || {})[`v${version}`];
+    const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const lastName = (client.name || 'Client').trim().split(/\s+/).slice(-1)[0];
+    const fileName = `CarePlan_${lastName}_v${version}_${coSigned ? 'signed' : 'authored'}_${dateStr}.pdf`;
+
+    await openemr.forActor(actor).uploadPatientDocument(
+      client.openEmrPatientId, fileName, buffer, 'application/pdf', '/Medical Record');
+
+    const fresh = await getUsers();
+    const fidx = fresh.findIndex(u => u.id === clientId);
+    if (fidx !== -1) {
+      fresh[fidx].carePlanDocs = {
+        ...(fresh[fidx].carePlanDocs || {}),
+        [`v${version}`]: {
+          ...((fresh[fidx].carePlanDocs || {})[`v${version}`] || {}),
+          chartFiled: { fileName, emrDocumented: true, at: new Date().toISOString(), trigger, source, coSigned }
+        }
+      };
+      await db.set('users', fresh);
+      invalidateUsersCache();
+    }
+    await logActivity(actor.id, actor.name || actor.email, 'care_plan_filed_to_chart', 'care_plan', `v${version}`,
+      { clientId, trigger, fileName, coSigned, source });
+    return { filed: true, version, fileName, coSigned, source };
+  } catch (err) {
+    console.error('Care-plan chart filing failed:', err.message);
+    return { filed: false, reason: 'UPLOAD_FAILED', error: err.message };
   }
 };
 
@@ -5594,6 +5710,107 @@ app.post('/api/gfc/messages', authenticateToken, requireEnrolledClient, async (r
   }
 });
 
+// ============== TWO-WAY DOCUMENT EXCHANGE ==============
+// Everything above this line moves in one direction: the client signs, and the
+// app files a PDF. The other direction had no home at all. A photo ID, an
+// insurance card, a Power of Attorney, records from a prior hospital — all of it
+// arrived by text message, by email, or in an envelope, and the only record that
+// it arrived was somebody remembering.
+//
+// Two collections, both keyed for the RDS migration:
+//   client_document_uploads  — what the client sent us, one row per file
+//   client_document_requests — what we asked for, one row per ask
+// Neither ever holds bytes. The file lives in HIPAA Drive; the row holds the
+// pointer, and every read of it goes back through the app so it is authenticated
+// and audited.
+//
+// A document the client owes is derived, never stored: the registry below,
+// filtered to their service line, plus any one-off a staff member asked for.
+// That way a service-line change (see the service-line route) silently changes
+// the checklist too, instead of leaving a stale copy behind.
+const GFC_EXPECTED_DOCUMENTS = [
+  { kind: 'photoId',          scope: 'ALL',  required: true,
+    label: 'Photo ID',
+    hint: "A driver's licence, state ID or passport. A clear phone photo is fine." },
+  { kind: 'insuranceCard',    scope: 'ALL',  required: true,
+    label: 'Insurance card — front and back',
+    hint: 'Both sides. Upload them as two files if that is easier.' },
+  { kind: 'poaGuardianship',  scope: 'ALL',  required: false, conditional: 'poa',
+    label: 'Power of Attorney or guardianship papers',
+    hint: 'Only if someone is authorized to make decisions or sign on your behalf.' },
+  { kind: 'advanceDirective', scope: 'ALL',  required: false,
+    label: 'Advance directive or living will',
+    hint: 'If you have one. We keep a copy so your wishes are on file before they are needed.' },
+  { kind: 'dnrPolst',         scope: 'IHPC', required: false,
+    label: 'DNR or POLST form',
+    hint: 'If one has been completed and signed by a physician.' },
+  { kind: 'medicationList',   scope: 'IHPC', required: false,
+    label: 'Current medication list',
+    hint: 'A pharmacy printout or photos of the bottles — whichever you have.' },
+  { kind: 'priorRecords',     scope: 'IHPC', required: false,
+    label: 'Records from a prior provider',
+    hint: 'Discharge paperwork, recent labs, or a visit summary. We can also request these for you with a record release.' }
+];
+
+// Which of the registry applies to a service line. Mirrors consentDefsForServiceLine.
+const expectedDocumentsForServiceLine = (serviceLine) => {
+  const line = (serviceLine || 'PHC').toUpperCase();
+  return GFC_EXPECTED_DOCUMENTS.filter(d =>
+    d.scope === 'ALL' || (line === 'BOTH' ? true : d.scope === line));
+};
+
+// The checklist the client sees and staff track: the applicable registry entries
+// plus any staff-requested one-offs, each carrying its own upload history.
+//
+// A conditional entry (the POA document) only counts as owed once the condition
+// is true, so a client with no representative is never chased for a document
+// that does not exist for them.
+const buildDocumentChecklist = (client, uploads, requests) => {
+  const line = client.serviceLine || (client.intake && client.intake.serviceLine) || 'PHC';
+  const mine = (uploads || []).filter(u => u.clientId === client.id);
+  const asks = (requests || []).filter(r => r.clientId === client.id && r.status === 'open');
+  const hasPoa = !!(client.familyIsPoa || client.hasPoa ||
+    ((client.intake || {}).legalDocs || {}).powerOfAttorney ||
+    ((client.intake || {}).decisionMaker || {}).name);
+
+  const rowFor = (def, ask) => {
+    const files = mine.filter(u => u.kind === def.kind && u.status !== 'rejected');
+    const rejected = mine.filter(u => u.kind === def.kind && u.status === 'rejected');
+    const accepted = files.some(u => u.status === 'accepted');
+    return {
+      kind: def.kind,
+      label: (ask && ask.label) || def.label,
+      hint: (ask && ask.note) || def.hint || '',
+      required: !!def.required,
+      requested: !!ask,
+      requestedAt: ask ? ask.requestedAt : null,
+      requestedBy: ask ? ask.requestedByName : null,
+      dueAt: ask ? ask.dueAt || null : null,
+      remindedAt: ask && (ask.reminders || []).length
+        ? ask.reminders[ask.reminders.length - 1].at : null,
+      // received = we have it; accepted = a person has looked at it.
+      status: accepted ? 'accepted' : (files.length ? 'received' : 'missing'),
+      files: files.concat(rejected).map(u => ({
+        id: u.id, fileName: u.fileName, uploadedAt: u.uploadedAt,
+        status: u.status, rejectionReason: u.rejectionReason || null,
+        url: `/api/gfc/documents/uploads/${u.id}/file`
+      }))
+    };
+  };
+
+  const rows = expectedDocumentsForServiceLine(line)
+    .filter(d => d.conditional !== 'poa' || hasPoa || asks.some(a => a.kind === d.kind))
+    .map(d => rowFor(d, asks.find(a => a.kind === d.kind)));
+
+  // Staff one-offs that are not registry entries get their own rows.
+  const known = new Set(rows.map(r => r.kind));
+  for (const ask of asks) {
+    if (known.has(ask.kind)) continue;
+    rows.push(rowFor({ kind: ask.kind, label: ask.label, required: false }, ask));
+  }
+  return rows;
+};
+
 // /api/gfc/documents — gated. Signed consents + client documents (Drive-backed).
 app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (req, res) => {
   try {
@@ -5601,22 +5818,15 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
     if (!client) return res.status(404).json({ error: 'No client record on file' });
 
     const consents = client.consents || {};
-    const consentLabels = {
-      npp: 'HIPAA Notice of Privacy Practices',
-      roiFamily: 'Release of Information — Family',
-      roiProvider: 'Release of Information — Provider',
-      roiTransfer: 'Transfer-of-Care Authorization (record release)',
-      serviceAgreement: 'Service Agreement',
-      billOfRights: 'Patient Bill of Rights & Self-Determination',
-      emergencyFinancial: 'Emergency Treatment & Financial Responsibility',
-      crisisProtocol: 'Emergency & Crisis Protocol (911/988)',
-      monitoring: 'Continuous Monitoring Opt-In',
-      financialAgreement: 'Financial Agreement (PHC)',
-      pcaScope: 'Personal Care Aide Scope Acknowledgment (PHC)',
-      consentToTreat: 'Consent to Medical Treatment (IHPC)',
-      assignmentOfBenefits: 'Assignment of Benefits (IHPC)',
-      practiceNpp: 'Practice Notice of Privacy Practices (IHPC)'
-    };
+    // Titles come from GFC_CONSENT_DEFS, never a second copy. This map used to
+    // duplicate them and had already drifted: it carried the OLD
+    // emergencyFinancial title (the one that read as a consent to treat) and had
+    // no entry at all for ihpcServiceAgreement, so a signed IHPC agreement would
+    // have listed itself to the client as the raw key `ihpcServiceAgreement`.
+    // roiTransfer is not in the registry — it is the 3.4 per-provider record —
+    // so it keeps an explicit label here.
+    const consentLabels = GFC_CONSENT_DEFS.reduce((m, d) => { m[d.type] = d.title; return m; },
+      { roiTransfer: 'Transfer-of-Care Authorization (record release)' });
     const signedConsents = Object.keys(consents)
       .filter(k => consents[k] && consents[k] !== 'na')
       .map(k => ({
@@ -5644,14 +5854,173 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
       generated: true
     } : null;
 
+    const faceSheet = {
+      title: 'Client Information Face Sheet',
+      description: 'Your contacts, medical team, directive and access details on one page',
+      url: '/api/gfc/face-sheet.pdf',
+      generated: true
+    };
+    // The other direction: what we still need FROM them, and what they sent.
+    const uploads = (await db.get('client_document_uploads')) || [];
+    const requests = (await db.get('client_document_requests')) || [];
+    const checklist = buildDocumentChecklist(client, uploads, requests);
+
     res.json({
-      signedConsents, documents: clientDocs, enrollmentPacket,
+      signedConsents, documents: clientDocs, enrollmentPacket, faceSheet,
       // Every executed consent in one download.
-      consentPacketZip: hasSignedConsents ? { title: 'All signed consents', url: '/api/gfc/enrollment-packet.zip' } : null
+      consentPacketZip: hasSignedConsents ? { title: 'All signed consents', url: '/api/gfc/enrollment-packet.zip' } : null,
+      checklist,
+      outstanding: checklist.filter(r => r.status === 'missing' && (r.required || r.requested)).length,
+      serviceLine: client.serviceLine || 'PHC'
     });
   } catch (error) {
     console.error('GFC documents error:', error);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+
+// POST /api/gfc/documents/upload — the client sends us a file.
+//
+// requireClientForIntake, NOT requireEnrolledClient: most of what we need from a
+// client (ID, insurance card) is needed BEFORE enrollment is approved, and the
+// enrollment gate would lock a pending client out of the one screen that lets
+// them finish.
+//
+// A Drive failure FAILS the upload. The tempting alternative — record the row
+// and log the Drive error — produces a checklist that says "received" pointing
+// at a file that does not exist, which is the same silent-success trap this
+// codebase has now hit five times in OpenEMR. If we cannot store it, we did not
+// receive it.
+app.post('/api/gfc/documents/upload', authenticateToken, requireClientForIntake, async (req, res) => {
+  try {
+    const { kind, fileName, fileDataB64 } = req.body || {};
+    if (!kind || !fileName || !fileDataB64) {
+      return res.status(400).json({ error: 'kind, fileName and fileDataB64 are required' });
+    }
+    let buffer;
+    try {
+      const b64 = fileDataB64.startsWith('data:') ? fileDataB64.slice(fileDataB64.indexOf(',') + 1) : fileDataB64;
+      buffer = Buffer.from(b64, 'base64');
+    } catch (e) { return res.status(400).json({ error: 'File data is not valid base64.' }); }
+    if (!buffer.length) return res.status(400).json({ error: 'File is empty.' });
+    if (buffer.length > config.MAX_FILE_SIZE) return res.status(400).json({ error: 'File exceeds 10 MB limit.' });
+    const sniffedType = detectFileType(buffer);
+    if (!sniffedType) return res.status(400).json({ error: 'Only PDF, JPG, and PNG files are accepted.' });
+
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+
+    // The kind must be something we actually asked for — a registry entry for
+    // their line, or an open staff request. Otherwise an upload lands in a
+    // bucket no checklist reads and nobody ever sees it.
+    const requests = (await db.get('client_document_requests')) || [];
+    const known = new Set(GFC_EXPECTED_DOCUMENTS.map(d => d.kind));
+    const openAsk = requests.find(r => r.clientId === client.id && r.kind === kind && r.status === 'open');
+    if (!known.has(kind) && !openAsk) {
+      return res.status(400).json({ error: 'Unknown document type', code: 'DOCUMENT_KIND_UNKNOWN' });
+    }
+
+    const safeName = `${kind}_${(client.slug || client.id)}_${Date.now()}_${String(fileName).replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+    let stored;
+    try {
+      stored = await googledrive.uploadClientDocumentFile(client.name || 'Client', safeName, buffer, sniffedType);
+    } catch (e) {
+      console.error('[DOCUMENTS] Drive upload failed:', e.message);
+      return res.status(502).json({
+        error: 'We could not store that file. Please try again, or send it to your care team.',
+        code: 'DOCUMENT_STORAGE_UNAVAILABLE'
+      });
+    }
+
+    const row = {
+      id: `doc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      clientId: client.id,
+      kind,
+      fileName: String(fileName).slice(0, 200),
+      storedName: safeName,
+      mimeType: sniffedType,
+      size: buffer.length,
+      driveFileId: stored.fileId,
+      driveUrl: stored.webViewLink || stored.webContentLink || null,
+      uploadedAt: new Date().toISOString(),
+      uploadedById: req.user.id,
+      uploadedByName: req.user.name || req.user.email,
+      status: 'received'
+    };
+    const uploads = (await db.get('client_document_uploads')) || [];
+    await db.set('client_document_uploads', [...uploads, row]);
+
+    // An upload answers the ask. Staff can reopen it by rejecting the file.
+    if (openAsk) {
+      const i = requests.findIndex(r => r.id === openAsk.id);
+      requests[i] = { ...openAsk, status: 'fulfilled', fulfilledAt: row.uploadedAt, fulfilledBy: row.id };
+      await db.set('client_document_requests', requests);
+    }
+
+    await logActivity(req.user.id, row.uploadedByName, 'client_document_uploaded', 'document', client.id, { kind });
+    res.json({ message: 'Document received', document: { id: row.id, kind, fileName: row.fileName, uploadedAt: row.uploadedAt, status: row.status } });
+  } catch (error) {
+    console.error('GFC document upload error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/gfc/documents/uploads/:id/file — the client reads back their own file.
+// Scoped to their own record; the Drive copy is never link-shared.
+app.get('/api/gfc/documents/uploads/:id/file', authenticateToken, requireClientForIntake, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const uploads = (await db.get('client_document_uploads')) || [];
+    const row = uploads.find(u => u.id === req.params.id && u.clientId === client.id);
+    if (!row) return res.status(404).json({ error: 'Document not found' });
+    await serveStoredDocument(res, row, req.user);
+  } catch (error) {
+    console.error('GFC document download error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Shared by the client and staff download routes so one of them cannot quietly
+// grow a different content-type or a different failure mode.
+const serveStoredDocument = async (res, row, actor) => {
+  if (!row.driveFileId) {
+    return res.status(404).json({ error: 'The stored copy of this file is unavailable', code: 'DOCUMENT_FILE_MISSING' });
+  }
+  let buf;
+  try {
+    buf = await googledrive.downloadFileBuffer(row.driveFileId);
+  } catch (e) {
+    console.error('[DOCUMENTS] Drive read failed:', e.message);
+    return res.status(502).json({ error: 'The stored copy could not be read', code: 'DOCUMENT_READ_FAILED' });
+  }
+  if (actor) {
+    await logActivity(actor.id, actor.name || actor.email, 'client_document_read', 'document', row.clientId, { kind: row.kind, documentId: row.id });
+  }
+  res.setHeader('Content-Type', row.mimeType || 'application/octet-stream');
+  res.setHeader('Content-Disposition', `inline; filename="${(row.fileName || 'document').replace(/"/g, '')}"`);
+  res.send(buf);
+};
+
+// GET /api/gfc/face-sheet.pdf — the Client Information Face Sheet.
+//
+// Every consent points at it ("recorded once on your Client Information Face
+// Sheet") and it did not exist anywhere in the app. It is assembled from the
+// client record and intake rather than collected again, which is the entire
+// reason those consents stopped repeating the questions.
+app.get('/api/gfc/face-sheet.pdf', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const pdf = await pdfGenerator.generateFaceSheetPDF(client);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'face_sheet_downloaded', 'client', client.id, {});
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="face-sheet-${client.slug || client.id}.pdf"`);
+    res.send(pdf);
+  } catch (error) {
+    console.error('Face sheet PDF error:', error);
+    res.status(500).json({ error: 'Failed to generate the face sheet' });
   }
 });
 
@@ -6085,30 +6454,9 @@ app.get('/api/gfc/clinical/care-plan.pdf', authenticateToken, requireEnrolledCli
     const coSign = (client.carePlanCoSign || {})[`v${version}`];
     if (!coSign) return res.status(409).json({ error: 'The signed care plan is available once it has been co-signed.', code: 'CARE_PLAN_NOT_SIGNED' });
 
-    const doc = ((client.carePlanDocs || {})[`v${version}`] || {}).signed || null;
-    let buffer = null; let source = null;
-    if (doc && doc.driveFileId) {
-      try { buffer = await googledrive.downloadFileBuffer(doc.driveFileId); source = 'drive'; }
-      catch (e) { console.error('Signed care-plan Drive download failed (regenerating from app records):', e.message); }
-    }
-    if (!buffer) {
-      const [versionRows, coSignEvents] = await Promise.all([db.get('care_plan_versions'), db.get('care_plan_cosign_events')]);
-      const vrow = (versionRows || []).find(r => r && r.client_id === client.id && String(r.version) === String(version)) || null;
-      const ev = (coSignEvents || []).filter(e => e && e.client_id === client.id && String(e.version) === String(version)).sort((a, b) => String(b.at).localeCompare(String(a.at)))[0] || null;
-      const plan = vrow ? vrow.plan : client.carePlan;
-      buffer = await pdfGenerator.generateCarePlanPDF({
-        state: 'signed',
-        patientName: client.name,
-        patientDOB: (client.intake && client.intake.dob) || client.dob || '',
-        careTier: normalizeCareTier(client.careTier),
-        careTierLabel: careTierLabelFor(client.careTier),
-        serviceLine: client.serviceLine || '',
-        plan,
-        rnSignature: vrow ? vrow.rnSignature : null,
-        clientSignature: ev ? { at: ev.at, name: ev.name, ipHash: ev.ipHash, signatureImage: ev.signatureImage, signerRole: ev.signerRole } : { pending: true }
-      });
-      source = 'regenerated';
-    }
+    // Same builder the chart filing uses, so the copy a client downloads and the
+    // copy in their chart cannot say different things.
+    const { buffer, source } = await buildCarePlanPdfForVersion(client, version);
     await logActivity(req.user.id, req.user.name || req.user.email, 'patient_clinical_read', 'client', client.id,
       { role: req.user.role, audience, actingFor: acting.actingFor, patientId: client.openEmrPatientId || null, resource: 'care_plan_pdf', version, source });
     const lastName = (client.name || 'Client').trim().split(/\s+/).slice(-1)[0];
@@ -6329,7 +6677,13 @@ app.post('/api/clinical/patients/:clientId/link', authenticateToken, requireClin
       openEmrPatientId: puuid, created: !(req.body && req.body.openEmrPatientId),
       confirmedDistinct: !!(req.body && req.body.confirmDistinct && !req.body.openEmrPatientId)
     });
-    res.json({ message: 'Linked to OpenEMR', openEmrPatientId: puuid });
+    // The other of the two moments. A client already on the clinical line with a
+    // plan authored before anyone opened a chart for them: this is the first
+    // point at which that plan CAN reach the chart, and nothing downstream
+    // would ever try again.
+    const carePlanFiling = await fileCarePlanToChart(client.id, req.user, 'patient_linked');
+
+    res.json({ message: 'Linked to OpenEMR', openEmrPatientId: puuid, carePlanFiling });
   } catch (error) {
     console.error('Clinical link error:', error);
     const status = error.status === 404 ? 400 : 502;
@@ -6340,6 +6694,120 @@ app.post('/api/clinical/patients/:clientId/link', authenticateToken, requireClin
 // GET /api/clinical/patients/:clientId/chart — demographics from the app
 // record; problems, allergies, meds, encounters, care plan, documents, vitals
 // read LIVE from OpenEMR (never cached into the KV store).
+// GET /api/clinical/patients/:clientId/documents/:docId/file — open one
+// document from the chart's list.
+//
+// One route resolving a composite id (`careplan:2`, `consent:npp`,
+// `roi:<id>`, `upload:<id>`) rather than four parallel routes, so the chart
+// list and the thing it opens cannot drift apart: every row the index emits as
+// `openable` resolves here, and nothing else does.
+//
+// A clinician reading a chart is a clinical READ — case managers included. It
+// is deliberately not gated on enrollment staff: reviewing a chart is not an
+// enrollment task, and the documents are the patient's record.
+app.get('/api/clinical/patients/:clientId/documents/:docId/file', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+
+    const raw = String(req.params.docId || '');
+    const sep = raw.indexOf(':');
+    const kind = sep === -1 ? raw : raw.slice(0, sep);
+    const ref = sep === -1 ? '' : raw.slice(sep + 1);
+
+    const audit = (resource) => logActivity(req.user.id, req.user.name || req.user.email,
+      'chart_document_read', 'document', client.id, { role: req.user.role, docId: raw, resource });
+
+    if (kind === 'careplan') {
+      const version = ref;
+      const rows = (await db.get('care_plan_versions')) || [];
+      if (!rows.some(r => r && r.client_id === client.id && String(r.version) === String(version))) {
+        return res.status(404).json({ error: 'No such care-plan version', code: 'CARE_PLAN_VERSION_UNKNOWN' });
+      }
+      const { buffer, source } = await buildCarePlanPdfForVersion(client, version);
+      await audit(`care_plan_v${version}`);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('X-GFC-PDF-Source', source);
+      res.setHeader('Content-Disposition', `inline; filename="CarePlan_v${version}.pdf"`);
+      return res.send(buffer);
+    }
+
+    if (kind === 'consent') {
+      // Same renderer the client's own copy and the staff copy use — one
+      // document, three readers, so a chart cannot show a fourth version of it.
+      // It already refuses an unexecuted consent and one out of the client's
+      // lane, which is why neither check is repeated here.
+      const out = await renderConsentPdf(client, ref, { audience: 'staff' });
+      if (out.error) return res.status(out.status || 400).json({ error: out.error, code: out.code });
+      await audit(`consent_${ref}`);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="${out.fileName}"`);
+      return res.send(out.pdf);
+    }
+
+    if (kind === 'upload') {
+      const uploads = (await db.get('client_document_uploads')) || [];
+      const row = uploads.find(u => u.id === ref && u.clientId === client.id);
+      if (!row) return res.status(404).json({ error: 'Document not found' });
+      // A rejected upload is not part of the record and the index does not list
+      // it; refuse it here too rather than relying on the list to hide it.
+      if (row.status === 'rejected') return res.status(409).json({ error: 'That document was rejected', code: 'DOCUMENT_REJECTED' });
+      // Audited as a CHART read as well as the document-exchange read
+      // serveStoredDocument writes. Without this, "who opened documents from
+      // this chart" silently misses every client upload.
+      await audit(`upload_${ref}`);
+      return serveStoredDocument(res, row, req.user);
+    }
+
+    if (kind === 'roi') {
+      const events = ((await db.get('consent_events')) || []).filter(e => e && e.client_id === client.id);
+      let auth = null;
+      for (const e of events) {
+        const list = await roiStore.listProviderAuthorizations(e.id);
+        auth = (list || []).find(a => String(a.id) === ref) || auth;
+        if (auth) break;
+      }
+      if (!auth) return res.status(404).json({ error: 'Record release not found' });
+      if (!auth.generated_pdf_drive_url) {
+        return res.status(404).json({ error: 'No stored copy of that record release', code: 'ROI_PDF_MISSING' });
+      }
+      await audit(`roi_${ref}`);
+      // The Drive copy is the filed original; hand back the reference rather
+      // than re-rendering, so what a clinician reads is what the provider got.
+      return res.json({ url: auth.generated_pdf_drive_url, fileName: auth.generated_pdf_file_name || null });
+    }
+
+    if (kind === 'emr') {
+      if (!client.openEmrPatientId) return res.status(409).json({ error: 'Client is not linked to OpenEMR', code: 'CLINICAL_NOT_LINKED' });
+      const read = await openemr.forActor(req.user).getPatientDocument(client.openEmrPatientId, ref);
+      if (!read.supported) {
+        // Named, not silent. Before the Phase 6B document routes are deployed
+        // there is no read at all, and upstream's own reads are dead on this
+        // instance (FHIR total 0, no list route, read-by-id 500s on a CSRF
+        // check). Pretending the row is missing would be worse than saying so.
+        return res.status(501).json({
+          error: 'The document read is not deployed on this OpenEMR instance — open it in OpenEMR directly',
+          code: 'EMR_DOCUMENT_READ_UNAVAILABLE'
+        });
+      }
+      // The read ran and this patient has no such document. A DIFFERENT FACT
+      // from the one above, and reported as one.
+      if (!read.doc) {
+        return res.status(404).json({ error: 'No such document on this chart', code: 'EMR_DOCUMENT_NOT_FOUND' });
+      }
+      await audit(`emr_${ref}`);
+      res.setHeader('Content-Type', read.doc.mimetype);
+      res.setHeader('Content-Disposition', `inline; filename="${String(read.doc.name).replace(/"/g, '')}"`);
+      return res.send(read.doc.buffer);
+    }
+
+    return res.status(400).json({ error: 'Unknown document reference', code: 'DOCUMENT_REF_UNKNOWN' });
+  } catch (error) {
+    console.error('Chart document read error:', error);
+    res.status(500).json({ error: 'Failed to open that document' });
+  }
+});
+
 app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
@@ -6397,14 +6865,60 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
         error: r.reason && r.reason.message
       };
     };
+    // The chart's document list. OpenEMR takes documents and gives none back on
+    // this instance (probed live: FHIR DocumentReference total 0 instance-wide, no
+    // list route, and the read-by-id route 500s on a CSRF check), so the list is
+    // assembled from what the app holds and merged with whatever the EMR does
+    // return. Every row says where it can be read from.
+    const [planVersions, roiEvents, docUploads] = await Promise.all([
+      db.get('care_plan_versions'), db.get('consent_events'), db.get('client_document_uploads')
+    ]);
+
+    // The EMR's own documents, through the Phase 6B patch route. Feature-
+    // detected: before the patch is deployed this answers supported:false, and
+    // the chart falls back to the FHIR read — which returns nothing on this
+    // instance, so the EMR section is simply empty rather than wrong.
+    let emrDocs = { supported: false, rows: [] };
+    try {
+      emrDocs = await emr.listPatientDocuments(puuid);
+    } catch (e) {
+      console.error('Patched document list unavailable (falling back to FHIR):', e.message);
+    }
+    let roiAuths = [];
+    try {
+      const events = (roiEvents || []).filter(e => e && e.client_id === client.id);
+      const lists = await Promise.all(events.map(e => roiStore.listProviderAuthorizations(e.id)));
+      roiAuths = lists.flat().map(a => ({ ...a, client_id: client.id }));
+    } catch (e) { console.error('Chart ROI lookup failed (non-fatal):', e.message); }
+
+    const chartDocuments = clinicalRepo.buildChartDocumentIndex({
+      client,
+      emrReadSupported: !!emrDocs.supported,
+      emrRows: emrDocs.supported
+        ? emrDocs.rows.map(r => ({
+          id: r.id,
+          description: r.name || r.category || 'Document',
+          date: r.docdate || r.filed_at || null,
+          contentType: r.mimetype || null
+        }))
+        : (documents.status === 'fulfilled' ? documents.value.map(clinicalRepo.summarizeDocument) : []),
+      carePlanVersions: planVersions || [],
+      roiAuthorizations: roiAuths,
+      clientUploads: docUploads || [],
+      consentDefs: consentDefsForServiceLine(client.serviceLine),
+      consentSatisfied: isConsentSatisfied
+    });
+
     res.json({
       demographics, intakePrefill, linked: true,
+      chartDocuments,
       emr: {
         problems: take(problems, clinicalRepo.summarizeCondition),
         allergies: take(allergies, clinicalRepo.summarizeAllergy),
         medications: take(meds, clinicalRepo.summarizeMedicationRequest),
         encounters: take(encounters, clinicalRepo.summarizeEncounter),
         carePlans: take(carePlans, r => ({ id: r.id, status: r.status, description: r.description || null })),
+        // The EMR half, and then the whole list — see chartDocuments below.
         documents: take(documents, clinicalRepo.summarizeDocument),
         vitals: take(vitals, clinicalRepo.summarizeVitalObservation)
       }
@@ -6685,8 +7199,11 @@ app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requir
     // OpenEMR-side record: authored care-plan PDF into patient Documents
     // (structured CarePlan resources are read-only on OpenEMR 7.0.4 — the
     // approved transport deviation; the final signed PDF follows at co-sign).
+    // The plan lives in the app. It reaches the chart only for a CLINICAL
+    // patient — stated, not inferred from an EMR id happening to be present.
+    // A home care client's plan stops here, which is correct and not a failure.
     let emrDocumented = false;
-    if (client.openEmrPatientId && openemr.isConfigured()) {
+    if (carePlanBelongsInChart(users[idx]) && openemr.isConfigured()) {
       try {
         const pdfBuffer = await pdfGenerator.generateCarePlanPDF({
           state: 'authored',
@@ -9184,6 +9701,12 @@ const enrollmentDetail = (client) => {
   const consents = client.consents || {};
   const consentMeta = client.consentMeta || {};
   const defs = consentDefsForServiceLine(serviceLine);
+  // A consent that no longer applies but was signed is still a signed record.
+  // The service-line change keeps it; the detail view has to SHOW it, or the
+  // only trace of a real signature is a KV key nobody looks at.
+  const applicable = new Set(defs.map(d => d.type));
+  const retainedDefs = GFC_CONSENT_DEFS.filter(d =>
+    !applicable.has(d.type) && isConsentSatisfied(consents[d.type]));
   const comp = computeEnrollmentCompletion(client);
   return {
     ...enrollmentListRow(client),
@@ -9197,6 +9720,12 @@ const enrollmentDetail = (client) => {
       const pres = consentRender.presentability(consentText, d.type, client);
       return {
         type: d.type, title: d.title, required: !!d.required, inactive: !!d.inactive,
+        // Stage tells staff WHICH VISIT this record belongs to — the home-care
+        // packet is signed at intake, the medical packet only when the client is
+        // ready to add medical care. Distinct from scope, which says which lane
+        // a record belongs to. Grouping by stage is what makes a BOTH client's
+        // paperwork legible instead of one long column.
+        stage: d.stage || 'homecare',
         // Which lane this consent belongs to — Scope D's "which consents are
         // outstanding and which lane each belongs to".
         scope: d.scope,
@@ -9228,7 +9757,14 @@ const enrollmentDetail = (client) => {
         scanUrl: (meta && meta.scanUrl) || null,
         meta
       };
-    }),
+    }).concat(retainedDefs.map(d => ({
+      type: d.type, title: d.title, required: false, inactive: !!d.inactive,
+      stage: d.stage || 'homecare', scope: d.scope || 'ALL',
+      status: consents[d.type], satisfied: true, retained: true,
+      provenance: consents[d.type] === 'signed_offline' ? 'signed_offline' : 'in_app',
+      signedAt: (consentMeta[d.type] && consentMeta[d.type].signedAt) || null,
+      meta: consentMeta[d.type] || null
+    }))),
     medications: Array.isArray(intake.medications) ? intake.medications : (Array.isArray(client.medications) ? client.medications : []),
     payer: intake.payer || client.payer || null,
     careTeam: client.careTeam || null,
@@ -9324,6 +9860,275 @@ app.get('/api/gfc/admin/enrollment/:clientId', authenticateToken, requireEnrollm
     res.status(500).json({ error: 'Server error' });
   }
 });
+
+// PUT /api/gfc/admin/enrollment/:clientId/service-line — change an enrolled
+// client's service line, and with it which paperwork they owe.
+//
+// THE GAP THIS CLOSES: serviceLine could be set in exactly two places — the
+// client's own intake wizard, and the offline-onboarding form at the moment a
+// patient is created. No staff member could change it afterwards. That blocks
+// the workflow the paper packets are built around: the medical packet is signed
+// only when the client is ready to add medical care, i.e. the client starts on
+// home care and adds medical care later, at the kitchen table, with a staff
+// member present. Until now the only way that happened was the client going
+// back into their own wizard and flipping it themselves.
+//
+// The transition RULES are not restated here. `applyServiceLineChange` in
+// consentRegistry.js owns them — newly required consents written explicitly as
+// pending, a signature never erased by a lane change, the admin flag raised so
+// nobody finds out by accident — and it is already what the intake save calls.
+// This route is the staff-facing door onto the same function, which is the only
+// way the two paths cannot drift.
+app.put('/api/gfc/admin/enrollment/:clientId/service-line', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const idx = users.findIndex(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (idx === -1) return res.status(404).json({ error: 'Client not found' });
+
+    const line = String((req.body || {}).serviceLine || '').toUpperCase();
+    if (!['PHC', 'IHPC', 'BOTH'].includes(line)) {
+      return res.status(400).json({ error: 'Service line must be PHC, IHPC or BOTH', code: 'BAD_SERVICE_LINE' });
+    }
+    const client = users[idx];
+    const previous = String(client.serviceLine || 'PHC').toUpperCase();
+
+    const change = applyServiceLineChange(client, line, req.user);
+    if (!change) {
+      return res.status(200).json({ message: 'No change', serviceLine: line, newlyRequired: [], noLongerRequired: [] });
+    }
+
+    users[idx] = client;
+    await db.set('users', users);
+    invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'service_line_changed', 'enrollment', client.id,
+      { from: change.from, to: change.to, newlyRequired: change.newlyRequired, noLongerRequired: change.noLongerRequired });
+
+    // Adding medical care is one of the two moments a client becomes a patient.
+    // If the chart is already linked, their plan of care belongs in it now — and
+    // nothing else would ever put it there, because authoring and co-signing are
+    // both behind them. Reported either way; a filing failure never fails the
+    // line change, which has already been recorded.
+    const carePlanFiling = await fileCarePlanToChart(client.id, req.user, 'service_line_changed');
+
+    res.json({
+      message: change.newlyRequired.length
+        ? `Service line set to ${line}. ${change.newlyRequired.length} document(s) now await the client's signature.`
+        : `Service line set to ${line}.`,
+      serviceLine: line, previous,
+      newlyRequired: change.newlyRequired,
+      noLongerRequired: change.noLongerRequired,
+      carePlanFiling,
+      titles: change.newlyRequired.map(t => consentRegistry.titleForType(t)),
+      requiredConsents: requiredConsentTypes(line)
+    });
+  } catch (error) {
+    console.error('GFC service-line change error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Staff side of the document exchange ─────────────────────────────
+// The client's half of this is a checklist they can see. The staff half is the
+// half that makes it move: asking for a specific document, chasing it, and
+// saying whether what arrived is usable.
+
+// GET /api/gfc/admin/enrollment/:clientId/documents — the same checklist staff
+// track against, built from the same function the client's portal reads, so the
+// two views cannot disagree about what is outstanding.
+app.get('/api/gfc/admin/enrollment/:clientId/documents', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+    const uploads = (await db.get('client_document_uploads')) || [];
+    const requests = (await db.get('client_document_requests')) || [];
+    const checklist = buildDocumentChecklist(client, uploads, requests);
+    res.json({
+      checklist,
+      outstanding: checklist.filter(r => r.status === 'missing' && (r.required || r.requested)).length,
+      awaitingReview: checklist.filter(r => r.status === 'received').length,
+      catalog: expectedDocumentsForServiceLine(client.serviceLine)
+        .map(d => ({ kind: d.kind, label: d.label })),
+      clientEmail: client.email || null
+    });
+  } catch (error) {
+    console.error('GFC staff documents error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/gfc/admin/enrollment/:clientId/documents/request — ask for files.
+// Items may be registry kinds or a one-off (`custom:<slug>`), so a request for
+// something the registry never anticipated still lands in the same checklist
+// rather than in an email nobody can audit.
+app.post('/api/gfc/admin/enrollment/:clientId/documents/request', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+
+    const items = Array.isArray((req.body || {}).items) ? req.body.items : [];
+    if (!items.length) return res.status(400).json({ error: 'Select at least one document to request' });
+    const dueAt = (req.body || {}).dueAt || null;
+
+    const requests = (await db.get('client_document_requests')) || [];
+    const now = new Date().toISOString();
+    const created = [];
+    for (const raw of items) {
+      const item = raw || {};
+      const registry = GFC_EXPECTED_DOCUMENTS.find(d => d.kind === item.kind);
+      const kind = registry ? registry.kind
+        : `custom:${String(item.label || item.kind || 'document').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40)}`;
+      const label = (item.label || (registry && registry.label) || 'Document').slice(0, 120);
+      // Asking twice for the same thing is one ask, not two rows to chase.
+      if (requests.some(r => r.clientId === client.id && r.kind === kind && r.status === 'open')) continue;
+      const row = {
+        id: `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        clientId: client.id, kind, label,
+        note: String(item.note || '').slice(0, 500),
+        dueAt, status: 'open', requestedAt: now,
+        requestedById: req.user.id, requestedByName: req.user.name || req.user.email,
+        reminders: []
+      };
+      requests.push(row);
+      created.push(row);
+    }
+    if (!created.length) return res.status(200).json({ message: 'Already requested — nothing new to ask for', created: [] });
+    await db.set('client_document_requests', requests);
+
+    const notified = await notifyDocumentRequest(client, created, req.user, false);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'client_documents_requested', 'document', client.id,
+      { kinds: created.map(r => r.kind), notified });
+
+    res.json({
+      message: `Requested ${created.length} document(s)${notified ? ' and emailed the client' : ''}.`,
+      created: created.map(r => ({ id: r.id, kind: r.kind, label: r.label })), notified
+    });
+  } catch (error) {
+    console.error('GFC document request error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/gfc/admin/enrollment/:clientId/documents/remind — chase what is open.
+// Every reminder is stamped on the request, so "we asked three times" is a fact
+// on the record rather than a recollection.
+app.post('/api/gfc/admin/enrollment/:clientId/documents/remind', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+
+    const requests = (await db.get('client_document_requests')) || [];
+    const only = Array.isArray((req.body || {}).requestIds) ? new Set(req.body.requestIds) : null;
+    const open = requests.filter(r => r.clientId === client.id && r.status === 'open' && (!only || only.has(r.id)));
+    if (!open.length) return res.status(400).json({ error: 'Nothing outstanding to remind about', code: 'NOTHING_OUTSTANDING' });
+
+    const now = new Date().toISOString();
+    const stamp = { at: now, byId: req.user.id, byName: req.user.name || req.user.email, channel: 'email' };
+    for (const r of open) {
+      const i = requests.findIndex(x => x.id === r.id);
+      requests[i] = { ...r, reminders: [...(r.reminders || []), stamp] };
+    }
+    await db.set('client_document_requests', requests);
+
+    const notified = await notifyDocumentRequest(client, open, req.user, true);
+    await logActivity(req.user.id, stamp.byName, 'client_documents_reminded', 'document', client.id,
+      { kinds: open.map(r => r.kind), notified });
+
+    res.json({ message: notified ? `Reminder sent for ${open.length} document(s).` : `Reminder recorded for ${open.length} document(s) — no email address on file.`, notified, reminded: open.length });
+  } catch (error) {
+    console.error('GFC document reminder error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/gfc/admin/enrollment/:clientId/documents/:uploadId/review — accept
+// or reject what arrived. Rejecting REOPENS the ask, so an unreadable photo of
+// an insurance card goes back on the client's checklist with the reason on it
+// instead of sitting in a folder marked received.
+app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const decision = String((req.body || {}).decision || '').toLowerCase();
+    if (!['accepted', 'rejected'].includes(decision)) {
+      return res.status(400).json({ error: 'decision must be accepted or rejected', code: 'BAD_DECISION' });
+    }
+    const reason = String((req.body || {}).reason || '').slice(0, 500);
+    if (decision === 'rejected' && !reason) {
+      return res.status(400).json({ error: 'A rejected document needs a reason the client can act on', code: 'REASON_REQUIRED' });
+    }
+    const uploads = (await db.get('client_document_uploads')) || [];
+    const i = uploads.findIndex(u => u.id === req.params.uploadId && u.clientId === req.params.clientId);
+    if (i === -1) return res.status(404).json({ error: 'Document not found' });
+
+    const now = new Date().toISOString();
+    uploads[i] = {
+      ...uploads[i], status: decision, rejectionReason: decision === 'rejected' ? reason : null,
+      reviewedAt: now, reviewedById: req.user.id, reviewedByName: req.user.name || req.user.email
+    };
+    await db.set('client_document_uploads', uploads);
+
+    if (decision === 'rejected') {
+      const requests = (await db.get('client_document_requests')) || [];
+      const j = requests.findIndex(r => r.clientId === uploads[i].clientId && r.kind === uploads[i].kind && r.status === 'fulfilled');
+      if (j !== -1) requests[j] = { ...requests[j], status: 'open', note: reason, reopenedAt: now };
+      await db.set('client_document_requests', requests);
+    }
+
+    await logActivity(req.user.id, req.user.name || req.user.email, 'client_document_reviewed', 'document', uploads[i].clientId,
+      { kind: uploads[i].kind, decision });
+    res.json({ message: decision === 'accepted' ? 'Document accepted.' : 'Document rejected and re-requested.', status: decision });
+  } catch (error) {
+    console.error('GFC document review error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/gfc/admin/enrollment/:clientId/documents/:uploadId/file — staff read.
+app.get('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/file', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const uploads = (await db.get('client_document_uploads')) || [];
+    const row = uploads.find(u => u.id === req.params.uploadId && u.clientId === req.params.clientId);
+    if (!row) return res.status(404).json({ error: 'Document not found' });
+    await serveStoredDocument(res, row, req.user);
+  } catch (error) {
+    console.error('GFC staff document read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// The email that goes with a request or a reminder.
+//
+// The subject names no client and no document — the same rule the admin ROI
+// email follows. A subject line is the part that shows on a lock screen.
+const notifyDocumentRequest = async (client, rows, actor, isReminder) => {
+  if (!client.email) return false;
+  const list = rows.map(r => `  • ${r.label}${r.note ? ` — ${r.note}` : ''}`).join('\n');
+  const due = rows.find(r => r.dueAt);
+  const body = [
+    `Hello${client.name ? ` ${String(client.name).split(' ')[0]}` : ''},`,
+    '',
+    isReminder
+      ? 'A quick reminder — we are still waiting on the following for your file:'
+      : 'We need a few documents to finish setting up your care:',
+    '',
+    list,
+    '',
+    due ? `Please send these by ${new Date(due.dueAt).toLocaleDateString()}.` : '',
+    'You can upload them from the Documents tab in your client portal. A clear phone photo is fine for most of them.',
+    '',
+    'If you have questions, reply to this message and someone from our team will help.',
+    '',
+    'Godwins Family Care'
+  ].filter(l => l !== null).join('\n');
+  try {
+    await sendEmail(client.email, isReminder ? 'A reminder about your documents' : 'Documents needed for your file', body);
+    return true;
+  } catch (e) {
+    console.error('[DOCUMENTS] request email failed (non-fatal):', e.message);
+    return false;
+  }
+};
 
 // POST /api/gfc/admin/enrollment/:clientId/review — record a review (no state change).
 app.post('/api/gfc/admin/enrollment/:clientId/review', authenticateToken, requireEnrollmentStaff, async (req, res) => {

@@ -37,11 +37,12 @@ FROM openemr/openemr:8.4.0
 # The webroot inside the official image.
 ARG OE=/var/www/localhost/htdocs/openemr
 
-# 1. The controller. A new file: it overwrites nothing, and resolves through
+# 1. The controllers. New files: they overwrite nothing, and resolve through
 #    composer's PSR-4 map (OpenEMR\ => src/), which this build does not dump as
 #    classmap-authoritative, so no require_once or autoloader regeneration is
 #    needed.
 COPY src/RestControllers/GfcChargeRestController.php ${OE}/src/RestControllers/GfcChargeRestController.php
+COPY src/RestControllers/GfcDocumentRestController.php ${OE}/src/RestControllers/GfcDocumentRestController.php
 
 # 2. Move OpenEMR's route map aside, unmodified. Guarded so the build fails
 #    loudly if the file is not where we expect, or if it is already one of ours
@@ -85,6 +86,7 @@ RUN set -eu; \
 RUN set -eu; \
     cd ${OE}; \
     php -l src/RestControllers/GfcChargeRestController.php; \
+    php -l src/RestControllers/GfcDocumentRestController.php; \
     php -l apis/routes/_rest_routes_standard.inc.php; \
     php -l apis/routes/_rest_routes_gfc.inc.php; \
     php -l apis/routes/_rest_routes_standard.upstream.inc.php; \
@@ -92,6 +94,6 @@ RUN set -eu; \
     echo "GFC 8.4.0-p1: route map wrapped, scopes registered, all files syntax-clean."
 
 LABEL org.godwinsfamilycare.patch="8.4.0-p1" \
-      org.godwinsfamilycare.patch.routes="fee-sheet charge, procedure order, code search" \
+      org.godwinsfamilycare.patch.routes="fee-sheet charge, procedure order, code search, document read" \
       org.godwinsfamilycare.patch.method="route-map wrapper (no diff, no patch binary)" \
       org.godwinsfamilycare.patch.base="openemr/openemr:8.4.0"

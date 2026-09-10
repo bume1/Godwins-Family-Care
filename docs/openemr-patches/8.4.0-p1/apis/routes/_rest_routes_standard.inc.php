@@ -22,6 +22,14 @@
  * of our keys, theirs is canonical and ours is redundant, so array_merge puts
  * the upstream map second.
  *
+ * The GFC map returns TWO sets, because that default is right for almost
+ * everything and wrong for one case. `routes` are additions and lose a
+ * collision to upstream, as above. `overrides` are the listed exceptions and
+ * win one — today that is the document read, a route upstream ships broken on
+ * this instance (500 "CSRF key is empty", a session check running on a
+ * bearer-token request). Each override justifies itself in the GFC map, and
+ * there is exactly one reason to add another: upstream ships it dead.
+ *
  * @package   OpenEMR
  * @author    Godwins Family Care (GFC Care Platform)
  * @license   https://github.com/openemr/openemr/blob/master/LICENSE GNU General Public License 3
@@ -47,14 +55,28 @@ if (!is_file($gfcRouteMap)) {
 }
 
 $gfcStandardRoutes = include $gfcUpstreamRouteMap;
-$gfcAddedRoutes = include $gfcRouteMap;
+$gfcOurRoutes = include $gfcRouteMap;
 
-if (!is_array($gfcStandardRoutes) || !is_array($gfcAddedRoutes)) {
+if (!is_array($gfcStandardRoutes)) {
     throw new \RuntimeException(
-        'GFC patch 8.4.0-p1: a route map did not return an array. OpenEMR may have '
-        . 'changed how apis/routes/*.inc.php files are consumed; the patch needs '
-        . 'regenerating against this version.'
+        'GFC patch 8.4.0-p1: the upstream route map did not return an array. OpenEMR '
+        . 'may have changed how apis/routes/*.inc.php files are consumed; the patch '
+        . 'needs regenerating against this version.'
     );
 }
 
-return array_merge($gfcAddedRoutes, $gfcStandardRoutes);
+if (
+    !is_array($gfcOurRoutes)
+    || !isset($gfcOurRoutes['routes']) || !is_array($gfcOurRoutes['routes'])
+    || !isset($gfcOurRoutes['overrides']) || !is_array($gfcOurRoutes['overrides'])
+) {
+    throw new \RuntimeException(
+        'GFC patch 8.4.0-p1: the GFC route map must return '
+        . "['routes' => [...], 'overrides' => [...]]. The derived image was not built "
+        . 'correctly, or the two patch files are from different versions.'
+    );
+}
+
+// Additions first (upstream wins a collision), then the listed overrides last
+// (ours wins, deliberately, for the keys named in the GFC map).
+return array_merge($gfcOurRoutes['routes'], $gfcStandardRoutes, $gfcOurRoutes['overrides']);
