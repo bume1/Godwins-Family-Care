@@ -55,6 +55,8 @@
     .stat-card { background: linear-gradient(135deg, white 0%, #f8fafc 100%); border-left: 4px solid; transition: all 0.3s; }
     .stat-card:hover { transform: translateY(-2px); box-shadow: 0 10px 25px -5px rgba(0,0,0,0.1); }
   </style>
+  <script src="/session-guard.js"></script>
+  <script src="/mfa-step.js"></script>
 </head>
 <body class="bg-gray-50 min-h-screen">
   <div id="root"></div>
@@ -124,7 +126,7 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email, password })
-        }).then(handleResponse).then(result => {
+        }).then(handleResponse).then(r => window.GFC_MFA.complete(r)).then(result => {
           // Verify user has service portal access (super admin, vendor, or explicit access - NOT managers)
           if (result.user && result.user.role !== 'admin' && !result.user.hasServicePortalAccess && result.user.role !== 'vendor') {
             return { error: 'Access denied. You do not have Service Portal access.' };

@@ -135,6 +135,7 @@
     .back{background:none;border:none;color:var(--navy);font-size:15px;font-weight:600;cursor:pointer;padding:0 0 14px;font-family:inherit;display:flex;align-items:center;gap:6px}
     .err{background:#fdeeee;border:1px solid #e7bcbc;color:#7d2020;border-radius:9px;padding:12px;font-size:15px;margin-bottom:13px}
   </style>
+  <script src="/session-guard.js"></script>
 </head>
 <body>
   <div id="root"></div>
@@ -972,7 +973,7 @@ const App = () => {
     api('/api/caregiver/me')
       .then(m => { setMe(m); return refresh(); })
       .catch(err => {
-        if (err.status === 401 || err.code === 'AUTH_EXPIRED' || err.code === 'AUTH_INVALID') {
+        if (err.status === 401 || ['AUTH_EXPIRED', 'AUTH_INVALID', 'AUTH_IDLE', 'AUTH_REVOKED', 'AUTH_MFA_REQUIRED'].includes(err.code)) {
           window.location.replace('/login'); return;
         }
         setFatal(err.message);

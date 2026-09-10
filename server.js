@@ -19,6 +19,9 @@ const roiRepo = require('./roiRepository');           // Transfer-of-Care ROI da
 const legacySync = require('./legacySync');            // ROI parallel-run legacy sync (Session 3.4)
 const openemr = require('./openemr');                  // OpenEMR FHIR/REST front-end client (Session 4.1)
 const emrAuthModule = require('./emrAuth');            // per-user OpenEMR authorization_code + PKCE (Session 5.2)
+const mfa = require('./mfa');                            // TOTP + recovery codes (Session 5.3)
+const { createSessionStore } = require('./sessionStore'); // server-side sessions: idle timeout + revocation (Session 5.3)
+const QRCode = require('qrcode');                        // enrollment QR for the authenticator app (Session 5.3)
 const clinicalRepo = require('./clinicalRepository');  // clinical workspace pure helpers (Session 4.1)
 // Session 4.3 — patient/family/POA clinical read rules + the case-manager read/write split
 const patientRead = require('./patientReadRepository');
@@ -72,11 +75,35 @@ console.log(`🗄️  Data store: ${db.adapter}${_storeSafety.production ? ' (pr
 const roiStore = roiRepo.createRepository(db);
 // Session 5.2: per-user OpenEMR tokens. openemr.js asks this provider for the
 // ACTING user's own access token on every call; there is no shared token.
-const emrAuth = emrAuthModule.createEmrAuth({ store: db, config });
+const emrAuth = emrAuthModule.createEmrAuth({ store: db, config: (config.OPENEMR.TOKEN_ENCRYPTION_KEY || process.env.NODE_ENV === 'production') ? config
+  // dev only: the same derived key as SECRETS_KEY below, so local runs work
+  : { ...config, OPENEMR: { ...config.OPENEMR, TOKEN_ENCRYPTION_KEY: require('crypto').createHash('sha256').update(String(config.JWT_SECRET)).digest('hex') } } });
 const emrTokenProvider = (actor) => emrAuth.getAccessTokenFor(actor && actor.id);
 emrTokenProvider.invalidate = (actor) => emrAuth.invalidateAccessToken(actor && actor.id);
 emrTokenProvider.statusFor = (actor) => emrAuth.statusFor(actor && actor.id);
 openemr.setTokenProvider(emrTokenProvider);
+
+// Session 5.3: server-side sessions. Every JWT names a session row; the auth
+// middleware checks it on every request (revoked → dead, idle → dead).
+const sessions = createSessionStore({ store: db, idleMinutes: config.SESSION_IDLE_MINUTES });
+// Secrets at rest (MFA secrets share the OpenEMR token key). In non-production
+// a key derived from JWT_SECRET keeps local runs working; production refuses
+// to boot without EMR_TOKEN_ENCRYPTION_KEY (config.js), so this fallback can
+// never be reached there.
+const SECRETS_KEY = (() => {
+  const k = emrAuthModule._internal.parseKey(config.OPENEMR.TOKEN_ENCRYPTION_KEY);
+  if (k) return k;
+  if (process.env.NODE_ENV === 'production') throw new Error('EMR_TOKEN_ENCRYPTION_KEY is required in production');
+  console.warn('⚠️  EMR_TOKEN_ENCRYPTION_KEY not set — deriving a dev-only secrets key from JWT_SECRET. Set a real 32-byte key before any real data.');
+  return require('crypto').createHash('sha256').update(String(config.JWT_SECRET)).digest();
+})();
+const sealSecret = (plain) => emrAuthModule._internal.encrypt(SECRETS_KEY, plain);
+const openSecret = (packed) => emrAuthModule._internal.decrypt(SECRETS_KEY, packed);
+const sessionIpHash = (req) => {
+  const fwd = String((req.headers && req.headers['x-forwarded-for']) || '').split(',')[0].trim();
+  const ip = fwd || (req.socket && req.socket.remoteAddress) || (req.ip) || '';
+  return ip ? require('crypto').createHash('sha256').update(`${config.JWT_SECRET}:${ip}`).digest('hex') : null;
+};
 const PORT = config.PORT;
 
 // HubSpot ticket polling timer reference
@@ -1912,12 +1939,35 @@ const authenticateToken = async (req, res, next) => {
       });
     }
     try {
+      // Session 5.3: the JWT is only a pointer to a server-side session. No
+      // sid (a token minted before 5.3, or forged) → dead. Revoked → dead.
+      // Idle past SESSION_IDLE_MINUTES → revoked on the spot and dead. Each
+      // answer has its own code so the client can say WHY it is signing you
+      // out; all of them belong to the "back to login" family, never to the
+      // permission-403 family.
+      if (!tokenUser.sid) return res.status(403).json({ error: 'Your session is no longer valid. Please sign in again.', code: 'AUTH_INVALID' });
+      const sess = await sessions.check(tokenUser.sid);
+      if (!sess.ok) {
+        const msg = sess.code === 'AUTH_IDLE' ? `You were signed out after ${config.SESSION_IDLE_MINUTES} minutes of inactivity. Please sign in again.`
+          : sess.code === 'AUTH_EXPIRED' ? 'Your session has expired. Please sign in again.'
+          : 'Your session has been signed out. Please sign in again.';
+        return res.status(403).json({ error: msg, code: sess.code });
+      }
+      req.session = sess.row;
       // Fetch fresh user data from database to get current role and permissions
       const users = await getUsers();
       const freshUser = users.find(u => u.id === tokenUser.id);
       if (!freshUser) return res.status(403).json({ error: 'User not found', code: 'AUTH_INVALID' });
       // Block inactive accounts
       if (freshUser.accountStatus === 'inactive') return res.status(403).json({ error: 'Account is inactive. Please contact an administrator.', code: 'AUTH_INACTIVE' });
+      // Defense in depth: a session for an MFA-required role is only ever
+      // issued after the code verifies (finishLogin), but the role can be
+      // widened after login — an admin promoting a caregiver to clinician
+      // must not hand them PHI on a session that never passed MFA.
+      if (config.MFA_ENFORCE && mfa.mfaRequiredFor(freshUser, config.MFA_REQUIRED_ROLES) && !sess.row.mfaVerified) {
+        await sessions.revoke(sess.row.id, 'mfa_required');
+        return res.status(403).json({ error: 'This account now requires multi-factor authentication. Please sign in again.', code: 'AUTH_MFA_REQUIRED' });
+      }
       // Use fresh data for all user properties to ensure permission changes take effect immediately
       // Determine if user is a manager (has limited admin access)
       const isManager = freshUser.isManager || false;
@@ -2614,6 +2664,148 @@ app.post('/api/bootstrap-admin', async (req, res) => {
   }
 });
 
+// ============================================================
+// Session 5.3 — how a login turns into a session
+//
+// finishLogin() is the ONE place a session is issued. Every login route
+// (unified, client portal, service portal, admin hub) calls it after the
+// password check. For a role that requires MFA (config.MFA_REQUIRED_ROLES, or
+// anyone with clinical access) it does NOT issue a session: it returns an MFA
+// challenge — enrolment if the user has no authenticator yet, verification if
+// they do — and the session is issued by /api/auth/mfa/verify once the code
+// checks out. A challenge lives 5 minutes and dies after 5 wrong codes.
+//
+// Recovery codes are shown exactly once, at enrolment (and on regeneration).
+// They are stored hashed; a used one cannot be used again.
+// ============================================================
+const MFA_CHALLENGE_TTL_MS = 5 * 60 * 1000;
+const MFA_MAX_ATTEMPTS = 5;
+const mfaChallengeKey = (id) => `mfa_pending:${id}`;
+
+const issueSession = async (user, req, { surface, mfaVerified }) => {
+  const absoluteExpiresAt = (() => {
+    const m = String(config.JWT_EXPIRY).match(/^(\d+)([smhd])$/);
+    const mult = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
+    return m ? new Date(Date.now() + Number(m[1]) * mult[m[2]]).toISOString() : null;
+  })();
+  const row = await sessions.create({ userId: user.id, role: user.role, ipHash: sessionIpHash(req), userAgent: req.headers['user-agent'], mfaVerified, surface, absoluteExpiresAt });
+  const token = jwt.sign({ id: user.id, email: user.email, name: user.name, role: user.role, sid: row.id }, JWT_SECRET, { expiresIn: config.JWT_EXPIRY });
+  await logActivity(user.id, user.name || user.email, 'login', 'user', user.id, { role: user.role, surface, mfaVerified, sid: row.id });
+  return token;
+};
+
+const finishLogin = async ({ user, req, surface, userResponse }) => {
+  const needsMfa = config.MFA_ENFORCE && mfa.mfaRequiredFor(user, config.MFA_REQUIRED_ROLES);
+  if (!needsMfa) {
+    const token = await issueSession(user, req, { surface, mfaVerified: false });
+    return { token, user: userResponse };
+  }
+  const challenge = uuidv4();
+  const base = { userId: user.id, surface, userResponse, attempts: 0, createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + MFA_CHALLENGE_TTL_MS).toISOString() };
+  if (mfa.isEnrolled(user)) {
+    await db.set(mfaChallengeKey(challenge), { ...base, enroll: false });
+    return { mfaRequired: true, method: 'totp', challenge, user: { email: user.email, name: user.name } };
+  }
+  // Not enrolled: the login becomes an enrolment. The secret lives on the
+  // challenge row (sealed) until the first code verifies; only then does it
+  // move onto the user record, so an abandoned enrolment leaves nothing behind.
+  const secret = mfa.generateSecret();
+  const otpauth = mfa.otpauthUri({ issuer: config.MFA_ISSUER, account: user.email, secret });
+  await db.set(mfaChallengeKey(challenge), { ...base, enroll: true, secret: sealSecret(secret) });
+  const qrDataUrl = await QRCode.toDataURL(otpauth, { margin: 1, width: 220 });
+  return { mfaEnrollmentRequired: true, method: 'totp', challenge, otpauthUri: otpauth, qrDataUrl, secret, issuer: config.MFA_ISSUER, user: { email: user.email, name: user.name } };
+};
+
+// POST /api/auth/mfa/verify { challenge, code } — code is a 6-digit TOTP or a
+// recovery code (xxxx-xxxx-xxxx). Issues the session on success.
+app.post('/api/auth/mfa/verify', async (req, res) => {
+  try {
+    const { challenge, code } = req.body || {};
+    if (!challenge || !code) return res.status(400).json({ error: 'Challenge and code are required', code: 'MFA_MISSING' });
+    const key = mfaChallengeKey(String(challenge));
+    const pending = await db.get(key);
+    if (!pending) return res.status(400).json({ error: 'This sign-in attempt has expired. Start again.', code: 'MFA_CHALLENGE_EXPIRED' });
+    if (new Date(pending.expiresAt).getTime() < Date.now()) { await db.delete(key); return res.status(400).json({ error: 'This sign-in attempt has expired. Start again.', code: 'MFA_CHALLENGE_EXPIRED' }); }
+    const users = await getUsers();
+    const idx = users.findIndex(u => u.id === pending.userId);
+    const user = users[idx];
+    if (!user || user.accountStatus === 'inactive') { await db.delete(key); return res.status(403).json({ error: 'Account unavailable', code: 'AUTH_INACTIVE' }); }
+    const fail = async (reason) => {
+      pending.attempts = (pending.attempts || 0) + 1;
+      if (pending.attempts >= MFA_MAX_ATTEMPTS) {
+        await db.delete(key);
+        await logActivity(user.id, user.name || user.email, 'mfa_locked', 'user', user.id, { reason: 'too many attempts', surface: pending.surface });
+        return res.status(400).json({ error: 'Too many incorrect codes. Start the sign-in again.', code: 'MFA_TOO_MANY_ATTEMPTS' });
+      }
+      await db.set(key, pending);
+      await logActivity(user.id, user.name || user.email, 'mfa_failed', 'user', user.id, { reason, attempts: pending.attempts, surface: pending.surface });
+      return res.status(400).json({ error: 'That code is not right. Check the authenticator app and try again.', code: 'MFA_INVALID_CODE', attemptsLeft: MFA_MAX_ATTEMPTS - pending.attempts });
+    };
+    const trimmed = String(code).trim();
+    let recoveryCodes = null; let via = 'totp';
+    if (pending.enroll) {
+      const secret = openSecret(pending.secret);
+      const v = mfa.verifyTotp(secret, trimmed);
+      if (!v.ok) return fail(v.reason);
+      recoveryCodes = mfa.generateRecoveryCodes();
+      users[idx].mfa = { secret: sealSecret(secret), enrolledAt: new Date().toISOString(), lastStep: v.step, recovery: mfa.buildRecoveryRecord(recoveryCodes) };
+      await db.set('users', users); invalidateUsersCache();
+      await logActivity(user.id, user.name || user.email, 'mfa_enrolled', 'user', user.id, { surface: pending.surface });
+    } else if (/^\d{6}$/.test(trimmed.replace(/\s+/g, ''))) {
+      const v = mfa.verifyTotp(openSecret(user.mfa.secret), trimmed, { lastStep: user.mfa.lastStep == null ? null : user.mfa.lastStep });
+      if (!v.ok) return fail(v.reason);
+      users[idx].mfa = { ...user.mfa, lastStep: v.step };
+      await db.set('users', users); invalidateUsersCache();
+    } else {
+      const r = mfa.consumeRecovery(user.mfa && user.mfa.recovery, trimmed);
+      if (!r.ok) return fail('recovery');
+      via = 'recovery';
+      users[idx].mfa = { ...user.mfa, recovery: r.record };
+      await db.set('users', users); invalidateUsersCache();
+      await logActivity(user.id, user.name || user.email, 'mfa_recovery_code_used', 'user', user.id, { remaining: r.remaining, surface: pending.surface });
+    }
+    await db.delete(key);
+    const token = await issueSession(user, req, { surface: pending.surface, mfaVerified: true });
+    const body = { token, user: pending.userResponse, mfaVia: via };
+    if (recoveryCodes) body.recoveryCodes = recoveryCodes;    // shown ONCE
+    res.json(body);
+  } catch (error) {
+    console.error('MFA verify error:', error.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+app.get('/api/auth/mfa/status', authenticateToken, async (req, res) => {
+  const users = await getUsers(); const u = users.find(x => x.id === req.user.id) || {};
+  const remaining = u.mfa && u.mfa.recovery ? u.mfa.recovery.hashes.filter(h => !h.usedAt).length : 0;
+  res.json({ enforced: config.MFA_ENFORCE, required: mfa.mfaRequiredFor(u, config.MFA_REQUIRED_ROLES), enrolled: mfa.isEnrolled(u), enrolledAt: (u.mfa && u.mfa.enrolledAt) || null, recoveryRemaining: remaining, sessionMfaVerified: !!(req.session && req.session.mfaVerified) });
+});
+// Regenerate recovery codes — needs a fresh TOTP code, returns the new set ONCE.
+app.post('/api/auth/mfa/recovery-codes/regenerate', authenticateToken, async (req, res) => {
+  try {
+    const users = await getUsers(); const idx = users.findIndex(x => x.id === req.user.id);
+    const u = users[idx];
+    if (!mfa.isEnrolled(u)) return res.status(409).json({ error: 'MFA is not enrolled', code: 'MFA_NOT_ENROLLED' });
+    const v = mfa.verifyTotp(openSecret(u.mfa.secret), String((req.body || {}).code || ''), { lastStep: u.mfa.lastStep == null ? null : u.mfa.lastStep });
+    if (!v.ok) return res.status(400).json({ error: 'That code is not right.', code: 'MFA_INVALID_CODE' });
+    const codes = mfa.generateRecoveryCodes();
+    users[idx].mfa = { ...u.mfa, lastStep: v.step, recovery: mfa.buildRecoveryRecord(codes) };
+    await db.set('users', users); invalidateUsersCache();
+    await logActivity(u.id, u.name || u.email, 'mfa_recovery_codes_regenerated', 'user', u.id, {});
+    res.json({ recoveryCodes: codes });
+  } catch (error) { res.status(500).json({ error: 'Server error' }); }
+});
+// Sign out: the session row is revoked, so the token is dead server-side
+// whatever the browser still holds.
+app.post('/api/auth/logout', authenticateToken, async (req, res) => {
+  await sessions.revoke(req.session.id, 'logout');
+  await logActivity(req.user.id, req.user.name || req.user.email, 'logout', 'user', req.user.id, { sid: req.session.id });
+  res.json({ ok: true });
+});
+app.get('/api/auth/sessions', authenticateToken, async (req, res) => {
+  const rows = await sessions.listForUser(req.user.id);
+  res.json({ sessions: rows.map(r => ({ id: r.id, current: r.id === req.session.id, createdAt: r.createdAt, lastSeenAt: r.lastSeenAt, revokedAt: r.revokedAt, revokedReason: r.revokedReason, surface: r.surface, userAgent: r.userAgent, mfaVerified: r.mfaVerified })) });
+});
+
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -2635,11 +2827,6 @@ app.post('/api/auth/login', async (req, res) => {
     if (user.accountStatus === 'inactive') {
       return res.status(403).json({ error: 'Account is inactive. Please contact an administrator.' });
     }
-    const token = jwt.sign(
-      { id: user.id, email: user.email, name: user.name, role: user.role },
-      JWT_SECRET,
-      { expiresIn: config.JWT_EXPIRY }
-    );
     const isManager = user.isManager || false;
     const userResponse = {
       id: user.id,
@@ -2691,7 +2878,7 @@ app.post('/api/auth/login', async (req, res) => {
     if (user.role === config.ROLES.USER) {
       userResponse.projectAccessLevels = user.projectAccessLevels || {};
     }
-    res.json({ token, user: userResponse });
+    res.json(await finishLogin({ user, req, surface: 'unified', userResponse }));
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -2719,30 +2906,22 @@ app.post('/api/auth/client-login', async (req, res) => {
     if (user.role === config.ROLES.CLIENT && slug && user.slug !== slug) {
       return res.status(400).json({ error: 'Invalid portal access' });
     }
-    const token = jwt.sign(
-      { id: user.id, email: user.email, name: user.name, role: user.role },
-      JWT_SECRET,
-      { expiresIn: config.JWT_EXPIRY }
-    );
     const isManager = user.isManager || false;
     // Admin and Manager get 'admin' slug for portal admin access
     const effectiveSlug = (user.role === config.ROLES.ADMIN || isManager) ? 'admin' : user.slug;
-    res.json({
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        role: user.role,
-        isManager: isManager,
-        hasClientPortalAdminAccess: user.hasClientPortalAdminAccess || isManager || user.role === config.ROLES.ADMIN,
-        practiceName: user.practiceName,
-        isNewClient: user.isNewClient,
-        slug: effectiveSlug,
-        logo: user.logo || '',
-        assignedProjects: user.assignedProjects || []
-      }
-    });
+    res.json(await finishLogin({ user, req, surface: 'portal', userResponse: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      isManager: isManager,
+      hasClientPortalAdminAccess: user.hasClientPortalAdminAccess || isManager || user.role === config.ROLES.ADMIN,
+      practiceName: user.practiceName,
+      isNewClient: user.isNewClient,
+      slug: effectiveSlug,
+      logo: user.logo || '',
+      assignedProjects: user.assignedProjects || []
+    } }));
   } catch (error) {
     console.error('Client login error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -3026,6 +3205,8 @@ app.get('/api/users', authenticateToken, async (req, res) => {
   try {
     const users = await getUsers();
     const safeUsers = users.map(u => ({
+      mfaEnrolled: mfa.isEnrolled(u),   // Session 5.3: the flag only — the secret and recovery hashes never leave the server
+
       id: u.id,
       email: u.email,
       name: u.name,
@@ -3077,6 +3258,29 @@ app.get('/api/users', authenticateToken, async (req, res) => {
   }
 });
 
+// Session 5.3 — admin controls. Resetting MFA is the break-glass for a lost
+// phone: the user re-enrols at their next login. It also ends every session
+// they hold, so a stolen device cannot ride an old session past the reset.
+app.post('/api/users/:userId/mfa/reset', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const users = await getUsers(); const idx = users.findIndex(u => u.id === req.params.userId);
+    if (idx === -1) return res.status(404).json({ error: 'User not found' });
+    const had = mfa.isEnrolled(users[idx]);
+    delete users[idx].mfa;
+    await db.set('users', users); invalidateUsersCache();
+    const revoked = await sessions.revokeAllForUser(users[idx].id, 'mfa_reset_by_admin');
+    await logActivity(req.user.id, req.user.name || req.user.email, 'mfa_reset', 'user', users[idx].id, { targetEmail: users[idx].email, hadEnrollment: had, sessionsRevoked: revoked });
+    res.json({ ok: true, hadEnrollment: had, sessionsRevoked: revoked });
+  } catch (error) { res.status(500).json({ error: 'Server error' }); }
+});
+app.post('/api/users/:userId/sessions/revoke', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const revoked = await sessions.revokeAllForUser(req.params.userId, 'revoked_by_admin');
+    await logActivity(req.user.id, req.user.name || req.user.email, 'sessions_revoked', 'user', req.params.userId, { revoked });
+    res.json({ ok: true, revoked });
+  } catch (error) { res.status(500).json({ error: 'Server error' }); }
+});
+
 app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { userId } = req.params;
@@ -3100,6 +3304,7 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
         return res.status(403).json({ error: 'Admin accounts cannot be deactivated. Remove admin role first if you need to deactivate this account.' });
       }
       users[idx].accountStatus = accountStatus;
+      if (accountStatus === 'inactive') await sessions.revokeAllForUser(users[idx].id, 'account_deactivated');
     }
 
     // Capture old values before update for cascade propagation
@@ -3115,6 +3320,7 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
       users[idx].requirePasswordChange = true;
       users[idx].lastPasswordReset = new Date().toISOString();
       passwordWasReset = true;
+      await sessions.revokeAllForUser(users[idx].id, 'password_reset_by_admin');
     }
     if (assignedProjects !== undefined) users[idx].assignedProjects = assignedProjects;
     if (projectAccessLevels !== undefined) users[idx].projectAccessLevels = projectAccessLevels;
@@ -14018,21 +14224,13 @@ app.post('/api/auth/service-login', async (req, res) => {
       return res.status(403).json({ error: 'Access denied. You do not have Service Portal access. Please contact an administrator.' });
     }
 
-    const token = jwt.sign(
-      { id: user.id, email: user.email, name: user.name, role: user.role, hasServicePortalAccess: user.hasServicePortalAccess },
-      JWT_SECRET,
-      { expiresIn: config.JWT_EXPIRY }
-    );
-    res.json({
-      token,
-      user: {
+    res.json(await finishLogin({ user, req, surface: 'service', userResponse: {
         id: user.id,
         email: user.email,
         name: user.name,
         role: user.role,
         hasServicePortalAccess: user.hasServicePortalAccess || user.role === config.ROLES.ADMIN
-      }
-    });
+    } }));
   } catch (error) {
     console.error('Service login error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -16393,6 +16591,8 @@ app.post('/api/auth/change-password', authenticateToken, async (req, res) => {
     users[userIndex].lastPasswordChange = new Date().toISOString();
 
     await db.set('users', users);
+    // Session 5.3: a changed password ends every OTHER session for this user.
+    await sessions.revokeAllForUser(user.id, 'password_changed', { exceptSid: req.session && req.session.id });
     invalidateUsersCache();
 
     res.json({ message: 'Password changed successfully' });
@@ -16438,20 +16638,12 @@ app.post('/api/auth/admin-login', async (req, res) => {
       return res.status(403).json({ error: 'Account is inactive. Please contact an administrator.' });
     }
 
-    const token = jwt.sign(
-      { id: user.id, email: user.email, name: user.name, role: user.role },
-      JWT_SECRET,
-      { expiresIn: config.JWT_EXPIRY }
-    );
-    res.json({
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        role: user.role
-      }
-    });
+    res.json(await finishLogin({ user, req, surface: 'admin', userResponse: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role
+    } }));
   } catch (error) {
     console.error('Admin login error:', error);
     res.status(500).json({ error: 'Server error' });

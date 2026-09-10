@@ -53,6 +53,7 @@
     .tabbtn.on { color:#033D50; border-color:#C9A44A; }
     ::-webkit-scrollbar { width:8px; height:8px; } ::-webkit-scrollbar-thumb { background:#d8d0bd; border-radius:8px; }
   </style>
+  <script src="/session-guard.js"></script>
 </head>
 <body>
   <div id="root"></div>
@@ -80,7 +81,7 @@
         // them out.
         const authCode = data && data.code;
         const isAuthFailure = response.status === 401
-          || ['AUTH_MISSING', 'AUTH_EXPIRED', 'AUTH_INVALID', 'AUTH_INACTIVE'].includes(authCode);
+          || ['AUTH_MISSING', 'AUTH_EXPIRED', 'AUTH_INVALID', 'AUTH_INACTIVE', 'AUTH_IDLE', 'AUTH_REVOKED', 'AUTH_MFA_REQUIRED'].includes(authCode);
         if (isAuthFailure) {
           localStorage.removeItem('admin_token'); localStorage.removeItem('admin_user');
           throw Object.assign(

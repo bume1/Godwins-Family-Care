@@ -22,6 +22,80 @@
 - backfill PR #56 on the Session 7 row
 
 #### Changes
+- 5.2 OpenEMR auth: authorization_code + PKCE per user, password grant removed, attribution interim retired
+- 5.1 data layer: one store module (kv
+- Retire the Session 3.5 interim message path
+- Session 9: messaging — channel matrix, role-based visibility, escalation
+- Document reads are live — verified 29/29 against the instance, bytes read back
+- Wire Session 7's schedule into the caregiver app
+- The override key must match upstream byte for byte — ours said :id, theirs :did
+- One-paste deploy that cannot skip a step, and the reason step 1 kept failing
+- Harden Workspace setup: repair mangled keys, name the two common failures
+- An unauthenticated 401 never proved a route exists, and the guide said it did
+- Brand the email chrome as Godwins Family Care, from config.BRAND
+- Honour the email opt-out at the point every notification passes through
+- Collapse the four identical changelog blocks this session's boots appended
+- Read documents back out of OpenEMR, and split "not deployed" from "not found"
+- Record that code search is live, and why the deploy took two attempts
+- Scheduling: explicit any-level shifts and direct posting to a caregiver
+- The chart can show documents again, and open them
+
+
+### Version 3.1.0 - September 10, 2026
+
+#### New Features
+- Add a BAA-covered Google Workspace email transport
+- Add the two admin screens the open owner items assumed existed
+
+#### Bug Fixes
+- Backfill PR #48 as merged, and note the fetch URLs now resolve
+
+#### Documentation
+- Session 5 accuracy pass — current session status, repos do not bypass the db layer, ~39 collections
+- backfill PR #69 on the Session 9 row
+- the session plan still said the schedule ships unmounted
+- Session 5 — dynamic collection enumeration, KV prod guard, rollback + break-glass; defer breach/retention to Session 12
+- add Session 5 prompt — clinical HIPAA go-live gate
+- backfill PR #56 on the Session 7 row
+
+#### Changes
+- 5.2 OpenEMR auth: authorization_code + PKCE per user, password grant removed, attribution interim retired
+- 5.1 data layer: one store module (kv
+- Retire the Session 3.5 interim message path
+- Session 9: messaging — channel matrix, role-based visibility, escalation
+- Document reads are live — verified 29/29 against the instance, bytes read back
+- Wire Session 7's schedule into the caregiver app
+- The override key must match upstream byte for byte — ours said :id, theirs :did
+- One-paste deploy that cannot skip a step, and the reason step 1 kept failing
+- Harden Workspace setup: repair mangled keys, name the two common failures
+- An unauthenticated 401 never proved a route exists, and the guide said it did
+- Brand the email chrome as Godwins Family Care, from config.BRAND
+- Honour the email opt-out at the point every notification passes through
+- Collapse the four identical changelog blocks this session's boots appended
+- Read documents back out of OpenEMR, and split "not deployed" from "not found"
+- Record that code search is live, and why the deploy took two attempts
+- Scheduling: explicit any-level shifts and direct posting to a caregiver
+- The chart can show documents again, and open them
+
+
+### Version 3.1.0 - September 10, 2026
+
+#### New Features
+- Add a BAA-covered Google Workspace email transport
+- Add the two admin screens the open owner items assumed existed
+
+#### Bug Fixes
+- Backfill PR #48 as merged, and note the fetch URLs now resolve
+
+#### Documentation
+- Session 5 accuracy pass — current session status, repos do not bypass the db layer, ~39 collections
+- backfill PR #69 on the Session 9 row
+- the session plan still said the schedule ships unmounted
+- Session 5 — dynamic collection enumeration, KV prod guard, rollback + break-glass; defer breach/retention to Session 12
+- add Session 5 prompt — clinical HIPAA go-live gate
+- backfill PR #56 on the Session 7 row
+
+#### Changes
 - Retire the Session 3.5 interim message path
 - Session 9: messaging — channel matrix, role-based visibility, escalation
 - Document reads are live — verified 29/29 against the instance, bytes read back
