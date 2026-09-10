@@ -53,6 +53,7 @@
     .tabbtn.on { color:#033D50; border-color:#C9A44A; }
     ::-webkit-scrollbar { width:8px; height:8px; } ::-webkit-scrollbar-thumb { background:#d8d0bd; border-radius:8px; }
   </style>
+  <script src="/session-guard.js"></script>
 </head>
 <body>
   <div id="root"></div>
@@ -80,7 +81,7 @@
         // them out.
         const authCode = data && data.code;
         const isAuthFailure = response.status === 401
-          || ['AUTH_MISSING', 'AUTH_EXPIRED', 'AUTH_INVALID', 'AUTH_INACTIVE'].includes(authCode);
+          || ['AUTH_MISSING', 'AUTH_EXPIRED', 'AUTH_INVALID', 'AUTH_INACTIVE', 'AUTH_IDLE', 'AUTH_REVOKED', 'AUTH_MFA_REQUIRED'].includes(authCode);
         if (isAuthFailure) {
           localStorage.removeItem('admin_token'); localStorage.removeItem('admin_user');
           throw Object.assign(
@@ -1947,6 +1948,18 @@
       const [chart, setChart] = useState(null);
       const [tab, setTab] = useState('summary');
       const [emrStatus, setEmrStatus] = useState(null);
+      // Session 5.2: the OAuth round trip lands back here with ?emr=connected|error.
+      const [emrReturn] = useState(() => new URLSearchParams(window.location.search).get('emr'));
+      const [emrReturnReason] = useState(() => new URLSearchParams(window.location.search).get('reason'));
+      useEffect(() => {
+        if (emrReturn) window.history.replaceState({}, '', window.location.pathname);
+      }, [emrReturn]);
+      const connectEmr = async () => {
+        try {
+          const r = await authedFetch('/api/emr/connect');
+          if (r && r.url) window.location.href = r.url;
+        } catch (e) { alert(`Could not start the OpenEMR sign-in: ${e.message}`); }
+      };
       const [linking, setLinking] = useState(false);
       const [linkCandidates, setLinkCandidates] = useState([]);
       const [err, setErr] = useState('');
@@ -2068,8 +2081,12 @@
               </div>
               <div className="flex items-center gap-2">
                 <div className="flex items-center gap-2 text-[11.5px] text-stone-500 bg-cream border border-stone-200 px-3 py-1.5 rounded-full">
-                  <span className={`w-2 h-2 rounded-full ${emrStatus === null ? 'bg-stone-300' : emrStatus.connected ? 'bg-emerald-500' : 'bg-red-500'}`} />
-                  {emrStatus === null ? 'OpenEMR…' : emrStatus.connected ? 'OpenEMR connected' : (emrStatus.configured ? 'OpenEMR unreachable' : 'OpenEMR not configured')}
+                  <span className={`w-2 h-2 rounded-full ${emrStatus === null ? 'bg-stone-300' : emrStatus.connected ? 'bg-emerald-500' : (emrStatus.reachable ? 'bg-amber-500' : 'bg-red-500')}`} />
+                  {emrStatus === null ? 'OpenEMR…'
+                    : !emrStatus.configured ? 'OpenEMR not configured'
+                    : !emrStatus.reachable ? 'OpenEMR unreachable'
+                    : emrStatus.connected ? `OpenEMR: ${(emrStatus.emrUser && (emrStatus.emrUser.username || emrStatus.emrUser.name)) || 'signed in'}`
+                    : 'OpenEMR: not signed in'}
                 </div>
                 {emrStatus && emrStatus.serverStartedAt && (
                   <span className="text-[10.5px] text-stone-400 hidden md:inline" title="When this server process started — older than your last deploy means it was never restarted.">
@@ -2107,9 +2124,27 @@
                       Stop and Run the app (not just a page reload) so it picks up both the current code and the secrets. If it still shows this afterwards, the OpenEMR secrets are not set on the running server.
                     </span>
                   )
+                ) : emrStatus.reachable ? (
+                  // Session 5.2: every clinician signs in to OpenEMR as
+                  // THEMSELVES. Until they do, this server holds no token for
+                  // them and every chart call is refused (EMR_NOT_CONNECTED).
+                  <span className="flex flex-wrap items-center gap-3">
+                    <span>
+                      <b>{emrStatus.disconnectReason ? 'Your OpenEMR sign-in has lapsed.' : 'Sign in to OpenEMR to open charts.'}</b>{' '}
+                      Charts, notes and orders are written under your own OpenEMR account
+                      {emrStatus.emrUser && emrStatus.emrUser.username ? ` (last signed in as ${emrStatus.emrUser.username})` : ''}. You will be sent to OpenEMR's login page and back.
+                    </span>
+                    <button type="button" onClick={connectEmr} className="px-3 py-1 rounded bg-[#033D50] text-white text-[12px] font-semibold hover:opacity-90">Sign in to OpenEMR</button>
+                  </span>
                 ) : (
                   <span><b>OpenEMR is configured but unreachable.</b> {emrStatus.error || 'The EMR did not respond.'}</span>
                 )}
+              </div>
+            )}
+            {emrReturn && (
+              <div className={`border-b px-4 lg:px-7 py-2 text-[12px] ${emrReturn === 'connected' ? 'bg-emerald-50 border-emerald-200 text-emerald-900' : 'bg-red-50 border-red-200 text-red-900'}`}>
+                {emrReturn === 'connected' ? <span><b>OpenEMR account connected.</b> Your clinical writes are now attributed to you in OpenEMR.</span>
+                  : <span><b>OpenEMR sign-in did not complete</b> ({emrReturnReason || 'unknown'}). Try again; if it repeats, tell an admin the code shown here.</span>}
               </div>
             )}
             {/* 4.4 deploy diagnostics: the appointment-scoped OAuth client swap

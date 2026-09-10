@@ -57,6 +57,8 @@
     table.list td { padding: 12px 14px; font-size: 13.5px; border-bottom: 1px solid #f0f0f0; }
     table.list tr:hover td { background: #fafafa; cursor: pointer; }
   </style>
+  <script src="/session-guard.js"></script>
+  <script src="/mfa-step.js"></script>
 </head>
 <body class="min-h-screen">
   <div id="root"></div>
@@ -100,7 +102,7 @@
         fetch(`${API_URL}/api/auth/login`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email, password })
-        }).then(handleResponse),
+        }).then(handleResponse).then(r => window.GFC_MFA.complete(r)),
       list: (params) => authedFetch(`/api/gfc/admin/enrollment/list?${new URLSearchParams(params)}`),
       detail: (id) => authedFetch(`/api/gfc/admin/enrollment/${id}`),
       review: (id) => authedFetch(`/api/gfc/admin/enrollment/${id}/review`, { method: 'POST' }),

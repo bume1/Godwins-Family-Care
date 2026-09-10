@@ -57,10 +57,12 @@ test('default service favorites are code numbers + family labels, not AMA descri
 
 // ---- 2. Follow-up writes + attribution ----
 test('follow-up writes stamp the clinician name + NPI on the note header and the encounter record', () => {
-  const w = R.buildFollowUpWrites({ reason: 'Diabetes follow-up', subjective: 'Feels well', vitals: { bpSys: '128', bpDia: '78', hr: '72' } }, FNP, { serviceAccount: 'gfc-app-api' });
+  const w = R.buildFollowUpWrites({ reason: 'Diabetes follow-up', subjective: 'Feels well', vitals: { bpSys: '128', bpDia: '78', hr: '72' } }, FNP, {});
   assert.ok(!w.error);
   assert.match(w.soapNote.subjective, /^\[GFC CLINICIAN\] Bethel Godwins, FNP-C \(NPI 1234567893\)/);
-  assert.match(w.soapNote.subjective, /gfc-app-api/);
+  // Session 5.2: the write runs under the clinician's own OpenEMR user, so
+  // the header is an author line and no longer names a service account.
+  assert.doesNotMatch(w.soapNote.subjective, /gfc-app-api|service account/);
   assert.match(w.encounter.reason, /Diabetes follow-up — Bethel Godwins, FNP-C \(NPI 1234567893\)/);
   assert.match(w.encounter.billing_note, /Rendering clinician: Bethel Godwins/);
   assert.equal(w.encounter.class_code, 'HH');

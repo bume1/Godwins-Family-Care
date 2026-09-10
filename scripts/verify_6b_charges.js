@@ -8,10 +8,13 @@
 // encounter and voids one of them.
 //
 //   OPENEMR_BASE_URL=… OPENEMR_CLIENT_ID=… OPENEMR_CLIENT_SECRET=… \\
-//   OPENEMR_API_USERNAME=… OPENEMR_API_PASSWORD=… node scripts/verify_6b_charges.js
+//   OPENEMR_PROBE_ACCESS_TOKEN=… (from scripts/emr_login.js) node scripts/verify_6b_charges.js
 //
 // Result on 2026-09-08 against the live instance: 24/24.
 const o=require('../openemr.js');
+// Session 5.2: no password grant — the probe runs as a real OpenEMR user.
+// Obtain a token with `node scripts/emr_login.js`, then export OPENEMR_PROBE_ACCESS_TOKEN.
+require('./lib/probe_emr_auth').installProbeToken(o);
 const R=require('../clinicalRepository.js');
 const e=o.forActor({id:'b',name:'4.5 scope B',role:'admin'});
 const U='a284d5c2-670e-4a62-aa95-2d1aa629003c';

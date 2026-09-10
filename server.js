@@ -1,9 +1,12 @@
+// Session 5.4: every console.* line is scrubbed of PHI before it leaves the
+// process. Installed before anything else can log.
+require('./logScrubber').install(console);
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
-const Database = require('@replit/database');
+const dataStore = require('./dataStore');           // THE data-access module: kv (dev) | postgres (production) | memory (tests) — Session 5.1
 const bodyParser = require('body-parser');
 const fs = require('fs').promises;
 const path = require('path');
@@ -18,6 +21,11 @@ const emailTransport = require('./email');
 const roiRepo = require('./roiRepository');           // Transfer-of-Care ROI data model (Session 3.4)
 const legacySync = require('./legacySync');            // ROI parallel-run legacy sync (Session 3.4)
 const openemr = require('./openemr');                  // OpenEMR FHIR/REST front-end client (Session 4.1)
+const emrAuthModule = require('./emrAuth');            // per-user OpenEMR authorization_code + PKCE (Session 5.2)
+const mfa = require('./mfa');                            // TOTP + recovery codes (Session 5.3)
+const { createAuditLog } = require('./auditLog');        // durable append-only audit_log + PHI-route middleware (Session 5.4)
+const { createSessionStore } = require('./sessionStore'); // server-side sessions: idle timeout + revocation (Session 5.3)
+const QRCode = require('qrcode');                        // enrollment QR for the authenticator app (Session 5.3)
 const clinicalRepo = require('./clinicalRepository');  // clinical workspace pure helpers (Session 4.1)
 // Session 4.3 — patient/family/POA clinical read rules + the case-manager read/write split
 const patientRead = require('./patientReadRepository');
@@ -50,11 +58,60 @@ const uploadLimiter = (req, res, next) => {
 };
 
 const app = express();
-const db = new Database();
+// Session 5.1: the ONE construction site for the operational data store.
+// Every db.get/set/list/delete below goes through dataStore's adapter; nothing
+// in this file or in routes/ touches @replit/database directly (build-enforced
+// in test/data_layer.test.js). In production the store MUST be Postgres inside
+// the AWS BAA boundary — assertProductionSafe() refuses to boot otherwise, and
+// the refusal is printed before the throw so it is legible in the process log.
+let _storeSafety;
+try {
+  _storeSafety = dataStore.assertProductionSafe();
+} catch (err) {
+  console.error(`❌ ${err.message}`);
+  throw err;
+}
+const db = dataStore.createStore();
+console.log(`🗄️  Data store: ${db.adapter}${_storeSafety.production ? ' (production, inside the BAA boundary)' : ' (non-production)'}`);
 // Transfer-of-Care ROI repository (Session 3.4) — three KV collections
 // (consent_events / consent_provider_authorizations / consent_records_categories)
 // bound to the same db, keyed for a later RDS migration.
 const roiStore = roiRepo.createRepository(db);
+// Session 5.2: per-user OpenEMR tokens. openemr.js asks this provider for the
+// ACTING user's own access token on every call; there is no shared token.
+const emrAuth = emrAuthModule.createEmrAuth({ store: db, config: (config.OPENEMR.TOKEN_ENCRYPTION_KEY || process.env.NODE_ENV === 'production') ? config
+  // dev only: the same derived key as SECRETS_KEY below, so local runs work
+  : { ...config, OPENEMR: { ...config.OPENEMR, TOKEN_ENCRYPTION_KEY: require('crypto').createHash('sha256').update(String(config.JWT_SECRET)).digest('hex') } } });
+const emrTokenProvider = (actor) => emrAuth.getAccessTokenFor(actor && actor.id);
+emrTokenProvider.invalidate = (actor) => emrAuth.invalidateAccessToken(actor && actor.id);
+emrTokenProvider.statusFor = (actor) => emrAuth.statusFor(actor && actor.id);
+openemr.setTokenProvider(emrTokenProvider);
+
+// Session 5.3: server-side sessions. Every JWT names a session row; the auth
+// middleware checks it on every request (revoked → dead, idle → dead).
+const sessions = createSessionStore({ store: db, idleMinutes: config.SESSION_IDLE_MINUTES });
+// Session 5.4: the durable audit log. logActivity() below writes to it on
+// every call, and the PHI-route middleware writes a row for every request
+// under a PHI prefix whatever the handler did. Never truncated.
+const audit = createAuditLog({ store: db, salt: config.JWT_SECRET });
+// Secrets at rest (MFA secrets share the OpenEMR token key). In non-production
+// a key derived from JWT_SECRET keeps local runs working; production refuses
+// to boot without EMR_TOKEN_ENCRYPTION_KEY (config.js), so this fallback can
+// never be reached there.
+const SECRETS_KEY = (() => {
+  const k = emrAuthModule._internal.parseKey(config.OPENEMR.TOKEN_ENCRYPTION_KEY);
+  if (k) return k;
+  if (process.env.NODE_ENV === 'production') throw new Error('EMR_TOKEN_ENCRYPTION_KEY is required in production');
+  console.warn('⚠️  EMR_TOKEN_ENCRYPTION_KEY not set — deriving a dev-only secrets key from JWT_SECRET. Set a real 32-byte key before any real data.');
+  return require('crypto').createHash('sha256').update(String(config.JWT_SECRET)).digest();
+})();
+const sealSecret = (plain) => emrAuthModule._internal.encrypt(SECRETS_KEY, plain);
+const openSecret = (packed) => emrAuthModule._internal.decrypt(SECRETS_KEY, packed);
+const sessionIpHash = (req) => {
+  const fwd = String((req.headers && req.headers['x-forwarded-for']) || '').split(',')[0].trim();
+  const ip = fwd || (req.socket && req.socket.remoteAddress) || (req.ip) || '';
+  return ip ? require('crypto').createHash('sha256').update(`${config.JWT_SECRET}:${ip}`).digest('hex') : null;
+};
 const PORT = config.PORT;
 
 // HubSpot ticket polling timer reference
@@ -72,6 +129,13 @@ if (!process.env.JWT_SECRET) {
 
 app.use(cors());
 app.use(bodyParser.json({ limit: config.BODY_PARSER_LIMIT }));
+// Session 5.4: request context (request id, hashed IP) for every request, and
+// the PHI-access audit row for every request under a PHI prefix. Registered
+// before any route so no route can be added in front of it.
+app.use(audit.contextMiddleware);
+app.use(audit.phiAccessMiddleware);
+// Liveness for the load balancer. Names the adapter, never a secret.
+app.get('/healthz', (req, res) => res.json({ ok: true, store: db.adapter, uptimeSeconds: Math.round(process.uptime()), production: process.env.NODE_ENV === 'production' }));
 
 // Static file options with no-cache headers for development
 const staticOptions = {
@@ -259,19 +323,26 @@ const getTasks = async (projectId) => {
 const ACTIVITY_LOG_MAX = config.ACTIVITY_LOG_MAX_ENTRIES;
 
 const logActivity = async (userId, userName, action, entityType, entityId, details, projectId = null) => {
+  const activity = {
+    id: uuidv4(),
+    userId,
+    userName,
+    action,
+    entityType,
+    entityId,
+    details,
+    projectId,
+    timestamp: new Date().toISOString()
+  };
+  // Session 5.4: the durable row FIRST. The capped blob below is the admin
+  // UI's view; if it fails, the record still exists.
+  try {
+    await audit.record({ id: activity.id, timestamp: activity.timestamp, userId, userName, action, entityType, entityId, details });
+  } catch (err) {
+    console.error('audit_log write failed:', err.message);
+  }
   try {
     const activities = (await db.get('activity_log')) || [];
-    const activity = {
-      id: uuidv4(),
-      userId,
-      userName,
-      action,
-      entityType,
-      entityId,
-      details,
-      projectId,
-      timestamp: new Date().toISOString()
-    };
     activities.unshift(activity);
     // Keep only last ACTIVITY_LOG_MAX activities to prevent unbounded growth
     if (activities.length > ACTIVITY_LOG_MAX) {
@@ -1890,12 +1961,35 @@ const authenticateToken = async (req, res, next) => {
       });
     }
     try {
+      // Session 5.3: the JWT is only a pointer to a server-side session. No
+      // sid (a token minted before 5.3, or forged) → dead. Revoked → dead.
+      // Idle past SESSION_IDLE_MINUTES → revoked on the spot and dead. Each
+      // answer has its own code so the client can say WHY it is signing you
+      // out; all of them belong to the "back to login" family, never to the
+      // permission-403 family.
+      if (!tokenUser.sid) return res.status(403).json({ error: 'Your session is no longer valid. Please sign in again.', code: 'AUTH_INVALID' });
+      const sess = await sessions.check(tokenUser.sid);
+      if (!sess.ok) {
+        const msg = sess.code === 'AUTH_IDLE' ? `You were signed out after ${config.SESSION_IDLE_MINUTES} minutes of inactivity. Please sign in again.`
+          : sess.code === 'AUTH_EXPIRED' ? 'Your session has expired. Please sign in again.'
+          : 'Your session has been signed out. Please sign in again.';
+        return res.status(403).json({ error: msg, code: sess.code });
+      }
+      req.session = sess.row;
       // Fetch fresh user data from database to get current role and permissions
       const users = await getUsers();
       const freshUser = users.find(u => u.id === tokenUser.id);
       if (!freshUser) return res.status(403).json({ error: 'User not found', code: 'AUTH_INVALID' });
       // Block inactive accounts
       if (freshUser.accountStatus === 'inactive') return res.status(403).json({ error: 'Account is inactive. Please contact an administrator.', code: 'AUTH_INACTIVE' });
+      // Defense in depth: a session for an MFA-required role is only ever
+      // issued after the code verifies (finishLogin), but the role can be
+      // widened after login — an admin promoting a caregiver to clinician
+      // must not hand them PHI on a session that never passed MFA.
+      if (config.MFA_ENFORCE && mfa.mfaRequiredFor(freshUser, config.MFA_REQUIRED_ROLES) && !sess.row.mfaVerified) {
+        await sessions.revoke(sess.row.id, 'mfa_required');
+        return res.status(403).json({ error: 'This account now requires multi-factor authentication. Please sign in again.', code: 'AUTH_MFA_REQUIRED' });
+      }
       // Use fresh data for all user properties to ensure permission changes take effect immediately
       // Determine if user is a manager (has limited admin access)
       const isManager = freshUser.isManager || false;
@@ -1919,9 +2013,9 @@ const authenticateToken = async (req, res, next) => {
         // OpenEMR provider (numeric pc_aid) this clinician's calendar maps to
         // (Session 4.2 scheduling; set by an admin in the user form)
         openEmrProviderId: freshUser.openEmrProviderId || null,
-        // Clinician NPI — stamped as attribution on every clinical write
-        // (Session 4.4 §4 interim: the EMR sees the service account, the
-        // chart must still say who did the work)
+        // Clinician NPI — heads every note and is the rendering provider on
+        // every charge (Session 4.4 §4; the EMR write itself is per-user
+        // since Session 5.2)
         npi: freshUser.npi || null,
         // Managers automatically get client portal admin access
         hasClientPortalAdminAccess: freshUser.hasClientPortalAdminAccess || isManager || false,
@@ -1942,6 +2036,7 @@ const authenticateToken = async (req, res, next) => {
         // access; acting gates wired in Session 4.3
         familyIsPoa: freshUser.familyIsPoa || false
       };
+      audit.bindUser(req.user, req.session);   // 5.4: attribution for every logActivity() downstream
       next();
     } catch (error) {
       console.error('Auth middleware error:', error);
@@ -2592,6 +2687,148 @@ app.post('/api/bootstrap-admin', async (req, res) => {
   }
 });
 
+// ============================================================
+// Session 5.3 — how a login turns into a session
+//
+// finishLogin() is the ONE place a session is issued. Every login route
+// (unified, client portal, service portal, admin hub) calls it after the
+// password check. For a role that requires MFA (config.MFA_REQUIRED_ROLES, or
+// anyone with clinical access) it does NOT issue a session: it returns an MFA
+// challenge — enrolment if the user has no authenticator yet, verification if
+// they do — and the session is issued by /api/auth/mfa/verify once the code
+// checks out. A challenge lives 5 minutes and dies after 5 wrong codes.
+//
+// Recovery codes are shown exactly once, at enrolment (and on regeneration).
+// They are stored hashed; a used one cannot be used again.
+// ============================================================
+const MFA_CHALLENGE_TTL_MS = 5 * 60 * 1000;
+const MFA_MAX_ATTEMPTS = 5;
+const mfaChallengeKey = (id) => `mfa_pending:${id}`;
+
+const issueSession = async (user, req, { surface, mfaVerified }) => {
+  const absoluteExpiresAt = (() => {
+    const m = String(config.JWT_EXPIRY).match(/^(\d+)([smhd])$/);
+    const mult = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
+    return m ? new Date(Date.now() + Number(m[1]) * mult[m[2]]).toISOString() : null;
+  })();
+  const row = await sessions.create({ userId: user.id, role: user.role, ipHash: sessionIpHash(req), userAgent: req.headers['user-agent'], mfaVerified, surface, absoluteExpiresAt });
+  const token = jwt.sign({ id: user.id, email: user.email, name: user.name, role: user.role, sid: row.id }, JWT_SECRET, { expiresIn: config.JWT_EXPIRY });
+  await logActivity(user.id, user.name || user.email, 'login', 'user', user.id, { role: user.role, surface, mfaVerified, sid: row.id });
+  return token;
+};
+
+const finishLogin = async ({ user, req, surface, userResponse }) => {
+  const needsMfa = config.MFA_ENFORCE && mfa.mfaRequiredFor(user, config.MFA_REQUIRED_ROLES);
+  if (!needsMfa) {
+    const token = await issueSession(user, req, { surface, mfaVerified: false });
+    return { token, user: userResponse };
+  }
+  const challenge = uuidv4();
+  const base = { userId: user.id, surface, userResponse, attempts: 0, createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + MFA_CHALLENGE_TTL_MS).toISOString() };
+  if (mfa.isEnrolled(user)) {
+    await db.set(mfaChallengeKey(challenge), { ...base, enroll: false });
+    return { mfaRequired: true, method: 'totp', challenge, user: { email: user.email, name: user.name } };
+  }
+  // Not enrolled: the login becomes an enrolment. The secret lives on the
+  // challenge row (sealed) until the first code verifies; only then does it
+  // move onto the user record, so an abandoned enrolment leaves nothing behind.
+  const secret = mfa.generateSecret();
+  const otpauth = mfa.otpauthUri({ issuer: config.MFA_ISSUER, account: user.email, secret });
+  await db.set(mfaChallengeKey(challenge), { ...base, enroll: true, secret: sealSecret(secret) });
+  const qrDataUrl = await QRCode.toDataURL(otpauth, { margin: 1, width: 220 });
+  return { mfaEnrollmentRequired: true, method: 'totp', challenge, otpauthUri: otpauth, qrDataUrl, secret, issuer: config.MFA_ISSUER, user: { email: user.email, name: user.name } };
+};
+
+// POST /api/auth/mfa/verify { challenge, code } — code is a 6-digit TOTP or a
+// recovery code (xxxx-xxxx-xxxx). Issues the session on success.
+app.post('/api/auth/mfa/verify', async (req, res) => {
+  try {
+    const { challenge, code } = req.body || {};
+    if (!challenge || !code) return res.status(400).json({ error: 'Challenge and code are required', code: 'MFA_MISSING' });
+    const key = mfaChallengeKey(String(challenge));
+    const pending = await db.get(key);
+    if (!pending) return res.status(400).json({ error: 'This sign-in attempt has expired. Start again.', code: 'MFA_CHALLENGE_EXPIRED' });
+    if (new Date(pending.expiresAt).getTime() < Date.now()) { await db.delete(key); return res.status(400).json({ error: 'This sign-in attempt has expired. Start again.', code: 'MFA_CHALLENGE_EXPIRED' }); }
+    const users = await getUsers();
+    const idx = users.findIndex(u => u.id === pending.userId);
+    const user = users[idx];
+    if (!user || user.accountStatus === 'inactive') { await db.delete(key); return res.status(403).json({ error: 'Account unavailable', code: 'AUTH_INACTIVE' }); }
+    const fail = async (reason) => {
+      pending.attempts = (pending.attempts || 0) + 1;
+      if (pending.attempts >= MFA_MAX_ATTEMPTS) {
+        await db.delete(key);
+        await logActivity(user.id, user.name || user.email, 'mfa_locked', 'user', user.id, { role: user.role, reason: 'too many attempts', surface: pending.surface });
+        return res.status(400).json({ error: 'Too many incorrect codes. Start the sign-in again.', code: 'MFA_TOO_MANY_ATTEMPTS' });
+      }
+      await db.set(key, pending);
+      await logActivity(user.id, user.name || user.email, 'mfa_failed', 'user', user.id, { role: user.role, reason, attempts: pending.attempts, surface: pending.surface });
+      return res.status(400).json({ error: 'That code is not right. Check the authenticator app and try again.', code: 'MFA_INVALID_CODE', attemptsLeft: MFA_MAX_ATTEMPTS - pending.attempts });
+    };
+    const trimmed = String(code).trim();
+    let recoveryCodes = null; let via = 'totp';
+    if (pending.enroll) {
+      const secret = openSecret(pending.secret);
+      const v = mfa.verifyTotp(secret, trimmed);
+      if (!v.ok) return fail(v.reason);
+      recoveryCodes = mfa.generateRecoveryCodes();
+      users[idx].mfa = { secret: sealSecret(secret), enrolledAt: new Date().toISOString(), lastStep: v.step, recovery: mfa.buildRecoveryRecord(recoveryCodes) };
+      await db.set('users', users); invalidateUsersCache();
+      await logActivity(user.id, user.name || user.email, 'mfa_enrolled', 'user', user.id, { role: user.role, surface: pending.surface });
+    } else if (/^\d{6}$/.test(trimmed.replace(/\s+/g, ''))) {
+      const v = mfa.verifyTotp(openSecret(user.mfa.secret), trimmed, { lastStep: user.mfa.lastStep == null ? null : user.mfa.lastStep });
+      if (!v.ok) return fail(v.reason);
+      users[idx].mfa = { ...user.mfa, lastStep: v.step };
+      await db.set('users', users); invalidateUsersCache();
+    } else {
+      const r = mfa.consumeRecovery(user.mfa && user.mfa.recovery, trimmed);
+      if (!r.ok) return fail('recovery');
+      via = 'recovery';
+      users[idx].mfa = { ...user.mfa, recovery: r.record };
+      await db.set('users', users); invalidateUsersCache();
+      await logActivity(user.id, user.name || user.email, 'mfa_recovery_code_used', 'user', user.id, { role: user.role, remaining: r.remaining, surface: pending.surface });
+    }
+    await db.delete(key);
+    const token = await issueSession(user, req, { surface: pending.surface, mfaVerified: true });
+    const body = { token, user: pending.userResponse, mfaVia: via };
+    if (recoveryCodes) body.recoveryCodes = recoveryCodes;    // shown ONCE
+    res.json(body);
+  } catch (error) {
+    console.error('MFA verify error:', error.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+app.get('/api/auth/mfa/status', authenticateToken, async (req, res) => {
+  const users = await getUsers(); const u = users.find(x => x.id === req.user.id) || {};
+  const remaining = u.mfa && u.mfa.recovery ? u.mfa.recovery.hashes.filter(h => !h.usedAt).length : 0;
+  res.json({ enforced: config.MFA_ENFORCE, required: mfa.mfaRequiredFor(u, config.MFA_REQUIRED_ROLES), enrolled: mfa.isEnrolled(u), enrolledAt: (u.mfa && u.mfa.enrolledAt) || null, recoveryRemaining: remaining, sessionMfaVerified: !!(req.session && req.session.mfaVerified) });
+});
+// Regenerate recovery codes — needs a fresh TOTP code, returns the new set ONCE.
+app.post('/api/auth/mfa/recovery-codes/regenerate', authenticateToken, async (req, res) => {
+  try {
+    const users = await getUsers(); const idx = users.findIndex(x => x.id === req.user.id);
+    const u = users[idx];
+    if (!mfa.isEnrolled(u)) return res.status(409).json({ error: 'MFA is not enrolled', code: 'MFA_NOT_ENROLLED' });
+    const v = mfa.verifyTotp(openSecret(u.mfa.secret), String((req.body || {}).code || ''), { lastStep: u.mfa.lastStep == null ? null : u.mfa.lastStep });
+    if (!v.ok) return res.status(400).json({ error: 'That code is not right.', code: 'MFA_INVALID_CODE' });
+    const codes = mfa.generateRecoveryCodes();
+    users[idx].mfa = { ...u.mfa, lastStep: v.step, recovery: mfa.buildRecoveryRecord(codes) };
+    await db.set('users', users); invalidateUsersCache();
+    await logActivity(u.id, u.name || u.email, 'mfa_recovery_codes_regenerated', 'user', u.id, { role: u.role });
+    res.json({ recoveryCodes: codes });
+  } catch (error) { res.status(500).json({ error: 'Server error' }); }
+});
+// Sign out: the session row is revoked, so the token is dead server-side
+// whatever the browser still holds.
+app.post('/api/auth/logout', authenticateToken, async (req, res) => {
+  await sessions.revoke(req.session.id, 'logout');
+  await logActivity(req.user.id, req.user.name || req.user.email, 'logout', 'user', req.user.id, { sid: req.session.id });
+  res.json({ ok: true });
+});
+app.get('/api/auth/sessions', authenticateToken, async (req, res) => {
+  const rows = await sessions.listForUser(req.user.id);
+  res.json({ sessions: rows.map(r => ({ id: r.id, current: r.id === req.session.id, createdAt: r.createdAt, lastSeenAt: r.lastSeenAt, revokedAt: r.revokedAt, revokedReason: r.revokedReason, surface: r.surface, userAgent: r.userAgent, mfaVerified: r.mfaVerified })) });
+});
+
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -2601,23 +2838,18 @@ app.post('/api/auth/login', async (req, res) => {
     const users = await getUsers();
     const user = users.find(u => u.email?.toLowerCase() === email.toLowerCase());
     if (!user) {
-      console.log('Login failed: User not found for email:', email);
+      console.log('Login failed: unknown account');
       return res.status(400).json({ error: 'Invalid credentials' });
     }
     const passwordMatch = await bcrypt.compare(password, user.password);
     if (!passwordMatch) {
-      console.log('Login failed: Password mismatch for:', email);
+      console.log('Login failed: password mismatch');
       return res.status(400).json({ error: 'Invalid credentials' });
     }
     // Block inactive accounts from logging in
     if (user.accountStatus === 'inactive') {
       return res.status(403).json({ error: 'Account is inactive. Please contact an administrator.' });
     }
-    const token = jwt.sign(
-      { id: user.id, email: user.email, name: user.name, role: user.role },
-      JWT_SECRET,
-      { expiresIn: config.JWT_EXPIRY }
-    );
     const isManager = user.isManager || false;
     const userResponse = {
       id: user.id,
@@ -2669,7 +2901,7 @@ app.post('/api/auth/login', async (req, res) => {
     if (user.role === config.ROLES.USER) {
       userResponse.projectAccessLevels = user.projectAccessLevels || {};
     }
-    res.json({ token, user: userResponse });
+    res.json(await finishLogin({ user, req, surface: 'unified', userResponse }));
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -2697,30 +2929,22 @@ app.post('/api/auth/client-login', async (req, res) => {
     if (user.role === config.ROLES.CLIENT && slug && user.slug !== slug) {
       return res.status(400).json({ error: 'Invalid portal access' });
     }
-    const token = jwt.sign(
-      { id: user.id, email: user.email, name: user.name, role: user.role },
-      JWT_SECRET,
-      { expiresIn: config.JWT_EXPIRY }
-    );
     const isManager = user.isManager || false;
     // Admin and Manager get 'admin' slug for portal admin access
     const effectiveSlug = (user.role === config.ROLES.ADMIN || isManager) ? 'admin' : user.slug;
-    res.json({
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        role: user.role,
-        isManager: isManager,
-        hasClientPortalAdminAccess: user.hasClientPortalAdminAccess || isManager || user.role === config.ROLES.ADMIN,
-        practiceName: user.practiceName,
-        isNewClient: user.isNewClient,
-        slug: effectiveSlug,
-        logo: user.logo || '',
-        assignedProjects: user.assignedProjects || []
-      }
-    });
+    res.json(await finishLogin({ user, req, surface: 'portal', userResponse: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      isManager: isManager,
+      hasClientPortalAdminAccess: user.hasClientPortalAdminAccess || isManager || user.role === config.ROLES.ADMIN,
+      practiceName: user.practiceName,
+      isNewClient: user.isNewClient,
+      slug: effectiveSlug,
+      logo: user.logo || '',
+      assignedProjects: user.assignedProjects || []
+    } }));
   } catch (error) {
     console.error('Client login error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -2759,7 +2983,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     });
     await db.set('password_reset_requests', resetRequests);
     
-    console.log(`Password reset requested for ${email} - Admin action required`);
+    console.log('Password reset requested - admin action required');
     res.json({ message: 'Your request has been submitted. An administrator will reach out to you shortly to help reset your password.' });
   } catch (error) {
     console.error('Forgot password error:', error);
@@ -3004,6 +3228,8 @@ app.get('/api/users', authenticateToken, async (req, res) => {
   try {
     const users = await getUsers();
     const safeUsers = users.map(u => ({
+      mfaEnrolled: mfa.isEnrolled(u),   // Session 5.3: the flag only — the secret and recovery hashes never leave the server
+
       id: u.id,
       email: u.email,
       name: u.name,
@@ -3055,6 +3281,41 @@ app.get('/api/users', authenticateToken, async (req, res) => {
   }
 });
 
+// Session 5.4 — read the durable audit log (admin). Session 12 builds the UI;
+// this is the verification surface for go-live acceptance: every PHI access
+// must be here. Filters: since, until (ISO), userId, patientId, limit.
+app.get('/api/admin/audit-log', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { since, until, userId, patientId } = req.query;
+    const limit = Math.min(1000, Math.max(1, parseInt(req.query.limit || '200', 10) || 200));
+    const rows = await audit.read({ since, until, userId, patientId, limit });
+    res.json({ rows, count: rows.length, total: await audit.count() });
+  } catch (error) { res.status(500).json({ error: 'Server error' }); }
+});
+
+// Session 5.3 — admin controls. Resetting MFA is the break-glass for a lost
+// phone: the user re-enrols at their next login. It also ends every session
+// they hold, so a stolen device cannot ride an old session past the reset.
+app.post('/api/users/:userId/mfa/reset', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const users = await getUsers(); const idx = users.findIndex(u => u.id === req.params.userId);
+    if (idx === -1) return res.status(404).json({ error: 'User not found' });
+    const had = mfa.isEnrolled(users[idx]);
+    delete users[idx].mfa;
+    await db.set('users', users); invalidateUsersCache();
+    const revoked = await sessions.revokeAllForUser(users[idx].id, 'mfa_reset_by_admin');
+    await logActivity(req.user.id, req.user.name || req.user.email, 'mfa_reset', 'user', users[idx].id, { targetEmail: users[idx].email, hadEnrollment: had, sessionsRevoked: revoked });
+    res.json({ ok: true, hadEnrollment: had, sessionsRevoked: revoked });
+  } catch (error) { res.status(500).json({ error: 'Server error' }); }
+});
+app.post('/api/users/:userId/sessions/revoke', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const revoked = await sessions.revokeAllForUser(req.params.userId, 'revoked_by_admin');
+    await logActivity(req.user.id, req.user.name || req.user.email, 'sessions_revoked', 'user', req.params.userId, { revoked });
+    res.json({ ok: true, revoked });
+  } catch (error) { res.status(500).json({ error: 'Server error' }); }
+});
+
 app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { userId } = req.params;
@@ -3078,6 +3339,7 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
         return res.status(403).json({ error: 'Admin accounts cannot be deactivated. Remove admin role first if you need to deactivate this account.' });
       }
       users[idx].accountStatus = accountStatus;
+      if (accountStatus === 'inactive') await sessions.revokeAllForUser(users[idx].id, 'account_deactivated');
     }
 
     // Capture old values before update for cascade propagation
@@ -3093,6 +3355,7 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
       users[idx].requirePasswordChange = true;
       users[idx].lastPasswordReset = new Date().toISOString();
       passwordWasReset = true;
+      await sessions.revokeAllForUser(users[idx].id, 'password_reset_by_admin');
     }
     if (assignedProjects !== undefined) users[idx].assignedProjects = assignedProjects;
     if (projectAccessLevels !== undefined) users[idx].projectAccessLevels = projectAccessLevels;
@@ -6558,13 +6821,62 @@ const clientToFhirPatient = (client) => {
 // just pulled?" question without shell access — a start time older than the
 // deploy means the process was never restarted.
 const SERVER_STARTED_AT = new Date().toISOString();
+// ============================================================
+// Session 5.2 — per-user OpenEMR sign-in (authorization_code + PKCE)
+//
+// GET  /api/emr/connect            → { url } the clinician's browser goes to
+// GET  /oauth/callback              ← OpenEMR redirects here; state binds it
+//                                     to the app user who started it
+// POST /api/emr/disconnect         → forget this user's tokens
+// (Under /api/emr, not /api/clinical: signing in to OpenEMR is not a clinical
+// mutation, and a read-only case manager must be able to do it too.)
+//
+// The callback carries no app JWT (it is a browser redirect from OpenEMR),
+// so the single-use `state` row IS the binding: it names the app user who
+// began the flow and the PKCE verifier only this server holds. The browser
+// never sees a token; it is redirected back to the workspace with a result
+// code only.
+// ============================================================
+app.get('/api/emr/connect', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const { url } = await emrAuth.beginAuthorization(req.user);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'emr_connect_started', 'openemr:oauth', req.user.id, { role: req.user.role });
+    res.json({ url });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message, code: err.code || 'EMR_CONNECT_FAILED', missing: err.missing });
+  }
+});
+app.get('/oauth/callback', async (req, res) => {
+  const back = (q) => res.redirect(`/clinical?${new URLSearchParams(q).toString()}`);
+  try {
+    const result = await emrAuth.completeAuthorization({
+      state: req.query.state, code: req.query.code, error: req.query.error, errorDescription: req.query.error_description
+    });
+    await logActivity(result.userId, null, 'emr_connected', 'openemr:oauth', result.userId,
+      { emrUsername: result.emrUser && result.emrUser.username, scopes: result.scopes.length, hasRefreshToken: result.hasRefreshToken });
+    return back({ emr: 'connected' });
+  } catch (err) {
+    console.error('OpenEMR callback failed:', err.code || err.message);
+    return back({ emr: 'error', reason: err.code || 'EMR_AUTH_FAILED' });
+  }
+});
+app.post('/api/emr/disconnect', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const had = await emrAuth.disconnect(req.user.id);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'emr_disconnected', 'openemr:oauth', req.user.id, { role: req.user.role, had });
+    res.json({ ok: true, disconnected: had });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not disconnect', code: 'EMR_DISCONNECT_FAILED' });
+  }
+});
+
 app.get('/api/clinical/status', authenticateToken, requireClinicalRead, async (req, res) => {
   const payer = await getPayerCredentialing();
   res.json({
     // 4.3: the API enforces the read/write split; this only tells the UI
     // which controls to render (case managers: read views, mutation UI hidden)
     access: { canRead: true, canWrite: patientRead.canClinicalWrite(req.user), role: req.user.role },
-    ...(await openemr.getStatus()), serverStartedAt: SERVER_STARTED_AT,
+    ...(await openemr.getStatus(req.user)), serverStartedAt: SERVER_STARTED_AT,
     // Session 4.4 deploy diagnostics: billing NPI (spec §2.5) + the caller's
     // own NPI for attribution (spec §4). Never hardcoded — both are config.
     billingNpiConfigured: !!payer.billing_npi_used,
@@ -6953,14 +7265,14 @@ app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireCli
 
     const built = clinicalRepo.buildHpWrites(req.body || {}, req.user.name);
     if (built.error) return res.status(400).json({ error: built.error, code: built.code });
-    // Session 4.4 attribution interim (spec §4): the encounter record and the
-    // note header name the acting clinician + NPI (the EMR sees only the
-    // gfc-app-api service account).
+    // The encounter record and the note header name the acting clinician +
+    // NPI (an author line). Since Session 5.2 the write itself runs under the
+    // clinician's own OpenEMR user, so OpenEMR attributes it natively too.
     const actor = actorFromReq(req);
     const plainReason = built.encounter.reason;
     built.encounter.reason = `${plainReason.slice(0, 180)} — ${clinicalRepo.actorStamp(actor)}`.slice(0, 250);
     built.encounter.billing_note = `Rendering clinician: ${clinicalRepo.actorStamp(actor)}. Coding is recorded by the GFC Care Platform (see the GFC structured note on this encounter).`.slice(0, 500);
-    built.soapNote.subjective = [clinicalRepo.buildAttributionHeader(actor, OPENEMR_SERVICE_ACCOUNT), built.soapNote.subjective].filter(Boolean).join('\n\n');
+    built.soapNote.subjective = [clinicalRepo.buildAttributionHeader(actor), built.soapNote.subjective].filter(Boolean).join('\n\n');
     const triage = (req.body && req.body.triage) || {};
     if (triage.track && !clinicalRepo.VALID_TRACKS.includes(triage.track)) {
       return res.status(400).json({ error: `Track must be one of ${clinicalRepo.VALID_TRACKS.join(', ')}` });
@@ -7834,9 +8146,10 @@ app.post('/api/clinical/appointments/:eid/no-show', authenticateToken, requireCl
 // silently stubbed: every EMR write that fails is returned as a warning and
 // the record flags it for a retry.
 //
-// Attribution interim (§4): every note header, encounter reason, billing
-// note and app-side record carries the acting clinician's name, credential
-// and NPI, because the EMR sees only the gfc-app-api service account.
+// Author line (§4): every note header, encounter reason, billing note and
+// app-side record carries the acting clinician's name, credential and NPI.
+// The write itself runs under the clinician's own OpenEMR user (Session 5.2),
+// so this is an author line, not an attribution workaround.
 //
 // Coding assist guardrail (§8): the system proposes, the clinician disposes.
 // T1 carry-forward pre-selects candidates in the UI only; T2 favorites only
@@ -7844,7 +8157,6 @@ app.post('/api/clinical/appointments/:eid/no-show', authenticateToken, requireCl
 // action, and there is no auto-submit.
 // ============================================================
 
-const OPENEMR_SERVICE_ACCOUNT = config.OPENEMR.API_USERNAME || 'gfc-app-api';
 const loadRows = async (name) => (await db.get(name)) || [];
 
 // Org-level billing identity — spec §2.5: the billing provider on every charge
@@ -8027,7 +8339,6 @@ app.get('/api/clinical/settings', authenticateToken, requireClinicalRead, async 
       serviceCodeFavorites: settings.serviceCodeFavorites, favoritesSource: settings.favoritesSource,
       me: { name: req.user.name, npi: req.user.npi || null, licenseLevel: req.user.licenseLevel || null, openEmrProviderId: req.user.openEmrProviderId || null },
       isAdmin: req.user.role === config.ROLES.ADMIN,
-      serviceAccount: OPENEMR_SERVICE_ACCOUNT
     });
   } catch (error) {
     console.error('Clinical settings read error:', error);
@@ -8198,7 +8509,7 @@ app.post('/api/clinical/patients/:clientId/encounters', authenticateToken, requi
     if (!client.openEmrPatientId) return res.status(409).json({ error: 'Link this client to an OpenEMR patient before documenting a visit', code: 'EMR_NOT_LINKED' });
     const body = req.body || {};
     const actor = actorFromReq(req);
-    const built = clinicalRepo.buildFollowUpWrites(body, actor, { serviceAccount: OPENEMR_SERVICE_ACCOUNT });
+    const built = clinicalRepo.buildFollowUpWrites(body, actor, {});
     if (built.error) return res.status(400).json({ error: built.error, code: built.code });
     // Validate coding BEFORE any EMR write so a bad code never leaves a half-documented visit
     const dx = clinicalRepo.buildEncounterDiagnoses(body.diagnoses || []);
@@ -13948,21 +14259,13 @@ app.post('/api/auth/service-login', async (req, res) => {
       return res.status(403).json({ error: 'Access denied. You do not have Service Portal access. Please contact an administrator.' });
     }
 
-    const token = jwt.sign(
-      { id: user.id, email: user.email, name: user.name, role: user.role, hasServicePortalAccess: user.hasServicePortalAccess },
-      JWT_SECRET,
-      { expiresIn: config.JWT_EXPIRY }
-    );
-    res.json({
-      token,
-      user: {
+    res.json(await finishLogin({ user, req, surface: 'service', userResponse: {
         id: user.id,
         email: user.email,
         name: user.name,
         role: user.role,
         hasServicePortalAccess: user.hasServicePortalAccess || user.role === config.ROLES.ADMIN
-      }
-    });
+    } }));
   } catch (error) {
     console.error('Service login error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -16323,6 +16626,8 @@ app.post('/api/auth/change-password', authenticateToken, async (req, res) => {
     users[userIndex].lastPasswordChange = new Date().toISOString();
 
     await db.set('users', users);
+    // Session 5.3: a changed password ends every OTHER session for this user.
+    await sessions.revokeAllForUser(user.id, 'password_changed', { exceptSid: req.session && req.session.id });
     invalidateUsersCache();
 
     res.json({ message: 'Password changed successfully' });
@@ -16368,20 +16673,12 @@ app.post('/api/auth/admin-login', async (req, res) => {
       return res.status(403).json({ error: 'Account is inactive. Please contact an administrator.' });
     }
 
-    const token = jwt.sign(
-      { id: user.id, email: user.email, name: user.name, role: user.role },
-      JWT_SECRET,
-      { expiresIn: config.JWT_EXPIRY }
-    );
-    res.json({
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        role: user.role
-      }
-    });
+    res.json(await finishLogin({ user, req, surface: 'admin', userResponse: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role
+    } }));
   } catch (error) {
     console.error('Admin login error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -16631,9 +16928,12 @@ app.get('/:slug', async (req, res, next) => {
 // Global error handling middleware (Gotcha #11)
 // Must be defined after all routes - Express identifies error handlers by 4-argument signature
 app.use((err, req, res, next) => {
-  console.error('Unhandled route error:', err.stack || err.message || err);
+  // 5.4: the request id ties this line to the audit row; the message is
+  // scrubbed by logScrubber; the body is never logged.
+  const ctx = audit.currentContext();
+  console.error(`Unhandled route error [${ctx ? ctx.requestId : '-'}] ${req.method} ${req.path}:`, err.stack || err.message || err);
   if (res.headersSent) return next(err);
-  res.status(500).json({ error: 'An unexpected error occurred' });
+  res.status(500).json({ error: 'An unexpected error occurred', requestId: ctx ? ctx.requestId : undefined });
 });
 
 // Process-level error handlers to prevent crashes from unhandled async errors
@@ -16648,7 +16948,7 @@ process.on('unhandledRejection', (reason, promise) => {
 
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
-  console.log(`🔐 Admin login: ${config.DEFAULT_ADMIN.EMAIL} / ${config.DEFAULT_ADMIN.PASSWORD}`);
+  console.log(`🔐 Default admin account: ${config.DEFAULT_ADMIN.EMAIL} (password from DEFAULT_ADMIN_PASSWORD — never printed)`);
 
   // Which mailer is live, said out loud at boot. A narrowed OAuth token looked
   // exactly like a healthy one in the UI for weeks during the 8.4 upgrade; the
@@ -16728,6 +17028,13 @@ app.listen(PORT, () => {
       console.error('Consent lane-split migration failed (non-fatal):', err.message);
     }
   })();
+
+  // Session 5: housekeeping. Revoked/idle session rows older than 7 days and
+  // abandoned OpenEMR authorization states are deleted; nothing PHI-bearing.
+  setInterval(() => {
+    sessions.sweep().catch(err => console.error('Session sweep failed:', err.message));
+    emrAuth.sweepExpiredState().catch(err => console.error('OAuth state sweep failed:', err.message));
+  }, 6 * 60 * 60 * 1000);
 
   // Start HubSpot ticket polling (webhook workaround)
   initializeTicketPolling();

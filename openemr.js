@@ -12,10 +12,11 @@
 // problem list, medications, allergies, documents) go through OpenEMR's
 // standard REST API (/apis/<site>/api/*). Patient create/update is FHIR.
 //
-// Auth (approved for the dev window, 08/2026): OAuth2 password grant with the
-// dedicated gfc-app-api OpenEMR user + confidential client. Tokens live ONLY
-// in this server process — the browser never sees them. Migration to
-// authorization_code + refresh_token is a Session 5 scope item.
+// Auth (Session 5.2): OAuth2 authorization_code + PKCE, PER USER. Each
+// clinician signs in to OpenEMR as themselves; the app holds their refresh
+// token server-side (emrAuth.js, encrypted at rest) and every call here runs
+// under the acting user's own access token. The browser never sees a token.
+// The dev-window password grant is gone from this file (build-enforced).
 //
 // Every FHIR/REST call is logged through the activity logger injected by
 // server.js (setActivityLogger) with user, role, patientId, resource, action.
@@ -36,8 +37,8 @@ const REQUIRED_ENV = [
   ['OPENEMR_BASE_URL', () => BASE_URL],
   ['OPENEMR_CLIENT_ID', () => config.OPENEMR.CLIENT_ID],
   ['OPENEMR_CLIENT_SECRET', () => config.OPENEMR.CLIENT_SECRET],
-  ['OPENEMR_API_USERNAME', () => config.OPENEMR.API_USERNAME],
-  ['OPENEMR_API_PASSWORD', () => config.OPENEMR.API_PASSWORD]
+  ['OPENEMR_REDIRECT_URI', () => config.OPENEMR.REDIRECT_URI],
+  ['EMR_TOKEN_ENCRYPTION_KEY', () => config.OPENEMR.TOKEN_ENCRYPTION_KEY]
 ];
 // Which required env vars are absent/blank. NAMES ONLY — never values, so this
 // is safe to surface in the UI for setup diagnostics.
@@ -56,81 +57,47 @@ const logEmrAccess = (actor, action, resource, patientId, details) => {
   )).catch(err => console.error('OpenEMR activity log failed:', err.message));
 };
 
-// ---- Token management (server-side only) ----
-let tokenState = { accessToken: null, refreshToken: null, expiresAt: 0, grantedScopes: [] };
-let authInFlight = null;
+// ---- Token management (Session 5.2: PER USER, server-side only) ----
+// There is no password grant and no shared service token any more. server.js
+// injects a token provider backed by emrAuth.js: given the acting app user it
+// returns THAT user's OpenEMR access token (minted from their own refresh
+// token, obtained when they signed in to OpenEMR through authorization_code +
+// PKCE). Every EMR call therefore runs as the clinician who made it, and
+// OpenEMR's own audit log, note author and encounter provider say so.
+//
+//   provider(actor) → { accessToken, emrUser: { username, name, sub }, scopes }
+//   provider.invalidate(actor) → forget the access token after a 401
+//
+// A user with no connected OpenEMR account gets EMR_NOT_CONNECTED (409) from
+// the provider, which every route surfaces as "connect your OpenEMR account".
+let tokenProvider = null;
+const setTokenProvider = (fn) => { tokenProvider = fn; };
 
-const requestToken = async (form) => {
-  const body = new URLSearchParams({
-    client_id: config.OPENEMR.CLIENT_ID,
-    client_secret: config.OPENEMR.CLIENT_SECRET,
-    ...form
-  });
-  const res = await fetch(tokenUrl(), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: body.toString(),
-    signal: AbortSignal.timeout(20000)
-  });
-  let data = null;
-  try { data = await res.json(); } catch { /* non-JSON error body */ }
-  if (res.status !== 200 || !data || !data.access_token) {
-    const hint = data && (data.error_description || data.error);
-    throw new Error(`OpenEMR token request failed (HTTP ${res.status}${hint ? `: ${hint}` : ''})`);
+class OpenEmrError extends Error {
+  constructor(message, status, data, code) { super(message); this.name = 'OpenEmrError'; this.status = status; this.data = data; if (code) this.code = code; }
+}
+
+const tokenFor = async (actor) => {
+  if (!isConfigured()) throw new OpenEmrError(`OpenEMR is not configured (missing env: ${missingConfig().join(', ')})`, 503, null, 'EMR_NOT_CONFIGURED');
+  if (!tokenProvider) throw new OpenEmrError('No OpenEMR token provider is installed (server wiring)', 500, null, 'EMR_NO_TOKEN_PROVIDER');
+  try {
+    return await tokenProvider(actor);
+  } catch (err) {
+    if (err && err.code) throw new OpenEmrError(err.message, err.status || 409, null, err.code);
+    throw err;
   }
-  tokenState = {
-    accessToken: data.access_token,
-    refreshToken: data.refresh_token || tokenState.refreshToken,
-    // Refresh 60s before actual expiry
-    expiresAt: Date.now() + (Math.max(120, data.expires_in || 3600) - 60) * 1000,
-    // Granted scope set (names only) — surfaced by getStatus() so the
-    // workspace can tell whether the deployed client carries the 4.2
-    // appointment scopes (the OAuth client swap is a P0 deploy step).
-    grantedScopes: String(data.scope || '').split(/\s+/).filter(Boolean)
-  };
-  return tokenState.accessToken;
 };
-
-const passwordGrant = () => requestToken({
-  grant_type: 'password',
-  user_role: 'users',
-  username: config.OPENEMR.API_USERNAME,
-  password: config.OPENEMR.API_PASSWORD,
-  scope: config.OPENEMR.SCOPES
-});
-
-const getAccessToken = async () => {
-  if (!isConfigured()) throw new Error('OpenEMR is not configured (missing env — see .env.example)');
-  if (tokenState.accessToken && Date.now() < tokenState.expiresAt) return tokenState.accessToken;
-  // Single-flight: concurrent requests share one auth round-trip
-  if (!authInFlight) {
-    authInFlight = (async () => {
-      try {
-        if (tokenState.refreshToken) {
-          try {
-            return await requestToken({ grant_type: 'refresh_token', refresh_token: tokenState.refreshToken });
-          } catch (e) {
-            tokenState.refreshToken = null; // stale refresh token → full re-auth
-          }
-        }
-        return await passwordGrant();
-      } finally {
-        authInFlight = null;
-      }
-    })();
-  }
-  return authInFlight;
+const invalidateToken = async (actor) => {
+  if (tokenProvider && tokenProvider.invalidate) await tokenProvider.invalidate(actor);
 };
-
-// Drop the cached token (e.g. after a 401) so the next call re-authenticates.
-const invalidateToken = () => { tokenState = { accessToken: null, refreshToken: null, expiresAt: 0, grantedScopes: [] }; };
 
 // ---- Low-level request with one automatic re-auth on 401 ----
-// Returns { status, data } — data parsed as JSON when possible.
-const rawRequest = async ({ method, url, body, headers, formData }) => {
+// Returns { status, data } — data parsed as JSON when possible. Runs as
+// `actor`: the bearer token is the acting user's own.
+const rawRequest = async ({ actor, method, url, body, headers, formData }) => {
   const attempt = async () => {
-    const token = await getAccessToken();
-    const h = { Authorization: `Bearer ${token}`, ...(headers || {}) };
+    const { accessToken } = await tokenFor(actor);
+    const h = { Authorization: `Bearer ${accessToken}`, ...(headers || {}) };
     let payload;
     if (formData) {
       payload = formData; // global FormData — fetch sets the multipart boundary
@@ -148,13 +115,10 @@ const rawRequest = async ({ method, url, body, headers, formData }) => {
     return { status: res.status, data };
   };
   let res = await attempt();
-  if (res.status === 401) { invalidateToken(); res = await attempt(); }
+  if (res.status === 401) { await invalidateToken(actor); res = await attempt(); }
   return res;
 };
 
-class OpenEmrError extends Error {
-  constructor(message, status, data) { super(message); this.name = 'OpenEmrError'; this.status = status; this.data = data; }
-}
 
 const expectOk = (res, what) => {
   if (res.status >= 200 && res.status < 300) return res.data;
@@ -203,13 +167,13 @@ const eidCache = new Map();
 // ============================================================
 const forActor = (actor) => {
   const fhirGet = async (path, resource, patientId, what) => {
-    const res = await rawRequest({ method: 'GET', url: fhirUrl(path) });
+    const res = await rawRequest({ actor, method: 'GET', url: fhirUrl(path) });
     const data = expectOk(res, what || `read ${resource}`);
     logEmrAccess(actor, 'read', resource, patientId, { path });
     return data;
   };
   const apiWrite = async (method, path, body, resource, patientId, what) => {
-    const res = await rawRequest({ method, url: apiUrl(path), body });
+    const res = await rawRequest({ actor, method, url: apiUrl(path), body });
     const data = expectOk(res, what || `write ${resource}`);
     logEmrAccess(actor, 'write', resource, patientId, { path });
     return unwrapApi(data);
@@ -217,7 +181,7 @@ const forActor = (actor) => {
   // The medication endpoints key by numeric pid, not uuid — resolve once.
   const resolvePid = async (puuid) => {
     if (pidCache.has(puuid)) return pidCache.get(puuid);
-    const res = await rawRequest({ method: 'GET', url: apiUrl(`patient/${encodeURIComponent(puuid)}`) });
+    const res = await rawRequest({ actor, method: 'GET', url: apiUrl(`patient/${encodeURIComponent(puuid)}`) });
     const row = unwrapApi(expectOk(res, 'read patient (pid resolve)'));
     const pid = row && row.id;
     if (pid == null) throw new OpenEmrError('Could not resolve OpenEMR pid for patient uuid', 404, null);
@@ -226,7 +190,7 @@ const forActor = (actor) => {
   };
   // Standard-API encounter row (has eid, reason, billing_note, provider_id…).
   const getEncounterRow = async (puuid, euuid) => {
-    const res = await rawRequest({ method: 'GET', url: apiUrl(`patient/${encodeURIComponent(puuid)}/encounter/${encodeURIComponent(euuid)}`) });
+    const res = await rawRequest({ actor, method: 'GET', url: apiUrl(`patient/${encodeURIComponent(puuid)}/encounter/${encodeURIComponent(euuid)}`) });
     const data = expectOk(res, 'read encounter');
     logEmrAccess(actor, 'read', 'encounter', puuid, { euuid });
     const payload = unwrapApi(data);
@@ -280,7 +244,7 @@ const forActor = (actor) => {
 
     // ---- FHIR Patient create/update (the link step) ----
     async createPatient(fhirPatient) {
-      const res = await rawRequest({ method: 'POST', url: fhirUrl('Patient'), body: fhirPatient });
+      const res = await rawRequest({ actor, method: 'POST', url: fhirUrl('Patient'), body: fhirPatient });
       const data = expectOk(res, 'create Patient');
       // 7.0.4 quirk (verified live): the FHIR Patient POST does NOT echo the
       // created resource — it returns {"pid":N,"uuid":"..."}. Accept that, the
@@ -349,7 +313,7 @@ const forActor = (actor) => {
     // note later (the GFC structured note is regenerated in place).
     async addSoapNote(puuid, encounterUuid, note) {
       const [pid, eid] = await Promise.all([resolvePid(puuid), resolveEid(puuid, encounterUuid)]);
-      const res = await rawRequest({ method: 'POST', url: apiUrl(`patient/${pid}/encounter/${eid}/soap_note`), body: note });
+      const res = await rawRequest({ actor, method: 'POST', url: apiUrl(`patient/${pid}/encounter/${eid}/soap_note`), body: note });
       const data = expectOk(res, 'write soap_note');
       logEmrAccess(actor, 'write', 'soap_note', puuid, { eid });
       const body = unwrapApi(data) || {};
@@ -368,7 +332,7 @@ const forActor = (actor) => {
     // query filters on encounter AND id).
     async getSoapNote(puuid, encounterUuid, sid) {
       const [pid, eid] = await Promise.all([resolvePid(puuid), resolveEid(puuid, encounterUuid)]);
-      const res = await rawRequest({ method: 'GET', url: apiUrl(`patient/${pid}/encounter/${eid}/soap_note/${encodeURIComponent(sid)}`) });
+      const res = await rawRequest({ actor, method: 'GET', url: apiUrl(`patient/${pid}/encounter/${eid}/soap_note/${encodeURIComponent(sid)}`) });
       if (res.status === 404) return null;
       const data = expectOk(res, 'read soap_note');
       logEmrAccess(actor, 'read', 'soap_note', puuid, { eid, sid: String(sid) });
@@ -383,7 +347,7 @@ const forActor = (actor) => {
     // sids they recorded (getSoapNote) and treat this list as a hint only.
     async getSoapNotes(puuid, encounterUuid) {
       const [pid, eid] = await Promise.all([resolvePid(puuid), resolveEid(puuid, encounterUuid)]);
-      const res = await rawRequest({ method: 'GET', url: apiUrl(`patient/${pid}/encounter/${eid}/soap_note`) });
+      const res = await rawRequest({ actor, method: 'GET', url: apiUrl(`patient/${pid}/encounter/${eid}/soap_note`) });
       if (res.status === 404) return []; // 7.0.4 answers 404 (empty body) when the encounter has no notes yet
       const data = expectOk(res, 'read soap_note');
       logEmrAccess(actor, 'read', 'soap_note', puuid, { eid });
@@ -412,14 +376,14 @@ const forActor = (actor) => {
       return apiWrite('PUT', `patient/${encodeURIComponent(puuid)}/medical_problem/${encodeURIComponent(problemUuid)}`, problem, 'medical_problem', puuid);
     },
     async getProblemRows(puuid) {
-      const res = await rawRequest({ method: 'GET', url: apiUrl(`patient/${encodeURIComponent(puuid)}/medical_problem`) });
+      const res = await rawRequest({ actor, method: 'GET', url: apiUrl(`patient/${encodeURIComponent(puuid)}/medical_problem`) });
       const data = expectOk(res, 'read medical_problem');
       logEmrAccess(actor, 'read', 'medical_problem', puuid, {});
       return unwrapApi(data) || [];
     },
     async getMedicationRows(puuid) {
       const pid = await resolvePid(puuid);
-      const res = await rawRequest({ method: 'GET', url: apiUrl(`patient/${pid}/medication`) });
+      const res = await rawRequest({ actor, method: 'GET', url: apiUrl(`patient/${pid}/medication`) });
       if (res.status === 404) return []; // empty med list answers 404 (see getPatientAppointmentRows)
       const data = expectOk(res, 'read medication');
       logEmrAccess(actor, 'read', 'medication', puuid, {});
@@ -450,7 +414,7 @@ const forActor = (actor) => {
     async addAllergy(puuid, allergy) {
       const body = { ...allergy };
       if (body.begdate) body.begdate = String(body.begdate).slice(0, 10);
-      const res = await rawRequest({ method: 'POST', url: apiUrl(`patient/${encodeURIComponent(puuid)}/allergy`), body });
+      const res = await rawRequest({ actor, method: 'POST', url: apiUrl(`patient/${encodeURIComponent(puuid)}/allergy`), body });
       const data = expectOk(res, 'write allergy');
       const invalid = data && data.validationErrors;
       if (invalid && (Array.isArray(invalid) ? invalid.length : Object.keys(invalid).length)) {
@@ -472,7 +436,7 @@ const forActor = (actor) => {
     // read-only. Reschedule/cancel therefore go through swapAppointment()
     // below (tombstone swap, approved 08/2026).
     async getPractitionerRows() {
-      const res = await rawRequest({ method: 'GET', url: apiUrl('practitioner') });
+      const res = await rawRequest({ actor, method: 'GET', url: apiUrl('practitioner') });
       const data = expectOk(res, 'read practitioner');
       logEmrAccess(actor, 'read', 'practitioner', null, {});
       return unwrapApi(data) || [];
@@ -480,14 +444,14 @@ const forActor = (actor) => {
     // Whole-calendar read — the conflict check and the admin unified view both
     // work from this live list (availability is never modeled app-side).
     async listAppointmentRows() {
-      const res = await rawRequest({ method: 'GET', url: apiUrl('appointment') });
+      const res = await rawRequest({ actor, method: 'GET', url: apiUrl('appointment') });
       const data = expectOk(res, 'read appointment list');
       logEmrAccess(actor, 'read', 'appointment', null, { scope: 'all' });
       return unwrapApi(data) || [];
     },
     async getPatientAppointmentRows(puuid) {
       const pid = await resolvePid(puuid);
-      const res = await rawRequest({ method: 'GET', url: apiUrl(`patient/${pid}/appointment`) });
+      const res = await rawRequest({ actor, method: 'GET', url: apiUrl(`patient/${pid}/appointment`) });
       // 404 = "this patient has no appointments", not an error (verified live
       // 2026-09-06 on 8.4: pid 11 with an empty calendar answers 404 with an
       // empty body, the same quirk already handled for soap_note). Without this
@@ -503,7 +467,7 @@ const forActor = (actor) => {
     // MUST build from it, or the original notes and location marker are lost.
     async getAppointmentRow(puuid, eid) {
       const pid = await resolvePid(puuid);
-      const res = await rawRequest({ method: 'GET', url: apiUrl(`patient/${pid}/appointment/${encodeURIComponent(eid)}`) });
+      const res = await rawRequest({ actor, method: 'GET', url: apiUrl(`patient/${pid}/appointment/${encodeURIComponent(eid)}`) });
       const data = expectOk(res, 'read appointment');
       logEmrAccess(actor, 'read', 'appointment', puuid, { eid: String(eid) });
       const payload = unwrapApi(data);
@@ -531,7 +495,7 @@ const forActor = (actor) => {
       }
       let deleted = false; let deleteError = null;
       try {
-        const res = await rawRequest({ method: 'DELETE', url: apiUrl(`patient/${pid}/appointment/${encodeURIComponent(oldEid)}`) });
+        const res = await rawRequest({ actor, method: 'DELETE', url: apiUrl(`patient/${pid}/appointment/${encodeURIComponent(oldEid)}`) });
         expectOk(res, 'remove superseded appointment');
         deleted = true;
       } catch (e) {
@@ -569,7 +533,7 @@ const forActor = (actor) => {
       return row;
     },
     async getPrescriptions(puuid) {
-      const res = await rawRequest({ method: 'GET', url: apiUrl('prescription') });
+      const res = await rawRequest({ actor, method: 'GET', url: apiUrl('prescription') });
       if (res.status === 404) return [];
       const data = expectOk(res, 'read prescription');
       logEmrAccess(actor, 'read', 'prescription', puuid, {});
@@ -585,8 +549,8 @@ const forActor = (actor) => {
     // facility, POS, reason) after create instead of only at create time.
     async updateEncounter(puuid, encounterUuid, fields) {
       const res = await rawRequest({
-        method: 'PUT', url: apiUrl(`patient/${encodeURIComponent(puuid)}/encounter/${encodeURIComponent(encounterUuid)}`),
-        body: { user: config.OPENEMR.API_USERNAME, group: config.OPENEMR.ENCOUNTER_GROUP, ...fields }
+        actor, method: 'PUT', url: apiUrl(`patient/${encodeURIComponent(puuid)}/encounter/${encodeURIComponent(encounterUuid)}`),
+        body: { user: (await tokenFor(actor)).emrUser && (await tokenFor(actor)).emrUser.username || 'unknown', group: config.OPENEMR.ENCOUNTER_GROUP, ...fields }
       });
       const data = expectOk(res, 'update encounter');
       const body = data && typeof data === 'object' ? data : {};
@@ -602,7 +566,7 @@ const forActor = (actor) => {
     // Facilities that may be selected as an encounter's BILLING facility.
     // `billing_location` marks the ones OpenEMR itself allows for billing.
     async getFacilities() {
-      const res = await rawRequest({ method: 'GET', url: apiUrl('facility') });
+      const res = await rawRequest({ actor, method: 'GET', url: apiUrl('facility') });
       if (res.status === 404) return [];
       const data = expectOk(res, 'read facilities');
       logEmrAccess(actor, 'read', 'facility', null, {});
@@ -621,7 +585,7 @@ const forActor = (actor) => {
     },
     async getCharges(puuid, encounterUuid) {
       const [pid, eid] = await Promise.all([resolvePid(puuid), resolveEid(puuid, encounterUuid)]);
-      const res = await rawRequest({ method: 'GET', url: apiUrl(`patient/${pid}/encounter/${eid}/billing`) });
+      const res = await rawRequest({ actor, method: 'GET', url: apiUrl(`patient/${pid}/encounter/${eid}/billing`) });
       if (res.status === 404) return [];
       const data = expectOk(res, 'read charges');
       logEmrAccess(actor, 'read', 'billing', puuid, { eid });
@@ -647,7 +611,7 @@ const forActor = (actor) => {
     },
     async getOrders(puuid, encounterUuid) {
       const [pid, eid] = await Promise.all([resolvePid(puuid), resolveEid(puuid, encounterUuid)]);
-      const res = await rawRequest({ method: 'GET', url: apiUrl(`patient/${pid}/encounter/${eid}/order`) });
+      const res = await rawRequest({ actor, method: 'GET', url: apiUrl(`patient/${pid}/encounter/${eid}/order`) });
       if (res.status === 404) return [];
       const data = expectOk(res, 'read orders');
       logEmrAccess(actor, 'read', 'order', puuid, { eid });
@@ -670,7 +634,7 @@ const forActor = (actor) => {
       const q = new URLSearchParams({ search: term });
       if (type) q.set('type', String(type).toUpperCase());
       if (limit) q.set('limit', String(limit));
-      const res = await rawRequest({ method: 'GET', url: apiUrl(`codes?${q.toString()}`) });
+      const res = await rawRequest({ actor, method: 'GET', url: apiUrl(`codes?${q.toString()}`) });
       if (res.status === 404) return [];
       const data = expectOk(res, 'search codes');
       logEmrAccess(actor, 'read', 'codes', null, { type: type || 'any' });
@@ -699,7 +663,7 @@ const forActor = (actor) => {
       const fd = new FormData(); // global (Node 18+)
       fd.append('document', new Blob([buffer], { type: mimeType || 'application/pdf' }), fileName);
       const path = `patient/${pid}/document?path=${encodeURIComponent(categoryPath || '/Medical Record')}`;
-      const res = await rawRequest({ method: 'POST', url: apiUrl(path), formData: fd });
+      const res = await rawRequest({ actor, method: 'POST', url: apiUrl(path), formData: fd });
       const data = expectOk(res, 'upload document');
       logEmrAccess(actor, 'write', 'document', puuid, { fileName });
       return unwrapApi(data);
@@ -723,7 +687,7 @@ const forActor = (actor) => {
     // `user/document.read`, already requested here and already on the v4 client.
     async listPatientDocuments(puuid) {
       const pid = await resolvePid(puuid);
-      const res = await rawRequest({ method: 'GET', url: apiUrl(`patient/${pid}/document`) });
+      const res = await rawRequest({ actor, method: 'GET', url: apiUrl(`patient/${pid}/document`) });
       if (res.status === 404) return { supported: false, rows: [] };
       const data = expectOk(res, 'list patient documents');
       logEmrAccess(actor, 'read', 'document', puuid, {});
@@ -742,7 +706,7 @@ const forActor = (actor) => {
     // headers for a binary stream.
     async getPatientDocument(puuid, documentId) {
       const pid = await resolvePid(puuid);
-      const res = await rawRequest({ method: 'GET', url: apiUrl(`patient/${pid}/document/${encodeURIComponent(documentId)}`) });
+      const res = await rawRequest({ actor, method: 'GET', url: apiUrl(`patient/${pid}/document/${encodeURIComponent(documentId)}`) });
       if (res.status === 404) return { supported: false, doc: null };
       if (res.status === 400) return { supported: true, doc: null };
       const data = expectOk(res, 'read patient document');
@@ -762,57 +726,58 @@ const forActor = (actor) => {
 };
 
 // Connectivity probe for the workspace sync indicator + preflight.
-const getStatus = async () => {
-  const missing = missingConfig();
-  if (missing.length) return { configured: false, connected: false, missing };
+// Two independent facts, reported separately because they fail separately:
+//   reachable  — the EMR answers its unauthenticated CapabilityStatement
+//                (server up, APIs enabled, site address right)
+//   connected  — THIS app user holds a live OpenEMR token (per-user, 5.2)
+// The per-user half comes from the token provider's status function; a
+// server-level probe cannot mint a token any more, and must not try.
+let reachCache = { at: 0, value: null };
+const probeReachable = async () => {
+  if (Date.now() - reachCache.at < 60000 && reachCache.value) return reachCache.value;
+  let value;
   try {
-    await getAccessToken();
-    const granted = tokenState.grantedScopes || [];
-    const requested = String(config.OPENEMR.SCOPES || '').split(/\s+/).filter(Boolean);
-    // A token carries the INTERSECTION of what this app requests and what the
-    // deployed OAuth client was registered with, and OpenEMR reports no error
-    // for the shortfall — it simply issues a narrower token. That is how the
-    // August v2 client stayed deployed through the 8.4 upgrade while the
-    // workspace showed a green "OpenEMR connected": every route the app had
-    // always used still worked, and only the NEW ones 401'd.
-    //
-    // So report the shortfall by name. `missingScopes` is the exact list an
-    // admin needs to recognise a stale client, and the two booleans below name
-    // the capability each shortfall costs.
-    // `api:oemr` / `api:fhir` are never echoed back in the granted set on 8.4
-    // even though both API surfaces demonstrably work (verified live
-    // 2026-09-06), so listing them as missing would be noise that trains an
-    // admin to ignore this banner. Everything else absent here is really absent.
-    const NOT_ECHOED = new Set(['api:oemr', 'api:fhir']);
-    const missingScopes = requested.filter(sc => !granted.includes(sc) && !NOT_ECHOED.has(sc));
-    const has = (...names) => names.every(n => granted.includes(n));
-    return {
-      configured: true, connected: true, baseUrl: BASE_URL,
-      grantedScopeCount: granted.length,
-      requestedScopeCount: requested.length,
-      missingScopes,
-      // 4.2 appointment client swap deployed? (P0 deploy step, spec §1 #15)
-      appointmentScopes: has('user/appointment.read', 'user/appointment.write'),
-      // 8.4 native writes (Session 4.5 scope A) — prescriptions above all.
-      nativeWriteScopes: has('user/prescription.read', 'user/prescription.write'),
-      // Phase 6B patched routes (charges, orders, code search). Without these
-      // the app cannot write a fee-sheet charge, so sign-and-close never
-      // reaches Billing Manager.
-      billingRouteScopes: has('user/billing.read', 'user/billing.write',
-        'user/order.read', 'user/order.write', 'user/codes.read')
-    };
+    const res = await fetch(fhirUrl('metadata'), { signal: AbortSignal.timeout(15000) });
+    let data = null; try { data = await res.json(); } catch { /* not JSON */ }
+    value = res.status === 200 && data && data.resourceType === 'CapabilityStatement'
+      ? { reachable: true, fhirVersion: data.fhirVersion || null, software: (data.software && data.software.version) || null }
+      : { reachable: false, error: `metadata answered HTTP ${res.status}${data && data.resourceType ? ` (${data.resourceType})` : ''}` };
   } catch (err) {
-    return { configured: true, connected: false, baseUrl: BASE_URL, error: err.message };
+    value = { reachable: false, error: err.message };
   }
+  reachCache = { at: Date.now(), value };
+  return value;
+};
+const getStatus = async (actor) => {
+  const missing = missingConfig();
+  if (missing.length) return { configured: false, connected: false, reachable: false, missing };
+  const reach = await probeReachable();
+  let user = { connected: false, emrUser: null, grantedScopeCount: 0, missingScopes: [] };
+  if (actor && tokenProvider && tokenProvider.statusFor) {
+    try { user = await tokenProvider.statusFor(actor); } catch (err) { user = { connected: false, emrUser: null, error: err.message }; }
+  }
+  return {
+    configured: true, baseUrl: BASE_URL, ...reach,
+    // `connected` keeps its name for the workspace, but it now means "this
+    // user is signed in to OpenEMR", not "the server holds a token".
+    connected: !!user.connected, emrUser: user.emrUser || null, connectedAt: user.connectedAt || null,
+    disconnectReason: user.disconnectReason || null, tokenExpiresAt: user.expiresAt || null,
+    grantedScopeCount: user.grantedScopeCount || 0, requestedScopeCount: user.requestedScopeCount || 0,
+    missingScopes: user.missingScopes || [],
+    appointmentScopes: user.appointmentScopes, nativeWriteScopes: user.nativeWriteScopes, billingRouteScopes: user.billingRouteScopes,
+    ...(reach.reachable ? {} : { error: reach.error })
+  };
 };
 
 module.exports = {
   isConfigured,
   missingConfig,
   setActivityLogger,
+  setTokenProvider,
   forActor,
   getStatus,
   invalidateToken,
+  OpenEmrError,
   // exported for unit tests
   _internal: { fhirUrl, apiUrl, bundleResources, unwrapApi }
 };

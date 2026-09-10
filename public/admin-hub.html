@@ -60,6 +60,8 @@
     .animate-fade-in { animation: fadeIn 0.4s ease-out forwards; }
     .glass-effect { backdrop-filter: blur(10px); background: rgba(255,255,255,0.9); }
   </style>
+  <script src="/session-guard.js"></script>
+  <script src="/mfa-step.js"></script>
 </head>
 <body class="min-h-screen">
   <div id="root"></div>
@@ -101,7 +103,7 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email, password })
-        }).then(handleResponse).then(result => {
+        }).then(handleResponse).then(r => window.GFC_MFA.complete(r)).then(result => {
           // Verify user has admin hub access (super admins, managers, or users with hasAdminHubAccess)
           if (result.user && result.user.role !== 'admin' && !result.user.isManager && !result.user.hasAdminHubAccess) {
             return { error: 'Access denied. Admin Hub access required.' };

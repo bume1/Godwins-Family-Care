@@ -10,8 +10,8 @@
  *   node debug-db.js --search email@example.com  # Search for value
  */
 
-const Database = require('@replit/database');
-const db = new Database();
+const dataStore = require('./dataStore');
+const db = dataStore.createStore(); // same adapter selection as the app (DATA_STORE)
 
 // ANSI color codes for pretty output
 const colors = {

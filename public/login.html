@@ -44,6 +44,7 @@
     .animate-fade-in { animation: fadeIn 0.4s ease-out forwards; }
     .glass-card { backdrop-filter: blur(10px); background: rgba(255,255,255,0.95); }
   </style>
+  <script src="/mfa-step.js"></script>
 </head>
 <body>
   <div id="root"></div>
@@ -71,7 +72,12 @@
     const LoginPage = ({ onLogin }) => {
       const [email, setEmail] = useState('');
       const [password, setPassword] = useState('');
-      const [error, setError] = useState('');
+      const [error, setError] = useState(() => {
+        // Why the person is back here, when the session guard sent them.
+        const reason = new URLSearchParams(window.location.search).get('reason');
+        const msgs = { idle: 'You were signed out after 15 minutes of inactivity.', revoked: 'Your session was signed out.', expired: 'Your session expired.', mfa_required: 'Your account now requires two-step sign-in. Please sign in again.', inactive: 'This account is inactive.' };
+        return (reason && msgs[reason]) || '';
+      });
       const [loading, setLoading] = useState(false);
       const [showForgotPassword, setShowForgotPassword] = useState(false);
       const [resetMessage, setResetMessage] = useState('');
@@ -87,7 +93,9 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ email, password })
           });
-          const result = await response.json();
+          // Session 5.3: a role that requires MFA gets a challenge instead of a
+          // token; GFC_MFA renders it and resolves with the verified response.
+          const result = await window.GFC_MFA.complete(await response.json());
 
           if (result.error) {
             setError(result.error);

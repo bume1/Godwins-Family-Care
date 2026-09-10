@@ -80,3 +80,13 @@ on any failure.
 
 One-time importer for the legacy Transfer-of-Care Provider ROI Google Sheet.
 See the file header for usage.
+
+## Session 5 — HIPAA go-live scripts (2026-09-10)
+
+| Script | What it does |
+|---|---|
+| `export_kv_snapshot.js [out.json]` | Dumps every key of the current store (`DATA_STORE` selects it) to JSON. The app-side half of the pre-cutover snapshot; contains PHI — keep it inside the boundary. |
+| `migrate_kv_to_postgres.js [--dry-run] [--verify-only] [--from-file snap.json] [--ignore k1,k2] [--overwrite]` | KV → Postgres. Walks the source dynamically; **refuses on any collection without a handler** in `dataMigration.js`; idempotent; verifies by read-back; writes a per-collection report next to the script. |
+| `verify_session5.js` | Boots the real server on the memory adapter (or `BASE_URL=` for a deployed host) and runs the 38-check acceptance: production boot refusals, MFA enrol/verify/recovery, session revocation and idle expiry, the per-user OpenEMR handshake, durable audit rows, scrubbed log. |
+| `verify_emr_authcode.js` | **Owner-run** live acceptance for per-user OpenEMR auth: authorize URL → pasted redirect → PKCE exchange → userinfo → TEST-DATA note written and read back with the OpenEMR `user` on the row. Reports whether the password grant is still on. |
+| `emr_login.js` | Obtains a per-user OpenEMR token from a terminal for the other live probes (`verify_84_transport.js`, `verify_6b_charges.js`, …), which now read `OPENEMR_PROBE_ACCESS_TOKEN` instead of the retired API user. |
