@@ -26,7 +26,8 @@ const consentRegistry = require('./consentRegistry'); // THE consent registry: l
 const consentRender = require('./consentRender');     // consent data blocks resolved from the client record (4.6)
 const zipWriter = require('./zipWriter');             // dependency-free ZIP for the signed-consent packet (4.6)
 const caregiverRoutes = require('./routes/caregiver'); // caregiver app: visit log + escalation (Session 6)
-const schedulingRoutes = require('./routes/scheduling'); // PHCP shifts, availability, time tracking (Session 7)
+const schedulingRoutes = require('./routes/scheduling');
+const messagingRoutes = require('./routes/messaging'); // channel matrix + role-scoped threads (Session 9) // PHCP shifts, availability, time tracking (Session 7)
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -2286,6 +2287,7 @@ app.use(caregiverRoutes({ db, config, logActivity, queueNotification, getUsers, 
 // PHCP scheduling (Session 7) — page shell + /api/scheduling/*. App-side only;
 // clinical appointments stay in OpenEMR (Session 4.2). Two systems by design.
 app.use(schedulingRoutes({ db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4 }));
+app.use(messagingRoutes({ db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4 }));
 
 // Uploads require authentication - registered here after authenticateToken is defined
 app.use('/uploads', authenticateToken, express.static('uploads', staticOptions));
@@ -5593,29 +5595,11 @@ const getClientVisits = async (client) => {
   return { upcoming, recent };
 };
 
-// Messages for a client from the gfc_messages KV collection, scoped to the
-// logged-in user's client record. Structured channels (admin/caregiver/clinical);
-// the full channel matrix is Session 9 — today the client can read their real
-// thread and send a basic message to admin (persisted). Never sample content.
-const GFC_MESSAGE_CHANNELS = ['caregiver', 'clinical', 'admin'];
-const getClientMessages = async (client) => {
-  const rows = ((await db.get('gfc_messages')) || []).filter(m => m && m.client_id === client.id);
-  rows.sort((a, b) => new Date(b.sentAt || 0) - new Date(a.sentAt || 0));
-  return {
-    channels: GFC_MESSAGE_CHANNELS,
-    messages: rows.slice(0, 100).map(m => ({
-      id: m.id,
-      channel: m.channel || 'admin',
-      direction: m.direction || 'out',           // 'in' = staff → client, 'out' = client → staff
-      from: m.fromName || 'You',
-      fromRole: m.fromRole || null,
-      initials: nameInitials(m.fromName),
-      body: m.body,
-      sentAt: m.sentAt,
-      unread: m.direction === 'in' && !m.readAt
-    }))
-  };
-};
+// The interim message shaper lived here and is gone with its routes (Session
+// 9). The `gfc_messages` collection itself is deliberately LEFT IN PLACE: its
+// rows were migrated, not moved, so the originals stay readable until someone
+// confirms the migration on the deployed store. Deleting the source in the
+// same change that reads it is how a migration becomes unverifiable.
 
 // /api/gfc/me — NOT gated. The portal calls this first to decide whether to
 // render the intake flow (gate) or the unlocked portal.
@@ -5711,59 +5695,31 @@ app.get('/api/gfc/visits', authenticateToken, requireEnrolledClient, async (req,
   }
 });
 
-// /api/gfc/messages — gated. Real messages scoped to the client from the
-// gfc_messages store (structured channels; full channel matrix is Session 9).
-app.get('/api/gfc/messages', authenticateToken, requireEnrolledClient, async (req, res) => {
-  try {
-    const client = await resolveGfcClientRecord(req.user);
-    if (!client) return res.status(404).json({ error: 'No client record on file' });
-    res.json(await getClientMessages(client));
-  } catch (error) {
-    console.error('GFC messages error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
+// GET /api/gfc/messages — RETIRED (Session 9). The portal reads threads
+// through /api/messaging/threads now, and the component owns its own loading.
+app.get('/api/gfc/messages', authenticateToken, (req, res) => {
+  res.status(410).json({
+    error: 'Messaging has moved. Refresh the page and open Messages.',
+    code: 'MESSAGING_MOVED',
+    replacedBy: '/api/messaging/threads'
+  });
 });
 
-// POST /api/gfc/messages — gated: the client, or a designated POA acting on
-// the client's behalf (4.3 acting gate — recorded as "<POA> as POA for
-// <client>"). Non-POA family stays read-only. Basic client→admin message send,
-// persisted to the gfc_messages store. Minimal by design: routing/replies/
-// notifications arrive with the Session 9 module.
-app.post('/api/gfc/messages', authenticateToken, requireEnrolledClient, async (req, res) => {
-  try {
-    const client = await resolveGfcClientRecord(req.user);
-    if (!client) return res.status(404).json({ error: 'No client record on file' });
-    const acting = patientRead.buildActingIdentity(req.user, client);
-    if (req.user.role !== config.ROLES.CLIENT && !acting.isPoa) {
-      return res.status(403).json({ error: 'Only the client (or their designated Power of Attorney) may send messages', code: 'FAMILY_READ_ONLY' });
-    }
-    const body = req.body && typeof req.body.body === 'string' ? req.body.body.trim() : '';
-    if (!body) return res.status(400).json({ error: 'Message text is required' });
-    if (body.length > 4000) return res.status(413).json({ error: 'Message is too long (4000 characters max)' });
-
-    const messages = (await db.get('gfc_messages')) || [];
-    const message = {
-      id: uuidv4(),
-      client_id: client.id,
-      channel: 'admin',
-      direction: 'out',
-      fromName: acting.isPoa ? acting.signerName : (client.preferredName || client.name || 'Client'),
-      fromRole: acting.isPoa ? 'POA' : 'Client',
-      fromUserId: req.user.id,
-      actingFor: acting.actingFor,
-      body,
-      sentAt: new Date().toISOString(),
-      readAt: null
-    };
-    messages.push(message);
-    await db.set('gfc_messages', messages);
-    await logActivity(req.user.id, req.user.name || req.user.email, 'gfc_message_sent', 'message', message.id,
-      { channel: 'admin', role: req.user.role, actingFor: acting.actingFor, signer: message.fromName });
-    res.json({ message: 'Message sent', sent: { id: message.id, sentAt: message.sentAt } });
-  } catch (error) {
-    console.error('GFC message send error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
+// POST /api/gfc/messages — RETIRED (Session 9, 2026-09-10).
+// The 3.5 interim send wrote a flat client→admin row into `gfc_messages`. Its
+// rows were migrated into `message_threads` / `messages` first and the new path
+// proven live (scripts/verify_messaging.js, 77/77) before this was removed —
+// the brief's rule, and the reason it is a rule: retiring the old path in the
+// same change that adds the new one leaves nothing to fall back to.
+//
+// It answers 410 rather than vanishing, because a client sitting on a cached
+// page would otherwise get a bare 404 and no idea why their message failed.
+app.post('/api/gfc/messages', authenticateToken, (req, res) => {
+  res.status(410).json({
+    error: 'Messaging has moved. Refresh the page and send it from Messages.',
+    code: 'MESSAGING_MOVED',
+    replacedBy: '/api/messaging/threads'
+  });
 });
 
 // ============== TWO-WAY DOCUMENT EXCHANGE ==============

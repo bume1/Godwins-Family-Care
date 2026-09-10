@@ -30,8 +30,16 @@ Read first, in full:
 - GFC_App_Build_v2.md §2 (boundary diagram), §9 (HIPAA hardening: MFA,
   15-min inactivity logout, audit on every view), §Session 5.
 - server.js — how the data store is used TODAY: `const db = new
-  Database()` from `@replit/database` at server.js:51, called directly
+  Database()` from `@replit/database` at server.js:53, called directly
   (db.get/set/list) throughout. There is NO abstraction yet — 5.1 adds it.
+  **Good news, verified 2026-09-09:** the repository modules
+  (caregiverRepository, schedulingRepository, messagingRepository,
+  clinicalRepository, patientReadRepository, roiRepository, consentRegistry)
+  do NOT instantiate their own Database — server.js is the single
+  instantiation point. 5.1 is therefore a narrower change than it looks:
+  swap one construction site and the call surface behind it. Roughly 39
+  distinct collections are in use; enumerate them dynamically per above
+  rather than trusting that number.
 - openemr.js — the token flow: `passwordGrant()` is primary,
   refresh_token supported but obtained via the password grant; there is no
   authorization_code flow. 5.2 replaces this.
@@ -141,7 +149,7 @@ DO NOT
   OAuth client enabled.
 - Emit PHI to any log/trace/error that leaves the boundary.
 - Claim go-live, or that any infra/BAA step is done, from the build sandbox.
-- Break Sessions 3.x / 4.x / 6 / 7 flows. Keep the KV adapter working for dev.
+- Break Sessions 3.x / 4.x / 6 / 7 / 9 flows, or 8 / 10 if they have landed. Keep the KV adapter working for dev.
 
 ACCEPTANCE (overall)
 - Every prior test green against the Postgres adapter; migration verified.

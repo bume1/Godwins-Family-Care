@@ -177,10 +177,10 @@ Then verify the files are exactly what was published:
 cd /opt/openemr/gfc-patch && sha256sum -c <<'SUMS'
 501cdaa64cc0681a6a454401e674ab15ad4614ce792a2bdc1ce0d5e4086d9e3c  Dockerfile
 2dde7b64e4ece3e3ed152ef0f04ae169172b7f0d5d137d42635a3f147b98872d  apis/routes/_rest_routes_standard.inc.php
-1a3a88383eb8f65fdd7549fa10ae4d1694ef207ffcb23bfdb1e362f75858edd3  apis/routes/_rest_routes_gfc.inc.php
+bcee864f9cf7cc35d3cd61686b65be0437002298ead3c284750e523c385125b2  apis/routes/_rest_routes_gfc.inc.php
 0333542b8c9e054711f50f7b31dbe9cec40c70f3479698b0ac31a8eb95a76d66  gfc-add-scopes.php
 4310e14f6cd63b2d954afbf4ec616b427e2412511483213e096aa006de8ae317  src/RestControllers/GfcChargeRestController.php
-e26781a16569f2c501844098acf19306e4575049a03d1bd992b3c4abdf8919ea  src/RestControllers/GfcDocumentRestController.php
+e5365547054b85076b96cd5a2095504884a18ba81e1d0d51fea7bebd505a97c6  src/RestControllers/GfcDocumentRestController.php
 SUMS
 ```
 
@@ -424,8 +424,8 @@ sudo curl -fsSL -o Dockerfile "$B/Dockerfile"
 sha256sum -c <<'SUMS'
 501cdaa64cc0681a6a454401e674ab15ad4614ce792a2bdc1ce0d5e4086d9e3c  Dockerfile
 2dde7b64e4ece3e3ed152ef0f04ae169172b7f0d5d137d42635a3f147b98872d  apis/routes/_rest_routes_standard.inc.php
-1a3a88383eb8f65fdd7549fa10ae4d1694ef207ffcb23bfdb1e362f75858edd3  apis/routes/_rest_routes_gfc.inc.php
-e26781a16569f2c501844098acf19306e4575049a03d1bd992b3c4abdf8919ea  src/RestControllers/GfcDocumentRestController.php
+bcee864f9cf7cc35d3cd61686b65be0437002298ead3c284750e523c385125b2  apis/routes/_rest_routes_gfc.inc.php
+e5365547054b85076b96cd5a2095504884a18ba81e1d0d51fea7bebd505a97c6  src/RestControllers/GfcDocumentRestController.php
 SUMS
 
 cd /opt/openemr && sudo docker compose build --pull && sudo docker compose up -d

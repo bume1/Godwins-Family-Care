@@ -563,23 +563,43 @@ test('server.js registers scheduling with exactly one require and one mount', ()
   assert.strictEqual((serverSrc.match(/app\.use\(caregiverRoutes\(/g) || []).length, 1);
 });
 
-test('SAFETY: the caregiver component ships UNMOUNTED', () => {
+test('the caregiver page mounts the component, once, with the TOKEN', () => {
+  // This inverts the Session 7 invariant on purpose. That test said the
+  // component must ship unmounted while Sessions 6 and 7 were built in
+  // parallel; the wiring session (2026-09-10) is the deliberate act it was
+  // waiting for. What has to stay true is HOW it is mounted.
   assert.ok(/GFCCaregiverSchedule\s*=\s*\{/.test(componentSrc), 'it exports a mount function');
-  // Session 6 owns caregiver.html and its mount point is still a placeholder.
-  // The wiring session mounts this; Session 7 does not.
-  assert.ok(!/GFCCaregiverSchedule/.test(caregiverPageSrc),
-    'public/caregiver.html must not reference the component — a follow-up session wires it');
-  assert.ok(!/caregiver-schedule\.js/.test(caregiverPageSrc),
-    'and must not load it');
-  assert.ok(/id="gfc-mount-schedule"/.test(caregiverPageSrc),
-    'the mount point Session 6 left is still there for it');
+  assert.ok(/src="\/components\/caregiver-schedule\.js"/.test(caregiverPageSrc), 'the page loads it');
 
-  // Nothing anywhere in public/ calls mount() on it yet.
-  const publicDir = path.join(__dirname, '..', 'public');
-  const callers = fs.readdirSync(publicDir)
-    .filter(f => f.endsWith('.html'))
-    .filter(f => /GFCCaregiverSchedule\s*\.\s*mount/.test(fs.readFileSync(path.join(publicDir, f), 'utf8')));
-  assert.deepStrictEqual(callers, [], `nothing should mount it yet, found: ${callers.join(', ')}`);
+  const mounts = caregiverPageSrc.match(/GFCCaregiverSchedule[\s\S]{0,40}?\.mount\(/g) || [];
+  assert.strictEqual(mounts.length, 1, 'exactly one mount call — two would fight over one element id');
+  assert.strictEqual(caregiverPageSrc.split('id="gfc-mount-schedule"').length - 1, 1,
+    'and exactly one element carrying the id');
+
+  // The token authorizes; the id is display only. Mounting with an id and no
+  // token would render an empty board and look like "no shifts".
+  const at = caregiverPageSrc.indexOf('lib.mount(');
+  const call = caregiverPageSrc.slice(at, at + 400);
+  assert.ok(/authToken:\s*token/.test(call), 'mounted with the bearer token');
+  assert.ok(!/localStorage/.test(call), 'the caregiver id never comes from localStorage');
+
+  // Unmounted on teardown: the component keys instance state by element id, so
+  // a stale instance would leave the next mount rendering into a dead node.
+  assert.ok(/lib\.unmount\('gfc-mount-schedule'\)/.test(caregiverPageSrc),
+    'the tab unmounts it on teardown');
+});
+
+test('SAFETY: Home does not grow a second clock-in control', () => {
+  // Two buttons over one clock-in API is how a double clock-in happens. Home
+  // renders the STATE and routes to the component, which owns the action.
+  const shiftCard = caregiverPageSrc.slice(
+    caregiverPageSrc.indexOf('const ShiftCard'),
+    caregiverPageSrc.indexOf('const HomeTab')
+  );
+  // The prose says "clock in"; what must be absent is the CALL.
+  assert.ok(!/\/api\/scheduling/.test(shiftCard) && !/fetch\(|api\(/.test(shiftCard),
+    'the Home card must not call a time-log route itself');
+  assert.ok(/onSchedule/.test(shiftCard), 'it sends the caregiver to the schedule instead');
 });
 
 test('the component documents its mount contract', () => {
@@ -589,20 +609,18 @@ test('the component documents its mount contract', () => {
   assert.ok(/SHIPPED UNMOUNTED/.test(componentSrc), 'and say plainly that it is not mounted');
 });
 
-test('Session 7 does not edit files Session 6 or Session 9 own', () => {
-  // Session 6 owns public/caregiver.html. Session 7 added nothing to it: the
-  // page calls no scheduling API and loads no script of ours. (Its prose does
-  // say "coming with scheduling" — that is Session 6's own placeholder copy.)
-  assert.ok(!/\/api\/scheduling/.test(caregiverPageSrc),
-    'caregiver.html must not call a scheduling route — the component does that, once mounted');
-  assert.ok(!/components\//.test(caregiverPageSrc),
-    'caregiver.html must not load a component script from this session');
-  // Session 9 owns messaging. The invariant is its STORE and ROUTES, not the
-  // word — a confirmation response legitimately carries a `message` field.
-  assert.ok(!/gfc_messages|\/api\/gfc\/messages|\/api\/messages/.test(routeSrc + repoSrc),
-    'Session 9 owns the message store and its routes');
-  assert.ok(!/db\.set\(\s*['"]gfc_messages/.test(routeSrc),
-    'scheduling must never write to the message store');
+test('scheduling stays out of messaging\'s store, and messaging out of scheduling\'s', () => {
+  // Session 9 is now built and wired too, so the old "Session 9 is untouched"
+  // invariant is superseded. What still has to hold is that the two modules
+  // do not reach into each other: one store, one owner.
+  assert.ok(!/message_threads|db\.set\(\s*['"]messages/.test(routeSrc + repoSrc),
+    'scheduling must never write to the messaging store');
+  const msgRouteSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'messaging.js'), 'utf8');
+  assert.ok(!/db\.set\(\s*['"](shifts|time_logs|caregiver_availability)/.test(msgRouteSrc),
+    'messaging must never write to the scheduling store');
+  // Both legitimately append to Session 6's ONE escalation store — that is
+  // deliberate, so a case manager has one inbox rather than two.
+  assert.ok(/escalation_events/.test(msgRouteSrc), 'messaging raises into Session 6\'s escalation store');
 });
 
 test('scheduling rides the existing notification queue and activity log', () => {

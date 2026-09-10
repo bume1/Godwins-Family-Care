@@ -466,26 +466,23 @@ test('server.js registers the caregiver routes with exactly one require and one 
   assert.strictEqual(mounts.length, 1, 'one app.use — the parallel-build protocol');
 });
 
-test('both mount points render as disabled labeled panels with a documented contract', () => {
+test('both mount points are FILLED, and each id appears exactly once', () => {
+  // Session 6 shipped two disabled placeholders. Both are now wired — the
+  // schedule on 2026-09-10 and messaging in the same session it was built —
+  // so what has to stay true is the mechanics, not the emptiness.
   for (const id of ['gfc-mount-schedule', 'gfc-mount-messaging']) {
-    const occurrences = pageSrc.split(`id="${id}"`).length - 1;
-    assert.strictEqual(occurrences, 1, `"${id}" must appear exactly once — ids are unique`);
-    const idx = pageSrc.indexOf(`id="${id}"`);
-    const el = pageSrc.slice(idx, idx + 400);
-    assert.ok(el.includes('aria-disabled="true"'), `${id} must be disabled, not fake-interactive`);
-    assert.ok(el.includes('className="mount"'), `${id} must render as a labeled placeholder panel`);
+    assert.strictEqual(pageSrc.split(`id="${id}"`).length - 1, 1,
+      `"${id}" must appear exactly once — a duplicate id means one component renders into a node it does not own`);
+    const el = pageSrc.slice(pageSrc.indexOf(`id="${id}"`), pageSrc.indexOf(`id="${id}"`) + 120);
+    assert.ok(!el.includes('aria-disabled'), `${id} is live, not a disabled panel`);
   }
-  // The contract each follow-up session needs: the mount id, the props, and
-  // where the caregiver's own id comes from.
-  for (const needle of [
-    'MOUNT POINT — SCHEDULE (Session 7)',
-    'MOUNT POINT — MESSAGING (Session 9)',
-    'GET /api/caregiver/me'
-  ]) {
+  assert.ok(/GFCCaregiverSchedule/.test(pageSrc), 'the schedule component fills its mount');
+  assert.ok(/GFCMessaging/.test(pageSrc), 'the messaging component fills its');
+
+  // The contract each documents, corrected to what actually shipped.
+  for (const needle of ['GET /api/caregiver/me', 'authToken']) {
     assert.ok(pageSrc.includes(needle), `the mount contract must document: ${needle}`);
   }
-  assert.ok(/caregiverId\s*:/.test(pageSrc) && /licenseLevel\s*:/.test(pageSrc),
-    'the documented props must name what each component receives');
 });
 
 test('the page builds no second offline queue and reuses one idempotency key per submission', () => {
