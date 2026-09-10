@@ -662,6 +662,20 @@
                     <p className="text-xs text-gray-500">View and manage service reports</p>
                   </div>
                 </button>
+                <a href="/admin/enrollment" className="w-full text-left p-4 bg-gray-50 hover:bg-warning-50 rounded-xl flex items-center gap-4 transition group">
+                  <span className="w-10 h-10 rounded-lg bg-warning-50 text-warning-600 flex items-center justify-center group-hover:bg-warning-500 group-hover:text-white transition">{Icons.clipboard}</span>
+                  <div>
+                    <p className="font-medium text-gray-900">Enrollment</p>
+                    <p className="text-xs text-gray-500">Review intake, consents, and documents for every client — home care and clinical alike</p>
+                  </div>
+                </a>
+                <a href="/clinical" className="w-full text-left p-4 bg-gray-50 hover:bg-primary-50 rounded-xl flex items-center gap-4 transition group">
+                  <span className="w-10 h-10 rounded-lg bg-primary-100 text-primary-600 flex items-center justify-center group-hover:bg-primary-500 group-hover:text-white transition">{Icons.clipboard}</span>
+                  <div>
+                    <p className="font-medium text-gray-900">Clinical Workspace</p>
+                    <p className="text-xs text-gray-500">Chart, schedule, and document clinical patients</p>
+                  </div>
+                </a>
               </div>
             </div>
 
@@ -934,6 +948,9 @@
       const [searchTerm, setSearchTerm] = useState('');
       const [roleFilter, setRoleFilter] = useState('all');
       const [message, setMessage] = useState('');
+      // Enrollment is the natural next step after adding a client — offered
+      // rather than forced, so the admin can also just keep managing users.
+      const [justCreatedClientId, setJustCreatedClientId] = useState(null);
       const [activeTab, setActiveTab] = useState('list');
       const [saving, setSaving] = useState(false);
       const [showBulkReset, setShowBulkReset] = useState(false);
@@ -1037,6 +1054,13 @@
             setEditingUser(null);
             setFormData(defaultFormData);
             setCompetencies([]);
+            // A newly created client's natural next step is enrollment — offer
+            // it instead of leaving the admin to go find it. An edit, or any
+            // other role, just closes as before.
+            if (!editingUser && formData.role === 'client') {
+              const newClientId = result.id || (result.user && result.user.id);
+              if (newClientId) setJustCreatedClientId(newClientId);
+            }
             loadData();
           }
         } catch (err) {
@@ -1346,6 +1370,25 @@
               ) : (
                 <p className="text-gray-500 text-center py-8">No pending password reset requests</p>
               )}
+            </div>
+          )}
+
+          {/* Client created — enrollment is the natural next step, offered not forced */}
+          {justCreatedClientId && (
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+              <div className="bg-white rounded-xl shadow-2xl w-full max-w-md p-6">
+                <h2 className="text-lg font-bold text-accent mb-2">Client created</h2>
+                <p className="text-sm text-gray-600 mb-5">Start their enrollment now — intake, consents, and documents live there, for home care or clinical care alike.</p>
+                <div className="flex gap-3">
+                  <a href={`/admin/enrollment?client=${justCreatedClientId}`}
+                    className="flex-1 text-center px-4 py-2.5 bg-primary-500 text-white rounded-lg hover:bg-primary-600 font-medium">
+                    Go to enrollment
+                  </a>
+                  <button onClick={() => setJustCreatedClientId(null)} className="px-4 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 font-medium">
+                    Not now
+                  </button>
+                </div>
+              </div>
             </div>
           )}
 

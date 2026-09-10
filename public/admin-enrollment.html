@@ -1204,7 +1204,10 @@
     const App = () => {
       const [token, setToken] = useState(getToken);
       const [user, setUser] = useState(getStoredUser);
-      const [view, setView] = useState({ page: 'list' });
+      const [view, setView] = useState(() => {
+        const deepLinkId = new URLSearchParams(window.location.search).get('client');
+        return deepLinkId ? { page: 'detail', id: deepLinkId } : { page: 'list' };
+      });
 
       if (!token || !user) return <LoginScreen onLogin={(t, u) => { setToken(t); setUser(u); }} />;
       if (!isStaff(user)) {
