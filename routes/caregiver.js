@@ -706,6 +706,16 @@ module.exports = function createCaregiverRoutes(deps) {
     }
   });
 
+  // GET /api/caregiver/admin/competencies — the catalog an admin picks from.
+  // The vocabulary lives in caregiverRepository.js and is served rather than
+  // restated in the browser: a second copy in a page is the thing that drifts,
+  // and a drifting competency list decides what a CNA may document.
+  router.get('/api/caregiver/admin/competencies', authenticateToken, requireAdmin, (req, res) => {
+    res.json({
+      competencies: cg.COMPETENCIES.map(task => ({ task, label: cg.COMPETENCY_LABELS[task] || task }))
+    });
+  });
+
   // ==========================================================================
   // PUT /api/caregiver/admin/caregivers/:userId/competencies — admin records a
   // caregiver's verified competencies. Lives here rather than in the admin-hub

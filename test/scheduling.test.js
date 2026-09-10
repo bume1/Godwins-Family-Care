@@ -468,6 +468,64 @@ test('the payroll export and every write that changes the board are admin-only',
   }
 });
 
+test('client coordinates: a real point is accepted, nonsense is refused', () => {
+  const ok = sched.validateClientLocation({ lat: 33.9526, lng: -84.5499 });
+  assert.ok(ok.valid);
+  assert.strictEqual(ok.clean.lat, 33.9526);
+  assert.strictEqual(ok.clean.clearing, false);
+
+  for (const bad of [{ lat: 91, lng: -84 }, { lat: 33, lng: 200 }, { lat: 'north', lng: 'west' }]) {
+    assert.ok(!sched.validateClientLocation(bad).valid, JSON.stringify(bad));
+  }
+});
+
+test('SAFETY: 0,0 is refused rather than stored as a location', () => {
+  const r = sched.validateClientLocation({ lat: 0, lng: 0 });
+  assert.ok(!r.valid);
+  assert.ok(r.errors.some(e => e.code === 'COORDINATES_NULL_ISLAND'),
+    'storing 0,0 would leave a client looking configured while every clock-in stayed unverifiable');
+  // And the geofence agrees, so the two halves cannot drift apart.
+  assert.strictEqual(sched.evaluateGeofence({ address: { lat: 0, lng: 0 } }, { lat: 33.9, lng: -84.5 }).verdict, 'unverifiable');
+});
+
+test('both boxes empty is a deliberate CLEAR, not an error', () => {
+  const r = sched.validateClientLocation({ lat: '', lng: '' });
+  assert.ok(r.valid);
+  assert.strictEqual(r.clean.clearing, true);
+  assert.strictEqual(r.clean.lat, null);
+});
+
+test('the radius is bounded, and an absent key keeps what is stored', () => {
+  assert.ok(!sched.validateClientLocation({ lat: 33.9, lng: -84.5, geofenceRadiusMeters: 5 }).valid, 'too small');
+  assert.ok(!sched.validateClientLocation({ lat: 33.9, lng: -84.5, geofenceRadiusMeters: 99999 }).valid, 'too large');
+
+  const kept = sched.validateClientLocation({ lat: 33.9, lng: -84.5 });
+  assert.strictEqual(kept.clean.radiusProvided, false, 'omitting it must not reset the stored radius');
+
+  const reset = sched.validateClientLocation({ lat: 33.9, lng: -84.5, geofenceRadiusMeters: '' });
+  assert.strictEqual(reset.clean.radiusProvided, true);
+  assert.strictEqual(reset.clean.geofenceRadiusMeters, null, 'an empty box resets to the default');
+});
+
+test('SAFETY: the location route writes only location fields, and never logs the coordinates', () => {
+  const idx = routeSrc.indexOf("'/api/scheduling/clients/:clientId/location'");
+  assert.ok(idx !== -1, 'the route exists');
+  const handler = routeSrc.slice(idx, idx + 3000);
+  assert.ok(handler.includes('requireAdmin'), 'admin only');
+
+  // It touches address + the radius and nothing else on the client record.
+  const assignments = (handler.match(/users\[idx\]\.(\w+)\s*=/g) || [])
+    .map(m => m.replace(/users\[idx\]\./, '').replace(/\s*=$/, ''));
+  assert.deepStrictEqual([...new Set(assignments)].sort(), ['address', 'geofenceRadiusMeters'],
+    'a scheduling screen must not edit the rest of a client record');
+
+  // An activity log is not a second copy of where a patient lives.
+  const logCall = handler.slice(handler.indexOf('logActivity'), handler.indexOf('res.json'));
+  assert.ok(!/clean\.lat|clean\.lng|coordinates:/.test(logCall),
+    'the audit entry records THAT the location changed, never the coordinates');
+  assert.ok(/hasCoordinates/.test(logCall));
+});
+
 test('SAFETY: a direct post lands at ASSIGNED, never confirmed, and checks before it writes', () => {
   const idx = routeSrc.indexOf("router.post('/api/scheduling/shifts'");
   assert.ok(idx !== -1);

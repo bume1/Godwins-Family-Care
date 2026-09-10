@@ -361,6 +361,66 @@ function evaluateGeofence(client, gps) {
   return { verdict: distance <= radius ? 'inside' : 'outside', reason: null, radius, distance };
 }
 
+// ---- Client location (admin-set) -------------------------------------------
+// Coordinates are the whole reason a clock-in can be checked at all. Without
+// them evaluateGeofence answers `unverifiable` forever — honest, but it means
+// nobody can tell a caregiver who was at the door from one who was not.
+const GEOFENCE_MIN_METERS = 25;
+const GEOFENCE_MAX_METERS = 5000;
+
+function validateClientLocation(input) {
+  const body = input && typeof input === 'object' ? input : {};
+  const errors = [];
+
+  // Both fields empty is a deliberate CLEAR, not a mistake: an address that
+  // turns out to be wrong is better removed than left pointing somewhere else.
+  const blank = (v) => v === null || v === undefined || String(v).trim() === '';
+  const clearing = blank(body.lat) && blank(body.lng);
+
+  let lat = null;
+  let lng = null;
+  if (!clearing) {
+    lat = Number(body.lat);
+    lng = Number(body.lng);
+    if (!isFinite(lat) || lat < -90 || lat > 90) {
+      errors.push({ field: 'lat', code: 'LAT_INVALID', message: 'Latitude is a number between -90 and 90.' });
+    }
+    if (!isFinite(lng) || lng < -180 || lng > 180) {
+      errors.push({ field: 'lng', code: 'LNG_INVALID', message: 'Longitude is a number between -180 and 180.' });
+    }
+    // 0,0 is open ocean off West Africa. evaluateGeofence already reads it as an
+    // UNSET field, so storing it would leave a client looking configured while
+    // every clock-in there stayed unverifiable. Refuse it at the door instead.
+    if (lat === 0 && lng === 0) {
+      errors.push({
+        field: 'lat', code: 'COORDINATES_NULL_ISLAND',
+        message: '0, 0 is not a location. Leave both boxes empty to clear the coordinates.'
+      });
+    }
+  }
+
+  // An absent key keeps whatever is stored; an empty one resets to the default.
+  const radiusProvided = Object.prototype.hasOwnProperty.call(body, 'geofenceRadiusMeters');
+  let geofenceRadiusMeters = null;
+  if (radiusProvided && !blank(body.geofenceRadiusMeters)) {
+    const n = Number(body.geofenceRadiusMeters);
+    if (!isFinite(n) || n < GEOFENCE_MIN_METERS || n > GEOFENCE_MAX_METERS) {
+      errors.push({
+        field: 'geofenceRadiusMeters', code: 'RADIUS_INVALID',
+        message: `The radius is between ${GEOFENCE_MIN_METERS}m and ${GEOFENCE_MAX_METERS}m.`
+      });
+    } else {
+      geofenceRadiusMeters = Math.round(n);
+    }
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    clean: { lat: clearing ? null : lat, lng: clearing ? null : lng, clearing, radiusProvided, geofenceRadiusMeters }
+  };
+}
+
 const TIME_LOG_FLAGS = Object.freeze([
   'outside_geofence', 'geofence_unverifiable', 'late_clock_in',
   'early_clock_out', 'late_clock_out', 'no_clock_out', 'admin_edited'
@@ -535,7 +595,7 @@ module.exports = {
   LICENSE_REQUIREMENT_ANY, normalizeLicenseRequirement, shiftLevelLabel, isOpenToAllLevels,
   isEligibleForShift, eligibilityReason, shiftsOverlap, findShiftConflict, BLOCKING_STATUSES,
   DEFAULT_GEOFENCE_METERS, DEFAULT_GRACE_MINUTES, distanceMeters, geofenceRadiusFor, clientCoords,
-  evaluateGeofence, TIME_LOG_FLAGS, clockInFlags, clockOutFlags, totalMinutes, minutesToHours,
+  evaluateGeofence, GEOFENCE_MIN_METERS, GEOFENCE_MAX_METERS, validateClientLocation, TIME_LOG_FLAGS, clockInFlags, clockOutFlags, totalMinutes, minutesToHours,
   DEFAULT_PAY_PERIOD_ANCHOR, DEFAULT_PAY_PERIOD_DAYS, payPeriodFor,
   PAYROLL_CSV_COLUMNS, csvCell, toPayrollCsv,
   SHIFT_REQUEST_STATUSES, SHIFT_REQUEST_TRANSITIONS, canTransitionRequest
