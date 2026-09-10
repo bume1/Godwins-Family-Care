@@ -3,7 +3,7 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
-const Database = require('@replit/database');
+const dataStore = require('./dataStore');           // THE data-access module: kv (dev) | postgres (production) | memory (tests) — Session 5.1
 const bodyParser = require('body-parser');
 const fs = require('fs').promises;
 const path = require('path');
@@ -50,7 +50,21 @@ const uploadLimiter = (req, res, next) => {
 };
 
 const app = express();
-const db = new Database();
+// Session 5.1: the ONE construction site for the operational data store.
+// Every db.get/set/list/delete below goes through dataStore's adapter; nothing
+// in this file or in routes/ touches @replit/database directly (build-enforced
+// in test/data_layer.test.js). In production the store MUST be Postgres inside
+// the AWS BAA boundary — assertProductionSafe() refuses to boot otherwise, and
+// the refusal is printed before the throw so it is legible in the process log.
+let _storeSafety;
+try {
+  _storeSafety = dataStore.assertProductionSafe();
+} catch (err) {
+  console.error(`❌ ${err.message}`);
+  throw err;
+}
+const db = dataStore.createStore();
+console.log(`🗄️  Data store: ${db.adapter}${_storeSafety.production ? ' (production, inside the BAA boundary)' : ' (non-production)'}`);
 // Transfer-of-Care ROI repository (Session 3.4) — three KV collections
 // (consent_events / consent_provider_authorizations / consent_records_categories)
 // bound to the same db, keyed for a later RDS migration.
