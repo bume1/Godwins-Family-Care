@@ -6452,6 +6452,164 @@ app.get('/api/gfc/clinical/summary', authenticateToken, requireEnrolledClient, a
   }
 });
 
+// GET /api/gfc/clinical/documents — the patient's own chart document index:
+// every plan-of-care version, executed consent, record release, their own
+// uploads, and anything OpenEMR itself holds (a fax, an outside record — the
+// one thing the app can never know about on its own). Built from the SAME
+// buildChartDocumentIndex() the clinician's chart uses, so a patient and
+// their clinician are reading off one definition of "the chart's documents",
+// never two that can drift apart.
+//
+// Client-equivalent only (patient or POA). Plain family gets an empty list —
+// none of the existing sharing defaults extend to clinical documents, and
+// opening that up is a sharing-settings decision, not something to default on.
+app.get('/api/gfc/clinical/documents', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const ctx = await resolvePatientClinicalContext(req, res);
+    if (!ctx) return;
+    const { client, audience } = ctx;
+    if (audience === 'family') return res.json({ documents: [] });
+
+    const [planVersions, roiEvents, docUploads] = await Promise.all([
+      db.get('care_plan_versions'), db.get('consent_events'), db.get('client_document_uploads')
+    ]);
+
+    // Same feature-detected EMR read the clinician's chart uses: supported:
+    // false until the Phase 6B document routes are deployed, never assumed.
+    let emrDocs = { supported: false, rows: [] };
+    if (client.openEmrPatientId && openemr.isConfigured()) {
+      try {
+        emrDocs = await openemr.forActor(req.user).listPatientDocuments(client.openEmrPatientId);
+      } catch (e) {
+        console.error('Patient chart document list unavailable:', e.message);
+      }
+    }
+    let roiAuths = [];
+    try {
+      const events = (roiEvents || []).filter(e => e && e.client_id === client.id);
+      const lists = await Promise.all(events.map(e => roiStore.listProviderAuthorizations(e.id)));
+      roiAuths = lists.flat().map(a => ({ ...a, client_id: client.id }));
+    } catch (e) { console.error('Patient chart ROI lookup failed (non-fatal):', e.message); }
+
+    const documents = clinicalRepo.buildChartDocumentIndex({
+      client,
+      emrReadSupported: !!emrDocs.supported,
+      emrRows: emrDocs.supported
+        ? emrDocs.rows.map(r => ({
+          id: r.id,
+          description: r.name || r.category || 'Document',
+          date: r.docdate || r.filed_at || null,
+          contentType: r.mimetype || null
+        }))
+        : [],
+      carePlanVersions: planVersions || [],
+      roiAuthorizations: roiAuths,
+      clientUploads: docUploads || [],
+      consentDefs: consentDefsForServiceLine(client.serviceLine),
+      consentSatisfied: isConsentSatisfied
+    });
+
+    await logPatientClinicalRead(req, ctx, 'chart_documents', { count: documents.length });
+    res.json({ documents });
+  } catch (error) {
+    console.error('Patient chart documents error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/gfc/clinical/documents/:docId/file — open one document from the
+// index above. Same composite-id shapes the clinician's resolver uses
+// (careplan:, consent:, roi:, upload:, emr:) so the list and the thing it
+// opens cannot drift apart on this side either. No clientId parameter — the
+// patient resolves from the session only, per the patient-route rule.
+app.get('/api/gfc/clinical/documents/:docId/file', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const ctx = await resolvePatientClinicalContext(req, res);
+    if (!ctx) return;
+    const { client, audience } = ctx;
+    if (audience === 'family') return res.status(403).json({ error: 'Not shared with family', code: 'DOCUMENT_NOT_SHARED' });
+
+    const raw = String(req.params.docId || '');
+    const sep = raw.indexOf(':');
+    const kind = sep === -1 ? raw : raw.slice(0, sep);
+    const ref = sep === -1 ? '' : raw.slice(sep + 1);
+    const audit = (resource) => logPatientClinicalRead(req, ctx, `chart_document_${resource}`, { docId: raw });
+
+    if (kind === 'careplan') {
+      const version = ref;
+      const rows = (await db.get('care_plan_versions')) || [];
+      if (!rows.some(r => r && r.client_id === client.id && String(r.version) === String(version))) {
+        return res.status(404).json({ error: 'No such care-plan version', code: 'CARE_PLAN_VERSION_UNKNOWN' });
+      }
+      const { buffer, source } = await buildCarePlanPdfForVersion(client, version);
+      await audit(`care_plan_v${version}`);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('X-GFC-PDF-Source', source);
+      res.setHeader('Content-Disposition', `inline; filename="CarePlan_v${version}.pdf"`);
+      return res.send(buffer);
+    }
+
+    if (kind === 'consent') {
+      // Same renderer the client's own "download a copy" route and the staff
+      // copy use — one document, three readers.
+      const out = await renderConsentPdf(client, ref, { audience: 'client' });
+      if (out.error) return res.status(out.status || 400).json({ error: out.error, code: out.code });
+      await audit(`consent_${ref}`);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="${out.fileName}"`);
+      return res.send(out.pdf);
+    }
+
+    if (kind === 'upload') {
+      const uploads = (await db.get('client_document_uploads')) || [];
+      const row = uploads.find(u => u.id === ref && u.clientId === client.id);
+      if (!row) return res.status(404).json({ error: 'Document not found' });
+      if (row.status === 'rejected') return res.status(409).json({ error: 'That document was rejected', code: 'DOCUMENT_REJECTED' });
+      await audit(`upload_${ref}`);
+      return serveStoredDocument(res, row, req.user);
+    }
+
+    if (kind === 'roi') {
+      const events = ((await db.get('consent_events')) || []).filter(e => e && e.client_id === client.id);
+      let auth = null;
+      for (const e of events) {
+        const list = await roiStore.listProviderAuthorizations(e.id);
+        auth = (list || []).find(a => String(a.id) === ref) || auth;
+        if (auth) break;
+      }
+      if (!auth) return res.status(404).json({ error: 'Record release not found' });
+      if (!auth.generated_pdf_drive_url) {
+        return res.status(404).json({ error: 'No stored copy of that record release', code: 'ROI_PDF_MISSING' });
+      }
+      await audit(`roi_${ref}`);
+      return res.json({ url: auth.generated_pdf_drive_url, fileName: auth.generated_pdf_file_name || null });
+    }
+
+    if (kind === 'emr') {
+      if (!client.openEmrPatientId) return res.status(409).json({ error: 'Client is not linked to OpenEMR', code: 'CLINICAL_NOT_LINKED' });
+      const read = await openemr.forActor(req.user).getPatientDocument(client.openEmrPatientId, ref);
+      if (!read.supported) {
+        return res.status(501).json({
+          error: 'This document is not ready to open yet — ask your care team for a copy',
+          code: 'EMR_DOCUMENT_READ_UNAVAILABLE'
+        });
+      }
+      if (!read.doc) {
+        return res.status(404).json({ error: 'No such document on this chart', code: 'EMR_DOCUMENT_NOT_FOUND' });
+      }
+      await audit(`emr_${ref}`);
+      res.setHeader('Content-Type', read.doc.mimetype);
+      res.setHeader('Content-Disposition', `inline; filename="${String(read.doc.name).replace(/"/g, '')}"`);
+      return res.send(read.doc.buffer);
+    }
+
+    return res.status(400).json({ error: 'Unknown document reference', code: 'DOCUMENT_REF_UNKNOWN' });
+  } catch (error) {
+    console.error('Patient chart document read error:', error);
+    res.status(500).json({ error: 'Failed to open that document' });
+  }
+});
+
 // GET /api/gfc/clinical/care-plan.pdf — the SIGNED care plan (both
 // signatures). Served from the Drive reference on client.carePlanDocs — never
 // from OpenEMR Documents (server defect). When the Drive copy is not

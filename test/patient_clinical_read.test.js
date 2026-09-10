@@ -150,9 +150,15 @@ const routeLines = serverSrc.split('\n').filter(l => /^app\.(get|post|put|delete
 test('patient-facing clinical routes take NO id parameter — the patient comes from the session', () => {
   const patientRoutes = routeLines.filter(l => l.includes("'/api/gfc/clinical") || l.includes("'/api/gfc/sharing") || l.includes("'/api/gfc/care-plan"));
   assert.ok(patientRoutes.length >= 4, 'patient clinical routes are registered');
+  // :docId is the one deliberate exception: it names a document WITHIN the
+  // session-resolved patient's own chart, never another patient — the same
+  // shape the clinician's composite-id resolver uses. Anything else with a
+  // parameter would be a patient id smuggled in through the request, which
+  // is exactly what this test exists to catch.
   for (const l of patientRoutes) {
     const routePath = l.match(/'([^']+)'/)[1];
-    assert.doesNotMatch(routePath, /:/, `${routePath} must not take a request parameter`);
+    const params = routePath.match(/:[A-Za-z]+/g) || [];
+    assert.ok(params.every(p => p === ':docId'), `${routePath} must not take a patient-identifying parameter`);
     assert.match(l, /requireEnrolledClient/, `${routePath} must sit behind the enrollment gate`);
   }
 });

@@ -365,6 +365,14 @@
           headers: { 'Authorization': `Bearer ${token}` }
         }).then(handleResponse).catch(asError),
 
+      // The IHPC clinical chart's own document index — every plan-of-care
+      // version, executed consent, record release, and anything OpenEMR
+      // itself holds. Same builder the clinician's chart uses.
+      getGfcClinicalDocuments: (token) =>
+        fetch(`${API_URL}/api/gfc/clinical/documents`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(asError),
+
       getGfcVisits: (token) =>
         fetch(`${API_URL}/api/gfc/visits`, {
           headers: { 'Authorization': `Bearer ${token}` }
@@ -5365,7 +5373,7 @@
       );
     };
 
-    const GfcDocuments = ({ docs, readOnly, token, onOpenTransferRoi, onRefresh }) => {
+    const GfcDocuments = ({ docs, readOnly, token, onOpenTransferRoi, onRefresh, clinicalDocs }) => {
       const signed = docs?.signedConsents || [];
       const files = docs?.documents || [];
       const packet = docs?.enrollmentPacket || null;
@@ -5373,6 +5381,38 @@
       const faceSheet = docs?.faceSheet || null;
       const checklist = docs?.checklist || [];
       const offlinePacketFiles = docs?.offlinePacketFiles || [];
+      const [chartBusy, setChartBusy] = useState('');
+      const [chartErr, setChartErr] = useState('');
+      // Opens a chart-document row (careplan:/consent:/roi:/upload:/emr:).
+      // Most kinds stream a PDF; a record release hands back its filed Drive
+      // reference as JSON instead of re-rendering, so what the client reads
+      // is what the provider actually got — same branch the clinician's
+      // chart view uses to open these same composite ids.
+      const openChartDoc = async (d) => {
+        if (!d.openable) return;
+        setChartBusy(d.id); setChartErr('');
+        try {
+          const res = await fetch(`${API_URL}/api/gfc/clinical/documents/${encodeURIComponent(d.id)}/file`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
+          if (!res.ok) {
+            let msg = 'That document could not be opened.';
+            try { const j = await res.json(); msg = j.error || msg; } catch (e) { /* non-JSON body */ }
+            setChartErr(msg); return;
+          }
+          const ct = res.headers.get('content-type') || '';
+          if (ct.includes('application/json')) {
+            const j = await res.json();
+            if (j.url) window.open(j.url, '_blank');
+            else setChartErr('No stored copy of that document.');
+            return;
+          }
+          const url = URL.createObjectURL(await res.blob());
+          window.open(url, '_blank');
+          setTimeout(() => URL.revokeObjectURL(url), 60000);
+        } catch (e) { setChartErr('That document could not be opened.'); }
+        finally { setChartBusy(''); }
+      };
       // A generic opener for the rows that are not consents: the face sheet and
       // anything Drive-hosted.
       const openDoc = (url) => {
@@ -5476,6 +5516,29 @@
                   <i className="ti ti-file-text" />
                   <div><b>{f.title}</b><span>Scanned by your care team</span></div>
                   <i className="ti ti-download" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
+                </div>
+              ))}
+            </React.Fragment>
+          )}
+
+          {clinicalDocs !== null && clinicalDocs !== undefined && (
+            <React.Fragment>
+              <p className="lbl">Your clinical record</p>
+              {chartErr && <div className="err">{chartErr}</div>}
+              {clinicalDocs.length === 0 && <p className="sub">Nothing on your clinical chart yet.</p>}
+              {clinicalDocs.map(d => (
+                <div className="doc" key={d.id} onClick={() => openChartDoc(d)}
+                  style={{ cursor: d.openable ? 'pointer' : 'default', opacity: d.openable ? 1 : 0.7 }}>
+                  <i className="ti ti-file-text" />
+                  <div>
+                    <b>{d.title}</b>
+                    <span>{[d.category, d.date ? prettyDate(d.date) : null, d.note].filter(Boolean).join(' · ')}</span>
+                  </div>
+                  {chartBusy === d.id
+                    ? <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--mut)' }}>Opening…</span>
+                    : d.openable
+                      ? <i className="ti ti-download" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
+                      : <span style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 700, color: 'var(--mut)' }}>Not yet available</span>}
                 </div>
               ))}
             </React.Fragment>
@@ -5732,6 +5795,7 @@
       const [docs, setDocs] = useState(null);
       const [clinical, setClinical] = useState(null);  // 4.3 curated clinical read (clinical-line clients only)
       const [shifts, setShifts] = useState([]);        // this client's own confirmed caregiver schedule (Session 7)
+      const [clinicalDocs, setClinicalDocs] = useState([]); // the IHPC chart's own documents (clinical-line clients only)
 
       const reloadMe = async () => {
         const result = await api.getGfcMe(token);
@@ -5785,8 +5849,13 @@
           if (!dc.error) setDocs(dc);
           if (!sh.error) setShifts(sh.shifts || []);
           if (clinicalAvailable) {
-            const cl = await api.getGfcClinicalSummary(token);
-            if (!cancelled) setClinical(cl);
+            const [cl, cd] = await Promise.all([
+              api.getGfcClinicalSummary(token),
+              api.getGfcClinicalDocuments(token)
+            ]);
+            if (cancelled) return;
+            setClinical(cl);
+            if (!cd.error) setClinicalDocs(cd.documents || []);
           }
         })();
         return () => { cancelled = true; };
@@ -5884,7 +5953,7 @@
           {view === 'health' && clinicalAvailable && <GfcHealth clinical={clinical} me={me} token={token} readOnly={readOnly}
             onSharingSaved={(sharing) => setMe(m => m ? { ...m, sharing } : m)} />}
           {view === 'messages' && <GfcMessages token={token} me={me} actingAs={me && me.actingAs} />}
-          {view === 'documents' && <GfcDocuments docs={docs} readOnly={readOnly} token={token} onOpenTransferRoi={() => setShowTransferRoi(true)} onRefresh={refreshDocs} />}
+          {view === 'documents' && <GfcDocuments docs={docs} readOnly={readOnly} token={token} onOpenTransferRoi={() => setShowTransferRoi(true)} onRefresh={refreshDocs} clinicalDocs={clinicalAvailable ? clinicalDocs : null} />}
           {!data && view !== 'messages' && view !== 'documents' && view !== 'health' && (
             <div className="gfc-body" style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}><div className="gfc-spin" /></div>
           )}
