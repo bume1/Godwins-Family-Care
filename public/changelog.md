@@ -4,6 +4,67 @@
 
 ---
 
+### Version 3.9.0 - September 10, 2026
+
+#### New Features
+- Add the two admin screens the open owner items assumed existed
+- documents can now travel both ways
+- staff can move a client between service lines after enrollment
+- one signed PDF per consent, and the Client Information Face Sheet
+- sign the medical packet as its own step, never alongside home care
+- real consent text for all 14 records, and the IHPC line becomes signable
+
+#### Bug Fixes
+- Backfill PR #48 as merged, and note the fetch URLs now resolve
+- allergies now reach the chart, and stop displaying as "Unknown"
+- lab orders now carry their test name; withdraw a mis-filed server defect
+- close the four app-side defects the shadow-data audit found
+- Fix fields that accepted one character and then stopped
+
+#### Documentation
+- add Session 5 prompt — clinical HIPAA go-live gate
+- backfill PR #56 on the Session 7 row
+- backfill PR #55 on the Session 6 row
+- record the enrollment paperwork rebuild in the running status
+- Session 6-10 prompts with a parallel build protocol for 6/7/9
+- backfill PR #50 on the patient-link guard entry
+- backfill PR #46 as merged in the status files
+- test count is 156 after the second main merge
+- test count reflects the merged tree
+- backfill PR #47 as merged (running instruction step 7)
+- bring the status table and focus bullet in line with the rest of the file
+- correct the packet-filing note against spec §10.4
+- shadow-data audit pass 1 — 13 gaps between the app and the legal record
+- record Session 4.6 per the running instruction
+- add Session CDS.1 prompt — clinical reminders (hybrid)
+- backfill PR #42 and clear the stale "still owed" wording
+
+#### Changes
+- Collapse the four identical changelog blocks this session's boots appended
+- Read documents back out of OpenEMR, and split "not deployed" from "not found"
+- Record that code search is live, and why the deploy took two attempts
+- Scheduling: explicit any-level shifts and direct posting to a caregiver
+- The chart can show documents again, and open them
+- Session 7: PHCP scheduling, availability, time tracking
+- The plan of care lives in the app, and follows the client into the chart
+- Session 6: Caregiver app — tier-branched visit log + escalation
+- Say to re-fetch the patched file before rebuilding, not just rebuild
+- Bill to facility 3, and withdraw the "uncheck Service Location" step
+- Split two status bullets a merge had run together
+- Split the service facility from the billing entity on appointments too
+- Guard the patient link step against creating duplicate OpenEMR charts
+- Let staff record a paper signature for a client who already exists
+- Make code search read the loaded code sets, and stop guessing at load state
+- Record the owner's two decisions: licence renders, legacy patients grandfathered
+- Correct the ICD-10 finding: the load ran, the probe was wrong
+- Record the 09/08 ICD-10 re-verification and how to probe it
+- Prove it: 37 unit tests and a 48-check acceptance run over the real routes
+- Render the real consent bodies, and stop the admin form keeping its own list
+- Generate the client's copy of what they signed
+- Split the Service Agreement by lane and close the holes around it
+- One source of truth for the consent text, the registry, and the rules
+
+
 ### Version 3.8.0 - September 10, 2026
 
 #### New Features
