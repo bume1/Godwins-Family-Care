@@ -71,12 +71,19 @@ test('the wizard cannot leave the first stage with it unsigned', () => {
   assert.match(PORTAL, /k === 'consentsMedical' &&/);
 });
 
-test('the medical stage leads with the voluntariness language', () => {
+// The medical stage used to lead with "you are under no obligation to sign
+// these" — true only for a client who added medical care as an optional
+// extra, false for anyone who chose the BOTH service line at intake, where
+// these items are REQUIRED to complete enrollment. It contradicted the
+// REQUIRED badge rendered right below it, so it was removed (2026-09-10).
+// This guards it does not silently come back, and that the stage still
+// explains what the medical consents actually are for.
+test('the medical stage explains the service without the misleading voluntariness claim', () => {
   const i = PORTAL.indexOf("k === 'consentsMedical'");
   assert.ok(i > 0);
   const stage = PORTAL.slice(i, i + 2200);
-  assert.match(stage, /under no obligation to sign/i);
-  assert.match(stage, /home care does not\s*\n?\s*change/i);
+  assert.match(stage, /different service from personal home care/i);
+  assert.doesNotMatch(stage, /under no obligation to sign/i);
 });
 
 // ── Staff service-line change ───────────────────────────────────────

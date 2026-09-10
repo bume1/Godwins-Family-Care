@@ -474,7 +474,15 @@
         fd.append('file', file);
         fd.append('signedAt', signedAt);
         api.recordOfflineConsent(consent.recordOfflineUrl, fd)
-          .then(() => { setOpen(false); setFile(null); setSignedAt(''); onDone(); })
+          .then((result) => {
+            setOpen(false); setFile(null); setSignedAt(''); onDone();
+            // The signature is recorded either way, but a Drive failure means
+            // the scan itself never landed anywhere — silent otherwise, which
+            // is exactly the trap that has bitten this app before.
+            if (result && result.scanFiled === false) {
+              alert('The signature was recorded, but the scan did not file to Drive. Re-upload it once Drive is reachable, or the scan will exist only in this browser\'s memory.');
+            }
+          })
           .catch(e => setErr(e.message))
           .finally(() => setBusy(false));
       };
@@ -999,7 +1007,16 @@
         const payload = { ...form, careTier: isPhc ? form.careTier : null, consents };
         fd.append('payload', JSON.stringify(payload));
         files.forEach(f => fd.append('files', f));
-        api.createOffline(fd).then(res => onDone(res.clientId)).catch(e => setErr(e.message)).finally(() => setBusy(false));
+        api.createOffline(fd).then(res => {
+          // Drive upload is best-effort server-side and fails silently there
+          // by design (dev without Drive configured); a mismatch here is the
+          // only place that gets reported back to the person who attached them.
+          const filed = (res.offlinePacketDriveUrls || []).length;
+          if (files.length > 0 && filed < files.length) {
+            alert(`${filed} of ${files.length} packet scan(s) filed to Drive. The client record was still created — re-upload the missing scan(s) from the client's detail page once Drive is reachable.`);
+          }
+          onDone(res.clientId);
+        }).catch(e => setErr(e.message)).finally(() => setBusy(false));
       };
 
       const signedCount = Object.values(consents).filter(c => c.status === 'signed_offline').length;
