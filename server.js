@@ -14,6 +14,7 @@ const pdfGenerator = require('./pdf-generator');
 const changelogGenerator = require('./changelog-generator');
 const config = require('./config');
 const { sendEmail, sendBulkEmail, sendBatchEmails } = require('./email');
+const emailTransport = require('./email');
 const roiRepo = require('./roiRepository');           // Transfer-of-Care ROI data model (Session 3.4)
 const legacySync = require('./legacySync');            // ROI parallel-run legacy sync (Session 3.4)
 const openemr = require('./openemr');                  // OpenEMR FHIR/REST front-end client (Session 4.1)
@@ -16637,6 +16638,20 @@ process.on('unhandledRejection', (reason, promise) => {
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
   console.log(`🔐 Admin login: ${config.DEFAULT_ADMIN.EMAIL} / ${config.DEFAULT_ADMIN.PASSWORD}`);
+
+  // Which mailer is live, said out loud at boot. A narrowed OAuth token looked
+  // exactly like a healthy one in the UI for weeks during the 8.4 upgrade; the
+  // same trap applies here, where "email works" and "email works and is inside
+  // the BAA" are different facts that look identical from a delivered message.
+  const mail = emailTransport.transportStatus();
+  if (!mail.configured) {
+    console.log(`📧 Email: NOT CONFIGURED — ${mail.reason}`);
+  } else if (mail.baaCovered) {
+    console.log(`📧 Email: ${mail.transport} as ${mail.from} — BAA-covered, PHI permitted`);
+  } else {
+    console.log(`📧 Email: ${mail.transport} as ${mail.from} — NOT BAA-covered, PHI is refused`);
+    console.log(`         ${mail.reason}`);
+  }
 
   // Safety net: reactivate any admin accounts that are inactive (prevent lockout)
   (async () => {
