@@ -11,6 +11,8 @@
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+  <!-- Session 9 messaging: the same thread component every portal mounts. -->
+  <script src="/components/gfc-messaging.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
   <script>
     tailwind.config = {
@@ -445,6 +447,32 @@
     };
 
     // Sidebar with portal access - Modern design
+    // ── Messages (Session 9) ──
+    // Admin has full visibility by the matrix, so this is the whole board: no
+    // client scope is passed, and the server returns every thread. That is the
+    // one role for which "everything" is the correct answer, and it is decided
+    // there, not by leaving the filter off here.
+    const MessagesPage = ({ token, user }) => {
+      React.useEffect(() => {
+        const lib = window.GFCMessaging;
+        if (!lib || !token) return undefined;
+        lib.mount('gfc-messaging-admin', { userId: user && user.id, role: 'admin', authToken: token });
+        return () => lib.unmount('gfc-messaging-admin');
+      }, [token, user && user.id]);
+
+      return (
+        <div className="p-6 lg:p-8">
+          <h1 className="text-2xl font-semibold text-gray-900 tracking-tight">Messages</h1>
+          <p className="text-gray-500 mt-1 text-sm">Every conversation across the platform, by client.</p>
+          <div className="mt-6 bg-white rounded-2xl shadow-soft p-5">
+            {window.GFCMessaging
+              ? <div id="gfc-messaging-admin"></div>
+              : <p className="text-sm text-gray-500">Messages did not load. Refresh the page.</p>}
+          </div>
+        </div>
+      );
+    };
+
     const Sidebar = ({ activePage, onNavigate, user, token, isMobileOpen, onClose }) => {
       // Check if user is a Super Admin (role === 'admin')
       const isSuperAdmin = user?.role === 'admin';
@@ -459,6 +487,7 @@
         { id: 'users', label: 'User Management', icon: Icons.users, color: 'text-primary-500', superAdminOnly: true },
         { id: 'service_portal', label: 'Service Portal', icon: Icons.clipboard, color: 'text-success-500', superAdminOnly: false },
         { id: 'notifications', label: 'Notifications', icon: Icons.bell, color: 'text-primary-500', superAdminOnly: false },
+        { id: 'messages', label: 'Messages', icon: Icons.inbox, color: 'text-primary-500', superAdminOnly: true },
       ];
 
       // Filter menu items: Super Admin sees all, Manager only sees non-superAdminOnly items
@@ -3732,6 +3761,7 @@
           case 'users': return <UsersPage token={token} />;
           case 'notifications': return <NotificationsPage token={token} isSuperAdmin={isSuperAdmin} />;
           case 'service_portal': return <ServicePortalPage token={token} user={user} />;
+          case 'messages': return <MessagesPage token={token} user={user} />;
           default: return <DashboardPage token={token} onNavigate={handleNavigation} user={user} />;
         }
       };

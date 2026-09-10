@@ -466,34 +466,21 @@ test('server.js registers the caregiver routes with exactly one require and one 
   assert.strictEqual(mounts.length, 1, 'one app.use — the parallel-build protocol');
 });
 
-test('the schedule mount is FILLED and the messaging one is still a placeholder', () => {
-  // Both ids must still be unique — an id in the DOM twice means one of the
-  // two components renders into a node it does not own.
+test('both mount points are FILLED, and each id appears exactly once', () => {
+  // Session 6 shipped two disabled placeholders. Both are now wired — the
+  // schedule on 2026-09-10 and messaging in the same session it was built —
+  // so what has to stay true is the mechanics, not the emptiness.
   for (const id of ['gfc-mount-schedule', 'gfc-mount-messaging']) {
     assert.strictEqual(pageSrc.split(`id="${id}"`).length - 1, 1,
-      `"${id}" must appear exactly once — ids are unique`);
+      `"${id}" must appear exactly once — a duplicate id means one component renders into a node it does not own`);
+    const el = pageSrc.slice(pageSrc.indexOf(`id="${id}"`), pageSrc.indexOf(`id="${id}"`) + 120);
+    assert.ok(!el.includes('aria-disabled'), `${id} is live, not a disabled panel`);
   }
+  assert.ok(/GFCCaregiverSchedule/.test(pageSrc), 'the schedule component fills its mount');
+  assert.ok(/GFCMessaging/.test(pageSrc), 'the messaging component fills its');
 
-  // Schedule: wired 2026-09-10. The div is now an empty target the component
-  // fills, so it carries no placeholder chrome of its own.
-  const sched = pageSrc.slice(pageSrc.indexOf('id="gfc-mount-schedule"'),
-    pageSrc.indexOf('id="gfc-mount-schedule"') + 120);
-  assert.ok(!sched.includes('aria-disabled'), 'the schedule mount is live, not a disabled panel');
-  assert.ok(/GFCCaregiverSchedule/.test(pageSrc), 'and the component is what fills it');
-
-  // Messaging: Session 9 has not been built, so it MUST still read as coming,
-  // with no fake interactivity.
-  const msgIdx = pageSrc.indexOf('id="gfc-mount-messaging"');
-  const msg = pageSrc.slice(msgIdx, msgIdx + 400);
-  assert.ok(msg.includes('aria-disabled="true"'), 'the messaging mount must be disabled, not fake-interactive');
-  assert.ok(msg.includes('className="mount"'), 'and render as a labeled placeholder panel');
-
-  // The contract Session 9 still needs, and the corrected schedule contract.
-  for (const needle of [
-    'MOUNT POINT — MESSAGING (Session 9)',
-    'GET /api/caregiver/me',
-    'authToken'
-  ]) {
+  // The contract each documents, corrected to what actually shipped.
+  for (const needle of ['GET /api/caregiver/me', 'authToken']) {
     assert.ok(pageSrc.includes(needle), `the mount contract must document: ${needle}`);
   }
 });
