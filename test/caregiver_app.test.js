@@ -505,6 +505,34 @@ test('the visit-log form renders from the server schema, never a local task list
   }
 });
 
+test('the competency catalog is SERVED, not restated in the admin page', () => {
+  assert.ok(routeSrc.includes("'/api/caregiver/admin/competencies'"), 'the catalog has a route');
+  const hubSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-hub.html'), 'utf8');
+  assert.ok(hubSrc.includes('getCompetencyCatalog'), 'the hub fetches it');
+  // A second copy of the vocabulary in a page is the thing that drifts, and a
+  // drifting competency list decides what a CNA may document.
+  const restated = cg.COMPETENCIES.filter(t => hubSrc.includes(`'${t}'`) || hubSrc.includes(`"${t}"`));
+  assert.deepStrictEqual(restated, [], `admin-hub.html must not hardcode competencies: ${restated.join(', ')}`);
+});
+
+test('SAFETY: editing a user cannot wipe their competencies', () => {
+  // Two independent guarantees, because one alone would be a convention.
+  // 1. The user PUT never assigns the field at all.
+  const userPut = serverSrc.slice(serverSrc.indexOf("app.put('/api/users/:userId'"));
+  const handler = userPut.slice(0, userPut.indexOf('app.delete'));
+  assert.ok(!/users\[idx\]\.skilledCompetencies\s*=/.test(handler),
+    'the user update route must not write skilledCompetencies');
+  // 2. The hub saves them through the caregiver route instead, as its own call.
+  const hubSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-hub.html'), 'utf8');
+  assert.ok(/\/api\/caregiver\/admin\/caregivers\/\$\{userId\}\/competencies/.test(hubSrc),
+    'the hub uses the caregiver endpoint to save competencies');
+  assert.ok(!/formData\.skilledCompetencies|skilledCompetencies:\s*formData/.test(hubSrc),
+    'competencies stay out of formData, which is round-tripped to the user PUT');
+  // And the list serializer returns them, or the form could not show what is set.
+  assert.ok(/skilledCompetencies:\s*Array\.isArray/.test(serverSrc),
+    'GET /api/users returns skilledCompetencies so the form can render them');
+});
+
 test('caregiver mobile body text is at least 16px', () => {
   const body = pageSrc.match(/body\{[^}]*font-size:(\d+)px/);
   assert.ok(body && Number(body[1]) >= 16, 'caregiver views set a 16px minimum body size');

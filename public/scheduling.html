@@ -348,6 +348,97 @@ const TimeLogRow = ({ l, onEdit }) => {
 // ============================================================================
 // App
 // ============================================================================
+// ============================================================================
+// Client locations — the missing half of the geofence
+// A clock-in can only be checked against a place the app knows. Until these
+// coordinates exist, every clock-in at that client records "unverifiable",
+// which is honest and useless. This is where they get set.
+// ============================================================================
+const ClientLocationRow = ({ c, onSave }) => {
+  const [lat, setLat] = useState(c.coordinates ? String(c.coordinates.lat) : '');
+  const [lng, setLng] = useState(c.coordinates ? String(c.coordinates.lng) : '');
+  const [radius, setRadius] = useState(String(c.geofenceRadiusMeters || ''));
+  const [busy, setBusy] = useState(false);
+
+  const dirty = (c.coordinates ? String(c.coordinates.lat) : '') !== lat
+    || (c.coordinates ? String(c.coordinates.lng) : '') !== lng
+    || String(c.geofenceRadiusMeters || '') !== radius;
+
+  const save = async () => {
+    setBusy(true);
+    try { await onSave(c.id, { lat, lng, geofenceRadiusMeters: radius }); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="row" style={{ display: 'block' }}>
+      <div><b>{c.name}</b> {c.hasCoordinates
+        ? <span className="chip completed">Checked to {c.geofenceRadiusMeters}m</span>
+        : <span className="chip open">Cannot be checked</span>}</div>
+      {c.addressLine && <div className="mu">{c.addressLine}</div>}
+      <div className="grid" style={{ marginTop: 8 }}>
+        <div><label>Latitude</label>
+          <input value={lat} onChange={e => setLat(e.target.value)} placeholder="33.9526" inputMode="decimal" /></div>
+        <div><label>Longitude</label>
+          <input value={lng} onChange={e => setLng(e.target.value)} placeholder="-84.5499" inputMode="decimal" /></div>
+        <div><label>Radius in metres</label>
+          <input value={radius} onChange={e => setRadius(e.target.value)} placeholder="150" inputMode="numeric" /></div>
+      </div>
+      <div className="btns">
+        <button className="btn" disabled={!dirty || busy} onClick={save}>{busy ? 'Saving…' : 'Save location'}</button>
+        {(lat || lng) && (
+          <button className="btn ghost" disabled={busy}
+            onClick={() => { setLat(''); setLng(''); }}>Clear coordinates</button>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const ClientLocations = ({ roster, onSaved, setErr, setOk }) => {
+  const missing = roster.clients.filter(c => !c.hasCoordinates);
+
+  const save = async (clientId, body) => {
+    setErr(''); setOk('');
+    try {
+      const res = await api(`/api/scheduling/clients/${clientId}/location`, {
+        method: 'PUT', body: JSON.stringify(body)
+      });
+      setOk((res && res.message) || 'Saved.');
+      await onSaved();
+    } catch (e) {
+      setErr(e.message);
+    }
+  };
+
+  return (
+    <div className="card">
+      <h2>Client locations</h2>
+      <p className="sub">
+        Where each client lives, as coordinates. A clock-in is measured against this point:
+        inside the radius it reads as verified, outside it is flagged for you to look at,
+        and with nothing here it can only ever record as unverifiable. Nobody is ever blocked
+        from clocking in either way.
+      </p>
+      <div className="note">
+        <b>How to get the coordinates.</b>
+        Open Google Maps, right-click the client's front door, and click the numbers at the
+        top of the menu. That copies them as “33.9526, -84.5499”: the first is latitude,
+        the second longitude. Leave the radius blank for the 150m default.
+      </div>
+      {missing.length > 0 && (
+        <div className="note">
+          <b>{missing.length} client{missing.length === 1 ? '' : 's'} still cannot be checked.</b>
+          {missing.map(c => c.name).join(', ')}
+        </div>
+      )}
+      {roster.clients.length === 0
+        ? <Empty icon="map-pin-off">No clients yet.</Empty>
+        : roster.clients.map(c => <ClientLocationRow key={c.id} c={c} onSave={save} />)}
+    </div>
+  );
+};
+
 const App = () => {
   const [tab, setTab] = useState('calendar');
   const [roster, setRoster] = useState({ caregivers: [], clients: [] });
@@ -439,7 +530,8 @@ const App = () => {
     { id: 'post', label: 'Post a shift' },
     { id: 'requests', label: `Requests${requests.filter(r => r.status === 'requested').length ? ` (${requests.filter(r => r.status === 'requested').length})` : ''}` },
     { id: 'availability', label: 'Availability' },
-    { id: 'time', label: 'Time & payroll' }
+    { id: 'time', label: 'Time & payroll' },
+    { id: 'locations', label: `Locations${roster.clients.filter(c => !c.hasCoordinates).length ? ` (${roster.clients.filter(c => !c.hasCoordinates).length})` : ''}` }
   ];
 
   const pending = shifts.filter(s => s.status === 'claimed');
@@ -560,6 +652,10 @@ const App = () => {
                 : timeLogs.map(l => <TimeLogRow key={l.id} l={l} onEdit={editLog} />)}
             </div>
           </div>
+        )}
+
+        {tab === 'locations' && (
+          <ClientLocations roster={roster} onSaved={refresh} setErr={setErr} setOk={setOk} />
         )}
       </div>
     </div>

@@ -2229,7 +2229,7 @@ app.use(caregiverRoutes({ db, config, logActivity, queueNotification, getUsers, 
 
 // PHCP scheduling (Session 7) — page shell + /api/scheduling/*. App-side only;
 // clinical appointments stay in OpenEMR (Session 4.2). Two systems by design.
-app.use(schedulingRoutes({ db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4 }));
+app.use(schedulingRoutes({ db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4 }));
 
 // Uploads require authentication - registered here after authenticateToken is defined
 app.use('/uploads', authenticateToken, express.static('uploads', staticOptions));
@@ -2984,7 +2984,12 @@ app.get('/api/users', authenticateToken, async (req, res) => {
       familyOfClientId: u.familyOfClientId || null,
       familyIsPoa: u.familyIsPoa || false,
       openEmrProviderId: u.openEmrProviderId || null,
-      npi: u.npi || null
+      npi: u.npi || null,
+      // Verified competencies decide which fields a caregiver's visit log shows
+      // (Session 6). Read-only here — the admin form saves them through
+      // PUT /api/caregiver/admin/caregivers/:userId/competencies, and the user
+      // PUT above never touches the field, so editing a user cannot wipe them.
+      skilledCompetencies: Array.isArray(u.skilledCompetencies) ? u.skilledCompetencies : []
     }));
     res.json(safeUsers);
   } catch (error) {

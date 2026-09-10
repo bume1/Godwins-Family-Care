@@ -479,6 +479,38 @@ const stored = async (collection, predicate) =>
   });
   check('only an admin may set competencies (403)', notAdmin.status === 403);
 
+  // --- The catalog the admin form renders from -----------------------------
+  const catalog = await call('GET', '/api/caregiver/admin/competencies', { as: 'admin-1' });
+  check('admin reads the competency catalog',
+    catalog.status === 200 && Array.isArray(catalog.data.competencies));
+  check('every competency is served WITH its label, so no page has to restate the list',
+    catalog.data.competencies.length === cg.COMPETENCIES.length &&
+    catalog.data.competencies.every(c => c.task && c.label && c.label !== c.task),
+    JSON.stringify(catalog.data.competencies.slice(0, 2)));
+  check('a caregiver cannot read the catalog (403)',
+    (await call('GET', '/api/caregiver/admin/competencies', { as: 'cna-bare' })).status === 403);
+
+  // --- Editing the user must not wipe what they are signed off to do -------
+  await call('PUT', '/api/caregiver/admin/caregivers/cna-bare/competencies', {
+    as: 'admin-1', body: { skilledCompetencies: [{ task: 'vital_signs', verified: true }] }
+  });
+  const usersNow = await db.get('users');
+  const beforeEdit = usersNow.find(u => u.id === 'cna-bare').skilledCompetencies;
+  check('the competency is on the record before the edit', beforeEdit.length === 1);
+
+  // Simulate the admin-hub user save: it round-trips its own form fields and
+  // never sends skilledCompetencies. The stored value must survive.
+  const afterEdit = usersNow.map(u => u.id === 'cna-bare' ? { ...u, phone: '770-555-0101', licenseLevel: 'cna' } : u);
+  await db.set('users', afterEdit);
+  const survived = (await db.get('users')).find(u => u.id === 'cna-bare').skilledCompetencies;
+  check('STORED: a profile edit leaves the competencies intact',
+    Array.isArray(survived) && survived.length === 1 && survived[0].task === 'vital_signs');
+  const schemaAfter = cg.visitLogSchemaFor((await db.get('users')).find(u => u.id === 'cna-bare'), null);
+  check('and the vitals fields are still on their form afterwards',
+    schemaAfter.competencies.includes('vital_signs') &&
+    schemaAfter.measurements.some(m => /vital|blood pressure|bp/i.test(m.label || m.id || '')),
+    JSON.stringify(schemaAfter.measurements.map(m => m.id)));
+
   // ==========================================================================
   console.log(`\n${'═'.repeat(66)}`);
   console.log(`  ${pass} passed · ${fail} failed  (${pass + fail} assertions)`);

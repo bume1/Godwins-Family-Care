@@ -61,6 +61,15 @@ module.exports = function createSchedulingRoutes(deps) {
     return users.find(u => u.id === id) || null;
   };
 
+  // The street address as one line, so the location form shows WHICH house the
+  // coordinates are meant to match. Read-only here: the address itself is
+  // captured at intake and this session does not own it.
+  const addressLine = (u) => {
+    const a = (u && u.address) || {};
+    return [a.line1 || a.street || '', a.city || '', a.state || '', a.zip || '']
+      .map(v => String(v).trim()).filter(Boolean).join(', ');
+  };
+
   const loadClient = async (clientId) => {
     const users = await getUsers();
     return users.find(u => u.id === clientId && u.role === ROLES.CLIENT) || null;
@@ -963,11 +972,76 @@ module.exports = function createSchedulingRoutes(deps) {
         clients: users.filter(u => u.role === ROLES.CLIENT).map(u => ({
           id: u.id, name: u.name, careTier: u.careTier || null,
           geofenceRadiusMeters: sched.geofenceRadiusFor(u),
-          hasCoordinates: !!sched.clientCoords(u)
+          hasCoordinates: !!sched.clientCoords(u),
+          coordinates: sched.clientCoords(u),
+          addressLine: addressLine(u)
         }))
       });
     } catch (error) {
       console.error('Scheduling roster error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // PUT /api/scheduling/clients/:clientId/location — admin records the client's
+  // address coordinates and, optionally, a geofence radius for that address.
+  //
+  // This is the missing half of the geofence: the check exists, the data did
+  // not, so every clock-in recorded `unverifiable` and there was nowhere in the
+  // app to fix that. Admin-only, and it writes ONLY the location fields — a
+  // scheduling screen has no business touching the rest of a client record.
+  router.put('/api/scheduling/clients/:clientId/location', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const { valid, errors, clean } = sched.validateClientLocation(req.body);
+      if (!valid) {
+        return res.status(400).json({ error: errors[0].message, code: errors[0].code, errors });
+      }
+
+      const users = await getUsers();
+      const idx = users.findIndex(u => u.id === req.params.clientId && u.role === ROLES.CLIENT);
+      if (idx === -1) return res.status(404).json({ error: 'Client not found.', code: 'CLIENT_NOT_FOUND' });
+
+      const before = sched.clientCoords(users[idx]);
+      const address = { ...(users[idx].address && typeof users[idx].address === 'object' ? users[idx].address : {}) };
+      if (clean.clearing) {
+        delete address.lat;
+        delete address.lng;
+      } else {
+        address.lat = clean.lat;
+        address.lng = clean.lng;
+      }
+      users[idx].address = address;
+      if (clean.radiusProvided) {
+        if (clean.geofenceRadiusMeters === null) delete users[idx].geofenceRadiusMeters;
+        else users[idx].geofenceRadiusMeters = clean.geofenceRadiusMeters;
+      }
+
+      await db.set('users', users);
+      if (typeof deps.invalidateUsersCache === 'function') deps.invalidateUsersCache();
+
+      // The audit entry records THAT the location changed and by whom, never the
+      // coordinates: an activity log is not a second copy of where a patient lives.
+      await logActivity(req.user.id, req.user.name || req.user.email, 'client_location_set', 'user', users[idx].id,
+        {
+          hadCoordinates: !!before,
+          hasCoordinates: !!sched.clientCoords(users[idx]),
+          cleared: clean.clearing,
+          geofenceRadiusMeters: sched.geofenceRadiusFor(users[idx])
+        });
+
+      res.json({
+        client: {
+          id: users[idx].id, name: users[idx].name,
+          hasCoordinates: !!sched.clientCoords(users[idx]),
+          geofenceRadiusMeters: sched.geofenceRadiusFor(users[idx]),
+          coordinates: sched.clientCoords(users[idx])
+        },
+        message: clean.clearing
+          ? 'Coordinates cleared. Clock-ins at this client will record as geofence-unverifiable.'
+          : `Saved. Clock-ins at this client are now checked against a ${sched.geofenceRadiusFor(users[idx])}m radius.`
+      });
+    } catch (error) {
+      console.error('Client location error:', error);
       res.status(500).json({ error: 'Server error' });
     }
   });

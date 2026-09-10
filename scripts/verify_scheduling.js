@@ -55,6 +55,7 @@ const USERS = [
 store.set('users', USERS);
 
 const getUsers = async () => await db.get('users');
+const invalidateUsersCache = () => {};
 const logActivity = async (userId, userName, action, entityType, entityId, details) => {
   const rows = (await db.get('activity_log')) || [];
   rows.unshift({ id: uuidv4(), userId, userName, action, entityType, entityId, details, timestamp: new Date().toISOString() });
@@ -91,7 +92,7 @@ const authenticateToken = async (req, res, next) => {
 
 const app = express();
 app.use(bodyParser.json({ limit: '5mb' }));
-app.use(schedulingRoutes({ db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4 }));
+app.use(schedulingRoutes({ db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4 }));
 
 // ---- Harness ---------------------------------------------------------------
 let PORT = 0;
@@ -588,6 +589,75 @@ const at = (dayOffset, hhmm) => new Date(`${plusDays(dayOffset)}T${hhmm}:00.000Z
     ((await db.get('activity_log')) || []).some(a => a.action === 'payroll_csv_exported'));
 
   // ==========================================================================
+  // ==========================================================================
+  section('L. Client locations — the missing half of the geofence');
+  // ==========================================================================
+  const noCoords = await stored('users', u => u.id === 'client-2');
+  check('client-2 starts with no coordinates', !sched.clientCoords(noCoords));
+
+  const rosterBefore = await call('GET', '/api/scheduling/caregivers', { as: 'admin-1' });
+  const c2Before = rosterBefore.data.clients.find(c => c.id === 'client-2');
+  check('the roster names it as uncheckable, and shows the address so you know which house',
+    c2Before.hasCoordinates === false && /Pine Rd/.test(c2Before.addressLine || ''), c2Before.addressLine);
+
+  const nullIsland = await call('PUT', '/api/scheduling/clients/client-2/location', {
+    as: 'admin-1', body: { lat: 0, lng: 0 }
+  });
+  check('0,0 is REFUSED rather than stored as a location',
+    nullIsland.status === 400 && nullIsland.data.code === 'COORDINATES_NULL_ISLAND');
+  check('STORED: nothing was written by the refusal',
+    !sched.clientCoords(await stored('users', u => u.id === 'client-2')));
+
+  const setLoc = await call('PUT', '/api/scheduling/clients/client-2/location', {
+    as: 'admin-1', body: { lat: 33.9601, lng: -84.5285, geofenceRadiusMeters: 200 }
+  });
+  check('admin sets the coordinates', setLoc.status === 200);
+  const c2Row = await stored('users', u => u.id === 'client-2');
+  check('STORED: on the client record, radius included',
+    c2Row.address.lat === 33.9601 && c2Row.address.lng === -84.5285 && c2Row.geofenceRadiusMeters === 200,
+    JSON.stringify({ a: c2Row.address, r: c2Row.geofenceRadiusMeters }));
+  check('STORED: the rest of the address is untouched',
+    c2Row.address.line1 === '9 Pine Rd' && c2Row.address.city === 'Marietta');
+  check('and the response says what changes for a clock-in', /200m/.test(setLoc.data.message || ''), setLoc.data.message);
+
+  check('a clock-in there is now CHECKED rather than unverifiable',
+    sched.evaluateGeofence(c2Row, { lat: 33.9602, lng: -84.5286 }).verdict === 'inside');
+  check('and a clock-in across town is flagged, with the distance measured',
+    sched.evaluateGeofence(c2Row, { lat: 33.7490, lng: -84.3880 }).verdict === 'outside');
+
+  const auditRows = (await db.get('activity_log')) || [];
+  const locAudit = auditRows.find(r => r.action === 'client_location_set');
+  check('AUDIT: the change is logged', !!locAudit);
+  check('AUDIT: and the log does NOT carry the coordinates — it is not a second copy of where someone lives',
+    !JSON.stringify(locAudit.details).includes('33.9601'), JSON.stringify(locAudit.details));
+
+  const notAdminLoc = await call('PUT', '/api/scheduling/clients/client-2/location', {
+    as: 'cna-1', body: { lat: 33.9, lng: -84.5 }
+  });
+  check('a caregiver cannot move a client (403)', notAdminLoc.status === 403);
+
+  const notAClient = await call('PUT', '/api/scheduling/clients/cna-1/location', {
+    as: 'admin-1', body: { lat: 33.9, lng: -84.5 }
+  });
+  check('and a caregiver id is not a client (404)',
+    notAClient.status === 404 && notAClient.data.code === 'CLIENT_NOT_FOUND');
+
+  const keepRadius = await call('PUT', '/api/scheduling/clients/client-2/location', {
+    as: 'admin-1', body: { lat: 33.9605, lng: -84.5280 }
+  });
+  check('omitting the radius KEEPS the one already stored',
+    keepRadius.status === 200 && (await stored('users', u => u.id === 'client-2')).geofenceRadiusMeters === 200);
+
+  const cleared = await call('PUT', '/api/scheduling/clients/client-2/location', {
+    as: 'admin-1', body: { lat: '', lng: '' }
+  });
+  check('clearing both boxes removes the coordinates', cleared.status === 200);
+  const clearedRow = await stored('users', u => u.id === 'client-2');
+  check('STORED: they are gone, and the street address survives',
+    !sched.clientCoords(clearedRow) && clearedRow.address.line1 === '9 Pine Rd');
+  check('and the caregiver is told what that means',
+    /unverifiable/i.test(cleared.data.message || ''), cleared.data.message);
+
   section('K. Audit trail');
   // ==========================================================================
   const acts = (await db.get('activity_log')) || [];
