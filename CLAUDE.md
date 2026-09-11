@@ -1,5 +1,5 @@
 # GFC Care Platform — running status
-_Last updated: 2026-09-10 (Session 5 merged, PR #72)_
+_Last updated: 2026-09-11 (appointment-booking hotfix)_
 
 This file is auto-loaded at the start of every Claude Code session. Read it first for current state. Details live in `docs/`.
 
@@ -92,6 +92,8 @@ This file is auto-loaded at the start of every Claude Code session. Read it firs
 ---
 
 ## Recent decisions
+
+**09/2026 — Appointment-booking silent-200 trap fixed (post-go-live hotfix, 2026-09-11).** On the live boundary, booking a new appointment failed with the generic "OpenEMR did not return an appointment id" — the sixth instance of the house-documented trap (soap_note, encounter PUT, allergy, documents, now appointment create/swap): `POST …/appointment` can answer HTTP 200 carrying a `validationErrors` map and write nothing, and `createAppointmentRow`/`swapAppointment` only ever checked for a missing id, never the body. `openemr.js`'s shared `postAppointmentRow()` now checks the body first and throws `OpenEMR rejected the appointment: {…}` with OpenEMR's actual reason. **The likely trigger:** a `pc_aid` (provider id) that does not resolve to an authorized OpenEMR provider — check that the numeric id just entered for Bethel in the admin-hub user form matches her OpenEMR user id exactly, and that her OpenEMR account is marked Provider/Authorized. Re-run the booking to see the real reason in the error banner.
 
 **09/2026 — Session 5 built & merged (PR #72, 2026-09-10, branch `claude/session-5-emr-execution-rbxdci`): clinical HIPAA go-live — data layer into the boundary · per-user OpenEMR auth · MFA + sessions · durable audit · cutover runbook.** Per `docs/GFC_Session5_ClaudeCode_Prompt.md`. **Prerequisite gate:** Session 0 is 🟡 and earlier in the table; the owner directed the session on 2026-09-10 ("execute session 5 so I might run this app and do testing in live production after doing so in dev"), and Session 0's open items are precisely this session's preflight, so the code was built against test config and **nothing infra or BAA is claimed done** — the honesty note in the brief is honoured to the letter. Locked in:
 - **ONE data module, and production cannot reach the dev path.** `dataStore.js` is the single construction site (`server.js` builds the store exactly once; only `dataStore.js` may require `@replit/database`, build-enforced). The ~800 `db.get/set` call sites are unchanged because the Postgres adapter keeps the blob-per-collection shape (`app_kv` table) — the boundary move is this session; row-level tables for the hot collections are a later refactor. **`NODE_ENV=production` refuses to boot on `kv` or `memory`, or on Postgres without `DATABASE_URL`, and prints the reason before throwing.** Proven by three real boots in the probe.
