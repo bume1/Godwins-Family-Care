@@ -191,3 +191,47 @@ test('the registry names the PHI floor the brief lists', () => {
   assert.equal(classifyKeys(['users', 'zzz']).unhandled[0], 'zzz');
   assert.ok(COLLECTION_REGISTRY.every(h => (h.key !== undefined) !== (h.pattern !== undefined)), 'each handler is a key OR a pattern');
 });
+
+// ---- 7. first boot against a server with no application database ----
+// RDS is provisioned with "Initial database name" blank (guide 6C.2), so the
+// first connection to `/gfc` fails with 3D000. The adapter must create the
+// database on that error alone, then run the schema; a pre-created database
+// must work identically; any other connection error must surface untouched.
+test('a missing application database is created on first boot, then the schema runs', async () => {
+  const { postgresAdapter } = dataStore._internal;
+  const url = 'postgres://appadmin:pw@gfc-app-db.example.rds.amazonaws.com:5432/gfc?sslmode=verify-full';
+  const log = [];
+  let dbExists = false;
+  const fakePool = (connStr) => ({
+    connStr,
+    async query(sql) {
+      const dbName = new URL(connStr).pathname.slice(1);
+      log.push(`${dbName}: ${sql.split(/\s+/).slice(0, 3).join(' ')}`);
+      if (dbName === 'gfc' && !dbExists) { const e = new Error('database "gfc" does not exist'); e.code = '3D000'; throw e; }
+      if (/^CREATE DATABASE/.test(sql)) { dbExists = true; return { rows: [] }; }
+      return { rows: [] };
+    },
+    async end() { log.push(`${new URL(connStr).pathname.slice(1)}: end`); }
+  });
+  const adapter = postgresAdapter({ env: { DATABASE_URL: url, NODE_ENV: 'test' }, createPool: fakePool });
+  await adapter.ready();
+  assert.deepEqual(log.slice(0, 3), ['gfc: SELECT 1', 'postgres: CREATE DATABASE "gfc"', 'postgres: end'], 'created via the maintenance database, then disconnected');
+  assert.ok(log.filter(l => l.startsWith('gfc: CREATE')).length >= 2, 'schema ran on the new database');
+  // idempotent: a second ready() is a no-op, and a pre-existing database skips creation
+  const before = log.length; await adapter.ready(); assert.equal(log.length, before);
+  const log2 = []; dbExists = true;
+  const a2 = postgresAdapter({ env: { DATABASE_URL: url, NODE_ENV: 'test' }, createPool: (c) => ({ async query(sql) { log2.push(sql.slice(0, 15)); return { rows: [] }; }, async end() {} }) });
+  await a2.ready();
+  assert.ok(!log2.some(l => /^CREATE DATABASE/.test(l)), 'a pre-created database is left alone');
+});
+test('any connection error other than "database does not exist" surfaces untouched', async () => {
+  const { postgresAdapter, databaseNameFromUrl, maintenanceUrl } = dataStore._internal;
+  const url = 'postgres://appadmin:pw@host:5432/gfc';
+  const created = [];
+  const a = postgresAdapter({ env: { DATABASE_URL: url, NODE_ENV: 'test' }, createPool: () => ({ async query(sql) { if (/^CREATE DATABASE/.test(sql)) created.push(sql); const e = new Error('password authentication failed'); e.code = '28P01'; throw e; }, async end() {} }) });
+  await assert.rejects(a.ready(), /password authentication failed/);
+  assert.deepEqual(created, [], 'no CREATE DATABASE on an auth failure');
+  assert.equal(databaseNameFromUrl(url), 'gfc');
+  assert.equal(maintenanceUrl('postgres://u:p@h:5432/gfc?sslmode=verify-full'), 'postgres://u:p@h:5432/postgres?sslmode=verify-full');
+  assert.equal(databaseNameFromUrl('not a url'), null);
+});
