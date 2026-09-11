@@ -128,20 +128,45 @@ const buildPgSsl = (env) => {
   return ssl;
 };
 
-const postgresAdapter = ({ pool, env = process.env } = {}) => {
-  let pgPool = pool;
-  if (!pgPool) {
+// The database named in DATABASE_URL is created if it does not exist. RDS is
+// provisioned with "Initial database name" left blank (Master Setup Guide
+// 6C.2 step 5), so the server holds only the maintenance `postgres` database
+// on first boot; connecting to `/gfc` then fails with 3D000 before a single
+// CREATE TABLE can run. On that error, and only that error, the adapter
+// connects to the maintenance database with the same credentials, creates
+// the named database, and retries. A pre-created database is equally fine —
+// every schema statement is IF NOT EXISTS.
+const databaseNameFromUrl = (url) => {
+  try { return decodeURIComponent(new URL(url).pathname.replace(/^\//, '')) || null; } catch { return null; }
+};
+const maintenanceUrl = (url) => { const u = new URL(url); u.pathname = '/postgres'; return u.toString(); };
+const postgresAdapter = ({ pool, env = process.env, createPool } = {}) => {
+  const makePool = createPool || ((connectionString) => {
     const { Pool } = require('pg');
-    pgPool = new Pool({
-      connectionString: env.DATABASE_URL,
-      ssl: buildPgSsl(env),
-      max: parseInt(env.DATABASE_POOL_MAX || '10', 10)
-    });
-  }
+    return new Pool({ connectionString, ssl: buildPgSsl(env), max: parseInt(env.DATABASE_POOL_MAX || '10', 10) });
+  });
+  let pgPool = pool || makePool(env.DATABASE_URL);
   let readyPromise = null;
+  const ensureDatabase = async (err) => {
+    if (!err || err.code !== '3D000') throw err;              // anything but "database does not exist" is real
+    const name = databaseNameFromUrl(env.DATABASE_URL);
+    if (!name || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw err;
+    const admin = makePool(maintenanceUrl(env.DATABASE_URL));
+    try {
+      console.log(`🗄️  Database "${name}" does not exist yet — creating it (first boot).`);
+      await admin.query(`CREATE DATABASE "${name}"`);
+    } finally { await admin.end().catch(() => {}); }
+  };
   const ready = () => {
     if (!readyPromise) {
-      readyPromise = (async () => { for (const sql of SCHEMA_SQL) await pgPool.query(sql); })();
+      readyPromise = (async () => {
+        try {
+          await pgPool.query('SELECT 1');
+        } catch (err) {
+          await ensureDatabase(err);
+        }
+        for (const sql of SCHEMA_SQL) await pgPool.query(sql);
+      })();
     }
     return readyPromise;
   };
@@ -279,5 +304,5 @@ module.exports = {
   assertProductionSafe,
   createStore,
   // exported for the migration + tests
-  _internal: { memoryAdapter, kvAdapter, postgresAdapter, bucketAudit, dayBucket, AUDIT_PREFIX, SCHEMA_SQL, buildPgSsl }
+  _internal: { memoryAdapter, kvAdapter, postgresAdapter, bucketAudit, dayBucket, AUDIT_PREFIX, SCHEMA_SQL, buildPgSsl, databaseNameFromUrl, maintenanceUrl }
 };

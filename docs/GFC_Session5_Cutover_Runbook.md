@@ -69,7 +69,7 @@ Grouped by where you do it. The Master Setup Guide v4.1 section is cited where o
 |---|---|---|
 | `NODE_ENV` | `production` | yes — turns on every refusal below |
 | `DATA_STORE` | `postgres` | yes (unset resolves to postgres in production) |
-| `DATABASE_URL` | RDS connection string, `sslmode=verify-full` | yes |
+| `DATABASE_URL` | RDS connection string, `sslmode=verify-full`. The database named in the path (`/gfc`) is **created by the app on first boot if it does not exist** — RDS is provisioned with "Initial database name" blank (Phase 6C.2), so the server starts with only the maintenance `postgres` database. Pre-creating `gfc` is equally fine; the schema is `IF NOT EXISTS` throughout. (Correction to 6C.2 step 5: pre-creating the database does *not* break anything.) | yes |
 | `DATABASE_SSL` / `DATABASE_SSL_CA` | `verify-full` (default) / path to the RDS global CA bundle | recommended |
 | `JWT_SECRET` | 64+ random chars, rotated for go-live | yes |
 | `EMR_TOKEN_ENCRYPTION_KEY` | 32 bytes as 64 hex (`node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`) | yes |
