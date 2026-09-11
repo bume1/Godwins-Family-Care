@@ -205,6 +205,28 @@ const forActor = (actor) => {
     if (!row || row.eid == null) throw new OpenEmrError('Could not resolve OpenEMR encounter id for encounter uuid', 404, null);
     return row.eid;
   };
+  // POST an appointment. Like soap_note / encounter PUT / allergy, OpenEMR
+  // can answer this HTTP 200 carrying a validationErrors map and write
+  // nothing (verified live 2026-09-11: a pc_aid that does not resolve to an
+  // authorized provider is refused this way, not with an error status), so
+  // the body is checked here rather than the status code. Without this the
+  // caller only ever saw "OpenEMR did not return an appointment id" with no
+  // way to tell a bad provider id from any other cause.
+  const postAppointmentRow = async (pid, puuid, fields, what) => {
+    const res = await rawRequest({ actor, method: 'POST', url: apiUrl(`patient/${pid}/appointment`), body: fields });
+    const data = expectOk(res, what || 'create appointment');
+    const body = data && typeof data === 'object' ? data : {};
+    const ve = body.validationErrors;
+    const hasErrors = Array.isArray(ve) ? ve.length > 0 : !!(ve && Object.keys(ve).length);
+    if (hasErrors) {
+      throw new OpenEmrError(`OpenEMR rejected the appointment: ${JSON.stringify(ve).slice(0, 300)}`, 422, body);
+    }
+    logEmrAccess(actor, 'write', 'appointment', puuid, { path: `patient/${pid}/appointment` });
+    const row = unwrapApi(data);
+    const eid = row && (row.id ?? row.pc_eid);
+    if (eid == null) throw new OpenEmrError('OpenEMR did not return an appointment id', 502, row);
+    return String(eid);
+  };
 
   return {
     // ---- FHIR reads ----
@@ -475,10 +497,7 @@ const forActor = (actor) => {
     },
     async createAppointmentRow(puuid, fields) {
       const pid = await resolvePid(puuid);
-      const row = await apiWrite('POST', `patient/${pid}/appointment`, fields, 'appointment', puuid, 'create appointment');
-      const eid = row && (row.id ?? row.pc_eid);
-      if (eid == null) throw new OpenEmrError('OpenEMR did not return an appointment id', 502, row);
-      return String(eid);
+      return postAppointmentRow(pid, puuid, fields, 'create appointment');
     },
     // Tombstone swap: POST every replacement row FIRST (so a mid-swap failure
     // leaves a visible duplicate, never a lost appointment), then delete the
@@ -488,10 +507,8 @@ const forActor = (actor) => {
       const pid = await resolvePid(puuid);
       const newEids = [];
       for (const fields of replacements) {
-        const row = await apiWrite('POST', `patient/${pid}/appointment`, fields, 'appointment', puuid, 'create appointment (swap)');
-        const eid = row && (row.id ?? row.pc_eid);
-        if (eid == null) throw new OpenEmrError('OpenEMR did not return an appointment id during swap', 502, row);
-        newEids.push(String(eid));
+        const eid = await postAppointmentRow(pid, puuid, fields, 'create appointment (swap)');
+        newEids.push(eid);
       }
       let deleted = false; let deleteError = null;
       try {
