@@ -171,8 +171,10 @@
     @media (min-width:1024px){
       .gfc{padding:36px 24px;}
       .gfc-shell{min-height:calc(100vh - 72px);border-radius:18px;overflow:hidden;box-shadow:0 24px 60px -16px rgba(3,61,80,.25);}
-      /* Pre-unlock flows (gate, intake, record release): wider, still centered */
-      .gfc-shell:not(.desktopnav){max-width:600px;}
+      /* Pre-unlock flows (gate, intake, record release): wider, still centered.
+         Fluid rather than a fixed cap, so it scales with the actual window/device
+         width instead of stopping at one fixed size on every desktop screen. */
+      .gfc-shell:not(.desktopnav){width:88vw;max-width:820px;}
       /* Unlocked portal: side-nav + content grid */
       .gfc-shell.desktopnav{max-width:1080px;display:grid;grid-template-columns:232px minmax(0,1fr);grid-template-rows:auto 1fr;}
       .gfc-shell.desktopnav .gfc-hdr{grid-column:1 / -1;grid-row:1;position:static;padding:18px 28px;}
@@ -354,6 +356,22 @@
 
       getGfcCarePlan: (token) =>
         fetch(`${API_URL}/api/gfc/care-plan`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(asError),
+
+      // The caregiver's confirmed schedule, scoped server-side to this client's
+      // own assigned care only (Session 7 scheduling — separate system from
+      // visit_logs, which is retrospective).
+      getMyUpcomingShifts: (token) =>
+        fetch(`${API_URL}/api/scheduling/my-upcoming-shifts`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(asError),
+
+      // The IHPC clinical chart's own document index — every plan-of-care
+      // version, executed consent, record release, and anything OpenEMR
+      // itself holds. Same builder the clinician's chart uses.
+      getGfcClinicalDocuments: (token) =>
+        fetch(`${API_URL}/api/gfc/clinical/documents`, {
           headers: { 'Authorization': `Bearer ${token}` }
         }).then(handleResponse).catch(asError),
 
@@ -3920,7 +3938,7 @@
     // e-signature. A consent the server has marked un-presentable (today: a
     // financial agreement with no agreed rate in it) shows what is missing and
     // offers no signature control at all.
-    const ConsentCard = ({ def, status, meta, onSign, signedName }) => {
+    const ConsentCard = ({ def, status, meta, onSign, signedName, token }) => {
       const [name, setName] = useState((meta && meta.typedName) || signedName || '');
       const [ack, setAck] = useState(false);
       const [busy, setBusy] = useState(false);
@@ -3962,7 +3980,7 @@
           {signed && (
             <div className="micro" style={{ justifyContent: 'flex-start', marginTop: 8 }}>
               <i className="ti ti-download" />
-              <a href={`/api/gfc/consents/${def.type}.pdf`} target="_blank" rel="noreferrer">Download a copy of this document</a>
+              <a href="#" onClick={(e) => { e.preventDefault(); openPdfSecurely(`${API_URL}/api/gfc/consents/${def.type}.pdf`, token); }}>Download a copy of this document</a>
             </div>
           )}
           {blocked && (
@@ -4578,7 +4596,7 @@
                       <TextField label="Any restrictions on information sharing?" value={(form.roiFamilyDetail || {}).restrictions} onChange={v => setNested('roiFamilyDetail', 'restrictions', v)} placeholder="Optional" />
                     </div>
                   )}
-                  <ConsentCard def={def} status={consents[def.type]} meta={consentMeta[def.type]} signedName={form.primaryContact?.name} onSign={handleSignConsent} />
+                  <ConsentCard def={def} status={consents[def.type]} meta={consentMeta[def.type]} signedName={form.primaryContact?.name} onSign={handleSignConsent} token={token} />
                 </React.Fragment>
               ))}
             </React.Fragment>
@@ -4588,16 +4606,9 @@
             <React.Fragment>
               <h2 className="disp">Medical care consents</h2>
               <p className="sub">These enroll you in medical care: visits, examination, diagnosis, prescribing, and chronic disease management by a nurse practitioner who comes to your home. It is a different service from personal home care, delivered by different people under a different license.</p>
-              <div className="card" style={{ marginBottom: 14, borderColor: 'var(--goldd)' }}>
-                <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.65, color: 'var(--mut)' }}>
-                  <b style={{ color: 'var(--navy)' }}>You are under no obligation to sign these.</b> Your home care does not
-                  change, pause, or cost more if you decline, and you are free to receive medical care from any
-                  provider you choose. Take your time with them.
-                </p>
-              </div>
               <p className="sub"><b>{stageSignedCount(medicalDefs)}/{stageRequired(medicalDefs).length}</b> required signed on this page.</p>
               {medicalDefs.map(def => (
-                <ConsentCard key={def.type} def={def} status={consents[def.type]} meta={consentMeta[def.type]} signedName={form.primaryContact?.name} onSign={handleSignConsent} />
+                <ConsentCard key={def.type} def={def} status={consents[def.type]} meta={consentMeta[def.type]} signedName={form.primaryContact?.name} onSign={handleSignConsent} token={token} />
               ))}
             </React.Fragment>
           )}
@@ -4668,18 +4679,32 @@
       );
     };
 
-    const GfcDashboard = ({ data, onNavigate, me, clinical }) => {
+    const GfcDashboard = ({ data, onNavigate, me, clinical, shifts }) => {
       const cp = data.carePlan;                       // null until an RN authors the real plan (Session 4)
       const nextClinical = clinical && !clinical.error && (clinical.appointments || [])[0]; // 4.3: live OpenEMR row, never a tombstone
       const pc = (cp && cp.primaryCaregiver) || {};
-      const upcoming = data.upcomingVisits || [];
+      // The client's own confirmed caregiver schedule (Session 7's shifts, not
+      // visit_logs — visit_logs is written retrospectively when a caregiver
+      // files a completed log, so it never actually carried a future visit).
+      const fmtShiftTime = (iso) => {
+        const d = new Date(iso);
+        return isNaN(d) ? '' : d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+      };
+      const upcoming = (shifts || []).map(s => ({
+        id: s.id,
+        day: prettyDate(s.start),
+        time: `${fmtShiftTime(s.start)} – ${fmtShiftTime(s.end)}`,
+        type: s.status === 'in_progress' ? 'Visit in progress' : 'Scheduled visit',
+        with: s.caregiverName || 'Your caregiver',
+        highlight: s.status === 'in_progress'
+      }));
 
       const roiFamilySigned = me && me.roiFamilySigned;
       const tierLabel = (cp && cp.careTierLabel) || data.careTierLabel;
       return (
         <div className="gfc-body">
           <h2 className="disp">Good morning, {data.greetingName}</h2>
-          <p className="sub">{pc.name ? `${pc.name.split(' ')[0]} arrives at ${(upcoming[0]||{}).time || 'your next visit'}.` : 'Welcome to your care portal.'}</p>
+          <p className="sub">{pc.name ? `${pc.name.split(' ')[0]} arrives at ${((upcoming[0]||{}).time || 'your next visit').split(' – ')[0]}.` : 'Welcome to your care portal.'}</p>
           {me && <EnrollmentPills status={me.enrollmentStatus} />}
           <div className="planhero">
             <div className="pe">Your care plan</div>
@@ -5350,13 +5375,46 @@
       );
     };
 
-    const GfcDocuments = ({ docs, readOnly, token, onOpenTransferRoi, onRefresh }) => {
+    const GfcDocuments = ({ docs, readOnly, token, onOpenTransferRoi, onRefresh, clinicalDocs }) => {
       const signed = docs?.signedConsents || [];
       const files = docs?.documents || [];
       const packet = docs?.enrollmentPacket || null;
       const packetZip = docs?.consentPacketZip || null;
       const faceSheet = docs?.faceSheet || null;
       const checklist = docs?.checklist || [];
+      const offlinePacketFiles = docs?.offlinePacketFiles || [];
+      const [chartBusy, setChartBusy] = useState('');
+      const [chartErr, setChartErr] = useState('');
+      // Opens a chart-document row (careplan:/consent:/roi:/upload:/emr:).
+      // Most kinds stream a PDF; a record release hands back its filed Drive
+      // reference as JSON instead of re-rendering, so what the client reads
+      // is what the provider actually got — same branch the clinician's
+      // chart view uses to open these same composite ids.
+      const openChartDoc = async (d) => {
+        if (!d.openable) return;
+        setChartBusy(d.id); setChartErr('');
+        try {
+          const res = await fetch(`${API_URL}/api/gfc/clinical/documents/${encodeURIComponent(d.id)}/file`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
+          if (!res.ok) {
+            let msg = 'That document could not be opened.';
+            try { const j = await res.json(); msg = j.error || msg; } catch (e) { /* non-JSON body */ }
+            setChartErr(msg); return;
+          }
+          const ct = res.headers.get('content-type') || '';
+          if (ct.includes('application/json')) {
+            const j = await res.json();
+            if (j.url) window.open(j.url, '_blank');
+            else setChartErr('No stored copy of that document.');
+            return;
+          }
+          const url = URL.createObjectURL(await res.blob());
+          window.open(url, '_blank');
+          setTimeout(() => URL.revokeObjectURL(url), 60000);
+        } catch (e) { setChartErr('That document could not be opened.'); }
+        finally { setChartBusy(''); }
+      };
       // A generic opener for the rows that are not consents: the face sheet and
       // anything Drive-hosted.
       const openDoc = (url) => {
@@ -5433,13 +5491,60 @@
               : s.status === 'signed_offline' ? `Signed on paper${s.signedAt ? ` ${prettyDate(s.signedAt)}` : ''}`
               : `Signed ${s.signedAt ? prettyDate(s.signedAt) : ''}${s.signerName ? ` · ${s.signerName}` : ''}`.trim();
             return (
-              <div className="doc" key={s.key} onClick={openConsentPdf} style={{ cursor: 'pointer' }}>
-                <i className="ti ti-file-certificate" />
-                <div><b>{s.label}</b><span>{sub}</span></div>
+              <div className="doc" key={s.key} style={{ alignItems: 'flex-start' }}>
+                <i className="ti ti-file-certificate" style={{ marginTop: 2 }} />
+                <div style={{ minWidth: 0, flex: 1, cursor: 'pointer' }} onClick={openConsentPdf}>
+                  <b>{s.label}</b><span>{sub}</span>
+                  {/* The copy above is regenerated from stored text and metadata —
+                      for a paper signature it never carried the actual scan.
+                      This opens the original file staff uploaded, when it filed. */}
+                  {s.scanUrl && (
+                    <div onClick={(e) => { e.stopPropagation(); openDoc(s.scanUrl); }}
+                      style={{ marginTop: 3, fontSize: 11.5, color: 'var(--goldd)', fontWeight: 600, cursor: 'pointer' }}>
+                      View the signed scan
+                    </div>
+                  )}
+                </div>
                 <span style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 700, letterSpacing: '.06em', color: 'var(--goldd)' }}>PDF</span>
               </div>
             );
           })}
+
+          {offlinePacketFiles.length > 0 && (
+            <React.Fragment>
+              <p className="lbl">Paper intake packet</p>
+              {offlinePacketFiles.map(f => (
+                <div className="doc" key={f.id} onClick={() => openDoc(f.url)} style={{ cursor: 'pointer' }}>
+                  <i className="ti ti-file-text" />
+                  <div><b>{f.title}</b><span>Scanned by your care team</span></div>
+                  <i className="ti ti-download" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
+                </div>
+              ))}
+            </React.Fragment>
+          )}
+
+          {clinicalDocs !== null && clinicalDocs !== undefined && (
+            <React.Fragment>
+              <p className="lbl">Your clinical record</p>
+              {chartErr && <div className="err">{chartErr}</div>}
+              {clinicalDocs.length === 0 && <p className="sub">Nothing on your clinical chart yet.</p>}
+              {clinicalDocs.map(d => (
+                <div className="doc" key={d.id} onClick={() => openChartDoc(d)}
+                  style={{ cursor: d.openable ? 'pointer' : 'default', opacity: d.openable ? 1 : 0.7 }}>
+                  <i className="ti ti-file-text" />
+                  <div>
+                    <b>{d.title}</b>
+                    <span>{[d.category, d.date ? prettyDate(d.date) : null, d.note].filter(Boolean).join(' · ')}</span>
+                  </div>
+                  {chartBusy === d.id
+                    ? <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--mut)' }}>Opening…</span>
+                    : d.openable
+                      ? <i className="ti ti-download" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
+                      : <span style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 700, color: 'var(--mut)' }}>Not yet available</span>}
+                </div>
+              ))}
+            </React.Fragment>
+          )}
 
           <p className="lbl">From your care team</p>
           {files.length === 0 && <p className="sub">Shared documents from your care team will appear here.</p>}
@@ -5691,6 +5796,8 @@
       const [data, setData] = useState(null);          // care-plan + visits
       const [docs, setDocs] = useState(null);
       const [clinical, setClinical] = useState(null);  // 4.3 curated clinical read (clinical-line clients only)
+      const [shifts, setShifts] = useState([]);        // this client's own confirmed caregiver schedule (Session 7)
+      const [clinicalDocs, setClinicalDocs] = useState([]); // the IHPC chart's own documents (clinical-line clients only)
 
       const reloadMe = async () => {
         const result = await api.getGfcMe(token);
@@ -5734,16 +5841,23 @@
           // Messages are no longer fetched here: the Session 9 component owns
           // its own loading, so the portal shell does not hold a second copy
           // of a thread list that can go stale behind it.
-          const [cp, dc] = await Promise.all([
+          const [cp, dc, sh] = await Promise.all([
             api.getGfcCarePlan(token),
-            api.getGfcDocuments(token)
+            api.getGfcDocuments(token),
+            api.getMyUpcomingShifts(token)
           ]);
           if (cancelled) return;
           if (!cp.error) setData(cp);
           if (!dc.error) setDocs(dc);
+          if (!sh.error) setShifts(sh.shifts || []);
           if (clinicalAvailable) {
-            const cl = await api.getGfcClinicalSummary(token);
-            if (!cancelled) setClinical(cl);
+            const [cl, cd] = await Promise.all([
+              api.getGfcClinicalSummary(token),
+              api.getGfcClinicalDocuments(token)
+            ]);
+            if (cancelled) return;
+            setClinical(cl);
+            if (!cd.error) setClinicalDocs(cd.documents || []);
           }
         })();
         return () => { cancelled = true; };
@@ -5836,12 +5950,12 @@
             <span className="ttl">{titles[view]}</span>
             <button onClick={gfcLogout} title="Sign out"><i className="ti ti-logout" /></button>
           </div>
-          {view === 'home' && data && <GfcDashboard data={data} onNavigate={setView} me={me} clinical={clinicalAvailable ? clinical : null} />}
+          {view === 'home' && data && <GfcDashboard data={data} onNavigate={setView} me={me} clinical={clinicalAvailable ? clinical : null} shifts={shifts} />}
           {view === 'care' && data && <GfcCarePlan data={data} readOnly={readOnly} token={token} />}
           {view === 'health' && clinicalAvailable && <GfcHealth clinical={clinical} me={me} token={token} readOnly={readOnly}
             onSharingSaved={(sharing) => setMe(m => m ? { ...m, sharing } : m)} />}
           {view === 'messages' && <GfcMessages token={token} me={me} actingAs={me && me.actingAs} />}
-          {view === 'documents' && <GfcDocuments docs={docs} readOnly={readOnly} token={token} onOpenTransferRoi={() => setShowTransferRoi(true)} onRefresh={refreshDocs} />}
+          {view === 'documents' && <GfcDocuments docs={docs} readOnly={readOnly} token={token} onOpenTransferRoi={() => setShowTransferRoi(true)} onRefresh={refreshDocs} clinicalDocs={clinicalAvailable ? clinicalDocs : null} />}
           {!data && view !== 'messages' && view !== 'documents' && view !== 'health' && (
             <div className="gfc-body" style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}><div className="gfc-spin" /></div>
           )}

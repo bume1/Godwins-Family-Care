@@ -444,7 +444,8 @@ test('every /api/scheduling route authenticates and carries a role guard', () =>
     // own) and branch inline. They must still branch, never return everything.
     const inlineGuarded = [
       '/api/scheduling/availability', '/api/scheduling/shifts',
-      '/api/scheduling/time-logs', '/api/scheduling/shift-requests'
+      '/api/scheduling/time-logs', '/api/scheduling/shift-requests',
+      '/api/scheduling/my-upcoming-shifts'
     ].includes(routePath) && method === 'get';
     const clientFacing = routePath === '/api/scheduling/shift-requests' && method === 'post';
     assert.ok(guarded || inlineGuarded || clientFacing,
