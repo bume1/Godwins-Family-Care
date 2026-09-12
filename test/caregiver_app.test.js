@@ -423,9 +423,14 @@ test('every /api/caregiver route authenticates and carries a role guard', () => 
     assert.ok(middleware.includes('authenticateToken'),
       `${method.toUpperCase()} ${routePath} must authenticate`);
     const guarded = /requireCaregiver|requireReviewStaff|requireAdmin/.test(middleware);
-    // Two routes guard inline because they serve two audiences (a caregiver
-    // reads their own rows; staff read the queue). They must still branch.
-    const inlineGuarded = ['/api/caregiver/visit-logs', '/api/caregiver/escalations'].includes(routePath) && method === 'get';
+    // Some reads guard inline because they serve two audiences (a caregiver
+    // reads their own rows; staff read the queue). They must still branch —
+    // and through the same isReviewStaff predicate the named guard uses, so
+    // the two cannot answer a different question.
+    const inlineGuarded = [
+      '/api/caregiver/visit-logs', '/api/caregiver/escalations',
+      '/api/caregiver/documents', '/api/caregiver/documents/:id/file'
+    ].includes(routePath) && method === 'get';
     assert.ok(guarded || inlineGuarded,
       `${method.toUpperCase()} ${routePath} must carry a role guard, not rely on the UI`);
     checked++;
@@ -533,4 +538,28 @@ test('SAFETY: editing a user cannot wipe their competencies', () => {
 test('caregiver mobile body text is at least 16px', () => {
   const body = pageSrc.match(/body\{[^}]*font-size:(\d+)px/);
   assert.ok(body && Number(body[1]) >= 16, 'caregiver views set a 16px minimum body size');
+});
+
+test('SAFETY: a caregiver reaches only their OWN documents; staff reach all', () => {
+  const i = routeSrc.indexOf("router.get('/api/caregiver/documents'");
+  assert.ok(i > 0, 'the document list route exists');
+  const list = routeSrc.slice(i, i + 1400);
+  assert.match(list, /isReviewStaff\(req\.user\)/, 'the staff branch uses the shared predicate');
+  assert.match(list, /d\.caregiver_id === req\.user\.id/, 'a caregiver is filtered to their own rows');
+  assert.match(list, /DOCUMENTS_DENIED/, 'anyone else is refused, not served an empty list');
+
+  const f = routeSrc.indexOf("router.get('/api/caregiver/documents/:id/file'");
+  const file = routeSrc.slice(f, f + 1400);
+  assert.match(file, /DOCUMENT_NOT_YOURS/, 'opening another caregiver\'s document is refused');
+});
+
+test('SAFETY: a Drive failure FAILS the caregiver upload — no row pointing at nothing', () => {
+  const i = routeSrc.indexOf("router.post('/api/caregiver/documents'");
+  const handler = routeSrc.slice(i, i + 3000);
+  assert.match(handler, /DOCUMENT_STORAGE_UNAVAILABLE/, 'a storage failure is reported as one');
+  const fail = handler.indexOf('DOCUMENT_STORAGE_UNAVAILABLE');
+  const write = handler.indexOf("db.set('caregiver_document_uploads'");
+  assert.ok(fail > 0 && write > 0 && fail < write,
+    'the upload must fail BEFORE the row is written, or the caregiver believes they sent something that does not exist');
+  assert.match(handler, /detectFileType\(buffer\)/, 'typed by its bytes, not its declared type');
 });
