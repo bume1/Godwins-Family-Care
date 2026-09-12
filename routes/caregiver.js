@@ -107,6 +107,13 @@ module.exports = function createCaregiverRoutes(deps) {
     res.sendFile(require('path').join(__dirname, '..', 'public', 'caregiver.html'));
   });
 
+  // The STAFF side of the same space: the escalation queue, the visit-log
+  // review queue, incidents and caregiver documents. Every route it calls
+  // enforces its own access, the same pattern /caregiver and /scheduling use.
+  router.get('/caregivers', (req, res) => {
+    res.sendFile(require('path').join(__dirname, '..', 'public', 'caregivers.html'));
+  });
+
   // ==========================================================================
   // GET /api/caregiver/me — identity, license level, competencies, and the
   // tier-branched schema. The form renders from exactly this.

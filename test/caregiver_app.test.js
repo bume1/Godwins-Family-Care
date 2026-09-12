@@ -563,3 +563,29 @@ test('SAFETY: a Drive failure FAILS the caregiver upload — no row pointing at 
     'the upload must fail BEFORE the row is written, or the caregiver believes they sent something that does not exist');
   assert.match(handler, /detectFileType\(buffer\)/, 'typed by its bytes, not its declared type');
 });
+
+// ---- The staff supervision surface -----------------------------------------
+// Session 6 built escalations, incident reports and a review queue with
+// notifications that fire, and no screen that could read any of them. These
+// guard the front door that was missing, not the plumbing behind it.
+test('the staff supervision page exists and is reachable from the admin hub', () => {
+  assert.ok(fs.existsSync(path.join(__dirname, '..', 'public', 'caregivers.html')),
+    'the caregiver supervision page exists');
+  assert.match(routeSrc, /router\.get\('\/caregivers'/, 'the page is served');
+  const hub = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-hub.html'), 'utf8');
+  assert.match(hub, /href="\/caregivers"/,
+    'an admin can reach it without knowing the URL — the gap this closes');
+});
+
+test('the supervision page reads the staff queues and never posts a visit log', () => {
+  const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'caregivers.html'), 'utf8');
+  for (const route of ['/api/caregiver/escalations', '/api/caregiver/visit-logs',
+    '/api/caregiver/incidents', '/api/caregiver/documents']) {
+    assert.ok(page.includes(route), `the page reads ${route}`);
+  }
+  // Filing a visit log is the caregiver's act, from the caregiver app. Staff
+  // append a review note to one; they never author one on someone's behalf.
+  assert.ok(!/method: 'POST', body: JSON\.stringify\(payload\)/.test(page),
+    'staff do not file visit logs');
+  assert.match(page, /review-note/, 'staff append a review note instead');
+});
