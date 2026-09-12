@@ -54,9 +54,34 @@ This is an admin task, not a code task. Nothing below is done from the app.
 
 **3. Pick the mailbox it sends as**
 
-Use a real Workspace mailbox on the GFC domain, e.g.
-`no-reply@godwinsfamilycarellc.com`. It must exist — delegation impersonates a
-real account, so a made-up address fails.
+Two different addresses, doing two different jobs:
+
+| | Address | What it is |
+|---|---|---|
+| `GMAIL_SEND_AS` | `no-reply@godwinsfamilycarellc.com` | who the mail is **from** |
+| `ORG_SUPPORT_EMAIL` | `support@godwinsfamilycarellc.com` | where a **reply** goes |
+
+Every message goes out from no-reply@ and carries `Reply-To: support@`, so a
+client who hits Reply reaches the support queue rather than a mailbox nobody
+watches. Both transports produce the identical pair, so this does not change
+when you switch from Resend to Workspace.
+
+**`GMAIL_SEND_AS` must be a REAL, LICENSED WORKSPACE USER.** This is the single
+most likely thing to cost you a cycle, and no-reply@ is exactly the kind of
+address that gets set up as something else:
+
+- A **Google Group** cannot be impersonated. Delegation signs in *as* an
+  account, and a group is not an account.
+- A **bare alias** on another mailbox cannot either — the alias is not itself
+  an account.
+
+If no-reply@ is currently a group or an alias, either create it as a real user
+(it needs a licence, and nobody ever has to sign in to it) or set
+`GMAIL_SEND_AS` to a mailbox that is one. Getting this wrong produces
+`invalid_grant`, which the app translates for you at step 6.
+
+`support@` has no such constraint. It is only a header, so it can be a group,
+an alias, or a shared inbox — whatever your team actually reads.
 
 **4. Set two environment variables on the deployment**
 
@@ -64,6 +89,9 @@ real account, so a made-up address fails.
 GOOGLE_SERVICE_ACCOUNT_KEY=<contents of the JSON key file>
 GMAIL_SEND_AS=no-reply@godwinsfamilycarellc.com
 ```
+
+`ORG_SUPPORT_EMAIL` defaults to `support@godwinsfamilycarellc.com` and only
+needs setting if you want replies somewhere else.
 
 `GOOGLE_SERVICE_ACCOUNT_KEY` takes the raw JSON, or the same JSON base64-encoded
 if the hosting panel mangles multi-line values. Both are accepted.
@@ -102,6 +130,7 @@ removed. Clearing `GMAIL_SEND_AS` has the same effect, since `auto` falls back.
 | Attachments | yes | yes |
 | Batch sends | one API call per 100 | one message at a time |
 | Inside the BAA | no | yes |
+| From / Reply-To | no-reply@ / support@ | no-reply@ / support@ (identical) |
 
 A message marked as carrying PHI is **refused, never downgraded**. The caller is
 the only place that knows what to cut, so silently stripping detail would be the

@@ -178,6 +178,10 @@ const NOTIFICATION_MAX_RETRIES = parseInt(process.env.NOTIFICATION_MAX_RETRIES |
 const NOTIFICATION_DAILY_SEND_LIMIT = parseInt(process.env.NOTIFICATION_DAILY_SEND_LIMIT || '500', 10);
 const EMAIL_FROM_ADDRESS = process.env.EMAIL_FROM_ADDRESS || 'no-reply@godwinsfamilycarellc.com';
 const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME || BRAND.COMPANY_NAME;
+// The address printed in the signature and footer of every email the app
+// sends — where a client replies. Distinct from EMAIL_FROM_ADDRESS, which is
+// the envelope sender, and from ROI_ADMIN_EMAIL, which is an internal inbox.
+const ORG_SUPPORT_EMAIL = process.env.ORG_SUPPORT_EMAIL || 'support@godwinsfamilycarellc.com';
 
 // ---- Email transport (BAA boundary) ----
 // 'auto' prefers Google Workspace whenever it is configured and falls back to
@@ -444,6 +448,7 @@ module.exports = {
   NOTIFICATION_DAILY_SEND_LIMIT,
   EMAIL_FROM_ADDRESS,
   EMAIL_FROM_NAME,
+  ORG_SUPPORT_EMAIL,
   EMAIL_TRANSPORT,
   GMAIL_SEND_AS,
   EMAIL_BAA_DOMAINS,

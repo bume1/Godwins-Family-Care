@@ -18,6 +18,8 @@ const changelogGenerator = require('./changelog-generator');
 const config = require('./config');
 const { sendEmail, sendBulkEmail, sendBatchEmails } = require('./email');
 const emailTransport = require('./email');
+const emailTemplates = require('./emailTemplates');
+const { createPhcNotifier } = require('./phcNotifications');
 const roiRepo = require('./roiRepository');           // Transfer-of-Care ROI data model (Session 3.4)
 const legacySync = require('./legacySync');            // ROI parallel-run legacy sync (Session 3.4)
 const openemr = require('./openemr');                  // OpenEMR FHIR/REST front-end client (Session 4.1)
@@ -445,6 +447,10 @@ const queueNotification = async (type, recipientUserId, recipientEmail, recipien
       relatedEntityId: options.relatedEntityId || null,
       relatedEntityType: options.relatedEntityType || null,
       relatedProjectId: options.relatedProjectId || null,
+      // Carried to the mailer, which REFUSES a PHI-marked message on a
+      // transport that is not BAA-covered rather than downgrading it. Stored
+      // on the row so a queued message keeps its marking across a restart.
+      phi: !!options.phi,
       templateData: {
         subject: templateData.subject,
         body: templateData.body,
@@ -502,7 +508,8 @@ const processNotificationQueue = async () => {
         to: notification.recipientEmail,
         subject: notification.templateData.subject,
         text: notification.templateData.body,
-        html: notification.templateData.htmlBody
+        html: notification.templateData.htmlBody,
+        phi: !!notification.phi
       });
       queueIndices.push(idx);
     }
@@ -668,8 +675,27 @@ function renderTemplate(templateStr, variables) {
   );
 }
 
-// Build HTML email body: use custom htmlBody if provided, otherwise wrap plain body in base layout
+// Build HTML email body: use custom htmlBody if provided, otherwise render the
+// GFC house template. The generic wrapper this replaced was the lab-era
+// layout with GFC colours painted on; `emailTemplates.js` is the real house
+// style, matching what the marketing sequence engine already sends, so a
+// client cannot tell the two systems apart.
 function buildHtmlEmail(body, htmlBody, ctaUrl, ctaLabel, unsubscribeUrl, baseUrl) {
+  if (htmlBody) return htmlBody;
+  // The plain body arrives as prose with blank-line paragraph breaks. A
+  // greeting line is dropped when present, because the template writes its own.
+  const lines = String(body || '').split(/\n{2,}/).map(t => t.trim()).filter(Boolean);
+  const greetingLine = lines.length && /^(hi|hello|dear)\b/i.test(lines[0]) ? lines.shift() : null;
+  const greeting = greetingLine
+    ? greetingLine.replace(/^(hi|hello|dear)\s+/i, '').replace(/[,!.]\s*$/, '')
+    : null;
+  return emailTemplates.renderGfcEmail({
+    greeting, paragraphs: lines, ctaUrl, ctaLabel, unsubscribeUrl
+  }).html;
+}
+
+// Retained for the two lab-era templates that still pass their own htmlBody.
+function buildHtmlEmailLegacy(body, htmlBody, ctaUrl, ctaLabel, unsubscribeUrl, baseUrl) {
   if (htmlBody) return htmlBody;
   const ctaBlock = (ctaUrl && ctaLabel)
     ? `<p style="margin-top: 20px;"><a href="${ctaUrl}" style="display: inline-block; background: ${config.BRAND.PRIMARY_COLOR}; color: #ffffff; padding: 10px 24px; border-radius: 6px; text-decoration: none; font-weight: 500; font-size: 14px;">${ctaLabel}</a></p>`
@@ -6243,6 +6269,10 @@ app.post('/api/gfc/documents/upload', authenticateToken, requireClientForIntake,
     }
 
     await logActivity(req.user.id, row.uploadedByName, 'client_document_uploaded', 'document', client.id, { kind });
+    // Staff had no way to know a document had arrived except by looking.
+    await phcNotify.documentUploaded({
+      client, kind, label: row.label || kind, uploadId: row.id, actorId: req.user.id
+    });
     res.json({ message: 'Document received', document: { id: row.id, kind, fileName: row.fileName, uploadedAt: row.uploadedAt, status: row.status } });
   } catch (error) {
     console.error('GFC document upload error:', error);
@@ -6556,6 +6586,16 @@ app.post('/api/gfc/care-plan/cosign', authenticateToken, requireEnrolledClient, 
     // storage failure never voids the completed co-signature.
     const signedPdf = await emitSignedCarePlanPdf(client.id, currentVersion,
       { ...signer, signatureImage: signatureImageB64 }, req.user);
+
+    // The authoring RN is the person waiting on this signature and had no way
+    // to know it had landed. Best-effort, after the PDF: a notification must
+    // never be the thing that fails a completed co-signature.
+    await phcNotify.carePlanCoSigned({
+      client, version: currentVersion, signerName,
+      signedByPoa: !!acting.isPoa,
+      authoredById: (client.carePlan && client.carePlan.authoredById) || null,
+      actorId: req.user.id
+    });
 
     res.json({ message: acting.isPoa ? `Care plan co-signed as ${signerName}` : 'Care plan co-signed', version: currentVersion, coSignedAt: at, signedBy: signerName, signedPdf });
   } catch (error) {
@@ -9898,6 +9938,15 @@ app.post('/api/gfc/consents', authenticateToken, requireClientForIntake, async (
     await logActivity(req.user.id, req.user.name || req.user.email, 'consent_signed', 'consent', type, {
       serviceLine, bodyVersion: signature.version, choices: answers
     });
+    // Staff only. A client signs up to fourteen consents in one sitting, so a
+    // per-consent receipt to them would be fourteen emails; the
+    // enrollment-complete confirmation already covers the client side. Staff
+    // need each one, because the enrollment gate advances on them.
+    await phcNotify.consentSigned({
+      client, consentType: type,
+      consentTitle: (def && def.title) || type,
+      offline: false, actorId: req.user.id
+    });
     res.json({ message: 'Consent recorded', type, status: client.consents[type], signed: true, bodyVersion: signature.version });
   } catch (error) {
     console.error('GFC consent error:', error);
@@ -10022,6 +10071,16 @@ app.post('/api/gfc/intake/submit', authenticateToken, requireClientForIntake, as
 // TEST DATA ONLY. No real PHI until HIPAA-live.
 
 const ENROLLMENT_STAFF_ROLES = [config.ROLES.ADMIN, config.ROLES.USER, config.ROLES.CASE_MANAGER];
+
+// PHC notifications (documents, consents, care-plan co-signature). The staff
+// role list is PASSED IN rather than restated in the module, so widening
+// enrollment access here widens who is notified, in one place.
+const phcNotify = createPhcNotifier({
+  getUsers, queueNotification, getAppBaseUrl, emailTransport,
+  staffRoles: ENROLLMENT_STAFF_ROLES,
+  clientRole: config.ROLES.CLIENT,
+  familyRole: config.ROLES.FAMILY
+});
 const requireEnrollmentStaff = (req, res, next) => {
   const role = req.user.role;
   if (ENROLLMENT_STAFF_ROLES.includes(role) || req.user.isManager || req.user.hasClientPortalAdminAccess) {
@@ -10567,6 +10626,13 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authe
 
     await logActivity(req.user.id, req.user.name || req.user.email, 'client_document_reviewed', 'document', uploads[i].clientId,
       { kind: uploads[i].kind, decision });
+    // The rejection reason is required at this route and was being captured
+    // and never delivered — the client saw nothing and re-sent the same file.
+    await phcNotify.documentReviewed({
+      clientId: uploads[i].clientId, decision,
+      label: uploads[i].label || uploads[i].kind, reason,
+      uploadId: uploads[i].id, actorId: req.user.id
+    });
     res.json({ message: decision === 'accepted' ? 'Document accepted.' : 'Document rejected and re-requested.', status: decision });
   } catch (error) {
     console.error('GFC document review error:', error);
