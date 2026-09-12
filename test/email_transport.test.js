@@ -353,7 +353,7 @@ test('the base64url payload contains no characters the Gmail API rejects', async
     // going back to proving nothing.
     await email.sendEmail(
       'c@example.com',
-      'Visit moved: 9/16 @ 10:30 — Godwins Family Care (rescheduled)',
+      'Visit moved: 9/16 @ 10:30 (rescheduled) — please review',
       'Hi Ada,\n\nYour visit has been moved.\n\n— Godwins Family Care',
       { htmlBody: '<p>Hi Ada,</p><p>Your visit has been moved.</p>' }
     );
@@ -491,6 +491,84 @@ test('an ordinary send failure gets no invented hint', async () => {
     const r = await email.sendEmail('c@example.com', 's', 'b');
     assert.strictEqual(r.success, false);
     assert.strictEqual(r.hint, undefined);
+  });
+});
+
+// ===========================================================================
+// 3c. Reply-To — the address the email PRINTS must be the one Reply reaches
+// ===========================================================================
+// The sender is a no-reply mailbox on Resend and the impersonated Workspace
+// mailbox on Gmail. Neither is where a client should land, and the signature
+// invites them to write to support@, so the header has to say so on BOTH
+// transports or the invitation is a dead end.
+
+test('the Gmail message carries a Reply-To header pointing at support@', async () => {
+  await withEnv(GMAIL_ENV, async (email) => {
+    const sent = [];
+    email._setGmailClientForTests(fakeGmail(sent));
+    await email.sendEmail('client@example.com', 's', 'b');
+    const raw = Buffer.from(sent[0].requestBody.raw, 'base64url').toString('utf8');
+    const { headers } = splitHeaders(raw);
+    assert.strictEqual(headers['reply-to'], 'support@godwinsfamilycarellc.com');
+    // And it is genuinely a different mailbox from the sender.
+    assert.match(headers.from, /no-reply@godwinsfamilycarellc\.com/);
+  });
+});
+
+test('Reply-To rides the Resend BATCH payload — the path the queue actually uses', async () => {
+  await withEnv({ RESEND_API_KEY: 're_test_key' }, async (email) => {
+    const batches = [];
+    email._setResendClientForTests({
+      batch: { send: async (payload) => { batches.push(payload); return { data: { data: payload.map(() => ({ id: 'r1' })) } }; } },
+      emails: { send: async () => ({ id: 'r1' }) }
+    });
+    // Two messages, so sendBatchEmails takes the real batch branch rather than
+    // falling through to the single-send path.
+    const out = await email.sendBatchEmails([
+      { to: 'a@example.com', subject: 's1', text: 't1' },
+      { to: 'b@example.com', subject: 's2', text: 't2' }
+    ]);
+    assert.strictEqual(out.sent, 2);
+    assert.strictEqual(batches.length, 1);
+    for (const msg of batches[0]) {
+      assert.strictEqual(msg.replyTo, 'support@godwinsfamilycarellc.com',
+        'a batched message went out with no Reply-To');
+    }
+  });
+});
+
+test('a per-message replyTo overrides the default', async () => {
+  await withEnv(GMAIL_ENV, async (email) => {
+    const sent = [];
+    email._setGmailClientForTests(fakeGmail(sent));
+    await email.sendEmail('c@example.com', 's', 'b', { replyTo: 'billing@godwinsfamilycarellc.com' });
+    const raw = Buffer.from(sent[0].requestBody.raw, 'base64url').toString('utf8');
+    assert.strictEqual(splitHeaders(raw).headers['reply-to'], 'billing@godwinsfamilycarellc.com');
+  });
+});
+
+test('a newline in the reply-to cannot inject a header', async () => {
+  await withEnv(GMAIL_ENV, async (email) => {
+    const sent = [];
+    email._setGmailClientForTests(fakeGmail(sent));
+    await email.sendEmail('c@example.com', 's', 'b', { replyTo: 'ok@x.com\r\nBcc: attacker@evil.example' });
+    const raw = Buffer.from(sent[0].requestBody.raw, 'base64url').toString('utf8');
+    assert.strictEqual(splitHeaders(raw).headers.bcc, undefined);
+  });
+});
+
+test('Reply-To sits before Subject and does not disturb the content headers', async () => {
+  await withEnv(GMAIL_ENV, async (email) => {
+    const raw = email.buildMimeMessage({
+      from: 'GFC <no-reply@godwinsfamilycarellc.com>', to: 'c@example.com',
+      replyTo: 'support@godwinsfamilycarellc.com', subject: 'x', text: 'y', html: '<p>y</p>'
+    });
+    const { headers, body } = splitHeaders(raw);
+    assert.strictEqual(headers['reply-to'], 'support@godwinsfamilycarellc.com');
+    assert.match(headers['content-type'], /^multipart\/alternative;/);
+    // The body must still parse into its two parts.
+    const parts = partsOf(body, boundaryOf(headers['content-type']));
+    assert.strictEqual(parts.length, 2);
   });
 });
 
