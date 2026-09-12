@@ -27,10 +27,14 @@
 
 const express = require('express');
 const cg = require('../caregiverRepository');
+const googledrive = require('../googledrive');
 
 module.exports = function createCaregiverRoutes(deps) {
   const {
-    db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4
+    db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4,
+    // Injected rather than re-implemented: one byte-sniffing definition for the
+    // whole app, so the caregiver upload cannot drift from the client one.
+    detectFileType
   } = deps;
   const router = express.Router();
 
@@ -55,9 +59,14 @@ module.exports = function createCaregiverRoutes(deps) {
   };
 
   // Staff who review caregiver work: admin, clinical (FNP/RN), case manager.
+  // The predicate is separate from the guard because some routes serve BOTH
+  // audiences off one path (a caregiver sees their own rows, staff see all),
+  // and those must not answer a different question than the guard does.
+  const isReviewStaff = (u) =>
+    !!u && (u.role === ROLES.ADMIN || u.hasClinicalAccess || u.role === ROLES.CASE_MANAGER);
+
   const requireReviewStaff = (req, res, next) => {
-    const u = req.user;
-    if (u.role === ROLES.ADMIN || u.hasClinicalAccess || u.role === ROLES.CASE_MANAGER) return next();
+    if (isReviewStaff(req.user)) return next();
     return res.status(403).json({ error: 'Clinical or administrative access required.', code: 'REVIEW_STAFF_ONLY' });
   };
 
@@ -710,6 +719,158 @@ module.exports = function createCaregiverRoutes(deps) {
       res.json({ broadcast: row });
     } catch (error) {
       console.error('Broadcast error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // ==========================================================================
+  // DOCUMENTS — the caregiver's own file drawer
+  //
+  // General purpose on purpose: LTC insurance forms are what prompted it, but
+  // a caregiver also has certifications, a signed timesheet, a receipt. Rather
+  // than a fixed list of kinds that is wrong the first time something new
+  // arrives, a document carries a free-text label and the office reads it.
+  //
+  // Mirrors the client-side document exchange deliberately, including the rule
+  // that matters most: A DRIVE FAILURE FAILS THE UPLOAD. Recording the row and
+  // logging the error would leave a caregiver believing they sent something
+  // that does not exist anywhere — the same silent-success trap this codebase
+  // has now been bitten by repeatedly. If we cannot store it, we did not
+  // receive it.
+  // ==========================================================================
+  const DOC_LABEL_MAX = 120;
+
+  const publicCaregiverDoc = (d) => ({
+    id: d.id,
+    label: d.label,
+    fileName: d.file_name,
+    mimeType: d.mime_type,
+    size: d.size,
+    uploadedAt: d.uploaded_at,
+    caregiverId: d.caregiver_id,
+    caregiverName: d.caregiver_name
+  });
+
+  router.post('/api/caregiver/documents', authenticateToken, requireCaregiver, async (req, res) => {
+    try {
+      const caregiver = await freshCaregiver(req);
+      const { label, fileName, fileDataB64 } = req.body || {};
+      if (!fileName || !fileDataB64) {
+        return res.status(400).json({ error: 'A file name and the file itself are required.', code: 'FILE_REQUIRED' });
+      }
+
+      let buffer;
+      try {
+        const b64 = String(fileDataB64).startsWith('data:')
+          ? String(fileDataB64).slice(String(fileDataB64).indexOf(',') + 1)
+          : String(fileDataB64);
+        buffer = Buffer.from(b64, 'base64');
+      } catch (e) {
+        return res.status(400).json({ error: 'That file could not be read.', code: 'FILE_UNREADABLE' });
+      }
+      if (!buffer.length) return res.status(400).json({ error: 'That file is empty.', code: 'FILE_EMPTY' });
+      if (buffer.length > config.MAX_FILE_SIZE) {
+        return res.status(400).json({ error: 'That file is larger than 10 MB.', code: 'FILE_TOO_LARGE' });
+      }
+      // Typed by its BYTES, never by what the upload claims it is.
+      const sniffedType = detectFileType(buffer);
+      if (!sniffedType) {
+        return res.status(400).json({ error: 'Only PDF, JPG and PNG files are accepted.', code: 'FILE_TYPE_REJECTED' });
+      }
+
+      const safeName = `caregiver_${caregiver.id}_${Date.now()}_${String(fileName).replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+      let stored;
+      try {
+        stored = await googledrive.uploadClientDocumentFile(
+          `Caregiver — ${caregiver.name}`, safeName, buffer, sniffedType);
+      } catch (e) {
+        console.error('[CAREGIVER DOCUMENTS] Drive upload failed:', e.message);
+        return res.status(502).json({
+          error: 'We could not store that file. Try again, or send it to the office.',
+          code: 'DOCUMENT_STORAGE_UNAVAILABLE'
+        });
+      }
+
+      const row = {
+        id: uuidv4(),
+        caregiver_id: caregiver.id,
+        caregiver_name: caregiver.name,
+        label: String(label || 'Document').trim().slice(0, DOC_LABEL_MAX) || 'Document',
+        file_name: String(fileName).slice(0, 200),
+        stored_name: safeName,
+        mime_type: sniffedType,
+        size: buffer.length,
+        drive_file_id: stored.fileId,
+        drive_url: stored.webViewLink || stored.webContentLink || null,
+        uploaded_at: nowIso()
+      };
+      const rows = await readRows('caregiver_document_uploads');
+      rows.push(row);
+      await db.set('caregiver_document_uploads', rows);
+
+      await logActivity(caregiver.id, caregiver.name, 'caregiver_document_uploaded', 'document', row.id,
+        { label: row.label, size: row.size });
+
+      res.json({ document: publicCaregiverDoc(row), message: 'Sent to the office.' });
+    } catch (error) {
+      console.error('Caregiver document upload error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // A caregiver sees THEIR OWN; review staff and admin see everyone's, which is
+  // the point — these exist so the office can act on them.
+  router.get('/api/caregiver/documents', authenticateToken, async (req, res) => {
+    try {
+      const rows = await readRows('caregiver_document_uploads');
+      let mine;
+      if (isReviewStaff(req.user)) {
+        mine = req.query.caregiverId
+          ? rows.filter(d => d && d.caregiver_id === String(req.query.caregiverId))
+          : rows;
+      } else if (cg.isCaregiver(req.user)) {
+        mine = rows.filter(d => d && d.caregiver_id === req.user.id);
+      } else {
+        return res.status(403).json({ error: 'Access denied.', code: 'DOCUMENTS_DENIED' });
+      }
+      mine = mine.slice().sort((a, b) => String(b.uploaded_at || '').localeCompare(String(a.uploaded_at || '')));
+      res.json({ documents: mine.slice(0, 200).map(publicCaregiverDoc) });
+    } catch (error) {
+      console.error('Caregiver document list error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  router.get('/api/caregiver/documents/:id/file', authenticateToken, async (req, res) => {
+    try {
+      const rows = await readRows('caregiver_document_uploads');
+      const row = rows.find(d => d && d.id === req.params.id);
+      if (!row) return res.status(404).json({ error: 'Document not found.', code: 'DOCUMENT_NOT_FOUND' });
+
+      const own = cg.isCaregiver(req.user) && row.caregiver_id === req.user.id;
+      if (!isReviewStaff(req.user) && !own) {
+        return res.status(403).json({ error: 'That document is not yours.', code: 'DOCUMENT_NOT_YOURS' });
+      }
+
+      if (!row.drive_file_id) {
+        return res.status(404).json({ error: 'The stored copy is unavailable.', code: 'DOCUMENT_FILE_MISSING' });
+      }
+      let buf;
+      try {
+        buf = await googledrive.downloadFileBuffer(row.drive_file_id);
+      } catch (e) {
+        console.error('[CAREGIVER DOCUMENTS] Drive read failed:', e.message);
+        return res.status(502).json({ error: 'The stored copy could not be read.', code: 'DOCUMENT_READ_FAILED' });
+      }
+
+      await logActivity(req.user.id, req.user.name || req.user.email, 'caregiver_document_read', 'document', row.id,
+        { caregiverId: row.caregiver_id, label: row.label });
+
+      res.setHeader('Content-Type', row.mime_type || 'application/octet-stream');
+      res.setHeader('Content-Disposition', `inline; filename="${String(row.file_name || 'document').replace(/"/g, '')}"`);
+      res.send(buf);
+    } catch (error) {
+      console.error('Caregiver document read error:', error);
       res.status(500).json({ error: 'Server error' });
     }
   });

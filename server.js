@@ -2282,7 +2282,14 @@ const buildConsentSignature = (args) =>
 
 // Caregiver app (Session 6) — page shell + /api/caregiver/*. Every route inside
 // enforces its own access (caregiver / review staff / admin) at the API layer.
-app.use(caregiverRoutes({ db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4 }));
+// detectFileType is declared further down this file, so it is passed as a
+// thunk rather than a reference: the body is not evaluated until a request
+// calls it, by which time the const exists. A direct reference here would
+// throw at boot.
+app.use(caregiverRoutes({
+  db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4,
+  detectFileType: (buf) => detectFileType(buf)
+}));
 
 // PHCP scheduling (Session 7) — page shell + /api/scheduling/*. App-side only;
 // clinical appointments stay in OpenEMR (Session 4.2). Two systems by design.

@@ -912,10 +912,82 @@ const ClientsTab = ({ clients, detail, onOpen, onClose, onMessages }) => {
   );
 };
 
+// Send a file to the office — an LTC form, a certificate, a receipt. The label
+// is free text rather than a fixed list of kinds, because a fixed list is
+// wrong the first time something new needs sending.
+const DocumentsCard = () => {
+  const [docs, setDocs] = useState(null);
+  const [label, setLabel] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [ok, setOk] = useState('');
+  const fileRef = useRef(null);
+
+  const load = useCallback(() => {
+    api('/api/caregiver/documents')
+      .then(r => setDocs(r.documents || []))
+      .catch(e => { setErr(e.message); setDocs([]); });
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const upload = async (file) => {
+    if (!file) return;
+    setErr(''); setOk(''); setBusy(true);
+    try {
+      const b64 = await new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(String(r.result));
+        r.onerror = () => reject(new Error('That file could not be read on this device.'));
+        r.readAsDataURL(file);
+      });
+      await api('/api/caregiver/documents', {
+        method: 'POST',
+        body: JSON.stringify({ label: label.trim() || file.name, fileName: file.name, fileDataB64: b64 })
+      });
+      setOk('Sent to the office.');
+      setLabel('');
+      if (fileRef.current) fileRef.current.value = '';
+      load();
+    } catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="card">
+      <h3>Documents</h3>
+      <p style={{ fontSize: 15, color: 'var(--mut)', marginTop: 0 }}>
+        Send the office a form, a certificate or a receipt. PDF, JPG or PNG, up to 10 MB.
+      </p>
+      <Err>{err}</Err>
+      {ok && <div className="note ok"><i className="ti ti-circle-check"></i><span><b>{ok}</b></span></div>}
+      <div className="fld">
+        <label>What is it?</label>
+        <input className="inp" value={label} maxLength={120} placeholder="LTC form, CPR card…"
+          onChange={e => setLabel(e.target.value)} />
+      </div>
+      <input ref={fileRef} type="file" accept=".pdf,.jpg,.jpeg,.png" disabled={busy}
+        style={{ marginBottom: 10 }} onChange={e => upload((e.target.files || [])[0])} />
+      {busy && <p style={{ fontSize: 15, color: 'var(--mut)' }}>Sending…</p>}
+
+      {docs === null ? <Loading /> : docs.length === 0
+        ? <Empty icon="file">Nothing sent yet.</Empty>
+        : docs.map(d => (
+          <div className="row" style={{ display: 'block' }} key={d.id}>
+            <b>{d.label}</b>
+            <div className="mu">{d.fileName} · {fmtDate(d.uploadedAt)}</div>
+            <a href={`/api/caregiver/documents/${encodeURIComponent(d.id)}/file?token=${encodeURIComponent(getToken())}`}
+              target="_blank" rel="noreferrer"
+              style={{ fontSize: 14, fontWeight: 600, color: 'var(--goldd)' }}>Open</a>
+          </div>
+        ))}
+    </div>
+  );
+};
+
 const MoreTab = ({ visitLogs, queued, me }) => (
   <div>
     <h2 className="pg">More</h2>
-    <p className="sub">Your logs, schedule, messages and help.</p>
+    <p className="sub">Your logs, documents, messages and help.</p>
 
     <div className="card">
       <h3>Visit logs</h3>
@@ -942,6 +1014,8 @@ const MoreTab = ({ visitLogs, queued, me }) => (
           </div>
         ))}
     </div>
+
+    <DocumentsCard />
 
     {/* Shifts, the open pool, availability and time history all live in the
         Schedule tab now that Session 7's component is wired in. Duplicating
