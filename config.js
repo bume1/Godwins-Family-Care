@@ -176,11 +176,21 @@ const NOTIFICATION_CHECK_INTERVAL_MINUTES = parseInt(process.env.NOTIFICATION_CH
 const NOTIFICATION_LOG_MAX_ENTRIES = parseInt(process.env.NOTIFICATION_LOG_MAX_ENTRIES || '2000', 10);
 const NOTIFICATION_MAX_RETRIES = parseInt(process.env.NOTIFICATION_MAX_RETRIES || '3', 10);
 const NOTIFICATION_DAILY_SEND_LIMIT = parseInt(process.env.NOTIFICATION_DAILY_SEND_LIMIT || '500', 10);
-const EMAIL_FROM_ADDRESS = process.env.EMAIL_FROM_ADDRESS || 'no-reply@godwinsfamilycarellc.com';
+// ONE address, and it is a monitored one. There is no such thing as a
+// "no-reply" that blocks a reply: SMTP has no such mechanism. A no-reply
+// address is either not a real mailbox, in which case a reply bounces and the
+// person gets a confusing failure notice instead of an answer, or it is a real
+// mailbox nobody reads. On Workspace it would also have to be a licensed user,
+// because domain-wide delegation impersonates a real account — so the choice
+// was to pay for a mailbox whose whole job is to swallow replies.
+const EMAIL_FROM_ADDRESS = process.env.EMAIL_FROM_ADDRESS || 'support@godwinsfamilycarellc.com';
 const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME || BRAND.COMPANY_NAME;
-// The address printed in the signature and footer of every email the app
-// sends — where a client replies. Distinct from EMAIL_FROM_ADDRESS, which is
-// the envelope sender, and from ROI_ADMIN_EMAIL, which is an internal inbox.
+// The address printed in the signature and footer. Normally the SAME mailbox
+// the mail is sent from, so no Reply-To header is emitted at all. It stays a
+// separate setting for the one case that needs it: if the sending mailbox has
+// to be some other account — on Workspace, delegation cannot impersonate a
+// Google Group, so a shared support@ inbox may not be usable as the sender —
+// then set them differently and a Reply-To appears automatically.
 const ORG_SUPPORT_EMAIL = process.env.ORG_SUPPORT_EMAIL || 'support@godwinsfamilycarellc.com';
 
 // ---- Email transport (BAA boundary) ----

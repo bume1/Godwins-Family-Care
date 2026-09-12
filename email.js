@@ -137,11 +137,15 @@ function resolveTransport() {
   }
 
   const fromAddress = name === 'gmail' ? sendAs : config.EMAIL_FROM_ADDRESS;
-  // Where a reply actually goes. The sender is a no-reply mailbox on Resend
-  // and the impersonated Workspace mailbox on Gmail, so without this header a
-  // client hitting Reply reaches neither a person nor the address printed in
-  // the email they are replying to.
-  const replyToAddress = config.ORG_SUPPORT_EMAIL || fromAddress;
+  // Emitted ONLY when replies should land somewhere other than the sender.
+  // Normally both are support@, so the header is omitted rather than repeating
+  // the From address — a Reply-To identical to From tells a mail client
+  // nothing and reads as a mistake to anyone inspecting the headers.
+  const support = String(config.ORG_SUPPORT_EMAIL || '').trim();
+  const replyToAddress =
+    support && support.toLowerCase() !== String(fromAddress || '').toLowerCase()
+      ? support
+      : null;
 
   _transportCache = Object.freeze({
     name,
