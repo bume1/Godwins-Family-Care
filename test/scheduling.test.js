@@ -636,3 +636,38 @@ test('the license enum is REQUIRED from Session 6, not restated', () => {
   assert.ok(!/'sitter'\s*,\s*'pca'\s*,\s*'cna'\s*,\s*'lpn'/.test(repoSrc),
     'the level list must not be duplicated here');
 });
+
+// ---- Clock-out requires the visit log (the EVV-style documentation gate) ----
+// A shift is not finished when the caregiver walks out; it is finished when the
+// visit is DOCUMENTED. Clocking out is refused until a visit log carrying that
+// shift's id exists. These guard the two halves that make it real: the refusal
+// itself, and the fact that a refusal writes nothing.
+test('SAFETY: clock-out is REFUSED until the shift has a visit log', () => {
+  const i = routeSrc.indexOf("'/api/scheduling/shifts/:id/clock-out'");
+  assert.ok(i > 0, 'the clock-out route exists');
+  const handler = routeSrc.slice(i, i + 3000);
+  assert.match(handler, /caregiver_visit_logs/, 'clock-out reads the visit-log store');
+  assert.match(handler, /VISIT_LOG_REQUIRED/, 'the refusal carries a specific code');
+});
+
+test('SAFETY: a refused clock-out writes NOTHING — the shift stays in progress', () => {
+  const i = routeSrc.indexOf("'/api/scheduling/shifts/:id/clock-out'");
+  const handler = routeSrc.slice(i, i + 3000);
+  const gate = handler.indexOf('VISIT_LOG_REQUIRED');
+  const firstWrite = handler.indexOf('db.set');
+  assert.ok(gate > 0 && firstWrite > 0, 'both the gate and a write are present');
+  assert.ok(gate < firstWrite,
+    'the documentation gate must be checked BEFORE anything is written, or a refused clock-out leaves a half-closed shift');
+});
+
+test('SAFETY: a visit log cannot claim a shift that is not the caregiver\'s own', () => {
+  const cgRouteSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'caregiver.js'), 'utf8');
+  const i = cgRouteSrc.indexOf("router.post('/api/caregiver/visit-logs'");
+  assert.ok(i > 0, 'the visit-log submit route exists');
+  const handler = cgRouteSrc.slice(i, i + 4000);
+  // shift_id gates a clock-out now, so an unvalidated one would let a log
+  // satisfy a gate on someone else's shift.
+  assert.match(handler, /SHIFT_NOT_YOURS/, 'a shift belonging to another caregiver is refused');
+  assert.match(handler, /SHIFT_CLIENT_MISMATCH/, 'a shift for a different client than the log names is refused');
+  assert.match(handler, /SHIFT_NOT_FOUND/, 'a shift id that does not exist is refused');
+});

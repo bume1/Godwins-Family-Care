@@ -263,7 +263,7 @@ const titleize = (s) => String(s || '').replace(/_/g, ' ').replace(/\b\w/g, c =>
 // element id, so leaving a stale instance behind would have the next mount
 // render into a dead node.
 // ============================================================================
-const ScheduleTab = ({ me, onChanged }) => {
+const ScheduleTab = ({ me, onChanged, onVisitLogRequired }) => {
   useEffect(() => {
     const lib = window.GFCCaregiverSchedule;
     const token = getToken();
@@ -271,10 +271,14 @@ const ScheduleTab = ({ me, onChanged }) => {
     lib.mount('gfc-mount-schedule', {
       caregiverId: me && me.id,
       authToken: token,
-      onChange: onChanged
+      onChange: onChanged,
+      // Clock-out is refused until the visit log for that shift is filed. The
+      // component cannot render the log form (it lives here), so it hands the
+      // shift back and this page takes the caregiver straight to it.
+      onVisitLogRequired: onVisitLogRequired
     });
     return () => lib.unmount('gfc-mount-schedule');
-  }, [me, onChanged]);
+  }, [me, onChanged, onVisitLogRequired]);
 
   if (!window.GFCCaregiverSchedule) {
     return (
@@ -547,8 +551,8 @@ const FlagConcern = ({ clients, onDone, onBack, online }) => {
 // not offer a field, this form cannot show it, and if the browser posted one
 // anyway the server would drop it. Two independent gates, one source.
 // ============================================================================
-const VisitLogForm = ({ me, clients, onDone, onBack, online }) => {
-  const [clientId, setClientId] = useState(clients.length === 1 ? clients[0].id : '');
+const VisitLogForm = ({ me, clients, onDone, onBack, online, shiftId, initialClientId }) => {
+  const [clientId, setClientId] = useState(initialClientId || (clients.length === 1 ? clients[0].id : ''));
   const [schema, setSchema] = useState(me.schema);
   const [loadingSchema, setLoadingSchema] = useState(false);
   const [tasks, setTasks] = useState({});
@@ -598,6 +602,7 @@ const VisitLogForm = ({ me, clients, onDone, onBack, online }) => {
     const payload = {
       idempotencyKey: newIdempotencyKey(),
       clientId,
+      shiftId: shiftId || null,
       visitDate: new Date().toISOString().slice(0, 10),
       visitType: visitType || 'Visit',
       tasks, measurements, narratives,
@@ -632,6 +637,11 @@ const VisitLogForm = ({ me, clients, onDone, onBack, online }) => {
             <span>{done.queued ? 'Nothing is lost. It files automatically, once.' : 'This log is final. A clinician adds a review note rather than editing it.'}</span>
           </span>
         </div>
+        {shiftId && (
+          <div className={`note ${done.queued ? 'warn' : 'ok'}`}><i className="ti ti-clock-check"></i>
+            <span><b>{done.queued ? 'Clock out once this syncs.' : 'You can clock out now.'}</b>
+              <span>{done.queued ? 'It needs to reach the office first — try clocking out again once you are back online.' : 'Head back to Schedule and tap Clock out to finish this shift.'}</span></span></div>
+        )}
         {done.escalation && (
           <div className="note"><i className="ti ti-bell"></i>
             <span><b>Concern raised.</b><span>{done.escalation.confirmation}</span></span></div>
@@ -641,7 +651,7 @@ const VisitLogForm = ({ me, clients, onDone, onBack, online }) => {
             <span><b>Incident report opened.</b>
               <span>{done.incidents.map(i => i.label).join(', ')} — filed separately, not just on this log.</span></span></div>
         )}
-        <button className="btn" onClick={onDone}>Done</button>
+        <button className="btn" onClick={onDone}>{shiftId ? 'Back to Schedule' : 'Done'}</button>
       </div>
     );
   }
@@ -651,15 +661,27 @@ const VisitLogForm = ({ me, clients, onDone, onBack, online }) => {
       <button className="back" onClick={onBack}><i className="ti ti-chevron-left"></i>Back</button>
       <h2 className="pg">Visit log</h2>
       <p className="sub">{schema.levelLabel} · filed with the time you submit it</p>
+      {shiftId && (
+        <div className="note"><i className="ti ti-calendar-event"></i>
+          <span><b>Filing this to clock out.</b><span>Clocking out on this shift needs this log first.</span></span></div>
+      )}
       <Err>{err}</Err>
 
-      {clients.length > 1 && (
+      {clients.length > 1 && !shiftId && (
         <div className="fld">
           <label>Client</label>
           <select className="inp" value={clientId} onChange={e => setClientId(e.target.value)}>
             <option value="">— Select —</option>
             {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
+        </div>
+      )}
+      {shiftId && clientId && (
+        <div className="fld">
+          <label>Client</label>
+          <div className="inp" style={{ background: '#f5f1e8', color: 'var(--mut)' }}>
+            {(clients.find(c => c.id === clientId) || {}).name || 'Your assigned client'}
+          </div>
         </div>
       )}
 
@@ -947,6 +969,10 @@ const App = () => {
   const [feed, setFeed] = useState([]);
   const [tab, setTab] = useState('home');
   const [screen, setScreen] = useState(null);         // 'visitLog' | 'flag' | null
+  // Set when a clock-out was refused for want of a visit log: carries which
+  // shift and client the log has to be filed against, so the form is not a
+  // free choice at the exact moment it has to match one specific shift.
+  const [pendingShift, setPendingShift] = useState(null);
   const [clientDetail, setClientDetail] = useState(null);
   const [online, setOnline] = useState(navigator.onLine);
   const [queued, setQueued] = useState(readQueue().length);
@@ -1022,12 +1048,19 @@ const App = () => {
     );
   }
 
-  const back = () => { setScreen(null); };
-  const doneAndRefresh = async () => { setScreen(null); await refresh(); };
+  const back = () => { setScreen(null); setPendingShift(null); };
+  const doneAndRefresh = async () => {
+    // A log filed to satisfy a clock-out returns to Schedule, where the button
+    // that sent them here is — not to Home, which would be a dead end.
+    if (pendingShift) setTab('schedule');
+    setScreen(null); setPendingShift(null);
+    await refresh();
+  };
 
   let content;
   if (screen === 'visitLog') {
-    content = <VisitLogForm me={me} clients={clients} online={online} onBack={back} onDone={doneAndRefresh} />;
+    content = <VisitLogForm me={me} clients={clients} online={online} onBack={back} onDone={doneAndRefresh}
+      shiftId={pendingShift && pendingShift.shiftId} initialClientId={pendingShift && pendingShift.clientId} />;
   } else if (screen === 'flag') {
     content = <FlagConcern clients={clients} online={online} onBack={back} onDone={doneAndRefresh} />;
   } else if (tab === 'home') {
@@ -1035,7 +1068,11 @@ const App = () => {
       onVisitLog={() => setScreen('visitLog')} onFlag={() => setScreen('flag')}
       onSchedule={() => setTab('schedule')} />;
   } else if (tab === 'schedule') {
-    content = <ScheduleTab me={me} onChanged={refresh} />;
+    content = <ScheduleTab me={me} onChanged={refresh}
+      onVisitLogRequired={(shift) => {
+        setPendingShift({ shiftId: shift.id, clientId: shift.clientId, clientName: shift.clientName });
+        setScreen('visitLog');
+      }} />;
   } else if (tab === 'feed') {
     content = <FeedTab items={feed} />;
   } else if (tab === 'clients') {

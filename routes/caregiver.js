@@ -212,6 +212,28 @@ module.exports = function createCaregiverRoutes(deps) {
         return res.status(403).json({ error: 'No license level is on file for this account.', code: 'CAREGIVER_NO_LICENSE_LEVEL' });
       }
 
+      // A shift id is no longer just a marker — clocking out is refused until a
+      // log carrying it exists (Session 7's clock-out gate). So it has to be a
+      // real shift, THIS caregiver's, and for the same client the log names;
+      // otherwise a log could be attached to someone else's shift and satisfy
+      // a gate that was never theirs to satisfy.
+      const rawShiftId = body.shiftId ? String(body.shiftId) : '';
+      if (rawShiftId) {
+        const shift = (await readRows('shifts')).find(s => s && String(s.id) === rawShiftId);
+        if (!shift) {
+          return res.status(404).json({ error: 'That shift does not exist.', code: 'SHIFT_NOT_FOUND' });
+        }
+        if (shift.caregiver_id !== caregiver.id) {
+          return res.status(403).json({ error: 'That shift is not yours.', code: 'SHIFT_NOT_YOURS' });
+        }
+        if (String(shift.client_id) !== String(client.id)) {
+          return res.status(409).json({
+            error: 'That shift is for a different client than this log names.',
+            code: 'SHIFT_CLIENT_MISMATCH'
+          });
+        }
+      }
+
       // The control: anything the schema did not offer is dropped, not stored.
       const { clean, rejected } = cg.sanitizeVisitLogSubmission(schema, body);
 

@@ -391,7 +391,21 @@
     }).then(function (res) {
       state.notice = (res && res.message) || (act === 'clock-in' ? 'Clocked in.' : 'Clocked out.');
       return refresh(state);
-    }).catch(function (err) { state.error = err.message; render(state); });
+    }).catch(function (err) {
+      // The one refusal with somewhere to go: the shift needs its visit log
+      // first. Hand the shift to the host page, which owns the log form,
+      // instead of leaving the caregiver reading an error with no next step.
+      if (err.code === 'VISIT_LOG_REQUIRED' && state.onVisitLogRequired) {
+        var shift = null;
+        for (var i = 0; i < state.mine.length; i++) {
+          if (state.mine[i] && state.mine[i].id === id) { shift = state.mine[i]; break; }
+        }
+        state.onVisitLogRequired(shift || { id: id });
+        return;
+      }
+      state.error = err.message;
+      render(state);
+    });
   }
 
   // ---- Data ---------------------------------------------------------------
@@ -435,6 +449,10 @@
       caregiverId: options.caregiverId || null,
       authToken: options.authToken,
       onChange: options.onChange || null,
+      // Fired when a clock-out is refused because that shift has no visit log
+      // yet. The log form belongs to the host page, so the shift is handed back
+      // rather than this component trying to render a form it does not own.
+      onVisitLogRequired: options.onVisitLogRequired || null,
       tab: options.initialTab || 'schedule',
       loading: true,
       error: '', notice: '',

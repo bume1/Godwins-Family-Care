@@ -830,6 +830,22 @@ module.exports = function createSchedulingRoutes(deps) {
       const li = logs.findIndex(l => l && l.shift_id === shift.id && !l.clock_out_at);
       if (li === -1) return res.status(409).json({ error: 'No open clock-in for that shift.', code: 'NO_OPEN_TIME_LOG' });
 
+      // The visit has to be DOCUMENTED before the clock stops. Checked here,
+      // before anything is written, so a refused clock-out leaves the shift
+      // exactly as it was — still in progress, its time log still open.
+      // Session 6 owns caregiver_visit_logs and already carries shift_id on
+      // the row; this is the rule that makes it more than a marker.
+      const visitLogs = await readRows('caregiver_visit_logs');
+      const documented = visitLogs.some(v => v && String(v.shift_id) === String(shift.id));
+      if (!documented) {
+        return res.status(409).json({
+          error: 'File the visit log for this shift before clocking out.',
+          code: 'VISIT_LOG_REQUIRED',
+          shiftId: shift.id,
+          clientId: shift.client_id
+        });
+      }
+
       const client = await loadClient(shift.client_id);
       const at = nowIso();
       const gps = normalizeGps((req.body || {}).gps);
