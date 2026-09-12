@@ -258,6 +258,17 @@ test('a transactional email carries NO tracking pixel and NO utm parameters', ()
   assert.ok(!/utm_/.test(r.html), 'a campaign parameter reached a patient email');
 });
 
+test('the reply-to address shown to clients is support@, never the admin inbox', () => {
+  const r = templates.renderGfcEmail({ greeting: 'Ada', paragraphs: ['Body.'] });
+  // A client replying to a care notification should reach the support queue.
+  // admin@ is an internal inbox (it is where ROI submissions land) and is a
+  // different thing from the address a patient is invited to write back to.
+  assert.match(r.html, /support@godwinsfamilycarellc\.com/);
+  assert.match(r.text, /support@godwinsfamilycarellc\.com/);
+  assert.ok(!/admin@godwinsfamilycarellc\.com/.test(r.html), 'the internal admin inbox was shown to a client');
+  assert.ok(!/admin@godwinsfamilycarellc\.com/.test(r.text), 'the internal admin inbox was shown to a client');
+});
+
 test('an automated notice signs off as the practice, not as a named clinician', () => {
   const r = templates.renderGfcEmail({ greeting: 'Ada', paragraphs: ['Body.'] });
   assert.match(r.html, /The Godwins Family Care Team/);

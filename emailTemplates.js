@@ -51,7 +51,7 @@ const ORG = Object.freeze({
   short:   config.BRAND.COMPANY_NAME,
   address: '4300 Paces Ferry Road SE, Suite 500, Atlanta, GA 30339',
   phone:   '(404) 913-6705',
-  email:   'admin@godwinsfamilycarellc.com',
+  email:   config.ORG_SUPPORT_EMAIL,
   site:    'https://godwinsfamilycarellc.com'
 });
 
