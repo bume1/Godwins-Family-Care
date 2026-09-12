@@ -818,6 +818,30 @@ module.exports = function createCaregiverRoutes(deps) {
       await logActivity(caregiver.id, caregiver.name, 'caregiver_document_uploaded', 'document', row.id,
         { label: row.label, size: row.size });
 
+      // Tell the office it arrived. A document nobody is told about is a
+      // document nobody acts on, and an LTC form sitting unseen is the exact
+      // failure this was built to prevent. Rides the existing queue.
+      try {
+        const admins = (await getUsers()).filter(u => u && u.role === ROLES.ADMIN && u.email);
+        for (const a of admins) {
+          await queueNotification(
+            'caregiver_document_uploaded',
+            a.id, a.email, a.name,
+            {
+              subject: `${caregiver.name} sent a document — ${row.label}`,
+              body: `${caregiver.name} uploaded "${row.label}" (${row.file_name}).\n\nOpen it under Caregiver Management → Documents.`,
+              ctaUrl: '/caregivers',
+              ctaLabel: 'Open Caregiver Management'
+            },
+            { relatedEntityId: row.id, relatedEntityType: 'caregiver_document', createdBy: caregiver.id }
+          );
+        }
+      } catch (e) {
+        // The file IS stored. A notification failure must not fail the upload
+        // and send the caregiver back to re-send something we already have.
+        console.error('[CAREGIVER DOCUMENTS] Notification failed (non-fatal):', e.message);
+      }
+
       res.json({ document: publicCaregiverDoc(row), message: 'Sent to the office.' });
     } catch (error) {
       console.error('Caregiver document upload error:', error);

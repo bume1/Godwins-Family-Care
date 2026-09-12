@@ -69,6 +69,13 @@
 
     const API_URL = window.location.origin;
 
+    // Lab-era UI (HubSpot CRM ids, launch-tracker stats, ticket counts) that
+    // GFC does not use. HIDDEN, not deleted: CLAUDE.md keeps the HubSpot
+    // connector and its hooks deliberately dormant for a future CRM upgrade,
+    // so the fields, their state and the save path all still exist — flip this
+    // one flag to true and every one of them comes back exactly as it was.
+    const SHOW_LAB_LEGACY_UI = false;
+
     const handleResponse = async (response) => {
       if (!response.ok) {
         // Auto-redirect to login on auth failure (expired/invalid token)
@@ -456,7 +463,10 @@
       React.useEffect(() => {
         const lib = window.GFCMessaging;
         if (!lib || !token) return undefined;
-        lib.mount('gfc-messaging-admin', { userId: user && user.id, role: 'admin', authToken: token });
+        // The caller's REAL role, not a hardcoded 'admin'. It is display-only
+        // (the server decides which threads come back from the token), but a
+        // manager should not be shown someone else's label.
+        lib.mount('gfc-messaging-admin', { userId: user && user.id, role: (user && user.role) || 'admin', authToken: token });
         return () => lib.unmount('gfc-messaging-admin');
       }, [token, user && user.id]);
 
@@ -487,7 +497,11 @@
         { id: 'users', label: 'User Management', icon: Icons.users, color: 'text-primary-500', superAdminOnly: true },
         { id: 'service_portal', label: 'Service Portal', icon: Icons.clipboard, color: 'text-success-500', superAdminOnly: false },
         { id: 'notifications', label: 'Notifications', icon: Icons.bell, color: 'text-primary-500', superAdminOnly: false },
-        { id: 'messages', label: 'Messages', icon: Icons.inbox, color: 'text-primary-500', superAdminOnly: true },
+        // Messages is NOT super-admin only: a manager or case manager who
+        // cannot open the thread cannot answer a caregiver who messaged them,
+        // and the server already decides which threads each role may see —
+        // hiding the whole surface was a second, blunter gate on top of it.
+        { id: 'messages', label: 'Messages', icon: Icons.inbox, color: 'text-primary-500', superAdminOnly: false },
       ];
 
       // Filter menu items: Super Admin sees all, Manager only sees non-superAdminOnly items
@@ -597,17 +611,16 @@
         </div>
       );
 
-      // Different stat cards for Manager vs Super Admin
-      const statCards = isManager ? [
+      // "New Launches" counts lab-era projects and means nothing for GFC, so
+      // it is hidden with the rest of the lab UI rather than sitting on the
+      // dashboard at zero forever. Caregivers earns the slot it leaves.
+      const statCards = [
         { label: 'Total Users', value: stats?.totalUsers || 0, color: 'from-primary-500 to-primary-700', icon: Icons.users },
-        { label: 'New Launches', value: stats?.activeProjects || 0, color: 'from-warning-500 to-warning-600', icon: Icons.rocket },
-        { label: 'Service Portal', value: stats?.servicePortalUsers || 0, color: 'from-success-500 to-success-600', icon: Icons.clipboard },
         { label: 'Client Accounts', value: stats?.clientUsers || 0, color: 'from-warning-500 to-warning-600', icon: Icons.folder },
-      ] : [
-        { label: 'Total Users', value: stats?.totalUsers || 0, color: 'from-primary-500 to-primary-700', icon: Icons.users },
-        { label: 'New Launches', value: stats?.activeProjects || 0, color: 'from-accent to-primary-900', icon: Icons.rocket },
-        { label: 'Service Portal', value: stats?.servicePortalUsers || 0, color: 'from-success-500 to-success-600', icon: Icons.clipboard },
-        { label: 'Client Accounts', value: stats?.clientUsers || 0, color: 'from-warning-500 to-warning-600', icon: Icons.folder },
+        { label: 'Caregivers', value: stats?.caregiverUsers || 0, color: 'from-success-500 to-success-600', icon: Icons.clipboard },
+        ...(SHOW_LAB_LEGACY_UI
+          ? [{ label: 'New Launches', value: stats?.activeProjects || 0, color: isManager ? 'from-warning-500 to-warning-600' : 'from-accent to-primary-900', icon: Icons.rocket }]
+          : [])
       ];
 
       return (
@@ -699,12 +712,30 @@
                 Quick Stats
               </h2>
               <div className="space-y-3">
+                {/* Open Tickets counts HubSpot tickets — lab-era, and zero for
+                    GFC. Hidden with the rest rather than shown as a permanent 0. */}
+                {SHOW_LAB_LEGACY_UI && (
+                  <div className="flex justify-between items-center p-4 bg-gray-50 rounded-xl">
+                    <div className="flex items-center gap-3">
+                      <span className="w-8 h-8 rounded-lg bg-red-50 text-red-600 flex items-center justify-center">{Icons.chat}</span>
+                      <span className="text-gray-700">Open Tickets</span>
+                    </div>
+                    <span className="text-xl font-bold text-red-600">{stats?.openTickets || 0}</span>
+                  </div>
+                )}
                 <div className="flex justify-between items-center p-4 bg-gray-50 rounded-xl">
                   <div className="flex items-center gap-3">
-                    <span className="w-8 h-8 rounded-lg bg-red-50 text-red-600 flex items-center justify-center">{Icons.chat}</span>
-                    <span className="text-gray-700">Open Tickets</span>
+                    <span className="w-8 h-8 rounded-lg bg-success-50 text-success-600 flex items-center justify-center">{Icons.users}</span>
+                    <span className="text-gray-700">Caregivers with a license level</span>
                   </div>
-                  <span className="text-xl font-bold text-red-600">{stats?.openTickets || 0}</span>
+                  <span className="text-xl font-bold text-success-600">{stats?.caregiverUsers || 0}</span>
+                </div>
+                <div className="flex justify-between items-center p-4 bg-gray-50 rounded-xl">
+                  <div className="flex items-center gap-3">
+                    <span className="w-8 h-8 rounded-lg bg-primary-100 text-primary-600 flex items-center justify-center">{Icons.folder}</span>
+                    <span className="text-gray-700">Client accounts</span>
+                  </div>
+                  <span className="text-xl font-bold text-primary-600">{stats?.clientUsers || 0}</span>
                 </div>
               </div>
             </div>
@@ -1260,9 +1291,14 @@
           'Admin Hub Access': user.hasAdminHubAccess ? 'Yes' : 'No',
           'Implementations Access': user.hasImplementationsAccess ? 'Yes' : 'No',
           'Client Portal Admin': user.hasClientPortalAdminAccess ? 'Yes' : 'No',
-          'HubSpot Company ID': user.hubspotCompanyId || '',
-          'HubSpot Deal ID': user.hubspotDealId || '',
-          'HubSpot Contact ID': user.hubspotContactId || '',
+          // Lab-era CRM ids — empty for every GFC user, so they are three
+          // empty columns in every export. Flip SHOW_LAB_LEGACY_UI to bring
+          // them back with the rest.
+          ...(SHOW_LAB_LEGACY_UI ? {
+            'HubSpot Company ID': user.hubspotCompanyId || '',
+            'HubSpot Deal ID': user.hubspotDealId || '',
+            'HubSpot Contact ID': user.hubspotContactId || ''
+          } : {}),
           // Assignments are stored as client ids now (older rows may still carry a
           // name from before the picker was fixed) — resolve to a name either way.
           'Assigned Clients': Array.isArray(user.assignedClients)
@@ -1286,9 +1322,13 @@
           { wch: 12 }, // Admin Hub
           { wch: 15 }, // Implementations
           { wch: 15 }, // Client Portal Admin
-          { wch: 18 }, // HubSpot Company ID
-          { wch: 18 }, // HubSpot Deal ID
-          { wch: 18 }, // HubSpot Contact ID
+          // Positional — these must rise and fall with the columns above, or
+          // every width after them lands on the wrong column.
+          ...(SHOW_LAB_LEGACY_UI ? [
+            { wch: 18 }, // HubSpot Company ID
+            { wch: 18 }, // HubSpot Deal ID
+            { wch: 18 }  // HubSpot Contact ID
+          ] : []),
           { wch: 30 }, // Assigned Clients
           { wch: 12 }, // Created At
           { wch: 38 }  // User ID
@@ -1739,25 +1779,32 @@
                         )}
                       </div>
 
-                      {/* HubSpot Integration */}
-                      <h4 className="font-medium text-gray-800 mt-4 mb-2">HubSpot Integration</h4>
-                      <div className="grid md:grid-cols-3 gap-4">
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Company ID</label>
-                          <input type="text" value={formData.hubspotCompanyId} onChange={(e) => setFormData({ ...formData, hubspotCompanyId: e.target.value })}
-                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" placeholder="HubSpot Company ID" />
-                        </div>
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Deal ID</label>
-                          <input type="text" value={formData.hubspotDealId} onChange={(e) => setFormData({ ...formData, hubspotDealId: e.target.value })}
-                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" placeholder="HubSpot Deal ID" />
-                        </div>
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Contact ID</label>
-                          <input type="text" value={formData.hubspotContactId} onChange={(e) => setFormData({ ...formData, hubspotContactId: e.target.value })}
-                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" placeholder="HubSpot Contact ID" />
-                        </div>
-                      </div>
+                      {/* HubSpot Integration — lab-era CRM, hidden for GFC.
+                          The values still round-trip through formData, so a
+                          client saved while this is hidden keeps whatever ids
+                          it already had rather than having them wiped. */}
+                      {SHOW_LAB_LEGACY_UI && (
+                        <React.Fragment>
+                          <h4 className="font-medium text-gray-800 mt-4 mb-2">HubSpot Integration</h4>
+                          <div className="grid md:grid-cols-3 gap-4">
+                            <div>
+                              <label className="block text-sm font-medium text-gray-700 mb-1">Company ID</label>
+                              <input type="text" value={formData.hubspotCompanyId} onChange={(e) => setFormData({ ...formData, hubspotCompanyId: e.target.value })}
+                                className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" placeholder="HubSpot Company ID" />
+                            </div>
+                            <div>
+                              <label className="block text-sm font-medium text-gray-700 mb-1">Deal ID</label>
+                              <input type="text" value={formData.hubspotDealId} onChange={(e) => setFormData({ ...formData, hubspotDealId: e.target.value })}
+                                className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" placeholder="HubSpot Deal ID" />
+                            </div>
+                            <div>
+                              <label className="block text-sm font-medium text-gray-700 mb-1">Contact ID</label>
+                              <input type="text" value={formData.hubspotContactId} onChange={(e) => setFormData({ ...formData, hubspotContactId: e.target.value })}
+                                className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" placeholder="HubSpot Contact ID" />
+                            </div>
+                          </div>
+                        </React.Fragment>
+                      )}
 
                       {/* Enrollment Status */}
                       <h4 className="font-medium text-gray-800 mt-4 mb-2">Enrollment Status</h4>
