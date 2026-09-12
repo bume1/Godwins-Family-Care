@@ -671,3 +671,39 @@ test('SAFETY: a visit log cannot claim a shift that is not the caregiver\'s own'
   assert.match(handler, /SHIFT_CLIENT_MISMATCH/, 'a shift for a different client than the log names is refused');
   assert.match(handler, /SHIFT_NOT_FOUND/, 'a shift id that does not exist is refused');
 });
+
+// ---- Billing and the caregiver's own hours ---------------------------------
+test('the billing CSV carries no clinical content either', () => {
+  const keys = sched.BILLING_CSV_COLUMNS.map(c => c.key).join(' ').toLowerCase();
+  for (const forbidden of ['diagnos', 'condition', 'careplan', 'note', 'medication', 'tier']) {
+    assert.ok(!keys.includes(forbidden), `billing must not export "${forbidden}"`);
+  }
+  // An invoice says a visit of this length happened — never what was done in it.
+  const csv = sched.toPayrollCsv([{ clientName: 'M. Whitfield', hours: 4 }], sched.BILLING_CSV_COLUMNS);
+  assert.ok(csv.startsWith('Client,Service Date,Caregiver,'));
+});
+
+test('SAFETY: billing lists only COMPLETED visits, and says what verification could establish', () => {
+  const i = routeSrc.indexOf("'/api/scheduling/billing.csv'");
+  assert.ok(i > 0, 'the billing route exists');
+  const handler = routeSrc.slice(i, i + 2600);
+  assert.match(handler, /!l\.clock_out_at.*return false/s,
+    'a shift still in progress has no final hours and must not reach an invoice');
+  assert.match(handler, /verification/, 'each line states what the geofence could establish');
+  assert.match(handler, /requireAdmin/, 'billing is admin-only');
+});
+
+test('SAFETY: a caregiver\'s hours export can only ever return their OWN rows', () => {
+  const i = routeSrc.indexOf("'/api/scheduling/my-hours.csv'");
+  assert.ok(i > 0, 'the caregiver hours route exists');
+  const decl = routeSrc.slice(i, i + 200);
+  assert.match(decl, /requireSchedulable/, 'only a caregiver or clinician reaches it');
+  const handler = routeSrc.slice(i, i + 2200);
+  assert.match(handler, /l\.caregiver_id !== req\.user\.id/,
+    'the filter is the token holder, not a parameter');
+  assert.ok(!/req\.query\.caregiverId/.test(handler),
+    'there must be no caregiverId parameter to widen the export with');
+  // An office correction and its reason belong on payroll, not in a personal copy.
+  const keys = sched.CAREGIVER_HOURS_CSV_COLUMNS.map(c => c.key).join(' ');
+  assert.ok(!keys.includes('editReason'), 'the edit reason is not in the caregiver copy');
+});

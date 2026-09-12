@@ -511,6 +511,11 @@ const App = () => {
     window.location.href = `${API}/api/scheduling/payroll.csv?from=${from}&to=${to}&token=${encodeURIComponent(getToken())}`;
   };
 
+  // What gets INVOICED, as opposed to what gets paid. Completed visits only.
+  const exportBillingCsv = () => {
+    window.location.href = `${API}/api/scheduling/billing.csv?from=${from}&to=${to}&token=${encodeURIComponent(getToken())}`;
+  };
+
   if (loading) return <div className="wrap"><div className="empty">Loading…</div></div>;
 
   if (denied) {
@@ -637,12 +642,14 @@ const App = () => {
                   {flaggedOnly ? 'Showing flagged only' : 'Show flagged only'}
                 </button>
                 <button className="btn gold" onClick={exportCsv}>Export payroll CSV</button>
+                <button className="btn" onClick={exportBillingCsv}>Export billing CSV</button>
               </div>
               <div className="note">
-                <b>The CSV column set is provisional.</b>
-                It carries caregiver, license level, client, scheduled and actual times, hours, flags,
-                edit details and the pay period — and nothing clinical. Confirm the columns your payroll
-                run needs and they change in one place.
+                <b>Two different questions.</b> Payroll is what caregivers are paid — every clock-in in
+                the range, including shifts still open, with edit details and the pay period.
+                Billing is what clients are invoiced — completed visits only, grouped by client, with
+                the billable hours, whether the visit location could be verified, and whether the visit
+                log was filed. Neither carries anything clinical.
               </div>
             </div>
             <div className="card">

@@ -1011,6 +1011,107 @@ module.exports = function createSchedulingRoutes(deps) {
     }
   });
 
+  // GET /api/scheduling/billing.csv — admin only. What gets INVOICED, which is
+  // a different question from what payroll.csv answers: one line per COMPLETED
+  // visit, grouped by client. A shift still in progress has no final hours, so
+  // it is not billable and is not listed — a half-open visit on an invoice is
+  // a credit note waiting to happen.
+  router.get('/api/scheduling/billing.csv', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const from = String(req.query.from || '');
+      const to = String(req.query.to || '');
+      if (!sched.isIsoDate(from) || !sched.isIsoDate(to)) {
+        return res.status(400).json({ error: 'Give a from and to date (YYYY-MM-DD).', code: 'DATE_RANGE_REQUIRED' });
+      }
+      if (to < from) return res.status(400).json({ error: 'The end date is before the start date.', code: 'DATE_RANGE_INVERTED' });
+      const onlyClient = req.query.clientId ? String(req.query.clientId) : null;
+
+      const visitLogs = await readRows('caregiver_visit_logs');
+      const documentedShiftIds = new Set(visitLogs.filter(v => v && v.shift_id).map(v => String(v.shift_id)));
+
+      const logs = (await readRows('time_logs')).filter(l => {
+        if (!l || !l.clock_out_at) return false;          // not finished, not billable
+        if (onlyClient && String(l.client_id) !== onlyClient) return false;
+        const d = String(l.clock_in_at || '').slice(0, 10);
+        return d >= from && d <= to;
+      }).sort((a, b) =>
+        String(a.client_name || '').localeCompare(String(b.client_name || '')) ||
+        String(a.clock_in_at).localeCompare(String(b.clock_in_at)));
+
+      const rows = logs.map(l => ({
+        clientName: l.client_name,
+        serviceDate: String(l.clock_in_at || '').slice(0, 10),
+        caregiverName: l.caregiver_name,
+        licenseLevel: l.license_level ? cg.LICENSE_LABELS[l.license_level] || l.license_level : '',
+        scheduledStart: l.scheduled_start,
+        scheduledEnd: l.scheduled_end,
+        clockInAt: l.clock_in_at,
+        clockOutAt: l.clock_out_at || '',
+        hours: sched.minutesToHours(l.total_minutes),
+        // Says what the GPS check could actually establish, never more: an
+        // unverifiable clock-in is not the same claim as a verified one, and
+        // an invoice should not blur them.
+        verification: (l.clock_in_geofence && l.clock_in_geofence.verdict) || 'unverifiable',
+        documented: documentedShiftIds.has(String(l.shift_id)) ? 'yes' : 'no'
+      }));
+
+      await logActivity(req.user.id, req.user.name || req.user.email, 'billing_csv_exported', 'time_log', null,
+        { from, to, clientId: onlyClient, rows: rows.length });
+
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="gfc_billing_${from}_to_${to}.csv"`);
+      res.send(sched.toPayrollCsv(rows, sched.BILLING_CSV_COLUMNS));
+    } catch (error) {
+      console.error('Billing CSV error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // GET /api/scheduling/my-hours.csv — a caregiver's OWN hours, for their own
+  // records. Resolved from the token, so there is no id to pass and no other
+  // caregiver's rows to reach. The date range is optional here (unlike
+  // payroll): this is someone pulling their own timesheet, not a pay run.
+  router.get('/api/scheduling/my-hours.csv', authenticateToken, requireSchedulable, async (req, res) => {
+    try {
+      const from = req.query.from ? String(req.query.from) : '';
+      const to = req.query.to ? String(req.query.to) : '';
+      if (from && !sched.isIsoDate(from)) return res.status(400).json({ error: 'That start date is not YYYY-MM-DD.', code: 'DATE_INVALID' });
+      if (to && !sched.isIsoDate(to)) return res.status(400).json({ error: 'That end date is not YYYY-MM-DD.', code: 'DATE_INVALID' });
+      if (from && to && to < from) return res.status(400).json({ error: 'The end date is before the start date.', code: 'DATE_RANGE_INVERTED' });
+
+      const logs = (await readRows('time_logs')).filter(l => {
+        if (!l || l.caregiver_id !== req.user.id) return false;
+        const d = String(l.clock_in_at || '').slice(0, 10);
+        if (from && d < from) return false;
+        if (to && d > to) return false;
+        return true;
+      }).sort((a, b) => String(a.clock_in_at).localeCompare(String(b.clock_in_at)));
+
+      const rows = logs.map(l => ({
+        shiftDate: String(l.clock_in_at || '').slice(0, 10),
+        clientName: l.client_name,
+        scheduledStart: l.scheduled_start,
+        scheduledEnd: l.scheduled_end,
+        clockInAt: l.clock_in_at,
+        clockOutAt: l.clock_out_at || '',
+        hours: sched.minutesToHours(l.total_minutes),
+        flags: (l.flags || []).join(' '),
+        edited: l.edited ? 'yes' : ''
+      }));
+
+      await logActivity(req.user.id, req.user.name || req.user.email, 'caregiver_hours_exported', 'time_log', null,
+        { from: from || null, to: to || null, rows: rows.length });
+
+      const stamp = `${from || 'all'}_to_${to || 'today'}`;
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="my_hours_${stamp}.csv"`);
+      res.send(sched.toPayrollCsv(rows, sched.CAREGIVER_HOURS_CSV_COLUMNS));
+    } catch (error) {
+      console.error('Caregiver hours CSV error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   // GET /api/scheduling/caregivers — admin picker: who can hold a shift.
   router.get('/api/scheduling/caregivers', authenticateToken, requireAdmin, async (req, res) => {
     try {

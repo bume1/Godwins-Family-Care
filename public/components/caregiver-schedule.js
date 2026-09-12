@@ -287,6 +287,12 @@
     var hours = state.totalHours === null || state.totalHours === undefined ? '—' : state.totalHours;
     return '<div class="gcard"><h3>My hours</h3>' +
       '<p class="gmu" style="margin-bottom:8px">' + esc(String(hours)) + ' hours logged.</p>' +
+      // Their own copy of their own hours. The server resolves the caregiver
+      // from the token, so this asks for no id and could not fetch anyone
+      // else's rows if it did.
+      '<div class="gbtns" style="margin-bottom:10px">' +
+        '<button class="gbtn ghost" data-act="download-hours">Download my hours (CSV)</button>' +
+      '</div>' +
       state.timeLogs.map(function (l) {
         return '<div class="grow" style="display:block">' +
           '<div class="gwhen">' + esc(fmtWhen(l.clockInAt)) + '</div>' +
@@ -334,6 +340,13 @@
           return render(state);
         }
         if (act === 'submit-availability') return submitAvailability(state, root);
+        if (act === 'download-hours') {
+          // A file download, so the token rides as a query param — the same
+          // pattern the app's other authenticated downloads use.
+          global.location.href = API + '/api/scheduling/my-hours.csv?token=' +
+            encodeURIComponent(state.authToken);
+          return;
+        }
         btn.disabled = true;
         act === 'clock-in' || act === 'clock-out'
           ? clock(state, id, act)

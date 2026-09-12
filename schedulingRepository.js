@@ -511,6 +511,42 @@ const PAYROLL_CSV_COLUMNS = Object.freeze([
   { key: 'payPeriodEnd', header: 'Pay Period End' }
 ]);
 
+// ---- Client billing CSV ----------------------------------------------------
+// What gets INVOICED, which is a different question from what gets PAID: one
+// line per completed visit, grouped by client, carrying the hours that back
+// the charge. No pay rate and nothing clinical — an invoice line says a visit
+// of this length happened on this date, not what was done during it.
+const BILLING_CSV_COLUMNS = Object.freeze([
+  { key: 'clientName', header: 'Client' },
+  { key: 'serviceDate', header: 'Service Date' },
+  { key: 'caregiverName', header: 'Caregiver' },
+  { key: 'licenseLevel', header: 'License Level' },
+  { key: 'scheduledStart', header: 'Scheduled Start' },
+  { key: 'scheduledEnd', header: 'Scheduled End' },
+  { key: 'clockInAt', header: 'Actual In' },
+  { key: 'clockOutAt', header: 'Actual Out' },
+  { key: 'hours', header: 'Billable Hours' },
+  { key: 'verification', header: 'Visit Verification' },
+  { key: 'documented', header: 'Visit Documented' }
+]);
+
+// ---- A caregiver's own hours ----------------------------------------------
+// Their own record of their own work, for their own files. Deliberately no
+// other caregiver's rows and no edit-reason column: an admin correction and
+// why it was made belongs on the payroll export, not in a personal copy that
+// reads like a dispute.
+const CAREGIVER_HOURS_CSV_COLUMNS = Object.freeze([
+  { key: 'shiftDate', header: 'Date' },
+  { key: 'clientName', header: 'Client' },
+  { key: 'scheduledStart', header: 'Scheduled Start' },
+  { key: 'scheduledEnd', header: 'Scheduled End' },
+  { key: 'clockInAt', header: 'Clock In' },
+  { key: 'clockOutAt', header: 'Clock Out' },
+  { key: 'hours', header: 'Hours' },
+  { key: 'flags', header: 'Flags' },
+  { key: 'edited', header: 'Adjusted by office' }
+]);
+
 // RFC 4180 quoting. A field is quoted when it contains a comma, a quote, a
 // newline, or leading/trailing space; embedded quotes are doubled. A leading
 // =, +, - or @ is prefixed with a single quote so a spreadsheet does not
@@ -597,6 +633,6 @@ module.exports = {
   DEFAULT_GEOFENCE_METERS, DEFAULT_GRACE_MINUTES, distanceMeters, geofenceRadiusFor, clientCoords,
   evaluateGeofence, GEOFENCE_MIN_METERS, GEOFENCE_MAX_METERS, validateClientLocation, TIME_LOG_FLAGS, clockInFlags, clockOutFlags, totalMinutes, minutesToHours,
   DEFAULT_PAY_PERIOD_ANCHOR, DEFAULT_PAY_PERIOD_DAYS, payPeriodFor,
-  PAYROLL_CSV_COLUMNS, csvCell, toPayrollCsv,
+  PAYROLL_CSV_COLUMNS, BILLING_CSV_COLUMNS, CAREGIVER_HOURS_CSV_COLUMNS, csvCell, toPayrollCsv,
   SHIFT_REQUEST_STATUSES, SHIFT_REQUEST_TRANSITIONS, canTransitionRequest
 };
