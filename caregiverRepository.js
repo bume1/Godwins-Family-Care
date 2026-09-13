@@ -314,11 +314,32 @@ function visitLogSchemaFor(caregiver, client = null, now = new Date()) {
   const competencies = verifiedCompetencies(caregiver, now);
   const authorized = authorizedTaskIds(client);
 
+  // OWNER RULE, 2026-09-13: for a COMPETENCY-GATED item the verified competency
+  // is the whole gate — the licence level is no longer a ceiling over it. The
+  // work is performed under licensed oversight, and a caregiver who did the
+  // task has to be able to document it; a task done and not recorded is worse
+  // than one recorded by someone below the old line.
+  //
+  // It also closes a silent failure. Before this, ticking `injections` for a
+  // PCA stored the competency, showed it in the admin form, and changed
+  // nothing — an administrator believed they had enabled something and had
+  // not. A sign-off that does nothing is the same class of trap as a 200 that
+  // writes nothing.
+  //
+  // What did NOT change, deliberately:
+  //  - An item with NO competency keeps its minLevel. A Sitter still is not
+  //    offered bathing or cooking; that is scope of role, not a credential, and
+  //    there is no sign-off that unlocks it. `postop` and `teach` stay LPN-only
+  //    for the same reason.
+  //  - Unverified or expired still counts as NOT PRESENT (verifiedCompetencies).
+  //    The gate moved; it did not loosen.
+  //  - The care plan still narrows, and never widens.
   const allows = (item) => {
-    if (LEVEL_RANK[item.minLevel] > rank) return false;
     if (item.competency) {
       const byLicense = Array.isArray(item.byLicense) && item.byLicense.includes(level);
       if (!byLicense && !competencies.includes(item.competency)) return false;
+    } else if (LEVEL_RANK[item.minLevel] > rank) {
+      return false;
     }
     if (authorized && !authorized.has(item.id) && item.id !== 'presence_confirmed') return false;
     return true;
@@ -328,8 +349,10 @@ function visitLogSchemaFor(caregiver, client = null, now = new Date()) {
     .map(g => ({ id: g.id, label: g.label, items: g.items.filter(allows).map(i => ({ id: i.id, label: i.label, legacy: i.legacy })) }))
     .filter(g => g.items.length > 0);
 
+  // Same rule: every measurement field is competency-gated, so the competency
+  // decides. The CNA floor is gone — a PCA signed off on vital signs records a
+  // blood pressure, which is the point of signing them off.
   const measurements = MEASUREMENT_FIELDS.filter(f => {
-    if (rank < LEVEL_RANK.cna) return false;
     const byLicense = Array.isArray(f.byLicense) && f.byLicense.includes(level);
     return byLicense || competencies.includes(f.competency);
   }).map(f => ({ id: f.id, label: f.label, unit: f.unit }));
@@ -351,8 +374,17 @@ function visitLogSchemaFor(caregiver, client = null, now = new Date()) {
     satisfactionValues: SATISFACTION_VALUES.slice(),
     // An LPN note is a skilled visit note: it lands as Pending Review and goes
     // to the clinician inbox. It does NOT write to OpenEMR in this session.
+    // A note is skilled because of WHAT IS IN IT, not who wrote it. Once a
+    // competency can be held below LPN (owner rule 2026-09-13), a skilled task
+    // documented by a PCA must reach a clinician exactly as an LPN's does —
+    // that review IS the licensed oversight the rule relies on. Decided per
+    // submission in `skilledContentPresent()`, because a schema that merely
+    // OFFERS a skilled task would send every routine ADL log to the inbox.
     submitStatus: level === 'lpn' ? 'pending_review' : 'submitted',
-    skilledNote: level === 'lpn'
+    skilledNote: level === 'lpn',
+    // Skilled task ids this caregiver may document at all — the route checks
+    // what they actually ticked against this.
+    skilledTaskIdsOffered: (taskGroups.find(g => g.id === 'skilled') || { items: [] }).items.map(i => i.id)
   };
 }
 
@@ -394,6 +426,16 @@ function standingInstructionsFor(client) {
   const wanted = new Set(active.map(v => String(typeof v === 'string' ? v : (v.id || v.label || '')).trim().toLowerCase()));
   const hits = STANDING_INSTRUCTIONS.filter(s => wanted.has(s.id) || wanted.has(s.label.toLowerCase()));
   return hits.length > 0 ? hits : STANDING_INSTRUCTIONS.slice();
+}
+
+// True when the sanitized submission records a skilled task as DONE. Such a
+// note routes to the clinician inbox whatever the author's licence level: the
+// task was performed under licensed oversight, so the licensed person has to
+// see it. Reads the sanitized payload, never the raw body — a task the schema
+// dropped is not in here to be counted.
+function skilledContentPresent(clean) {
+  const tasks = (clean && clean.tasks) || {};
+  return SKILLED_TASK_IDS.some(id => tasks[id] && tasks[id].done === true);
 }
 
 // ============================================================================
@@ -709,7 +751,7 @@ module.exports = {
   TASK_GROUPS, RESTRICTED_TASK_IDS, SKILLED_TASK_IDS,
   STANDING_INSTRUCTIONS, PATIENT_CONDITIONS, SAFETY_CONCERNS, INCIDENT_SAFETY_CONCERNS,
   MEASUREMENT_FIELDS, NARRATIVE_FIELDS, SATISFACTION_VALUES, VISIT_LOG_STATUSES,
-  visitLogSchemaFor, authorizedTaskIds, standingInstructionsFor, sanitizeVisitLogSubmission,
+  visitLogSchemaFor, authorizedTaskIds, standingInstructionsFor, sanitizeVisitLogSubmission, skilledContentPresent,
   CONCERN_TYPES, CONCERN_META, normalizeConcernType, severityForConcernType,
   ESCALATION_STATUSES, ESCALATION_TRANSITIONS, ESCALATION_NOTE_REQUIRED, canAdvanceEscalation,
   routeEscalation, describeRecipients, escalationConfirmation,

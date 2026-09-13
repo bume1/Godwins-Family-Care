@@ -27,6 +27,11 @@
 
 const express = require('express');
 const cg = require('../caregiverRepository');
+// The office contact block. ORG in public/consent-text.js is the single source
+// of the practice's own contact details — it is what prints into executed
+// consent documents — so the caregiver help card reads it rather than keeping a
+// second copy that can drift from the one a client has in writing.
+const { ORG } = require('../public/consent-text');
 
 module.exports = function createCaregiverRoutes(deps) {
   const {
@@ -116,6 +121,7 @@ module.exports = function createCaregiverRoutes(deps) {
         competencies: schema.competencies,
         competencyLabels: cg.COMPETENCY_LABELS,
         assignedClientCount: clients.length,
+        office: { phone: ORG.phone, email: ORG.email },
         schema
       });
     } catch (error) {
@@ -240,8 +246,14 @@ module.exports = function createCaregiverRoutes(deps) {
         // Session 7 owns the clock; we record whatever marker it has already
         // written, and never invent one.
         shift_id: body.shiftId ? String(body.shiftId).slice(0, 120) : null,
-        status: schema.submitStatus,        // lpn → pending_review
-        skilled_note: !!schema.skilledNote,
+        // An LPN's note always goes for review; so does ANY note that records a
+        // skilled task, whoever wrote it (owner rule 2026-09-13 — a competency
+        // can now be held below LPN, and the clinician's review is the licensed
+        // oversight that rule depends on). Read off the SANITIZED payload, so a
+        // task the schema dropped cannot trigger it.
+        status: (schema.submitStatus === 'pending_review' || cg.skilledContentPresent(clean))
+          ? 'pending_review' : 'submitted',
+        skilled_note: !!schema.skilledNote || cg.skilledContentPresent(clean),
         submitted_at: submittedAt,
         // Immutability is a property of the data, not a UI state: there is no
         // update route for this collection, and the review trail lives in its
@@ -269,7 +281,7 @@ module.exports = function createCaregiverRoutes(deps) {
         scheduledAt: submittedAt,
         status: 'completed',
         licenseLevel: schema.level,
-        pendingReview: schema.submitStatus === 'pending_review'
+        pendingReview: row.status === 'pending_review'
       });
       await db.set('visit_logs', displayRows);
 
@@ -321,7 +333,7 @@ module.exports = function createCaregiverRoutes(deps) {
         duplicate: false,
         incidents: incidentRows.map(r => ({ id: r.id, kind: r.kind, label: r.label })),
         escalation: escalation ? { id: escalation.id, confirmation: escalation.confirmation, notified: escalation.notified } : null,
-        message: schema.submitStatus === 'pending_review'
+        message: row.status === 'pending_review'
           ? 'Filed. Your skilled note is with the clinician for review.'
           : 'Visit log filed.'
       });

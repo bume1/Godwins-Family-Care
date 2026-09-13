@@ -16889,6 +16889,17 @@ app.get('/clinical', (req, res) => {
   res.sendFile(__dirname + '/public/clinical.html');
 });
 
+// PHCP scheduling — the admin/manager surface for caregiver shifts (Session 7).
+// The page existed from PR #56 but was only reachable by typing the .html
+// filename: express.static is registered without the `extensions` option, so
+// /scheduling answered 404 and nothing in the app linked to it. Same class of
+// gap as the two missing admin screens (2026-09-10): a screen nobody can reach
+// is a screen that does not exist. Shell is public; every /api/scheduling/*
+// route it calls enforces the admin-only filters.
+app.get('/scheduling', (req, res) => {
+  res.sendFile(__dirname + '/public/scheduling.html');
+});
+
 // Admin hub login endpoint (same as regular admin login)
 app.post('/api/auth/admin-login', async (req, res) => {
   try {

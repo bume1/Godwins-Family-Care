@@ -636,3 +636,76 @@ test('the license enum is REQUIRED from Session 6, not restated', () => {
   assert.ok(!/'sitter'\s*,\s*'pca'\s*,\s*'cna'\s*,\s*'lpn'/.test(repoSrc),
     'the level list must not be duplicated here');
 });
+
+// ============================================================================
+// Open-pool VISIBILITY vs CLAIMABILITY (owner rule, 2026-09-13)
+// Every caregiver sees every open shift; one their licence does not cover is
+// greyed out with the reason rather than hidden. The claim gate is unchanged.
+// ============================================================================
+
+test('a caregiver SEES a shift above their licence level, greyed out with the reason', () => {
+  const skilled = shift({ required_license_level: 'cna' });
+  const v = sched.shiftVisibility(caregiver('pca'), skilled, client());
+  assert.equal(v.visible, true, 'the shift is on the board');
+  assert.equal(v.claimable, false, 'but it cannot be taken');
+  assert.match(v.reason, /below the required/i, 'and the reason names the shortfall');
+  // The CLAIM gate is untouched by the visibility change — this is the assertion
+  // that matters, because showing the row is only safe while the API still refuses it.
+  assert.equal(sched.isEligibleForShift(caregiver('pca'), skilled, client()), false);
+});
+
+test('a caregiver who MEETS the requirement sees it claimable, with no reason attached', () => {
+  const skilled = shift({ required_license_level: 'cna' });
+  for (const level of ['cna', 'lpn']) {
+    const v = sched.shiftVisibility(caregiver(level), skilled, client());
+    assert.equal(v.visible, true);
+    assert.equal(v.claimable, true, `${level} can take a CNA shift`);
+    assert.equal(v.reason, null, 'a claimable shift carries no refusal text');
+  }
+});
+
+test('an unrecognized licence requirement is VISIBLE but claimable by nobody', () => {
+  // Previously invisible to everyone, which made a misconfigured shift look
+  // like no shift at all. Greyed-out-with-a-reason is the same protection and
+  // an admin can actually see that something needs fixing.
+  const bad = shift({ required_license_level: 'anyone' });
+  for (const level of ['sitter', 'pca', 'cna', 'lpn']) {
+    const v = sched.shiftVisibility(caregiver(level), bad, client());
+    assert.equal(v.visible, true, `${level} sees the row`);
+    assert.equal(v.claimable, false, `${level} cannot take it`);
+    assert.match(v.reason, /not recognized/i);
+  }
+});
+
+test('a care-team shift stays HIDDEN from caregivers off that team — a licence gate greys, a care-team gate hides', () => {
+  const teamOnly = shift({ pool_visibility: 'care_team' });
+  const offTeam = sched.shiftVisibility(caregiver('cna'), teamOnly, client());
+  assert.equal(offTeam.visible, false, 'a client name and address is not licence information');
+  assert.equal(offTeam.claimable, false);
+
+  const onTeamClient = client({ careTeam: { assignedFNPs: [], assignedCaseManager: null, primaryCaregiver: 'cg-cna', backupCaregiver: null } });
+  const onTeam = sched.shiftVisibility(caregiver('cna'), teamOnly, onTeamClient);
+  assert.equal(onTeam.visible, true);
+  assert.equal(onTeam.claimable, true);
+});
+
+test('a deactivated caregiver and a non-caregiver see nothing at all', () => {
+  assert.equal(sched.shiftVisibility(caregiver('cna', { accountStatus: 'inactive' }), shift(), client()).visible, false);
+  assert.equal(sched.shiftVisibility({ id: 'u1', role: 'client' }, shift(), client()).visible, false);
+});
+
+test('claimable is DEFINED BY the claim gate, so the board and the API cannot drift', () => {
+  // Walks every level against every requirement and asserts the two agree on
+  // each cell. If someone re-derives the rule inside shiftVisibility(), this fails.
+  for (const level of ['sitter', 'pca', 'cna', 'lpn']) {
+    for (const req of [null, 'sitter', 'pca', 'cna', 'lpn']) {
+      const s = shift({ required_license_level: req });
+      const v = sched.shiftVisibility(caregiver(level), s, client());
+      assert.equal(
+        v.claimable,
+        sched.isEligibleForShift(caregiver(level), s, client()),
+        `${level} vs ${req || 'no requirement'}`
+      );
+    }
+  }
+});
