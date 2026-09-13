@@ -311,6 +311,39 @@ function findShiftConflict(rows, caregiverId, shift) {
 const DEFAULT_GEOFENCE_METERS = 150;
 const DEFAULT_GRACE_MINUTES = 10;
 
+// ---- Clock-in window -------------------------------------------------------
+// A caregiver may clock in from two hours before the shift starts, and not a
+// minute earlier. This one BLOCKS where the geofence only flags, and the
+// asymmetry is deliberate: being somewhere unexpected has honest explanations
+// (transporting the client), whereas starting the clock five hours early does
+// not — it is either a mistake or time that was not worked.
+//
+// It constrains EARLY only. A caregiver arriving late must always be able to
+// clock in: refusing them would mean unpaid work and no record of the visit,
+// which is the outcome this whole subsystem exists to prevent. Lateness is
+// already flagged (late_clock_in) and flagging is the right answer there.
+const CLOCK_IN_WINDOW_MINUTES = 120;
+
+// Pure so the rule is testable without a shift row or a clock.
+//   { allowed, opensAt, minutesEarly }
+// A shift whose start cannot be read is ALLOWED through: that shift is broken
+// either way, and blocking a caregiver out of a visit over a data problem is
+// the worse of the two failures.
+function clockInWindow({ shift, at, windowMinutes = CLOCK_IN_WINDOW_MINUTES }) {
+  const start = new Date((shift || {}).start);
+  const now = new Date(at);
+  if (isNaN(start.getTime()) || isNaN(now.getTime())) {
+    return { allowed: true, opensAt: null, minutesEarly: null };
+  }
+  const opens = new Date(start.getTime() - windowMinutes * 60000);
+  if (now >= opens) return { allowed: true, opensAt: opens.toISOString(), minutesEarly: 0 };
+  return {
+    allowed: false,
+    opensAt: opens.toISOString(),
+    minutesEarly: Math.ceil((opens.getTime() - now.getTime()) / 60000)
+  };
+}
+
 const EARTH_RADIUS_M = 6371000;
 const toRad = (deg) => (deg * Math.PI) / 180;
 
@@ -641,6 +674,7 @@ module.exports = {
   isEligibleForShift, eligibilityReason, shiftsOverlap, findShiftConflict, BLOCKING_STATUSES,
   DEFAULT_GEOFENCE_METERS, DEFAULT_GRACE_MINUTES, distanceMeters, geofenceRadiusFor, clientCoords,
   evaluateGeofence, GEOFENCE_MIN_METERS, GEOFENCE_MAX_METERS, validateClientLocation, TIME_LOG_FLAGS, clockInFlags, clockOutFlags, totalMinutes, minutesToHours,
+  CLOCK_IN_WINDOW_MINUTES, clockInWindow,
   DEFAULT_PAY_PERIOD_ANCHOR, DEFAULT_PAY_PERIOD_DAYS, payPeriodFor,
   PAYROLL_CSV_COLUMNS, BILLING_CSV_COLUMNS, CAREGIVER_HOURS_CSV_COLUMNS, csvCell, toPayrollCsv,
   SHIFT_REQUEST_STATUSES, SHIFT_REQUEST_TRANSITIONS, canTransitionRequest

@@ -748,3 +748,47 @@ test('payroll says whether hours were clocked or typed', () => {
   assert.ok(keys.includes('source'), 'the export distinguishes clocked from manual');
   assert.ok(keys.includes('enteredBy'), 'and names who entered a manual row');
 });
+
+// ---- The clock-in window (two hours before the start) ----------------------
+test('SAFETY: a caregiver cannot clock in more than 2 hours before the start', () => {
+  const s = shift({ start: '2026-10-01T14:00:00.000Z' });
+  // 2h01m early: refused, and the refusal says how early and when it opens.
+  const early = sched.clockInWindow({ shift: s, at: '2026-10-01T11:59:00.000Z' });
+  assert.strictEqual(early.allowed, false);
+  assert.strictEqual(early.opensAt, '2026-10-01T12:00:00.000Z');
+  assert.ok(early.minutesEarly >= 1);
+  // Exactly 2h: allowed. The boundary is inclusive.
+  assert.strictEqual(sched.clockInWindow({ shift: s, at: '2026-10-01T12:00:00.000Z' }).allowed, true);
+  assert.strictEqual(sched.clockInWindow({ shift: s, at: '2026-10-01T13:30:00.000Z' }).allowed, true);
+});
+
+test('SAFETY: arriving LATE is never blocked — only early is', () => {
+  const s = shift({ start: '2026-10-01T14:00:00.000Z' });
+  // Refusing a late caregiver means unpaid work and no record of the visit,
+  // which is the outcome the whole subsystem exists to prevent. Lateness is
+  // flagged elsewhere; it is never a refusal.
+  for (const at of ['2026-10-01T14:30:00.000Z', '2026-10-01T17:00:00.000Z', '2026-10-02T09:00:00.000Z']) {
+    assert.strictEqual(sched.clockInWindow({ shift: s, at }).allowed, true, `${at} must be allowed`);
+  }
+});
+
+test('a shift with an unreadable start is allowed through, not blocked', () => {
+  // That shift is broken either way; locking a caregiver out of a visit over a
+  // data problem is the worse of the two failures.
+  assert.strictEqual(sched.clockInWindow({ shift: { start: 'nonsense' }, at: '2026-10-01T12:00:00.000Z' }).allowed, true);
+  assert.strictEqual(sched.clockInWindow({ shift: {}, at: '2026-10-01T12:00:00.000Z' }).allowed, true);
+});
+
+test('SAFETY: the window is enforced server-side, before anything is written', () => {
+  const i = routeSrc.indexOf("'/api/scheduling/shifts/:id/clock-in'");
+  // Wide enough to reach the first write: a slice that stops short makes this
+  // assertion pass or fail on the window size rather than on the ordering.
+  const handler = routeSrc.slice(i, i + 4200);
+  assert.match(handler, /CLOCK_IN_TOO_EARLY/, 'the refusal carries a specific code');
+  const gate = handler.indexOf('CLOCK_IN_TOO_EARLY');
+  const write = handler.indexOf('db.set');
+  assert.ok(gate > 0 && write > 0 && gate < write,
+    'refused before any write, or a rejected clock-in leaves a half-started shift');
+  // The component only decides whether to offer the button.
+  assert.match(componentSrc, /CLOCK_IN_WINDOW_MINUTES/, 'the app mirrors the window to disable the button');
+});

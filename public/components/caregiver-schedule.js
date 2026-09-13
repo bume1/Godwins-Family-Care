@@ -51,6 +51,10 @@
 
   var API = global.location.origin;
   var LEAD_DAYS = 30;                    // mirrors AVAILABILITY_LEAD_DAYS
+  // Mirrors CLOCK_IN_WINDOW_MINUTES. The SERVER is what enforces it; this only
+  // decides whether the button is offered, so the two disagreeing costs a
+  // clear refusal rather than an unenforced rule.
+  var CLOCK_IN_WINDOW_MINUTES = 120;
   var instances = Object.create(null);   // elementId → instance state
 
   // ---- Brand tokens (scoped; the host page keeps its own) -----------------
@@ -197,14 +201,24 @@
     if (!rows.length) return '<div class="gempty">No confirmed shifts yet.</div>';
     return '<div class="gcard"><h3>My schedule</h3>' + rows.map(function (s) {
       var running = s.status === 'in_progress';
+      // The clock-in window opens two hours before the start. Shown as a
+      // disabled button with the time on it rather than an enabled one that
+      // fails: the server refuses either way, but a caregiver standing in
+      // someone's kitchen should be able to read WHEN, not just be told no.
+      var opens = new Date(new Date(s.start).getTime() - CLOCK_IN_WINDOW_MINUTES * 60000);
+      var tooEarly = !running && !isNaN(opens.getTime()) && Date.now() < opens.getTime();
       return '<div class="grow" style="display:block">' +
         '<div class="gwhen">' + esc(fmtRange(s.start, s.end)) + '</div>' +
         '<div class="gmu">' + esc(s.clientName || '') + (s.careTier ? ' · ' + esc(s.careTier) : '') + '</div>' +
         '<div class="gmu"><span class="gchip ' + (running ? 'on' : 'ok') + '">' + esc(titleize(s.status)) + '</span></div>' +
+        (tooEarly
+          ? '<div class="gmu">Clock in opens at ' + esc(opens.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })) + '.</div>'
+          : '') +
         '<div class="gbtns">' +
           (running
             ? '<button class="gbtn danger" data-act="clock-out" data-id="' + s.id + '">Clock out</button>'
-            : '<button class="gbtn gold" data-act="clock-in" data-id="' + s.id + '">Clock in</button>') +
+            : '<button class="gbtn gold" data-act="clock-in" data-id="' + s.id + '"' +
+              (tooEarly ? ' disabled' : '') + '>Clock in</button>') +
         '</div>' +
       '</div>';
     }).join('') + '</div>';

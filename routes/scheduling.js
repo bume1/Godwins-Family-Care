@@ -757,8 +757,24 @@ module.exports = function createSchedulingRoutes(deps) {
         });
       }
 
-      const client = await loadClient(shift.client_id);
       const at = nowIso();
+
+      // Too early to start the clock. Checked before anything is written, so a
+      // refusal leaves the shift confirmed and un-started rather than half
+      // begun. Unlike the geofence this REFUSES — see the note on
+      // CLOCK_IN_WINDOW_MINUTES for why the two differ. Late is never blocked.
+      const window = sched.clockInWindow({ shift, at });
+      if (!window.allowed) {
+        const opens = new Date(window.opensAt);
+        return res.status(409).json({
+          error: `Too early. You can clock in from ${opens.toLocaleString('en-US', { hour: 'numeric', minute: '2-digit', month: 'short', day: 'numeric' })}, two hours before the shift starts.`,
+          code: 'CLOCK_IN_TOO_EARLY',
+          opensAt: window.opensAt,
+          minutesEarly: window.minutesEarly
+        });
+      }
+
+      const client = await loadClient(shift.client_id);
       const gps = normalizeGps((req.body || {}).gps);
       const { flags, geo } = sched.clockInFlags({ shift, client, gps, at });
 
