@@ -12,7 +12,7 @@
 // looks fine from the caller's seat while doing nothing at all.
 
 const BASE = process.env.GFC_PROBE_BASE || 'http://localhost:3199';
-const ADMIN_EMAIL = process.env.GFC_PROBE_ADMIN || 'admin@godwinsfamilycarell.com';
+const ADMIN_EMAIL = process.env.GFC_PROBE_ADMIN || 'admin@godwinsfamilycarellc.com';
 const ADMIN_PASSWORD = process.env.GFC_PROBE_PASSWORD || 'gfcforever2026';
 let pass = 0, fail = 0;
 const ok = (label, cond, detail) => {

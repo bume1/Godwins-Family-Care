@@ -504,16 +504,22 @@ const processNotificationQueue = async () => {
     let sentCount = 0;
     let failCount = 0;
 
+    // Resolved once for the whole batch: every queued CTA is an app path and
+    // has to be made absolute before it reaches the template.
+    const appBaseUrl = await getAppBaseUrl();
+
     const emailPayloads = [];
     const queueIndices = [];
     for (const notification of toProcess) {
       const idx = queue.findIndex(n => n.id === notification.id);
       if (idx === -1) continue;
+      // Branding belongs to the drain, not to each caller remembering.
+      const built = buildQueuedEmail(notification.templateData, appBaseUrl);
       emailPayloads.push({
         to: notification.recipientEmail,
         subject: notification.templateData.subject,
-        text: notification.templateData.body,
-        html: notification.templateData.htmlBody,
+        text: built.text,
+        html: built.html,
         phi: !!notification.phi
       });
       queueIndices.push(idx);
@@ -663,16 +669,61 @@ function renderTemplate(templateStr, variables) {
 // client cannot tell the two systems apart.
 function buildHtmlEmail(body, htmlBody, ctaUrl, ctaLabel, unsubscribeUrl, baseUrl) {
   if (htmlBody) return htmlBody;
-  // The plain body arrives as prose with blank-line paragraph breaks. A
-  // greeting line is dropped when present, because the template writes its own.
+  return emailTemplates.renderGfcEmail(emailPiecesFromBody(body, ctaUrl, ctaLabel, unsubscribeUrl)).html;
+}
+
+// The plain body arrives as prose with blank-line paragraph breaks. A greeting
+// line is dropped when present, because the template writes its own.
+function emailPiecesFromBody(body, ctaUrl, ctaLabel, unsubscribeUrl) {
   const lines = String(body || '').split(/\n{2,}/).map(t => t.trim()).filter(Boolean);
   const greetingLine = lines.length && /^(hi|hello|dear)\b/i.test(lines[0]) ? lines.shift() : null;
   const greeting = greetingLine
     ? greetingLine.replace(/^(hi|hello|dear)\s+/i, '').replace(/[,!.]\s*$/, '')
     : null;
-  return emailTemplates.renderGfcEmail({
-    greeting, paragraphs: lines, ctaUrl, ctaLabel, unsubscribeUrl
-  }).html;
+  return { greeting, paragraphs: lines, ctaUrl, ctaLabel, unsubscribeUrl };
+}
+
+// A queued notice carries an app PATH, not a URL — `/portal`, `/caregiver`.
+// That is correct in the app and useless in an inbox, and the template's
+// `safeUrl` drops anything that is not http(s), so a relative link does not
+// render a broken button, it renders NO button and no link in the text half
+// either. Resolve it against the app's own base before it reaches the render.
+// A link we cannot make absolute is dropped rather than printed: a dead button
+// in an email about someone's care is worse than no button.
+function absoluteEmailUrl(url, baseUrl) {
+  const u = String(url || '').trim();
+  if (!u) return null;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(u)) return u;
+  const base = String(baseUrl || '').trim().replace(/\/+$/, '');
+  if (!/^https?:\/\//i.test(base)) return null;
+  return `${base}/${u.replace(/^\/+/, '')}`;
+}
+
+// THE QUEUE IS THE LAST PLACE A NOTICE CAN PICK UP THE HOUSE TEMPLATE, and
+// until 2026-09-13 it did not try. The drain forwarded `templateData.htmlBody`
+// straight through, so a caller that queued a plain body and no HTML sent a
+// bare text/plain email — eleven notice types did exactly that (every shift
+// notice, both caregiver escalations, message-received, the admin custom
+// send). Reported live: a message notification arrived unbranded.
+//
+// This is the SAME bypass as `buildHtmlEmail`'s `if (htmlBody) return htmlBody`
+// pointed the other way. There the caller's HTML wins; here the caller's
+// SILENCE won. Branding now belongs to the drain, so a caller cannot opt out
+// of it by omission, and a new notice type is branded by default rather than
+// by remembering.
+//
+// Both halves are returned from ONE render so they cannot disagree: a
+// text-only client was previously getting a body that said "open the portal"
+// with no address in it at all.
+function buildQueuedEmail(templateData, baseUrl) {
+  const t = templateData || {};
+  const text = String(t.body || '');
+  if (t.htmlBody) return { html: t.htmlBody, text };
+  const ctaUrl = absoluteEmailUrl(t.ctaUrl, baseUrl);
+  const rendered = emailTemplates.renderGfcEmail(
+    emailPiecesFromBody(text, ctaUrl, ctaUrl ? (t.ctaLabel || 'Open your portal') : null, null)
+  );
+  return { html: rendered.html, text: rendered.text };
 }
 
 // ============================================================
@@ -16487,14 +16538,22 @@ app.post('/api/admin/reset-user-password/:userId', authenticateToken, requireAdm
   }
 });
 
-// Test email endpoint (admin only) - remove after validating Resend setup
+// Test email endpoint (admin only). It goes through the house template like
+// every other send, because a probe that does not look like the real thing
+// cannot tell you the real thing looks right. The old copy claimed the arrival
+// proved Resend was working; it proves whichever transport is live delivered,
+// and the transport status says which — so it reports that instead of guessing.
 app.post('/api/admin/test-email', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { to, subject, body } = req.body;
+    const appBaseUrl = await getAppBaseUrl();
+    const text = body || 'This is a test email from your notification system. If you received this, email delivery is working. The boot log and the sending address name which transport carried it.';
+    const built = buildQueuedEmail({ body: text, ctaUrl: appBaseUrl, ctaLabel: 'Open the app' }, appBaseUrl);
     const result = await sendEmail(
       to || req.user.email,
       subject || `Test notification from ${config.BRAND.COMPANY_NAME}`,
-      body || 'This is a test email from your notification system. If you received this, Resend is working.'
+      built.text,
+      { htmlBody: built.html }
     );
     res.json(result);
   } catch (error) {
