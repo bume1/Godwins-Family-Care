@@ -63,9 +63,14 @@ module.exports = function createCaregiverRoutes(deps) {
   };
 
   // Staff who review caregiver work: admin, clinical (FNP/RN), case manager.
+  // The predicate is separate from the guard because some routes serve BOTH
+  // audiences off one path (a caregiver sees their own rows, staff see all),
+  // and those must not answer a different question than the guard does.
+  const isReviewStaff = (u) =>
+    !!u && (u.role === ROLES.ADMIN || u.hasClinicalAccess || u.role === ROLES.CASE_MANAGER);
+
   const requireReviewStaff = (req, res, next) => {
-    const u = req.user;
-    if (u.role === ROLES.ADMIN || u.hasClinicalAccess || u.role === ROLES.CASE_MANAGER) return next();
+    if (isReviewStaff(req.user)) return next();
     return res.status(403).json({ error: 'Clinical or administrative access required.', code: 'REVIEW_STAFF_ONLY' });
   };
 
@@ -112,6 +117,13 @@ module.exports = function createCaregiverRoutes(deps) {
   // ==========================================================================
   router.get('/caregiver', (req, res) => {
     res.sendFile(require('path').join(__dirname, '..', 'public', 'caregiver.html'));
+  });
+
+  // The STAFF side of the same space: the escalation queue, the visit-log
+  // review queue, incidents and caregiver documents. Every route it calls
+  // enforces its own access, the same pattern /caregiver and /scheduling use.
+  router.get('/caregivers', (req, res) => {
+    res.sendFile(require('path').join(__dirname, '..', 'public', 'caregivers.html'));
   });
 
   // ==========================================================================
@@ -229,6 +241,43 @@ module.exports = function createCaregiverRoutes(deps) {
         return res.status(403).json({ error: 'No license level is on file for this account.', code: 'CAREGIVER_NO_LICENSE_LEVEL' });
       }
 
+      // A shift id is no longer just a marker — clocking out is refused until a
+      // log carrying it exists (Session 7's clock-out gate). So it has to be a
+      // real shift, THIS caregiver's, and for the same client the log names;
+      // otherwise a log could be attached to someone else's shift and satisfy
+      // a gate that was never theirs to satisfy.
+      const rawShiftId = body.shiftId ? String(body.shiftId) : '';
+      let attachedShiftId = null;
+      if (rawShiftId) {
+        const shift = (await readRows('shifts')).find(s => s && String(s.id) === rawShiftId);
+        if (!shift) {
+          return res.status(404).json({ error: 'That shift does not exist.', code: 'SHIFT_NOT_FOUND' });
+        }
+        if (shift.caregiver_id !== caregiver.id) {
+          return res.status(403).json({ error: 'That shift is not yours.', code: 'SHIFT_NOT_YOURS' });
+        }
+        if (String(shift.client_id) !== String(client.id)) {
+          return res.status(409).json({
+            error: 'That shift is for a different client than this log names.',
+            code: 'SHIFT_CLIENT_MISMATCH'
+          });
+        }
+        attachedShiftId = rawShiftId.slice(0, 120);
+      } else {
+        // No shift id came with the form. A caregiver who is CLOCKED IN on this
+        // client right now is documenting that visit whichever screen they
+        // started from, so the shift is attached here rather than left off.
+        // Without this, a log filed from anywhere but the clock-out prompt
+        // carries no shift and the clock-out gate tells the caregiver to file
+        // the log they just filed — which is the kind of dead end that gets a
+        // safety control worked around instead of followed.
+        const openShift = (await readRows('shifts')).find(s =>
+          s && s.status === 'in_progress' &&
+          s.caregiver_id === caregiver.id &&
+          String(s.client_id) === String(client.id));
+        if (openShift) attachedShiftId = String(openShift.id).slice(0, 120);
+      }
+
       // The control: anything the schema did not offer is dropped, not stored.
       const { clean, rejected } = cg.sanitizeVisitLogSubmission(schema, body);
 
@@ -256,7 +305,7 @@ module.exports = function createCaregiverRoutes(deps) {
         satisfaction: clean.satisfaction,
         // Session 7 owns the clock; we record whatever marker it has already
         // written, and never invent one.
-        shift_id: body.shiftId ? String(body.shiftId).slice(0, 120) : null,
+        shift_id: attachedShiftId,
         // An LPN's note always goes for review; so does ANY note that records a
         // skilled task, whoever wrote it (owner rule 2026-09-13 — a competency
         // can now be held below LPN, and the clinician's review is the licensed

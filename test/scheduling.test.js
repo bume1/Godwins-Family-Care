@@ -603,6 +603,25 @@ test('SAFETY: Home does not grow a second clock-in control', () => {
   assert.ok(/onSchedule/.test(shiftCard), 'it sends the caregiver to the schedule instead');
 });
 
+test('the Home card reflects the LIVE clock state, read from the shift board', () => {
+  const shiftCard = caregiverPageSrc.slice(
+    caregiverPageSrc.indexOf('const ShiftCard'),
+    caregiverPageSrc.indexOf('const HomeTab')
+  );
+  // It takes the board as a prop rather than fetching it, so the no-second-
+  // clock-in rule above still holds while the card stops being static.
+  assert.match(shiftCard, /\(\{[^}]*shifts[^}]*\}\)/, 'shifts arrive as a prop');
+  assert.match(shiftCard, /in_progress/, 'a running shift is recognised');
+  assert.match(shiftCard, /visitLogFiled === false/,
+    'and it says when the visit log is still owed, before they try to clock out');
+
+  // The App is where the read happens.
+  assert.match(caregiverPageSrc, /api\('\/api\/scheduling\/shifts'\)/,
+    'the app refreshes the board alongside its own data');
+  assert.match(caregiverPageSrc, /<ShiftCard clients=\{clients\} shifts=\{shifts\}/,
+    'and hands it to the card');
+});
+
 test('the component documents its mount contract', () => {
   for (const needle of ['MOUNT CONTRACT', 'caregiverId', 'authToken', 'gfc-mount-schedule', 'GET /api/caregiver/me']) {
     assert.ok(componentSrc.includes(needle), `the contract must document: ${needle}`);
@@ -635,6 +654,225 @@ test('the license enum is REQUIRED from Session 6, not restated', () => {
     'one license vocabulary — a second copy is the thing that drifts');
   assert.ok(!/'sitter'\s*,\s*'pca'\s*,\s*'cna'\s*,\s*'lpn'/.test(repoSrc),
     'the level list must not be duplicated here');
+});
+
+// ---- Clock-out requires the visit log (the EVV-style documentation gate) ----
+// A shift is not finished when the caregiver walks out; it is finished when the
+// visit is DOCUMENTED. Clocking out is refused until a visit log carrying that
+// shift's id exists. These guard the two halves that make it real: the refusal
+// itself, and the fact that a refusal writes nothing.
+test('SAFETY: clock-out is REFUSED until the shift has a visit log', () => {
+  const i = routeSrc.indexOf("'/api/scheduling/shifts/:id/clock-out'");
+  assert.ok(i > 0, 'the clock-out route exists');
+  const handler = routeSrc.slice(i, i + 3000);
+  assert.match(handler, /caregiver_visit_logs/, 'clock-out reads the visit-log store');
+  assert.match(handler, /VISIT_LOG_REQUIRED/, 'the refusal carries a specific code');
+});
+
+test('SAFETY: a refused clock-out writes NOTHING — the shift stays in progress', () => {
+  const i = routeSrc.indexOf("'/api/scheduling/shifts/:id/clock-out'");
+  const handler = routeSrc.slice(i, i + 3000);
+  const gate = handler.indexOf('VISIT_LOG_REQUIRED');
+  const firstWrite = handler.indexOf('db.set');
+  assert.ok(gate > 0 && firstWrite > 0, 'both the gate and a write are present');
+  assert.ok(gate < firstWrite,
+    'the documentation gate must be checked BEFORE anything is written, or a refused clock-out leaves a half-closed shift');
+});
+
+test('SAFETY: the gate matches the caregiver AND the client, not the shift id alone', () => {
+  const i = routeSrc.indexOf("'/api/scheduling/shifts/:id/clock-out'");
+  const handler = routeSrc.slice(i, i + 3000);
+  const gate = handler.slice(handler.indexOf('caregiver_visit_logs'), handler.indexOf('VISIT_LOG_REQUIRED'));
+  assert.match(gate, /caregiver_id/,
+    "a log filed by a different caregiver must not satisfy another caregiver's gate");
+  assert.match(gate, /client_id/,
+    'a log naming a different client must not satisfy this shift');
+});
+
+test('a visit log filed while clocked in is attached to that shift, whatever screen it came from', () => {
+  const cgRouteSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'caregiver.js'), 'utf8');
+  const i = cgRouteSrc.indexOf("router.post('/api/caregiver/visit-logs'");
+  const handler = cgRouteSrc.slice(i, i + 5000);
+  // Without this, a log filed from the Home tab carries no shift id, the
+  // clock-out gate does not see it, and the caregiver is told to file the log
+  // they just filed. A safety control with a dead end in it gets worked around.
+  assert.match(handler, /in_progress/,
+    'the route resolves the caregiver\'s running shift when the form did not carry one');
+  assert.match(handler, /shift_id: attachedShiftId/,
+    'and the resolved id is what gets stored');
+  assert.ok(!/shift_id: body\.shiftId/.test(handler),
+    'the stored shift id is no longer taken straight off the request body');
+});
+
+test('the schedule reports whether the visit log is filed, and only for a running shift', () => {
+  const i = routeSrc.indexOf("router.get('/api/scheduling/shifts'");
+  assert.ok(i > 0, 'the shift list route exists');
+  const handler = routeSrc.slice(i, i + 2400);
+  assert.match(handler, /visitLogFiled/, 'the list carries the fact the gate reads');
+  // The app must not claim a state it cannot observe: a shift that is not
+  // running is not "missing" a log, so it reports null rather than false.
+  assert.match(handler, /in_progress'\s*\n?\s*\?/,
+    'only an in-progress shift gets a true/false; anything else is null');
+});
+
+test('SAFETY: a visit log cannot claim a shift that is not the caregiver\'s own', () => {
+  const cgRouteSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'caregiver.js'), 'utf8');
+  const i = cgRouteSrc.indexOf("router.post('/api/caregiver/visit-logs'");
+  assert.ok(i > 0, 'the visit-log submit route exists');
+  const handler = cgRouteSrc.slice(i, i + 4000);
+  // shift_id gates a clock-out now, so an unvalidated one would let a log
+  // satisfy a gate on someone else's shift.
+  assert.match(handler, /SHIFT_NOT_YOURS/, 'a shift belonging to another caregiver is refused');
+  assert.match(handler, /SHIFT_CLIENT_MISMATCH/, 'a shift for a different client than the log names is refused');
+  assert.match(handler, /SHIFT_NOT_FOUND/, 'a shift id that does not exist is refused');
+});
+
+// ---- Billing and the caregiver's own hours ---------------------------------
+test('the billing CSV carries no clinical content either', () => {
+  const keys = sched.BILLING_CSV_COLUMNS.map(c => c.key).join(' ').toLowerCase();
+  for (const forbidden of ['diagnos', 'condition', 'careplan', 'note', 'medication', 'tier']) {
+    assert.ok(!keys.includes(forbidden), `billing must not export "${forbidden}"`);
+  }
+  // An invoice says a visit of this length happened — never what was done in it.
+  const csv = sched.toPayrollCsv([{ clientName: 'M. Whitfield', hours: 4 }], sched.BILLING_CSV_COLUMNS);
+  assert.ok(csv.startsWith('Client,Service Date,Caregiver,'));
+});
+
+test('SAFETY: billing lists only COMPLETED visits, and says what verification could establish', () => {
+  const i = routeSrc.indexOf("'/api/scheduling/billing.csv'");
+  assert.ok(i > 0, 'the billing route exists');
+  const handler = routeSrc.slice(i, i + 2600);
+  assert.match(handler, /!l\.clock_out_at.*return false/s,
+    'a shift still in progress has no final hours and must not reach an invoice');
+  assert.match(handler, /verification/, 'each line states what the geofence could establish');
+  assert.match(handler, /requireAdmin/, 'billing is admin-only');
+});
+
+test('SAFETY: a caregiver\'s hours export can only ever return their OWN rows', () => {
+  const i = routeSrc.indexOf("'/api/scheduling/my-hours.csv'");
+  assert.ok(i > 0, 'the caregiver hours route exists');
+  const decl = routeSrc.slice(i, i + 200);
+  assert.match(decl, /requireSchedulable/, 'only a caregiver or clinician reaches it');
+  const handler = routeSrc.slice(i, i + 2200);
+  assert.match(handler, /l\.caregiver_id !== req\.user\.id/,
+    'the filter is the token holder, not a parameter');
+  assert.ok(!/req\.query\.caregiverId/.test(handler),
+    'there must be no caregiverId parameter to widen the export with');
+  // An office correction and its reason belong on payroll, not in a personal copy.
+  const keys = sched.CAREGIVER_HOURS_CSV_COLUMNS.map(c => c.key).join(' ');
+  assert.ok(!keys.includes('editReason'), 'the edit reason is not in the caregiver copy');
+});
+
+// ---- Manual time entry (hours that were never clocked) ---------------------
+// Every other way into time_logs starts at a clock-in on the caregiver's
+// device, so without this a dead phone means hours that cannot be paid. What
+// must never happen is these becoming indistinguishable from clocked hours.
+test('SAFETY: a manual time entry is impossible without a reason', () => {
+  const i = routeSrc.indexOf("router.post('/api/scheduling/time-logs'");
+  assert.ok(i > 0, 'the manual entry route exists');
+  const handler = routeSrc.slice(i, i + 4500);
+  assert.match(handler, /ENTRY_REASON_REQUIRED/, 'a reason is mandatory');
+  const gate = handler.indexOf('ENTRY_REASON_REQUIRED');
+  const write = handler.indexOf("db.set('time_logs'");
+  assert.ok(gate > 0 && write > 0 && gate < write, 'refused before anything is written');
+  assert.match(handler, /requireAdmin/, 'admin only');
+});
+
+test('SAFETY: a manual entry never claims a verified location', () => {
+  const i = routeSrc.indexOf("router.post('/api/scheduling/time-logs'");
+  const handler = routeSrc.slice(i, i + 4500);
+  // There was no clock-in, so there is nothing to check a location against.
+  // Reporting "inside" would be the app asserting something it never observed.
+  assert.match(handler, /verdict: 'unverifiable'/, 'the geofence verdict is unverifiable');
+  assert.ok(!/verdict: 'inside'/.test(handler), 'it must never record inside');
+  assert.match(handler, /'manual_entry'/, 'the row carries the manual_entry flag');
+  assert.ok(sched.TIME_LOG_FLAGS.includes('manual_entry'), 'manual_entry is a known flag');
+});
+
+test('a manual entry invents no schedule, and cannot borrow another caregiver\'s shift', () => {
+  const i = routeSrc.indexOf("router.post('/api/scheduling/time-logs'");
+  const handler = routeSrc.slice(i, i + 4500);
+  assert.match(handler, /scheduled_start: shift \? shift\.start : null/,
+    'with no shift there is no schedule to report — copying the entered times would invent one');
+  assert.match(handler, /SHIFT_CAREGIVER_MISMATCH/, 'a shift belonging to someone else is refused');
+  assert.match(handler, /SHIFT_CLIENT_MISMATCH/, 'a shift for a different client is refused');
+});
+
+test('payroll says whether hours were clocked or typed', () => {
+  const keys = sched.PAYROLL_CSV_COLUMNS.map(c => c.key);
+  assert.ok(keys.includes('source'), 'the export distinguishes clocked from manual');
+  assert.ok(keys.includes('enteredBy'), 'and names who entered a manual row');
+});
+
+// ---- The clock-in window (two hours before the start) ----------------------
+test('SAFETY: a caregiver cannot clock in more than 2 hours before the start', () => {
+  const s = shift({ start: '2026-10-01T14:00:00.000Z' });
+  // 2h01m early: refused, and the refusal says how early and when it opens.
+  const early = sched.clockInWindow({ shift: s, at: '2026-10-01T11:59:00.000Z' });
+  assert.strictEqual(early.allowed, false);
+  assert.strictEqual(early.opensAt, '2026-10-01T12:00:00.000Z');
+  assert.ok(early.minutesEarly >= 1);
+  // Exactly 2h: allowed. The boundary is inclusive.
+  assert.strictEqual(sched.clockInWindow({ shift: s, at: '2026-10-01T12:00:00.000Z' }).allowed, true);
+  assert.strictEqual(sched.clockInWindow({ shift: s, at: '2026-10-01T13:30:00.000Z' }).allowed, true);
+});
+
+test('SAFETY: arriving LATE is never blocked — only early is', () => {
+  const s = shift({ start: '2026-10-01T14:00:00.000Z' });
+  // Refusing a late caregiver means unpaid work and no record of the visit,
+  // which is the outcome the whole subsystem exists to prevent. Lateness is
+  // flagged elsewhere; it is never a refusal.
+  for (const at of ['2026-10-01T14:30:00.000Z', '2026-10-01T17:00:00.000Z', '2026-10-02T09:00:00.000Z']) {
+    assert.strictEqual(sched.clockInWindow({ shift: s, at }).allowed, true, `${at} must be allowed`);
+  }
+});
+
+test('a shift with an unreadable start is allowed through, not blocked', () => {
+  // That shift is broken either way; locking a caregiver out of a visit over a
+  // data problem is the worse of the two failures.
+  assert.strictEqual(sched.clockInWindow({ shift: { start: 'nonsense' }, at: '2026-10-01T12:00:00.000Z' }).allowed, true);
+  assert.strictEqual(sched.clockInWindow({ shift: {}, at: '2026-10-01T12:00:00.000Z' }).allowed, true);
+});
+
+test('SAFETY: the window is enforced server-side, before anything is written', () => {
+  const i = routeSrc.indexOf("'/api/scheduling/shifts/:id/clock-in'");
+  // Wide enough to reach the first write: a slice that stops short makes this
+  // assertion pass or fail on the window size rather than on the ordering.
+  const handler = routeSrc.slice(i, i + 4200);
+  assert.match(handler, /CLOCK_IN_TOO_EARLY/, 'the refusal carries a specific code');
+  const gate = handler.indexOf('CLOCK_IN_TOO_EARLY');
+  const write = handler.indexOf('db.set');
+  assert.ok(gate > 0 && write > 0 && gate < write,
+    'refused before any write, or a rejected clock-in leaves a half-started shift');
+  // The component only decides whether to offer the button.
+  assert.match(componentSrc, /CLOCK_IN_WINDOW_MINUTES/, 'the app mirrors the window to disable the button');
+});
+
+test('the client portal answers "is someone here now" the same way on both tabs', () => {
+  const portal = fs.readFileSync(path.join(__dirname, '..', 'public', 'portal.html'), 'utf8');
+  // ONE component, rendered on Home and on Care. Two copies would be two
+  // answers to the question a family member opens the portal to ask.
+  assert.ok((portal.match(/<GfcVisitInProgress/g) || []).length >= 2,
+    'the live-visit card renders on both Home and Care');
+  assert.match(portal, /const GfcVisitInProgress/, 'and there is exactly one definition');
+  assert.strictEqual((portal.match(/const GfcVisitInProgress/g) || []).length, 1);
+
+  // A client is never shown the location check or the lateness flags. Those
+  // are between the agency and its caregiver, and a client cannot act on them.
+  const i = portal.indexOf('const GfcVisitInProgress');
+  const card = portal.slice(i, i + 1600);
+  for (const leak of ['geofence', 'clockInGeofence', 'distance', 'late_clock_in', 'flags']) {
+    assert.ok(!card.includes(leak), `the client's live-visit card must not surface "${leak}"`);
+  }
+});
+
+test('the Care tab reads the real schedule, not the retrospective visit log', () => {
+  const portal = fs.readFileSync(path.join(__dirname, '..', 'public', 'portal.html'), 'utf8');
+  const i = portal.indexOf('const GfcCarePlan');
+  const body = portal.slice(i, i + 2000);
+  assert.match(body, /const upcoming = \(shifts \|\| \[\]\)/,
+    'upcoming comes from shifts — visit_logs is written after a visit and never held a future one');
+  assert.match(body, /data\.recentVisits/, 'recent still reads visit_logs, which is what it is for');
 });
 
 // ============================================================================

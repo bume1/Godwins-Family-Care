@@ -346,6 +346,39 @@ function findShiftConflict(rows, caregiverId, shift) {
 const DEFAULT_GEOFENCE_METERS = 150;
 const DEFAULT_GRACE_MINUTES = 10;
 
+// ---- Clock-in window -------------------------------------------------------
+// A caregiver may clock in from two hours before the shift starts, and not a
+// minute earlier. This one BLOCKS where the geofence only flags, and the
+// asymmetry is deliberate: being somewhere unexpected has honest explanations
+// (transporting the client), whereas starting the clock five hours early does
+// not — it is either a mistake or time that was not worked.
+//
+// It constrains EARLY only. A caregiver arriving late must always be able to
+// clock in: refusing them would mean unpaid work and no record of the visit,
+// which is the outcome this whole subsystem exists to prevent. Lateness is
+// already flagged (late_clock_in) and flagging is the right answer there.
+const CLOCK_IN_WINDOW_MINUTES = 120;
+
+// Pure so the rule is testable without a shift row or a clock.
+//   { allowed, opensAt, minutesEarly }
+// A shift whose start cannot be read is ALLOWED through: that shift is broken
+// either way, and blocking a caregiver out of a visit over a data problem is
+// the worse of the two failures.
+function clockInWindow({ shift, at, windowMinutes = CLOCK_IN_WINDOW_MINUTES }) {
+  const start = new Date((shift || {}).start);
+  const now = new Date(at);
+  if (isNaN(start.getTime()) || isNaN(now.getTime())) {
+    return { allowed: true, opensAt: null, minutesEarly: null };
+  }
+  const opens = new Date(start.getTime() - windowMinutes * 60000);
+  if (now >= opens) return { allowed: true, opensAt: opens.toISOString(), minutesEarly: 0 };
+  return {
+    allowed: false,
+    opensAt: opens.toISOString(),
+    minutesEarly: Math.ceil((opens.getTime() - now.getTime()) / 60000)
+  };
+}
+
 const EARTH_RADIUS_M = 6371000;
 const toRad = (deg) => (deg * Math.PI) / 180;
 
@@ -458,7 +491,12 @@ function validateClientLocation(input) {
 
 const TIME_LOG_FLAGS = Object.freeze([
   'outside_geofence', 'geofence_unverifiable', 'late_clock_in',
-  'early_clock_out', 'late_clock_out', 'no_clock_out', 'admin_edited'
+  'early_clock_out', 'late_clock_out', 'no_clock_out', 'admin_edited',
+  // Typed in by the office because no clock-in happened at all — a dead
+  // phone, a forgotten tap, an unscheduled visit. It is a FLAG, not a quiet
+  // row: these hours are attested by an administrator, not observed by the
+  // app, and payroll and an audit both need to be able to tell the two apart.
+  'manual_entry'
 ]);
 
 // Flags for a clock-in. A flag is a signal to admin, never a refusal.
@@ -551,8 +589,48 @@ const PAYROLL_CSV_COLUMNS = Object.freeze([
   { key: 'flags', header: 'Flags' },
   { key: 'edited', header: 'Edited' },
   { key: 'editReason', header: 'Edit Reason' },
+  // Clocked on a device, or typed in by the office. A payroll run should not
+  // have to infer that difference from a flags column.
+  { key: 'source', header: 'Source' },
+  { key: 'enteredBy', header: 'Entered By' },
   { key: 'payPeriodStart', header: 'Pay Period Start' },
   { key: 'payPeriodEnd', header: 'Pay Period End' }
+]);
+
+// ---- Client billing CSV ----------------------------------------------------
+// What gets INVOICED, which is a different question from what gets PAID: one
+// line per completed visit, grouped by client, carrying the hours that back
+// the charge. No pay rate and nothing clinical — an invoice line says a visit
+// of this length happened on this date, not what was done during it.
+const BILLING_CSV_COLUMNS = Object.freeze([
+  { key: 'clientName', header: 'Client' },
+  { key: 'serviceDate', header: 'Service Date' },
+  { key: 'caregiverName', header: 'Caregiver' },
+  { key: 'licenseLevel', header: 'License Level' },
+  { key: 'scheduledStart', header: 'Scheduled Start' },
+  { key: 'scheduledEnd', header: 'Scheduled End' },
+  { key: 'clockInAt', header: 'Actual In' },
+  { key: 'clockOutAt', header: 'Actual Out' },
+  { key: 'hours', header: 'Billable Hours' },
+  { key: 'verification', header: 'Visit Verification' },
+  { key: 'documented', header: 'Visit Documented' }
+]);
+
+// ---- A caregiver's own hours ----------------------------------------------
+// Their own record of their own work, for their own files. Deliberately no
+// other caregiver's rows and no edit-reason column: an admin correction and
+// why it was made belongs on the payroll export, not in a personal copy that
+// reads like a dispute.
+const CAREGIVER_HOURS_CSV_COLUMNS = Object.freeze([
+  { key: 'shiftDate', header: 'Date' },
+  { key: 'clientName', header: 'Client' },
+  { key: 'scheduledStart', header: 'Scheduled Start' },
+  { key: 'scheduledEnd', header: 'Scheduled End' },
+  { key: 'clockInAt', header: 'Clock In' },
+  { key: 'clockOutAt', header: 'Clock Out' },
+  { key: 'hours', header: 'Hours' },
+  { key: 'flags', header: 'Flags' },
+  { key: 'edited', header: 'Adjusted by office' }
 ]);
 
 // RFC 4180 quoting. A field is quoted when it contains a comma, a quote, a
@@ -640,7 +718,8 @@ module.exports = {
   isEligibleForShift, eligibilityReason, shiftVisibility, shiftsOverlap, findShiftConflict, BLOCKING_STATUSES,
   DEFAULT_GEOFENCE_METERS, DEFAULT_GRACE_MINUTES, distanceMeters, geofenceRadiusFor, clientCoords,
   evaluateGeofence, GEOFENCE_MIN_METERS, GEOFENCE_MAX_METERS, validateClientLocation, TIME_LOG_FLAGS, clockInFlags, clockOutFlags, totalMinutes, minutesToHours,
+  CLOCK_IN_WINDOW_MINUTES, clockInWindow,
   DEFAULT_PAY_PERIOD_ANCHOR, DEFAULT_PAY_PERIOD_DAYS, payPeriodFor,
-  PAYROLL_CSV_COLUMNS, csvCell, toPayrollCsv,
+  PAYROLL_CSV_COLUMNS, BILLING_CSV_COLUMNS, CAREGIVER_HOURS_CSV_COLUMNS, csvCell, toPayrollCsv,
   SHIFT_REQUEST_STATUSES, SHIFT_REQUEST_TRANSITIONS, canTransitionRequest
 };

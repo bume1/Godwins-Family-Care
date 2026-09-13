@@ -51,6 +51,10 @@
 
   var API = global.location.origin;
   var LEAD_DAYS = 30;                    // mirrors AVAILABILITY_LEAD_DAYS
+  // Mirrors CLOCK_IN_WINDOW_MINUTES. The SERVER is what enforces it; this only
+  // decides whether the button is offered, so the two disagreeing costs a
+  // clear refusal rather than an unenforced rule.
+  var CLOCK_IN_WINDOW_MINUTES = 120;
   var instances = Object.create(null);   // elementId → instance state
 
   // ---- Brand tokens (scoped; the host page keeps its own) -----------------
@@ -200,14 +204,33 @@
     if (!rows.length) return '<div class="gempty">No confirmed shifts yet.</div>';
     return '<div class="gcard"><h3>My schedule</h3>' + rows.map(function (s) {
       var running = s.status === 'in_progress';
+      // The clock-in window opens two hours before the start. Shown as a
+      // disabled button with the time on it rather than an enabled one that
+      // fails: the server refuses either way, but a caregiver standing in
+      // someone's kitchen should be able to read WHEN, not just be told no.
+      var opens = new Date(new Date(s.start).getTime() - CLOCK_IN_WINDOW_MINUTES * 60000);
+      var tooEarly = !running && !isNaN(opens.getTime()) && Date.now() < opens.getTime();
       return '<div class="grow" style="display:block">' +
         '<div class="gwhen">' + esc(fmtRange(s.start, s.end)) + '</div>' +
         '<div class="gmu">' + esc(s.clientName || '') + (s.careTier ? ' · ' + esc(s.careTier) : '') + '</div>' +
         '<div class="gmu"><span class="gchip ' + (running ? 'on' : 'ok') + '">' + esc(titleize(s.status)) + '</span></div>' +
+        (tooEarly
+          ? '<div class="gmu">Clock in opens at ' + esc(opens.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })) + '.</div>'
+          : '') +
+        // The visit log comes before the clock stops, so the running shift
+        // says which step it is on instead of offering a Clock out the server
+        // will refuse. `visitLogFiled` is read from the shift the server sent;
+        // when it is missing we say nothing rather than guess either way.
+        (running && s.visitLogFiled === false
+          ? '<div class="gmu">The visit log is not filed yet.</div>'
+          : '') +
         '<div class="gbtns">' +
           (running
-            ? '<button class="gbtn danger" data-act="clock-out" data-id="' + s.id + '">Clock out</button>'
-            : '<button class="gbtn gold" data-act="clock-in" data-id="' + s.id + '">Clock in</button>') +
+            ? (s.visitLogFiled === false
+              ? '<button class="gbtn gold" data-act="visit-log" data-id="' + s.id + '">File the visit log</button>'
+              : '<button class="gbtn danger" data-act="clock-out" data-id="' + s.id + '">Clock out</button>')
+            : '<button class="gbtn gold" data-act="clock-in" data-id="' + s.id + '"' +
+              (tooEarly ? ' disabled' : '') + '>Clock in</button>') +
         '</div>' +
       '</div>';
     }).join('') + '</div>';
@@ -314,6 +337,12 @@
     var hours = state.totalHours === null || state.totalHours === undefined ? '—' : state.totalHours;
     return '<div class="gcard"><h3>My hours</h3>' +
       '<p class="gmu" style="margin-bottom:8px">' + esc(String(hours)) + ' hours logged.</p>' +
+      // Their own copy of their own hours. The server resolves the caregiver
+      // from the token, so this asks for no id and could not fetch anyone
+      // else's rows if it did.
+      '<div class="gbtns" style="margin-bottom:10px">' +
+        '<button class="gbtn ghost" data-act="download-hours">Download my hours (CSV)</button>' +
+      '</div>' +
       state.timeLogs.map(function (l) {
         return '<div class="grow" style="display:block">' +
           '<div class="gwhen">' + esc(fmtWhen(l.clockInAt)) + '</div>' +
@@ -361,6 +390,23 @@
           return render(state);
         }
         if (act === 'submit-availability') return submitAvailability(state, root);
+        if (act === 'download-hours') {
+          // A file download, so the token rides as a query param — the same
+          // pattern the app's other authenticated downloads use.
+          global.location.href = API + '/api/scheduling/my-hours.csv?token=' +
+            encodeURIComponent(state.authToken);
+          return;
+        }
+        if (act === 'visit-log') {
+          // Same destination the refused clock-out sends them to; reaching it
+          // from the button means the caregiver never has to be told no first.
+          var pending = null;
+          for (var j = 0; j < state.mine.length; j++) {
+            if (state.mine[j] && state.mine[j].id === id) { pending = state.mine[j]; break; }
+          }
+          if (state.onVisitLogRequired) state.onVisitLogRequired(pending || { id: id });
+          return;
+        }
         btn.disabled = true;
         act === 'clock-in' || act === 'clock-out'
           ? clock(state, id, act)
@@ -418,7 +464,21 @@
     }).then(function (res) {
       state.notice = (res && res.message) || (act === 'clock-in' ? 'Clocked in.' : 'Clocked out.');
       return refresh(state);
-    }).catch(function (err) { state.error = err.message; render(state); });
+    }).catch(function (err) {
+      // The one refusal with somewhere to go: the shift needs its visit log
+      // first. Hand the shift to the host page, which owns the log form,
+      // instead of leaving the caregiver reading an error with no next step.
+      if (err.code === 'VISIT_LOG_REQUIRED' && state.onVisitLogRequired) {
+        var shift = null;
+        for (var i = 0; i < state.mine.length; i++) {
+          if (state.mine[i] && state.mine[i].id === id) { shift = state.mine[i]; break; }
+        }
+        state.onVisitLogRequired(shift || { id: id });
+        return;
+      }
+      state.error = err.message;
+      render(state);
+    });
   }
 
   // ---- Data ---------------------------------------------------------------
@@ -462,6 +522,10 @@
       caregiverId: options.caregiverId || null,
       authToken: options.authToken,
       onChange: options.onChange || null,
+      // Fired when a clock-out is refused because that shift has no visit log
+      // yet. The log form belongs to the host page, so the shift is handed back
+      // rather than this component trying to render a form it does not own.
+      onVisitLogRequired: options.onVisitLogRequired || null,
       tab: options.initialTab || 'schedule',
       loading: true,
       error: '', notice: '',

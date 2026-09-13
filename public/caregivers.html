@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Godwins Family Care — Caregiver Management</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.1.0/dist/tabler-icons.min.css">
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+  <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
+  <style>
+    /* The supervision half of the caregiver app. Session 6 built escalations,
+       incident reports and a visit-log review queue with notifications that
+       fire — and no screen anywhere that could read any of them. An admin
+       probe found 16 of 18 caregiver routes unreachable from any staff page.
+       A separate page rather than an edit to the 220KB hub, the same call
+       Session 7 made for /scheduling; the hub links to it. */
+    :root{--navy:#033D50;--navy-d:#022A38;--gold:#F5CD85;--goldd:#C9A44A;
+          --cream:#FAF7F2;--cream-d:#efe9db;--ink:#2b2b28;--mut:#7a746a;
+          --red:#A32D2D;--green:#0f6e56;--line:#e5ddcb}
+    *{box-sizing:border-box;margin:0;padding:0;font-family:'DM Sans',system-ui,sans-serif}
+    body{background:var(--cream-d);color:var(--ink);font-size:15px;line-height:1.5}
+    .serif{font-family:'Cormorant Garamond',Georgia,serif}
+    .hdr{background:var(--navy);color:var(--cream);padding:14px 22px;display:flex;align-items:center;justify-content:space-between;gap:12px;position:sticky;top:0;z-index:30}
+    .hdr .t{font-family:'Cormorant Garamond',serif;font-size:23px;font-weight:600}
+    .hdr a,.hdr button{color:var(--gold);background:none;border:none;font-size:14px;font-weight:600;cursor:pointer;text-decoration:none;font-family:inherit}
+    .wrap{max-width:1180px;margin:0 auto;padding:20px 18px 60px}
+    .tabs{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:18px}
+    .tab{border:1.5px solid #d8cdb8;background:#fff;border-radius:20px;padding:8px 16px;font-size:14px;color:var(--navy);cursor:pointer;font-family:inherit;font-weight:600}
+    .tab.on{background:var(--navy);border-color:var(--navy);color:var(--gold)}
+    .tab .n{display:inline-block;margin-left:6px;background:var(--red);color:#fff;border-radius:10px;padding:0 7px;font-size:11.5px}
+    .tab.on .n{background:var(--gold);color:var(--navy)}
+    .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:14px}
+    .card h2{font-family:'Cormorant Garamond',serif;font-size:20px;color:var(--navy);font-weight:600;margin-bottom:4px}
+    .card .sub{font-size:14px;color:var(--mut);margin-bottom:12px}
+    .row{display:flex;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid #ece6db;flex-wrap:wrap}
+    .row:last-child{border:none}
+    .row b{color:var(--navy);font-weight:600}
+    .mu{color:var(--mut);font-size:14px}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:11px}
+    label{display:block;font-size:11px;letter-spacing:.6px;text-transform:uppercase;color:var(--mut);font-weight:700;margin-bottom:5px}
+    input,select,textarea{width:100%;border:1px solid #ddd3c0;border-radius:8px;padding:10px;font-size:15px;background:#fff;color:var(--ink)}
+    textarea{min-height:70px;resize:vertical}
+    .btn{border-radius:8px;padding:10px 15px;font-size:14px;font-weight:600;cursor:pointer;border:1px solid var(--navy);background:var(--navy);color:#fff;font-family:inherit}
+    .btn.gold{background:var(--goldd);border-color:var(--goldd);color:#fff}
+    .btn.ghost{background:#fff;color:var(--navy)}
+    .btn.sm{padding:7px 11px;font-size:13px}
+    .btn[disabled]{opacity:.5;cursor:not-allowed}
+    .btns{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+    .chip{display:inline-block;border-radius:12px;padding:3px 10px;font-size:11.5px;font-weight:700}
+    .chip.raised,.chip.received{background:#fdeeee;color:var(--red)}
+    .chip.acknowledged{background:#fdf3dd;color:#8a6a1e}
+    .chip.action_taken{background:#e7edf0;color:var(--navy)}
+    .chip.resolved{background:#eef3f0;color:var(--green)}
+    .chip.pending_review{background:#fdf3dd;color:#8a6a1e}
+    .chip.submitted,.chip.reviewed{background:#eef3f0;color:var(--green)}
+    .chip.urgent{background:var(--red);color:#fff}
+    .chip.mu{background:#eee8db;color:#8a8378}
+    .err{background:#fdeeee;border:1px solid #e7bcbc;color:#7d2020;border-radius:9px;padding:11px;font-size:14px;margin-bottom:12px}
+    .ok{background:#f2f8f6;border:1px solid #b8ddd0;color:#0d5744;border-radius:9px;padding:11px;font-size:14px;margin-bottom:12px}
+    .empty{text-align:center;padding:30px;color:var(--mut)}
+    .empty i{display:block;font-size:32px;color:#c8bda6;margin-bottom:8px}
+    .note{background:var(--cream);border:1.5px dashed var(--goldd);border-radius:10px;padding:12px;margin:10px 0;font-size:14px;color:var(--mut)}
+    .note b{color:var(--navy);display:block}
+    .trail{border-left:2px solid var(--line);margin:8px 0 0 4px;padding-left:11px}
+    .trail div{font-size:13.5px;color:var(--mut);padding:3px 0}
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback } = React;
+const API = window.location.origin;
+
+const getToken = () =>
+  localStorage.getItem('admin_token') || localStorage.getItem('unified_token') || localStorage.getItem('portal_token');
+
+const api = async (path, opts = {}) => {
+  const res = await fetch(API + path, {
+    ...opts,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}`, ...(opts.headers || {}) }
+  });
+  let data = null;
+  try { data = await res.json(); } catch (e) { /* empty */ }
+  if (!res.ok) {
+    const err = new Error((data && data.error) || `Request failed (${res.status})`);
+    err.code = data && data.code; err.status = res.status; err.data = data;
+    throw err;
+  }
+  return data;
+};
+
+const fmtWhen = (iso) => {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }) +
+    ' · ' + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+};
+const titleize = (s) => String(s || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+
+const Empty = ({ icon, children }) => (
+  <div className="empty"><i className={`ti ti-${icon}`}></i>{children}</div>
+);
+
+// ============================================================================
+// Escalations — the queue Session 6 routes concerns into
+//
+// Forward-only: received → acknowledged → action_taken → resolved, and the
+// last two REQUIRE a note server-side. The buttons mirror that rather than
+// discovering it as a 400, and the trail below each row is the record.
+// ============================================================================
+const ESCALATION_NEXT = {
+  raised: ['acknowledged'],
+  received: ['acknowledged'],
+  acknowledged: ['action_taken', 'resolved'],
+  action_taken: ['resolved'],
+  resolved: []
+};
+const NOTE_REQUIRED = ['action_taken', 'resolved'];
+
+const EscalationRow = ({ e, onAdvanced, setErr, setOk }) => {
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState('');
+  const next = ESCALATION_NEXT[e.status] || [];
+
+  const advance = async (status) => {
+    setErr(''); setOk('');
+    if (NOTE_REQUIRED.includes(status) && !note.trim()) {
+      setErr('Say what was done before marking it ' + titleize(status).toLowerCase() + '.');
+      return;
+    }
+    setBusy(status);
+    try {
+      await api(`/api/caregiver/escalations/${encodeURIComponent(e.id)}/status`, {
+        method: 'POST', body: JSON.stringify({ status, note: note.trim() })
+      });
+      setOk(`Marked ${titleize(status).toLowerCase()}.`);
+      setNote('');
+      await onAdvanced();
+    } catch (err) { setErr(err.message); }
+    finally { setBusy(''); }
+  };
+
+  return (
+    <div className="row" style={{ display: 'block' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+        <div>
+          <b>{titleize(e.concernType)} · {e.clientName}</b>
+          <div className="mu">Raised by {e.caregiverName} · {fmtWhen(e.raisedAt)}</div>
+        </div>
+        <div>
+          {e.severity === 'urgent' && <span className="chip urgent">Urgent</span>}{' '}
+          <span className={`chip ${e.status}`}>{titleize(e.status)}</span>
+        </div>
+      </div>
+      {e.description && <div style={{ marginTop: 6 }}>{e.description}</div>}
+      {/* Who it actually reached. An escalation that fell back to admin because
+          nobody was assigned must say so here, not read as if it reached the
+          clinician it was meant for. */}
+      <div className="mu" style={{ marginTop: 6 }}>
+        Sent to: {(e.notified || []).map(n => n.name || n).join(', ') || '—'}
+        {e.fallbackToAdmin ? ' · no one was assigned for this type, so it went to the office' : ''}
+      </div>
+      {e.trail && e.trail.length > 0 && (
+        <div className="trail">
+          {e.trail.map((t, i) => (
+            <div key={i}>{titleize(t.status)} · {t.byName} · {fmtWhen(t.at)}{t.note ? ` — ${t.note}` : ''}</div>
+          ))}
+        </div>
+      )}
+      {next.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          <textarea placeholder={`What was done?${next.some(s => NOTE_REQUIRED.includes(s)) ? ' (required to close)' : ' (optional)'}`}
+            value={note} onChange={ev => setNote(ev.target.value)} />
+          <div className="btns">
+            {next.map(s => (
+              <button key={s} className={`btn sm ${s === 'resolved' ? 'gold' : 'ghost'}`}
+                disabled={!!busy} onClick={() => advance(s)}>
+                {busy === s ? 'Saving…' : `Mark ${titleize(s).toLowerCase()}`}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const Escalations = ({ rows, reload, setErr, setOk }) => {
+  const [openOnly, setOpenOnly] = useState(true);
+  const shown = openOnly ? rows.filter(e => e.status !== 'resolved') : rows;
+  return (
+    <div className="card">
+      <h2>Escalations</h2>
+      <p className="sub">Concerns caregivers raised from a visit. Forward-only; closing one needs a note.</p>
+      <div className="btns" style={{ marginTop: 0, marginBottom: 8 }}>
+        <button className={`btn sm ${openOnly ? '' : 'ghost'}`} onClick={() => setOpenOnly(!openOnly)}>
+          {openOnly ? 'Showing open only' : 'Showing all'}
+        </button>
+      </div>
+      {shown.length === 0
+        ? <Empty icon="bell-check">{openOnly ? 'Nothing open.' : 'No escalations yet.'}</Empty>
+        : shown.map(e => <EscalationRow key={e.id} e={e} onAdvanced={reload} setErr={setErr} setOk={setOk} />)}
+    </div>
+  );
+};
+
+// ============================================================================
+// Visit logs — the review queue. An LPN's skilled note files as pending_review.
+// A submitted log is immutable: a clinician APPENDS a note, never edits it.
+// ============================================================================
+const VisitLogRow = ({ v, reload, setErr, setOk }) => {
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(false);
+
+  const addNote = async () => {
+    if (!note.trim()) { setErr('A review note is required.'); return; }
+    setErr(''); setOk(''); setBusy(true);
+    try {
+      await api(`/api/caregiver/visit-logs/${encodeURIComponent(v.id)}/review-note`, {
+        method: 'POST', body: JSON.stringify({ note: note.trim() })
+      });
+      setOk('Review note added.');
+      setNote(''); setOpen(false);
+      await reload();
+    } catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="row" style={{ display: 'block' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+        <div>
+          <b>{v.clientName || v.clientId} · {v.visitType || 'Visit'}</b>
+          <div className="mu">{v.caregiverName} · {v.licenseLevel ? titleize(v.licenseLevel) + ' · ' : ''}{v.visitDate}</div>
+        </div>
+        <span className={`chip ${v.status}`}>{titleize(v.status)}</span>
+      </div>
+      {v.reviews && v.reviews.map(r => (
+        <div className="trail" key={r.id}><div>{r.byName} · {fmtWhen(r.at)} — {r.note}</div></div>
+      ))}
+      {!open
+        ? <div className="btns"><button className="btn sm ghost" onClick={() => setOpen(true)}>Add review note</button></div>
+        : (
+          <div style={{ marginTop: 10 }}>
+            <textarea placeholder="A submitted log is never edited — this is appended to it."
+              value={note} onChange={e => setNote(e.target.value)} />
+            <div className="btns">
+              <button className="btn sm" disabled={busy} onClick={addNote}>{busy ? 'Saving…' : 'Append note'}</button>
+              <button className="btn sm ghost" disabled={busy} onClick={() => { setOpen(false); setNote(''); }}>Cancel</button>
+            </div>
+          </div>
+        )}
+    </div>
+  );
+};
+
+const VisitLogs = ({ rows, reload, setErr, setOk, status, setStatus }) => (
+  <div className="card">
+    <h2>Visit logs</h2>
+    <p className="sub">What caregivers documented. A skilled LPN note files as Pending Review.</p>
+    <div style={{ maxWidth: 260, marginBottom: 10 }}>
+      <label>Status</label>
+      <select value={status} onChange={e => setStatus(e.target.value)}>
+        <option value="pending_review">Pending review</option>
+        <option value="">All</option>
+        <option value="submitted">Submitted</option>
+        <option value="reviewed">Reviewed</option>
+      </select>
+    </div>
+    {rows.length === 0
+      ? <Empty icon="clipboard-check">Nothing here.</Empty>
+      : rows.map(v => <VisitLogRow key={v.id} v={v} reload={reload} setErr={setErr} setOk={setOk} />)}
+  </div>
+);
+
+// ============================================================================
+// Incidents — falls and abuse/neglect, filed as their own records
+// ============================================================================
+const Incidents = ({ rows }) => (
+  <div className="card">
+    <h2>Incident reports</h2>
+    <p className="sub">A fall or an abuse/neglect observation is its own record, not a checkbox on a visit log.</p>
+    {rows.length === 0
+      ? <Empty icon="shield-check">No incidents reported.</Empty>
+      : rows.map(i => (
+        <div className="row" style={{ display: 'block' }} key={i.id}>
+          <b>{titleize(i.type || i.label || 'Incident')} · {i.client_name || i.clientName || ''}</b>
+          <div className="mu">
+            {i.caregiver_name || i.caregiverName || ''} · {fmtWhen(i.reported_at || i.reportedAt)}
+          </div>
+          {(i.detail || i.description) && <div style={{ marginTop: 5 }}>{i.detail || i.description}</div>}
+        </div>
+      ))}
+  </div>
+);
+
+// ============================================================================
+// Documents — what caregivers sent the office
+// ============================================================================
+const Documents = ({ rows }) => (
+  <div className="card">
+    <h2>Caregiver documents</h2>
+    <p className="sub">LTC forms, certifications, receipts — whatever a caregiver sent in.</p>
+    {rows.length === 0
+      ? <Empty icon="file-off">Nothing sent yet.</Empty>
+      : rows.map(d => (
+        <div className="row" key={d.id}>
+          <div>
+            <b>{d.label}</b>
+            <div className="mu">{d.caregiverName} · {d.fileName} · {fmtWhen(d.uploadedAt)}</div>
+          </div>
+          <a className="btn sm ghost" style={{ textDecoration: 'none' }}
+            href={`${API}/api/caregiver/documents/${encodeURIComponent(d.id)}/file?token=${encodeURIComponent(getToken())}`}
+            target="_blank" rel="noreferrer">Open</a>
+        </div>
+      ))}
+  </div>
+);
+
+// ============================================================================
+// Broadcast — a message onto every caregiver's Feed tab
+// ============================================================================
+const Broadcast = ({ setErr, setOk }) => {
+  const [title, setTitle] = useState('');
+  const [body, setBody] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const send = async () => {
+    if (!title.trim()) { setErr('A title is required.'); return; }
+    setErr(''); setOk(''); setBusy(true);
+    try {
+      await api('/api/caregiver/broadcasts', {
+        method: 'POST', body: JSON.stringify({ title: title.trim(), body: body.trim() })
+      });
+      setOk('Posted to every caregiver\'s feed.');
+      setTitle(''); setBody('');
+    } catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="card">
+      <h2>Post to the caregiver feed</h2>
+      <p className="sub">Goes to every caregiver's Feed tab. Not a message thread — nobody replies to it.</p>
+      <div style={{ marginBottom: 10 }}>
+        <label>Title</label>
+        <input value={title} maxLength={200} onChange={e => setTitle(e.target.value)} placeholder="Holiday pay schedule" />
+      </div>
+      <div>
+        <label>Message</label>
+        <textarea value={body} maxLength={4000} onChange={e => setBody(e.target.value)} />
+      </div>
+      <div className="btns">
+        <button className="btn gold" disabled={busy} onClick={send}>{busy ? 'Posting…' : 'Post to feed'}</button>
+      </div>
+      <div className="note">
+        <b>This is not the place for anything about one client.</b>
+        Every caregiver sees it, including caregivers with no connection to that client. Use Messages for that.
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
+// App
+// ============================================================================
+const App = () => {
+  const [tab, setTab] = useState('escalations');
+  const [escalations, setEscalations] = useState([]);
+  const [visitLogs, setVisitLogs] = useState([]);
+  const [incidents, setIncidents] = useState([]);
+  const [documents, setDocuments] = useState([]);
+  const [logStatus, setLogStatus] = useState('pending_review');
+  const [loading, setLoading] = useState(true);
+  const [denied, setDenied] = useState(false);
+  const [err, setErr] = useState('');
+  const [ok, setOk] = useState('');
+
+  const reload = useCallback(async () => {
+    const q = logStatus ? `?status=${encodeURIComponent(logStatus)}` : '';
+    const [e, v, i, d] = await Promise.all([
+      api('/api/caregiver/escalations').catch(er => { if (er.status === 403) setDenied(true); return { escalations: [] }; }),
+      api(`/api/caregiver/visit-logs${q}`).catch(() => ({ visitLogs: [] })),
+      api('/api/caregiver/incidents').catch(() => ({ incidents: [] })),
+      api('/api/caregiver/documents').catch(() => ({ documents: [] }))
+    ]);
+    setEscalations(e.escalations || []);
+    setVisitLogs(v.visitLogs || []);
+    setIncidents(i.incidents || []);
+    setDocuments(d.documents || []);
+  }, [logStatus]);
+
+  useEffect(() => {
+    if (!getToken()) { window.location.replace('/login'); return; }
+    reload().finally(() => setLoading(false));
+  }, [reload]);
+
+  if (loading) return <div className="wrap"><div className="empty">Loading…</div></div>;
+
+  if (denied) {
+    return (
+      <div>
+        <div className="hdr"><span className="t">Caregiver Management</span><a href="/admin">Admin hub</a></div>
+        <div className="wrap"><div className="card">
+          <h2>Not your area</h2>
+          <p className="sub">This is for administrators, clinical staff and case managers.</p>
+        </div></div>
+      </div>
+    );
+  }
+
+  const openEscalations = escalations.filter(e => e.status !== 'resolved').length;
+  const pendingLogs = visitLogs.filter(v => v.status === 'pending_review').length;
+
+  const TABS = [
+    { id: 'escalations', label: 'Escalations', n: openEscalations },
+    { id: 'logs', label: 'Visit logs', n: logStatus === 'pending_review' ? pendingLogs : 0 },
+    { id: 'incidents', label: 'Incidents', n: 0 },
+    { id: 'documents', label: 'Documents', n: 0 },
+    { id: 'broadcast', label: 'Feed post', n: 0 }
+  ];
+
+  return (
+    <div>
+      <div className="hdr">
+        <span className="t">Caregiver Management</span>
+        <span style={{ display: 'flex', gap: 14 }}>
+          <a href="/scheduling">Scheduling</a>
+          <a href="/admin">Admin hub</a>
+        </span>
+      </div>
+      <div className="wrap">
+        <div className="tabs">
+          {TABS.map(t => (
+            <button key={t.id} className={`tab ${tab === t.id ? 'on' : ''}`}
+              onClick={() => { setTab(t.id); setErr(''); setOk(''); }}>
+              {t.label}{t.n > 0 && <span className="n">{t.n}</span>}
+            </button>
+          ))}
+        </div>
+        {err && <div className="err">{err}</div>}
+        {ok && <div className="ok">{ok}</div>}
+
+        {tab === 'escalations' && <Escalations rows={escalations} reload={reload} setErr={setErr} setOk={setOk} />}
+        {tab === 'logs' && <VisitLogs rows={visitLogs} reload={reload} setErr={setErr} setOk={setOk}
+          status={logStatus} setStatus={setLogStatus} />}
+        {tab === 'incidents' && <Incidents rows={incidents} />}
+        {tab === 'documents' && <Documents rows={documents} />}
+        {tab === 'broadcast' && <Broadcast setErr={setErr} setOk={setOk} />}
+
+        <div className="note">
+          <b>Roster, license levels and competencies live in the Admin hub.</b>
+          Shifts, time logs, payroll and billing live in Scheduling. This page is the supervision
+          queue: what caregivers raised, documented and sent in.
+        </div>
+      </div>
+    </div>
+  );
+};
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

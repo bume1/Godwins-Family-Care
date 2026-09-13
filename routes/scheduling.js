@@ -434,7 +434,23 @@ module.exports = function createSchedulingRoutes(deps) {
       if (req.query.to) mine = mine.filter(r => String(r.start) <= String(req.query.to));
       if (isAdmin(req.user) && req.query.clientId) mine = mine.filter(r => r.client_id === String(req.query.clientId));
       mine = mine.slice().sort((a, b) => String(a.start).localeCompare(String(b.start)));
-      res.json({ shifts: mine.slice(0, 500).map(publicShift) });
+
+      // Whether the visit log is already filed is a fact the clock-out gate
+      // reads, so the schedule reads it too rather than showing a Clock out
+      // button that the server is going to refuse. Observed, never assumed:
+      // an in-progress shift with no log says so, and a shift that is not
+      // running carries null rather than a guess.
+      const filedLogs = await readRows('caregiver_visit_logs');
+      const page = mine.slice(0, 500).map((r) => {
+        const out = publicShift(r);
+        out.visitLogFiled = r.status === 'in_progress'
+          ? filedLogs.some(v => v && String(v.shift_id) === String(r.id) &&
+              String(v.caregiver_id) === String(r.caregiver_id) &&
+              String(v.client_id) === String(r.client_id))
+          : null;
+        return out;
+      });
+      res.json({ shifts: page });
     } catch (error) {
       console.error('Shift list error:', error);
       res.status(500).json({ error: 'Server error' });
@@ -828,8 +844,24 @@ module.exports = function createSchedulingRoutes(deps) {
         });
       }
 
-      const client = await loadClient(shift.client_id);
       const at = nowIso();
+
+      // Too early to start the clock. Checked before anything is written, so a
+      // refusal leaves the shift confirmed and un-started rather than half
+      // begun. Unlike the geofence this REFUSES — see the note on
+      // CLOCK_IN_WINDOW_MINUTES for why the two differ. Late is never blocked.
+      const window = sched.clockInWindow({ shift, at });
+      if (!window.allowed) {
+        const opens = new Date(window.opensAt);
+        return res.status(409).json({
+          error: `Too early. You can clock in from ${opens.toLocaleString('en-US', { hour: 'numeric', minute: '2-digit', month: 'short', day: 'numeric' })}, two hours before the shift starts.`,
+          code: 'CLOCK_IN_TOO_EARLY',
+          opensAt: window.opensAt,
+          minutesEarly: window.minutesEarly
+        });
+      }
+
+      const client = await loadClient(shift.client_id);
       const gps = normalizeGps((req.body || {}).gps);
       const { flags, geo } = sched.clockInFlags({ shift, client, gps, at });
 
@@ -901,6 +933,28 @@ module.exports = function createSchedulingRoutes(deps) {
       const li = logs.findIndex(l => l && l.shift_id === shift.id && !l.clock_out_at);
       if (li === -1) return res.status(409).json({ error: 'No open clock-in for that shift.', code: 'NO_OPEN_TIME_LOG' });
 
+      // The visit has to be DOCUMENTED before the clock stops. Checked here,
+      // before anything is written, so a refused clock-out leaves the shift
+      // exactly as it was — still in progress, its time log still open.
+      // Session 6 owns caregiver_visit_logs and already carries shift_id on
+      // the row; this is the rule that makes it more than a marker.
+      // It has to be THIS caregiver's log for THIS client on THIS shift.
+      // Matching the shift id alone would let a log filed by someone else, or
+      // for another client, satisfy a gate that was never theirs to satisfy.
+      const visitLogs = await readRows('caregiver_visit_logs');
+      const documented = visitLogs.some(v =>
+        v && String(v.shift_id) === String(shift.id) &&
+        String(v.caregiver_id) === String(req.user.id) &&
+        String(v.client_id) === String(shift.client_id));
+      if (!documented) {
+        return res.status(409).json({
+          error: 'File the visit log for this visit before you clock out.',
+          code: 'VISIT_LOG_REQUIRED',
+          shiftId: shift.id,
+          clientId: shift.client_id
+        });
+      }
+
       const client = await loadClient(shift.client_id);
       const at = nowIso();
       const gps = normalizeGps((req.body || {}).gps);
@@ -952,6 +1006,124 @@ module.exports = function createSchedulingRoutes(deps) {
       });
     } catch (error) {
       console.error('Time-log list error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // POST /api/scheduling/time-logs — the office enters hours that were never
+  // clocked. A dead phone, a forgotten tap, a visit nobody posted as a shift:
+  // without this those hours cannot be paid at all, because every other way
+  // into this collection starts at a clock-in on the caregiver's device.
+  //
+  // A REASON IS MANDATORY, exactly as it is for an edit. These hours are
+  // ATTESTED by an administrator rather than observed by the app, so the row
+  // says so in three places that already travel everywhere: the manual_entry
+  // flag, an unverifiable geofence verdict (never "inside" — the app must not
+  // claim a location it did not check), and the entering admin's name.
+  router.post('/api/scheduling/time-logs', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const body = req.body || {};
+      const reason = String(body.reason || '').trim();
+      if (!reason) {
+        return res.status(400).json({
+          error: 'Say why these hours are being entered by hand.',
+          code: 'ENTRY_REASON_REQUIRED'
+        });
+      }
+
+      const clockInAt = isoOrNull(body.clockInAt);
+      const clockOutAt = body.clockOutAt ? isoOrNull(body.clockOutAt) : null;
+      if (!clockInAt) return res.status(400).json({ error: 'A valid start time is required.', code: 'CLOCK_IN_INVALID' });
+      if (body.clockOutAt && !clockOutAt) {
+        return res.status(400).json({ error: 'That end time is not a valid timestamp.', code: 'CLOCK_OUT_INVALID' });
+      }
+      if (clockOutAt && clockOutAt < clockInAt) {
+        return res.status(400).json({ error: 'The end time is before the start time.', code: 'CLOCK_OUT_BEFORE_IN' });
+      }
+
+      const users = await getUsers();
+      const caregiver = users.find(u => u && u.id === String(body.caregiverId || ''));
+      if (!caregiver || !isSchedulable(caregiver)) {
+        return res.status(400).json({ error: 'Pick a caregiver.', code: 'CAREGIVER_REQUIRED' });
+      }
+      const client = await loadClient(String(body.clientId || ''));
+      if (!client) return res.status(400).json({ error: 'Pick a client.', code: 'CLIENT_REQUIRED' });
+
+      // Optional: tie it to a real shift. It must be that caregiver's and that
+      // client's, or the entry would attach hours to work someone else did.
+      let shift = null;
+      if (body.shiftId) {
+        const shifts = await readRows('shifts');
+        shift = shifts.find(s => s && s.id === String(body.shiftId)) || null;
+        if (!shift) return res.status(404).json({ error: 'That shift does not exist.', code: 'SHIFT_NOT_FOUND' });
+        if (shift.caregiver_id !== caregiver.id) {
+          return res.status(409).json({ error: 'That shift belongs to a different caregiver.', code: 'SHIFT_CAREGIVER_MISMATCH' });
+        }
+        if (String(shift.client_id) !== String(client.id)) {
+          return res.status(409).json({ error: 'That shift is for a different client.', code: 'SHIFT_CLIENT_MISMATCH' });
+        }
+      }
+
+      const at = nowIso();
+      const unverified = { verdict: 'unverifiable', reason: 'MANUAL_ENTRY', radius: null, distance: null };
+      const row = {
+        id: uuidv4(),
+        shift_id: shift ? shift.id : null,
+        client_id: client.id,
+        client_name: client.name,
+        caregiver_id: caregiver.id,
+        caregiver_name: caregiver.name || caregiver.email,
+        license_level: caregiver.licenseLevel || null,
+        // Only a real shift carries a schedule. Copying the entered times in
+        // here would invent a schedule that never existed and make the payroll
+        // export read as though the caregiver worked exactly to plan.
+        scheduled_start: shift ? shift.start : null,
+        scheduled_end: shift ? shift.end : null,
+        clock_in_at: clockInAt,
+        clock_in_gps: null,
+        clock_in_geofence: unverified,
+        clock_out_at: clockOutAt,
+        clock_out_gps: null,
+        clock_out_geofence: clockOutAt ? unverified : null,
+        total_minutes: clockOutAt ? sched.totalMinutes(clockInAt, clockOutAt) : null,
+        flags: clockOutAt ? ['manual_entry'] : ['manual_entry', 'no_clock_out'],
+        edited: false,
+        edit_reason: null,
+        entered_manually: true,
+        entry_reason: reason,
+        entered_by: req.user.id,
+        entered_by_name: req.user.name || req.user.email,
+        created_at: at
+      };
+
+      const logs = await readRows('time_logs');
+      logs.push(row);
+      await db.set('time_logs', logs);
+
+      // Same append-only trail an edit writes, so "who put these hours in the
+      // system, and why" has one answer whether they were typed or corrected.
+      const edits = await readRows('time_log_edits');
+      edits.push({
+        id: uuidv4(),
+        time_log_id: row.id,
+        kind: 'manual_entry',
+        before: null,
+        after: { clockInAt: row.clock_in_at, clockOutAt: row.clock_out_at, totalMinutes: row.total_minutes },
+        reason,
+        by: req.user.id,
+        by_name: row.entered_by_name,
+        at
+      });
+      await db.set('time_log_edits', edits);
+
+      await logActivity(req.user.id, row.entered_by_name, 'time_log_entered_manually', 'time_log', row.id, {
+        caregiverId: caregiver.id, clientId: client.id, shiftId: row.shift_id,
+        clockInAt: row.clock_in_at, clockOutAt: row.clock_out_at, reason
+      });
+
+      res.json({ timeLog: publicTimeLog(row), message: 'Hours entered and flagged as a manual entry.' });
+    } catch (error) {
+      console.error('Manual time-log entry error:', error);
       res.status(500).json({ error: 'Server error' });
     }
   });
@@ -1073,6 +1245,8 @@ module.exports = function createSchedulingRoutes(deps) {
           flags: (l.flags || []).join(' '),
           edited: l.edited ? 'yes' : '',
           editReason: l.edit_reason || '',
+          source: l.entered_manually ? 'Manual entry' : 'Clocked',
+          enteredBy: l.entered_manually ? (l.entered_by_name || '') : '',
           payPeriodStart: period.start,
           payPeriodEnd: period.end
         };
@@ -1086,6 +1260,107 @@ module.exports = function createSchedulingRoutes(deps) {
       res.send(sched.toPayrollCsv(rows));
     } catch (error) {
       console.error('Payroll CSV error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // GET /api/scheduling/billing.csv — admin only. What gets INVOICED, which is
+  // a different question from what payroll.csv answers: one line per COMPLETED
+  // visit, grouped by client. A shift still in progress has no final hours, so
+  // it is not billable and is not listed — a half-open visit on an invoice is
+  // a credit note waiting to happen.
+  router.get('/api/scheduling/billing.csv', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const from = String(req.query.from || '');
+      const to = String(req.query.to || '');
+      if (!sched.isIsoDate(from) || !sched.isIsoDate(to)) {
+        return res.status(400).json({ error: 'Give a from and to date (YYYY-MM-DD).', code: 'DATE_RANGE_REQUIRED' });
+      }
+      if (to < from) return res.status(400).json({ error: 'The end date is before the start date.', code: 'DATE_RANGE_INVERTED' });
+      const onlyClient = req.query.clientId ? String(req.query.clientId) : null;
+
+      const visitLogs = await readRows('caregiver_visit_logs');
+      const documentedShiftIds = new Set(visitLogs.filter(v => v && v.shift_id).map(v => String(v.shift_id)));
+
+      const logs = (await readRows('time_logs')).filter(l => {
+        if (!l || !l.clock_out_at) return false;          // not finished, not billable
+        if (onlyClient && String(l.client_id) !== onlyClient) return false;
+        const d = String(l.clock_in_at || '').slice(0, 10);
+        return d >= from && d <= to;
+      }).sort((a, b) =>
+        String(a.client_name || '').localeCompare(String(b.client_name || '')) ||
+        String(a.clock_in_at).localeCompare(String(b.clock_in_at)));
+
+      const rows = logs.map(l => ({
+        clientName: l.client_name,
+        serviceDate: String(l.clock_in_at || '').slice(0, 10),
+        caregiverName: l.caregiver_name,
+        licenseLevel: l.license_level ? cg.LICENSE_LABELS[l.license_level] || l.license_level : '',
+        scheduledStart: l.scheduled_start,
+        scheduledEnd: l.scheduled_end,
+        clockInAt: l.clock_in_at,
+        clockOutAt: l.clock_out_at || '',
+        hours: sched.minutesToHours(l.total_minutes),
+        // Says what the GPS check could actually establish, never more: an
+        // unverifiable clock-in is not the same claim as a verified one, and
+        // an invoice should not blur them.
+        verification: (l.clock_in_geofence && l.clock_in_geofence.verdict) || 'unverifiable',
+        documented: documentedShiftIds.has(String(l.shift_id)) ? 'yes' : 'no'
+      }));
+
+      await logActivity(req.user.id, req.user.name || req.user.email, 'billing_csv_exported', 'time_log', null,
+        { from, to, clientId: onlyClient, rows: rows.length });
+
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="gfc_billing_${from}_to_${to}.csv"`);
+      res.send(sched.toPayrollCsv(rows, sched.BILLING_CSV_COLUMNS));
+    } catch (error) {
+      console.error('Billing CSV error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // GET /api/scheduling/my-hours.csv — a caregiver's OWN hours, for their own
+  // records. Resolved from the token, so there is no id to pass and no other
+  // caregiver's rows to reach. The date range is optional here (unlike
+  // payroll): this is someone pulling their own timesheet, not a pay run.
+  router.get('/api/scheduling/my-hours.csv', authenticateToken, requireSchedulable, async (req, res) => {
+    try {
+      const from = req.query.from ? String(req.query.from) : '';
+      const to = req.query.to ? String(req.query.to) : '';
+      if (from && !sched.isIsoDate(from)) return res.status(400).json({ error: 'That start date is not YYYY-MM-DD.', code: 'DATE_INVALID' });
+      if (to && !sched.isIsoDate(to)) return res.status(400).json({ error: 'That end date is not YYYY-MM-DD.', code: 'DATE_INVALID' });
+      if (from && to && to < from) return res.status(400).json({ error: 'The end date is before the start date.', code: 'DATE_RANGE_INVERTED' });
+
+      const logs = (await readRows('time_logs')).filter(l => {
+        if (!l || l.caregiver_id !== req.user.id) return false;
+        const d = String(l.clock_in_at || '').slice(0, 10);
+        if (from && d < from) return false;
+        if (to && d > to) return false;
+        return true;
+      }).sort((a, b) => String(a.clock_in_at).localeCompare(String(b.clock_in_at)));
+
+      const rows = logs.map(l => ({
+        shiftDate: String(l.clock_in_at || '').slice(0, 10),
+        clientName: l.client_name,
+        scheduledStart: l.scheduled_start,
+        scheduledEnd: l.scheduled_end,
+        clockInAt: l.clock_in_at,
+        clockOutAt: l.clock_out_at || '',
+        hours: sched.minutesToHours(l.total_minutes),
+        flags: (l.flags || []).join(' '),
+        edited: l.edited ? 'yes' : ''
+      }));
+
+      await logActivity(req.user.id, req.user.name || req.user.email, 'caregiver_hours_exported', 'time_log', null,
+        { from: from || null, to: to || null, rows: rows.length });
+
+      const stamp = `${from || 'all'}_to_${to || 'today'}`;
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="my_hours_${stamp}.csv"`);
+      res.send(sched.toPayrollCsv(rows, sched.CAREGIVER_HOURS_CSV_COLUMNS));
+    } catch (error) {
+      console.error('Caregiver hours CSV error:', error);
       res.status(500).json({ error: 'Server error' });
     }
   });
@@ -1280,7 +1555,12 @@ module.exports = function createSchedulingRoutes(deps) {
     totalMinutes: l.total_minutes, totalHours: sched.minutesToHours(l.total_minutes),
     flags: l.flags || [],
     edited: !!l.edited, editReason: l.edit_reason || null,
-    editedByName: l.edited_by_name || null, editedAt: l.edited_at || null
+    editedByName: l.edited_by_name || null, editedAt: l.edited_at || null,
+    // Attested by the office rather than observed by the app. Surfaced so a
+    // reviewer can tell a typed entry from a clocked one without reading flags.
+    enteredManually: !!l.entered_manually,
+    entryReason: l.entry_reason || null,
+    enteredByName: l.entered_by_name || null
   });
 
   const normalizeGps = (gps) => {

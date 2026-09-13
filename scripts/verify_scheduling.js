@@ -46,11 +46,15 @@ const USERS = [
   { id: 'cna-1', name: 'Cam CNA (TEST DATA)', email: 'cna@test.local', role: 'vendor', licenseLevel: 'cna' },
   { id: 'vendor-legacy', name: 'Lab Vendor (TEST DATA)', email: 'lab@test.local', role: 'vendor' },
   { id: 'client-1', name: 'Margaret Whitfield (TEST DATA)', email: 'c1@test.local', role: 'client',
+    // Nothing can be scheduled against a client who is not enrolled
+    // (enrollmentGate.js). These two are, so the probe exercises scheduling
+    // rather than the gate — the gate has its own coverage in the suite.
+    enrollmentStatus: 'enrolled',
     careTier: 'A2',
     address: { line1: '12 Oak St', city: 'Marietta', state: 'GA', zip: '30060', lat: 33.9526, lng: -84.5499 },
     careTeam: { assignedFNPs: ['fnp-1'], assignedCaseManager: 'cm-1', primaryCaregiver: 'pca-1', backupCaregiver: null } },
   { id: 'client-2', name: 'Harold Vance (TEST DATA)', email: 'c2@test.local', role: 'client',
-    careTier: 'A1', address: { line1: '9 Pine Rd', city: 'Marietta', state: 'GA' }, careTeam: {} }
+    enrollmentStatus: 'enrolled', careTier: 'A1', address: { line1: '9 Pine Rd', city: 'Marietta', state: 'GA' }, careTeam: {} }
 ];
 store.set('users', USERS);
 
@@ -133,6 +137,10 @@ const stored = async (collection, predicate) =>
 
 const plusDays = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
 const at = (dayOffset, hhmm) => new Date(`${plusDays(dayOffset)}T${hhmm}:00.000Z`).toISOString();
+// Clock-in only opens two hours before the start, so time-tracking shifts are
+// anchored to the moment the probe runs rather than to a wall-clock hour that
+// may or may not be inside the window depending on when someone runs it.
+const minsFromNow = (n) => new Date(Date.now() + n * 60000).toISOString();
 
 (async () => {
   const server = app.listen(0);
@@ -193,7 +201,7 @@ const at = (dayOffset, hhmm) => new Date(`${plusDays(dayOffset)}T${hhmm}:00.000Z
     as: 'admin-1',
     body: { clientId: 'client-1', start: at(40, '14:00'), end: at(40, '18:00'), requiredLicenseLevel: 'cna', notes: 'TEST DATA' }
   });
-  check('admin posts a CNA shift', skilled.status === 200 && skilled.data.shift.status === 'open');
+  check('admin posts a CNA shift', skilled.status === 200 && skilled.data.shift.status === 'open', JSON.stringify(skilled.data));
   const skilledId = skilled.data.shift.id;
 
   const general = await call('POST', '/api/scheduling/shifts', {
@@ -234,20 +242,30 @@ const at = (dayOffset, hhmm) => new Date(`${plusDays(dayOffset)}T${hhmm}:00.000Z
     misspelled.data.errors.some(e => e.code === 'LICENSE_LEVEL_INVALID' && /"any"/.test(e.message)),
     JSON.stringify(misspelled.data.errors));
 
+  // Owner rule 2026-09-13: the pool SHOWS every open shift and marks the ones a
+  // licence does not cover as unclaimable, with the reason. Hiding the row was
+  // never the control — the claim gate is, and it is asserted below.
   const pcaPool = await call('GET', '/api/scheduling/shifts/open', { as: 'pca-1' });
   const pcaIds = pcaPool.data.shifts.map(s => s.id);
-  check('a PCA does NOT see the CNA shift in the open pool',
-    !pcaIds.includes(skilledId), JSON.stringify(pcaIds));
-  check('but does see the unrestricted one', pcaIds.includes(generalId));
-  check('and the any-level one', pcaIds.includes(anyLevelId));
+  const pcaSkilled = pcaPool.data.shifts.find(s => s.id === skilledId);
+  check('a PCA SEES the CNA shift in the pool', pcaIds.includes(skilledId), JSON.stringify(pcaIds));
+  check('but it is marked unclaimable, with the reason named',
+    pcaSkilled && pcaSkilled.claimable === false && /below the required/i.test(pcaSkilled.ineligibleReason || ''),
+    JSON.stringify(pcaSkilled));
+  check('and the unrestricted one IS claimable',
+    (pcaPool.data.shifts.find(s => s.id === generalId) || {}).claimable === true);
+  check('as is the any-level one',
+    (pcaPool.data.shifts.find(s => s.id === anyLevelId) || {}).claimable === true);
 
   const cnaPool = await call('GET', '/api/scheduling/shifts/open', { as: 'cna-1' });
   check('a CNA sees all three', cnaPool.data.shifts.length === 3);
+  check('and all three are claimable by a CNA', cnaPool.data.shifts.every(s => s.claimable === true));
 
   const sitterPool = await call('GET', '/api/scheduling/shifts/open', { as: 'sitter-1' });
   const sitterIds = sitterPool.data.shifts.map(s => s.id);
-  check('a sitter sees the unrestricted and any-level shifts, and not the CNA one',
-    sitterIds.length === 2 && sitterIds.includes(generalId) && sitterIds.includes(anyLevelId),
+  check('a sitter sees all three too, with the CNA one unclaimable',
+    sitterIds.length === 3 &&
+    (sitterPool.data.shifts.find(s => s.id === skilledId) || {}).claimable === false,
     JSON.stringify(sitterIds));
   check('a PCA and a CNA can BOTH take the any-level shift — the point of the option',
     pcaIds.includes(anyLevelId) && cnaPool.data.shifts.map(s => s.id).includes(anyLevelId));
@@ -412,33 +430,91 @@ const at = (dayOffset, hhmm) => new Date(`${plusDays(dayOffset)}T${hhmm}:00.000Z
   // ==========================================================================
   section('F. Time tracking — geofence FLAGS, never blocks');
   // ==========================================================================
-  const clockIn = await call('POST', `/api/scheduling/shifts/${generalId}/clock-in`, {
+  // The shift the clock is exercised on starts in ten minutes, so the two-hour
+  // clock-in window is open whenever this probe runs. `generalId` is 41 days
+  // out and is deliberately left where it is — it proves the window REFUSES.
+  const evv = await call('POST', '/api/scheduling/shifts', {
+    as: 'admin-1', body: { clientId: 'client-1', start: minsFromNow(10), end: minsFromNow(250) }
+  });
+  const evvId = evv.data.shift.id;
+  await call('POST', `/api/scheduling/shifts/${evvId}/assign`, { as: 'admin-1', body: { caregiverId: 'pca-1' } });
+  await call('POST', `/api/scheduling/shifts/${evvId}/accept`, { as: 'pca-1' });
+
+  const tooEarly = await call('POST', `/api/scheduling/shifts/${generalId}/clock-in`, { as: 'pca-1', body: {} });
+  check('a clock-in 41 days before the shift is REFUSED',
+    tooEarly.status === 409 && tooEarly.data.code === 'CLOCK_IN_TOO_EARLY', JSON.stringify(tooEarly.data));
+  check('STORED: and nothing was written for it',
+    !(await stored('time_logs', l => l.shift_id === generalId)));
+
+  const clockIn = await call('POST', `/api/scheduling/shifts/${evvId}/clock-in`, {
     as: 'pca-1', body: { gps: { lat: 33.9527, lng: -84.5500, accuracy: 12 } }
   });
-  check('clock-in on a confirmed shift succeeds', clockIn.status === 200);
-  const log = await stored('time_logs', l => l.shift_id === generalId);
+  check('clock-in inside the window succeeds', clockIn.status === 200, JSON.stringify(clockIn.data));
+  const log = await stored('time_logs', l => l.shift_id === evvId);
   check('STORED: a time log exists with the GPS and the geofence verdict',
     !!log && log.clock_in_geofence.verdict === 'inside' && log.clock_in_gps.lat === 33.9527);
   check('STORED: no flags for an on-site clock-in', log.flags.length === 0, JSON.stringify(log.flags));
   check('STORED: the shift moved to in_progress',
-    (await stored('shifts', r => r.id === generalId)).status === 'in_progress');
+    (await stored('shifts', r => r.id === evvId)).status === 'in_progress');
 
-  const doubleClock = await call('POST', `/api/scheduling/shifts/${generalId}/clock-in`, { as: 'pca-1', body: {} });
+  const doubleClock = await call('POST', `/api/scheduling/shifts/${evvId}/clock-in`, { as: 'pca-1', body: {} });
   check('a second clock-in is refused', doubleClock.status === 409 && doubleClock.data.code === 'ALREADY_CLOCKED_IN');
 
-  const clockOut = await call('POST', `/api/scheduling/shifts/${generalId}/clock-out`, {
+  // ---- THE FAILSAFE: no visit log, no clock-out --------------------------
+  const noLog = await call('POST', `/api/scheduling/shifts/${evvId}/clock-out`, {
     as: 'pca-1', body: { gps: { lat: 33.9527, lng: -84.5500 } }
   });
-  check('clock-out succeeds', clockOut.status === 200);
+  check('clock-out with NO visit log is REFUSED',
+    noLog.status === 409 && noLog.data.code === 'VISIT_LOG_REQUIRED', JSON.stringify(noLog.data));
+  check('STORED: the shift is still in progress after the refusal',
+    (await stored('shifts', r => r.id === evvId)).status === 'in_progress');
+  check('STORED: and the time log is still open',
+    !(await stored('time_logs', l => l.id === log.id)).clock_out_at);
+
+  // The schedule reads the same fact, so the app never offers a Clock out the
+  // server is going to refuse.
+  const listNoLog = await call('GET', '/api/scheduling/shifts', { as: 'pca-1' });
+  check('the schedule reports visitLogFiled:false on the running shift',
+    listNoLog.data.shifts.find(x => x.id === evvId).visitLogFiled === false);
+
+  // A log for the RIGHT shift but the WRONG caregiver does not satisfy it.
+  await db.set('caregiver_visit_logs', [
+    { id: 'vl-wrong', shift_id: evvId, caregiver_id: 'pca-2', client_id: 'client-1' }
+  ]);
+  const wrongAuthor = await call('POST', `/api/scheduling/shifts/${evvId}/clock-out`, { as: 'pca-1', body: {} });
+  check("another caregiver's log does not satisfy the gate",
+    wrongAuthor.status === 409 && wrongAuthor.data.code === 'VISIT_LOG_REQUIRED');
+
+  // A log by the right caregiver for a DIFFERENT client does not satisfy it.
+  await db.set('caregiver_visit_logs', [
+    { id: 'vl-other-client', shift_id: evvId, caregiver_id: 'pca-1', client_id: 'client-2' }
+  ]);
+  const wrongClient = await call('POST', `/api/scheduling/shifts/${evvId}/clock-out`, { as: 'pca-1', body: {} });
+  check('a log naming a different client does not satisfy the gate',
+    wrongClient.status === 409 && wrongClient.data.code === 'VISIT_LOG_REQUIRED');
+
+  // Now the real thing. Session 6 owns the write; the shape is its row.
+  await db.set('caregiver_visit_logs', [
+    { id: 'vl-1', shift_id: evvId, caregiver_id: 'pca-1', client_id: 'client-1',
+      visit_date: new Date().toISOString().slice(0, 10), status: 'submitted' }
+  ]);
+  const listFiled = await call('GET', '/api/scheduling/shifts', { as: 'pca-1' });
+  check('the schedule flips to visitLogFiled:true once the log is filed',
+    listFiled.data.shifts.find(x => x.id === evvId).visitLogFiled === true);
+
+  const clockOut = await call('POST', `/api/scheduling/shifts/${evvId}/clock-out`, {
+    as: 'pca-1', body: { gps: { lat: 33.9527, lng: -84.5500 } }
+  });
+  check('clock-out succeeds once the visit is documented', clockOut.status === 200, JSON.stringify(clockOut.data));
   const closed = await stored('time_logs', l => l.id === log.id);
   check('STORED: the log is closed and the total is computed',
     !!closed.clock_out_at && typeof closed.total_minutes === 'number' && closed.total_minutes >= 0);
   check('STORED: the shift is completed',
-    (await stored('shifts', r => r.id === generalId)).status === 'completed');
+    (await stored('shifts', r => r.id === evvId)).status === 'completed');
 
   // The one that matters: outside the radius SUCCEEDS and is flagged.
   const farShift = await call('POST', '/api/scheduling/shifts', {
-    as: 'admin-1', body: { clientId: 'client-1', start: at(0, '09:00'), end: at(0, '13:00') }
+    as: 'admin-1', body: { clientId: 'client-1', start: minsFromNow(15), end: minsFromNow(255) }
   });
   const farId = farShift.data.shift.id;
   await call('POST', `/api/scheduling/shifts/${farId}/assign`, { as: 'admin-1', body: { caregiverId: 'pca-2' } });
@@ -458,7 +534,7 @@ const at = (dayOffset, hhmm) => new Date(`${plusDays(dayOffset)}T${hhmm}:00.000Z
 
   // A client with no coordinates: unverifiable, never reported as inside.
   const noCoordShift = await call('POST', '/api/scheduling/shifts', {
-    as: 'admin-1', body: { clientId: 'client-2', start: at(0, '14:00'), end: at(0, '16:00') }
+    as: 'admin-1', body: { clientId: 'client-2', start: minsFromNow(20), end: minsFromNow(140) }
   });
   const ncId = noCoordShift.data.shift.id;
   await call('POST', `/api/scheduling/shifts/${ncId}/assign`, { as: 'admin-1', body: { caregiverId: 'sitter-1' } });

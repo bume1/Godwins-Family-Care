@@ -498,9 +498,14 @@ test('every /api/caregiver route authenticates and carries a role guard', () => 
     assert.ok(middleware.includes('authenticateToken'),
       `${method.toUpperCase()} ${routePath} must authenticate`);
     const guarded = /requireCaregiver|requireReviewStaff|requireAdmin/.test(middleware);
-    // Two routes guard inline because they serve two audiences (a caregiver
-    // reads their own rows; staff read the queue). They must still branch.
-    const inlineGuarded = ['/api/caregiver/visit-logs', '/api/caregiver/escalations'].includes(routePath) && method === 'get';
+    // Some reads guard inline because they serve two audiences (a caregiver
+    // reads their own rows; staff read the queue). They must still branch —
+    // and through the same isReviewStaff predicate the named guard uses, so
+    // the two cannot answer a different question.
+    const inlineGuarded = [
+      '/api/caregiver/visit-logs', '/api/caregiver/escalations',
+      '/api/caregiver/documents', '/api/caregiver/documents/:id/file'
+    ].includes(routePath) && method === 'get';
     assert.ok(guarded || inlineGuarded,
       `${method.toUpperCase()} ${routePath} must carry a role guard, not rely on the UI`);
     checked++;
@@ -608,4 +613,56 @@ test('SAFETY: editing a user cannot wipe their competencies', () => {
 test('caregiver mobile body text is at least 16px', () => {
   const body = pageSrc.match(/body\{[^}]*font-size:(\d+)px/);
   assert.ok(body && Number(body[1]) >= 16, 'caregiver views set a 16px minimum body size');
+});
+
+test('SAFETY: a caregiver reaches only their OWN documents; staff reach all', () => {
+  const i = routeSrc.indexOf("router.get('/api/caregiver/documents'");
+  assert.ok(i > 0, 'the document list route exists');
+  const list = routeSrc.slice(i, i + 1400);
+  assert.match(list, /requireCaregiverOrAdmin/, 'nobody else reaches the list at all');
+  assert.match(list, /wanted = isAdmin \? \(req\.query\.caregiverId \|\| null\) : req\.user\.id/,
+    'a caregiver is pinned to their own rows; only an admin may name someone');
+
+  const f = routeSrc.indexOf("router.get('/api/caregiver/documents/:id/file'");
+  const file = routeSrc.slice(f, f + 1400);
+  assert.match(file, /DOC_NOT_YOURS/, "opening another caregiver's document is refused");
+  assert.match(file, /!isAdmin && row\.caregiver_id !== req\.user\.id/,
+    'and the check is on the row, not on what was asked for');
+});
+
+test('SAFETY: a Drive failure FAILS the caregiver upload — no row pointing at nothing', () => {
+  const i = routeSrc.indexOf("router.post('/api/caregiver/documents'");
+  const handler = routeSrc.slice(i, i + 6000);
+  assert.match(handler, /DOCUMENT_STORAGE_UNAVAILABLE/, 'a storage failure is reported as one');
+  const fail = handler.indexOf('DOCUMENT_STORAGE_UNAVAILABLE');
+  const write = handler.indexOf("db.set('caregiver_documents'");
+  assert.ok(fail > 0 && write > 0 && fail < write,
+    'the upload must fail BEFORE the row is written, or the caregiver believes they sent something that does not exist');
+  assert.match(handler, /detectFileType\(buffer\)/, 'typed by its bytes, not its declared type');
+});
+
+// ---- The staff supervision surface -----------------------------------------
+// Session 6 built escalations, incident reports and a review queue with
+// notifications that fire, and no screen that could read any of them. These
+// guard the front door that was missing, not the plumbing behind it.
+test('the staff supervision page exists and is reachable from the admin hub', () => {
+  assert.ok(fs.existsSync(path.join(__dirname, '..', 'public', 'caregivers.html')),
+    'the caregiver supervision page exists');
+  assert.match(routeSrc, /router\.get\('\/caregivers'/, 'the page is served');
+  const hub = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-hub.html'), 'utf8');
+  assert.match(hub, /href="\/caregivers"/,
+    'an admin can reach it without knowing the URL — the gap this closes');
+});
+
+test('the supervision page reads the staff queues and never posts a visit log', () => {
+  const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'caregivers.html'), 'utf8');
+  for (const route of ['/api/caregiver/escalations', '/api/caregiver/visit-logs',
+    '/api/caregiver/incidents', '/api/caregiver/documents']) {
+    assert.ok(page.includes(route), `the page reads ${route}`);
+  }
+  // Filing a visit log is the caregiver's act, from the caregiver app. Staff
+  // append a review note to one; they never author one on someone's behalf.
+  assert.ok(!/method: 'POST', body: JSON\.stringify\(payload\)/.test(page),
+    'staff do not file visit logs');
+  assert.match(page, /review-note/, 'staff append a review note instead');
 });

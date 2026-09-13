@@ -17225,6 +17225,10 @@ app.get('/api/admin-hub/dashboard', authenticateToken, requireAdminHubAccess, as
       managerUsers: users.filter(u => u.isManager).length,
       clientUsers: users.filter(u => u.role === config.ROLES.CLIENT).length,
       servicePortalUsers: users.filter(u => u.hasServicePortalAccess || u.role === config.ROLES.VENDOR).length,
+      // A CAREGIVER is the vendor role WITH a license level — the same rule the
+      // caregiver app enforces. Counting service-portal access instead would
+      // include lab-era vendors who cannot open the app at all.
+      caregiverUsers: users.filter(u => u.role === config.ROLES.VENDOR && u.licenseLevel).length,
       totalProjects: projects.length,
       activeProjects: projects.filter(p => p.status !== 'completed').length,
       totalServiceReports: serviceReports.length,

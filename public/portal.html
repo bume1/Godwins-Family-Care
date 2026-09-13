@@ -4905,12 +4905,15 @@
         const d = new Date(iso);
         return isNaN(d) ? '' : d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
       };
+      // A visit in progress has its own card above the list, so it is marked
+      // here and filtered out of the list rather than appearing twice.
       const upcoming = (shifts || []).map(s => ({
         id: s.id,
         day: prettyDate(s.start),
         time: `${fmtShiftTime(s.start)} – ${fmtShiftTime(s.end)}`,
         type: s.status === 'in_progress' ? 'Visit in progress' : 'Scheduled visit',
         with: s.caregiverName || 'Your caregiver',
+        live: s.status === 'in_progress',
         highlight: s.status === 'in_progress'
       }));
 
@@ -4919,7 +4922,15 @@
       return (
         <div className="gfc-body">
           <h2 className="disp">Good morning, {data.greetingName}</h2>
-          <p className="sub">{pc.name ? `${pc.name.split(' ')[0]} arrives at ${((upcoming[0]||{}).time || 'your next visit').split(' – ')[0]}.` : 'Welcome to your care portal.'}</p>
+          {/* "Arrives at 2:00 PM" is wrong when they are already standing in
+              the kitchen. The live visit gets its own sentence. */}
+          <p className="sub">{(() => {
+            const live = upcoming.find(v => v.live);
+            if (live) return `${(live.with || 'Your caregiver').split(' ')[0]} is with you now.`;
+            const next = upcoming.find(v => !v.live);
+            if (pc.name) return `${pc.name.split(' ')[0]} arrives at ${((next || {}).time || 'your next visit').split(' – ')[0]}.`;
+            return 'Welcome to your care portal.';
+          })()}</p>
           {me && <EnrollmentPills status={me.enrollmentStatus} />}
           <div className="planhero">
             <div className="pe">Your care plan</div>
@@ -4951,9 +4962,12 @@
               </div>
             </React.Fragment>
           )}
+          {/* Same component the Care tab uses, so "is someone here right now"
+              cannot be answered differently on two screens. */}
+          <GfcVisitInProgress shifts={shifts} />
           <p className="lbl">Upcoming visits</p>
           {upcoming.length === 0 && <p className="sub" style={{ marginTop: 0 }}>No visits scheduled yet — your care coordinator will reach out to set up your schedule.</p>}
-          {upcoming.slice(0, 2).map(v => (
+          {upcoming.filter(v => !v.live).slice(0, 2).map(v => (
             <div className={`visit ${v.highlight ? 'hl' : ''}`} key={v.id}>
               <span className="vt">{v.day}<br />{v.time}</span>
               <div className="vm"><b>{v.type}</b><span>{v.with}</span></div>
@@ -4981,10 +4995,55 @@
       );
     };
 
-    const GfcCarePlan = ({ data, readOnly, token }) => {
+    // A visit that is HAPPENING RIGHT NOW. The single most common thing a
+    // client or a family member opens this portal to find out, and until now
+    // it appeared only on Home. Deliberately NOT shown: GPS, distance, the
+    // geofence verdict, or whether the caregiver was late. Those are matters
+    // between the agency and its caregiver; putting them in front of a client
+    // creates friction over something the client cannot act on.
+    const GfcVisitInProgress = ({ shifts }) => {
+      const live = (shifts || []).find(s => s.status === 'in_progress');
+      if (!live) return null;
+      const since = new Date(live.start);
+      const until = new Date(live.end);
+      const t = (d) => isNaN(d.getTime()) ? '' : d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+      return (
+        <React.Fragment>
+          <p className="lbl">Right now</p>
+          <div className="visit hl" style={{ alignItems: 'flex-start' }}>
+            <span className="vt"><i className="ti ti-user-check" style={{ fontSize: 20, color: 'var(--goldd)' }} /></span>
+            <div className="vm">
+              <b>{live.caregiverName || 'Your caregiver'} is with you</b>
+              <span>Visit in progress{until && t(until) ? ` · scheduled until ${t(until)}` : ''}</span>
+              {t(since) ? <span>Started at {t(since)}</span> : null}
+            </div>
+          </div>
+        </React.Fragment>
+      );
+    };
+
+    const GfcCarePlan = ({ data, readOnly, token, shifts }) => {
       const cp = data.carePlan || {};
       const hasPlan = !!data.carePlan;               // null until the RN-authored plan exists (Session 4)
-      const upcoming = data.upcomingVisits || [];
+      // Upcoming comes from the real caregiver schedule, not from visit_logs.
+      // visit_logs is written when a caregiver FILES a completed log, so it
+      // never carried a future visit — this tab said "no visits scheduled"
+      // while Home showed one in progress. Recent still reads visit_logs,
+      // which is exactly what that collection is for.
+      const fmtShiftTime = (iso) => {
+        const d = new Date(iso);
+        return isNaN(d.getTime()) ? '' : d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+      };
+      const upcoming = (shifts || [])
+        .filter(s => s.status !== 'in_progress')      // the live one has its own card above
+        .map(s => ({
+          id: s.id,
+          day: prettyDate(s.start),
+          time: `${fmtShiftTime(s.start)} – ${fmtShiftTime(s.end)}`,
+          type: 'Scheduled visit',
+          with: s.caregiverName || 'Your caregiver',
+          highlight: false
+        }));
       const recent = data.recentVisits || [];
       const teamColors = ['var(--gold)', '#9FE1CB', '#CECBF6'];
       const teamTextColors = ['var(--navy)', '#0f6e56', '#3c3489'];
@@ -5124,6 +5183,7 @@
           )}
           </React.Fragment>
           )}
+          <GfcVisitInProgress shifts={shifts} />
           <p className="lbl">Upcoming visits</p>
           {upcoming.length === 0 && <p className="sub" style={{ marginTop: 0 }}>No visits scheduled yet.</p>}
           {upcoming.map(v => (
@@ -6166,7 +6226,7 @@
             <button onClick={gfcLogout} title="Sign out"><i className="ti ti-logout" /></button>
           </div>
           {view === 'home' && data && <GfcDashboard data={data} onNavigate={setView} me={me} clinical={clinicalAvailable ? clinical : null} shifts={shifts} />}
-          {view === 'care' && data && <GfcCarePlan data={data} readOnly={readOnly} token={token} />}
+          {view === 'care' && data && <GfcCarePlan data={data} readOnly={readOnly} token={token} shifts={shifts} />}
           {view === 'health' && clinicalAvailable && <GfcHealth clinical={clinical} me={me} token={token} readOnly={readOnly}
             onSharingSaved={(sharing) => setMe(m => m ? { ...m, sharing } : m)} />}
           {view === 'messages' && <GfcMessages token={token} me={me} actingAs={me && me.actingAs} />}
