@@ -592,7 +592,57 @@ async function uploadCaregiverDocumentFile(caregiverName, fileName, fileBuffer, 
 // care-plan PDF is served from the Drive reference on client.carePlanDocs,
 // never from OpenEMR Documents). The service token reads it; the file stays
 // private (no anyone-link needed).
+// ---------------------------------------------------------------------------
+// What Google actually refused, in words that name the fix
+// ---------------------------------------------------------------------------
+// Google's own messages are accurate and say nothing about what to DO. Worse,
+// every Drive failure used to reach the screen as one sentence — "That file
+// could not be retrieved" — which cannot distinguish a missing scope from an
+// expired session from a file that was never stored. That is the house rule
+// this repo keeps paying for: a signal that cannot tell two states apart is
+// not evidence for either.
+//
+// ONE copy, here, because `scripts/verify_drive_access.js` carried its own and
+// two copies of "what this error means" drift the moment one is updated.
+const DRIVE_ERROR_HINTS = [
+  [/unauthorized_client/i,
+   'Domain-wide delegation does not grant the Drive scope to this service account. Admin console → Security → API controls → Manage Domain Wide Delegation: the scope list must carry BOTH https://www.googleapis.com/auth/gmail.send AND https://www.googleapis.com/auth/drive, on ONE line. (Setup step 2.)'],
+  [/invalid_grant/i,
+   'The impersonated user is not a real licensed Workspace mailbox. An alias or a Google Group cannot be impersonated. Check GOOGLE_DRIVE_IMPERSONATE (or GMAIL_SEND_AS). (Setup step 4.)'],
+  [/storage quota/i,
+   'No impersonation subject is set, so the service account tried to own the file itself and has no quota of its own. Set GOOGLE_DRIVE_IMPERSONATE. (Setup step 4.)'],
+  [/File not found/i,
+   'Google cannot see that file as the impersonated user. Either the file lives in a Shared Drive this user is not a member of, or GOOGLE_DRIVE_FOLDER_ID points somewhere the service account was never shared with. (Setup step 3.)'],
+  [/insufficient|insufficientFilePermissions|forbidden/i,
+   'The impersonated user can see the file but may not read it. On a Shared Drive the service account needs at least Content manager. (Setup step 3.)'],
+  [/Only files with binary content|fileNotDownloadable/i,
+   'That Drive item is a Google-native document (Doc/Sheet/Slide), which has no bytes to download. Only uploaded files can be read back.'],
+  [/API has not been used|accessNotConfigured|has not been enabled/i,
+   'The Google Drive API is not enabled on the Cloud project. (Setup step 1.)']
+];
+
+/**
+ * Turn a thrown Drive error into { reason, hint }.
+ *
+ * `hint` is null when nothing matches, deliberately: an invented explanation
+ * sends someone down the wrong path, which costs more than saying nothing.
+ * The same rule the mailer's hints follow.
+ */
+function describeDriveError(err) {
+  const reason = String((err && (err.message || err.error)) || 'Unknown Drive error');
+  if (err instanceof DriveNotConfiguredError) {
+    return { reason, hint: 'Drive is not configured on this deployment. See docs/DRIVE_ACCESS_SETUP.md.', code: 'DRIVE_NOT_CONFIGURED' };
+  }
+  for (const [pattern, hint] of DRIVE_ERROR_HINTS) {
+    if (pattern.test(reason)) return { reason, hint, code: 'DRIVE_REFUSED' };
+  }
+  return { reason, hint: null, code: 'DRIVE_REFUSED' };
+}
+
 async function downloadFileBuffer(fileId) {
+  // Asking Google about `undefined` comes back as "File not found", which reads
+  // as a Drive problem when it is actually a row with no file behind it.
+  if (!fileId) throw new Error('No Drive file id is stored for that record');
   const drive = await getDriveClient();
   const res = await drive.files.get({ fileId, alt: 'media',
                                       ...ALL_DRIVES
@@ -620,6 +670,7 @@ module.exports = {
   // not set up" from "Google refused this file".
   driveStatus,
   DriveNotConfiguredError,
+  describeDriveError,
   // exported for tests
   loadServiceAccount,
   escapeDriveQueryValue,

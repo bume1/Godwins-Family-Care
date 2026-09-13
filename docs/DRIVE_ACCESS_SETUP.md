@@ -147,6 +147,13 @@ connected" for weeks.
 
 ## When it goes wrong
 
+**First: read what the screen says now.** As of 2026-09-13 a failed upload or
+download shown to an **administrator** carries Google's actual reason plus the
+setup step that fixes it. A caregiver still sees a plain message, because
+Google's errors name file ids and accounts they cannot act on. If you are
+signed in as admin and still see only one sentence, the deployment is running
+older code.
+
 The failure messages Google returns are accurate and tell you nothing about what
 to fix. These are the three that actually happen:
 

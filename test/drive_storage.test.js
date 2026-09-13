@@ -232,7 +232,12 @@ const fakeDrive = (opts = {}) => {
     async deleteFile(id) {
       if (!files.has(id)) throw new Error('File not found');
       files.delete(id);
-    }
+    },
+    // The fake mirrors production: server.js injects the real module, which
+    // carries this. A fake missing it let the route fall through to its
+    // no-hint branch and the first version of the admin-reason test passed
+    // against the wrong path — the fake, not the code, was the bug.
+    describeDriveError: (e) => drive.describeDriveError(e)
   };
 };
 
@@ -607,4 +612,105 @@ test('an existing assignment stored by NAME still reads as assigned', () => {
   assert.ok(i > 0, 'the picker must match on id OR name');
   assert.match(hub.slice(i, i + 1500), /filter\(c => c !== client\.id && c !== clientName\)/,
     'and unticking must clear both forms, or the old name survives the save');
+});
+
+// ===========================================================================
+// A failure has to name itself
+// ===========================================================================
+// Reported live: uploads worked, opening a stored file answered "That file
+// could not be retrieved." That one sentence covered an expired session, a row
+// with no file behind it, and every way Google can refuse — so it was not
+// possible to tell which had happened without reading the server's log. That
+// is the house rule this repo keeps re-learning: a signal that cannot
+// distinguish two states is not evidence for either.
+
+test('a Drive error is translated into the setup step that fixes it', () => {
+  const cases = [
+    ['unauthorized_client: Client is unauthorized', /delegation|scope/i],
+    ['invalid_grant: Invalid email or User ID', /licensed|alias|impersonat/i],
+    ['Service Accounts do not have storage quota', /GOOGLE_DRIVE_IMPERSONATE/],
+    ['File not found: 1a2b3c', /Shared Drive|FOLDER_ID/],
+    ['The caller does not have permission (insufficientFilePermissions)', /Content manager|read/i],
+    ['Only files with binary content can be downloaded', /Google-native|no bytes/i]
+  ];
+  for (const [message, expected] of cases) {
+    const d = drive.describeDriveError(new Error(message));
+    assert.ok(d.hint, `no hint for: ${message}`);
+    assert.match(d.hint, expected, `wrong hint for: ${message}`);
+    assert.strictEqual(d.reason, message, 'the raw reason is preserved for the log');
+  }
+});
+
+test('an unrecognised failure gets NO hint rather than an invented one', () => {
+  // An explanation that does not fit sends someone down the wrong path, which
+  // costs more than saying nothing — the same rule the mailer's hints follow.
+  const d = drive.describeDriveError(new Error('socket hang up'));
+  assert.strictEqual(d.hint, null);
+  assert.strictEqual(d.reason, 'socket hang up');
+});
+
+test('a not-configured Drive is named as SETUP, not as a refusal', () => {
+  const d = drive.describeDriveError(new drive.DriveNotConfiguredError('nothing is set'));
+  assert.strictEqual(d.code, 'DRIVE_NOT_CONFIGURED');
+  assert.match(d.hint, /DRIVE_ACCESS_SETUP/);
+});
+
+test('an ADMIN is told what Google actually said; a CAREGIVER is not', async (t) => {
+  // Google's messages carry file ids and account addresses, and there is
+  // nothing a caregiver can do with either. The admin is the one who can fix
+  // the delegation, so the admin is the one who gets the reason.
+  const store = {};
+  const stub = fakeDrive();
+  const cgHandle = await mountCaregiver(t, { store, driveStub: stub });
+  const { document } = await (await upload(cgHandle)).json();
+
+  // Make the read fail the way a missing scope does.
+  stub.downloadFileBuffer = async () => { throw new Error('unauthorized_client: Client is unauthorized'); };
+
+  const asAdmin = await mountCaregiver(t, { as: ADMIN, store, driveStub: stub });
+  const adminRes = await asAdmin.call(`/api/caregiver/documents/${document.id}/file`);
+  assert.strictEqual(adminRes.status, 502);
+  const adminBody = await adminRes.json();
+  assert.match(adminBody.error, /unauthorized_client/, 'the admin sees the real reason');
+  assert.match(adminBody.hint, /delegation|scope/i, 'and the step that fixes it');
+  assert.strictEqual(adminBody.setup, 'docs/DRIVE_ACCESS_SETUP.md');
+
+  const cgRes = await cgHandle.call(`/api/caregiver/documents/${document.id}/file`);
+  assert.strictEqual(cgRes.status, 502);
+  const cgBody = await cgRes.json();
+  assert.ok(!/unauthorized_client/.test(JSON.stringify(cgBody)),
+    'a caregiver must not be handed Google internals');
+  assert.strictEqual(cgBody.hint, undefined);
+});
+
+test('a row with NO stored file is its own answer, not a storage outage', async (t) => {
+  // Asking Google about `undefined` comes back as "File not found", which reads
+  // as Drive being down when it is actually a broken row.
+  const store = { caregiver_documents: [{
+    id: 'cgdoc_orphan', caregiver_id: 'cg1', kind: 'timesheet',
+    file_name: 'x.pdf', drive_file_id: null, status: 'received', uploaded_at: '2026-09-13T00:00:00.000Z'
+  }] };
+  const stub = fakeDrive();
+  let asked = false;
+  stub.downloadFileBuffer = async () => { asked = true; throw new Error('File not found'); };
+  const h = await mountCaregiver(t, { store, driveStub: stub });
+  const res = await h.call('/api/caregiver/documents/cgdoc_orphan/file');
+  assert.strictEqual(res.status, 404);
+  assert.strictEqual((await res.json()).code, 'DOC_FILE_MISSING');
+  assert.strictEqual(asked, false, 'Drive is never asked about a file id we do not have');
+});
+
+test('both screens read the server answer instead of printing one sentence', () => {
+  const hub = read('public/admin-hub.html');
+  const i = hub.indexOf('const open = async (d) =>');
+  const openFn = hub.slice(i, i + 1400);
+  assert.ok(!/throw new Error\('That file could not be retrieved\.'\)/.test(openFn),
+    'the one-sentence catch-all must be gone');
+  assert.match(openFn, /res\.status === 401/, 'an expired session is named as one');
+  assert.match(openFn, /body\.hint/, 'and the server hint reaches the screen');
+
+  // The caregiver app tells a timed-out session from a refused file.
+  const cg = read('public/caregiver.html');
+  const card = cg.slice(cg.indexOf('const DocumentsCard'), cg.indexOf('const MoreTab'));
+  assert.match(card, /session timed out/i);
 });

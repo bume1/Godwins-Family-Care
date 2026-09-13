@@ -1,5 +1,5 @@
 # GFC Care Platform — running status
-_Last updated: 2026-09-13 (SECURITY: cross-client messaging leak closed; admin address typo fixed and every queued notice branded; Drive off Replit — every upload was broken on AWS; caregiver + payroll documents; the assigned-clients picker had never worked)_
+_Last updated: 2026-09-13 (Drive wired live — a failed read now NAMES its cause; SECURITY: cross-client messaging leak closed; admin address typo fixed and every queued notice branded; caregiver + payroll documents)_
 
 This file is auto-loaded at the start of every Claude Code session. Read it first for current state. Details live in `docs/`.
 
@@ -115,6 +115,17 @@ This file is auto-loaded at the start of every Claude Code session. Read it firs
 ---
 
 ## Recent decisions
+
+**09/2026 — Drive went live, and the first failure could not be diagnosed (2026-09-13, owner report).** The owner wired the Google setup and **uploads worked**. Opening a stored file answered *"That file could not be retrieved."* — and that sentence was the real defect.
+
+- **The read path was NOT a regression.** `downloadFileBuffer` is byte-identical to the version that worked before the service-account move, apart from the shared-drive flags. Checked against git rather than assumed, which is what stopped an hour of rewriting working code.
+- **THE DEFECT WAS THAT THE MESSAGE COULD NOT DISTINGUISH ANYTHING.** One sentence covered an expired session (Session 5's 15-minute idle logout), a row with no file behind it, a missing Drive scope on the delegation, a Shared Drive the impersonated user was never added to, and a Google-native file with no bytes. Every one needs a different action and **none of them could be told apart without reading the server log**. *A signal that cannot distinguish two states is not evidence for either* — the house rule, this time applied to an error message rather than a deploy check.
+- **`describeDriveError()` in `googledrive.js` is the ONE copy**, moved out of `scripts/verify_drive_access.js` which had its own. Two copies of "what this error means" drift the moment one is updated. **An unrecognised failure gets NO hint**, deliberately: an explanation that does not fit sends someone down the wrong path, which costs more than saying nothing — the same rule the mailer's hints follow.
+- **An ADMIN is told what Google actually said; a CAREGIVER is not.** Google's messages carry file ids and account addresses, and there is nothing a caregiver can do with either. The admin is the one who can fix a delegation, so the admin gets the reason, the setup step, and the runbook path. Build-enforced in both directions.
+- **A row with no `drive_file_id` is a 404 with its own code, and Drive is never asked.** Asking Google about `undefined` answers "File not found", which reads as a storage outage when it is a broken row.
+- **Both screens read the server's answer instead of printing their own sentence**, and **401 is named as an expired session** — the one failure the person looking at it can fix themselves. The hub's upload helper deliberately does **not** go through `handleResponse`: that throws `Error(error)` and drops `hint`/`setup`, and widening the shared helper would touch every call on a 3,500-line page.
+- **A TEST FAILURE HERE WAS THE FAKE, NOT THE CODE.** `fakeDrive` had no `describeDriveError`, so the route fell through to its no-hint branch and the first version of the admin-reason test asserted against a path production never takes. The fake now mirrors what `server.js` injects. *A fake that is missing what production supplies tests a different function* — the same shape as the cross-client leak, where the test passed the viewer's client where production passes the thread's.
+- **Verification: 6 new tests (39 in the file), seven mutations each confirmed to fail them** — every error given one generic hint, an unknown error given an invented one, a missing file id asked of Google anyway, the caregiver handed the raw reason, the admin losing the hint, the hub back to one sentence, and the caregiver app no longer naming a timed-out session. Full suite **633, 0 failing**; both pages compile. **Still not diagnosed from here:** which of those states the owner actually hit — that is the point. The next attempt says so on screen.
 
 **09/2026 — The admin address had a typo, and eleven notices were still plain text (PR #90, merged 2026-09-13, owner report).** A bounce arrived from a message notification. Both defects were in the same email and neither announced itself.
 
