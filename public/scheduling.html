@@ -126,7 +126,15 @@ const PostShift = ({ roster, onPosted, setErr, setOk }) => {
   const canWork = (c) => !level || level === 'any' || RANK[c.licenseLevel] >= RANK[level];
   const eligible = roster.caregivers.filter(canWork);
 
-  const post = async () => {
+  // The enrollment gate refuses a client who is not enrolled. An admin may go
+  // ahead anyway with a reason — an urgent start is a real situation and a gate
+  // with no visible way through gets worked around somewhere nobody can see.
+  // The panel appears only after the refusal, so the normal path never offers a
+  // bypass nobody asked for.
+  const [gateBlock, setGateBlock] = useState(null);
+  const [overrideReason, setOverrideReason] = useState('');
+
+  const post = async (override) => {
     setErr(''); setOk(''); setBusy(true);
     try {
       const res = await api('/api/scheduling/shifts', {
@@ -138,14 +146,22 @@ const PostShift = ({ roster, onPosted, setErr, setOk }) => {
           requiredLicenseLevel: level,
           poolVisibility: visibility,
           assignToCaregiverId: assignTo || null,
-          notes
+          notes,
+          ...(override ? { override: true, overrideReason } : {})
         })
       });
       setOk((res && res.message) || 'Shift posted.');
-      setNotes(''); setAssignTo('');
+      setNotes(''); setAssignTo(''); setGateBlock(null); setOverrideReason('');
       await onPosted();
     } catch (e) {
-      setErr(e.data && e.data.errors ? e.data.errors.map(x => x.message).join(' ') : e.message);
+      const d = e.data || {};
+      if (d.code === 'CLIENT_NOT_ENROLLED' && d.overridable) {
+        setGateBlock({ message: d.error, status: d.enrollmentStatus });
+        setErr('');
+      } else {
+        setGateBlock(null);
+        setErr(d.errors ? d.errors.map(x => x.message).join(' ') : e.message);
+      }
     } finally { setBusy(false); }
   };
 
@@ -218,8 +234,29 @@ const PostShift = ({ roster, onPosted, setErr, setOk }) => {
           checked against a radius. Add the coordinates to check it properly.
         </div>
       )}
+      {gateBlock && (
+        <div className="note" style={{ marginTop: 10 }}>
+          <b>{gateBlock.message}</b>
+          <p className="sub" style={{ marginTop: 6 }}>
+            You can go ahead anyway. The reason you give is stored on the shift and shows on the
+            board, so anyone looking at it later can see this client was not enrolled when it was posted.
+          </p>
+          <input
+            value={overrideReason}
+            onChange={e => setOverrideReason(e.target.value)}
+            placeholder="Why can this not wait for enrollment?"
+            style={{ width: '100%', marginTop: 6 }} />
+          <div className="btns" style={{ marginTop: 8 }}>
+            <button className="btn" disabled={busy || !overrideReason.trim()} onClick={() => post(true)}>
+              {busy ? 'Posting…' : 'Post anyway, with this reason'}
+            </button>
+            <button className="btn ghost" disabled={busy}
+              onClick={() => { setGateBlock(null); setOverrideReason(''); }}>Cancel</button>
+          </div>
+        </div>
+      )}
       <div className="btns">
-        <button className="btn gold" disabled={!clientId || !level || busy} onClick={post}>
+        <button className="btn gold" disabled={!clientId || !level || busy} onClick={() => post(false)}>
           {busy ? 'Posting…' : (assignTo ? 'Post to caregiver' : 'Post shift')}
         </button>
       </div>
@@ -252,6 +289,12 @@ const ShiftRow = ({ s, roster, act }) => {
         <div className="mu">Released by {s.releasedFromName}{s.releasedReason ? ` — ${s.releasedReason}` : ''}</div>
       )}
       {s.cancelReason && <div className="mu">Cancelled — {s.cancelReason}</div>}
+      {s.enrollmentOverride && (
+        <div className="note" style={{ margin: '8px 0' }}>
+          <b>Posted before enrollment was complete.</b>{' '}
+          {s.enrollmentOverride.byName} went ahead on {fmtWhen(s.enrollmentOverride.at)} — “{s.enrollmentOverride.reason}”
+        </div>
+      )}
 
       {s.status === 'claimed' && (
         <div className="btns">
@@ -581,7 +624,10 @@ const App = () => {
         {tab === 'requests' && (
           <div className="card">
             <h2>Client shift requests</h2>
-            <p className="sub">A request becomes a shift when you post it. Post it from the “Post a shift” tab.</p>
+            <p className="sub">
+              Anyone can ask, at any point in enrollment. A request becomes a shift when you post it from
+              the “Post a shift” tab, and that is where enrollment is checked.
+            </p>
             {requests.length === 0
               ? <Empty icon="inbox">No requests.</Empty>
               : requests.map(r => (
@@ -589,6 +635,14 @@ const App = () => {
                   <div><b>{r.client_name || r.clientName}</b> <span className="chip open">{titleize(r.status)}</span></div>
                   <div className="mu">{r.date} · {r.start}–{r.end} — requested by {r.requested_by_name || r.requestedByName}</div>
                   {r.care_needs && <div className="mu">{r.care_needs}</div>}
+                  {/* Enrollment as it stood when they ASKED. Surfaced here rather
+                      than blocking the ask, so whoever works this queue knows
+                      before they post instead of hitting the gate afterwards. */}
+                  {r.client_enrollment_ok === false && (
+                    <div className="note" style={{ margin: '8px 0' }}>
+                      <b>Not enrolled when this was requested.</b> {r.client_enrollment_note}
+                    </div>
+                  )}
                 </div>
               ))}
           </div>
