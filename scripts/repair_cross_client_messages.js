@@ -92,13 +92,17 @@ function refreshPreviews(threads, remaining) {
   return touched;
 }
 
-async function main() {
+// `opts.db` is for the test harness only — it lets the suite drive the REAL
+// repair end to end against a seeded in-memory store, so the --apply write path
+// is proven rather than assumed. Nothing on the command line can reach it.
+async function main(opts = {}) {
   // Built the same way server.js builds it (`dataStore.createStore()`), so this
   // reads and writes exactly the store the app is running on — dev or the
   // production Postgres inside the boundary. Do NOT require the module and call
   // get/set on it: `dataStore` exports the FACTORY, not a store.
   const dataStore = require(path.join(__dirname, '..', 'dataStore'));
-  const db = dataStore.createStore();
+  const db = opts.db || dataStore.createStore();
+  const apply = opts.apply !== undefined ? opts.apply : APPLY;
 
   const get = async (k) => (await db.get(k)) || [];
   const users = await get('users');
@@ -130,7 +134,7 @@ async function main() {
     console.log(`  ${name(a)} → ${name(b)}: ${n} message(s). Everyone who can read ${name(b)}'s thread saw them.`);
   }
 
-  if (!APPLY) {
+  if (!apply) {
     console.log('\nREPORT ONLY. Re-run with --apply to move these into quarantined_messages.\n');
     return;
   }
@@ -157,10 +161,11 @@ async function main() {
 
   console.log(`\nMoved ${misfiled.length} message(s) into quarantined_messages.`);
   console.log(`Refreshed the preview on ${touched} thread(s).`);
-  console.log('Read them back with the KV snapshot script if a breach assessment needs them.\n');
+  console.log('They are kept in the \'quarantined_messages\' collection, with who wrote them,');
+  console.log('whose thread they were in, and when they were pulled. Nothing was deleted.\n');
 }
 
-module.exports = { findMisfiled, refreshPreviews, ownClientId };
+module.exports = { main, findMisfiled, refreshPreviews, ownClientId };
 
 // Only run when invoked directly, so requiring it from a test does not repair
 // anything.

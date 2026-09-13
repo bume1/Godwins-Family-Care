@@ -654,3 +654,53 @@ test('REPAIR: the script builds the store the way server.js does', () => {
   assert.ok(!/db\.init\(/.test(src), 'there is no init() on the store contract');
   assert.ok(/require\.main === module/.test(src), 'requiring it from a test must not repair anything');
 });
+
+test('REPAIR: --apply actually moves the rows, and a re-run is a no-op', async () => {
+  // The write path, driven end to end against a real (in-memory) store. It is
+  // the path that runs ONCE, on production data, during an incident — so it is
+  // proven here rather than assumed from the pure helpers.
+  const dataStore = require('../dataStore');
+  const repair = require('../scripts/repair_cross_client_messages');
+  const db = dataStore.createStore({ adapter: 'memory', env: { NODE_ENV: 'test' } });
+
+  await db.set('users', [
+    { id: 'client-1', name: 'Bianca (TEST DATA)', role: 'client' },
+    { id: 'client-2', name: 'Dorothy (TEST DATA)', role: 'client' },
+    { id: 'cg-1', name: 'Caregiver (TEST DATA)', role: 'vendor' }
+  ]);
+  await db.set('message_threads', [
+    { id: 't1', channel: 'direct_care', client_id: 'client-1', created_at: '2026-09-01T00:00:00Z',
+      last_message_at: '2026-09-13T11:49:00Z', last_message_preview: 'Test' }
+  ]);
+  await db.set('messages', [
+    { id: 'm1', thread_id: 't1', from_user_id: 'client-1', body: 'Hello', sent_at: '2026-09-13T00:51:00Z' },
+    { id: 'm2', thread_id: 't1', from_user_id: 'client-2', body: 'Test',  sent_at: '2026-09-13T11:49:00Z' },
+    { id: 'm3', thread_id: 't1', from_user_id: 'cg-1',     body: 'On my way', sent_at: '2026-09-13T09:00:00Z' }
+  ]);
+
+  // A report-only run must change NOTHING. That is the run she does first.
+  await repair.main({ db, apply: false });
+  assert.strictEqual((await db.get('messages')).length, 3, 'the report changes nothing');
+  assert.strictEqual((await db.get('quarantined_messages') || []).length, 0);
+
+  await repair.main({ db, apply: true });
+  const left = await db.get('messages');
+  assert.deepStrictEqual(left.map(m => m.id).sort(), ['m1', 'm3'],
+    'the other client\'s message is gone; both legitimate ones stay');
+  const quarantined = await db.get('quarantined_messages');
+  assert.strictEqual(quarantined.length, 1);
+  assert.strictEqual(quarantined[0].id, 'm2', 'it is MOVED, not deleted — this is breach evidence');
+  assert.strictEqual(quarantined[0].body, 'Test', 'with its content intact');
+  assert.strictEqual(quarantined[0].original_thread_client_id, 'client-1', 'and whose thread it was in');
+  assert.ok(quarantined[0].quarantined_at, 'and when it was pulled');
+
+  // The preview is refreshed, or the removed message keeps showing in the list.
+  const thread = (await db.get('message_threads'))[0];
+  assert.strictEqual(thread.last_message_preview, 'On my way');
+  assert.strictEqual(thread.last_message_at, '2026-09-13T09:00:00Z');
+
+  // Idempotent: running it twice must not double-quarantine or remove more.
+  await repair.main({ db, apply: true });
+  assert.strictEqual((await db.get('messages')).length, 2, 'a re-run removes nothing further');
+  assert.strictEqual((await db.get('quarantined_messages')).length, 1, 'and quarantines nothing twice');
+});
