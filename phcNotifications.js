@@ -17,12 +17,17 @@
 //   7. An admin approves the enrollment   → nobody, including the client who
 //      had been waiting for exactly that
 //
-// HOW MUCH EACH EMAIL MAY SAY DEPENDS ON THE LIVE TRANSPORT, and that is the
-// point rather than an inconvenience. "Ada Bell's care plan is signed" is
-// protected health information. On Resend, which carries no BAA, these notices
-// say only that something is waiting; on Google Workspace they say what it is,
-// and the detailed version is marked { phi: true } so the mailer refuses it
-// outright if the transport changes underneath us.
+// HOW MUCH EACH EMAIL MAY SAY DEPENDS ON WHETHER THE LIVE TRANSPORT IS INSIDE
+// THE BAA, and that is the point rather than an inconvenience. "Ada Bell's care
+// plan is signed" is protected health information. On a transport that carries
+// no BAA these notices say only that something is waiting; on a covered one
+// they say what it is, and the detailed version is marked { phi: true } so the
+// mailer refuses it outright if the transport changes underneath us.
+//
+// Coverage is read from the SENDING ADDRESS at send time, never from a
+// transport's name, and an unreadable transport counts as NOT covered — which
+// is why none of this names a vendor. Whichever one is configured today, the
+// rule is the same and it is re-evaluated on every send.
 //
 // Every function here is best-effort. A notification failure must never undo
 // an upload, a review, a signature or a co-signature that already succeeded.

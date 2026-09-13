@@ -207,8 +207,16 @@ module.exports = function createSchedulingRoutes(deps) {
       const client = await loadClient(clientId);
       if (!client) return res.status(404).json({ error: 'Client not found.', code: 'CLIENT_NOT_FOUND' });
 
-      const requestOverride = gateScheduling(req, res, client);
-      if (requestOverride === false) return;
+      // DELIBERATELY NOT GATED (owner decision, 2026-09-13). A family calling to
+      // ask for care before the paperwork is finished is the normal way this
+      // starts, not an edge case — refusing the ask would turn the gate into a
+      // reason people phone instead, and then there is no record at all.
+      //
+      // The gate belongs on COMMITTING care (posting or assigning a shift), which
+      // is where an admin decides. So the ask is free and the client's enrollment
+      // state rides on the row instead, where whoever works the queue sees it
+      // before they act on it rather than discovering it at post time.
+      const requestEligibility = gate.schedulingEligibility(client);
 
       if (!sched.isIsoDate(body.date)) {
         return res.status(400).json({ error: 'Give the date you need care, as YYYY-MM-DD.', code: 'DATE_INVALID' });
@@ -233,15 +241,19 @@ module.exports = function createSchedulingRoutes(deps) {
         requested_at: nowIso(),
         resolved_at: null,
         shift_id: null,
-        enrollment_override: requestOverride
+        // Captured at request time, and kept: what the admin working this queue
+        // needs to know is whether enrollment was outstanding when the family
+        // asked, which is also the thing that will have moved by the time
+        // anybody looks. `client_enrollment_ok` is the answer, not the raw
+        // status, so the queue reads one field rather than re-deriving a rule.
+        client_enrollment_status: requestEligibility.status,
+        client_enrollment_ok: requestEligibility.allowed,
+        client_enrollment_note: requestEligibility.allowed ? null : requestEligibility.message
       };
       rows.push(row);
       await db.set('shift_requests', rows);
       await logActivity(req.user.id, row.requested_by_name, 'shift_requested', 'shift_request', row.id,
-        { clientId: client.id, date: row.date,
-          enrollmentOverride: requestOverride
-            ? { reason: requestOverride.reason, enrollmentStatus: requestOverride.enrollmentStatus }
-            : null });
+        { clientId: client.id, date: row.date, enrollmentStatus: row.client_enrollment_status });
 
       res.json({ shiftRequest: row });
     } catch (error) {

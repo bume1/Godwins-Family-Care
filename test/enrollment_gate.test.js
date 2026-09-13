@@ -124,19 +124,38 @@ test('an override reason is bounded, so a pasted document cannot land in the rec
 // Build enforcement — the gate has to be CALLED, not merely available
 // ===========================================================================
 
-test('every route that creates work against a client passes through the gate', () => {
+test('committing care passes through the gate, before anything is written', () => {
   const src = read('routes/scheduling.js');
-  // Posting a shift and requesting one are the two write paths that name a
-  // client. Both must gate before anything is written.
-  for (const route of ["router.post('/api/scheduling/shifts'", "router.post('/api/scheduling/shift-requests'"]) {
-    const at = src.indexOf(route);
-    assert.notStrictEqual(at, -1, `${route} still exists`);
-    const body = src.slice(at, src.indexOf('router.', at + 10));
-    const gateAt = body.indexOf('gateScheduling(');
-    const writeAt = body.indexOf('db.set(');
-    assert.ok(gateAt !== -1, `${route} calls the gate`);
-    assert.ok(writeAt === -1 || gateAt < writeAt, `${route} gates BEFORE it writes`);
-  }
+  const route = "router.post('/api/scheduling/shifts'";
+  const at = src.indexOf(route);
+  assert.notStrictEqual(at, -1, `${route} still exists`);
+  const body = src.slice(at, src.indexOf('router.', at + 10));
+  const gateAt = body.indexOf('gateScheduling(');
+  const writeAt = body.indexOf('db.set(');
+  assert.ok(gateAt !== -1, `${route} calls the gate`);
+  assert.ok(writeAt === -1 || gateAt < writeAt, `${route} gates BEFORE it writes`);
+});
+
+test('ASKING for care is never gated — only committing it is', () => {
+  // Owner decision, 2026-09-13. A family calling before the paperwork is
+  // finished is the normal way this starts. Refusing the ask would turn the
+  // gate into a reason to phone instead, and then there is no record at all.
+  const src = read('routes/scheduling.js');
+  const at = src.indexOf("router.post('/api/scheduling/shift-requests'");
+  assert.notStrictEqual(at, -1);
+  const body = src.slice(at, src.indexOf('router.', at + 10));
+  assert.ok(!body.includes('gateScheduling('), 'a shift REQUEST must not be refused on enrollment');
+});
+
+test('but the request carries the enrollment state, so the queue is not blind', () => {
+  // Ungating without surfacing would just move the surprise to post time.
+  const src = read('routes/scheduling.js');
+  const at = src.indexOf("router.post('/api/scheduling/shift-requests'");
+  const body = src.slice(at, src.indexOf('router.', at + 10));
+  assert.match(body, /gate\.schedulingEligibility\(client\)/);
+  assert.match(body, /client_enrollment_ok: requestEligibility\.allowed/);
+  // And the admin queue shows it.
+  assert.match(read('public/scheduling.html'), /r\.client_enrollment_ok === false/);
 });
 
 test('the clinical appointment booking route enforces the same gate from the same module', () => {

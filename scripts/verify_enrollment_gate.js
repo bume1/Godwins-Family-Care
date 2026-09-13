@@ -97,6 +97,30 @@ const call = async (method, path, token, body) => {
     sample: (Array.isArray(rows) ? rows.slice(0, 3).map(a => a && a.action) : rows)
   });
 
+  console.log('\n--- asking is free; committing is what is gated ---');
+  // A FRESH client: the one above was flipped to enrolled two steps ago, and a
+  // probe that reuses it would assert the not-enrolled case against an enrolled
+  // record and pass for the wrong reason.
+  const askC = await call('POST', '/api/users', token, {
+    email: `gate.probe3.${Date.now()}@example.com`, password: 'Probe12345!', name: 'Request Probe Client',
+    role: 'client', practiceName: 'Request Probe Client'
+  });
+  const askId = askC.body && (askC.body.user ? askC.body.user.id : askC.body.id);
+  const rq = await call('POST', '/api/scheduling/shift-requests', token, {
+    clientId: askId, date: '2026-12-05', start: '09:00', end: '13:00',
+    careNeeds: 'Mornings, help with bathing and breakfast.'
+  });
+  ok('a not-yet-enrolled client can still have a shift REQUESTED', rq.status === 200, rq.body);
+  const rlist = await call('GET', '/api/scheduling/shift-requests', token);
+  const rrow = ((rlist.body || {}).shiftRequests || []).find(r => r.client_id === askId);
+  ok('  the request is really stored', !!rrow, rlist.body);
+  ok('  and carries the enrollment state as it stood when they asked',
+    !!rrow && rrow.client_enrollment_ok === false, rrow && rrow.client_enrollment_ok);
+  ok('  with the reason, so the queue is not blind',
+    !!rrow && /not completed enrollment|not been approved/.test(rrow.client_enrollment_note || ''),
+    rrow && rrow.client_enrollment_note);
+  ok('  and the care needs survived', !!rrow && /bathing/.test(rrow.care_needs || ''), rrow && rrow.care_needs);
+
   console.log('\n--- the approval override ---');
   const c2 = await call('POST', '/api/users', token, {
     email: `gate.probe2.${Date.now()}@example.com`, password: 'Probe12345!', name: 'Approval Probe Client',

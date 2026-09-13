@@ -624,7 +624,10 @@ const App = () => {
         {tab === 'requests' && (
           <div className="card">
             <h2>Client shift requests</h2>
-            <p className="sub">A request becomes a shift when you post it. Post it from the “Post a shift” tab.</p>
+            <p className="sub">
+              Anyone can ask, at any point in enrollment. A request becomes a shift when you post it from
+              the “Post a shift” tab, and that is where enrollment is checked.
+            </p>
             {requests.length === 0
               ? <Empty icon="inbox">No requests.</Empty>
               : requests.map(r => (
@@ -632,6 +635,14 @@ const App = () => {
                   <div><b>{r.client_name || r.clientName}</b> <span className="chip open">{titleize(r.status)}</span></div>
                   <div className="mu">{r.date} · {r.start}–{r.end} — requested by {r.requested_by_name || r.requestedByName}</div>
                   {r.care_needs && <div className="mu">{r.care_needs}</div>}
+                  {/* Enrollment as it stood when they ASKED. Surfaced here rather
+                      than blocking the ask, so whoever works this queue knows
+                      before they post instead of hitting the gate afterwards. */}
+                  {r.client_enrollment_ok === false && (
+                    <div className="note" style={{ margin: '8px 0' }}>
+                      <b>Not enrolled when this was requested.</b> {r.client_enrollment_note}
+                    </div>
+                  )}
                 </div>
               ))}
           </div>

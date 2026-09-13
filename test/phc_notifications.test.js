@@ -352,7 +352,7 @@ test('a document request reaches the client and their POA, and no other family',
   })();
 });
 
-test('on Resend a document request names no document; on Workspace it names them', async () => {
+test('an uncovered transport names no document; a BAA-covered one names them', async () => {
   const vague = harness({ baaCovered: false });
   const rows = [{ id: 'r1', label: 'Guardianship order' }];
   await vague.notifier.documentsRequested({ clientId: 'c1', rows, isReminder: false });
