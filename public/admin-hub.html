@@ -150,6 +150,14 @@
           body: JSON.stringify(userData)
         }).then(handleResponse).catch(err => ({ error: err.message })),
 
+      // The clinical role vocabulary (Session 4.8) — SERVED, never restated in
+      // this page. A second copy of the enum is a copy that drifts, and a
+      // drifting clinical role decides who may prescribe.
+      getClinicalRoles: (token) =>
+        fetch(`${API_URL}/api/admin/clinical-roles`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(err => ({ error: err.message })),
+
       // Verified competencies (Session 6). Deliberately a SEPARATE call from the
       // user save: the user PUT never touches skilledCompetencies, so a normal
       // profile edit can never wipe what a caregiver is signed off to do.
@@ -1419,7 +1427,7 @@
         assignedProjects: [], projectAccessLevels: {}, assignedClients: [],
         sendWelcomeEmail: true,
         // GFC extended fields
-        licenseLevel: '', hasClinicalAccess: false, enrollmentStatus: 'intake_pending',
+        licenseLevel: '', hasClinicalAccess: false, clinicalRole: '', enrollmentStatus: 'intake_pending',
         careTeam: { assignedFNPs: [], assignedCaseManager: '', primaryCaregiver: '', backupCaregiver: '' },
         familyOfClientId: '', // family role: the client (user id) this contact is linked to
         familyIsPoa: false, // family role: designated Power of Attorney (client-equivalent portal access)
@@ -1439,6 +1447,11 @@
       // to PUT /api/users, and these save through the caregiver route instead.
       const [competencyCatalog, setCompetencyCatalog] = useState([]);
       const [competencies, setCompetencies] = useState([]);
+      // Session 4.8 — served, not hardcoded (see api.getClinicalRoles).
+      const [clinicalRoleCatalog, setClinicalRoleCatalog] = useState([]);
+
+      const selectedClinicalRole = clinicalRoleCatalog.find(r => r.value === formData.clinicalRole) || null;
+      const pendingRoleReview = users.filter(u => u.clinicalRoleAutoAssigned && u.clinicalRole);
 
       const competencyFor = (task) => competencies.find(c => c.task === task) || null;
       const toggleCompetency = (task) => {
@@ -1458,6 +1471,9 @@
       useEffect(() => {
         api.getCompetencyCatalog(token).then(r => {
           if (r && Array.isArray(r.competencies)) setCompetencyCatalog(r.competencies);
+        });
+        api.getClinicalRoles(token).then(r => {
+          if (r && Array.isArray(r.roles)) setClinicalRoleCatalog(r.roles);
         });
       }, [token]);
 
@@ -1565,6 +1581,10 @@
           // GFC extended fields
           licenseLevel: user.licenseLevel || '',
           hasClinicalAccess: user.hasClinicalAccess || false,
+          // Session 4.8 — the credential, not a boolean. Round-tripped from
+          // GET /api/users, or the form save would wipe it.
+          clinicalRole: user.clinicalRole || '',
+          clinicalRoleAutoAssigned: !!user.clinicalRoleAutoAssigned,
           enrollmentStatus: user.enrollmentStatus || 'intake_pending',
           careTeam: user.careTeam || { assignedFNPs: [], assignedCaseManager: '', primaryCaregiver: '', backupCaregiver: '' },
           familyOfClientId: user.familyOfClientId || '',
@@ -1779,6 +1799,34 @@
 
       return (
         <div className="space-y-6">
+          {/* Session 4.8 — the reassignment queue. Clinical access stopped being
+              one checkbox, and the migration could not tell an RN from an FNP,
+              so it mapped everyone who had access to PROVIDER. That preserves
+              what they could do, and it means a nurse currently holds
+              prescribing rights until someone says otherwise. The boot log
+              names them too, but the log scrubber redacts the addresses and a
+              console line is not where an admin works. This banner stands
+              until each role has been confirmed. */}
+          {pendingRoleReview.length > 0 && (
+            <div className="bg-amber-50 border border-amber-300 p-4 rounded-xl">
+              <p className="font-semibold text-amber-900">
+                {pendingRoleReview.length} clinical role{pendingRoleReview.length === 1 ? '' : 's'} still need{pendingRoleReview.length === 1 ? 's' : ''} confirming
+              </p>
+              <p className="text-sm text-amber-800 mt-1">
+                Everyone who had clinical access was mapped to <b>Provider</b>, which carries prescribing, placing
+                orders on their own authority and signing billable encounters. Open each person and set their real
+                credential — saving the form confirms it.
+              </p>
+              <div className="flex flex-wrap gap-2 mt-3">
+                {pendingRoleReview.map(u => (
+                  <button key={u.id} onClick={() => handleEdit(u)}
+                    className="px-3 py-1.5 rounded-lg text-sm bg-white border border-amber-300 text-amber-900 hover:bg-amber-100">
+                    {u.name} — {u.clinicalRole}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="bg-white p-6 rounded-xl shadow-sm">
             <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
               <div>
@@ -2034,14 +2082,40 @@
                     </div>
                   )}
 
-                  {/* Clinical Access — shown for Clinical (FNP) / user role */}
-                  {formData.role === 'user' && (
+                  {/* Clinical role (Session 4.8) — shown for clinical staff and
+                      case managers. This REPLACED a single "Clinical Access"
+                      checkbox that granted prescribing, ordering, CPT selection
+                      and billable signing all at once. The options are served by
+                      GET /api/admin/clinical-roles, never listed here. */}
+                  {(formData.role === 'user' || formData.role === 'caseManager') && (
                     <div className="border-t pt-4">
-                      <div className="flex items-center gap-3 p-3 bg-teal-50 rounded-lg">
-                        <input type="checkbox" id="hasClinicalAccess" checked={formData.hasClinicalAccess}
-                          onChange={(e) => setFormData({ ...formData, hasClinicalAccess: e.target.checked })}
-                          className="w-5 h-5 rounded border-gray-300 text-teal-600 focus:ring-teal-500" />
-                        <label htmlFor="hasClinicalAccess" className="text-sm font-medium text-gray-700">Clinical Access (FNP / charting)</label>
+                      <div className="p-3 bg-teal-50 rounded-lg">
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Clinical role</label>
+                        <select value={formData.clinicalRole}
+                          onChange={(e) => setFormData({ ...formData, clinicalRole: e.target.value, hasClinicalAccess: !!e.target.value && e.target.value !== 'readOnly' })}
+                          className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
+                          <option value="">No clinical access</option>
+                          {clinicalRoleCatalog.map(r => (
+                            <option key={r.value} value={r.value}>{r.label}</option>
+                          ))}
+                        </select>
+                        <p className="text-xs text-gray-500 mt-2">
+                          Certification decides what this person may do: prescribing, placing an order on their own
+                          authority, selecting CPT codes and signing a billable encounter are a provider's. An RN or an
+                          LMSW places orders under a signed standing order. Read-only is chart access without a clinical
+                          licence.
+                        </p>
+                        {selectedClinicalRole && (
+                          <p className="text-xs text-teal-800 mt-2">
+                            May execute under a standing order: {(selectedClinicalRole.credentialCeiling || []).join(', ') || 'nothing'}.
+                          </p>
+                        )}
+                        {editingUser && editingUser.clinicalRoleAutoAssigned && (
+                          <p className="text-xs text-amber-700 mt-2">
+                            This role was assigned automatically when clinical access stopped being one checkbox. Confirm
+                            or change it — saving this form counts as confirming it.
+                          </p>
+                        )}
                       </div>
                       {formData.hasClinicalAccess && (
                         <div className="mt-3">

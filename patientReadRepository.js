@@ -21,6 +21,8 @@
 // rule, build-enforced in test/patient_clinical_read.test.js.
 // ============================================================
 
+const clinicalRoles = require('./clinicalRoles');
+
 const AUDIENCES = Object.freeze(['patient', 'poa', 'family']);
 
 // ---- Sharing settings the client (or their POA) controls for NON-POA family ----
@@ -161,8 +163,17 @@ const buildActingIdentity = (reqUser, client) => {
 };
 
 // ---- Case-manager scoped read: the ONE rule for the /api/clinical split ----
-const canClinicalWrite = (u) => !!u && (u.role === 'admin' || (!!u.hasClinicalAccess && u.role !== 'caseManager'));
-const canClinicalRead = (u) => canClinicalWrite(u) || (!!u && u.role === 'caseManager');
+// Session 4.8: the rule moved onto `clinicalRole` and is answered by
+// clinicalRoles.js. These two names stay because every /api/clinical guard and
+// the build-enforcement test in test/patient_clinical_read.test.js read them —
+// they now DELEGATE rather than restate, because two copies of "who may write
+// a chart" is how one path starts accepting what the other refuses.
+//
+// READ  = any assigned clinical role, `readOnly` (the case manager) included.
+// WRITE = any LICENSED role. A case manager stays read-only exactly as before,
+//         flag or no flag.
+const canClinicalWrite = (u) => clinicalRoles.canClinicalWrite(u);
+const canClinicalRead = (u) => clinicalRoles.canClinicalRead(u);
 
 // ---- Visit summary (scope A): filtered fields only, plain language ----
 // The encounter's app-side record (4.4 encounter_billing) carries the

@@ -58,6 +58,11 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'appointment_encounters', phi: true, owner: '4.2', note: 'pointers only' },
   { key: 'clinical_code_usage', phi: false, owner: '4.4', note: 'per-clinician code favorites' },
   { key: 'clinical_settings', phi: false, owner: '4.4' },
+  // Signed, versioned, expiring protocols (Session 4.8). PHI-bearing: a
+  // named-scope protocol lists the clients it covers, and the indications are
+  // diagnoses. Versions are immutable, so this collection only ever grows.
+  { key: 'standing_orders', phi: true, owner: '4.8', note: 'versions are immutable — a revision is a new row' },
+  { key: 'standing_order_executions', phi: true, owner: '4.8', note: 'the audit trail: who acted under whose authority, under which version' },
   { key: 'gfc_payer_credentialing', phi: false, owner: '4.4' },
   // ---- caregiver app (Session 6) ----
   { key: 'caregiver_visit_logs', phi: true, owner: '6' },

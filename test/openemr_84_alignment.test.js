@@ -171,13 +171,30 @@ test('order status maps app vocabulary to OpenEMR vocabulary', () => {
 
 test('charges post at sign-and-close with the signing clinician as rendering provider', () => {
   const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
-  const sign = server.slice(server.indexOf("encounters/:euuid/sign'"), server.indexOf("encounters/:euuid/sign'") + 6000);
-  assert.match(sign, /buildChargePayloads/, 'sign-and-close must post charges');
-  assert.match(sign, /attestation\.signedBy && attestation\.signedBy\.openEmrProviderId/,
-    'rendering provider is the signing clinician');
-  assert.match(sign, /billing_npi_used/, 'billing provider stays the config value');
+  // REPOINTED in Session 4.8, not deleted. The charge block was extracted into
+  // postEncounterCharges so the sign route and the new LMSW co-sign route share
+  // ONE copy; this test used to scan a fixed 6000-character window of the sign
+  // route and stopped seeing the code it guards the moment that happened.
+  // A bounded scan is a guard that works on the code it was written against —
+  // it now reads the helper and the call sites, which is where the rule lives.
+  const helper = server.slice(server.indexOf('const postEncounterCharges ='), server.indexOf('const refuseIfClosed ='));
+  assert.match(helper, /buildChargePayloads/, 'sign-and-close must post charges');
+  assert.match(helper, /signedBy && signedBy\.openEmrProviderId/,
+    'rendering provider is the clinician whose signature is being posted');
   // A charge failure must never void a signature that already succeeded.
-  assert.match(sign, /chargesPosted = false/);
+  assert.match(helper, /chargesPosted = false/);
+
+  const sign = server.slice(server.indexOf("encounters/:euuid/sign'"), server.indexOf("encounters/:euuid/co-sign'"));
+  assert.match(sign, /postEncounterCharges\(/, 'the sign route still posts the charge');
+  assert.match(sign, /signedBy: attestation\.signedBy/, 'rendering provider is the signing clinician');
+  assert.match(sign, /billing_npi_used/, 'billing provider stays the config value');
+  // Session 4.8: an LMSW signs, and nothing bills until a supervising
+  // credential co-signs. Posting now and reversing later would put a claim in
+  // Billing Manager that nobody was certified to render.
+  assert.match(sign, /PENDING_CO_SIGN/, 'an LMSW signature holds the charge');
+  const coSign = server.slice(server.indexOf("encounters/:euuid/co-sign'"), server.indexOf("encounters/:euuid/co-sign'") + 4000);
+  assert.match(coSign, /postEncounterCharges\(/, 'and the co-signature is what releases it');
+  assert.match(coSign, /signedBy: coSigner/, 'the co-signer becomes the rendering provider — they carry the certification the claim asserts');
 });
 
 // ---- Scope D: per-visit billing facility ----
