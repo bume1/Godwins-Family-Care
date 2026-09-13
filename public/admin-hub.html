@@ -158,6 +158,31 @@
           body: JSON.stringify({ skilledCompetencies })
         }).then(handleResponse).catch(err => ({ error: err.message })),
 
+      // Caregiver documents. The admin files onboarding paperwork on a
+      // caregiver's behalf and must name them; the API refuses an unnamed one.
+      listCaregiverDocs: (token, caregiverId) =>
+        fetch(`${API_URL}/api/caregiver/documents?caregiverId=${encodeURIComponent(caregiverId)}`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(err => ({ error: err.message })),
+
+      getCaregiverDocKinds: (token) =>
+        fetch(`${API_URL}/api/caregiver/documents/kinds`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(err => ({ error: err.message })),
+
+      uploadCaregiverDoc: (token, body) =>
+        fetch(`${API_URL}/api/caregiver/documents`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        }).then(handleResponse).catch(err => ({ error: err.message })),
+
+      deleteCaregiverDoc: (token, id) =>
+        fetch(`${API_URL}/api/caregiver/documents/${id}`, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(err => ({ error: err.message })),
+
       deleteUser: (token, userId) =>
         fetch(`${API_URL}/api/users/${userId}`, {
           method: 'DELETE',
@@ -1114,6 +1139,171 @@
     };
 
     // Full User Management Page with all features
+    // ======================================================================
+    // CAREGIVER DOCUMENTS on the user form (2026-09-13, owner request)
+    // ======================================================================
+    // Photo ID, paystub and W-9 for payroll onboarding, plus anything the
+    // caregiver has sent in themselves. It sits on the user record because
+    // that is where the person is managed — a timesheet is payroll, but a
+    // W-9 is part of who this employee is.
+    //
+    // GUSTO IS THE SYSTEM OF RECORD for the payroll paperwork. The caregiver
+    // submits it there; what the app holds is the office's copy. The card
+    // says so, because a screen that stays quiet about it lets someone
+    // believe uploading here filed their W-9.
+    //
+    // AT MODULE SCOPE, deliberately — it was first written inside UsersPage,
+    // where a component is a new function identity on every render, so React
+    // unmounts and remounts it and the file picker resets mid-use.
+    // test/react_input_focus.test.js did not catch that: it only read 40 lines
+    // past a declaration and this component is far longer. The guard now scans
+    // the whole component body, which is the hole this change found.
+    const CaregiverDocsSection = ({ token, caregiverId, caregiverName }) => {
+      const [docs, setDocs] = React.useState([]);
+      const [kinds, setKinds] = React.useState([]);
+      const [kind, setKind] = React.useState('');
+      const [file, setFile] = React.useState(null);
+      const [busy, setBusy] = React.useState(false);
+      const [msg, setMsg] = React.useState(null);
+      const fileRef = React.useRef(null);
+
+      const load = React.useCallback(async () => {
+        if (!caregiverId) return;   // not saved yet — there is nothing to file against
+        const [d, k] = await Promise.all([
+          api.listCaregiverDocs(token, caregiverId),
+          api.getCaregiverDocKinds(token)
+        ]);
+        if (d && Array.isArray(d.documents)) setDocs(d.documents);
+        if (k && Array.isArray(k.kinds)) {
+          setKinds(k.kinds);
+          // The catalog decides the default, so no kind is named in this page.
+          setKind(cur => cur || (k.kinds.find(x => x.payroll) || k.kinds[0] || {}).kind || '');
+        }
+      }, [token, caregiverId]);
+
+      React.useEffect(() => { load(); }, [load]);
+
+      const upload = async () => {
+        if (!file) { setMsg({ ok: false, text: 'Choose a file first.' }); return; }
+        if (file.size > 10 * 1024 * 1024) { setMsg({ ok: false, text: 'That file is over 10 MB.' }); return; }
+        setBusy(true); setMsg(null);
+        try {
+          const b64 = await new Promise((resolve, reject) => {
+            const r = new FileReader();
+            r.onload = () => resolve(r.result);
+            r.onerror = () => reject(new Error('read failed'));
+            r.readAsDataURL(file);
+          });
+          const res = await api.uploadCaregiverDoc(token, {
+            caregiverId, kind, fileName: file.name, fileDataB64: b64
+          });
+          if (res && res.error) { setMsg({ ok: false, text: res.error }); }
+          else {
+            setMsg({ ok: true, text: 'Filed.' });
+            setFile(null);
+            if (fileRef.current) fileRef.current.value = '';
+            await load();
+          }
+        } catch (e) {
+          setMsg({ ok: false, text: e.message || 'That did not upload.' });
+        }
+        setBusy(false);
+      };
+
+      // Read back THROUGH THE APP, never a Drive link — that is what makes
+      // the read audited and keeps the file un-shared.
+      const open = async (d) => {
+        try {
+          const res = await fetch(`${API_URL}/api/caregiver/documents/${d.id}/file`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
+          if (!res.ok) throw new Error('That file could not be retrieved.');
+          const url = URL.createObjectURL(await res.blob());
+          window.open(url, '_blank');
+          setTimeout(() => URL.revokeObjectURL(url), 60000);
+        } catch (e) { setMsg({ ok: false, text: e.message }); }
+      };
+
+      const remove = async (d) => {
+        if (!window.confirm(`Remove ${d.kindLabel} "${d.fileName}"? This deletes the stored file.`)) return;
+        const res = await api.deleteCaregiverDoc(token, d.id);
+        if (res && res.error) setMsg({ ok: false, text: res.error });
+        else { setMsg({ ok: true, text: 'Removed.' }); await load(); }
+      };
+
+      if (!caregiverId) {
+        return (
+          <div className="mt-5 border-t pt-4">
+            <h4 className="font-medium text-gray-800 mb-1">Documents</h4>
+            <p className="text-xs text-gray-500">Save this caregiver first, then their documents can be filed here.</p>
+          </div>
+        );
+      }
+
+      return (
+        <div className="mt-5 border-t pt-4">
+          <h4 className="font-medium text-gray-800 mb-1">Documents</h4>
+          <p className="text-xs text-gray-500 mb-3">
+            Photo ID, paystub and W-9 for onboarding, plus anything {caregiverName || 'this caregiver'} has
+            sent in. <span className="font-medium">Gusto is where payroll paperwork is actually submitted</span> —
+            this is the office's copy, and uploading here does not send it to Gusto.
+          </p>
+
+          <div className="flex flex-wrap items-end gap-2 mb-3">
+            <div className="flex-1 min-w-[180px]">
+              <label className="block text-xs font-medium text-gray-600 mb-1">Type</label>
+              <select className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                value={kind} onChange={(e) => setKind(e.target.value)}>
+                {kinds.map(k => <option key={k.kind} value={k.kind}>{k.label}</option>)}
+              </select>
+            </div>
+            <div className="flex-1 min-w-[200px]">
+              <label className="block text-xs font-medium text-gray-600 mb-1">File</label>
+              <input ref={fileRef} type="file" accept="image/*,application/pdf"
+                className="w-full text-sm"
+                onChange={(e) => { setFile(e.target.files && e.target.files[0]); setMsg(null); }} />
+            </div>
+            <button type="button" onClick={upload} disabled={busy || !file || !kind}
+              className="px-4 py-2 bg-gray-900 text-white rounded-lg text-sm disabled:opacity-50">
+              {busy ? 'Uploading…' : 'Upload'}
+            </button>
+          </div>
+
+          {msg && (
+            <p className={`text-xs mb-2 ${msg.ok ? 'text-green-700' : 'text-red-600'}`}>{msg.text}</p>
+          )}
+
+          {docs.length === 0
+            ? <p className="text-sm text-gray-500 py-2">Nothing on file yet.</p>
+            : (
+              <div className="space-y-2">
+                {docs.map(d => (
+                  <div key={d.id} className="flex items-center gap-3 p-2 bg-gray-50 rounded-lg">
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium text-gray-800 truncate">
+                        {d.kindLabel}
+                        {d.payroll && <span className="ml-2 text-[10px] uppercase tracking-wide text-gray-500">payroll</span>}
+                      </div>
+                      <div className="text-xs text-gray-500 truncate">
+                        {d.fileName} · {String(d.uploadedAt).slice(0, 10)}
+                        {/* Who filed it. "The caregiver sent this" and "the office
+                            filed it for them" are different facts. */}
+                        {d.uploadedByOffice ? ' · filed by the office' : ' · sent in by the caregiver'}
+                        {d.status !== 'received' && d.status !== 'accepted' ? ` · ${d.status}` : ''}
+                      </div>
+                    </div>
+                    <button type="button" onClick={() => open(d)}
+                      className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs">Open</button>
+                    <button type="button" onClick={() => remove(d)}
+                      className="px-3 py-1.5 border border-red-200 text-red-600 rounded-lg text-xs">Remove</button>
+                  </div>
+                ))}
+              </div>
+            )}
+        </div>
+      );
+    };
+
     const UsersPage = ({ token }) => {
       const [users, setUsers] = useState([]);
       const [projects, setProjects] = useState([]);
@@ -1191,17 +1381,27 @@
 
       const loadData = async () => {
         setLoading(true);
-        const [usersRes, projectsRes, resetsRes, clientsRes, portalsRes] = await Promise.all([
+        const [usersRes, projectsRes, resetsRes, portalsRes] = await Promise.all([
           api.getUsers(token),
           api.getProjects(token),
           api.getPasswordResetRequests(token),
-          fetch('/api/clients', { headers: { 'Authorization': `Bearer ${token}` } }).then(r => r.json()).catch(() => []),
           fetch('/api/client-portals', { headers: { 'Authorization': `Bearer ${token}` } }).then(r => r.json()).catch(() => [])
         ]);
         if (!usersRes.error) setUsers(usersRes);
         if (!projectsRes.error) setProjects(projectsRes);
         if (!resetsRes.error) setPasswordResets(resetsRes);
-        if (Array.isArray(clientsRes)) setClients(clientsRes);
+        // THE ASSIGNED-CLIENTS PICKER WAS ALWAYS EMPTY, and this is why.
+        // It fetched `/api/clients` — a LAB-ERA endpoint that does not exist
+        // anywhere in this server. The request 404'd, `.json()` threw, and
+        // `.catch(() => [])` swallowed it, so the list was `[]` on every load
+        // and the form said "No clients available" forever. No caregiver could
+        // be assigned to anyone through this screen, which is the thing that
+        // gates a caregiver's access to a client at all.
+        //
+        // A GFC client IS a user with role 'client'. That list is already
+        // loaded, so the picker reads it rather than a second endpoint that
+        // can go missing without anyone noticing.
+        if (Array.isArray(usersRes)) setClients(usersRes.filter(u => u && u.role === 'client'));
         if (Array.isArray(portalsRes)) setClientPortals(portalsRes);
         setLoading(false);
       };
@@ -1802,28 +2002,37 @@
                       <div>
                         <label className="block text-sm font-medium text-gray-700 mb-2">Assigned Clients</label>
                         <div className="max-h-48 overflow-y-auto border rounded-lg p-2 space-y-2">
+                          {/* Stored by ID for anything ticked from here on. caregiverRepository's
+                              isAssignedToCaregiver accepts an id OR a name and checks the id
+                              first, so both read correctly — but a NAME silently drops the
+                              assignment the day a client is renamed, which is the same defect
+                              the per-client pay rates are keyed by id to avoid.
+                              Existing rows hold names, so the tick and the untick both have to
+                              recognise either form. Matching on id alone would show a saved
+                              assignment as unchecked and wipe it on the next save — the 4.2
+                              bug class, pointed at who may visit whom. */}
                           {clients.length > 0 ? clients.map((client, idx) => {
-                            const isAssigned = (formData.assignedClients || []).includes(client.name || client.clientName);
+                            const clientName = client.name || client.clientName;
+                            const current = formData.assignedClients || [];
+                            const isAssigned = current.includes(client.id) || current.includes(clientName);
                             return (
-                              <div key={idx} className={`flex items-center p-2 rounded ${isAssigned ? 'bg-green-50' : 'bg-gray-50'}`}>
+                              <div key={client.id || idx} className={`flex items-center p-2 rounded ${isAssigned ? 'bg-green-50' : 'bg-gray-50'}`}>
                                 <label className="flex items-center gap-2 cursor-pointer flex-1">
                                   <input type="checkbox" checked={isAssigned}
                                     onChange={() => {
-                                      const clientName = client.name || client.clientName;
-                                      const current = formData.assignedClients || [];
                                       setFormData({
                                         ...formData,
                                         assignedClients: isAssigned
-                                          ? current.filter(c => c !== clientName)
-                                          : [...current, clientName]
+                                          ? current.filter(c => c !== client.id && c !== clientName)
+                                          : [...current, client.id]
                                       });
                                     }}
                                     className="w-4 h-4 rounded border-gray-300 text-green-600 focus:ring-green-500" />
-                                  <span className="text-sm">{client.name || client.clientName}</span>
+                                  <span className="text-sm">{clientName}</span>
                                 </label>
                               </div>
                             );
-                          }) : <p className="text-sm text-gray-500 text-center py-4">No clients available</p>}
+                          }) : <p className="text-sm text-gray-500 text-center py-4">No clients yet. Add one with the Add User button.</p>}
                         </div>
                       </div>
 
@@ -1852,7 +2061,14 @@
                             <p className="text-xs text-gray-500 mb-2">Optional. Blank means this caregiver's base rate applies for that client.</p>
                             <div className="space-y-2">
                               {clients
-                                .filter(c => (formData.assignedClients || []).includes(c.name || c.clientName))
+                                // Same either-form match as the picker above. Filtering on
+                                // name alone would hide the rate row for every client ticked
+                                // since assignments moved onto ids — a caregiver would look
+                                // un-assigned here while being assigned everywhere else.
+                                .filter(c => {
+                                  const a = formData.assignedClients || [];
+                                  return a.includes(c.id) || a.includes(c.name || c.clientName);
+                                })
                                 .map((c, i) => {
                                   const cid = c.id || c.userId;
                                   if (!cid) return null;
@@ -1880,6 +2096,11 @@
                           </div>
                         )}
                       </div>
+
+                      <CaregiverDocsSection
+                        token={token}
+                        caregiverId={editingUser ? editingUser.id : null}
+                        caregiverName={formData.name} />
                     </div>
                   )}
 
@@ -2416,11 +2637,10 @@
 
       const loadData = async () => {
         setLoading(true);
-        const [reportsData, clientsData, usersData, allClientsData, techniciansData, pollingData] = await Promise.all([
+        const [reportsData, clientsData, usersData, techniciansData, pollingData] = await Promise.all([
           api.getServiceReports(token),
           api.getServiceClients(token),
           canManageVendors ? api.getUsers(token) : Promise.resolve([]),
-          canManageVendors ? fetch('/api/clients', { headers: { 'Authorization': `Bearer ${token}` } }).then(r => r.json()).catch(() => []) : Promise.resolve([]),
           api.getTechnicians(token),
           api.getPollingStatus(token)
         ]);
@@ -2430,8 +2650,12 @@
         if (Array.isArray(usersData)) {
           setVendors(usersData.filter(u => u.role === 'vendor'));
         }
-        if (Array.isArray(allClientsData)) {
-          setAllClients(allClientsData);
+        // The SECOND picker onto the same dead `/api/clients` endpoint, with
+        // the same symptom: always "No clients available". It writes
+        // `assignedClients` on the same user records the caregiver app reads,
+        // so it is the same assignment, not a lab-era leftover.
+        if (Array.isArray(usersData)) {
+          setAllClients(usersData.filter(u => u && u.role === 'client'));
         }
         if (!reportsData.error) {
           setReports(reportsData);
@@ -2963,18 +3187,18 @@
                           <div className="max-h-48 overflow-y-auto border rounded-lg p-2 space-y-2">
                             {allClients.length > 0 ? allClients.map((client, idx) => {
                               const clientName = client.name || client.clientName;
-                              const isAssigned = (vendorFormData.assignedClients || []).includes(clientName);
+                              const current = vendorFormData.assignedClients || [];
+                              const isAssigned = current.includes(client.id) || current.includes(clientName);
                               return (
-                                <div key={idx} className={`flex items-center p-2 rounded ${isAssigned ? 'bg-orange-50' : 'bg-gray-50'}`}>
+                                <div key={client.id || idx} className={`flex items-center p-2 rounded ${isAssigned ? 'bg-orange-50' : 'bg-gray-50'}`}>
                                   <label className="flex items-center gap-2 cursor-pointer flex-1">
                                     <input type="checkbox" checked={isAssigned}
                                       onChange={() => {
-                                        const current = vendorFormData.assignedClients || [];
                                         setVendorFormData({
                                           ...vendorFormData,
                                           assignedClients: isAssigned
-                                            ? current.filter(c => c !== clientName)
-                                            : [...current, clientName]
+                                            ? current.filter(c => c !== client.id && c !== clientName)
+                                            : [...current, client.id]
                                         });
                                       }}
                                       className="w-4 h-4 rounded border-gray-300 text-orange-600 focus:ring-orange-500" />

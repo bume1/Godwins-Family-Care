@@ -906,6 +906,160 @@ const ClientsTab = ({ clients, detail, onOpen, onClose, onMessages }) => {
   );
 };
 
+// ============================================================================
+// DOCUMENTS — sending the office a file (2026-09-13, owner request)
+// ============================================================================
+// "Caregivers need to upload documents (like physical timesheets) when needed."
+// Before this there was no upload of any kind in the caregiver app, so a paper
+// timesheet arrived by text message or not at all.
+//
+// At MODULE SCOPE, not nested inside MoreTab. A component defined inside
+// another is a new component type on every render, so React unmounts and
+// remounts it — and the note field would lose focus on every keystroke. That
+// is the bug test/react_input_focus.test.js exists to catch.
+//
+// DELIBERATELY NOT OFFLINE-QUEUED. The offline queue holds small JSON payloads
+// in localStorage; a photographed timesheet is megabytes and would fill the
+// quota, taking the VISIT LOG queue down with it. A caregiver with no signal is
+// told to send it when they are back on, which is honest — unlike a file that
+// silently never leaves the phone.
+const DocumentsCard = () => {
+  const [kinds, setKinds] = useState([]);
+  const [docs, setDocs] = useState([]);
+  const [kind, setKind] = useState('');   // set from the served catalog, so no kind is named here
+  const [file, setFile] = useState(null);
+  const [periodStart, setPeriodStart] = useState('');
+  const [periodEnd, setPeriodEnd] = useState('');
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const fileRef = useRef(null);
+
+  const load = useCallback(async () => {
+    const [k, d] = await Promise.all([
+      api('/api/caregiver/documents/kinds').catch(() => ({ kinds: [] })),
+      api('/api/caregiver/documents').catch(() => ({ documents: [] }))
+    ]);
+    // The catalog is SERVED, never restated here — the form and the validator
+    // that refuses an unknown kind read the same list.
+    setKinds(k.kinds || []);
+    setDocs(d.documents || []);
+    // The catalog decides the default too. Naming one here would be a fifth
+    // place the list of kinds lives.
+    setKind(cur => cur || ((k.kinds || [])[0] || {}).kind || '');
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const submit = async () => {
+    if (!file) { setMsg({ ok: false, text: 'Choose a file first.' }); return; }
+    if (file.size > 10 * 1024 * 1024) { setMsg({ ok: false, text: 'That file is over 10 MB. Try photographing it again at a smaller size.' }); return; }
+    setBusy(true); setMsg(null);
+    try {
+      const b64 = await new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(r.result);
+        r.onerror = () => reject(new Error('read failed'));
+        r.readAsDataURL(file);
+      });
+      await api('/api/caregiver/documents', {
+        method: 'POST',
+        body: JSON.stringify({
+          kind, fileName: file.name, fileDataB64: b64,
+          periodStart: periodStart || null, periodEnd: periodEnd || null,
+          note: note || null
+        })
+      });
+      setMsg({ ok: true, text: 'Sent to the office.' });
+      setFile(null); setNote(''); setPeriodStart(''); setPeriodEnd('');
+      if (fileRef.current) fileRef.current.value = '';
+      await load();
+    } catch (e) {
+      // The server's own message, not a generic one: "we could not store that
+      // file" and "only PDF, JPG and PNG are accepted" need different actions
+      // from the person holding the phone.
+      setMsg({ ok: false, text: e.message || 'That did not send.' });
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div className="card">
+      <h3>Documents</h3>
+      <p className="sub" style={{ marginBottom: 12 }}>
+        Send the office a timesheet, a signed visit note or a certificate. Photo or PDF.
+      </p>
+
+      <div className="fld">
+        <label>What is it</label>
+        <select className="inp" value={kind} onChange={e => setKind(e.target.value)}>
+          {kinds.map(k => <option key={k.kind} value={k.kind}>{k.label}</option>)}
+        </select>
+      </div>
+
+      <div className="fld">
+        <label>File</label>
+        <input ref={fileRef} className="inp" type="file" accept="image/*,application/pdf"
+          onChange={e => { setFile(e.target.files && e.target.files[0]); setMsg(null); }} />
+      </div>
+
+      {/* A timesheet is FOR a period, and payroll needs to know which one. */}
+      {(kinds.find(k => k.kind === kind) || {}).needsPeriod && (
+        <div style={{ display: 'flex', gap: 10 }}>
+          <div className="fld" style={{ flex: 1 }}>
+            <label>Period from</label>
+            <input className="inp" type="date" value={periodStart} onChange={e => setPeriodStart(e.target.value)} />
+          </div>
+          <div className="fld" style={{ flex: 1 }}>
+            <label>Period to</label>
+            <input className="inp" type="date" value={periodEnd} onChange={e => setPeriodEnd(e.target.value)} />
+          </div>
+        </div>
+      )}
+
+      <div className="fld">
+        <label>Anything the office should know (optional)</label>
+        <input className="inp" value={note} maxLength={1000}
+          onChange={e => setNote(e.target.value)} placeholder="e.g. Thursday's hours are on the back" />
+      </div>
+
+      <button className="btn" onClick={submit} disabled={busy || !file || !kind}>
+        {busy ? 'Sending…' : 'Send to the office'}
+      </button>
+
+      {msg && (
+        <div className={`note ${msg.ok ? 'ok' : 'warn'}`}>
+          <i className={`ti ti-${msg.ok ? 'circle-check' : 'alert-triangle'}`}></i>
+          <span><b>{msg.ok ? 'Sent' : 'Not sent'}</b><span>{msg.text}</span></span>
+        </div>
+      )}
+
+      <div style={{ marginTop: 14 }}>
+        {docs.length === 0
+          ? <Empty icon="file-text">Nothing sent yet.</Empty>
+          : docs.slice(0, 15).map(d => (
+            <div className="row" style={{ display: 'block' }} key={d.id}>
+              <b>{d.kindLabel} · {String(d.uploadedAt).slice(0, 10)}</b>
+              <div className="mu">
+                {d.fileName}
+                {d.periodStart ? ` · ${d.periodStart}${d.periodEnd ? ` to ${d.periodEnd}` : ''}` : ''}
+                {' · '}{d.status === 'received' ? 'With the office' : titleize(d.status)}
+              </div>
+              {/* A caregiver told only "not accepted" re-sends the same blurry
+                  photo, so the reason is shown, not just the status. */}
+              {d.status === 'rejected' && d.reviewNote && (
+                <div className="note warn" style={{ marginTop: 8 }}>
+                  <i className="ti ti-rotate"></i>
+                  <span><b>Send it again</b><span>{d.reviewNote}</span></span>
+                </div>
+              )}
+            </div>
+          ))}
+      </div>
+    </div>
+  );
+};
+
 const MoreTab = ({ visitLogs, queued, me }) => (
   <div>
     <h2 className="pg">More</h2>
@@ -941,6 +1095,8 @@ const MoreTab = ({ visitLogs, queued, me }) => (
         Schedule tab now that Session 7's component is wired in. Duplicating
         the mount here would put the same id in the DOM twice. */}
     <MessagingMount me={me} label="Messages" />
+
+    <DocumentsCard />
 
     <div className="card">
       <h3>Help</h3>

@@ -1,105 +1,163 @@
 const { google } = require('googleapis');
 const config = require('./config');
 
-let connectionSettings = null;
-let tokenExpiresAt = null;
+// ── AUTH ─────────────────────────────────────────────────────────────────────
+// Drive authenticates with the SAME Google service account the mailer uses
+// (`GOOGLE_SERVICE_ACCOUNT_KEY`), with the Drive scope added to the existing
+// domain-wide delegation grant. One credential, one Admin-console screen, two
+// scopes.
+//
+// THIS REPLACED A REPLIT CONNECTOR. The old getAccessToken() read
+// REPLIT_CONNECTORS_HOSTNAME and REPL_IDENTITY and called Replit's connector
+// API for a token. On AWS those variables do not exist, so it threw on its
+// first line and took every Drive write with it — client uploads, care plans,
+// ROI PDFs, consents, offline packet scans. The platform is AWS (owner
+// directive, 2026-09-13), so the Replit path is deleted rather than kept as a
+// fallback: a branch that can never run is not a fallback, it is a place for a
+// future session to be misled about what is supported.
+//
+// DELEGATION IMPERSONATES A REAL USER, exactly as Gmail does. A bare service
+// account has no Drive storage quota of its own in Workspace, so it cannot own
+// files; it acts AS a licensed user and the files live in that user's Drive.
+// GOOGLE_DRIVE_IMPERSONATE names that user and falls back to GMAIL_SEND_AS,
+// because in practice it is the same account and asking for it twice is how
+// the two drift.
+
+const DRIVE_SCOPES = ['https://www.googleapis.com/auth/drive'];
 
 // PHI files must not be world-readable. By default we do NOT grant "anyone with
 // link" access — files inherit their (private, BAA-scoped) folder's permissions.
 // The legacy Apps Script shared PHI via anyone-link; that is re-enabled only when
 // DRIVE_ALLOW_ANYONE_LINK is explicitly true (non-PHI contexts only).
+//
+// RESTORED 2026-09-13: the service-account rewrite deleted this by replacing a
+// range that happened to contain it, and `node --check` passed because a syntax
+// check is not a reference check — the same trap that lost `ShiftCard` in
+// Session 9. Six call sites referenced a function that no longer existed.
 async function maybeGrantAnyoneLink(drive, fileId) {
   if (!config.DRIVE_ALLOW_ANYONE_LINK) return;
   await drive.permissions.create({
     fileId,
-    requestBody: { role: 'reader', type: 'anyone' }
+    requestBody: { role: 'reader', type: 'anyone' },
+    ...ALL_DRIVES
   });
 }
 
-async function getAccessToken() {
-  if (connectionSettings && tokenExpiresAt && (tokenExpiresAt - Date.now() > 60000)) {
-    const cachedToken = connectionSettings?.settings?.access_token || 
-                        connectionSettings?.settings?.oauth?.credentials?.access_token;
-    if (cachedToken) {
-      return cachedToken;
-    }
-  }
-  
-  connectionSettings = null;
-  tokenExpiresAt = null;
-  
-  const hostname = process.env.REPLIT_CONNECTORS_HOSTNAME;
-  if (!hostname) {
-    throw new Error('Google Drive connector not configured - REPLIT_CONNECTORS_HOSTNAME not found');
-  }
-  
-  const xReplitToken = process.env.REPL_IDENTITY 
-    ? 'repl ' + process.env.REPL_IDENTITY 
-    : process.env.WEB_REPL_RENEWAL 
-    ? 'depl ' + process.env.WEB_REPL_RENEWAL 
-    : null;
+// Shared-drive calls need these flags on EVERY request or the API answers
+// "File not found" for a folder that plainly exists. They are harmless on My
+// Drive, so they are set unconditionally rather than behind a config branch
+// that would have to be remembered at each of the call sites below.
+const ALL_DRIVES = { supportsAllDrives: true };
+const ALL_DRIVES_LIST = { supportsAllDrives: true, includeItemsFromAllDrives: true };
 
-  if (!xReplitToken) {
-    throw new Error('Google Drive connector authentication not available');
-  }
+let _drive = null;
+let _driveOverride = null;
 
+// Tests drive a fake client rather than the network. Exported at the bottom.
+function _setDriveClientForTests(client) {
+  _driveOverride = client;
+  _drive = null;
+}
+
+// The service-account key, read the same way the mailer reads it — including
+// the newline repair, because a PEM that has been through a hosting panel or a
+// CI variable arrives with its backslash-n intact and the JWT library then
+// fails with an opaque complaint about the key format.
+function loadServiceAccount() {
+  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
+  if (!raw || !String(raw).trim()) return null;
   try {
-    const response = await fetch(
-      'https://' + hostname + '/api/v2/connection?include_secrets=true&connector_names=google-drive',
-      {
-        headers: {
-          'Accept': 'application/json',
-          'X_REPLIT_TOKEN': xReplitToken
-        }
-      }
-    );
-    
-    if (!response.ok) {
-      throw new Error('Failed to fetch Google Drive connection settings');
+    const text = String(raw).trim().startsWith('{')
+      ? String(raw)
+      : Buffer.from(String(raw).trim(), 'base64').toString('utf8');
+    const parsed = JSON.parse(text);
+    if (!parsed.client_email || !parsed.private_key) return null;
+    if (parsed.private_key.includes('\\n')) {
+      parsed.private_key = parsed.private_key.replace(/\\n/g, '\n');
     }
-    
-    const data = await response.json();
-    connectionSettings = data.items?.[0];
-  } catch (error) {
-    throw new Error('Failed to connect to Google Drive: ' + error.message);
+    return parsed;
+  } catch (e) {
+    console.error('[DRIVE] GOOGLE_SERVICE_ACCOUNT_KEY is set but could not be parsed:', e.message);
+    return null;
   }
+}
 
-  if (!connectionSettings) {
-    throw new Error('Google Drive connector not configured');
-  }
+/**
+ * Is Drive actually usable, and if not, exactly why?
+ *
+ * Every field here is observable. The app must never report Drive as working
+ * on the strength of a variable being set — that is the same trap as the
+ * narrowed OAuth token that survived the 8.4 upgrade behind a green
+ * "OpenEMR connected". `configured` means the credential parses and an
+ * impersonation subject exists; only `verify_drive_access.js` proves Google
+ * accepts it.
+ */
+function driveStatus() {
+  const sa = loadServiceAccount();
+  const impersonate = String(
+    process.env.GOOGLE_DRIVE_IMPERSONATE || process.env.GMAIL_SEND_AS || ''
+  ).trim();
 
-  const accessToken = connectionSettings?.settings?.access_token || 
-                      connectionSettings?.settings?.oauth?.credentials?.access_token;
+  const blockers = [];
+  if (!sa) blockers.push('GOOGLE_SERVICE_ACCOUNT_KEY is not set (or is not valid JSON)');
+  if (!impersonate) blockers.push('GOOGLE_DRIVE_IMPERSONATE is not set (and GMAIL_SEND_AS is not set to fall back on)');
 
-  if (!accessToken) {
-    throw new Error('Google Drive not connected - no access token found');
+  return {
+    configured: blockers.length === 0,
+    serviceAccount: sa ? sa.client_email : null,
+    impersonating: impersonate || null,
+    rootFolderId: String(process.env.GOOGLE_DRIVE_FOLDER_ID || '').trim() || null,
+    blockers,
+    reason: blockers.length ? blockers.join('; ') : null
+  };
+}
+
+// Thrown when Drive is not configured, so callers can tell "not set up" from
+// "Google refused". Every upload route already turns a throw here into a 502
+// that says the file was NOT stored, which is the behaviour to preserve: a row
+// pointing at a file that does not exist is worse than a refused upload.
+class DriveNotConfiguredError extends Error {
+  constructor(reason) {
+    super(`Google Drive is not configured: ${reason}`);
+    this.name = 'DriveNotConfiguredError';
+    this.code = 'DRIVE_NOT_CONFIGURED';
   }
-  
-  const expiresAt = connectionSettings?.settings?.expires_at || 
-                    connectionSettings?.settings?.oauth?.credentials?.expires_at;
-  if (expiresAt) {
-    tokenExpiresAt = new Date(expiresAt).getTime();
-  } else {
-    tokenExpiresAt = Date.now() + (50 * 60 * 1000);
-  }
-  
-  return accessToken;
+}
+
+function buildDriveAuth() {
+  const sa = loadServiceAccount();
+  const status = driveStatus();
+  if (!status.configured) throw new DriveNotConfiguredError(status.reason);
+  return new google.auth.JWT({
+    email: sa.client_email,
+    key: sa.private_key,
+    scopes: DRIVE_SCOPES,
+    subject: status.impersonating   // domain-wide delegation acts AS this user
+  });
 }
 
 async function getDriveClient() {
-  const accessToken = await getAccessToken();
-  const oauth2Client = new google.auth.OAuth2();
-  oauth2Client.setCredentials({ access_token: accessToken });
-  return google.drive({ version: 'v3', auth: oauth2Client });
+  if (_driveOverride) return _driveOverride;
+  if (_drive) return _drive;
+  _drive = google.drive({ version: 'v3', auth: buildDriveAuth() });
+  return _drive;
 }
 
-// Sheets client over the same OAuth token — used by the Transfer-of-Care ROI
-// parallel-run logger and the legacy importer (Session 3.4).
+// Sheets over the SAME credential — used by the Transfer-of-Care ROI
+// parallel-run logger and the legacy importer (Session 3.4). It needs the
+// spreadsheets scope added to the delegation grant alongside Drive; without it
+// only the parallel-run Sheet logging fails, never a document upload.
 async function getSheetsClient() {
-  const accessToken = await getAccessToken();
-  const oauth2Client = new google.auth.OAuth2();
-  oauth2Client.setCredentials({ access_token: accessToken });
-  return google.sheets({ version: 'v4', auth: oauth2Client });
+  const sa = loadServiceAccount();
+  const status = driveStatus();
+  if (!status.configured) throw new DriveNotConfiguredError(status.reason);
+  const auth = new google.auth.JWT({
+    email: sa.client_email,
+    key: sa.private_key,
+    scopes: [...DRIVE_SCOPES, 'https://www.googleapis.com/auth/spreadsheets'],
+    subject: status.impersonating
+  });
+  return google.sheets({ version: 'v4', auth });
 }
 
 async function testConnection() {
@@ -112,19 +170,34 @@ async function testConnection() {
   }
 }
 
+// A folder name in a query is user-influenced in one place (the client's own
+// name, used as a per-client folder), and an apostrophe would otherwise
+// terminate the quoted string and change the query. O'Brien is a name, not a
+// syntax error.
+function escapeDriveQueryValue(value) {
+  return String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
 async function findOrCreateFolder(folderName, parentFolderId = null) {
   try {
     const drive = await getDriveClient();
-    
-    let query = `name='${folderName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
-    if (parentFolderId) {
-      query += ` and '${parentFolderId}' in parents`;
+
+    // With no explicit parent, nest under the configured root when there is
+    // one. That is what puts every GFC file inside ONE folder (or one Shared
+    // Drive) that can be shared with the service account once, instead of
+    // scattering top-level folders through the impersonated user's Drive.
+    const parent = parentFolderId || (String(process.env.GOOGLE_DRIVE_FOLDER_ID || '').trim() || null);
+
+    let query = `name='${escapeDriveQueryValue(folderName)}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+    if (parent) {
+      query += ` and '${escapeDriveQueryValue(parent)}' in parents`;
     }
-    
+
     const searchResponse = await drive.files.list({
       q: query,
       fields: 'files(id, name)',
-      spaces: 'drive'
+      spaces: 'drive',
+      ...ALL_DRIVES_LIST
     });
     
     if (searchResponse.data.files && searchResponse.data.files.length > 0) {
@@ -135,13 +208,14 @@ async function findOrCreateFolder(folderName, parentFolderId = null) {
       name: folderName,
       mimeType: 'application/vnd.google-apps.folder'
     };
-    if (parentFolderId) {
-      fileMetadata.parents = [parentFolderId];
+    if (parent) {
+      fileMetadata.parents = [parent];
     }
     
     const createResponse = await drive.files.create({
       resource: fileMetadata,
-      fields: 'id'
+      fields: 'id',
+      ...ALL_DRIVES
     });
     
     return createResponse.data.id;
@@ -172,6 +246,8 @@ async function uploadHtmlFile(fileName, htmlContent, folderId = null) {
       resource: fileMetadata,
       media: media,
       fields: 'id, name, webViewLink'
+    ,
+      ...ALL_DRIVES
     });
     
     return {
@@ -213,6 +289,8 @@ async function uploadTaskFile(projectName, clientName, fileName, fileBuffer, mim
       resource: fileMetadata,
       media: media,
       fields: 'id, name, webViewLink, webContentLink, thumbnailLink, size'
+    ,
+      ...ALL_DRIVES
     });
     
     // Make file viewable by anyone with link
@@ -221,8 +299,9 @@ async function uploadTaskFile(projectName, clientName, fileName, fileBuffer, mim
       requestBody: {
         role: 'reader',
         type: 'anyone'
-      }
-    });
+      },
+                                     ...ALL_DRIVES
+                                   });
     
     console.log(`✅ Uploaded task file to Google Drive: ${response.data.name}`);
     
@@ -243,7 +322,9 @@ async function uploadTaskFile(projectName, clientName, fileName, fileBuffer, mim
 async function deleteFile(fileId) {
   try {
     const drive = await getDriveClient();
-    await drive.files.delete({ fileId: fileId });
+    await drive.files.delete({ fileId: fileId,
+                               ...ALL_DRIVES
+                             });
     console.log(`✅ Deleted file from Google Drive: ${fileId}`);
     return true;
   } catch (error) {
@@ -276,6 +357,8 @@ async function uploadServiceReportPDF(clientName, fileName, pdfBuffer) {
       resource: fileMetadata,
       media: media,
       fields: 'id, name, webViewLink, webContentLink'
+    ,
+      ...ALL_DRIVES
     });
 
     // PHI: no anyone-link grant unless explicitly enabled (see maybeGrantAnyoneLink).
@@ -319,6 +402,8 @@ async function uploadServiceReportAttachment(clientName, fileName, fileBuffer, m
       resource: fileMetadata,
       media: media,
       fields: 'id, name, webViewLink, webContentLink, thumbnailLink'
+    ,
+      ...ALL_DRIVES
     });
 
     // PHI: no anyone-link grant unless explicitly enabled (see maybeGrantAnyoneLink).
@@ -354,7 +439,8 @@ async function uploadProviderROIFile(folderName, fileName, fileBuffer, mimeType)
     const response = await drive.files.create({
       resource: { name: fileName, parents: [folderId] },
       media: { mimeType: mimeType || 'application/pdf', body: Readable.from([fileBuffer]) },
-      fields: 'id, name, webViewLink, webContentLink'
+      fields: 'id, name, webViewLink, webContentLink',
+      ...ALL_DRIVES
     });
 
     // PHI (provider-facing ROI): no anyone-link grant unless explicitly enabled.
@@ -389,7 +475,8 @@ async function uploadOfflinePacketFile(clientName, fileName, fileBuffer, mimeTyp
     const response = await drive.files.create({
       resource: { name: fileName, parents: [clientFolderId] },
       media: { mimeType: mimeType || 'application/octet-stream', body: Readable.from([fileBuffer]) },
-      fields: 'id, name, webViewLink, webContentLink, thumbnailLink'
+      fields: 'id, name, webViewLink, webContentLink, thumbnailLink',
+      ...ALL_DRIVES
     });
 
     // PHI (paper intake packet scan): no anyone-link grant unless explicitly enabled.
@@ -423,7 +510,8 @@ async function uploadCarePlanFile(clientName, fileName, pdfBuffer) {
     const response = await drive.files.create({
       resource: { name: fileName, parents: [clientFolderId] },
       media: { mimeType: 'application/pdf', body: Readable.from([pdfBuffer]) },
-      fields: 'id, name, webViewLink, webContentLink'
+      fields: 'id, name, webViewLink, webContentLink',
+      ...ALL_DRIVES
     });
 
     await maybeGrantAnyoneLink(drive, response.data.id);
@@ -455,12 +543,43 @@ async function uploadClientDocumentFile(clientName, fileName, fileBuffer, mimeTy
   const response = await drive.files.create({
     resource: { name: fileName, parents: [clientFolderId] },
     media: { mimeType: mimeType || 'application/octet-stream', body: Readable.from([fileBuffer]) },
-    fields: 'id, name, webViewLink, webContentLink'
+    fields: 'id, name, webViewLink, webContentLink',
+    ...ALL_DRIVES
   });
 
   await maybeGrantAnyoneLink(drive, response.data.id);
 
   console.log(`✅ Uploaded client document to Google Drive: ${response.data.name}`);
+  return {
+    fileId: response.data.id,
+    fileName: response.data.name,
+    webViewLink: response.data.webViewLink,
+    webContentLink: response.data.webContentLink
+  };
+}
+
+// A caregiver's own paperwork — a physical timesheet photographed at the end of
+// a shift, a certificate, a signed visit note. Filed under the CAREGIVER, not
+// the client: it is employment paperwork, and a timesheet routinely covers
+// several clients, so putting it in one client's folder would file it wrong and
+// widen who can see it.
+async function uploadCaregiverDocumentFile(caregiverName, fileName, fileBuffer, mimeType) {
+  const drive = await getDriveClient();
+  const { Readable } = require('stream');
+
+  const rootFolderId = await findOrCreateFolder('GFC Caregiver Documents', null);
+  const caregiverFolderId = await findOrCreateFolder(caregiverName || 'Unnamed Caregiver', rootFolderId);
+
+  const response = await drive.files.create({
+    resource: { name: fileName, parents: [caregiverFolderId] },
+    media: { mimeType: mimeType || 'application/octet-stream', body: Readable.from([fileBuffer]) },
+    fields: 'id, name, webViewLink, webContentLink',
+    ...ALL_DRIVES
+  });
+
+  await maybeGrantAnyoneLink(drive, response.data.id);
+
+  console.log(`✅ Uploaded caregiver document to Google Drive: ${response.data.name}`);
   return {
     fileId: response.data.id,
     fileName: response.data.name,
@@ -475,7 +594,9 @@ async function uploadClientDocumentFile(clientName, fileName, fileBuffer, mimeTy
 // private (no anyone-link needed).
 async function downloadFileBuffer(fileId) {
   const drive = await getDriveClient();
-  const res = await drive.files.get({ fileId, alt: 'media' }, { responseType: 'arraybuffer' });
+  const res = await drive.files.get({ fileId, alt: 'media',
+                                      ...ALL_DRIVES
+                                    }, { responseType: 'arraybuffer' });
   return Buffer.from(res.data);
 }
 
@@ -492,6 +613,15 @@ module.exports = {
   uploadOfflinePacketFile,
   uploadCarePlanFile,
   uploadClientDocumentFile,
+  uploadCaregiverDocumentFile,
   getSheetsClient,
-  getDriveClient
+  getDriveClient,
+  // Observability + the not-configured signal, so a caller can tell "Drive is
+  // not set up" from "Google refused this file".
+  driveStatus,
+  DriveNotConfiguredError,
+  // exported for tests
+  loadServiceAccount,
+  escapeDriveQueryValue,
+  _setDriveClientForTests
 };

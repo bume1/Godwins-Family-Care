@@ -48,6 +48,7 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'gfc_messages', phi: true, owner: '3.5', note: 'interim messages; migrated into message_threads/messages by Session 9, source retained' },
   { key: 'client_document_uploads', phi: true, owner: '4.6+' },
   { key: 'client_document_requests', phi: true, owner: '4.6+' },
+  { key: 'caregiver_documents', phi: false, owner: '6+', note: 'employment paperwork (timesheets, certs) — pointers only, bytes in Drive' },
   // ---- clinical (Session 4.x) ----
   { key: 'encounter_billing', phi: true, owner: '4.4' },
   { key: 'prescriptions', phi: true, owner: '4.4' },
