@@ -128,6 +128,24 @@ function calloutBlock(text) {
 </td></tr></table>`;
 }
 
+// A label/value block for the one or two emails that must carry structured
+// detail rather than prose — today only the welcome email's sign-in
+// credentials. It borrows the callout's cream panel and gold rule so it reads
+// as part of the same system; the marketing engine has no counterpart because
+// a sales email never had anything to tabulate.
+function fieldsBlock(fields) {
+  const rows = (Array.isArray(fields) ? fields : []).filter(f => f && f.label && f.value);
+  if (!rows.length) return '';
+  const cells = rows.map(f => `<tr>
+<td style="padding:5px 18px 5px 0;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:${PALETTE.muted};white-space:nowrap;vertical-align:top;">${esc(f.label)}</td>
+<td style="padding:5px 0;font-size:14px;color:${PALETTE.navy};font-weight:bold;word-break:break-all;${f.mono ? "font-family:'Courier New',Courier,monospace;letter-spacing:.04em;" : 'font-family:Arial,Helvetica,sans-serif;'}">${esc(f.value)}</td>
+</tr>`).join('\n');
+  return `<table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px 0;"><tr>
+<td style="padding:16px 22px;background:${PALETTE.cream};border-left:4px solid ${PALETTE.gold};">
+<table cellpadding="0" cellspacing="0" style="border-collapse:collapse;">${cells}</table>
+</td></tr></table>`;
+}
+
 /**
  * Render one transactional email in the GFC house style.
  *
@@ -156,6 +174,7 @@ ${headline}
 <div style="font-size:14px;color:${PALETTE.body};line-height:1.75;">
 <p style="margin:0 0 16px 0;">${greeting}</p>
 ${bodyHtml}
+${fieldsBlock(o.fields)}
 ${calloutBlock(o.callout)}
 ${ctaButton(o.ctaUrl, o.ctaLabel)}
 ${signatureBlock(o.signoff)}
@@ -166,6 +185,11 @@ ${footerBlock(o.unsubscribeUrl)}
 
   const textParts = [greeting.replace(/&#39;/g, "'"), ''];
   paragraphs.forEach(p => { textParts.push(p, ''); });
+  const fieldRows = (Array.isArray(o.fields) ? o.fields : []).filter(f => f && f.label && f.value);
+  if (fieldRows.length) {
+    fieldRows.forEach(f => textParts.push(`${f.label}: ${f.value}`));
+    textParts.push('');
+  }
   if (o.callout) textParts.push(o.callout, '');
   if (safeUrl(o.ctaUrl)) textParts.push(`${o.ctaLabel || 'Open your portal'}: ${safeUrl(o.ctaUrl)}`, '');
   textParts.push(
@@ -184,7 +208,7 @@ ${footerBlock(o.unsubscribeUrl)}
 
 module.exports = {
   renderGfcEmail,
-  headerBlock, signatureBlock, footerBlock, ctaButton, calloutBlock,
+  headerBlock, signatureBlock, footerBlock, ctaButton, calloutBlock, fieldsBlock,
   PALETTE, ASSETS, ORG, TEAM_SIGNOFF,
   // exported for tests
   esc, safeUrl

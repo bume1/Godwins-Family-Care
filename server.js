@@ -641,31 +641,32 @@ const BASE_HTML_EMAIL_WRAPPER = () => `
   </div>
 </div>`;
 
-// Branded HTML for the welcome email (has credential table — not a standard wrapper)
-const WELCOME_HTML_BODY = () => `<div style="font-family: ${config.BRAND.FONT_FAMILY}, Inter, -apple-system, sans-serif; width: 100%; max-width: 600px; margin: 0 auto; background: #f8fafc;">
-  ${emailHeaderHtml()}
-  <div style="background: #ffffff; padding: 24px 16px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px;">
-    <h2 style="color: ${config.BRAND.PRIMARY_COLOR}; margin-top: 0; font-size: 20px;">Welcome to ${config.BRAND.COMPANY_NAME}, {{recipientName}}!</h2>
-    <p style="color: #374151; line-height: 1.7; font-size: 15px;">Your account has been created. Use the credentials below to log in for the first time. You will be prompted to set a new password after your first login.</p>
-    <div style="background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 8px; padding: 16px; margin: 24px 0;">
-      <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
-        <tr>
-          <td style="color: #64748b; padding: 6px 0; width: 140px; font-weight: 500; vertical-align: top;">Username / Email</td>
-          <td style="color: #0f172a; padding: 6px 0; font-weight: 600; word-break: break-all;">{{recipientEmail}}</td>
-        </tr>
-        <tr>
-          <td style="color: #64748b; padding: 6px 0; font-weight: 500; vertical-align: top;">Temporary Password</td>
-          <td style="color: #0f172a; padding: 6px 0; font-weight: 600; font-family: monospace; letter-spacing: 0.05em; word-break: break-all;">{{temporaryPassword}}</td>
-        </tr>
-      </table>
-    </div>
-    <p style="margin-top: 20px;">
-      <a href="{{loginUrl}}" style="display: inline-block; background: ${config.BRAND.PRIMARY_COLOR}; color: #ffffff; padding: 12px 20px; border-radius: 6px; text-decoration: none; font-weight: 600; font-size: 14px;">Log In Now</a>
-    </p>
-    <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 28px 0 16px;" />
-    <p style="color: #9ca3af; font-size: 12px; margin: 0;">If you did not expect this email, please contact your ${config.BRAND.COMPANY_NAME} administrator.</p>
-  </div>
-</div>`;
+// The welcome email is the one notification that carries structured detail —
+// the sign-in credentials — rather than prose, which is why it was originally
+// written as its own hand-rolled HTML. That is exactly how it kept the old
+// plain chrome when PR #76 moved every other notification onto the house
+// template: `buildHtmlEmail` hands back any HTML a caller supplies and never
+// wraps it, so a caller with its own HTML silently opts out of the branding.
+// Reported live 2026-09-13. It now renders through `emailTemplates` like
+// everything else, with the credentials in the shared fields block.
+//
+// It takes the vars and returns finished HTML — it is NOT a placeholder string
+// run through renderTemplate afterwards. Substituting after the render would
+// put unescaped values into the markup.
+const WELCOME_HTML_BODY = (vars = {}) => emailTemplates.renderGfcEmail({
+  greeting: vars.recipientName,
+  headline: `Welcome to ${config.BRAND.COMPANY_NAME}`,
+  paragraphs: [
+    'Your account is ready. Use the details below to sign in for the first time. You will be asked to choose your own password once you are in.',
+    'If you were not expecting this email, please contact our office and we will look into it.'
+  ],
+  fields: [
+    { label: 'Username', value: vars.recipientEmail },
+    { label: 'Temporary password', value: vars.temporaryPassword, mono: true }
+  ],
+  ctaUrl: vars.loginUrl,
+  ctaLabel: 'Sign in'
+}).html;
 
 // Render a template string by replacing {{variable}} placeholders with values
 function renderTemplate(templateStr, variables) {
@@ -1204,7 +1205,7 @@ async function sendWelcomeEmail(user, plainPassword) {
     const body = renderTemplate(tpl.body, vars);
     const htmlBody = tpl.htmlBody
       ? renderTemplate(tpl.htmlBody, vars)
-      : renderTemplate(WELCOME_HTML_BODY(), vars);
+      : WELCOME_HTML_BODY(vars);
     const notification = await queueNotification(
       'welcome_email',
       user.id, user.email, user.name,
@@ -16728,7 +16729,7 @@ app.post('/api/admin/email-templates/:id/test-send', authenticateToken, requireA
     const subject = `[TEST] ${renderTemplate(tpl.subject, vars)}`;
     const body = renderTemplate(tpl.body, vars);
     const htmlSrc = tpl.id === 'welcome_email'
-      ? renderTemplate(WELCOME_HTML_BODY(), vars)
+      ? WELCOME_HTML_BODY(vars)
       : buildHtmlEmail(body, tpl.htmlBody ? renderTemplate(tpl.htmlBody, vars) : null, null, null, null, appBaseUrl);
     const result = await sendEmail(req.user.email, subject, body, { htmlBody: htmlSrc });
     if (!result.success) return res.status(500).json({ error: result.error || 'Send failed' });
@@ -17138,7 +17139,7 @@ app.post('/api/admin/email-templates/:id/preview', authenticateToken, requireAdm
     const subject = renderTemplate(tpl.subject, vars);
     const body = renderTemplate(tpl.body, vars);
     const htmlSrc = tpl.id === 'welcome_email'
-      ? renderTemplate(WELCOME_HTML_BODY(), vars)
+      ? WELCOME_HTML_BODY(vars)
       : buildHtmlEmail(body, tpl.htmlBody ? renderTemplate(tpl.htmlBody, vars) : null, appBaseUrl, 'View in App', null, appBaseUrl);
     res.json({ subject, body, html: htmlSrc });
   } catch (error) {
