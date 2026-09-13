@@ -1,5 +1,5 @@
 # GFC Care Platform — running status
-_Last updated: 2026-09-13 (Drive wired live — a failed read now NAMES its cause; SECURITY: cross-client messaging leak closed; admin address typo fixed and every queued notice branded; caregiver + payroll documents)_
+_Last updated: 2026-09-13 (a macOS screenshot filename 500'd every document download; Drive wired live and a failed read now NAMES its cause; SECURITY: cross-client messaging leak closed; admin address typo fixed and every queued notice branded; caregiver + payroll documents)_
 
 This file is auto-loaded at the start of every Claude Code session. Read it first for current state. Details live in `docs/`.
 
@@ -115,6 +115,15 @@ This file is auto-loaded at the start of every Claude Code session. Read it firs
 ---
 
 ## Recent decisions
+
+**09/2026 — A macOS screenshot filename 500'd every document download (2026-09-13, owner report).** Reported minutes after the Drive diagnostics deployed: opening a stored caregiver document answered **"Server error"**. **It was never Drive** — the bytes came back fine.
+
+- **THE CAUSE IS THE FILENAME.** macOS screenshots since Ventura are named `Screenshot 2026-09-13 at 11.55.07<U+202F>AM.png`, with a **NARROW NO-BREAK SPACE** before AM. `res.setHeader` refuses anything outside latin-1 and throws `ERR_INVALID_CHAR` **synchronously**, so the route's outer catch turned it into a 500 — *after* the file had already been fetched from Drive. Reproduced exactly against Node's real `setHeader` before a line was changed.
+- **EVERY DOCUMENT ROUTE HAD IT, not just the caregiver one.** 22 call sites built `Content-Disposition` by hand across `server.js`, `routes/caregiver.js` and `routes/scheduling.js`: client uploads, chart documents, consent copies, the face sheet, the enrollment packet ZIP, every care-plan PDF and every CSV export. **A client named `José` would have broken the care plan the same way**, and the signed care-plan filename is built from the client's surname.
+- **The fix is the STANDARD one (RFC 6266 / 5987), not a mangled name.** `contentDisposition.js` emits an ASCII-safe `filename=` (what makes the header legal) **plus `filename*=UTF-8''…` carrying the real name**. Browsers prefer `filename*`, so the person downloading still gets their actual filename. **Stripping to ASCII would have fixed the crash and silently renamed everyone's files** — mutation-checked, because that is the tempting one-line "fix".
+- **Two latent crashes went with it.** `row.file_name.replace(...)` and `String(read.doc.name)` both threw on a row with no filename; the helper is null-safe and defaults to `document`, so a broken row is a sensible download rather than a 500.
+- **THE DIAGNOSTIC CHANGE EARLIER THE SAME DAY IS WHAT FOUND THIS.** Before it, the admin screen printed *"That file could not be retrieved"* for every failure — a 500 and a 502 looked identical, and the 502 wording sent the investigation at Drive, which was innocent. The moment the screen showed the server's own words the answer was one word long: **"Server error" is a 500, so it is not the storage layer at all.** *A message that cannot distinguish two states does not just fail to help — it points at the wrong thing.*
+- **Verification: 8 tests, seven mutations, six of them confirmed to fail.** The tests assert against **Node's real `setHeader`**, not a regex over the string, because whether Node accepts the header is the only question that matters. A build guard fails if any route hand-builds the header again, plus a second guard that each such file actually requires the helper — a grep-only guard would pass on a file that never imported it, which is a `ReferenceError` at request time and a 500 again. **The seventh mutation changed no behaviour and is recorded as such rather than claimed as a catch:** stripping CR/LF in the sanitizer is belt-and-braces, since the ASCII filter and percent-encoding both already neutralise it — and *that* line is mutation-checked. The module comment says so, so a later simplification does not open the hole believing the sanitizer covers it. Full suite **665, 0 failing**; the app boots and both pages serve.
 
 **09/2026 — Drive went live, and the first failure could not be diagnosed (2026-09-13, owner report).** The owner wired the Google setup and **uploads worked**. Opening a stored file answered *"That file could not be retrieved."* — and that sentence was the real defect.
 

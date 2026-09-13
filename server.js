@@ -1,6 +1,7 @@
 // Session 5.4: every console.* line is scrubbed of PHI before it leaves the
 // process. Installed before anything else can log.
 require('./logScrubber').install(console);
+const { contentDisposition } = require('./contentDisposition');
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
@@ -6484,7 +6485,7 @@ const serveStoredDocument = async (res, row, actor) => {
     await logActivity(actor.id, actor.name || actor.email, 'client_document_read', 'document', row.clientId, { kind: row.kind, documentId: row.id });
   }
   res.setHeader('Content-Type', row.mimeType || 'application/octet-stream');
-  res.setHeader('Content-Disposition', `inline; filename="${(row.fileName || 'document').replace(/"/g, '')}"`);
+  res.setHeader('Content-Disposition', contentDisposition('inline', row.fileName));
   res.send(buf);
 };
 
@@ -6501,7 +6502,7 @@ app.get('/api/gfc/face-sheet.pdf', authenticateToken, requireEnrolledClient, asy
     const pdf = await pdfGenerator.generateFaceSheetPDF(client);
     await logActivity(req.user.id, req.user.name || req.user.email, 'face_sheet_downloaded', 'client', client.id, {});
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="face-sheet-${client.slug || client.id}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition('inline', `face-sheet-${client.slug || client.id}.pdf`));
     res.send(pdf);
   } catch (error) {
     console.error('Face sheet PDF error:', error);
@@ -6596,7 +6597,7 @@ app.get('/api/gfc/consents/:type.pdf', authenticateToken, requireClientForOwnCon
     if (out.error) return res.status(out.status).json({ error: out.error, code: out.code });
     await logActivity(req.user.id, req.user.name || req.user.email, 'consent_copy_downloaded', 'consent', req.params.type, { clientId: client.id, audience: 'client' });
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${out.fileName}"`);
+    res.setHeader('Content-Disposition', contentDisposition('inline', out.fileName));
     res.send(out.pdf);
   } catch (error) {
     console.error('GFC consent PDF error:', error);
@@ -6613,7 +6614,7 @@ app.get('/api/gfc/enrollment-packet.zip', authenticateToken, requireClientForOwn
     if (out.error) return res.status(out.status).json({ error: out.error, code: out.code });
     await logActivity(req.user.id, req.user.name || req.user.email, 'enrollment_packet_downloaded', 'enrollment', client.id, { consents: out.included, audience: 'client' });
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename="${out.fileName}"`);
+    res.setHeader('Content-Disposition', contentDisposition('attachment', out.fileName));
     res.send(out.zip);
   } catch (error) {
     console.error('GFC packet ZIP error:', error);
@@ -6629,7 +6630,7 @@ app.get('/api/gfc/enrollment-packet.pdf', authenticateToken, requireEnrolledClie
     if (!client) return res.status(404).json({ error: 'No client record on file' });
     const pdf = await pdfGenerator.generateEnrollmentPacketPDF(client);
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="enrollment-packet-${client.slug || client.id}.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition('inline', `enrollment-packet-${client.slug || client.id}.pdf`));
     res.send(pdf);
   } catch (error) {
     console.error('GFC enrollment packet PDF error:', error);
@@ -7019,7 +7020,7 @@ app.get('/api/gfc/clinical/documents/:docId/file', authenticateToken, requireEnr
       await audit(`care_plan_v${version}`);
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('X-GFC-PDF-Source', source);
-      res.setHeader('Content-Disposition', `inline; filename="CarePlan_v${version}.pdf"`);
+      res.setHeader('Content-Disposition', contentDisposition('inline', `CarePlan_v${version}.pdf`));
       return res.send(buffer);
     }
 
@@ -7030,7 +7031,7 @@ app.get('/api/gfc/clinical/documents/:docId/file', authenticateToken, requireEnr
       if (out.error) return res.status(out.status || 400).json({ error: out.error, code: out.code });
       await audit(`consent_${ref}`);
       res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `inline; filename="${out.fileName}"`);
+      res.setHeader('Content-Disposition', contentDisposition('inline', out.fileName));
       return res.send(out.pdf);
     }
 
@@ -7073,7 +7074,7 @@ app.get('/api/gfc/clinical/documents/:docId/file', authenticateToken, requireEnr
       }
       await audit(`emr_${ref}`);
       res.setHeader('Content-Type', read.doc.mimetype);
-      res.setHeader('Content-Disposition', `inline; filename="${String(read.doc.name).replace(/"/g, '')}"`);
+      res.setHeader('Content-Disposition', contentDisposition('inline', read.doc.name));
       return res.send(read.doc.buffer);
     }
 
@@ -7114,7 +7115,7 @@ app.get('/api/gfc/clinical/care-plan.pdf', authenticateToken, requireEnrolledCli
       { role: req.user.role, audience, actingFor: acting.actingFor, patientId: client.openEmrPatientId || null, resource: 'care_plan_pdf', version, source });
     const lastName = (client.name || 'Client').trim().split(/\s+/).slice(-1)[0];
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="CarePlan_${lastName}_v${version}_signed.pdf"`);
+    res.setHeader('Content-Disposition', contentDisposition('inline', `CarePlan_${lastName}_v${version}_signed.pdf`));
     res.setHeader('X-GFC-PDF-Source', source);
     res.send(buffer);
   } catch (error) {
@@ -7430,7 +7431,7 @@ app.get('/api/clinical/patients/:clientId/documents/:docId/file', authenticateTo
       await audit(`care_plan_v${version}`);
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('X-GFC-PDF-Source', source);
-      res.setHeader('Content-Disposition', `inline; filename="CarePlan_v${version}.pdf"`);
+      res.setHeader('Content-Disposition', contentDisposition('inline', `CarePlan_v${version}.pdf`));
       return res.send(buffer);
     }
 
@@ -7443,7 +7444,7 @@ app.get('/api/clinical/patients/:clientId/documents/:docId/file', authenticateTo
       if (out.error) return res.status(out.status || 400).json({ error: out.error, code: out.code });
       await audit(`consent_${ref}`);
       res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `inline; filename="${out.fileName}"`);
+      res.setHeader('Content-Disposition', contentDisposition('inline', out.fileName));
       return res.send(out.pdf);
     }
 
@@ -7499,7 +7500,7 @@ app.get('/api/clinical/patients/:clientId/documents/:docId/file', authenticateTo
       }
       await audit(`emr_${ref}`);
       res.setHeader('Content-Type', read.doc.mimetype);
-      res.setHeader('Content-Disposition', `inline; filename="${String(read.doc.name).replace(/"/g, '')}"`);
+      res.setHeader('Content-Disposition', contentDisposition('inline', read.doc.name));
       return res.send(read.doc.buffer);
     }
 
@@ -11345,7 +11346,7 @@ app.get('/api/gfc/admin/enrollment/:clientId/consent/:type.pdf', authenticateTok
     if (out.error) return res.status(out.status).json({ error: out.error, code: out.code });
     await logActivity(req.user.id, req.user.name || req.user.email, 'consent_copy_downloaded', 'consent', req.params.type, { clientId: client.id });
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${out.fileName}"`);
+    res.setHeader('Content-Disposition', contentDisposition('inline', out.fileName));
     res.send(out.pdf);
   } catch (error) {
     console.error('GFC admin consent PDF error:', error);
@@ -11368,7 +11369,7 @@ app.get('/api/gfc/admin/enrollment/:clientId/consent/:type/blank.pdf', authentic
     if (out.error) return res.status(out.status).json({ error: out.error, code: out.code });
     await logActivity(req.user.id, req.user.name || req.user.email, 'consent_blank_printed', 'consent', req.params.type, { clientId: client.id });
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${out.fileName}"`);
+    res.setHeader('Content-Disposition', contentDisposition('inline', out.fileName));
     res.send(out.pdf);
   } catch (error) {
     console.error('GFC blank consent PDF error:', error);
@@ -11483,7 +11484,7 @@ app.get('/api/gfc/admin/enrollment/:clientId/enrollment-packet.zip', authenticat
     if (out.error) return res.status(out.status).json({ error: out.error, code: out.code });
     await logActivity(req.user.id, req.user.name || req.user.email, 'enrollment_packet_downloaded', 'enrollment', client.id, { consents: out.included });
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename="${out.fileName}"`);
+    res.setHeader('Content-Disposition', contentDisposition('attachment', out.fileName));
     res.send(out.zip);
   } catch (error) {
     console.error('GFC admin packet ZIP error:', error);
@@ -13305,7 +13306,7 @@ app.get('/api/client/service-reports/:id/pdf', authenticateToken, async (req, re
     // Preview-only (unsigned) = always inline; token-based open = inline; otherwise attachment
     const disposition = (isPreviewOnly || req.query.token) ? 'inline' : 'attachment';
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `${disposition}; filename="${fileName}"`);
+    res.setHeader('Content-Disposition', contentDisposition(disposition, fileName));
     res.setHeader('Content-Length', pdfBuffer.length);
     res.send(pdfBuffer);
   } catch (error) {
@@ -14289,7 +14290,7 @@ app.get('/api/projects/:id/export', authenticateToken, async (req, res) => {
     const csv = [headers.join(','), ...rows.map(row => row.join(','))].join('\n');
 
     res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename="${project.name.replace(/[^a-zA-Z0-9]/g, '_')}.csv"`);
+    res.setHeader('Content-Disposition', contentDisposition('attachment', `${project.name.replace(/[^a-zA-Z0-9]/g, '_')}.csv`));
     res.send(csv);
   } catch (error) {
     console.error('Export error:', error);
@@ -15223,7 +15224,7 @@ app.get('/api/service-reports/:id/pdf', authenticateToken, requireServiceAccess,
     const fileName = `Service_Report_${(report.clientFacilityName || 'Report').replace(/[^a-zA-Z0-9]/g, '_')}_${reportDate}.pdf`;
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.setHeader('Content-Disposition', contentDisposition('attachment', fileName));
     res.setHeader('Content-Length', pdfBuffer.length);
     res.send(pdfBuffer);
   } catch (error) {

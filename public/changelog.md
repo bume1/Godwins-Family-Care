@@ -8,6 +8,38 @@
 
 #### Bug Fixes
 - Fix an assignment picker that never worked, and give payroll paperwork a home
+- Fix the bouncing admin address and brand every queued notice
+
+#### Changes
+- Record that the host is EC2 + Docker, not ECS
+- Make a failed Drive read say which failure it was
+- Backfill PR #87 in the running status, and pin its suite figure to it
+- Make the Home shift bar live instead of static
+- Close the holes around the no-visit-log-no-clock-out rule
+- Backfill PR #90 into the running status
+- Put Drive back on its feet, and let caregivers send a file
+- Backfill PR #88 in the running status, and correct the test-count claim
+- Prove the repair script's --apply path end to end
+- Show the client a visit that is happening right now
+- Refuse a clock-in more than two hours before the shift starts
+- Let admin enter hours that were never clocked
+- Make the repair script actually runnable, and prove it against the report
+- Close the cross-client messaging leak, and let staff answer what they can see
+- Record PR #86, and stop saying the patient hears nothing
+- Discover the senders instead of listing them
+- Backfill PR #84 into the running status, and correct its counts
+- Tell the patient when a visit is booked, moved or cancelled — and show it
+- Workspace email is live — record it, and stop saying it isn't
+- Ungate shift requests; make the email detail rule name no vendor
+- Every email through the house template, and a guard that keeps it that way
+- Make enrollment gate scheduling; edit consent prefill; de-practice the client form
+- Caregiver pay rate, and the client billed rate at creation
+
+
+### Version 3.0.1 - September 13, 2026
+
+#### Bug Fixes
+- Fix an assignment picker that never worked, and give payroll paperwork a home
 
 #### Changes
 - Put Drive back on its feet, and let caregivers send a file
