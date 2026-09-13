@@ -36,7 +36,16 @@ function discoverSenders() {
       const rel = dir === '.' ? f : `${dir}/${f}`;
       if (rel === 'emailTemplates.js') continue;
       const src = fs.readFileSync(path.join(root, rel), 'utf8');
-      if (/require\(['"]\.{1,2}\/(email|emailTemplates)['"]\)/.test(src)) found.push(rel);
+      // TWO signals, and the second one is why this guard missed eleven notice
+      // types until 2026-09-13. `routes/messaging.js`, `routes/scheduling.js`
+      // and `routes/caregiver.js` require NEITHER the mailer nor the template —
+      // they are handed an injected `queueNotification` by server.js. On the
+      // require signal alone they were invisible to every sweep below, and all
+      // three were sending bare text/plain. A sender is anything that can put
+      // an email in front of a person, however it reaches the transport.
+      const requiresMailer = /require\(['"]\.{1,2}\/(email|emailTemplates)['"]\)/.test(src);
+      const queuesMail = /queueNotification\s*\(/.test(src);
+      if (requiresMailer || queuesMail) found.push(rel);
     }
   }
   return found;
@@ -52,6 +61,12 @@ test('the sender sweep actually finds the senders', () => {
   assert.ok(SENDERS.length >= 4, `expected several senders, found ${SENDERS.length}: ${SENDERS.join(', ')}`);
   for (const must of ['server.js', 'legacySync.js', 'notifications.js']) {
     assert.ok(SENDERS.includes(must), `${must} sends mail and must be swept`);
+  }
+  // The three that the require-only signal missed. Named explicitly because
+  // their absence is the exact hole this guard had, and a regression in the
+  // discovery rule should fail here rather than pass quietly on a shorter list.
+  for (const must of ['routes/messaging.js', 'routes/scheduling.js', 'routes/caregiver.js']) {
+    assert.ok(SENDERS.includes(must), `${must} queues email and must be swept`);
   }
 });
 
@@ -274,4 +289,198 @@ test('the migration writes nothing when the store has no templates yet', async (
   const result = await fn();
   assert.deepStrictEqual(result, { cleared: 0, kept: 0 });
   assert.strictEqual(written, false, 'a fresh store must not be written to by the migration');
+});
+
+// ===========================================================================
+// The queue drain — the last place a notice can pick up the house template,
+// and until 2026-09-13 it did not try.
+//
+// Reported live: a message-received notification arrived as bare text/plain
+// while every notice from `notifications.js` was branded. The drain forwarded
+// `templateData.htmlBody` straight through, so a caller that queued a plain
+// body and no HTML sent no HTML. ELEVEN notice types did exactly that.
+//
+// These guards RUN the real builder rather than reading it, the technique the
+// welcome-email and appointment guards use: the functions are lifted out of
+// server.js by source (requiring server.js boots a server) and executed.
+// ===========================================================================
+
+const emailTemplates = require('../emailTemplates');
+
+const QUEUE_BUILDERS = (() => {
+  const src = read('server.js');
+  const from = src.indexOf('function buildHtmlEmail(');
+  const to = src.indexOf('// ============================================================\n// VARIABLE POOLS', from);
+  assert.ok(from !== -1 && to > from, 'could not locate the email builders in server.js');
+  const block = src.slice(from, to);
+  // eslint-disable-next-line no-new-func
+  return new Function('emailTemplates', `${block}\nreturn { buildHtmlEmail, emailPiecesFromBody, absoluteEmailUrl, buildQueuedEmail };`)(emailTemplates);
+})();
+
+const BASE = 'https://app.godwinsfamilycarellc.com';
+const houseMarkers = (html) => ({
+  logo: /Godwins-llc-3\.png/.test(html),
+  signature: /The Godwins Family Care Team/.test(html)
+});
+
+test('a queued notice with NO htmlBody is branded by the drain', () => {
+  // This is the reported defect, stated as a behaviour. Before the fix this
+  // returned no HTML at all and the email left as text/plain.
+  const built = QUEUE_BUILDERS.buildQueuedEmail({
+    body: 'Bethel Godwins sent you a message about a client. Open the portal to read it.',
+    ctaUrl: '/portal',
+    ctaLabel: 'Open messages'
+  }, BASE);
+
+  assert.ok(built.html, 'the drain must produce HTML for a caller that supplied none');
+  const m = houseMarkers(built.html);
+  assert.ok(m.logo, 'the house header logo is missing — this is not the house template');
+  assert.ok(m.signature, 'the house signature is missing — this is not the house template');
+});
+
+test('a relative CTA is made absolute, so the button is not silently dropped', () => {
+  // Every queued ctaUrl in this repo is an app PATH. `safeUrl` accepts only
+  // http(s), so an unresolved path renders NO button and no link in the text
+  // half either — the reader is told to open the portal and given no way in.
+  const built = QUEUE_BUILDERS.buildQueuedEmail(
+    { body: 'A shift was assigned to you.', ctaUrl: '/caregiver', ctaLabel: 'Open your schedule' }, BASE);
+
+  assert.match(built.html, /href="https:\/\/app\.godwinsfamilycarellc\.com\/caregiver"/,
+    'the CTA must resolve against the app base URL');
+  assert.match(built.text, /https:\/\/app\.godwinsfamilycarellc\.com\/caregiver/,
+    'the text half must carry the link too — a text-only client otherwise gets no address at all');
+});
+
+test('both halves come from ONE render and cannot disagree', () => {
+  const built = QUEUE_BUILDERS.buildQueuedEmail(
+    { body: 'Hi Ada,\n\nYour visit is confirmed.', ctaUrl: '/portal', ctaLabel: 'Open your portal' }, BASE);
+  assert.match(built.text, /Your visit is confirmed\./);
+  assert.match(built.html, /Your visit is confirmed\./);
+  // The greeting is lifted out of the prose and rendered by the TEMPLATE. It
+  // must therefore appear exactly once - the failure mode is it surviving as a
+  // body paragraph as well, so the reader is greeted twice.
+  assert.strictEqual((built.html.match(/Hi Ada,/g) || []).length, 1, 'the greeting should be rendered once, by the template');
+  assert.strictEqual((built.text.match(/Hi Ada,/g) || []).length, 1, 'the text half should greet once too');
+});
+
+test('a link that cannot be made absolute is dropped, never printed broken', () => {
+  // Asserted at the resolver FIRST. The end-to-end check below passes either
+  // way, because the template's own `safeUrl` refuses a non-http href — so on
+  // its own it cannot tell "we dropped it" from "we handed over a dead path
+  // and something downstream saved us". Both layers are worth having; only
+  // this line proves this layer works.
+  assert.strictEqual(QUEUE_BUILDERS.absoluteEmailUrl('/caregiver', ''), null);
+  assert.strictEqual(QUEUE_BUILDERS.absoluteEmailUrl('/caregiver', 'not-a-url'), null);
+
+  const built = QUEUE_BUILDERS.buildQueuedEmail(
+    { body: 'A shift was assigned to you.', ctaUrl: '/caregiver', ctaLabel: 'Open your schedule' }, '');
+  assert.ok(!/href="\/caregiver"/.test(built.html), 'a relative href in an inbox is a dead link');
+  assert.ok(!/Open your schedule/.test(built.html), 'the button must be dropped with its dead link');
+  // The message itself still goes.
+  assert.match(built.html, /A shift was assigned to you\./);
+});
+
+test('an absolute CTA passes through untouched', () => {
+  assert.strictEqual(QUEUE_BUILDERS.absoluteEmailUrl('https://drive.google.com/x', BASE), 'https://drive.google.com/x');
+  assert.strictEqual(QUEUE_BUILDERS.absoluteEmailUrl('mailto:support@godwinsfamilycarellc.com', BASE), 'mailto:support@godwinsfamilycarellc.com');
+  assert.strictEqual(QUEUE_BUILDERS.absoluteEmailUrl('', BASE), null);
+  // No double slash when the base carries a trailing one.
+  assert.strictEqual(QUEUE_BUILDERS.absoluteEmailUrl('/portal', 'https://x.com/'), 'https://x.com/portal');
+});
+
+test('a caller that DOES supply HTML still wins — that contract is unchanged', () => {
+  const built = QUEUE_BUILDERS.buildQueuedEmail(
+    { body: 'text', htmlBody: '<p>caller markup</p>', ctaUrl: '/portal' }, BASE);
+  assert.strictEqual(built.html, '<p>caller markup</p>');
+  assert.strictEqual(built.text, 'text');
+});
+
+test('the drain actually calls the builder — the fix is wired, not merely present', () => {
+  const src = read('server.js');
+  const from = src.indexOf('const processNotificationQueue');
+  const to = src.indexOf('const cancelProjectNotifications', from);
+  assert.ok(from !== -1 && to > from, 'could not locate processNotificationQueue');
+  const drain = src.slice(from, to);
+  assert.ok(drain.includes('buildQueuedEmail('), 'the drain must brand through buildQueuedEmail');
+  assert.ok(!/html:\s*notification\.templateData\.htmlBody/.test(drain),
+    'the drain must not forward a caller htmlBody raw — that is the bypass that shipped eleven plain-text notices');
+});
+
+test('EVERY queued notice in the repo renders to house HTML with a live link', () => {
+  // Discovered, not listed. A new notice type is covered the day it is added.
+  const dirs = ['.', 'routes'];
+  const sites = [];
+  for (const dir of dirs) {
+    for (const f of fs.readdirSync(path.join(root, dir))) {
+      if (!f.endsWith('.js')) continue;
+      const rel = dir === '.' ? f : `${dir}/${f}`;
+      const src = fs.readFileSync(path.join(root, rel), 'utf8');
+      const re = /queueNotification\s*\(/g;
+      let m;
+      while ((m = re.exec(src))) {
+        let i = m.index + m[0].length, depth = 1;
+        while (i < src.length && depth > 0) {
+          const c = src[i];
+          if (c === '(') depth++; else if (c === ')') depth--;
+          i++;
+        }
+        const call = src.slice(m.index, i);
+        if (call.length > 8000) continue;
+        const type = (call.match(/queueNotification\(\s*['"`]([a-z_]+)/) || [])[1] || 'unknown';
+        const cta = (call.match(/ctaUrl:\s*'([^']+)'/) || [])[1] || null;
+        sites.push({ rel, type, cta, suppliesHtml: /htmlBody/.test(call) });
+      }
+    }
+  }
+  assert.ok(sites.length >= 10, `expected the repo to queue many notices; found ${sites.length}`);
+
+  for (const s of sites) {
+    if (s.suppliesHtml) continue; // its own HTML, covered by the contract test above
+    const built = QUEUE_BUILDERS.buildQueuedEmail(
+      { body: 'A notice body.', ctaUrl: s.cta, ctaLabel: 'Open' }, BASE);
+    const m = houseMarkers(built.html);
+    assert.ok(m.logo && m.signature, `${s.rel} (${s.type}) would send unbranded mail`);
+    if (s.cta) {
+      assert.ok(built.html.includes(`href="${BASE}${s.cta}"`),
+        `${s.rel} (${s.type}) CTA ${s.cta} did not resolve to an absolute link`);
+    }
+  }
+});
+
+// ---- the address itself ---------------------------------------------------
+
+test('no GFC address anywhere is on a domain other than godwinsfamilycarellc.com', () => {
+  // A one-character typo in `config.DEFAULT_ADMIN.EMAIL` (the domain a letter
+  // short) seeded the live admin account at an address that does not exist, so
+  // every staff notification addressed to admin bounced. Nothing failed loudly:
+  // the send succeeded and the bounce went to a mailbox nobody watches. This is
+  // the durable guard, and it catches the class rather than the one instance.
+  // The misspelling is deliberately not written out here: this file is inside
+  // its own sweep, and a guard that trips on its own explanation is no guard.
+  const dirs = ['.', 'routes', 'scripts', 'public', 'test'];
+  const bad = [];
+  for (const dir of dirs) {
+    const abs = path.join(root, dir);
+    if (!fs.existsSync(abs)) continue;
+    for (const f of fs.readdirSync(abs)) {
+      if (!/\.(js|json|md|example|html)$/.test(f) && f !== '.env.example') continue;
+      const rel = dir === '.' ? f : `${dir}/${f}`;
+      const full = path.join(root, rel);
+      if (!fs.statSync(full).isFile()) continue;
+      // Read raw. A regex literal in a test spells the domain with an escaped
+      // dot, which this pattern simply does not match — so it is skipped, not
+      // misread as a typo. Stripping the backslashes first was worse: it turned
+      // a domain at the end of a line into `...com` plus the `n` of `\n`.
+      const src = fs.readFileSync(full, 'utf8');
+      for (const m of src.matchAll(/@(godwins[a-z0-9-]+(?:\.[a-z0-9-]+)+)/gi)) {
+        if (m[1].toLowerCase() !== 'godwinsfamilycarellc.com') bad.push(`${rel}: @${m[1]}`);
+      }
+    }
+  }
+  assert.deepStrictEqual(bad, [], `misspelled GFC domain(s) found:\n  ${bad.join('\n  ')}`);
+});
+
+test('the default admin address is the real mailbox', () => {
+  const cfg = require('../config');
+  assert.strictEqual(cfg.DEFAULT_ADMIN.EMAIL, 'admin@godwinsfamilycarellc.com');
 });
