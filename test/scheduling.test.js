@@ -709,3 +709,169 @@ test('claimable is DEFINED BY the claim gate, so the board and the API cannot dr
     }
   }
 });
+
+// ============================================================================
+// Dashboard summary block (owner request, 2026-09-13)
+// ============================================================================
+
+test('the dashboard summary route is admin-only, and RETURNS ONLY COUNTS', async () => {
+  // Executed, not parsed. Two earlier versions of this test read the source and
+  // both got it wrong — one tripped on `clientsMissingCoordinates` (a number
+  // whose NAME contains "coordinates"), the next on the multi-line literal.
+  // Verify the behaviour, not the artifact: call the route and look at what
+  // comes back.
+  const express = require('express');
+  const store = {
+    shifts: [
+      { id: 's1', status: 'open', start: '2030-01-01T10:00:00.000Z', client_id: 'c1', client_name: 'Margaret Whitfield' },
+      { id: 's2', status: 'claimed', start: '2030-01-01T10:00:00.000Z', client_id: 'c1', client_name: 'Margaret Whitfield' }
+    ],
+    time_logs: [{ id: 'l1', flags: ['outside_geofence'], client_name: 'Margaret Whitfield' }]
+  };
+  const db = { get: async (k) => store[k] || [], set: async (k, v) => { store[k] = v; } };
+  const users = [
+    { id: 'c1', role: 'client', name: 'Margaret Whitfield', address: { line1: '12 Oak St' } },
+    { id: 'a1', role: 'admin', name: 'GFC Admin' }
+  ];
+
+  const router = require('../routes/scheduling')({
+    db, config: require('../config'),
+    logActivity: async () => {}, queueNotification: async () => {},
+    getUsers: async () => users, invalidateUsersCache: () => {},
+    authenticateToken: (req, _res, next) => { req.user = { id: 'a1', role: 'admin', name: 'GFC Admin' }; next(); },
+    uuidv4: () => 'x'
+  });
+
+  const app = express();
+  app.use(express.json());
+  app.use(router);
+  const server = app.listen(0);
+  try {
+    const port = server.address().port;
+    const res = await fetch(`http://127.0.0.1:${port}/api/scheduling/summary`);
+    assert.strictEqual(res.status, 200);
+    const { summary } = await res.json();
+
+    // EVERY value is a number. A string in here would be a name or an address.
+    for (const [key, value] of Object.entries(summary)) {
+      assert.strictEqual(typeof value, 'number', `summary.${key} must be a count, got ${typeof value}`);
+    }
+    // And it actually counted, so the test is not passing on an empty object.
+    assert.strictEqual(summary.openUnfilled, 1);
+    assert.strictEqual(summary.awaitingApproval, 1);
+    assert.strictEqual(summary.flaggedTimeLogs, 1);
+    assert.strictEqual(summary.clientsMissingCoordinates, 1, 'the one client has no lat/lng');
+    assert.strictEqual(summary.clientCount, 1);
+
+    // The client's name is in the fixture rows the route read; it must not
+    // survive into the payload.
+    assert.ok(!JSON.stringify(summary).includes('Margaret'),
+      'a dashboard tile is a glance and a glance does not carry PHI');
+  } finally {
+    server.close();
+  }
+});
+
+test('a NON-admin is refused the summary at the route', async () => {
+  const express = require('express');
+  const db = { get: async () => [], set: async () => {} };
+  const router = require('../routes/scheduling')({
+    db, config: require('../config'),
+    logActivity: async () => {}, queueNotification: async () => {},
+    getUsers: async () => [], invalidateUsersCache: () => {},
+    // A "manager" is the legacy lab-era isManager flag — NOT an admin. Today
+    // that means no scheduling read at all; widening it is an owner decision.
+    authenticateToken: (req, _res, next) => { req.user = { id: 'm1', role: 'user', isManager: true }; next(); },
+    uuidv4: () => 'x'
+  });
+  const app = express();
+  app.use(express.json());
+  app.use(router);
+  const server = app.listen(0);
+  try {
+    const port = server.address().port;
+    const res = await fetch(`http://127.0.0.1:${port}/api/scheduling/summary`);
+    assert.strictEqual(res.status, 403);
+    assert.strictEqual((await res.json()).code, 'ADMIN_ONLY');
+  } finally {
+    server.close();
+  }
+});
+
+test('the admin hub renders the scheduling block only when the summary returned', () => {
+  const hub = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-hub.html'), 'utf8');
+  assert.ok(hub.includes('getSchedulingSummary'), 'the hub fetches the summary');
+  assert.ok(hub.includes('{sched && ('),
+    'the block is conditional on the summary having loaded — a refused fetch renders nothing');
+  // The dashboard must still render when scheduling is unreachable: the
+  // summary sets its own state and never touches setLoading.
+  const effect = hub.slice(hub.indexOf('api.getSchedulingSummary(token)'));
+  const effectBody = effect.slice(0, effect.indexOf('}, [token]);'));
+  assert.ok(!effectBody.includes('setLoading'),
+    'a scheduling failure must never hold the whole dashboard in its loading state');
+});
+
+test('the payroll CSV carries a rate, and NOTHING clinical', () => {
+  // REPOINTED, not deleted. This guard used to assert the CSV carried no money
+  // at all, because no caregiver pay rate existed anywhere in the app. One now
+  // does (owner request, 2026-09-13), so the rule it protects becomes: a money
+  // column must have a real resolved rate behind it, and an unset rate must
+  // stay distinguishable from a rate of zero (asserted in the next test).
+  const keys = sched.PAYROLL_CSV_COLUMNS.map(c => c.key);
+  assert.ok(keys.includes('hours'));
+  assert.ok(keys.includes('payRate'), 'the rate is exported');
+  assert.ok(keys.includes('grossPay'), 'and what it comes to');
+  assert.ok(keys.includes('payRateSource'),
+    'and where it came from — "why is this different this week" needs an answer');
+  for (const clinical of ['diagnosis', 'careplan', 'notes', 'visitLog', 'condition']) {
+    assert.ok(!keys.includes(clinical), `"${clinical}" is clinical and must not reach payroll`);
+  }
+});
+
+test('SAFETY: an unset pay rate resolves to null, NEVER 0', () => {
+  // A payroll run must tell "nobody set a rate" from "the rate is zero".
+  // Coercing the first into the second pays someone nothing and looks
+  // deliberate on the export.
+  assert.strictEqual(cg.resolvePayRate({}, null, null).rate, null);
+  assert.strictEqual(cg.resolvePayRate({ payRate: '' }, null, null).rate, null);
+  assert.strictEqual(cg.resolvePayRate({ payRate: 'abc' }, null, null).rate, null);
+  assert.strictEqual(cg.resolvePayRate({ payRate: -5 }, null, null).rate, null, 'negative is not a rate');
+  assert.strictEqual(cg.resolvePayRate({ payRate: 99999 }, null, null).rate, null, 'a typo past the ceiling is refused');
+  assert.strictEqual(cg.resolvePayRate({}, null, null).source, 'unset', 'and it says so');
+  // Zero, explicitly set, IS kept — a number somebody chose.
+  assert.deepStrictEqual(cg.resolvePayRate({ payRate: 0 }, null, null), { rate: 0, source: 'base' });
+});
+
+test('pay rate resolves shift → per-client → base, and SAYS which', () => {
+  const caregiver = { payRate: 18, clientPayRates: { 'client-1': 22.5 } };
+  assert.deepStrictEqual(cg.resolvePayRate(caregiver, 'client-1', { pay_rate: 30 }),
+    { rate: 30, source: 'shift' }, 'a rate posted on the shift wins');
+  assert.deepStrictEqual(cg.resolvePayRate(caregiver, 'client-1', null),
+    { rate: 22.5, source: 'client' }, 'then the per-client rate');
+  assert.deepStrictEqual(cg.resolvePayRate(caregiver, 'client-9', null),
+    { rate: 18, source: 'base' }, 'then the base rate');
+  // An unusable rate on the shift falls THROUGH rather than zeroing the shift.
+  assert.deepStrictEqual(cg.resolvePayRate(caregiver, 'client-1', { pay_rate: 'oops' }),
+    { rate: 22.5, source: 'client' });
+});
+
+test('SAFETY: per-client pay rates are keyed by client ID, never by name', () => {
+  // The vendor picker stores assignedClients by NAME. Keying pay off a name
+  // means a renamed client silently drops that caregiver back to their base
+  // rate — a pay cut nobody would see happen.
+  assert.deepStrictEqual(
+    cg.normalizeClientPayRates({ 'client-1': '22.505', 'client-2': 'bad', '': 9 }),
+    { 'client-1': 22.51 },
+    'rounded to cents; unusable values and blank keys dropped rather than stored as 0'
+  );
+});
+
+test('SAFETY: the client and family schedule carries NO pay rate', () => {
+  // What we pay a caregiver IS the margin. A client seeing it learns our cost.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'scheduling.js'), 'utf8');
+  const start = src.indexOf("router.get('/api/scheduling/my-upcoming-shifts'");
+  assert.ok(start > -1, 'the client-facing route exists');
+  const handler = src.slice(start, src.indexOf('router.', start + 10));
+  assert.ok(!/pay_?[Rr]ate/.test(handler),
+    'the client and family schedule must never carry what we pay the caregiver');
+});

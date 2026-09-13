@@ -20,7 +20,7 @@ const { sendEmail, sendBulkEmail, sendBatchEmails } = require('./email');
 const emailTransport = require('./email');
 const emailTemplates = require('./emailTemplates');
 const enrollmentGate = require('./enrollmentGate');
-const { createPhcNotifier } = require('./phcNotifications');
+const { createNotifier } = require('./notifications');
 const roiRepo = require('./roiRepository');           // Transfer-of-Care ROI data model (Session 3.4)
 const legacySync = require('./legacySync');            // ROI parallel-run legacy sync (Session 3.4)
 const openemr = require('./openemr');                  // OpenEMR FHIR/REST front-end client (Session 4.1)
@@ -36,6 +36,10 @@ const consentText = require('./public/consent-text'); // approved consent bodies
 const consentRegistry = require('./consentRegistry'); // THE consent registry: lanes, statuses, provenance (4.6)
 const consentRender = require('./consentRender');     // consent data blocks resolved from the client record (4.6)
 const zipWriter = require('./zipWriter');             // dependency-free ZIP for the signed-consent packet (4.6)
+// The caregiver vocabulary — licence levels, competencies, and pay-rate
+// resolution. Required, never restated: a second copy of what a pay rate means
+// is how the admin form and payroll start disagreeing about someone's wages.
+const caregiverRepo = require('./caregiverRepository');
 const caregiverRoutes = require('./routes/caregiver'); // caregiver app: visit log + escalation (Session 6)
 const schedulingRoutes = require('./routes/scheduling');
 const messagingRoutes = require('./routes/messaging'); // channel matrix + role-scoped threads (Session 9) // PHCP shifts, availability, time tracking (Session 7)
@@ -617,31 +621,6 @@ const EMAIL_BRAND = () => ({
   accent: config.BRAND.ACCENT_COLOR
 });
 
-const emailHeaderHtml = () => {
-  const b = EMAIL_BRAND();
-  return `<div style="background-color: #ffffff; padding: 22px 16px 18px; border-radius: 8px 8px 0 0; text-align: center; border-bottom: 3px solid ${b.primary};">
-    <span style="display: inline-block; color: ${b.primary}; font-size: 20px; font-weight: 700; letter-spacing: 0.02em;">${b.company}</span>
-  </div>`;
-};
-
-const emailFooterNote = (context) => {
-  const b = EMAIL_BRAND();
-  return `You are receiving this because you have ${context || 'an account'} with ${b.company}.`;
-};
-
-// Base HTML email wrapper used when a template has no custom htmlBody
-const BASE_HTML_EMAIL_WRAPPER = () => `
-<div style="font-family: ${config.BRAND.FONT_FAMILY}, Inter, -apple-system, sans-serif; width: 100%; max-width: 600px; margin: 0 auto; background: #f8fafc;">
-  ${emailHeaderHtml()}
-  <div style="background: #ffffff; padding: 24px 16px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px;">
-    <div style="color: #374151; line-height: 1.7; font-size: 15px; white-space: pre-wrap; word-break: break-word;">{{content}}</div>
-    {{ctaBlock}}
-    <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 28px 0 16px;" />
-    <p style="color: #9ca3af; font-size: 12px; margin: 0;">${emailFooterNote('an account')}</p>
-    {{unsubscribeBlock}}
-  </div>
-</div>`;
-
 // The welcome email is the one notification that carries structured detail —
 // the sign-in credentials — rather than prose, which is why it was originally
 // written as its own hand-rolled HTML. That is exactly how it kept the old
@@ -694,18 +673,6 @@ function buildHtmlEmail(body, htmlBody, ctaUrl, ctaLabel, unsubscribeUrl, baseUr
   return emailTemplates.renderGfcEmail({
     greeting, paragraphs: lines, ctaUrl, ctaLabel, unsubscribeUrl
   }).html;
-}
-
-// Retained for the two lab-era templates that still pass their own htmlBody.
-function buildHtmlEmailLegacy(body, htmlBody, ctaUrl, ctaLabel, unsubscribeUrl, baseUrl) {
-  if (htmlBody) return htmlBody;
-  const ctaBlock = (ctaUrl && ctaLabel)
-    ? `<p style="margin-top: 20px;"><a href="${ctaUrl}" style="display: inline-block; background: ${config.BRAND.PRIMARY_COLOR}; color: #ffffff; padding: 10px 24px; border-radius: 6px; text-decoration: none; font-weight: 500; font-size: 14px;">${ctaLabel}</a></p>`
-    : '';
-  const unsubscribeBlock = unsubscribeUrl
-    ? `<p style="color: #9ca3af; font-size: 11px; margin: 6px 0 0;"><a href="${unsubscribeUrl}" style="color: #9ca3af; text-decoration: underline;">Unsubscribe from these emails</a></p>`
-    : '';
-  return renderTemplate(BASE_HTML_EMAIL_WRAPPER(), { content: body, ctaBlock, unsubscribeBlock, appUrl: baseUrl || 'https://godwinsfamilycarellc.com' });
 }
 
 // ============================================================
@@ -1033,17 +1000,12 @@ const DEFAULT_EMAIL_TEMPLATES = [
     category: 'announcement',
     subject: '{{priorityTag}}New Announcement: {{title}}',
     body: '{{priorityTag}}{{title}}\n\n{{content}}{{attachmentLine}}',
-    htmlBody: `<div style="font-family: ${config.BRAND.FONT_FAMILY}, Inter, -apple-system, sans-serif; width: 100%; max-width: 600px; margin: 0 auto;">
-  ${emailHeaderHtml()}
-  <div style="background: #ffffff; padding: 24px 16px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px;">
-    {{priorityBanner}}
-    <h2 style="color: ${config.BRAND.PRIMARY_COLOR}; margin-top: 0;">{{title}}</h2>
-    <div style="color: #374151; line-height: 1.6; white-space: pre-wrap; word-break: break-word;">{{content}}</div>
-    {{attachmentBlock}}
-    <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 24px 0;" />
-    <p style="color: #9ca3af; font-size: 12px; margin: 0;">${emailFooterNote('a client portal account')}</p>
-  </div>
-</div>`,
+    // No custom HTML. An announcement renders through the house template
+    // like every other notification; the structured pieces (priority,
+    // attachment) are passed to it at the send site rather than baked
+    // into markup here. A stored copy of the old chrome is cleared by
+    // migrateAnnouncementTemplateChrome() on boot.
+    htmlBody: null,
     variables: [
       { key: 'title', label: 'Announcement Title', example: 'System Maintenance Scheduled' },
       { key: 'content', label: 'Announcement Content', example: 'We will be performing system maintenance this weekend.' },
@@ -2474,7 +2436,7 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       isManager, assignedClients, hubspotCompanyId, hubspotDealId, hubspotContactId, projectAccessLevels,
       existingPortalSlug, phone, sendWelcomeEmail: shouldSendWelcome = true,
       licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
-      familyIsPoa, openEmrProviderId, npi
+      familyIsPoa, openEmrProviderId, npi, payRate, clientPayRates, rateAgreement
     } = req.body;
 
     // Managers can only create client users
@@ -2510,6 +2472,10 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       openEmrProviderId: openEmrProviderId || null,
       // Clinician NPI for attribution stamps (Session 4.4)
       npi: normalizeNpi(npi),
+      // What WE PAY a caregiver (owner request, 2026-09-13) — never the same
+      // number as the client's rateAgreement; the gap between them is the margin.
+      payRate: caregiverRepo.normalizePayRate(payRate),
+      clientPayRates: caregiverRepo.normalizeClientPayRates(clientPayRates),
       createdAt: new Date().toISOString(),
       // Account status — active accounts receive notifications, inactive do not
       accountStatus: 'active',
@@ -2530,6 +2496,20 @@ app.post('/api/users', authenticateToken, async (req, res) => {
 
     // Client-specific fields
     if (role === config.ROLES.CLIENT) {
+      // The agreed BILLED rate, settable HERE (owner request, 2026-09-13).
+      // The financial agreement and the home care service agreement both print
+      // this table and neither is presentable without it, so a client added
+      // without a rate walks straight into a hard gate at signing — which is
+      // exactly what happened in testing. The rate is agreed at the point of
+      // sale, long before anyone opens the enrollment screen.
+      // Optional at creation (a clinical-only client signs neither of those
+      // two), and it goes through the SAME builder the enrollment route uses so
+      // the two paths cannot start accepting different things.
+      if (rateAgreement && Object.keys(rateAgreement).length) {
+        const built = buildRateAgreement(rateAgreement, req.user);
+        if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+        newUser.rateAgreement = built.rateAgreement;
+      }
       // GFC client enrollment & care team defaults
       newUser.enrollmentStatus = enrollmentStatus || 'intake_pending';
       newUser.careTeam = careTeam || { assignedFNPs: [], assignedCaseManager: null, primaryCaregiver: null, backupCaregiver: null };
@@ -3301,7 +3281,17 @@ app.get('/api/users', authenticateToken, async (req, res) => {
       // (Session 6). Read-only here — the admin form saves them through
       // PUT /api/caregiver/admin/caregivers/:userId/competencies, and the user
       // PUT above never touches the field, so editing a user cannot wipe them.
-      skilledCompetencies: Array.isArray(u.skilledCompetencies) ? u.skilledCompetencies : []
+      skilledCompetencies: Array.isArray(u.skilledCompetencies) ? u.skilledCompetencies : [],
+      // What WE PAY this caregiver — a different number from rateAgreement,
+      // which is what the CLIENT pays. The gap between them is the margin, so
+      // these are separate fields and neither is derived from the other.
+      // Admin-only: this route already requires an admin, and no caregiver- or
+      // client-facing payload carries either one.
+      // A field the GET omits is a field the form wipes on save (the 4.2 bug
+      // class) — for a pay rate that is an unannounced pay cut.
+      payRate: u.payRate === undefined ? null : u.payRate,
+      clientPayRates: (u.clientPayRates && typeof u.clientPayRates === 'object') ? u.clientPayRates : {},
+      rateAgreement: u.rateAgreement || null
     }));
     res.json(safeUsers);
   } catch (error) {
@@ -3353,7 +3343,7 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
       hasServicePortalAccess, hasAdminHubAccess, hasImplementationsAccess, hasClientPortalAdminAccess,
       isManager, assignedClients, phone, accountStatus, emailUnsubscribed,
       licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
-      familyIsPoa, openEmrProviderId, npi
+      familyIsPoa, openEmrProviderId, npi, payRate, clientPayRates
     } = req.body;
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === userId);
@@ -3440,6 +3430,16 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
     if (familyIsPoa !== undefined) users[idx].familyIsPoa = !!familyIsPoa;
     // Clinician → OpenEMR provider mapping (numeric pc_aid; Session 4.2 calendars)
     if (openEmrProviderId !== undefined) users[idx].openEmrProviderId = openEmrProviderId || null;
+    // Caregiver pay (owner request, 2026-09-13). Normalized through
+    // caregiverRepository so the admin form, the shift post and any payroll read
+    // cannot disagree about what a number means. An unusable value stores as
+    // null, never 0: "nobody has set a rate" and "the rate is zero" are
+    // different facts and a payroll run has to tell them apart.
+    // rateAgreement is deliberately NOT settable here — a change after signing
+    // has consent consequences (it flags the client to re-sign) and that logic
+    // lives on the enrollment rate route. This PUT would bypass it.
+    if (payRate !== undefined) users[idx].payRate = caregiverRepo.normalizePayRate(payRate);
+    if (clientPayRates !== undefined) users[idx].clientPayRates = caregiverRepo.normalizeClientPayRates(clientPayRates);
     // Clinician NPI (Session 4.4 attribution stamps); 10 digits or cleared
     if (npi !== undefined) users[idx].npi = normalizeNpi(npi);
 
@@ -5248,7 +5248,21 @@ app.post('/api/announcements', authenticateToken, requireClientPortalAdmin, asyn
           const vars = { ...baseVars, recipientName: user.name || user.email, recipientEmail: user.email };
           const subject = renderTemplate(annTpl.subject, vars);
           const textBody = renderTemplate(annBody, vars);
-          const htmlBody = annHtml ? renderTemplate(annHtml, vars) : buildHtmlEmail(textBody, null);
+          // An announcement has structure — a title, a body, a priority flag,
+          // an attachment — so it is handed to the house template as those
+          // pieces rather than as one blob of prose. An admin who has written
+          // their own HTML still wins; nobody else hand-rolls chrome.
+          const htmlBody = annHtml
+            ? renderTemplate(annHtml, vars)
+            : emailTemplates.renderGfcEmail({
+                greeting: user.name || null,
+                headline: renderTemplate(newAnnouncement.title || 'A new announcement', vars),
+                paragraphs: String(renderTemplate(newAnnouncement.content || '', vars))
+                  .split(/\n{2,}/).map(t => t.trim()).filter(Boolean),
+                callout: newAnnouncement.priority ? 'This is a priority announcement.' : null,
+                ctaUrl: newAnnouncement.attachmentUrl || null,
+                ctaLabel: newAnnouncement.attachmentUrl ? (newAnnouncement.attachmentName || 'View attachment') : null
+              }).html;
           const result = await queueNotification(
             'announcement', user.id, user.email, user.name || user.email,
             { subject, body: textBody, htmlBody },
@@ -5546,6 +5560,39 @@ async function migrateCareTierEnum() {
 // exactly once. Writes scripts/consent_lane_split_migration.log — the migration
 // log the session deliverables call for.
 const CONSENT_MIGRATION_LOG = path.join(__dirname, 'scripts', 'consent_lane_split_migration.log');
+
+// One-shot: clear the lab-era chrome stored on the announcement template.
+//
+// The shipped default used to carry its own htmlBody, and getEmailTemplates()
+// seeds the defaults into the store on first boot — so changing the default
+// alone changes nothing for an app that has already run. That is the same
+// class of trap as rebuilding the OpenEMR patch without re-fetching: the code
+// looks fixed and the deployment is not.
+//
+// Only the SHIPPED chrome is cleared. HTML an admin wrote themselves is left
+// exactly as it is and reported, because overwriting someone's deliberate
+// customisation is worse than an off-brand email. Idempotent: once cleared
+// there is nothing left to match.
+const LEGACY_CHROME_MARKERS = ['border-bottom: 3px solid', 'You are receiving this because you have'];
+
+async function migrateAnnouncementTemplateChrome() {
+  const templates = await db.get('email_templates');
+  if (!Array.isArray(templates)) return { cleared: 0, kept: 0 };
+  let cleared = 0, kept = 0;
+  for (const t of templates) {
+    if (!t || !t.htmlBody) continue;
+    if (LEGACY_CHROME_MARKERS.every(m => t.htmlBody.includes(m))) {
+      t.htmlBody = null;
+      cleared += 1;
+      console.log(`   ↳ Cleared lab-era email chrome from template "${t.id}" — it now renders in the house style.`);
+    } else {
+      kept += 1;
+      console.log(`   ↳ Template "${t.id}" carries custom HTML that is not the shipped default. Left as is; it will not pick up the house style.`);
+    }
+  }
+  if (cleared) await db.set('email_templates', templates);
+  return { cleared, kept };
+}
 
 async function migrateConsentLaneSplit() {
   if (String(process.env.CONSENT_LANE_SPLIT_MIGRATION_APPLIED).toLowerCase() === 'true') {
@@ -5906,11 +5953,45 @@ const visitDisplayRow = (v) => {
     completed: v.status === 'completed'
   };
 };
+// Which shift statuses mean "somebody is actually coming". `claimed` and
+// `assigned` are NOT agreed yet — a caregiver can still decline — and showing
+// one to a client promises a visit that may never happen. `open` is a shift
+// nobody has taken at all.
+const CLIENT_VISIBLE_SHIFT_STATUSES = Object.freeze(['confirmed', 'in_progress']);
+
 const getClientVisits = async (client) => {
   const rows = ((await db.get('visit_logs')) || []).filter(v => v && v.client_id === client.id);
   const now = Date.now();
   const ts = (v) => { const d = new Date(v.scheduledAt || v.date || 0); return isNaN(d.getTime()) ? 0 : d.getTime(); };
-  const upcoming = rows.filter(v => v.status !== 'completed' && ts(v) >= now)
+
+  // UPCOMING comes from the shift board, because `visit_logs` only ever
+  // receives a row when a caregiver SUBMITS a log — that is, after the visit.
+  // Reading upcoming visits out of it meant a client with three confirmed
+  // shifts this week saw an empty card.
+  //
+  // RECENT deliberately stays on `visit_logs`: that is the documented record
+  // of what happened, and a completed shift carries no id linking it to its
+  // log, so merging the two would double-count every visit.
+  const shifts = ((await db.get('shifts')) || []).filter(sh =>
+    sh && sh.clientId === client.id && CLIENT_VISIBLE_SHIFT_STATUSES.includes(sh.status));
+  let caregiverNames = null;
+  if (shifts.length) {
+    const users = await getUsers();
+    caregiverNames = new Map(users.map(u => [u.id, u.name]));
+  }
+  const shiftRows = shifts.map(sh => ({
+    id: `shift:${sh.id}`,
+    client_id: client.id,
+    source: 'shift',
+    type: 'Home care visit',
+    scheduledAt: sh.start,
+    // Named only when we know it. "Your care team" is the honest fallback and
+    // is what visitDisplayRow already prints for an unnamed visit.
+    caregiverName: (caregiverNames && caregiverNames.get(sh.caregiverId)) || null,
+    status: sh.status === 'in_progress' ? 'in_progress' : 'confirmed'
+  }));
+
+  const upcoming = [...rows.filter(v => v.status !== 'completed' && ts(v) >= now), ...shiftRows.filter(v => ts(v) >= now)]
     .sort((a, b) => ts(a) - ts(b)).slice(0, 10).map(visitDisplayRow);
   const recent = rows.filter(v => v.status === 'completed' || ts(v) < now)
     .sort((a, b) => ts(b) - ts(a)).slice(0, 10).map(visitDisplayRow);
@@ -6303,7 +6384,7 @@ app.post('/api/gfc/documents/upload', authenticateToken, requireClientForIntake,
 
     await logActivity(req.user.id, row.uploadedByName, 'client_document_uploaded', 'document', client.id, { kind });
     // Staff had no way to know a document had arrived except by looking.
-    await phcNotify.documentUploaded({
+    await notify.documentUploaded({
       client, kind, label: row.label || kind, uploadId: row.id, actorId: req.user.id
     });
     res.json({ message: 'Document received', document: { id: row.id, kind, fileName: row.fileName, uploadedAt: row.uploadedAt, status: row.status } });
@@ -6623,7 +6704,7 @@ app.post('/api/gfc/care-plan/cosign', authenticateToken, requireEnrolledClient, 
     // The authoring RN is the person waiting on this signature and had no way
     // to know it had landed. Best-effort, after the PDF: a notification must
     // never be the thing that fails a completed co-signature.
-    await phcNotify.carePlanCoSigned({
+    await notify.carePlanCoSigned({
       client, version: currentVersion, signerName,
       signedByPoa: !!acting.isPoa,
       authoredById: (client.carePlan && client.carePlan.authoredById) || null,
@@ -8010,6 +8091,32 @@ const resolveProviderScope = (reqUser, requestedProviderId) => {
 };
 
 // puuid → app client (for calendar rows → chart navigation). Pointer data only.
+// A visit time a patient can read, from OpenEMR's date + 24h start time.
+// Falls back to the raw values rather than printing "Invalid Date" — a wrong
+// time in an email about someone's care is worse than an ugly one.
+const formatVisitWhen = (date, startTime) => {
+  const d = new Date(`${date}T${String(startTime || '00:00').slice(0, 5)}:00`);
+  if (isNaN(d.getTime())) return [date, startTime].filter(Boolean).join(' ');
+  return d.toLocaleString('en-US', {
+    weekday: 'long', month: 'long', day: 'numeric',
+    hour: 'numeric', minute: '2-digit'
+  });
+};
+
+// The clinician's name from OUR user records, matched on the provider id the
+// appointment carries. Never the acting user: an admin books for a clinician,
+// and naming the wrong person in a patient's email is worse than naming none.
+const clinicianNameForProviderId = async (providerId) => {
+  if (!providerId) return null;
+  const users = await getUsers();
+  const u = users.find(x => x && String(x.openEmrProviderId || '') === String(providerId));
+  return u ? [u.name, u.licenseLevel || u.credential].filter(Boolean).join(', ') : null;
+};
+
+const VISIT_PLACE_LABEL = Object.freeze({
+  home: 'Your home', telehealth: 'By video visit', office: 'Our office'
+});
+
 const clinicalClientsByPuuid = async () => {
   const users = await getUsers();
   const map = new Map();
@@ -8232,6 +8339,17 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
         ? { reason: apptGate.override.reason, enrollmentStatus: apptGate.override.enrollmentStatus }
         : null
     });
+    // Tell the patient. Best-effort by design: a notification failure must
+    // never undo an appointment that is already on the calendar.
+    await notify.appointmentBooked({
+      client,
+      eid: String(eid),
+      when: formatVisitWhen(body.date, body.startTime),
+      clinician: await clinicianNameForProviderId(providerId),
+      place: VISIT_PLACE_LABEL[built.location] || null,
+      actorId: req.user.id
+    });
+
     // Read-back proves the round-trip (acceptance requirement); the single-row
     // GET carries the full record (list rows omit notes/location on 7.0.4).
     const readBack = await emr.getAppointmentRow(client.openEmrPatientId, eid).catch(() => null);
@@ -8301,6 +8419,17 @@ app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requir
       from: `${row.pc_eventDate} ${String(row.pc_startTime).slice(0, 5)}`, to: `${body.date} ${body.startTime}`,
       providerId, supersededRowRemoved: swap.deleted
     });
+    if (appClient) {
+      await notify.appointmentRescheduled({
+        client: { id: appClient.clientId, name: appClient.name },
+        eid: String(newEid),
+        from: formatVisitWhen(row.pc_eventDate, row.pc_startTime),
+        to: formatVisitWhen(body.date, body.startTime),
+        clinician: await clinicianNameForProviderId(providerId),
+        place: VISIT_PLACE_LABEL[built.location] || null,
+        actorId: req.user.id
+      });
+    }
     res.json({
       message: 'Appointment rescheduled in OpenEMR (original slot preserved as a cancelled entry)',
       appointmentEid: newEid, tombstoneEid,
@@ -8339,6 +8468,16 @@ app.post('/api/clinical/appointments/:eid/cancel', authenticateToken, requireCli
       reason: reason.slice(0, 500), slot: `${row.pc_eventDate} ${String(row.pc_startTime).slice(0, 5)}`,
       supersededRowRemoved: swap.deleted
     });
+    if (appClient) {
+      await notify.appointmentCancelled({
+        client: { id: appClient.clientId, name: appClient.name },
+        eid: String(tombstoneEid),
+        when: formatVisitWhen(row.pc_eventDate, row.pc_startTime),
+        reason: reason.slice(0, 500),
+        clinician: await clinicianNameForProviderId(row.pc_aid),
+        actorId: req.user.id
+      });
+    }
     res.json({
       message: 'Appointment cancelled — it stays on the calendar as a cancelled entry with the reason',
       appointmentEid: tombstoneEid,
@@ -9991,7 +10130,7 @@ app.post('/api/gfc/consents', authenticateToken, requireClientForIntake, async (
     // per-consent receipt to them would be fourteen emails; the
     // enrollment-complete confirmation already covers the client side. Staff
     // need each one, because the enrollment gate advances on them.
-    await phcNotify.consentSigned({
+    await notify.consentSigned({
       client, consentType: type,
       consentTitle: (def && def.title) || type,
       offline: false, actorId: req.user.id
@@ -10013,14 +10152,16 @@ async function sendEnrollmentConfirmation(client, portalUrl, extraRecipient) {
   const firstName = (client.preferredName || client.name || 'there').split(' ')[0];
   const subject = 'Your Godwins Family Care enrollment is complete';
   const text = `Hi ${firstName},\n\nWe've received your enrollment with Godwins Family Care. Your care plan, signed consents, and documents are now available in your secure portal.\n\nView them here: ${portalUrl}\n\nFor your privacy, we don't include any health or consent details in email — everything lives in your portal.\n\n— Godwins Family Care`;
-  const htmlBody = `<div style="font-family:'DM Sans',Arial,sans-serif;color:#1B2A33;max-width:520px">
-    <h2 style="color:#033D50;font-weight:600">Enrollment complete</h2>
-    <p>Hi ${firstName},</p>
-    <p>We've received your enrollment with <strong>Godwins Family Care</strong>. Your care plan, signed consents, and documents are now available in your secure portal.</p>
-    <p><a href="${portalUrl}" style="display:inline-block;background:#C9A44A;color:#033D50;text-decoration:none;font-weight:600;padding:12px 20px;border-radius:10px">Open your portal</a></p>
-    <p style="font-size:13px;color:#4F6470">For your privacy, we don't include any health or consent details in email — everything lives in your portal.</p>
-    <p style="font-size:13px;color:#4F6470">— Godwins Family Care</p>
-  </div>`;
+  const htmlBody = emailTemplates.renderGfcEmail({
+    greeting: firstName,
+    headline: 'Enrollment complete',
+    paragraphs: [
+      "We've received your enrollment with Godwins Family Care. Your care plan, signed consents and documents are now available in your secure portal.",
+      'For your privacy we do not put health or consent details in email. Everything lives in your portal.'
+    ],
+    ctaUrl: portalUrl,
+    ctaLabel: 'Open your portal'
+  }).html;
   try {
     await sendEmail(to, subject, text, { htmlBody });
   } catch (e) {
@@ -10124,7 +10265,7 @@ const ENROLLMENT_STAFF_ROLES = [config.ROLES.ADMIN, config.ROLES.USER, config.RO
 // PHC notifications (documents, consents, care-plan co-signature). The staff
 // role list is PASSED IN rather than restated in the module, so widening
 // enrollment access here widens who is notified, in one place.
-const phcNotify = createPhcNotifier({
+const notify = createNotifier({
   getUsers, queueNotification, getAppBaseUrl, emailTransport,
   staffRoles: ENROLLMENT_STAFF_ROLES,
   clientRole: config.ROLES.CLIENT,
@@ -10597,7 +10738,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/request', authenticateTo
     if (!created.length) return res.status(200).json({ message: 'Already requested — nothing new to ask for', created: [] });
     await db.set('client_document_requests', requests);
 
-    const { notified } = await phcNotify.documentsRequested({
+    const { notified } = await notify.documentsRequested({
       clientId: client.id, rows: created, isReminder: false, dueAt, actorId: req.user.id
     });
     await logActivity(req.user.id, req.user.name || req.user.email, 'client_documents_requested', 'document', client.id,
@@ -10635,7 +10776,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/remind', authenticateTok
     }
     await db.set('client_document_requests', requests);
 
-    const { notified } = await phcNotify.documentsRequested({
+    const { notified } = await notify.documentsRequested({
       clientId: client.id, rows: open, isReminder: true, actorId: req.user.id
     });
     await logActivity(req.user.id, stamp.byName, 'client_documents_reminded', 'document', client.id,
@@ -10684,7 +10825,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authe
       { kind: uploads[i].kind, decision });
     // The rejection reason is required at this route and was being captured
     // and never delivered — the client saw nothing and re-sent the same file.
-    await phcNotify.documentReviewed({
+    await notify.documentReviewed({
       clientId: uploads[i].clientId, decision,
       label: uploads[i].label || uploads[i].kind, reason,
       uploadId: uploads[i].id, actorId: req.user.id
@@ -10765,7 +10906,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/follow-up', authenticateToken, req
     await db.set('users', users);
     invalidateUsersCache();
     await logActivity(req.user.id, req.user.name || req.user.email, 'enrollment_follow_up_requested', 'enrollment', client.id, { items });
-    await phcNotify.enrollmentFollowUp({ clientId: client.id, itemLabels, actorId: req.user.id });
+    await notify.enrollmentFollowUp({ clientId: client.id, itemLabels, actorId: req.user.id });
     res.json({ message: 'Follow-up requested', followUp: client.enrollmentFollowUp });
   } catch (error) {
     console.error('GFC enrollment follow-up error:', error);
@@ -10841,7 +10982,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/approve', authenticateToken, requi
                    missingConsents: comp.missingConsentLabels, missingFields: comp.missingFieldLabels } : {});
     // The client was never told they were approved. That was the one event
     // that says "you are done" and it was silent.
-    await phcNotify.enrollmentApproved({ clientId: client.id, overridden: overrode, actorId: req.user.id });
+    await notify.enrollmentApproved({ clientId: client.id, overridden: overrode, actorId: req.user.id });
     res.json({
       message: overrode ? 'Enrollment approved with an override' : 'Enrollment approved',
       enrollmentStatus: client.enrollmentStatus,
@@ -11061,6 +11202,39 @@ app.get('/api/gfc/admin/enrollment/meta/consent-registry', authenticateToken, re
   });
 });
 
+// The agreed CLIENT rate, built in ONE place (owner request, 2026-09-13).
+//
+// The rate must exist before a PHC client can sign the financial agreement or
+// the home care service agreement — both print the table — so it has to be
+// settable when the client is FIRST ADDED, not only later in the enrollment
+// view. That was a hard gate in testing: the rate is agreed at the point of
+// sale, long before anyone opens the enrollment screen.
+//
+// Both writers call this rather than restating the rules, the same reason the
+// service-line route calls applyServiceLineChange: two copies of "what a valid
+// rate is" is how one path starts accepting what the other refuses.
+// Returns { error, code } on a bad rate and writes nothing.
+function buildRateAgreement(body, actor) {
+  const b = body || {};
+  const hourlyRate = Number(b.hourlyRate);
+  const dailyMinimumHours = Number(b.dailyMinimumHours);
+  if (!isFinite(hourlyRate) || hourlyRate <= 0) return { error: 'hourlyRate must be a positive number', code: 'RATE_INVALID' };
+  if (!isFinite(dailyMinimumHours) || dailyMinimumHours <= 0) return { error: 'dailyMinimumHours must be a positive number', code: 'RATE_INVALID' };
+  return {
+    rateAgreement: {
+      hourlyRate, dailyMinimumHours,
+      includedServices: (b.includedServices || '').trim() || null,
+      holidayTreatment: (b.holidayTreatment || '').trim() || null,
+      errandFuel: (b.errandFuel || '').trim() || null,
+      invoiceCadence: (b.invoiceCadence || '').trim() || null,
+      cancellationWindowHours: Number(b.cancellationWindowHours) > 0 ? Number(b.cancellationWindowHours) : 24,
+      rateChangeNoticeDays: Number(b.rateChangeNoticeDays) > 0 ? Number(b.rateChangeNoticeDays) : 30,
+      effectiveDate: b.effectiveDate || null,
+      setById: actor.id, setByName: actor.name || actor.email, setAt: new Date().toISOString()
+    }
+  };
+}
+
 // PUT /api/gfc/admin/enrollment/:clientId/rate — set the agreed rate (Scope B2).
 //
 // The financial agreement and the home care service agreement both PRINT this
@@ -11070,27 +11244,16 @@ app.get('/api/gfc/admin/enrollment/meta/consent-registry', authenticateToken, re
 app.put('/api/gfc/admin/enrollment/:clientId/rate', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const b = req.body || {};
-    const hourlyRate = Number(b.hourlyRate);
-    const dailyMinimumHours = Number(b.dailyMinimumHours);
-    if (!isFinite(hourlyRate) || hourlyRate <= 0) return res.status(400).json({ error: 'hourlyRate must be a positive number', code: 'RATE_INVALID' });
-    if (!isFinite(dailyMinimumHours) || dailyMinimumHours <= 0) return res.status(400).json({ error: 'dailyMinimumHours must be a positive number', code: 'RATE_INVALID' });
+    const built = buildRateAgreement(b, req.user);
+    if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+    const { hourlyRate, dailyMinimumHours } = built.rateAgreement;
 
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
     if (idx === -1) return res.status(404).json({ error: 'Client not found' });
 
     const prior = users[idx].rateAgreement || null;
-    users[idx].rateAgreement = {
-      hourlyRate, dailyMinimumHours,
-      includedServices: (b.includedServices || '').trim() || null,
-      holidayTreatment: (b.holidayTreatment || '').trim() || null,
-      errandFuel: (b.errandFuel || '').trim() || null,
-      invoiceCadence: (b.invoiceCadence || '').trim() || null,
-      cancellationWindowHours: Number(b.cancellationWindowHours) > 0 ? Number(b.cancellationWindowHours) : 24,
-      rateChangeNoticeDays: Number(b.rateChangeNoticeDays) > 0 ? Number(b.rateChangeNoticeDays) : 30,
-      effectiveDate: b.effectiveDate || null,
-      setById: req.user.id, setByName: req.user.name || req.user.email, setAt: new Date().toISOString()
-    };
+    users[idx].rateAgreement = built.rateAgreement;
     // A rate change after the client already signed against the old figures is
     // not a silent edit — the agreement they hold no longer matches the record.
     const signedAgainstOldRate = prior && ['financialAgreement', 'serviceAgreement']
@@ -16173,21 +16336,17 @@ async function createPasswordResetLink(user, plainPassword) {
 // Send the password reset email with the secure link
 async function sendPasswordResetEmail(user, token) {
   const resetUrl = `${await getAppBaseUrl()}/password-reset-${token}`;
-  const htmlBody = `
-    <div style="font-family: Inter, Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-      <div style="background: ${config.BRAND.PRIMARY_COLOR}; padding: 24px; border-radius: 8px 8px 0 0; text-align: center;">
-        <h1 style="color: white; margin: 0; font-size: 22px; font-weight: 700;">${config.BRAND.COMPANY_NAME}</h1>
-      </div>
-      <div style="background: #f9fafb; padding: 32px; border-radius: 0 0 8px 8px; border: 1px solid #e5e7eb; border-top: none;">
-        <p style="color: #374151; font-size: 16px; margin-top: 0;">Hi ${user.name},</p>
-        <p style="color: #374151; font-size: 16px;">Your password has been reset by an administrator. Click the button below to view your temporary credentials.</p>
-        <p style="color: #374151; font-size: 16px;">You will be required to create a new password when you log in.</p>
-        <div style="text-align: center; margin: 32px 0;">
-          <a href="${resetUrl}" style="background: ${config.BRAND.PRIMARY_COLOR}; color: white; padding: 14px 28px; border-radius: 6px; text-decoration: none; font-size: 16px; font-weight: 600; display: inline-block;">View My Temporary Password</a>
-        </div>
-        <p style="color: #6b7280; font-size: 13px; margin-bottom: 0;">This link expires in 24 hours. If you did not expect this reset, please contact your administrator immediately.</p>
-      </div>
-    </div>`;
+  const htmlBody = emailTemplates.renderGfcEmail({
+    greeting: user.name,
+    headline: 'Your password has been reset',
+    paragraphs: [
+      'An administrator reset your password. Use the button below to see your temporary credentials.',
+      'You will be asked to choose a new password when you sign in. The link expires in 24 hours.',
+      'If you were not expecting this, please contact your administrator right away.'
+    ],
+    ctaUrl: resetUrl,
+    ctaLabel: 'View my temporary password'
+  }).html;
   const plainText = `Hi ${user.name},\n\nYour password has been reset by an administrator.\n\nClick the link below to view your temporary credentials and log in:\n${resetUrl}\n\nThis link expires in 24 hours.`;
   return sendEmail(user.email, `Your ${config.BRAND.COMPANY_NAME} Password Has Been Reset`, plainText, { htmlBody });
 }
@@ -17319,6 +17478,11 @@ app.listen(PORT, () => {
       await migrateConsentLaneSplit();
     } catch (err) {
       console.error('Consent lane-split migration failed (non-fatal):', err.message);
+    }
+    try {
+      await migrateAnnouncementTemplateChrome();
+    } catch (err) {
+      console.error('Announcement chrome migration failed (non-fatal):', err.message);
     }
   })();
 

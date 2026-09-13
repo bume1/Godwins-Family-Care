@@ -116,6 +116,14 @@
           headers: { 'Authorization': `Bearer ${token}` }
         }).then(handleResponse).catch(err => ({ error: err.message })),
 
+      // Scheduling summary for the dashboard block. Admin-only server-side, so
+      // a non-admin gets an error object and the block simply does not render —
+      // the gate is the route, never the absence of a tile.
+      getSchedulingSummary: (token) =>
+        fetch(`${API_URL}/api/scheduling/summary`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(err => ({ error: err.message })),
+
       getUsers: (token) =>
         fetch(`${API_URL}/api/users`, {
           headers: { 'Authorization': `Bearer ${token}` }
@@ -581,12 +589,18 @@
     const DashboardPage = ({ token, onNavigate, user }) => {
       const isManager = user?.isManager && user?.role !== 'admin';
       const [stats, setStats] = useState(null);
+      const [sched, setSched] = useState(null);
       const [loading, setLoading] = useState(true);
 
       useEffect(() => {
         api.getDashboard(token).then(data => {
           if (!data.error) setStats(data);
           setLoading(false);
+        });
+        // Separate call, deliberately not awaited with the one above: the
+        // dashboard must still render if scheduling is unreachable or refuses.
+        api.getSchedulingSummary(token).then(data => {
+          if (data && !data.error && data.summary) setSched(data.summary);
         });
       }, [token]);
 
@@ -641,6 +655,73 @@
               </div>
             ))}
           </div>
+
+          {/* Caregiver scheduling — the dashboard block (2026-09-13, owner request).
+              Renders only when the admin-only summary actually came back, so the
+              access control is the route rather than a hidden tile. Every row is
+              something waiting on a person; a zero row is deliberately still
+              shown, because "nothing is waiting" is information too. */}
+          {sched && (
+            <div className="card-modern p-6">
+              <div className="flex items-start justify-between mb-5 gap-3 flex-wrap">
+                <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                  <span className="w-8 h-8 rounded-lg bg-teal-50 text-teal-600 flex items-center justify-center">{Icons.clipboard}</span>
+                  Caregiver Scheduling
+                </h2>
+                <a href="/scheduling" className="text-sm font-medium text-primary-600 hover:text-primary-700">Open scheduling →</a>
+              </div>
+
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+                <div className="p-4 bg-gray-50 rounded-xl">
+                  <p className="text-2xl font-bold text-gray-900">{sched.today}</p>
+                  <p className="text-xs text-gray-500 mt-1">Shifts today</p>
+                </div>
+                <div className="p-4 bg-gray-50 rounded-xl">
+                  <p className="text-2xl font-bold text-gray-900">{sched.inProgress}</p>
+                  <p className="text-xs text-gray-500 mt-1">Clocked in now</p>
+                </div>
+                <div className={`p-4 rounded-xl ${sched.openUnfilled ? 'bg-warning-50' : 'bg-gray-50'}`}>
+                  <p className={`text-2xl font-bold ${sched.openUnfilled ? 'text-warning-600' : 'text-gray-900'}`}>{sched.openUnfilled}</p>
+                  <p className="text-xs text-gray-500 mt-1">Unfilled shifts</p>
+                </div>
+                <div className={`p-4 rounded-xl ${sched.flaggedTimeLogs ? 'bg-warning-50' : 'bg-gray-50'}`}>
+                  <p className={`text-2xl font-bold ${sched.flaggedTimeLogs ? 'text-warning-600' : 'text-gray-900'}`}>{sched.flaggedTimeLogs}</p>
+                  <p className="text-xs text-gray-500 mt-1">Time logs to review</p>
+                </div>
+              </div>
+
+              {/* Waiting on someone. Each line says who it is waiting on, because
+                  "3 pending" without that is a number nobody can act on. */}
+              <div className="space-y-2">
+                {sched.awaitingApproval > 0 && (
+                  <a href="/scheduling" className="flex items-center justify-between p-3 bg-warning-50 hover:bg-warning-100 rounded-xl transition">
+                    <span className="text-sm text-gray-800">
+                      <b>{sched.awaitingApproval}</b> claimed {sched.awaitingApproval === 1 ? 'shift is' : 'shifts are'} waiting on <b>your</b> approval
+                    </span>
+                    <span className="text-xs text-warning-700 font-medium whitespace-nowrap ml-3">Review →</span>
+                  </a>
+                )}
+                {sched.awaitingAcceptance > 0 && (
+                  <div className="flex items-center justify-between p-3 bg-gray-50 rounded-xl">
+                    <span className="text-sm text-gray-700">
+                      <b>{sched.awaitingAcceptance}</b> assigned {sched.awaitingAcceptance === 1 ? 'shift is' : 'shifts are'} waiting on the caregiver to accept
+                    </span>
+                  </div>
+                )}
+                {sched.clientsMissingCoordinates > 0 && (
+                  <a href="/scheduling" className="flex items-center justify-between p-3 bg-red-50 hover:bg-red-100 rounded-xl transition">
+                    <span className="text-sm text-gray-800">
+                      <b>{sched.clientsMissingCoordinates}</b> of {sched.clientCount} {sched.clientsMissingCoordinates === 1 ? 'client has' : 'clients have'} no address coordinates — clock-ins there can only record as unverifiable
+                    </span>
+                    <span className="text-xs text-red-700 font-medium whitespace-nowrap ml-3">Locations →</span>
+                  </a>
+                )}
+                {!sched.awaitingApproval && !sched.awaitingAcceptance && !sched.clientsMissingCoordinates && (
+                  <p className="text-sm text-gray-500 p-3">Nothing is waiting on you.</p>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Quick Actions & Projects */}
           <div className="grid lg:grid-cols-2 gap-6">
@@ -983,7 +1064,15 @@
         familyOfClientId: '', // family role: the client (user id) this contact is linked to
         familyIsPoa: false, // family role: designated Power of Attorney (client-equivalent portal access)
         openEmrProviderId: '', // clinician: OpenEMR provider (numeric id) their calendar maps to (4.2)
-        npi: '' // clinician: individual NPI, stamped on every clinical write (4.4 attribution)
+        npi: '', // clinician: individual NPI, stamped on every clinical write (4.4 attribution)
+        // What WE PAY a caregiver — never the same number as the client's
+        // billed rate below; the gap between them is the margin.
+        payRate: '',
+        clientPayRates: {},
+        // What the CLIENT is billed. Settable at creation because the financial
+        // agreement and the home care service agreement both print it and
+        // neither can be signed without it.
+        rateAgreement: { hourlyRate: '', dailyMinimumHours: '' }
       };
       const [formData, setFormData] = useState(defaultFormData);
       // Competencies live OUTSIDE formData on purpose — formData is round-tripped
@@ -1111,7 +1200,12 @@
           familyOfClientId: user.familyOfClientId || '',
           familyIsPoa: user.familyIsPoa || false,
           openEmrProviderId: user.openEmrProviderId || '',
-          npi: user.npi || ''
+          npi: user.npi || '',
+          payRate: user.payRate === null || user.payRate === undefined ? '' : String(user.payRate),
+          clientPayRates: user.clientPayRates || {},
+          // Read-only on EDIT: changing a signed rate has consent consequences
+          // and belongs on the enrollment rate screen, which handles them.
+          rateAgreement: user.rateAgreement || { hourlyRate: '', dailyMinimumHours: '' }
         });
         setCompetencies((user.skilledCompetencies || [])
           .filter(c => c && c.verified)
@@ -1644,6 +1738,60 @@
                           }) : <p className="text-sm text-gray-500 text-center py-4">No clients available</p>}
                         </div>
                       </div>
+
+                      {/* Caregiver pay (owner request, 2026-09-13). This is what WE PAY,
+                          which is never the client's billed rate — the gap is the margin,
+                          so they are two separate fields and neither is derived from the
+                          other. Per-client rates are keyed by client ID, so renaming a
+                          client cannot quietly drop someone back to their base rate. */}
+                      <div className="mt-5 border-t pt-4">
+                        <h4 className="font-medium text-gray-800 mb-1">Pay rate</h4>
+                        <p className="text-xs text-gray-500 mb-3">
+                          What Godwins pays this caregiver per hour. Separate from what the client is billed.
+                          Leave blank if it is not set yet — payroll will show the gap rather than paying $0.
+                        </p>
+                        <div className="max-w-xs">
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Base hourly rate ($)</label>
+                          <input className="w-full px-4 py-2.5 border border-gray-200 rounded-xl" type="number" min="0" step="0.01"
+                            placeholder="e.g. 18.00"
+                            value={formData.payRate}
+                            onChange={(e) => setFormData({ ...formData, payRate: e.target.value })} />
+                        </div>
+
+                        {(formData.assignedClients || []).length > 0 && (
+                          <div className="mt-4">
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Different rate for a specific client</label>
+                            <p className="text-xs text-gray-500 mb-2">Optional. Blank means this caregiver's base rate applies for that client.</p>
+                            <div className="space-y-2">
+                              {clients
+                                .filter(c => (formData.assignedClients || []).includes(c.name || c.clientName))
+                                .map((c, i) => {
+                                  const cid = c.id || c.userId;
+                                  if (!cid) return null;
+                                  return (
+                                    <div key={i} className="flex items-center gap-3 p-2 bg-gray-50 rounded-lg">
+                                      <span className="text-sm flex-1 truncate">{c.name || c.clientName}</span>
+                                      <div className="flex items-center gap-1">
+                                        <span className="text-gray-400 text-sm">$</span>
+                                        <input className="w-24 px-2 py-1.5 border border-gray-200 rounded-lg text-sm"
+                                          type="number" min="0" step="0.01"
+                                          placeholder={formData.payRate || 'base'}
+                                          value={(formData.clientPayRates || {})[cid] ?? ''}
+                                          onChange={(e) => {
+                                            const next = { ...(formData.clientPayRates || {}) };
+                                            if (e.target.value === '') delete next[cid];
+                                            else next[cid] = e.target.value;
+                                            setFormData({ ...formData, clientPayRates: next });
+                                          }} />
+                                        <span className="text-gray-400 text-xs">/hr</span>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
 
@@ -1651,6 +1799,50 @@
                   {formData.role === 'client' && (
                     <div className="border-t pt-4">
                       <h3 className="font-medium text-gray-800 mb-3">Client Settings</h3>
+
+                      {/* The agreed BILLED rate (owner request, 2026-09-13).
+                          The financial agreement and the home care service agreement
+                          both PRINT this table, so neither is presentable until it is
+                          set — a client added without one hits a hard gate the moment
+                          they try to sign. The rate is agreed at the point of sale, so
+                          it belongs here, not only on the enrollment screen.
+                          On EDIT it is read-only: changing a rate someone already
+                          signed against flags them to re-sign, and that logic lives on
+                          the enrollment rate screen. */}
+                      {!editingUser ? (
+                        <div className="mb-4 p-4 bg-amber-50 rounded-xl">
+                          <h4 className="font-medium text-gray-800 mb-1">Agreed rate (private home care)</h4>
+                          <p className="text-xs text-gray-500 mb-3">
+                            Needed before this client can sign the Financial Agreement or the Service Agreement — both print it.
+                            Skip it for a clinical-only patient, who signs neither.
+                          </p>
+                          <div className="grid grid-cols-2 gap-3 max-w-md">
+                            <div>
+                              <label className="block text-sm font-medium text-gray-700 mb-1">Billed rate ($/hour)</label>
+                              <input className="w-full px-4 py-2.5 border border-gray-200 rounded-xl" type="number" min="0" step="0.01"
+                                placeholder="e.g. 32.00"
+                                value={formData.rateAgreement?.hourlyRate || ''}
+                                onChange={(e) => setFormData({ ...formData, rateAgreement: { ...(formData.rateAgreement || {}), hourlyRate: e.target.value } })} />
+                            </div>
+                            <div>
+                              <label className="block text-sm font-medium text-gray-700 mb-1">Daily minimum (hours)</label>
+                              <input className="w-full px-4 py-2.5 border border-gray-200 rounded-xl" type="number" min="0" step="0.5"
+                                placeholder="e.g. 4"
+                                value={formData.rateAgreement?.dailyMinimumHours || ''}
+                                onChange={(e) => setFormData({ ...formData, rateAgreement: { ...(formData.rateAgreement || {}), dailyMinimumHours: e.target.value } })} />
+                            </div>
+                          </div>
+                          <p className="text-xs text-gray-500 mt-2">The rest of the terms — holidays, errands, invoicing, cancellation window — are set under Enrollment.</p>
+                        </div>
+                      ) : (
+                        <div className="mb-4 p-3 bg-gray-50 rounded-xl text-sm">
+                          <span className="text-gray-500">Agreed rate: </span>
+                          {formData.rateAgreement?.hourlyRate
+                            ? <span className="font-medium">${formData.rateAgreement.hourlyRate}/hr, {formData.rateAgreement.dailyMinimumHours} hr daily minimum</span>
+                            : <span className="text-amber-700 font-medium">not set — this client cannot sign the Financial or Service Agreement</span>}
+                          <a href="/admin/enrollment" className="ml-2 text-primary-600 hover:underline">Change under Enrollment →</a>
+                        </div>
+                      )}
 
                       {/* Add to existing portal option - only for new users */}
                       {!editingUser && clientPortals.length > 0 && (

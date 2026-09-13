@@ -539,6 +539,15 @@ const PAYROLL_CSV_COLUMNS = Object.freeze([
   { key: 'clockInAt', header: 'Clock In' },
   { key: 'clockOutAt', header: 'Clock Out' },
   { key: 'hours', header: 'Hours' },
+  // What we PAY, added 2026-09-13 once a caregiver pay rate existed to read.
+  // An unset rate prints EMPTY, never 0.00: a blank cell is a question for
+  // whoever runs payroll, a zero is an answer and the wrong one. `Rate Source`
+  // says WHERE the number came from (shift · client · base · not set), because
+  // "why is this person's rate different this week" needs an answer that is not
+  // guesswork. Nothing clinical is added — still build-enforced.
+  { key: 'payRate', header: 'Pay Rate' },
+  { key: 'payRateSource', header: 'Rate Source' },
+  { key: 'grossPay', header: 'Gross Pay' },
   { key: 'flags', header: 'Flags' },
   { key: 'edited', header: 'Edited' },
   { key: 'editReason', header: 'Edit Reason' },

@@ -327,6 +327,13 @@ module.exports = function createSchedulingRoutes(deps) {
         pool_visibility: clean.poolVisibility,
         care_tier: clean.careTier || client.careTier || null,
         notes: clean.notes,
+        // The rate an admin set when RELEASING this shift (owner request,
+        // 2026-09-13). Optional: left null, each caregiver's own per-client or
+        // base rate applies at payroll time. Set, it overrides both — which is
+        // how a hard-to-fill shift gets paid more without editing anyone's
+        // standing rate. Normalized through caregiverRepository, so an
+        // unusable value lands as null rather than as a shift that pays zero.
+        pay_rate: cg.normalizePayRate((req.body || {}).payRate),
         status: 'open',
         created_by: req.user.id,
         created_by_name: req.user.name || req.user.email,
@@ -1026,10 +1033,34 @@ module.exports = function createSchedulingRoutes(deps) {
         return d >= from && d <= to;
       }).sort((a, b) => String(a.clock_in_at).localeCompare(String(b.clock_in_at)));
 
+      // Resolve each row's pay rate (owner request, 2026-09-13). A pay rate
+      // that payroll never reads is a number stored and left inert — the exact
+      // trap the competency ceiling was, one week earlier in this same repo.
+      const allUsers = await getUsers();
+      const usersById = new Map(allUsers.map(u => [u.id, u]));
+      const shiftRows = await readRows('shifts');
+      const shiftsById = new Map(shiftRows.filter(r => r && r.id).map(r => [r.id, r]));
+
       const rows = logs.map(l => {
         const shiftDate = String(l.clock_in_at || '').slice(0, 10);
         const period = sched.payPeriodFor(shiftDate) || { start: '', end: '' };
+        // Shift rate → this caregiver's rate for this client → their base rate.
+        const resolved = cg.resolvePayRate(
+          usersById.get(l.caregiver_id),
+          l.client_id,
+          shiftsById.get(l.shift_id)
+        );
+        const hoursNum = sched.minutesToHours(l.total_minutes);
+        // An unset rate prints EMPTY, never 0.00 — a blank cell is a question
+        // for whoever runs payroll; a zero is an answer, and the wrong one.
+        // Same for an open shift, where hours is null rather than zero.
+        const gross = (resolved.rate !== null && hoursNum !== null && hoursNum !== undefined)
+          ? (Math.round(resolved.rate * Number(hoursNum) * 100) / 100).toFixed(2)
+          : '';
         return {
+          payRate: resolved.rate === null ? '' : resolved.rate.toFixed(2),
+          payRateSource: resolved.rate === null ? 'not set' : resolved.source,
+          grossPay: gross,
           caregiverName: l.caregiver_name,
           licenseLevel: l.license_level ? cg.LICENSE_LABELS[l.license_level] || l.license_level : '',
           clientName: l.client_name,
@@ -1055,6 +1086,58 @@ module.exports = function createSchedulingRoutes(deps) {
       res.send(sched.toPayrollCsv(rows));
     } catch (error) {
       console.error('Payroll CSV error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // GET /api/scheduling/summary — the dashboard block (2026-09-13, owner request).
+  //
+  // One endpoint, one gate. The alternative was the admin hub calling four list
+  // routes and doing the arithmetic itself, which would put a second copy of
+  // "what counts as needing attention" in a page — and a dashboard that
+  // disagrees with the screen it links to is worse than no dashboard.
+  //
+  // Every number is a THING SOMEONE MUST DO, not a vanity count, and each one
+  // names where to go and answer it. Counts only: no client names, no
+  // caregiver names, no addresses. A dashboard tile is a glance, and a glance
+  // does not need PHI on it.
+  router.get('/api/scheduling/summary', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const [shifts, logs, users] = await Promise.all([
+        readRows('shifts'), readRows('time_logs'), getUsers()
+      ]);
+      const now = new Date();
+      const dayStart = new Date(now); dayStart.setUTCHours(0, 0, 0, 0);
+      const dayEnd = new Date(dayStart.getTime() + 86400000);
+      const within = (v, a, b) => {
+        const t = new Date(v).getTime();
+        return isFinite(t) && t >= a.getTime() && t < b.getTime();
+      };
+      const live = shifts.filter(r => r && r.status);
+      const clients = users.filter(u => u.role === ROLES.CLIENT);
+
+      res.json({
+        summary: {
+          today: live.filter(r => within(r.start, dayStart, dayEnd)
+            && ['confirmed', 'in_progress', 'completed'].includes(r.status)).length,
+          inProgress: live.filter(r => r.status === 'in_progress').length,
+          // Unfilled work: posted and nobody has taken it.
+          openUnfilled: live.filter(r => r.status === 'open').length,
+          // Pathway A — a caregiver claimed and is WAITING ON AN ADMIN.
+          awaitingApproval: live.filter(r => r.status === 'claimed').length,
+          // Pathway B — admin assigned and is waiting on the caregiver.
+          awaitingAcceptance: live.filter(r => r.status === 'assigned').length,
+          // A clock-in or clock-out that did not look right and nobody has
+          // corrected. `admin_edited` means someone already dealt with it.
+          flaggedTimeLogs: logs.filter(l => l && Array.isArray(l.flags)
+            && l.flags.length > 0 && !l.flags.includes('admin_edited')).length,
+          // Without coordinates a clock-in there can only ever be unverifiable.
+          clientsMissingCoordinates: clients.filter(u => !sched.clientCoords(u)).length,
+          clientCount: clients.length
+        }
+      });
+    } catch (error) {
+      console.error('Scheduling summary error:', error);
       res.status(500).json({ error: 'Server error' });
     }
   });
@@ -1167,6 +1250,14 @@ module.exports = function createSchedulingRoutes(deps) {
     openToAllLevels: sched.isOpenToAllLevels(r),
     levelRequirementLabel: sched.shiftLevelLabel(r),
     poolVisibility: r.pool_visibility, careTier: r.care_tier, notes: r.notes,
+    // Only the rate POSTED ON THE SHIFT, never anyone's base or per-client rate.
+    // A posted rate is identical for everyone eligible to take the shift, so
+    // showing it in the open pool leaks nothing about another caregiver's pay —
+    // and a caregiver deciding whether to pick up a shift is entitled to know
+    // what it pays. The client- and family-facing reader is a separate
+    // allow-list (my-upcoming-shifts) and carries no rate at all: what we pay a
+    // caregiver is the margin, and the client never sees it.
+    payRate: cg.normalizePayRate(r.pay_rate),
     status: r.status,
     createdByName: r.created_by_name, createdAt: r.created_at,
     claimedAt: r.claimed_at, assignedAt: r.assigned_at, confirmedAt: r.confirmed_at,

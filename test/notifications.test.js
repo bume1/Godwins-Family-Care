@@ -11,7 +11,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { createPhcNotifier } = require('../phcNotifications');
+const { createNotifier } = require('../notifications');
 const templates = require('../emailTemplates');
 
 const CLIENT = { id: 'c1', role: 'client', name: 'Ada Bell', email: 'ada@example.com', slug: 'ada-bell' };
@@ -26,7 +26,7 @@ const CAREGIVER = { id: 'cg1', role: 'vendor', name: 'Mo Diallo', email: 'mo@exa
 // actual message rather than a return code.
 function harness({ baaCovered = false, users = null } = {}) {
   const queued = [];
-  const notifier = createPhcNotifier({
+  const notifier = createNotifier({
     getUsers: async () => users || [CLIENT, POA, PLAIN_FAMILY, ADMIN, RN, CASE_MGR, CAREGIVER],
     queueNotification: async (type, userId, email, name, templateData, options) => {
       queued.push({ type, userId, email, name, ...templateData, ...options });
@@ -190,7 +190,7 @@ test('a co-signature still reaches admin when the author has left and has no acc
 // ===========================================================================
 
 test('a notifier failure is swallowed and reported, never thrown at the route', async () => {
-  const notifier = createPhcNotifier({
+  const notifier = createNotifier({
     getUsers: async () => { throw new Error('store unreachable'); },
     queueNotification: async () => ({ id: 'x' }),
     getAppBaseUrl: async () => 'https://app.example.com',
@@ -204,7 +204,7 @@ test('a notifier failure is swallowed and reported, never thrown at the route', 
 
 test('an unreadable transport is treated as NOT BAA-covered, not as covered', async () => {
   const queued = [];
-  const notifier = createPhcNotifier({
+  const notifier = createNotifier({
     getUsers: async () => [CLIENT, ADMIN],
     queueNotification: async (t, id, email, n, td, o) => { queued.push({ email, ...td, ...o }); return { id: 'x' }; },
     getAppBaseUrl: async () => 'https://app.example.com',
@@ -217,7 +217,7 @@ test('an unreadable transport is treated as NOT BAA-covered, not as covered', as
 });
 
 test('a skipped queue entry (unsubscribed) is not counted as notified', async () => {
-  const notifier = createPhcNotifier({
+  const notifier = createNotifier({
     getUsers: async () => [CLIENT, ADMIN],
     queueNotification: async () => ({ skipped: true, reason: 'recipient unsubscribed from email' }),
     getAppBaseUrl: async () => 'https://app.example.com',
@@ -307,17 +307,33 @@ test('a non-http CTA url is dropped rather than rendered as a link', () => {
 const read = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
 
 test('the notifier does NOT restate the staff role list — it is passed in', () => {
-  const src = read('phcNotifications.js');
+  const src = read('notifications.js');
   assert.ok(!/caseManager|'admin'/.test(src.replace(/u\.role === 'admin'/g, '')),
     'a second copy of the role vocabulary will drift from the one in server.js');
 });
 
-test('all four routes are wired, exactly once each', () => {
+// Main's own guard covers the three enrollment notices it added, including
+// documentsRequested, which is deliberately called TWICE (a request and a
+// reminder are different routes). This one covers the rest.
+test('each of these notices is wired to exactly one route', () => {
   const src = read('server.js');
-  for (const fn of ['documentUploaded', 'documentReviewed', 'consentSigned', 'carePlanCoSigned']) {
-    const n = (src.match(new RegExp(`phcNotify\\.${fn}\\(`, 'g')) || []).length;
-    assert.strictEqual(n, 1, `phcNotify.${fn} should be called exactly once, found ${n}`);
+  const wired = [
+    'documentUploaded', 'documentReviewed', 'consentSigned', 'carePlanCoSigned',
+    'appointmentBooked', 'appointmentRescheduled', 'appointmentCancelled'
+  ];
+  for (const fn of wired) {
+    const n = (src.match(new RegExp(`notify\\.${fn}\\(`, 'g')) || []).length;
+    assert.strictEqual(n, 1, `notify.${fn} should be called exactly once, found ${n}`);
   }
+});
+
+test('a no-show never emails the patient', () => {
+  // "You missed your appointment" is a conversation, not an automated email,
+  // and the patient may have been in hospital. Deliberate, and guarded so a
+  // later session does not add it for symmetry.
+  const src = read('server.js');
+  const route = src.slice(src.indexOf("appointments/:eid/no-show"), src.indexOf("appointments/:eid/no-show") + 2500);
+  assert.ok(!/notify\./.test(route), 'the no-show route must not send the patient anything');
 });
 
 test('the PHI flag is carried from queueNotification through to the mailer', () => {
@@ -438,7 +454,7 @@ test('every one of the three goes through the QUEUE, so an unsubscribe is honour
   // notifier that reached sendEmail directly would skip both, which is exactly
   // what the old path did.
   let checked = 0;
-  const notifier = createPhcNotifier({
+  const notifier = createNotifier({
     getUsers: async () => [CLIENT],
     queueNotification: async () => { checked += 1; return { id: 'n' }; },
     getAppBaseUrl: async () => 'https://app.example.com',
@@ -452,7 +468,7 @@ test('every one of the three goes through the QUEUE, so an unsubscribe is honour
 });
 
 test('a queue SKIP is reported as not-notified, never as a send', async () => {
-  const notifier = createPhcNotifier({
+  const notifier = createNotifier({
     getUsers: async () => [CLIENT],
     queueNotification: async () => ({ skipped: true, reason: 'unsubscribed' }),
     getAppBaseUrl: async () => 'https://app.example.com',
@@ -472,8 +488,8 @@ test('the raw sendEmail paths these replaced are GONE from server.js', () => {
 
 test('the three new routes are wired, exactly once each', () => {
   const src = read('server.js');
-  assert.strictEqual((src.match(/phcNotify\.enrollmentFollowUp\(/g) || []).length, 1);
-  assert.strictEqual((src.match(/phcNotify\.enrollmentApproved\(/g) || []).length, 1);
+  assert.strictEqual((src.match(/notify\.enrollmentFollowUp\(/g) || []).length, 1);
+  assert.strictEqual((src.match(/notify\.enrollmentApproved\(/g) || []).length, 1);
   // Request and reminder are two call sites of one notifier, by design.
-  assert.strictEqual((src.match(/phcNotify\.documentsRequested\(/g) || []).length, 2);
+  assert.strictEqual((src.match(/notify\.documentsRequested\(/g) || []).length, 2);
 });

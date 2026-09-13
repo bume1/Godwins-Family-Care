@@ -15,6 +15,7 @@
 
 const email = require('../email');
 const config = require('../config');
+const { renderGfcEmail } = require('../emailTemplates');
 
 const recipient = process.argv[2];
 let pass = 0;
@@ -79,7 +80,13 @@ async function main() {
     recipient,
     `${config.BRAND.COMPANY_NAME} — transport check (plain + HTML)`,
     `This is a transport check sent at ${stamp}.\n\nIf you can read this, plain text works.\n\n— ${config.BRAND.COMPANY_NAME}`,
-    { htmlBody: `<div style="font-family:sans-serif"><h2 style="color:${config.BRAND.PRIMARY_COLOR}">Transport check</h2><p>Sent at ${stamp}.</p><p>If this is styled, the HTML part works.</p></div>` }
+    // Rendered through the house template, not hand-rolled markup: this probe
+    // proves the real send path, and the real send path is the template.
+    { htmlBody: renderGfcEmail({
+        greeting: null,
+        headline: 'Transport check',
+        paragraphs: [`Sent at ${stamp}.`, 'If this arrived styled, with the logo and the signature block, the HTML part works.']
+      }).html }
   );
   check('plain + HTML message accepted by the provider', plain.success === true, plain.error || `id ${plain.id}`);
 
