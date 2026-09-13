@@ -792,3 +792,30 @@ test('SAFETY: the window is enforced server-side, before anything is written', (
   // The component only decides whether to offer the button.
   assert.match(componentSrc, /CLOCK_IN_WINDOW_MINUTES/, 'the app mirrors the window to disable the button');
 });
+
+test('the client portal answers "is someone here now" the same way on both tabs', () => {
+  const portal = fs.readFileSync(path.join(__dirname, '..', 'public', 'portal.html'), 'utf8');
+  // ONE component, rendered on Home and on Care. Two copies would be two
+  // answers to the question a family member opens the portal to ask.
+  assert.ok((portal.match(/<GfcVisitInProgress/g) || []).length >= 2,
+    'the live-visit card renders on both Home and Care');
+  assert.match(portal, /const GfcVisitInProgress/, 'and there is exactly one definition');
+  assert.strictEqual((portal.match(/const GfcVisitInProgress/g) || []).length, 1);
+
+  // A client is never shown the location check or the lateness flags. Those
+  // are between the agency and its caregiver, and a client cannot act on them.
+  const i = portal.indexOf('const GfcVisitInProgress');
+  const card = portal.slice(i, i + 1600);
+  for (const leak of ['geofence', 'clockInGeofence', 'distance', 'late_clock_in', 'flags']) {
+    assert.ok(!card.includes(leak), `the client's live-visit card must not surface "${leak}"`);
+  }
+});
+
+test('the Care tab reads the real schedule, not the retrospective visit log', () => {
+  const portal = fs.readFileSync(path.join(__dirname, '..', 'public', 'portal.html'), 'utf8');
+  const i = portal.indexOf('const GfcCarePlan');
+  const body = portal.slice(i, i + 2000);
+  assert.match(body, /const upcoming = \(shifts \|\| \[\]\)/,
+    'upcoming comes from shifts — visit_logs is written after a visit and never held a future one');
+  assert.match(body, /data\.recentVisits/, 'recent still reads visit_logs, which is what it is for');
+});
