@@ -423,7 +423,12 @@ function validateClientLocation(input) {
 
 const TIME_LOG_FLAGS = Object.freeze([
   'outside_geofence', 'geofence_unverifiable', 'late_clock_in',
-  'early_clock_out', 'late_clock_out', 'no_clock_out', 'admin_edited'
+  'early_clock_out', 'late_clock_out', 'no_clock_out', 'admin_edited',
+  // Typed in by the office because no clock-in happened at all — a dead
+  // phone, a forgotten tap, an unscheduled visit. It is a FLAG, not a quiet
+  // row: these hours are attested by an administrator, not observed by the
+  // app, and payroll and an audit both need to be able to tell the two apart.
+  'manual_entry'
 ]);
 
 // Flags for a clock-in. A flag is a signal to admin, never a refusal.
@@ -507,6 +512,10 @@ const PAYROLL_CSV_COLUMNS = Object.freeze([
   { key: 'flags', header: 'Flags' },
   { key: 'edited', header: 'Edited' },
   { key: 'editReason', header: 'Edit Reason' },
+  // Clocked on a device, or typed in by the office. A payroll run should not
+  // have to infer that difference from a flags column.
+  { key: 'source', header: 'Source' },
+  { key: 'enteredBy', header: 'Entered By' },
   { key: 'payPeriodStart', header: 'Pay Period Start' },
   { key: 'payPeriodEnd', header: 'Pay Period End' }
 ]);

@@ -289,6 +289,87 @@ const ShiftRow = ({ s, roster, act }) => {
 // ============================================================================
 // Time logs — flagged review and edits
 // ============================================================================
+// Hours that were never clocked. Every other route into the time log starts at
+// a clock-in on the caregiver's phone, so without this a dead battery means
+// hours that cannot be paid at all. Flagged as a manual entry rather than
+// filed silently: these are attested by the office, not observed by the app.
+const AddTimeEntry = ({ roster, onAdded, setErr, setOk }) => {
+  const [open, setOpen] = useState(false);
+  const [caregiverId, setCaregiverId] = useState('');
+  const [clientId, setClientId] = useState('');
+  const [clockInAt, setClockInAt] = useState('');
+  const [clockOutAt, setClockOutAt] = useState('');
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    setErr(''); setOk(''); setBusy(true);
+    try {
+      await api('/api/scheduling/time-logs', {
+        method: 'POST',
+        body: JSON.stringify({
+          caregiverId, clientId,
+          clockInAt: new Date(clockInAt).toISOString(),
+          clockOutAt: clockOutAt ? new Date(clockOutAt).toISOString() : null,
+          reason: reason.trim()
+        })
+      });
+      setOk('Hours entered and flagged as a manual entry.');
+      setCaregiverId(''); setClientId(''); setClockInAt(''); setClockOutAt(''); setReason('');
+      setOpen(false);
+      await onAdded();
+    } catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const ready = caregiverId && clientId && clockInAt && reason.trim();
+
+  if (!open) {
+    return (
+      <div className="btns" style={{ marginTop: 0 }}>
+        <button className="btn ghost" onClick={() => setOpen(true)}>Add hours manually</button>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ marginTop: 10, borderTop: '1px solid #ece6db', paddingTop: 12 }}>
+      <div className="grid">
+        <div>
+          <label>Caregiver</label>
+          <select value={caregiverId} onChange={e => setCaregiverId(e.target.value)}>
+            <option value="">— Select —</option>
+            {roster.caregivers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </div>
+        <div>
+          <label>Client</label>
+          <select value={clientId} onChange={e => setClientId(e.target.value)}>
+            <option value="">— Select —</option>
+            {roster.clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </div>
+        <div><label>Start</label><input type="datetime-local" value={clockInAt} onChange={e => setClockInAt(e.target.value)} /></div>
+        <div><label>End</label><input type="datetime-local" value={clockOutAt} onChange={e => setClockOutAt(e.target.value)} /></div>
+      </div>
+      <div style={{ marginTop: 9 }}>
+        <label>Why is this being entered by hand? (required)</label>
+        <input value={reason} onChange={e => setReason(e.target.value)} placeholder="Phone died mid-shift; hours confirmed with the client" />
+      </div>
+      <div className="btns">
+        <button className="btn gold" disabled={!ready || busy} onClick={submit}>{busy ? 'Saving…' : 'Enter hours'}</button>
+        <button className="btn ghost" disabled={busy} onClick={() => setOpen(false)}>Cancel</button>
+      </div>
+      <div className="note">
+        <b>This is recorded as attested, not verified.</b>
+        There was no clock-in to check a location against, so the entry carries an unverifiable
+        geofence and a manual-entry flag, and the payroll export names you as the person who entered it.
+        Leave the end time blank if the shift is still running.
+      </div>
+    </div>
+  );
+};
+
 const TimeLogRow = ({ l, onEdit }) => {
   const [open, setOpen] = useState(false);
   const [clockInAt, setClockInAt] = useState(l.clockInAt ? l.clockInAt.slice(0, 16) : '');
@@ -310,6 +391,9 @@ const TimeLogRow = ({ l, onEdit }) => {
       )}
       {l.clockInGeofence && l.clockInGeofence.verdict === 'unverifiable' && (
         <div className="mu">Geofence could not be checked — {titleize(l.clockInGeofence.reason || '')}.</div>
+      )}
+      {l.enteredManually && (
+        <div className="mu">Entered by hand by {l.enteredByName} — {l.entryReason}</div>
       )}
       {l.edited && <div className="mu">Edited by {l.editedByName} — {l.editReason}</div>}
 
@@ -654,6 +738,7 @@ const App = () => {
             </div>
             <div className="card">
               <h2>Time logs</h2>
+              <AddTimeEntry roster={roster} onAdded={refresh} setErr={setErr} setOk={setOk} />
               {timeLogs.length === 0
                 ? <Empty icon="clock-off">Nothing logged in this range.</Empty>
                 : timeLogs.map(l => <TimeLogRow key={l.id} l={l} onEdit={editLog} />)}

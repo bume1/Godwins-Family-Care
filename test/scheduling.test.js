@@ -707,3 +707,44 @@ test('SAFETY: a caregiver\'s hours export can only ever return their OWN rows', 
   const keys = sched.CAREGIVER_HOURS_CSV_COLUMNS.map(c => c.key).join(' ');
   assert.ok(!keys.includes('editReason'), 'the edit reason is not in the caregiver copy');
 });
+
+// ---- Manual time entry (hours that were never clocked) ---------------------
+// Every other way into time_logs starts at a clock-in on the caregiver's
+// device, so without this a dead phone means hours that cannot be paid. What
+// must never happen is these becoming indistinguishable from clocked hours.
+test('SAFETY: a manual time entry is impossible without a reason', () => {
+  const i = routeSrc.indexOf("router.post('/api/scheduling/time-logs'");
+  assert.ok(i > 0, 'the manual entry route exists');
+  const handler = routeSrc.slice(i, i + 4500);
+  assert.match(handler, /ENTRY_REASON_REQUIRED/, 'a reason is mandatory');
+  const gate = handler.indexOf('ENTRY_REASON_REQUIRED');
+  const write = handler.indexOf("db.set('time_logs'");
+  assert.ok(gate > 0 && write > 0 && gate < write, 'refused before anything is written');
+  assert.match(handler, /requireAdmin/, 'admin only');
+});
+
+test('SAFETY: a manual entry never claims a verified location', () => {
+  const i = routeSrc.indexOf("router.post('/api/scheduling/time-logs'");
+  const handler = routeSrc.slice(i, i + 4500);
+  // There was no clock-in, so there is nothing to check a location against.
+  // Reporting "inside" would be the app asserting something it never observed.
+  assert.match(handler, /verdict: 'unverifiable'/, 'the geofence verdict is unverifiable');
+  assert.ok(!/verdict: 'inside'/.test(handler), 'it must never record inside');
+  assert.match(handler, /'manual_entry'/, 'the row carries the manual_entry flag');
+  assert.ok(sched.TIME_LOG_FLAGS.includes('manual_entry'), 'manual_entry is a known flag');
+});
+
+test('a manual entry invents no schedule, and cannot borrow another caregiver\'s shift', () => {
+  const i = routeSrc.indexOf("router.post('/api/scheduling/time-logs'");
+  const handler = routeSrc.slice(i, i + 4500);
+  assert.match(handler, /scheduled_start: shift \? shift\.start : null/,
+    'with no shift there is no schedule to report — copying the entered times would invent one');
+  assert.match(handler, /SHIFT_CAREGIVER_MISMATCH/, 'a shift belonging to someone else is refused');
+  assert.match(handler, /SHIFT_CLIENT_MISMATCH/, 'a shift for a different client is refused');
+});
+
+test('payroll says whether hours were clocked or typed', () => {
+  const keys = sched.PAYROLL_CSV_COLUMNS.map(c => c.key);
+  assert.ok(keys.includes('source'), 'the export distinguishes clocked from manual');
+  assert.ok(keys.includes('enteredBy'), 'and names who entered a manual row');
+});

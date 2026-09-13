@@ -901,6 +901,124 @@ module.exports = function createSchedulingRoutes(deps) {
     }
   });
 
+  // POST /api/scheduling/time-logs — the office enters hours that were never
+  // clocked. A dead phone, a forgotten tap, a visit nobody posted as a shift:
+  // without this those hours cannot be paid at all, because every other way
+  // into this collection starts at a clock-in on the caregiver's device.
+  //
+  // A REASON IS MANDATORY, exactly as it is for an edit. These hours are
+  // ATTESTED by an administrator rather than observed by the app, so the row
+  // says so in three places that already travel everywhere: the manual_entry
+  // flag, an unverifiable geofence verdict (never "inside" — the app must not
+  // claim a location it did not check), and the entering admin's name.
+  router.post('/api/scheduling/time-logs', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const body = req.body || {};
+      const reason = String(body.reason || '').trim();
+      if (!reason) {
+        return res.status(400).json({
+          error: 'Say why these hours are being entered by hand.',
+          code: 'ENTRY_REASON_REQUIRED'
+        });
+      }
+
+      const clockInAt = isoOrNull(body.clockInAt);
+      const clockOutAt = body.clockOutAt ? isoOrNull(body.clockOutAt) : null;
+      if (!clockInAt) return res.status(400).json({ error: 'A valid start time is required.', code: 'CLOCK_IN_INVALID' });
+      if (body.clockOutAt && !clockOutAt) {
+        return res.status(400).json({ error: 'That end time is not a valid timestamp.', code: 'CLOCK_OUT_INVALID' });
+      }
+      if (clockOutAt && clockOutAt < clockInAt) {
+        return res.status(400).json({ error: 'The end time is before the start time.', code: 'CLOCK_OUT_BEFORE_IN' });
+      }
+
+      const users = await getUsers();
+      const caregiver = users.find(u => u && u.id === String(body.caregiverId || ''));
+      if (!caregiver || !isSchedulable(caregiver)) {
+        return res.status(400).json({ error: 'Pick a caregiver.', code: 'CAREGIVER_REQUIRED' });
+      }
+      const client = await loadClient(String(body.clientId || ''));
+      if (!client) return res.status(400).json({ error: 'Pick a client.', code: 'CLIENT_REQUIRED' });
+
+      // Optional: tie it to a real shift. It must be that caregiver's and that
+      // client's, or the entry would attach hours to work someone else did.
+      let shift = null;
+      if (body.shiftId) {
+        const shifts = await readRows('shifts');
+        shift = shifts.find(s => s && s.id === String(body.shiftId)) || null;
+        if (!shift) return res.status(404).json({ error: 'That shift does not exist.', code: 'SHIFT_NOT_FOUND' });
+        if (shift.caregiver_id !== caregiver.id) {
+          return res.status(409).json({ error: 'That shift belongs to a different caregiver.', code: 'SHIFT_CAREGIVER_MISMATCH' });
+        }
+        if (String(shift.client_id) !== String(client.id)) {
+          return res.status(409).json({ error: 'That shift is for a different client.', code: 'SHIFT_CLIENT_MISMATCH' });
+        }
+      }
+
+      const at = nowIso();
+      const unverified = { verdict: 'unverifiable', reason: 'MANUAL_ENTRY', radius: null, distance: null };
+      const row = {
+        id: uuidv4(),
+        shift_id: shift ? shift.id : null,
+        client_id: client.id,
+        client_name: client.name,
+        caregiver_id: caregiver.id,
+        caregiver_name: caregiver.name || caregiver.email,
+        license_level: caregiver.licenseLevel || null,
+        // Only a real shift carries a schedule. Copying the entered times in
+        // here would invent a schedule that never existed and make the payroll
+        // export read as though the caregiver worked exactly to plan.
+        scheduled_start: shift ? shift.start : null,
+        scheduled_end: shift ? shift.end : null,
+        clock_in_at: clockInAt,
+        clock_in_gps: null,
+        clock_in_geofence: unverified,
+        clock_out_at: clockOutAt,
+        clock_out_gps: null,
+        clock_out_geofence: clockOutAt ? unverified : null,
+        total_minutes: clockOutAt ? sched.totalMinutes(clockInAt, clockOutAt) : null,
+        flags: clockOutAt ? ['manual_entry'] : ['manual_entry', 'no_clock_out'],
+        edited: false,
+        edit_reason: null,
+        entered_manually: true,
+        entry_reason: reason,
+        entered_by: req.user.id,
+        entered_by_name: req.user.name || req.user.email,
+        created_at: at
+      };
+
+      const logs = await readRows('time_logs');
+      logs.push(row);
+      await db.set('time_logs', logs);
+
+      // Same append-only trail an edit writes, so "who put these hours in the
+      // system, and why" has one answer whether they were typed or corrected.
+      const edits = await readRows('time_log_edits');
+      edits.push({
+        id: uuidv4(),
+        time_log_id: row.id,
+        kind: 'manual_entry',
+        before: null,
+        after: { clockInAt: row.clock_in_at, clockOutAt: row.clock_out_at, totalMinutes: row.total_minutes },
+        reason,
+        by: req.user.id,
+        by_name: row.entered_by_name,
+        at
+      });
+      await db.set('time_log_edits', edits);
+
+      await logActivity(req.user.id, row.entered_by_name, 'time_log_entered_manually', 'time_log', row.id, {
+        caregiverId: caregiver.id, clientId: client.id, shiftId: row.shift_id,
+        clockInAt: row.clock_in_at, clockOutAt: row.clock_out_at, reason
+      });
+
+      res.json({ timeLog: publicTimeLog(row), message: 'Hours entered and flagged as a manual entry.' });
+    } catch (error) {
+      console.error('Manual time-log entry error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   // PUT /api/scheduling/time-logs/:id — admin correction. A REASON IS
   // MANDATORY, and the before/after goes to the activity log. There is no path
   // that edits a time log without leaving that trail.
@@ -994,6 +1112,8 @@ module.exports = function createSchedulingRoutes(deps) {
           flags: (l.flags || []).join(' '),
           edited: l.edited ? 'yes' : '',
           editReason: l.edit_reason || '',
+          source: l.entered_manually ? 'Manual entry' : 'Clocked',
+          enteredBy: l.entered_manually ? (l.entered_by_name || '') : '',
           payPeriodStart: period.start,
           payPeriodEnd: period.end
         };
@@ -1238,7 +1358,12 @@ module.exports = function createSchedulingRoutes(deps) {
     totalMinutes: l.total_minutes, totalHours: sched.minutesToHours(l.total_minutes),
     flags: l.flags || [],
     edited: !!l.edited, editReason: l.edit_reason || null,
-    editedByName: l.edited_by_name || null, editedAt: l.edited_at || null
+    editedByName: l.edited_by_name || null, editedAt: l.edited_at || null,
+    // Attested by the office rather than observed by the app. Surfaced so a
+    // reviewer can tell a typed entry from a clocked one without reading flags.
+    enteredManually: !!l.entered_manually,
+    entryReason: l.entry_reason || null,
+    enteredByName: l.entered_by_name || null
   });
 
   const normalizeGps = (gps) => {
