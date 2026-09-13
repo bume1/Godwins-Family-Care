@@ -17,13 +17,43 @@ const path = require('path');
 const root = path.join(__dirname, '..');
 const read = (f) => fs.readFileSync(path.join(root, f), 'utf8');
 
-// Every file that builds or sends mail. emailTemplates.js is the one place
-// allowed to contain markup, which is the whole point of it.
-const SENDERS = ['server.js', 'legacySync.js', 'phcNotifications.js', 'email.js', 'scripts/verify_email_transport.js'];
+// Every file that builds or sends mail, DISCOVERED rather than listed.
+// A hardcoded list is the wrong tool here: `phcNotifications.js` became
+// `notifications.js` an hour after this guard was written, and a list either
+// crashes on the missing path or — worse, if someone "fixes" it by deleting
+// the entry — quietly stops checking a real sender. Anything that pulls in the
+// mailer or the template is a sender by definition.
+// emailTemplates.js is the one place allowed to contain markup, which is the
+// whole point of it.
+function discoverSenders() {
+  const dirs = ['.', 'scripts', 'routes'];
+  const found = [];
+  for (const dir of dirs) {
+    const abs = path.join(root, dir);
+    if (!fs.existsSync(abs)) continue;
+    for (const f of fs.readdirSync(abs)) {
+      if (!f.endsWith('.js')) continue;
+      const rel = dir === '.' ? f : `${dir}/${f}`;
+      if (rel === 'emailTemplates.js') continue;
+      const src = fs.readFileSync(path.join(root, rel), 'utf8');
+      if (/require\(['"]\.{1,2}\/(email|emailTemplates)['"]\)/.test(src)) found.push(rel);
+    }
+  }
+  return found;
+}
+const SENDERS = discoverSenders();
 
 // The house palette. Hardcoded anywhere but the template means someone is
 // painting their own chrome instead of using it.
 const HOUSE_HEXES = ['#033D50', '#F5CD85', '#FAF7F2'];
+
+test('the sender sweep actually finds the senders', () => {
+  // A guard that scans an empty list passes forever and proves nothing.
+  assert.ok(SENDERS.length >= 4, `expected several senders, found ${SENDERS.length}: ${SENDERS.join(', ')}`);
+  for (const must of ['server.js', 'legacySync.js', 'notifications.js']) {
+    assert.ok(SENDERS.includes(must), `${must} sends mail and must be swept`);
+  }
+});
 
 test('no sender hardcodes the house palette — emailTemplates owns it', () => {
   for (const file of SENDERS) {
