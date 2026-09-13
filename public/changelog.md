@@ -4,6 +4,72 @@
 
 ---
 
+### Version 3.0.1 - September 13, 2026
+
+#### Documentation
+- Phase 6C+6D as guide pages 13-20 — app build and full cutover in the Master Setup Guide
+- move app-on-AWS build into the Master Setup Guide as Phase 6C; runbook appendix becomes a pointer
+- cutover runbook — Appendix A (stand up the app on AWS) + seven review findings
+
+#### Changes
+- Record PR #86, and stop saying the patient hears nothing
+- Discover the senders instead of listing them
+- Backfill PR #84 into the running status, and correct its counts
+- Tell the patient when a visit is booked, moved or cancelled — and show it
+- Workspace email is live — record it, and stop saying it isn't
+- Ungate shift requests; make the email detail rule name no vendor
+- Every email through the house template, and a guard that keeps it that way
+- Make enrollment gate scheduling; edit consent prefill; de-practice the client form
+- Caregiver pay rate, and the client billed rate at creation
+- Record the welcome-email fix, and correct PR #76's overclaim
+- Put the welcome email back inside the house template
+- Scheduling block on the admin dashboard
+- Competency gate over licence ceiling; whole open board; reach /scheduling
+- Record the AWS-only directive, and name the one live Replit dependency
+- One address: send from support@, and drop the redundant Reply-To
+- Record the PHC notifications and the house email template in CLAUDE.md
+- Send from no-reply@, reply to support@ — on both transports
+- Show support@ as the reply address, not the internal admin inbox
+- Close the four PHC notification gaps, in the GFC house email template
+- openemr: surface OpenEMR's real validation error on appointment booking
+- dataStore: create the application database on first boot when RDS was provisioned without one
+- IHPC patients can see their full clinical chart documents
+- Surface staff-uploaded scans in the client's own Documents tab
+
+
+### Version 3.0.1 - September 13, 2026
+
+#### Documentation
+- Phase 6C+6D as guide pages 13-20 — app build and full cutover in the Master Setup Guide
+- move app-on-AWS build into the Master Setup Guide as Phase 6C; runbook appendix becomes a pointer
+- cutover runbook — Appendix A (stand up the app on AWS) + seven review findings
+
+#### Changes
+- Record PR #86, and stop saying the patient hears nothing
+- Discover the senders instead of listing them
+- Backfill PR #84 into the running status, and correct its counts
+- Tell the patient when a visit is booked, moved or cancelled — and show it
+- Workspace email is live — record it, and stop saying it isn't
+- Ungate shift requests; make the email detail rule name no vendor
+- Every email through the house template, and a guard that keeps it that way
+- Make enrollment gate scheduling; edit consent prefill; de-practice the client form
+- Caregiver pay rate, and the client billed rate at creation
+- Record the welcome-email fix, and correct PR #76's overclaim
+- Put the welcome email back inside the house template
+- Scheduling block on the admin dashboard
+- Competency gate over licence ceiling; whole open board; reach /scheduling
+- Record the AWS-only directive, and name the one live Replit dependency
+- One address: send from support@, and drop the redundant Reply-To
+- Record the PHC notifications and the house email template in CLAUDE.md
+- Send from no-reply@, reply to support@ — on both transports
+- Show support@ as the reply address, not the internal admin inbox
+- Close the four PHC notification gaps, in the GFC house email template
+- openemr: surface OpenEMR's real validation error on appointment booking
+- dataStore: create the application database on first boot when RDS was provisioned without one
+- IHPC patients can see their full clinical chart documents
+- Surface staff-uploaded scans in the client's own Documents tab
+
+
 ### Version 3.1.0 - September 10, 2026
 
 #### New Features

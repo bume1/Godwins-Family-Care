@@ -35,7 +35,10 @@ const { ORG } = require('../public/consent-text');
 
 module.exports = function createCaregiverRoutes(deps) {
   const {
-    db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4
+    db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4,
+    // Document upload (2026-09-13). Injected rather than required here so this
+    // module keeps no I/O of its own and the tests can drive a fake Drive.
+    drive, detectFileType
   } = deps;
   const router = express.Router();
 
@@ -69,6 +72,14 @@ module.exports = function createCaregiverRoutes(deps) {
   const requireAdmin = (req, res, next) => {
     if (req.user.role === ROLES.ADMIN) return next();
     return res.status(403).json({ error: 'Administrator access required.', code: 'ADMIN_ONLY' });
+  };
+
+  // Caregiver documents serve two audiences from one route: a caregiver reads
+  // their OWN rows, an admin reads everyone's. This gates the door; which rows
+  // you get is decided per row inside, because that needs the row.
+  const requireCaregiverOrAdmin = (req, res, next) => {
+    if (req.user.role === ROLES.ADMIN || cg.isCaregiver(req.user)) return next();
+    return res.status(403).json({ error: 'Caregiver or administrator access required.', code: 'CAREGIVER_ONLY' });
   };
 
   // Resolve the caregiver's FULL user record. req.user is the trimmed token
@@ -827,6 +838,227 @@ module.exports = function createCaregiverRoutes(deps) {
     const d = new Date(v);
     return isNaN(d.getTime()) ? null : d.toISOString();
   };
+
+
+  // ==========================================================================
+  // CAREGIVER DOCUMENTS (2026-09-13, owner request)
+  // ==========================================================================
+  // "Caregivers need to upload documents (like physical timesheets) when
+  // needed." Until now the caregiver app had no upload of any kind, so a paper
+  // timesheet had no way into the system and went by text message or not at all.
+  //
+  // Filed under the CAREGIVER, never a client. A timesheet routinely covers
+  // several clients in one week, so filing it against one of them would both
+  // file it wrong and put it where that client's care team can read it. Only
+  // rows the caregiver sends themselves, plus admin, are readable.
+  //
+  // POINTERS ONLY in the store. The bytes live in Drive under the BAA, the same
+  // rule the client document exchange follows.
+
+  // What a caregiver may send. An open list would let an upload land in a
+  // bucket nobody reads; these are the things the office actually chases.
+  // `needsPeriod` travels WITH the kind rather than being a list of kind names
+  // in the page: the form asks for a pay period only where one means something.
+  // Keeping that decision here is the same rule as the catalog itself — a page
+  // that names kinds is a page that drifts from the validator that refuses them.
+  const CAREGIVER_DOC_KINDS = [
+    { kind: 'timesheet',     label: 'Timesheet',                 needsPeriod: true },
+    { kind: 'visit_note',    label: 'Signed visit note',         needsPeriod: false },
+    { kind: 'mileage',       label: 'Mileage or expense log',    needsPeriod: true },
+    { kind: 'certification', label: 'Certification or licence',  needsPeriod: false },
+    { kind: 'other',         label: 'Something else',            needsPeriod: false }
+  ];
+
+  router.get('/api/caregiver/documents/kinds', authenticateToken, requireCaregiver, (req, res) => {
+    // SERVED, not restated in the page — the same rule the competency catalog
+    // follows, so the list cannot drift between the form and the validator.
+    res.json({ kinds: CAREGIVER_DOC_KINDS });
+  });
+
+  router.post('/api/caregiver/documents', authenticateToken, requireCaregiver, async (req, res) => {
+    try {
+      const { kind, fileName, fileDataB64, note, periodStart, periodEnd, shiftId } = req.body || {};
+      if (!kind || !fileName || !fileDataB64) {
+        return res.status(400).json({ error: 'kind, fileName and fileDataB64 are required', code: 'DOC_FIELDS_REQUIRED' });
+      }
+      if (!CAREGIVER_DOC_KINDS.some(k => k.kind === kind)) {
+        return res.status(400).json({ error: 'Unknown document type', code: 'DOC_KIND_UNKNOWN' });
+      }
+
+      let buffer;
+      try {
+        const b64 = String(fileDataB64).startsWith('data:')
+          ? String(fileDataB64).slice(String(fileDataB64).indexOf(',') + 1)
+          : String(fileDataB64);
+        buffer = Buffer.from(b64, 'base64');
+      } catch (e) {
+        return res.status(400).json({ error: 'File data is not valid base64.', code: 'DOC_NOT_BASE64' });
+      }
+      if (!buffer.length) return res.status(400).json({ error: 'File is empty.', code: 'DOC_EMPTY' });
+      if (buffer.length > config.MAX_FILE_SIZE) {
+        return res.status(400).json({ error: 'File exceeds 10 MB limit.', code: 'DOC_TOO_LARGE' });
+      }
+      // Typed by its BYTES, never by what the caller claimed — a declared mime
+      // is caller-controlled and this is the only thing standing between the
+      // Drive folder and an arbitrary file.
+      const sniffedType = detectFileType(buffer);
+      if (!sniffedType) {
+        return res.status(400).json({ error: 'Only PDF, JPG, and PNG files are accepted.', code: 'DOC_TYPE_REJECTED' });
+      }
+
+      const me = await freshCaregiver(req);
+      if (!me) return res.status(404).json({ error: 'Caregiver record not found.', code: 'CAREGIVER_NOT_FOUND' });
+
+      const safeName = `${kind}_${me.id}_${Date.now()}_${String(fileName).replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+      let stored;
+      try {
+        stored = await drive.uploadCaregiverDocumentFile(me.name || 'Caregiver', safeName, buffer, sniffedType);
+      } catch (e) {
+        // A Drive failure FAILS the upload. Recording the row anyway would show
+        // the caregiver a filed timesheet pointing at nothing and leave payroll
+        // waiting on a file that was never stored — the silent-success trap this
+        // codebase has now hit six times in OpenEMR, pointed at someone's pay.
+        console.error('[CAREGIVER DOCS] Drive upload failed:', e.message);
+        return res.status(502).json({
+          error: 'We could not store that file. Please try again, or send it to the office.',
+          code: 'DOCUMENT_STORAGE_UNAVAILABLE'
+        });
+      }
+
+      const rows = (await db.get('caregiver_documents')) || [];
+      const row = {
+        id: `cgdoc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        caregiver_id: me.id,
+        caregiver_name: me.name || null,
+        kind,
+        file_name: String(fileName).slice(0, 200),
+        stored_name: safeName,
+        mime_type: sniffedType,
+        size_bytes: buffer.length,
+        drive_file_id: stored.fileId,
+        drive_url: stored.webViewLink || null,
+        note: String(note || '').trim().slice(0, 1000),
+        // A timesheet is FOR a period, and payroll needs to know which one.
+        period_start: normalizeDate(periodStart),
+        period_end: normalizeDate(periodEnd),
+        shift_id: shiftId ? String(shiftId) : null,
+        status: 'received',
+        uploaded_at: new Date().toISOString(),
+        reviewed_at: null, reviewed_by_name: null, review_note: null
+      };
+      rows.push(row);
+      await db.set('caregiver_documents', rows);
+
+      // The activity log records THAT a document arrived, never its contents.
+      await logActivity(me.id, me.name || me.email, 'caregiver_document_uploaded', 'caregiver_document', row.id,
+        { kind, periodStart: row.period_start, periodEnd: row.period_end });
+
+      res.json({ message: 'Document received', document: publicCaregiverDoc(row) });
+    } catch (error) {
+      console.error('Caregiver document upload error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // A caregiver reads only their OWN documents. Admin reads everyone's and may
+  // filter to one caregiver; the filter is admin-only, so a caregiver cannot
+  // widen their view by passing someone else's id.
+  router.get('/api/caregiver/documents', authenticateToken, requireCaregiverOrAdmin, async (req, res) => {
+    try {
+      const isAdmin = req.user.role === ROLES.ADMIN;
+      const rows = (await db.get('caregiver_documents')) || [];
+      const wanted = isAdmin ? (req.query.caregiverId || null) : req.user.id;
+      const mine = rows
+        .filter(r => r && (!wanted || r.caregiver_id === wanted))
+        .sort((a, b) => String(b.uploaded_at).localeCompare(String(a.uploaded_at)));
+      res.json({ documents: mine.map(publicCaregiverDoc) });
+    } catch (error) {
+      console.error('Caregiver document list error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // The bytes, read back through the app so every read is audited and no file
+  // is ever link-shared. A caregiver may open only their own.
+  router.get('/api/caregiver/documents/:id/file', authenticateToken, requireCaregiverOrAdmin, async (req, res) => {
+    try {
+      const isAdmin = req.user.role === ROLES.ADMIN;
+      const rows = (await db.get('caregiver_documents')) || [];
+      const row = rows.find(r => r && r.id === req.params.id);
+      if (!row) return res.status(404).json({ error: 'Document not found', code: 'DOC_NOT_FOUND' });
+      if (!isAdmin && row.caregiver_id !== req.user.id) {
+        return res.status(403).json({ error: 'That document belongs to someone else.', code: 'DOC_NOT_YOURS' });
+      }
+      let buf;
+      try {
+        buf = await drive.downloadFileBuffer(row.drive_file_id);
+      } catch (e) {
+        console.error('[CAREGIVER DOCS] Drive read failed:', e.message);
+        return res.status(502).json({ error: 'That file could not be retrieved right now.', code: 'DOCUMENT_STORAGE_UNAVAILABLE' });
+      }
+      await logActivity(req.user.id, req.user.name || req.user.email, 'caregiver_document_read', 'caregiver_document', row.id,
+        { kind: row.kind, owner: row.caregiver_id });
+      res.setHeader('Content-Type', row.mime_type || 'application/octet-stream');
+      res.setHeader('Content-Disposition', `inline; filename="${row.file_name.replace(/"/g, '')}"`);
+      res.send(buf);
+    } catch (error) {
+      console.error('Caregiver document read error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // Admin marks a document reviewed (or sends it back). A rejection REQUIRES a
+  // reason and the caregiver is told what it was — a caregiver told only "not
+  // accepted" re-sends the same blurry photo, which is the exact failure the
+  // client-side document rejection was written to prevent.
+  router.post('/api/caregiver/documents/:id/review', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const { decision, reason } = req.body || {};
+      if (!['accepted', 'rejected'].includes(decision)) {
+        return res.status(400).json({ error: 'decision must be accepted or rejected', code: 'DECISION_INVALID' });
+      }
+      if (decision === 'rejected' && !String(reason || '').trim()) {
+        return res.status(400).json({ error: 'Say why it is being sent back, so it can be fixed.', code: 'REVIEW_REASON_REQUIRED' });
+      }
+      const rows = (await db.get('caregiver_documents')) || [];
+      const i = rows.findIndex(r => r && r.id === req.params.id);
+      if (i === -1) return res.status(404).json({ error: 'Document not found', code: 'DOC_NOT_FOUND' });
+
+      rows[i] = {
+        ...rows[i],
+        status: decision,
+        reviewed_at: new Date().toISOString(),
+        reviewed_by_name: req.user.name || req.user.email,
+        review_note: String(reason || '').trim().slice(0, 1000) || null
+      };
+      await db.set('caregiver_documents', rows);
+      await logActivity(req.user.id, req.user.name || req.user.email, 'caregiver_document_reviewed', 'caregiver_document', rows[i].id,
+        { decision, caregiverId: rows[i].caregiver_id });
+
+      res.json({ message: `Document ${decision}`, document: publicCaregiverDoc(rows[i]) });
+    } catch (error) {
+      console.error('Caregiver document review error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // The Drive id and stored name never reach a client of this API — they are
+  // storage plumbing, and the file is read back through the route above.
+  const publicCaregiverDoc = (r) => ({
+    id: r.id,
+    caregiverId: r.caregiver_id,
+    caregiverName: r.caregiver_name,
+    kind: r.kind,
+    kindLabel: (CAREGIVER_DOC_KINDS.find(k => k.kind === r.kind) || {}).label || r.kind,
+    fileName: r.file_name,
+    sizeBytes: r.size_bytes,
+    note: r.note || null,
+    periodStart: r.period_start, periodEnd: r.period_end,
+    shiftId: r.shift_id || null,
+    status: r.status,
+    uploadedAt: r.uploaded_at,
+    reviewedAt: r.reviewed_at, reviewedByName: r.reviewed_by_name, reviewNote: r.review_note
+  });
 
   return router;
 };

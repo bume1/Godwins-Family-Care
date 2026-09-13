@@ -2367,7 +2367,13 @@ const buildConsentSignature = (args) =>
 
 // Caregiver app (Session 6) — page shell + /api/caregiver/*. Every route inside
 // enforces its own access (caregiver / review staff / admin) at the API layer.
-app.use(caregiverRoutes({ db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4 }));
+app.use(caregiverRoutes({ db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4,
+  drive: googledrive,
+  // Wrapped, not passed by reference: `detectFileType` is a `const` declared
+  // ~7000 lines below this mount, so naming it here reads it in its temporal
+  // dead zone and the app dies at require time. The arrow closes over the
+  // binding and is only called on a request, long after initialization.
+  detectFileType: (buf) => detectFileType(buf) }));
 
 // PHCP scheduling (Session 7) — page shell + /api/scheduling/*. App-side only;
 // clinical appointments stay in OpenEMR (Session 4.2). Two systems by design.
@@ -17414,6 +17420,25 @@ app.listen(PORT, () => {
   } else {
     console.log(`📧 Email: ${mail.transport} as ${mail.from} — NOT BAA-covered, PHI is refused`);
     console.log(`         ${mail.reason}`);
+  }
+
+  // And which Drive, for the same reason. Every document upload in the app goes
+  // through it, and when it is not configured they ALL fail — a client's photo
+  // ID, a caregiver's timesheet, a care plan PDF. Saying so at boot is the
+  // difference between a known gap and a support ticket per client.
+  //
+  // `configured` means the credential PARSES and a subject is set. It does not
+  // mean Google accepts it — only scripts/verify_drive_access.js proves that,
+  // and the line says so rather than implying more than it knows.
+  const driveState = googledrive.driveStatus();
+  if (!driveState.configured) {
+    console.log(`📁 Drive: NOT CONFIGURED — every document upload will fail`);
+    console.log(`         ${driveState.reason}`);
+    console.log(`         Setup: docs/DRIVE_ACCESS_SETUP.md`);
+  } else {
+    console.log(`📁 Drive: service account ${driveState.serviceAccount} as ${driveState.impersonating}` +
+      `${driveState.rootFolderId ? ` → folder ${driveState.rootFolderId}` : ' (no root folder set)'}`);
+    console.log(`         Credential parses; run scripts/verify_drive_access.js to prove Google accepts it.`);
   }
 
   // Safety net: reactivate any admin accounts that are inactive (prevent lockout)
