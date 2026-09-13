@@ -621,31 +621,6 @@ const EMAIL_BRAND = () => ({
   accent: config.BRAND.ACCENT_COLOR
 });
 
-const emailHeaderHtml = () => {
-  const b = EMAIL_BRAND();
-  return `<div style="background-color: #ffffff; padding: 22px 16px 18px; border-radius: 8px 8px 0 0; text-align: center; border-bottom: 3px solid ${b.primary};">
-    <span style="display: inline-block; color: ${b.primary}; font-size: 20px; font-weight: 700; letter-spacing: 0.02em;">${b.company}</span>
-  </div>`;
-};
-
-const emailFooterNote = (context) => {
-  const b = EMAIL_BRAND();
-  return `You are receiving this because you have ${context || 'an account'} with ${b.company}.`;
-};
-
-// Base HTML email wrapper used when a template has no custom htmlBody
-const BASE_HTML_EMAIL_WRAPPER = () => `
-<div style="font-family: ${config.BRAND.FONT_FAMILY}, Inter, -apple-system, sans-serif; width: 100%; max-width: 600px; margin: 0 auto; background: #f8fafc;">
-  ${emailHeaderHtml()}
-  <div style="background: #ffffff; padding: 24px 16px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px;">
-    <div style="color: #374151; line-height: 1.7; font-size: 15px; white-space: pre-wrap; word-break: break-word;">{{content}}</div>
-    {{ctaBlock}}
-    <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 28px 0 16px;" />
-    <p style="color: #9ca3af; font-size: 12px; margin: 0;">${emailFooterNote('an account')}</p>
-    {{unsubscribeBlock}}
-  </div>
-</div>`;
-
 // The welcome email is the one notification that carries structured detail —
 // the sign-in credentials — rather than prose, which is why it was originally
 // written as its own hand-rolled HTML. That is exactly how it kept the old
@@ -698,18 +673,6 @@ function buildHtmlEmail(body, htmlBody, ctaUrl, ctaLabel, unsubscribeUrl, baseUr
   return emailTemplates.renderGfcEmail({
     greeting, paragraphs: lines, ctaUrl, ctaLabel, unsubscribeUrl
   }).html;
-}
-
-// Retained for the two lab-era templates that still pass their own htmlBody.
-function buildHtmlEmailLegacy(body, htmlBody, ctaUrl, ctaLabel, unsubscribeUrl, baseUrl) {
-  if (htmlBody) return htmlBody;
-  const ctaBlock = (ctaUrl && ctaLabel)
-    ? `<p style="margin-top: 20px;"><a href="${ctaUrl}" style="display: inline-block; background: ${config.BRAND.PRIMARY_COLOR}; color: #ffffff; padding: 10px 24px; border-radius: 6px; text-decoration: none; font-weight: 500; font-size: 14px;">${ctaLabel}</a></p>`
-    : '';
-  const unsubscribeBlock = unsubscribeUrl
-    ? `<p style="color: #9ca3af; font-size: 11px; margin: 6px 0 0;"><a href="${unsubscribeUrl}" style="color: #9ca3af; text-decoration: underline;">Unsubscribe from these emails</a></p>`
-    : '';
-  return renderTemplate(BASE_HTML_EMAIL_WRAPPER(), { content: body, ctaBlock, unsubscribeBlock, appUrl: baseUrl || 'https://godwinsfamilycarellc.com' });
 }
 
 // ============================================================
@@ -1037,17 +1000,12 @@ const DEFAULT_EMAIL_TEMPLATES = [
     category: 'announcement',
     subject: '{{priorityTag}}New Announcement: {{title}}',
     body: '{{priorityTag}}{{title}}\n\n{{content}}{{attachmentLine}}',
-    htmlBody: `<div style="font-family: ${config.BRAND.FONT_FAMILY}, Inter, -apple-system, sans-serif; width: 100%; max-width: 600px; margin: 0 auto;">
-  ${emailHeaderHtml()}
-  <div style="background: #ffffff; padding: 24px 16px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px;">
-    {{priorityBanner}}
-    <h2 style="color: ${config.BRAND.PRIMARY_COLOR}; margin-top: 0;">{{title}}</h2>
-    <div style="color: #374151; line-height: 1.6; white-space: pre-wrap; word-break: break-word;">{{content}}</div>
-    {{attachmentBlock}}
-    <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 24px 0;" />
-    <p style="color: #9ca3af; font-size: 12px; margin: 0;">${emailFooterNote('a client portal account')}</p>
-  </div>
-</div>`,
+    // No custom HTML. An announcement renders through the house template
+    // like every other notification; the structured pieces (priority,
+    // attachment) are passed to it at the send site rather than baked
+    // into markup here. A stored copy of the old chrome is cleared by
+    // migrateAnnouncementTemplateChrome() on boot.
+    htmlBody: null,
     variables: [
       { key: 'title', label: 'Announcement Title', example: 'System Maintenance Scheduled' },
       { key: 'content', label: 'Announcement Content', example: 'We will be performing system maintenance this weekend.' },
@@ -5290,7 +5248,21 @@ app.post('/api/announcements', authenticateToken, requireClientPortalAdmin, asyn
           const vars = { ...baseVars, recipientName: user.name || user.email, recipientEmail: user.email };
           const subject = renderTemplate(annTpl.subject, vars);
           const textBody = renderTemplate(annBody, vars);
-          const htmlBody = annHtml ? renderTemplate(annHtml, vars) : buildHtmlEmail(textBody, null);
+          // An announcement has structure — a title, a body, a priority flag,
+          // an attachment — so it is handed to the house template as those
+          // pieces rather than as one blob of prose. An admin who has written
+          // their own HTML still wins; nobody else hand-rolls chrome.
+          const htmlBody = annHtml
+            ? renderTemplate(annHtml, vars)
+            : emailTemplates.renderGfcEmail({
+                greeting: user.name || null,
+                headline: renderTemplate(newAnnouncement.title || 'A new announcement', vars),
+                paragraphs: String(renderTemplate(newAnnouncement.content || '', vars))
+                  .split(/\n{2,}/).map(t => t.trim()).filter(Boolean),
+                callout: newAnnouncement.priority ? 'This is a priority announcement.' : null,
+                ctaUrl: newAnnouncement.attachmentUrl || null,
+                ctaLabel: newAnnouncement.attachmentUrl ? (newAnnouncement.attachmentName || 'View attachment') : null
+              }).html;
           const result = await queueNotification(
             'announcement', user.id, user.email, user.name || user.email,
             { subject, body: textBody, htmlBody },
@@ -5588,6 +5560,39 @@ async function migrateCareTierEnum() {
 // exactly once. Writes scripts/consent_lane_split_migration.log — the migration
 // log the session deliverables call for.
 const CONSENT_MIGRATION_LOG = path.join(__dirname, 'scripts', 'consent_lane_split_migration.log');
+
+// One-shot: clear the lab-era chrome stored on the announcement template.
+//
+// The shipped default used to carry its own htmlBody, and getEmailTemplates()
+// seeds the defaults into the store on first boot — so changing the default
+// alone changes nothing for an app that has already run. That is the same
+// class of trap as rebuilding the OpenEMR patch without re-fetching: the code
+// looks fixed and the deployment is not.
+//
+// Only the SHIPPED chrome is cleared. HTML an admin wrote themselves is left
+// exactly as it is and reported, because overwriting someone's deliberate
+// customisation is worse than an off-brand email. Idempotent: once cleared
+// there is nothing left to match.
+const LEGACY_CHROME_MARKERS = ['border-bottom: 3px solid', 'You are receiving this because you have'];
+
+async function migrateAnnouncementTemplateChrome() {
+  const templates = await db.get('email_templates');
+  if (!Array.isArray(templates)) return { cleared: 0, kept: 0 };
+  let cleared = 0, kept = 0;
+  for (const t of templates) {
+    if (!t || !t.htmlBody) continue;
+    if (LEGACY_CHROME_MARKERS.every(m => t.htmlBody.includes(m))) {
+      t.htmlBody = null;
+      cleared += 1;
+      console.log(`   ↳ Cleared lab-era email chrome from template "${t.id}" — it now renders in the house style.`);
+    } else {
+      kept += 1;
+      console.log(`   ↳ Template "${t.id}" carries custom HTML that is not the shipped default. Left as is; it will not pick up the house style.`);
+    }
+  }
+  if (cleared) await db.set('email_templates', templates);
+  return { cleared, kept };
+}
 
 async function migrateConsentLaneSplit() {
   if (String(process.env.CONSENT_LANE_SPLIT_MIGRATION_APPLIED).toLowerCase() === 'true') {
@@ -10147,14 +10152,16 @@ async function sendEnrollmentConfirmation(client, portalUrl, extraRecipient) {
   const firstName = (client.preferredName || client.name || 'there').split(' ')[0];
   const subject = 'Your Godwins Family Care enrollment is complete';
   const text = `Hi ${firstName},\n\nWe've received your enrollment with Godwins Family Care. Your care plan, signed consents, and documents are now available in your secure portal.\n\nView them here: ${portalUrl}\n\nFor your privacy, we don't include any health or consent details in email — everything lives in your portal.\n\n— Godwins Family Care`;
-  const htmlBody = `<div style="font-family:'DM Sans',Arial,sans-serif;color:#1B2A33;max-width:520px">
-    <h2 style="color:#033D50;font-weight:600">Enrollment complete</h2>
-    <p>Hi ${firstName},</p>
-    <p>We've received your enrollment with <strong>Godwins Family Care</strong>. Your care plan, signed consents, and documents are now available in your secure portal.</p>
-    <p><a href="${portalUrl}" style="display:inline-block;background:#C9A44A;color:#033D50;text-decoration:none;font-weight:600;padding:12px 20px;border-radius:10px">Open your portal</a></p>
-    <p style="font-size:13px;color:#4F6470">For your privacy, we don't include any health or consent details in email — everything lives in your portal.</p>
-    <p style="font-size:13px;color:#4F6470">— Godwins Family Care</p>
-  </div>`;
+  const htmlBody = emailTemplates.renderGfcEmail({
+    greeting: firstName,
+    headline: 'Enrollment complete',
+    paragraphs: [
+      "We've received your enrollment with Godwins Family Care. Your care plan, signed consents and documents are now available in your secure portal.",
+      'For your privacy we do not put health or consent details in email. Everything lives in your portal.'
+    ],
+    ctaUrl: portalUrl,
+    ctaLabel: 'Open your portal'
+  }).html;
   try {
     await sendEmail(to, subject, text, { htmlBody });
   } catch (e) {
@@ -16329,21 +16336,17 @@ async function createPasswordResetLink(user, plainPassword) {
 // Send the password reset email with the secure link
 async function sendPasswordResetEmail(user, token) {
   const resetUrl = `${await getAppBaseUrl()}/password-reset-${token}`;
-  const htmlBody = `
-    <div style="font-family: Inter, Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-      <div style="background: ${config.BRAND.PRIMARY_COLOR}; padding: 24px; border-radius: 8px 8px 0 0; text-align: center;">
-        <h1 style="color: white; margin: 0; font-size: 22px; font-weight: 700;">${config.BRAND.COMPANY_NAME}</h1>
-      </div>
-      <div style="background: #f9fafb; padding: 32px; border-radius: 0 0 8px 8px; border: 1px solid #e5e7eb; border-top: none;">
-        <p style="color: #374151; font-size: 16px; margin-top: 0;">Hi ${user.name},</p>
-        <p style="color: #374151; font-size: 16px;">Your password has been reset by an administrator. Click the button below to view your temporary credentials.</p>
-        <p style="color: #374151; font-size: 16px;">You will be required to create a new password when you log in.</p>
-        <div style="text-align: center; margin: 32px 0;">
-          <a href="${resetUrl}" style="background: ${config.BRAND.PRIMARY_COLOR}; color: white; padding: 14px 28px; border-radius: 6px; text-decoration: none; font-size: 16px; font-weight: 600; display: inline-block;">View My Temporary Password</a>
-        </div>
-        <p style="color: #6b7280; font-size: 13px; margin-bottom: 0;">This link expires in 24 hours. If you did not expect this reset, please contact your administrator immediately.</p>
-      </div>
-    </div>`;
+  const htmlBody = emailTemplates.renderGfcEmail({
+    greeting: user.name,
+    headline: 'Your password has been reset',
+    paragraphs: [
+      'An administrator reset your password. Use the button below to see your temporary credentials.',
+      'You will be asked to choose a new password when you sign in. The link expires in 24 hours.',
+      'If you were not expecting this, please contact your administrator right away.'
+    ],
+    ctaUrl: resetUrl,
+    ctaLabel: 'View my temporary password'
+  }).html;
   const plainText = `Hi ${user.name},\n\nYour password has been reset by an administrator.\n\nClick the link below to view your temporary credentials and log in:\n${resetUrl}\n\nThis link expires in 24 hours.`;
   return sendEmail(user.email, `Your ${config.BRAND.COMPANY_NAME} Password Has Been Reset`, plainText, { htmlBody });
 }
@@ -17475,6 +17478,11 @@ app.listen(PORT, () => {
       await migrateConsentLaneSplit();
     } catch (err) {
       console.error('Consent lane-split migration failed (non-fatal):', err.message);
+    }
+    try {
+      await migrateAnnouncementTemplateChrome();
+    } catch (err) {
+      console.error('Announcement chrome migration failed (non-fatal):', err.message);
     }
   })();
 
