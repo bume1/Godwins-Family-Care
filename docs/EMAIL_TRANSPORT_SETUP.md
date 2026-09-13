@@ -23,7 +23,7 @@ The BAA covers a **Workspace domain**, not "Google" in general. A personal
 `@gmail.com` mailbox is Google and is **not** covered. So the app checks the
 **sending address**, not the transport's name:
 
-- `no-reply@godwinsfamilycarellc.com` → covered, PHI permitted.
+- `support@godwinsfamilycarellc.com` → covered, PHI permitted.
 - `godwinsfamilycare@gmail.com` → **not** covered. The app refuses to treat it
   as a PHI-capable sender and falls back rather than sending.
 
@@ -54,44 +54,50 @@ This is an admin task, not a code task. Nothing below is done from the app.
 
 **3. Pick the mailbox it sends as**
 
-Two different addresses, doing two different jobs:
+**One address: `support@godwinsfamilycarellc.com`.** Mail is sent from it and
+replies come back to it.
 
-| | Address | What it is |
-|---|---|---|
-| `GMAIL_SEND_AS` | `no-reply@godwinsfamilycarellc.com` | who the mail is **from** |
-| `ORG_SUPPORT_EMAIL` | `support@godwinsfamilycarellc.com` | where a **reply** goes |
+There is no such thing as a "no-reply" address that blocks a reply — SMTP has
+no such mechanism. A no-reply address is either not a real mailbox, in which
+case a reply bounces and the person gets a confusing failure notice instead of
+an answer, or it is a real mailbox nobody reads. On Workspace it would also
+have to be a licensed user, because delegation impersonates a real account, so
+it would mean paying for a mailbox whose whole job is to swallow replies.
 
-Every message goes out from no-reply@ and carries `Reply-To: support@`, so a
-client who hits Reply reaches the support queue rather than a mailbox nobody
-watches. Both transports produce the identical pair, so this does not change
-when you switch from Resend to Workspace.
+**`GMAIL_SEND_AS` must be a REAL, LICENSED WORKSPACE USER**, and this is the
+one thing likely to cost you a cycle, because a shared support inbox is often
+set up as something that cannot be impersonated:
 
-**`GMAIL_SEND_AS` must be a REAL, LICENSED WORKSPACE USER.** This is the single
-most likely thing to cost you a cycle, and no-reply@ is exactly the kind of
-address that gets set up as something else:
+- A **Google Group** cannot be. Delegation signs in *as* an account, and a
+  group is not an account.
+- A **bare alias** on another mailbox cannot either.
 
-- A **Google Group** cannot be impersonated. Delegation signs in *as* an
-  account, and a group is not an account.
-- A **bare alias** on another mailbox cannot either — the alias is not itself
-  an account.
+If support@ is a real user mailbox, you are done — set `GMAIL_SEND_AS` to it
+and skip the rest of this note.
 
-If no-reply@ is currently a group or an alias, either create it as a real user
-(it needs a licence, and nobody ever has to sign in to it) or set
-`GMAIL_SEND_AS` to a mailbox that is one. Getting this wrong produces
-`invalid_grant`, which the app translates for you at step 6.
+**If support@ is a group or an alias**, you have two options. Convert it to a
+real user (it needs a licence, and your team can still read it however they do
+today), or leave it as it is and send from some other real user — then set
+both variables:
 
-`support@` has no such constraint. It is only a header, so it can be a group,
-an alias, or a shared inbox — whatever your team actually reads.
+```
+GMAIL_SEND_AS=care-bot@godwinsfamilycarellc.com     # a real licensed user
+ORG_SUPPORT_EMAIL=support@godwinsfamilycarellc.com  # where replies go
+```
+
+The app notices they differ and adds a `Reply-To` header automatically, so
+replies still land in support@. When the two match it emits no `Reply-To` at
+all, because a Reply-To identical to From tells a mail client nothing.
 
 **4. Set two environment variables on the deployment**
 
 ```
 GOOGLE_SERVICE_ACCOUNT_KEY=<contents of the JSON key file>
-GMAIL_SEND_AS=no-reply@godwinsfamilycarellc.com
+GMAIL_SEND_AS=support@godwinsfamilycarellc.com
 ```
 
-`ORG_SUPPORT_EMAIL` defaults to `support@godwinsfamilycarellc.com` and only
-needs setting if you want replies somewhere else.
+Only add `ORG_SUPPORT_EMAIL` if you had to send from a different mailbox, per
+the note in step 3.
 
 `GOOGLE_SERVICE_ACCOUNT_KEY` takes the raw JSON, or the same JSON base64-encoded
 if the hosting panel mangles multi-line values. Both are accepted.
@@ -103,7 +109,7 @@ Restart the app.
 The boot log now says which mailer is live:
 
 ```
-📧 Email: gmail as Godwins Family Care <no-reply@godwinsfamilycarellc.com> — BAA-covered, PHI permitted
+📧 Email: gmail as Godwins Family Care <support@godwinsfamilycarellc.com> — BAA-covered, PHI permitted
 ```
 
 Then send real mail and confirm it arrives:
@@ -130,7 +136,7 @@ removed. Clearing `GMAIL_SEND_AS` has the same effect, since `auto` falls back.
 | Attachments | yes | yes |
 | Batch sends | one API call per 100 | one message at a time |
 | Inside the BAA | no | yes |
-| From / Reply-To | no-reply@ / support@ | no-reply@ / support@ (identical) |
+| Sends from | support@ | support@ (identical) |
 
 A message marked as carrying PHI is **refused, never downgraded**. The caller is
 the only place that knows what to cut, so silently stripping detail would be the
