@@ -116,6 +116,14 @@
           headers: { 'Authorization': `Bearer ${token}` }
         }).then(handleResponse).catch(err => ({ error: err.message })),
 
+      // Scheduling summary for the dashboard block. Admin-only server-side, so
+      // a non-admin gets an error object and the block simply does not render —
+      // the gate is the route, never the absence of a tile.
+      getSchedulingSummary: (token) =>
+        fetch(`${API_URL}/api/scheduling/summary`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(err => ({ error: err.message })),
+
       getUsers: (token) =>
         fetch(`${API_URL}/api/users`, {
           headers: { 'Authorization': `Bearer ${token}` }
@@ -581,12 +589,18 @@
     const DashboardPage = ({ token, onNavigate, user }) => {
       const isManager = user?.isManager && user?.role !== 'admin';
       const [stats, setStats] = useState(null);
+      const [sched, setSched] = useState(null);
       const [loading, setLoading] = useState(true);
 
       useEffect(() => {
         api.getDashboard(token).then(data => {
           if (!data.error) setStats(data);
           setLoading(false);
+        });
+        // Separate call, deliberately not awaited with the one above: the
+        // dashboard must still render if scheduling is unreachable or refuses.
+        api.getSchedulingSummary(token).then(data => {
+          if (data && !data.error && data.summary) setSched(data.summary);
         });
       }, [token]);
 
@@ -641,6 +655,73 @@
               </div>
             ))}
           </div>
+
+          {/* Caregiver scheduling — the dashboard block (2026-09-13, owner request).
+              Renders only when the admin-only summary actually came back, so the
+              access control is the route rather than a hidden tile. Every row is
+              something waiting on a person; a zero row is deliberately still
+              shown, because "nothing is waiting" is information too. */}
+          {sched && (
+            <div className="card-modern p-6">
+              <div className="flex items-start justify-between mb-5 gap-3 flex-wrap">
+                <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                  <span className="w-8 h-8 rounded-lg bg-teal-50 text-teal-600 flex items-center justify-center">{Icons.clipboard}</span>
+                  Caregiver Scheduling
+                </h2>
+                <a href="/scheduling" className="text-sm font-medium text-primary-600 hover:text-primary-700">Open scheduling →</a>
+              </div>
+
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+                <div className="p-4 bg-gray-50 rounded-xl">
+                  <p className="text-2xl font-bold text-gray-900">{sched.today}</p>
+                  <p className="text-xs text-gray-500 mt-1">Shifts today</p>
+                </div>
+                <div className="p-4 bg-gray-50 rounded-xl">
+                  <p className="text-2xl font-bold text-gray-900">{sched.inProgress}</p>
+                  <p className="text-xs text-gray-500 mt-1">Clocked in now</p>
+                </div>
+                <div className={`p-4 rounded-xl ${sched.openUnfilled ? 'bg-warning-50' : 'bg-gray-50'}`}>
+                  <p className={`text-2xl font-bold ${sched.openUnfilled ? 'text-warning-600' : 'text-gray-900'}`}>{sched.openUnfilled}</p>
+                  <p className="text-xs text-gray-500 mt-1">Unfilled shifts</p>
+                </div>
+                <div className={`p-4 rounded-xl ${sched.flaggedTimeLogs ? 'bg-warning-50' : 'bg-gray-50'}`}>
+                  <p className={`text-2xl font-bold ${sched.flaggedTimeLogs ? 'text-warning-600' : 'text-gray-900'}`}>{sched.flaggedTimeLogs}</p>
+                  <p className="text-xs text-gray-500 mt-1">Time logs to review</p>
+                </div>
+              </div>
+
+              {/* Waiting on someone. Each line says who it is waiting on, because
+                  "3 pending" without that is a number nobody can act on. */}
+              <div className="space-y-2">
+                {sched.awaitingApproval > 0 && (
+                  <a href="/scheduling" className="flex items-center justify-between p-3 bg-warning-50 hover:bg-warning-100 rounded-xl transition">
+                    <span className="text-sm text-gray-800">
+                      <b>{sched.awaitingApproval}</b> claimed {sched.awaitingApproval === 1 ? 'shift is' : 'shifts are'} waiting on <b>your</b> approval
+                    </span>
+                    <span className="text-xs text-warning-700 font-medium whitespace-nowrap ml-3">Review →</span>
+                  </a>
+                )}
+                {sched.awaitingAcceptance > 0 && (
+                  <div className="flex items-center justify-between p-3 bg-gray-50 rounded-xl">
+                    <span className="text-sm text-gray-700">
+                      <b>{sched.awaitingAcceptance}</b> assigned {sched.awaitingAcceptance === 1 ? 'shift is' : 'shifts are'} waiting on the caregiver to accept
+                    </span>
+                  </div>
+                )}
+                {sched.clientsMissingCoordinates > 0 && (
+                  <a href="/scheduling" className="flex items-center justify-between p-3 bg-red-50 hover:bg-red-100 rounded-xl transition">
+                    <span className="text-sm text-gray-800">
+                      <b>{sched.clientsMissingCoordinates}</b> of {sched.clientCount} {sched.clientsMissingCoordinates === 1 ? 'client has' : 'clients have'} no address coordinates — clock-ins there can only record as unverifiable
+                    </span>
+                    <span className="text-xs text-red-700 font-medium whitespace-nowrap ml-3">Locations →</span>
+                  </a>
+                )}
+                {!sched.awaitingApproval && !sched.awaitingAcceptance && !sched.clientsMissingCoordinates && (
+                  <p className="text-sm text-gray-500 p-3">Nothing is waiting on you.</p>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Quick Actions & Projects */}
           <div className="grid lg:grid-cols-2 gap-6">
@@ -1704,24 +1785,33 @@
 
                       <div className="grid md:grid-cols-2 gap-4">
                         <div className="md:col-span-2">
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Practice Name {!formData.existingPortalSlug && '*'}</label>
+                          {/* Labelled "Name" because a client is a person now.
+                              The field is still practiceName underneath: it is
+                              what generates their portal slug, and renaming the
+                              key would break the URL of every portal on file. */}
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Name {!formData.existingPortalSlug && '*'}</label>
                           <input type="text" value={formData.practiceName} onChange={(e) => setFormData({ ...formData, practiceName: e.target.value })}
                             className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" required={!formData.existingPortalSlug}
                             disabled={!!formData.existingPortalSlug} />
                           {formData.existingPortalSlug && <p className="text-xs text-gray-500 mt-1">Inherited from existing portal</p>}
                         </div>
                         <div className="md:col-span-2">
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Practice Logo</label>
+                          {/* A headshot, not a logo. Clients were practices in
+                              the lab app so this asked for their branding; the
+                              storage key is still `logo` for the same reason
+                              practiceName is. Shown round here because that is
+                              how it renders in the portal. */}
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Client Photo</label>
                           <div className="flex items-center gap-4">
-                            {formData.logo && <img src={formData.logo} alt="Logo" className="h-16 w-16 object-contain border rounded" />}
+                            {formData.logo && <img src={formData.logo} alt="" className="h-16 w-16 object-cover border rounded-full" />}
                             <input type="file" ref={logoInputRef} accept="image/png,image/jpeg" onChange={handleLogoUpload} className="hidden" />
                             <button type="button" onClick={() => logoInputRef.current?.click()}
                               className="px-4 py-2 border border-primary text-primary rounded-lg hover:bg-primary hover:text-white flex items-center gap-2">
-                              {Icons.upload} Upload Logo
+                              {Icons.upload} Upload Photo
                             </button>
                             {formData.logo && <button type="button" onClick={() => setFormData({ ...formData, logo: '' })} className="text-red-600 text-sm">Remove</button>}
                           </div>
-                          <p className="text-xs text-gray-500 mt-1">Max 2MB, PNG or JPEG</p>
+                          <p className="text-xs text-gray-500 mt-1">A headshot helps caregivers recognise who they are visiting. Max 2MB, PNG or JPEG.</p>
                         </div>
                         {editingUser?.slug && (
                           <div className="md:col-span-2 p-3 bg-blue-50 rounded-lg">
@@ -1730,25 +1820,12 @@
                         )}
                       </div>
 
-                      {/* HubSpot Integration */}
-                      <h4 className="font-medium text-gray-800 mt-4 mb-2">HubSpot Integration</h4>
-                      <div className="grid md:grid-cols-3 gap-4">
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Company ID</label>
-                          <input type="text" value={formData.hubspotCompanyId} onChange={(e) => setFormData({ ...formData, hubspotCompanyId: e.target.value })}
-                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" placeholder="HubSpot Company ID" />
-                        </div>
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Deal ID</label>
-                          <input type="text" value={formData.hubspotDealId} onChange={(e) => setFormData({ ...formData, hubspotDealId: e.target.value })}
-                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" placeholder="HubSpot Deal ID" />
-                        </div>
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Contact ID</label>
-                          <input type="text" value={formData.hubspotContactId} onChange={(e) => setFormData({ ...formData, hubspotContactId: e.target.value })}
-                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" placeholder="HubSpot Contact ID" />
-                        </div>
-                      </div>
+                      {/* The HubSpot ID boxes used to sit here. They belong to
+                          the dormant lab CRM connector, which is retained but
+                          inactive and must not be deleted — so the three values
+                          still round-trip on the record and through the API, and
+                          only the inputs are gone. Nobody enrolling a home care
+                          client has a HubSpot deal id to type. */}
 
                       {/* Enrollment Status */}
                       <h4 className="font-medium text-gray-800 mt-4 mb-2">Enrollment Status</h4>
