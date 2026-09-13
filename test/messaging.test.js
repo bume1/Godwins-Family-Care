@@ -571,3 +571,86 @@ test('BUILD: the component asks the server which clients a user may message abou
   assert.ok(/if \(state\.fixedScope \|\| !state\.pickerClients/.test(src),
     'a fixed scope renders no picker at all');
 });
+
+// ============================================================================
+// The repair script — it cleans up what the leak already wrote
+// ============================================================================
+
+test('REPAIR: the script finds exactly the misfiled messages, and nothing else', () => {
+  const repair = require('../scripts/repair_cross_client_messages');
+  // Bianca's screenshot, as a fixture: Dorothy (client-2) posted into Bianca's
+  // (client-1) Direct thread, and the caregiver saw one merged conversation.
+  const fixture = {
+    users: [
+      { id: 'client-1', name: 'Bianca (TEST DATA)', role: 'client' },
+      { id: 'client-2', name: 'Dorothy (TEST DATA)', role: 'client' },
+      { id: 'fam-1', name: 'Relative (TEST DATA)', role: 'family', familyOfClientId: 'client-1' },
+      { id: 'fam-2', name: 'Other relative (TEST DATA)', role: 'family', familyOfClientId: 'client-2' },
+      { id: 'fam-9', name: 'Unlinked relative (TEST DATA)', role: 'family' },
+      { id: 'cg-1', name: 'Caregiver (TEST DATA)', role: 'vendor' },
+      { id: 'admin-1', name: 'GFC Admin', role: 'admin' }
+    ],
+    threads: [
+      { id: 't1', channel: 'direct_care', client_id: 'client-1', created_at: '2026-09-01T00:00:00Z',
+        last_message_at: '2026-09-13T11:49:00Z', last_message_preview: 'Test' }
+    ],
+    messages: [
+      { id: 'm1', thread_id: 't1', from_user_id: 'client-1', body: 'Hello', sent_at: '2026-09-13T00:51:00Z' },
+      { id: 'm2', thread_id: 't1', from_user_id: 'client-2', body: 'Test',  sent_at: '2026-09-13T11:49:00Z' },
+      { id: 'm3', thread_id: 't1', from_user_id: 'cg-1',     body: 'On my way', sent_at: '2026-09-13T09:00:00Z' },
+      { id: 'm4', thread_id: 't1', from_user_id: 'admin-1',  body: 'Noted', sent_at: '2026-09-13T10:00:00Z' },
+      { id: 'm5', thread_id: 't1', from_user_id: 'fam-1',    body: 'Thank you', sent_at: '2026-09-13T10:30:00Z' },
+      { id: 'm6', thread_id: 't1', from_user_id: 'fam-2',    body: 'Wrong thread', sent_at: '2026-09-13T10:45:00Z' },
+      { id: 'm7', thread_id: 't1', from_user_id: 'fam-9',    body: 'Unlinked', sent_at: '2026-09-13T10:50:00Z' }
+    ]
+  };
+
+  const found = repair.findMisfiled(fixture);
+  // m2: another CLIENT. m6: another client's FAMILY — the case that proves the
+  // family branch is doing work, since without it fam-2 resolves to nobody and
+  // is waved through as if they were staff.
+  assert.deepStrictEqual(found.map(f => f.message.id).sort(), ['m2', 'm6'],
+    'both the other client and the other client\'s family are misfiled');
+  const m2 = found.find(f => f.message.id === 'm2');
+  assert.strictEqual(m2.senderClientId, 'client-2');
+  assert.strictEqual(m2.threadClientId, 'client-1');
+  assert.strictEqual(found.find(f => f.message.id === 'm6').senderClientId, 'client-2',
+    'a family member is resolved through familyOfClientId, not their own id');
+  // Staff post across clients as their job, and the thread's own family member
+  // belongs here. Pulling either would be the repair causing its own outage.
+  assert.ok(!found.some(f => ['m3', 'm4', 'm5'].includes(f.message.id)),
+    'a caregiver, an admin and the thread\'s own family member are never misfiled');
+  // An UNLINKED family member is left alone deliberately: they resolve to no
+  // client, so there is nothing to say they are in the wrong thread. The fixed
+  // visibility rule refuses them at read time; quarantining their words on a
+  // guess is not the repair's job.
+  assert.ok(!found.some(f => f.message.id === 'm7'), 'an unlinked family member is not guessed at');
+});
+
+test('REPAIR: the preview is refreshed, or a quarantined message keeps showing', () => {
+  const repair = require('../scripts/repair_cross_client_messages');
+  const threads = [{ id: 't1', client_id: 'client-1', created_at: '2026-09-01T00:00:00Z',
+    last_message_at: '2026-09-13T11:49:00Z', last_message_preview: 'Test' }];
+  const remaining = [{ id: 'm1', thread_id: 't1', body: 'Hello', sent_at: '2026-09-13T00:51:00Z' }];
+  const touched = repair.refreshPreviews(threads, remaining);
+  assert.strictEqual(touched, 1);
+  assert.strictEqual(threads[0].last_message_preview, 'Hello', 'the removed message is gone from the list too');
+  assert.strictEqual(threads[0].last_message_at, '2026-09-13T00:51:00Z');
+  // A thread emptied entirely falls back to its creation time, not to a
+  // timestamp belonging to a message that is no longer there.
+  const emptied = [{ id: 't2', client_id: 'c', created_at: '2026-09-01T00:00:00Z', last_message_at: 'x', last_message_preview: 'gone' }];
+  repair.refreshPreviews(emptied, []);
+  assert.strictEqual(emptied[0].last_message_preview, '');
+  assert.strictEqual(emptied[0].last_message_at, '2026-09-01T00:00:00Z');
+});
+
+test('REPAIR: the script builds the store the way server.js does', () => {
+  // It required `dataStore` and called get/set on it. dataStore exports the
+  // FACTORY, not a store, so every call was undefined and the script would have
+  // failed on the first line of real work — on the one run that matters, during
+  // a PHI incident.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'repair_cross_client_messages.js'), 'utf8');
+  assert.ok(/dataStore\.createStore\(\)/.test(src), 'it builds a store through the factory');
+  assert.ok(!/db\.init\(/.test(src), 'there is no init() on the store contract');
+  assert.ok(/require\.main === module/.test(src), 'requiring it from a test must not repair anything');
+});
