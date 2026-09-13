@@ -1064,7 +1064,15 @@
         familyOfClientId: '', // family role: the client (user id) this contact is linked to
         familyIsPoa: false, // family role: designated Power of Attorney (client-equivalent portal access)
         openEmrProviderId: '', // clinician: OpenEMR provider (numeric id) their calendar maps to (4.2)
-        npi: '' // clinician: individual NPI, stamped on every clinical write (4.4 attribution)
+        npi: '', // clinician: individual NPI, stamped on every clinical write (4.4 attribution)
+        // What WE PAY a caregiver — never the same number as the client's
+        // billed rate below; the gap between them is the margin.
+        payRate: '',
+        clientPayRates: {},
+        // What the CLIENT is billed. Settable at creation because the financial
+        // agreement and the home care service agreement both print it and
+        // neither can be signed without it.
+        rateAgreement: { hourlyRate: '', dailyMinimumHours: '' }
       };
       const [formData, setFormData] = useState(defaultFormData);
       // Competencies live OUTSIDE formData on purpose — formData is round-tripped
@@ -1192,7 +1200,12 @@
           familyOfClientId: user.familyOfClientId || '',
           familyIsPoa: user.familyIsPoa || false,
           openEmrProviderId: user.openEmrProviderId || '',
-          npi: user.npi || ''
+          npi: user.npi || '',
+          payRate: user.payRate === null || user.payRate === undefined ? '' : String(user.payRate),
+          clientPayRates: user.clientPayRates || {},
+          // Read-only on EDIT: changing a signed rate has consent consequences
+          // and belongs on the enrollment rate screen, which handles them.
+          rateAgreement: user.rateAgreement || { hourlyRate: '', dailyMinimumHours: '' }
         });
         setCompetencies((user.skilledCompetencies || [])
           .filter(c => c && c.verified)
@@ -1725,6 +1738,60 @@
                           }) : <p className="text-sm text-gray-500 text-center py-4">No clients available</p>}
                         </div>
                       </div>
+
+                      {/* Caregiver pay (owner request, 2026-09-13). This is what WE PAY,
+                          which is never the client's billed rate — the gap is the margin,
+                          so they are two separate fields and neither is derived from the
+                          other. Per-client rates are keyed by client ID, so renaming a
+                          client cannot quietly drop someone back to their base rate. */}
+                      <div className="mt-5 border-t pt-4">
+                        <h4 className="font-medium text-gray-800 mb-1">Pay rate</h4>
+                        <p className="text-xs text-gray-500 mb-3">
+                          What Godwins pays this caregiver per hour. Separate from what the client is billed.
+                          Leave blank if it is not set yet — payroll will show the gap rather than paying $0.
+                        </p>
+                        <div className="max-w-xs">
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Base hourly rate ($)</label>
+                          <input className="w-full px-4 py-2.5 border border-gray-200 rounded-xl" type="number" min="0" step="0.01"
+                            placeholder="e.g. 18.00"
+                            value={formData.payRate}
+                            onChange={(e) => setFormData({ ...formData, payRate: e.target.value })} />
+                        </div>
+
+                        {(formData.assignedClients || []).length > 0 && (
+                          <div className="mt-4">
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Different rate for a specific client</label>
+                            <p className="text-xs text-gray-500 mb-2">Optional. Blank means this caregiver's base rate applies for that client.</p>
+                            <div className="space-y-2">
+                              {clients
+                                .filter(c => (formData.assignedClients || []).includes(c.name || c.clientName))
+                                .map((c, i) => {
+                                  const cid = c.id || c.userId;
+                                  if (!cid) return null;
+                                  return (
+                                    <div key={i} className="flex items-center gap-3 p-2 bg-gray-50 rounded-lg">
+                                      <span className="text-sm flex-1 truncate">{c.name || c.clientName}</span>
+                                      <div className="flex items-center gap-1">
+                                        <span className="text-gray-400 text-sm">$</span>
+                                        <input className="w-24 px-2 py-1.5 border border-gray-200 rounded-lg text-sm"
+                                          type="number" min="0" step="0.01"
+                                          placeholder={formData.payRate || 'base'}
+                                          value={(formData.clientPayRates || {})[cid] ?? ''}
+                                          onChange={(e) => {
+                                            const next = { ...(formData.clientPayRates || {}) };
+                                            if (e.target.value === '') delete next[cid];
+                                            else next[cid] = e.target.value;
+                                            setFormData({ ...formData, clientPayRates: next });
+                                          }} />
+                                        <span className="text-gray-400 text-xs">/hr</span>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
 
@@ -1732,6 +1799,50 @@
                   {formData.role === 'client' && (
                     <div className="border-t pt-4">
                       <h3 className="font-medium text-gray-800 mb-3">Client Settings</h3>
+
+                      {/* The agreed BILLED rate (owner request, 2026-09-13).
+                          The financial agreement and the home care service agreement
+                          both PRINT this table, so neither is presentable until it is
+                          set — a client added without one hits a hard gate the moment
+                          they try to sign. The rate is agreed at the point of sale, so
+                          it belongs here, not only on the enrollment screen.
+                          On EDIT it is read-only: changing a rate someone already
+                          signed against flags them to re-sign, and that logic lives on
+                          the enrollment rate screen. */}
+                      {!editingUser ? (
+                        <div className="mb-4 p-4 bg-amber-50 rounded-xl">
+                          <h4 className="font-medium text-gray-800 mb-1">Agreed rate (private home care)</h4>
+                          <p className="text-xs text-gray-500 mb-3">
+                            Needed before this client can sign the Financial Agreement or the Service Agreement — both print it.
+                            Skip it for a clinical-only patient, who signs neither.
+                          </p>
+                          <div className="grid grid-cols-2 gap-3 max-w-md">
+                            <div>
+                              <label className="block text-sm font-medium text-gray-700 mb-1">Billed rate ($/hour)</label>
+                              <input className="w-full px-4 py-2.5 border border-gray-200 rounded-xl" type="number" min="0" step="0.01"
+                                placeholder="e.g. 32.00"
+                                value={formData.rateAgreement?.hourlyRate || ''}
+                                onChange={(e) => setFormData({ ...formData, rateAgreement: { ...(formData.rateAgreement || {}), hourlyRate: e.target.value } })} />
+                            </div>
+                            <div>
+                              <label className="block text-sm font-medium text-gray-700 mb-1">Daily minimum (hours)</label>
+                              <input className="w-full px-4 py-2.5 border border-gray-200 rounded-xl" type="number" min="0" step="0.5"
+                                placeholder="e.g. 4"
+                                value={formData.rateAgreement?.dailyMinimumHours || ''}
+                                onChange={(e) => setFormData({ ...formData, rateAgreement: { ...(formData.rateAgreement || {}), dailyMinimumHours: e.target.value } })} />
+                            </div>
+                          </div>
+                          <p className="text-xs text-gray-500 mt-2">The rest of the terms — holidays, errands, invoicing, cancellation window — are set under Enrollment.</p>
+                        </div>
+                      ) : (
+                        <div className="mb-4 p-3 bg-gray-50 rounded-xl text-sm">
+                          <span className="text-gray-500">Agreed rate: </span>
+                          {formData.rateAgreement?.hourlyRate
+                            ? <span className="font-medium">${formData.rateAgreement.hourlyRate}/hr, {formData.rateAgreement.dailyMinimumHours} hr daily minimum</span>
+                            : <span className="text-amber-700 font-medium">not set — this client cannot sign the Financial or Service Agreement</span>}
+                          <a href="/admin/enrollment" className="ml-2 text-primary-600 hover:underline">Change under Enrollment →</a>
+                        </div>
+                      )}
 
                       {/* Add to existing portal option - only for new users */}
                       {!editingUser && clientPortals.length > 0 && (
