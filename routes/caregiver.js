@@ -32,6 +32,7 @@ const cg = require('../caregiverRepository');
 // consent documents — so the caregiver help card reads it rather than keeping a
 // second copy that can drift from the one a client has in writing.
 const { ORG } = require('../public/consent-text');
+const { contentDisposition } = require('../contentDisposition');
 
 module.exports = function createCaregiverRoutes(deps) {
   const {
@@ -1109,7 +1110,7 @@ module.exports = function createCaregiverRoutes(deps) {
       await logActivity(req.user.id, req.user.name || req.user.email, 'caregiver_document_read', 'caregiver_document', row.id,
         { kind: row.kind, owner: row.caregiver_id });
       res.setHeader('Content-Type', row.mime_type || 'application/octet-stream');
-      res.setHeader('Content-Disposition', `inline; filename="${row.file_name.replace(/"/g, '')}"`);
+      res.setHeader('Content-Disposition', contentDisposition('inline', row.file_name));
       res.send(buf);
     } catch (error) {
       console.error('Caregiver document read error:', error);

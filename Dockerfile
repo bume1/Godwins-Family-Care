@@ -1,6 +1,9 @@
 # GFC Care Platform — app image for the AWS BAA boundary (Session 5.5)
 # Build:  docker build -t gfc/app:$(git rev-parse --short HEAD) .
-# Run:    every secret comes from the environment (Secrets Manager → task/env),
+# Run:    every secret comes from the environment (Secrets Manager → the host's
+#         env file or exported vars), never baked into the image. THE HOST IS EC2
+#         + Docker (owner-confirmed 2026-09-13) — earlier wording here said
+#         "task/env", which is ECS language and does not describe this setup.
 #         never baked into the image. See docs/GFC_Session5_Cutover_Runbook.md.
 FROM node:22-alpine
 ENV NODE_ENV=production
