@@ -222,7 +222,7 @@ test('the approval notifies the client, which it never used to', () => {
   const src = read('server.js');
   const at = src.indexOf("app.post('/api/gfc/admin/enrollment/:clientId/approve'");
   const body = src.slice(at, src.indexOf('\napp.', at + 10));
-  assert.match(body, /phcNotify\.enrollmentApproved\(/);
+  assert.match(body, /notify\.enrollmentApproved\(/);
   assert.match(body, /overridden: overrode/,
     'an overridden approval must not tell the client their file is complete');
 });

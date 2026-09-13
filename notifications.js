@@ -1,6 +1,22 @@
 // ============================================================================
-// PRIVATE HOME CARE NOTIFICATIONS
+// NOTIFICATIONS TO A CLIENT AND THEIR CARE CIRCLE
 // ============================================================================
+// Named for what it is rather than for the arm it started in. It began as the
+// four private-home-care notices below and now carries the clinical
+// appointment ones too, because BOTH need the same two rules and a second
+// copy of either is how they drift:
+//
+//   * WHO may be emailed about a client — the client and a designated POA,
+//     never non-POA family (their access is ROI- and sharing-gated at READ
+//     time, and email is a push channel where neither gate can be re-checked
+//     once the message is out).
+//   * HOW MUCH the message may say — read from whether the LIVE transport is
+//     inside the BAA, never from a vendor's name, and re-evaluated on every
+//     send.
+//
+// ---------------------------------------------------------------------------
+// The private-home-care events
+// ---------------------------------------------------------------------------
 // The PHC arm had events that changed something a person was waiting on and
 // told nobody, or told them over plumbing that ignored their own preferences:
 //
@@ -37,7 +53,7 @@ const { renderGfcEmail } = require('./emailTemplates');
 
 // Roles that receive staff-side PHC notices. Mirrors ENROLLMENT_STAFF_ROLES in
 // server.js — passed in rather than restated, so the two cannot drift.
-function createPhcNotifier(deps) {
+function createNotifier(deps) {
   const {
     getUsers, queueNotification, getAppBaseUrl, emailTransport,
     staffRoles, clientRole, familyRole
@@ -90,9 +106,9 @@ function createPhcNotifier(deps) {
     return { client, recipients };
   };
 
-  const send = async ({ type, user, subject, headline, paragraphs, callout, ctaUrl, ctaLabel, relatedEntityId, relatedEntityType, actorId, phi }) => {
+  const send = async ({ type, user, subject, headline, paragraphs, fields, callout, ctaUrl, ctaLabel, relatedEntityId, relatedEntityType, actorId, phi }) => {
     const rendered = renderGfcEmail({
-      greeting: firstNameOf(user), headline, paragraphs, callout, ctaUrl, ctaLabel
+      greeting: firstNameOf(user), headline, paragraphs, fields, callout, ctaUrl, ctaLabel
     });
     const queued = await queueNotification(
       type, user.id, user.email, user.name,
@@ -265,6 +281,73 @@ function createPhcNotifier(deps) {
     }
   }
 
+  // ---- Clinical appointments -----------------------------------------------
+  // Booking, moving or cancelling a visit used to tell the patient NOTHING.
+  // The whole point of a home-visit practice is that someone is coming to the
+  // door; a change to that is the one thing a patient needs in writing.
+  //
+  // A no-show is deliberately NOT notified. "You missed your appointment" is a
+  // conversation, not an automated email, and the patient may have been in
+  // hospital. It stays a clinician action.
+  //
+  // The date, the clinician and the place are all PHI, so the detailed version
+  // is marked and the vague one is what sends if the transport is not covered.
+
+  const apptRecipients = (clientId) => clientSideRecipients(clientId);
+
+  const sendToClientSide = async ({ clientId, type, subject, headline, paragraphs, fields, callout, actorId, entityId }) => {
+    const { client, recipients } = await apptRecipients(clientId);
+    if (!client) return { notified: 0, reason: 'no client record' };
+    if (!recipients.length) return { notified: 0, reason: 'no email address on file' };
+    const url = await portalUrlFor(client);
+    let n = 0;
+    for (const { user, actingFor } of recipients) {
+      const ok = await send({
+        type, user, subject, headline,
+        // A POA is told whose visit it is; the client is not told their own name.
+        paragraphs: actingFor ? paragraphs.map(p => p.replace(/^Your visit/, `${actingFor.name}'s visit`)) : paragraphs,
+        fields, callout,
+        ctaUrl: url, ctaLabel: 'Open your portal',
+        relatedEntityId: entityId, relatedEntityType: 'appointment',
+        actorId, phi: true
+      });
+      if (ok) n += 1;
+    }
+    return { notified: n, detailed: transportAllowsDetail() };
+  };
+
+  // Detail is decided ONCE per notice and passed down, so the subject line and
+  // the body can never disagree about what may be said.
+  const visitFields = (detail, { when, clinician, place }) => (detail
+    ? [
+        { label: 'When', value: when },
+        { label: 'Who', value: clinician },
+        { label: 'Where', value: place }
+      ].filter(f => f.value)
+    : []);
+
+  async function appointmentBooked({ client, eid, when, clinician, place, actorId }) {
+    try {
+      const detail = transportAllowsDetail();
+      return await sendToClientSide({
+        clientId: client.id,
+        type: 'appointment_booked',
+        subject: detail ? `Your visit is scheduled — ${when}` : 'A visit has been scheduled',
+        headline: 'Your visit is scheduled',
+        paragraphs: detail
+          ? ['Your visit is booked. The details are below and in your portal.',
+             'If the time does not work, call the office and we will move it.']
+          : ['A visit has been scheduled for you. The date and time are in your secure portal.',
+             'For privacy we do not put visit details in email.'],
+        fields: visitFields(detail, { when, clinician, place }),
+        actorId, entityId: eid
+      });
+    } catch (e) {
+      console.error('[APPT] booked notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
   // ---- 5. Staff asked the client for documents (or chased them) ------------
   // This notice and the follow-up below used to go out through a raw sendEmail
   // call. Three things followed from that and none of them were intended: a
@@ -326,6 +409,28 @@ function createPhcNotifier(deps) {
     }
   }
 
+  async function appointmentRescheduled({ client, eid, from, to, clinician, place, actorId }) {
+    try {
+      const detail = transportAllowsDetail();
+      return await sendToClientSide({
+        clientId: client.id,
+        type: 'appointment_rescheduled',
+        subject: detail ? `Your visit has moved to ${to}` : 'A visit has been rescheduled',
+        headline: 'Your visit has moved',
+        paragraphs: detail
+          ? [`Your visit has been moved from ${from} to ${to}.`,
+             'Nothing else about the visit has changed. Call the office if the new time does not work.']
+          : ['A visit has been moved to a new time. The new details are in your secure portal.',
+             'For privacy we do not put visit details in email.'],
+        fields: visitFields(detail, { when: to, clinician, place }),
+        actorId, entityId: eid
+      });
+    } catch (e) {
+      console.error('[APPT] reschedule notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
   // ---- 6. Staff requested follow-up on the enrollment checklist ------------
   // The outstanding items are consent titles and face-sheet field labels. A
   // list naming "Advance directive status" and "Allergies" for one identified
@@ -366,6 +471,31 @@ function createPhcNotifier(deps) {
       return { notified: n, detailed: detail };
     } catch (e) {
       console.error('[PHC] enrollment follow-up notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  async function appointmentCancelled({ client, eid, when, reason, clinician, actorId }) {
+    try {
+      const detail = transportAllowsDetail();
+      return await sendToClientSide({
+        clientId: client.id,
+        type: 'appointment_cancelled',
+        subject: detail ? `Your visit on ${when} is cancelled` : 'A visit has been cancelled',
+        headline: 'Your visit is cancelled',
+        paragraphs: detail
+          ? [`Your visit on ${when} has been cancelled.`,
+             'Call the office when you are ready to rebook and we will find a new time.']
+          : ['A scheduled visit has been cancelled. The details are in your secure portal.',
+             'Call the office when you are ready to rebook.'],
+        fields: visitFields(detail, { when, clinician, place: null }),
+        // The cancellation reason is staff free text. It rides only where the
+        // transport can carry it, the same rule the document rejection follows.
+        callout: detail && reason ? reason : null,
+        actorId, entityId: eid
+      });
+    } catch (e) {
+      console.error('[APPT] cancel notice failed (non-fatal):', e.message);
       return { notified: 0, reason: e.message };
     }
   }
@@ -415,8 +545,13 @@ function createPhcNotifier(deps) {
     }
   }
 
-  return { documentUploaded, documentReviewed, consentSigned, carePlanCoSigned,
-           documentsRequested, enrollmentFollowUp, enrollmentApproved };
+  return {
+    // private home care
+    documentUploaded, documentReviewed, consentSigned, carePlanCoSigned,
+    documentsRequested, enrollmentFollowUp, enrollmentApproved,
+    // clinical visits
+    appointmentBooked, appointmentRescheduled, appointmentCancelled
+  };
 }
 
-module.exports = { createPhcNotifier };
+module.exports = { createNotifier };
