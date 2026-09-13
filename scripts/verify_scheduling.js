@@ -133,6 +133,10 @@ const stored = async (collection, predicate) =>
 
 const plusDays = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
 const at = (dayOffset, hhmm) => new Date(`${plusDays(dayOffset)}T${hhmm}:00.000Z`).toISOString();
+// Clock-in only opens two hours before the start, so time-tracking shifts are
+// anchored to the moment the probe runs rather than to a wall-clock hour that
+// may or may not be inside the window depending on when someone runs it.
+const minsFromNow = (n) => new Date(Date.now() + n * 60000).toISOString();
 
 (async () => {
   const server = app.listen(0);
@@ -412,33 +416,91 @@ const at = (dayOffset, hhmm) => new Date(`${plusDays(dayOffset)}T${hhmm}:00.000Z
   // ==========================================================================
   section('F. Time tracking — geofence FLAGS, never blocks');
   // ==========================================================================
-  const clockIn = await call('POST', `/api/scheduling/shifts/${generalId}/clock-in`, {
+  // The shift the clock is exercised on starts in ten minutes, so the two-hour
+  // clock-in window is open whenever this probe runs. `generalId` is 41 days
+  // out and is deliberately left where it is — it proves the window REFUSES.
+  const evv = await call('POST', '/api/scheduling/shifts', {
+    as: 'admin-1', body: { clientId: 'client-1', start: minsFromNow(10), end: minsFromNow(250) }
+  });
+  const evvId = evv.data.shift.id;
+  await call('POST', `/api/scheduling/shifts/${evvId}/assign`, { as: 'admin-1', body: { caregiverId: 'pca-1' } });
+  await call('POST', `/api/scheduling/shifts/${evvId}/accept`, { as: 'pca-1' });
+
+  const tooEarly = await call('POST', `/api/scheduling/shifts/${generalId}/clock-in`, { as: 'pca-1', body: {} });
+  check('a clock-in 41 days before the shift is REFUSED',
+    tooEarly.status === 409 && tooEarly.data.code === 'CLOCK_IN_TOO_EARLY', JSON.stringify(tooEarly.data));
+  check('STORED: and nothing was written for it',
+    !(await stored('time_logs', l => l.shift_id === generalId)));
+
+  const clockIn = await call('POST', `/api/scheduling/shifts/${evvId}/clock-in`, {
     as: 'pca-1', body: { gps: { lat: 33.9527, lng: -84.5500, accuracy: 12 } }
   });
-  check('clock-in on a confirmed shift succeeds', clockIn.status === 200);
-  const log = await stored('time_logs', l => l.shift_id === generalId);
+  check('clock-in inside the window succeeds', clockIn.status === 200, JSON.stringify(clockIn.data));
+  const log = await stored('time_logs', l => l.shift_id === evvId);
   check('STORED: a time log exists with the GPS and the geofence verdict',
     !!log && log.clock_in_geofence.verdict === 'inside' && log.clock_in_gps.lat === 33.9527);
   check('STORED: no flags for an on-site clock-in', log.flags.length === 0, JSON.stringify(log.flags));
   check('STORED: the shift moved to in_progress',
-    (await stored('shifts', r => r.id === generalId)).status === 'in_progress');
+    (await stored('shifts', r => r.id === evvId)).status === 'in_progress');
 
-  const doubleClock = await call('POST', `/api/scheduling/shifts/${generalId}/clock-in`, { as: 'pca-1', body: {} });
+  const doubleClock = await call('POST', `/api/scheduling/shifts/${evvId}/clock-in`, { as: 'pca-1', body: {} });
   check('a second clock-in is refused', doubleClock.status === 409 && doubleClock.data.code === 'ALREADY_CLOCKED_IN');
 
-  const clockOut = await call('POST', `/api/scheduling/shifts/${generalId}/clock-out`, {
+  // ---- THE FAILSAFE: no visit log, no clock-out --------------------------
+  const noLog = await call('POST', `/api/scheduling/shifts/${evvId}/clock-out`, {
     as: 'pca-1', body: { gps: { lat: 33.9527, lng: -84.5500 } }
   });
-  check('clock-out succeeds', clockOut.status === 200);
+  check('clock-out with NO visit log is REFUSED',
+    noLog.status === 409 && noLog.data.code === 'VISIT_LOG_REQUIRED', JSON.stringify(noLog.data));
+  check('STORED: the shift is still in progress after the refusal',
+    (await stored('shifts', r => r.id === evvId)).status === 'in_progress');
+  check('STORED: and the time log is still open',
+    !(await stored('time_logs', l => l.id === log.id)).clock_out_at);
+
+  // The schedule reads the same fact, so the app never offers a Clock out the
+  // server is going to refuse.
+  const listNoLog = await call('GET', '/api/scheduling/shifts', { as: 'pca-1' });
+  check('the schedule reports visitLogFiled:false on the running shift',
+    listNoLog.data.shifts.find(x => x.id === evvId).visitLogFiled === false);
+
+  // A log for the RIGHT shift but the WRONG caregiver does not satisfy it.
+  await db.set('caregiver_visit_logs', [
+    { id: 'vl-wrong', shift_id: evvId, caregiver_id: 'pca-2', client_id: 'client-1' }
+  ]);
+  const wrongAuthor = await call('POST', `/api/scheduling/shifts/${evvId}/clock-out`, { as: 'pca-1', body: {} });
+  check("another caregiver's log does not satisfy the gate",
+    wrongAuthor.status === 409 && wrongAuthor.data.code === 'VISIT_LOG_REQUIRED');
+
+  // A log by the right caregiver for a DIFFERENT client does not satisfy it.
+  await db.set('caregiver_visit_logs', [
+    { id: 'vl-other-client', shift_id: evvId, caregiver_id: 'pca-1', client_id: 'client-2' }
+  ]);
+  const wrongClient = await call('POST', `/api/scheduling/shifts/${evvId}/clock-out`, { as: 'pca-1', body: {} });
+  check('a log naming a different client does not satisfy the gate',
+    wrongClient.status === 409 && wrongClient.data.code === 'VISIT_LOG_REQUIRED');
+
+  // Now the real thing. Session 6 owns the write; the shape is its row.
+  await db.set('caregiver_visit_logs', [
+    { id: 'vl-1', shift_id: evvId, caregiver_id: 'pca-1', client_id: 'client-1',
+      visit_date: new Date().toISOString().slice(0, 10), status: 'submitted' }
+  ]);
+  const listFiled = await call('GET', '/api/scheduling/shifts', { as: 'pca-1' });
+  check('the schedule flips to visitLogFiled:true once the log is filed',
+    listFiled.data.shifts.find(x => x.id === evvId).visitLogFiled === true);
+
+  const clockOut = await call('POST', `/api/scheduling/shifts/${evvId}/clock-out`, {
+    as: 'pca-1', body: { gps: { lat: 33.9527, lng: -84.5500 } }
+  });
+  check('clock-out succeeds once the visit is documented', clockOut.status === 200, JSON.stringify(clockOut.data));
   const closed = await stored('time_logs', l => l.id === log.id);
   check('STORED: the log is closed and the total is computed',
     !!closed.clock_out_at && typeof closed.total_minutes === 'number' && closed.total_minutes >= 0);
   check('STORED: the shift is completed',
-    (await stored('shifts', r => r.id === generalId)).status === 'completed');
+    (await stored('shifts', r => r.id === evvId)).status === 'completed');
 
   // The one that matters: outside the radius SUCCEEDS and is flagged.
   const farShift = await call('POST', '/api/scheduling/shifts', {
-    as: 'admin-1', body: { clientId: 'client-1', start: at(0, '09:00'), end: at(0, '13:00') }
+    as: 'admin-1', body: { clientId: 'client-1', start: minsFromNow(15), end: minsFromNow(255) }
   });
   const farId = farShift.data.shift.id;
   await call('POST', `/api/scheduling/shifts/${farId}/assign`, { as: 'admin-1', body: { caregiverId: 'pca-2' } });
@@ -458,7 +520,7 @@ const at = (dayOffset, hhmm) => new Date(`${plusDays(dayOffset)}T${hhmm}:00.000Z
 
   // A client with no coordinates: unverifiable, never reported as inside.
   const noCoordShift = await call('POST', '/api/scheduling/shifts', {
-    as: 'admin-1', body: { clientId: 'client-2', start: at(0, '14:00'), end: at(0, '16:00') }
+    as: 'admin-1', body: { clientId: 'client-2', start: minsFromNow(20), end: minsFromNow(140) }
   });
   const ncId = noCoordShift.data.shift.id;
   await call('POST', `/api/scheduling/shifts/${ncId}/assign`, { as: 'admin-1', body: { caregiverId: 'sitter-1' } });

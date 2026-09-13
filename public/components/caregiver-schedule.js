@@ -214,9 +214,18 @@
         (tooEarly
           ? '<div class="gmu">Clock in opens at ' + esc(opens.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })) + '.</div>'
           : '') +
+        // The visit log comes before the clock stops, so the running shift
+        // says which step it is on instead of offering a Clock out the server
+        // will refuse. `visitLogFiled` is read from the shift the server sent;
+        // when it is missing we say nothing rather than guess either way.
+        (running && s.visitLogFiled === false
+          ? '<div class="gmu">The visit log is not filed yet.</div>'
+          : '') +
         '<div class="gbtns">' +
           (running
-            ? '<button class="gbtn danger" data-act="clock-out" data-id="' + s.id + '">Clock out</button>'
+            ? (s.visitLogFiled === false
+              ? '<button class="gbtn gold" data-act="visit-log" data-id="' + s.id + '">File the visit log</button>'
+              : '<button class="gbtn danger" data-act="clock-out" data-id="' + s.id + '">Clock out</button>')
             : '<button class="gbtn gold" data-act="clock-in" data-id="' + s.id + '"' +
               (tooEarly ? ' disabled' : '') + '>Clock in</button>') +
         '</div>' +
@@ -359,6 +368,16 @@
           // pattern the app's other authenticated downloads use.
           global.location.href = API + '/api/scheduling/my-hours.csv?token=' +
             encodeURIComponent(state.authToken);
+          return;
+        }
+        if (act === 'visit-log') {
+          // Same destination the refused clock-out sends them to; reaching it
+          // from the button means the caregiver never has to be told no first.
+          var pending = null;
+          for (var j = 0; j < state.mine.length; j++) {
+            if (state.mine[j] && state.mine[j].id === id) { pending = state.mine[j]; break; }
+          }
+          if (state.onVisitLogRequired) state.onVisitLogRequired(pending || { id: id });
           return;
         }
         btn.disabled = true;

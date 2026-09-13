@@ -379,7 +379,23 @@ module.exports = function createSchedulingRoutes(deps) {
       if (req.query.to) mine = mine.filter(r => String(r.start) <= String(req.query.to));
       if (isAdmin(req.user) && req.query.clientId) mine = mine.filter(r => r.client_id === String(req.query.clientId));
       mine = mine.slice().sort((a, b) => String(a.start).localeCompare(String(b.start)));
-      res.json({ shifts: mine.slice(0, 500).map(publicShift) });
+
+      // Whether the visit log is already filed is a fact the clock-out gate
+      // reads, so the schedule reads it too rather than showing a Clock out
+      // button that the server is going to refuse. Observed, never assumed:
+      // an in-progress shift with no log says so, and a shift that is not
+      // running carries null rather than a guess.
+      const filedLogs = await readRows('caregiver_visit_logs');
+      const page = mine.slice(0, 500).map((r) => {
+        const out = publicShift(r);
+        out.visitLogFiled = r.status === 'in_progress'
+          ? filedLogs.some(v => v && String(v.shift_id) === String(r.id) &&
+              String(v.caregiver_id) === String(r.caregiver_id) &&
+              String(v.client_id) === String(r.client_id))
+          : null;
+        return out;
+      });
+      res.json({ shifts: page });
     } catch (error) {
       console.error('Shift list error:', error);
       res.status(500).json({ error: 'Server error' });
@@ -851,11 +867,17 @@ module.exports = function createSchedulingRoutes(deps) {
       // exactly as it was — still in progress, its time log still open.
       // Session 6 owns caregiver_visit_logs and already carries shift_id on
       // the row; this is the rule that makes it more than a marker.
+      // It has to be THIS caregiver's log for THIS client on THIS shift.
+      // Matching the shift id alone would let a log filed by someone else, or
+      // for another client, satisfy a gate that was never theirs to satisfy.
       const visitLogs = await readRows('caregiver_visit_logs');
-      const documented = visitLogs.some(v => v && String(v.shift_id) === String(shift.id));
+      const documented = visitLogs.some(v =>
+        v && String(v.shift_id) === String(shift.id) &&
+        String(v.caregiver_id) === String(req.user.id) &&
+        String(v.client_id) === String(shift.client_id));
       if (!documented) {
         return res.status(409).json({
-          error: 'File the visit log for this shift before clocking out.',
+          error: 'File the visit log for this visit before you clock out.',
           code: 'VISIT_LOG_REQUIRED',
           shiftId: shift.id,
           clientId: shift.client_id

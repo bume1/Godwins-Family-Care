@@ -660,6 +660,42 @@ test('SAFETY: a refused clock-out writes NOTHING — the shift stays in progress
     'the documentation gate must be checked BEFORE anything is written, or a refused clock-out leaves a half-closed shift');
 });
 
+test('SAFETY: the gate matches the caregiver AND the client, not the shift id alone', () => {
+  const i = routeSrc.indexOf("'/api/scheduling/shifts/:id/clock-out'");
+  const handler = routeSrc.slice(i, i + 3000);
+  const gate = handler.slice(handler.indexOf('caregiver_visit_logs'), handler.indexOf('VISIT_LOG_REQUIRED'));
+  assert.match(gate, /caregiver_id/,
+    "a log filed by a different caregiver must not satisfy another caregiver's gate");
+  assert.match(gate, /client_id/,
+    'a log naming a different client must not satisfy this shift');
+});
+
+test('a visit log filed while clocked in is attached to that shift, whatever screen it came from', () => {
+  const cgRouteSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'caregiver.js'), 'utf8');
+  const i = cgRouteSrc.indexOf("router.post('/api/caregiver/visit-logs'");
+  const handler = cgRouteSrc.slice(i, i + 5000);
+  // Without this, a log filed from the Home tab carries no shift id, the
+  // clock-out gate does not see it, and the caregiver is told to file the log
+  // they just filed. A safety control with a dead end in it gets worked around.
+  assert.match(handler, /in_progress/,
+    'the route resolves the caregiver\'s running shift when the form did not carry one');
+  assert.match(handler, /shift_id: attachedShiftId/,
+    'and the resolved id is what gets stored');
+  assert.ok(!/shift_id: body\.shiftId/.test(handler),
+    'the stored shift id is no longer taken straight off the request body');
+});
+
+test('the schedule reports whether the visit log is filed, and only for a running shift', () => {
+  const i = routeSrc.indexOf("router.get('/api/scheduling/shifts'");
+  assert.ok(i > 0, 'the shift list route exists');
+  const handler = routeSrc.slice(i, i + 2400);
+  assert.match(handler, /visitLogFiled/, 'the list carries the fact the gate reads');
+  // The app must not claim a state it cannot observe: a shift that is not
+  // running is not "missing" a log, so it reports null rather than false.
+  assert.match(handler, /in_progress'\s*\n?\s*\?/,
+    'only an in-progress shift gets a true/false; anything else is null');
+});
+
 test('SAFETY: a visit log cannot claim a shift that is not the caregiver\'s own', () => {
   const cgRouteSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'caregiver.js'), 'utf8');
   const i = cgRouteSrc.indexOf("router.post('/api/caregiver/visit-logs'");

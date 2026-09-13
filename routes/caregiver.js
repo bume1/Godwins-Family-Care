@@ -234,6 +234,7 @@ module.exports = function createCaregiverRoutes(deps) {
       // otherwise a log could be attached to someone else's shift and satisfy
       // a gate that was never theirs to satisfy.
       const rawShiftId = body.shiftId ? String(body.shiftId) : '';
+      let attachedShiftId = null;
       if (rawShiftId) {
         const shift = (await readRows('shifts')).find(s => s && String(s.id) === rawShiftId);
         if (!shift) {
@@ -248,6 +249,20 @@ module.exports = function createCaregiverRoutes(deps) {
             code: 'SHIFT_CLIENT_MISMATCH'
           });
         }
+        attachedShiftId = rawShiftId.slice(0, 120);
+      } else {
+        // No shift id came with the form. A caregiver who is CLOCKED IN on this
+        // client right now is documenting that visit whichever screen they
+        // started from, so the shift is attached here rather than left off.
+        // Without this, a log filed from anywhere but the clock-out prompt
+        // carries no shift and the clock-out gate tells the caregiver to file
+        // the log they just filed — which is the kind of dead end that gets a
+        // safety control worked around instead of followed.
+        const openShift = (await readRows('shifts')).find(s =>
+          s && s.status === 'in_progress' &&
+          s.caregiver_id === caregiver.id &&
+          String(s.client_id) === String(client.id));
+        if (openShift) attachedShiftId = String(openShift.id).slice(0, 120);
       }
 
       // The control: anything the schema did not offer is dropped, not stored.
@@ -277,7 +292,7 @@ module.exports = function createCaregiverRoutes(deps) {
         satisfaction: clean.satisfaction,
         // Session 7 owns the clock; we record whatever marker it has already
         // written, and never invent one.
-        shift_id: body.shiftId ? String(body.shiftId).slice(0, 120) : null,
+        shift_id: attachedShiftId,
         status: schema.submitStatus,        // lpn → pending_review
         skilled_note: !!schema.skilledNote,
         submitted_at: submittedAt,
