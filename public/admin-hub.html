@@ -60,6 +60,8 @@
     .animate-fade-in { animation: fadeIn 0.4s ease-out forwards; }
     .glass-effect { backdrop-filter: blur(10px); background: rgba(255,255,255,0.9); }
   </style>
+  <script src="/session-guard.js"></script>
+  <script src="/mfa-step.js"></script>
 </head>
 <body class="min-h-screen">
   <div id="root"></div>
@@ -108,7 +110,7 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email, password })
-        }).then(handleResponse).then(result => {
+        }).then(handleResponse).then(r => window.GFC_MFA.complete(r)).then(result => {
           // Verify user has admin hub access (super admins, managers, or users with hasAdminHubAccess)
           if (result.user && result.user.role !== 'admin' && !result.user.isManager && !result.user.hasAdminHubAccess) {
             return { error: 'Access denied. Admin Hub access required.' };
@@ -118,6 +120,14 @@
 
       getDashboard: (token) =>
         fetch(`${API_URL}/api/admin-hub/dashboard`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(err => ({ error: err.message })),
+
+      // Scheduling summary for the dashboard block. Admin-only server-side, so
+      // a non-admin gets an error object and the block simply does not render —
+      // the gate is the route, never the absence of a tile.
+      getSchedulingSummary: (token) =>
+        fetch(`${API_URL}/api/scheduling/summary`, {
           headers: { 'Authorization': `Bearer ${token}` }
         }).then(handleResponse).catch(err => ({ error: err.message })),
 
@@ -153,6 +163,31 @@
           method: 'PUT',
           headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ skilledCompetencies })
+        }).then(handleResponse).catch(err => ({ error: err.message })),
+
+      // Caregiver documents. The admin files onboarding paperwork on a
+      // caregiver's behalf and must name them; the API refuses an unnamed one.
+      listCaregiverDocs: (token, caregiverId) =>
+        fetch(`${API_URL}/api/caregiver/documents?caregiverId=${encodeURIComponent(caregiverId)}`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(err => ({ error: err.message })),
+
+      getCaregiverDocKinds: (token) =>
+        fetch(`${API_URL}/api/caregiver/documents/kinds`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(err => ({ error: err.message })),
+
+      uploadCaregiverDoc: (token, body) =>
+        fetch(`${API_URL}/api/caregiver/documents`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        }).then(handleResponse).catch(err => ({ error: err.message })),
+
+      deleteCaregiverDoc: (token, id) =>
+        fetch(`${API_URL}/api/caregiver/documents/${id}`, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${token}` }
         }).then(handleResponse).catch(err => ({ error: err.message })),
 
       deleteUser: (token, userId) =>
@@ -455,11 +490,17 @@
 
     // Sidebar with portal access - Modern design
     // ── Messages (Session 9) ──
+    // A PANEL, not a page: it lives inside the Inbox as its first tab. Two
+    // sidebar entries both called some form of "inbox" — one for real people
+    // messaging, one for bug reports and password resets — read as duplicates
+    // of each other, so there is now one Inbox and these are its tabs.
+    //
     // Admin has full visibility by the matrix, so this is the whole board: no
     // client scope is passed, and the server returns every thread. That is the
     // one role for which "everything" is the correct answer, and it is decided
-    // there, not by leaving the filter off here.
-    const MessagesPage = ({ token, user }) => {
+    // there, not by leaving the filter off here. Leaving the scope unset is
+    // also what gives the panel its client picker.
+    const MessagesPanel = ({ token, user }) => {
       React.useEffect(() => {
         const lib = window.GFCMessaging;
         if (!lib || !token) return undefined;
@@ -471,14 +512,10 @@
       }, [token, user && user.id]);
 
       return (
-        <div className="p-6 lg:p-8">
-          <h1 className="text-2xl font-semibold text-gray-900 tracking-tight">Messages</h1>
-          <p className="text-gray-500 mt-1 text-sm">Every conversation across the platform, by client.</p>
-          <div className="mt-6 bg-white rounded-2xl shadow-soft p-5">
-            {window.GFCMessaging
-              ? <div id="gfc-messaging-admin"></div>
-              : <p className="text-sm text-gray-500">Messages did not load. Refresh the page.</p>}
-          </div>
+        <div className="bg-white rounded-xl shadow-soft border border-gray-100 p-5">
+          {window.GFCMessaging
+            ? <div id="gfc-messaging-admin"></div>
+            : <p className="text-sm text-gray-500">Messages did not load. Refresh the page.</p>}
         </div>
       );
     };
@@ -493,15 +530,18 @@
       // Managers can only see Dashboard and Service Portal (no Inbox or User Management)
       const allMenuItems = [
         { id: 'dashboard', label: 'Dashboard', icon: Icons.home, color: 'text-primary-500', superAdminOnly: false },
-        { id: 'inbox', label: 'Inbox', icon: Icons.inbox, color: 'text-primary-500', superAdminOnly: true },
+        // ONE inbox. There were two entries, both with the inbox icon — one for
+        // people messaging and one for bug reports and password resets — which
+        // is the duplication this removes. They are tabs of this now.
+        // Not super-admin only, because Messages lives in here: a manager or
+        // case manager who cannot open the thread cannot answer a caregiver
+        // who messaged them, and the server already decides which threads each
+        // role may see. The Inbox's ADMIN halves — feedback and password
+        // resets — are hidden inside the page for everyone else.
+        { id: 'inbox', label: 'Inbox', icon: Icons.inbox, color: 'text-primary-500', superAdminOnly: false },
         { id: 'users', label: 'User Management', icon: Icons.users, color: 'text-primary-500', superAdminOnly: true },
         { id: 'service_portal', label: 'Service Portal', icon: Icons.clipboard, color: 'text-success-500', superAdminOnly: false },
         { id: 'notifications', label: 'Notifications', icon: Icons.bell, color: 'text-primary-500', superAdminOnly: false },
-        // Messages is NOT super-admin only: a manager or case manager who
-        // cannot open the thread cannot answer a caregiver who messaged them,
-        // and the server already decides which threads each role may see —
-        // hiding the whole surface was a second, blunter gate on top of it.
-        { id: 'messages', label: 'Messages', icon: Icons.inbox, color: 'text-primary-500', superAdminOnly: false },
       ];
 
       // Filter menu items: Super Admin sees all, Manager only sees non-superAdminOnly items
@@ -593,12 +633,18 @@
     const DashboardPage = ({ token, onNavigate, user }) => {
       const isManager = user?.isManager && user?.role !== 'admin';
       const [stats, setStats] = useState(null);
+      const [sched, setSched] = useState(null);
       const [loading, setLoading] = useState(true);
 
       useEffect(() => {
         api.getDashboard(token).then(data => {
           if (!data.error) setStats(data);
           setLoading(false);
+        });
+        // Separate call, deliberately not awaited with the one above: the
+        // dashboard must still render if scheduling is unreachable or refuses.
+        api.getSchedulingSummary(token).then(data => {
+          if (data && !data.error && data.summary) setSched(data.summary);
         });
       }, [token]);
 
@@ -653,6 +699,73 @@
             ))}
           </div>
 
+          {/* Caregiver scheduling — the dashboard block (2026-09-13, owner request).
+              Renders only when the admin-only summary actually came back, so the
+              access control is the route rather than a hidden tile. Every row is
+              something waiting on a person; a zero row is deliberately still
+              shown, because "nothing is waiting" is information too. */}
+          {sched && (
+            <div className="card-modern p-6">
+              <div className="flex items-start justify-between mb-5 gap-3 flex-wrap">
+                <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                  <span className="w-8 h-8 rounded-lg bg-teal-50 text-teal-600 flex items-center justify-center">{Icons.clipboard}</span>
+                  Caregiver Scheduling
+                </h2>
+                <a href="/scheduling" className="text-sm font-medium text-primary-600 hover:text-primary-700">Open scheduling →</a>
+              </div>
+
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+                <div className="p-4 bg-gray-50 rounded-xl">
+                  <p className="text-2xl font-bold text-gray-900">{sched.today}</p>
+                  <p className="text-xs text-gray-500 mt-1">Shifts today</p>
+                </div>
+                <div className="p-4 bg-gray-50 rounded-xl">
+                  <p className="text-2xl font-bold text-gray-900">{sched.inProgress}</p>
+                  <p className="text-xs text-gray-500 mt-1">Clocked in now</p>
+                </div>
+                <div className={`p-4 rounded-xl ${sched.openUnfilled ? 'bg-warning-50' : 'bg-gray-50'}`}>
+                  <p className={`text-2xl font-bold ${sched.openUnfilled ? 'text-warning-600' : 'text-gray-900'}`}>{sched.openUnfilled}</p>
+                  <p className="text-xs text-gray-500 mt-1">Unfilled shifts</p>
+                </div>
+                <div className={`p-4 rounded-xl ${sched.flaggedTimeLogs ? 'bg-warning-50' : 'bg-gray-50'}`}>
+                  <p className={`text-2xl font-bold ${sched.flaggedTimeLogs ? 'text-warning-600' : 'text-gray-900'}`}>{sched.flaggedTimeLogs}</p>
+                  <p className="text-xs text-gray-500 mt-1">Time logs to review</p>
+                </div>
+              </div>
+
+              {/* Waiting on someone. Each line says who it is waiting on, because
+                  "3 pending" without that is a number nobody can act on. */}
+              <div className="space-y-2">
+                {sched.awaitingApproval > 0 && (
+                  <a href="/scheduling" className="flex items-center justify-between p-3 bg-warning-50 hover:bg-warning-100 rounded-xl transition">
+                    <span className="text-sm text-gray-800">
+                      <b>{sched.awaitingApproval}</b> claimed {sched.awaitingApproval === 1 ? 'shift is' : 'shifts are'} waiting on <b>your</b> approval
+                    </span>
+                    <span className="text-xs text-warning-700 font-medium whitespace-nowrap ml-3">Review →</span>
+                  </a>
+                )}
+                {sched.awaitingAcceptance > 0 && (
+                  <div className="flex items-center justify-between p-3 bg-gray-50 rounded-xl">
+                    <span className="text-sm text-gray-700">
+                      <b>{sched.awaitingAcceptance}</b> assigned {sched.awaitingAcceptance === 1 ? 'shift is' : 'shifts are'} waiting on the caregiver to accept
+                    </span>
+                  </div>
+                )}
+                {sched.clientsMissingCoordinates > 0 && (
+                  <a href="/scheduling" className="flex items-center justify-between p-3 bg-red-50 hover:bg-red-100 rounded-xl transition">
+                    <span className="text-sm text-gray-800">
+                      <b>{sched.clientsMissingCoordinates}</b> of {sched.clientCount} {sched.clientsMissingCoordinates === 1 ? 'client has' : 'clients have'} no address coordinates — clock-ins there can only record as unverifiable
+                    </span>
+                    <span className="text-xs text-red-700 font-medium whitespace-nowrap ml-3">Locations →</span>
+                  </a>
+                )}
+                {!sched.awaitingApproval && !sched.awaitingAcceptance && !sched.clientsMissingCoordinates && (
+                  <p className="text-sm text-gray-500 p-3">Nothing is waiting on you.</p>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Quick Actions & Projects */}
           <div className="grid lg:grid-cols-2 gap-6">
             <div className="card-modern p-6">
@@ -696,11 +809,11 @@
                     <p className="text-xs text-gray-500">Escalations, visit-log review, incidents and documents</p>
                   </div>
                 </a>
-                <a href="/scheduling" className="w-full text-left p-4 bg-gray-50 hover:bg-warning-50 rounded-xl flex items-center gap-4 transition group">
-                  <span className="w-10 h-10 rounded-lg bg-warning-50 text-warning-600 flex items-center justify-center group-hover:bg-warning-500 group-hover:text-white transition">{Icons.rocket}</span>
+                <a href="/scheduling" className="w-full text-left p-4 bg-gray-50 hover:bg-teal-50 rounded-xl flex items-center gap-4 transition group">
+                  <span className="w-10 h-10 rounded-lg bg-teal-50 text-teal-600 flex items-center justify-center group-hover:bg-teal-500 group-hover:text-white transition">{Icons.clipboard}</span>
                   <div>
-                    <p className="font-medium text-gray-900">Scheduling &amp; Payroll</p>
-                    <p className="text-xs text-gray-500">Shifts, time logs, payroll and client billing exports</p>
+                    <p className="font-medium text-gray-900">Caregiver Scheduling</p>
+                    <p className="text-xs text-gray-500">Post shifts, approve claims, correct time logs, run payroll, and set client locations</p>
                   </div>
                 </a>
               </div>
@@ -745,11 +858,84 @@
     };
 
     // Inbox Page - Bug Reports and Feature Requests
-    const InboxPage = ({ token }) => {
+    // ── Caregiver Feed broadcasts (Session 6) ──
+    // The caregiver app's Feed tab reads `caregiver_broadcasts` and this
+    // caregiver's own escalation alerts. The escalation half fills itself. The
+    // broadcast half had a working API and NO SCREEN ANYWHERE, so nothing could
+    // ever be posted and the Feed read "Nothing new right now" permanently.
+    // Same shape as the two admin screens built on 2026-09-10: an owner item is
+    // only open for the owner once there is somewhere to do it.
+    const CaregiverFeedPanel = ({ token }) => {
+      const [title, setTitle] = useState('');
+      const [body, setBody] = useState('');
+      const [posting, setPosting] = useState(false);
+      const [result, setResult] = useState(null);
+
+      const post = async () => {
+        setPosting(true);
+        setResult(null);
+        try {
+          const res = await fetch(`${window.location.origin}/api/caregiver/broadcasts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ title, body })
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.error || `Could not post (${res.status})`);
+          setResult({ ok: true, text: 'Posted. It is on every caregiver\'s Feed now.' });
+          setTitle('');
+          setBody('');
+        } catch (err) {
+          setResult({ ok: false, text: err.message });
+        } finally {
+          setPosting(false);
+        }
+      };
+
+      return (
+        <div className="bg-white rounded-xl shadow-soft border border-gray-100 p-5 space-y-4">
+          <div>
+            <h3 className="font-semibold text-gray-800">Post to the caregiver Feed</h3>
+            <p className="text-sm text-gray-500 mt-1">
+              Goes to every caregiver, read-only, in the Feed tab of their app. It reaches
+              everyone, so it carries no client names and nothing clinical — a message about
+              one person's care belongs in a thread about that person, under Messages.
+            </p>
+          </div>
+          {result && (
+            <div className={`rounded-lg px-4 py-3 text-sm ${result.ok ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
+              {result.text}
+            </div>
+          )}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Title</label>
+            <input value={title} onChange={e => setTitle(e.target.value)} maxLength={200}
+              placeholder="Office closed Monday"
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Message</label>
+            <textarea value={body} onChange={e => setBody(e.target.value)} maxLength={4000} rows={4}
+              placeholder="Payroll runs Tuesday this week instead of Monday."
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
+          </div>
+          <button onClick={post} disabled={posting || !title.trim()}
+            className="px-4 py-2 rounded-lg bg-primary-500 text-white text-sm font-medium disabled:opacity-50">
+            {posting ? 'Posting…' : 'Post to Feed'}
+          </button>
+        </div>
+      );
+    };
+
+    const InboxPage = ({ token, user, initialTab }) => {
       const [feedback, setFeedback] = useState([]);
       const [passwordResets, setPasswordResets] = useState([]);
       const [loading, setLoading] = useState(true);
-      const [activeTab, setActiveTab] = useState('feedback');
+      const [activeTab, setActiveTab] = useState(initialTab || 'messages');
+      // Managers and case managers come here for Messages. Feedback and
+      // password resets are the super admin's work, and both routes refuse
+      // them at the API anyway — a tab that always errors is worse than no tab.
+      const canSeeAdminInbox = user?.role === 'admin';
       const [selectedItem, setSelectedItem] = useState(null);
 
       useEffect(() => {
@@ -759,8 +945,8 @@
       const loadData = async () => {
         setLoading(true);
         const [feedbackData, resetData] = await Promise.all([
-          api.getFeedback(token),
-          api.getPasswordResetRequests(token)
+          canSeeAdminInbox ? api.getFeedback(token) : Promise.resolve([]),
+          canSeeAdminInbox ? api.getPasswordResetRequests(token) : Promise.resolve([])
         ]);
         if (!feedbackData.error) setFeedback(feedbackData);
         if (!resetData.error) setPasswordResets(resetData);
@@ -786,7 +972,10 @@
       const openFeedback = feedback.filter(f => f.status === 'open');
       const resolvedFeedback = feedback.filter(f => f.status === 'resolved');
 
-      if (loading) return (
+      // The spinner covers the FEEDBACK fetch, not the Messages panel, which
+      // loads its own data. Blocking the whole page on an unrelated request is
+      // how a working inbox ends up looking broken.
+      if (loading && activeTab !== 'messages' && activeTab !== 'broadcast') return (
         <div className="flex items-center justify-center py-20">
           <div className="flex flex-col items-center gap-4">
             <div className="animate-spin rounded-full h-10 w-10 border-[3px] border-primary-500 border-t-transparent"></div>
@@ -801,25 +990,45 @@
           <div className="flex justify-between items-center">
             <div>
               <h1 className="text-2xl font-bold text-accent">Inbox</h1>
-              <p className="text-gray-500 text-sm mt-1">Bug reports, feature requests, and password resets</p>
+              <p className="text-gray-500 text-sm mt-1">
+                {canSeeAdminInbox
+                  ? 'Messages, bug reports, feature requests, and password resets'
+                  : 'Messages and the caregiver feed'}
+              </p>
             </div>
           </div>
 
           {/* Tabs */}
           <div className="flex gap-2 border-b border-gray-200">
-            <button onClick={() => setActiveTab('feedback')}
-              className={`px-4 py-3 text-sm font-medium border-b-2 transition ${activeTab === 'feedback' ? 'border-primary-500 text-primary-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
-              Feedback & Requests
-              {openFeedback.length > 0 && <span className="ml-2 px-2 py-0.5 bg-red-100 text-red-600 rounded-full text-xs">{openFeedback.length}</span>}
+            <button onClick={() => setActiveTab('messages')}
+              className={`px-4 py-3 text-sm font-medium border-b-2 transition ${activeTab === 'messages' ? 'border-primary-500 text-primary-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
+              Messages
             </button>
-            <button onClick={() => setActiveTab('password')}
-              className={`px-4 py-3 text-sm font-medium border-b-2 transition ${activeTab === 'password' ? 'border-primary-500 text-primary-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
-              Password Resets
-              {passwordResets.length > 0 && <span className="ml-2 px-2 py-0.5 bg-orange-100 text-orange-600 rounded-full text-xs">{passwordResets.length}</span>}
+            <button onClick={() => setActiveTab('broadcast')}
+              className={`px-4 py-3 text-sm font-medium border-b-2 transition ${activeTab === 'broadcast' ? 'border-primary-500 text-primary-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
+              Caregiver Feed
             </button>
+            {canSeeAdminInbox && (
+              <button onClick={() => setActiveTab('feedback')}
+                className={`px-4 py-3 text-sm font-medium border-b-2 transition ${activeTab === 'feedback' ? 'border-primary-500 text-primary-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
+                Feedback & Requests
+                {openFeedback.length > 0 && <span className="ml-2 px-2 py-0.5 bg-red-100 text-red-600 rounded-full text-xs">{openFeedback.length}</span>}
+              </button>
+            )}
+            {canSeeAdminInbox && (
+              <button onClick={() => setActiveTab('password')}
+                className={`px-4 py-3 text-sm font-medium border-b-2 transition ${activeTab === 'password' ? 'border-primary-500 text-primary-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
+                Password Resets
+                {passwordResets.length > 0 && <span className="ml-2 px-2 py-0.5 bg-orange-100 text-orange-600 rounded-full text-xs">{passwordResets.length}</span>}
+              </button>
+            )}
           </div>
 
-          {activeTab === 'feedback' && (
+          {activeTab === 'messages' && <MessagesPanel token={token} user={user} />}
+
+          {activeTab === 'broadcast' && <CaregiverFeedPanel token={token} />}
+
+          {canSeeAdminInbox && activeTab === 'feedback' && (
             <div className="space-y-4">
               {/* Open Feedback */}
               <div className="bg-white rounded-xl shadow-soft border border-gray-100 overflow-hidden">
@@ -885,7 +1094,7 @@
             </div>
           )}
 
-          {activeTab === 'password' && (
+          {canSeeAdminInbox && activeTab === 'password' && (
             <div className="bg-white rounded-xl shadow-soft border border-gray-100 overflow-hidden">
               <div className="px-5 py-4 border-b border-gray-100 bg-gray-50/50">
                 <h3 className="font-semibold text-gray-800">Pending Password Reset Requests</h3>
@@ -981,6 +1190,171 @@
     };
 
     // Full User Management Page with all features
+    // ======================================================================
+    // CAREGIVER DOCUMENTS on the user form (2026-09-13, owner request)
+    // ======================================================================
+    // Photo ID, paystub and W-9 for payroll onboarding, plus anything the
+    // caregiver has sent in themselves. It sits on the user record because
+    // that is where the person is managed — a timesheet is payroll, but a
+    // W-9 is part of who this employee is.
+    //
+    // GUSTO IS THE SYSTEM OF RECORD for the payroll paperwork. The caregiver
+    // submits it there; what the app holds is the office's copy. The card
+    // says so, because a screen that stays quiet about it lets someone
+    // believe uploading here filed their W-9.
+    //
+    // AT MODULE SCOPE, deliberately — it was first written inside UsersPage,
+    // where a component is a new function identity on every render, so React
+    // unmounts and remounts it and the file picker resets mid-use.
+    // test/react_input_focus.test.js did not catch that: it only read 40 lines
+    // past a declaration and this component is far longer. The guard now scans
+    // the whole component body, which is the hole this change found.
+    const CaregiverDocsSection = ({ token, caregiverId, caregiverName }) => {
+      const [docs, setDocs] = React.useState([]);
+      const [kinds, setKinds] = React.useState([]);
+      const [kind, setKind] = React.useState('');
+      const [file, setFile] = React.useState(null);
+      const [busy, setBusy] = React.useState(false);
+      const [msg, setMsg] = React.useState(null);
+      const fileRef = React.useRef(null);
+
+      const load = React.useCallback(async () => {
+        if (!caregiverId) return;   // not saved yet — there is nothing to file against
+        const [d, k] = await Promise.all([
+          api.listCaregiverDocs(token, caregiverId),
+          api.getCaregiverDocKinds(token)
+        ]);
+        if (d && Array.isArray(d.documents)) setDocs(d.documents);
+        if (k && Array.isArray(k.kinds)) {
+          setKinds(k.kinds);
+          // The catalog decides the default, so no kind is named in this page.
+          setKind(cur => cur || (k.kinds.find(x => x.payroll) || k.kinds[0] || {}).kind || '');
+        }
+      }, [token, caregiverId]);
+
+      React.useEffect(() => { load(); }, [load]);
+
+      const upload = async () => {
+        if (!file) { setMsg({ ok: false, text: 'Choose a file first.' }); return; }
+        if (file.size > 10 * 1024 * 1024) { setMsg({ ok: false, text: 'That file is over 10 MB.' }); return; }
+        setBusy(true); setMsg(null);
+        try {
+          const b64 = await new Promise((resolve, reject) => {
+            const r = new FileReader();
+            r.onload = () => resolve(r.result);
+            r.onerror = () => reject(new Error('read failed'));
+            r.readAsDataURL(file);
+          });
+          const res = await api.uploadCaregiverDoc(token, {
+            caregiverId, kind, fileName: file.name, fileDataB64: b64
+          });
+          if (res && res.error) { setMsg({ ok: false, text: res.error }); }
+          else {
+            setMsg({ ok: true, text: 'Filed.' });
+            setFile(null);
+            if (fileRef.current) fileRef.current.value = '';
+            await load();
+          }
+        } catch (e) {
+          setMsg({ ok: false, text: e.message || 'That did not upload.' });
+        }
+        setBusy(false);
+      };
+
+      // Read back THROUGH THE APP, never a Drive link — that is what makes
+      // the read audited and keeps the file un-shared.
+      const open = async (d) => {
+        try {
+          const res = await fetch(`${API_URL}/api/caregiver/documents/${d.id}/file`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
+          if (!res.ok) throw new Error('That file could not be retrieved.');
+          const url = URL.createObjectURL(await res.blob());
+          window.open(url, '_blank');
+          setTimeout(() => URL.revokeObjectURL(url), 60000);
+        } catch (e) { setMsg({ ok: false, text: e.message }); }
+      };
+
+      const remove = async (d) => {
+        if (!window.confirm(`Remove ${d.kindLabel} "${d.fileName}"? This deletes the stored file.`)) return;
+        const res = await api.deleteCaregiverDoc(token, d.id);
+        if (res && res.error) setMsg({ ok: false, text: res.error });
+        else { setMsg({ ok: true, text: 'Removed.' }); await load(); }
+      };
+
+      if (!caregiverId) {
+        return (
+          <div className="mt-5 border-t pt-4">
+            <h4 className="font-medium text-gray-800 mb-1">Documents</h4>
+            <p className="text-xs text-gray-500">Save this caregiver first, then their documents can be filed here.</p>
+          </div>
+        );
+      }
+
+      return (
+        <div className="mt-5 border-t pt-4">
+          <h4 className="font-medium text-gray-800 mb-1">Documents</h4>
+          <p className="text-xs text-gray-500 mb-3">
+            Photo ID, paystub and W-9 for onboarding, plus anything {caregiverName || 'this caregiver'} has
+            sent in. <span className="font-medium">Gusto is where payroll paperwork is actually submitted</span> —
+            this is the office's copy, and uploading here does not send it to Gusto.
+          </p>
+
+          <div className="flex flex-wrap items-end gap-2 mb-3">
+            <div className="flex-1 min-w-[180px]">
+              <label className="block text-xs font-medium text-gray-600 mb-1">Type</label>
+              <select className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                value={kind} onChange={(e) => setKind(e.target.value)}>
+                {kinds.map(k => <option key={k.kind} value={k.kind}>{k.label}</option>)}
+              </select>
+            </div>
+            <div className="flex-1 min-w-[200px]">
+              <label className="block text-xs font-medium text-gray-600 mb-1">File</label>
+              <input ref={fileRef} type="file" accept="image/*,application/pdf"
+                className="w-full text-sm"
+                onChange={(e) => { setFile(e.target.files && e.target.files[0]); setMsg(null); }} />
+            </div>
+            <button type="button" onClick={upload} disabled={busy || !file || !kind}
+              className="px-4 py-2 bg-gray-900 text-white rounded-lg text-sm disabled:opacity-50">
+              {busy ? 'Uploading…' : 'Upload'}
+            </button>
+          </div>
+
+          {msg && (
+            <p className={`text-xs mb-2 ${msg.ok ? 'text-green-700' : 'text-red-600'}`}>{msg.text}</p>
+          )}
+
+          {docs.length === 0
+            ? <p className="text-sm text-gray-500 py-2">Nothing on file yet.</p>
+            : (
+              <div className="space-y-2">
+                {docs.map(d => (
+                  <div key={d.id} className="flex items-center gap-3 p-2 bg-gray-50 rounded-lg">
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium text-gray-800 truncate">
+                        {d.kindLabel}
+                        {d.payroll && <span className="ml-2 text-[10px] uppercase tracking-wide text-gray-500">payroll</span>}
+                      </div>
+                      <div className="text-xs text-gray-500 truncate">
+                        {d.fileName} · {String(d.uploadedAt).slice(0, 10)}
+                        {/* Who filed it. "The caregiver sent this" and "the office
+                            filed it for them" are different facts. */}
+                        {d.uploadedByOffice ? ' · filed by the office' : ' · sent in by the caregiver'}
+                        {d.status !== 'received' && d.status !== 'accepted' ? ` · ${d.status}` : ''}
+                      </div>
+                    </div>
+                    <button type="button" onClick={() => open(d)}
+                      className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs">Open</button>
+                    <button type="button" onClick={() => remove(d)}
+                      className="px-3 py-1.5 border border-red-200 text-red-600 rounded-lg text-xs">Remove</button>
+                  </div>
+                ))}
+              </div>
+            )}
+        </div>
+      );
+    };
+
     const UsersPage = ({ token }) => {
       const [users, setUsers] = useState([]);
       const [projects, setProjects] = useState([]);
@@ -1019,7 +1393,15 @@
         familyOfClientId: '', // family role: the client (user id) this contact is linked to
         familyIsPoa: false, // family role: designated Power of Attorney (client-equivalent portal access)
         openEmrProviderId: '', // clinician: OpenEMR provider (numeric id) their calendar maps to (4.2)
-        npi: '' // clinician: individual NPI, stamped on every clinical write (4.4 attribution)
+        npi: '', // clinician: individual NPI, stamped on every clinical write (4.4 attribution)
+        // What WE PAY a caregiver — never the same number as the client's
+        // billed rate below; the gap between them is the margin.
+        payRate: '',
+        clientPayRates: {},
+        // What the CLIENT is billed. Settable at creation because the financial
+        // agreement and the home care service agreement both print it and
+        // neither can be signed without it.
+        rateAgreement: { hourlyRate: '', dailyMinimumHours: '' }
       };
       const [formData, setFormData] = useState(defaultFormData);
       // Competencies live OUTSIDE formData on purpose — formData is round-tripped
@@ -1050,17 +1432,27 @@
 
       const loadData = async () => {
         setLoading(true);
-        const [usersRes, projectsRes, resetsRes, clientsRes, portalsRes] = await Promise.all([
+        const [usersRes, projectsRes, resetsRes, portalsRes] = await Promise.all([
           api.getUsers(token),
           api.getProjects(token),
           api.getPasswordResetRequests(token),
-          fetch('/api/clients', { headers: { 'Authorization': `Bearer ${token}` } }).then(r => r.json()).catch(() => []),
           fetch('/api/client-portals', { headers: { 'Authorization': `Bearer ${token}` } }).then(r => r.json()).catch(() => [])
         ]);
         if (!usersRes.error) setUsers(usersRes);
         if (!projectsRes.error) setProjects(projectsRes);
         if (!resetsRes.error) setPasswordResets(resetsRes);
-        if (Array.isArray(clientsRes)) setClients(clientsRes);
+        // THE ASSIGNED-CLIENTS PICKER WAS ALWAYS EMPTY, and this is why.
+        // It fetched `/api/clients` — a LAB-ERA endpoint that does not exist
+        // anywhere in this server. The request 404'd, `.json()` threw, and
+        // `.catch(() => [])` swallowed it, so the list was `[]` on every load
+        // and the form said "No clients available" forever. No caregiver could
+        // be assigned to anyone through this screen, which is the thing that
+        // gates a caregiver's access to a client at all.
+        //
+        // A GFC client IS a user with role 'client'. That list is already
+        // loaded, so the picker reads it rather than a second endpoint that
+        // can go missing without anyone noticing.
+        if (Array.isArray(usersRes)) setClients(usersRes.filter(u => u && u.role === 'client'));
         if (Array.isArray(portalsRes)) setClientPortals(portalsRes);
         setLoading(false);
       };
@@ -1147,7 +1539,12 @@
           familyOfClientId: user.familyOfClientId || '',
           familyIsPoa: user.familyIsPoa || false,
           openEmrProviderId: user.openEmrProviderId || '',
-          npi: user.npi || ''
+          npi: user.npi || '',
+          payRate: user.payRate === null || user.payRate === undefined ? '' : String(user.payRate),
+          clientPayRates: user.clientPayRates || {},
+          // Read-only on EDIT: changing a signed rate has consent consequences
+          // and belongs on the enrollment rate screen, which handles them.
+          rateAgreement: user.rateAgreement || { hourlyRate: '', dailyMinimumHours: '' }
         });
         setCompetencies((user.skilledCompetencies || [])
           .filter(c => c && c.verified)
@@ -1670,29 +2067,105 @@
                         <label className="block text-sm font-medium text-gray-700 mb-2">Assigned Clients</label>
                         <p className="text-xs text-gray-500 mb-2">This is what controls which clients this caregiver can see and document visits for in the caregiver app.</p>
                         <div className="max-h-48 overflow-y-auto border rounded-lg p-2 space-y-2">
-                          {users.filter(u => u.role === 'client').length > 0 ? users.filter(u => u.role === 'client').map(client => {
-                            const isAssigned = (formData.assignedClients || []).includes(client.id);
+                          {/* Stored by ID for anything ticked from here on. caregiverRepository's
+                              isAssignedToCaregiver accepts an id OR a name and checks the id
+                              first, so both read correctly — but a NAME silently drops the
+                              assignment the day a client is renamed, which is the same defect
+                              the per-client pay rates are keyed by id to avoid.
+                              Existing rows hold names, so the tick and the untick both have to
+                              recognise either form. Matching on id alone would show a saved
+                              assignment as unchecked and wipe it on the next save — the 4.2
+                              bug class, pointed at who may visit whom. */}
+                          {clients.length > 0 ? clients.map((client, idx) => {
+                            const clientName = client.name || client.clientName;
+                            const current = formData.assignedClients || [];
+                            const isAssigned = current.includes(client.id) || current.includes(clientName);
                             return (
-                              <div key={client.id} className={`flex items-center p-2 rounded ${isAssigned ? 'bg-green-50' : 'bg-gray-50'}`}>
+                              <div key={client.id || idx} className={`flex items-center p-2 rounded ${isAssigned ? 'bg-green-50' : 'bg-gray-50'}`}>
                                 <label className="flex items-center gap-2 cursor-pointer flex-1">
                                   <input type="checkbox" checked={isAssigned}
                                     onChange={() => {
-                                      const current = formData.assignedClients || [];
                                       setFormData({
                                         ...formData,
                                         assignedClients: isAssigned
-                                          ? current.filter(c => c !== client.id)
+                                          ? current.filter(c => c !== client.id && c !== clientName)
                                           : [...current, client.id]
                                       });
                                     }}
                                     className="w-4 h-4 rounded border-gray-300 text-green-600 focus:ring-green-500" />
-                                  <span className="text-sm">{client.name}</span>
+                                  <span className="text-sm">{clientName}</span>
                                 </label>
                               </div>
                             );
-                          }) : <p className="text-sm text-gray-500 text-center py-4">No clients available</p>}
+                          }) : <p className="text-sm text-gray-500 text-center py-4">No clients yet. Add one with the Add User button.</p>}
                         </div>
                       </div>
+
+                      {/* Caregiver pay (owner request, 2026-09-13). This is what WE PAY,
+                          which is never the client's billed rate — the gap is the margin,
+                          so they are two separate fields and neither is derived from the
+                          other. Per-client rates are keyed by client ID, so renaming a
+                          client cannot quietly drop someone back to their base rate. */}
+                      <div className="mt-5 border-t pt-4">
+                        <h4 className="font-medium text-gray-800 mb-1">Pay rate</h4>
+                        <p className="text-xs text-gray-500 mb-3">
+                          What Godwins pays this caregiver per hour. Separate from what the client is billed.
+                          Leave blank if it is not set yet — payroll will show the gap rather than paying $0.
+                        </p>
+                        <div className="max-w-xs">
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Base hourly rate ($)</label>
+                          <input className="w-full px-4 py-2.5 border border-gray-200 rounded-xl" type="number" min="0" step="0.01"
+                            placeholder="e.g. 18.00"
+                            value={formData.payRate}
+                            onChange={(e) => setFormData({ ...formData, payRate: e.target.value })} />
+                        </div>
+
+                        {(formData.assignedClients || []).length > 0 && (
+                          <div className="mt-4">
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Different rate for a specific client</label>
+                            <p className="text-xs text-gray-500 mb-2">Optional. Blank means this caregiver's base rate applies for that client.</p>
+                            <div className="space-y-2">
+                              {clients
+                                // Same either-form match as the picker above. Filtering on
+                                // name alone would hide the rate row for every client ticked
+                                // since assignments moved onto ids — a caregiver would look
+                                // un-assigned here while being assigned everywhere else.
+                                .filter(c => {
+                                  const a = formData.assignedClients || [];
+                                  return a.includes(c.id) || a.includes(c.name || c.clientName);
+                                })
+                                .map((c, i) => {
+                                  const cid = c.id || c.userId;
+                                  if (!cid) return null;
+                                  return (
+                                    <div key={i} className="flex items-center gap-3 p-2 bg-gray-50 rounded-lg">
+                                      <span className="text-sm flex-1 truncate">{c.name || c.clientName}</span>
+                                      <div className="flex items-center gap-1">
+                                        <span className="text-gray-400 text-sm">$</span>
+                                        <input className="w-24 px-2 py-1.5 border border-gray-200 rounded-lg text-sm"
+                                          type="number" min="0" step="0.01"
+                                          placeholder={formData.payRate || 'base'}
+                                          value={(formData.clientPayRates || {})[cid] ?? ''}
+                                          onChange={(e) => {
+                                            const next = { ...(formData.clientPayRates || {}) };
+                                            if (e.target.value === '') delete next[cid];
+                                            else next[cid] = e.target.value;
+                                            setFormData({ ...formData, clientPayRates: next });
+                                          }} />
+                                        <span className="text-gray-400 text-xs">/hr</span>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      <CaregiverDocsSection
+                        token={token}
+                        caregiverId={editingUser ? editingUser.id : null}
+                        caregiverName={formData.name} />
                     </div>
                   )}
 
@@ -1700,6 +2173,50 @@
                   {formData.role === 'client' && (
                     <div className="border-t pt-4">
                       <h3 className="font-medium text-gray-800 mb-3">Client Settings</h3>
+
+                      {/* The agreed BILLED rate (owner request, 2026-09-13).
+                          The financial agreement and the home care service agreement
+                          both PRINT this table, so neither is presentable until it is
+                          set — a client added without one hits a hard gate the moment
+                          they try to sign. The rate is agreed at the point of sale, so
+                          it belongs here, not only on the enrollment screen.
+                          On EDIT it is read-only: changing a rate someone already
+                          signed against flags them to re-sign, and that logic lives on
+                          the enrollment rate screen. */}
+                      {!editingUser ? (
+                        <div className="mb-4 p-4 bg-amber-50 rounded-xl">
+                          <h4 className="font-medium text-gray-800 mb-1">Agreed rate (private home care)</h4>
+                          <p className="text-xs text-gray-500 mb-3">
+                            Needed before this client can sign the Financial Agreement or the Service Agreement — both print it.
+                            Skip it for a clinical-only patient, who signs neither.
+                          </p>
+                          <div className="grid grid-cols-2 gap-3 max-w-md">
+                            <div>
+                              <label className="block text-sm font-medium text-gray-700 mb-1">Billed rate ($/hour)</label>
+                              <input className="w-full px-4 py-2.5 border border-gray-200 rounded-xl" type="number" min="0" step="0.01"
+                                placeholder="e.g. 32.00"
+                                value={formData.rateAgreement?.hourlyRate || ''}
+                                onChange={(e) => setFormData({ ...formData, rateAgreement: { ...(formData.rateAgreement || {}), hourlyRate: e.target.value } })} />
+                            </div>
+                            <div>
+                              <label className="block text-sm font-medium text-gray-700 mb-1">Daily minimum (hours)</label>
+                              <input className="w-full px-4 py-2.5 border border-gray-200 rounded-xl" type="number" min="0" step="0.5"
+                                placeholder="e.g. 4"
+                                value={formData.rateAgreement?.dailyMinimumHours || ''}
+                                onChange={(e) => setFormData({ ...formData, rateAgreement: { ...(formData.rateAgreement || {}), dailyMinimumHours: e.target.value } })} />
+                            </div>
+                          </div>
+                          <p className="text-xs text-gray-500 mt-2">The rest of the terms — holidays, errands, invoicing, cancellation window — are set under Enrollment.</p>
+                        </div>
+                      ) : (
+                        <div className="mb-4 p-3 bg-gray-50 rounded-xl text-sm">
+                          <span className="text-gray-500">Agreed rate: </span>
+                          {formData.rateAgreement?.hourlyRate
+                            ? <span className="font-medium">${formData.rateAgreement.hourlyRate}/hr, {formData.rateAgreement.dailyMinimumHours} hr daily minimum</span>
+                            : <span className="text-amber-700 font-medium">not set — this client cannot sign the Financial or Service Agreement</span>}
+                          <a href="/admin/enrollment" className="ml-2 text-primary-600 hover:underline">Change under Enrollment →</a>
+                        </div>
+                      )}
 
                       {/* Add to existing portal option - only for new users */}
                       {!editingUser && clientPortals.length > 0 && (
@@ -1753,24 +2270,33 @@
 
                       <div className="grid md:grid-cols-2 gap-4">
                         <div className="md:col-span-2">
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Practice Name {!formData.existingPortalSlug && '*'}</label>
+                          {/* Labelled "Name" because a client is a person now.
+                              The field is still practiceName underneath: it is
+                              what generates their portal slug, and renaming the
+                              key would break the URL of every portal on file. */}
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Name {!formData.existingPortalSlug && '*'}</label>
                           <input type="text" value={formData.practiceName} onChange={(e) => setFormData({ ...formData, practiceName: e.target.value })}
                             className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" required={!formData.existingPortalSlug}
                             disabled={!!formData.existingPortalSlug} />
                           {formData.existingPortalSlug && <p className="text-xs text-gray-500 mt-1">Inherited from existing portal</p>}
                         </div>
                         <div className="md:col-span-2">
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Practice Logo</label>
+                          {/* A headshot, not a logo. Clients were practices in
+                              the lab app so this asked for their branding; the
+                              storage key is still `logo` for the same reason
+                              practiceName is. Shown round here because that is
+                              how it renders in the portal. */}
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Client Photo</label>
                           <div className="flex items-center gap-4">
-                            {formData.logo && <img src={formData.logo} alt="Logo" className="h-16 w-16 object-contain border rounded" />}
+                            {formData.logo && <img src={formData.logo} alt="" className="h-16 w-16 object-cover border rounded-full" />}
                             <input type="file" ref={logoInputRef} accept="image/png,image/jpeg" onChange={handleLogoUpload} className="hidden" />
                             <button type="button" onClick={() => logoInputRef.current?.click()}
                               className="px-4 py-2 border border-primary text-primary rounded-lg hover:bg-primary hover:text-white flex items-center gap-2">
-                              {Icons.upload} Upload Logo
+                              {Icons.upload} Upload Photo
                             </button>
                             {formData.logo && <button type="button" onClick={() => setFormData({ ...formData, logo: '' })} className="text-red-600 text-sm">Remove</button>}
                           </div>
-                          <p className="text-xs text-gray-500 mt-1">Max 2MB, PNG or JPEG</p>
+                          <p className="text-xs text-gray-500 mt-1">A headshot helps caregivers recognise who they are visiting. Max 2MB, PNG or JPEG.</p>
                         </div>
                         {editingUser?.slug && (
                           <div className="md:col-span-2 p-3 bg-blue-50 rounded-lg">
@@ -1779,32 +2305,12 @@
                         )}
                       </div>
 
-                      {/* HubSpot Integration — lab-era CRM, hidden for GFC.
-                          The values still round-trip through formData, so a
-                          client saved while this is hidden keeps whatever ids
-                          it already had rather than having them wiped. */}
-                      {SHOW_LAB_LEGACY_UI && (
-                        <React.Fragment>
-                          <h4 className="font-medium text-gray-800 mt-4 mb-2">HubSpot Integration</h4>
-                          <div className="grid md:grid-cols-3 gap-4">
-                            <div>
-                              <label className="block text-sm font-medium text-gray-700 mb-1">Company ID</label>
-                              <input type="text" value={formData.hubspotCompanyId} onChange={(e) => setFormData({ ...formData, hubspotCompanyId: e.target.value })}
-                                className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" placeholder="HubSpot Company ID" />
-                            </div>
-                            <div>
-                              <label className="block text-sm font-medium text-gray-700 mb-1">Deal ID</label>
-                              <input type="text" value={formData.hubspotDealId} onChange={(e) => setFormData({ ...formData, hubspotDealId: e.target.value })}
-                                className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" placeholder="HubSpot Deal ID" />
-                            </div>
-                            <div>
-                              <label className="block text-sm font-medium text-gray-700 mb-1">Contact ID</label>
-                              <input type="text" value={formData.hubspotContactId} onChange={(e) => setFormData({ ...formData, hubspotContactId: e.target.value })}
-                                className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" placeholder="HubSpot Contact ID" />
-                            </div>
-                          </div>
-                        </React.Fragment>
-                      )}
+                      {/* The HubSpot ID boxes used to sit here. They belong to
+                          the dormant lab CRM connector, which is retained but
+                          inactive and must not be deleted — so the three values
+                          still round-trip on the record and through the API, and
+                          only the inputs are gone. Nobody enrolling a home care
+                          client has a HubSpot deal id to type. */}
 
                       {/* Enrollment Status */}
                       <h4 className="font-medium text-gray-800 mt-4 mb-2">Enrollment Status</h4>
@@ -3644,11 +4150,11 @@
 
         switch (activePage) {
           case 'dashboard': return <DashboardPage token={token} onNavigate={handleNavigation} user={user} />;
-          case 'inbox': return <InboxPage token={token} />;
+          case 'inbox': return <InboxPage token={token} user={user} />;
           case 'users': return <UsersPage token={token} />;
           case 'notifications': return <NotificationsPage token={token} isSuperAdmin={isSuperAdmin} />;
           case 'service_portal': return <ServicePortalPage token={token} user={user} />;
-          case 'messages': return <MessagesPage token={token} user={user} />;
+          case 'messages': return <InboxPage token={token} user={user} initialTab="messages" />;
           default: return <DashboardPage token={token} onNavigate={handleNavigation} user={user} />;
         }
       };

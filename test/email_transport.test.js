@@ -353,7 +353,7 @@ test('the base64url payload contains no characters the Gmail API rejects', async
     // going back to proving nothing.
     await email.sendEmail(
       'c@example.com',
-      'Visit moved: 9/16 @ 10:30 — Godwins Family Care (rescheduled)',
+      'Visit moved: 9/16 @ 10:30 (rescheduled) — please review',
       'Hi Ada,\n\nYour visit has been moved.\n\n— Godwins Family Care',
       { htmlBody: '<p>Hi Ada,</p><p>Your visit has been moved.</p>' }
     );
@@ -491,6 +491,101 @@ test('an ordinary send failure gets no invented hint', async () => {
     const r = await email.sendEmail('c@example.com', 's', 'b');
     assert.strictEqual(r.success, false);
     assert.strictEqual(r.hint, undefined);
+  });
+});
+
+// ===========================================================================
+// 3c. One address, and the fallback for when one address is not possible
+// ===========================================================================
+// There is no such thing as a no-reply that blocks a reply, so mail is sent
+// FROM the monitored mailbox and no Reply-To is emitted at all. The header
+// stays available for the one case that needs it: on Workspace, delegation
+// cannot impersonate a Google Group, so a shared support@ inbox may not be
+// usable as the sender. Point GMAIL_SEND_AS at a real user and support@
+// reappears as Reply-To automatically.
+
+test('mail is sent FROM the monitored address, on both transports', async () => {
+  await withEnv({ ...GMAIL_ENV, GMAIL_SEND_AS: 'support@godwinsfamilycarellc.com' }, (email) => {
+    assert.strictEqual(email.transportStatus().from, 'Godwins Family Care <support@godwinsfamilycarellc.com>');
+  });
+  await withEnv({ RESEND_API_KEY: 're_test_key' }, (email) => {
+    assert.strictEqual(email.transportStatus().from, 'Godwins Family Care <support@godwinsfamilycarellc.com>');
+  });
+});
+
+test('NO Reply-To header is emitted when it would just repeat the sender', async () => {
+  await withEnv({ ...GMAIL_ENV, GMAIL_SEND_AS: 'support@godwinsfamilycarellc.com' }, async (email) => {
+    const sent = [];
+    email._setGmailClientForTests(fakeGmail(sent));
+    await email.sendEmail('client@example.com', 's', 'b');
+    const raw = Buffer.from(sent[0].requestBody.raw, 'base64url').toString('utf8');
+    const { headers } = splitHeaders(raw);
+    // A Reply-To identical to From tells a client nothing and reads as a
+    // mistake to anyone inspecting the headers.
+    assert.strictEqual(headers['reply-to'], undefined);
+    assert.match(headers.from, /support@godwinsfamilycarellc\.com/);
+  });
+});
+
+test('a DIFFERENT sending mailbox brings the Reply-To back automatically', async () => {
+  // The Google Group case: support@ cannot be impersonated, so the app sends
+  // as another real user and points replies back at support@.
+  await withEnv({ ...GMAIL_ENV, GMAIL_SEND_AS: 'care-bot@godwinsfamilycarellc.com' }, async (email) => {
+    const sent = [];
+    email._setGmailClientForTests(fakeGmail(sent));
+    await email.sendEmail('client@example.com', 's', 'b');
+    const raw = Buffer.from(sent[0].requestBody.raw, 'base64url').toString('utf8');
+    const { headers } = splitHeaders(raw);
+    assert.strictEqual(headers['reply-to'], 'support@godwinsfamilycarellc.com');
+    assert.match(headers.from, /care-bot@godwinsfamilycarellc\.com/);
+  });
+});
+
+test('the same-address check is case-insensitive', async () => {
+  await withEnv({ ...GMAIL_ENV, GMAIL_SEND_AS: 'Support@GodwinsFamilyCareLLC.com', EMAIL_BAA_DOMAINS: 'godwinsfamilycarellc.com' }, (email) => {
+    assert.strictEqual(email.transportStatus().replyTo, null,
+      'a case difference must not produce a redundant Reply-To');
+  });
+});
+
+test('the Resend BATCH path carries Reply-To when there is one to carry', async () => {
+  // The batch path is what the notification queue actually drains through, so
+  // a header set only on the single-send path would be missing from almost
+  // every real send. Asserting on transport status would not catch that.
+  await withEnv({ RESEND_API_KEY: 're_test_key', EMAIL_FROM_ADDRESS: 'care-bot@godwinsfamilycarellc.com' }, async (email) => {
+    const batches = [];
+    email._setResendClientForTests({
+      batch: { send: async (payload) => { batches.push(payload); return { data: { data: payload.map(() => ({ id: 'r1' })) } }; } },
+      emails: { send: async () => ({ id: 'r1' }) }
+    });
+    const out = await email.sendBatchEmails([
+      { to: 'a@example.com', subject: 's1', text: 't1' },
+      { to: 'b@example.com', subject: 's2', text: 't2' }
+    ]);
+    assert.strictEqual(out.sent, 2);
+    for (const msg of batches[0]) {
+      assert.strictEqual(msg.replyTo, 'support@godwinsfamilycarellc.com');
+    }
+  });
+});
+
+test('a per-message replyTo still overrides', async () => {
+  await withEnv({ ...GMAIL_ENV, GMAIL_SEND_AS: 'support@godwinsfamilycarellc.com' }, async (email) => {
+    const sent = [];
+    email._setGmailClientForTests(fakeGmail(sent));
+    await email.sendEmail('c@example.com', 's', 'b', { replyTo: 'billing@godwinsfamilycarellc.com' });
+    const raw = Buffer.from(sent[0].requestBody.raw, 'base64url').toString('utf8');
+    assert.strictEqual(splitHeaders(raw).headers['reply-to'], 'billing@godwinsfamilycarellc.com');
+  });
+});
+
+test('a newline in a reply-to cannot inject a header', async () => {
+  await withEnv({ ...GMAIL_ENV, GMAIL_SEND_AS: 'support@godwinsfamilycarellc.com' }, async (email) => {
+    const sent = [];
+    email._setGmailClientForTests(fakeGmail(sent));
+    await email.sendEmail('c@example.com', 's', 'b', { replyTo: 'ok@x.com\r\nBcc: attacker@evil.example' });
+    const raw = Buffer.from(sent[0].requestBody.raw, 'base64url').toString('utf8');
+    assert.strictEqual(splitHeaders(raw).headers.bcc, undefined);
   });
 });
 

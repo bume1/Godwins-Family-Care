@@ -30,7 +30,18 @@ let _resend = null;
 let _gmail = null;
 let _transportCache = null;
 
+// Test seam, symmetric with the Gmail one. The BATCH path is what the
+// notification queue actually drains through, so asserting on transport
+// status instead of on the payload proves nothing about the mail that really
+// goes out — a Reply-To could be missing from every queued send and a
+// status-only test would still pass.
+let _resendOverride = null;
+function _setResendClientForTests(client) {
+  _resendOverride = client;
+}
+
 function getResend() {
+  if (_resendOverride) return _resendOverride;
   if (!_resend) {
     const key = process.env.RESEND_API_KEY;
     if (!key) return null;
@@ -126,6 +137,15 @@ function resolveTransport() {
   }
 
   const fromAddress = name === 'gmail' ? sendAs : config.EMAIL_FROM_ADDRESS;
+  // Emitted ONLY when replies should land somewhere other than the sender.
+  // Normally both are support@, so the header is omitted rather than repeating
+  // the From address — a Reply-To identical to From tells a mail client
+  // nothing and reads as a mistake to anyone inspecting the headers.
+  const support = String(config.ORG_SUPPORT_EMAIL || '').trim();
+  const replyToAddress =
+    support && support.toLowerCase() !== String(fromAddress || '').toLowerCase()
+      ? support
+      : null;
 
   _transportCache = Object.freeze({
     name,
@@ -133,6 +153,7 @@ function resolveTransport() {
     // PHI rides on a BAA-covered transport only. Resend is never one.
     baaCovered: name === 'gmail' && isBaaSender(fromAddress),
     fromAddress,
+    replyToAddress,
     fromName: config.EMAIL_FROM_NAME,
     reason,
     gmailReady,
@@ -152,6 +173,7 @@ function transportStatus() {
     baaCovered: t.baaCovered,
     phiAllowed: t.baaCovered,
     from: t.configured ? `${t.fromName} <${t.fromAddress}>` : null,
+    replyTo: t.configured ? t.replyToAddress : null,
     reason: t.reason || null,
     gmailBlockers: t.gmailBlockers
   };
@@ -163,6 +185,7 @@ function resetTransportCache() {
   _gmail = null;
   _resend = null;
   _gmailOverride = null;
+  _resendOverride = null;
 }
 
 // Test seam. The Gmail dispatch path — MIME assembly, base64url encoding, the
@@ -231,7 +254,7 @@ function multipart(subtype, parts) {
   return { headers: [`Content-Type: multipart/${subtype}; boundary="${boundary}"`], body };
 }
 
-function buildMimeMessage({ from, to, subject, text, html, attachments }) {
+function buildMimeMessage({ from, to, replyTo, subject, text, html, attachments }) {
   const recipients = (Array.isArray(to) ? to : [to]).filter(Boolean);
   const atts = (Array.isArray(attachments) ? attachments : []).filter(a => a && a.filename && a.content);
 
@@ -252,10 +275,14 @@ function buildMimeMessage({ from, to, subject, text, html, attachments }) {
 
   const headers = [
     `From: ${sanitizeHeader(from)}`,
-    `To: ${recipients.map(sanitizeHeader).join(', ')}`,
+    `To: ${recipients.map(sanitizeHeader).join(', ')}`
+  ];
+  if (replyTo) headers.push(`Reply-To: ${sanitizeHeader(replyTo)}`);
+  headers.push(
     `Subject: ${encodeHeaderValue(subject)}`,
     'MIME-Version: 1.0'
-  ].concat(root.headers);
+  );
+  headers.push(...root.headers);
 
   return `${headers.join('\r\n')}\r\n\r\n${root.body}`;
 }
@@ -268,6 +295,7 @@ async function sendViaGmail(payload) {
   const t = resolveTransport();
   const raw = buildMimeMessage({
     from: `${t.fromName} <${t.fromAddress}>`,
+    replyTo: payload.replyTo || t.replyToAddress,
     to: payload.to,
     subject: payload.subject,
     text: payload.text,
@@ -292,6 +320,8 @@ async function sendViaResend(payload) {
     text: payload.text
   };
   if (payload.html) body.html = payload.html;
+  const replyTo = payload.replyTo || t.replyToAddress;
+  if (replyTo) body.replyTo = replyTo;
   if (payload.attachments && payload.attachments.length) {
     body.attachments = payload.attachments.map(a => ({
       filename: a.filename,
@@ -367,6 +397,7 @@ async function sendEmail(to, subject, body, options = {}) {
     to,
     subject,
     text: body,
+    replyTo: options.replyTo || null,
     html: options.htmlBody || null,
     attachments: Array.isArray(options.attachments) ? options.attachments : []
   };
@@ -392,6 +423,7 @@ async function sendPerRecipient(payloads) {
     const r = await sendEmail(p.to, p.subject, p.text || p.body || '', {
       htmlBody: p.html || p.htmlBody,
       attachments: p.attachments,
+      replyTo: p.replyTo,
       phi: p.phi
     });
     results.push({ email: p.to, ...r });
@@ -458,6 +490,10 @@ async function sendBatchEmails(emailPayloads) {
         text: p.text || p.body || ''
       };
       if (p.html || p.htmlBody) payload.html = p.html || p.htmlBody;
+      // The batch path is the one the notification queue actually uses, so
+      // omitting it here would drop Reply-To from almost every real send.
+      const rt = p.replyTo || t.replyToAddress;
+      if (rt) payload.replyTo = rt;
       return payload;
     });
 
@@ -492,6 +528,6 @@ module.exports = {
   sendEmail, sendBulkEmail, sendBatchEmails,
   transportStatus, resetTransportCache,
   // exported for tests
-  buildMimeMessage, isBaaSender, sanitizeHeader, encodeHeaderValue, _setGmailClientForTests,
+  buildMimeMessage, isBaaSender, sanitizeHeader, encodeHeaderValue, _setGmailClientForTests, _setResendClientForTests,
   loadServiceAccount, setupHintFor
 };

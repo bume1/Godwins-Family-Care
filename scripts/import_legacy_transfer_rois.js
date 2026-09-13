@@ -25,14 +25,14 @@
 // ============================================================
 
 const path = require('path');
-const Database = require('@replit/database');
+const dataStore = require('../dataStore'); // Session 5.1: the app's store, whichever adapter DATA_STORE selects
 const config = require('../config');
 const googledrive = require('../googledrive');
 const roiRepo = require('../roiRepository');
 
 const DRY_RUN = process.argv.includes('--dry-run');
 
-const db = new Database();
+const db = dataStore.createStore();
 const roiStore = roiRepo.createRepository(db);
 
 function log(...args) { console.log('[roi-import]', ...args); }

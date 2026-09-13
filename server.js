@@ -1,9 +1,12 @@
+// Session 5.4: every console.* line is scrubbed of PHI before it leaves the
+// process. Installed before anything else can log.
+require('./logScrubber').install(console);
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
-const Database = require('@replit/database');
+const dataStore = require('./dataStore');           // THE data-access module: kv (dev) | postgres (production) | memory (tests) — Session 5.1
 const bodyParser = require('body-parser');
 const fs = require('fs').promises;
 const path = require('path');
@@ -15,9 +18,17 @@ const changelogGenerator = require('./changelog-generator');
 const config = require('./config');
 const { sendEmail, sendBulkEmail, sendBatchEmails } = require('./email');
 const emailTransport = require('./email');
+const emailTemplates = require('./emailTemplates');
+const enrollmentGate = require('./enrollmentGate');
+const { createNotifier } = require('./notifications');
 const roiRepo = require('./roiRepository');           // Transfer-of-Care ROI data model (Session 3.4)
 const legacySync = require('./legacySync');            // ROI parallel-run legacy sync (Session 3.4)
 const openemr = require('./openemr');                  // OpenEMR FHIR/REST front-end client (Session 4.1)
+const emrAuthModule = require('./emrAuth');            // per-user OpenEMR authorization_code + PKCE (Session 5.2)
+const mfa = require('./mfa');                            // TOTP + recovery codes (Session 5.3)
+const { createAuditLog } = require('./auditLog');        // durable append-only audit_log + PHI-route middleware (Session 5.4)
+const { createSessionStore } = require('./sessionStore'); // server-side sessions: idle timeout + revocation (Session 5.3)
+const QRCode = require('qrcode');                        // enrollment QR for the authenticator app (Session 5.3)
 const clinicalRepo = require('./clinicalRepository');  // clinical workspace pure helpers (Session 4.1)
 // Session 4.3 — patient/family/POA clinical read rules + the case-manager read/write split
 const patientRead = require('./patientReadRepository');
@@ -25,6 +36,10 @@ const consentText = require('./public/consent-text'); // approved consent bodies
 const consentRegistry = require('./consentRegistry'); // THE consent registry: lanes, statuses, provenance (4.6)
 const consentRender = require('./consentRender');     // consent data blocks resolved from the client record (4.6)
 const zipWriter = require('./zipWriter');             // dependency-free ZIP for the signed-consent packet (4.6)
+// The caregiver vocabulary — licence levels, competencies, and pay-rate
+// resolution. Required, never restated: a second copy of what a pay rate means
+// is how the admin form and payroll start disagreeing about someone's wages.
+const caregiverRepo = require('./caregiverRepository');
 const caregiverRoutes = require('./routes/caregiver'); // caregiver app: visit log + escalation (Session 6)
 const schedulingRoutes = require('./routes/scheduling');
 const messagingRoutes = require('./routes/messaging'); // channel matrix + role-scoped threads (Session 9) // PHCP shifts, availability, time tracking (Session 7)
@@ -50,11 +65,60 @@ const uploadLimiter = (req, res, next) => {
 };
 
 const app = express();
-const db = new Database();
+// Session 5.1: the ONE construction site for the operational data store.
+// Every db.get/set/list/delete below goes through dataStore's adapter; nothing
+// in this file or in routes/ touches @replit/database directly (build-enforced
+// in test/data_layer.test.js). In production the store MUST be Postgres inside
+// the AWS BAA boundary — assertProductionSafe() refuses to boot otherwise, and
+// the refusal is printed before the throw so it is legible in the process log.
+let _storeSafety;
+try {
+  _storeSafety = dataStore.assertProductionSafe();
+} catch (err) {
+  console.error(`❌ ${err.message}`);
+  throw err;
+}
+const db = dataStore.createStore();
+console.log(`🗄️  Data store: ${db.adapter}${_storeSafety.production ? ' (production, inside the BAA boundary)' : ' (non-production)'}`);
 // Transfer-of-Care ROI repository (Session 3.4) — three KV collections
 // (consent_events / consent_provider_authorizations / consent_records_categories)
 // bound to the same db, keyed for a later RDS migration.
 const roiStore = roiRepo.createRepository(db);
+// Session 5.2: per-user OpenEMR tokens. openemr.js asks this provider for the
+// ACTING user's own access token on every call; there is no shared token.
+const emrAuth = emrAuthModule.createEmrAuth({ store: db, config: (config.OPENEMR.TOKEN_ENCRYPTION_KEY || process.env.NODE_ENV === 'production') ? config
+  // dev only: the same derived key as SECRETS_KEY below, so local runs work
+  : { ...config, OPENEMR: { ...config.OPENEMR, TOKEN_ENCRYPTION_KEY: require('crypto').createHash('sha256').update(String(config.JWT_SECRET)).digest('hex') } } });
+const emrTokenProvider = (actor) => emrAuth.getAccessTokenFor(actor && actor.id);
+emrTokenProvider.invalidate = (actor) => emrAuth.invalidateAccessToken(actor && actor.id);
+emrTokenProvider.statusFor = (actor) => emrAuth.statusFor(actor && actor.id);
+openemr.setTokenProvider(emrTokenProvider);
+
+// Session 5.3: server-side sessions. Every JWT names a session row; the auth
+// middleware checks it on every request (revoked → dead, idle → dead).
+const sessions = createSessionStore({ store: db, idleMinutes: config.SESSION_IDLE_MINUTES });
+// Session 5.4: the durable audit log. logActivity() below writes to it on
+// every call, and the PHI-route middleware writes a row for every request
+// under a PHI prefix whatever the handler did. Never truncated.
+const audit = createAuditLog({ store: db, salt: config.JWT_SECRET });
+// Secrets at rest (MFA secrets share the OpenEMR token key). In non-production
+// a key derived from JWT_SECRET keeps local runs working; production refuses
+// to boot without EMR_TOKEN_ENCRYPTION_KEY (config.js), so this fallback can
+// never be reached there.
+const SECRETS_KEY = (() => {
+  const k = emrAuthModule._internal.parseKey(config.OPENEMR.TOKEN_ENCRYPTION_KEY);
+  if (k) return k;
+  if (process.env.NODE_ENV === 'production') throw new Error('EMR_TOKEN_ENCRYPTION_KEY is required in production');
+  console.warn('⚠️  EMR_TOKEN_ENCRYPTION_KEY not set — deriving a dev-only secrets key from JWT_SECRET. Set a real 32-byte key before any real data.');
+  return require('crypto').createHash('sha256').update(String(config.JWT_SECRET)).digest();
+})();
+const sealSecret = (plain) => emrAuthModule._internal.encrypt(SECRETS_KEY, plain);
+const openSecret = (packed) => emrAuthModule._internal.decrypt(SECRETS_KEY, packed);
+const sessionIpHash = (req) => {
+  const fwd = String((req.headers && req.headers['x-forwarded-for']) || '').split(',')[0].trim();
+  const ip = fwd || (req.socket && req.socket.remoteAddress) || (req.ip) || '';
+  return ip ? require('crypto').createHash('sha256').update(`${config.JWT_SECRET}:${ip}`).digest('hex') : null;
+};
 const PORT = config.PORT;
 
 // HubSpot ticket polling timer reference
@@ -72,6 +136,13 @@ if (!process.env.JWT_SECRET) {
 
 app.use(cors());
 app.use(bodyParser.json({ limit: config.BODY_PARSER_LIMIT }));
+// Session 5.4: request context (request id, hashed IP) for every request, and
+// the PHI-access audit row for every request under a PHI prefix. Registered
+// before any route so no route can be added in front of it.
+app.use(audit.contextMiddleware);
+app.use(audit.phiAccessMiddleware);
+// Liveness for the load balancer. Names the adapter, never a secret.
+app.get('/healthz', (req, res) => res.json({ ok: true, store: db.adapter, uptimeSeconds: Math.round(process.uptime()), production: process.env.NODE_ENV === 'production' }));
 
 // Static file options with no-cache headers for development
 const staticOptions = {
@@ -259,19 +330,26 @@ const getTasks = async (projectId) => {
 const ACTIVITY_LOG_MAX = config.ACTIVITY_LOG_MAX_ENTRIES;
 
 const logActivity = async (userId, userName, action, entityType, entityId, details, projectId = null) => {
+  const activity = {
+    id: uuidv4(),
+    userId,
+    userName,
+    action,
+    entityType,
+    entityId,
+    details,
+    projectId,
+    timestamp: new Date().toISOString()
+  };
+  // Session 5.4: the durable row FIRST. The capped blob below is the admin
+  // UI's view; if it fails, the record still exists.
+  try {
+    await audit.record({ id: activity.id, timestamp: activity.timestamp, userId, userName, action, entityType, entityId, details });
+  } catch (err) {
+    console.error('audit_log write failed:', err.message);
+  }
   try {
     const activities = (await db.get('activity_log')) || [];
-    const activity = {
-      id: uuidv4(),
-      userId,
-      userName,
-      action,
-      entityType,
-      entityId,
-      details,
-      projectId,
-      timestamp: new Date().toISOString()
-    };
     activities.unshift(activity);
     // Keep only last ACTIVITY_LOG_MAX activities to prevent unbounded growth
     if (activities.length > ACTIVITY_LOG_MAX) {
@@ -374,6 +452,10 @@ const queueNotification = async (type, recipientUserId, recipientEmail, recipien
       relatedEntityId: options.relatedEntityId || null,
       relatedEntityType: options.relatedEntityType || null,
       relatedProjectId: options.relatedProjectId || null,
+      // Carried to the mailer, which REFUSES a PHI-marked message on a
+      // transport that is not BAA-covered rather than downgrading it. Stored
+      // on the row so a queued message keeps its marking across a restart.
+      phi: !!options.phi,
       templateData: {
         subject: templateData.subject,
         body: templateData.body,
@@ -422,16 +504,23 @@ const processNotificationQueue = async () => {
     let sentCount = 0;
     let failCount = 0;
 
+    // Resolved once for the whole batch: every queued CTA is an app path and
+    // has to be made absolute before it reaches the template.
+    const appBaseUrl = await getAppBaseUrl();
+
     const emailPayloads = [];
     const queueIndices = [];
     for (const notification of toProcess) {
       const idx = queue.findIndex(n => n.id === notification.id);
       if (idx === -1) continue;
+      // Branding belongs to the drain, not to each caller remembering.
+      const built = buildQueuedEmail(notification.templateData, appBaseUrl);
       emailPayloads.push({
         to: notification.recipientEmail,
         subject: notification.templateData.subject,
-        text: notification.templateData.body,
-        html: notification.templateData.htmlBody
+        text: built.text,
+        html: built.html,
+        phi: !!notification.phi
       });
       queueIndices.push(idx);
     }
@@ -538,56 +627,32 @@ const EMAIL_BRAND = () => ({
   accent: config.BRAND.ACCENT_COLOR
 });
 
-const emailHeaderHtml = () => {
-  const b = EMAIL_BRAND();
-  return `<div style="background-color: #ffffff; padding: 22px 16px 18px; border-radius: 8px 8px 0 0; text-align: center; border-bottom: 3px solid ${b.primary};">
-    <span style="display: inline-block; color: ${b.primary}; font-size: 20px; font-weight: 700; letter-spacing: 0.02em;">${b.company}</span>
-  </div>`;
-};
-
-const emailFooterNote = (context) => {
-  const b = EMAIL_BRAND();
-  return `You are receiving this because you have ${context || 'an account'} with ${b.company}.`;
-};
-
-// Base HTML email wrapper used when a template has no custom htmlBody
-const BASE_HTML_EMAIL_WRAPPER = () => `
-<div style="font-family: ${config.BRAND.FONT_FAMILY}, Inter, -apple-system, sans-serif; width: 100%; max-width: 600px; margin: 0 auto; background: #f8fafc;">
-  ${emailHeaderHtml()}
-  <div style="background: #ffffff; padding: 24px 16px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px;">
-    <div style="color: #374151; line-height: 1.7; font-size: 15px; white-space: pre-wrap; word-break: break-word;">{{content}}</div>
-    {{ctaBlock}}
-    <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 28px 0 16px;" />
-    <p style="color: #9ca3af; font-size: 12px; margin: 0;">${emailFooterNote('an account')}</p>
-    {{unsubscribeBlock}}
-  </div>
-</div>`;
-
-// Branded HTML for the welcome email (has credential table — not a standard wrapper)
-const WELCOME_HTML_BODY = () => `<div style="font-family: ${config.BRAND.FONT_FAMILY}, Inter, -apple-system, sans-serif; width: 100%; max-width: 600px; margin: 0 auto; background: #f8fafc;">
-  ${emailHeaderHtml()}
-  <div style="background: #ffffff; padding: 24px 16px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px;">
-    <h2 style="color: ${config.BRAND.PRIMARY_COLOR}; margin-top: 0; font-size: 20px;">Welcome to ${config.BRAND.COMPANY_NAME}, {{recipientName}}!</h2>
-    <p style="color: #374151; line-height: 1.7; font-size: 15px;">Your account has been created. Use the credentials below to log in for the first time. You will be prompted to set a new password after your first login.</p>
-    <div style="background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 8px; padding: 16px; margin: 24px 0;">
-      <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
-        <tr>
-          <td style="color: #64748b; padding: 6px 0; width: 140px; font-weight: 500; vertical-align: top;">Username / Email</td>
-          <td style="color: #0f172a; padding: 6px 0; font-weight: 600; word-break: break-all;">{{recipientEmail}}</td>
-        </tr>
-        <tr>
-          <td style="color: #64748b; padding: 6px 0; font-weight: 500; vertical-align: top;">Temporary Password</td>
-          <td style="color: #0f172a; padding: 6px 0; font-weight: 600; font-family: monospace; letter-spacing: 0.05em; word-break: break-all;">{{temporaryPassword}}</td>
-        </tr>
-      </table>
-    </div>
-    <p style="margin-top: 20px;">
-      <a href="{{loginUrl}}" style="display: inline-block; background: ${config.BRAND.PRIMARY_COLOR}; color: #ffffff; padding: 12px 20px; border-radius: 6px; text-decoration: none; font-weight: 600; font-size: 14px;">Log In Now</a>
-    </p>
-    <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 28px 0 16px;" />
-    <p style="color: #9ca3af; font-size: 12px; margin: 0;">If you did not expect this email, please contact your ${config.BRAND.COMPANY_NAME} administrator.</p>
-  </div>
-</div>`;
+// The welcome email is the one notification that carries structured detail —
+// the sign-in credentials — rather than prose, which is why it was originally
+// written as its own hand-rolled HTML. That is exactly how it kept the old
+// plain chrome when PR #76 moved every other notification onto the house
+// template: `buildHtmlEmail` hands back any HTML a caller supplies and never
+// wraps it, so a caller with its own HTML silently opts out of the branding.
+// Reported live 2026-09-13. It now renders through `emailTemplates` like
+// everything else, with the credentials in the shared fields block.
+//
+// It takes the vars and returns finished HTML — it is NOT a placeholder string
+// run through renderTemplate afterwards. Substituting after the render would
+// put unescaped values into the markup.
+const WELCOME_HTML_BODY = (vars = {}) => emailTemplates.renderGfcEmail({
+  greeting: vars.recipientName,
+  headline: `Welcome to ${config.BRAND.COMPANY_NAME}`,
+  paragraphs: [
+    'Your account is ready. Use the details below to sign in for the first time. You will be asked to choose your own password once you are in.',
+    'If you were not expecting this email, please contact our office and we will look into it.'
+  ],
+  fields: [
+    { label: 'Username', value: vars.recipientEmail },
+    { label: 'Temporary password', value: vars.temporaryPassword, mono: true }
+  ],
+  ctaUrl: vars.loginUrl,
+  ctaLabel: 'Sign in'
+}).html;
 
 // Render a template string by replacing {{variable}} placeholders with values
 function renderTemplate(templateStr, variables) {
@@ -597,16 +662,68 @@ function renderTemplate(templateStr, variables) {
   );
 }
 
-// Build HTML email body: use custom htmlBody if provided, otherwise wrap plain body in base layout
+// Build HTML email body: use custom htmlBody if provided, otherwise render the
+// GFC house template. The generic wrapper this replaced was the lab-era
+// layout with GFC colours painted on; `emailTemplates.js` is the real house
+// style, matching what the marketing sequence engine already sends, so a
+// client cannot tell the two systems apart.
 function buildHtmlEmail(body, htmlBody, ctaUrl, ctaLabel, unsubscribeUrl, baseUrl) {
   if (htmlBody) return htmlBody;
-  const ctaBlock = (ctaUrl && ctaLabel)
-    ? `<p style="margin-top: 20px;"><a href="${ctaUrl}" style="display: inline-block; background: ${config.BRAND.PRIMARY_COLOR}; color: #ffffff; padding: 10px 24px; border-radius: 6px; text-decoration: none; font-weight: 500; font-size: 14px;">${ctaLabel}</a></p>`
-    : '';
-  const unsubscribeBlock = unsubscribeUrl
-    ? `<p style="color: #9ca3af; font-size: 11px; margin: 6px 0 0;"><a href="${unsubscribeUrl}" style="color: #9ca3af; text-decoration: underline;">Unsubscribe from these emails</a></p>`
-    : '';
-  return renderTemplate(BASE_HTML_EMAIL_WRAPPER(), { content: body, ctaBlock, unsubscribeBlock, appUrl: baseUrl || 'https://godwinsfamilycarellc.com' });
+  return emailTemplates.renderGfcEmail(emailPiecesFromBody(body, ctaUrl, ctaLabel, unsubscribeUrl)).html;
+}
+
+// The plain body arrives as prose with blank-line paragraph breaks. A greeting
+// line is dropped when present, because the template writes its own.
+function emailPiecesFromBody(body, ctaUrl, ctaLabel, unsubscribeUrl) {
+  const lines = String(body || '').split(/\n{2,}/).map(t => t.trim()).filter(Boolean);
+  const greetingLine = lines.length && /^(hi|hello|dear)\b/i.test(lines[0]) ? lines.shift() : null;
+  const greeting = greetingLine
+    ? greetingLine.replace(/^(hi|hello|dear)\s+/i, '').replace(/[,!.]\s*$/, '')
+    : null;
+  return { greeting, paragraphs: lines, ctaUrl, ctaLabel, unsubscribeUrl };
+}
+
+// A queued notice carries an app PATH, not a URL — `/portal`, `/caregiver`.
+// That is correct in the app and useless in an inbox, and the template's
+// `safeUrl` drops anything that is not http(s), so a relative link does not
+// render a broken button, it renders NO button and no link in the text half
+// either. Resolve it against the app's own base before it reaches the render.
+// A link we cannot make absolute is dropped rather than printed: a dead button
+// in an email about someone's care is worse than no button.
+function absoluteEmailUrl(url, baseUrl) {
+  const u = String(url || '').trim();
+  if (!u) return null;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(u)) return u;
+  const base = String(baseUrl || '').trim().replace(/\/+$/, '');
+  if (!/^https?:\/\//i.test(base)) return null;
+  return `${base}/${u.replace(/^\/+/, '')}`;
+}
+
+// THE QUEUE IS THE LAST PLACE A NOTICE CAN PICK UP THE HOUSE TEMPLATE, and
+// until 2026-09-13 it did not try. The drain forwarded `templateData.htmlBody`
+// straight through, so a caller that queued a plain body and no HTML sent a
+// bare text/plain email — eleven notice types did exactly that (every shift
+// notice, both caregiver escalations, message-received, the admin custom
+// send). Reported live: a message notification arrived unbranded.
+//
+// This is the SAME bypass as `buildHtmlEmail`'s `if (htmlBody) return htmlBody`
+// pointed the other way. There the caller's HTML wins; here the caller's
+// SILENCE won. Branding now belongs to the drain, so a caller cannot opt out
+// of it by omission, and a new notice type is branded by default rather than
+// by remembering.
+//
+// Both halves are returned from ONE render so they cannot disagree: a
+// text-only client was previously getting a body that said "open the portal"
+// with no address in it at all.
+function buildQueuedEmail(templateData, baseUrl) {
+  const t = templateData || {};
+  const text = String(t.body || '');
+  if (t.htmlBody) return { html: t.htmlBody, text };
+  const ctaUrl = absoluteEmailUrl(t.ctaUrl, baseUrl);
+  const rendered = emailTemplates.renderGfcEmail(
+    emailPiecesFromBody(text, ctaUrl, ctaUrl ? (t.ctaLabel || 'Open your portal') : null, null)
+  );
+  return { html: rendered.html, text: rendered.text };
 }
 
 // ============================================================
@@ -934,17 +1051,12 @@ const DEFAULT_EMAIL_TEMPLATES = [
     category: 'announcement',
     subject: '{{priorityTag}}New Announcement: {{title}}',
     body: '{{priorityTag}}{{title}}\n\n{{content}}{{attachmentLine}}',
-    htmlBody: `<div style="font-family: ${config.BRAND.FONT_FAMILY}, Inter, -apple-system, sans-serif; width: 100%; max-width: 600px; margin: 0 auto;">
-  ${emailHeaderHtml()}
-  <div style="background: #ffffff; padding: 24px 16px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px;">
-    {{priorityBanner}}
-    <h2 style="color: ${config.BRAND.PRIMARY_COLOR}; margin-top: 0;">{{title}}</h2>
-    <div style="color: #374151; line-height: 1.6; white-space: pre-wrap; word-break: break-word;">{{content}}</div>
-    {{attachmentBlock}}
-    <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 24px 0;" />
-    <p style="color: #9ca3af; font-size: 12px; margin: 0;">${emailFooterNote('a client portal account')}</p>
-  </div>
-</div>`,
+    // No custom HTML. An announcement renders through the house template
+    // like every other notification; the structured pieces (priority,
+    // attachment) are passed to it at the send site rather than baked
+    // into markup here. A stored copy of the old chrome is cleared by
+    // migrateAnnouncementTemplateChrome() on boot.
+    htmlBody: null,
     variables: [
       { key: 'title', label: 'Announcement Title', example: 'System Maintenance Scheduled' },
       { key: 'content', label: 'Announcement Content', example: 'We will be performing system maintenance this weekend.' },
@@ -1107,7 +1219,7 @@ async function sendWelcomeEmail(user, plainPassword) {
     const body = renderTemplate(tpl.body, vars);
     const htmlBody = tpl.htmlBody
       ? renderTemplate(tpl.htmlBody, vars)
-      : renderTemplate(WELCOME_HTML_BODY(), vars);
+      : WELCOME_HTML_BODY(vars);
     const notification = await queueNotification(
       'welcome_email',
       user.id, user.email, user.name,
@@ -1890,12 +2002,35 @@ const authenticateToken = async (req, res, next) => {
       });
     }
     try {
+      // Session 5.3: the JWT is only a pointer to a server-side session. No
+      // sid (a token minted before 5.3, or forged) → dead. Revoked → dead.
+      // Idle past SESSION_IDLE_MINUTES → revoked on the spot and dead. Each
+      // answer has its own code so the client can say WHY it is signing you
+      // out; all of them belong to the "back to login" family, never to the
+      // permission-403 family.
+      if (!tokenUser.sid) return res.status(403).json({ error: 'Your session is no longer valid. Please sign in again.', code: 'AUTH_INVALID' });
+      const sess = await sessions.check(tokenUser.sid);
+      if (!sess.ok) {
+        const msg = sess.code === 'AUTH_IDLE' ? `You were signed out after ${config.SESSION_IDLE_MINUTES} minutes of inactivity. Please sign in again.`
+          : sess.code === 'AUTH_EXPIRED' ? 'Your session has expired. Please sign in again.'
+          : 'Your session has been signed out. Please sign in again.';
+        return res.status(403).json({ error: msg, code: sess.code });
+      }
+      req.session = sess.row;
       // Fetch fresh user data from database to get current role and permissions
       const users = await getUsers();
       const freshUser = users.find(u => u.id === tokenUser.id);
       if (!freshUser) return res.status(403).json({ error: 'User not found', code: 'AUTH_INVALID' });
       // Block inactive accounts
       if (freshUser.accountStatus === 'inactive') return res.status(403).json({ error: 'Account is inactive. Please contact an administrator.', code: 'AUTH_INACTIVE' });
+      // Defense in depth: a session for an MFA-required role is only ever
+      // issued after the code verifies (finishLogin), but the role can be
+      // widened after login — an admin promoting a caregiver to clinician
+      // must not hand them PHI on a session that never passed MFA.
+      if (config.MFA_ENFORCE && mfa.mfaRequiredFor(freshUser, config.MFA_REQUIRED_ROLES) && !sess.row.mfaVerified) {
+        await sessions.revoke(sess.row.id, 'mfa_required');
+        return res.status(403).json({ error: 'This account now requires multi-factor authentication. Please sign in again.', code: 'AUTH_MFA_REQUIRED' });
+      }
       // Use fresh data for all user properties to ensure permission changes take effect immediately
       // Determine if user is a manager (has limited admin access)
       const isManager = freshUser.isManager || false;
@@ -1919,9 +2054,9 @@ const authenticateToken = async (req, res, next) => {
         // OpenEMR provider (numeric pc_aid) this clinician's calendar maps to
         // (Session 4.2 scheduling; set by an admin in the user form)
         openEmrProviderId: freshUser.openEmrProviderId || null,
-        // Clinician NPI — stamped as attribution on every clinical write
-        // (Session 4.4 §4 interim: the EMR sees the service account, the
-        // chart must still say who did the work)
+        // Clinician NPI — heads every note and is the rendering provider on
+        // every charge (Session 4.4 §4; the EMR write itself is per-user
+        // since Session 5.2)
         npi: freshUser.npi || null,
         // Managers automatically get client portal admin access
         hasClientPortalAdminAccess: freshUser.hasClientPortalAdminAccess || isManager || false,
@@ -1942,6 +2077,7 @@ const authenticateToken = async (req, res, next) => {
         // access; acting gates wired in Session 4.3
         familyIsPoa: freshUser.familyIsPoa || false
       };
+      audit.bindUser(req.user, req.session);   // 5.4: attribution for every logActivity() downstream
       next();
     } catch (error) {
       console.error('Auth middleware error:', error);
@@ -2282,14 +2418,13 @@ const buildConsentSignature = (args) =>
 
 // Caregiver app (Session 6) — page shell + /api/caregiver/*. Every route inside
 // enforces its own access (caregiver / review staff / admin) at the API layer.
-// detectFileType is declared further down this file, so it is passed as a
-// thunk rather than a reference: the body is not evaluated until a request
-// calls it, by which time the const exists. A direct reference here would
-// throw at boot.
-app.use(caregiverRoutes({
-  db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4,
-  detectFileType: (buf) => detectFileType(buf)
-}));
+app.use(caregiverRoutes({ db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4,
+  drive: googledrive,
+  // Wrapped, not passed by reference: `detectFileType` is a `const` declared
+  // ~7000 lines below this mount, so naming it here reads it in its temporal
+  // dead zone and the app dies at require time. The arrow closes over the
+  // binding and is only called on a request, long after initialization.
+  detectFileType: (buf) => detectFileType(buf) }));
 
 // PHCP scheduling (Session 7) — page shell + /api/scheduling/*. App-side only;
 // clinical appointments stay in OpenEMR (Session 4.2). Two systems by design.
@@ -2358,7 +2493,7 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       isManager, assignedClients, hubspotCompanyId, hubspotDealId, hubspotContactId, projectAccessLevels,
       existingPortalSlug, phone, sendWelcomeEmail: shouldSendWelcome = true,
       licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
-      familyIsPoa, openEmrProviderId, npi
+      familyIsPoa, openEmrProviderId, npi, payRate, clientPayRates, rateAgreement
     } = req.body;
 
     // Managers can only create client users
@@ -2394,6 +2529,10 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       openEmrProviderId: openEmrProviderId || null,
       // Clinician NPI for attribution stamps (Session 4.4)
       npi: normalizeNpi(npi),
+      // What WE PAY a caregiver (owner request, 2026-09-13) — never the same
+      // number as the client's rateAgreement; the gap between them is the margin.
+      payRate: caregiverRepo.normalizePayRate(payRate),
+      clientPayRates: caregiverRepo.normalizeClientPayRates(clientPayRates),
       createdAt: new Date().toISOString(),
       // Account status — active accounts receive notifications, inactive do not
       accountStatus: 'active',
@@ -2414,6 +2553,20 @@ app.post('/api/users', authenticateToken, async (req, res) => {
 
     // Client-specific fields
     if (role === config.ROLES.CLIENT) {
+      // The agreed BILLED rate, settable HERE (owner request, 2026-09-13).
+      // The financial agreement and the home care service agreement both print
+      // this table and neither is presentable without it, so a client added
+      // without a rate walks straight into a hard gate at signing — which is
+      // exactly what happened in testing. The rate is agreed at the point of
+      // sale, long before anyone opens the enrollment screen.
+      // Optional at creation (a clinical-only client signs neither of those
+      // two), and it goes through the SAME builder the enrollment route uses so
+      // the two paths cannot start accepting different things.
+      if (rateAgreement && Object.keys(rateAgreement).length) {
+        const built = buildRateAgreement(rateAgreement, req.user);
+        if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+        newUser.rateAgreement = built.rateAgreement;
+      }
       // GFC client enrollment & care team defaults
       newUser.enrollmentStatus = enrollmentStatus || 'intake_pending';
       newUser.careTeam = careTeam || { assignedFNPs: [], assignedCaseManager: null, primaryCaregiver: null, backupCaregiver: null };
@@ -2599,6 +2752,148 @@ app.post('/api/bootstrap-admin', async (req, res) => {
   }
 });
 
+// ============================================================
+// Session 5.3 — how a login turns into a session
+//
+// finishLogin() is the ONE place a session is issued. Every login route
+// (unified, client portal, service portal, admin hub) calls it after the
+// password check. For a role that requires MFA (config.MFA_REQUIRED_ROLES, or
+// anyone with clinical access) it does NOT issue a session: it returns an MFA
+// challenge — enrolment if the user has no authenticator yet, verification if
+// they do — and the session is issued by /api/auth/mfa/verify once the code
+// checks out. A challenge lives 5 minutes and dies after 5 wrong codes.
+//
+// Recovery codes are shown exactly once, at enrolment (and on regeneration).
+// They are stored hashed; a used one cannot be used again.
+// ============================================================
+const MFA_CHALLENGE_TTL_MS = 5 * 60 * 1000;
+const MFA_MAX_ATTEMPTS = 5;
+const mfaChallengeKey = (id) => `mfa_pending:${id}`;
+
+const issueSession = async (user, req, { surface, mfaVerified }) => {
+  const absoluteExpiresAt = (() => {
+    const m = String(config.JWT_EXPIRY).match(/^(\d+)([smhd])$/);
+    const mult = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
+    return m ? new Date(Date.now() + Number(m[1]) * mult[m[2]]).toISOString() : null;
+  })();
+  const row = await sessions.create({ userId: user.id, role: user.role, ipHash: sessionIpHash(req), userAgent: req.headers['user-agent'], mfaVerified, surface, absoluteExpiresAt });
+  const token = jwt.sign({ id: user.id, email: user.email, name: user.name, role: user.role, sid: row.id }, JWT_SECRET, { expiresIn: config.JWT_EXPIRY });
+  await logActivity(user.id, user.name || user.email, 'login', 'user', user.id, { role: user.role, surface, mfaVerified, sid: row.id });
+  return token;
+};
+
+const finishLogin = async ({ user, req, surface, userResponse }) => {
+  const needsMfa = config.MFA_ENFORCE && mfa.mfaRequiredFor(user, config.MFA_REQUIRED_ROLES);
+  if (!needsMfa) {
+    const token = await issueSession(user, req, { surface, mfaVerified: false });
+    return { token, user: userResponse };
+  }
+  const challenge = uuidv4();
+  const base = { userId: user.id, surface, userResponse, attempts: 0, createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + MFA_CHALLENGE_TTL_MS).toISOString() };
+  if (mfa.isEnrolled(user)) {
+    await db.set(mfaChallengeKey(challenge), { ...base, enroll: false });
+    return { mfaRequired: true, method: 'totp', challenge, user: { email: user.email, name: user.name } };
+  }
+  // Not enrolled: the login becomes an enrolment. The secret lives on the
+  // challenge row (sealed) until the first code verifies; only then does it
+  // move onto the user record, so an abandoned enrolment leaves nothing behind.
+  const secret = mfa.generateSecret();
+  const otpauth = mfa.otpauthUri({ issuer: config.MFA_ISSUER, account: user.email, secret });
+  await db.set(mfaChallengeKey(challenge), { ...base, enroll: true, secret: sealSecret(secret) });
+  const qrDataUrl = await QRCode.toDataURL(otpauth, { margin: 1, width: 220 });
+  return { mfaEnrollmentRequired: true, method: 'totp', challenge, otpauthUri: otpauth, qrDataUrl, secret, issuer: config.MFA_ISSUER, user: { email: user.email, name: user.name } };
+};
+
+// POST /api/auth/mfa/verify { challenge, code } — code is a 6-digit TOTP or a
+// recovery code (xxxx-xxxx-xxxx). Issues the session on success.
+app.post('/api/auth/mfa/verify', async (req, res) => {
+  try {
+    const { challenge, code } = req.body || {};
+    if (!challenge || !code) return res.status(400).json({ error: 'Challenge and code are required', code: 'MFA_MISSING' });
+    const key = mfaChallengeKey(String(challenge));
+    const pending = await db.get(key);
+    if (!pending) return res.status(400).json({ error: 'This sign-in attempt has expired. Start again.', code: 'MFA_CHALLENGE_EXPIRED' });
+    if (new Date(pending.expiresAt).getTime() < Date.now()) { await db.delete(key); return res.status(400).json({ error: 'This sign-in attempt has expired. Start again.', code: 'MFA_CHALLENGE_EXPIRED' }); }
+    const users = await getUsers();
+    const idx = users.findIndex(u => u.id === pending.userId);
+    const user = users[idx];
+    if (!user || user.accountStatus === 'inactive') { await db.delete(key); return res.status(403).json({ error: 'Account unavailable', code: 'AUTH_INACTIVE' }); }
+    const fail = async (reason) => {
+      pending.attempts = (pending.attempts || 0) + 1;
+      if (pending.attempts >= MFA_MAX_ATTEMPTS) {
+        await db.delete(key);
+        await logActivity(user.id, user.name || user.email, 'mfa_locked', 'user', user.id, { role: user.role, reason: 'too many attempts', surface: pending.surface });
+        return res.status(400).json({ error: 'Too many incorrect codes. Start the sign-in again.', code: 'MFA_TOO_MANY_ATTEMPTS' });
+      }
+      await db.set(key, pending);
+      await logActivity(user.id, user.name || user.email, 'mfa_failed', 'user', user.id, { role: user.role, reason, attempts: pending.attempts, surface: pending.surface });
+      return res.status(400).json({ error: 'That code is not right. Check the authenticator app and try again.', code: 'MFA_INVALID_CODE', attemptsLeft: MFA_MAX_ATTEMPTS - pending.attempts });
+    };
+    const trimmed = String(code).trim();
+    let recoveryCodes = null; let via = 'totp';
+    if (pending.enroll) {
+      const secret = openSecret(pending.secret);
+      const v = mfa.verifyTotp(secret, trimmed);
+      if (!v.ok) return fail(v.reason);
+      recoveryCodes = mfa.generateRecoveryCodes();
+      users[idx].mfa = { secret: sealSecret(secret), enrolledAt: new Date().toISOString(), lastStep: v.step, recovery: mfa.buildRecoveryRecord(recoveryCodes) };
+      await db.set('users', users); invalidateUsersCache();
+      await logActivity(user.id, user.name || user.email, 'mfa_enrolled', 'user', user.id, { role: user.role, surface: pending.surface });
+    } else if (/^\d{6}$/.test(trimmed.replace(/\s+/g, ''))) {
+      const v = mfa.verifyTotp(openSecret(user.mfa.secret), trimmed, { lastStep: user.mfa.lastStep == null ? null : user.mfa.lastStep });
+      if (!v.ok) return fail(v.reason);
+      users[idx].mfa = { ...user.mfa, lastStep: v.step };
+      await db.set('users', users); invalidateUsersCache();
+    } else {
+      const r = mfa.consumeRecovery(user.mfa && user.mfa.recovery, trimmed);
+      if (!r.ok) return fail('recovery');
+      via = 'recovery';
+      users[idx].mfa = { ...user.mfa, recovery: r.record };
+      await db.set('users', users); invalidateUsersCache();
+      await logActivity(user.id, user.name || user.email, 'mfa_recovery_code_used', 'user', user.id, { role: user.role, remaining: r.remaining, surface: pending.surface });
+    }
+    await db.delete(key);
+    const token = await issueSession(user, req, { surface: pending.surface, mfaVerified: true });
+    const body = { token, user: pending.userResponse, mfaVia: via };
+    if (recoveryCodes) body.recoveryCodes = recoveryCodes;    // shown ONCE
+    res.json(body);
+  } catch (error) {
+    console.error('MFA verify error:', error.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+app.get('/api/auth/mfa/status', authenticateToken, async (req, res) => {
+  const users = await getUsers(); const u = users.find(x => x.id === req.user.id) || {};
+  const remaining = u.mfa && u.mfa.recovery ? u.mfa.recovery.hashes.filter(h => !h.usedAt).length : 0;
+  res.json({ enforced: config.MFA_ENFORCE, required: mfa.mfaRequiredFor(u, config.MFA_REQUIRED_ROLES), enrolled: mfa.isEnrolled(u), enrolledAt: (u.mfa && u.mfa.enrolledAt) || null, recoveryRemaining: remaining, sessionMfaVerified: !!(req.session && req.session.mfaVerified) });
+});
+// Regenerate recovery codes — needs a fresh TOTP code, returns the new set ONCE.
+app.post('/api/auth/mfa/recovery-codes/regenerate', authenticateToken, async (req, res) => {
+  try {
+    const users = await getUsers(); const idx = users.findIndex(x => x.id === req.user.id);
+    const u = users[idx];
+    if (!mfa.isEnrolled(u)) return res.status(409).json({ error: 'MFA is not enrolled', code: 'MFA_NOT_ENROLLED' });
+    const v = mfa.verifyTotp(openSecret(u.mfa.secret), String((req.body || {}).code || ''), { lastStep: u.mfa.lastStep == null ? null : u.mfa.lastStep });
+    if (!v.ok) return res.status(400).json({ error: 'That code is not right.', code: 'MFA_INVALID_CODE' });
+    const codes = mfa.generateRecoveryCodes();
+    users[idx].mfa = { ...u.mfa, lastStep: v.step, recovery: mfa.buildRecoveryRecord(codes) };
+    await db.set('users', users); invalidateUsersCache();
+    await logActivity(u.id, u.name || u.email, 'mfa_recovery_codes_regenerated', 'user', u.id, { role: u.role });
+    res.json({ recoveryCodes: codes });
+  } catch (error) { res.status(500).json({ error: 'Server error' }); }
+});
+// Sign out: the session row is revoked, so the token is dead server-side
+// whatever the browser still holds.
+app.post('/api/auth/logout', authenticateToken, async (req, res) => {
+  await sessions.revoke(req.session.id, 'logout');
+  await logActivity(req.user.id, req.user.name || req.user.email, 'logout', 'user', req.user.id, { sid: req.session.id });
+  res.json({ ok: true });
+});
+app.get('/api/auth/sessions', authenticateToken, async (req, res) => {
+  const rows = await sessions.listForUser(req.user.id);
+  res.json({ sessions: rows.map(r => ({ id: r.id, current: r.id === req.session.id, createdAt: r.createdAt, lastSeenAt: r.lastSeenAt, revokedAt: r.revokedAt, revokedReason: r.revokedReason, surface: r.surface, userAgent: r.userAgent, mfaVerified: r.mfaVerified })) });
+});
+
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -2608,23 +2903,18 @@ app.post('/api/auth/login', async (req, res) => {
     const users = await getUsers();
     const user = users.find(u => u.email?.toLowerCase() === email.toLowerCase());
     if (!user) {
-      console.log('Login failed: User not found for email:', email);
+      console.log('Login failed: unknown account');
       return res.status(400).json({ error: 'Invalid credentials' });
     }
     const passwordMatch = await bcrypt.compare(password, user.password);
     if (!passwordMatch) {
-      console.log('Login failed: Password mismatch for:', email);
+      console.log('Login failed: password mismatch');
       return res.status(400).json({ error: 'Invalid credentials' });
     }
     // Block inactive accounts from logging in
     if (user.accountStatus === 'inactive') {
       return res.status(403).json({ error: 'Account is inactive. Please contact an administrator.' });
     }
-    const token = jwt.sign(
-      { id: user.id, email: user.email, name: user.name, role: user.role },
-      JWT_SECRET,
-      { expiresIn: config.JWT_EXPIRY }
-    );
     const isManager = user.isManager || false;
     const userResponse = {
       id: user.id,
@@ -2676,7 +2966,7 @@ app.post('/api/auth/login', async (req, res) => {
     if (user.role === config.ROLES.USER) {
       userResponse.projectAccessLevels = user.projectAccessLevels || {};
     }
-    res.json({ token, user: userResponse });
+    res.json(await finishLogin({ user, req, surface: 'unified', userResponse }));
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -2704,30 +2994,22 @@ app.post('/api/auth/client-login', async (req, res) => {
     if (user.role === config.ROLES.CLIENT && slug && user.slug !== slug) {
       return res.status(400).json({ error: 'Invalid portal access' });
     }
-    const token = jwt.sign(
-      { id: user.id, email: user.email, name: user.name, role: user.role },
-      JWT_SECRET,
-      { expiresIn: config.JWT_EXPIRY }
-    );
     const isManager = user.isManager || false;
     // Admin and Manager get 'admin' slug for portal admin access
     const effectiveSlug = (user.role === config.ROLES.ADMIN || isManager) ? 'admin' : user.slug;
-    res.json({
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        role: user.role,
-        isManager: isManager,
-        hasClientPortalAdminAccess: user.hasClientPortalAdminAccess || isManager || user.role === config.ROLES.ADMIN,
-        practiceName: user.practiceName,
-        isNewClient: user.isNewClient,
-        slug: effectiveSlug,
-        logo: user.logo || '',
-        assignedProjects: user.assignedProjects || []
-      }
-    });
+    res.json(await finishLogin({ user, req, surface: 'portal', userResponse: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      isManager: isManager,
+      hasClientPortalAdminAccess: user.hasClientPortalAdminAccess || isManager || user.role === config.ROLES.ADMIN,
+      practiceName: user.practiceName,
+      isNewClient: user.isNewClient,
+      slug: effectiveSlug,
+      logo: user.logo || '',
+      assignedProjects: user.assignedProjects || []
+    } }));
   } catch (error) {
     console.error('Client login error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -2766,7 +3048,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     });
     await db.set('password_reset_requests', resetRequests);
     
-    console.log(`Password reset requested for ${email} - Admin action required`);
+    console.log('Password reset requested - admin action required');
     res.json({ message: 'Your request has been submitted. An administrator will reach out to you shortly to help reset your password.' });
   } catch (error) {
     console.error('Forgot password error:', error);
@@ -3011,6 +3293,8 @@ app.get('/api/users', authenticateToken, async (req, res) => {
   try {
     const users = await getUsers();
     const safeUsers = users.map(u => ({
+      mfaEnrolled: mfa.isEnrolled(u),   // Session 5.3: the flag only — the secret and recovery hashes never leave the server
+
       id: u.id,
       email: u.email,
       name: u.name,
@@ -3054,12 +3338,57 @@ app.get('/api/users', authenticateToken, async (req, res) => {
       // (Session 6). Read-only here — the admin form saves them through
       // PUT /api/caregiver/admin/caregivers/:userId/competencies, and the user
       // PUT above never touches the field, so editing a user cannot wipe them.
-      skilledCompetencies: Array.isArray(u.skilledCompetencies) ? u.skilledCompetencies : []
+      skilledCompetencies: Array.isArray(u.skilledCompetencies) ? u.skilledCompetencies : [],
+      // What WE PAY this caregiver — a different number from rateAgreement,
+      // which is what the CLIENT pays. The gap between them is the margin, so
+      // these are separate fields and neither is derived from the other.
+      // Admin-only: this route already requires an admin, and no caregiver- or
+      // client-facing payload carries either one.
+      // A field the GET omits is a field the form wipes on save (the 4.2 bug
+      // class) — for a pay rate that is an unannounced pay cut.
+      payRate: u.payRate === undefined ? null : u.payRate,
+      clientPayRates: (u.clientPayRates && typeof u.clientPayRates === 'object') ? u.clientPayRates : {},
+      rateAgreement: u.rateAgreement || null
     }));
     res.json(safeUsers);
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
   }
+});
+
+// Session 5.4 — read the durable audit log (admin). Session 12 builds the UI;
+// this is the verification surface for go-live acceptance: every PHI access
+// must be here. Filters: since, until (ISO), userId, patientId, limit.
+app.get('/api/admin/audit-log', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { since, until, userId, patientId } = req.query;
+    const limit = Math.min(1000, Math.max(1, parseInt(req.query.limit || '200', 10) || 200));
+    const rows = await audit.read({ since, until, userId, patientId, limit });
+    res.json({ rows, count: rows.length, total: await audit.count() });
+  } catch (error) { res.status(500).json({ error: 'Server error' }); }
+});
+
+// Session 5.3 — admin controls. Resetting MFA is the break-glass for a lost
+// phone: the user re-enrols at their next login. It also ends every session
+// they hold, so a stolen device cannot ride an old session past the reset.
+app.post('/api/users/:userId/mfa/reset', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const users = await getUsers(); const idx = users.findIndex(u => u.id === req.params.userId);
+    if (idx === -1) return res.status(404).json({ error: 'User not found' });
+    const had = mfa.isEnrolled(users[idx]);
+    delete users[idx].mfa;
+    await db.set('users', users); invalidateUsersCache();
+    const revoked = await sessions.revokeAllForUser(users[idx].id, 'mfa_reset_by_admin');
+    await logActivity(req.user.id, req.user.name || req.user.email, 'mfa_reset', 'user', users[idx].id, { targetEmail: users[idx].email, hadEnrollment: had, sessionsRevoked: revoked });
+    res.json({ ok: true, hadEnrollment: had, sessionsRevoked: revoked });
+  } catch (error) { res.status(500).json({ error: 'Server error' }); }
+});
+app.post('/api/users/:userId/sessions/revoke', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const revoked = await sessions.revokeAllForUser(req.params.userId, 'revoked_by_admin');
+    await logActivity(req.user.id, req.user.name || req.user.email, 'sessions_revoked', 'user', req.params.userId, { revoked });
+    res.json({ ok: true, revoked });
+  } catch (error) { res.status(500).json({ error: 'Server error' }); }
 });
 
 app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) => {
@@ -3071,7 +3400,7 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
       hasServicePortalAccess, hasAdminHubAccess, hasImplementationsAccess, hasClientPortalAdminAccess,
       isManager, assignedClients, phone, accountStatus, emailUnsubscribed,
       licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
-      familyIsPoa, openEmrProviderId, npi
+      familyIsPoa, openEmrProviderId, npi, payRate, clientPayRates
     } = req.body;
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === userId);
@@ -3085,6 +3414,7 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
         return res.status(403).json({ error: 'Admin accounts cannot be deactivated. Remove admin role first if you need to deactivate this account.' });
       }
       users[idx].accountStatus = accountStatus;
+      if (accountStatus === 'inactive') await sessions.revokeAllForUser(users[idx].id, 'account_deactivated');
     }
 
     // Capture old values before update for cascade propagation
@@ -3100,6 +3430,7 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
       users[idx].requirePasswordChange = true;
       users[idx].lastPasswordReset = new Date().toISOString();
       passwordWasReset = true;
+      await sessions.revokeAllForUser(users[idx].id, 'password_reset_by_admin');
     }
     if (assignedProjects !== undefined) users[idx].assignedProjects = assignedProjects;
     if (projectAccessLevels !== undefined) users[idx].projectAccessLevels = projectAccessLevels;
@@ -3116,7 +3447,38 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
     // GFC extended fields
     if (licenseLevel !== undefined) users[idx].licenseLevel = licenseLevel;
     if (hasClinicalAccess !== undefined) users[idx].hasClinicalAccess = hasClinicalAccess;
-    if (enrollmentStatus !== undefined) users[idx].enrollmentStatus = enrollmentStatus;
+    // The enrollment status dropdown is the SECOND door onto `enrolled`, and
+    // now that `enrolled` is what unlocks scheduling it cannot stay a silent
+    // one. The Approve button re-checks every required consent and field; this
+    // field wrote the status straight to the record, so a client could be
+    // marked enrolled with nothing on file and nobody would ever know.
+    //
+    // The bypass is deliberately KEPT (owner decision, 2026-09-13) — an admin
+    // has to be able to move a file that the checklist is wrong about. What
+    // changes is that it leaves a trace, exactly like the Approve override.
+    if (enrollmentStatus !== undefined) {
+      const wasIncomplete = users[idx].role === config.ROLES.CLIENT &&
+        enrollmentStatus === 'enrolled' && users[idx].enrollmentStatus !== 'enrolled';
+      if (wasIncomplete) {
+        const comp = computeEnrollmentCompletion(users[idx]);
+        if (comp.missingConsentLabels.length || comp.missingFieldLabels.length) {
+          users[idx].enrollmentApproval = {
+            approvedAt: new Date().toISOString(),
+            approvedById: req.user.id,
+            approvedByName: req.user.name || req.user.email,
+            override: {
+              reason: 'Set directly on the user form, without a stated reason.',
+              missingConsents: comp.missingConsentLabels,
+              missingFields: comp.missingFieldLabels
+            }
+          };
+          await logActivity(req.user.id, req.user.name || req.user.email,
+            'enrollment_status_forced', 'enrollment', users[idx].id,
+            { to: enrollmentStatus, missingConsents: comp.missingConsentLabels, missingFields: comp.missingFieldLabels });
+        }
+      }
+      users[idx].enrollmentStatus = enrollmentStatus;
+    }
     if (careTeam !== undefined) users[idx].careTeam = careTeam;
     // Family / authorized contact → linked client (user id); drives the
     // ROI-family portal gate (resolveGfcClientRecord).
@@ -3125,6 +3487,16 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
     if (familyIsPoa !== undefined) users[idx].familyIsPoa = !!familyIsPoa;
     // Clinician → OpenEMR provider mapping (numeric pc_aid; Session 4.2 calendars)
     if (openEmrProviderId !== undefined) users[idx].openEmrProviderId = openEmrProviderId || null;
+    // Caregiver pay (owner request, 2026-09-13). Normalized through
+    // caregiverRepository so the admin form, the shift post and any payroll read
+    // cannot disagree about what a number means. An unusable value stores as
+    // null, never 0: "nobody has set a rate" and "the rate is zero" are
+    // different facts and a payroll run has to tell them apart.
+    // rateAgreement is deliberately NOT settable here — a change after signing
+    // has consent consequences (it flags the client to re-sign) and that logic
+    // lives on the enrollment rate route. This PUT would bypass it.
+    if (payRate !== undefined) users[idx].payRate = caregiverRepo.normalizePayRate(payRate);
+    if (clientPayRates !== undefined) users[idx].clientPayRates = caregiverRepo.normalizeClientPayRates(clientPayRates);
     // Clinician NPI (Session 4.4 attribution stamps); 10 digits or cleared
     if (npi !== undefined) users[idx].npi = normalizeNpi(npi);
 
@@ -4933,7 +5305,21 @@ app.post('/api/announcements', authenticateToken, requireClientPortalAdmin, asyn
           const vars = { ...baseVars, recipientName: user.name || user.email, recipientEmail: user.email };
           const subject = renderTemplate(annTpl.subject, vars);
           const textBody = renderTemplate(annBody, vars);
-          const htmlBody = annHtml ? renderTemplate(annHtml, vars) : buildHtmlEmail(textBody, null);
+          // An announcement has structure — a title, a body, a priority flag,
+          // an attachment — so it is handed to the house template as those
+          // pieces rather than as one blob of prose. An admin who has written
+          // their own HTML still wins; nobody else hand-rolls chrome.
+          const htmlBody = annHtml
+            ? renderTemplate(annHtml, vars)
+            : emailTemplates.renderGfcEmail({
+                greeting: user.name || null,
+                headline: renderTemplate(newAnnouncement.title || 'A new announcement', vars),
+                paragraphs: String(renderTemplate(newAnnouncement.content || '', vars))
+                  .split(/\n{2,}/).map(t => t.trim()).filter(Boolean),
+                callout: newAnnouncement.priority ? 'This is a priority announcement.' : null,
+                ctaUrl: newAnnouncement.attachmentUrl || null,
+                ctaLabel: newAnnouncement.attachmentUrl ? (newAnnouncement.attachmentName || 'View attachment') : null
+              }).html;
           const result = await queueNotification(
             'announcement', user.id, user.email, user.name || user.email,
             { subject, body: textBody, htmlBody },
@@ -5231,6 +5617,39 @@ async function migrateCareTierEnum() {
 // exactly once. Writes scripts/consent_lane_split_migration.log — the migration
 // log the session deliverables call for.
 const CONSENT_MIGRATION_LOG = path.join(__dirname, 'scripts', 'consent_lane_split_migration.log');
+
+// One-shot: clear the lab-era chrome stored on the announcement template.
+//
+// The shipped default used to carry its own htmlBody, and getEmailTemplates()
+// seeds the defaults into the store on first boot — so changing the default
+// alone changes nothing for an app that has already run. That is the same
+// class of trap as rebuilding the OpenEMR patch without re-fetching: the code
+// looks fixed and the deployment is not.
+//
+// Only the SHIPPED chrome is cleared. HTML an admin wrote themselves is left
+// exactly as it is and reported, because overwriting someone's deliberate
+// customisation is worse than an off-brand email. Idempotent: once cleared
+// there is nothing left to match.
+const LEGACY_CHROME_MARKERS = ['border-bottom: 3px solid', 'You are receiving this because you have'];
+
+async function migrateAnnouncementTemplateChrome() {
+  const templates = await db.get('email_templates');
+  if (!Array.isArray(templates)) return { cleared: 0, kept: 0 };
+  let cleared = 0, kept = 0;
+  for (const t of templates) {
+    if (!t || !t.htmlBody) continue;
+    if (LEGACY_CHROME_MARKERS.every(m => t.htmlBody.includes(m))) {
+      t.htmlBody = null;
+      cleared += 1;
+      console.log(`   ↳ Cleared lab-era email chrome from template "${t.id}" — it now renders in the house style.`);
+    } else {
+      kept += 1;
+      console.log(`   ↳ Template "${t.id}" carries custom HTML that is not the shipped default. Left as is; it will not pick up the house style.`);
+    }
+  }
+  if (cleared) await db.set('email_templates', templates);
+  return { cleared, kept };
+}
 
 async function migrateConsentLaneSplit() {
   if (String(process.env.CONSENT_LANE_SPLIT_MIGRATION_APPLIED).toLowerCase() === 'true') {
@@ -5591,11 +6010,45 @@ const visitDisplayRow = (v) => {
     completed: v.status === 'completed'
   };
 };
+// Which shift statuses mean "somebody is actually coming". `claimed` and
+// `assigned` are NOT agreed yet — a caregiver can still decline — and showing
+// one to a client promises a visit that may never happen. `open` is a shift
+// nobody has taken at all.
+const CLIENT_VISIBLE_SHIFT_STATUSES = Object.freeze(['confirmed', 'in_progress']);
+
 const getClientVisits = async (client) => {
   const rows = ((await db.get('visit_logs')) || []).filter(v => v && v.client_id === client.id);
   const now = Date.now();
   const ts = (v) => { const d = new Date(v.scheduledAt || v.date || 0); return isNaN(d.getTime()) ? 0 : d.getTime(); };
-  const upcoming = rows.filter(v => v.status !== 'completed' && ts(v) >= now)
+
+  // UPCOMING comes from the shift board, because `visit_logs` only ever
+  // receives a row when a caregiver SUBMITS a log — that is, after the visit.
+  // Reading upcoming visits out of it meant a client with three confirmed
+  // shifts this week saw an empty card.
+  //
+  // RECENT deliberately stays on `visit_logs`: that is the documented record
+  // of what happened, and a completed shift carries no id linking it to its
+  // log, so merging the two would double-count every visit.
+  const shifts = ((await db.get('shifts')) || []).filter(sh =>
+    sh && sh.clientId === client.id && CLIENT_VISIBLE_SHIFT_STATUSES.includes(sh.status));
+  let caregiverNames = null;
+  if (shifts.length) {
+    const users = await getUsers();
+    caregiverNames = new Map(users.map(u => [u.id, u.name]));
+  }
+  const shiftRows = shifts.map(sh => ({
+    id: `shift:${sh.id}`,
+    client_id: client.id,
+    source: 'shift',
+    type: 'Home care visit',
+    scheduledAt: sh.start,
+    // Named only when we know it. "Your care team" is the honest fallback and
+    // is what visitDisplayRow already prints for an unnamed visit.
+    caregiverName: (caregiverNames && caregiverNames.get(sh.caregiverId)) || null,
+    status: sh.status === 'in_progress' ? 'in_progress' : 'confirmed'
+  }));
+
+  const upcoming = [...rows.filter(v => v.status !== 'completed' && ts(v) >= now), ...shiftRows.filter(v => ts(v) >= now)]
     .sort((a, b) => ts(a) - ts(b)).slice(0, 10).map(visitDisplayRow);
   const recent = rows.filter(v => v.status === 'completed' || ts(v) < now)
     .sort((a, b) => ts(b) - ts(a)).slice(0, 10).map(visitDisplayRow);
@@ -5987,6 +6440,10 @@ app.post('/api/gfc/documents/upload', authenticateToken, requireClientForIntake,
     }
 
     await logActivity(req.user.id, row.uploadedByName, 'client_document_uploaded', 'document', client.id, { kind });
+    // Staff had no way to know a document had arrived except by looking.
+    await notify.documentUploaded({
+      client, kind, label: row.label || kind, uploadId: row.id, actorId: req.user.id
+    });
     res.json({ message: 'Document received', document: { id: row.id, kind, fileName: row.fileName, uploadedAt: row.uploadedAt, status: row.status } });
   } catch (error) {
     console.error('GFC document upload error:', error);
@@ -6300,6 +6757,16 @@ app.post('/api/gfc/care-plan/cosign', authenticateToken, requireEnrolledClient, 
     // storage failure never voids the completed co-signature.
     const signedPdf = await emitSignedCarePlanPdf(client.id, currentVersion,
       { ...signer, signatureImage: signatureImageB64 }, req.user);
+
+    // The authoring RN is the person waiting on this signature and had no way
+    // to know it had landed. Best-effort, after the PDF: a notification must
+    // never be the thing that fails a completed co-signature.
+    await notify.carePlanCoSigned({
+      client, version: currentVersion, signerName,
+      signedByPoa: !!acting.isPoa,
+      authoredById: (client.carePlan && client.carePlan.authoredById) || null,
+      actorId: req.user.id
+    });
 
     res.json({ message: acting.isPoa ? `Care plan co-signed as ${signerName}` : 'Care plan co-signed', version: currentVersion, coSignedAt: at, signedBy: signerName, signedPdf });
   } catch (error) {
@@ -6732,13 +7199,62 @@ const clientToFhirPatient = (client) => {
 // just pulled?" question without shell access — a start time older than the
 // deploy means the process was never restarted.
 const SERVER_STARTED_AT = new Date().toISOString();
+// ============================================================
+// Session 5.2 — per-user OpenEMR sign-in (authorization_code + PKCE)
+//
+// GET  /api/emr/connect            → { url } the clinician's browser goes to
+// GET  /oauth/callback              ← OpenEMR redirects here; state binds it
+//                                     to the app user who started it
+// POST /api/emr/disconnect         → forget this user's tokens
+// (Under /api/emr, not /api/clinical: signing in to OpenEMR is not a clinical
+// mutation, and a read-only case manager must be able to do it too.)
+//
+// The callback carries no app JWT (it is a browser redirect from OpenEMR),
+// so the single-use `state` row IS the binding: it names the app user who
+// began the flow and the PKCE verifier only this server holds. The browser
+// never sees a token; it is redirected back to the workspace with a result
+// code only.
+// ============================================================
+app.get('/api/emr/connect', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const { url } = await emrAuth.beginAuthorization(req.user);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'emr_connect_started', 'openemr:oauth', req.user.id, { role: req.user.role });
+    res.json({ url });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message, code: err.code || 'EMR_CONNECT_FAILED', missing: err.missing });
+  }
+});
+app.get('/oauth/callback', async (req, res) => {
+  const back = (q) => res.redirect(`/clinical?${new URLSearchParams(q).toString()}`);
+  try {
+    const result = await emrAuth.completeAuthorization({
+      state: req.query.state, code: req.query.code, error: req.query.error, errorDescription: req.query.error_description
+    });
+    await logActivity(result.userId, null, 'emr_connected', 'openemr:oauth', result.userId,
+      { emrUsername: result.emrUser && result.emrUser.username, scopes: result.scopes.length, hasRefreshToken: result.hasRefreshToken });
+    return back({ emr: 'connected' });
+  } catch (err) {
+    console.error('OpenEMR callback failed:', err.code || err.message);
+    return back({ emr: 'error', reason: err.code || 'EMR_AUTH_FAILED' });
+  }
+});
+app.post('/api/emr/disconnect', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const had = await emrAuth.disconnect(req.user.id);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'emr_disconnected', 'openemr:oauth', req.user.id, { role: req.user.role, had });
+    res.json({ ok: true, disconnected: had });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not disconnect', code: 'EMR_DISCONNECT_FAILED' });
+  }
+});
+
 app.get('/api/clinical/status', authenticateToken, requireClinicalRead, async (req, res) => {
   const payer = await getPayerCredentialing();
   res.json({
     // 4.3: the API enforces the read/write split; this only tells the UI
     // which controls to render (case managers: read views, mutation UI hidden)
     access: { canRead: true, canWrite: patientRead.canClinicalWrite(req.user), role: req.user.role },
-    ...(await openemr.getStatus()), serverStartedAt: SERVER_STARTED_AT,
+    ...(await openemr.getStatus(req.user)), serverStartedAt: SERVER_STARTED_AT,
     // Session 4.4 deploy diagnostics: billing NPI (spec §2.5) + the caller's
     // own NPI for attribution (spec §4). Never hardcoded — both are config.
     billingNpiConfigured: !!payer.billing_npi_used,
@@ -7127,14 +7643,14 @@ app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireCli
 
     const built = clinicalRepo.buildHpWrites(req.body || {}, req.user.name);
     if (built.error) return res.status(400).json({ error: built.error, code: built.code });
-    // Session 4.4 attribution interim (spec §4): the encounter record and the
-    // note header name the acting clinician + NPI (the EMR sees only the
-    // gfc-app-api service account).
+    // The encounter record and the note header name the acting clinician +
+    // NPI (an author line). Since Session 5.2 the write itself runs under the
+    // clinician's own OpenEMR user, so OpenEMR attributes it natively too.
     const actor = actorFromReq(req);
     const plainReason = built.encounter.reason;
     built.encounter.reason = `${plainReason.slice(0, 180)} — ${clinicalRepo.actorStamp(actor)}`.slice(0, 250);
     built.encounter.billing_note = `Rendering clinician: ${clinicalRepo.actorStamp(actor)}. Coding is recorded by the GFC Care Platform (see the GFC structured note on this encounter).`.slice(0, 500);
-    built.soapNote.subjective = [clinicalRepo.buildAttributionHeader(actor, OPENEMR_SERVICE_ACCOUNT), built.soapNote.subjective].filter(Boolean).join('\n\n');
+    built.soapNote.subjective = [clinicalRepo.buildAttributionHeader(actor), built.soapNote.subjective].filter(Boolean).join('\n\n');
     const triage = (req.body && req.body.triage) || {};
     if (triage.track && !clinicalRepo.VALID_TRACKS.includes(triage.track)) {
       return res.status(400).json({ error: `Track must be one of ${clinicalRepo.VALID_TRACKS.join(', ')}` });
@@ -7632,6 +8148,32 @@ const resolveProviderScope = (reqUser, requestedProviderId) => {
 };
 
 // puuid → app client (for calendar rows → chart navigation). Pointer data only.
+// A visit time a patient can read, from OpenEMR's date + 24h start time.
+// Falls back to the raw values rather than printing "Invalid Date" — a wrong
+// time in an email about someone's care is worse than an ugly one.
+const formatVisitWhen = (date, startTime) => {
+  const d = new Date(`${date}T${String(startTime || '00:00').slice(0, 5)}:00`);
+  if (isNaN(d.getTime())) return [date, startTime].filter(Boolean).join(' ');
+  return d.toLocaleString('en-US', {
+    weekday: 'long', month: 'long', day: 'numeric',
+    hour: 'numeric', minute: '2-digit'
+  });
+};
+
+// The clinician's name from OUR user records, matched on the provider id the
+// appointment carries. Never the acting user: an admin books for a clinician,
+// and naming the wrong person in a patient's email is worse than naming none.
+const clinicianNameForProviderId = async (providerId) => {
+  if (!providerId) return null;
+  const users = await getUsers();
+  const u = users.find(x => x && String(x.openEmrProviderId || '') === String(providerId));
+  return u ? [u.name, u.licenseLevel || u.credential].filter(Boolean).join(', ') : null;
+};
+
+const VISIT_PLACE_LABEL = Object.freeze({
+  home: 'Your home', telehealth: 'By video visit', office: 'Our office'
+});
+
 const clinicalClientsByPuuid = async () => {
   const users = await getUsers();
   const map = new Map();
@@ -7798,6 +8340,19 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
     if (!client.openEmrPatientId) return res.status(409).json({ error: 'Link this client to an OpenEMR patient before scheduling', code: 'EMR_NOT_LINKED' });
     if (!openemr.isConfigured()) return res.status(503).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
 
+    // The enrollment gate — the same rule PHCP shifts enforce, from the same
+    // module. A clinical visit becomes a claim, so booking one against a
+    // client whose consent to treat and assignment of benefits are not on file
+    // is the more expensive half of the same mistake.
+    const apptGate = enrollmentGate.checkSchedulingAllowed(
+      client, req.body || {}, req.user, req.user.role === config.ROLES.ADMIN);
+    if (!apptGate.ok) {
+      return res.status(apptGate.status).json({
+        error: apptGate.message, code: apptGate.code,
+        enrollmentStatus: apptGate.enrollmentStatus, overridable: apptGate.overridable
+      });
+    }
+
     const body = req.body || {};
     const scope = resolveProviderScope(req.user, body.providerId);
     if (scope.error) return res.status(scope.code === 'PROVIDER_SCOPE' ? 403 : 409).json({ error: scope.error, code: scope.code });
@@ -7836,8 +8391,22 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
     const eid = await emr.createAppointmentRow(client.openEmrPatientId, built.fields);
     await logActivity(req.user.id, req.user.name || req.user.email, 'appointment_created', 'client', client.id, {
       role: req.user.role, appointmentEid: eid, providerId,
-      date: body.date, startTime: body.startTime, durationMinutes: built.minutes, location: built.location
+      date: body.date, startTime: body.startTime, durationMinutes: built.minutes, location: built.location,
+      enrollmentOverride: apptGate.override
+        ? { reason: apptGate.override.reason, enrollmentStatus: apptGate.override.enrollmentStatus }
+        : null
     });
+    // Tell the patient. Best-effort by design: a notification failure must
+    // never undo an appointment that is already on the calendar.
+    await notify.appointmentBooked({
+      client,
+      eid: String(eid),
+      when: formatVisitWhen(body.date, body.startTime),
+      clinician: await clinicianNameForProviderId(providerId),
+      place: VISIT_PLACE_LABEL[built.location] || null,
+      actorId: req.user.id
+    });
+
     // Read-back proves the round-trip (acceptance requirement); the single-row
     // GET carries the full record (list rows omit notes/location on 7.0.4).
     const readBack = await emr.getAppointmentRow(client.openEmrPatientId, eid).catch(() => null);
@@ -7907,6 +8476,17 @@ app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requir
       from: `${row.pc_eventDate} ${String(row.pc_startTime).slice(0, 5)}`, to: `${body.date} ${body.startTime}`,
       providerId, supersededRowRemoved: swap.deleted
     });
+    if (appClient) {
+      await notify.appointmentRescheduled({
+        client: { id: appClient.clientId, name: appClient.name },
+        eid: String(newEid),
+        from: formatVisitWhen(row.pc_eventDate, row.pc_startTime),
+        to: formatVisitWhen(body.date, body.startTime),
+        clinician: await clinicianNameForProviderId(providerId),
+        place: VISIT_PLACE_LABEL[built.location] || null,
+        actorId: req.user.id
+      });
+    }
     res.json({
       message: 'Appointment rescheduled in OpenEMR (original slot preserved as a cancelled entry)',
       appointmentEid: newEid, tombstoneEid,
@@ -7945,6 +8525,16 @@ app.post('/api/clinical/appointments/:eid/cancel', authenticateToken, requireCli
       reason: reason.slice(0, 500), slot: `${row.pc_eventDate} ${String(row.pc_startTime).slice(0, 5)}`,
       supersededRowRemoved: swap.deleted
     });
+    if (appClient) {
+      await notify.appointmentCancelled({
+        client: { id: appClient.clientId, name: appClient.name },
+        eid: String(tombstoneEid),
+        when: formatVisitWhen(row.pc_eventDate, row.pc_startTime),
+        reason: reason.slice(0, 500),
+        clinician: await clinicianNameForProviderId(row.pc_aid),
+        actorId: req.user.id
+      });
+    }
     res.json({
       message: 'Appointment cancelled — it stays on the calendar as a cancelled entry with the reason',
       appointmentEid: tombstoneEid,
@@ -8008,9 +8598,10 @@ app.post('/api/clinical/appointments/:eid/no-show', authenticateToken, requireCl
 // silently stubbed: every EMR write that fails is returned as a warning and
 // the record flags it for a retry.
 //
-// Attribution interim (§4): every note header, encounter reason, billing
-// note and app-side record carries the acting clinician's name, credential
-// and NPI, because the EMR sees only the gfc-app-api service account.
+// Author line (§4): every note header, encounter reason, billing note and
+// app-side record carries the acting clinician's name, credential and NPI.
+// The write itself runs under the clinician's own OpenEMR user (Session 5.2),
+// so this is an author line, not an attribution workaround.
 //
 // Coding assist guardrail (§8): the system proposes, the clinician disposes.
 // T1 carry-forward pre-selects candidates in the UI only; T2 favorites only
@@ -8018,7 +8609,6 @@ app.post('/api/clinical/appointments/:eid/no-show', authenticateToken, requireCl
 // action, and there is no auto-submit.
 // ============================================================
 
-const OPENEMR_SERVICE_ACCOUNT = config.OPENEMR.API_USERNAME || 'gfc-app-api';
 const loadRows = async (name) => (await db.get(name)) || [];
 
 // Org-level billing identity — spec §2.5: the billing provider on every charge
@@ -8201,7 +8791,6 @@ app.get('/api/clinical/settings', authenticateToken, requireClinicalRead, async 
       serviceCodeFavorites: settings.serviceCodeFavorites, favoritesSource: settings.favoritesSource,
       me: { name: req.user.name, npi: req.user.npi || null, licenseLevel: req.user.licenseLevel || null, openEmrProviderId: req.user.openEmrProviderId || null },
       isAdmin: req.user.role === config.ROLES.ADMIN,
-      serviceAccount: OPENEMR_SERVICE_ACCOUNT
     });
   } catch (error) {
     console.error('Clinical settings read error:', error);
@@ -8372,7 +8961,7 @@ app.post('/api/clinical/patients/:clientId/encounters', authenticateToken, requi
     if (!client.openEmrPatientId) return res.status(409).json({ error: 'Link this client to an OpenEMR patient before documenting a visit', code: 'EMR_NOT_LINKED' });
     const body = req.body || {};
     const actor = actorFromReq(req);
-    const built = clinicalRepo.buildFollowUpWrites(body, actor, { serviceAccount: OPENEMR_SERVICE_ACCOUNT });
+    const built = clinicalRepo.buildFollowUpWrites(body, actor, {});
     if (built.error) return res.status(400).json({ error: built.error, code: built.code });
     // Validate coding BEFORE any EMR write so a bad code never leaves a half-documented visit
     const dx = clinicalRepo.buildEncounterDiagnoses(body.diagnoses || []);
@@ -9594,6 +10183,15 @@ app.post('/api/gfc/consents', authenticateToken, requireClientForIntake, async (
     await logActivity(req.user.id, req.user.name || req.user.email, 'consent_signed', 'consent', type, {
       serviceLine, bodyVersion: signature.version, choices: answers
     });
+    // Staff only. A client signs up to fourteen consents in one sitting, so a
+    // per-consent receipt to them would be fourteen emails; the
+    // enrollment-complete confirmation already covers the client side. Staff
+    // need each one, because the enrollment gate advances on them.
+    await notify.consentSigned({
+      client, consentType: type,
+      consentTitle: (def && def.title) || type,
+      offline: false, actorId: req.user.id
+    });
     res.json({ message: 'Consent recorded', type, status: client.consents[type], signed: true, bodyVersion: signature.version });
   } catch (error) {
     console.error('GFC consent error:', error);
@@ -9611,14 +10209,16 @@ async function sendEnrollmentConfirmation(client, portalUrl, extraRecipient) {
   const firstName = (client.preferredName || client.name || 'there').split(' ')[0];
   const subject = 'Your Godwins Family Care enrollment is complete';
   const text = `Hi ${firstName},\n\nWe've received your enrollment with Godwins Family Care. Your care plan, signed consents, and documents are now available in your secure portal.\n\nView them here: ${portalUrl}\n\nFor your privacy, we don't include any health or consent details in email — everything lives in your portal.\n\n— Godwins Family Care`;
-  const htmlBody = `<div style="font-family:'DM Sans',Arial,sans-serif;color:#1B2A33;max-width:520px">
-    <h2 style="color:#033D50;font-weight:600">Enrollment complete</h2>
-    <p>Hi ${firstName},</p>
-    <p>We've received your enrollment with <strong>Godwins Family Care</strong>. Your care plan, signed consents, and documents are now available in your secure portal.</p>
-    <p><a href="${portalUrl}" style="display:inline-block;background:#C9A44A;color:#033D50;text-decoration:none;font-weight:600;padding:12px 20px;border-radius:10px">Open your portal</a></p>
-    <p style="font-size:13px;color:#4F6470">For your privacy, we don't include any health or consent details in email — everything lives in your portal.</p>
-    <p style="font-size:13px;color:#4F6470">— Godwins Family Care</p>
-  </div>`;
+  const htmlBody = emailTemplates.renderGfcEmail({
+    greeting: firstName,
+    headline: 'Enrollment complete',
+    paragraphs: [
+      "We've received your enrollment with Godwins Family Care. Your care plan, signed consents and documents are now available in your secure portal.",
+      'For your privacy we do not put health or consent details in email. Everything lives in your portal.'
+    ],
+    ctaUrl: portalUrl,
+    ctaLabel: 'Open your portal'
+  }).html;
   try {
     await sendEmail(to, subject, text, { htmlBody });
   } catch (e) {
@@ -9718,6 +10318,16 @@ app.post('/api/gfc/intake/submit', authenticateToken, requireClientForIntake, as
 // TEST DATA ONLY. No real PHI until HIPAA-live.
 
 const ENROLLMENT_STAFF_ROLES = [config.ROLES.ADMIN, config.ROLES.USER, config.ROLES.CASE_MANAGER];
+
+// PHC notifications (documents, consents, care-plan co-signature). The staff
+// role list is PASSED IN rather than restated in the module, so widening
+// enrollment access here widens who is notified, in one place.
+const notify = createNotifier({
+  getUsers, queueNotification, getAppBaseUrl, emailTransport,
+  staffRoles: ENROLLMENT_STAFF_ROLES,
+  clientRole: config.ROLES.CLIENT,
+  familyRole: config.ROLES.FAMILY
+});
 const requireEnrollmentStaff = (req, res, next) => {
   const role = req.user.role;
   if (ENROLLMENT_STAFF_ROLES.includes(role) || req.user.isManager || req.user.hasClientPortalAdminAccess) {
@@ -9898,6 +10508,9 @@ const enrollmentDetail = (client) => {
     ...enrollmentListRow(client),
     email: client.email || null,
     serviceLineResolved: serviceLine,
+    // Who approved, and whether they did it over outstanding items. An override
+    // that the detail view cannot show is the silent approval it replaced.
+    enrollmentApproval: client.enrollmentApproval || null,
     age: intake.age != null ? intake.age : deriveAge(intake.dob || client.dob),
     intake,
     consents: defs.map(d => {
@@ -10182,7 +10795,9 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/request', authenticateTo
     if (!created.length) return res.status(200).json({ message: 'Already requested — nothing new to ask for', created: [] });
     await db.set('client_document_requests', requests);
 
-    const notified = await notifyDocumentRequest(client, created, req.user, false);
+    const { notified } = await notify.documentsRequested({
+      clientId: client.id, rows: created, isReminder: false, dueAt, actorId: req.user.id
+    });
     await logActivity(req.user.id, req.user.name || req.user.email, 'client_documents_requested', 'document', client.id,
       { kinds: created.map(r => r.kind), notified });
 
@@ -10218,7 +10833,9 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/remind', authenticateTok
     }
     await db.set('client_document_requests', requests);
 
-    const notified = await notifyDocumentRequest(client, open, req.user, true);
+    const { notified } = await notify.documentsRequested({
+      clientId: client.id, rows: open, isReminder: true, actorId: req.user.id
+    });
     await logActivity(req.user.id, stamp.byName, 'client_documents_reminded', 'document', client.id,
       { kinds: open.map(r => r.kind), notified });
 
@@ -10263,6 +10880,13 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authe
 
     await logActivity(req.user.id, req.user.name || req.user.email, 'client_document_reviewed', 'document', uploads[i].clientId,
       { kind: uploads[i].kind, decision });
+    // The rejection reason is required at this route and was being captured
+    // and never delivered — the client saw nothing and re-sent the same file.
+    await notify.documentReviewed({
+      clientId: uploads[i].clientId, decision,
+      label: uploads[i].label || uploads[i].kind, reason,
+      uploadId: uploads[i].id, actorId: req.user.id
+    });
     res.json({ message: decision === 'accepted' ? 'Document accepted.' : 'Document rejected and re-requested.', status: decision });
   } catch (error) {
     console.error('GFC document review error:', error);
@@ -10282,39 +10906,6 @@ app.get('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/file', authenti
     res.status(500).json({ error: 'Server error' });
   }
 });
-
-// The email that goes with a request or a reminder.
-//
-// The subject names no client and no document — the same rule the admin ROI
-// email follows. A subject line is the part that shows on a lock screen.
-const notifyDocumentRequest = async (client, rows, actor, isReminder) => {
-  if (!client.email) return false;
-  const list = rows.map(r => `  • ${r.label}${r.note ? ` — ${r.note}` : ''}`).join('\n');
-  const due = rows.find(r => r.dueAt);
-  const body = [
-    `Hello${client.name ? ` ${String(client.name).split(' ')[0]}` : ''},`,
-    '',
-    isReminder
-      ? 'A quick reminder — we are still waiting on the following for your file:'
-      : 'We need a few documents to finish setting up your care:',
-    '',
-    list,
-    '',
-    due ? `Please send these by ${new Date(due.dueAt).toLocaleDateString()}.` : '',
-    'You can upload them from the Documents tab in your client portal. A clear phone photo is fine for most of them.',
-    '',
-    'If you have questions, reply to this message and someone from our team will help.',
-    '',
-    'Godwins Family Care'
-  ].filter(l => l !== null).join('\n');
-  try {
-    await sendEmail(client.email, isReminder ? 'A reminder about your documents' : 'Documents needed for your file', body);
-    return true;
-  } catch (e) {
-    console.error('[DOCUMENTS] request email failed (non-fatal):', e.message);
-    return false;
-  }
-};
 
 // POST /api/gfc/admin/enrollment/:clientId/review — record a review (no state change).
 app.post('/api/gfc/admin/enrollment/:clientId/review', authenticateToken, requireEnrollmentStaff, async (req, res) => {
@@ -10336,23 +10927,6 @@ app.post('/api/gfc/admin/enrollment/:clientId/review', authenticateToken, requir
     res.status(500).json({ error: 'Server error' });
   }
 });
-
-// Non-PHI follow-up notice — lists ONLY the outstanding item labels, never any
-// clinical or consent content. Safe to email pre-BAA (mirrors the enrollment
-// confirmation pattern).
-async function sendFollowUpNotification(client, itemLabels) {
-  try {
-    const to = [client.email, (client.intake && client.intake.primaryContact && client.intake.primaryContact.email)].filter(Boolean);
-    if (!to.length) return;
-    const firstName = enrollmentDisplayName(client).split(' ')[0];
-    const list = (itemLabels || []).map(l => `• ${l}`).join('\n');
-    const subject = 'Action needed to complete your Godwins Family Care enrollment';
-    const text = `Hi ${firstName},\n\nA few items still need your attention before we can finish your enrollment:\n\n${list}\n\nPlease sign in to your secure portal to complete them. For your privacy, no health details are included in this email.\n\n— Godwins Family Care`;
-    await sendEmail(to, subject, text, {});
-  } catch (e) {
-    console.error('Follow-up notification failed (non-fatal):', e.message);
-  }
-}
 
 // POST /api/gfc/admin/enrollment/:clientId/follow-up — request patient action.
 // body: { items: [key1, key2, ...] }  (keys are consent types or field keys)
@@ -10389,7 +10963,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/follow-up', authenticateToken, req
     await db.set('users', users);
     invalidateUsersCache();
     await logActivity(req.user.id, req.user.name || req.user.email, 'enrollment_follow_up_requested', 'enrollment', client.id, { items });
-    sendFollowUpNotification(client, itemLabels).catch(() => {});
+    await notify.enrollmentFollowUp({ clientId: client.id, itemLabels, actorId: req.user.id });
     res.json({ message: 'Follow-up requested', followUp: client.enrollmentFollowUp });
   } catch (error) {
     console.error('GFC enrollment follow-up error:', error);
@@ -10399,6 +10973,16 @@ app.post('/api/gfc/admin/enrollment/:clientId/follow-up', authenticateToken, req
 
 // POST /api/gfc/admin/enrollment/:clientId/approve — flip to enrolled (admin only).
 // Blocks with 409 + specific missing items if any required consent/field is absent.
+//
+// THE OVERRIDE (owner decision, 2026-09-13). An admin may approve over that
+// refusal with `{ override: true, overrideReason }`. Care that cannot wait is a
+// real situation and a gate with no documented way through gets worked around
+// in ways nobody can see. So the bypass is deliberate, but it is never quiet:
+// a reason is REQUIRED, exactly what was outstanding at the moment of approval
+// is frozen onto the record, and the client's file carries an override badge
+// until the gaps actually close. An override that left no trace would be
+// indistinguishable from a complete file a week later, which is the whole
+// failure it is meant to avoid.
 app.post('/api/gfc/admin/enrollment/:clientId/approve', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const users = await getUsers();
@@ -10406,28 +10990,61 @@ app.post('/api/gfc/admin/enrollment/:clientId/approve', authenticateToken, requi
     if (idx === -1) return res.status(404).json({ error: 'Client not found' });
     const client = users[idx];
 
+    const { override, overrideReason } = req.body || {};
     const comp = computeEnrollmentCompletion(client);
-    if (comp.missingConsentLabels.length || comp.missingFieldLabels.length) {
+    const incomplete = comp.missingConsentLabels.length || comp.missingFieldLabels.length;
+
+    if (incomplete && !override) {
       return res.status(409).json({
         error: 'Cannot approve — required items are missing.',
         code: 'ENROLLMENT_INCOMPLETE',
         missingConsents: comp.missingConsentLabels,
-        missingFields: comp.missingFieldLabels
+        missingFields: comp.missingFieldLabels,
+        // Named so the UI can offer the override rather than leaving an admin
+        // to discover it exists by reading the API.
+        overridable: true
+      });
+    }
+    // A reason is the entire value of the override. Without one the record
+    // says an incomplete file was approved and nothing about why, which is
+    // worse than no override at all.
+    if (incomplete && override && !String(overrideReason || '').trim()) {
+      return res.status(400).json({
+        error: 'An override needs a reason. Say why enrollment is being approved with items outstanding.',
+        code: 'OVERRIDE_REASON_REQUIRED'
       });
     }
 
+    const overrode = !!(incomplete && override);
     client.enrollmentStatus = 'enrolled';
     if (client.reviewStatus === 'needs_followup') client.reviewStatus = null;
     client.enrollmentApproval = {
       approvedAt: new Date().toISOString(),
       approvedById: req.user.id,
-      approvedByName: req.user.name || req.user.email
+      approvedByName: req.user.name || req.user.email,
+      // Frozen, not recomputed later: the point of the record is what was
+      // outstanding WHEN the call was made. Recomputing it on read would erase
+      // the override's history the moment someone filed the missing consent.
+      override: overrode ? {
+        reason: String(overrideReason).trim().slice(0, 1000),
+        missingConsents: comp.missingConsentLabels,
+        missingFields: comp.missingFieldLabels
+      } : null
     };
     users[idx] = client;
     await db.set('users', users);
     invalidateUsersCache();
-    await logActivity(req.user.id, req.user.name || req.user.email, 'enrollment_approved', 'enrollment', client.id, {});
-    res.json({ message: 'Enrollment approved', enrollmentStatus: client.enrollmentStatus });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'enrollment_approved', 'enrollment', client.id,
+      overrode ? { override: true, reason: client.enrollmentApproval.override.reason,
+                   missingConsents: comp.missingConsentLabels, missingFields: comp.missingFieldLabels } : {});
+    // The client was never told they were approved. That was the one event
+    // that says "you are done" and it was silent.
+    await notify.enrollmentApproved({ clientId: client.id, overridden: overrode, actorId: req.user.id });
+    res.json({
+      message: overrode ? 'Enrollment approved with an override' : 'Enrollment approved',
+      enrollmentStatus: client.enrollmentStatus,
+      override: client.enrollmentApproval.override
+    });
   } catch (error) {
     console.error('GFC enrollment approve error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -10642,6 +11259,39 @@ app.get('/api/gfc/admin/enrollment/meta/consent-registry', authenticateToken, re
   });
 });
 
+// The agreed CLIENT rate, built in ONE place (owner request, 2026-09-13).
+//
+// The rate must exist before a PHC client can sign the financial agreement or
+// the home care service agreement — both print the table — so it has to be
+// settable when the client is FIRST ADDED, not only later in the enrollment
+// view. That was a hard gate in testing: the rate is agreed at the point of
+// sale, long before anyone opens the enrollment screen.
+//
+// Both writers call this rather than restating the rules, the same reason the
+// service-line route calls applyServiceLineChange: two copies of "what a valid
+// rate is" is how one path starts accepting what the other refuses.
+// Returns { error, code } on a bad rate and writes nothing.
+function buildRateAgreement(body, actor) {
+  const b = body || {};
+  const hourlyRate = Number(b.hourlyRate);
+  const dailyMinimumHours = Number(b.dailyMinimumHours);
+  if (!isFinite(hourlyRate) || hourlyRate <= 0) return { error: 'hourlyRate must be a positive number', code: 'RATE_INVALID' };
+  if (!isFinite(dailyMinimumHours) || dailyMinimumHours <= 0) return { error: 'dailyMinimumHours must be a positive number', code: 'RATE_INVALID' };
+  return {
+    rateAgreement: {
+      hourlyRate, dailyMinimumHours,
+      includedServices: (b.includedServices || '').trim() || null,
+      holidayTreatment: (b.holidayTreatment || '').trim() || null,
+      errandFuel: (b.errandFuel || '').trim() || null,
+      invoiceCadence: (b.invoiceCadence || '').trim() || null,
+      cancellationWindowHours: Number(b.cancellationWindowHours) > 0 ? Number(b.cancellationWindowHours) : 24,
+      rateChangeNoticeDays: Number(b.rateChangeNoticeDays) > 0 ? Number(b.rateChangeNoticeDays) : 30,
+      effectiveDate: b.effectiveDate || null,
+      setById: actor.id, setByName: actor.name || actor.email, setAt: new Date().toISOString()
+    }
+  };
+}
+
 // PUT /api/gfc/admin/enrollment/:clientId/rate — set the agreed rate (Scope B2).
 //
 // The financial agreement and the home care service agreement both PRINT this
@@ -10651,27 +11301,16 @@ app.get('/api/gfc/admin/enrollment/meta/consent-registry', authenticateToken, re
 app.put('/api/gfc/admin/enrollment/:clientId/rate', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const b = req.body || {};
-    const hourlyRate = Number(b.hourlyRate);
-    const dailyMinimumHours = Number(b.dailyMinimumHours);
-    if (!isFinite(hourlyRate) || hourlyRate <= 0) return res.status(400).json({ error: 'hourlyRate must be a positive number', code: 'RATE_INVALID' });
-    if (!isFinite(dailyMinimumHours) || dailyMinimumHours <= 0) return res.status(400).json({ error: 'dailyMinimumHours must be a positive number', code: 'RATE_INVALID' });
+    const built = buildRateAgreement(b, req.user);
+    if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+    const { hourlyRate, dailyMinimumHours } = built.rateAgreement;
 
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
     if (idx === -1) return res.status(404).json({ error: 'Client not found' });
 
     const prior = users[idx].rateAgreement || null;
-    users[idx].rateAgreement = {
-      hourlyRate, dailyMinimumHours,
-      includedServices: (b.includedServices || '').trim() || null,
-      holidayTreatment: (b.holidayTreatment || '').trim() || null,
-      errandFuel: (b.errandFuel || '').trim() || null,
-      invoiceCadence: (b.invoiceCadence || '').trim() || null,
-      cancellationWindowHours: Number(b.cancellationWindowHours) > 0 ? Number(b.cancellationWindowHours) : 24,
-      rateChangeNoticeDays: Number(b.rateChangeNoticeDays) > 0 ? Number(b.rateChangeNoticeDays) : 30,
-      effectiveDate: b.effectiveDate || null,
-      setById: req.user.id, setByName: req.user.name || req.user.email, setAt: new Date().toISOString()
-    };
+    users[idx].rateAgreement = built.rateAgreement;
     // A rate change after the client already signed against the old figures is
     // not a silent edit — the agreement they hold no longer matches the record.
     const signedAgainstOldRate = prior && ['financialAgreement', 'serviceAgreement']
@@ -14122,21 +14761,13 @@ app.post('/api/auth/service-login', async (req, res) => {
       return res.status(403).json({ error: 'Access denied. You do not have Service Portal access. Please contact an administrator.' });
     }
 
-    const token = jwt.sign(
-      { id: user.id, email: user.email, name: user.name, role: user.role, hasServicePortalAccess: user.hasServicePortalAccess },
-      JWT_SECRET,
-      { expiresIn: config.JWT_EXPIRY }
-    );
-    res.json({
-      token,
-      user: {
+    res.json(await finishLogin({ user, req, surface: 'service', userResponse: {
         id: user.id,
         email: user.email,
         name: user.name,
         role: user.role,
         hasServicePortalAccess: user.hasServicePortalAccess || user.role === config.ROLES.ADMIN
-      }
-    });
+    } }));
   } catch (error) {
     console.error('Service login error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -15762,21 +16393,17 @@ async function createPasswordResetLink(user, plainPassword) {
 // Send the password reset email with the secure link
 async function sendPasswordResetEmail(user, token) {
   const resetUrl = `${await getAppBaseUrl()}/password-reset-${token}`;
-  const htmlBody = `
-    <div style="font-family: Inter, Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-      <div style="background: ${config.BRAND.PRIMARY_COLOR}; padding: 24px; border-radius: 8px 8px 0 0; text-align: center;">
-        <h1 style="color: white; margin: 0; font-size: 22px; font-weight: 700;">${config.BRAND.COMPANY_NAME}</h1>
-      </div>
-      <div style="background: #f9fafb; padding: 32px; border-radius: 0 0 8px 8px; border: 1px solid #e5e7eb; border-top: none;">
-        <p style="color: #374151; font-size: 16px; margin-top: 0;">Hi ${user.name},</p>
-        <p style="color: #374151; font-size: 16px;">Your password has been reset by an administrator. Click the button below to view your temporary credentials.</p>
-        <p style="color: #374151; font-size: 16px;">You will be required to create a new password when you log in.</p>
-        <div style="text-align: center; margin: 32px 0;">
-          <a href="${resetUrl}" style="background: ${config.BRAND.PRIMARY_COLOR}; color: white; padding: 14px 28px; border-radius: 6px; text-decoration: none; font-size: 16px; font-weight: 600; display: inline-block;">View My Temporary Password</a>
-        </div>
-        <p style="color: #6b7280; font-size: 13px; margin-bottom: 0;">This link expires in 24 hours. If you did not expect this reset, please contact your administrator immediately.</p>
-      </div>
-    </div>`;
+  const htmlBody = emailTemplates.renderGfcEmail({
+    greeting: user.name,
+    headline: 'Your password has been reset',
+    paragraphs: [
+      'An administrator reset your password. Use the button below to see your temporary credentials.',
+      'You will be asked to choose a new password when you sign in. The link expires in 24 hours.',
+      'If you were not expecting this, please contact your administrator right away.'
+    ],
+    ctaUrl: resetUrl,
+    ctaLabel: 'View my temporary password'
+  }).html;
   const plainText = `Hi ${user.name},\n\nYour password has been reset by an administrator.\n\nClick the link below to view your temporary credentials and log in:\n${resetUrl}\n\nThis link expires in 24 hours.`;
   return sendEmail(user.email, `Your ${config.BRAND.COMPANY_NAME} Password Has Been Reset`, plainText, { htmlBody });
 }
@@ -15917,14 +16544,22 @@ app.post('/api/admin/reset-user-password/:userId', authenticateToken, requireAdm
   }
 });
 
-// Test email endpoint (admin only) - remove after validating Resend setup
+// Test email endpoint (admin only). It goes through the house template like
+// every other send, because a probe that does not look like the real thing
+// cannot tell you the real thing looks right. The old copy claimed the arrival
+// proved Resend was working; it proves whichever transport is live delivered,
+// and the transport status says which — so it reports that instead of guessing.
 app.post('/api/admin/test-email', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { to, subject, body } = req.body;
+    const appBaseUrl = await getAppBaseUrl();
+    const text = body || 'This is a test email from your notification system. If you received this, email delivery is working. The boot log and the sending address name which transport carried it.';
+    const built = buildQueuedEmail({ body: text, ctaUrl: appBaseUrl, ctaLabel: 'Open the app' }, appBaseUrl);
     const result = await sendEmail(
       to || req.user.email,
       subject || `Test notification from ${config.BRAND.COMPANY_NAME}`,
-      body || 'This is a test email from your notification system. If you received this, Resend is working.'
+      built.text,
+      { htmlBody: built.html }
     );
     res.json(result);
   } catch (error) {
@@ -16366,7 +17001,7 @@ app.post('/api/admin/email-templates/:id/test-send', authenticateToken, requireA
     const subject = `[TEST] ${renderTemplate(tpl.subject, vars)}`;
     const body = renderTemplate(tpl.body, vars);
     const htmlSrc = tpl.id === 'welcome_email'
-      ? renderTemplate(WELCOME_HTML_BODY(), vars)
+      ? WELCOME_HTML_BODY(vars)
       : buildHtmlEmail(body, tpl.htmlBody ? renderTemplate(tpl.htmlBody, vars) : null, null, null, null, appBaseUrl);
     const result = await sendEmail(req.user.email, subject, body, { htmlBody: htmlSrc });
     if (!result.success) return res.status(500).json({ error: result.error || 'Send failed' });
@@ -16497,6 +17132,8 @@ app.post('/api/auth/change-password', authenticateToken, async (req, res) => {
     users[userIndex].lastPasswordChange = new Date().toISOString();
 
     await db.set('users', users);
+    // Session 5.3: a changed password ends every OTHER session for this user.
+    await sessions.revokeAllForUser(user.id, 'password_changed', { exceptSid: req.session && req.session.id });
     invalidateUsersCache();
 
     res.json({ message: 'Password changed successfully' });
@@ -16525,6 +17162,17 @@ app.get('/clinical', (req, res) => {
   res.sendFile(__dirname + '/public/clinical.html');
 });
 
+// PHCP scheduling — the admin/manager surface for caregiver shifts (Session 7).
+// The page existed from PR #56 but was only reachable by typing the .html
+// filename: express.static is registered without the `extensions` option, so
+// /scheduling answered 404 and nothing in the app linked to it. Same class of
+// gap as the two missing admin screens (2026-09-10): a screen nobody can reach
+// is a screen that does not exist. Shell is public; every /api/scheduling/*
+// route it calls enforces the admin-only filters.
+app.get('/scheduling', (req, res) => {
+  res.sendFile(__dirname + '/public/scheduling.html');
+});
+
 // Admin hub login endpoint (same as regular admin login)
 app.post('/api/auth/admin-login', async (req, res) => {
   try {
@@ -16542,20 +17190,12 @@ app.post('/api/auth/admin-login', async (req, res) => {
       return res.status(403).json({ error: 'Account is inactive. Please contact an administrator.' });
     }
 
-    const token = jwt.sign(
-      { id: user.id, email: user.email, name: user.name, role: user.role },
-      JWT_SECRET,
-      { expiresIn: config.JWT_EXPIRY }
-    );
-    res.json({
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        role: user.role
-      }
-    });
+    res.json(await finishLogin({ user, req, surface: 'admin', userResponse: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role
+    } }));
   } catch (error) {
     console.error('Admin login error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -16775,7 +17415,7 @@ app.post('/api/admin/email-templates/:id/preview', authenticateToken, requireAdm
     const subject = renderTemplate(tpl.subject, vars);
     const body = renderTemplate(tpl.body, vars);
     const htmlSrc = tpl.id === 'welcome_email'
-      ? renderTemplate(WELCOME_HTML_BODY(), vars)
+      ? WELCOME_HTML_BODY(vars)
       : buildHtmlEmail(body, tpl.htmlBody ? renderTemplate(tpl.htmlBody, vars) : null, appBaseUrl, 'View in App', null, appBaseUrl);
     res.json({ subject, body, html: htmlSrc });
   } catch (error) {
@@ -16809,9 +17449,12 @@ app.get('/:slug', async (req, res, next) => {
 // Global error handling middleware (Gotcha #11)
 // Must be defined after all routes - Express identifies error handlers by 4-argument signature
 app.use((err, req, res, next) => {
-  console.error('Unhandled route error:', err.stack || err.message || err);
+  // 5.4: the request id ties this line to the audit row; the message is
+  // scrubbed by logScrubber; the body is never logged.
+  const ctx = audit.currentContext();
+  console.error(`Unhandled route error [${ctx ? ctx.requestId : '-'}] ${req.method} ${req.path}:`, err.stack || err.message || err);
   if (res.headersSent) return next(err);
-  res.status(500).json({ error: 'An unexpected error occurred' });
+  res.status(500).json({ error: 'An unexpected error occurred', requestId: ctx ? ctx.requestId : undefined });
 });
 
 // Process-level error handlers to prevent crashes from unhandled async errors
@@ -16826,7 +17469,7 @@ process.on('unhandledRejection', (reason, promise) => {
 
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
-  console.log(`🔐 Admin login: ${config.DEFAULT_ADMIN.EMAIL} / ${config.DEFAULT_ADMIN.PASSWORD}`);
+  console.log(`🔐 Default admin account: ${config.DEFAULT_ADMIN.EMAIL} (password from DEFAULT_ADMIN_PASSWORD — never printed)`);
 
   // Which mailer is live, said out loud at boot. A narrowed OAuth token looked
   // exactly like a healthy one in the UI for weeks during the 8.4 upgrade; the
@@ -16840,6 +17483,25 @@ app.listen(PORT, () => {
   } else {
     console.log(`📧 Email: ${mail.transport} as ${mail.from} — NOT BAA-covered, PHI is refused`);
     console.log(`         ${mail.reason}`);
+  }
+
+  // And which Drive, for the same reason. Every document upload in the app goes
+  // through it, and when it is not configured they ALL fail — a client's photo
+  // ID, a caregiver's timesheet, a care plan PDF. Saying so at boot is the
+  // difference between a known gap and a support ticket per client.
+  //
+  // `configured` means the credential PARSES and a subject is set. It does not
+  // mean Google accepts it — only scripts/verify_drive_access.js proves that,
+  // and the line says so rather than implying more than it knows.
+  const driveState = googledrive.driveStatus();
+  if (!driveState.configured) {
+    console.log(`📁 Drive: NOT CONFIGURED — every document upload will fail`);
+    console.log(`         ${driveState.reason}`);
+    console.log(`         Setup: docs/DRIVE_ACCESS_SETUP.md`);
+  } else {
+    console.log(`📁 Drive: service account ${driveState.serviceAccount} as ${driveState.impersonating}` +
+      `${driveState.rootFolderId ? ` → folder ${driveState.rootFolderId}` : ' (no root folder set)'}`);
+    console.log(`         Credential parses; run scripts/verify_drive_access.js to prove Google accepts it.`);
   }
 
   // Safety net: reactivate any admin accounts that are inactive (prevent lockout)
@@ -16905,7 +17567,19 @@ app.listen(PORT, () => {
     } catch (err) {
       console.error('Consent lane-split migration failed (non-fatal):', err.message);
     }
+    try {
+      await migrateAnnouncementTemplateChrome();
+    } catch (err) {
+      console.error('Announcement chrome migration failed (non-fatal):', err.message);
+    }
   })();
+
+  // Session 5: housekeeping. Revoked/idle session rows older than 7 days and
+  // abandoned OpenEMR authorization states are deleted; nothing PHI-bearing.
+  setInterval(() => {
+    sessions.sweep().catch(err => console.error('Session sweep failed:', err.message));
+    emrAuth.sweepExpiredState().catch(err => console.error('OAuth state sweep failed:', err.message));
+  }, 6 * 60 * 60 * 1000);
 
   // Start HubSpot ticket polling (webhook workaround)
   initializeTicketPolling();

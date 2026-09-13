@@ -22,6 +22,7 @@
 const express = require('express');
 const sched = require('../schedulingRepository');
 const cg = require('../caregiverRepository');
+const gate = require('../enrollmentGate');
 
 module.exports = function createSchedulingRoutes(deps) {
   const { db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4 } = deps;
@@ -73,6 +74,24 @@ module.exports = function createSchedulingRoutes(deps) {
   const loadClient = async (clientId) => {
     const users = await getUsers();
     return users.find(u => u.id === clientId && u.role === ROLES.CLIENT) || null;
+  };
+
+  // Nothing may be scheduled against a client who is not enrolled. The rule
+  // lives in enrollmentGate.js because clinical appointments enforce the same
+  // one from server.js, and two copies would drift.
+  //
+  // Returns the override stamp (or null) when scheduling may proceed, and
+  // `false` after it has already answered the response. A caller that forgets
+  // to check gets a thrown response rather than a silent pass — the helper
+  // never returns undefined.
+  const gateScheduling = (req, res, client) => {
+    const verdict = gate.checkSchedulingAllowed(client, req.body || {}, req.user, isAdmin(req.user));
+    if (verdict.ok) return verdict.override;
+    res.status(verdict.status).json({
+      error: verdict.message, code: verdict.code,
+      enrollmentStatus: verdict.enrollmentStatus, overridable: verdict.overridable
+    });
+    return false;
   };
 
   // ==========================================================================
@@ -188,6 +207,17 @@ module.exports = function createSchedulingRoutes(deps) {
       const client = await loadClient(clientId);
       if (!client) return res.status(404).json({ error: 'Client not found.', code: 'CLIENT_NOT_FOUND' });
 
+      // DELIBERATELY NOT GATED (owner decision, 2026-09-13). A family calling to
+      // ask for care before the paperwork is finished is the normal way this
+      // starts, not an edge case — refusing the ask would turn the gate into a
+      // reason people phone instead, and then there is no record at all.
+      //
+      // The gate belongs on COMMITTING care (posting or assigning a shift), which
+      // is where an admin decides. So the ask is free and the client's enrollment
+      // state rides on the row instead, where whoever works the queue sees it
+      // before they act on it rather than discovering it at post time.
+      const requestEligibility = gate.schedulingEligibility(client);
+
       if (!sched.isIsoDate(body.date)) {
         return res.status(400).json({ error: 'Give the date you need care, as YYYY-MM-DD.', code: 'DATE_INVALID' });
       }
@@ -210,12 +240,20 @@ module.exports = function createSchedulingRoutes(deps) {
         status: 'requested',
         requested_at: nowIso(),
         resolved_at: null,
-        shift_id: null
+        shift_id: null,
+        // Captured at request time, and kept: what the admin working this queue
+        // needs to know is whether enrollment was outstanding when the family
+        // asked, which is also the thing that will have moved by the time
+        // anybody looks. `client_enrollment_ok` is the answer, not the raw
+        // status, so the queue reads one field rather than re-deriving a rule.
+        client_enrollment_status: requestEligibility.status,
+        client_enrollment_ok: requestEligibility.allowed,
+        client_enrollment_note: requestEligibility.allowed ? null : requestEligibility.message
       };
       rows.push(row);
       await db.set('shift_requests', rows);
       await logActivity(req.user.id, row.requested_by_name, 'shift_requested', 'shift_request', row.id,
-        { clientId: client.id, date: row.date });
+        { clientId: client.id, date: row.date, enrollmentStatus: row.client_enrollment_status });
 
       res.json({ shiftRequest: row });
     } catch (error) {
@@ -264,6 +302,9 @@ module.exports = function createSchedulingRoutes(deps) {
       const client = await loadClient(clean.clientId);
       if (!client) return res.status(404).json({ error: 'Client not found.', code: 'CLIENT_NOT_FOUND' });
 
+      const shiftOverride = gateScheduling(req, res, client);
+      if (shiftOverride === false) return;
+
       const assignToId = String((req.body || {}).assignToCaregiverId || '').trim();
       let assignee = null;
       if (assignToId) {
@@ -286,12 +327,23 @@ module.exports = function createSchedulingRoutes(deps) {
         pool_visibility: clean.poolVisibility,
         care_tier: clean.careTier || client.careTier || null,
         notes: clean.notes,
+        // The rate an admin set when RELEASING this shift (owner request,
+        // 2026-09-13). Optional: left null, each caregiver's own per-client or
+        // base rate applies at payroll time. Set, it overrides both — which is
+        // how a hard-to-fill shift gets paid more without editing anyone's
+        // standing rate. Normalized through caregiverRepository, so an
+        // unusable value lands as null rather than as a shift that pays zero.
+        pay_rate: cg.normalizePayRate((req.body || {}).payRate),
         status: 'open',
         created_by: req.user.id,
         created_by_name: req.user.name || req.user.email,
         created_at: nowIso(),
         claimed_at: null, assigned_at: null, confirmed_at: null,
-        started_at: null, completed_at: null, cancelled_at: null, reopened_at: null
+        started_at: null, completed_at: null, cancelled_at: null, reopened_at: null,
+        // Present only when an admin scheduled over the enrollment gate. It
+        // rides on the shift itself so the override is visible wherever the
+        // work is, not only in an activity log nobody opens.
+        enrollment_override: shiftOverride
       };
 
       if (assignee) {
@@ -334,7 +386,10 @@ module.exports = function createSchedulingRoutes(deps) {
           clientId: client.id, start: row.start,
           requiredLicenseLevel: row.required_license_level,
           openToAllLevels: sched.isOpenToAllLevels(row),
-          assignedTo: assignee ? assignee.id : null
+          assignedTo: assignee ? assignee.id : null,
+          enrollmentOverride: shiftOverride
+            ? { reason: shiftOverride.reason, enrollmentStatus: shiftOverride.enrollmentStatus }
+            : null
         });
 
       if (assignee) {
@@ -440,8 +495,17 @@ module.exports = function createSchedulingRoutes(deps) {
     }
   });
 
-  // GET /api/scheduling/shifts/open — the open pool, filtered to what THIS
-  // caregiver is eligible for. Ineligible shifts are not returned at all.
+  // GET /api/scheduling/shifts/open — the whole open board (owner rule,
+  // 2026-09-13). Every caregiver sees every open shift; one their licence does
+  // not cover comes back with `claimable: false` and the REASON, and the UI
+  // greys it out. Care-team-restricted shifts are still absent — see
+  // sched.shiftVisibility() for why those two gates differ.
+  //
+  // Returning the reason matters as much as returning the row: "you need a CNA
+  // sign-off for this" is a thing a caregiver can act on; a greyed row with no
+  // explanation is just a locked door. The claim route re-checks
+  // isEligibleForShift() independently, so a row shown here is never a row that
+  // can be taken here.
   router.get('/api/scheduling/shifts/open', authenticateToken, requireSchedulable, async (req, res) => {
     try {
       const me = await freshUser(req.user.id);
@@ -450,9 +514,16 @@ module.exports = function createSchedulingRoutes(deps) {
       const rows = await readRows('shifts');
       const open = rows
         .filter(r => r && r.status === 'open')
-        .filter(r => sched.isEligibleForShift(me, r, clientsById.get(r.client_id)))
-        .sort((a, b) => String(a.start).localeCompare(String(b.start)));
-      res.json({ shifts: open.slice(0, 200).map(publicShift) });
+        .map(r => ({ row: r, vis: sched.shiftVisibility(me, r, clientsById.get(r.client_id)) }))
+        .filter(x => x.vis.visible)
+        .sort((a, b) => String(a.row.start).localeCompare(String(b.row.start)));
+      res.json({
+        shifts: open.slice(0, 200).map(x => ({
+          ...publicShift(x.row),
+          claimable: x.vis.claimable,
+          ineligibleReason: x.vis.reason
+        }))
+      });
     } catch (error) {
       console.error('Open pool error:', error);
       res.status(500).json({ error: 'Server error' });
@@ -1134,10 +1205,34 @@ module.exports = function createSchedulingRoutes(deps) {
         return d >= from && d <= to;
       }).sort((a, b) => String(a.clock_in_at).localeCompare(String(b.clock_in_at)));
 
+      // Resolve each row's pay rate (owner request, 2026-09-13). A pay rate
+      // that payroll never reads is a number stored and left inert — the exact
+      // trap the competency ceiling was, one week earlier in this same repo.
+      const allUsers = await getUsers();
+      const usersById = new Map(allUsers.map(u => [u.id, u]));
+      const shiftRows = await readRows('shifts');
+      const shiftsById = new Map(shiftRows.filter(r => r && r.id).map(r => [r.id, r]));
+
       const rows = logs.map(l => {
         const shiftDate = String(l.clock_in_at || '').slice(0, 10);
         const period = sched.payPeriodFor(shiftDate) || { start: '', end: '' };
+        // Shift rate → this caregiver's rate for this client → their base rate.
+        const resolved = cg.resolvePayRate(
+          usersById.get(l.caregiver_id),
+          l.client_id,
+          shiftsById.get(l.shift_id)
+        );
+        const hoursNum = sched.minutesToHours(l.total_minutes);
+        // An unset rate prints EMPTY, never 0.00 — a blank cell is a question
+        // for whoever runs payroll; a zero is an answer, and the wrong one.
+        // Same for an open shift, where hours is null rather than zero.
+        const gross = (resolved.rate !== null && hoursNum !== null && hoursNum !== undefined)
+          ? (Math.round(resolved.rate * Number(hoursNum) * 100) / 100).toFixed(2)
+          : '';
         return {
+          payRate: resolved.rate === null ? '' : resolved.rate.toFixed(2),
+          payRateSource: resolved.rate === null ? 'not set' : resolved.source,
+          grossPay: gross,
           caregiverName: l.caregiver_name,
           licenseLevel: l.license_level ? cg.LICENSE_LABELS[l.license_level] || l.license_level : '',
           clientName: l.client_name,
@@ -1270,6 +1365,58 @@ module.exports = function createSchedulingRoutes(deps) {
     }
   });
 
+  // GET /api/scheduling/summary — the dashboard block (2026-09-13, owner request).
+  //
+  // One endpoint, one gate. The alternative was the admin hub calling four list
+  // routes and doing the arithmetic itself, which would put a second copy of
+  // "what counts as needing attention" in a page — and a dashboard that
+  // disagrees with the screen it links to is worse than no dashboard.
+  //
+  // Every number is a THING SOMEONE MUST DO, not a vanity count, and each one
+  // names where to go and answer it. Counts only: no client names, no
+  // caregiver names, no addresses. A dashboard tile is a glance, and a glance
+  // does not need PHI on it.
+  router.get('/api/scheduling/summary', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const [shifts, logs, users] = await Promise.all([
+        readRows('shifts'), readRows('time_logs'), getUsers()
+      ]);
+      const now = new Date();
+      const dayStart = new Date(now); dayStart.setUTCHours(0, 0, 0, 0);
+      const dayEnd = new Date(dayStart.getTime() + 86400000);
+      const within = (v, a, b) => {
+        const t = new Date(v).getTime();
+        return isFinite(t) && t >= a.getTime() && t < b.getTime();
+      };
+      const live = shifts.filter(r => r && r.status);
+      const clients = users.filter(u => u.role === ROLES.CLIENT);
+
+      res.json({
+        summary: {
+          today: live.filter(r => within(r.start, dayStart, dayEnd)
+            && ['confirmed', 'in_progress', 'completed'].includes(r.status)).length,
+          inProgress: live.filter(r => r.status === 'in_progress').length,
+          // Unfilled work: posted and nobody has taken it.
+          openUnfilled: live.filter(r => r.status === 'open').length,
+          // Pathway A — a caregiver claimed and is WAITING ON AN ADMIN.
+          awaitingApproval: live.filter(r => r.status === 'claimed').length,
+          // Pathway B — admin assigned and is waiting on the caregiver.
+          awaitingAcceptance: live.filter(r => r.status === 'assigned').length,
+          // A clock-in or clock-out that did not look right and nobody has
+          // corrected. `admin_edited` means someone already dealt with it.
+          flaggedTimeLogs: logs.filter(l => l && Array.isArray(l.flags)
+            && l.flags.length > 0 && !l.flags.includes('admin_edited')).length,
+          // Without coordinates a clock-in there can only ever be unverifiable.
+          clientsMissingCoordinates: clients.filter(u => !sched.clientCoords(u)).length,
+          clientCount: clients.length
+        }
+      });
+    } catch (error) {
+      console.error('Scheduling summary error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   // GET /api/scheduling/caregivers — admin picker: who can hold a shift.
   router.get('/api/scheduling/caregivers', authenticateToken, requireAdmin, async (req, res) => {
     try {
@@ -1378,13 +1525,25 @@ module.exports = function createSchedulingRoutes(deps) {
     openToAllLevels: sched.isOpenToAllLevels(r),
     levelRequirementLabel: sched.shiftLevelLabel(r),
     poolVisibility: r.pool_visibility, careTier: r.care_tier, notes: r.notes,
+    // Only the rate POSTED ON THE SHIFT, never anyone's base or per-client rate.
+    // A posted rate is identical for everyone eligible to take the shift, so
+    // showing it in the open pool leaks nothing about another caregiver's pay —
+    // and a caregiver deciding whether to pick up a shift is entitled to know
+    // what it pays. The client- and family-facing reader is a separate
+    // allow-list (my-upcoming-shifts) and carries no rate at all: what we pay a
+    // caregiver is the margin, and the client never sees it.
+    payRate: cg.normalizePayRate(r.pay_rate),
     status: r.status,
     createdByName: r.created_by_name, createdAt: r.created_at,
     claimedAt: r.claimed_at, assignedAt: r.assigned_at, confirmedAt: r.confirmed_at,
     startedAt: r.started_at, completedAt: r.completed_at,
     cancelledAt: r.cancelled_at, cancelReason: r.cancel_reason || null,
     reopenedAt: r.reopened_at,
-    releasedFromName: r.released_from_name || null, releasedReason: r.released_reason || null
+    releasedFromName: r.released_from_name || null, releasedReason: r.released_reason || null,
+    // An override that lives only in the store is barely better than a silent
+    // one. It reaches every reader of the board so the shift itself says the
+    // client was not enrolled when it was posted.
+    enrollmentOverride: r.enrollment_override || null
   });
 
   const publicTimeLog = (l) => ({

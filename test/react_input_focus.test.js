@@ -15,23 +15,52 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const PAGES = ['clinical.html', 'portal.html', 'admin-hub.html', 'admin-enrollment.html'];
-// Module scope in these files is 4 spaces (inside the babel <script> block).
-// 6+ means it is nested inside another component.
-const NESTED_COMPONENT = /^(\s{6,})const ([A-Z][A-Za-z0-9]*)\s*=\s*\(/;
+// Module scope differs by page: the older pages indent their babel block by 4
+// spaces, the newer ones write it flush left. The threshold is therefore
+// per-page — one shared number would either miss real nesting on the flush-left
+// pages or flag every component on the indented ones.
+//
+// caregiver.html and scheduling.html were ADDED 2026-09-13, when the caregiver
+// document card put a form control on a page this guard had never covered. A
+// protection that only covers the pages that happened to exist when it was
+// written stops being a protection as the app grows.
+const PAGES = [
+  { page: 'clinical.html',         nestedAt: 6 },
+  { page: 'portal.html',           nestedAt: 6 },
+  { page: 'admin-hub.html',        nestedAt: 6 },
+  { page: 'admin-enrollment.html', nestedAt: 6 },
+  { page: 'caregiver.html',        nestedAt: 2 },
+  { page: 'scheduling.html',       nestedAt: 2 }
+];
 const FORM_CONTROL = /<(input|textarea|select)\b/;
 
 test('no component that renders a form control is defined inside another component', () => {
   const offenders = [];
-  for (const page of PAGES) {
+  for (const { page, nestedAt } of PAGES) {
     const file = path.resolve(__dirname, '..', 'public', page);
     if (!fs.existsSync(file)) continue;
+    const nested = new RegExp(`^(\\s{${nestedAt},})const ([A-Z][A-Za-z0-9]*)\\s*=\\s*\\(`);
     const lines = fs.readFileSync(file, 'utf8').split('\n');
     lines.forEach((line, i) => {
-      const m = line.match(NESTED_COMPONENT);
+      const m = line.match(nested);
       if (!m) return;
-      // Look at the component's body — bounded, since these are small helpers.
-      const body = lines.slice(i, i + 40).join('\n');
+      // Scan the component's WHOLE body, found by walking back to its own
+      // indentation. This used to read a fixed 40 lines, which is fine for a
+      // small helper and blind to anything longer — a 150-line nested
+      // component with its first <input> on line 60 sailed through. That is
+      // not hypothetical: it is how the caregiver-documents section was first
+      // written, and this guard passed on it.
+      const indent = m[1].length;
+      let j = i + 1;
+      for (; j < lines.length; j++) {
+        const l = lines[j];
+        if (!l.trim()) continue;
+        const li = l.length - l.trimStart().length;
+        // Back at or above the declaration's own indent, on a line that closes
+        // or starts something: the component body has ended.
+        if (li <= indent && /^\s*(\}|\)|const |let |function |var )/.test(l)) break;
+      }
+      const body = lines.slice(i, j).join('\n');
       if (FORM_CONTROL.test(body)) {
         offenders.push(`${page}:${i + 1} — ${m[2]} (indent ${m[1].length}) renders a form control`);
       }

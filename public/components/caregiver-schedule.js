@@ -77,6 +77,9 @@
     '.gfcs .gchip.on{background:var(--navy);color:var(--gold)}',
     '.gfcs .gchip.warn{background:#fdeeee;color:var(--red)}',
     '.gfcs .gchip.ok{background:#eef3f0;color:var(--green)}',
+    '.gfcs .gpay{font-size:14px;font-weight:600;color:var(--navy);margin-top:3px}',
+    '.gfcs .gblocked{opacity:.55}',
+    '.gfcs .gwhy{font-size:13px;color:var(--mut);font-style:italic;margin-top:5px}',
     '.gfcs .gempty{text-align:center;padding:22px 12px;color:var(--mut);font-size:15px}',
     '.gfcs .gerr{background:#fdeeee;border:1px solid #e7bcbc;color:#7d2020;border-radius:9px;padding:11px;font-size:15px;margin-bottom:10px}',
     '.gfcs .gok{background:#f2f8f6;border:1px solid #b8ddd0;color:#0d5744;border-radius:9px;padding:11px;font-size:15px;margin-bottom:10px}',
@@ -248,17 +251,41 @@
     }).join('') + '</div>';
   }
 
+  // The whole open board (owner rule, 2026-09-13). A shift this caregiver's
+  // licence does not cover is shown GREYED OUT with the reason, not hidden —
+  // seeing the board is how someone learns what work exists and which
+  // credential would open it. The server decides `claimable`; this only
+  // renders it, and the claim route re-checks independently, so a greyed row
+  // that somehow got clicked is still refused server-side.
+  //
+  // `claimable !== false` is deliberate: an older cached response with no such
+  // field renders as claimable and is refused at the API, which is the same
+  // outcome as today. Reading a missing field as "not claimable" would grey out
+  // the entire board on a stale payload.
   function renderOpen(state) {
-    if (!state.open.length) return '<div class="gempty">No open shifts you can take right now.</div>';
+    if (!state.open.length) return '<div class="gempty">No open shifts right now.</div>';
+    var takeable = state.open.filter(function (s) { return s.claimable !== false; }).length;
     return '<div class="gcard"><h3>Open shifts</h3>' +
-      '<p class="gmu" style="margin-bottom:8px">Claiming submits the shift for approval. The office confirms it before it is yours.</p>' +
+      '<p class="gmu" style="margin-bottom:8px">Claiming submits the shift for approval. The office confirms it before it is yours.' +
+        (takeable < state.open.length
+          ? ' Shifts you are not credentialed for are shown greyed out.'
+          : '') + '</p>' +
       state.open.map(function (s) {
-        return '<div class="grow" style="display:block">' +
+        var can = s.claimable !== false;
+        return '<div class="grow' + (can ? '' : ' gblocked') + '" style="display:block">' +
           '<div class="gwhen">' + esc(fmtRange(s.start, s.end)) + '</div>' +
           '<div class="gmu">' + esc(s.clientName || '') +
             (s.levelRequirementLabel ? ' · ' + esc(s.levelRequirementLabel) : '') + '</div>' +
+          // Only a rate POSTED on the shift by an admin — identical for everyone
+          // eligible, so it says nothing about any other caregiver's pay. A
+          // caregiver deciding whether to pick up a shift is entitled to know
+          // what it pays.
+          (typeof s.payRate === 'number'
+            ? '<div class="gpay">$' + s.payRate.toFixed(2) + ' / hour</div>' : '') +
           (s.notes ? '<div class="gmu">' + esc(s.notes) + '</div>' : '') +
-          '<div class="gbtns"><button class="gbtn gold" data-act="claim" data-id="' + s.id + '">Claim</button></div>' +
+          (can ? '' : '<div class="gwhy">Not available to you — ' + esc(s.ineligibleReason || 'your licence level does not meet this shift\'s requirement') + '</div>') +
+          '<div class="gbtns"><button class="gbtn gold" data-act="claim" data-id="' + esc(s.id) + '"' +
+            (can ? '' : ' disabled aria-disabled="true"') + '>Claim</button></div>' +
         '</div>';
       }).join('') + '</div>';
   }

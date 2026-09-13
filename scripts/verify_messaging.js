@@ -142,13 +142,20 @@ const server = app.listen(0, '127.0.0.1', async () => {
   const clientCh = await call('GET', '/api/messaging/channels', { as: 'client-1' });
   check('a client reads their channels', clientCh.status === 200);
   const clientIds = clientCh.data.channels.map(c => c.id).sort();
-  check('and they are exactly Direct, Support and Clinical Escalation',
-    JSON.stringify(clientIds) === JSON.stringify(['clinical_escalation', 'direct_care', 'support']),
+  check('and they reach every role on the care team — caregiver, office, clinician, case manager',
+    JSON.stringify(clientIds) === JSON.stringify(['care_coordination', 'clinical_escalation', 'direct_care', 'support']),
     JSON.stringify(clientIds));
 
-  const cmCh = await call('GET', '/api/messaging/channels', { as: 'cm-1' });
-  check('a case manager opens none — behavioral escalations come TO them',
-    cmCh.status === 200 && cmCh.data.channels.length === 0);
+  const cmCh = await call('GET', '/api/messaging/channels?clientId=client-1', { as: 'cm-1' });
+  const cmIds = cmCh.data.channels.map(c => c.id).sort();
+  check('OWNER RULE: a case manager can now START a conversation, not only receive one',
+    cmCh.status === 200 && JSON.stringify(cmIds) === JSON.stringify(['behavioral_escalation', 'care_coordination']),
+    JSON.stringify(cmIds));
+
+  const adminCh = await call('GET', '/api/messaging/channels?clientId=client-1', { as: 'admin-1' });
+  check('OWNER RULE: admin opens every channel — "admin / manager should be able to message anyone"',
+    adminCh.status === 200 && adminCh.data.channels.length === 10,
+    `${adminCh.data.channels.length} channels`);
 
   const unauth = await call('GET', '/api/messaging/channels');
   check('unauthenticated is 401', unauth.status === 401);
@@ -213,11 +220,13 @@ const server = app.listen(0, '127.0.0.1', async () => {
   check('and it is a refusal, not "there is nothing here"',
     denied.data.code === 'THREAD_NOT_YOURS' && !('messages' in denied.data));
 
+  // OWNER RULE 2026-09-13: a case manager is scoped by CLIENT, not by channel.
+  // client-1 is theirs, so every thread about client-1 is theirs to read.
   const cmClinical = await call('GET', `/api/messaging/threads/${made.clinical_oversight}`, { as: 'cm-1' });
-  check('a case manager is refused a clinical thread',
-    cmClinical.status === 403 && cmClinical.data.code === 'CASE_MANAGER_SCOPE');
+  check('a case manager reads a clinical thread for THEIR OWN client',
+    cmClinical.status === 200, `${cmClinical.status} ${JSON.stringify(cmClinical.data).slice(0, 90)}`);
   const cmBehavioral = await call('GET', `/api/messaging/threads/${made.behavioral_escalation}`, { as: 'cm-1' });
-  check('and reads the behavioral one they were never named on', cmBehavioral.status === 200);
+  check('and the behavioral one they were never named on', cmBehavioral.status === 200);
 
   const famClinical = await call('GET', `/api/messaging/threads/${made.clinical_escalation}`, { as: 'fam-1' });
   check('non-POA family are refused a clinical thread',
@@ -232,6 +241,80 @@ const server = app.listen(0, '127.0.0.1', async () => {
   const ghost = await call('GET', '/api/messaging/threads/does-not-exist', { as: 'admin-1' });
   check('a thread that does not exist is 404 — a different fact from "not yours"',
     ghost.status === 404 && ghost.data.code === 'THREAD_NOT_FOUND');
+
+  // ==========================================================================
+  section('D2. THE CROSS-CLIENT LEAK (regression, 2026-09-13)');
+  // Reported from production: two unrelated clients in one Direct thread, each
+  // able to post. Every assertion here reads the STORE back, because the defect
+  // returned 200 the whole time it was live.
+  // ==========================================================================
+  const before = (await storedAll('messages', m => m.thread_id === made.direct_care)).length;
+
+  const peek = await call('GET', `/api/messaging/threads/${made.direct_care}`, { as: 'client-2' });
+  check('a client CANNOT open another client\'s Direct thread',
+    peek.status === 403 && peek.data.code === 'THREAD_NOT_YOURS',
+    `${peek.status} ${JSON.stringify(peek.data).slice(0, 120)}`);
+  check('and the refusal returns no messages at all', !('messages' in peek.data));
+
+  const intrude = await call('POST', `/api/messaging/threads/${made.direct_care}/messages`, {
+    as: 'client-2', body: { body: 'I should not be here (TEST DATA)' }
+  });
+  check('and cannot POST into it either', intrude.status === 403, `${intrude.status}`);
+  check('STORED: the refusal wrote nothing — the thread is unchanged',
+    (await storedAll('messages', m => m.thread_id === made.direct_care)).length === before,
+    `${(await storedAll('messages', m => m.thread_id === made.direct_care)).length} vs ${before}`);
+
+  const listed = await call('GET', '/api/messaging/threads', { as: 'client-2' });
+  check('STORED: another client\'s thread is absent from the list too',
+    listed.status === 200 && !listed.data.threads.some(t => t.id === made.direct_care),
+    JSON.stringify(listed.data.threads.map(t => t.clientName)));
+  check('and every thread they DO see belongs to them',
+    listed.data.threads.every(t => t.clientId === 'client-2'),
+    JSON.stringify(listed.data.threads.map(t => t.clientId)));
+
+  // ==========================================================================
+  section('D3. Staff can answer what they can see (owner rule 2026-09-13)');
+  // ==========================================================================
+  const adminReply = await call('POST', `/api/messaging/threads/${made.direct_care}/messages`, {
+    as: 'admin-1', body: { body: 'The office is on this (TEST DATA)' }
+  });
+  check('an admin REPLIES in a Direct thread — the reported defect',
+    adminReply.status === 200, `${adminReply.status} ${JSON.stringify(adminReply.data).slice(0, 120)}`);
+  const directRows = await storedAll('messages', m => m.thread_id === made.direct_care);
+  check('STORED: the reply is on the thread, attributed to the admin',
+    directRows.some(m => m.body.includes('The office is on this') && m.from_role === 'admin'),
+    JSON.stringify(directRows.map(m => m.from_role)));
+  check('STORED: and the admin joined the participant list rather than posting from outside it',
+    (await storedAll('message_threads', t => t.id === made.direct_care))[0].participant_ids.includes('admin-1'));
+
+  const picker = await call('GET', '/api/messaging/clients', { as: 'cm-1' });
+  check('a case manager\'s client picker lists only clients assigned to them',
+    picker.status === 200 && picker.data.clients.every(c => c.id === 'client-1'),
+    JSON.stringify(picker.data.clients));
+  const adminPicker = await call('GET', '/api/messaging/clients', { as: 'admin-1' });
+  check('an admin\'s picker lists every client', adminPicker.data.clients.length >= 2,
+    `${adminPicker.data.clients.length}`);
+  const clientPicker = await call('GET', '/api/messaging/clients', { as: 'client-1' });
+  check('a client\'s picker is only themselves — never a way to find another client',
+    clientPicker.data.clients.length === 1 && clientPicker.data.clients[0].id === 'client-1',
+    JSON.stringify(clientPicker.data.clients));
+
+  const outOfScope = await call('POST', '/api/messaging/threads', {
+    as: 'cm-1', body: { channel: 'care_coordination', clientId: 'client-2', body: 'Not mine (TEST DATA)' }
+  });
+  check('a case manager cannot start a thread about a client who is not theirs',
+    outOfScope.status === 403 && outOfScope.data.code === 'CLIENT_NOT_IN_SCOPE',
+    `${outOfScope.status} ${JSON.stringify(outOfScope.data).slice(0, 120)}`);
+  check('STORED: and nothing was written by that refusal',
+    (await storedAll('message_threads', t => t.client_id === 'client-2' && t.channel === 'care_coordination')).length === 0);
+
+  const coord = await call('POST', '/api/messaging/threads', {
+    as: 'client-1', body: { channel: 'care_coordination', body: 'A question for my case manager (TEST DATA)' }
+  });
+  check('a client opens Care Coordination with their case manager', coord.status === 200,
+    `${coord.status} ${JSON.stringify(coord.data).slice(0, 120)}`);
+  check('STORED: the case manager is on it',
+    (await storedAll('message_threads', t => t.channel === 'care_coordination'))[0].participant_ids.includes('cm-1'));
 
   // ==========================================================================
   section('E. A Care Update is an update, not a conversation');

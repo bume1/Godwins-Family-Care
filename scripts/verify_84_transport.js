@@ -7,7 +7,7 @@
 // the TEST patient. Never point it at a real patient.
 //
 //   OPENEMR_BASE_URL=… OPENEMR_CLIENT_ID=… OPENEMR_CLIENT_SECRET=… \
-//   OPENEMR_API_USERNAME=… OPENEMR_API_PASSWORD=… node scripts/verify_84_transport.js
+//   OPENEMR_PROBE_ACCESS_TOKEN=… (from scripts/emr_login.js) node scripts/verify_84_transport.js
 //
 // It asserts STORED VALUES read back, never status codes. The charge block in
 // particular re-checks the defect that took Phase 6B three runs to catch: a
@@ -18,6 +18,9 @@
 //
 // Result on 2026-09-08 against the live instance: 23/23.
 const o=require('../openemr.js');
+// Session 5.2: no password grant — the probe runs as a real OpenEMR user.
+// Obtain a token with `node scripts/emr_login.js`, then export OPENEMR_PROBE_ACCESS_TOKEN.
+require('./lib/probe_emr_auth').installProbeToken(o);
 const e=o.forActor({id:'4.5probe',name:'4.5 probe',role:'admin'});
 const U='a284d5c2-670e-4a62-aa95-2d1aa629003c';
 let pass=0,fail=0;

@@ -10,6 +10,9 @@
 //
 // TEST DATA only. Appointments it creates are cancelled (tombstoned) at the end.
 const o = require('../openemr.js');
+// Session 5.2: no password grant — the probe runs as a real OpenEMR user.
+// Obtain a token with `node scripts/emr_login.js`, then export OPENEMR_PROBE_ACCESS_TOKEN.
+require('./lib/probe_emr_auth').installProbeToken(o);
 const repo = require('../clinicalRepository.js');
 const config = require('../config.js');
 const e = o.forActor({ id: 'splitprobe', name: 'facility split probe', role: 'admin' });

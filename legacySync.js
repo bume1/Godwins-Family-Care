@@ -100,55 +100,59 @@ function columnLetter(idx) {
   return s;
 }
 
+// Both of these used to hand-roll their own HTML. They were close to the house
+// style by eye and wrong in the details — a text wordmark instead of the logo,
+// no signature block, and the patient one printed info@ while every other
+// email the app sends says support@. They render through `emailTemplates` now,
+// like everything else. Do not reintroduce markup here; the build fails on it.
+const { renderGfcEmail } = require('./emailTemplates');
+
 // ── Admin email (mirror of buildAdminEmail in gfc_roi_upload.gs) ──
 // fileNames/fileUrls may be arrays (multi-provider) or single strings.
+// Internal, so it may name the client; the patient-facing one below may not
+// carry anything a person did not already know about themselves.
 function buildAdminEmailHtml(clientName, tokenOrKey, fileNames, fileUrls) {
   const names = Array.isArray(fileNames) ? fileNames : [fileNames];
   const urls = Array.isArray(fileUrls) ? fileUrls : [fileUrls];
 
-  let fileLines = '';
+  const fields = [{ label: 'Reference', value: tokenOrKey, mono: true }];
   names.forEach((name, i) => {
-    const url = urls[i] || '';
-    fileLines += `<p style="font-size:14px;color:#3a4a52;line-height:1.6;margin:0 0 6px;">`
-      + `<strong>${names.length > 1 ? 'File ' + (i + 1) + ':' : 'File:'}</strong> ${esc(name)}`
-      + (url ? ` &nbsp;<a href="${esc(url)}" style="color:#033D50;font-size:13px;">View in Drive</a>` : '')
-      + `</p>`;
+    if (!name) return;
+    fields.push({ label: names.length > 1 ? `File ${i + 1}` : 'File', value: name });
   });
 
-  return `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#FAF7F2;font-family:Arial,sans-serif;">`
-    + `<div style="max-width:600px;margin:32px auto;">`
-    + `<div style="background:#033D50;padding:28px 40px;border-radius:8px 8px 0 0;">`
-    + `<span style="color:#fff;font-family:Georgia,serif;font-size:18px;">Godwins Family Care</span>`
-    + `</div><div style="background:#F5CD85;height:4px;"></div>`
-    + `<div style="background:#fff;padding:40px;border-radius:0 0 8px 8px;">`
-    + `<h1 style="font-family:Georgia,serif;font-size:20px;color:#033D50;margin:0 0 16px;">Provider ROI Received</h1>`
-    + `<p style="font-size:14px;color:#3a4a52;line-height:1.75;margin:0 0 12px;">A completed authorization was received for <strong>${esc(clientName)}</strong>.`
-    + (names.length > 1 ? ` <strong>${names.length} PDFs attached</strong> — one per provider.` : ` PDF attached.`)
-    + `</p>`
-    + `<p style="font-size:14px;color:#3a4a52;line-height:1.75;margin:0 0 4px;"><strong>Reference:</strong> ${esc(tokenOrKey)}</p>`
-    + fileLines
-    + `<p style="font-size:13px;color:#8a9aa2;margin-top:20px;">Drive links have also been written to the intake sheet (parallel run).</p>`
-    + `</div><div style="text-align:center;padding:20px;font-size:11px;color:#8a9aa2;">Godwins Family Care LLC &nbsp;·&nbsp; (404) 913-6705</div>`
-    + `</div></body></html>`;
+  // One Drive link becomes the button; several are listed in the prose, since
+  // a template has one call to action and picking a file arbitrarily is worse
+  // than naming them all.
+  const links = urls.filter(Boolean);
+  const paragraphs = [
+    `A completed authorization was received for ${clientName}.` +
+      (names.length > 1 ? ` ${names.length} PDFs are attached, one per provider.` : ' The PDF is attached.')
+  ];
+  if (links.length > 1) paragraphs.push(`Drive copies: ${links.join('  ·  ')}`);
+  paragraphs.push('Drive links have also been written to the intake sheet (parallel run).');
+
+  return renderGfcEmail({
+    greeting: null,
+    headline: 'Provider ROI received',
+    paragraphs,
+    fields,
+    ctaUrl: links.length === 1 ? links[0] : null,
+    ctaLabel: links.length === 1 ? 'View in Drive' : null
+  }).html;
 }
 
 // ── Patient confirmation email (mirror of buildPatientEmail; no PDF attached) ──
 function buildPatientEmailHtml(patientName) {
-  const first = (patientName || '').split(' ')[0] || 'there';
-  return `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#FAF7F2;font-family:Arial,sans-serif;">`
-    + `<div style="max-width:600px;margin:32px auto;">`
-    + `<div style="background:#033D50;padding:28px 40px;border-radius:8px 8px 0 0;">`
-    + `<span style="color:#fff;font-family:Georgia,serif;font-size:18px;">Godwins Family Care</span>`
-    + `</div><div style="background:#F5CD85;height:4px;"></div>`
-    + `<div style="background:#fff;padding:40px;border-radius:0 0 8px 8px;">`
-    + `<h1 style="font-family:Georgia,serif;font-size:20px;color:#033D50;margin:0 0 20px;">We received your form.</h1>`
-    + `<p style="font-size:14px;color:#3a4a52;line-height:1.8;margin:0 0 14px;">Hi ${esc(first)},</p>`
-    + `<p style="font-size:14px;color:#3a4a52;line-height:1.8;margin:0 0 14px;">Your signed Authorization to Obtain Medical Records was received. Our care team will use it to request your records from your provider and will be in touch with next steps.</p>`
-    + `<p style="font-size:14px;color:#3a4a52;line-height:1.8;margin:0 0 24px;">Please don't hesitate to reach out with any questions.</p>`
-    + `<p style="font-size:14px;color:#3a4a52;line-height:1.8;margin:0;">Warmly,<br><strong>Godwins Family Care</strong><br>`
-    + `<a href="tel:4049136705" style="color:#033D50;">(404) 913-6705</a> &nbsp;·&nbsp; <a href="mailto:info@godwinsfamilycarellc.com" style="color:#033D50;">info@godwinsfamilycarellc.com</a></p>`
-    + `</div><div style="text-align:center;padding:20px;font-size:11px;color:#8a9aa2;">Godwins Family Care LLC &nbsp;·&nbsp; 4300 Paces Ferry Rd SE, Ste 500, Atlanta, GA 30339</div>`
-    + `</div></body></html>`;
+  const first = (patientName || '').split(' ')[0] || null;
+  return renderGfcEmail({
+    greeting: first,
+    headline: 'We received your form',
+    paragraphs: [
+      'Your signed Authorization to Obtain Medical Records was received. Our care team will use it to request your records from your provider and will be in touch with next steps.',
+      'Please reach out any time if you have questions.'
+    ]
+  }).html;
 }
 
 function esc(s) {

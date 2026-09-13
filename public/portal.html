@@ -228,6 +228,8 @@
     .gfc .err{background:#fdecea;border:1px solid rgba(181,70,46,.3);color:var(--gfc-danger,#B5462E);border-radius:11px;padding:11px 13px;font-size:13px;margin-top:14px;}
     .gfc .ok-badge{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:600;color:var(--teal);}
   </style>
+  <script src="/session-guard.js"></script>
+  <script src="/mfa-step.js"></script>
 </head>
 <body class="bg-gray-50 min-h-screen">
   <div id="root"></div>
@@ -319,7 +321,7 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email, password })
-        }).then(handleResponse).then(result => {
+        }).then(handleResponse).then(r => window.GFC_MFA.complete(r)).then(result => {
           // Verify slug matches for client users if a slug was specified in URL
           if (result.user && result.user.role === 'client' && slug && result.user.slug !== slug) {
             return { error: 'This account is not associated with this portal' };
@@ -632,11 +634,11 @@
           
           <aside className={`w-64 bg-white border-r min-h-screen fixed left-0 top-0 z-50 transform transition-transform duration-300 ${isMobileOpen ? 'translate-x-0' : '-translate-x-full'} lg:translate-x-0`}>
             <div className="p-4 border-b flex justify-between items-center">
-              {user?.logo ? (
-                <img src={user.logo} alt={user.practiceName || 'Practice Logo'} className="h-12 max-w-full object-contain" />
-              ) : (
-                <img src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" className="h-10" />
-              )}
+              {/* GFC's wordmark, always. `user.logo` holds the client's own
+                  photo now (clients were practices in the lab app and the field
+                  kept its name), and a person's face where the provider's logo
+                  belongs tells the reader this is their own site, not ours. */}
+              <img src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" className="h-10" />
               <button onClick={onClose} className="lg:hidden text-gray-500 hover:text-gray-700">
                 {Icons.close}
               </button>
@@ -769,13 +771,19 @@
             <div className="absolute inset-0 bg-cover bg-center" style={{backgroundImage: 'url(/banners/banner-client.jpg)', backgroundColor: '#033D50'}}></div>
             <div className="absolute inset-0" style={{background: 'linear-gradient(to right, rgba(0,32,90,0.95) 0%, rgba(4,94,159,0.8) 50%, rgba(4,94,159,0.4) 100%)'}}></div>
             <div className="relative p-6 md:p-8 flex items-center justify-between min-h-[160px]">
-              <div className="text-white">
-                <h1 className="text-2xl md:text-3xl font-bold drop-shadow-sm">Welcome to Your Portal</h1>
-                <p className="mt-2 text-white/90">{data?.user?.practiceName || 'Your Practice'}</p>
+              <div className="text-white flex items-center gap-4">
+                {/* Their photo, as an avatar. It used to be stretched across
+                    this banner as practice branding, which is what it was when
+                    a client was a practice. A person gets a headshot. */}
+                {data?.user?.logo && (
+                  <img src={data.user.logo} alt=""
+                    className="h-14 w-14 md:h-16 md:w-16 rounded-full object-cover border-2 border-white/70 shadow-lg flex-shrink-0" />
+                )}
+                <div>
+                  <h1 className="text-2xl md:text-3xl font-bold drop-shadow-sm">Welcome to Your Portal</h1>
+                  <p className="mt-2 text-white/90">{data?.user?.practiceName || data?.user?.name || ''}</p>
+                </div>
               </div>
-              {data?.user?.logo && (
-                <img src={data.user.logo} alt={data?.user?.practiceName || 'Practice Logo'} className="h-16 md:h-20 max-w-[200px] object-contain bg-white/90 rounded-xl p-3 shadow-lg" />
-              )}
             </div>
           </div>
           
@@ -3879,12 +3887,156 @@
     // the one-pass rule: the paper packet consolidated twelve repetitions of the
     // same fields behind one face sheet, and a consent here confirms a value
     // rather than asking for it again.
-    const ConsentData = ({ block, resolved }) => {
+    // ── Correcting prefilled information from inside a consent ──────────
+    //
+    // A consent RENDERS what intake already collected rather than asking again
+    // (the one-pass rule). That was display-only, so a client whose pharmacy
+    // changed between intake and signing had no way to fix it and signed a
+    // document printing the old one.
+    //
+    // This map says which intake fields back each rendered block. It edits the
+    // STRUCTURED fields, never the rendered line: "CVS Main St · 770-555-1234"
+    // is two fields joined for display and there is no way back from the string
+    // to the pair. Writing the structure is also what keeps the matching and
+    // billing engines reading real values rather than prose.
+    //
+    // A source missing from this map is not silently read-only — the block says
+    // which step of the wizard owns it, because sending someone to hunt is
+    // worse than telling them where to go. Deliberately absent:
+    //   rateTable      the agreed price. An administrator sets it; a client
+    //                  editing their own rate inside the agreement that prints
+    //                  it is the one edit this must never allow.
+    //   priorProviders owned by the Transfer-of-Care ROI, which has its own
+    //                  multi-provider editor.
+    //   roiFamilyDetail already has its own editor directly above the card.
+    const CONSENT_DATA_FIELDS = {
+      parties: { step: 'Your details', fields: [
+        { path: 'dob', label: 'Date of birth', type: 'date' },
+        { path: 'phone', label: 'Phone', type: 'tel' },
+        { path: 'address.line1', label: 'Street address' },
+        { path: 'address.city', label: 'City' },
+        { path: 'address.state', label: 'State' },
+        { path: 'address.zip', label: 'ZIP' },
+        { path: 'primaryContact.name', label: 'Representative' },
+        { path: 'primaryContact.relationship', label: 'Their relationship to you' },
+        { path: 'primaryContact.phone', label: 'Their phone', type: 'tel' }
+      ] },
+      clientIdentity: { step: 'Your details', fields: [
+        { path: 'dob', label: 'Date of birth', type: 'date' },
+        { path: 'phone', label: 'Phone', type: 'tel' },
+        { path: 'address.line1', label: 'Street address' },
+        { path: 'address.city', label: 'City' },
+        { path: 'address.state', label: 'State' },
+        { path: 'address.zip', label: 'ZIP' }
+      ] },
+      schedule: { step: 'Schedule & urgency', fields: [
+        { path: 'schedule.startDate', label: 'Requested start', type: 'date' },
+        { path: 'schedule.hoursPerWeek', label: 'Hours per week' },
+        { path: 'schedule.recurring', label: 'Recurring' },
+        { path: 'schedule.urgency', label: 'Urgency' }
+      ] },
+      ltcPolicy: { step: 'Insurance', fields: [
+        { path: 'ltc.carrier', label: 'Carrier' },
+        { path: 'ltc.policyNum', label: 'Policy number' },
+        { path: 'ltc.policyHolder', label: 'Policy holder' },
+        { path: 'ltc.benefit', label: 'Daily / monthly benefit' },
+        { path: 'ltc.elimination', label: 'Elimination period' }
+      ] },
+      careCoordinationContacts: { step: 'Medical', fields: [
+        { path: 'medicalTeam.pcpName', label: 'Primary care provider' },
+        { path: 'medicalTeam.pcpPractice', label: 'Their practice / clinic' },
+        { path: 'medicalTeam.pcpPhone', label: 'Their phone', type: 'tel' },
+        { path: 'medicalTeam.specialist1Name', label: 'Specialist' },
+        { path: 'medicalTeam.specialist2Name', label: 'Second specialist' },
+        { path: 'medicalTeam.preferredPharmacy', label: 'Pharmacy' },
+        { path: 'medicalTeam.pharmacyPhone', label: 'Pharmacy phone', type: 'tel' },
+        { path: 'medicalTeam.preferredHospital', label: 'Preferred hospital' }
+      ] },
+      advanceDirective: { step: 'Medical', fields: [
+        { path: 'advanceDirective.status', label: 'Advance directive', type: 'select',
+          options: ['', 'On file with Godwins Family Care', 'I have one, not yet provided', 'I do not have one', 'Not sure'] }
+      ] },
+      faceSheetEmergency: { step: 'Medical', note: 'Emergency contacts are edited on the Contacts step.', fields: [
+        { path: 'allergies', label: 'Allergies (or "none")' },
+        { path: 'medicalTeam.pcpName', label: 'Primary care provider' },
+        { path: 'medicalTeam.pcpPhone', label: 'Their phone', type: 'tel' },
+        { path: 'medicalTeam.preferredPharmacy', label: 'Pharmacy' },
+        { path: 'medicalTeam.pharmacyPhone', label: 'Pharmacy phone', type: 'tel' },
+        { path: 'medicalTeam.preferredHospital', label: 'Preferred hospital' }
+      ] },
+      callOrder: { step: 'Medical', note: 'Emergency contacts are edited on the Contacts step.', fields: [
+        { path: 'crisisNotify', label: 'Who we notify first' },
+        { path: 'auth911', label: '911 authorization' },
+        { path: 'entryInstructions', label: 'How responders get in' },
+        { path: 'medicalTeam.preferredHospital', label: 'Preferred hospital' }
+      ] },
+      responsibleParty: { step: 'Insurance', fields: [
+        { path: 'responsibleParty.name', label: 'Responsible party' },
+        { path: 'responsibleParty.relationship', label: 'Their relationship to you' },
+        { path: 'responsibleParty.phone', label: 'Their phone', type: 'tel' }
+      ] },
+      coverage: { step: 'Insurance' },
+      rateTable: { step: null, note: 'Your agreed rate is set by our office. Tell us if it looks wrong and we will correct it before you sign.' },
+      priorProviders: { step: 'Transfer of Care' },
+      roiFamilyDetail: { step: null, note: 'Edit these in the box directly above.' }
+    };
+
+    const getPath = (obj, path) =>
+      String(path).split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj);
+
+    // Returns a NEW object with the dot-path set, leaving the original alone —
+    // React state is replaced, never mutated in place.
+    const setPath = (obj, path, value) => {
+      const keys = String(path).split('.');
+      const out = { ...(obj || {}) };
+      let cur = out;
+      for (let i = 0; i < keys.length - 1; i++) {
+        cur[keys[i]] = { ...(cur[keys[i]] || {}) };
+        cur = cur[keys[i]];
+      }
+      cur[keys[keys.length - 1]] = value;
+      return out;
+    };
+
+    const ConsentData = ({ block, resolved, form, onSaveEdits, locked }) => {
       const r = resolved || { rows: [] };
+      const spec = CONSENT_DATA_FIELDS[block.source] || null;
+      const canEdit = !locked && !!(spec && spec.fields && spec.fields.length && form && onSaveEdits);
+      const [editing, setEditing] = useState(false);
+      const [draft, setDraft] = useState({});
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+
+      const open = () => {
+        const d = {};
+        (spec.fields || []).forEach(f => { d[f.path] = getPath(form, f.path) || ''; });
+        setDraft(d); setErr(''); setEditing(true);
+      };
+
+      const save = async () => {
+        setBusy(true); setErr('');
+        // The save PERSISTS before the card re-renders, and the signature is
+        // taken afterwards. That ordering is the whole point: a correction made
+        // but not written would print the old value on the signed copy.
+        const res = await onSaveEdits(draft);
+        setBusy(false);
+        if (res && res.error) { setErr(res.error); return; }
+        setEditing(false);
+      };
+
       return (
         <div className="card" style={{ background: 'var(--gfc-cream,#FAF7F2)', marginTop: 8, marginBottom: 8 }}>
-          {block.label && <div style={{ fontWeight: 600, color: 'var(--navy)', fontSize: 12.5, marginBottom: 6 }}>{block.label}</div>}
-          {r.blocked
+          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
+            {block.label && <div style={{ fontWeight: 600, color: 'var(--navy)', fontSize: 12.5, marginBottom: 6 }}>{block.label}</div>}
+            {canEdit && !editing && (
+              <button type="button" onClick={open}
+                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontSize: 12, fontWeight: 600, color: 'var(--primary,#045E9F)', textDecoration: 'underline' }}>
+                This has changed
+              </button>
+            )}
+          </div>
+
+          {!editing && (r.blocked
             ? <div className="err" style={{ marginTop: 0 }}>{r.message}</div>
             : (!r.rows || !r.rows.length)
               ? <div className="sub" style={{ marginTop: 0 }}>Not recorded yet.</div>
@@ -3893,12 +4045,45 @@
                     <span style={{ color: 'var(--mut)', minWidth: 140, fontWeight: 600 }}>{row.label}</span>
                     <span style={{ color: 'var(--ink)' }}>{row.value}</span>
                   </div>
-                ))}
+                )))}
+
+          {!editing && !canEdit && !locked && spec && (spec.note || spec.step) && (
+            <div className="sub" style={{ marginTop: 6, fontSize: 11.5 }}>
+              {spec.note || `To change this, go back to the ${spec.step} step.`}
+            </div>
+          )}
+
+          {editing && (
+            <div style={{ marginTop: 4 }}>
+              {(spec.fields || []).map(f => (
+                <div key={f.path} style={{ marginBottom: 8 }}>
+                  <label className="lbl" style={{ display: 'block', marginTop: 0, marginBottom: 3, fontSize: 11.5 }}>{f.label}</label>
+                  {f.type === 'select' ? (
+                    <select className="inp" value={draft[f.path] || ''}
+                      onChange={e => setDraft(d => ({ ...d, [f.path]: e.target.value }))}>
+                      {(f.options || []).map(o => <option key={o} value={o}>{o || '— Select —'}</option>)}
+                    </select>
+                  ) : (
+                    <input className="inp" type={f.type || 'text'} value={draft[f.path] || ''}
+                      onChange={e => setDraft(d => ({ ...d, [f.path]: e.target.value }))} />
+                  )}
+                </div>
+              ))}
+              {spec.note && <div className="sub" style={{ fontSize: 11.5 }}>{spec.note}</div>}
+              {err && <div className="err" style={{ marginTop: 6 }}>{err}</div>}
+              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                <button className="btn" disabled={busy} onClick={save} style={{ marginTop: 0 }}>
+                  {busy ? 'Saving…' : 'Save correction'}
+                </button>
+                <button className="btn ghost" disabled={busy} onClick={() => setEditing(false)} style={{ marginTop: 0 }}>Cancel</button>
+              </div>
+            </div>
+          )}
         </div>
       );
     };
 
-    const ConsentBody = ({ type, renderData, choiceValues, onChoice, readOnly }) => {
+    const ConsentBody = ({ type, renderData, choiceValues, onChoice, readOnly, form, onSaveEdits }) => {
       const blocks = CONSENT_TEXT.bodyFor(type);
       return (
         <React.Fragment>
@@ -3908,7 +4093,12 @@
             if (b.t === 'p') return <p key={i}>{richText(b.text)}</p>;
             if (b.t === 'note') return <p key={i} className="sub" style={{ fontStyle: 'italic' }}>{b.text}</p>;
             if (b.t === 'ul') return <ul key={i} style={{ paddingLeft: 18, margin: '6px 0' }}>{(b.items || []).map((it, j) => <li key={j} style={{ marginBottom: 4 }}>{richText(it)}</li>)}</ul>;
-            if (b.t === 'data') return <ConsentData key={i} block={b} resolved={(renderData || {})[b.source]} />;
+            // `readOnly` is a signed or un-presentable consent. A correction
+            // after signing is not an edit, it is a new signature on a changed
+            // document, so the control disappears rather than silently rewriting
+            // what somebody already put their name to.
+            if (b.t === 'data') return <ConsentData key={i} block={b} resolved={(renderData || {})[b.source]}
+              form={form} onSaveEdits={onSaveEdits} locked={readOnly} />;
             if (b.t === 'choice') {
               // Elections are their own fields on the consent record, not
               // something buried inside the signature where nobody could later
@@ -3936,7 +4126,7 @@
     // e-signature. A consent the server has marked un-presentable (today: a
     // financial agreement with no agreed rate in it) shows what is missing and
     // offers no signature control at all.
-    const ConsentCard = ({ def, status, meta, onSign, signedName, token }) => {
+    const ConsentCard = ({ def, status, meta, onSign, signedName, token, form, onSaveEdits }) => {
       const [name, setName] = useState((meta && meta.typedName) || signedName || '');
       const [ack, setAck] = useState(false);
       const [busy, setBusy] = useState(false);
@@ -3972,7 +4162,7 @@
           </div>
           <div className="consentbox" style={{ marginTop: 10 }}>
             <ConsentBody type={def.type} renderData={def.renderData} choiceValues={choiceValues}
-              readOnly={signed || blocked}
+              readOnly={signed || blocked} form={form} onSaveEdits={onSaveEdits}
               onChoice={(k, v) => setChoiceValues(c => ({ ...c, [k]: v }))} />
           </div>
           {signed && (
@@ -4197,6 +4387,33 @@
             setConsentMeta(r.consentMeta || {});
           }
         } catch (_) { /* non-fatal; user can retry by re-selecting */ }
+      };
+
+      // A correction made from inside a consent. `patch` is { 'dot.path': value }.
+      //
+      // It writes through the SAME intake save every wizard step uses, so the
+      // structured mirror onto the client profile, the prior-provider derivation
+      // and the service-line rules all run exactly as they do on the step that
+      // owns the field. A second write path here would be a second set of rules.
+      //
+      // Then it re-reads, because the values a consent shows are resolved on the
+      // SERVER from the client record. Setting local state alone would leave the
+      // card showing a correction the signed copy would not carry.
+      const handleConsentDataEdit = async (patch) => {
+        let next = form;
+        Object.keys(patch || {}).forEach(path => { next = setPath(next, path, patch[path]); });
+        setForm(next);
+        const res = await api.saveGfcIntake(token, next, serviceLine);
+        if (res && res.error) return res;
+        try {
+          const r = await api.getGfcIntake(token);
+          if (!r.error) { setConsentMeta(r.consentMeta || {}); setConsentDefs(r.consentDefs || []); }
+        } catch (_) {
+          // The correction IS saved. Say so rather than reporting a failure
+          // that would have them type it again on top of itself.
+          return { error: 'Saved, but the document below could not be refreshed. Reload the page to see it.' };
+        }
+        return res;
       };
 
       const handleSignConsent = async (type, payload) => {
@@ -4594,7 +4811,7 @@
                       <TextField label="Any restrictions on information sharing?" value={(form.roiFamilyDetail || {}).restrictions} onChange={v => setNested('roiFamilyDetail', 'restrictions', v)} placeholder="Optional" />
                     </div>
                   )}
-                  <ConsentCard def={def} status={consents[def.type]} meta={consentMeta[def.type]} signedName={form.primaryContact?.name} onSign={handleSignConsent} token={token} />
+                  <ConsentCard def={def} status={consents[def.type]} meta={consentMeta[def.type]} signedName={form.primaryContact?.name} onSign={handleSignConsent} token={token} form={form} onSaveEdits={handleConsentDataEdit} />
                 </React.Fragment>
               ))}
             </React.Fragment>
@@ -4606,7 +4823,7 @@
               <p className="sub">These enroll you in medical care: visits, examination, diagnosis, prescribing, and chronic disease management by a nurse practitioner who comes to your home. It is a different service from personal home care, delivered by different people under a different license.</p>
               <p className="sub"><b>{stageSignedCount(medicalDefs)}/{stageRequired(medicalDefs).length}</b> required signed on this page.</p>
               {medicalDefs.map(def => (
-                <ConsentCard key={def.type} def={def} status={consents[def.type]} meta={consentMeta[def.type]} signedName={form.primaryContact?.name} onSign={handleSignConsent} token={token} />
+                <ConsentCard key={def.type} def={def} status={consents[def.type]} meta={consentMeta[def.type]} signedName={form.primaryContact?.name} onSign={handleSignConsent} token={token} form={form} onSaveEdits={handleConsentDataEdit} />
               ))}
             </React.Fragment>
           )}

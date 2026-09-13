@@ -39,10 +39,14 @@ const thread = (extra = {}) => ({
 // ============================================================================
 
 test('every row of the brief\'s matrix resolves to a channel covering both ends', () => {
-  // The brief lists eleven FROM→TO rows; the module stores nine channels,
-  // because several rows are one conversation read from either end. This is
-  // the test that makes that collapse safe: lose a row and it fails.
-  assert.strictEqual(msg.MATRIX_ROWS.length, 11, 'the brief has eleven rows');
+  // The brief lists eleven FROM→TO rows; the owner added four on 2026-09-13
+  // (client↔case manager both ways, clinician→client, case manager→caregiver).
+  // The module stores ten channels, because several rows are one conversation
+  // read from either end. This is the test that makes that collapse safe: lose
+  // a row and it fails.
+  assert.strictEqual(msg.MATRIX_ROWS.length, 15, 'eleven from the brief, four from the owner');
+  const brief = msg.MATRIX_ROWS.slice(0, 11);
+  assert.ok(brief.every(r => msg.channelById(r.channel)), 'the brief\'s own eleven still resolve');
   for (const row of msg.MATRIX_ROWS) {
     const c = msg.channelById(row.channel);
     assert.ok(c, `${row.from}→${row.to} has no channel`);
@@ -62,14 +66,42 @@ test('SAFETY: no channel exists that the brief did not ask for', () => {
 
 test('a role is offered only the channels it may open', () => {
   const ids = (user) => msg.channelsFor({ user, client: CLIENT, users: USERS }).map(c => c.id).sort();
-  assert.deepStrictEqual(ids(u('client-1')), ['clinical_escalation', 'direct_care', 'support']);
+  assert.deepStrictEqual(ids(u('client-1')), ['care_coordination', 'clinical_escalation', 'direct_care', 'support']);
   assert.deepStrictEqual(ids(u('cg-1')), ['behavioral_escalation', 'direct_care', 'family_portal', 'operations']);
   assert.deepStrictEqual(ids(u('fam-1')), ['family_portal', 'support']);
-  assert.deepStrictEqual(ids(u('fnp-1')), ['care_update', 'clinical_oversight']);
-  // Admin opens Operations too — the matrix's "Admin | Anyone" row reaches a
-  // caregiver, and Operations is the caregiver↔office channel.
-  assert.deepStrictEqual(ids(u('admin-1')), ['admin_direct', 'operations', 'support']);
-  assert.deepStrictEqual(ids(u('cm-1')), [], 'a case manager receives behavioral escalations; they do not open channels');
+  assert.deepStrictEqual(ids(u('fnp-1')), ['care_update', 'clinical_escalation', 'clinical_oversight']);
+  // A case manager had NO channel at all: they could receive a behavioral
+  // escalation and start nothing, so they could not reach the client whose care
+  // they coordinate. Owner rule 2026-09-13.
+  assert.deepStrictEqual(ids(u('cm-1')), ['behavioral_escalation', 'care_coordination']);
+});
+
+test('OWNER RULE: admin opens every channel, and a lab-era manager counts as admin', () => {
+  // "admin / manager should be able to message anyone." There is no distinct
+  // GFC manager role — `isManager` is a lab-era flag that collapses to admin
+  // everywhere else in the app, so it collapses here too rather than inventing
+  // a role the role model does not have.
+  const ids = (user) => msg.channelsFor({ user, client: CLIENT, users: USERS }).map(c => c.id).sort();
+  assert.deepStrictEqual(ids(u('admin-1')), [...msg.CHANNEL_IDS].sort());
+  const manager = { id: 'mgr-1', name: 'Ops Manager', role: 'user', isManager: true };
+  assert.deepStrictEqual(ids(manager), [...msg.CHANNEL_IDS].sort());
+});
+
+test('OWNER RULE: a staff member who can SEE a thread can ANSWER it', () => {
+  // The reported defect: an administrator opened a Direct thread, read every
+  // word, and was told "Admins do not post in Direct". Visibility is already
+  // the stricter control, so it decides posting for staff.
+  for (const ch of msg.CHANNEL_IDS) {
+    const t = thread({ channel: ch, participant_ids: ['client-1', 'cg-1'] });
+    const r = msg.canPostToThread(u('admin-1'), t, { client: CLIENT });
+    assert.strictEqual(r.allowed, true, `an admin must be able to reply in ${ch} (got ${r.code})`);
+  }
+  // A clinician on this client's team can answer a Direct thread they can see.
+  const direct = thread({ channel: 'direct_care', participant_ids: ['client-1', 'cg-1'] });
+  assert.strictEqual(msg.canPostToThread(u('fnp-1'), direct, { client: CLIENT }).allowed, true);
+  // And it does NOT hand posting to a non-staff role the channel excludes.
+  const oversight = thread({ channel: 'clinical_oversight', participant_ids: ['fnp-1', 'cg-1'] });
+  assert.strictEqual(msg.canPostToThread(u('fam-1'), oversight, { client: CLIENT }).allowed, false);
 });
 
 test('actorRole reads a clinician from the FLAG, not a role string', () => {
@@ -147,17 +179,68 @@ test('a caregiver reads their own threads and nobody else\'s', () => {
     'another caregiver on the same client is still not a party');
 });
 
-test('SAFETY: a case manager sees behavioral escalations and 403s on clinical notes', () => {
-  const behavioral = thread({ id: 't-b', channel: 'behavioral_escalation', participant_ids: ['cg-1'] });
-  const seen = msg.threadVisibility(u('cm-1'), behavioral, { client: CLIENT });
-  assert.strictEqual(seen.visible, true, 'theirs by role, even without being named on the row');
-
-  for (const ch of ['clinical_oversight', 'clinical_escalation', 'care_update', 'family_portal']) {
+test('OWNER RULE: a case manager is scoped to the clients assigned to THEM', () => {
+  // "from case manager permission down, would be scoped to them only seeing
+  // patients assigned to them." The scope is the CLIENT, not the channel: on
+  // their own client they read every conversation, whether or not anyone named
+  // them on it, which is consistent with the 08/2026 decision giving them
+  // scoped clinical read. cm-1 is CLIENT's case manager; client-2 has none.
+  for (const ch of msg.CHANNEL_IDS) {
     const t = thread({ id: `t-${ch}`, channel: ch, participant_ids: ['fnp-1', 'cg-1'] });
-    const r = msg.threadVisibility(u('cm-1'), t, { client: CLIENT });
-    assert.strictEqual(r.visible, false, `a case manager must not read ${ch}`);
+    assert.strictEqual(msg.threadVisibility(u('cm-1'), t, { client: CLIENT }).visible, true,
+      `their own client's ${ch} thread is theirs to read`);
+  }
+  // Another case manager's client is refused on every channel.
+  const other = { ...CLIENT, id: 'client-3', careTeam: { assignedCaseManager: 'cm-2' } };
+  for (const ch of msg.CHANNEL_IDS) {
+    const t = thread({ id: `x-${ch}`, channel: ch, client_id: 'client-3', participant_ids: ['fnp-1', 'cg-1'] });
+    const r = msg.threadVisibility(u('cm-1'), t, { client: other });
+    assert.strictEqual(r.visible, false, `a case manager must not read ${ch} for a client who is not theirs`);
     assert.strictEqual(r.code, 'CASE_MANAGER_SCOPE');
   }
+});
+
+test('SAFETY: a behavioral concern on a client with NO case manager still reaches one', () => {
+  // The carve-out, and the reason the brief made behavioral role-based in the
+  // first place. Scoping strictly by assignment would leave a concern raised
+  // before anyone was assigned readable by no case manager at all.
+  const unassigned = { id: 'client-4', name: 'Unassigned (TEST DATA)', role: 'client', careTeam: {} };
+  const t = thread({ id: 't-u', channel: 'behavioral_escalation', client_id: 'client-4', participant_ids: ['cg-1'] });
+  assert.strictEqual(msg.threadVisibility(u('cm-1'), t, { client: unassigned }).visible, true);
+  // It is the ESCALATION that is carved out, not the client: everything else
+  // about a client who is not theirs stays refused.
+  const direct = thread({ id: 't-u2', channel: 'direct_care', client_id: 'client-4', participant_ids: ['cg-1'] });
+  assert.strictEqual(msg.threadVisibility(u('cm-1'), direct, { client: unassigned }).visible, false);
+});
+
+test('OWNER RULE: the client reaches everyone on their care team, case manager included', () => {
+  // "client can message anyone who is assigned to them as part of their care
+  // team." The brief had no client↔case-manager row at all.
+  const ids = msg.channelsFor({ user: u('client-1'), client: CLIENT, users: USERS }).map(c => c.id);
+  assert.ok(ids.includes('care_coordination'), 'a client can open Care Coordination');
+  assert.ok(ids.includes('direct_care'), 'and still reach their caregiver');
+  assert.ok(ids.includes('clinical_escalation'), 'and still reach their clinician');
+  const t = thread({ channel: 'care_coordination', participant_ids: ['client-1', 'cm-1'] });
+  assert.strictEqual(msg.threadVisibility(u('client-1'), t, { client: CLIENT }).visible, true);
+  assert.strictEqual(msg.canPostToThread(u('client-1'), t, { client: CLIENT }).allowed, true);
+  // And it stays a client↔case-manager conversation: a caregiver is not in it.
+  assert.strictEqual(msg.threadVisibility(u('cg-1'), t, { client: CLIENT }).visible, false);
+});
+
+test('OWNER RULE: clientInScope decides which clients each role may message about', () => {
+  const other = { id: 'client-9', name: 'Not mine (TEST DATA)', role: 'client', careTeam: {} };
+  assert.strictEqual(msg.clientInScope(u('admin-1'), other), true, 'admin reaches every client');
+  assert.strictEqual(msg.clientInScope(u('cm-1'), CLIENT), true);
+  assert.strictEqual(msg.clientInScope(u('cm-1'), other), false);
+  assert.strictEqual(msg.clientInScope(u('fnp-1'), CLIENT), true);
+  assert.strictEqual(msg.clientInScope(u('fnp-1'), other), false);
+  assert.strictEqual(msg.clientInScope(u('cg-1'), CLIENT), true);
+  assert.strictEqual(msg.clientInScope(u('cg-1'), other), false);
+  assert.strictEqual(msg.clientInScope(u('client-1'), CLIENT), true);
+  assert.strictEqual(msg.clientInScope(u('client-1'), other), false, 'a client reaches only their own record');
+  assert.strictEqual(msg.clientInScope(u('fam-1'), other), false);
+  // A role this does not name reaches nobody, rather than everybody.
+  assert.strictEqual(msg.clientInScope({ id: 'x', role: 'nonsense' }, CLIENT), false);
 });
 
 test('family read the caregiver and office channels, plus a Care Update pushed to them', () => {
@@ -192,10 +275,50 @@ test('a POA reads what the CLIENT reads; non-POA family do not', () => {
 });
 
 test('SAFETY: nobody reads another client\'s thread, whatever their role on their own', () => {
+  // THE ROUTES PASS THE THREAD'S CLIENT, not the viewer's. The version of this
+  // test that shipped passed `{ client: CLIENT }` — the VIEWER's — so it
+  // exercised a comparison production never made, and the leak below sat behind
+  // a green assertion. Every case here is called the way `openThread()` and the
+  // list route call it: the client that OWNS the thread.
   const other = thread({ client_id: 'client-2', participant_ids: ['client-2', 'admin-1'] });
   for (const id of ['client-1', 'fam-1']) {
-    assert.strictEqual(msg.threadVisibility(u(id), other, { client: CLIENT }).visible, false, id);
+    const r = msg.threadVisibility(u(id), other, { client: OTHER_CLIENT });
+    assert.strictEqual(r.visible, false, `${id} must not read client-2's thread`);
+    assert.strictEqual(r.code, 'THREAD_NOT_YOURS');
   }
+});
+
+test('SECURITY REGRESSION (2026-09-13): a client could read and REPLY TO every other client\'s thread', () => {
+  // Found in production from a screenshot: two unrelated clients in one Direct
+  // thread, each able to post. The guard read `client && thread.client_id !==
+  // client.id`, and `client` was the THREAD's client — so it compared a thread
+  // to itself, was always false, and never once refused. Every client-reachable
+  // channel was open to every client.
+  for (const channel of ['direct_care', 'support', 'clinical_escalation', 'admin_direct', 'care_update', 'family_portal']) {
+    const theirs = thread({ channel, client_id: 'client-1', participant_ids: ['client-1', 'cg-1'] });
+    const intruder = u('client-2');
+    const seen = msg.threadVisibility(intruder, theirs, { client: CLIENT });
+    assert.strictEqual(seen.visible, false, `client-2 must not READ a ${channel} thread of client-1`);
+    const post = msg.canPostToThread(intruder, theirs, { client: CLIENT });
+    assert.strictEqual(post.allowed, false, `client-2 must not POST into a ${channel} thread of client-1`);
+  }
+  // And the client's own thread still works, or the fix is just a new outage.
+  const mine = thread({ channel: 'direct_care', client_id: 'client-1', participant_ids: ['client-1', 'cg-1'] });
+  assert.strictEqual(msg.threadVisibility(u('client-1'), mine, { client: CLIENT }).visible, true);
+});
+
+test('SAFETY: the viewer\'s own client is resolved from the VIEWER, and fails closed', () => {
+  // The whole fix rests on this one function, so it is asserted directly rather
+  // than only through its callers.
+  assert.strictEqual(msg.ownClientId(u('client-1')), 'client-1', 'a client IS their client record');
+  assert.strictEqual(msg.ownClientId(u('fam-1')), 'client-1', 'family resolve through familyOfClientId');
+  assert.strictEqual(msg.ownClientId(u('admin-1')), null, 'staff have no own-client');
+  assert.strictEqual(msg.ownClientId({ role: 'family' }), null, 'an unlinked family member reaches nobody');
+  assert.strictEqual(msg.ownClientId(null), null);
+  // A family user with no link must be refused, not admitted by a null match.
+  const orphan = { id: 'fam-9', role: 'family' };
+  const t = thread({ channel: 'support', client_id: 'client-1' });
+  assert.strictEqual(msg.threadVisibility(orphan, t, { client: CLIENT }).visible, false);
 });
 
 test('a clinician reads threads for a client they are assigned to, and not others', () => {
@@ -383,4 +506,201 @@ test('the 3.5 interim rows are MIGRATED, and the migration cannot double-run', (
   // proven — so it must still be here in this one.
   assert.ok(/app\.post\('\/api\/gfc\/messages'/.test(serverSrc),
     'the 3.5 send is retired in its own commit, not this one');
+});
+
+// ============================================================================
+// Build-enforced — the 2026-09-13 owner pass
+// ============================================================================
+
+test('BUILD: the routes pass the THREAD\'s client into every visibility call', () => {
+  // The leak lived in the gap between what the tests passed and what the routes
+  // pass. This pins the routes' side of that contract, so the fix cannot be
+  // undone by a future session "simplifying" the argument back.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'messaging.js'), 'utf8');
+  assert.ok(/clientById\(thread\.client_id\)/.test(src), 'openThread resolves the thread\'s own client');
+  assert.ok(/clientsById\.get\(t\.client_id\)/.test(src), 'the list resolves each thread\'s own client');
+  // …and the repository must therefore NOT trust that argument for the
+  // own-client test. If this string comes back, the tautology is back with it.
+  const repo = fs.readFileSync(path.join(__dirname, '..', 'messagingRepository.js'), 'utf8');
+  assert.ok(!/client && thread\.client_id !== client\.id/.test(repo),
+    'the own-client check must never compare a thread to its own client again');
+  assert.ok(/ownClientId\(user\)/.test(repo), 'it resolves the viewer\'s own client from the viewer');
+});
+
+test('BUILD: a staff member can only message about clients in their scope', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'messaging.js'), 'utf8');
+  assert.ok(/CLIENT_NOT_IN_SCOPE/.test(src), 'starting a thread out of scope is refused at creation');
+  assert.ok(/\/api\/messaging\/clients/.test(src), 'the picker list exists');
+  // The picker and the gate must be the SAME function, or a name can appear in
+  // the list and be refused when used.
+  const uses = (src.match(/inScope\(req\.user/g) || []).length;
+  assert.ok(uses >= 2, `the scope function gates both the list and the write (found ${uses} uses)`);
+  assert.ok(/caregiverRepo\.isAssignedToCaregiver/.test(src),
+    'caregiver assignment comes from Session 6, not a second copy of the rule');
+});
+
+test('BUILD: the admin hub has ONE inbox, with messages inside it', () => {
+  const hub = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-hub.html'), 'utf8');
+  const navIds = (hub.match(/\{ id: '(\w+)', label: '[^']*', icon: Icons\.\w+/g) || []).join(' ');
+  assert.ok(!/id: 'messages', label: 'Messages'/.test(hub),
+    'the separate Messages nav item is gone — it is a tab of the Inbox now');
+  assert.ok(/id: 'inbox', label: 'Inbox'/.test(hub), 'the Inbox stays');
+  assert.ok(/activeTab === 'messages' && <MessagesPanel/.test(hub), 'Messages renders as an Inbox tab');
+  // An old link to `messages` must still land on the messages tab, not fall
+  // through to the dashboard.
+  assert.ok(/case 'messages': return <InboxPage[^>]*initialTab="messages"/.test(hub),
+    'the old route still lands on the messages tab');
+});
+
+test('BUILD: the caregiver Feed\'s broadcast half has a screen', () => {
+  // It had an API and no UI, so the Feed could only ever read "Nothing new".
+  const hub = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-hub.html'), 'utf8');
+  assert.ok(/CaregiverFeedPanel/.test(hub), 'the composer exists');
+  assert.ok(/\/api\/caregiver\/broadcasts/.test(hub), 'and posts to the route that feeds it');
+  const routes = fs.readFileSync(path.join(__dirname, '..', 'routes', 'caregiver.js'), 'utf8');
+  assert.ok(/router\.post\('\/api\/caregiver\/broadcasts', authenticateToken, requireAdmin/.test(routes),
+    'and only an admin may post one');
+});
+
+test('BUILD: the component asks the server which clients a user may message about', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'components', 'gfc-messaging.js'), 'utf8');
+  assert.ok(/\/api\/messaging\/clients/.test(src), 'the picker is server-driven, never a client-side guess');
+  assert.ok(/fixedScope/.test(src), 'a host that named a client owns the scope');
+  // The client portal is about ONE client and must never offer a way to look
+  // at another, so a fixed scope removes the picker entirely.
+  assert.ok(/if \(state\.fixedScope \|\| !state\.pickerClients/.test(src),
+    'a fixed scope renders no picker at all');
+});
+
+// ============================================================================
+// The repair script — it cleans up what the leak already wrote
+// ============================================================================
+
+test('REPAIR: the script finds exactly the misfiled messages, and nothing else', () => {
+  const repair = require('../scripts/repair_cross_client_messages');
+  // Bianca's screenshot, as a fixture: Dorothy (client-2) posted into Bianca's
+  // (client-1) Direct thread, and the caregiver saw one merged conversation.
+  const fixture = {
+    users: [
+      { id: 'client-1', name: 'Bianca (TEST DATA)', role: 'client' },
+      { id: 'client-2', name: 'Dorothy (TEST DATA)', role: 'client' },
+      { id: 'fam-1', name: 'Relative (TEST DATA)', role: 'family', familyOfClientId: 'client-1' },
+      { id: 'fam-2', name: 'Other relative (TEST DATA)', role: 'family', familyOfClientId: 'client-2' },
+      { id: 'fam-9', name: 'Unlinked relative (TEST DATA)', role: 'family' },
+      { id: 'cg-1', name: 'Caregiver (TEST DATA)', role: 'vendor' },
+      { id: 'admin-1', name: 'GFC Admin', role: 'admin' }
+    ],
+    threads: [
+      { id: 't1', channel: 'direct_care', client_id: 'client-1', created_at: '2026-09-01T00:00:00Z',
+        last_message_at: '2026-09-13T11:49:00Z', last_message_preview: 'Test' }
+    ],
+    messages: [
+      { id: 'm1', thread_id: 't1', from_user_id: 'client-1', body: 'Hello', sent_at: '2026-09-13T00:51:00Z' },
+      { id: 'm2', thread_id: 't1', from_user_id: 'client-2', body: 'Test',  sent_at: '2026-09-13T11:49:00Z' },
+      { id: 'm3', thread_id: 't1', from_user_id: 'cg-1',     body: 'On my way', sent_at: '2026-09-13T09:00:00Z' },
+      { id: 'm4', thread_id: 't1', from_user_id: 'admin-1',  body: 'Noted', sent_at: '2026-09-13T10:00:00Z' },
+      { id: 'm5', thread_id: 't1', from_user_id: 'fam-1',    body: 'Thank you', sent_at: '2026-09-13T10:30:00Z' },
+      { id: 'm6', thread_id: 't1', from_user_id: 'fam-2',    body: 'Wrong thread', sent_at: '2026-09-13T10:45:00Z' },
+      { id: 'm7', thread_id: 't1', from_user_id: 'fam-9',    body: 'Unlinked', sent_at: '2026-09-13T10:50:00Z' }
+    ]
+  };
+
+  const found = repair.findMisfiled(fixture);
+  // m2: another CLIENT. m6: another client's FAMILY — the case that proves the
+  // family branch is doing work, since without it fam-2 resolves to nobody and
+  // is waved through as if they were staff.
+  assert.deepStrictEqual(found.map(f => f.message.id).sort(), ['m2', 'm6'],
+    'both the other client and the other client\'s family are misfiled');
+  const m2 = found.find(f => f.message.id === 'm2');
+  assert.strictEqual(m2.senderClientId, 'client-2');
+  assert.strictEqual(m2.threadClientId, 'client-1');
+  assert.strictEqual(found.find(f => f.message.id === 'm6').senderClientId, 'client-2',
+    'a family member is resolved through familyOfClientId, not their own id');
+  // Staff post across clients as their job, and the thread's own family member
+  // belongs here. Pulling either would be the repair causing its own outage.
+  assert.ok(!found.some(f => ['m3', 'm4', 'm5'].includes(f.message.id)),
+    'a caregiver, an admin and the thread\'s own family member are never misfiled');
+  // An UNLINKED family member is left alone deliberately: they resolve to no
+  // client, so there is nothing to say they are in the wrong thread. The fixed
+  // visibility rule refuses them at read time; quarantining their words on a
+  // guess is not the repair's job.
+  assert.ok(!found.some(f => f.message.id === 'm7'), 'an unlinked family member is not guessed at');
+});
+
+test('REPAIR: the preview is refreshed, or a quarantined message keeps showing', () => {
+  const repair = require('../scripts/repair_cross_client_messages');
+  const threads = [{ id: 't1', client_id: 'client-1', created_at: '2026-09-01T00:00:00Z',
+    last_message_at: '2026-09-13T11:49:00Z', last_message_preview: 'Test' }];
+  const remaining = [{ id: 'm1', thread_id: 't1', body: 'Hello', sent_at: '2026-09-13T00:51:00Z' }];
+  const touched = repair.refreshPreviews(threads, remaining);
+  assert.strictEqual(touched, 1);
+  assert.strictEqual(threads[0].last_message_preview, 'Hello', 'the removed message is gone from the list too');
+  assert.strictEqual(threads[0].last_message_at, '2026-09-13T00:51:00Z');
+  // A thread emptied entirely falls back to its creation time, not to a
+  // timestamp belonging to a message that is no longer there.
+  const emptied = [{ id: 't2', client_id: 'c', created_at: '2026-09-01T00:00:00Z', last_message_at: 'x', last_message_preview: 'gone' }];
+  repair.refreshPreviews(emptied, []);
+  assert.strictEqual(emptied[0].last_message_preview, '');
+  assert.strictEqual(emptied[0].last_message_at, '2026-09-01T00:00:00Z');
+});
+
+test('REPAIR: the script builds the store the way server.js does', () => {
+  // It required `dataStore` and called get/set on it. dataStore exports the
+  // FACTORY, not a store, so every call was undefined and the script would have
+  // failed on the first line of real work — on the one run that matters, during
+  // a PHI incident.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'repair_cross_client_messages.js'), 'utf8');
+  assert.ok(/dataStore\.createStore\(\)/.test(src), 'it builds a store through the factory');
+  assert.ok(!/db\.init\(/.test(src), 'there is no init() on the store contract');
+  assert.ok(/require\.main === module/.test(src), 'requiring it from a test must not repair anything');
+});
+
+test('REPAIR: --apply actually moves the rows, and a re-run is a no-op', async () => {
+  // The write path, driven end to end against a real (in-memory) store. It is
+  // the path that runs ONCE, on production data, during an incident — so it is
+  // proven here rather than assumed from the pure helpers.
+  const dataStore = require('../dataStore');
+  const repair = require('../scripts/repair_cross_client_messages');
+  const db = dataStore.createStore({ adapter: 'memory', env: { NODE_ENV: 'test' } });
+
+  await db.set('users', [
+    { id: 'client-1', name: 'Bianca (TEST DATA)', role: 'client' },
+    { id: 'client-2', name: 'Dorothy (TEST DATA)', role: 'client' },
+    { id: 'cg-1', name: 'Caregiver (TEST DATA)', role: 'vendor' }
+  ]);
+  await db.set('message_threads', [
+    { id: 't1', channel: 'direct_care', client_id: 'client-1', created_at: '2026-09-01T00:00:00Z',
+      last_message_at: '2026-09-13T11:49:00Z', last_message_preview: 'Test' }
+  ]);
+  await db.set('messages', [
+    { id: 'm1', thread_id: 't1', from_user_id: 'client-1', body: 'Hello', sent_at: '2026-09-13T00:51:00Z' },
+    { id: 'm2', thread_id: 't1', from_user_id: 'client-2', body: 'Test',  sent_at: '2026-09-13T11:49:00Z' },
+    { id: 'm3', thread_id: 't1', from_user_id: 'cg-1',     body: 'On my way', sent_at: '2026-09-13T09:00:00Z' }
+  ]);
+
+  // A report-only run must change NOTHING. That is the run she does first.
+  await repair.main({ db, apply: false });
+  assert.strictEqual((await db.get('messages')).length, 3, 'the report changes nothing');
+  assert.strictEqual((await db.get('quarantined_messages') || []).length, 0);
+
+  await repair.main({ db, apply: true });
+  const left = await db.get('messages');
+  assert.deepStrictEqual(left.map(m => m.id).sort(), ['m1', 'm3'],
+    'the other client\'s message is gone; both legitimate ones stay');
+  const quarantined = await db.get('quarantined_messages');
+  assert.strictEqual(quarantined.length, 1);
+  assert.strictEqual(quarantined[0].id, 'm2', 'it is MOVED, not deleted — this is breach evidence');
+  assert.strictEqual(quarantined[0].body, 'Test', 'with its content intact');
+  assert.strictEqual(quarantined[0].original_thread_client_id, 'client-1', 'and whose thread it was in');
+  assert.ok(quarantined[0].quarantined_at, 'and when it was pulled');
+
+  // The preview is refreshed, or the removed message keeps showing in the list.
+  const thread = (await db.get('message_threads'))[0];
+  assert.strictEqual(thread.last_message_preview, 'On my way');
+  assert.strictEqual(thread.last_message_at, '2026-09-13T09:00:00Z');
+
+  // Idempotent: running it twice must not double-quarantine or remove more.
+  await repair.main({ db, apply: true });
+  assert.strictEqual((await db.get('messages')).length, 2, 'a re-run removes nothing further');
+  assert.strictEqual((await db.get('quarantined_messages')).length, 1, 'and quarantines nothing twice');
 });

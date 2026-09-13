@@ -22,11 +22,11 @@ const fs = require('fs');
 const path = require('path');
 const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
-const Database = require('@replit/database');
+const dataStore = require('../dataStore'); // Session 5.1: the app's store, whichever adapter DATA_STORE selects
 const config = require('../config');
 const consentText = require('../public/consent-text'); // the consent registry's titles + body versions (4.6)
 
-const db = new Database();
+const db = dataStore.createStore();
 const LOG_PATH = path.join(__dirname, 'import_offline_patients.log');
 
 function logLine(msg) {

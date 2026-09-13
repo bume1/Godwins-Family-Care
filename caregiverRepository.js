@@ -82,6 +82,67 @@ function verifiedCompetencies(caregiver, now = new Date()) {
   return out;
 }
 
+// ---- Pay rate (owner request, 2026-09-13) ------------------------------------
+// What we PAY a caregiver. This is a different number from `client.rateAgreement`
+// — what the CLIENT pays — and the difference between them is the margin, so the
+// two must never be read from one field. Lives here with the rest of the
+// caregiver vocabulary rather than in config, same as the licence enum.
+//
+// Three levels, most specific first:
+//   1. the rate posted ON THE SHIFT (an admin set it when releasing the shift)
+//   2. a per-client rate for this caregiver (a harder client pays more)
+//   3. the caregiver's base rate
+// A rate that is set nowhere resolves to null and SAYS so. It never falls back
+// to zero: zero is a rate somebody chose, null is a rate nobody has set, and a
+// payroll run must be able to tell those apart.
+//
+// Stored as plain dollars rounded to cents, matching `client.rateAgreement`
+// rather than introducing a second money convention in the same codebase.
+
+const MAX_PAY_RATE = 500; // a sanity ceiling, not a policy — catches a typo'd 3200
+
+// Returns a number in dollars, or null when the value is absent or unusable.
+// An unparseable rate is null, never 0 — see above.
+function normalizePayRate(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  if (!isFinite(n) || n < 0 || n > MAX_PAY_RATE) return null;
+  return Math.round(n * 100) / 100;
+}
+
+// Per-client overrides, keyed by client ID. Deliberately NOT by name: the
+// vendor picker stores assignedClients by name, and a client who gets renamed
+// would silently drop back to the base rate — a quiet pay cut nobody would see.
+function normalizeClientPayRates(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const out = {};
+  for (const [clientId, rate] of Object.entries(value)) {
+    const id = String(clientId || '').trim();
+    if (!id) continue;
+    const n = normalizePayRate(rate);
+    if (n !== null) out[id] = n;   // an unusable override is dropped, not stored as 0
+  }
+  return out;
+}
+
+// The whole resolution, in one place, so the admin screen, the shift post and
+// any later payroll read cannot disagree about what someone is paid.
+// `source` is returned because "it came from the shift" and "it came from the
+// base rate" are different facts an admin needs when a number looks wrong.
+function resolvePayRate(caregiver, clientId = null, shift = null) {
+  const posted = normalizePayRate(shift && (shift.pay_rate !== undefined ? shift.pay_rate : shift.payRate));
+  if (posted !== null) return { rate: posted, source: 'shift' };
+
+  const perClient = normalizeClientPayRates(caregiver && caregiver.clientPayRates);
+  const id = String(clientId || '').trim();
+  if (id && perClient[id] !== undefined) return { rate: perClient[id], source: 'client' };
+
+  const base = normalizePayRate(caregiver && caregiver.payRate);
+  if (base !== null) return { rate: base, source: 'base' };
+
+  return { rate: null, source: 'unset' };
+}
+
 // ---- Task catalog (spec §3a, transferred from docs/source-forms/gfc-visit-log.html) ----
 // `legacy` is the legacy daily-note field name, preserved so a paper/legacy
 // record maps onto the same item. `minLevel` is the lowest license level the
@@ -314,11 +375,32 @@ function visitLogSchemaFor(caregiver, client = null, now = new Date()) {
   const competencies = verifiedCompetencies(caregiver, now);
   const authorized = authorizedTaskIds(client);
 
+  // OWNER RULE, 2026-09-13: for a COMPETENCY-GATED item the verified competency
+  // is the whole gate — the licence level is no longer a ceiling over it. The
+  // work is performed under licensed oversight, and a caregiver who did the
+  // task has to be able to document it; a task done and not recorded is worse
+  // than one recorded by someone below the old line.
+  //
+  // It also closes a silent failure. Before this, ticking `injections` for a
+  // PCA stored the competency, showed it in the admin form, and changed
+  // nothing — an administrator believed they had enabled something and had
+  // not. A sign-off that does nothing is the same class of trap as a 200 that
+  // writes nothing.
+  //
+  // What did NOT change, deliberately:
+  //  - An item with NO competency keeps its minLevel. A Sitter still is not
+  //    offered bathing or cooking; that is scope of role, not a credential, and
+  //    there is no sign-off that unlocks it. `postop` and `teach` stay LPN-only
+  //    for the same reason.
+  //  - Unverified or expired still counts as NOT PRESENT (verifiedCompetencies).
+  //    The gate moved; it did not loosen.
+  //  - The care plan still narrows, and never widens.
   const allows = (item) => {
-    if (LEVEL_RANK[item.minLevel] > rank) return false;
     if (item.competency) {
       const byLicense = Array.isArray(item.byLicense) && item.byLicense.includes(level);
       if (!byLicense && !competencies.includes(item.competency)) return false;
+    } else if (LEVEL_RANK[item.minLevel] > rank) {
+      return false;
     }
     if (authorized && !authorized.has(item.id) && item.id !== 'presence_confirmed') return false;
     return true;
@@ -328,8 +410,10 @@ function visitLogSchemaFor(caregiver, client = null, now = new Date()) {
     .map(g => ({ id: g.id, label: g.label, items: g.items.filter(allows).map(i => ({ id: i.id, label: i.label, legacy: i.legacy })) }))
     .filter(g => g.items.length > 0);
 
+  // Same rule: every measurement field is competency-gated, so the competency
+  // decides. The CNA floor is gone — a PCA signed off on vital signs records a
+  // blood pressure, which is the point of signing them off.
   const measurements = MEASUREMENT_FIELDS.filter(f => {
-    if (rank < LEVEL_RANK.cna) return false;
     const byLicense = Array.isArray(f.byLicense) && f.byLicense.includes(level);
     return byLicense || competencies.includes(f.competency);
   }).map(f => ({ id: f.id, label: f.label, unit: f.unit }));
@@ -351,8 +435,17 @@ function visitLogSchemaFor(caregiver, client = null, now = new Date()) {
     satisfactionValues: SATISFACTION_VALUES.slice(),
     // An LPN note is a skilled visit note: it lands as Pending Review and goes
     // to the clinician inbox. It does NOT write to OpenEMR in this session.
+    // A note is skilled because of WHAT IS IN IT, not who wrote it. Once a
+    // competency can be held below LPN (owner rule 2026-09-13), a skilled task
+    // documented by a PCA must reach a clinician exactly as an LPN's does —
+    // that review IS the licensed oversight the rule relies on. Decided per
+    // submission in `skilledContentPresent()`, because a schema that merely
+    // OFFERS a skilled task would send every routine ADL log to the inbox.
     submitStatus: level === 'lpn' ? 'pending_review' : 'submitted',
-    skilledNote: level === 'lpn'
+    skilledNote: level === 'lpn',
+    // Skilled task ids this caregiver may document at all — the route checks
+    // what they actually ticked against this.
+    skilledTaskIdsOffered: (taskGroups.find(g => g.id === 'skilled') || { items: [] }).items.map(i => i.id)
   };
 }
 
@@ -394,6 +487,16 @@ function standingInstructionsFor(client) {
   const wanted = new Set(active.map(v => String(typeof v === 'string' ? v : (v.id || v.label || '')).trim().toLowerCase()));
   const hits = STANDING_INSTRUCTIONS.filter(s => wanted.has(s.id) || wanted.has(s.label.toLowerCase()));
   return hits.length > 0 ? hits : STANDING_INSTRUCTIONS.slice();
+}
+
+// True when the sanitized submission records a skilled task as DONE. Such a
+// note routes to the clinician inbox whatever the author's licence level: the
+// task was performed under licensed oversight, so the licensed person has to
+// see it. Reads the sanitized payload, never the raw body — a task the schema
+// dropped is not in here to be counted.
+function skilledContentPresent(clean) {
+  const tasks = (clean && clean.tasks) || {};
+  return SKILLED_TASK_IDS.some(id => tasks[id] && tasks[id].done === true);
 }
 
 // ============================================================================
@@ -706,10 +809,11 @@ function incidentsFromSubmission(clean) {
 module.exports = {
   LICENSE_LEVELS, LICENSE_LABELS, LEVEL_RANK, normalizeLevel,
   COMPETENCIES, COMPETENCY_LABELS, verifiedCompetencies,
+  MAX_PAY_RATE, normalizePayRate, normalizeClientPayRates, resolvePayRate,
   TASK_GROUPS, RESTRICTED_TASK_IDS, SKILLED_TASK_IDS,
   STANDING_INSTRUCTIONS, PATIENT_CONDITIONS, SAFETY_CONCERNS, INCIDENT_SAFETY_CONCERNS,
   MEASUREMENT_FIELDS, NARRATIVE_FIELDS, SATISFACTION_VALUES, VISIT_LOG_STATUSES,
-  visitLogSchemaFor, authorizedTaskIds, standingInstructionsFor, sanitizeVisitLogSubmission,
+  visitLogSchemaFor, authorizedTaskIds, standingInstructionsFor, sanitizeVisitLogSubmission, skilledContentPresent,
   CONCERN_TYPES, CONCERN_META, normalizeConcernType, severityForConcernType,
   ESCALATION_STATUSES, ESCALATION_TRANSITIONS, ESCALATION_NOTE_REQUIRED, canAdvanceEscalation,
   routeEscalation, describeRecipients, escalationConfirmation,

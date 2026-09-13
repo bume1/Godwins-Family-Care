@@ -25,6 +25,28 @@ if (process.env.NODE_ENV === 'production' &&
   throw new Error('JWT_SECRET must be set to a strong, unique value in production — refusing to boot with the default secret.');
 }
 
+// ---- Session 5.3: MFA + session controls ----
+// MFA is required for the roles that can reach PHI at scale: admin, clinical
+// (role 'user' with hasClinicalAccess, and any 'user' at all), case manager.
+// Clients, family and caregivers are not gated today (owner decision pending;
+// MFA_REQUIRED_ROLES widens it without a code change).
+const MFA_REQUIRED_ROLES = Object.freeze(String(process.env.MFA_REQUIRED_ROLES || 'admin,user,caseManager').split(',').map(s => s.trim()).filter(Boolean));
+// MFA_ENFORCE=false is a DEV convenience for local runs and the probe scripts.
+// It is refused in production (below) so it cannot be reached by accident.
+const MFA_ENFORCE = String(process.env.MFA_ENFORCE || 'true').toLowerCase() !== 'false';
+const MFA_ISSUER = process.env.MFA_ISSUER || 'Godwins Family Care';
+// 15-minute inactivity logout (v2 §9). A session whose last request is older
+// than this is revoked on its next request; the client-side guard signs the
+// user out a few seconds early so they see it happen rather than a 403.
+const SESSION_IDLE_MINUTES = parseInt(process.env.SESSION_IDLE_MINUTES || '15', 10);
+// Absolute session lifetime — the JWT expiry; idle is the tighter of the two.
+if (process.env.NODE_ENV === 'production') {
+  if (!MFA_ENFORCE) throw new Error('MFA_ENFORCE=false is not permitted in production — refusing to boot.');
+  if (!String(process.env.EMR_TOKEN_ENCRYPTION_KEY || '').trim()) {
+    throw new Error('EMR_TOKEN_ENCRYPTION_KEY must be set in production (per-user OpenEMR tokens are encrypted at rest) — refusing to boot.');
+  }
+}
+
 // ---- Server ----
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const BODY_PARSER_LIMIT = process.env.BODY_PARSER_LIMIT || '50mb';
@@ -154,8 +176,22 @@ const NOTIFICATION_CHECK_INTERVAL_MINUTES = parseInt(process.env.NOTIFICATION_CH
 const NOTIFICATION_LOG_MAX_ENTRIES = parseInt(process.env.NOTIFICATION_LOG_MAX_ENTRIES || '2000', 10);
 const NOTIFICATION_MAX_RETRIES = parseInt(process.env.NOTIFICATION_MAX_RETRIES || '3', 10);
 const NOTIFICATION_DAILY_SEND_LIMIT = parseInt(process.env.NOTIFICATION_DAILY_SEND_LIMIT || '500', 10);
-const EMAIL_FROM_ADDRESS = process.env.EMAIL_FROM_ADDRESS || 'no-reply@godwinsfamilycarellc.com';
+// ONE address, and it is a monitored one. There is no such thing as a
+// "no-reply" that blocks a reply: SMTP has no such mechanism. A no-reply
+// address is either not a real mailbox, in which case a reply bounces and the
+// person gets a confusing failure notice instead of an answer, or it is a real
+// mailbox nobody reads. On Workspace it would also have to be a licensed user,
+// because domain-wide delegation impersonates a real account — so the choice
+// was to pay for a mailbox whose whole job is to swallow replies.
+const EMAIL_FROM_ADDRESS = process.env.EMAIL_FROM_ADDRESS || 'support@godwinsfamilycarellc.com';
 const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME || BRAND.COMPANY_NAME;
+// The address printed in the signature and footer. Normally the SAME mailbox
+// the mail is sent from, so no Reply-To header is emitted at all. It stays a
+// separate setting for the one case that needs it: if the sending mailbox has
+// to be some other account — on Workspace, delegation cannot impersonate a
+// Google Group, so a shared support@ inbox may not be usable as the sender —
+// then set them differently and a Reply-To appears automatically.
+const ORG_SUPPORT_EMAIL = process.env.ORG_SUPPORT_EMAIL || 'support@godwinsfamilycarellc.com';
 
 // ---- Email transport (BAA boundary) ----
 // 'auto' prefers Google Workspace whenever it is configured and falls back to
@@ -225,16 +261,22 @@ const ROI_LEGACY_SHEET_TAB = process.env.ROI_LEGACY_SHEET_TAB || 'Assessments & 
 // One patient record lives in OpenEMR; the app is a front end over it.
 // Reads via FHIR R4, clinical writes via the standard REST API (approved
 // transport deviation — OpenEMR 7.0.4 FHIR is read-only for clinical
-// resources). Auth: password grant with a dedicated API user (dev window;
-// migrate to authorization_code at Session 5 go-live). Credentials come from
-// env/secrets ONLY — never stored anywhere else.
+// resources). Auth: authorization_code + PKCE per clinician (Session 5.2).
+// Credentials come from env/secrets ONLY — never stored anywhere else.
 const OPENEMR = Object.freeze({
   BASE_URL: process.env.OPENEMR_BASE_URL || '',
   SITE: process.env.OPENEMR_SITE || 'default',
   CLIENT_ID: process.env.OPENEMR_CLIENT_ID || '',
   CLIENT_SECRET: process.env.OPENEMR_CLIENT_SECRET || '',
-  API_USERNAME: process.env.OPENEMR_API_USERNAME || '',
-  API_PASSWORD: process.env.OPENEMR_API_PASSWORD || '',
+  // Session 5.2: authorization_code + PKCE, per user. The redirect URI must
+  // match one registered on the OAuth client byte for byte (OpenEMR rejects
+  // anything else with invalid_request). Per-user refresh tokens are held in
+  // the data store encrypted under TOKEN_ENCRYPTION_KEY (32 bytes, hex or
+  // base64) — production refuses to boot without it (below). The dev-window
+  // API user variables (username / password) are GONE: nothing
+  // reads it, and the password-grant global should be turned off in OpenEMR.
+  REDIRECT_URI: process.env.OPENEMR_REDIRECT_URI || '',
+  TOKEN_ENCRYPTION_KEY: process.env.EMR_TOKEN_ENCRYPTION_KEY || '',
   // Encounter defaults (verified required by the dev instance's encounter
   // POST). pos_code 12 = Home (home-visit practice). Override per environment
   // once practice/facility setup (§15) is finalized.
@@ -347,7 +389,7 @@ const GFC_BILLING_PROVIDER_NAME = process.env.GFC_BILLING_PROVIDER_NAME || '';
 
 // ---- Default Admin (initial setup only) ----
 const DEFAULT_ADMIN = Object.freeze({
-  EMAIL: process.env.DEFAULT_ADMIN_EMAIL || 'admin@godwinsfamilycarell.com',
+  EMAIL: process.env.DEFAULT_ADMIN_EMAIL || 'admin@godwinsfamilycarellc.com',
   NAME: process.env.DEFAULT_ADMIN_NAME || 'GFC Admin',
   PASSWORD: process.env.DEFAULT_ADMIN_PASSWORD || 'gfcforever2026'
 });
@@ -367,6 +409,7 @@ function getPublicConfig() {
 }
 
 module.exports = {
+  MFA_REQUIRED_ROLES, MFA_ENFORCE, MFA_ISSUER, SESSION_IDLE_MINUTES,
   // Security
   JWT_SECRET,
   JWT_EXPIRY,
@@ -415,6 +458,7 @@ module.exports = {
   NOTIFICATION_DAILY_SEND_LIMIT,
   EMAIL_FROM_ADDRESS,
   EMAIL_FROM_NAME,
+  ORG_SUPPORT_EMAIL,
   EMAIL_TRANSPORT,
   GMAIL_SEND_AS,
   EMAIL_BAA_DOMAINS,

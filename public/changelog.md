@@ -4,6 +4,358 @@
 
 ---
 
+### Version 3.0.1 - September 13, 2026
+
+#### Bug Fixes
+- Fix an assignment picker that never worked, and give payroll paperwork a home
+
+#### Changes
+- Put Drive back on its feet, and let caregivers send a file
+- Prove the repair script's --apply path end to end
+- Make the repair script actually runnable, and prove it against the report
+- Close the cross-client messaging leak, and let staff answer what they can see
+- Record PR #86, and stop saying the patient hears nothing
+- Discover the senders instead of listing them
+- Backfill PR #84 into the running status, and correct its counts
+- Tell the patient when a visit is booked, moved or cancelled — and show it
+- Workspace email is live — record it, and stop saying it isn't
+- Ungate shift requests; make the email detail rule name no vendor
+- Every email through the house template, and a guard that keeps it that way
+- Make enrollment gate scheduling; edit consent prefill; de-practice the client form
+- Caregiver pay rate, and the client billed rate at creation
+- Record the welcome-email fix, and correct PR #76's overclaim
+- Put the welcome email back inside the house template
+- Scheduling block on the admin dashboard
+- Competency gate over licence ceiling; whole open board; reach /scheduling
+- Record the AWS-only directive, and name the one live Replit dependency
+- One address: send from support@, and drop the redundant Reply-To
+- Record the PHC notifications and the house email template in CLAUDE.md
+- Send from no-reply@, reply to support@ — on both transports
+- Show support@ as the reply address, not the internal admin inbox
+- Close the four PHC notification gaps, in the GFC house email template
+- openemr: surface OpenEMR's real validation error on appointment booking
+
+
+### Version 3.0.1 - September 13, 2026
+
+#### Bug Fixes
+- Fix an assignment picker that never worked, and give payroll paperwork a home
+
+#### Documentation
+- Phase 6C+6D as guide pages 13-20 — app build and full cutover in the Master Setup Guide
+- move app-on-AWS build into the Master Setup Guide as Phase 6C; runbook appendix becomes a pointer
+- cutover runbook — Appendix A (stand up the app on AWS) + seven review findings
+
+#### Changes
+- Put Drive back on its feet, and let caregivers send a file
+- Record PR #86, and stop saying the patient hears nothing
+- Discover the senders instead of listing them
+- Backfill PR #84 into the running status, and correct its counts
+- Tell the patient when a visit is booked, moved or cancelled — and show it
+- Workspace email is live — record it, and stop saying it isn't
+- Ungate shift requests; make the email detail rule name no vendor
+- Every email through the house template, and a guard that keeps it that way
+- Make enrollment gate scheduling; edit consent prefill; de-practice the client form
+- Caregiver pay rate, and the client billed rate at creation
+- Record the welcome-email fix, and correct PR #76's overclaim
+- Put the welcome email back inside the house template
+- Scheduling block on the admin dashboard
+- Competency gate over licence ceiling; whole open board; reach /scheduling
+- Record the AWS-only directive, and name the one live Replit dependency
+- One address: send from support@, and drop the redundant Reply-To
+- Record the PHC notifications and the house email template in CLAUDE.md
+- Send from no-reply@, reply to support@ — on both transports
+- Show support@ as the reply address, not the internal admin inbox
+- Close the four PHC notification gaps, in the GFC house email template
+- openemr: surface OpenEMR's real validation error on appointment booking
+- dataStore: create the application database on first boot when RDS was provisioned without one
+
+
+### Version 3.0.1 - September 13, 2026
+
+#### Documentation
+- Phase 6C+6D as guide pages 13-20 — app build and full cutover in the Master Setup Guide
+- move app-on-AWS build into the Master Setup Guide as Phase 6C; runbook appendix becomes a pointer
+- cutover runbook — Appendix A (stand up the app on AWS) + seven review findings
+
+#### Changes
+- Put Drive back on its feet, and let caregivers send a file
+- Record PR #86, and stop saying the patient hears nothing
+- Discover the senders instead of listing them
+- Backfill PR #84 into the running status, and correct its counts
+- Tell the patient when a visit is booked, moved or cancelled — and show it
+- Workspace email is live — record it, and stop saying it isn't
+- Ungate shift requests; make the email detail rule name no vendor
+- Every email through the house template, and a guard that keeps it that way
+- Make enrollment gate scheduling; edit consent prefill; de-practice the client form
+- Caregiver pay rate, and the client billed rate at creation
+- Record the welcome-email fix, and correct PR #76's overclaim
+- Put the welcome email back inside the house template
+- Scheduling block on the admin dashboard
+- Competency gate over licence ceiling; whole open board; reach /scheduling
+- Record the AWS-only directive, and name the one live Replit dependency
+- One address: send from support@, and drop the redundant Reply-To
+- Record the PHC notifications and the house email template in CLAUDE.md
+- Send from no-reply@, reply to support@ — on both transports
+- Show support@ as the reply address, not the internal admin inbox
+- Close the four PHC notification gaps, in the GFC house email template
+- openemr: surface OpenEMR's real validation error on appointment booking
+- dataStore: create the application database on first boot when RDS was provisioned without one
+- IHPC patients can see their full clinical chart documents
+
+
+### Version 3.0.1 - September 13, 2026
+
+#### Documentation
+- Phase 6C+6D as guide pages 13-20 — app build and full cutover in the Master Setup Guide
+- move app-on-AWS build into the Master Setup Guide as Phase 6C; runbook appendix becomes a pointer
+- cutover runbook — Appendix A (stand up the app on AWS) + seven review findings
+
+#### Changes
+- Record PR #86, and stop saying the patient hears nothing
+- Discover the senders instead of listing them
+- Backfill PR #84 into the running status, and correct its counts
+- Tell the patient when a visit is booked, moved or cancelled — and show it
+- Workspace email is live — record it, and stop saying it isn't
+- Ungate shift requests; make the email detail rule name no vendor
+- Every email through the house template, and a guard that keeps it that way
+- Make enrollment gate scheduling; edit consent prefill; de-practice the client form
+- Caregiver pay rate, and the client billed rate at creation
+- Record the welcome-email fix, and correct PR #76's overclaim
+- Put the welcome email back inside the house template
+- Scheduling block on the admin dashboard
+- Competency gate over licence ceiling; whole open board; reach /scheduling
+- Record the AWS-only directive, and name the one live Replit dependency
+- One address: send from support@, and drop the redundant Reply-To
+- Record the PHC notifications and the house email template in CLAUDE.md
+- Send from no-reply@, reply to support@ — on both transports
+- Show support@ as the reply address, not the internal admin inbox
+- Close the four PHC notification gaps, in the GFC house email template
+- openemr: surface OpenEMR's real validation error on appointment booking
+- dataStore: create the application database on first boot when RDS was provisioned without one
+- IHPC patients can see their full clinical chart documents
+- Surface staff-uploaded scans in the client's own Documents tab
+
+
+### Version 3.0.1 - September 13, 2026
+
+#### Documentation
+- Phase 6C+6D as guide pages 13-20 — app build and full cutover in the Master Setup Guide
+- move app-on-AWS build into the Master Setup Guide as Phase 6C; runbook appendix becomes a pointer
+- cutover runbook — Appendix A (stand up the app on AWS) + seven review findings
+
+#### Changes
+- Record PR #86, and stop saying the patient hears nothing
+- Discover the senders instead of listing them
+- Backfill PR #84 into the running status, and correct its counts
+- Tell the patient when a visit is booked, moved or cancelled — and show it
+- Workspace email is live — record it, and stop saying it isn't
+- Ungate shift requests; make the email detail rule name no vendor
+- Every email through the house template, and a guard that keeps it that way
+- Make enrollment gate scheduling; edit consent prefill; de-practice the client form
+- Caregiver pay rate, and the client billed rate at creation
+- Record the welcome-email fix, and correct PR #76's overclaim
+- Put the welcome email back inside the house template
+- Scheduling block on the admin dashboard
+- Competency gate over licence ceiling; whole open board; reach /scheduling
+- Record the AWS-only directive, and name the one live Replit dependency
+- One address: send from support@, and drop the redundant Reply-To
+- Record the PHC notifications and the house email template in CLAUDE.md
+- Send from no-reply@, reply to support@ — on both transports
+- Show support@ as the reply address, not the internal admin inbox
+- Close the four PHC notification gaps, in the GFC house email template
+- openemr: surface OpenEMR's real validation error on appointment booking
+- dataStore: create the application database on first boot when RDS was provisioned without one
+- IHPC patients can see their full clinical chart documents
+- Surface staff-uploaded scans in the client's own Documents tab
+
+
+### Version 3.1.0 - September 10, 2026
+
+#### New Features
+- Add a BAA-covered Google Workspace email transport
+- Add the two admin screens the open owner items assumed existed
+
+#### Bug Fixes
+- Backfill PR #48 as merged, and note the fetch URLs now resolve
+
+#### Documentation
+- Session 5 accuracy pass — current session status, repos do not bypass the db layer, ~39 collections
+- backfill PR #69 on the Session 9 row
+- the session plan still said the schedule ships unmounted
+- Session 5 — dynamic collection enumeration, KV prod guard, rollback + break-glass; defer breach/retention to Session 12
+- add Session 5 prompt — clinical HIPAA go-live gate
+- backfill PR #56 on the Session 7 row
+
+#### Changes
+- 5.3 app auth: TOTP MFA + recovery codes, server-side sessions, 15-minute idle logout, revocation
+- 5.2 OpenEMR auth: authorization_code + PKCE per user, password grant removed, attribution interim retired
+- 5.1 data layer: one store module (kv
+- Retire the Session 3.5 interim message path
+- Session 9: messaging — channel matrix, role-based visibility, escalation
+- Document reads are live — verified 29/29 against the instance, bytes read back
+- Wire Session 7's schedule into the caregiver app
+- The override key must match upstream byte for byte — ours said :id, theirs :did
+- One-paste deploy that cannot skip a step, and the reason step 1 kept failing
+- Harden Workspace setup: repair mangled keys, name the two common failures
+- An unauthenticated 401 never proved a route exists, and the guide said it did
+- Brand the email chrome as Godwins Family Care, from config.BRAND
+- Honour the email opt-out at the point every notification passes through
+- Collapse the four identical changelog blocks this session's boots appended
+- Read documents back out of OpenEMR, and split "not deployed" from "not found"
+- Record that code search is live, and why the deploy took two attempts
+- Scheduling: explicit any-level shifts and direct posting to a caregiver
+- The chart can show documents again, and open them
+
+
+### Version 3.1.0 - September 10, 2026
+
+#### New Features
+- Add a BAA-covered Google Workspace email transport
+- Add the two admin screens the open owner items assumed existed
+
+#### Bug Fixes
+- Backfill PR #48 as merged, and note the fetch URLs now resolve
+
+#### Documentation
+- Session 5 accuracy pass — current session status, repos do not bypass the db layer, ~39 collections
+- backfill PR #69 on the Session 9 row
+- the session plan still said the schedule ships unmounted
+- Session 5 — dynamic collection enumeration, KV prod guard, rollback + break-glass; defer breach/retention to Session 12
+- add Session 5 prompt — clinical HIPAA go-live gate
+- backfill PR #56 on the Session 7 row
+
+#### Changes
+- 5.2 OpenEMR auth: authorization_code + PKCE per user, password grant removed, attribution interim retired
+- 5.1 data layer: one store module (kv
+- Retire the Session 3.5 interim message path
+- Session 9: messaging — channel matrix, role-based visibility, escalation
+- Document reads are live — verified 29/29 against the instance, bytes read back
+- Wire Session 7's schedule into the caregiver app
+- The override key must match upstream byte for byte — ours said :id, theirs :did
+- One-paste deploy that cannot skip a step, and the reason step 1 kept failing
+- Harden Workspace setup: repair mangled keys, name the two common failures
+- An unauthenticated 401 never proved a route exists, and the guide said it did
+- Brand the email chrome as Godwins Family Care, from config.BRAND
+- Honour the email opt-out at the point every notification passes through
+- Collapse the four identical changelog blocks this session's boots appended
+- Read documents back out of OpenEMR, and split "not deployed" from "not found"
+- Record that code search is live, and why the deploy took two attempts
+- Scheduling: explicit any-level shifts and direct posting to a caregiver
+- The chart can show documents again, and open them
+
+
+### Version 3.1.0 - September 10, 2026
+
+#### New Features
+- Add a BAA-covered Google Workspace email transport
+- Add the two admin screens the open owner items assumed existed
+
+#### Bug Fixes
+- Backfill PR #48 as merged, and note the fetch URLs now resolve
+
+#### Documentation
+- Session 5 accuracy pass — current session status, repos do not bypass the db layer, ~39 collections
+- backfill PR #69 on the Session 9 row
+- the session plan still said the schedule ships unmounted
+- Session 5 — dynamic collection enumeration, KV prod guard, rollback + break-glass; defer breach/retention to Session 12
+- add Session 5 prompt — clinical HIPAA go-live gate
+- backfill PR #56 on the Session 7 row
+
+#### Changes
+- 5.2 OpenEMR auth: authorization_code + PKCE per user, password grant removed, attribution interim retired
+- 5.1 data layer: one store module (kv
+- Retire the Session 3.5 interim message path
+- Session 9: messaging — channel matrix, role-based visibility, escalation
+- Document reads are live — verified 29/29 against the instance, bytes read back
+- Wire Session 7's schedule into the caregiver app
+- The override key must match upstream byte for byte — ours said :id, theirs :did
+- One-paste deploy that cannot skip a step, and the reason step 1 kept failing
+- Harden Workspace setup: repair mangled keys, name the two common failures
+- An unauthenticated 401 never proved a route exists, and the guide said it did
+- Brand the email chrome as Godwins Family Care, from config.BRAND
+- Honour the email opt-out at the point every notification passes through
+- Collapse the four identical changelog blocks this session's boots appended
+- Read documents back out of OpenEMR, and split "not deployed" from "not found"
+- Record that code search is live, and why the deploy took two attempts
+- Scheduling: explicit any-level shifts and direct posting to a caregiver
+- The chart can show documents again, and open them
+
+
+### Version 3.1.0 - September 10, 2026
+
+#### New Features
+- Add a BAA-covered Google Workspace email transport
+- Add the two admin screens the open owner items assumed existed
+
+#### Bug Fixes
+- Backfill PR #48 as merged, and note the fetch URLs now resolve
+
+#### Documentation
+- Session 5 accuracy pass — current session status, repos do not bypass the db layer, ~39 collections
+- backfill PR #69 on the Session 9 row
+- the session plan still said the schedule ships unmounted
+- Session 5 — dynamic collection enumeration, KV prod guard, rollback + break-glass; defer breach/retention to Session 12
+- add Session 5 prompt — clinical HIPAA go-live gate
+- backfill PR #56 on the Session 7 row
+
+#### Changes
+- Retire the Session 3.5 interim message path
+- Session 9: messaging — channel matrix, role-based visibility, escalation
+- Document reads are live — verified 29/29 against the instance, bytes read back
+- Wire Session 7's schedule into the caregiver app
+- The override key must match upstream byte for byte — ours said :id, theirs :did
+- One-paste deploy that cannot skip a step, and the reason step 1 kept failing
+- Harden Workspace setup: repair mangled keys, name the two common failures
+- An unauthenticated 401 never proved a route exists, and the guide said it did
+- Brand the email chrome as Godwins Family Care, from config.BRAND
+- Honour the email opt-out at the point every notification passes through
+- Collapse the four identical changelog blocks this session's boots appended
+- Read documents back out of OpenEMR, and split "not deployed" from "not found"
+- Record that code search is live, and why the deploy took two attempts
+- Scheduling: explicit any-level shifts and direct posting to a caregiver
+- The chart can show documents again, and open them
+- Session 7: PHCP scheduling, availability, time tracking
+- The plan of care lives in the app, and follows the client into the chart
+
+
+### Version 3.1.0 - September 10, 2026
+
+#### New Features
+- Add a BAA-covered Google Workspace email transport
+- Add the two admin screens the open owner items assumed existed
+
+#### Bug Fixes
+- Backfill PR #48 as merged, and note the fetch URLs now resolve
+
+#### Documentation
+- Session 5 accuracy pass — current session status, repos do not bypass the db layer, ~39 collections
+- backfill PR #69 on the Session 9 row
+- the session plan still said the schedule ships unmounted
+- Session 5 — dynamic collection enumeration, KV prod guard, rollback + break-glass; defer breach/retention to Session 12
+- add Session 5 prompt — clinical HIPAA go-live gate
+- backfill PR #56 on the Session 7 row
+
+#### Changes
+- Retire the Session 3.5 interim message path
+- Session 9: messaging — channel matrix, role-based visibility, escalation
+- Document reads are live — verified 29/29 against the instance, bytes read back
+- Wire Session 7's schedule into the caregiver app
+- The override key must match upstream byte for byte — ours said :id, theirs :did
+- One-paste deploy that cannot skip a step, and the reason step 1 kept failing
+- Harden Workspace setup: repair mangled keys, name the two common failures
+- An unauthenticated 401 never proved a route exists, and the guide said it did
+- Brand the email chrome as Godwins Family Care, from config.BRAND
+- Honour the email opt-out at the point every notification passes through
+- Collapse the four identical changelog blocks this session's boots appended
+- Read documents back out of OpenEMR, and split "not deployed" from "not found"
+- Record that code search is live, and why the deploy took two attempts
+- Scheduling: explicit any-level shifts and direct posting to a caregiver
+- The chart can show documents again, and open them
+- Session 7: PHCP scheduling, availability, time tracking
+- The plan of care lives in the app, and follows the client into the chart
+
+
 ### Version 3.9.0 - September 10, 2026
 
 #### New Features
