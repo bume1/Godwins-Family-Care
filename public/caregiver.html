@@ -1147,6 +1147,56 @@ const DocumentsCard = () => {
   );
 };
 
+// The checklist stays reachable after the packet is signed — the uploads
+// outlive the wizard, and a caregiver chasing their own TB result needs
+// somewhere to send it that is not an email to the office.
+const OnboardingCard = ({ me, onChanged }) => {
+  const [packet, setPacket] = useState(null);
+  const load = useCallback(async () => {
+    try { setPacket(await api('/api/caregiver/welcome-packet')); } catch (e) { setPacket(null); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  if (!packet) return null;
+
+  const outstanding = (me.onboarding && me.onboarding.outstanding) || [];
+  const theirs = outstanding.filter(o => o.waitingOn === 'you');
+
+  return (
+    <div>
+      <div className="card">
+        <h3>Your onboarding</h3>
+        {me.onboarding && me.onboarding.cleared ? (
+          <p className="sub">You are cleared to work. Everything on your checklist is in.</p>
+        ) : (
+          <p className="sub">
+            {theirs.length
+              ? `${theirs.length} ${theirs.length === 1 ? 'item is' : 'items are'} waiting on you.`
+              : 'Nothing is waiting on you — the rest is with the office.'}
+            {outstanding.length - theirs.length > 0
+              ? ` ${outstanding.length - theirs.length} with the office.`
+              : ''}
+          </p>
+        )}
+        <button className="btn ghost" onClick={async () => {
+          try {
+            const res = await fetch(`${API}/api/caregiver/welcome-packet/signed.pdf`, {
+              headers: { Authorization: `Bearer ${getToken()}` }
+            });
+            if (!res.ok) throw new Error('No signed packet is on file yet.');
+            const url = URL.createObjectURL(await res.blob());
+            window.open(url, '_blank');
+            setTimeout(() => URL.revokeObjectURL(url), 60000);
+          } catch (e) { /* the button is a convenience; the checklist below is the work */ }
+        }}>Download my signed packet</button>
+      </div>
+      <OnboardingChecklist checklist={packet.checklist || []}
+        groupTitles={packet.groupTitles} groupIntros={packet.groupIntros}
+        compact
+        onChanged={async () => { await load(); if (onChanged) await onChanged(); }} />
+    </div>
+  );
+};
+
 const MoreTab = ({ visitLogs, queued, me }) => (
   <div>
     <h2 className="pg">More</h2>
@@ -1183,6 +1233,8 @@ const MoreTab = ({ visitLogs, queued, me }) => (
         the mount here would put the same id in the DOM twice. */}
     <MessagingMount me={me} label="Messages" />
 
+    <OnboardingCard me={me} />
+
     <DocumentsCard />
 
     <div className="card">
@@ -1200,6 +1252,557 @@ const MoreTab = ({ visitLogs, queued, me }) => (
 // ============================================================================
 // APP
 // ============================================================================
+// ============================================================================
+// THE WELCOME PACKET WIZARD (2026-09)
+// ============================================================================
+// The first screen a new caregiver sees, and the whole app until it is signed.
+//
+// EVERY QUESTION COMES FROM THE SERVER. This page renders whatever
+// `GET /api/caregiver/welcome-packet` hands it and names no section, no field
+// and no option of its own — the same rule the competency catalog and the
+// document kinds follow. A page that restates the questions drifts from the
+// validator that refuses an answer they did not offer, silently.
+// ============================================================================
+
+const SignaturePad = ({ onChange }) => {
+  const canvasRef = useRef(null);
+  const drawing = useRef(false);
+  const dirty = useRef(false);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    // Drawn at device resolution, or a signature on a phone comes out furry.
+    const ratio = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * ratio;
+    canvas.height = rect.height * ratio;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(ratio, ratio);
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = '#0d2438';
+  }, []);
+
+  const pointFrom = (e) => {
+    const rect = canvasRef.current.getBoundingClientRect();
+    const source = e.touches ? e.touches[0] : e;
+    return { x: source.clientX - rect.left, y: source.clientY - rect.top };
+  };
+
+  const start = (e) => {
+    e.preventDefault();
+    drawing.current = true;
+    const ctx = canvasRef.current.getContext('2d');
+    const p = pointFrom(e);
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+  };
+  const move = (e) => {
+    if (!drawing.current) return;
+    e.preventDefault();
+    const ctx = canvasRef.current.getContext('2d');
+    const p = pointFrom(e);
+    ctx.lineTo(p.x, p.y);
+    ctx.stroke();
+    dirty.current = true;
+  };
+  const end = () => {
+    if (!drawing.current) return;
+    drawing.current = false;
+    if (dirty.current) onChange(canvasRef.current.toDataURL('image/png'));
+  };
+  const clear = () => {
+    const canvas = canvasRef.current;
+    canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+    dirty.current = false;
+    onChange(null);
+  };
+
+  return (
+    <div>
+      <canvas ref={canvasRef}
+        style={{ width: '100%', height: 150, border: '1.5px dashed #d8cdb8', borderRadius: 10, background: '#fff', touchAction: 'none' }}
+        onMouseDown={start} onMouseMove={move} onMouseUp={end} onMouseLeave={end}
+        onTouchStart={start} onTouchMove={move} onTouchEnd={end} />
+      <button type="button" className="btn ghost" style={{ marginTop: 8 }} onClick={clear}>Clear signature</button>
+    </div>
+  );
+};
+
+// One field, rendered from its served definition. Nothing here knows what any
+// particular question is.
+const PacketField = ({ field, value, onChange, imported }) => {
+  const set = (v) => onChange(field.id, v);
+
+  const label = (
+    <label>
+      {field.label}
+      {field.required ? <span style={{ color: '#b3261e' }}> *</span> : null}
+      {imported ? <span className="lvl" style={{ marginLeft: 8, fontSize: 10 }}>from your packet — check this</span> : null}
+    </label>
+  );
+
+  if (field.type === 'single') {
+    return (
+      <div className="fld">
+        {label}
+        <div className="chips">
+          {field.options.map(o => (
+            <button type="button" key={o.value}
+              className={`chip ${value === o.value ? 'on' : ''}`}
+              onClick={() => set(value === o.value ? '' : o.value)}>{o.label}</button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (field.type === 'multi') {
+    const picked = Array.isArray(value) ? value : [];
+    return (
+      <div className="fld">
+        {label}
+        {field.hint ? <p className="sub" style={{ marginBottom: 8 }}>{field.hint}</p> : null}
+        <div className="chips">
+          {field.options.map(o => (
+            <button type="button" key={o.value}
+              className={`chip ${picked.includes(o.value) ? 'on' : ''}`}
+              onClick={() => set(picked.includes(o.value) ? picked.filter(v => v !== o.value) : [...picked, o.value])}>
+              {o.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (field.type === 'grid') {
+    const grid = (value && typeof value === 'object') ? value : {};
+    return (
+      <div className="fld">
+        {label}
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: 'left', padding: '6px 4px', color: '#6f6a60', fontWeight: 600 }}></th>
+                {field.columns.map(c => (
+                  <th key={c.value} style={{ padding: '6px 4px', color: '#6f6a60', fontWeight: 600, fontSize: 11 }}>{c.label}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {field.rows.map(r => (
+                <tr key={r.value} style={{ borderTop: '1px solid #ece6db' }}>
+                  <td style={{ padding: '8px 4px', fontWeight: 600, color: '#0d2438' }}>{r.label}</td>
+                  {field.columns.map(c => {
+                    const on = (grid[r.value] || []).includes(c.value);
+                    return (
+                      <td key={c.value} style={{ padding: '6px 4px', textAlign: 'center' }}>
+                        <button type="button"
+                          aria-label={`${r.label} ${c.label}`}
+                          aria-pressed={on}
+                          className={`chip ${on ? 'on' : ''}`}
+                          style={{ padding: '6px 10px', minWidth: 36 }}
+                          onClick={() => {
+                            const current = grid[r.value] || [];
+                            const next = on ? current.filter(v => v !== c.value) : [...current, c.value];
+                            set({ ...grid, [r.value]: next });
+                          }}>{on ? '✓' : ''}</button>
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  }
+
+  if (field.type === 'rows') {
+    const rows = Array.isArray(value) ? value : [];
+    return (
+      <div className="fld">
+        {label}
+        {Array.from({ length: field.rowCount }).map((_, i) => (
+          <div key={i} className="card" style={{ marginBottom: 10 }}>
+            <p className="sub" style={{ marginBottom: 8 }}>Reference {i + 1}</p>
+            {field.rowFields.map(rf => (
+              <div className="fld" key={rf.id} style={{ marginBottom: 9 }}>
+                <label>{rf.label}</label>
+                <input type={rf.type === 'tel' ? 'tel' : 'text'}
+                  value={(rows[i] || {})[rf.id] || ''}
+                  onChange={(e) => {
+                    const next = Array.from({ length: field.rowCount }).map((__, j) => ({ ...(rows[j] || {}) }));
+                    next[i][rf.id] = e.target.value;
+                    set(next);
+                  }} />
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (field.type === 'textarea') {
+    return (
+      <div className="fld">
+        {label}
+        {field.hint ? <p className="sub" style={{ marginBottom: 8 }}>{field.hint}</p> : null}
+        <textarea rows={4} value={value || ''} maxLength={field.max || 2000}
+          onChange={(e) => set(e.target.value)} />
+      </div>
+    );
+  }
+
+  const inputType = field.type === 'date' ? 'date' : (field.type === 'email' ? 'email' : (field.type === 'tel' ? 'tel' : 'text'));
+  return (
+    <div className="fld">
+      {label}
+      <input type={inputType} value={value || ''} maxLength={field.max || undefined}
+        onChange={(e) => set(e.target.value)} />
+    </div>
+  );
+};
+
+// The Part Two checklist, with an upload on every item that takes one.
+const OnboardingChecklist = ({ checklist, groupTitles, groupIntros, onChanged, compact }) => {
+  const [busyKind, setBusyKind] = useState(null);
+  const [msg, setMsg] = useState(null);
+
+  const upload = async (row, file) => {
+    if (!file) return;
+    if (file.size > 10 * 1024 * 1024) {
+      setMsg({ ok: false, text: 'That file is over 10 MB. Try photographing it again at a smaller size.' });
+      return;
+    }
+    setBusyKind(row.kind); setMsg(null);
+    try {
+      const b64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error('read failed'));
+        reader.readAsDataURL(file);
+      });
+      await api('/api/caregiver/documents', {
+        method: 'POST',
+        body: JSON.stringify({ kind: row.kind, fileName: file.name, fileDataB64: b64, note: row.title })
+      });
+      setMsg({ ok: true, text: `${row.title} sent to the office.` });
+      if (onChanged) await onChanged();
+    } catch (e) {
+      // The server's own words. "We could not store that file" and "only PDF,
+      // JPG and PNG are accepted" need different actions from the person
+      // holding the phone, and an expired session is a third thing.
+      const expired = e.status === 401 || String(e.code || '').startsWith('AUTH_');
+      setMsg({ ok: false, text: expired ? 'Your session timed out. Sign in again and resend.' : (e.message || 'That did not send.') });
+    }
+    setBusyKind(null);
+  };
+
+  const groups = [];
+  for (const row of checklist) {
+    if (!groups.length || groups[groups.length - 1].group !== row.group) groups.push({ group: row.group, rows: [] });
+    groups[groups.length - 1].rows.push(row);
+  }
+
+  const badge = (row) => {
+    if (row.status === 'complete') return <span className="lvl" style={{ background: '#e8f4ec', color: '#1d6b3d', borderColor: '#b6ddc4' }}>Done</span>;
+    if (row.status === 'in_review') return <span className="lvl">With the office</span>;
+    if (row.status === 'in_progress') return <span className="lvl">Scheduled</span>;
+    if (row.status === 'rejected') return <span className="lvl" style={{ background: '#fdeeee', color: '#7d2020', borderColor: '#e7bcbc' }}>Send again</span>;
+    return <span className="lvl" style={{ background: '#fff', color: '#6f6a60', borderColor: '#e0d8c8' }}>{row.required ? 'Needed' : 'Optional'}</span>;
+  };
+
+  return (
+    <div>
+      {msg ? <div className={msg.ok ? 'ok' : 'err'}>{msg.text}</div> : null}
+      {groups.map(g => (
+        <div className="card" key={g.group}>
+          <h3>{g.group}. {groupTitles[g.group]}</h3>
+          {groupIntros[g.group] ? <p className="sub">{groupIntros[g.group]}</p> : null}
+          {g.rows.map(row => (
+            <div key={row.kind} style={{ padding: '11px 0', borderTop: '1px solid #ece6db' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'flex-start' }}>
+                <b style={{ color: '#0d2438' }}>{row.item}. {row.title}</b>
+                {badge(row)}
+              </div>
+              {!compact && row.detail ? <p className="sub" style={{ margin: '5px 0 0' }}>{row.detail}</p> : null}
+              {!compact && row.help ? <p className="sub" style={{ margin: '5px 0 0', color: '#0d2438' }}>{row.help}</p> : null}
+              {row.requiredWhen ? <p className="sub" style={{ margin: '5px 0 0' }}>{row.requiredWhen}</p> : null}
+
+              {row.uploads && row.uploads.filter(u => u.status === 'rejected' && u.reviewNote).slice(0, 1).map(u => (
+                // A rejection WITH ITS REASON, because a caregiver told only
+                // "not accepted" re-sends the same blurry photo.
+                <div className="err" key={u.id} style={{ margin: '8px 0 0' }}>Not accepted: {u.reviewNote}</div>
+              ))}
+
+              {row.source === 'office' ? (
+                <p className="sub" style={{ margin: '6px 0 0' }}>We take care of this one. We will be in touch.</p>
+              ) : null}
+
+              {row.upload ? (
+                <div style={{ marginTop: 8 }}>
+                  <input type="file" accept="application/pdf,image/jpeg,image/png"
+                    disabled={busyKind === row.kind}
+                    onChange={(e) => { const f = e.target.files[0]; e.target.value = ''; upload(row, f); }} />
+                  {busyKind === row.kind ? <p className="sub" style={{ margin: '6px 0 0' }}>Sending…</p> : null}
+                </div>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+};
+
+const WelcomePacketWizard = ({ me, onComplete }) => {
+  const [packet, setPacket] = useState(null);
+  const [data, setData] = useState({});
+  const [step, setStep] = useState('start');   // 'start' | section id | 'documents' | 'sign'
+  const [imported, setImported] = useState([]);
+  const [importNote, setImportNote] = useState(null);
+  const [signature, setSignature] = useState(null);
+  const [printedName, setPrintedName] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [missing, setMissing] = useState([]);
+
+  const load = useCallback(async () => {
+    const p = await api('/api/caregiver/welcome-packet');
+    setPacket(p);
+    setData(p.data || {});
+    if (p.status === 'in_progress') setStep(s => (s === 'start' ? (p.sections[0] || {}).id : s));
+    return p;
+  }, []);
+
+  useEffect(() => { load().catch(e => setErr(e.message)); }, [load]);
+
+  const steps = packet ? ['start', ...packet.sections.map(s => s.id), 'documents', 'sign'] : ['start'];
+  const index = steps.indexOf(step);
+
+  const saveStep = async () => {
+    setBusy(true); setErr('');
+    try {
+      const res = await api('/api/caregiver/welcome-packet', { method: 'PUT', body: JSON.stringify({ data }) });
+      setMissing(res.missing || []);
+      setPacket(p => ({ ...p, checklist: res.checklist }));
+      return true;
+    } catch (e) {
+      setErr(e.message); return false;
+    } finally { setBusy(false); }
+  };
+
+  const go = async (target) => {
+    if (step !== 'start' && step !== 'documents' && step !== 'sign') {
+      const ok = await saveStep();
+      if (!ok) return;
+    }
+    setStep(target);
+    window.scrollTo(0, 0);
+  };
+
+  const importPdf = async (file) => {
+    if (!file) return;
+    if (file.size > 10 * 1024 * 1024) { setErr('That file is over 10 MB.'); return; }
+    setBusy(true); setErr(''); setImportNote(null);
+    try {
+      const b64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error('read failed'));
+        reader.readAsDataURL(file);
+      });
+      const res = await api('/api/caregiver/welcome-packet/import', {
+        method: 'POST', body: JSON.stringify({ fileName: file.name, fileDataB64: b64 })
+      });
+      setData(res.data || {});
+      setMissing(res.missing || []);
+      // Only a TEXT read needs proofreading. A packet read field by field off
+      // the form we handed out was not interpreted, so flagging every answer on
+      // it would train people to ignore the flag.
+      setImported(res.needsConfirmation ? (res.filled || []) : []);
+      setImportNote({
+        source: res.source,
+        filled: (res.filled || []).length,
+        reason: res.reason
+      });
+      setPacket(p => ({ ...p, checklist: res.checklist }));
+      if (res.source !== 'none') setStep((packet.sections[0] || {}).id);
+      window.scrollTo(0, 0);
+    } catch (e) {
+      setErr(e.message);
+    }
+    setBusy(false);
+  };
+
+  const submit = async () => {
+    setBusy(true); setErr('');
+    try {
+      await api('/api/caregiver/welcome-packet/submit', {
+        method: 'POST', body: JSON.stringify({ data, signaturePng: signature, printedName })
+      });
+      await onComplete();
+    } catch (e) {
+      setErr(e.message);
+      if (e.data && e.data.missing) {
+        setMissing(e.data.missing);
+        // Sent back to the first section that still has a gap rather than left
+        // on the signature screen with a list of things that are elsewhere.
+        const first = e.data.missing[0];
+        if (first && first.section) setStep(first.section);
+        window.scrollTo(0, 0);
+      }
+      setBusy(false);
+    }
+  };
+
+  if (err && !packet) return <div className="main"><div className="err">{err}</div></div>;
+  if (!packet) return <Loading />;
+
+  const section = packet.sections.find(s => s.id === step) || null;
+  const progress = Math.round(((index) / (steps.length - 1)) * 100);
+
+  return (
+    <div>
+      <div style={{ height: 4, background: '#ece6db', borderRadius: 3, marginBottom: 16 }}>
+        <div style={{ height: '100%', width: `${progress}%`, background: '#c9a227', borderRadius: 3, transition: 'width .2s' }} />
+      </div>
+
+      <Err>{err}</Err>
+
+      {step === 'start' ? (
+        <div>
+          <div className="card">
+            <h3>Welcome to Godwins Family Care</h3>
+            <p className="sub">
+              This packet has two parts. Part One is your caregiver profile, which is how we match you with clients
+              close to where you live. Part Two is the list of documents we need before your first shift.
+              Finish Part One to open the app.
+            </p>
+          </div>
+
+          <div className="card">
+            <h3>Already filled out the PDF?</h3>
+            <p className="sub">
+              Upload it and we will read what we can into the form, so you only fill in what is missing.
+            </p>
+            <input type="file" accept="application/pdf" disabled={busy}
+              onChange={(e) => { const f = e.target.files[0]; e.target.value = ''; importPdf(f); }} />
+            {busy ? <p className="sub" style={{ marginTop: 8 }}>Reading your packet…</p> : null}
+          </div>
+
+          <div className="card">
+            <h3>Start fresh</h3>
+            <p className="sub">About ten minutes. It saves as you go, so you can stop and come back.</p>
+            <button className="btn" onClick={() => go((packet.sections[0] || {}).id)}>Fill it in here</button>
+            <button className="btn ghost" onClick={async () => {
+              // Fetched with the auth header rather than linked, then handed to
+              // the browser — the route is authenticated and a plain href
+              // carries no token.
+              try {
+                const res = await fetch(`${API}/api/caregiver/welcome-packet/blank.pdf`, {
+                  headers: { Authorization: `Bearer ${getToken()}` }
+                });
+                if (!res.ok) throw new Error('Could not build the PDF.');
+                const blob = await res.blob();
+                const url = URL.createObjectURL(blob);
+                window.open(url, '_blank');
+                setTimeout(() => URL.revokeObjectURL(url), 60000);
+              } catch (e) { setErr(e.message); }
+            }}>Download the blank PDF instead</button>
+          </div>
+        </div>
+      ) : null}
+
+      {importNote ? (
+        <div className={importNote.source === 'none' ? 'err' : 'ok'} style={{ marginBottom: 14 }}>
+          {importNote.source === 'form'
+            ? `We read ${importNote.filled} answers straight out of your packet. Check them as you go.`
+            : (importNote.source === 'text'
+              ? `We read ${importNote.filled} answers out of your packet. ${importNote.reason}`
+              : importNote.reason)}
+        </div>
+      ) : null}
+
+      {section ? (
+        <div>
+          <div className="card">
+            <h3>{section.number}. {section.title}</h3>
+            {section.intro ? <p className="sub">{section.intro}</p> : null}
+            {section.fields.map(field => (
+              <PacketField key={field.id} field={field}
+                value={data[field.id]}
+                imported={imported.includes(field.id)}
+                onChange={(id, v) => setData(d => ({ ...d, [id]: v }))} />
+            ))}
+          </div>
+          <button className="btn" disabled={busy} onClick={() => go(steps[index + 1])}>
+            {busy ? 'Saving…' : 'Save and continue'}
+          </button>
+          {index > 1 ? (
+            <button className="btn ghost" disabled={busy} onClick={() => go(steps[index - 1])}>Back</button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {step === 'documents' ? (
+        <div>
+          <div className="card">
+            <h3>Part Two — What to send us</h3>
+            <p className="sub">
+              Georgia requires every caregiver to be fully cleared before working in a client's home.
+              You can upload these now or come back to them — they do not hold up the rest of your packet,
+              but they do have to be in before we can put you on a shift.
+            </p>
+          </div>
+          <OnboardingChecklist checklist={packet.checklist || []}
+            groupTitles={packet.groupTitles} groupIntros={packet.groupIntros}
+            onChanged={async () => { const p = await load(); setData(d => ({ ...d, ...(p.data || {}) })); }} />
+          <button className="btn" onClick={() => go('sign')}>Continue to sign</button>
+          <button className="btn ghost" onClick={() => go(steps[index - 1])}>Back</button>
+        </div>
+      ) : null}
+
+      {step === 'sign' ? (
+        <div>
+          {missing.length ? (
+            <div className="err">
+              Still needed before you can sign:
+              <ul style={{ margin: '8px 0 0 18px' }}>
+                {missing.map(m => <li key={m.id}>{m.label} <span className="mu">({m.sectionTitle})</span></li>)}
+              </ul>
+            </div>
+          ) : null}
+          <div className="card">
+            <h3>Sign your packet</h3>
+            <p className="sub">{packet.payPromise}</p>
+            <div className="fld">
+              <label>Printed name</label>
+              <input type="text" value={printedName} onChange={(e) => setPrintedName(e.target.value)}
+                placeholder="Type your name as it should appear" />
+            </div>
+            <div className="fld">
+              <label>Signature</label>
+              <SignaturePad onChange={setSignature} />
+            </div>
+          </div>
+          <button className="btn gold" disabled={busy || !signature || !printedName.trim()} onClick={submit}>
+            {busy ? 'Submitting…' : 'Submit my packet'}
+          </button>
+          <button className="btn ghost" disabled={busy} onClick={() => go('documents')}>Back</button>
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
 const App = () => {
   const [me, setMe] = useState(null);
   const [clients, setClients] = useState([]);
@@ -1287,6 +1890,30 @@ const App = () => {
         <div className="main">
           <div className="err">{fatal || 'Could not load your account.'}</div>
           <button className="btn ghost" onClick={logout}>Sign out</button>
+        </div>
+      </div>
+    );
+  }
+
+  // THE WELCOME PACKET GATE. A caregiver who has not signed theirs gets the
+  // packet and nothing else — no tabs, because a tab bar over a locked app is
+  // a row of buttons that answer 403. The API refuses those routes too: the
+  // screen is the courtesy, the route is the control.
+  if (me.onboarding && !me.onboarding.appAccess) {
+    return (
+      <div className="shell">
+        <div className="hdr">
+          <span className="ttl">Godwins Family Care</span>
+          <button onClick={logout} title="Sign out"><i className="ti ti-logout"></i></button>
+        </div>
+        <div className="main">
+          <WelcomePacketWizard me={me} onComplete={async () => {
+            // Re-read rather than assuming: what opens the app is the stored
+            // packet, so the shell should believe the server about it.
+            const fresh = await api('/api/caregiver/me');
+            setMe(fresh);
+            await refresh();
+          }} />
         </div>
       </div>
     );
