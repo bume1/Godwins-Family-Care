@@ -8,7 +8,11 @@
  *   Mount:  window.GFCMessaging.mount('some-element-id', {
  *             userId:        me.id,     // display and bookkeeping only
  *             role:          'client',  // display only; the server decides
- *             scopeClientId: null,      // staff: whose threads to show
+ *             scopeClientId: null,      // staff: whose threads to show. PASSING
+ *                                       // one fixes the scope and removes the
+ *                                       // picker; leaving it null lets a staff
+ *                                       // user choose from the clients they
+ *                                       // cover (the server decides which).
  *             authToken:     token,     // what actually authorizes
  *             onUnread:      (n) => {}  // optional badge callback
  *           });
@@ -144,11 +148,39 @@
     bind(state, root);
   }
 
+  // Staff message ABOUT a client, so a staff screen with no client named has
+  // every channel switched off with "none is selected" — which reads as a
+  // broken app rather than as a step not yet taken. The list is the server's
+  // (`/api/messaging/clients`), scoped the same way the routes are, so a name
+  // shown here can always be opened and one that cannot never appears.
+  // Is it settled which client we are talking about? Either the host fixed it,
+  // or the user picked one, or there is only one it could be (a client and a
+  // family member each cover exactly one, so they are never asked).
+  function scopeSettled(state) {
+    if (state.fixedScope || state.scopeClientId) return true;
+    return !!state.pickerClients && state.pickerClients.length < 2;
+  }
+
+  function renderPicker(state) {
+    if (state.fixedScope || !state.pickerClients || state.pickerClients.length < 2) return '';
+    var opts = ['<option value="">Everyone I can see</option>'].concat(
+      state.pickerClients.map(function (c) {
+        return '<option value="' + esc(c.id) + '"' +
+          (state.scopeClientId === c.id ? ' selected' : '') + '>' + esc(c.name) + '</option>';
+      })
+    ).join('');
+    return '<div class="mcard"><label for="gfcm-client">Client</label>' +
+      '<select id="gfcm-client" data-client-pick="1">' + opts + '</select>' +
+      (state.scopeClientId ? '' :
+        '<div class="mnote">Pick a client to start a new message. Conversations from every client you cover are listed below either way.</div>') +
+      '</div>';
+  }
+
   function renderList(state) {
     var openable = state.channels.filter(function (c) { return c.available; });
     var blocked = state.channels.filter(function (c) { return !c.available; });
 
-    var html = '<div class="mcard"><h3>Messages</h3>';
+    var html = renderPicker(state) + '<div class="mcard"><h3>Messages</h3>';
     if (!state.threads.length) {
       html += '<div class="mempty">No conversations yet.</div>';
     } else {
@@ -175,7 +207,12 @@
 
     // A channel that is off is SHOWN, disabled, with the reason. Hiding it
     // leaves someone hunting for a button that is not there.
-    if (blocked.length) {
+    // A channel that is off stays SHOWN with its reason — that is the brief's
+    // rule and it is why a client who has no caregiver yet reads "the office
+    // assigns one" instead of hunting for a missing button. The only case it is
+    // withheld is a staff screen that has not named a client, where every
+    // reason would read "none is selected" and say nothing about the client.
+    if (blocked.length && scopeSettled(state)) {
       html += '<div class="mcard mdis"><h3>Not available yet</h3>' +
         blocked.map(function (c) {
           return '<div class="mnote"><b>' + esc(c.label) + '</b>' + esc(c.reason || '') + '</div>';
@@ -243,6 +280,15 @@
       return p.catch(function (err) { state.error = err.message; render(state); });
     };
 
+    var pick = root.querySelector('[data-client-pick]');
+    if (pick) pick.onchange = function () {
+      state.scopeClientId = pick.value || null;
+      state.error = '';
+      state.loading = true;
+      render(state);
+      refresh(state).catch(function (err) { state.loading = false; state.error = err.message; render(state); });
+    };
+
     root.querySelectorAll('[data-open]').forEach(function (b) {
       b.onclick = function () { go(openThread(state, b.getAttribute('data-open'))); };
     });
@@ -307,10 +353,16 @@
     var q = state.scopeClientId ? '?clientId=' + encodeURIComponent(state.scopeClientId) : '';
     return Promise.all([
       api(state, '/api/messaging/threads' + q),
-      api(state, '/api/messaging/channels' + q)
+      api(state, '/api/messaging/channels' + q),
+      // A picker the caller cannot fail on: if the list cannot be read the
+      // panel still renders its threads, with no picker, rather than showing
+      // an error over a working inbox.
+      state.fixedScope ? Promise.resolve({ clients: [] })
+                       : api(state, '/api/messaging/clients').catch(function () { return { clients: [] }; })
     ]).then(function (r) {
       state.threads = r[0].threads || [];
       state.channels = r[1].channels || [];
+      state.pickerClients = r[2].clients || [];
       state.loading = false;
       render(state);
       reportUnread(state);
@@ -335,6 +387,11 @@
       userId: options.userId || null,
       role: options.role || null,
       scopeClientId: options.scopeClientId || null,
+      // A host that named a client OWNS the scope — the client portal is about
+      // one client and must never offer a way to look at another. Only a staff
+      // surface that named none gets the picker.
+      fixedScope: !!options.scopeClientId,
+      pickerClients: [],
       authToken: options.authToken,
       onUnread: options.onUnread || null,
       view: 'list',

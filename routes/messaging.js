@@ -26,6 +26,7 @@
 
 const express = require('express');
 const msg = require('../messagingRepository');
+const caregiverRepo = require('../caregiverRepository');
 
 module.exports = function createMessagingRoutes(deps) {
   const { db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4 } = deps;
@@ -58,6 +59,12 @@ module.exports = function createMessagingRoutes(deps) {
     const fresh = await freshUser(user.id);
     return !!(fresh && fresh.familyIsPoa && fresh.familyOfClientId === client.id);
   };
+
+  // Is this client one the acting user may message about? Session 6 owns the
+  // caregiver assignment rule, so it is called here rather than copied.
+  const inScope = (user, client) => msg.clientInScope(user, client, {
+    caregiverAssigned: caregiverRepo.isAssignedToCaregiver(user, client)
+  });
 
   const requireMessagingRole = (req, res, next) => {
     if (msg.actorRole(req.user)) return next();
@@ -138,6 +145,27 @@ module.exports = function createMessagingRoutes(deps) {
     body: m.body,
     sentAt: m.sent_at,
     mine: false
+  });
+
+  // ==========================================================================
+  // Which clients this user may message about — the picker behind every staff
+  // screen. Without it a staff member had no way to name a client, so every
+  // channel answered NO_CLIENT and the whole surface read as broken.
+  // Scoped by the SAME function the routes gate on, so a name that appears here
+  // can always be opened and one that cannot be opened never appears.
+  // ==========================================================================
+  router.get('/api/messaging/clients', authenticateToken, requireMessagingRole, async (req, res) => {
+    try {
+      const users = await getUsers();
+      const clients = users
+        .filter(u => u && u.role === ROLES.CLIENT && inScope(req.user, u))
+        .map(u => ({ id: u.id, name: u.name || u.email || 'Client' }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      res.json({ role: msg.actorRole(req.user), scoped: !msg.isUnrestricted(req.user), clients });
+    } catch (error) {
+      console.error('Messaging client list error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
   });
 
   // ==========================================================================
@@ -249,6 +277,15 @@ module.exports = function createMessagingRoutes(deps) {
       }
 
       const client = await resolveClient(req.user, body.clientId);
+      // Refused HERE, not only at read time. Without this a case manager could
+      // start a thread about a client they are not assigned to and then be
+      // unable to see the thread they had just created — a message sent into a
+      // room the sender cannot enter.
+      if (client && !inScope(req.user, client)) {
+        return res.status(403).json({
+          error: 'You are not on this client\'s care team.', code: 'CLIENT_NOT_IN_SCOPE'
+        });
+      }
       const users = await getUsers();
       const availability = msg.channelAvailability(channelId, { user: req.user, client, users });
       if (!availability.available) {
@@ -277,7 +314,13 @@ module.exports = function createMessagingRoutes(deps) {
         // A clinical escalation is a question waiting for an answer, so it
         // carries a status from the moment it exists. Every other channel has
         // none, rather than a meaningless "n/a".
-        response_status: channel.tracksResponse ? 'awaiting_response' : null,
+        // A clinical escalation carries a status because someone is waiting on an
+        // answer. When the CLINICIAN opens the conversation there is nobody
+        // waiting, so it carries none rather than an 'awaiting_response' that
+        // would sit on the clinician's own queue asking them to answer
+        // themselves.
+        response_status: (channel.tracksResponse && msg.actorRole(req.user) !== msg.ROLE.CLINICAL)
+          ? 'awaiting_response' : null,
         escalation_event_id: null,
         created_at: at,
         last_message_at: at,
