@@ -424,8 +424,17 @@ module.exports = function createSchedulingRoutes(deps) {
     }
   });
 
-  // GET /api/scheduling/shifts/open — the open pool, filtered to what THIS
-  // caregiver is eligible for. Ineligible shifts are not returned at all.
+  // GET /api/scheduling/shifts/open — the whole open board (owner rule,
+  // 2026-09-13). Every caregiver sees every open shift; one their licence does
+  // not cover comes back with `claimable: false` and the REASON, and the UI
+  // greys it out. Care-team-restricted shifts are still absent — see
+  // sched.shiftVisibility() for why those two gates differ.
+  //
+  // Returning the reason matters as much as returning the row: "you need a CNA
+  // sign-off for this" is a thing a caregiver can act on; a greyed row with no
+  // explanation is just a locked door. The claim route re-checks
+  // isEligibleForShift() independently, so a row shown here is never a row that
+  // can be taken here.
   router.get('/api/scheduling/shifts/open', authenticateToken, requireSchedulable, async (req, res) => {
     try {
       const me = await freshUser(req.user.id);
@@ -434,9 +443,16 @@ module.exports = function createSchedulingRoutes(deps) {
       const rows = await readRows('shifts');
       const open = rows
         .filter(r => r && r.status === 'open')
-        .filter(r => sched.isEligibleForShift(me, r, clientsById.get(r.client_id)))
-        .sort((a, b) => String(a.start).localeCompare(String(b.start)));
-      res.json({ shifts: open.slice(0, 200).map(publicShift) });
+        .map(r => ({ row: r, vis: sched.shiftVisibility(me, r, clientsById.get(r.client_id)) }))
+        .filter(x => x.vis.visible)
+        .sort((a, b) => String(a.row.start).localeCompare(String(b.row.start)));
+      res.json({
+        shifts: open.slice(0, 200).map(x => ({
+          ...publicShift(x.row),
+          claimable: x.vis.claimable,
+          ineligibleReason: x.vis.reason
+        }))
+      });
     } catch (error) {
       console.error('Open pool error:', error);
       res.status(500).json({ error: 'Server error' });

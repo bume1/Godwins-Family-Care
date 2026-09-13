@@ -94,19 +94,94 @@ test('LPN gets the skilled note plus the clinical narrative, and files as Pendin
     'an LPN records vitals by license, not by delegated competency');
 });
 
-test('SAFETY: no skilled or delegated task id can reach a Sitter or PCA schema', () => {
-  for (const level of ['sitter', 'pca']) {
-    // Even handed every competency in the book — a competency must not
-    // promote someone past their license level.
-    const schema = cg.visitLogSchemaFor(caregiver(level, cg.COMPETENCIES.slice()));
-    const ids = taskIdsIn(schema);
+test('SAFETY: a restricted task needs its VERIFIED competency at every level, sign-off or no sign-off', () => {
+  // REPOINTED, not deleted. Before 2026-09-13 this asserted a licence ceiling:
+  // a Sitter or PCA could never be offered a delegated or skilled task. The
+  // owner moved the gate onto the competency itself, because the work is done
+  // under licensed oversight and has to be documentable. The protection did not
+  // go away — it is now "no verified sign-off, no field" — so the test asserts
+  // the rule that replaced it rather than disappearing with the code it happened
+  // to point at.
+  // Read the item out of the catalog rather than assuming which ids are
+  // competency-gated — an item added later is then covered by this test for free.
+  const itemById = new Map();
+  for (const g of cg.TASK_GROUPS) for (const i of g.items) itemById.set(i.id, i);
+
+  for (const level of ['sitter', 'pca', 'cna', 'lpn']) {
+    const bare = cg.visitLogSchemaFor(caregiver(level, []));
+    const ids = taskIdsIn(bare);
     for (const restricted of cg.RESTRICTED_TASK_IDS) {
+      const item = itemById.get(restricted);
+      // Not competency-gated → it is licence-gated and an LPN legitimately has
+      // it (postop, teach). `byLicense` is the same exemption for the delegated
+      // block, which an LPN performs under their own licence.
+      if (!item.competency) continue;
+      if (Array.isArray(item.byLicense) && item.byLicense.includes(level)) continue;
       assert.ok(!ids.includes(restricted),
-        `${level} must never be offered the restricted task "${restricted}", competency or not`);
+        `${level} with no sign-off must not be offered "${restricted}"`);
     }
-    assert.strictEqual(schema.measurements.length, 0,
-      `${level} must never be offered a measurement field`);
+    if (level !== 'lpn') {
+      assert.strictEqual(bare.measurements.length, 0,
+        `${level} with no sign-off must be offered no measurement field`);
+    }
   }
+});
+
+test('a SIGN-OFF, not a licence, is what opens a restricted task (owner rule 2026-09-13)', () => {
+  // The change this rule was asked for: a PCA signed off on vital signs can
+  // record a blood pressure. Before, that sign-off was stored and inert.
+  const pca = cg.visitLogSchemaFor(caregiver('pca', ['vital_signs']));
+  const ids = taskIdsIn(pca);
+  assert.ok(ids.includes('vitals'), 'the signed-off task is offered');
+  assert.ok(ids.includes('blood_pressure'));
+  assert.ok(pca.measurements.map(m => m.id).includes('bloodPressure'),
+    'and so is the numeric field that goes with it');
+  // Still narrow: only what they were signed off for.
+  assert.ok(!ids.includes('blood_sugar'), 'an unheld competency stays closed');
+  assert.ok(!ids.includes('wound'));
+
+  // A Sitter is not a special case — the gate is the sign-off at every level.
+  const sitter = cg.visitLogSchemaFor(caregiver('sitter', ['blood_glucose']));
+  assert.ok(taskIdsIn(sitter).includes('blood_sugar'));
+});
+
+test('SAFETY: what is NOT competency-gated still keeps its licence floor', () => {
+  // Scope of role, not a credential: there is no sign-off that makes a Sitter a
+  // PCA. Handing them every competency in the book must not open bathing,
+  // cooking, or the two skilled items that carry no competency.
+  const sitter = cg.visitLogSchemaFor(caregiver('sitter', cg.COMPETENCIES.slice()));
+  const ids = taskIdsIn(sitter);
+  for (const roleScoped of ['bath', 'toileting', 'cook', 'feed', 'dressing', 'postop', 'teach']) {
+    assert.ok(!ids.includes(roleScoped),
+      `"${roleScoped}" is scope of role and no competency unlocks it`);
+  }
+});
+
+test('SAFETY: an UNVERIFIED or EXPIRED sign-off opens nothing, at any level', () => {
+  const unverified = cg.visitLogSchemaFor({
+    id: 'x', role: 'vendor', licenseLevel: 'pca',
+    skilledCompetencies: [{ task: 'vital_signs', verified: false }]
+  });
+  assert.ok(!taskIdsIn(unverified).includes('vitals'));
+  assert.strictEqual(unverified.measurements.length, 0);
+
+  const expired = cg.visitLogSchemaFor({
+    id: 'x', role: 'vendor', licenseLevel: 'pca',
+    skilledCompetencies: [{ task: 'vital_signs', verified: true, expiry: '2020-01-01' }]
+  });
+  assert.ok(!taskIdsIn(expired).includes('vitals'), 'an expired sign-off is NOT a sign-off');
+});
+
+test('a skilled task documented below LPN still goes to the clinician — that IS the oversight', () => {
+  const pca = cg.visitLogSchemaFor(caregiver('pca', ['wound_care']));
+  assert.ok(taskIdsIn(pca).includes('wound'), 'the signed-off skilled task is offered');
+  const { clean } = cg.sanitizeVisitLogSubmission(pca, { tasks: { wound: { done: true } } });
+  assert.strictEqual(cg.skilledContentPresent(clean), true,
+    'a skilled task recorded as done routes for review whoever wrote it');
+
+  // A routine log from the same caregiver does NOT flood the inbox.
+  const { clean: routine } = cg.sanitizeVisitLogSubmission(pca, { tasks: { bath: { done: true } } });
+  assert.strictEqual(cg.skilledContentPresent(routine), false);
 });
 
 test('a caregiver with no license level gets no form at all', () => {

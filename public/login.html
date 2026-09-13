@@ -361,6 +361,20 @@
         });
       }
 
+      // Caregiver Scheduling (Session 7) — admin-run. Every /api/scheduling/*
+      // filter is admin-only, so the tile follows the same audience as the hub's
+      // other staff tiles rather than inventing a new flag.
+      if (isAdmin || isManager) {
+        availablePortals.push({
+          id: 'scheduling',
+          name: 'Caregiver Scheduling',
+          description: 'Shifts, availability, time tracking, payroll, and client locations',
+          icon: Icons.service,
+          color: 'from-teal-500 to-teal-700',
+          path: '/scheduling'
+        });
+      }
+
       // Service Portal - super admins, users with hasServicePortalAccess, or vendors (NOT managers)
       if (isAdmin || user.hasServicePortalAccess || isVendor) {
         availablePortals.push({

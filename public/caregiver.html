@@ -37,9 +37,16 @@
     .serif{font-family:'Cormorant Garamond',Georgia,serif}
     #root{min-height:100%}
 
-    /* Shell: full-bleed on mobile, a centred phone-width column on desktop. */
-    .shell{display:flex;flex-direction:column;min-height:100vh;max-width:520px;margin:0 auto;background:var(--cream);box-shadow:0 0 40px rgba(3,61,80,.10)}
-    @media(min-width:900px){ .shell{max-width:720px} }
+    /* Shell: fills the device up to tablet size, then becomes a centred column
+       on a true desktop screen.
+
+       It used to cap at 520px at every width below 900px, which meant an iPad
+       (820pt portrait) rendered a 520px app with ~150px of dead cream either
+       side. A tablet is a device a caregiver actually documents on, so it gets
+       the whole screen; only a desktop monitor, where a full-bleed single
+       column would run absurdly long lines, keeps a cap. One constant each. */
+    .shell{display:flex;flex-direction:column;min-height:100vh;width:100%;margin:0 auto;background:var(--cream);box-shadow:0 0 40px rgba(3,61,80,.10)}
+    @media(min-width:1100px){ .shell{max-width:1000px} }
 
     .hdr{background:var(--navy);color:var(--cream);padding:14px 18px;display:flex;align-items:center;justify-content:space-between;gap:10px;position:sticky;top:0;z-index:20}
     .hdr .ttl{font-family:'Cormorant Garamond',serif;font-size:22px;font-weight:600}
@@ -47,6 +54,14 @@
     .hdr button{background:none;border:none;color:var(--gold);font-size:20px;cursor:pointer;padding:4px}
 
     .main{flex:1;padding:18px 16px 26px}
+    /* Above phone width there is room for a gutter and for the quick-action
+       grid to lay out by available space rather than always two-up. */
+    @media(min-width:700px){
+      .main{padding:24px 28px 34px}
+      .grid2{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+      .nav button{font-size:13px}
+      h2.pg{font-size:30px}
+    }
     h2.pg{font-family:'Cormorant Garamond',serif;font-size:26px;color:var(--navy);font-weight:600;margin-bottom:2px}
     .sub{font-size:14px;color:var(--mut);margin-bottom:16px}
 
@@ -930,8 +945,10 @@ const MoreTab = ({ visitLogs, queued, me }) => (
     <div className="card">
       <h3>Help</h3>
       <p style={{ fontSize: 15, color: 'var(--mut)' }}>
-        Call the office at {'(770) 800-4000'} for anything urgent that is not a client emergency.
-        For a client emergency, call 911 first, then flag a safety concern here.
+        {me && me.office && me.office.phone
+          ? <>Call the office at <a href={`tel:${me.office.phone.replace(/[^0-9+]/g, '')}`} style={{ color: 'var(--navy)', fontWeight: 600 }}>{me.office.phone}</a> for anything urgent that is not a client emergency.</>
+          : <>Call the office for anything urgent that is not a client emergency.</>}
+        {' '}For a client emergency, call 911 first, then flag a safety concern here.
       </p>
     </div>
   </div>

@@ -264,6 +264,41 @@ function isEligibleForShift(caregiver, shift, client) {
   return true;
 }
 
+// ---- Open-pool VISIBILITY (owner rule, 2026-09-13) -------------------------
+// Visibility and claimability are two different questions and this is the only
+// place that answers both, so they cannot drift.
+//
+// The owner's rule: every caregiver sees every open shift. One whose licence
+// requirement they do not meet is shown GREYED OUT with the reason, not hidden.
+// A caregiver who can see the whole board knows what work exists and what
+// credential would open it; a hidden row just looks like no work.
+//
+// That is safe because hiding was never the control — `isEligibleForShift()`
+// still gates the claim at the API and is UNCHANGED by this. `claimable` is
+// defined in terms of it rather than re-deriving the rule.
+//
+// ONE thing stays hidden, deliberately: a `care_team` shift. That restriction
+// is about who may know this client is receiving care, not about licence, so
+// widening it would put a client's name and address in front of caregivers who
+// are not assigned to them. A licence gate greys out; a care-team gate hides.
+function shiftVisibility(caregiver, shift, client) {
+  if (!cg.isCaregiver(caregiver)) return { visible: false, claimable: false, reason: 'not a caregiver' };
+  if (caregiver.accountStatus === 'inactive') return { visible: false, claimable: false, reason: 'account inactive' };
+  if (!shift) return { visible: false, claimable: false, reason: 'no shift' };
+
+  const visibility = shift.pool_visibility || shift.poolVisibility || 'all_eligible';
+  if (visibility === 'care_team' && !(client && cg.isAssignedToCaregiver(caregiver, client))) {
+    return { visible: false, claimable: false, reason: 'shift is limited to the client\'s care team' };
+  }
+
+  const claimable = isEligibleForShift(caregiver, shift, client);
+  return {
+    visible: true,
+    claimable,
+    reason: claimable ? null : eligibilityReason(caregiver, shift, client)
+  };
+}
+
 // Why a caregiver is not eligible — for the admin view, so "why can't Adaeze
 // see this shift" has an answer that is not guesswork.
 function eligibilityReason(caregiver, shift, client) {
@@ -593,7 +628,7 @@ module.exports = {
   SHIFT_STATUSES, SHIFT_TRANSITIONS, SHIFT_STATUS_TIMESTAMP,
   canTransitionShift, transitionRefusal, validateShift,
   LICENSE_REQUIREMENT_ANY, normalizeLicenseRequirement, shiftLevelLabel, isOpenToAllLevels,
-  isEligibleForShift, eligibilityReason, shiftsOverlap, findShiftConflict, BLOCKING_STATUSES,
+  isEligibleForShift, eligibilityReason, shiftVisibility, shiftsOverlap, findShiftConflict, BLOCKING_STATUSES,
   DEFAULT_GEOFENCE_METERS, DEFAULT_GRACE_MINUTES, distanceMeters, geofenceRadiusFor, clientCoords,
   evaluateGeofence, GEOFENCE_MIN_METERS, GEOFENCE_MAX_METERS, validateClientLocation, TIME_LOG_FLAGS, clockInFlags, clockOutFlags, totalMinutes, minutesToHours,
   DEFAULT_PAY_PERIOD_ANCHOR, DEFAULT_PAY_PERIOD_DAYS, payPeriodFor,
