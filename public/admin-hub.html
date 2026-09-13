@@ -458,11 +458,17 @@
 
     // Sidebar with portal access - Modern design
     // ── Messages (Session 9) ──
+    // A PANEL, not a page: it lives inside the Inbox as its first tab. Two
+    // sidebar entries both called some form of "inbox" — one for real people
+    // messaging, one for bug reports and password resets — read as duplicates
+    // of each other, so there is now one Inbox and these are its tabs.
+    //
     // Admin has full visibility by the matrix, so this is the whole board: no
     // client scope is passed, and the server returns every thread. That is the
     // one role for which "everything" is the correct answer, and it is decided
-    // there, not by leaving the filter off here.
-    const MessagesPage = ({ token, user }) => {
+    // there, not by leaving the filter off here. Leaving the scope unset is
+    // also what gives the panel its client picker.
+    const MessagesPanel = ({ token, user }) => {
       React.useEffect(() => {
         const lib = window.GFCMessaging;
         if (!lib || !token) return undefined;
@@ -471,14 +477,10 @@
       }, [token, user && user.id]);
 
       return (
-        <div className="p-6 lg:p-8">
-          <h1 className="text-2xl font-semibold text-gray-900 tracking-tight">Messages</h1>
-          <p className="text-gray-500 mt-1 text-sm">Every conversation across the platform, by client.</p>
-          <div className="mt-6 bg-white rounded-2xl shadow-soft p-5">
-            {window.GFCMessaging
-              ? <div id="gfc-messaging-admin"></div>
-              : <p className="text-sm text-gray-500">Messages did not load. Refresh the page.</p>}
-          </div>
+        <div className="bg-white rounded-xl shadow-soft border border-gray-100 p-5">
+          {window.GFCMessaging
+            ? <div id="gfc-messaging-admin"></div>
+            : <p className="text-sm text-gray-500">Messages did not load. Refresh the page.</p>}
         </div>
       );
     };
@@ -493,11 +495,13 @@
       // Managers can only see Dashboard and Service Portal (no Inbox or User Management)
       const allMenuItems = [
         { id: 'dashboard', label: 'Dashboard', icon: Icons.home, color: 'text-primary-500', superAdminOnly: false },
+        // ONE inbox. There were two entries, both with the inbox icon — one for
+        // people messaging and one for bug reports and password resets — which
+        // is the duplication this removes. They are tabs of this now.
         { id: 'inbox', label: 'Inbox', icon: Icons.inbox, color: 'text-primary-500', superAdminOnly: true },
         { id: 'users', label: 'User Management', icon: Icons.users, color: 'text-primary-500', superAdminOnly: true },
         { id: 'service_portal', label: 'Service Portal', icon: Icons.clipboard, color: 'text-success-500', superAdminOnly: false },
         { id: 'notifications', label: 'Notifications', icon: Icons.bell, color: 'text-primary-500', superAdminOnly: false },
-        { id: 'messages', label: 'Messages', icon: Icons.inbox, color: 'text-primary-500', superAdminOnly: true },
       ];
 
       // Filter menu items: Super Admin sees all, Manager only sees non-superAdminOnly items
@@ -790,11 +794,80 @@
     };
 
     // Inbox Page - Bug Reports and Feature Requests
-    const InboxPage = ({ token }) => {
+    // ── Caregiver Feed broadcasts (Session 6) ──
+    // The caregiver app's Feed tab reads `caregiver_broadcasts` and this
+    // caregiver's own escalation alerts. The escalation half fills itself. The
+    // broadcast half had a working API and NO SCREEN ANYWHERE, so nothing could
+    // ever be posted and the Feed read "Nothing new right now" permanently.
+    // Same shape as the two admin screens built on 2026-09-10: an owner item is
+    // only open for the owner once there is somewhere to do it.
+    const CaregiverFeedPanel = ({ token }) => {
+      const [title, setTitle] = useState('');
+      const [body, setBody] = useState('');
+      const [posting, setPosting] = useState(false);
+      const [result, setResult] = useState(null);
+
+      const post = async () => {
+        setPosting(true);
+        setResult(null);
+        try {
+          const res = await fetch(`${window.location.origin}/api/caregiver/broadcasts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ title, body })
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.error || `Could not post (${res.status})`);
+          setResult({ ok: true, text: 'Posted. It is on every caregiver\'s Feed now.' });
+          setTitle('');
+          setBody('');
+        } catch (err) {
+          setResult({ ok: false, text: err.message });
+        } finally {
+          setPosting(false);
+        }
+      };
+
+      return (
+        <div className="bg-white rounded-xl shadow-soft border border-gray-100 p-5 space-y-4">
+          <div>
+            <h3 className="font-semibold text-gray-800">Post to the caregiver Feed</h3>
+            <p className="text-sm text-gray-500 mt-1">
+              Goes to every caregiver, read-only, in the Feed tab of their app. It reaches
+              everyone, so it carries no client names and nothing clinical — a message about
+              one person's care belongs in a thread about that person, under Messages.
+            </p>
+          </div>
+          {result && (
+            <div className={`rounded-lg px-4 py-3 text-sm ${result.ok ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
+              {result.text}
+            </div>
+          )}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Title</label>
+            <input value={title} onChange={e => setTitle(e.target.value)} maxLength={200}
+              placeholder="Office closed Monday"
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Message</label>
+            <textarea value={body} onChange={e => setBody(e.target.value)} maxLength={4000} rows={4}
+              placeholder="Payroll runs Tuesday this week instead of Monday."
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
+          </div>
+          <button onClick={post} disabled={posting || !title.trim()}
+            className="px-4 py-2 rounded-lg bg-primary-500 text-white text-sm font-medium disabled:opacity-50">
+            {posting ? 'Posting…' : 'Post to Feed'}
+          </button>
+        </div>
+      );
+    };
+
+    const InboxPage = ({ token, user, initialTab }) => {
       const [feedback, setFeedback] = useState([]);
       const [passwordResets, setPasswordResets] = useState([]);
       const [loading, setLoading] = useState(true);
-      const [activeTab, setActiveTab] = useState('feedback');
+      const [activeTab, setActiveTab] = useState(initialTab || 'messages');
       const [selectedItem, setSelectedItem] = useState(null);
 
       useEffect(() => {
@@ -831,7 +904,10 @@
       const openFeedback = feedback.filter(f => f.status === 'open');
       const resolvedFeedback = feedback.filter(f => f.status === 'resolved');
 
-      if (loading) return (
+      // The spinner covers the FEEDBACK fetch, not the Messages panel, which
+      // loads its own data. Blocking the whole page on an unrelated request is
+      // how a working inbox ends up looking broken.
+      if (loading && activeTab !== 'messages' && activeTab !== 'broadcast') return (
         <div className="flex items-center justify-center py-20">
           <div className="flex flex-col items-center gap-4">
             <div className="animate-spin rounded-full h-10 w-10 border-[3px] border-primary-500 border-t-transparent"></div>
@@ -846,12 +922,20 @@
           <div className="flex justify-between items-center">
             <div>
               <h1 className="text-2xl font-bold text-accent">Inbox</h1>
-              <p className="text-gray-500 text-sm mt-1">Bug reports, feature requests, and password resets</p>
+              <p className="text-gray-500 text-sm mt-1">Messages, bug reports, feature requests, and password resets</p>
             </div>
           </div>
 
           {/* Tabs */}
           <div className="flex gap-2 border-b border-gray-200">
+            <button onClick={() => setActiveTab('messages')}
+              className={`px-4 py-3 text-sm font-medium border-b-2 transition ${activeTab === 'messages' ? 'border-primary-500 text-primary-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
+              Messages
+            </button>
+            <button onClick={() => setActiveTab('broadcast')}
+              className={`px-4 py-3 text-sm font-medium border-b-2 transition ${activeTab === 'broadcast' ? 'border-primary-500 text-primary-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
+              Caregiver Feed
+            </button>
             <button onClick={() => setActiveTab('feedback')}
               className={`px-4 py-3 text-sm font-medium border-b-2 transition ${activeTab === 'feedback' ? 'border-primary-500 text-primary-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
               Feedback & Requests
@@ -863,6 +947,10 @@
               {passwordResets.length > 0 && <span className="ml-2 px-2 py-0.5 bg-orange-100 text-orange-600 rounded-full text-xs">{passwordResets.length}</span>}
             </button>
           </div>
+
+          {activeTab === 'messages' && <MessagesPanel token={token} user={user} />}
+
+          {activeTab === 'broadcast' && <CaregiverFeedPanel token={token} />}
 
           {activeTab === 'feedback' && (
             <div className="space-y-4">
@@ -3997,11 +4085,11 @@
 
         switch (activePage) {
           case 'dashboard': return <DashboardPage token={token} onNavigate={handleNavigation} user={user} />;
-          case 'inbox': return <InboxPage token={token} />;
+          case 'inbox': return <InboxPage token={token} user={user} />;
           case 'users': return <UsersPage token={token} />;
           case 'notifications': return <NotificationsPage token={token} isSuperAdmin={isSuperAdmin} />;
           case 'service_portal': return <ServicePortalPage token={token} user={user} />;
-          case 'messages': return <MessagesPage token={token} user={user} />;
+          case 'messages': return <InboxPage token={token} user={user} initialTab="messages" />;
           default: return <DashboardPage token={token} onNavigate={handleNavigation} user={user} />;
         }
       };

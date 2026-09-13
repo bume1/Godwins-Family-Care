@@ -74,6 +74,10 @@ const COLLECTION_REGISTRY = Object.freeze([
   // ---- messaging (Session 9) ----
   { key: 'message_threads', phi: true, owner: '9' },
   { key: 'messages', phi: true, owner: '9' },
+  // Messages pulled out of the wrong client's thread by the 2026-09-13
+  // cross-client leak repair. Tombstoned, never deleted: they are evidence of a
+  // PHI exposure and a breach assessment may need to read them back.
+  { key: 'quarantined_messages', phi: true, owner: '9', note: 'misfiled messages removed from view by scripts/repair_cross_client_messages.js; retained for breach assessment' },
   // ---- notifications + email ----
   { key: 'pending_notifications', phi: true, owner: 'core', note: 'queued email bodies can name a client' },
   { key: 'notification_log', phi: true, owner: 'core' },
