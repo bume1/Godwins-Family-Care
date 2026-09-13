@@ -82,6 +82,67 @@ function verifiedCompetencies(caregiver, now = new Date()) {
   return out;
 }
 
+// ---- Pay rate (owner request, 2026-09-13) ------------------------------------
+// What we PAY a caregiver. This is a different number from `client.rateAgreement`
+// — what the CLIENT pays — and the difference between them is the margin, so the
+// two must never be read from one field. Lives here with the rest of the
+// caregiver vocabulary rather than in config, same as the licence enum.
+//
+// Three levels, most specific first:
+//   1. the rate posted ON THE SHIFT (an admin set it when releasing the shift)
+//   2. a per-client rate for this caregiver (a harder client pays more)
+//   3. the caregiver's base rate
+// A rate that is set nowhere resolves to null and SAYS so. It never falls back
+// to zero: zero is a rate somebody chose, null is a rate nobody has set, and a
+// payroll run must be able to tell those apart.
+//
+// Stored as plain dollars rounded to cents, matching `client.rateAgreement`
+// rather than introducing a second money convention in the same codebase.
+
+const MAX_PAY_RATE = 500; // a sanity ceiling, not a policy — catches a typo'd 3200
+
+// Returns a number in dollars, or null when the value is absent or unusable.
+// An unparseable rate is null, never 0 — see above.
+function normalizePayRate(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  if (!isFinite(n) || n < 0 || n > MAX_PAY_RATE) return null;
+  return Math.round(n * 100) / 100;
+}
+
+// Per-client overrides, keyed by client ID. Deliberately NOT by name: the
+// vendor picker stores assignedClients by name, and a client who gets renamed
+// would silently drop back to the base rate — a quiet pay cut nobody would see.
+function normalizeClientPayRates(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const out = {};
+  for (const [clientId, rate] of Object.entries(value)) {
+    const id = String(clientId || '').trim();
+    if (!id) continue;
+    const n = normalizePayRate(rate);
+    if (n !== null) out[id] = n;   // an unusable override is dropped, not stored as 0
+  }
+  return out;
+}
+
+// The whole resolution, in one place, so the admin screen, the shift post and
+// any later payroll read cannot disagree about what someone is paid.
+// `source` is returned because "it came from the shift" and "it came from the
+// base rate" are different facts an admin needs when a number looks wrong.
+function resolvePayRate(caregiver, clientId = null, shift = null) {
+  const posted = normalizePayRate(shift && (shift.pay_rate !== undefined ? shift.pay_rate : shift.payRate));
+  if (posted !== null) return { rate: posted, source: 'shift' };
+
+  const perClient = normalizeClientPayRates(caregiver && caregiver.clientPayRates);
+  const id = String(clientId || '').trim();
+  if (id && perClient[id] !== undefined) return { rate: perClient[id], source: 'client' };
+
+  const base = normalizePayRate(caregiver && caregiver.payRate);
+  if (base !== null) return { rate: base, source: 'base' };
+
+  return { rate: null, source: 'unset' };
+}
+
 // ---- Task catalog (spec §3a, transferred from docs/source-forms/gfc-visit-log.html) ----
 // `legacy` is the legacy daily-note field name, preserved so a paper/legacy
 // record maps onto the same item. `minLevel` is the lowest license level the
@@ -748,6 +809,7 @@ function incidentsFromSubmission(clean) {
 module.exports = {
   LICENSE_LEVELS, LICENSE_LABELS, LEVEL_RANK, normalizeLevel,
   COMPETENCIES, COMPETENCY_LABELS, verifiedCompetencies,
+  MAX_PAY_RATE, normalizePayRate, normalizeClientPayRates, resolvePayRate,
   TASK_GROUPS, RESTRICTED_TASK_IDS, SKILLED_TASK_IDS,
   STANDING_INSTRUCTIONS, PATIENT_CONDITIONS, SAFETY_CONCERNS, INCIDENT_SAFETY_CONCERNS,
   MEASUREMENT_FIELDS, NARRATIVE_FIELDS, SATISFACTION_VALUES, VISIT_LOG_STATUSES,

@@ -73,6 +73,7 @@
     '.gfcs .gchip.on{background:var(--navy);color:var(--gold)}',
     '.gfcs .gchip.warn{background:#fdeeee;color:var(--red)}',
     '.gfcs .gchip.ok{background:#eef3f0;color:var(--green)}',
+    '.gfcs .gpay{font-size:14px;font-weight:600;color:var(--navy);margin-top:3px}',
     '.gfcs .gblocked{opacity:.55}',
     '.gfcs .gwhy{font-size:13px;color:var(--mut);font-style:italic;margin-top:5px}',
     '.gfcs .gempty{text-align:center;padding:22px 12px;color:var(--mut);font-size:15px}',
@@ -252,6 +253,12 @@
           '<div class="gwhen">' + esc(fmtRange(s.start, s.end)) + '</div>' +
           '<div class="gmu">' + esc(s.clientName || '') +
             (s.levelRequirementLabel ? ' · ' + esc(s.levelRequirementLabel) : '') + '</div>' +
+          // Only a rate POSTED on the shift by an admin — identical for everyone
+          // eligible, so it says nothing about any other caregiver's pay. A
+          // caregiver deciding whether to pick up a shift is entitled to know
+          // what it pays.
+          (typeof s.payRate === 'number'
+            ? '<div class="gpay">$' + s.payRate.toFixed(2) + ' / hour</div>' : '') +
           (s.notes ? '<div class="gmu">' + esc(s.notes) + '</div>' : '') +
           (can ? '' : '<div class="gwhy">Not available to you — ' + esc(s.ineligibleReason || 'your licence level does not meet this shift\'s requirement') + '</div>') +
           '<div class="gbtns"><button class="gbtn gold" data-act="claim" data-id="' + esc(s.id) + '"' +
