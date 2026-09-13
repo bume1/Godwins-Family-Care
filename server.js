@@ -36,6 +36,10 @@ const consentText = require('./public/consent-text'); // approved consent bodies
 const consentRegistry = require('./consentRegistry'); // THE consent registry: lanes, statuses, provenance (4.6)
 const consentRender = require('./consentRender');     // consent data blocks resolved from the client record (4.6)
 const zipWriter = require('./zipWriter');             // dependency-free ZIP for the signed-consent packet (4.6)
+// The caregiver vocabulary — licence levels, competencies, and pay-rate
+// resolution. Required, never restated: a second copy of what a pay rate means
+// is how the admin form and payroll start disagreeing about someone's wages.
+const caregiverRepo = require('./caregiverRepository');
 const caregiverRoutes = require('./routes/caregiver'); // caregiver app: visit log + escalation (Session 6)
 const schedulingRoutes = require('./routes/scheduling');
 const messagingRoutes = require('./routes/messaging'); // channel matrix + role-scoped threads (Session 9) // PHCP shifts, availability, time tracking (Session 7)
@@ -2474,7 +2478,7 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       isManager, assignedClients, hubspotCompanyId, hubspotDealId, hubspotContactId, projectAccessLevels,
       existingPortalSlug, phone, sendWelcomeEmail: shouldSendWelcome = true,
       licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
-      familyIsPoa, openEmrProviderId, npi
+      familyIsPoa, openEmrProviderId, npi, payRate, clientPayRates, rateAgreement
     } = req.body;
 
     // Managers can only create client users
@@ -2510,6 +2514,10 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       openEmrProviderId: openEmrProviderId || null,
       // Clinician NPI for attribution stamps (Session 4.4)
       npi: normalizeNpi(npi),
+      // What WE PAY a caregiver (owner request, 2026-09-13) — never the same
+      // number as the client's rateAgreement; the gap between them is the margin.
+      payRate: caregiverRepo.normalizePayRate(payRate),
+      clientPayRates: caregiverRepo.normalizeClientPayRates(clientPayRates),
       createdAt: new Date().toISOString(),
       // Account status — active accounts receive notifications, inactive do not
       accountStatus: 'active',
@@ -2530,6 +2538,20 @@ app.post('/api/users', authenticateToken, async (req, res) => {
 
     // Client-specific fields
     if (role === config.ROLES.CLIENT) {
+      // The agreed BILLED rate, settable HERE (owner request, 2026-09-13).
+      // The financial agreement and the home care service agreement both print
+      // this table and neither is presentable without it, so a client added
+      // without a rate walks straight into a hard gate at signing — which is
+      // exactly what happened in testing. The rate is agreed at the point of
+      // sale, long before anyone opens the enrollment screen.
+      // Optional at creation (a clinical-only client signs neither of those
+      // two), and it goes through the SAME builder the enrollment route uses so
+      // the two paths cannot start accepting different things.
+      if (rateAgreement && Object.keys(rateAgreement).length) {
+        const built = buildRateAgreement(rateAgreement, req.user);
+        if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+        newUser.rateAgreement = built.rateAgreement;
+      }
       // GFC client enrollment & care team defaults
       newUser.enrollmentStatus = enrollmentStatus || 'intake_pending';
       newUser.careTeam = careTeam || { assignedFNPs: [], assignedCaseManager: null, primaryCaregiver: null, backupCaregiver: null };
@@ -3301,7 +3323,17 @@ app.get('/api/users', authenticateToken, async (req, res) => {
       // (Session 6). Read-only here — the admin form saves them through
       // PUT /api/caregiver/admin/caregivers/:userId/competencies, and the user
       // PUT above never touches the field, so editing a user cannot wipe them.
-      skilledCompetencies: Array.isArray(u.skilledCompetencies) ? u.skilledCompetencies : []
+      skilledCompetencies: Array.isArray(u.skilledCompetencies) ? u.skilledCompetencies : [],
+      // What WE PAY this caregiver — a different number from rateAgreement,
+      // which is what the CLIENT pays. The gap between them is the margin, so
+      // these are separate fields and neither is derived from the other.
+      // Admin-only: this route already requires an admin, and no caregiver- or
+      // client-facing payload carries either one.
+      // A field the GET omits is a field the form wipes on save (the 4.2 bug
+      // class) — for a pay rate that is an unannounced pay cut.
+      payRate: u.payRate === undefined ? null : u.payRate,
+      clientPayRates: (u.clientPayRates && typeof u.clientPayRates === 'object') ? u.clientPayRates : {},
+      rateAgreement: u.rateAgreement || null
     }));
     res.json(safeUsers);
   } catch (error) {
@@ -3353,7 +3385,7 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
       hasServicePortalAccess, hasAdminHubAccess, hasImplementationsAccess, hasClientPortalAdminAccess,
       isManager, assignedClients, phone, accountStatus, emailUnsubscribed,
       licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
-      familyIsPoa, openEmrProviderId, npi
+      familyIsPoa, openEmrProviderId, npi, payRate, clientPayRates
     } = req.body;
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === userId);
@@ -3440,6 +3472,16 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
     if (familyIsPoa !== undefined) users[idx].familyIsPoa = !!familyIsPoa;
     // Clinician → OpenEMR provider mapping (numeric pc_aid; Session 4.2 calendars)
     if (openEmrProviderId !== undefined) users[idx].openEmrProviderId = openEmrProviderId || null;
+    // Caregiver pay (owner request, 2026-09-13). Normalized through
+    // caregiverRepository so the admin form, the shift post and any payroll read
+    // cannot disagree about what a number means. An unusable value stores as
+    // null, never 0: "nobody has set a rate" and "the rate is zero" are
+    // different facts and a payroll run has to tell them apart.
+    // rateAgreement is deliberately NOT settable here — a change after signing
+    // has consent consequences (it flags the client to re-sign) and that logic
+    // lives on the enrollment rate route. This PUT would bypass it.
+    if (payRate !== undefined) users[idx].payRate = caregiverRepo.normalizePayRate(payRate);
+    if (clientPayRates !== undefined) users[idx].clientPayRates = caregiverRepo.normalizeClientPayRates(clientPayRates);
     // Clinician NPI (Session 4.4 attribution stamps); 10 digits or cleared
     if (npi !== undefined) users[idx].npi = normalizeNpi(npi);
 
@@ -11061,6 +11103,39 @@ app.get('/api/gfc/admin/enrollment/meta/consent-registry', authenticateToken, re
   });
 });
 
+// The agreed CLIENT rate, built in ONE place (owner request, 2026-09-13).
+//
+// The rate must exist before a PHC client can sign the financial agreement or
+// the home care service agreement — both print the table — so it has to be
+// settable when the client is FIRST ADDED, not only later in the enrollment
+// view. That was a hard gate in testing: the rate is agreed at the point of
+// sale, long before anyone opens the enrollment screen.
+//
+// Both writers call this rather than restating the rules, the same reason the
+// service-line route calls applyServiceLineChange: two copies of "what a valid
+// rate is" is how one path starts accepting what the other refuses.
+// Returns { error, code } on a bad rate and writes nothing.
+function buildRateAgreement(body, actor) {
+  const b = body || {};
+  const hourlyRate = Number(b.hourlyRate);
+  const dailyMinimumHours = Number(b.dailyMinimumHours);
+  if (!isFinite(hourlyRate) || hourlyRate <= 0) return { error: 'hourlyRate must be a positive number', code: 'RATE_INVALID' };
+  if (!isFinite(dailyMinimumHours) || dailyMinimumHours <= 0) return { error: 'dailyMinimumHours must be a positive number', code: 'RATE_INVALID' };
+  return {
+    rateAgreement: {
+      hourlyRate, dailyMinimumHours,
+      includedServices: (b.includedServices || '').trim() || null,
+      holidayTreatment: (b.holidayTreatment || '').trim() || null,
+      errandFuel: (b.errandFuel || '').trim() || null,
+      invoiceCadence: (b.invoiceCadence || '').trim() || null,
+      cancellationWindowHours: Number(b.cancellationWindowHours) > 0 ? Number(b.cancellationWindowHours) : 24,
+      rateChangeNoticeDays: Number(b.rateChangeNoticeDays) > 0 ? Number(b.rateChangeNoticeDays) : 30,
+      effectiveDate: b.effectiveDate || null,
+      setById: actor.id, setByName: actor.name || actor.email, setAt: new Date().toISOString()
+    }
+  };
+}
+
 // PUT /api/gfc/admin/enrollment/:clientId/rate — set the agreed rate (Scope B2).
 //
 // The financial agreement and the home care service agreement both PRINT this
@@ -11070,27 +11145,16 @@ app.get('/api/gfc/admin/enrollment/meta/consent-registry', authenticateToken, re
 app.put('/api/gfc/admin/enrollment/:clientId/rate', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const b = req.body || {};
-    const hourlyRate = Number(b.hourlyRate);
-    const dailyMinimumHours = Number(b.dailyMinimumHours);
-    if (!isFinite(hourlyRate) || hourlyRate <= 0) return res.status(400).json({ error: 'hourlyRate must be a positive number', code: 'RATE_INVALID' });
-    if (!isFinite(dailyMinimumHours) || dailyMinimumHours <= 0) return res.status(400).json({ error: 'dailyMinimumHours must be a positive number', code: 'RATE_INVALID' });
+    const built = buildRateAgreement(b, req.user);
+    if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+    const { hourlyRate, dailyMinimumHours } = built.rateAgreement;
 
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
     if (idx === -1) return res.status(404).json({ error: 'Client not found' });
 
     const prior = users[idx].rateAgreement || null;
-    users[idx].rateAgreement = {
-      hourlyRate, dailyMinimumHours,
-      includedServices: (b.includedServices || '').trim() || null,
-      holidayTreatment: (b.holidayTreatment || '').trim() || null,
-      errandFuel: (b.errandFuel || '').trim() || null,
-      invoiceCadence: (b.invoiceCadence || '').trim() || null,
-      cancellationWindowHours: Number(b.cancellationWindowHours) > 0 ? Number(b.cancellationWindowHours) : 24,
-      rateChangeNoticeDays: Number(b.rateChangeNoticeDays) > 0 ? Number(b.rateChangeNoticeDays) : 30,
-      effectiveDate: b.effectiveDate || null,
-      setById: req.user.id, setByName: req.user.name || req.user.email, setAt: new Date().toISOString()
-    };
+    users[idx].rateAgreement = built.rateAgreement;
     // A rate change after the client already signed against the old figures is
     // not a silent edit — the agreement they hold no longer matches the record.
     const signedAgainstOldRate = prior && ['financialAgreement', 'serviceAgreement']

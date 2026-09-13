@@ -811,14 +811,67 @@ test('the admin hub renders the scheduling block only when the summary returned'
     'a scheduling failure must never hold the whole dashboard in its loading state');
 });
 
-test('the payroll CSV carries HOURS and no pay rate — the rate does not exist in the app yet', () => {
-  // Guards the honest state of things rather than a feature: caregiver pay
-  // rates are Track D (B-series) and unbuilt. If someone adds a money column
-  // here without building the rate, this fails and says why.
+test('the payroll CSV carries a rate, and NOTHING clinical', () => {
+  // REPOINTED, not deleted. This guard used to assert the CSV carried no money
+  // at all, because no caregiver pay rate existed anywhere in the app. One now
+  // does (owner request, 2026-09-13), so the rule it protects becomes: a money
+  // column must have a real resolved rate behind it, and an unset rate must
+  // stay distinguishable from a rate of zero (asserted in the next test).
   const keys = sched.PAYROLL_CSV_COLUMNS.map(c => c.key);
   assert.ok(keys.includes('hours'));
-  for (const money of ['payRate', 'hourlyRate', 'gross', 'pay', 'amount', 'total']) {
-    assert.ok(!keys.includes(money),
-      `"${money}" implies a caregiver rate the app does not store — build the rate first`);
+  assert.ok(keys.includes('payRate'), 'the rate is exported');
+  assert.ok(keys.includes('grossPay'), 'and what it comes to');
+  assert.ok(keys.includes('payRateSource'),
+    'and where it came from — "why is this different this week" needs an answer');
+  for (const clinical of ['diagnosis', 'careplan', 'notes', 'visitLog', 'condition']) {
+    assert.ok(!keys.includes(clinical), `"${clinical}" is clinical and must not reach payroll`);
   }
+});
+
+test('SAFETY: an unset pay rate resolves to null, NEVER 0', () => {
+  // A payroll run must tell "nobody set a rate" from "the rate is zero".
+  // Coercing the first into the second pays someone nothing and looks
+  // deliberate on the export.
+  assert.strictEqual(cg.resolvePayRate({}, null, null).rate, null);
+  assert.strictEqual(cg.resolvePayRate({ payRate: '' }, null, null).rate, null);
+  assert.strictEqual(cg.resolvePayRate({ payRate: 'abc' }, null, null).rate, null);
+  assert.strictEqual(cg.resolvePayRate({ payRate: -5 }, null, null).rate, null, 'negative is not a rate');
+  assert.strictEqual(cg.resolvePayRate({ payRate: 99999 }, null, null).rate, null, 'a typo past the ceiling is refused');
+  assert.strictEqual(cg.resolvePayRate({}, null, null).source, 'unset', 'and it says so');
+  // Zero, explicitly set, IS kept — a number somebody chose.
+  assert.deepStrictEqual(cg.resolvePayRate({ payRate: 0 }, null, null), { rate: 0, source: 'base' });
+});
+
+test('pay rate resolves shift → per-client → base, and SAYS which', () => {
+  const caregiver = { payRate: 18, clientPayRates: { 'client-1': 22.5 } };
+  assert.deepStrictEqual(cg.resolvePayRate(caregiver, 'client-1', { pay_rate: 30 }),
+    { rate: 30, source: 'shift' }, 'a rate posted on the shift wins');
+  assert.deepStrictEqual(cg.resolvePayRate(caregiver, 'client-1', null),
+    { rate: 22.5, source: 'client' }, 'then the per-client rate');
+  assert.deepStrictEqual(cg.resolvePayRate(caregiver, 'client-9', null),
+    { rate: 18, source: 'base' }, 'then the base rate');
+  // An unusable rate on the shift falls THROUGH rather than zeroing the shift.
+  assert.deepStrictEqual(cg.resolvePayRate(caregiver, 'client-1', { pay_rate: 'oops' }),
+    { rate: 22.5, source: 'client' });
+});
+
+test('SAFETY: per-client pay rates are keyed by client ID, never by name', () => {
+  // The vendor picker stores assignedClients by NAME. Keying pay off a name
+  // means a renamed client silently drops that caregiver back to their base
+  // rate — a pay cut nobody would see happen.
+  assert.deepStrictEqual(
+    cg.normalizeClientPayRates({ 'client-1': '22.505', 'client-2': 'bad', '': 9 }),
+    { 'client-1': 22.51 },
+    'rounded to cents; unusable values and blank keys dropped rather than stored as 0'
+  );
+});
+
+test('SAFETY: the client and family schedule carries NO pay rate', () => {
+  // What we pay a caregiver IS the margin. A client seeing it learns our cost.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'scheduling.js'), 'utf8');
+  const start = src.indexOf("router.get('/api/scheduling/my-upcoming-shifts'");
+  assert.ok(start > -1, 'the client-facing route exists');
+  const handler = src.slice(start, src.indexOf('router.', start + 10));
+  assert.ok(!/pay_?[Rr]ate/.test(handler),
+    'the client and family schedule must never carry what we pay the caregiver');
 });

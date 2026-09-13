@@ -120,6 +120,11 @@ const PostShift = ({ roster, onPosted, setErr, setOk }) => {
   const [visibility, setVisibility] = useState('all_eligible');
   const [assignTo, setAssignTo] = useState('');
   const [notes, setNotes] = useState('');
+  // An optional rate for THIS shift (owner request, 2026-09-13). Left blank,
+  // each caregiver's own per-client or base rate applies. Set, it overrides
+  // both — which is how a hard-to-fill shift pays more without editing anyone's
+  // standing rate.
+  const [payRate, setPayRate] = useState('');
   const [busy, setBusy] = useState(false);
 
   const RANK = { sitter: 0, pca: 1, cna: 2, lpn: 3 };
@@ -146,12 +151,14 @@ const PostShift = ({ roster, onPosted, setErr, setOk }) => {
           requiredLicenseLevel: level,
           poolVisibility: visibility,
           assignToCaregiverId: assignTo || null,
+          payRate: payRate === '' ? null : payRate,
           notes,
           ...(override ? { override: true, overrideReason } : {})
         })
       });
       setOk((res && res.message) || 'Shift posted.');
-      setNotes(''); setAssignTo(''); setGateBlock(null); setOverrideReason('');
+      setNotes(''); setAssignTo(''); setPayRate('');
+      setGateBlock(null); setOverrideReason('');
       await onPosted();
     } catch (e) {
       const d = e.data || {};
@@ -223,6 +230,15 @@ const PostShift = ({ roster, onPosted, setErr, setOk }) => {
           They are offered the shift and it is theirs once they accept. A decline puts it back in the open pool.
         </div>
       )}
+      <div style={{ marginTop: 11, maxWidth: 320 }}>
+        <label>Pay rate for this shift ($/hour) — optional</label>
+        <input type="number" min="0" step="0.01" placeholder="Leave blank to use each caregiver's own rate"
+          value={payRate} onChange={e => setPayRate(e.target.value)} />
+        <p className="sub" style={{ marginTop: 4 }}>
+          Blank means each caregiver is paid their own rate for this client. Setting a figure here overrides that
+          for this shift only, and every eligible caregiver sees the same number in the open pool.
+        </p>
+      </div>
       <div style={{ marginTop: 11 }}>
         <label>Notes for the caregiver</label>
         <textarea value={notes} onChange={e => setNotes(e.target.value)} maxLength={2000} />
