@@ -177,12 +177,27 @@
           headers: { 'Authorization': `Bearer ${token}` }
         }).then(handleResponse).catch(err => ({ error: err.message })),
 
-      uploadCaregiverDoc: (token, body) =>
-        fetch(`${API_URL}/api/caregiver/documents`, {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify(body)
-        }).then(handleResponse).catch(err => ({ error: err.message })),
+      uploadCaregiverDoc: async (token, body) => {
+        // Deliberately NOT handleResponse: it throws Error(error) and drops
+        // `hint`/`setup`, which are the only parts that say what to fix.
+        // Widening the shared helper would touch every call on this page.
+        try {
+          const res = await fetch(`${API_URL}/api/caregiver/documents`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+          });
+          const data = await res.json().catch(() => null);
+          if (!res.ok) {
+            if (res.status === 401) return { error: 'Your session expired. Sign in again and re-upload.' };
+            return {
+              error: (data && data.error) || `The server answered ${res.status}.`,
+              hint: data && data.hint, setup: data && data.setup
+            };
+          }
+          return data;
+        } catch (err) { return { error: err.message }; }
+      },
 
       deleteCaregiverDoc: (token, id) =>
         fetch(`${API_URL}/api/caregiver/documents/${id}`, {
@@ -1248,7 +1263,9 @@
           const res = await api.uploadCaregiverDoc(token, {
             caregiverId, kind, fileName: file.name, fileDataB64: b64
           });
-          if (res && res.error) { setMsg({ ok: false, text: res.error }); }
+          if (res && res.error) {
+            setMsg({ ok: false, text: [res.error, res.hint, res.setup && `Setup: ${res.setup}`].filter(Boolean).join(' — ') });
+          }
           else {
             setMsg({ ok: true, text: 'Filed.' });
             setFile(null);
@@ -1264,11 +1281,25 @@
       // Read back THROUGH THE APP, never a Drive link — that is what makes
       // the read audited and keeps the file un-shared.
       const open = async (d) => {
+        setMsg(null);
         try {
           const res = await fetch(`${API_URL}/api/caregiver/documents/${d.id}/file`, {
             headers: { 'Authorization': `Bearer ${token}` }
           });
-          if (!res.ok) throw new Error('That file could not be retrieved.');
+          if (!res.ok) {
+            // "That file could not be retrieved" was every failure wearing one
+            // sentence — an expired session, a row with no file behind it, and a
+            // missing Drive scope all read identically, and none of them could be
+            // acted on. Read the server's own answer instead.
+            let body = null;
+            try { body = await res.json(); } catch (err) { /* not JSON */ }
+            if (res.status === 401) throw new Error('Your session expired. Sign in again, then reopen this.');
+            throw new Error([
+              (body && body.error) || `The server answered ${res.status}.`,
+              body && body.hint,
+              body && body.setup && `Setup: ${body.setup}`
+            ].filter(Boolean).join(' — '));
+          }
           const url = URL.createObjectURL(await res.blob());
           window.open(url, '_blank');
           setTimeout(() => URL.revokeObjectURL(url), 60000);

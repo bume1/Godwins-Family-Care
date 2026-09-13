@@ -1060,8 +1060,12 @@ const DocumentsCard = () => {
     } catch (e) {
       // The server's own message, not a generic one: "we could not store that
       // file" and "only PDF, JPG and PNG are accepted" need different actions
-      // from the person holding the phone.
-      setMsg({ ok: false, text: e.message || 'That did not send.' });
+      // from the person holding the phone. An expired session is a THIRD thing
+      // and the only one the caregiver can fix themselves, so it is named.
+      const expired = e.status === 401 || String(e.code || '').startsWith('AUTH_');
+      setMsg({ ok: false, text: expired
+        ? 'Your session timed out. Sign in again and resend.'
+        : (e.message || 'That did not send.') });
     }
     setBusy(false);
   };

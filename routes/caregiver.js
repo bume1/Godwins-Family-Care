@@ -995,10 +995,14 @@ module.exports = function createCaregiverRoutes(deps) {
         // the caregiver a filed timesheet pointing at nothing and leave payroll
         // waiting on a file that was never stored — the silent-success trap this
         // codebase has now hit six times in OpenEMR, pointed at someone's pay.
-        console.error('[CAREGIVER DOCS] Drive upload failed:', e.message);
+        const d = drive.describeDriveError ? drive.describeDriveError(e) : { reason: e.message, hint: null };
+        console.error('[CAREGIVER DOCS] Drive upload failed:', d.reason, '| hint:', d.hint || 'none');
         return res.status(502).json({
-          error: 'We could not store that file. Please try again, or send it to the office.',
-          code: 'DOCUMENT_STORAGE_UNAVAILABLE'
+          error: isAdmin
+            ? `Google refused that upload: ${d.reason}`
+            : 'We could not store that file. Please try again, or send it to the office.',
+          code: 'DOCUMENT_STORAGE_UNAVAILABLE',
+          ...(isAdmin ? { reason: d.reason, hint: d.hint, setup: 'docs/DRIVE_ACCESS_SETUP.md' } : {})
         });
       }
 
@@ -1073,12 +1077,34 @@ module.exports = function createCaregiverRoutes(deps) {
       if (!isAdmin && row.caregiver_id !== req.user.id) {
         return res.status(403).json({ error: 'That document belongs to someone else.', code: 'DOC_NOT_YOURS' });
       }
+      // A row with no stored file is a DIFFERENT fact from Google refusing one,
+      // and asking Google about `undefined` answers "File not found", which
+      // reads as a storage outage. Say which it is.
+      if (!row.drive_file_id) {
+        return res.status(404).json({
+          error: 'No stored file is attached to that record.', code: 'DOC_FILE_MISSING'
+        });
+      }
+
       let buf;
       try {
         buf = await drive.downloadFileBuffer(row.drive_file_id);
       } catch (e) {
-        console.error('[CAREGIVER DOCS] Drive read failed:', e.message);
-        return res.status(502).json({ error: 'That file could not be retrieved right now.', code: 'DOCUMENT_STORAGE_UNAVAILABLE' });
+        // ONE generic sentence could not distinguish a missing Drive scope from
+        // a file in a Shared Drive nobody was added to — which is exactly the
+        // state this codebase spent a day guessing at. An ADMIN gets Google's
+        // actual reason and the setup step that fixes it; a caregiver does not,
+        // because those messages carry file ids and account addresses and there
+        // is nothing a caregiver can do with either.
+        const d = drive.describeDriveError ? drive.describeDriveError(e) : { reason: e.message, hint: null };
+        console.error('[CAREGIVER DOCS] Drive read failed:', d.reason, '| file:', row.drive_file_id, '| hint:', d.hint || 'none');
+        return res.status(502).json({
+          error: isAdmin
+            ? `Google refused that file: ${d.reason}`
+            : 'That file could not be retrieved right now. The office has been told.',
+          code: 'DOCUMENT_STORAGE_UNAVAILABLE',
+          ...(isAdmin ? { reason: d.reason, hint: d.hint, setup: 'docs/DRIVE_ACCESS_SETUP.md' } : {})
+        });
       }
       await logActivity(req.user.id, req.user.name || req.user.email, 'caregiver_document_read', 'caregiver_document', row.id,
         { kind: row.kind, owner: row.caregiver_id });
