@@ -20,6 +20,7 @@
 // ============================================================================
 
 const express = require('express');
+const { contentDisposition } = require('../contentDisposition');
 const sched = require('../schedulingRepository');
 const cg = require('../caregiverRepository');
 const gate = require('../enrollmentGate');
@@ -1256,7 +1257,7 @@ module.exports = function createSchedulingRoutes(deps) {
         { from, to, rows: rows.length });
 
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-      res.setHeader('Content-Disposition', `attachment; filename="gfc_payroll_${from}_to_${to}.csv"`);
+      res.setHeader('Content-Disposition', contentDisposition('attachment', `gfc_payroll_${from}_to_${to}.csv`));
       res.send(sched.toPayrollCsv(rows));
     } catch (error) {
       console.error('Payroll CSV error:', error);
@@ -1312,7 +1313,7 @@ module.exports = function createSchedulingRoutes(deps) {
         { from, to, clientId: onlyClient, rows: rows.length });
 
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-      res.setHeader('Content-Disposition', `attachment; filename="gfc_billing_${from}_to_${to}.csv"`);
+      res.setHeader('Content-Disposition', contentDisposition('attachment', `gfc_billing_${from}_to_${to}.csv`));
       res.send(sched.toPayrollCsv(rows, sched.BILLING_CSV_COLUMNS));
     } catch (error) {
       console.error('Billing CSV error:', error);
@@ -1357,7 +1358,7 @@ module.exports = function createSchedulingRoutes(deps) {
 
       const stamp = `${from || 'all'}_to_${to || 'today'}`;
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-      res.setHeader('Content-Disposition', `attachment; filename="my_hours_${stamp}.csv"`);
+      res.setHeader('Content-Disposition', contentDisposition('attachment', `my_hours_${stamp}.csv`));
       res.send(sched.toPayrollCsv(rows, sched.CAREGIVER_HOURS_CSV_COLUMNS));
     } catch (error) {
       console.error('Caregiver hours CSV error:', error);
