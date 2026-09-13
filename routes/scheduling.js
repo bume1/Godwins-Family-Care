@@ -1059,6 +1059,58 @@ module.exports = function createSchedulingRoutes(deps) {
     }
   });
 
+  // GET /api/scheduling/summary — the dashboard block (2026-09-13, owner request).
+  //
+  // One endpoint, one gate. The alternative was the admin hub calling four list
+  // routes and doing the arithmetic itself, which would put a second copy of
+  // "what counts as needing attention" in a page — and a dashboard that
+  // disagrees with the screen it links to is worse than no dashboard.
+  //
+  // Every number is a THING SOMEONE MUST DO, not a vanity count, and each one
+  // names where to go and answer it. Counts only: no client names, no
+  // caregiver names, no addresses. A dashboard tile is a glance, and a glance
+  // does not need PHI on it.
+  router.get('/api/scheduling/summary', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const [shifts, logs, users] = await Promise.all([
+        readRows('shifts'), readRows('time_logs'), getUsers()
+      ]);
+      const now = new Date();
+      const dayStart = new Date(now); dayStart.setUTCHours(0, 0, 0, 0);
+      const dayEnd = new Date(dayStart.getTime() + 86400000);
+      const within = (v, a, b) => {
+        const t = new Date(v).getTime();
+        return isFinite(t) && t >= a.getTime() && t < b.getTime();
+      };
+      const live = shifts.filter(r => r && r.status);
+      const clients = users.filter(u => u.role === ROLES.CLIENT);
+
+      res.json({
+        summary: {
+          today: live.filter(r => within(r.start, dayStart, dayEnd)
+            && ['confirmed', 'in_progress', 'completed'].includes(r.status)).length,
+          inProgress: live.filter(r => r.status === 'in_progress').length,
+          // Unfilled work: posted and nobody has taken it.
+          openUnfilled: live.filter(r => r.status === 'open').length,
+          // Pathway A — a caregiver claimed and is WAITING ON AN ADMIN.
+          awaitingApproval: live.filter(r => r.status === 'claimed').length,
+          // Pathway B — admin assigned and is waiting on the caregiver.
+          awaitingAcceptance: live.filter(r => r.status === 'assigned').length,
+          // A clock-in or clock-out that did not look right and nobody has
+          // corrected. `admin_edited` means someone already dealt with it.
+          flaggedTimeLogs: logs.filter(l => l && Array.isArray(l.flags)
+            && l.flags.length > 0 && !l.flags.includes('admin_edited')).length,
+          // Without coordinates a clock-in there can only ever be unverifiable.
+          clientsMissingCoordinates: clients.filter(u => !sched.clientCoords(u)).length,
+          clientCount: clients.length
+        }
+      });
+    } catch (error) {
+      console.error('Scheduling summary error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   // GET /api/scheduling/caregivers — admin picker: who can hold a shift.
   router.get('/api/scheduling/caregivers', authenticateToken, requireAdmin, async (req, res) => {
     try {
