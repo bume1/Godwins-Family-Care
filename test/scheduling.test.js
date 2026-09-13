@@ -603,6 +603,25 @@ test('SAFETY: Home does not grow a second clock-in control', () => {
   assert.ok(/onSchedule/.test(shiftCard), 'it sends the caregiver to the schedule instead');
 });
 
+test('the Home card reflects the LIVE clock state, read from the shift board', () => {
+  const shiftCard = caregiverPageSrc.slice(
+    caregiverPageSrc.indexOf('const ShiftCard'),
+    caregiverPageSrc.indexOf('const HomeTab')
+  );
+  // It takes the board as a prop rather than fetching it, so the no-second-
+  // clock-in rule above still holds while the card stops being static.
+  assert.match(shiftCard, /\(\{[^}]*shifts[^}]*\}\)/, 'shifts arrive as a prop');
+  assert.match(shiftCard, /in_progress/, 'a running shift is recognised');
+  assert.match(shiftCard, /visitLogFiled === false/,
+    'and it says when the visit log is still owed, before they try to clock out');
+
+  // The App is where the read happens.
+  assert.match(caregiverPageSrc, /api\('\/api\/scheduling\/shifts'\)/,
+    'the app refreshes the board alongside its own data');
+  assert.match(caregiverPageSrc, /<ShiftCard clients=\{clients\} shifts=\{shifts\}/,
+    'and hands it to the card');
+});
+
 test('the component documents its mount contract', () => {
   for (const needle of ['MOUNT CONTRACT', 'caregiverId', 'authToken', 'gfc-mount-schedule', 'GET /api/caregiver/me']) {
     assert.ok(componentSrc.includes(needle), `the contract must document: ${needle}`);

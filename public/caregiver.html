@@ -359,36 +359,97 @@ const MessagingEntry = ({ onOpen }) => (
   </button>
 );
 
-const ShiftCard = ({ clients, onSchedule }) => {
+// Mirrors CLOCK_IN_WINDOW_MINUTES. Display only — the server is what refuses
+// an early clock-in; this just decides which sentence to show.
+const CLOCK_IN_WINDOW_MINUTES = 120;
+const hhmm = (d) => isNaN(d.getTime()) ? '' : d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+const isSameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+
+// The card reflects the caregiver's ACTUAL state: clocked in, due to start,
+// too early to start, or nothing scheduled. It takes shifts as a PROP and
+// makes no call of its own — Session 7's component owns the clock-in action,
+// and two buttons over one clock-in API is how a double clock-in happens.
+const ShiftCard = ({ clients, shifts, onSchedule }) => {
+  const now = new Date();
+  const rows = (shifts || []).slice()
+    .sort((a, b) => String(a.start).localeCompare(String(b.start)));
+  const live = rows.find(s => s.status === 'in_progress');
+  const next = rows.find(s => s.status === 'confirmed' && new Date(s.end) >= now);
+
+  // Clocked in right now.
+  if (live) {
+    const started = new Date(live.startedAt || live.start);
+    const until = new Date(live.end);
+    return (
+      <div className="shift">
+        <div className="e">On shift now</div>
+        <div className="nm">{live.clientName || 'Your client'}</div>
+        <div className="mt">
+          Clocked in{hhmm(started) ? ` at ${hhmm(started)}` : ''}{hhmm(until) ? ` · scheduled until ${hhmm(until)}` : ''}
+        </div>
+        {/* The visit log comes before the clock stops. Said here rather than
+            discovered at the moment they try to leave. `visitLogFiled` is the
+            server's own answer; when it is absent we say nothing. */}
+        {live.visitLogFiled === false && (
+          <div className="mt">The visit log is not filed yet.</div>
+        )}
+        <button className="shiftlink" onClick={onSchedule}>
+          <i className="ti ti-clock-stop"></i>
+          {live.visitLogFiled === false
+            ? 'Go to Schedule to file the log and clock out'
+            : 'Go to Schedule to clock out'}
+        </button>
+      </div>
+    );
+  }
+
+  // A confirmed shift still to come.
+  if (next) {
+    const start = new Date(next.start);
+    const opens = new Date(start.getTime() - CLOCK_IN_WINDOW_MINUTES * 60000);
+    const today = isSameDay(start, now);
+    const tooEarly = now < opens;
+    return (
+      <div className="shift">
+        <div className="e">{today ? 'Today' : start.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}</div>
+        <div className="nm">{next.clientName || 'Your client'}</div>
+        <div className="mt">{hhmm(start)} – {hhmm(new Date(next.end))}</div>
+        <button className="shiftlink" onClick={onSchedule}>
+          <i className="ti ti-current-location"></i>
+          {tooEarly ? `Clock in opens at ${hhmm(opens)}` : 'Clock in and see today\'s shift'}
+        </button>
+      </div>
+    );
+  }
+
+  // Nothing confirmed. Say that plainly rather than offering a clock-in for a
+  // shift that does not exist.
   const first = clients[0];
   return (
     <div className="shift">
-      <div className="e">Today</div>
-      <div className="nm">{first ? first.name : 'No client assigned'}</div>
+      <div className="e">Schedule</div>
+      <div className="nm">{first ? 'No shift scheduled' : 'No client assigned'}</div>
       <div className="mt">
         {first
-          ? (first.careTierLabel || first.careTier || 'Care visit')
+          ? 'Nothing confirmed yet. Open Schedule for offers and the open pool.'
           : 'An administrator assigns your clients.'}
       </div>
-      {/* Clock-in STATE only. Session 7's component owns the ACTION, so this
-          sends the caregiver to it rather than duplicating the GPS control —
-          two clock-in buttons over one API is how a double clock-in happens. */}
       <button className="shiftlink" onClick={onSchedule}>
-        <i className="ti ti-current-location"></i>
-        Clock in and see today's shift
+        <i className="ti ti-calendar"></i>
+        Open Schedule
       </button>
     </div>
   );
 };
 
-const HomeTab = ({ me, clients, onVisitLog, onFlag, onSchedule, escalations }) => {
+const HomeTab = ({ me, clients, shifts, onVisitLog, onFlag, onSchedule, escalations }) => {
   const open = escalations.filter(e => e.status !== 'resolved');
   return (
     <div>
       <h2 className="pg">Hi, {String(me.name || '').split(' ')[0]}</h2>
       <p className="sub">{me.licenseLabel} · {clients.length} {clients.length === 1 ? 'client' : 'clients'}</p>
 
-      <ShiftCard clients={clients} onSchedule={onSchedule} />
+      <ShiftCard clients={clients} shifts={shifts} onSchedule={onSchedule} />
 
       <div className="grid2">
         <button className="qb o" onClick={onVisitLog}>
@@ -1041,6 +1102,9 @@ const App = () => {
   const [visitLogs, setVisitLogs] = useState([]);
   const [escalations, setEscalations] = useState([]);
   const [feed, setFeed] = useState([]);
+  // Read so Home can show the caregiver's ACTUAL clock state. Session 7's
+  // component owns every clock ACTION; this is the same board, read only.
+  const [shifts, setShifts] = useState([]);
   const [tab, setTab] = useState('home');
   const [screen, setScreen] = useState(null);         // 'visitLog' | 'flag' | null
   // Set when a clock-out was refused for want of a visit log: carries which
@@ -1055,16 +1119,18 @@ const App = () => {
   const draining = useRef(false);
 
   const refresh = useCallback(async () => {
-    const [c, v, e, f] = await Promise.all([
+    const [c, v, e, f, s] = await Promise.all([
       api('/api/caregiver/clients').catch(() => ({ clients: [] })),
       api('/api/caregiver/visit-logs').catch(() => ({ visitLogs: [] })),
       api('/api/caregiver/escalations').catch(() => ({ escalations: [] })),
-      api('/api/caregiver/feed').catch(() => ({ items: [] }))
+      api('/api/caregiver/feed').catch(() => ({ items: [] })),
+      api('/api/scheduling/shifts').catch(() => ({ shifts: [] }))
     ]);
     setClients(c.clients || []);
     setVisitLogs(v.visitLogs || []);
     setEscalations(e.escalations || []);
     setFeed(f.items || []);
+    setShifts(s.shifts || []);
   }, []);
 
   useEffect(() => {
@@ -1138,7 +1204,7 @@ const App = () => {
   } else if (screen === 'flag') {
     content = <FlagConcern clients={clients} online={online} onBack={back} onDone={doneAndRefresh} />;
   } else if (tab === 'home') {
-    content = <HomeTab me={me} clients={clients} escalations={escalations}
+    content = <HomeTab me={me} clients={clients} escalations={escalations} shifts={shifts}
       onVisitLog={() => setScreen('visitLog')} onFlag={() => setScreen('flag')}
       onSchedule={() => setTab('schedule')} />;
   } else if (tab === 'schedule') {
