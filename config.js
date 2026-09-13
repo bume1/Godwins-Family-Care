@@ -389,7 +389,7 @@ const GFC_BILLING_PROVIDER_NAME = process.env.GFC_BILLING_PROVIDER_NAME || '';
 
 // ---- Default Admin (initial setup only) ----
 const DEFAULT_ADMIN = Object.freeze({
-  EMAIL: process.env.DEFAULT_ADMIN_EMAIL || 'admin@godwinsfamilycarell.com',
+  EMAIL: process.env.DEFAULT_ADMIN_EMAIL || 'admin@godwinsfamilycarellc.com',
   NAME: process.env.DEFAULT_ADMIN_NAME || 'GFC Admin',
   PASSWORD: process.env.DEFAULT_ADMIN_PASSWORD || 'gfcforever2026'
 });
