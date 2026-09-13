@@ -1,5 +1,5 @@
 # GFC Care Platform — running status
-_Last updated: 2026-09-11 (appointment-booking hotfix)_
+_Last updated: 2026-09-13 (AWS-only directive; mailer runbook de-Replit)_
 
 This file is auto-loaded at the start of every Claude Code session. Read it first for current state. Details live in `docs/`.
 
@@ -418,6 +418,8 @@ Session-specific prompts live at `docs/GFC_SessionN_ClaudeCode_Prompt.md`.
 
 ## Environment reminders
 
+- **The platform is AWS. Replit is not part of it (owner directive, 2026-09-13).** Session 5 moved the app onto the AWS boundary, so no new code, doc, runbook or setup step may assume Replit, and any instruction that names it is stale rather than optional. Dev work happens between Claude Code, AWS and whatever else is genuinely needed.
+- **Two Replit dependencies are still in the tree, and they are not equal.** `dataStore.js`'s `kv` driver is dev-only and already refused at boot in production, so it is dead weight. **`googledrive.js` is a live break:** `getAccessToken()` reads `REPLIT_CONNECTORS_HOSTNAME` and `REPL_IDENTITY`/`WEB_REPL_RENEWAL` and calls the Replit connector API, so off Replit it throws on the first call and takes every Drive write with it — consents, care plans, ROI PDFs, client uploads, offline packet scans. It needs a service-account credential like the mailer's, and the owner has not yet given the go-ahead to change it. Do not report Drive as working on AWS until it does.
 - **Data hosting for PHI:** AWS inside the BAA boundary. Never Replit.
 - **Documents, consents, email:** HIPAA Google Workspace (Drive + Gmail) under existing BAA. Drive is live; **Gmail sending is built but not yet configured** — see `docs/EMAIL_TRANSPORT_SETUP.md`. Until it is, mail goes over Resend, which is outside the BAA, and anything marked `{ phi: true }` is refused rather than sent. Mail sends from and replies to `support@` on both transports (`ORG_SUPPORT_EMAIL`); email HTML always comes from `emailTemplates.js`, never hand-rolled.
 - **Test data only** on all sessions until HIPAA-live. No real client PHI.
