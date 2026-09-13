@@ -19,6 +19,7 @@ const config = require('./config');
 const { sendEmail, sendBulkEmail, sendBatchEmails } = require('./email');
 const emailTransport = require('./email');
 const emailTemplates = require('./emailTemplates');
+const enrollmentGate = require('./enrollmentGate');
 const { createPhcNotifier } = require('./phcNotifications');
 const roiRepo = require('./roiRepository');           // Transfer-of-Care ROI data model (Session 3.4)
 const legacySync = require('./legacySync');            // ROI parallel-run legacy sync (Session 3.4)
@@ -3431,7 +3432,38 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
     // GFC extended fields
     if (licenseLevel !== undefined) users[idx].licenseLevel = licenseLevel;
     if (hasClinicalAccess !== undefined) users[idx].hasClinicalAccess = hasClinicalAccess;
-    if (enrollmentStatus !== undefined) users[idx].enrollmentStatus = enrollmentStatus;
+    // The enrollment status dropdown is the SECOND door onto `enrolled`, and
+    // now that `enrolled` is what unlocks scheduling it cannot stay a silent
+    // one. The Approve button re-checks every required consent and field; this
+    // field wrote the status straight to the record, so a client could be
+    // marked enrolled with nothing on file and nobody would ever know.
+    //
+    // The bypass is deliberately KEPT (owner decision, 2026-09-13) — an admin
+    // has to be able to move a file that the checklist is wrong about. What
+    // changes is that it leaves a trace, exactly like the Approve override.
+    if (enrollmentStatus !== undefined) {
+      const wasIncomplete = users[idx].role === config.ROLES.CLIENT &&
+        enrollmentStatus === 'enrolled' && users[idx].enrollmentStatus !== 'enrolled';
+      if (wasIncomplete) {
+        const comp = computeEnrollmentCompletion(users[idx]);
+        if (comp.missingConsentLabels.length || comp.missingFieldLabels.length) {
+          users[idx].enrollmentApproval = {
+            approvedAt: new Date().toISOString(),
+            approvedById: req.user.id,
+            approvedByName: req.user.name || req.user.email,
+            override: {
+              reason: 'Set directly on the user form, without a stated reason.',
+              missingConsents: comp.missingConsentLabels,
+              missingFields: comp.missingFieldLabels
+            }
+          };
+          await logActivity(req.user.id, req.user.name || req.user.email,
+            'enrollment_status_forced', 'enrollment', users[idx].id,
+            { to: enrollmentStatus, missingConsents: comp.missingConsentLabels, missingFields: comp.missingFieldLabels });
+        }
+      }
+      users[idx].enrollmentStatus = enrollmentStatus;
+    }
     if (careTeam !== undefined) users[idx].careTeam = careTeam;
     // Family / authorized contact → linked client (user id); drives the
     // ROI-family portal gate (resolveGfcClientRecord).
@@ -8186,6 +8218,19 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
     if (!client.openEmrPatientId) return res.status(409).json({ error: 'Link this client to an OpenEMR patient before scheduling', code: 'EMR_NOT_LINKED' });
     if (!openemr.isConfigured()) return res.status(503).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
 
+    // The enrollment gate — the same rule PHCP shifts enforce, from the same
+    // module. A clinical visit becomes a claim, so booking one against a
+    // client whose consent to treat and assignment of benefits are not on file
+    // is the more expensive half of the same mistake.
+    const apptGate = enrollmentGate.checkSchedulingAllowed(
+      client, req.body || {}, req.user, req.user.role === config.ROLES.ADMIN);
+    if (!apptGate.ok) {
+      return res.status(apptGate.status).json({
+        error: apptGate.message, code: apptGate.code,
+        enrollmentStatus: apptGate.enrollmentStatus, overridable: apptGate.overridable
+      });
+    }
+
     const body = req.body || {};
     const scope = resolveProviderScope(req.user, body.providerId);
     if (scope.error) return res.status(scope.code === 'PROVIDER_SCOPE' ? 403 : 409).json({ error: scope.error, code: scope.code });
@@ -8224,7 +8269,10 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
     const eid = await emr.createAppointmentRow(client.openEmrPatientId, built.fields);
     await logActivity(req.user.id, req.user.name || req.user.email, 'appointment_created', 'client', client.id, {
       role: req.user.role, appointmentEid: eid, providerId,
-      date: body.date, startTime: body.startTime, durationMinutes: built.minutes, location: built.location
+      date: body.date, startTime: body.startTime, durationMinutes: built.minutes, location: built.location,
+      enrollmentOverride: apptGate.override
+        ? { reason: apptGate.override.reason, enrollmentStatus: apptGate.override.enrollmentStatus }
+        : null
     });
     // Read-back proves the round-trip (acceptance requirement); the single-row
     // GET carries the full record (list rows omit notes/location on 7.0.4).
@@ -10304,6 +10352,9 @@ const enrollmentDetail = (client) => {
     ...enrollmentListRow(client),
     email: client.email || null,
     serviceLineResolved: serviceLine,
+    // Who approved, and whether they did it over outstanding items. An override
+    // that the detail view cannot show is the silent approval it replaced.
+    enrollmentApproval: client.enrollmentApproval || null,
     age: intake.age != null ? intake.age : deriveAge(intake.dob || client.dob),
     intake,
     consents: defs.map(d => {
@@ -10588,7 +10639,9 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/request', authenticateTo
     if (!created.length) return res.status(200).json({ message: 'Already requested — nothing new to ask for', created: [] });
     await db.set('client_document_requests', requests);
 
-    const notified = await notifyDocumentRequest(client, created, req.user, false);
+    const { notified } = await phcNotify.documentsRequested({
+      clientId: client.id, rows: created, isReminder: false, dueAt, actorId: req.user.id
+    });
     await logActivity(req.user.id, req.user.name || req.user.email, 'client_documents_requested', 'document', client.id,
       { kinds: created.map(r => r.kind), notified });
 
@@ -10624,7 +10677,9 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/remind', authenticateTok
     }
     await db.set('client_document_requests', requests);
 
-    const notified = await notifyDocumentRequest(client, open, req.user, true);
+    const { notified } = await phcNotify.documentsRequested({
+      clientId: client.id, rows: open, isReminder: true, actorId: req.user.id
+    });
     await logActivity(req.user.id, stamp.byName, 'client_documents_reminded', 'document', client.id,
       { kinds: open.map(r => r.kind), notified });
 
@@ -10696,39 +10751,6 @@ app.get('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/file', authenti
   }
 });
 
-// The email that goes with a request or a reminder.
-//
-// The subject names no client and no document — the same rule the admin ROI
-// email follows. A subject line is the part that shows on a lock screen.
-const notifyDocumentRequest = async (client, rows, actor, isReminder) => {
-  if (!client.email) return false;
-  const list = rows.map(r => `  • ${r.label}${r.note ? ` — ${r.note}` : ''}`).join('\n');
-  const due = rows.find(r => r.dueAt);
-  const body = [
-    `Hello${client.name ? ` ${String(client.name).split(' ')[0]}` : ''},`,
-    '',
-    isReminder
-      ? 'A quick reminder — we are still waiting on the following for your file:'
-      : 'We need a few documents to finish setting up your care:',
-    '',
-    list,
-    '',
-    due ? `Please send these by ${new Date(due.dueAt).toLocaleDateString()}.` : '',
-    'You can upload them from the Documents tab in your client portal. A clear phone photo is fine for most of them.',
-    '',
-    'If you have questions, reply to this message and someone from our team will help.',
-    '',
-    'Godwins Family Care'
-  ].filter(l => l !== null).join('\n');
-  try {
-    await sendEmail(client.email, isReminder ? 'A reminder about your documents' : 'Documents needed for your file', body);
-    return true;
-  } catch (e) {
-    console.error('[DOCUMENTS] request email failed (non-fatal):', e.message);
-    return false;
-  }
-};
-
 // POST /api/gfc/admin/enrollment/:clientId/review — record a review (no state change).
 app.post('/api/gfc/admin/enrollment/:clientId/review', authenticateToken, requireEnrollmentStaff, async (req, res) => {
   try {
@@ -10749,23 +10771,6 @@ app.post('/api/gfc/admin/enrollment/:clientId/review', authenticateToken, requir
     res.status(500).json({ error: 'Server error' });
   }
 });
-
-// Non-PHI follow-up notice — lists ONLY the outstanding item labels, never any
-// clinical or consent content. Safe to email pre-BAA (mirrors the enrollment
-// confirmation pattern).
-async function sendFollowUpNotification(client, itemLabels) {
-  try {
-    const to = [client.email, (client.intake && client.intake.primaryContact && client.intake.primaryContact.email)].filter(Boolean);
-    if (!to.length) return;
-    const firstName = enrollmentDisplayName(client).split(' ')[0];
-    const list = (itemLabels || []).map(l => `• ${l}`).join('\n');
-    const subject = 'Action needed to complete your Godwins Family Care enrollment';
-    const text = `Hi ${firstName},\n\nA few items still need your attention before we can finish your enrollment:\n\n${list}\n\nPlease sign in to your secure portal to complete them. For your privacy, no health details are included in this email.\n\n— Godwins Family Care`;
-    await sendEmail(to, subject, text, {});
-  } catch (e) {
-    console.error('Follow-up notification failed (non-fatal):', e.message);
-  }
-}
 
 // POST /api/gfc/admin/enrollment/:clientId/follow-up — request patient action.
 // body: { items: [key1, key2, ...] }  (keys are consent types or field keys)
@@ -10802,7 +10807,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/follow-up', authenticateToken, req
     await db.set('users', users);
     invalidateUsersCache();
     await logActivity(req.user.id, req.user.name || req.user.email, 'enrollment_follow_up_requested', 'enrollment', client.id, { items });
-    sendFollowUpNotification(client, itemLabels).catch(() => {});
+    await phcNotify.enrollmentFollowUp({ clientId: client.id, itemLabels, actorId: req.user.id });
     res.json({ message: 'Follow-up requested', followUp: client.enrollmentFollowUp });
   } catch (error) {
     console.error('GFC enrollment follow-up error:', error);
@@ -10812,6 +10817,16 @@ app.post('/api/gfc/admin/enrollment/:clientId/follow-up', authenticateToken, req
 
 // POST /api/gfc/admin/enrollment/:clientId/approve — flip to enrolled (admin only).
 // Blocks with 409 + specific missing items if any required consent/field is absent.
+//
+// THE OVERRIDE (owner decision, 2026-09-13). An admin may approve over that
+// refusal with `{ override: true, overrideReason }`. Care that cannot wait is a
+// real situation and a gate with no documented way through gets worked around
+// in ways nobody can see. So the bypass is deliberate, but it is never quiet:
+// a reason is REQUIRED, exactly what was outstanding at the moment of approval
+// is frozen onto the record, and the client's file carries an override badge
+// until the gaps actually close. An override that left no trace would be
+// indistinguishable from a complete file a week later, which is the whole
+// failure it is meant to avoid.
 app.post('/api/gfc/admin/enrollment/:clientId/approve', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const users = await getUsers();
@@ -10819,28 +10834,61 @@ app.post('/api/gfc/admin/enrollment/:clientId/approve', authenticateToken, requi
     if (idx === -1) return res.status(404).json({ error: 'Client not found' });
     const client = users[idx];
 
+    const { override, overrideReason } = req.body || {};
     const comp = computeEnrollmentCompletion(client);
-    if (comp.missingConsentLabels.length || comp.missingFieldLabels.length) {
+    const incomplete = comp.missingConsentLabels.length || comp.missingFieldLabels.length;
+
+    if (incomplete && !override) {
       return res.status(409).json({
         error: 'Cannot approve — required items are missing.',
         code: 'ENROLLMENT_INCOMPLETE',
         missingConsents: comp.missingConsentLabels,
-        missingFields: comp.missingFieldLabels
+        missingFields: comp.missingFieldLabels,
+        // Named so the UI can offer the override rather than leaving an admin
+        // to discover it exists by reading the API.
+        overridable: true
+      });
+    }
+    // A reason is the entire value of the override. Without one the record
+    // says an incomplete file was approved and nothing about why, which is
+    // worse than no override at all.
+    if (incomplete && override && !String(overrideReason || '').trim()) {
+      return res.status(400).json({
+        error: 'An override needs a reason. Say why enrollment is being approved with items outstanding.',
+        code: 'OVERRIDE_REASON_REQUIRED'
       });
     }
 
+    const overrode = !!(incomplete && override);
     client.enrollmentStatus = 'enrolled';
     if (client.reviewStatus === 'needs_followup') client.reviewStatus = null;
     client.enrollmentApproval = {
       approvedAt: new Date().toISOString(),
       approvedById: req.user.id,
-      approvedByName: req.user.name || req.user.email
+      approvedByName: req.user.name || req.user.email,
+      // Frozen, not recomputed later: the point of the record is what was
+      // outstanding WHEN the call was made. Recomputing it on read would erase
+      // the override's history the moment someone filed the missing consent.
+      override: overrode ? {
+        reason: String(overrideReason).trim().slice(0, 1000),
+        missingConsents: comp.missingConsentLabels,
+        missingFields: comp.missingFieldLabels
+      } : null
     };
     users[idx] = client;
     await db.set('users', users);
     invalidateUsersCache();
-    await logActivity(req.user.id, req.user.name || req.user.email, 'enrollment_approved', 'enrollment', client.id, {});
-    res.json({ message: 'Enrollment approved', enrollmentStatus: client.enrollmentStatus });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'enrollment_approved', 'enrollment', client.id,
+      overrode ? { override: true, reason: client.enrollmentApproval.override.reason,
+                   missingConsents: comp.missingConsentLabels, missingFields: comp.missingFieldLabels } : {});
+    // The client was never told they were approved. That was the one event
+    // that says "you are done" and it was silent.
+    await phcNotify.enrollmentApproved({ clientId: client.id, overridden: overrode, actorId: req.user.id });
+    res.json({
+      message: overrode ? 'Enrollment approved with an override' : 'Enrollment approved',
+      enrollmentStatus: client.enrollmentStatus,
+      override: client.enrollmentApproval.override
+    });
   } catch (error) {
     console.error('GFC enrollment approve error:', error);
     res.status(500).json({ error: 'Server error' });

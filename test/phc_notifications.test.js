@@ -330,3 +330,150 @@ test('the template module never imports the marketing tracking url', () => {
   const src = read('emailTemplates.js');
   assert.ok(!/TRACKING_URL|script\.google\.com/.test(src));
 });
+
+// ===========================================================================
+// 5-7. The three enrollment notices moved off raw sendEmail (2026-09-13)
+//
+// Document requests and enrollment follow-up were emailing through a direct
+// sendEmail call, which meant they reached people who had unsubscribed, arrived
+// as unbranded plain text, and were neither retried nor logged on failure.
+// Approval told the client nothing at all. These assertions read the QUEUED
+// message, because the whole defect was that the old path never touched it.
+// ===========================================================================
+
+test('a document request reaches the client and their POA, and no other family', () => {
+  return (async () => {
+    const h = harness();
+    const rows = [{ id: 'r1', label: 'Insurance card' }, { id: 'r2', label: 'Photo ID' }];
+    await h.notifier.documentsRequested({ clientId: 'c1', rows, isReminder: false });
+    const emails = h.queued.map(q => q.email).sort();
+    assert.deepStrictEqual(emails, ['ada@example.com', 'ruth@example.com']);
+    assert.strictEqual(h.to('ken@example.com').length, 0, 'non-POA family are never on a push channel');
+  })();
+});
+
+test('an uncovered transport names no document; a BAA-covered one names them', async () => {
+  const vague = harness({ baaCovered: false });
+  const rows = [{ id: 'r1', label: 'Guardianship order' }];
+  await vague.notifier.documentsRequested({ clientId: 'c1', rows, isReminder: false });
+  const v = vague.to('ada@example.com')[0];
+  assert.ok(!/Guardianship/.test(v.body), 'the document name must not ride an uncovered transport');
+  // And it still says something useful, rather than being vague by being empty.
+  assert.match(v.body, /1 document/);
+  assert.match(v.body, /secure portal/);
+  assert.strictEqual(v.phi, false);
+
+  const full = harness({ baaCovered: true });
+  await full.notifier.documentsRequested({ clientId: 'c1', rows, isReminder: false });
+  const f = full.to('ada@example.com')[0];
+  assert.match(f.body, /Guardianship order/);
+  assert.strictEqual(f.phi, true);
+});
+
+test('a reminder is a distinct message and cannot be collapsed into the original request', async () => {
+  // They share a recipient and a subject shape. If both carried the same
+  // relatedEntityId the queue's duplicate check would swallow the chase, which
+  // is the one message that exists to be sent twice.
+  const h = harness({ baaCovered: true });
+  const rows = [{ id: 'r1', label: 'Insurance card' }];
+  await h.notifier.documentsRequested({ clientId: 'c1', rows, isReminder: false });
+  await h.notifier.documentsRequested({ clientId: 'c1', rows, isReminder: true });
+  const mine = h.to('ada@example.com');
+  assert.strictEqual(mine.length, 2);
+  assert.notStrictEqual(mine[0].relatedEntityId, mine[1].relatedEntityId);
+  assert.notStrictEqual(mine[0].type, mine[1].type);
+  assert.match(mine[1].body, /reminder/i);
+});
+
+test('a document request renders in the house template, both halves', async () => {
+  const h = harness();
+  await h.notifier.documentsRequested({ clientId: 'c1', rows: [{ id: 'r1', label: 'Photo ID' }] });
+  const m = h.to('ada@example.com')[0];
+  assert.match(m.htmlBody, new RegExp(templates.PALETTE.navy.replace('#', '#?'), 'i'));
+  assert.ok(m.body && m.body.length, 'a text half exists for clients that strip HTML');
+  assert.ok(!/<table/.test(m.body), 'the text half is not markup');
+});
+
+test('enrollment follow-up lists the outstanding items only on a covered transport', async () => {
+  const vague = harness({ baaCovered: false });
+  await vague.notifier.enrollmentFollowUp({ clientId: 'c1', itemLabels: ['Advance directive status', 'Allergies (or "none")'] });
+  const v = vague.to('ada@example.com')[0];
+  assert.ok(!/Advance directive|Allergies/.test(v.body),
+    'a list naming one person\'s directive and allergies is the same class of detail as a document name');
+  assert.match(v.body, /2 items/);
+
+  const full = harness({ baaCovered: true });
+  await full.notifier.enrollmentFollowUp({ clientId: 'c1', itemLabels: ['Advance directive status'] });
+  assert.match(full.to('ada@example.com')[0].body, /Advance directive status/);
+});
+
+test('follow-up counts read naturally for one item', async () => {
+  const h = harness({ baaCovered: true });
+  await h.notifier.enrollmentFollowUp({ clientId: 'c1', itemLabels: ['Allergies'] });
+  assert.match(h.to('ada@example.com')[0].body, /1 item still/);
+});
+
+test('approval finally tells the client, and says so plainly', async () => {
+  const h = harness();
+  await h.notifier.enrollmentApproved({ clientId: 'c1' });
+  const m = h.to('ada@example.com')[0];
+  assert.ok(m, 'the client is told their enrollment is approved');
+  assert.match(m.subject, /enrollment is complete/i);
+  // Nothing here is PHI: that a person is enrolled with us is what the welcome
+  // email already established.
+  assert.strictEqual(m.phi, false);
+  assert.ok(!/outstanding/i.test(m.body), 'a clean approval does not mention outstanding items');
+});
+
+test('an OVERRIDDEN approval tells the client their file is not actually complete', async () => {
+  // Saying nothing would leave them believing everything is on file while
+  // staff know it is not.
+  const h = harness();
+  await h.notifier.enrollmentApproved({ clientId: 'c1', overridden: true });
+  assert.match(h.to('ada@example.com')[0].body, /still outstanding/i);
+});
+
+test('every one of the three goes through the QUEUE, so an unsubscribe is honoured', async () => {
+  // The queue is where the opt-out and the deactivated-account check live. A
+  // notifier that reached sendEmail directly would skip both, which is exactly
+  // what the old path did.
+  let checked = 0;
+  const notifier = createPhcNotifier({
+    getUsers: async () => [CLIENT],
+    queueNotification: async () => { checked += 1; return { id: 'n' }; },
+    getAppBaseUrl: async () => 'https://app.example.com',
+    emailTransport: { transportStatus: () => ({ baaCovered: false }) },
+    staffRoles: ['admin'], clientRole: 'client', familyRole: 'family'
+  });
+  await notifier.documentsRequested({ clientId: 'c1', rows: [{ id: 'r1', label: 'X' }] });
+  await notifier.enrollmentFollowUp({ clientId: 'c1', itemLabels: ['X'] });
+  await notifier.enrollmentApproved({ clientId: 'c1' });
+  assert.strictEqual(checked, 3);
+});
+
+test('a queue SKIP is reported as not-notified, never as a send', async () => {
+  const notifier = createPhcNotifier({
+    getUsers: async () => [CLIENT],
+    queueNotification: async () => ({ skipped: true, reason: 'unsubscribed' }),
+    getAppBaseUrl: async () => 'https://app.example.com',
+    emailTransport: { transportStatus: () => ({ baaCovered: false }) },
+    staffRoles: ['admin'], clientRole: 'client', familyRole: 'family'
+  });
+  const r = await notifier.documentsRequested({ clientId: 'c1', rows: [{ id: 'r1', label: 'X' }] });
+  assert.strictEqual(r.notified, 0);
+});
+
+test('the raw sendEmail paths these replaced are GONE from server.js', () => {
+  const src = read('server.js');
+  for (const dead of ['notifyDocumentRequest', 'sendFollowUpNotification']) {
+    assert.ok(!src.includes(dead), `${dead} still exists — the old unbranded path is back`);
+  }
+});
+
+test('the three new routes are wired, exactly once each', () => {
+  const src = read('server.js');
+  assert.strictEqual((src.match(/phcNotify\.enrollmentFollowUp\(/g) || []).length, 1);
+  assert.strictEqual((src.match(/phcNotify\.enrollmentApproved\(/g) || []).length, 1);
+  // Request and reminder are two call sites of one notifier, by design.
+  assert.strictEqual((src.match(/phcNotify\.documentsRequested\(/g) || []).length, 2);
+});
