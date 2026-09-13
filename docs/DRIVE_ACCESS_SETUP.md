@@ -185,6 +185,12 @@ Three decisions worth knowing:
 - **Rejecting one requires a reason, and the caregiver is told what it was.** A
   caregiver told only "not accepted" re-sends the same blurry photo.
 
+**Payroll onboarding paperwork lives here too** — photo ID, paystub and W-9.
+Admin files it from **User Management → edit the caregiver → Documents**, and
+it appears in that caregiver's own app. **Gusto is where payroll paperwork is
+actually submitted.** What the app holds is the office's copy; nothing here
+sends anything to Gusto.
+
 This needs no extra Google setup. The files go to a **GFC Caregiver Documents**
 folder inside whatever you configured above, created on first upload.
 

@@ -44,8 +44,23 @@ test('no component that renders a form control is defined inside another compone
     lines.forEach((line, i) => {
       const m = line.match(nested);
       if (!m) return;
-      // Look at the component's body — bounded, since these are small helpers.
-      const body = lines.slice(i, i + 40).join('\n');
+      // Scan the component's WHOLE body, found by walking back to its own
+      // indentation. This used to read a fixed 40 lines, which is fine for a
+      // small helper and blind to anything longer — a 150-line nested
+      // component with its first <input> on line 60 sailed through. That is
+      // not hypothetical: it is how the caregiver-documents section was first
+      // written, and this guard passed on it.
+      const indent = m[1].length;
+      let j = i + 1;
+      for (; j < lines.length; j++) {
+        const l = lines[j];
+        if (!l.trim()) continue;
+        const li = l.length - l.trimStart().length;
+        // Back at or above the declaration's own indent, on a line that closes
+        // or starts something: the component body has ended.
+        if (li <= indent && /^\s*(\}|\)|const |let |function |var )/.test(l)) break;
+      }
+      const body = lines.slice(i, j).join('\n');
       if (FORM_CONTROL.test(body)) {
         offenders.push(`${page}:${i + 1} — ${m[2]} (indent ${m[1].length}) renders a form control`);
       }

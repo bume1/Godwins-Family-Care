@@ -861,23 +861,36 @@ module.exports = function createCaregiverRoutes(deps) {
   // in the page: the form asks for a pay period only where one means something.
   // Keeping that decision here is the same rule as the catalog itself — a page
   // that names kinds is a page that drifts from the validator that refuses them.
+  // `needsPeriod` travels WITH the kind rather than being a list of kind names
+  // in the page: the form asks for a pay period only where one means something.
+  // Keeping that decision here is the same rule as the catalog itself — a page
+  // that names kinds is a page that drifts from the validator that refuses them.
+  //
+  // `payroll: true` marks the onboarding paperwork (2026-09-13, owner request).
+  // GUSTO IS THE SYSTEM OF RECORD for these — the caregiver submits them there,
+  // and what the app holds is the office's copy. Nothing here transmits to
+  // Gusto and no screen may imply it does, or someone will believe their W9 is
+  // filed because they uploaded it here.
   const CAREGIVER_DOC_KINDS = [
-    { kind: 'timesheet',     label: 'Timesheet',                 needsPeriod: true },
-    { kind: 'visit_note',    label: 'Signed visit note',         needsPeriod: false },
-    { kind: 'mileage',       label: 'Mileage or expense log',    needsPeriod: true },
-    { kind: 'certification', label: 'Certification or licence',  needsPeriod: false },
-    { kind: 'other',         label: 'Something else',            needsPeriod: false }
+    { kind: 'timesheet',     label: 'Timesheet',                 needsPeriod: true,  payroll: false },
+    { kind: 'visit_note',    label: 'Signed visit note',         needsPeriod: false, payroll: false },
+    { kind: 'mileage',       label: 'Mileage or expense log',    needsPeriod: true,  payroll: false },
+    { kind: 'certification', label: 'Certification or licence',  needsPeriod: false, payroll: false },
+    { kind: 'id_document',   label: 'Photo ID',                  needsPeriod: false, payroll: true },
+    { kind: 'paystub',       label: 'Paystub',                   needsPeriod: true,  payroll: true },
+    { kind: 'w9',            label: 'W-9',                       needsPeriod: false, payroll: true },
+    { kind: 'other',         label: 'Something else',            needsPeriod: false, payroll: false }
   ];
 
-  router.get('/api/caregiver/documents/kinds', authenticateToken, requireCaregiver, (req, res) => {
+  router.get('/api/caregiver/documents/kinds', authenticateToken, requireCaregiverOrAdmin, (req, res) => {
     // SERVED, not restated in the page — the same rule the competency catalog
     // follows, so the list cannot drift between the form and the validator.
     res.json({ kinds: CAREGIVER_DOC_KINDS });
   });
 
-  router.post('/api/caregiver/documents', authenticateToken, requireCaregiver, async (req, res) => {
+  router.post('/api/caregiver/documents', authenticateToken, requireCaregiverOrAdmin, async (req, res) => {
     try {
-      const { kind, fileName, fileDataB64, note, periodStart, periodEnd, shiftId } = req.body || {};
+      const { kind, fileName, fileDataB64, note, periodStart, periodEnd, shiftId, caregiverId } = req.body || {};
       if (!kind || !fileName || !fileDataB64) {
         return res.status(400).json({ error: 'kind, fileName and fileDataB64 are required', code: 'DOC_FIELDS_REQUIRED' });
       }
@@ -906,7 +919,22 @@ module.exports = function createCaregiverRoutes(deps) {
         return res.status(400).json({ error: 'Only PDF, JPG, and PNG files are accepted.', code: 'DOC_TYPE_REJECTED' });
       }
 
-      const me = await freshCaregiver(req);
+      // WHOSE document this is. An admin files onboarding paperwork on a
+      // caregiver's behalf and must NAME them — inferring it would file a W9
+      // against whoever happened to be signed in. A caregiver can only ever
+      // file their own: passing someone else's id does not widen anything,
+      // the same rule the list route follows.
+      const isAdmin = req.user.role === ROLES.ADMIN;
+      let me;
+      if (isAdmin) {
+        if (!caregiverId) {
+          return res.status(400).json({ error: 'Say which caregiver this belongs to.', code: 'CAREGIVER_ID_REQUIRED' });
+        }
+        const users = await getUsers();
+        me = users.find(u => u.id === caregiverId && cg.isCaregiver(u)) || null;
+      } else {
+        me = await freshCaregiver(req);
+      }
       if (!me) return res.status(404).json({ error: 'Caregiver record not found.', code: 'CAREGIVER_NOT_FOUND' });
 
       const safeName = `${kind}_${me.id}_${Date.now()}_${String(fileName).replace(/[^a-zA-Z0-9._-]/g, '_')}`;
@@ -942,16 +970,23 @@ module.exports = function createCaregiverRoutes(deps) {
         period_start: normalizeDate(periodStart),
         period_end: normalizeDate(periodEnd),
         shift_id: shiftId ? String(shiftId) : null,
-        status: 'received',
+        // Onboarding paperwork the office filed is already accepted by
+        // definition — it did not arrive needing review. A timesheet did.
+        status: (isAdmin && (CAREGIVER_DOC_KINDS.find(k => k.kind === kind) || {}).payroll) ? 'accepted' : 'received',
         uploaded_at: new Date().toISOString(),
+        // "The caregiver sent this" and "the office filed it for them" are
+        // different facts, and for a W9 the difference is the whole point.
+        uploaded_by_id: req.user.id,
+        uploaded_by_name: req.user.name || req.user.email || null,
+        uploaded_by_office: isAdmin,
         reviewed_at: null, reviewed_by_name: null, review_note: null
       };
       rows.push(row);
       await db.set('caregiver_documents', rows);
 
       // The activity log records THAT a document arrived, never its contents.
-      await logActivity(me.id, me.name || me.email, 'caregiver_document_uploaded', 'caregiver_document', row.id,
-        { kind, periodStart: row.period_start, periodEnd: row.period_end });
+      await logActivity(req.user.id, req.user.name || req.user.email, 'caregiver_document_uploaded', 'caregiver_document', row.id,
+        { kind, caregiverId: me.id, filedByOffice: isAdmin, periodStart: row.period_start, periodEnd: row.period_end });
 
       res.json({ message: 'Document received', document: publicCaregiverDoc(row) });
     } catch (error) {
@@ -1042,6 +1077,39 @@ module.exports = function createCaregiverRoutes(deps) {
     }
   });
 
+  // Remove a document. Admin only, and the Drive file goes with the row — a
+  // superseded W9 has no value and a stale copy of someone's photo ID is the
+  // worse thing to leave lying around. This is payroll paperwork, not a
+  // clinical record, so the append-only rule that governs visit logs does not
+  // apply and a real delete is the honest behaviour.
+  router.delete('/api/caregiver/documents/:id', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const rows = (await db.get('caregiver_documents')) || [];
+      const i = rows.findIndex(r => r && r.id === req.params.id);
+      if (i === -1) return res.status(404).json({ error: 'Document not found', code: 'DOC_NOT_FOUND' });
+      const row = rows[i];
+
+      // The row goes whatever Drive says. A Drive failure here leaves an
+      // orphaned file, which is untidy; keeping the row would leave a listing
+      // that opens nothing, which is worse — and the admin already decided it
+      // should be gone.
+      try {
+        if (row.drive_file_id) await drive.deleteFile(row.drive_file_id);
+      } catch (e) {
+        console.error('[CAREGIVER DOCS] Drive delete failed, removing the row anyway:', e.message);
+      }
+
+      rows.splice(i, 1);
+      await db.set('caregiver_documents', rows);
+      await logActivity(req.user.id, req.user.name || req.user.email, 'caregiver_document_deleted', 'caregiver_document', row.id,
+        { kind: row.kind, caregiverId: row.caregiver_id });
+      res.json({ message: 'Document removed' });
+    } catch (error) {
+      console.error('Caregiver document delete error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   // The Drive id and stored name never reach a client of this API — they are
   // storage plumbing, and the file is read back through the route above.
   const publicCaregiverDoc = (r) => ({
@@ -1057,6 +1125,9 @@ module.exports = function createCaregiverRoutes(deps) {
     shiftId: r.shift_id || null,
     status: r.status,
     uploadedAt: r.uploaded_at,
+    uploadedByName: r.uploaded_by_name || null,
+    uploadedByOffice: !!r.uploaded_by_office,
+    payroll: !!(CAREGIVER_DOC_KINDS.find(k => k.kind === r.kind) || {}).payroll,
     reviewedAt: r.reviewed_at, reviewedByName: r.reviewed_by_name, reviewNote: r.review_note
   });
 

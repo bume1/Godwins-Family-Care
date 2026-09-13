@@ -228,6 +228,10 @@ const fakeDrive = (opts = {}) => {
     async downloadFileBuffer(id) {
       if (!files.has(id)) throw new Error('File not found');
       return files.get(id);
+    },
+    async deleteFile(id) {
+      if (!files.has(id)) throw new Error('File not found');
+      files.delete(id);
     }
   };
 };
@@ -472,4 +476,135 @@ test('a client cannot reach the caregiver document routes at all', async (t) => 
     assert.strictEqual((await h.call(p)).status, 403, `${p} must refuse a client`);
   }
   assert.strictEqual((await upload(h)).status, 403);
+});
+
+// ===========================================================================
+// Payroll paperwork: the office files it, Gusto is the system of record
+// ===========================================================================
+
+test('an admin files a W-9 FOR a caregiver, and must name whose it is', async (t) => {
+  const store = {};
+  const admin = await mountCaregiver(t, { as: ADMIN, store });
+
+  // Unnamed is refused. Inferring it would file a W-9 against whoever
+  // happened to be signed in.
+  const unnamed = await admin.post('/api/caregiver/documents',
+    { kind: 'w9', fileName: 'w9.pdf', fileDataB64: PDF.toString('base64') });
+  assert.strictEqual(unnamed.status, 400);
+  assert.strictEqual((await unnamed.json()).code, 'CAREGIVER_ID_REQUIRED');
+
+  const named = await admin.post('/api/caregiver/documents',
+    { kind: 'w9', caregiverId: 'cg1', fileName: 'w9.pdf', fileDataB64: PDF.toString('base64') });
+  assert.strictEqual(named.status, 200);
+  const { document } = await named.json();
+  assert.strictEqual(document.payroll, true);
+  assert.strictEqual(document.uploadedByOffice, true, 'who filed it is recorded');
+  // Filed against the CAREGIVER, not the admin who uploaded it.
+  assert.strictEqual(store.caregiver_documents[0].caregiver_id, 'cg1');
+  assert.strictEqual(store.caregiver_documents[0].uploaded_by_id, 'a1');
+
+  // And it lands in the caregiver's own space.
+  const theirs = await mountCaregiver(t, { store });
+  const list = await (await theirs.call('/api/caregiver/documents')).json();
+  assert.strictEqual(list.documents.length, 1);
+  assert.strictEqual(list.documents[0].kindLabel, 'W-9');
+});
+
+test('a caregiver cannot file against someone else by passing an id', async (t) => {
+  // The same widening rule the list route follows. A caregiver files their
+  // own, full stop — the id in the body is ignored, not honoured.
+  const store = {};
+  const h = await mountCaregiver(t, { store });
+  const res = await upload(h, { caregiverId: 'cg2' });
+  assert.strictEqual(res.status, 200);
+  assert.strictEqual(store.caregiver_documents[0].caregiver_id, 'cg1');
+});
+
+test('an admin cannot file against a non-caregiver', async (t) => {
+  const store = {};
+  const admin = await mountCaregiver(t, { as: ADMIN, store });
+  const res = await admin.post('/api/caregiver/documents',
+    { kind: 'w9', caregiverId: 'a1', fileName: 'w9.pdf', fileDataB64: PDF.toString('base64') });
+  assert.strictEqual(res.status, 404);
+  assert.strictEqual((await res.json()).code, 'CAREGIVER_NOT_FOUND');
+});
+
+test('removing a document deletes the STORED FILE too, and only an admin may', async (t) => {
+  // Payroll paperwork is not a clinical record. A superseded W-9 has no value
+  // and a stale copy of someone's photo ID is the worse thing to leave lying
+  // around, so this is a real delete rather than an append-only tombstone.
+  const store = {};
+  const stub = fakeDrive();
+  const cgHandle = await mountCaregiver(t, { store, driveStub: stub });
+  const { document } = await (await upload(cgHandle, { kind: 'id_document' })).json();
+  assert.strictEqual(stub.files.size, 1);
+
+  // A caregiver cannot delete their own — the office decides what is on file.
+  const refused = await cgHandle.call(`/api/caregiver/documents/${document.id}`, { method: 'DELETE' });
+  assert.strictEqual(refused.status, 403);
+  assert.strictEqual(store.caregiver_documents.length, 1);
+
+  const admin = await mountCaregiver(t, { as: ADMIN, store, driveStub: stub });
+  const gone = await admin.call(`/api/caregiver/documents/${document.id}`, { method: 'DELETE' });
+  assert.strictEqual(gone.status, 200);
+  assert.strictEqual(store.caregiver_documents.length, 0, 'the row is gone');
+  assert.strictEqual(stub.files.size, 0, 'and so is the file, not just the pointer');
+});
+
+test('the payroll kinds exist and say they are payroll', async (t) => {
+  const h = await mountCaregiver(t, { as: ADMIN });
+  const { kinds } = await (await h.call('/api/caregiver/documents/kinds')).json();
+  const payroll = kinds.filter(k => k.payroll).map(k => k.kind).sort();
+  assert.deepStrictEqual(payroll, ['id_document', 'paystub', 'w9']);
+  // A timesheet is not onboarding paperwork and must not be marked as such.
+  assert.strictEqual(kinds.find(k => k.kind === 'timesheet').payroll, false);
+});
+
+test('no screen claims the app submits anything to Gusto', () => {
+  // Gusto is the system of record for payroll paperwork. A screen that stays
+  // quiet about that lets someone believe uploading here filed their W-9.
+  const hub = read('public/admin-hub.html');
+  const i = hub.indexOf('const CaregiverDocsSection');
+  const card = hub.slice(i, hub.indexOf('const UsersPage', i));
+  assert.ok(card.length > 500, 'the section should have been found');
+  assert.match(card, /Gusto/, 'the card must name where payroll paperwork actually goes');
+  assert.match(card, /does not send it to Gusto|office's copy/,
+    'and must not let it read as though uploading here submits it');
+  // Nothing in the app talks to Gusto, and nothing should start by accident.
+  assert.ok(!/api\.gusto|gusto\.com\/v1|GUSTO_API/i.test(hub));
+});
+
+// ===========================================================================
+// The assigned-clients picker, which had never worked
+// ===========================================================================
+
+test('the assigned-clients picker no longer reads a route that does not exist', () => {
+  // It fetched `/api/clients` — a lab-era endpoint present nowhere in this
+  // server. The request 404'd, .json() threw, and .catch(() => []) swallowed
+  // it, so the list was empty on every load and no caregiver could be assigned
+  // to anyone through the only screen that does it.
+  const hub = read('public/admin-hub.html');
+  assert.ok(!/fetch\('\/api\/clients'/.test(hub),
+    'the dead endpoint must not be called');
+  const server = read('server.js');
+  assert.ok(!/['"`]\/api\/clients['"`]/.test(server),
+    'and it still does not exist, so nothing may depend on it');
+});
+
+test('an existing assignment stored by NAME still reads as assigned', () => {
+  // Assignments now save by id, but every row on file holds a name. Matching
+  // on id alone would show a saved assignment as unchecked and wipe it on the
+  // next save — the 4.2 bug class, pointed at who may visit whom.
+  const cgRepo = require('../caregiverRepository');
+  const client = { id: 'c9', role: 'client', name: 'Margaret Whitfield' };
+  assert.strictEqual(cgRepo.isAssignedToCaregiver({ assignedClients: ['Margaret Whitfield'] }, client), true);
+  assert.strictEqual(cgRepo.isAssignedToCaregiver({ assignedClients: ['c9'] }, client), true);
+  assert.strictEqual(cgRepo.isAssignedToCaregiver({ assignedClients: ['someone else'] }, client), false);
+
+  // And the form recognises both forms, so neither is silently dropped.
+  const hub = read('public/admin-hub.html');
+  const i = hub.indexOf('const isAssigned = current.includes(client.id)');
+  assert.ok(i > 0, 'the picker must match on id OR name');
+  assert.match(hub.slice(i, i + 1500), /filter\(c => c !== client\.id && c !== clientName\)/,
+    'and unticking must clear both forms, or the old name survives the save');
 });
