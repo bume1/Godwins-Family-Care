@@ -22,6 +22,7 @@
 const express = require('express');
 const sched = require('../schedulingRepository');
 const cg = require('../caregiverRepository');
+const gate = require('../enrollmentGate');
 
 module.exports = function createSchedulingRoutes(deps) {
   const { db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4 } = deps;
@@ -73,6 +74,24 @@ module.exports = function createSchedulingRoutes(deps) {
   const loadClient = async (clientId) => {
     const users = await getUsers();
     return users.find(u => u.id === clientId && u.role === ROLES.CLIENT) || null;
+  };
+
+  // Nothing may be scheduled against a client who is not enrolled. The rule
+  // lives in enrollmentGate.js because clinical appointments enforce the same
+  // one from server.js, and two copies would drift.
+  //
+  // Returns the override stamp (or null) when scheduling may proceed, and
+  // `false` after it has already answered the response. A caller that forgets
+  // to check gets a thrown response rather than a silent pass — the helper
+  // never returns undefined.
+  const gateScheduling = (req, res, client) => {
+    const verdict = gate.checkSchedulingAllowed(client, req.body || {}, req.user, isAdmin(req.user));
+    if (verdict.ok) return verdict.override;
+    res.status(verdict.status).json({
+      error: verdict.message, code: verdict.code,
+      enrollmentStatus: verdict.enrollmentStatus, overridable: verdict.overridable
+    });
+    return false;
   };
 
   // ==========================================================================
@@ -188,6 +207,17 @@ module.exports = function createSchedulingRoutes(deps) {
       const client = await loadClient(clientId);
       if (!client) return res.status(404).json({ error: 'Client not found.', code: 'CLIENT_NOT_FOUND' });
 
+      // DELIBERATELY NOT GATED (owner decision, 2026-09-13). A family calling to
+      // ask for care before the paperwork is finished is the normal way this
+      // starts, not an edge case — refusing the ask would turn the gate into a
+      // reason people phone instead, and then there is no record at all.
+      //
+      // The gate belongs on COMMITTING care (posting or assigning a shift), which
+      // is where an admin decides. So the ask is free and the client's enrollment
+      // state rides on the row instead, where whoever works the queue sees it
+      // before they act on it rather than discovering it at post time.
+      const requestEligibility = gate.schedulingEligibility(client);
+
       if (!sched.isIsoDate(body.date)) {
         return res.status(400).json({ error: 'Give the date you need care, as YYYY-MM-DD.', code: 'DATE_INVALID' });
       }
@@ -210,12 +240,20 @@ module.exports = function createSchedulingRoutes(deps) {
         status: 'requested',
         requested_at: nowIso(),
         resolved_at: null,
-        shift_id: null
+        shift_id: null,
+        // Captured at request time, and kept: what the admin working this queue
+        // needs to know is whether enrollment was outstanding when the family
+        // asked, which is also the thing that will have moved by the time
+        // anybody looks. `client_enrollment_ok` is the answer, not the raw
+        // status, so the queue reads one field rather than re-deriving a rule.
+        client_enrollment_status: requestEligibility.status,
+        client_enrollment_ok: requestEligibility.allowed,
+        client_enrollment_note: requestEligibility.allowed ? null : requestEligibility.message
       };
       rows.push(row);
       await db.set('shift_requests', rows);
       await logActivity(req.user.id, row.requested_by_name, 'shift_requested', 'shift_request', row.id,
-        { clientId: client.id, date: row.date });
+        { clientId: client.id, date: row.date, enrollmentStatus: row.client_enrollment_status });
 
       res.json({ shiftRequest: row });
     } catch (error) {
@@ -264,6 +302,9 @@ module.exports = function createSchedulingRoutes(deps) {
       const client = await loadClient(clean.clientId);
       if (!client) return res.status(404).json({ error: 'Client not found.', code: 'CLIENT_NOT_FOUND' });
 
+      const shiftOverride = gateScheduling(req, res, client);
+      if (shiftOverride === false) return;
+
       const assignToId = String((req.body || {}).assignToCaregiverId || '').trim();
       let assignee = null;
       if (assignToId) {
@@ -291,7 +332,11 @@ module.exports = function createSchedulingRoutes(deps) {
         created_by_name: req.user.name || req.user.email,
         created_at: nowIso(),
         claimed_at: null, assigned_at: null, confirmed_at: null,
-        started_at: null, completed_at: null, cancelled_at: null, reopened_at: null
+        started_at: null, completed_at: null, cancelled_at: null, reopened_at: null,
+        // Present only when an admin scheduled over the enrollment gate. It
+        // rides on the shift itself so the override is visible wherever the
+        // work is, not only in an activity log nobody opens.
+        enrollment_override: shiftOverride
       };
 
       if (assignee) {
@@ -334,7 +379,10 @@ module.exports = function createSchedulingRoutes(deps) {
           clientId: client.id, start: row.start,
           requiredLicenseLevel: row.required_license_level,
           openToAllLevels: sched.isOpenToAllLevels(row),
-          assignedTo: assignee ? assignee.id : null
+          assignedTo: assignee ? assignee.id : null,
+          enrollmentOverride: shiftOverride
+            ? { reason: shiftOverride.reason, enrollmentStatus: shiftOverride.enrollmentStatus }
+            : null
         });
 
       if (assignee) {
@@ -1177,7 +1225,11 @@ module.exports = function createSchedulingRoutes(deps) {
     startedAt: r.started_at, completedAt: r.completed_at,
     cancelledAt: r.cancelled_at, cancelReason: r.cancel_reason || null,
     reopenedAt: r.reopened_at,
-    releasedFromName: r.released_from_name || null, releasedReason: r.released_reason || null
+    releasedFromName: r.released_from_name || null, releasedReason: r.released_reason || null,
+    // An override that lives only in the store is barely better than a silent
+    // one. It reaches every reader of the board so the shift itself says the
+    // client was not enrolled when it was posted.
+    enrollmentOverride: r.enrollment_override || null
   });
 
   const publicTimeLog = (l) => ({

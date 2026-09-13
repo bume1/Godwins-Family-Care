@@ -109,7 +109,10 @@
       followUp: (id, items) => authedFetch(`/api/gfc/admin/enrollment/${id}/follow-up`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items })
       }),
-      approve: (id) => authedFetch(`/api/gfc/admin/enrollment/${id}/approve`, { method: 'POST' }),
+      approve: (id, override) => authedFetch(`/api/gfc/admin/enrollment/${id}/approve`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(override ? { override: true, overrideReason: override } : {})
+      }),
       setServiceLine: (id, serviceLine) => authedFetch(`/api/gfc/admin/enrollment/${id}/service-line`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ serviceLine })
       }),
@@ -630,6 +633,7 @@
       const [followUpItems, setFollowUpItems] = useState([]);
       const [showFollowUp, setShowFollowUp] = useState(false);
       const [approveErr, setApproveErr] = useState(null);
+      const [overrideReason, setOverrideReason] = useState('');
       const [lineOpen, setLineOpen] = useState(false);
       const [lineChoice, setLineChoice] = useState('');
       const [lineResult, setLineResult] = useState(null);
@@ -641,9 +645,9 @@
       useEffect(() => { load(); }, [load]);
 
       const doReview = () => { setBusy(true); api.review(clientId).then(load).catch(e => setErr(e.message)).finally(() => setBusy(false)); };
-      const doApprove = () => {
+      const doApprove = (override) => {
         setBusy(true); setApproveErr(null);
-        api.approve(clientId).then(load).catch(e => {
+        api.approve(clientId, override).then(() => { setOverrideReason(''); load(); }).catch(e => {
           if (e.status === 409 && e.data) setApproveErr(e.data);
           else setErr(e.message);
         }).finally(() => setBusy(false));
@@ -685,7 +689,7 @@
               <button className="btn btn-ghost" disabled={busy} onClick={doReview}>Mark as reviewed</button>
               <button className="btn btn-ghost" disabled={busy} onClick={() => setShowFollowUp(v => !v)}>Request follow-up</button>
               <button className="btn btn-ghost" disabled={busy} onClick={() => { setLineChoice(client.serviceLineResolved || 'PHC'); setLineOpen(v => !v); }}>Change service line</button>
-              {isAdminRole(user) && <button className="btn btn-primary" disabled={busy} onClick={doApprove}>Approve enrollment</button>}
+              {isAdminRole(user) && <button className="btn btn-primary" disabled={busy} onClick={() => doApprove(null)}>Approve enrollment</button>}
             </div>
           </div>
 
@@ -695,6 +699,42 @@
               <ul className="list-disc ml-5 mt-1">
                 {(approveErr.missingConsents || []).map(m => <li key={m}>{m}</li>)}
                 {(approveErr.missingFields || []).map(m => <li key={m}>{m}</li>)}
+              </ul>
+              {/* The override, offered only after the refusal. Enrolling is what
+                  unlocks scheduling now, so an urgent start needs a documented
+                  way through — otherwise it happens on the user form instead,
+                  where nothing records why. */}
+              {approveErr.overridable && (
+                <div className="mt-3 pt-3 border-t border-danger-200">
+                  <div className="text-gray-700">
+                    You can approve anyway. The reason is stored on the record with what was
+                    outstanding, and the client is told their file is not yet complete.
+                  </div>
+                  <input
+                    className="input mt-2 w-full"
+                    value={overrideReason}
+                    onChange={e => setOverrideReason(e.target.value)}
+                    placeholder="Why is this being approved with items outstanding?" />
+                  <button className="btn btn-ghost mt-2" disabled={busy || !overrideReason.trim()}
+                    onClick={() => doApprove(overrideReason.trim())}>
+                    Approve with this reason
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* And once it happened, it stays visible. An override that fades on
+              the next page load is the silent approval it replaced. */}
+          {client.enrollmentApproval && client.enrollmentApproval.override && (
+            <div className="bg-warning-50 text-warning-600 text-sm rounded-lg px-4 py-3 mb-4">
+              <strong>Approved with items outstanding.</strong>
+              <div className="mt-1">
+                {client.enrollmentApproval.approvedByName} — “{client.enrollmentApproval.override.reason}”
+              </div>
+              <ul className="list-disc ml-5 mt-1">
+                {(client.enrollmentApproval.override.missingConsents || []).map(m => <li key={m}>{m}</li>)}
+                {(client.enrollmentApproval.override.missingFields || []).map(m => <li key={m}>{m}</li>)}
               </ul>
             </div>
           )}
