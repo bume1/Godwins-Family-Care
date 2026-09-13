@@ -10,14 +10,15 @@
 //     never non-POA family (their access is ROI- and sharing-gated at READ
 //     time, and email is a push channel where neither gate can be re-checked
 //     once the message is out).
-//   * HOW MUCH the message may say — read from the live transport, not
-//     assumed.
+//   * HOW MUCH the message may say — read from whether the LIVE transport is
+//     inside the BAA, never from a vendor's name, and re-evaluated on every
+//     send.
 //
 // ---------------------------------------------------------------------------
-// The four private-home-care events
+// The private-home-care events
 // ---------------------------------------------------------------------------
-// The PHC arm had four events that changed something a person was waiting on
-// and told nobody:
+// The PHC arm had events that changed something a person was waiting on and
+// told nobody, or told them over plumbing that ignored their own preferences:
 //
 //   1. A client uploads a document        → staff found out by looking
 //   2. Staff accept or reject an upload   → the client was never told, so a
@@ -26,13 +27,23 @@
 //   3. A client signs a consent           → nobody
 //   4. A client co-signs the care plan    → the RN who authored it and is
 //      waiting on that signature had to check by hand
+//   5. Staff request or chase documents   → emailed, but on raw plumbing that
+//      ignored an unsubscribe and sent unbranded plain text
+//   6. Staff request enrollment follow-up → same raw plumbing
+//   7. An admin approves the enrollment   → nobody, including the client who
+//      had been waiting for exactly that
 //
-// HOW MUCH EACH EMAIL MAY SAY DEPENDS ON THE LIVE TRANSPORT, and that is the
-// point rather than an inconvenience. "Ada Bell's care plan is signed" is
-// protected health information. On Resend, which carries no BAA, these notices
-// say only that something is waiting; on Google Workspace they say what it is,
-// and the detailed version is marked { phi: true } so the mailer refuses it
-// outright if the transport changes underneath us.
+// HOW MUCH EACH EMAIL MAY SAY DEPENDS ON WHETHER THE LIVE TRANSPORT IS INSIDE
+// THE BAA, and that is the point rather than an inconvenience. "Ada Bell's care
+// plan is signed" is protected health information. On a transport that carries
+// no BAA these notices say only that something is waiting; on a covered one
+// they say what it is, and the detailed version is marked { phi: true } so the
+// mailer refuses it outright if the transport changes underneath us.
+//
+// Coverage is read from the SENDING ADDRESS at send time, never from a
+// transport's name, and an unreadable transport counts as NOT covered — which
+// is why none of this names a vendor. Whichever one is configured today, the
+// rule is the same and it is re-evaluated on every send.
 //
 // Every function here is best-effort. A notification failure must never undo
 // an upload, a review, a signature or a co-signature that already succeeded.
@@ -337,6 +348,67 @@ function createNotifier(deps) {
     }
   }
 
+  // ---- 5. Staff asked the client for documents (or chased them) ------------
+  // This notice and the follow-up below used to go out through a raw sendEmail
+  // call. Three things followed from that and none of them were intended: a
+  // client who had unsubscribed or whose account was deactivated was emailed
+  // anyway, the message arrived as unbranded plain text beside notices that
+  // carry the house style, and a failed send was neither retried nor logged.
+  // Routing them through the queue like everything else fixes all three at
+  // once, and brings them under the same transport-aware detail rule.
+  async function documentsRequested({ clientId, rows, isReminder, dueAt, actorId }) {
+    try {
+      const detail = transportAllowsDetail();
+      const { client, recipients } = await clientSideRecipients(clientId);
+      if (!client) return { notified: 0, reason: 'no client record' };
+      if (!recipients.length) return { notified: 0, reason: 'no email address on file' };
+      const url = await portalUrlFor(client);
+      const list = (rows || []).map(r => r && r.label).filter(Boolean);
+      const count = list.length;
+      const noun = count === 1 ? 'document' : 'documents';
+      const due = dueAt || (rows || []).map(r => r && r.dueAt).find(Boolean);
+
+      let n = 0;
+      for (const { user, actingFor } of recipients) {
+        const forWhom = actingFor ? ` for ${actingFor.name}` : '';
+        const paragraphs = detail
+          ? [isReminder
+              ? `A quick reminder — we are still waiting on ${count} ${noun}${forWhom} to finish setting up care.`
+              : `We need ${count} ${noun}${forWhom} to finish setting up care.`,
+             'You can upload them from the Documents tab in your portal. A clear phone photo is fine for most of them.']
+          : [isReminder
+              ? `A quick reminder — we are still waiting on ${count} ${noun}${forWhom}.`
+              : `We need ${count} ${noun}${forWhom} to finish setting up care.`,
+             'The list is in your secure portal, along with the button to upload each one. For privacy we do not name documents in email.'];
+        if (detail && due) {
+          paragraphs.push(`Please send these by ${new Date(due).toLocaleDateString('en-US', { dateStyle: 'long' })}.`);
+        }
+        const ok = await send({
+          type: isReminder ? 'phc_documents_reminder' : 'phc_documents_requested',
+          user,
+          subject: isReminder ? 'A reminder about your documents' : `${count} ${noun} needed for your file`,
+          headline: isReminder ? 'Still waiting on a few documents' : `We need a few ${noun}`,
+          paragraphs,
+          // The document NAMES are the detail. "Advance directive" and
+          // "Guardianship order" say something about a named person's
+          // circumstances, so they ride only on a transport that may carry it.
+          callout: detail && count ? list.join(' · ') : null,
+          ctaUrl: url, ctaLabel: 'Open your portal',
+          // A reminder is a deliberate second ask, so it must not be collapsed
+          // into the original request by the queue's duplicate check.
+          relatedEntityId: `${client.id}:docs:${isReminder ? 'remind' : 'request'}:${(rows || []).map(r => r && r.id).filter(Boolean).sort().join(',')}`,
+          relatedEntityType: 'document',
+          actorId, phi: detail
+        });
+        if (ok) n += 1;
+      }
+      return { notified: n, detailed: detail };
+    } catch (e) {
+      console.error('[PHC] document-request notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
   async function appointmentRescheduled({ client, eid, from, to, clinician, place, actorId }) {
     try {
       const detail = transportAllowsDetail();
@@ -355,6 +427,50 @@ function createNotifier(deps) {
       });
     } catch (e) {
       console.error('[APPT] reschedule notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- 6. Staff requested follow-up on the enrollment checklist ------------
+  // The outstanding items are consent titles and face-sheet field labels. A
+  // list naming "Advance directive status" and "Allergies" for one identified
+  // person is the same class of detail as a document name, so it follows the
+  // same rule rather than being treated as harmless because it is only labels.
+  async function enrollmentFollowUp({ clientId, itemLabels, actorId }) {
+    try {
+      const detail = transportAllowsDetail();
+      const { client, recipients } = await clientSideRecipients(clientId);
+      if (!client) return { notified: 0, reason: 'no client record' };
+      if (!recipients.length) return { notified: 0, reason: 'no email address on file' };
+      const url = await portalUrlFor(client);
+      const list = (itemLabels || []).filter(Boolean);
+      const count = list.length;
+      const noun = count === 1 ? 'item' : 'items';
+
+      let n = 0;
+      for (const { user, actingFor } of recipients) {
+        const forWhom = actingFor ? ` on ${actingFor.name}'s enrollment` : '';
+        const ok = await send({
+          type: 'phc_enrollment_follow_up',
+          user,
+          subject: 'Action needed to finish your enrollment',
+          headline: 'A few things still need you',
+          paragraphs: detail
+            ? [`${count} ${noun}${forWhom} still need your attention before we can finish enrollment.`,
+               'Sign in to your portal to complete them. Everything else is already on file.']
+            : [`${count} ${noun}${forWhom} still need your attention before we can finish enrollment.`,
+               'The list is waiting in your secure portal. For privacy we do not put the details in email.'],
+          callout: detail && count ? list.join(' · ') : null,
+          ctaUrl: url, ctaLabel: 'Open your portal',
+          relatedEntityId: `${client.id}:followup:${list.slice().sort().join(',')}`,
+          relatedEntityType: 'enrollment',
+          actorId, phi: detail
+        });
+        if (ok) n += 1;
+      }
+      return { notified: n, detailed: detail };
+    } catch (e) {
+      console.error('[PHC] enrollment follow-up notice failed (non-fatal):', e.message);
       return { notified: 0, reason: e.message };
     }
   }
@@ -384,8 +500,56 @@ function createNotifier(deps) {
     }
   }
 
+  // ---- 7. An admin approved the enrollment ---------------------------------
+  // Nobody told the client. They completed intake, signed everything, waited,
+  // and the one event that says "you are done" was silent. It carries no
+  // detail worth gating: that a person is enrolled with us is the same fact
+  // the welcome email already established.
+  async function enrollmentApproved({ clientId, overridden, actorId }) {
+    try {
+      const { client, recipients } = await clientSideRecipients(clientId);
+      if (!client) return { notified: 0, reason: 'no client record' };
+      if (!recipients.length) return { notified: 0, reason: 'no email address on file' };
+      const url = await portalUrlFor(client);
+
+      let n = 0;
+      for (const { user, actingFor } of recipients) {
+        const forWhom = actingFor ? ` for ${actingFor.name}` : '';
+        const paragraphs = [
+          `Enrollment${forWhom} is approved and complete. Everything we needed is on file.`,
+          'We can now schedule care. Someone from our team will be in touch about start dates, and your portal has your plan, your documents and your signed paperwork whenever you want them.'
+        ];
+        // An override means enrollment was approved with items outstanding.
+        // Saying nothing would leave the client believing their file is
+        // complete when staff know it is not.
+        if (overridden) {
+          paragraphs.push('A few items are still outstanding on your file. We have gone ahead so care is not delayed, and we will follow up with you about them.');
+        }
+        const ok = await send({
+          type: 'phc_enrollment_approved',
+          user,
+          subject: 'Your enrollment is complete',
+          headline: 'Your enrollment is complete',
+          paragraphs,
+          ctaUrl: url, ctaLabel: 'Open your portal',
+          relatedEntityId: `${client.id}:enrolled`,
+          relatedEntityType: 'enrollment',
+          actorId, phi: false
+        });
+        if (ok) n += 1;
+      }
+      return { notified: n };
+    } catch (e) {
+      console.error('[PHC] enrollment-approved notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
   return {
+    // private home care
     documentUploaded, documentReviewed, consentSigned, carePlanCoSigned,
+    documentsRequested, enrollmentFollowUp, enrollmentApproved,
+    // clinical visits
     appointmentBooked, appointmentRescheduled, appointmentCancelled
   };
 }
