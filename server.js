@@ -20,7 +20,7 @@ const { sendEmail, sendBulkEmail, sendBatchEmails } = require('./email');
 const emailTransport = require('./email');
 const emailTemplates = require('./emailTemplates');
 const enrollmentGate = require('./enrollmentGate');
-const { createPhcNotifier } = require('./phcNotifications');
+const { createNotifier } = require('./notifications');
 const roiRepo = require('./roiRepository');           // Transfer-of-Care ROI data model (Session 3.4)
 const legacySync = require('./legacySync');            // ROI parallel-run legacy sync (Session 3.4)
 const openemr = require('./openemr');                  // OpenEMR FHIR/REST front-end client (Session 4.1)
@@ -5948,11 +5948,45 @@ const visitDisplayRow = (v) => {
     completed: v.status === 'completed'
   };
 };
+// Which shift statuses mean "somebody is actually coming". `claimed` and
+// `assigned` are NOT agreed yet — a caregiver can still decline — and showing
+// one to a client promises a visit that may never happen. `open` is a shift
+// nobody has taken at all.
+const CLIENT_VISIBLE_SHIFT_STATUSES = Object.freeze(['confirmed', 'in_progress']);
+
 const getClientVisits = async (client) => {
   const rows = ((await db.get('visit_logs')) || []).filter(v => v && v.client_id === client.id);
   const now = Date.now();
   const ts = (v) => { const d = new Date(v.scheduledAt || v.date || 0); return isNaN(d.getTime()) ? 0 : d.getTime(); };
-  const upcoming = rows.filter(v => v.status !== 'completed' && ts(v) >= now)
+
+  // UPCOMING comes from the shift board, because `visit_logs` only ever
+  // receives a row when a caregiver SUBMITS a log — that is, after the visit.
+  // Reading upcoming visits out of it meant a client with three confirmed
+  // shifts this week saw an empty card.
+  //
+  // RECENT deliberately stays on `visit_logs`: that is the documented record
+  // of what happened, and a completed shift carries no id linking it to its
+  // log, so merging the two would double-count every visit.
+  const shifts = ((await db.get('shifts')) || []).filter(sh =>
+    sh && sh.clientId === client.id && CLIENT_VISIBLE_SHIFT_STATUSES.includes(sh.status));
+  let caregiverNames = null;
+  if (shifts.length) {
+    const users = await getUsers();
+    caregiverNames = new Map(users.map(u => [u.id, u.name]));
+  }
+  const shiftRows = shifts.map(sh => ({
+    id: `shift:${sh.id}`,
+    client_id: client.id,
+    source: 'shift',
+    type: 'Home care visit',
+    scheduledAt: sh.start,
+    // Named only when we know it. "Your care team" is the honest fallback and
+    // is what visitDisplayRow already prints for an unnamed visit.
+    caregiverName: (caregiverNames && caregiverNames.get(sh.caregiverId)) || null,
+    status: sh.status === 'in_progress' ? 'in_progress' : 'confirmed'
+  }));
+
+  const upcoming = [...rows.filter(v => v.status !== 'completed' && ts(v) >= now), ...shiftRows.filter(v => ts(v) >= now)]
     .sort((a, b) => ts(a) - ts(b)).slice(0, 10).map(visitDisplayRow);
   const recent = rows.filter(v => v.status === 'completed' || ts(v) < now)
     .sort((a, b) => ts(b) - ts(a)).slice(0, 10).map(visitDisplayRow);
@@ -6345,7 +6379,7 @@ app.post('/api/gfc/documents/upload', authenticateToken, requireClientForIntake,
 
     await logActivity(req.user.id, row.uploadedByName, 'client_document_uploaded', 'document', client.id, { kind });
     // Staff had no way to know a document had arrived except by looking.
-    await phcNotify.documentUploaded({
+    await notify.documentUploaded({
       client, kind, label: row.label || kind, uploadId: row.id, actorId: req.user.id
     });
     res.json({ message: 'Document received', document: { id: row.id, kind, fileName: row.fileName, uploadedAt: row.uploadedAt, status: row.status } });
@@ -6665,7 +6699,7 @@ app.post('/api/gfc/care-plan/cosign', authenticateToken, requireEnrolledClient, 
     // The authoring RN is the person waiting on this signature and had no way
     // to know it had landed. Best-effort, after the PDF: a notification must
     // never be the thing that fails a completed co-signature.
-    await phcNotify.carePlanCoSigned({
+    await notify.carePlanCoSigned({
       client, version: currentVersion, signerName,
       signedByPoa: !!acting.isPoa,
       authoredById: (client.carePlan && client.carePlan.authoredById) || null,
@@ -8052,6 +8086,32 @@ const resolveProviderScope = (reqUser, requestedProviderId) => {
 };
 
 // puuid → app client (for calendar rows → chart navigation). Pointer data only.
+// A visit time a patient can read, from OpenEMR's date + 24h start time.
+// Falls back to the raw values rather than printing "Invalid Date" — a wrong
+// time in an email about someone's care is worse than an ugly one.
+const formatVisitWhen = (date, startTime) => {
+  const d = new Date(`${date}T${String(startTime || '00:00').slice(0, 5)}:00`);
+  if (isNaN(d.getTime())) return [date, startTime].filter(Boolean).join(' ');
+  return d.toLocaleString('en-US', {
+    weekday: 'long', month: 'long', day: 'numeric',
+    hour: 'numeric', minute: '2-digit'
+  });
+};
+
+// The clinician's name from OUR user records, matched on the provider id the
+// appointment carries. Never the acting user: an admin books for a clinician,
+// and naming the wrong person in a patient's email is worse than naming none.
+const clinicianNameForProviderId = async (providerId) => {
+  if (!providerId) return null;
+  const users = await getUsers();
+  const u = users.find(x => x && String(x.openEmrProviderId || '') === String(providerId));
+  return u ? [u.name, u.licenseLevel || u.credential].filter(Boolean).join(', ') : null;
+};
+
+const VISIT_PLACE_LABEL = Object.freeze({
+  home: 'Your home', telehealth: 'By video visit', office: 'Our office'
+});
+
 const clinicalClientsByPuuid = async () => {
   const users = await getUsers();
   const map = new Map();
@@ -8274,6 +8334,17 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
         ? { reason: apptGate.override.reason, enrollmentStatus: apptGate.override.enrollmentStatus }
         : null
     });
+    // Tell the patient. Best-effort by design: a notification failure must
+    // never undo an appointment that is already on the calendar.
+    await notify.appointmentBooked({
+      client,
+      eid: String(eid),
+      when: formatVisitWhen(body.date, body.startTime),
+      clinician: await clinicianNameForProviderId(providerId),
+      place: VISIT_PLACE_LABEL[built.location] || null,
+      actorId: req.user.id
+    });
+
     // Read-back proves the round-trip (acceptance requirement); the single-row
     // GET carries the full record (list rows omit notes/location on 7.0.4).
     const readBack = await emr.getAppointmentRow(client.openEmrPatientId, eid).catch(() => null);
@@ -8343,6 +8414,17 @@ app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requir
       from: `${row.pc_eventDate} ${String(row.pc_startTime).slice(0, 5)}`, to: `${body.date} ${body.startTime}`,
       providerId, supersededRowRemoved: swap.deleted
     });
+    if (appClient) {
+      await notify.appointmentRescheduled({
+        client: { id: appClient.clientId, name: appClient.name },
+        eid: String(newEid),
+        from: formatVisitWhen(row.pc_eventDate, row.pc_startTime),
+        to: formatVisitWhen(body.date, body.startTime),
+        clinician: await clinicianNameForProviderId(providerId),
+        place: VISIT_PLACE_LABEL[built.location] || null,
+        actorId: req.user.id
+      });
+    }
     res.json({
       message: 'Appointment rescheduled in OpenEMR (original slot preserved as a cancelled entry)',
       appointmentEid: newEid, tombstoneEid,
@@ -8381,6 +8463,16 @@ app.post('/api/clinical/appointments/:eid/cancel', authenticateToken, requireCli
       reason: reason.slice(0, 500), slot: `${row.pc_eventDate} ${String(row.pc_startTime).slice(0, 5)}`,
       supersededRowRemoved: swap.deleted
     });
+    if (appClient) {
+      await notify.appointmentCancelled({
+        client: { id: appClient.clientId, name: appClient.name },
+        eid: String(tombstoneEid),
+        when: formatVisitWhen(row.pc_eventDate, row.pc_startTime),
+        reason: reason.slice(0, 500),
+        clinician: await clinicianNameForProviderId(row.pc_aid),
+        actorId: req.user.id
+      });
+    }
     res.json({
       message: 'Appointment cancelled — it stays on the calendar as a cancelled entry with the reason',
       appointmentEid: tombstoneEid,
@@ -10033,7 +10125,7 @@ app.post('/api/gfc/consents', authenticateToken, requireClientForIntake, async (
     // per-consent receipt to them would be fourteen emails; the
     // enrollment-complete confirmation already covers the client side. Staff
     // need each one, because the enrollment gate advances on them.
-    await phcNotify.consentSigned({
+    await notify.consentSigned({
       client, consentType: type,
       consentTitle: (def && def.title) || type,
       offline: false, actorId: req.user.id
@@ -10166,7 +10258,7 @@ const ENROLLMENT_STAFF_ROLES = [config.ROLES.ADMIN, config.ROLES.USER, config.RO
 // PHC notifications (documents, consents, care-plan co-signature). The staff
 // role list is PASSED IN rather than restated in the module, so widening
 // enrollment access here widens who is notified, in one place.
-const phcNotify = createPhcNotifier({
+const notify = createNotifier({
   getUsers, queueNotification, getAppBaseUrl, emailTransport,
   staffRoles: ENROLLMENT_STAFF_ROLES,
   clientRole: config.ROLES.CLIENT,
@@ -10639,7 +10731,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/request', authenticateTo
     if (!created.length) return res.status(200).json({ message: 'Already requested — nothing new to ask for', created: [] });
     await db.set('client_document_requests', requests);
 
-    const { notified } = await phcNotify.documentsRequested({
+    const { notified } = await notify.documentsRequested({
       clientId: client.id, rows: created, isReminder: false, dueAt, actorId: req.user.id
     });
     await logActivity(req.user.id, req.user.name || req.user.email, 'client_documents_requested', 'document', client.id,
@@ -10677,7 +10769,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/remind', authenticateTok
     }
     await db.set('client_document_requests', requests);
 
-    const { notified } = await phcNotify.documentsRequested({
+    const { notified } = await notify.documentsRequested({
       clientId: client.id, rows: open, isReminder: true, actorId: req.user.id
     });
     await logActivity(req.user.id, stamp.byName, 'client_documents_reminded', 'document', client.id,
@@ -10726,7 +10818,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authe
       { kind: uploads[i].kind, decision });
     // The rejection reason is required at this route and was being captured
     // and never delivered — the client saw nothing and re-sent the same file.
-    await phcNotify.documentReviewed({
+    await notify.documentReviewed({
       clientId: uploads[i].clientId, decision,
       label: uploads[i].label || uploads[i].kind, reason,
       uploadId: uploads[i].id, actorId: req.user.id
@@ -10807,7 +10899,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/follow-up', authenticateToken, req
     await db.set('users', users);
     invalidateUsersCache();
     await logActivity(req.user.id, req.user.name || req.user.email, 'enrollment_follow_up_requested', 'enrollment', client.id, { items });
-    await phcNotify.enrollmentFollowUp({ clientId: client.id, itemLabels, actorId: req.user.id });
+    await notify.enrollmentFollowUp({ clientId: client.id, itemLabels, actorId: req.user.id });
     res.json({ message: 'Follow-up requested', followUp: client.enrollmentFollowUp });
   } catch (error) {
     console.error('GFC enrollment follow-up error:', error);
@@ -10883,7 +10975,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/approve', authenticateToken, requi
                    missingConsents: comp.missingConsentLabels, missingFields: comp.missingFieldLabels } : {});
     // The client was never told they were approved. That was the one event
     // that says "you are done" and it was silent.
-    await phcNotify.enrollmentApproved({ clientId: client.id, overridden: overrode, actorId: req.user.id });
+    await notify.enrollmentApproved({ clientId: client.id, overridden: overrode, actorId: req.user.id });
     res.json({
       message: overrode ? 'Enrollment approved with an override' : 'Enrollment approved',
       enrollmentStatus: client.enrollmentStatus,
