@@ -57,6 +57,11 @@ function pdfSafe(value) {
   return s.replace(/[^\x09\x0A\x20-\xFF]/g, '');
 }
 
+// The attestation bodies mark emphasis the way the consent bodies do, with
+// **double asterisks**. pdf-lib draws one font per run, so the markers are
+// removed rather than rendered as literal asterisks in the signed copy.
+const stripEmphasis = (text) => String(text == null ? '' : text).replace(/\*\*/g, '');
+
 function wrap(text, font, size, width) {
   const words = pdfSafe(text).split(/\s+/).filter(Boolean);
   const lines = [];
@@ -509,6 +514,105 @@ async function generateSignedWelcomePacketPDF(packet, caregiver = {}, checklist 
   return Buffer.from(await pdf.save());
 }
 
+/**
+ * A SIGNED ATTESTATION, as its own document.
+ *
+ * The body is rendered AT THE VERSION STORED ON THE RECORD, never at whatever
+ * the current wording says. That is the whole reason the version is stamped at
+ * signature time: a copy of what somebody signed has to be what they signed.
+ */
+async function generateSignedAttestationPDF(record, caregiver) {
+  const attest = require('./caregiverAttestations');
+  const kind = (record && record.kind) || '';
+  const version = (record && record.version) || null;
+  const title = attest.titleFor(kind) || (record && record.title) || 'Attestation';
+  const blocks = attest.bodyFor(kind, version);
+
+  const pdf = await PDFDocument.create();
+  pdf.setTitle(`Godwins Family Care - ${title}`);
+  pdf.setSubject(`${title} ${version || ''}`.trim());
+  const fonts = {
+    regular: await pdf.embedFont(StandardFonts.Helvetica),
+    bold: await pdf.embedFont(StandardFonts.HelveticaBold)
+  };
+
+  const w = createWriter(pdf, fonts);
+  drawHeader(w.newPage(), fonts, title.toUpperCase());
+  w.state.y = PAGE_H - 118;
+
+  const who = (caregiver && caregiver.name) || (record && record.printed_name) || 'Caregiver';
+  w.text(who, { size: 13, font: fonts.bold, color: NAVY, gap: 4 });
+  if (version) w.text(`Document version ${version}`, { size: 8, color: MUTED, gap: 3 });
+  // Named on the copy rather than left to be inferred: a reader has to be able
+  // to tell a current signature from one against wording we have since changed.
+  if (version && version !== attest.CURRENT_VERSION) {
+    w.text('This copy reproduces the wording in force when it was signed. The current version of this form differs.',
+      { size: 8, color: MUTED, gap: 4 });
+  }
+  w.state.y -= 6;
+
+  for (const block of blocks) {
+    if (block.t === 'h') {
+      w.state.y -= 6;
+      w.text(block.text, { size: 10.5, font: fonts.bold, color: NAVY, gap: 4 });
+    } else if (block.t === 'ul') {
+      for (const entry of block.items) w.text(`-  ${stripEmphasis(entry)}`, { size: 9, gap: 3.5, indent: 12 });
+    } else if (block.t === 'note') {
+      w.text(stripEmphasis(block.text), { size: 8.5, color: MUTED, gap: 3.5 });
+    } else if (block.t === 'choice') {
+      w.state.y -= 4;
+      w.text(block.label, { size: 9.5, font: fonts.bold, gap: 4 });
+      const chosen = ((record && record.elections) || {})[block.key];
+      for (const option of block.options) {
+        const mark = option.value === chosen ? '[X]' : '[ ]';
+        w.text(`${mark}  ${stripEmphasis(option.label)}`, { size: 9, gap: 3.5, indent: 12 });
+      }
+      w.state.y -= 2;
+    } else {
+      w.text(stripEmphasis(block.text), { size: 9.5, gap: 4 });
+    }
+  }
+
+  w.state.y -= 12;
+  w.text('SIGNATURE', { size: 7, font: fonts.bold, color: MUTED, gap: 4 });
+
+  if (record && record.signature_png) {
+    try {
+      const bytes = Buffer.from(String(record.signature_png).split(',')[1] || '', 'base64');
+      const image = await pdf.embedPng(bytes);
+      const drawW = Math.min(220, image.width);
+      const drawH = (image.height / image.width) * drawW;
+      w.space(drawH + 10);
+      w.state.page.drawImage(image, { x: MARGIN, y: w.state.y - drawH, width: drawW, height: drawH });
+      w.state.y -= drawH + 6;
+    } catch (_) {
+      // A copy that says the image would not render still proves the signature
+      // exists in the record. Failing the whole document would not.
+      w.text('[signature image could not be rendered - the stored record holds it]', { size: 8, color: MUTED, gap: 3 });
+    }
+  }
+
+  w.state.page.drawLine({
+    start: { x: MARGIN, y: w.state.y }, end: { x: MARGIN + 240, y: w.state.y },
+    thickness: 0.75, color: RULE
+  });
+  w.state.y -= 12;
+  w.text(`Printed name: ${(record && record.printed_name) || who}`, { size: 9, gap: 3 });
+  if (record && record.signed_at) {
+    w.text(`Signed: ${new Date(record.signed_at).toLocaleString('en-US')}`, { size: 9, gap: 3 });
+  }
+  if (record && record.signer_ip_hash) {
+    w.text(`Verification: ${String(record.signer_ip_hash).slice(0, 16)}`, { size: 7, color: MUTED, gap: 3 });
+  }
+  if (record && record.supersedes && record.supersedes.signedAt) {
+    w.text(`Replaces a signature of ${new Date(record.supersedes.signedAt).toLocaleDateString('en-US')} against version ${record.supersedes.version}.`,
+      { size: 7, color: MUTED, gap: 3 });
+  }
+
+  pdf.getPages().forEach((page, i) => drawFooter(page, fonts, i + 1));
+  return Buffer.from(await pdf.save());
+}
+
 module.exports = {
   PREFIX,
   fieldName,
@@ -517,5 +621,6 @@ module.exports = {
   rowFieldName,
   pdfSafe,
   generateFillableWelcomePacketPDF,
-  generateSignedWelcomePacketPDF
+  generateSignedWelcomePacketPDF,
+  generateSignedAttestationPDF
 };

@@ -307,21 +307,46 @@ const titleize = (s) => String(s || '').replace(/_/g, ' ').replace(/\b\w/g, c =>
 // render into a dead node.
 // ============================================================================
 const ScheduleTab = ({ me, onChanged, onVisitLogRequired }) => {
+  // THE CALLBACKS ARE HELD IN A REF AND READ AT CALL TIME, and the effect
+  // depends on the caregiver's ID rather than on the `me` object.
+  //
+  // This is not tidiness. `onVisitLogRequired` is an inline arrow in the
+  // parent, so it is a NEW FUNCTION IDENTITY ON EVERY App RENDER. With it in
+  // the dependency array the effect tore down and remounted the schedule
+  // component on every render — and the component calls `onChange` as soon as
+  // its first fetch resolves, which sets App state, which renders, which
+  // remounts it, which fetches again. An infinite loop: the tab flickered and
+  // sat on "Loading…" forever, because every mount starts at loading and never
+  // survived long enough to finish. `me` did the same thing more slowly, since
+  // `setMe` hands back a new object.
+  //
+  // A ref has no identity to change, so the effect runs once per visit to the
+  // tab and the callbacks are still always the current ones.
+  const callbacks = useRef({ onChanged, onVisitLogRequired });
+  callbacks.current = { onChanged, onVisitLogRequired };
+  const caregiverId = (me && me.id) || null;
+
   useEffect(() => {
     const lib = window.GFCCaregiverSchedule;
     const token = getToken();
     if (!lib || !token) return undefined;
     lib.mount('gfc-mount-schedule', {
-      caregiverId: me && me.id,
+      caregiverId,
       authToken: token,
-      onChange: onChanged,
+      onChange: (...args) => {
+        const fn = callbacks.current.onChanged;
+        if (typeof fn === 'function') fn(...args);
+      },
       // Clock-out is refused until the visit log for that shift is filed. The
       // component cannot render the log form (it lives here), so it hands the
       // shift back and this page takes the caregiver straight to it.
-      onVisitLogRequired: onVisitLogRequired
+      onVisitLogRequired: (...args) => {
+        const fn = callbacks.current.onVisitLogRequired;
+        if (typeof fn === 'function') fn(...args);
+      }
     });
     return () => lib.unmount('gfc-mount-schedule');
-  }, [me, onChanged, onVisitLogRequired]);
+  }, [caregiverId]);
 
   if (!window.GFCCaregiverSchedule) {
     return (
@@ -1033,6 +1058,21 @@ const ClientsTab = ({ clients, detail, onOpen, onClose, onMessages }) => {
 // quota, taking the VISIT LOG queue down with it. A caregiver with no signal is
 // told to send it when they are back on, which is honest — unlike a file that
 // silently never leaves the phone.
+// Fetched with the auth header and handed to the browser: the file route is
+// authenticated, so a plain href carries no token and would 401.
+const openCaregiverDocument = async (id) => {
+  const res = await fetch(`${API}/api/caregiver/documents/${encodeURIComponent(id)}/file`, {
+    headers: { Authorization: `Bearer ${getToken()}` }
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error((body && body.error) || 'That file could not be opened.');
+  }
+  const url = URL.createObjectURL(await res.blob());
+  window.open(url, '_blank');
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+};
+
 const DocumentsCard = () => {
   const [kinds, setKinds] = useState([]);
   const [docs, setDocs] = useState([]);
@@ -1150,7 +1190,7 @@ const DocumentsCard = () => {
 
       <div style={{ marginTop: 14 }}>
         {docs.length === 0
-          ? <Empty icon="file-text">Nothing sent yet.</Empty>
+          ? <Empty icon="file-text">Nothing on file yet.</Empty>
           : docs.slice(0, 15).map(d => (
             <div className="row" style={{ display: 'block' }} key={d.id}>
               <b>{d.kindLabel} · {String(d.uploadedAt).slice(0, 10)}</b>
@@ -1158,7 +1198,16 @@ const DocumentsCard = () => {
                 {d.fileName}
                 {d.periodStart ? ` · ${d.periodStart}${d.periodEnd ? ` to ${d.periodEnd}` : ''}` : ''}
                 {' · '}{d.status === 'received' ? 'With the office' : titleize(d.status)}
+                {/* "You sent this" and "the office filed it for you" are
+                    different facts. A caregiver who sees a photo ID they never
+                    uploaded, unlabelled, has no way to tell which. */}
+                {d.uploadedByOffice ? ' · filed by the office' : ''}
               </div>
+              <button className="btn ghost" style={{ marginTop: 8 }}
+                onClick={async () => {
+                  try { await openCaregiverDocument(d.id); }
+                  catch (e) { setMsg({ ok: false, text: e.message }); }
+                }}>Open this file</button>
               {/* A caregiver told only "not accepted" re-sends the same blurry
                   photo, so the reason is shown, not just the status. */}
               {d.status === 'rejected' && d.reviewNote && (
@@ -1218,6 +1267,7 @@ const OnboardingCard = ({ me, onChanged }) => {
       </div>
       <OnboardingChecklist checklist={packet.checklist || []}
         groupTitles={packet.groupTitles} groupIntros={packet.groupIntros}
+        attestations={packet.attestations}
         compact
         onChanged={async () => { await load(); if (onChanged) await onChanged(); }} />
     </div>
@@ -1520,10 +1570,146 @@ const PacketField = ({ field, value, onChange, imported }) => {
   );
 };
 
+// A run of text with **bold** spans. The bodies mark emphasis the way the
+// client consents do, and both render it rather than printing the asterisks.
+const RichText = ({ text }) => (
+  <>
+    {String(text || '').split(/(\*\*[^*]+\*\*)/g).filter(Boolean).map((part, i) =>
+      part.startsWith('**') && part.endsWith('**')
+        ? <b key={i}>{part.slice(2, -2)}</b>
+        : <React.Fragment key={i}>{part}</React.Fragment>
+    )}
+  </>
+);
+
+// ONE SIGNABLE FORM, rendered entirely from what the server served. It names no
+// clause, no heading and no option of its own — the rule every other served
+// surface in this app follows, and the reason the signed PDF can reproduce
+// exactly what was on the screen.
+const AttestationForm = ({ doc, onSigned, onCancel }) => {
+  const [elections, setElections] = useState({});
+  const [printedName, setPrintedName] = useState('');
+  const [signature, setSignature] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  const choices = (doc.blocks || []).filter(b => b.t === 'choice');
+  const unanswered = choices.filter(c => c.required && !elections[c.key]);
+
+  const submit = async () => {
+    setBusy(true); setErr('');
+    try {
+      const res = await api(`/api/caregiver/welcome-packet/attestations/${encodeURIComponent(doc.kind)}`, {
+        method: 'POST',
+        body: JSON.stringify({ elections, printedName, signaturePng: signature })
+      });
+      await onSigned(res);
+    } catch (e) {
+      setErr(e.message || 'That did not save.');
+      setBusy(false);
+      window.scrollTo(0, 0);
+    }
+  };
+
+  return (
+    <div>
+      <Err>{err}</Err>
+      <div className="card">
+        <h3>{doc.title}</h3>
+        {doc.intro ? <p className="sub">{doc.intro}</p> : null}
+
+        {(doc.blocks || []).map((block, i) => {
+          if (block.t === 'h') {
+            return <p key={i} className="grp" style={{ margin: '16px 0 6px' }}>{block.text}</p>;
+          }
+          if (block.t === 'ul') {
+            return (
+              <ul key={i} style={{ margin: '0 0 10px 20px' }}>
+                {block.items.map((entry, j) => (
+                  <li key={j} style={{ marginBottom: 6 }}><RichText text={entry} /></li>
+                ))}
+              </ul>
+            );
+          }
+          if (block.t === 'note') {
+            return (
+              <p key={i} className="sub" style={{ marginBottom: 10, fontStyle: 'italic' }}>
+                <RichText text={block.text} />
+              </p>
+            );
+          }
+          if (block.t === 'choice') {
+            return (
+              <div className="fld" key={i} style={{ marginTop: 14 }}>
+                <label>
+                  {block.label}
+                  {block.required ? <span style={{ color: '#b3261e' }}> *</span> : null}
+                </label>
+                {block.options.map(option => (
+                  <button type="button" key={option.value}
+                    className={`opt ${elections[block.key] === option.value ? 'sel' : ''}`}
+                    onClick={() => setElections(e => ({ ...e, [block.key]: option.value }))}>
+                    <i className={`ti ti-${elections[block.key] === option.value ? 'circle-check' : 'circle'}`}></i>
+                    <span style={{ flex: 1 }}><b>{option.label}</b></span>
+                  </button>
+                ))}
+              </div>
+            );
+          }
+          return <p key={i} style={{ marginBottom: 10 }}><RichText text={block.text} /></p>;
+        })}
+      </div>
+
+      <div className="card">
+        <h3>Sign</h3>
+        <div className="fld">
+          <label>Printed name</label>
+          <input className="inp" type="text" value={printedName}
+            onChange={(e) => setPrintedName(e.target.value)}
+            placeholder="Type your name as it should appear" />
+        </div>
+        <div className="fld">
+          <label>Signature</label>
+          <SignaturePad onChange={setSignature} />
+        </div>
+        {/* The button says WHAT IS MISSING rather than sitting dead. A disabled
+            control with no reason is a caregiver tapping the same grey box. */}
+        {unanswered.length ? (
+          <p className="sub">Answer every question above before you sign.</p>
+        ) : null}
+      </div>
+
+      <button className="btn gold" disabled={busy || !signature || !printedName.trim() || unanswered.length > 0}
+        onClick={submit}>
+        {busy ? 'Saving…' : 'Sign this form'}
+      </button>
+      <button className="btn ghost" disabled={busy} onClick={onCancel}>Back to the list</button>
+    </div>
+  );
+};
+
 // The Part Two checklist, with an upload on every item that takes one.
-const OnboardingChecklist = ({ checklist, groupTitles, groupIntros, onChanged, compact }) => {
+const OnboardingChecklist = ({ checklist, groupTitles, groupIntros, attestations, onChanged, compact }) => {
   const [busyKind, setBusyKind] = useState(null);
   const [msg, setMsg] = useState(null);
+  // Which signable form is open, if any. A form takes over the screen rather
+  // than opening in a modal: it is a document somebody has to read, on a phone.
+  const [signing, setSigning] = useState(null);
+
+  const docFor = (kind) => (attestations || []).find(d => d && d.kind === kind) || null;
+
+  const downloadSigned = async (row) => {
+    setMsg(null);
+    try {
+      const res = await fetch(`${API}/api/caregiver/welcome-packet/attestations/${encodeURIComponent(row.kind)}.pdf`, {
+        headers: { Authorization: `Bearer ${getToken()}` }
+      });
+      if (!res.ok) throw new Error('That copy is not available yet.');
+      const url = URL.createObjectURL(await res.blob());
+      window.open(url, '_blank');
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (e) { setMsg({ ok: false, text: e.message }); }
+  };
 
   const upload = async (row, file) => {
     if (!file) return;
@@ -1569,6 +1755,17 @@ const OnboardingChecklist = ({ checklist, groupTitles, groupIntros, onChanged, c
     return <span className="lvl" style={{ background: '#fff', color: '#6f6a60', borderColor: '#e0d8c8' }}>{row.required ? 'Needed' : 'Optional'}</span>;
   };
 
+  if (signing) {
+    const doc = docFor(signing);
+    if (doc) {
+      return (
+        <AttestationForm doc={doc}
+          onSigned={async () => { setSigning(null); if (onChanged) await onChanged(); }}
+          onCancel={() => setSigning(null)} />
+      );
+    }
+  }
+
   return (
     <div>
       {msg ? <div className={msg.ok ? 'ok' : 'err'}>{msg.text}</div> : null}
@@ -1592,8 +1789,51 @@ const OnboardingChecklist = ({ checklist, groupTitles, groupIntros, onChanged, c
                 <div className="err" key={u.id} style={{ margin: '8px 0 0' }}>Not accepted: {u.reviewNote}</div>
               ))}
 
+              {/* THE FILE THAT TICKED THIS ITEM, openable. The office files a
+                  photo ID or a TB result on a caregiver's behalf, and without
+                  this the item simply turned green with nothing to look at —
+                  no way to check it is the right document, or the right year. */}
+              {row.uploads && row.uploads.filter(u => u.status === 'accepted').slice(0, 1).map(u => (
+                <div key={u.id} style={{ marginTop: 8 }}>
+                  <div className="sub" style={{ marginBottom: 6 }}>
+                    {u.fileName}{u.uploadedByOffice ? ' · filed by the office' : ''}
+                  </div>
+                  <button className="btn ghost"
+                    onClick={async () => {
+                      setMsg(null);
+                      try { await openCaregiverDocument(u.id); }
+                      catch (e) { setMsg({ ok: false, text: e.message }); }
+                    }}>Open this file</button>
+                </div>
+              ))}
+
               {row.source === 'office' ? (
                 <p className="sub" style={{ margin: '6px 0 0' }}>We take care of this one. We will be in touch.</p>
+              ) : null}
+
+              {row.sign ? (
+                <div style={{ marginTop: 8 }}>
+                  {row.status === 'complete' ? (
+                    <button className="btn ghost" onClick={() => downloadSigned(row)}>
+                      Download my signed copy
+                    </button>
+                  ) : (
+                    <>
+                      {/* SIGNED, BUT AGAINST WORDING WE HAVE SINCE CHANGED is a
+                          different sentence from never signed, and a caregiver
+                          who reads "not signed" about a form they remember
+                          signing stops trusting the list. */}
+                      {row.supersededSignature ? (
+                        <p className="sub" style={{ margin: '0 0 8px' }}>
+                          This form has changed since you signed it. Please read and sign the new version.
+                        </p>
+                      ) : null}
+                      <button className="btn gold" onClick={() => setSigning(row.kind)}>
+                        {row.supersededSignature ? 'Read and sign the new version' : 'Read and sign'}
+                      </button>
+                    </>
+                  )}
+                </div>
               ) : null}
 
               {row.upload ? (
@@ -1814,6 +2054,7 @@ const WelcomePacketWizard = ({ me, onComplete }) => {
           </div>
           <OnboardingChecklist checklist={packet.checklist || []}
             groupTitles={packet.groupTitles} groupIntros={packet.groupIntros}
+            attestations={packet.attestations}
             onChanged={async () => { const p = await load(); setData(d => ({ ...d, ...(p.data || {}) })); }} />
           <button className="btn" onClick={() => go('sign')}>Continue to sign</button>
           <button className="btn ghost" onClick={() => go(steps[index - 1])}>Back</button>
