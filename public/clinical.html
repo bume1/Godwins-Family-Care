@@ -65,8 +65,20 @@
     // (requireClinicalRead / requireClinicalWrite); this context only decides
     // which controls to RENDER. Mirrors patientReadRepository.canClinicalWrite.
     const canWriteFor = (u) => !!u && (u.role === 'admin' || (!!u.hasClinicalAccess && u.role !== 'caseManager'));
-    const AccessContext = React.createContext({ canWrite: true, role: null });
+    // Session 4.8 — the capability matrix comes from GET /api/clinical/status,
+    // which reads the SAME module the routes enforce with. This page never
+    // decides a capability itself: a control drawn here is one the server will
+    // accept, and every one is re-checked at the route regardless.
+    const AccessContext = React.createContext({ canWrite: true, role: null, capabilities: {}, clinicalRole: null });
     const useCanWrite = () => useContext(AccessContext).canWrite;
+    const useCan = (capability) => {
+      const ctx = useContext(AccessContext);
+      // Until the status call lands there is no matrix; fall back to the
+      // read/write split rather than drawing controls we cannot vouch for.
+      if (!ctx.capabilities || !Object.keys(ctx.capabilities).length) return ctx.canWrite;
+      return !!ctx.capabilities[capability];
+    };
+    const useClinicalRole = () => useContext(AccessContext).clinicalRole;
 
     const getToken = () => localStorage.getItem('admin_token') || localStorage.getItem('unified_token');
     const handleResponse = async (response) => {
@@ -137,6 +149,10 @@
       saveCoding: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/coding`, { method: 'PUT', body: JSON.stringify(body) }),
       addRx: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/prescriptions`, { method: 'POST', body: JSON.stringify(body) }),
       addOrder: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/orders`, { method: 'POST', body: JSON.stringify(body) }),
+      // Session 4.8 — "what may I actually act on". The server answers with the
+      // protocol's permitted tests and the intersection with my credential
+      // ceiling, so the form never computes either.
+      myStandingOrders: () => authedFetch('/api/clinical/standing-orders?executable=true'),
       orderStatus: (orderId, status, note) => authedFetch(`/api/clinical/orders/${orderId}/status`, { method: 'POST', body: JSON.stringify({ status, note }) }),
       sign: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/sign`, { method: 'POST', body: JSON.stringify({ attest: true }) }),
       addAddendum: (id, euuid, text) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/addenda`, { method: 'POST', body: JSON.stringify({ text }) }),
@@ -1571,16 +1587,57 @@
       );
     };
 
-    const OrderForm = ({ diagnoses, types, priorities, onSave, busy }) => {
-      const [f, setF] = useState({ orderType: 'lab', tests: '', priority: 'routine', diagnosisCodes: diagnoses.map(d => d.code), notes: '' });
+    // Session 4.8: the same form places a direct order (a provider's own
+    // authority) and an order under a protocol. `requireStandingOrder` is set
+    // for a credential that has no direct authority — the protocol picker then
+    // has no blank option, and the TESTS come from the protocol's list rather
+    // than a free-text box, because a test typed in is refused server-side.
+    const OrderForm = ({ diagnoses, types, priorities, onSave, busy, standingOrders, requireStandingOrder }) => {
+      const [f, setF] = useState({ orderType: 'lab', tests: '', priority: 'routine', diagnosisCodes: diagnoses.map(d => d.code), notes: '', standingOrderId: '' });
       const toggleDx = (c) => setF(p => ({ ...p, diagnosisCodes: p.diagnosisCodes.includes(c) ? p.diagnosisCodes.filter(x => x !== c) : [...p.diagnosisCodes, c] }));
+      const protocols = (standingOrders || []).filter(o => o.executableByMe);
+      const picked = protocols.find(o => o.id === f.standingOrderId) || null;
+      const pickedTests = picked ? (picked.permittedTests || []) : [];
+      const toggleTest = (t) => setF(p => {
+        const cur = p.tests.split('\n').map(x => x.trim()).filter(Boolean);
+        return { ...p, tests: (cur.includes(t) ? cur.filter(x => x !== t) : cur.concat([t])).join('\n') };
+      });
+      // Under a protocol the choice narrows to the types BOTH the protocol and
+      // the caller's licence allow — the server computed that intersection, so
+      // the form does not re-derive it.
+      const typeOptions = picked ? (picked.executableOrderTypes || []) : (types || []);
       return (
         <div className="grid gap-2 border-t border-stone-100 pt-3">
+          {(requireStandingOrder || protocols.length > 0) && (
+            <Field label={requireStandingOrder ? 'Standing order (required)' : 'Standing order (optional)'}>
+              <select className="inp" value={f.standingOrderId}
+                onChange={e => setF({ ...f, standingOrderId: e.target.value, tests: '', orderType: 'lab' })}>
+                {!requireStandingOrder && <option value="">No protocol — my own authority</option>}
+                {requireStandingOrder && <option value="">Select a protocol…</option>}
+                {protocols.map(o => <option key={o.id} value={o.id}>{o.title} (v{o.version})</option>)}
+              </select>
+              {requireStandingOrder && protocols.length === 0 &&
+                <p className="text-[11px] text-amber-700 mt-1">No active standing order authorises your credential for this work. A provider authors and signs one.</p>}
+              {picked && <p className="text-[11px] text-stone-500 mt-1">Ordering clinician of record: {picked.authorizingProvider && picked.authorizingProvider.name}. Expires {String(picked.expiresAt || '').slice(0, 10)}.</p>}
+            </Field>
+          )}
           <div className="grid grid-cols-2 gap-2">
-            <Field label="Order type"><select className="inp" value={f.orderType} onChange={e => setF({ ...f, orderType: e.target.value })}>{(types || []).map(t => <option key={t} value={t}>{t}</option>)}</select></Field>
+            <Field label="Order type"><select className="inp" value={f.orderType} onChange={e => setF({ ...f, orderType: e.target.value })}>{typeOptions.map(t => <option key={t} value={t}>{t}</option>)}</select></Field>
             <Field label="Priority"><select className="inp" value={f.priority} onChange={e => setF({ ...f, priority: e.target.value })}>{(priorities || []).map(t => <option key={t} value={t}>{t}</option>)}</select></Field>
           </div>
-          <Field label="Tests / studies (one per line)"><textarea className="inp" rows={2} value={f.tests} onChange={e => setF({ ...f, tests: e.target.value })} /></Field>
+          {picked
+            ? (
+              <Field label="Tests / studies this protocol permits">
+                <div className="flex flex-wrap gap-1.5">
+                  {pickedTests.map(t => (
+                    <button key={t} type="button"
+                      className={`chip border ${f.tests.split('\n').map(x => x.trim()).includes(t) ? 'bg-primary text-white border-primary' : 'bg-white text-primary border-stone-200'}`}
+                      onClick={() => toggleTest(t)}>{t}</button>
+                  ))}
+                </div>
+              </Field>
+            )
+            : <Field label="Tests / studies (one per line)"><textarea className="inp" rows={2} value={f.tests} onChange={e => setF({ ...f, tests: e.target.value })} /></Field>}
           <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-stone-500">Linked dx:
             {diagnoses.length === 0 && <span className="text-amber-700">add an encounter diagnosis first</span>}
             {diagnoses.map(d => (
@@ -1588,7 +1645,7 @@
             ))}
           </div>
           <Field label="Notes"><input className="inp" value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} /></Field>
-          <div className="flex justify-end"><button className="btn !py-1.5" disabled={busy || !f.tests.trim() || !f.diagnosisCodes.length} onClick={() => onSave({ ...f, tests: f.tests.split('\n').map(s => s.trim()).filter(Boolean) })}>{busy ? 'Recording…' : 'Record order'}</button></div>
+          <div className="flex justify-end"><button className="btn !py-1.5" disabled={busy || !f.tests.trim() || !f.diagnosisCodes.length || (requireStandingOrder && !f.standingOrderId)} onClick={() => onSave({ ...f, tests: f.tests.split('\n').map(s => s.trim()).filter(Boolean) })}>{busy ? 'Recording…' : 'Record order'}</button></div>
         </div>
       );
     };
@@ -1609,6 +1666,21 @@
       // patient portal ever shows (never the narrative note)
       const [facing, setFacing] = useState({ patientSummary: '', followUpInstructions: '' });
       const canWrite = useCanWrite();
+      // Session 4.8 — certification, not one boolean. Each control asks for the
+      // capability it actually needs, so an RN sees the chart and the note and
+      // does not see a Record Rx button the server would refuse.
+      const canPrescribe = useCan('prescribe');
+      const canOrderDirect = useCan('orderDirect');
+      const canOrderStanding = useCan('orderStanding');
+      const canSelectCodes = useCan('selectServiceCodes');
+      const canAdvanceOrders = useCan('orderStatusAdvance');
+      const myClinicalRole = useClinicalRole();
+      const canSignBillable = useCan('signBillableEncounter');
+      const [standingOrders, setStandingOrders] = useState([]);
+      useEffect(() => {
+        if (!canOrderStanding) return;
+        api.myStandingOrders().then(r => setStandingOrders((r && r.standingOrders) || [])).catch(() => setStandingOrders([]));
+      }, [canOrderStanding]);
       const load = useCallback(() => {
         api.encounterDetail(patient.id, euuid).then(r => {
           setD(r); setErr('');
@@ -1629,6 +1701,17 @@
       const closed = d.closed;
       // Read-only for a signed encounter OR a read-only role (case manager)
       const locked = closed || !canWrite;
+      // Session 4.8 — GATE ON WHAT IS BEING ATTESTED. An encounter carrying a
+      // service code is a claim, and the claim asserts the signer was certified
+      // to render it. With no service codes it is nursing documentation, and an
+      // RN attesting her own note is exactly right. Mirrors
+      // clinicalRoles.evaluateEncounterSignature; the route decides.
+      const encounterServiceCodes = (d.record.services || []).map(x => x.code);
+      const carriesService = encounterServiceCodes.length > 0;
+      const canSignThisEncounter = carriesService ? canSignBillable : canWrite;
+      const signBlockReason = carriesService
+        ? `This encounter carries a billable service code (${encounterServiceCodes.join(', ')}), so it must be signed by a provider. A nursing note carrying no service code you can sign yourself.`
+        : 'Signing an encounter requires a clinical licence.';
       const facingDirty = (facing.patientSummary || '') !== (d.record.patientSummary || '') || (facing.followUpInstructions || '') !== (d.record.followUpInstructions || '');
       const dirty = JSON.stringify(diagnoses) !== JSON.stringify(d.record.diagnoses || []) || JSON.stringify(services) !== JSON.stringify(d.record.services || []) || facingDirty;
       const ORDER_LABEL = { ordered: 'Ordered', sent: 'Sent', resulted: 'Resulted', cancelled: 'Cancelled' };
@@ -1683,8 +1766,15 @@
               </div>
               <div>
                 <span className="lblu block mb-1">Services (CPT / HCPCS) — each linked to ≥1 diagnosis</span>
-                <SvcEditor services={services} setServices={setServices} diagnoses={diagnoses} readOnly={locked}
+                {/* Session 4.8: certification gates the CODE. The service
+                    editor goes read-only for a credential that may not select
+                    one — the diagnosis editor above does not, because an RN
+                    correcting a diagnosis is not coding a claim. The route
+                    gates on the codes CHANGING, so a read-only editor and the
+                    server agree without the page having to re-derive it. */}
+                <SvcEditor services={services} setServices={setServices} diagnoses={diagnoses} readOnly={locked || !canSelectCodes}
                   practiceFavorites={d.favorites.practiceServices} favorites={d.favorites.services} />
+                {!locked && !canSelectCodes && <p className="text-[11px] text-stone-400 mt-1">Selecting a service code is a provider's (an LCSW selects the behavioural-health set). You can still correct the diagnoses.</p>}
               </div>
               <div className="border-t border-stone-100 pt-3">
                 <span className="lblu block mb-1">Patient-facing summary (shown in the patient portal — plain language, optional)</span>
@@ -1707,7 +1797,7 @@
 
           <div className="grid md:grid-cols-2 gap-4 mb-4">
             <div className="card">
-              <div className="card-h"><h2>Prescriptions</h2>{!locked && <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={() => setShowRx(v => !v)}>{showRx ? 'Close' : '+ Record Rx'}</button>}</div>
+              <div className="card-h"><h2>Prescriptions</h2>{!locked && canPrescribe && <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={() => setShowRx(v => !v)}>{showRx ? 'Close' : '+ Record Rx'}</button>}</div>
               <div className="p-4 text-sm">
                 {d.prescriptions.length === 0 && <p className="text-xs text-stone-400">None recorded on this encounter.</p>}
                 {d.prescriptions.map(r => (
@@ -1717,12 +1807,13 @@
                     {r.instructions && <div className="text-xs text-stone-500">{r.instructions}</div>}
                   </div>
                 ))}
-                {showRx && !locked && <RxForm routes={d.rxRoutes} busy={busy === 'rx'} onSave={(f) => run('rx', () => api.addRx(patient.id, euuid, f)).then(() => setShowRx(false))} />}
+                {!locked && !canPrescribe && <p className="text-[11px] text-stone-400 mt-2">Prescribing is a provider's — your credential can read what was prescribed but not add to it.</p>}
+                {showRx && !locked && canPrescribe && <RxForm routes={d.rxRoutes} busy={busy === 'rx'} onSave={(f) => run('rx', () => api.addRx(patient.id, euuid, f)).then(() => setShowRx(false))} />}
                 <p className="text-[10.5px] text-stone-400 mt-2">Record only — e-prescribing is out of scope; transmission continues as today.</p>
               </div>
             </div>
             <div className="card">
-              <div className="card-h"><h2>Orders</h2>{!locked && <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={() => setShowOrder(v => !v)}>{showOrder ? 'Close' : '+ Record order'}</button>}</div>
+              <div className="card-h"><h2>Orders</h2>{!locked && (canOrderDirect || canOrderStanding) && <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={() => setShowOrder(v => !v)}>{showOrder ? 'Close' : '+ Record order'}</button>}</div>
               <div className="p-4 text-sm">
                 {d.orders.length === 0 && <p className="text-xs text-stone-400">None recorded on this encounter.</p>}
                 {d.orders.map(o => (
@@ -1733,20 +1824,33 @@
                     </div>
                     <div className="text-xs text-stone-500">dx {o.diagnosisCodes.join(', ')} · {npiLabel(o.orderingClinician)} · {fmtTs(o.createdAt)}</div>
                     <div className="flex flex-wrap gap-1.5 mt-1">
-                      {canWrite && (d.orderTransitions[o.status] || []).map(n => (
+                      {canAdvanceOrders && (d.orderTransitions[o.status] || []).map(n => (
                         <button key={n} className="chip border bg-white text-primary border-stone-200" disabled={busy === `o${o.id}`}
                           onClick={() => run(`o${o.id}`, () => api.orderStatus(o.id, n))}>mark {ORDER_LABEL[n].toLowerCase()}</button>
                       ))}
                     </div>
                   </div>
                 ))}
-                {showOrder && !locked && <OrderForm diagnoses={diagnoses} types={d.orderTypes} priorities={d.orderPriorities} busy={busy === 'order'} onSave={(f) => run('order', () => api.addOrder(patient.id, euuid, f)).then(() => setShowOrder(false))} />}
+                {showOrder && !locked && (canOrderDirect || canOrderStanding) &&
+                  <OrderForm diagnoses={diagnoses} types={d.orderTypes} priorities={d.orderPriorities} busy={busy === 'order'}
+                    standingOrders={standingOrders} requireStandingOrder={!canOrderDirect}
+                    onSave={(f) => run('order', () => api.addOrder(patient.id, euuid, f)).then(() => setShowOrder(false))} />}
+                {!locked && !canOrderDirect && canOrderStanding && <p className="text-[11px] text-stone-400 mt-2">You place orders under a signed standing order. Pick the protocol, then the test it permits.</p>}
                 <p className="text-[10.5px] text-stone-400 mt-2">Transmission is manual (Quest portal / requisition); advance the status here as it moves. Status can still be advanced after the encounter is signed.</p>
               </div>
             </div>
           </div>
 
-          {!locked && (
+          {!locked && !canSignThisEncounter && (
+            <div className="card mb-4">
+              <div className="card-h"><h2>Sign &amp; close encounter</h2></div>
+              <div className="p-4 text-sm text-amber-800">
+                {signBlockReason}
+              </div>
+            </div>
+          )}
+
+          {!locked && canSignThisEncounter && (
             <div className="card mb-4">
               <div className="card-h"><h2>Sign &amp; close encounter</h2>
                 <span className={`chip ${d.signReadiness.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-800'}`}>{d.signReadiness.ok ? 'Ready to sign' : `${d.signReadiness.missing.length} blocker${d.signReadiness.missing.length > 1 ? 's' : ''}`}</span>
@@ -2024,7 +2128,12 @@
       // 4.3 read/write split: the server's answer wins once it arrives; until
       // then mirror the rule from the stored user so the UI does not flash.
       const canWrite = emrStatus && emrStatus.access ? !!emrStatus.access.canWrite : canWriteFor(user);
-      const access = { canWrite, role: user.role };
+      const access = {
+        canWrite, role: user.role,
+        capabilities: (emrStatus && emrStatus.access && emrStatus.access.capabilities) || {},
+        clinicalRole: (emrStatus && emrStatus.access && emrStatus.access.clinicalRole) || null,
+        clinicalRoleLabel: (emrStatus && emrStatus.access && emrStatus.access.clinicalRoleLabel) || null
+      };
       const tabs = [
         ['summary', 'Chart'], ['appts', 'Appointments'], ['encounters', 'Encounters'],
         ...(canWrite ? [['visit', 'Initial Visit (H&P)']] : []),
