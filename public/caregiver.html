@@ -53,6 +53,23 @@
     .lvl{font-size:12px;letter-spacing:.6px;background:rgba(245,205,133,.16);color:var(--gold);border:1px solid rgba(245,205,133,.5);border-radius:14px;padding:3px 11px;font-weight:500;white-space:nowrap}
     .hdr button{background:none;border:none;color:var(--gold);font-size:20px;cursor:pointer;padding:4px}
 
+    /* The welcome packet's hero. Full bleed under the sticky header, so the
+       first thing a new caregiver sees is a person, not a form. The photo sits
+       on navy and carries a navy gradient over it: if the file is ever missing
+       the headline still reads, which a transparent overlay would not do. */
+    .whero{position:relative;background:var(--navy);overflow:hidden}
+    .whero .img{position:absolute;inset:0;background-size:cover;background-position:center 30%}
+    .whero .scrim{position:absolute;inset:0;background:linear-gradient(180deg,rgba(3,61,80,.44) 0%,rgba(3,61,80,.70) 55%,rgba(2,42,56,.93) 100%)}
+    .whero .inner{position:relative;padding:34px 18px 20px;min-height:190px;display:flex;flex-direction:column;justify-content:flex-end}
+    .whero .rule{width:56px;height:3px;background:var(--gold);border-radius:2px;margin-bottom:12px}
+    .whero h1{font-family:'Cormorant Garamond',Georgia,serif;font-weight:600;color:var(--cream);font-size:30px;line-height:1.12;letter-spacing:.2px}
+    .whero p{color:rgba(250,247,242,.86);font-size:15px;margin-top:8px;max-width:44ch}
+    @media(min-width:700px){
+      .whero .inner{padding:52px 28px 28px;min-height:260px}
+      .whero h1{font-size:42px}
+      .whero p{font-size:16px}
+    }
+
     .main{flex:1;padding:18px 16px 26px}
     /* Above phone width there is room for a gutter and for the quick-action
        grid to lay out by available space rather than always two-up. */
@@ -103,6 +120,16 @@
     .fld label{display:block;font-size:12px;letter-spacing:.5px;text-transform:uppercase;color:var(--mut);margin-bottom:5px;font-weight:600}
     .inp{width:100%;background:#fff;border:1px solid #ddd3c0;border-radius:9px;padding:12px;font-size:16px;color:var(--ink);font-family:inherit}
     textarea.inp{min-height:88px;resize:vertical}
+    /* A field inside .fld is full width whether or not somebody remembered the
+       class. The welcome packet shipped without it and every box rendered at
+       the browser's default ~150px, so a home address and a date of birth got
+       the same tiny slot. File pickers and tick boxes are their own widths. */
+    .fld input:not([type=file]):not([type=checkbox]):not([type=radio]),
+    .fld textarea, .fld select{
+      width:100%;background:#fff;border:1px solid #ddd3c0;border-radius:9px;
+      padding:12px;font-size:16px;color:var(--ink);font-family:inherit;
+    }
+    .fld textarea{min-height:88px;resize:vertical}
     .vit{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 
     .chips{display:flex;flex-wrap:wrap;gap:8px}
@@ -1264,6 +1291,29 @@ const MoreTab = ({ visitLogs, queued, me }) => (
 // validator that refuses an answer they did not offer, silently.
 // ============================================================================
 
+// The banner over the packet. It greets the person by name where we have one
+// — the packet is the one screen a caregiver reaches before we know anything
+// else about them, so a first name is all it ever has.
+//
+// THE PHOTO IS ONE FILE, /banners/banner-caregiver.jpg. Replacing that file
+// changes the banner; no code moves. If it is ever missing the navy ground and
+// the gradient still carry the headline, so a broken image is a plain banner
+// rather than a broken page.
+const PacketHero = ({ firstName }) => (
+  <div className="whero">
+    <div className="img" style={{ backgroundImage: 'url(/banners/banner-caregiver.jpg)' }}></div>
+    <div className="scrim"></div>
+    <div className="inner">
+      <div className="rule"></div>
+      <h1>Welcome to the Godwins Family Care team!</h1>
+      <p>
+        {firstName ? `We are glad you are here, ${firstName}. ` : 'We are glad you are here. '}
+        Let us get your paperwork out of the way so you can start caring for families.
+      </p>
+    </div>
+  </div>
+);
+
 const SignaturePad = ({ onChange }) => {
   const canvasRef = useRef(null);
   const drawing = useRef(false);
@@ -1434,7 +1484,7 @@ const PacketField = ({ field, value, onChange, imported }) => {
             {field.rowFields.map(rf => (
               <div className="fld" key={rf.id} style={{ marginBottom: 9 }}>
                 <label>{rf.label}</label>
-                <input type={rf.type === 'tel' ? 'tel' : 'text'}
+                <input className="inp" type={rf.type === 'tel' ? 'tel' : 'text'}
                   value={(rows[i] || {})[rf.id] || ''}
                   onChange={(e) => {
                     const next = Array.from({ length: field.rowCount }).map((__, j) => ({ ...(rows[j] || {}) }));
@@ -1454,7 +1504,7 @@ const PacketField = ({ field, value, onChange, imported }) => {
       <div className="fld">
         {label}
         {field.hint ? <p className="sub" style={{ marginBottom: 8 }}>{field.hint}</p> : null}
-        <textarea rows={4} value={value || ''} maxLength={field.max || 2000}
+        <textarea className="inp" rows={4} value={value || ''} maxLength={field.max || 2000}
           onChange={(e) => set(e.target.value)} />
       </div>
     );
@@ -1464,7 +1514,7 @@ const PacketField = ({ field, value, onChange, imported }) => {
   return (
     <div className="fld">
       {label}
-      <input type={inputType} value={value || ''} maxLength={field.max || undefined}
+      <input className="inp" type={inputType} value={value || ''} maxLength={field.max || undefined}
         onChange={(e) => set(e.target.value)} />
     </div>
   );
@@ -1680,7 +1730,7 @@ const WelcomePacketWizard = ({ me, onComplete }) => {
       {step === 'start' ? (
         <div>
           <div className="card">
-            <h3>Welcome to Godwins Family Care</h3>
+            <h3>What this packet is</h3>
             <p className="sub">
               This packet has two parts. Part One is your caregiver profile, which is how we match you with clients
               close to where you live. Part Two is the list of documents we need before your first shift.
@@ -1785,7 +1835,7 @@ const WelcomePacketWizard = ({ me, onComplete }) => {
             <p className="sub">{packet.payPromise}</p>
             <div className="fld">
               <label>Printed name</label>
-              <input type="text" value={printedName} onChange={(e) => setPrintedName(e.target.value)}
+              <input className="inp" type="text" value={printedName} onChange={(e) => setPrintedName(e.target.value)}
                 placeholder="Type your name as it should appear" />
             </div>
             <div className="fld">
@@ -1906,6 +1956,7 @@ const App = () => {
           <span className="ttl">Godwins Family Care</span>
           <button onClick={logout} title="Sign out"><i className="ti ti-logout"></i></button>
         </div>
+        <PacketHero firstName={String(me.name || '').trim().split(/\s+/)[0] || ''} />
         <div className="main">
           <WelcomePacketWizard me={me} onComplete={async () => {
             // Re-read rather than assuming: what opens the app is the stored
