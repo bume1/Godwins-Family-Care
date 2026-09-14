@@ -33,6 +33,12 @@ const QRCode = require('qrcode');                        // enrollment QR for th
 const clinicalRepo = require('./clinicalRepository');  // clinical workspace pure helpers (Session 4.1)
 // Session 4.3 — patient/family/POA clinical read rules + the case-manager read/write split
 const patientRead = require('./patientReadRepository');
+// Session 4.8 — the clinical role enum, capability matrix and credential
+// ceiling. THE one place that answers "may this person do this"; the clinical
+// vocabulary lives there rather than in config.js for the same reason the
+// caregiver vocabulary lives in caregiverRepository.js.
+const clinicalRoles = require('./clinicalRoles');
+const standingOrders = require('./standingOrders');   // signed, versioned, expiring protocols (4.8 Scope C)
 const consentText = require('./public/consent-text'); // approved consent bodies, versioned (Session 4.6)
 const consentRegistry = require('./consentRegistry'); // THE consent registry: lanes, statuses, provenance (4.6)
 const consentRender = require('./consentRender');     // consent data blocks resolved from the client record (4.6)
@@ -2076,8 +2082,16 @@ const authenticateToken = async (req, res, next) => {
         familyOfClientId: freshUser.familyOfClientId || (freshUser.role === config.ROLES.FAMILY ? (freshUser.assignedClients || [])[0] : null) || null,
         // Designated Power of Attorney (family role) — client-equivalent portal
         // access; acting gates wired in Session 4.3
-        familyIsPoa: freshUser.familyIsPoa || false
+        familyIsPoa: freshUser.familyIsPoa || false,
+        // Session 4.8: the credential every clinical capability is decided
+        // from. Read from the FRESH user record, never the token, so a role an
+        // admin narrowed this morning takes effect on the next request rather
+        // than when the nurse next signs in — the same rule POA status follows.
+        clinicalRole: clinicalRoles.resolveClinicalRole(freshUser)
       };
+      // ...and the legacy boolean is DERIVED from that role, so a stale stored
+      // flag cannot widen someone the enum has narrowed.
+      req.user.hasClinicalAccess = clinicalRoles.derivedHasClinicalAccess(req.user);
       audit.bindUser(req.user, req.session);   // 5.4: attribution for every logActivity() downstream
       next();
     } catch (error) {
@@ -2276,6 +2290,22 @@ const requireClinicalWrite = (req, res, next) => {
     return res.status(403).json({ error: 'Case managers have read-only clinical access.', code: 'CLINICAL_READ_ONLY' });
   }
   return res.status(403).json({ error: 'Clinical access required.', code: 'CLINICAL_ONLY' });
+};
+
+// ── Session 4.8: the credential gate, on top of the read/write split ──────
+// requireClinicalWrite answers "is this person licensed at all". This answers
+// "does THIS credential carry THIS action" — prescribing, placing a direct
+// order, selecting CPT codes, signing a billable encounter.
+//
+// It is a THIRD middleware rather than a replacement: the 4.3 read/write split
+// is build-enforced on every /api/clinical route (test/patient_clinical_read),
+// and stacking keeps that guarantee intact while narrowing what a licence
+// permits. The 403 NAMES THE CREDENTIAL REASON — a refusal that says only
+// "forbidden" sends a nurse to an admin, when what she needs to know is that
+// the work requires a different person.
+const requireCapability = (capability) => (req, res, next) => {
+  if (clinicalRoles.can(req.user, capability)) return next();
+  return res.status(403).json(clinicalRoles.refusalFor(req.user, capability));
 };
 
 // Require Admin Hub access (super admins, managers, or users with hasAdminHubAccess)
@@ -2478,6 +2508,24 @@ app.post('/api/auth/signup', authenticateToken, requireAdmin, async (req, res) =
   }
 });
 
+// GET /api/admin/clinical-roles — the role vocabulary, SERVED not restated.
+// The admin user form renders from this rather than hardcoding the enum, the
+// same rule the competency catalog follows (2026-09-10): a second copy of the
+// vocabulary is a copy that drifts, and a drifting clinical role decides who
+// may prescribe. Build-enforced in test/clinical_roles.test.js.
+app.get('/api/admin/clinical-roles', authenticateToken, requireAdmin, (req, res) => {
+  res.json({
+    roles: clinicalRoles.ALL_CLINICAL_ROLES.map(value => ({
+      value,
+      label: clinicalRoles.CLINICAL_ROLE_LABELS[value],
+      capabilities: clinicalRoles.ROLE_CAPABILITIES[value] || [],
+      credentialCeiling: clinicalRoles.ceilingFor(value),
+      licensed: clinicalRoles.LICENSED_CLINICAL_ROLES.includes(value)
+    })),
+    capabilityLabels: clinicalRoles.CAPABILITY_REASONS
+  });
+});
+
 // Admin create user endpoint (Super Admin or Manager for client users only)
 app.post('/api/users', authenticateToken, async (req, res) => {
   try {
@@ -2494,7 +2542,8 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       isManager, assignedClients, hubspotCompanyId, hubspotDealId, hubspotContactId, projectAccessLevels,
       existingPortalSlug, phone, sendWelcomeEmail: shouldSendWelcome = true,
       licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
-      familyIsPoa, openEmrProviderId, npi, payRate, clientPayRates, rateAgreement
+      familyIsPoa, openEmrProviderId, npi, payRate, clientPayRates, rateAgreement,
+      clinicalRole
     } = req.body;
 
     // Managers can only create client users
@@ -2524,7 +2573,15 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       hasImplementationsAccess: hasImplementationsAccess || false,
       hasClientPortalAdminAccess: hasClientPortalAdminAccess || false,
       // GFC extended fields
-      hasClinicalAccess: hasClinicalAccess || false,
+      // Session 4.8: `clinicalRole` is the authority — certification gates
+      // prescribing, direct ordering, CPT selection and billable signing.
+      // `hasClinicalAccess` is kept and DERIVED from it so every existing
+      // reader (login destination, messaging, MFA, caregiver + scheduling
+      // routes) keeps working; it is no longer what decides anything clinical.
+      clinicalRole: clinicalRoles.isValidClinicalRole(clinicalRole) ? String(clinicalRole) : null,
+      hasClinicalAccess: clinicalRoles.isValidClinicalRole(clinicalRole)
+        ? clinicalRoles.derivedHasClinicalAccess({ clinicalRole })
+        : (hasClinicalAccess || false),
       licenseLevel: licenseLevel || null,
       // OpenEMR provider mapping for clinician calendars (Session 4.2)
       openEmrProviderId: openEmrProviderId || null,
@@ -3328,7 +3385,17 @@ app.get('/api/users', authenticateToken, async (req, res) => {
       // formData, so anything missing here would be silently wiped on save.
       phone: u.phone || '',
       licenseLevel: u.licenseLevel || '',
-      hasClinicalAccess: u.hasClinicalAccess || false,
+      hasClinicalAccess: clinicalRoles.derivedHasClinicalAccess(u),
+      // Session 4.8 — returned so the admin form can render what is set. A
+      // field the GET omits is a field the round-tripped form wipes on save,
+      // and for a clinical credential that is a silent widening.
+      clinicalRole: clinicalRoles.resolveClinicalRole(u),
+      // TRUE while the role is still the value the migration guessed. The boot
+      // warning names these people, but Session 5.5's log scrubber redacts the
+      // email addresses out of it (it cannot tell a staff address from a
+      // patient's) and a console line is not where an admin works anyway. This
+      // is what puts the reassignment on the screen that does it.
+      clinicalRoleAutoAssigned: !!u.clinicalRoleAutoAssigned,
       enrollmentStatus: u.enrollmentStatus || null,
       careTeam: u.careTeam || null,
       familyOfClientId: u.familyOfClientId || null,
@@ -3401,7 +3468,7 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
       hasServicePortalAccess, hasAdminHubAccess, hasImplementationsAccess, hasClientPortalAdminAccess,
       isManager, assignedClients, phone, accountStatus, emailUnsubscribed,
       licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
-      familyIsPoa, openEmrProviderId, npi, payRate, clientPayRates
+      familyIsPoa, openEmrProviderId, npi, payRate, clientPayRates, clinicalRole
     } = req.body;
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === userId);
@@ -3447,7 +3514,25 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
 
     // GFC extended fields
     if (licenseLevel !== undefined) users[idx].licenseLevel = licenseLevel;
-    if (hasClinicalAccess !== undefined) users[idx].hasClinicalAccess = hasClinicalAccess;
+    // Session 4.8: the clinical role decides, and `hasClinicalAccess` follows
+    // it. An empty string clears the role (no clinical access at all); an
+    // unrecognised value is REFUSED rather than silently dropped — silently
+    // dropping it leaves an admin believing they narrowed someone's authority
+    // when they did not, which is the failure this whole session exists to fix.
+    if (clinicalRole !== undefined) {
+      const wanted = clinicalRole === null || clinicalRole === '' ? null : String(clinicalRole);
+      if (wanted !== null && !clinicalRoles.isValidClinicalRole(wanted)) {
+        return res.status(400).json({ error: `clinicalRole must be one of ${clinicalRoles.ALL_CLINICAL_ROLES.join(', ')} (or empty for none)`, code: 'CLINICAL_ROLE_INVALID' });
+      }
+      users[idx].clinicalRole = wanted;
+      users[idx].clinicalRoleAutoAssigned = false;   // an admin chose it — the boot reminder stops for this user
+      users[idx].hasClinicalAccess = clinicalRoles.derivedHasClinicalAccess({ clinicalRole: wanted });
+      await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_role_set', 'user', users[idx].id, {
+        clinicalRole: wanted, targetName: users[idx].name, targetEmail: users[idx].email
+      });
+    } else if (hasClinicalAccess !== undefined) {
+      users[idx].hasClinicalAccess = hasClinicalAccess;
+    }
     // The enrollment status dropdown is the SECOND door onto `enrolled`, and
     // now that `enrolled` is what unlocks scheduling it cannot stay a silent
     // one. The Approve button re-checks every required consent and field; this
@@ -5652,6 +5737,39 @@ async function migrateAnnouncementTemplateChrome() {
   return { cleared, kept };
 }
 
+// ── Session 4.8: assign a clinical role to every existing user ───────────
+// Clinical access used to be ONE BOOLEAN, so this migration CANNOT tell an RN
+// from an FNP. Everyone who had clinical access becomes a `provider`, which
+// preserves exactly what they could do this morning — and then the boot log
+// NAMES EVERY ONE OF THEM so an admin reassigns the RNs deliberately.
+//
+// Nobody is silently downgraded and nobody is silently widened. A case manager
+// maps to `readOnly`, unchanged from today, even though GFC's case managers
+// are LMSW: assigning `lmsw` would hand them writes they did not have, and a
+// migration is not where that decision belongs.
+//
+// Deliberately NOT gated behind an env flag, unlike the care-tier and consent
+// migrations. It is idempotent by the presence of the field itself — a user
+// who already has a valid `clinicalRole` is skipped — so re-running it cannot
+// overwrite an admin's reassignment, and the warning keeps printing until the
+// reassignment is actually done.
+async function migrateClinicalRoles() {
+  const users = await getUsers();
+  const { users: next, changed } = clinicalRoles.applyClinicalRoleMigration(users);
+  if (changed.length) {
+    await db.set('users', next);
+    invalidateUsersCache();
+    const warning = clinicalRoles.buildMigrationWarning(changed);
+    if (warning) console.warn(warning);
+  }
+  // And every boot after this one, until the reassignment is actually done.
+  const pending = clinicalRoles.usersPendingRoleReview(next);
+  if (pending.length && !changed.length) {
+    const standing = clinicalRoles.buildPendingReviewWarning(pending);
+    if (standing) console.warn(standing);
+  }
+}
+
 async function migrateConsentLaneSplit() {
   if (String(process.env.CONSENT_LANE_SPLIT_MIGRATION_APPLIED).toLowerCase() === 'true') {
     return { skipped: true };
@@ -7254,7 +7372,16 @@ app.get('/api/clinical/status', authenticateToken, requireClinicalRead, async (r
   res.json({
     // 4.3: the API enforces the read/write split; this only tells the UI
     // which controls to render (case managers: read views, mutation UI hidden)
-    access: { canRead: true, canWrite: patientRead.canClinicalWrite(req.user), role: req.user.role },
+    // 4.8: the UI renders from the SAME matrix the API enforces, so a control
+    // a clinician can see is one the server will accept. This only decides
+    // what to draw — every one of these is re-checked at the route.
+    access: {
+      canRead: true, canWrite: patientRead.canClinicalWrite(req.user), role: req.user.role,
+      clinicalRole: clinicalRoles.resolveClinicalRole(req.user),
+      clinicalRoleLabel: clinicalRoles.CLINICAL_ROLE_LABELS[clinicalRoles.resolveClinicalRole(req.user)] || null,
+      capabilities: clinicalRoles.capabilitiesFor(req.user),
+      credentialCeiling: clinicalRoles.ceilingFor(req.user)
+    },
     ...(await openemr.getStatus(req.user)), serverStartedAt: SERVER_STARTED_AT,
     // Session 4.4 deploy diagnostics: billing NPI (spec §2.5) + the caller's
     // own NPI for attribution (spec §4). Never hardcoded — both are config.
@@ -7636,7 +7763,7 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
 // visit (H&P) per intake spec §2C → Encounter + vitals + structured SOAP note
 // written to OpenEMR. Records the checklist stamp and (optionally) the RN
 // Track assignment on the app record.
-app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireClinicalWrite, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.NURSING_NOTE), async (req, res) => {
   try {
     const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -7771,7 +7898,7 @@ app.get('/api/clinical/patients/:clientId/medrec', authenticateToken, requireCli
   }
 });
 
-app.post('/api/clinical/patients/:clientId/medrec', authenticateToken, requireClinicalWrite, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/medrec', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.MED_REC), async (req, res) => {
   try {
     const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -7816,7 +7943,7 @@ app.post('/api/clinical/patients/:clientId/medrec', authenticateToken, requireCl
 
 // POST /api/clinical/patients/:clientId/problems — problem-list management →
 // OpenEMR Condition (medical_problem) writes.
-app.post('/api/clinical/patients/:clientId/problems', authenticateToken, requireClinicalWrite, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/problems', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.PROBLEM_LIST_WRITE), async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -7864,7 +7991,7 @@ app.get('/api/clinical/patients/:clientId/care-plan', authenticateToken, require
   }
 });
 
-app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requireClinicalWrite, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.CARE_PLAN_AUTHOR), async (req, res) => {
   try {
     const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -7883,6 +8010,25 @@ app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requir
     const plan = built.plan;
     const ipHash = roiRepo.hashIp(clientIpFrom(req), JWT_SECRET);
 
+    // ── Session 4.8: the care-plan signature branches on the SERVICE LINE ──
+    //   Track A / PHC  → an RN signature satisfies the plan
+    //   IHPC / clinical → a provider signature is required; the RN's is
+    //                     recorded as the AUTHORING signature and the plan
+    //                     stays pending provider co-signature
+    // An LMSW authors and never completes a signature alone on either line.
+    // The signature is recorded either way — what changes is whether the plan
+    // is complete, and a plan that says so is better than one that quietly
+    // looks finished.
+    const planSig = clinicalRoles.evaluateCarePlanSignature(req.user, client.serviceLine);
+    if (planSig.outcome === clinicalRoles.CARE_PLAN_OUTCOME.REFUSED) {
+      return res.status(403).json({ error: planSig.reason, code: planSig.code, clinicalRole: clinicalRoles.resolveClinicalRole(req.user) });
+    }
+    const pendingProviderCoSign = planSig.outcome === clinicalRoles.CARE_PLAN_OUTCOME.PENDING_PROVIDER;
+    plan.authorClinicalRole = planSig.clinicalRole;
+    plan.signatureRole = planSig.signatureRole;
+    plan.providerCoSignStatus = pendingProviderCoSign ? 'pending' : 'not_required';
+    plan.providerCoSignReason = pendingProviderCoSign ? planSig.reason : null;
+
     // Append-only version history — the RN signature image lives here, out of
     // the hot-path users blob. Prior versions are never overwritten.
     const versionRows = (await db.get('care_plan_versions')) || [];
@@ -7895,7 +8041,7 @@ app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requir
 
     // The current plan on the client record (no image) — this is what the
     // portal renders and the co-sign flow validates against.
-    users[idx].carePlan = { ...plan, rnSignedAt: at, rnName: req.user.name };
+    users[idx].carePlan = { ...plan, rnSignedAt: at, rnName: req.user.name, rnClinicalRole: planSig.clinicalRole };
     await db.set('users', users);
     invalidateUsersCache();
 
@@ -7929,10 +8075,75 @@ app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requir
         console.error('Authored care-plan EMR upload failed:', e.message);
       }
     }
-    await logActivity(req.user.id, req.user.name || req.user.email, 'care_plan_authored', 'care_plan', `v${plan.version}`, { clientId: client.id, emrDocumented });
-    res.json({ message: `Care plan v${plan.version} saved — awaiting client co-signature in the portal`, carePlan: users[idx].carePlan, emrDocumented });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'care_plan_authored', 'care_plan', `v${plan.version}`, {
+      clientId: client.id, emrDocumented, authorClinicalRole: planSig.clinicalRole,
+      signatureRole: planSig.signatureRole, providerCoSignStatus: plan.providerCoSignStatus, serviceLine: client.serviceLine || null
+    });
+    res.json({
+      message: pendingProviderCoSign
+        ? `Care plan v${plan.version} saved as the authoring signature — it needs a provider co-signature before it is complete`
+        : `Care plan v${plan.version} saved — awaiting client co-signature in the portal`,
+      carePlan: users[idx].carePlan, emrDocumented,
+      providerCoSignStatus: plan.providerCoSignStatus,
+      providerCoSignReason: plan.providerCoSignReason
+    });
   } catch (error) {
     console.error('Clinical care-plan save error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/clinical/patients/:clientId/care-plan/provider-cosign (4.8)
+// The provider signature an IHPC plan (or any LMSW-authored plan) is waiting
+// on. The authoring signature is NEVER overwritten — the provider's is added
+// beside it, the same append-only discipline the care-plan versions and the
+// encounter addenda follow. Without this route the pending state would be a
+// field nothing ever clears.
+app.post('/api/clinical/patients/:clientId/care-plan/provider-cosign', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.CARE_PLAN_SIGN), async (req, res) => {
+  try {
+    const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    const plan = client.carePlan;
+    if (!plan) return res.status(409).json({ error: 'There is no care plan to co-sign', code: 'NO_CARE_PLAN' });
+    if (plan.providerCoSignStatus !== 'pending') {
+      return res.status(409).json({ error: 'This care plan is not waiting on a provider co-signature', code: 'CARE_PLAN_NOT_PENDING_PROVIDER' });
+    }
+    // An RN cannot clear an RN-authored IHPC plan, and an LMSW cannot clear
+    // their own — the co-signature exists to add a credential the authoring
+    // one does not carry.
+    const outcome = clinicalRoles.evaluateCarePlanSignature(req.user, client.serviceLine);
+    if (outcome.outcome !== clinicalRoles.CARE_PLAN_OUTCOME.COMPLETE) {
+      return res.status(403).json({ error: outcome.reason || 'Your clinical credential cannot complete this care plan\u2019s signature.', code: 'CARE_PLAN_CO_SIGN_CREDENTIAL', clinicalRole: clinicalRoles.resolveClinicalRole(req.user) });
+    }
+    const sig = req.body && req.body.signatureImageB64;
+    if (typeof sig !== 'string' || !/^data:image\/png;base64,/.test(sig)) {
+      return res.status(400).json({ error: 'The provider signature (drawn) is required', code: 'CARE_PLAN_NO_SIGNATURE' });
+    }
+    if (sig.length > 600 * 1024) return res.status(413).json({ error: 'Signature image is too large' });
+    const at = new Date().toISOString();
+    const ipHash = roiRepo.hashIp(clientIpFrom(req), JWT_SECRET);
+    // The image goes on the append-only version row, not the hot-path users
+    // blob — the same split the RN author signature uses.
+    const versionRows = (await db.get('care_plan_versions')) || [];
+    const vIdx = versionRows.findIndex(r => r && r.client_id === client.id && r.version === plan.version);
+    if (vIdx === -1) return res.status(409).json({ error: 'No stored version row for this care plan', code: 'CARE_PLAN_VERSION_MISSING' });
+    versionRows[vIdx] = {
+      ...versionRows[vIdx],
+      providerSignature: { signatureImage: sig, name: req.user.name, at, ipHash, clinicalRole: clinicalRoles.resolveClinicalRole(req.user), npi: req.user.npi || null }
+    };
+    await db.set('care_plan_versions', versionRows);
+    users[idx].carePlan = {
+      ...plan, providerCoSignStatus: 'complete', providerCoSignReason: null,
+      providerSignedAt: at, providerName: req.user.name
+    };
+    await db.set('users', users);
+    invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'care_plan_provider_cosigned', 'care_plan', `v${plan.version}`, {
+      clientId: client.id, authoredBy: plan.authoredById || null, authorClinicalRole: plan.authorClinicalRole || null
+    });
+    res.json({ message: `Care plan v${plan.version} co-signed`, carePlan: users[idx].carePlan });
+  } catch (error) {
+    console.error('Care-plan provider co-sign error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -7946,7 +8157,7 @@ app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requir
 // allergy list is patient safety before it is paperwork, and prescribing
 // against a chart that has none is the risk that matters. Shadow-data audit
 // G4, 2026-09-08.
-app.post('/api/clinical/patients/:clientId/allergies', authenticateToken, requireClinicalWrite, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/allergies', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.PROBLEM_LIST_WRITE), async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -8334,7 +8545,7 @@ app.get('/api/clinical/appointments/:eid', authenticateToken, requireClinicalRea
 // POST /api/clinical/patients/:clientId/appointments — create on the
 // provider's OpenEMR calendar. Double-booking is rejected against the LIVE
 // OpenEMR list (the availability authority) with a specific 409.
-app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, requireClinicalWrite, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.SCHEDULING), async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -8425,7 +8636,7 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
 // POST /api/clinical/appointments/:eid/reschedule — tombstone swap: new slot
 // row + cancelled tombstone preserving the old slot, then remove the
 // superseded row. Conflict-checked against the live calendar first.
-app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requireClinicalWrite, async (req, res) => {
+app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.SCHEDULING), async (req, res) => {
   try {
     if (!openemr.isConfigured()) return res.status(503).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
     const body = req.body || {};
@@ -8502,7 +8713,7 @@ app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requir
 // POST /api/clinical/appointments/:eid/cancel — reason REQUIRED; the slot
 // becomes a cancelled row (status 'x') with the reason on it. Never a bare
 // hard delete.
-app.post('/api/clinical/appointments/:eid/cancel', authenticateToken, requireClinicalWrite, async (req, res) => {
+app.post('/api/clinical/appointments/:eid/cancel', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.SCHEDULING), async (req, res) => {
   try {
     if (!openemr.isConfigured()) return res.status(503).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
     const reason = String((req.body || {}).reason || '').trim();
@@ -8549,7 +8760,7 @@ app.post('/api/clinical/appointments/:eid/cancel', authenticateToken, requireCli
 
 // POST /api/clinical/appointments/:eid/no-show — same swap, status '?'; the
 // chart list shows it as no-show (Scope B).
-app.post('/api/clinical/appointments/:eid/no-show', authenticateToken, requireClinicalWrite, async (req, res) => {
+app.post('/api/clinical/appointments/:eid/no-show', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.SCHEDULING), async (req, res) => {
   try {
     if (!openemr.isConfigured()) return res.status(503).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
     const emr = openemr.forActor(req.user);
@@ -8640,9 +8851,20 @@ const getClinicalSettings = async () => {
 const NO_PROVIDER_ID_WARNING = 'This visit was filed under the practice default provider, not you: your user record has no OpenEMR provider id. An admin sets it in Admin hub \u2192 Users. Charges will not post at sign-and-close until it is set.';
 
 // The acting clinician as stamped onto records (name, credential, NPI).
+// The clinical actor. Session 4.8 added `clinicalRole` and it is LOAD-BEARING:
+// standingOrders and clinicalRoles resolve a credential from whatever object
+// they are handed, and this one is narrower than req.user. Without it every
+// module-level re-check resolved to "no clinical role" and refused a genuine
+// provider — found by scripts/verify_clinical_roles.js, not by a unit test,
+// because the unit tests pass a user-shaped fixture where production passes
+// this. Same shape as the fake that was missing what server.js injects
+// (2026-09-13) and the cross-client leak before it: AN OBJECT THAT IS MISSING
+// WHAT PRODUCTION SUPPLIES EXERCISES A DIFFERENT FUNCTION.
 const actorFromReq = (req) => ({
   id: req.user.id, name: req.user.name, licenseLevel: req.user.licenseLevel || null,
-  npi: req.user.npi || null, openEmrProviderId: req.user.openEmrProviderId || null, role: req.user.role, email: req.user.email
+  npi: req.user.npi || null, openEmrProviderId: req.user.openEmrProviderId || null, role: req.user.role, email: req.user.email,
+  clinicalRole: clinicalRoles.resolveClinicalRole(req.user),
+  hasClinicalAccess: clinicalRoles.derivedHasClinicalAccess(req.user)
 });
 
 const forEncounter = (rows, encounterUuid) => rows.filter(r => r && r.encounterUuid === String(encounterUuid));
@@ -8772,6 +8994,42 @@ const loadEncounterContext = async (req, res, { createRecord = true } = {}) => {
   const side = await loadEncounterSideRecords(encounterUuid);
   return { users, idx, client, emr, actor, encounterUuid, rows, record, ...side, closed: clinicalRepo.isEncounterClosed(side.attestation) };
 };
+// The charge write (Session 4.5 / Phase 6B) — extracted in 4.8 so the sign
+// route and the LMSW co-sign route share ONE copy. Two copies of "what posts a
+// charge" is how one path starts double-billing what the other skips.
+//
+// A charge failure must NEVER void a completed signature: the attestation is
+// already persisted by the time this runs. It surfaces as a warning and the
+// encounter is marked so the coding queue can show the charge did not post.
+// Partial posts are recorded so a re-post does not double-bill.
+const postEncounterCharges = async ({ emr, client, encounterUuid, record, warnings, signedBy }) => {
+  const providerId = (signedBy && signedBy.openEmrProviderId) || null;
+  if (!providerId) {
+    warnings.push('Charges were not posted to Billing Manager: this clinician has no OpenEMR provider id on file. An admin sets it on the user record (Admin hub → Users → OpenEMR provider id), then use Re-post charges on this encounter.');
+    record.chargesPosted = false;
+    record.chargeError = 'NO_OPENEMR_PROVIDER_ID';
+    return record;
+  }
+  const payloads = clinicalRepo.buildChargePayloads(record, { providerId });
+  const posted = [];
+  try {
+    for (const payload of payloads) {
+      const row = await emr.postCharge(client.openEmrPatientId, encounterUuid, payload);
+      posted.push({ id: row && row.id != null ? String(row.id) : null, code: payload.code, codeType: payload.code_type });
+    }
+    record.chargesPosted = true;
+    record.chargeError = null;
+    record.postedCharges = posted;
+    record.chargesPostedAt = new Date().toISOString();
+  } catch (e) {
+    record.chargesPosted = false;
+    record.chargeError = e.message.slice(0, 300);
+    record.postedCharges = posted;
+    warnings.push(`Charges did not post to Billing Manager (${e.message.slice(0, 140)}). The encounter is signed; use Re-post charges once the cause is fixed.${posted.length ? ` ${posted.length} of ${payloads.length} line(s) did post — a re-post skips those.` : ''}`);
+  }
+  return record;
+};
+
 const refuseIfClosed = (ctx, res) => {
   if (ctx.closed) {
     res.status(409).json({ error: `This encounter was signed and closed ${ctx.attestation.signedAt} by ${ctx.attestation.signedBy.name}. It is read-only — record a correction as an addendum.`, code: 'ENCOUNTER_CLOSED' });
@@ -8955,7 +9213,7 @@ app.get('/api/clinical/patients/:clientId/dx-candidates', authenticateToken, req
 // Shorter SOAP form (S / O incl. vitals / A / P) → Encounter + narrative note
 // in OpenEMR (attribution stamped, §4), the app-side encounter_billing record,
 // optional T1-selected diagnoses and services, and the GFC structured note.
-app.post('/api/clinical/patients/:clientId/encounters', authenticateToken, requireClinicalWrite, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/encounters', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.NURSING_NOTE), async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -9155,6 +9413,27 @@ app.put('/api/clinical/patients/:clientId/encounters/:euuid/coding', authenticat
     const coded = clinicalRepo.applyCoding(before, { diagnoses: body.diagnoses || [], services: body.services || [] }, ctx.actor, payer.billing_npi_used);
     if (coded.error) return res.status(400).json({ error: coded.error, code: coded.code });
     const record = coded.record;
+    // ── Session 4.8: certification gates the CODE, not just the encounter ──
+    // The billing spec's rule (§4 item 4) is that the rendering provider's
+    // certification must match the code billed. The gate is on CHANGING the
+    // service codes, not on opening the panel: an RN may correct a diagnosis
+    // on an encounter someone else coded, and re-saving an unchanged set is
+    // not a selection. Removing a code is a change too — a credential that
+    // cannot add a CPT code must not be able to silently wipe one either.
+    const beforeCodes = (before.services || []).map(x => x.code).sort().join(',');
+    const afterCodes = (record.services || []).map(x => x.code).sort().join(',');
+    if (beforeCodes !== afterCodes) {
+      if (!clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.SELECT_SERVICE_CODES)) {
+        return res.status(403).json(clinicalRoles.refusalFor(req.user, clinicalRoles.CAPABILITIES.SELECT_SERVICE_CODES));
+      }
+      const badCodes = clinicalRoles.disallowedServiceCodesFor(req.user, record.services || []);
+      if (badCodes.length) {
+        return res.status(403).json({
+          error: clinicalRoles.serviceCodeRefusal(req.user, badCodes),
+          code: 'CLINICAL_CODE_SET', codes: badCodes, clinicalRole: clinicalRoles.resolveClinicalRole(req.user)
+        });
+      }
+    }
     // 4.3: optional patient-facing summary + follow-up instructions — the only
     // visit text a patient ever sees (never the narrative note). Clinician-authored.
     if ('patientSummary' in body || 'followUpInstructions' in body) {
@@ -9193,7 +9472,7 @@ app.put('/api/clinical/patients/:clientId/encounters/:euuid/coding', authenticat
 });
 
 // ── Prescriptions (Scope C) — record only; transmission stays as today ───
-app.post('/api/clinical/patients/:clientId/encounters/:euuid/prescriptions', authenticateToken, requireClinicalWrite, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/prescriptions', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.PRESCRIBE), async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res);
     if (!ctx || refuseIfClosed(ctx, res)) return;
@@ -9230,12 +9509,71 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authentica
     const built = clinicalRepo.buildOrder({ id: uuidv4(), clientId: ctx.client.id, puuid: ctx.client.openEmrPatientId, encounterUuid: ctx.encounterUuid, input: req.body, actor: ctx.actor, encounterDiagnoses: ctx.record.diagnoses });
     if (built.error) return res.status(400).json({ error: built.error, code: built.code });
     const warnings = [];
+
+    // ── Session 4.8: direct authority, or authority granted by a protocol ──
+    // EVERY ORDER IS ANCHORED TO AN ENCOUNTER — the :euuid in this path is the
+    // anchor, so a patient-scoped floating order is structurally impossible.
+    // Between-visit standing-order work documents a nursing encounter first
+    // (POST …/encounters); an order with no encounter has no clinical context
+    // and nothing to bill or audit against.
+    const standingOrderId = String((req.body || {}).standingOrderId || '').trim();
+    let execution = null;
+    let standingOrder = null;
+    if (standingOrderId) {
+      const protocols = await loadRows('standing_orders');
+      standingOrder = protocols.find(o => o && o.id === standingOrderId) || null;
+      const auth = standingOrders.authorizeExecution({
+        standingOrder, actor: ctx.actor, orderType: built.order.orderType,
+        tests: built.order.tests, diagnosisCodes: built.order.diagnosisCodes, clientId: ctx.client.id
+      });
+      if (auth.error) return res.status(auth.status || 403).json({ error: auth.error, code: auth.code, ...(auth.ceiling ? { ceiling: auth.ceiling, requested: auth.requested } : {}) });
+      execution = auth;
+      // The order is under the AUTHORIZING PROVIDER's authority, not the
+      // nurse's — so they are the ordering clinician of record, and the acting
+      // user is recorded separately as who carried it out.
+      built.order.authority = 'standing_order';
+      built.order.standingOrder = auth.standingOrderRef;
+      built.order.orderingClinician = auth.orderingClinician;
+      built.order.executedBy = auth.executedBy;
+      Object.assign(built.order, auth.coSign);
+      // Every status-history entry already records the acting user; the first
+      // one now says which authority it was placed under.
+      if (built.order.statusHistory && built.order.statusHistory[0]) {
+        built.order.statusHistory[0].authority = 'standing_order';
+        built.order.statusHistory[0].standingOrderVersion = auth.standingOrderRef.version;
+      }
+    } else {
+      // No protocol named — this is the clinician's own authority, so it is a
+      // provider-only action. An RN gets a 403 naming the alternative.
+      if (!clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.ORDER_DIRECT)) {
+        return res.status(403).json(clinicalRoles.refusalFor(req.user, clinicalRoles.CAPABILITIES.ORDER_DIRECT));
+      }
+      built.order.authority = 'direct';
+      built.order.standingOrder = null;
+      built.order.executedBy = null;
+      built.order.coSignStatus = 'not_required';
+      built.order.coSignDueAt = null;
+      built.order.coSignedAt = null;
+      built.order.coSignedBy = null;
+    }
     // Session 4.5 / Phase 6B: the order now lands in OpenEMR's procedure_order
     // table and on the encounter, not only in the app. user/procedure.write
     // does not exist on 8.4, so this goes through the patched route.
-    const providerId = ctx.actor.openEmrProviderId || null;
+    // The OpenEMR provider on the row follows the ORDERING CLINICIAN OF RECORD.
+    // Under a standing order that is the authorizing provider, whose OpenEMR id
+    // lives on THEIR user record, not the acting nurse's — filing it under the
+    // nurse would put a name on the chart that did not order the test.
+    let providerId = ctx.actor.openEmrProviderId || null;
+    if (execution) {
+      const allUsers = await getUsers();
+      const authorizer = allUsers.find(u => u && u.id === execution.orderingClinician.id) || null;
+      providerId = (authorizer && authorizer.openEmrProviderId) || null;
+      built.order.orderingClinician.openEmrProviderId = providerId ? String(providerId) : null;
+    }
     if (!providerId) {
-      warnings.push('The order is recorded in the chart but was not filed in OpenEMR: this clinician has no OpenEMR provider id on file. An admin sets it on the user record.');
+      warnings.push(execution
+        ? 'The order is recorded in the chart but was not filed in OpenEMR: the authorizing provider on this standing order has no OpenEMR provider id on file. An admin sets it on their user record.'
+        : 'The order is recorded in the chart but was not filed in OpenEMR: this clinician has no OpenEMR provider id on file. An admin sets it on the user record.');
       built.order.emrOrderError = 'NO_OPENEMR_PROVIDER_ID';
     } else {
       try {
@@ -9250,11 +9588,37 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authentica
     const rows = await loadRows('clinical_orders');
     rows.push(built.order);
     await db.set('clinical_orders', rows);
+    // A standing order's whole defensibility is being able to reconstruct who
+    // acted under whose authority, under WHICH VERSION, on what date — so the
+    // execution is its own durable row, not only a line in the activity log.
+    if (execution) {
+      const execRows = await loadRows('standing_order_executions');
+      execRows.push({
+        id: uuidv4(),
+        ...standingOrders.buildExecutionAudit({ order: built.order, standingOrder, actor: ctx.actor, clientId: ctx.client.id })
+      });
+      await db.set('standing_order_executions', execRows);
+    }
     const syncWarning = await syncStructuredNote(ctx.emr, ctx.client, ctx.record);
     if (syncWarning) warnings.push(syncWarning);
     await saveBillingRecord(ctx.rows, ctx.record);
-    await logActivity(req.user.id, req.user.name || req.user.email, 'order_recorded', 'client', ctx.client.id, { encounterUuid: ctx.encounterUuid, orderId: built.order.id, orderType: built.order.orderType, tests: built.order.tests, orderingNpi: ctx.actor.npi || null, transmission: 'manual' });
-    res.json({ message: 'Order recorded (transmission is manual)', order: built.order, warnings });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'order_recorded', 'client', ctx.client.id, {
+      encounterUuid: ctx.encounterUuid, orderId: built.order.id, orderType: built.order.orderType, tests: built.order.tests,
+      authority: built.order.authority,
+      standingOrderId: execution ? execution.standingOrderRef.id : null,
+      standingOrderVersion: execution ? execution.standingOrderRef.version : null,
+      orderingClinicianId: built.order.orderingClinician && built.order.orderingClinician.id,
+      orderingNpi: (built.order.orderingClinician && built.order.orderingClinician.npi) || null,
+      executedByUserId: execution ? execution.executedBy.id : null,
+      executedByClinicalRole: execution ? execution.executedBy.clinicalRole : null,
+      transmission: 'manual'
+    });
+    res.json({
+      message: execution
+        ? `Order recorded under standing order "${execution.standingOrderRef.title}" v${execution.standingOrderRef.version} (transmission is manual)`
+        : 'Order recorded (transmission is manual)',
+      order: built.order, warnings
+    });
   } catch (error) {
     console.error('Clinical order error:', error);
     res.status(502).json({ error: `Order save failed: ${error.message}` });
@@ -9262,7 +9626,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authentica
 });
 // Status advance is an operational step (sent / resulted / cancelled), so it
 // stays allowed after the encounter is closed; every step is who/when-stamped.
-app.post('/api/clinical/orders/:orderId/status', authenticateToken, requireClinicalWrite, async (req, res) => {
+app.post('/api/clinical/orders/:orderId/status', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.ORDER_STATUS_ADVANCE), async (req, res) => {
   try {
     const rows = await loadRows('clinical_orders');
     const idx = rows.findIndex(o => o && o.id === req.params.orderId);
@@ -9343,12 +9707,32 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
     catch { encPos = null; }
     const ready = clinicalRepo.checkSignReadiness({ hasNote, record: ctx.record, billingNpi: payer.billing_npi_used, posCode: encPos });
     if (!ready.ok) return res.status(409).json({ error: ready.message, code: ready.codes[0], codes: ready.codes, missing: ready.missing });
+
+    // ── Session 4.8: gate on WHAT IS BEING ATTESTED, not only on who asks ──
+    // An encounter carrying any CPT/service code is a claim, and a claim
+    // asserts that the signer was certified to render it. An encounter with no
+    // service codes is nursing documentation, and an RN attesting her own note
+    // is exactly right. The distinction is the encounter's content, so it is
+    // read off the record rather than assumed from the route.
+    const signature = clinicalRoles.evaluateEncounterSignature(req.user, ctx.record.services || []);
+    if (signature.outcome === clinicalRoles.SIGN_OUTCOME.REFUSED) {
+      return res.status(403).json({
+        error: signature.reason, code: signature.code, clinicalRole: signature.clinicalRole,
+        serviceCodes: (ctx.record.services || []).map(x => x.code)
+      });
+    }
     const attestation = clinicalRepo.buildAttestation({ id: uuidv4(), record: ctx.record, actor: ctx.actor, billingNpi: payer.billing_npi_used, narrativeNoteSid: ctx.record.narrativeNoteSid });
+    // The credential the signature was made under, stored on the attestation:
+    // a role reassigned next year must not change what last year's signature
+    // says it was. The name alone does not answer that.
+    attestation.signedByClinicalRole = signature.clinicalRole;
+    attestation.billable = signature.outcome === clinicalRoles.SIGN_OUTCOME.ALLOWED && !!(ctx.record.services || []).length;
+    attestation.coSignStatus = signature.outcome === clinicalRoles.SIGN_OUTCOME.PENDING_CO_SIGN ? 'pending' : 'not_required';
     const atts = await loadRows('encounter_attestations');
     atts.push(attestation);
     await db.set('encounter_attestations', atts);
     // Rendering provider on the charge = signing clinician (spec §2.5)
-    const record = { ...ctx.record, renderingProvider: attestation.signedBy, billingProviderNpi: payer.billing_npi_used, closedAt: attestation.signedAt, updatedAt: attestation.signedAt };
+    const record = { ...ctx.record, renderingProvider: attestation.signedBy, renderingProviderClinicalRole: signature.clinicalRole, billingProviderNpi: payer.billing_npi_used, closedAt: attestation.signedAt, updatedAt: attestation.signedAt };
     const warnings = [...attestation.warnings];
 
     // ── Session 4.5 / Phase 6B: the charge write ──────────────────────────
@@ -9361,30 +9745,20 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
     // A charge failure must never void a completed signature: the attestation
     // is already persisted. It is surfaced as a warning and the encounter is
     // marked so the coding queue can show the charge did not post.
-    const providerId = (attestation.signedBy && attestation.signedBy.openEmrProviderId) || null;
-    if (!providerId) {
-      warnings.push('Charges were not posted to Billing Manager: this clinician has no OpenEMR provider id on file. An admin sets it on the user record (Admin hub → Users → OpenEMR provider id), then use Re-post charges on this encounter.');
+    // ── Session 4.8: an LMSW signature holds the charge ───────────────────
+    // A10 bills nothing independently, so the encounter is SIGNED (the note is
+    // documented and attested) and the charge waits for an LCSW or provider
+    // co-signature. Posting it now and reversing it later would put a claim in
+    // Billing Manager that nobody was certified to render.
+    if (signature.outcome === clinicalRoles.SIGN_OUTCOME.PENDING_CO_SIGN) {
+      record.coSignStatus = 'pending';
+      record.coSignReason = signature.reason;
       record.chargesPosted = false;
-      record.chargeError = 'NO_OPENEMR_PROVIDER_ID';
+      record.chargeError = 'PENDING_CO_SIGN';
+      warnings.push(signature.reason);
     } else {
-      const payloads = clinicalRepo.buildChargePayloads(record, { providerId });
-      const posted = [];
-      try {
-        for (const payload of payloads) {
-          const row = await ctx.emr.postCharge(ctx.client.openEmrPatientId, ctx.encounterUuid, payload);
-          posted.push({ id: row && row.id != null ? String(row.id) : null, code: payload.code, codeType: payload.code_type });
-        }
-        record.chargesPosted = true;
-        record.chargeError = null;
-        record.postedCharges = posted;
-        record.chargesPostedAt = new Date().toISOString();
-      } catch (e) {
-        // Partial posts are recorded so a re-post does not double-bill.
-        record.chargesPosted = false;
-        record.chargeError = e.message.slice(0, 300);
-        record.postedCharges = posted;
-        warnings.push(`Charges did not post to Billing Manager (${e.message.slice(0, 140)}). The encounter is signed; use Re-post charges once the cause is fixed.${posted.length ? ` ${posted.length} of ${payloads.length} line(s) did post — a re-post skips those.` : ''}`);
-      }
+      await postEncounterCharges({ emr: ctx.emr, client: ctx.client, encounterUuid: ctx.encounterUuid, record, warnings, signedBy: attestation.signedBy });
+      record.coSignStatus = 'not_required';
     }
     const syncWarning = await syncStructuredNote(ctx.emr, ctx.client, record);
     if (syncWarning) warnings.push(syncWarning);
@@ -9394,10 +9768,235 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
       diagnoses: attestation.diagnosisCodes, services: attestation.serviceCodes,
       chargesPosted: !!record.chargesPosted, postedChargeIds: (record.postedCharges || []).map(c => c.id), chargeError: record.chargeError || null
     });
-    res.json({ message: record.chargesPosted ? 'Encounter signed and closed; charges posted' : 'Encounter signed and closed', attestation, record, state: 'signed', chargesPosted: !!record.chargesPosted, postedCharges: record.postedCharges || [], warnings });
+    res.json({
+      message: record.coSignStatus === 'pending'
+        ? 'Encounter signed and held for co-signature — no charge posts until an LCSW or provider co-signs'
+        : (record.chargesPosted ? 'Encounter signed and closed; charges posted' : 'Encounter signed and closed'),
+      attestation, record, state: 'signed',
+      coSignStatus: record.coSignStatus || 'not_required',
+      billable: record.coSignStatus !== 'pending',
+      chargesPosted: !!record.chargesPosted, postedCharges: record.postedCharges || [], warnings
+    });
   } catch (error) {
     console.error('Encounter sign error:', error);
     res.status(502).json({ error: `Sign failed: ${error.message}` });
+  }
+});
+
+// ── Encounter co-signature (Session 4.8) ─────────────────────────────────
+// An LMSW documents and attests; nothing bills until a supervising credential
+// co-signs. The CO-SIGNER becomes the rendering provider on the charge, which
+// is the point of the co-signature — the claim names the person certified to
+// render the service (spec §2.5, billing spec §4 item 4).
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/co-sign', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res, { createRecord: false });
+    if (!ctx) return;
+    if (!ctx.record) return res.status(404).json({ error: 'No encounter record', code: 'ENCOUNTER_NOT_FOUND' });
+    if (ctx.record.coSignStatus !== 'pending') {
+      return res.status(409).json({ error: 'This encounter is not waiting on a co-signature', code: 'ENCOUNTER_NOT_PENDING_CO_SIGN' });
+    }
+    if (!clinicalRoles.canCoSignEncounter(req.user)) {
+      return res.status(403).json({ error: 'A co-signature is provided by an LCSW or a provider', code: 'CO_SIGN_CREDENTIAL', clinicalRole: clinicalRoles.resolveClinicalRole(req.user) });
+    }
+    // The signer cannot clear their own hold. An LMSW cannot reach this route
+    // at all, so this guards the case a future role change creates rather than
+    // one that exists today — a co-signature that can be self-issued is not a
+    // co-signature.
+    if (ctx.attestation && ctx.attestation.signedBy && ctx.attestation.signedBy.id === req.user.id) {
+      return res.status(409).json({ error: 'A co-signature comes from someone other than the clinician who signed', code: 'CO_SIGN_SELF' });
+    }
+    if (!(req.body || {}).attest) return res.status(400).json({ error: 'You must confirm the attestation statement to co-sign', code: 'SIGN_NO_ATTEST' });
+    // The co-signer's own certification must match what is being billed.
+    const badCodes = clinicalRoles.disallowedServiceCodesFor(req.user, ctx.record.services || []);
+    if (badCodes.length) {
+      return res.status(403).json({ error: clinicalRoles.serviceCodeRefusal(req.user, badCodes), code: 'CLINICAL_CODE_SET', codes: badCodes });
+    }
+    const now = new Date().toISOString();
+    const coSigner = clinicalRepo.actorRecord(actorFromReq(req));
+    const warnings = [];
+    const record = {
+      ...ctx.record,
+      coSignStatus: 'cleared',
+      coSignedAt: now,
+      coSignedBy: { ...coSigner, clinicalRole: clinicalRoles.resolveClinicalRole(req.user) },
+      // The co-signer is the rendering provider: they carry the certification
+      // the claim asserts. The documenting clinician stays on the attestation.
+      renderingProvider: coSigner,
+      renderingProviderClinicalRole: clinicalRoles.resolveClinicalRole(req.user),
+      updatedAt: now
+    };
+    await postEncounterCharges({ emr: ctx.emr, client: ctx.client, encounterUuid: ctx.encounterUuid, record, warnings, signedBy: coSigner });
+    const syncWarning = await syncStructuredNote(ctx.emr, ctx.client, record);
+    if (syncWarning) warnings.push(syncWarning);
+    await saveBillingRecord(ctx.rows, record);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'encounter_co_signed', 'client', ctx.client.id, {
+      encounterUuid: ctx.encounterUuid,
+      signedByUserId: ctx.attestation && ctx.attestation.signedBy ? ctx.attestation.signedBy.id : null,
+      coSignedByClinicalRole: record.renderingProviderClinicalRole,
+      services: (record.services || []).map(x => x.code),
+      chargesPosted: !!record.chargesPosted, chargeError: record.chargeError || null
+    });
+    res.json({ message: record.chargesPosted ? 'Encounter co-signed; charges posted' : 'Encounter co-signed', record, coSignStatus: 'cleared', billable: true, chargesPosted: !!record.chargesPosted, warnings });
+  } catch (error) {
+    console.error('Encounter co-sign error:', error);
+    res.status(502).json({ error: `Co-sign failed: ${error.message}` });
+  }
+});
+
+// ── Standing orders (Session 4.8, Scope C) ───────────────────────────────
+// A standing order is a clinical DOCUMENT, not a permission flag: authored and
+// signed by a provider, versioned immutably, expiring, and naming both the
+// tests it permits and the credentials that may act on it. The rules live in
+// standingOrders.js and are enforced there, never in the UI.
+//
+// The SIGNATURE IMAGE never leaves the server. The same rule the care plan
+// follows: a list returns signedAt, not the drawing.
+const publicStandingOrder = (o, at) => {
+  if (!o) return null;
+  const { signatureImage, ...rest } = o;
+  return { ...rest, effectiveStatus: standingOrders.effectiveStatus(o, at), signed: !!o.signedAt };
+};
+app.get('/api/clinical/standing-orders', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const rows = await loadRows('standing_orders');
+    const now = new Date().toISOString();
+    const wantExecutable = String(req.query.executable || '') === 'true';
+    const myRole = clinicalRoles.resolveClinicalRole(req.user);
+    let list = rows.map(o => publicStandingOrder(o, now));
+    if (wantExecutable) {
+      // "What may I actually act on" — the protocol must be active AND name my
+      // role AND its permitted types must sit inside my credential ceiling.
+      // A protocol I can see but never execute is listed with its reason
+      // rather than hidden: a hidden row reads as "no protocol exists".
+      list = list
+        .filter(o => o.effectiveStatus === standingOrders.EXECUTABLE_STATUS)
+        .map(o => {
+          const roleOk = (o.permittedExecutorRoles || []).includes(myRole);
+          const ceiling = clinicalRoles.withinCredentialCeiling(myRole, o.permittedOrderTypes || []);
+          return {
+            ...o,
+            executableByMe: roleOk && ceiling.ok,
+            // Only the types BOTH the protocol and my licence allow.
+            executableOrderTypes: roleOk ? (o.permittedOrderTypes || []).filter(t => ceiling.allowed.includes(t)) : [],
+            notExecutableReason: roleOk
+              ? (ceiling.ok ? null : `Your ${myRole} licence permits ${ceiling.allowed.join(', ') || 'no'} orders under a standing order; this protocol permits ${(o.permittedOrderTypes || []).join(', ')}.`)
+              : `This protocol authorises ${(o.permittedExecutorRoles || []).join(', ') || 'nobody'} to act on it.`
+          };
+        });
+    }
+    res.json({ standingOrders: list, orderTypes: clinicalRoles.STANDING_ORDER_TYPES, executorRoles: standingOrders.EXECUTOR_ROLES, myClinicalRole: myRole, myCeiling: clinicalRoles.ceilingFor(req.user) });
+  } catch (error) {
+    console.error('Standing order list error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+app.get('/api/clinical/standing-orders/:id', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const rows = await loadRows('standing_orders');
+    const row = rows.find(o => o && o.id === req.params.id);
+    if (!row) return res.status(404).json({ error: 'Standing order not found', code: 'STANDING_ORDER_NOT_FOUND' });
+    const executions = (await loadRows('standing_order_executions')).filter(e => e && e.standingOrderId === row.id);
+    res.json({
+      standingOrder: publicStandingOrder(row, new Date().toISOString()),
+      // The version lineage, so "which version was this executed under" is
+      // answerable from the document rather than from the order rows alone.
+      versions: rows.filter(o => (o.lineageId || o.id) === (row.lineageId || row.id))
+        .sort((a, b) => a.version - b.version).map(o => ({ id: o.id, version: o.version, status: o.status, signedAt: o.signedAt, supersedesVersionId: o.supersedesVersionId })),
+      executionCount: executions.length
+    });
+  } catch (error) {
+    console.error('Standing order read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+app.post('/api/clinical/standing-orders', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.AUTHOR_STANDING_ORDER), async (req, res) => {
+  try {
+    const built = standingOrders.buildStandingOrder({ id: uuidv4(), input: req.body, author: actorFromReq(req) });
+    if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+    // A protocol whose permitted types sit outside a named executor's ceiling
+    // is FLAGGED AT AUTHORING — it is still refused at execution, because the
+    // ceiling is the control and a warning is not. Flagging it here is so the
+    // provider finds out now rather than when a nurse is standing in a kitchen.
+    const warnings = [];
+    for (const r of built.standingOrder.permittedExecutorRoles) {
+      const ceiling = clinicalRoles.withinCredentialCeiling(r, built.standingOrder.permittedOrderTypes);
+      if (!ceiling.ok) warnings.push(`An ${r} may execute ${ceiling.allowed.join(', ') || 'no'} orders under a standing order, so ${ceiling.outside.join(', ')} on this protocol will be refused for them at execution. A signed protocol cannot extend a licence.`);
+    }
+    const rows = await loadRows('standing_orders');
+    rows.push(built.standingOrder);
+    await db.set('standing_orders', rows);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'standing_order_authored', 'standing_order', built.standingOrder.id, {
+      title: built.standingOrder.title, version: built.standingOrder.version, status: built.standingOrder.status,
+      permittedOrderTypes: built.standingOrder.permittedOrderTypes, permittedExecutorRoles: built.standingOrder.permittedExecutorRoles,
+      expiresAt: built.standingOrder.expiresAt
+    });
+    res.json({ message: `Standing order "${built.standingOrder.title}" saved as ${built.standingOrder.status}`, standingOrder: publicStandingOrder(built.standingOrder), warnings });
+  } catch (error) {
+    console.error('Standing order create error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+// A revision is a NEW ROW at version n+1. The superseded row is retired, never
+// rewritten — an order executed under v2 references v2 forever.
+app.post('/api/clinical/standing-orders/:id/revise', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.AUTHOR_STANDING_ORDER), async (req, res) => {
+  try {
+    const rows = await loadRows('standing_orders');
+    const idx = rows.findIndex(o => o && o.id === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: 'Standing order not found', code: 'STANDING_ORDER_NOT_FOUND' });
+    const built = standingOrders.buildStandingOrder({ id: uuidv4(), input: req.body, author: actorFromReq(req), existing: rows[idx] });
+    if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+    const now = built.standingOrder.createdAt;
+    rows[idx] = { ...rows[idx], status: 'retired', supersededByVersionId: built.standingOrder.id, updatedAt: now };
+    rows.push(built.standingOrder);
+    await db.set('standing_orders', rows);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'standing_order_revised', 'standing_order', built.standingOrder.id, {
+      title: built.standingOrder.title, version: built.standingOrder.version, supersedes: req.params.id
+    });
+    res.json({ message: `Standing order revised to v${built.standingOrder.version}`, standingOrder: publicStandingOrder(built.standingOrder), supersededId: req.params.id });
+  } catch (error) {
+    console.error('Standing order revise error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+app.post('/api/clinical/standing-orders/:id/status', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.AUTHOR_STANDING_ORDER), async (req, res) => {
+  try {
+    const rows = await loadRows('standing_orders');
+    const idx = rows.findIndex(o => o && o.id === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: 'Standing order not found', code: 'STANDING_ORDER_NOT_FOUND' });
+    const next = standingOrders.setStandingOrderStatus(rows[idx], String((req.body || {}).status || ''), actorFromReq(req));
+    if (next.error) return res.status(next.code === 'STANDING_ORDER_NOT_PROVIDER' ? 403 : 409).json({ error: next.error, code: next.code });
+    rows[idx] = next.standingOrder;
+    await db.set('standing_orders', rows);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'standing_order_status', 'standing_order', rows[idx].id, { status: rows[idx].status, version: rows[idx].version });
+    res.json({ message: `Standing order ${rows[idx].status}`, standingOrder: publicStandingOrder(rows[idx]) });
+  } catch (error) {
+    console.error('Standing order status error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+// Clearing a pending co-signature on an order executed under a protocol that
+// requires one. The clinical inbox that will QUEUE these is out of scope for
+// this session — the field exists and this is what clears it, so it is not a
+// number stored and left inert.
+app.post('/api/clinical/orders/:orderId/co-sign', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const rows = await loadRows('clinical_orders');
+    const idx = rows.findIndex(o => o && o.id === req.params.orderId);
+    if (idx === -1) return res.status(404).json({ error: 'Order not found', code: 'ORDER_NOT_FOUND' });
+    const next = standingOrders.applyOrderCoSign(rows[idx], actorFromReq(req));
+    if (next.error) return res.status(next.code === 'CO_SIGN_CREDENTIAL' ? 403 : 409).json({ error: next.error, code: next.code });
+    rows[idx] = next.order;
+    await db.set('clinical_orders', rows);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'order_co_signed', 'client', next.order.clientId, {
+      orderId: next.order.id, encounterUuid: next.order.encounterUuid,
+      standingOrderId: next.order.standingOrder ? next.order.standingOrder.id : null,
+      standingOrderVersion: next.order.standingOrder ? next.order.standingOrder.version : null
+    });
+    res.json({ message: 'Order co-signed', order: next.order });
+  } catch (error) {
+    console.error('Order co-sign error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -17572,6 +18171,11 @@ app.listen(PORT, () => {
       await migrateAnnouncementTemplateChrome();
     } catch (err) {
       console.error('Announcement chrome migration failed (non-fatal):', err.message);
+    }
+    try {
+      await migrateClinicalRoles();
+    } catch (err) {
+      console.error('Clinical-role migration failed (non-fatal):', err.message);
     }
   })();
 
