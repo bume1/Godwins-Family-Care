@@ -704,3 +704,50 @@ test('REPAIR: --apply actually moves the rows, and a re-run is a no-op', async (
   assert.strictEqual((await db.get('messages')).length, 2, 'a re-run removes nothing further');
   assert.strictEqual((await db.get('quarantined_messages')).length, 1, 'and quarantines nothing twice');
 });
+
+
+// ===========================================================================
+// The blurb a viewer is shown is in THEIR voice
+// ===========================================================================
+
+test('a channel describes the OTHER person, never the viewer as somebody else', () => {
+  // OWNER REPORT, 2026-09-14: a caregiver opening Direct was told the thread
+  // was "You and the caregiver working with you." Every blurb had been written
+  // from the client's side, so on the one channel whose whole point is that
+  // there are exactly two people in it, the viewer was described as the person
+  // who is not them.
+  const m = require('../messagingRepository');
+
+  assert.match(m.blurbFor('direct_care', m.ROLE.CLIENT), /the caregiver working with you/);
+  assert.match(m.blurbFor('direct_care', m.ROLE.CAREGIVER), /the client you are working with/);
+  assert.doesNotMatch(m.blurbFor('direct_care', m.ROLE.CAREGIVER), /the caregiver working with you/);
+
+  assert.match(m.blurbFor('family_portal', m.ROLE.CAREGIVER), /family/i);
+  assert.doesNotMatch(m.blurbFor('family_portal', m.ROLE.CAREGIVER), /your relative/);
+
+  assert.match(m.blurbFor('care_coordination', m.ROLE.CASE_MANAGER), /whose care you coordinate/);
+});
+
+test('every channel resolves a blurb for every role that can be in it', () => {
+  const m = require('../messagingRepository');
+  for (const id of m.CHANNEL_IDS) {
+    for (const role of m.CHANNELS[id].participants) {
+      const blurb = m.blurbFor(id, role);
+      assert.ok(blurb && blurb.length > 5, `${id} has a blurb for ${role}`);
+    }
+    assert.ok(m.blurbFor(id, null), `${id} still has a default`);
+  }
+  assert.strictEqual(m.blurbFor('not-a-channel', m.ROLE.CLIENT), null);
+});
+
+test('the channel list serves the blurb in the CALLER\'s voice, not the default', () => {
+  // The resolver is only worth having if the serving function uses it. The
+  // first version of this change resolved per role in a helper the route never
+  // called, which is a fix that changes nothing on the screen.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'messagingRepository.js'), 'utf8');
+  const start = src.indexOf('function channelsFor(');
+  assert.ok(start > 0);
+  const body = src.slice(start, src.indexOf('\n}', start));
+  assert.match(body, /blurb: blurbFor\(id, role\)/,
+    'serving CHANNELS[id].blurb directly hands every viewer the client\'s wording');
+});

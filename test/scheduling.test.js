@@ -425,6 +425,32 @@ const componentSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'compo
 const serverSrc = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 const caregiverPageSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'caregiver.html'), 'utf8');
 
+test('the schedule component is mounted ONCE per visit, not on every parent render', () => {
+  // OWNER REPORT, 2026-09-14: the Schedule tab flickered and sat on
+  // "Loading…" forever. `onVisitLogRequired` is an inline arrow in the parent,
+  // so it is a new function identity on every App render; with it in the
+  // effect's dependency array React tore the component down and remounted it
+  // each time — and the component calls `onChange` as soon as its first fetch
+  // resolves, which sets App state, which renders, which remounts it. A loop.
+  //
+  // The rule: the mount effect may depend only on values with a stable
+  // identity. Callbacks are read from a ref at call time.
+  const start = caregiverPageSrc.indexOf('const ScheduleTab =');
+  assert.ok(start > 0, 'ScheduleTab exists');
+  const body = caregiverPageSrc.slice(start, caregiverPageSrc.indexOf('\nconst ', start + 10));
+
+  const deps = body.match(/\}, \[([^\]]*)\]\);/);
+  assert.ok(deps, 'the mount effect declares its dependencies');
+  const listed = deps[1].split(',').map(d => d.trim()).filter(Boolean);
+  for (const dep of listed) {
+    assert.ok(!/^on[A-Z]/.test(dep),
+      `ScheduleTab must not depend on the callback prop "${dep}" — a new arrow each render remounts the component in a loop`);
+    assert.notStrictEqual(dep, 'me',
+      'setMe hands back a new object, so depending on it remounts the component too');
+  }
+  assert.match(body, /useRef\(/, 'the callbacks are held in a ref and read at call time');
+});
+
 test('SAFETY: PHCP scheduling never touches OpenEMR — two systems by design', () => {
   for (const [label, src] of [['routes/scheduling.js', routeSrc], ['schedulingRepository.js', repoSrc], ['caregiver-schedule.js', componentSrc]]) {
     assert.ok(!/require\(\s*['"][./]*openemr['"]\s*\)/i.test(src), `${label} must not require the EMR client`);
