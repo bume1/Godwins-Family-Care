@@ -28,7 +28,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 const express = require('express');
-const { PDFDocument } = require('pdf-lib');
+const { PDFDocument, PDFName, PDFString, StandardFonts } = require('pdf-lib');
 
 const wp = require('../welcomePacketRepository');
 const gate = require('../caregiverOnboardingGate');
@@ -381,6 +381,128 @@ test('a FLATTENED packet is read by label — text only, and never a tick box', 
   // ticked. A wrongly inferred answer gets signed; a blank one gets asked.
   assert.strictEqual(result.values.maxCommute, undefined);
   assert.strictEqual(result.values.certifications, undefined);
+});
+
+/**
+ * A packet somebody typed on with a markup tool (Preview's "Add text",
+ * Acrobat's typewriter) and sent back WITHOUT flattening. The answer is an
+ * annotation, not page content — its own list, its own position.
+ *
+ * `mode` picks where the producer put the text: 'contents' is the annotation's
+ * own plain text (what a markup tool writes), 'appearance' is the little
+ * drawing a viewer shows. Both exist in the wild and they are read differently.
+ */
+const packetWithMarkup = async (labelPattern, value, mode) => {
+  const blank = await packetPdf.generateFillableWelcomePacketPDF({});
+  const pdf = await PDFDocument.load(blank);
+  pdf.getForm().flatten();
+
+  // Placed under the printed label, the way somebody dragging a text box would.
+  const runs = await packetImport.extractRuns(pdf);
+  const label = runs.find(r => labelPattern.test(r.text));
+  assert.ok(label, `the packet prints a ${labelPattern} label to sit under`);
+  const page = pdf.getPages()[label.page];
+  const top = page.getHeight() - (label.y + 12);
+  const rect = [label.x, top - 16, label.x + 180, top];
+
+  const fields = { Type: 'Annot', Subtype: 'FreeText', Rect: rect, F: 4 };
+  if (mode === 'contents') {
+    fields.Contents = PDFString.of(value);
+  } else {
+    const font = await pdf.embedFont(StandardFonts.Helvetica);
+    const appearance = pdf.context.flateStream(`/Helv 9 Tf 0 g BT 2 4 Td (${value}) Tj ET`, {
+      Type: 'XObject', Subtype: 'Form', BBox: [0, 0, 180, 16],
+      Resources: pdf.context.obj({ Font: pdf.context.obj({ Helv: font.ref }) })
+    });
+    fields.AP = pdf.context.obj({ N: pdf.context.register(appearance) });
+  }
+  page.node.set(PDFName.of('Annots'),
+    pdf.context.obj([pdf.context.register(pdf.context.obj(fields))]));
+  return Buffer.from(await pdf.save());
+};
+
+test('a packet TYPED ON with a markup tool is read, not reported blank', async () => {
+  // Somebody who types with Preview does not write into the page — the answer
+  // goes into an annotation, in its own list with its own position. A parser
+  // that reads only page content sees a blank form and reports it as one, which
+  // is the same wrong answer as reading a flattened PDF without descending into
+  // its XObjects, one layer along.
+  const bytes = await packetWithMarkup(/FIRST NAME/i, 'Ada', 'contents');
+  const result = await packetImport.extractPacket(bytes);
+  assert.strictEqual(result.source, 'text');
+  assert.strictEqual(result.values.firstName, 'Ada');
+  assert.strictEqual(result.needsConfirmation, true, 'matched off the page, so it wants checking');
+});
+
+test('a markup answer stored only as its drawing is read too', async () => {
+  // Some producers write the appearance stream and no /Contents. The stream
+  // draws at its OWN coordinates, so it has to be placed into the annotation's
+  // rectangle before the position means anything — otherwise every typed answer
+  // lands in one pile at the corner of the page and matches nothing.
+  const bytes = await packetWithMarkup(/HOME ZIP CODE/i, '30339', 'appearance');
+  const result = await packetImport.extractPacket(bytes);
+  assert.strictEqual(result.source, 'text');
+  assert.strictEqual(result.values.homeZip, '30339');
+});
+
+test('a TALL markup box is read from its top line, not its bottom edge', async () => {
+  // Somebody typing a paragraph drags a big box. Its text starts at the TOP,
+  // level with the label it sits under; its bottom edge can be a long way down
+  // the page. Measuring from the bottom puts the answer further from its label
+  // than the matcher will reach, and a paragraph somebody wrote is dropped.
+  const blank = await packetPdf.generateFillableWelcomePacketPDF({});
+  const pdf = await PDFDocument.load(blank);
+  pdf.getForm().flatten();
+  const runs = await packetImport.extractRuns(pdf);
+  const label = runs.find(r => /IN YOUR OWN WORDS/i.test(r.text));
+  assert.ok(label, 'the packet asks for it');
+  const page = pdf.getPages()[label.page];
+  const top = page.getHeight() - (label.y + 12);
+  const TALL = 150;
+  const answer = 'I have looked after people at home for seven years and I like the quiet work.';
+  page.node.set(PDFName.of('Annots'), pdf.context.obj([
+    pdf.context.register(pdf.context.obj({
+      Type: 'Annot', Subtype: 'FreeText',
+      Rect: [label.x, top - TALL, label.x + 400, top],
+      Contents: PDFString.of(answer), F: 4
+    }))
+  ]));
+  const result = await packetImport.extractPacket(Buffer.from(await pdf.save()));
+  assert.strictEqual(result.values.ownWords, answer);
+});
+
+test('a link annotation is never read as an answer', async () => {
+  // A link's /Contents is its alt text and a popup repeats its parent's note.
+  // Reading either would put the form's own furniture into somebody's profile.
+  const blank = await packetPdf.generateFillableWelcomePacketPDF({});
+  const pdf = await PDFDocument.load(blank);
+  pdf.getForm().flatten();
+  const runs = await packetImport.extractRuns(pdf);
+  const label = runs.find(r => /FIRST NAME/i.test(r.text));
+  const page = pdf.getPages()[label.page];
+  const top = page.getHeight() - (label.y + 12);
+  page.node.set(PDFName.of('Annots'), pdf.context.obj([
+    pdf.context.register(pdf.context.obj({
+      Type: 'Annot', Subtype: 'Link',
+      Rect: [label.x, top - 16, label.x + 180, top],
+      Contents: PDFString.of('Ada')
+    }))
+  ]));
+  const result = await packetImport.extractPacket(Buffer.from(await pdf.save()));
+  assert.strictEqual(result.values.firstName, undefined);
+});
+
+test('the appearance placement maps a stream onto its own rectangle', () => {
+  // The transform in PDF 32000-1 §12.5.5, on its own: a 0,0-based 100x20 box
+  // asked to land at (300, 500) must be moved there and left unscaled.
+  const placement = packetImport.appearancePlacement(
+    { x1: 0, y1: 0, x2: 100, y2: 20 }, null, { x1: 300, y1: 500, x2: 400, y2: 520 });
+  assert.deepStrictEqual(placement, [1, 0, 0, 1, 300, 500]);
+
+  // And one asked to land in half the space is scaled to fit it.
+  const halved = packetImport.appearancePlacement(
+    { x1: 0, y1: 0, x2: 100, y2: 20 }, null, { x1: 0, y1: 0, x2: 50, y2: 20 });
+  assert.strictEqual(halved[0], 0.5);
 });
 
 test('the label reader never mistakes the form\'s own furniture for an answer', async () => {

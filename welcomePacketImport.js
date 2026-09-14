@@ -31,7 +31,7 @@
 'use strict';
 
 const zlib = require('zlib');
-const { PDFDocument, PDFRawStream, PDFName, PDFArray, decodePDFRawStream } = require('pdf-lib');
+const { PDFDocument, PDFRawStream, PDFName, PDFArray, PDFString, PDFHexString, decodePDFRawStream } = require('pdf-lib');
 const wp = require('./welcomePacketRepository');
 const pdfNames = require('./welcomePacketPdf');
 
@@ -438,6 +438,168 @@ function xObjectResolver(resources, context) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// ANNOTATIONS — the third place a filled-in answer can hide.
+// ---------------------------------------------------------------------------
+// Somebody who types onto the packet with Preview's markup tools, or Acrobat's
+// "Add text", does NOT write into the page. They add an annotation, which lives
+// in its own list with its own position and its own little drawing. A parser
+// that reads only the page content sees a blank form and reports it as one —
+// which is the same wrong answer as reading a flattened PDF without descending
+// into its XObjects, one layer along.
+//
+// Two ways to get the text out, and the cheap one is also the reliable one:
+//
+//   /Contents — the annotation's own plain text. This is what a markup tool
+//               stores when somebody types, so it needs no parsing at all.
+//   /AP /N    — the drawing the viewer actually shows. Parsed only when there
+//               is no /Contents, for producers that write one and not the other.
+//
+// A LINK OR A POPUP IS NOT AN ANSWER and is skipped by subtype: a link's
+// /Contents is its alt text, and a popup repeats its parent's note. Reading
+// either would put the form's own furniture into somebody's profile.
+
+const SKIP_ANNOT_SUBTYPES = new Set(['/Link', '/Popup', '/FileAttachment', '/Sound', '/Movie']);
+
+const textOfPdfString = (obj) => {
+  if (!obj) return '';
+  if (obj instanceof PDFString || obj instanceof PDFHexString) {
+    try { return obj.decodeText(); } catch (e) { return ''; }
+  }
+  return '';
+};
+
+const rectOf = (dict, context) => {
+  try {
+    const raw = dict.get(PDFName.of('Rect'));
+    const arr = context.lookup(raw);
+    if (!(arr instanceof PDFArray) || arr.size() < 4) return null;
+    const n = [0, 1, 2, 3].map(i => {
+      const v = context.lookup(arr.get(i));
+      return v && v.asNumber ? v.asNumber() : Number(v);
+    });
+    if (!n.every(Number.isFinite)) return null;
+    return {
+      x1: Math.min(n[0], n[2]), y1: Math.min(n[1], n[3]),
+      x2: Math.max(n[0], n[2]), y2: Math.max(n[1], n[3])
+    };
+  } catch (e) { return null; }
+};
+
+/**
+ * The transform that places an appearance stream inside its annotation's
+ * rectangle (PDF 32000-1 §12.5.5): transform the stream's BBox by its Matrix,
+ * then map that box onto Rect. Without it the stream draws at its own
+ * coordinates, which for most producers is the bottom-left corner of the page —
+ * so every typed answer would land in one pile and match nothing.
+ */
+function appearancePlacement(bbox, matrix, rect) {
+  const m = matrix || IDENTITY;
+  const corners = [
+    [bbox.x1, bbox.y1], [bbox.x2, bbox.y1], [bbox.x2, bbox.y2], [bbox.x1, bbox.y2]
+  ].map(([x, y]) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]);
+  const xs = corners.map(c => c[0]), ys = corners.map(c => c[1]);
+  const bx1 = Math.min(...xs), bx2 = Math.max(...xs);
+  const by1 = Math.min(...ys), by2 = Math.max(...ys);
+  const sx = (bx2 - bx1) > 1e-6 ? (rect.x2 - rect.x1) / (bx2 - bx1) : 1;
+  const sy = (by2 - by1) > 1e-6 ? (rect.y2 - rect.y1) / (by2 - by1) : 1;
+  return [sx, 0, 0, sy, rect.x1 - bx1 * sx, rect.y1 - by1 * sy];
+}
+
+/** The appearance stream a viewer would actually draw, if there is one. */
+function appearanceStreamRef(dict, context) {
+  try {
+    const ap = context.lookup(dict.get(PDFName.of('AP')));
+    if (!ap || !ap.get) return null;
+    let normal = ap.get(PDFName.of('N'));
+    if (!normal) return null;
+    let resolved = context.lookup(normal);
+    // A checkbox's /N is a dictionary of appearance states keyed by /On, /Off.
+    // The one to draw is named by /AS; without that there is nothing to pick.
+    if (resolved && !(resolved instanceof PDFRawStream) && resolved.get) {
+      const stateName = dict.get(PDFName.of('AS'));
+      if (!stateName || !stateName.asString) return null;
+      normal = resolved.get(PDFName.of(stateName.asString().replace(/^\//, '')));
+      if (!normal) return null;
+      resolved = context.lookup(normal);
+    }
+    return (resolved instanceof PDFRawStream) ? { ref: normal, stream: resolved } : null;
+  } catch (e) { return null; }
+}
+
+function annotationRuns(pageNode, context, pageHeight) {
+  const runs = [];
+  let annots;
+  try {
+    annots = context.lookup(pageNode.get(PDFName.of('Annots')));
+  } catch (e) { return runs; }
+  if (!(annots instanceof PDFArray)) return runs;
+
+  for (let i = 0; i < annots.size(); i++) {
+    try {
+      const dict = context.lookup(annots.get(i));
+      if (!dict || !dict.get) continue;
+      const subtype = dict.get(PDFName.of('Subtype'));
+      const subtypeName = subtype && subtype.asString ? subtype.asString() : '';
+      if (SKIP_ANNOT_SUBTYPES.has(subtypeName)) continue;
+
+      const rect = rectOf(dict, context);
+      if (!rect) continue;
+
+      // The typed text itself, where the producer stored it.
+      const typed = textOfPdfString(context.lookup(dict.get(PDFName.of('Contents'))));
+      if (typed.trim()) {
+        runs.push({
+          text: typed.replace(/\s+/g, ' ').trim(),
+          x: rect.x1,
+          // Flipped into the page-down space every other run uses, measured at
+          // the TOP of the box: a text annotation's first line starts there, and
+          // matching against a label is a question about where the line sits.
+          y: pageHeight - rect.y2,
+          size: Math.max(6, Math.min(24, rect.y2 - rect.y1))
+        });
+        continue;
+      }
+
+      // Otherwise, whatever the viewer draws.
+      const appearance = appearanceStreamRef(dict, context);
+      if (!appearance) continue;
+      const content = decodeStream(context, appearance.ref);
+      if (!content) continue;
+
+      const dictOf = appearance.stream.dict;
+      const bboxArr = context.lookup(dictOf.get(PDFName.of('BBox')));
+      let bbox = { x1: 0, y1: 0, x2: rect.x2 - rect.x1, y2: rect.y2 - rect.y1 };
+      if (bboxArr instanceof PDFArray && bboxArr.size() >= 4) {
+        const n = [0, 1, 2, 3].map(k => {
+          const v = context.lookup(bboxArr.get(k));
+          return v && v.asNumber ? v.asNumber() : Number(v);
+        });
+        if (n.every(Number.isFinite)) {
+          bbox = { x1: Math.min(n[0], n[2]), y1: Math.min(n[1], n[3]), x2: Math.max(n[0], n[2]), y2: Math.max(n[1], n[3]) };
+        }
+      }
+      let matrix = null;
+      const matrixArr = context.lookup(dictOf.get(PDFName.of('Matrix')));
+      if (matrixArr instanceof PDFArray && matrixArr.size() === 6) {
+        const n = [0, 1, 2, 3, 4, 5].map(k => {
+          const v = context.lookup(matrixArr.get(k));
+          return v && v.asNumber ? v.asNumber() : Number(v);
+        });
+        if (n.every(Number.isFinite)) matrix = n;
+      }
+
+      const own = context.lookup(dictOf.get(PDFName.of('Resources')));
+      const placement = appearancePlacement(bbox, matrix, rect);
+      const ctm = matrix ? mul(matrix, placement) : placement;
+      for (const run of runsFromContent(content, fontMapsForResources(own, context), pageHeight, {
+        resolveXObject: xObjectResolver(own, context), ctm, depth: 1
+      })) runs.push(run);
+    } catch (e) { /* one unreadable annotation is not the whole page */ }
+  }
+  return runs;
+}
+
 async function extractRuns(pdf) {
   const runs = [];
   pdf.getPages().forEach((page, pageIndex) => {
@@ -450,6 +612,11 @@ async function extractRuns(pdf) {
       resolveXObject: xObjectResolver(resources, pdf.context)
     });
     for (const run of found) runs.push({ ...run, page: pageIndex });
+    // Annotations come AFTER the page content, so a typed answer sorts below
+    // its printed label when the two share a baseline.
+    for (const run of annotationRuns(page.node, pdf.context, height)) {
+      runs.push({ ...run, page: pageIndex });
+    }
   });
   return runs;
 }
@@ -685,6 +852,8 @@ module.exports = {
   extractPacket,
   // Exported for the tests, which drive the halves independently.
   readFormFields,
+  annotationRuns,
+  appearancePlacement,
   extractRuns,
   extractLines,
   groupIntoLines,

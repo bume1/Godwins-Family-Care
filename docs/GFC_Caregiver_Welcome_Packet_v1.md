@@ -92,6 +92,16 @@ hold before a candidate is accepted as an answer: it sits with the label geometr
 something the form itself prints, and it does not repeat. Anything that fails is left blank and
 asked.
 
+An answer can be in any of **three places** in the file, and all three are read: the page content;
+a form XObject (what a flattened PDF draws its filled values into); and an **annotation**, which is
+where a markup tool puts text somebody typed without flattening — Preview's "Add text", Acrobat's
+typewriter. Each is a separate list in the file, so a parser that reads only the first sees a blank
+form and reports it as one. An annotation's text is taken from its own `/Contents` where the
+producer stored it there, and otherwise parsed out of the drawing the viewer shows, placed into the
+annotation's rectangle first (PDF 32000-1 §12.5.5) — the stream draws at its own coordinates, so
+without that every typed answer lands in one pile at the corner of the page and matches nothing.
+Links and popups are skipped by subtype: a link's `/Contents` is its alt text.
+
 **The text path fills text and never choices.** An option label printed on the page is evidence
 the *question* is there, never evidence that box was the one ticked — every option sits next to
 every other one on a printed form. A wrongly inferred "willing to drive clients" is worse than a
@@ -125,7 +135,7 @@ nearly every request and rewritten whole on every write.
 
 ## Verifying it
 
-- `node --test test/welcome_packet.test.js` — 49 tests, 19 of 20 mutations confirmed to fail them
+- `node --test test/welcome_packet.test.js` — 53 tests; 19 of 20 mutations on the first pass and 6 of 6 on the annotation pass confirmed to fail them
   (the twentieth is recorded in the code as behaviour-neutral rather than claimed as a catch)
 - `node scripts/verify_welcome_packet.js` — 42 assertions through the real routers over HTTP,
   reading stored values back: shut app → import → sign → app opens → claim refused → override with
