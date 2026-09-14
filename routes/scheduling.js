@@ -22,6 +22,8 @@
 const express = require('express');
 const { contentDisposition } = require('../contentDisposition');
 const sched = require('../schedulingRepository');
+const wpRepo = require('../welcomePacketRepository');
+const onboardingGate = require('../caregiverOnboardingGate');
 const cg = require('../caregiverRepository');
 const gate = require('../enrollmentGate');
 
@@ -30,6 +32,32 @@ module.exports = function createSchedulingRoutes(deps) {
   const router = express.Router();
 
   const ROLES = config.ROLES;
+
+  // ---- THE CAREGIVER CLEARANCE GATE (2026-09-13) --------------------------
+  // Georgia requires a caregiver to be fully cleared before working in a
+  // client's home, so committing one to a shift checks it. The rule lives in
+  // caregiverOnboardingGate.js — this is the only place scheduling reads it,
+  // and it reads it rather than restating it, for the same reason the client
+  // enrollment gate is one module: a gate written twice disagrees with itself.
+  //
+  // IT GATES COMMITTING A CAREGIVER, never finishing work already in flight.
+  // Clock-in and clock-out are deliberately untouched: care that was given gets
+  // documented and paid whatever the paperwork says.
+  const clearanceStateFor = async (caregiver) => {
+    const packets = (await db.get('welcome_packets')) || [];
+    const packet = packets.find(r => r && r.caregiver_id === caregiver.id) || null;
+    const documents = ((await db.get('caregiver_documents')) || [])
+      .filter(r => r && r.caregiver_id === caregiver.id);
+    const checklist = wpRepo.buildChecklist((packet || {}).data, documents, (packet || {}).office);
+    return { packet, checklist };
+  };
+
+  const checkCaregiverCleared = async (caregiver, req) => {
+    const { packet, checklist } = await clearanceStateFor(caregiver);
+    return onboardingGate.checkClearanceAllowed(
+      caregiver, packet, checklist, req.body || {}, req.user, req.user.role === ROLES.ADMIN);
+  };
+
   const nowIso = () => new Date().toISOString();
   const readRows = async (key) => (await db.get(key)) || [];
 
@@ -574,6 +602,20 @@ module.exports = function createSchedulingRoutes(deps) {
           reason: sched.eligibilityReason(me, target, client)
         });
       }
+      // Cleared to work? A caregiver cannot override their own clearance, so
+      // this is a plain refusal that names what is outstanding and who each
+      // item is waiting on.
+      const cleared = await checkCaregiverCleared(me, req);
+      if (!cleared.ok) {
+        return res.status(cleared.status).json({
+          error: cleared.code === 'CAREGIVER_NOT_CLEARED'
+            ? 'You are not cleared to work yet. Finish the items on your onboarding checklist and we will get you scheduled.'
+            : cleared.message,
+          code: cleared.code,
+          outstanding: cleared.outstanding || []
+        });
+      }
+
       const conflict = sched.findShiftConflict(shiftsAll, me.id, target);
       if (conflict) {
         return res.status(409).json({
@@ -668,6 +710,19 @@ module.exports = function createSchedulingRoutes(deps) {
           reason: sched.eligibilityReason(caregiver, target, client)
         });
       }
+      // Cleared to work? An admin MAY go ahead anyway, with a reason, and the
+      // reason plus the state it overrode are stamped on the shift — frozen,
+      // because recomputing it later would erase the override the moment the
+      // missing document was accepted.
+      const cleared = await checkCaregiverCleared(caregiver, req);
+      if (!cleared.ok) {
+        return res.status(cleared.status).json({
+          error: cleared.message, code: cleared.code,
+          outstanding: cleared.outstanding || [],
+          overridable: cleared.overridable
+        });
+      }
+
       const conflict = sched.findShiftConflict(shiftsAll, caregiver.id, target);
       if (conflict) {
         return res.status(409).json({
@@ -683,6 +738,7 @@ module.exports = function createSchedulingRoutes(deps) {
       const idx = rows.findIndex(r => r.id === req.params.id);
       rows[idx].caregiver_id = caregiver.id;
       rows[idx].caregiver_name = caregiver.name;
+      if (cleared.override) rows[idx].clearance_override = cleared.override;
       await db.set('shifts', rows);
 
       if (caregiver.email) {
@@ -1544,7 +1600,11 @@ module.exports = function createSchedulingRoutes(deps) {
     // An override that lives only in the store is barely better than a silent
     // one. It reaches every reader of the board so the shift itself says the
     // client was not enrolled when it was posted.
-    enrollmentOverride: r.enrollment_override || null
+    enrollmentOverride: r.enrollment_override || null,
+    // Same rule for the caregiver's side of it: an admin who scheduled someone
+    // who was not cleared said why, and the board shows it. A stamp only in the
+    // store is one nobody reads.
+    clearanceOverride: r.clearance_override || null
   });
 
   const publicTimeLog = (l) => ({

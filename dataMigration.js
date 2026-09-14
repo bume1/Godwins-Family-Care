@@ -49,6 +49,12 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'client_document_uploads', phi: true, owner: '4.6+' },
   { key: 'client_document_requests', phi: true, owner: '4.6+' },
   { key: 'caregiver_documents', phi: false, owner: '6+', note: 'employment paperwork (timesheets, certs) — pointers only, bytes in Drive' },
+  // The caregiver welcome packet: their profile answers, their signature, and
+  // the office's own onboarding checklist. NOT patient PHI — it is employment
+  // data about the caregiver — but it carries a date of birth, a home address
+  // and a signature image, so it moves with the same care and never leaves the
+  // boundary.
+  { key: 'welcome_packets', phi: false, owner: 'welcome-packet', note: 'caregiver onboarding: profile answers + signature image + office checklist' },
   // ---- clinical (Session 4.x) ----
   { key: 'encounter_billing', phi: true, owner: '4.4' },
   { key: 'prescriptions', phi: true, owner: '4.4' },

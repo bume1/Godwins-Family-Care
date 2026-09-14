@@ -49,6 +49,7 @@ const zipWriter = require('./zipWriter');             // dependency-free ZIP for
 const caregiverRepo = require('./caregiverRepository');
 const caregiverRoutes = require('./routes/caregiver'); // caregiver app: visit log + escalation (Session 6)
 const schedulingRoutes = require('./routes/scheduling');
+const welcomePacketRoutes = require('./routes/welcomePacket'); // caregiver onboarding packet + gate (2026-09)
 const messagingRoutes = require('./routes/messaging'); // channel matrix + role-scoped threads (Session 9) // PHCP shifts, availability, time tracking (Session 7)
 
 const upload = multer({
@@ -2459,6 +2460,16 @@ app.use(caregiverRoutes({ db, config, logActivity, queueNotification, getUsers, 
 
 // PHCP scheduling (Session 7) — page shell + /api/scheduling/*. App-side only;
 // clinical appointments stay in OpenEMR (Session 4.2). Two systems by design.
+// Caregiver welcome packet — the onboarding wizard, the document checklist and
+// the gate that opens the caregiver app. Mounted after the caregiver routes so
+// the two share one document store and one checklist builder.
+app.use(welcomePacketRoutes({ db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4,
+  drive: googledrive,
+  detectFileType: (buf) => detectFileType(buf),
+  // The signer's own address, hashed — the chain is not the signer, the same
+  // rule the consent signatures follow.
+  hashIp: (req) => roiRepo.hashIp(clientIpFrom(req), JWT_SECRET) }));
+
 app.use(schedulingRoutes({ db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4 }));
 app.use(messagingRoutes({ db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4 }));
 

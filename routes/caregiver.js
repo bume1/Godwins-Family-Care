@@ -27,6 +27,8 @@
 
 const express = require('express');
 const cg = require('../caregiverRepository');
+const wp = require('../welcomePacketRepository');
+const onboardingGate = require('../caregiverOnboardingGate');
 // The office contact block. ORG in public/consent-text.js is the single source
 // of the practice's own contact details — it is what prints into executed
 // consent documents — so the caregiver help card reads it rather than keeping a
@@ -88,6 +90,31 @@ module.exports = function createCaregiverRoutes(deps) {
     return res.status(403).json({ error: 'Caregiver or administrator access required.', code: 'CAREGIVER_ONLY' });
   };
 
+  // ---- THE WELCOME PACKET GATE (2026-09-13) -------------------------------
+  // A caregiver who has not completed their welcome packet has no app yet. The
+  // packet screen is the whole app until it is signed.
+  //
+  // WHAT IS DELIBERATELY NOT BEHIND IT, and each for its own reason:
+  //   /api/caregiver/me          the shell reads it to know to show the wizard
+  //   /api/caregiver/documents*  the uploading happens there, so gating it
+  //                              would lock someone out of the screen they
+  //                              were sent to
+  //   the welcome packet routes  gating the packet on the packet
+  //   visit logs                 work already in flight is documented and paid
+  //                              whatever the paperwork says
+  const requireOnboarded = async (req, res, next) => {
+    try {
+      const packets = (await db.get('welcome_packets')) || [];
+      const packet = packets.find(r => r && r.caregiver_id === req.user.id) || null;
+      const access = onboardingGate.appAccessEligibility(packet);
+      if (access.allowed) return next();
+      return res.status(403).json({ error: access.message, code: access.code, packetStatus: access.status });
+    } catch (error) {
+      console.error('Welcome packet gate error:', error);
+      return res.status(500).json({ error: 'Authorization error' });
+    }
+  };
+
   // Resolve the caregiver's FULL user record. req.user is the trimmed token
   // view and does not carry skilledCompetencies, which the tier gate needs.
   const freshCaregiver = async (req) => {
@@ -135,11 +162,26 @@ module.exports = function createCaregiverRoutes(deps) {
     try {
       const caregiver = await freshCaregiver(req);
       if (!caregiver) return res.status(404).json({ error: 'Account not found.' });
-      const clients = await assignedClientsFor(caregiver);
+      // The packet gate is read BEFORE the assigned clients, because a
+      // caregiver who has not signed their packet has no business being handed
+      // a client list even to count.
+      const packets = (await db.get('welcome_packets')) || [];
+      const packet = packets.find(r => r && r.caregiver_id === caregiver.id) || null;
+      const documents = ((await db.get('caregiver_documents')) || [])
+        .filter(r => r && r.caregiver_id === caregiver.id);
+      const checklist = wp.buildChecklist((packet || {}).data, documents, (packet || {}).office);
+      const onboarding = onboardingGate.onboardingSummary(caregiver, packet, checklist);
+
+      const clients = onboarding.appAccess ? await assignedClientsFor(caregiver) : [];
       const schema = cg.visitLogSchemaFor(caregiver);
       res.json({
         id: caregiver.id,
         name: caregiver.name,
+        // The shell renders the packet and nothing else while this is false.
+        // The API refuses those routes too — the screen is the courtesy, the
+        // route is the control.
+        onboarding,
+        checklist,
         licenseLevel: schema.level,
         licenseLabel: schema.levelLabel,
         competencies: schema.competencies,
@@ -157,7 +199,7 @@ module.exports = function createCaregiverRoutes(deps) {
   // ==========================================================================
   // GET /api/caregiver/clients — assigned patients only (spec §5).
   // ==========================================================================
-  router.get('/api/caregiver/clients', authenticateToken, requireCaregiver, async (req, res) => {
+  router.get('/api/caregiver/clients', authenticateToken, requireCaregiver, requireOnboarded, async (req, res) => {
     try {
       const caregiver = await freshCaregiver(req);
       const clients = await assignedClientsFor(caregiver);
@@ -170,7 +212,7 @@ module.exports = function createCaregiverRoutes(deps) {
 
   // GET /api/caregiver/clients/:clientId — read-only care plan + behavioral
   // protocols, filtered by the allow-list in caregiverRepository.
-  router.get('/api/caregiver/clients/:clientId', authenticateToken, requireCaregiver, async (req, res) => {
+  router.get('/api/caregiver/clients/:clientId', authenticateToken, requireCaregiver, requireOnboarded, async (req, res) => {
     try {
       const caregiver = await freshCaregiver(req);
       const { client, error } = await loadAssignedClient(caregiver, req.params.clientId);
@@ -191,7 +233,7 @@ module.exports = function createCaregiverRoutes(deps) {
   // GET /api/caregiver/visit-log/schema?clientId= — the tier-branched form.
   // Narrowed to the client's authorized care plan when one is on file.
   // ==========================================================================
-  router.get('/api/caregiver/visit-log/schema', authenticateToken, requireCaregiver, async (req, res) => {
+  router.get('/api/caregiver/visit-log/schema', authenticateToken, requireCaregiver, requireOnboarded, async (req, res) => {
     try {
       const caregiver = await freshCaregiver(req);
       let client = null;
@@ -584,7 +626,7 @@ module.exports = function createCaregiverRoutes(deps) {
   }
 
   // POST /api/caregiver/escalations — the persistent "Flag a concern" button.
-  router.post('/api/caregiver/escalations', authenticateToken, requireCaregiver, async (req, res) => {
+  router.post('/api/caregiver/escalations', authenticateToken, requireCaregiver, requireOnboarded, async (req, res) => {
     try {
       const caregiver = await freshCaregiver(req);
       const body = req.body || {};
@@ -719,7 +761,7 @@ module.exports = function createCaregiverRoutes(deps) {
   // ==========================================================================
   // Feed — admin broadcasts + this caregiver's escalation alerts, read-only.
   // ==========================================================================
-  router.get('/api/caregiver/feed', authenticateToken, requireCaregiver, async (req, res) => {
+  router.get('/api/caregiver/feed', authenticateToken, requireCaregiver, requireOnboarded, async (req, res) => {
     try {
       const broadcasts = await readRows('caregiver_broadcasts');
       const events = await readRows('escalation_events');
@@ -921,7 +963,7 @@ module.exports = function createCaregiverRoutes(deps) {
   // and what the app holds is the office's copy. Nothing here transmits to
   // Gusto and no screen may imply it does, or someone will believe their W9 is
   // filed because they uploaded it here.
-  const CAREGIVER_DOC_KINDS = [
+  const BASE_DOC_KINDS = [
     { kind: 'timesheet',     label: 'Timesheet',                 needsPeriod: true,  payroll: false },
     { kind: 'visit_note',    label: 'Signed visit note',         needsPeriod: false, payroll: false },
     { kind: 'mileage',       label: 'Mileage or expense log',    needsPeriod: true,  payroll: false },
@@ -930,6 +972,29 @@ module.exports = function createCaregiverRoutes(deps) {
     { kind: 'paystub',       label: 'Paystub',                   needsPeriod: true,  payroll: true },
     { kind: 'w9',            label: 'W-9',                       needsPeriod: false, payroll: true },
     { kind: 'other',         label: 'Something else',            needsPeriod: false, payroll: false }
+  ];
+
+  // The welcome packet's own document items join this list rather than living
+  // on a second one (2026-09-13). One catalog means a kind cannot appear on the
+  // onboarding checklist and be refused by the upload route that has to accept
+  // it — and the checklist reads the same `kind` values the store holds, so an
+  // item ticks itself off the moment the office accepts the file.
+  //
+  // `id_document` and `certification` ALREADY EXIST above and are deliberately
+  // reused rather than duplicated: a photo ID is a photo ID, and two buckets
+  // for one document is how the office ends up chasing a file it already has.
+  const CAREGIVER_DOC_KINDS = [
+    ...BASE_DOC_KINDS,
+    ...wp.PACKET_DOCUMENT_KINDS
+      .filter(k => !BASE_DOC_KINDS.some(b => b.kind === k.kind))
+      .map(k => ({
+        kind: k.kind, label: k.label, needsPeriod: false, payroll: false,
+        onboarding: true, item: k.item, group: k.group, source: k.source
+      })),
+    // The returned packet itself. Not a checklist item — it is the thing the
+    // checklist was read out of — but it is kept, because the extraction is a
+    // convenience and the document they actually sent is the record.
+    { kind: 'welcome_packet', label: 'Completed welcome packet', needsPeriod: false, payroll: false, onboarding: true }
   ];
 
   router.get('/api/caregiver/documents/kinds', authenticateToken, requireCaregiverOrAdmin, (req, res) => {
