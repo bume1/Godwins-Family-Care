@@ -55,6 +55,14 @@ const COLLECTION_REGISTRY = Object.freeze([
   // and a signature image, so it moves with the same care and never leaves the
   // boundary.
   { key: 'welcome_packets', phi: false, owner: 'welcome-packet', note: 'caregiver onboarding: profile answers + signature image + office checklist' },
+  // The four forms a caregiver signs IN THE APP rather than printing: the
+  // background check authorization, the registry attestation, the physical
+  // ability acknowledgement and the mandatory reporter acknowledgement. Its
+  // own collection rather than a field on the packet row, because that row is
+  // read on nearly every caregiver request and four signature images on it is
+  // the care-plan signature mistake repeated. Employment data, not patient
+  // PHI — and it still never leaves the boundary.
+  { key: 'caregiver_attestations', phi: false, owner: 'welcome-packet', note: 'caregiver-signed onboarding forms: body version, elections, signature image' },
   // ---- clinical (Session 4.x) ----
   { key: 'encounter_billing', phi: true, owner: '4.4' },
   { key: 'prescriptions', phi: true, owner: '4.4' },

@@ -169,7 +169,12 @@ module.exports = function createCaregiverRoutes(deps) {
       const packet = packets.find(r => r && r.caregiver_id === caregiver.id) || null;
       const documents = ((await db.get('caregiver_documents')) || [])
         .filter(r => r && r.caregiver_id === caregiver.id);
-      const checklist = wp.buildChecklist((packet || {}).data, documents, (packet || {}).office);
+      // The four signable forms tick their own items. Read here too, or a
+      // caregiver who signed them is told on their own Home screen that they
+      // are outstanding.
+      const attestations = ((await db.get('caregiver_attestations')) || [])
+        .filter(r => r && r.caregiver_id === caregiver.id);
+      const checklist = wp.buildChecklist((packet || {}).data, documents, (packet || {}).office, attestations);
       const onboarding = onboardingGate.onboardingSummary(caregiver, packet, checklist);
 
       const clients = onboarding.appAccess ? await assignedClientsFor(caregiver) : [];
@@ -1089,9 +1094,17 @@ module.exports = function createCaregiverRoutes(deps) {
         period_start: normalizeDate(periodStart),
         period_end: normalizeDate(periodEnd),
         shift_id: shiftId ? String(shiftId) : null,
-        // Onboarding paperwork the office filed is already accepted by
-        // definition — it did not arrive needing review. A timesheet did.
-        status: (isAdmin && (CAREGIVER_DOC_KINDS.find(k => k.kind === kind) || {}).payroll) ? 'accepted' : 'received',
+        // ANYTHING THE OFFICE FILES IS ACCEPTED. It did not arrive needing
+        // review — the office is the reviewer, and it was looking at the
+        // document when it filed it.
+        //
+        // OWNER, 2026-09-14: this used to check `payroll`, so an office-filed
+        // TB test or CPR card landed 'received' and sat reading "With the
+        // office" forever, waiting on a review nobody was ever going to do.
+        // The checklist item never ticked, so the office chased a caregiver
+        // for a document the office had itself uploaded. A safety net with a
+        // dead end in it is the shape this repo keeps paying for.
+        status: isAdmin ? 'accepted' : 'received',
         uploaded_at: new Date().toISOString(),
         // "The caregiver sent this" and "the office filed it for them" are
         // different facts, and for a W9 the difference is the whole point.
@@ -1268,6 +1281,10 @@ module.exports = function createCaregiverRoutes(deps) {
     uploadedAt: r.uploaded_at,
     uploadedByName: r.uploaded_by_name || null,
     uploadedByOffice: !!r.uploaded_by_office,
+    // Onboarding paperwork joins the welcome packet's checklist, so the
+    // caregiver's own list can say which item a file ticked off.
+    onboarding: !!(CAREGIVER_DOC_KINDS.find(k => k.kind === r.kind) || {}).onboarding
+      || !!(CAREGIVER_DOC_KINDS.find(k => k.kind === r.kind) || {}).payroll,
     payroll: !!(CAREGIVER_DOC_KINDS.find(k => k.kind === r.kind) || {}).payroll,
     reviewedAt: r.reviewed_at, reviewedByName: r.reviewed_by_name, reviewNote: r.review_note
   });

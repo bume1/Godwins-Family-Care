@@ -70,7 +70,11 @@ const CHANNELS = Object.freeze({
     participants: [ROLE.CLIENT, ROLE.CAREGIVER],
     initiators: [ROLE.CLIENT, ROLE.CAREGIVER],
     requiresAssignedCaregiver: true,
-    blurb: 'You and the caregiver working with you.'
+    blurb: 'You and the caregiver working with you.',
+    blurbByRole: {
+      [ROLE.CAREGIVER]: 'You and the client you are working with.',
+      [ROLE.ADMIN]: 'The client and the caregiver working with them.'
+    }
   },
   support: {
     id: 'support', label: 'Support',
@@ -83,7 +87,10 @@ const CHANNELS = Object.freeze({
     participants: [ROLE.CLIENT, ROLE.CLINICAL],
     initiators: [ROLE.CLIENT, ROLE.CLINICAL],
     tracksResponse: true,
-    blurb: 'A clinical concern for the nurse practitioner. Not for emergencies — call 911.'
+    blurb: 'A clinical concern for the nurse practitioner. Not for emergencies — call 911.',
+    blurbByRole: {
+      [ROLE.CLINICAL]: 'A clinical concern raised about this client. Not for emergencies.'
+    }
   },
   operations: {
     id: 'operations', label: 'Operations',
@@ -96,7 +103,10 @@ const CHANNELS = Object.freeze({
     participants: [ROLE.CAREGIVER, ROLE.CASE_MANAGER],
     initiators: [ROLE.CAREGIVER, ROLE.CASE_MANAGER],
     raisesEscalation: true,
-    blurb: 'A behavioral concern for the case manager.'
+    blurb: 'A behavioral concern for the case manager.',
+    blurbByRole: {
+      [ROLE.CASE_MANAGER]: 'A behavioral concern raised by the caregiver on this client.'
+    }
   },
   clinical_oversight: {
     id: 'clinical_oversight', label: 'Clinical Oversight',
@@ -121,18 +131,44 @@ const CHANNELS = Object.freeze({
     id: 'care_coordination', label: 'Care Coordination',
     participants: [ROLE.CLIENT, ROLE.CASE_MANAGER],
     initiators: [ROLE.CLIENT, ROLE.CASE_MANAGER],
-    blurb: 'You and the case manager coordinating your care.'
+    blurb: 'You and the case manager coordinating your care.',
+    blurbByRole: {
+      [ROLE.CASE_MANAGER]: 'You and the client whose care you coordinate.',
+      [ROLE.ADMIN]: 'The client and their case manager.'
+    }
   },
   family_portal: {
     id: 'family_portal', label: 'Family Portal',
     participants: [ROLE.FAMILY, ROLE.CAREGIVER],
     initiators: [ROLE.FAMILY, ROLE.CAREGIVER],
     requiresAssignedCaregiver: true,
-    blurb: 'Family and the caregiver working with your relative.'
+    blurb: 'Family and the caregiver working with your relative.',
+    blurbByRole: {
+      [ROLE.CAREGIVER]: "You and this client's family.",
+      [ROLE.ADMIN]: 'The family and the caregiver working with this client.'
+    }
   }
 });
 
 const CHANNEL_IDS = Object.freeze(Object.keys(CHANNELS));
+
+/**
+ * The one-line description of a channel, IN THE VIEWER'S OWN VOICE.
+ *
+ * OWNER REPORT, 2026-09-14: a caregiver opening Direct was told the thread was
+ * "You and the caregiver working with you." Every blurb had been written from
+ * the client's side, so the other participant was described as somebody who is
+ * not in the room — and on the channel whose whole point is that there are
+ * exactly two people in it. `blurb` stays the default; `blurbByRole` carries
+ * the wording for a participant the default does not address. A channel with
+ * one neutral sentence needs no entry, which is why most have none.
+ */
+function blurbFor(channelId, role) {
+  const def = CHANNELS[channelId];
+  if (!def) return null;
+  const byRole = def.blurbByRole || {};
+  return (role && byRole[role]) || def.blurb || null;
+}
 
 // The brief's table, verbatim, as data. Every row must resolve to a channel
 // whose participants cover both ends — build-enforced — so collapsing the
@@ -286,7 +322,7 @@ function channelsFor({ user, client, users }) {
     .map(id => {
       const a = channelAvailability(id, { user, client, users });
       return {
-        id, label: CHANNELS[id].label, blurb: CHANNELS[id].blurb,
+        id, label: CHANNELS[id].label, blurb: blurbFor(id, role),
         available: a.available, code: a.code, reason: a.reason,
         oneWay: !!CHANNELS[id].oneWay
       };
@@ -522,7 +558,7 @@ function unreadCount(messages, userId) {
 
 module.exports = {
   ROLE, ROLE_LABELS, actorRole,
-  CHANNELS, CHANNEL_IDS, MATRIX_ROWS, channelById,
+  CHANNELS, CHANNEL_IDS, MATRIX_ROWS, channelById, blurbFor,
   STAFF_ROLES, isStaffRole, isUnrestricted,
   careTeamOf, assignedCaregiverIds, assignedClinicianIds, assignedCaseManagerId, hasActiveCaregiver,
   clientInScope, channelAvailability, channelsFor,

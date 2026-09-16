@@ -25,6 +25,7 @@ const wp = require('../welcomePacketRepository');
 const gate = require('../caregiverOnboardingGate');
 const packetPdf = require('../welcomePacketPdf');
 const packetImport = require('../welcomePacketImport');
+const attest = require('../caregiverAttestations');
 const { contentDisposition } = require('../contentDisposition');
 
 module.exports = function createWelcomePacketRoutes(deps) {
@@ -97,6 +98,19 @@ module.exports = function createWelcomePacketRoutes(deps) {
     return rows.filter(r => r && r.caregiver_id === caregiverId);
   };
 
+  const attestationsFor = async (caregiverId) => {
+    const rows = (await db.get('caregiver_attestations')) || [];
+    return rows.filter(r => r && r.caregiver_id === caregiverId);
+  };
+
+  const saveAttestation = async (record) => {
+    const rows = (await db.get('caregiver_attestations')) || [];
+    const idx = rows.findIndex(r => r && r.caregiver_id === record.caregiver_id && r.kind === record.kind);
+    if (idx === -1) rows.push(record); else rows[idx] = record;
+    await db.set('caregiver_attestations', rows);
+    return record;
+  };
+
   /**
    * Everything the app needs about one caregiver's onboarding, assembled the
    * same way for the caregiver, the admin queue and the scheduling gate. One
@@ -106,8 +120,9 @@ module.exports = function createWelcomePacketRoutes(deps) {
   const stateFor = async (caregiver) => {
     const packet = (await loadPacket(caregiver.id)) || blankPacket(caregiver.id);
     const documents = await documentsFor(caregiver.id);
-    const checklist = wp.buildChecklist(packet.data, documents, packet.office);
-    return { packet, documents, checklist, summary: gate.onboardingSummary(caregiver, packet, checklist) };
+    const attestations = await attestationsFor(caregiver.id);
+    const checklist = wp.buildChecklist(packet.data, documents, packet.office, attestations);
+    return { packet, documents, attestations, checklist, summary: gate.onboardingSummary(caregiver, packet, checklist) };
   };
 
   // Shared with the caregiver route module through the same injection, so the
@@ -132,6 +147,14 @@ module.exports = function createWelcomePacketRoutes(deps) {
         groupTitles: wp.GROUP_TITLES,
         groupIntros: wp.GROUP_INTROS,
         payPromise: wp.PAY_PROMISE,
+        // THE FOUR SIGNABLE FORMS, SERVED WHOLE. The page renders these blocks
+        // and names no clause of its own — the same rule the sections follow,
+        // and the reason a signed copy can reproduce exactly what was on screen.
+        attestations: attest.servedDocuments(),
+        attestationsSigned: state.attestations.map(r => ({
+          kind: r.kind, version: r.version, signedAt: r.signed_at,
+          printedName: r.printed_name, elections: r.elections || {}
+        })),
         status: state.packet.status,
         data: state.packet.data,
         signedAt: state.packet.signed_at,
@@ -172,7 +195,8 @@ module.exports = function createWelcomePacketRoutes(deps) {
       await savePacket(packet);
 
       const documents = await documentsFor(caregiver.id);
-      const checklist = wp.buildChecklist(packet.data, documents, packet.office);
+      const attestations = await attestationsFor(caregiver.id);
+      const checklist = wp.buildChecklist(packet.data, documents, packet.office, attestations);
       res.json({
         saved: true,
         data: packet.data,
@@ -303,7 +327,7 @@ module.exports = function createWelcomePacketRoutes(deps) {
         reason: extraction.reason,
         data: packet.data,
         missing: wp.missingProfileFields(packet.data),
-        checklist: wp.buildChecklist(packet.data, documents, packet.office),
+        checklist: wp.buildChecklist(packet.data, documents, packet.office, await attestationsFor(caregiver.id)),
         document: { id: docRow.id, fileName: docRow.file_name }
       });
     } catch (error) {
@@ -366,7 +390,8 @@ module.exports = function createWelcomePacketRoutes(deps) {
         { version: packet.version, imported: !!packet.imported_from });
 
       const documents = await documentsFor(caregiver.id);
-      const checklist = wp.buildChecklist(packet.data, documents, packet.office);
+      const checklist = wp.buildChecklist(packet.data, documents, packet.office,
+        await attestationsFor(caregiver.id));
 
       // The office is told a packet landed. Queued like every other notice, so
       // an unsubscribe is honoured and the mail carries the house template.
@@ -395,6 +420,149 @@ module.exports = function createWelcomePacketRoutes(deps) {
   });
 
   // ==========================================================================
+  // THE SIGNABLE FORMS — signed here, at this stage, not printed and posted.
+  // ==========================================================================
+  // OWNER, 2026-09-14. Four Part Two items were upload slots for forms WE
+  // wrote: the caregiver waited on a PDF from us, printed it, signed it,
+  // photographed it and sent it back. Four steps and a printer, for a document
+  // we already had. They are signed in the app now, the way a client signs a
+  // consent in the intake wizard.
+  //
+  // A signature is stamped with the BODY VERSION it was given, so the signed
+  // copy reproduces what was actually on the screen rather than whatever the
+  // wording says after a later revision.
+  router.post('/api/caregiver/welcome-packet/attestations/:kind',
+    authenticateToken, requireCaregiver, async (req, res) => {
+      try {
+        const caregiver = await freshCaregiver(req);
+        if (!caregiver) return res.status(404).json({ error: 'Account not found.' });
+
+        const kind = String(req.params.kind || '');
+        if (!attest.isAttestationKind(kind)) {
+          return res.status(404).json({ error: 'That is not a form we hold.', code: 'ATTESTATION_UNKNOWN' });
+        }
+
+        const existing = (await attestationsFor(caregiver.id)).find(r => r.kind === kind) || null;
+        if (attest.isSigned(existing)) {
+          // Already signed, at the current wording. A correction is a NEW
+          // signature on a changed document, never an edit to this one — the
+          // rule the consents and the packet itself follow.
+          return res.status(409).json({
+            error: 'You have already signed this form.',
+            code: 'ATTESTATION_SIGNED',
+            signedAt: existing.signed_at
+          });
+        }
+
+        // ELECTIONS BEFORE SIGNATURE. Refusing for an unanswered question after
+        // taking a signature would have somebody sign a form we then say is
+        // unfinished — the ordering the packet's own submit route settled.
+        const check = attest.validateElections(kind, (req.body || {}).elections);
+        if (!check.ok) {
+          return res.status(400).json({
+            error: check.missing.length
+              ? 'Answer every question on the form before you sign it.'
+              : 'That answer is not one of the choices on this form.',
+            code: check.missing.length ? 'ELECTION_REQUIRED' : 'ELECTION_INVALID',
+            missing: check.missing,
+            invalid: check.invalid
+          });
+        }
+
+        const sig = String((req.body || {}).signaturePng || '');
+        if (!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(sig)) {
+          return res.status(400).json({ error: 'Please sign in the box before submitting.', code: 'SIGNATURE_REQUIRED' });
+        }
+        if (sig.length > 400000) {
+          return res.status(413).json({ error: 'That signature is too large to store.', code: 'SIGNATURE_TOO_LARGE' });
+        }
+        const printed = String((req.body || {}).printedName || '').trim();
+        if (!printed) {
+          return res.status(400).json({ error: 'Type your name as it should appear on the form.', code: 'PRINTED_NAME_REQUIRED' });
+        }
+
+        const record = {
+          id: `catt_${caregiver.id}_${kind}`,
+          caregiver_id: caregiver.id,
+          kind,
+          // The version the body was SERVED at, read here rather than taken
+          // from the caller: a page posting a version it was not given would
+          // stamp a signature onto text nobody saw.
+          version: attest.currentVersion(kind),
+          title: attest.titleFor(kind),
+          elections: check.elections,
+          printed_name: printed.slice(0, 160),
+          signature_png: sig,
+          signed_at: nowIso(),
+          signer_ip_hash: hashIp ? hashIp(req) : null,
+          // A superseded signature is REPLACED here but never lost: what they
+          // signed before, and when, is carried on the new record.
+          supersedes: existing && existing.signed_at
+            ? { version: existing.version, signedAt: existing.signed_at, elections: existing.elections || {} }
+            : null,
+          created_at: (existing && existing.created_at) || nowIso(),
+          updated_at: nowIso()
+        };
+        await saveAttestation(record);
+
+        await logActivity(caregiver.id, caregiver.name, 'caregiver_attestation_signed',
+          'caregiver_attestation', record.id, { kind, version: record.version });
+
+        const state = await stateFor(caregiver);
+        res.json({
+          signed: true,
+          kind,
+          signedAt: record.signed_at,
+          version: record.version,
+          checklist: state.checklist,
+          onboarding: state.summary
+        });
+      } catch (error) {
+        console.error('Attestation sign error:', error);
+        res.status(500).json({ error: 'Server error' });
+      }
+    });
+
+  // The signed copy. Renders the body AT THE STORED VERSION, so an old
+  // signature reproduces the document it was actually given.
+  router.get('/api/caregiver/welcome-packet/attestations/:kind.pdf',
+    authenticateToken, async (req, res) => {
+      try {
+        const isAdmin = req.user.role === ROLES.ADMIN;
+        if (!isAdmin && !cg.isCaregiver(req.user)) {
+          return res.status(403).json({ error: 'Caregiver or administrator access required.', code: 'CAREGIVER_ONLY' });
+        }
+        const kind = String(req.params.kind || '');
+        if (!attest.isAttestationKind(kind)) {
+          return res.status(404).json({ error: 'That is not a form we hold.', code: 'ATTESTATION_UNKNOWN' });
+        }
+        // ADMIN-ONLY filter: a caregiver passing someone else's id still gets
+        // their own, the same rule every other caregiver read follows.
+        const caregiverId = isAdmin && req.query.caregiverId ? String(req.query.caregiverId) : req.user.id;
+        const users = await getUsers();
+        const caregiver = users.find(u => u.id === caregiverId) || null;
+        if (!caregiver) return res.status(404).json({ error: 'Caregiver not found.' });
+
+        const record = (await attestationsFor(caregiverId)).find(r => r.kind === kind) || null;
+        if (!record || !record.signed_at) {
+          return res.status(404).json({ error: 'That form is not signed yet.', code: 'ATTESTATION_NOT_SIGNED' });
+        }
+
+        const buffer = await packetPdf.generateSignedAttestationPDF(record, caregiver);
+        await logActivity(req.user.id, req.user.name || req.user.email, 'caregiver_attestation_read',
+          'caregiver_attestation', record.id, { caregiverId, kind });
+
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition',
+          contentDisposition('attachment', `GFC_${attest.titleFor(kind)}_${caregiver.name || caregiverId}.pdf`));
+        res.send(buffer);
+      } catch (error) {
+        console.error('Attestation PDF error:', error);
+        res.status(500).json({ error: 'Server error' });
+      }
+    });
+
+  // ==========================================================================
   // The PDFs.
   // ==========================================================================
   // The blank one is SEEDED with what we already know, so a caregiver who
@@ -412,7 +580,7 @@ module.exports = function createWelcomePacketRoutes(deps) {
 
       const buffer = await packetPdf.generateFillableWelcomePacketPDF(seed);
       res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', contentDisposition('GFC_Welcome_Packet.pdf', 'attachment'));
+      res.setHeader('Content-Disposition', contentDisposition('attachment', 'GFC_Welcome_Packet.pdf'));
       res.send(buffer);
     } catch (error) {
       console.error('Welcome packet blank PDF error:', error);
@@ -438,7 +606,8 @@ module.exports = function createWelcomePacketRoutes(deps) {
         return res.status(404).json({ error: 'No signed packet is on file.', code: 'PACKET_NOT_SIGNED' });
       }
       const documents = await documentsFor(caregiverId);
-      const checklist = wp.buildChecklist(packet.data, documents, packet.office);
+      const checklist = wp.buildChecklist(packet.data, documents, packet.office,
+        await attestationsFor(caregiverId));
       const buffer = await packetPdf.generateSignedWelcomePacketPDF(packet, caregiver, checklist);
 
       await logActivity(req.user.id, req.user.name || req.user.email, 'welcome_packet_read', 'welcome_packet', packet.id,
@@ -446,7 +615,7 @@ module.exports = function createWelcomePacketRoutes(deps) {
 
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition',
-        contentDisposition(`GFC_Welcome_Packet_${caregiver.name || caregiverId}.pdf`, 'attachment'));
+        contentDisposition('attachment', `GFC_Welcome_Packet_${caregiver.name || caregiverId}.pdf`));
       res.send(buffer);
     } catch (error) {
       console.error('Welcome packet signed PDF error:', error);
@@ -515,7 +684,8 @@ module.exports = function createWelcomePacketRoutes(deps) {
           'welcome_packet', packet.id, { caregiverId: caregiver.id, kind, status });
 
         const documents = await documentsFor(caregiver.id);
-        const checklist = wp.buildChecklist(packet.data, documents, packet.office);
+        const checklist = wp.buildChecklist(packet.data, documents, packet.office,
+          await attestationsFor(caregiver.id));
         res.json({ saved: true, checklist, onboarding: gate.onboardingSummary(caregiver, packet, checklist) });
       } catch (error) {
         console.error('Welcome packet office item error:', error);

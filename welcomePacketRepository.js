@@ -378,14 +378,14 @@ const DOCUMENT_ITEMS = Object.freeze([
     help: 'This one has the longest wait, so do it first. Results usually come back in a few days but can take longer.'
   },
   {
-    item: 7, group: 'B', kind: 'background_check_auth', source: 'gfc', upload: true, required: true,
-    title: 'Signed background check authorization',
-    detail: 'A one-page consent form we send you. Sign and return it before we can start.'
+    item: 7, group: 'B', kind: 'background_check_auth', source: 'gfc_sign', upload: false, sign: true, required: true,
+    title: 'Background check authorization',
+    detail: 'Read it and sign it here. We cannot start your screening until you do, and the screening has the longest wait on this list.'
   },
   {
-    item: 8, group: 'B', kind: 'registry_attestation', source: 'gfc', upload: true, required: true,
-    title: 'Signed registry attestation',
-    detail: 'A short form confirming you have never been listed on an abuse or neglect registry.'
+    item: 8, group: 'B', kind: 'registry_attestation', source: 'gfc_sign', upload: false, sign: true, required: true,
+    title: 'Registry attestation',
+    detail: 'Your own statement about abuse and neglect registries. Read it and sign it here. Takes a minute.'
   },
 
   // C — Health Records
@@ -406,10 +406,10 @@ const DOCUMENT_ITEMS = Object.freeze([
     detail: 'Whatever you have. Some clients and families ask for specific vaccines, and having your record on file means we can place you faster.'
   },
   {
-    item: 12, group: 'C', kind: 'physical_ability', source: 'gfc', upload: true, required: true,
-    title: 'Signed physical ability form',
-    detail: 'A short form confirming you can do the physical parts of the job, like standing, walking, and any lifting the assignment involves.',
-    help: 'If you have a limitation, tell us now. We will match you to an assignment that fits rather than one that does not.'
+    item: 12, group: 'C', kind: 'physical_ability', source: 'gfc_sign', upload: false, sign: true, required: true,
+    title: 'Physical ability acknowledgement',
+    detail: 'What the work involves physically, and what you can do. Read it and sign it here.',
+    help: 'If you have a limitation, say so on the form. We will match you to an assignment that fits rather than one that does not.'
   },
 
   // D — Certifications and Driving
@@ -428,7 +428,6 @@ const DOCUMENT_ITEMS = Object.freeze([
       const held = ((packet || {}).certifications) || [];
       return held.some(c => ['cna', 'hha', 'pca', 'lpn', 'rn'].includes(c));
     },
-    requiredWhen: 'You told us you hold a CNA, HHA, PCA, LPN or RN certification.',
     title: 'CNA, HHA, PCA, or LPN certificate',
     detail: 'If you hold one. Include the certificate number and expiration date. We verify it with the state directly, so the number matters more than the card.'
   },
@@ -440,8 +439,14 @@ const DOCUMENT_ITEMS = Object.freeze([
       return p.willingToDriveClients === 'yes_my_car' || p.willingToDriveClients === 'clients_car_only';
     },
     requiredWhen: 'You told us you are willing to drive clients.',
-    title: "Driver's license and current auto insurance",
-    detail: 'Only if you will be driving clients or driving as part of your shift. The insurance card must be current.'
+    // OWNER, 2026-09-14: the driver's licence is ITEM 1. Asking for it again
+    // here made a caregiver photograph the same card twice for two different
+    // slots, and a checklist that asks twice for one document is a checklist
+    // people stop trusting. The KIND still reads `license_insurance` because
+    // documents already filed carry it — renaming the kind would orphan them
+    // and show a file we hold as missing.
+    title: 'Current auto insurance',
+    detail: 'Only if you will be driving clients or driving as part of your shift. The card must be current and show your name. We already have your license from item 1.'
   },
 
   // E — Paperwork in your Gusto HR onboarding portal
@@ -475,27 +480,35 @@ const DOCUMENT_ITEMS = Object.freeze([
     title: 'Code of conduct, attendance, and incident reporting',
     detail: 'What we expect on a shift, and how to tell us when something goes wrong.'
   },
+
+  // F — Signed here, with us
+  //
+  // OWNER, 2026-09-14: the mandatory reporter acknowledgement LEFT GROUP E.
+  // It is not a Gusto document — it is Georgia law and it is our form — and
+  // leaving it under a heading whose intro says "each of these is waiting in
+  // your Gusto portal" would have been a contradiction on the screen. It keeps
+  // its printed item number; only its group moved.
   {
-    item: 20, group: 'E', kind: 'mandatory_reporter', source: 'gusto', upload: true, required: true,
+    item: 20, group: 'F', kind: 'mandatory_reporter', source: 'gfc_sign', upload: false, sign: true, required: true,
     title: 'Mandatory reporter acknowledgement',
-    detail: 'In Georgia, caregivers are required to report suspected abuse or neglect. We will walk you through what that means.'
+    detail: 'In Georgia this is your personal legal duty, not the agency\'s. Read it and sign it here.'
   },
 
-  // F — Before Your First Shift
+  // G — Before Your First Shift
   {
-    item: 21, group: 'F', kind: 'orientation', source: 'office', upload: false, required: true,
+    item: 21, group: 'G', kind: 'orientation', source: 'office', upload: false, required: true,
     statuses: ['not_started', 'scheduled', 'done'],
     title: 'Orientation',
     detail: 'About eight hours covering safety, privacy, infection control, body mechanics, and how we document visits. Paid.'
   },
   {
-    item: 22, group: 'F', kind: 'app_training', source: 'office', upload: false, required: true,
+    item: 22, group: 'G', kind: 'app_training', source: 'office', upload: false, required: true,
     statuses: ['not_started', 'scheduled', 'done'],
     title: 'App and clock-in training',
     detail: 'You will use our app for your schedule, clocking in and out, and visit notes. We make sure you are comfortable with it before your first shift.'
   },
   {
-    item: 23, group: 'F', kind: 'skills_check', source: 'office', upload: false, required: true,
+    item: 23, group: 'G', kind: 'skills_check', source: 'office', upload: false, required: true,
     statuses: ['not_started', 'scheduled', 'done'],
     title: 'Skills check',
     detail: 'You show us the hands-on skills your assignment calls for. This is not a test to trip you up. It tells us where to support you.'
@@ -508,7 +521,8 @@ const GROUP_TITLES = Object.freeze({
   C: 'Health Records',
   D: 'Certifications and Driving',
   E: 'Paperwork in your Gusto HR portal',
-  F: 'Before Your First Shift'
+  F: 'Forms you sign with us',
+  G: 'Before Your First Shift'
 });
 
 const GROUP_INTROS = Object.freeze({
@@ -518,7 +532,8 @@ const GROUP_INTROS = Object.freeze({
   D: null,
   // The one place the printed wording was replaced rather than ported.
   E: 'Each of these is waiting in your Gusto HR onboarding portal to review and sign. Once you have signed a document in Gusto, upload the signed copy here so the office has it on file. Uploading here does not file it in Gusto, and signing in Gusto does not send it here — both are needed.',
-  F: null
+  F: 'You sign this one right here. Nothing to print, nothing to send back.',
+  G: null
 });
 
 const PAY_PROMISE = 'Your first shift is paid. Every hour you work with us is paid at your full hourly rate, including your first shift with a new client. We do not do unpaid working interviews. If you are ever asked to work unpaid hours, tell us immediately.';
@@ -546,6 +561,11 @@ const FIELD_INDEX = (() => {
   }
   return map;
 })();
+
+// The attestation wording and its version live in caregiverAttestations.js.
+// Required rather than restated: a second copy of "which version counts"
+// is how a checklist ticks an item the signing route would refuse.
+const ATTESTATION_VERSION = require('./caregiverAttestations').CURRENT_VERSION;
 
 const trim = (v, max) => String(v == null ? '' : v).trim().slice(0, max || 500);
 
@@ -691,8 +711,15 @@ function itemRequired(item, packet) {
  * @param documents caregiver_documents rows for this caregiver
  * @param office    { [kind]: { status, at, byName } } office-tracked items
  */
-function buildChecklist(packet, documents, office) {
+/**
+ * @param attestations  the caregiver's signed attestation rows. A signable item
+ *                      is ticked by a SIGNATURE, never by a file. Defaults to
+ *                      none, which fails closed: an item nobody proved signed
+ *                      reads as outstanding rather than as done.
+ */
+function buildChecklist(packet, documents, office, attestations) {
   const docs = Array.isArray(documents) ? documents : [];
+  const signed = Array.isArray(attestations) ? attestations : [];
   const officeState = (office && typeof office === 'object') ? office : {};
   const p = packet || {};
 
@@ -708,11 +735,28 @@ function buildChecklist(packet, documents, office) {
       help: item.help || null,
       source: item.source,
       upload: !!item.upload,
+      sign: !!item.sign,
       required,
       requiredWhen: (typeof item.required === 'function' && required) ? (item.requiredWhen || null) : null,
       status: 'missing',
       uploads: []
     };
+
+    // A SIGNABLE ITEM IS SATISFIED BY A SIGNATURE AT THE CURRENT VERSION, and
+    // by nothing else. A signature against superseded wording is kept, still
+    // renders its own text, and deliberately does NOT tick the box: the
+    // document changed, so the signature is on a different document. The row
+    // says which of the two it is, because "never signed" and "signed the old
+    // one" need different sentences on a phone.
+    if (item.sign) {
+      const record = signed.find(r => r && r.kind === item.kind) || null;
+      const current = record && record.signed_at && record.version === ATTESTATION_VERSION;
+      row.signedAt = record ? (record.signed_at || null) : null;
+      row.signedVersion = record ? (record.version || null) : null;
+      row.supersededSignature = !!(record && record.signed_at && !current);
+      row.status = current ? 'complete' : 'missing';
+      return row;
+    }
 
     if (item.fromProfile) {
       // A profile-backed item is satisfied by the answers, not by a file.
@@ -735,7 +779,12 @@ function buildChecklist(packet, documents, office) {
       .sort((a, b) => String(b.uploaded_at || '').localeCompare(String(a.uploaded_at || '')));
     row.uploads = mine.map(d => ({
       id: d.id, fileName: d.file_name, status: d.status,
-      uploadedAt: d.uploaded_at, reviewNote: d.review_note || null
+      uploadedAt: d.uploaded_at, reviewNote: d.review_note || null,
+      // "You sent this" and "the office filed it for you" are different facts,
+      // and a caregiver looking at a ticked item they do not remember ticking
+      // needs to be told which. Never the Drive id or the stored name: those
+      // do not leave the server.
+      uploadedByOffice: !!d.uploaded_by_office
     }));
 
     // A REJECTED upload is not a missing one, and the difference is the whole

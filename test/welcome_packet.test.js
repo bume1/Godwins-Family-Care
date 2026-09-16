@@ -32,6 +32,7 @@ const { PDFDocument, PDFName, PDFString, StandardFonts } = require('pdf-lib');
 
 const wp = require('../welcomePacketRepository');
 const gate = require('../caregiverOnboardingGate');
+const attest = require('../caregiverAttestations');
 const packetPdf = require('../welcomePacketPdf');
 const packetImport = require('../welcomePacketImport');
 const config = require('../config');
@@ -71,6 +72,14 @@ const acceptedDocsFor = (profile) =>
   wp.DOCUMENT_ITEMS
     .filter(d => d.upload && wp.itemRequired(d, profile))
     .map((d, i) => ({ id: `d${i}`, kind: d.kind, status: 'accepted', uploaded_at: '2026-09-10T00:00:00.000Z' }));
+
+// The signable forms are ticked by a SIGNATURE, never by a file, so a fixture
+// that only builds uploads leaves four required items outstanding.
+const signedAttestations = () =>
+  attest.KINDS.map(kind => ({
+    caregiver_id: CAREGIVER.id, kind,
+    version: attest.CURRENT_VERSION, signed_at: '2026-09-10T00:00:00.000Z'
+  }));
 
 const officeAllDone = () => {
   const out = {};
@@ -199,10 +208,14 @@ test('the Gusto group points at Gusto and does not say we will email them', () =
   // And it says plainly that the two do not talk to each other.
   assert.match(intro, /does not file it in Gusto|does not send it here/i);
   const gustoItems = wp.DOCUMENT_ITEMS.filter(d => d.group === 'E');
-  assert.strictEqual(gustoItems.length, 5, 'items 16-20');
+  assert.strictEqual(gustoItems.length, 4, 'items 16-19; the mandatory reporter left this group in 09/2026');
   for (const item of gustoItems) {
     assert.strictEqual(item.source, 'gusto');
     assert.strictEqual(item.upload, true, 'each signed copy comes back here one by one');
+    // THE RULE THAT MOVED ITEM 20 OUT, asserted rather than left to whoever
+    // edits the list next: this group's intro says every item in it is waiting
+    // in Gusto, so a form signed HERE cannot sit under that heading.
+    assert.ok(!item.sign, 'a form signed in the app does not belong under a heading that says it is in Gusto');
   }
 });
 
@@ -234,7 +247,7 @@ test('clearance needs the documents too, and names who each item waits on', () =
   assert.ok(nothing.outstanding.some(o => o.waitingOn === 'us'),
     'a caregiver staring at one list has to be able to tell which half is theirs');
 
-  const all = wp.buildChecklist(profile, acceptedDocsFor(profile), officeAllDone());
+  const all = wp.buildChecklist(profile, acceptedDocsFor(profile), officeAllDone(), signedAttestations());
   assert.strictEqual(gate.shiftClearanceEligibility(CAREGIVER, packet, all).allowed, true);
 });
 
@@ -243,7 +256,7 @@ test('an OPTIONAL item left undone does not block clearance', () => {
   const packet = { status: 'submitted', data: profile };
   const optional = wp.DOCUMENT_ITEMS.find(d => d.item === 11);   // immunization record
   assert.strictEqual(wp.itemRequired(optional, profile), false);
-  const checklist = wp.buildChecklist(profile, acceptedDocsFor(profile), officeAllDone());
+  const checklist = wp.buildChecklist(profile, acceptedDocsFor(profile), officeAllDone(), signedAttestations());
   assert.strictEqual(checklist.find(r => r.kind === 'immunization_record').status, 'missing');
   assert.strictEqual(gate.shiftClearanceEligibility(CAREGIVER, packet, checklist).allowed, true);
 });
