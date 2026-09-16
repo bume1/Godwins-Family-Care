@@ -6,6 +6,14 @@
   <title>Godwins Family Care — Enrollment Submissions</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <!-- EVERY time this app shows is Eastern, on both sides (owner rule,
+       2026-09-16). Loaded before the page's own scripts so nothing can format a
+       date before the default is in place. `installDefaultTimeZone()` fills in
+       the zone where a caller passed none; the shift and visit sites also call
+       GFC_TIME's helpers explicitly, because code that says what it means
+       outlives a shim. See public/gfc-time.js. -->
+  <script src="/gfc-time.js"></script>
+  <script>window.GFC_TIME && window.GFC_TIME.installDefaultTimeZone();</script>
   <script src="https://cdn.tailwindcss.com"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>

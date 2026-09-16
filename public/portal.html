@@ -9,6 +9,14 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.1.0/dist/tabler-icons.min.css">
+  <!-- EVERY time this app shows is Eastern, on both sides (owner rule,
+       2026-09-16). Loaded before the page's own scripts so nothing can format a
+       date before the default is in place. `installDefaultTimeZone()` fills in
+       the zone where a caller passed none; the shift and visit sites also call
+       GFC_TIME's helpers explicitly, because code that says what it means
+       outlives a shim. See public/gfc-time.js. -->
+  <script src="/gfc-time.js"></script>
+  <script>window.GFC_TIME && window.GFC_TIME.installDefaultTimeZone();</script>
   <script src="https://cdn.tailwindcss.com"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -4863,7 +4871,7 @@
     function prettyDate(iso) {
       if (!iso) return '';
       const d = new Date(iso); if (isNaN(d)) return '';
-      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      return window.GFC_TIME ? window.GFC_TIME.fmtDate(d).replace(/\/\d{4}$/, '') : '';
     }
 
     // Derive whole-years age from a YYYY-MM-DD DOB for the review screen.
@@ -4901,10 +4909,8 @@
       // The client's own confirmed caregiver schedule (Session 7's shifts, not
       // visit_logs — visit_logs is written retrospectively when a caregiver
       // files a completed log, so it never actually carried a future visit).
-      const fmtShiftTime = (iso) => {
-        const d = new Date(iso);
-        return isNaN(d) ? '' : d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-      };
+      // Eastern, always — see public/gfc-time.js.
+      const fmtShiftTime = (iso) => window.GFC_TIME ? window.GFC_TIME.fmtTime(iso) : '';
       // A visit in progress has its own card above the list, so it is marked
       // here and filtered out of the list rather than appearing twice.
       const upcoming = (shifts || []).map(s => ({
@@ -5006,7 +5012,7 @@
       if (!live) return null;
       const since = new Date(live.start);
       const until = new Date(live.end);
-      const t = (d) => isNaN(d.getTime()) ? '' : d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+      const t = (d) => window.GFC_TIME ? window.GFC_TIME.fmtTime(d) : '';
       return (
         <React.Fragment>
           <p className="lbl">Right now</p>
@@ -5030,10 +5036,8 @@
       // never carried a future visit — this tab said "no visits scheduled"
       // while Home showed one in progress. Recent still reads visit_logs,
       // which is exactly what that collection is for.
-      const fmtShiftTime = (iso) => {
-        const d = new Date(iso);
-        return isNaN(d.getTime()) ? '' : d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-      };
+      // Eastern, always — see public/gfc-time.js.
+      const fmtShiftTime = (iso) => window.GFC_TIME ? window.GFC_TIME.fmtTime(iso) : '';
       const upcoming = (shifts || [])
         .filter(s => s.status !== 'in_progress')      // the live one has its own card above
         .map(s => ({

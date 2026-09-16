@@ -20,6 +20,7 @@
 // ============================================================================
 
 const express = require('express');
+const time = require('../public/gfc-time');   // every time shown is Eastern
 const { contentDisposition } = require('../contentDisposition');
 const sched = require('../schedulingRepository');
 const wpRepo = require('../welcomePacketRepository');
@@ -432,7 +433,7 @@ module.exports = function createSchedulingRoutes(deps) {
           await queueNotification('shift_assigned', assignee.id, assignee.email, assignee.name,
             {
               subject: `New shift offered — ${row.client_name}`,
-              body: `You have been offered the ${new Date(row.start).toLocaleString('en-US')} shift for ${row.client_name}. Accept or decline it in your schedule.`,
+              body: `You have been offered the ${time.fmtDateTime(row.start)} shift for ${row.client_name}. Accept or decline it in your schedule.`,
               ctaUrl: '/caregiver', ctaLabel: 'Open the caregiver app'
             },
             { relatedEntityId: row.id, relatedEntityType: 'shift', createdBy: req.user.id });
@@ -642,7 +643,7 @@ module.exports = function createSchedulingRoutes(deps) {
         await queueNotification('shift_claimed', admin.id, admin.email, admin.name,
           {
             subject: `Shift claim awaiting approval — ${rows[idx].client_name}`,
-            body: `${me.name} claimed the ${new Date(rows[idx].start).toLocaleString('en-US')} shift for ${rows[idx].client_name}. Approve or decline it in Scheduling.`,
+            body: `${me.name} claimed the ${time.fmtDateTime(rows[idx].start)} shift for ${rows[idx].client_name}. Approve or decline it in Scheduling.`,
             ctaUrl: '/scheduling', ctaLabel: 'Open scheduling'
           },
           { relatedEntityId: rows[idx].id, relatedEntityType: 'shift', createdBy: me.id });
@@ -749,7 +750,7 @@ module.exports = function createSchedulingRoutes(deps) {
         await queueNotification('shift_assigned', caregiver.id, caregiver.email, caregiver.name,
           {
             subject: `New shift offered — ${rows[idx].client_name}`,
-            body: `You have been offered the ${new Date(rows[idx].start).toLocaleString('en-US')} shift for ${rows[idx].client_name}. Accept or decline it in your schedule.`,
+            body: `You have been offered the ${time.fmtDateTime(rows[idx].start)} shift for ${rows[idx].client_name}. Accept or decline it in your schedule.`,
             ctaUrl: '/caregiver', ctaLabel: 'Open the caregiver app'
           },
           { relatedEntityId: rows[idx].id, relatedEntityType: 'shift', createdBy: req.user.id });
@@ -808,7 +809,7 @@ module.exports = function createSchedulingRoutes(deps) {
         await queueNotification('shift_declined', admin.id, admin.email, admin.name,
           {
             subject: `Shift declined — back in the open pool`,
-            body: `${req.user.name} declined the ${new Date(result.shift.start).toLocaleString('en-US')} shift for ${result.shift.client_name}. It is open again.`,
+            body: `${req.user.name} declined the ${time.fmtDateTime(result.shift.start)} shift for ${result.shift.client_name}. It is open again.`,
             ctaUrl: '/scheduling', ctaLabel: 'Open scheduling'
           },
           { relatedEntityId: `${result.shift.id}:declined`, relatedEntityType: 'shift', createdBy: req.user.id });
@@ -856,7 +857,7 @@ module.exports = function createSchedulingRoutes(deps) {
   // Both parties are told on confirmation — the caregiver and the client.
   const notifyConfirmed = async (shift, actor) => {
     const users = await getUsers();
-    const when = new Date(shift.start).toLocaleString('en-US');
+    const when = time.fmtDateTime(shift.start);
     const caregiver = users.find(u => u.id === shift.caregiver_id);
     if (caregiver && caregiver.email) {
       await queueNotification('shift_confirmed', caregiver.id, caregiver.email, caregiver.name,
@@ -915,7 +916,7 @@ module.exports = function createSchedulingRoutes(deps) {
       if (!window.allowed) {
         const opens = new Date(window.opensAt);
         return res.status(409).json({
-          error: `Too early. You can clock in from ${opens.toLocaleString('en-US', { hour: 'numeric', minute: '2-digit', month: 'short', day: 'numeric' })}, two hours before the shift starts.`,
+          error: `Too early. You can clock in from ${time.fmtDayTime(opens)}, two hours before the shift starts.`,
           code: 'CLOCK_IN_TOO_EARLY',
           opensAt: window.opensAt,
           minutesEarly: window.minutesEarly
