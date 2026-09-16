@@ -1,5 +1,5 @@
 # GFC Care Platform — running status
-_Last updated: 2026-09-14 (four packet forms are SIGNED IN THE APP now, not printed and posted; the Schedule tab's remount loop is fixed; an office-filed document ticks its own checklist item; the caregiver welcome packet is now the app's front door — an onboarding wizard, a document checklist, and two gates; Session 4.8 — clinical access stopped being one boolean: certification now gates prescribing, ordering, CPT selection and billable signing, and RNs/LMSWs act under signed standing orders; EVV-style clock in/out — no visit log, no clock-out; a macOS screenshot filename 500'd every document download; Drive wired live and a failed read now NAMES its cause; SECURITY: cross-client messaging leak closed)_
+_Last updated: 2026-09-16 (PR #99 merged: four packet forms are SIGNED IN THE APP now, not printed and posted; the Schedule tab's remount loop is fixed; an office-filed document ticks its own checklist item; the caregiver welcome packet is now the app's front door — an onboarding wizard, a document checklist, and two gates; Session 4.8 — clinical access stopped being one boolean: certification now gates prescribing, ordering, CPT selection and billable signing, and RNs/LMSWs act under signed standing orders; EVV-style clock in/out — no visit log, no clock-out; a macOS screenshot filename 500'd every document download; Drive wired live and a failed read now NAMES its cause; SECURITY: cross-client messaging leak closed)_
 
 This file is auto-loaded at the start of every Claude Code session. Read it first for current state. Details live in `docs/`.
 
@@ -128,7 +128,7 @@ This file is auto-loaded at the start of every Claude Code session. Read it firs
 
 ## Recent decisions
 
-**09/2026 — Four packet forms are signed IN THE APP, and three live bugs found alongside (2026-09-14, owner-directed).** Five owner reports in one pass. Locked in:
+**09/2026 — Four packet forms are signed IN THE APP, and three live bugs found alongside (PR #99, merged 2026-09-16; built 2026-09-14, owner-directed).** Five owner reports in one pass. Locked in:
 
 - **THE FOUR FORMS WE WROTE ARE NO LONGER UPLOAD SLOTS.** The background check authorization, the registry attestation, the physical ability acknowledgement and the mandatory reporter acknowledgement were items a caregiver had to wait on a PDF for, print, sign, photograph and send back — four steps and a printer, for a document we already had. They are signed here now, the way a client signs a consent in the intake wizard. `caregiverAttestations.js` holds the wording; `caregiver_attestations` is its own collection, because four signature images on the packet row — read on nearly every caregiver request — is the care-plan signature mistake repeated.
 - **⚠️ THE WORDING IS A DRAFT PENDING COUNSEL AND GEORGIA LICENSURE REVIEW**, the same status the client consent set carries. The background check authorization is written as a **standalone** document because the FCRA requires the disclosure to appear in a document consisting solely of it; folding it into the packet's own signature would defeat that. **Open for the owner.**
