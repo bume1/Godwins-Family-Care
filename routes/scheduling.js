@@ -20,6 +20,7 @@
 // ============================================================================
 
 const express = require('express');
+const links = require('../appLinks');   // where each person actually goes
 const time = require('../public/gfc-time');   // every time shown is Eastern
 const { contentDisposition } = require('../contentDisposition');
 const sched = require('../schedulingRepository');
@@ -434,7 +435,7 @@ module.exports = function createSchedulingRoutes(deps) {
             {
               subject: `New shift offered — ${row.client_name}`,
               body: `You have been offered the ${time.fmtDateTime(row.start)} shift for ${row.client_name}. Accept or decline it in your schedule.`,
-              ctaUrl: '/caregiver', ctaLabel: 'Open the caregiver app'
+              ctaUrl: links.shiftFor(), ctaLabel: 'View the shift'
             },
             { relatedEntityId: row.id, relatedEntityType: 'shift', createdBy: req.user.id });
         }
@@ -644,7 +645,7 @@ module.exports = function createSchedulingRoutes(deps) {
           {
             subject: `Shift claim awaiting approval — ${rows[idx].client_name}`,
             body: `${me.name} claimed the ${time.fmtDateTime(rows[idx].start)} shift for ${rows[idx].client_name}. Approve or decline it in Scheduling.`,
-            ctaUrl: '/scheduling', ctaLabel: 'Open scheduling'
+            ctaUrl: links.PATHS.SCHEDULING, ctaLabel: 'Open scheduling'
           },
           { relatedEntityId: rows[idx].id, relatedEntityType: 'shift', createdBy: me.id });
       }
@@ -751,7 +752,7 @@ module.exports = function createSchedulingRoutes(deps) {
           {
             subject: `New shift offered — ${rows[idx].client_name}`,
             body: `You have been offered the ${time.fmtDateTime(rows[idx].start)} shift for ${rows[idx].client_name}. Accept or decline it in your schedule.`,
-            ctaUrl: '/caregiver', ctaLabel: 'Open the caregiver app'
+            ctaUrl: links.shiftFor(), ctaLabel: 'View the shift'
           },
           { relatedEntityId: rows[idx].id, relatedEntityType: 'shift', createdBy: req.user.id });
       }
@@ -810,7 +811,7 @@ module.exports = function createSchedulingRoutes(deps) {
           {
             subject: `Shift declined — back in the open pool`,
             body: `${req.user.name} declined the ${time.fmtDateTime(result.shift.start)} shift for ${result.shift.client_name}. It is open again.`,
-            ctaUrl: '/scheduling', ctaLabel: 'Open scheduling'
+            ctaUrl: links.PATHS.SCHEDULING, ctaLabel: 'Open scheduling'
           },
           { relatedEntityId: `${result.shift.id}:declined`, relatedEntityType: 'shift', createdBy: req.user.id });
       }
@@ -864,7 +865,7 @@ module.exports = function createSchedulingRoutes(deps) {
         {
           subject: `Shift confirmed — ${shift.client_name}`,
           body: `Your ${when} shift for ${shift.client_name} is confirmed.`,
-          ctaUrl: '/caregiver', ctaLabel: 'Open the caregiver app'
+          ctaUrl: links.shiftFor(), ctaLabel: 'View the shift'
         },
         { relatedEntityId: `${shift.id}:confirmed`, relatedEntityType: 'shift', createdBy: actor.id });
     }
@@ -874,7 +875,7 @@ module.exports = function createSchedulingRoutes(deps) {
         {
           subject: 'Your care visit is confirmed',
           body: `${shift.caregiver_name || 'A caregiver'} is confirmed for ${when}.`,
-          ctaUrl: '/portal', ctaLabel: 'Open your portal'
+          ctaUrl: links.PATHS.PORTAL, ctaLabel: 'Open your portal'
         },
         { relatedEntityId: `${shift.id}:confirmed-client`, relatedEntityType: 'shift', createdBy: actor.id });
     }

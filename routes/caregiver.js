@@ -26,6 +26,7 @@
 // ============================================================================
 
 const express = require('express');
+const links = require('../appLinks');   // where each person actually goes
 const cg = require('../caregiverRepository');
 const wp = require('../welcomePacketRepository');
 const onboardingGate = require('../caregiverOnboardingGate');
@@ -582,7 +583,7 @@ module.exports = function createCaregiverRoutes(deps) {
         {
           subject: `${routing.label} concern — ${client.name}`,
           body: `${caregiver.name} raised a ${routing.label.toLowerCase()} concern for ${client.name}.\n\n${text || '(no description)'}\n\nStatus: Received. Acknowledge it in the workspace so ${caregiver.name} can see it was seen.`,
-          ctaUrl: '/clinical',
+          ctaUrl: links.PATHS.CLINICAL,
           ctaLabel: 'Open the workspace'
         },
         { relatedEntityId: id, relatedEntityType: 'escalation', createdBy: caregiver.id }
@@ -750,7 +751,7 @@ module.exports = function createCaregiverRoutes(deps) {
           {
             subject: `Your concern for ${event.client_name} — ${to.replace(/_/g, ' ')}`,
             body: `${req.user.name || req.user.email} marked your ${event.concern_type.replace(/_/g, ' ')} concern "${to.replace(/_/g, ' ')}".${note ? `\n\n${note}` : ''}`,
-            ctaUrl: '/caregiver', ctaLabel: 'Open the caregiver app'
+            ctaUrl: links.PATHS.CAREGIVER_APP, ctaLabel: 'Open the caregiver app'
           },
           { relatedEntityId: `${event.id}:${to}`, relatedEntityType: 'escalation', createdBy: req.user.id }
         );
