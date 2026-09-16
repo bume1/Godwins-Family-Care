@@ -125,16 +125,16 @@
   }
 
   // ---- Formatting ---------------------------------------------------------
+  // Eastern, always — a caregiver who travels sees the shift in the time the
+  // office means by it, not the time where their phone happens to be.
+  var T = (typeof window !== 'undefined' && window.GFC_TIME) || null;
   function fmtWhen(iso) {
-    var d = new Date(iso);
-    if (isNaN(d.getTime())) return '';
-    return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }) +
-      ' · ' + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    return T ? T.fmtDayTime(iso) : '';
   }
   function fmtRange(a, b) {
     var end = new Date(b);
-    if (isNaN(end.getTime())) return fmtWhen(a);
-    return fmtWhen(a) + ' – ' + end.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    if (!T || isNaN(end.getTime())) return fmtWhen(a);
+    return fmtWhen(a) + ' – ' + T.fmtTime(end);
   }
   function titleize(s) { return String(s || '').replace(/_/g, ' ').replace(/\b\w/g, function (c) { return c.toUpperCase(); }); }
   function esc(s) {
@@ -215,7 +215,7 @@
         '<div class="gmu">' + esc(s.clientName || '') + (s.careTier ? ' · ' + esc(s.careTier) : '') + '</div>' +
         '<div class="gmu"><span class="gchip ' + (running ? 'on' : 'ok') + '">' + esc(titleize(s.status)) + '</span></div>' +
         (tooEarly
-          ? '<div class="gmu">Clock in opens at ' + esc(opens.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })) + '.</div>'
+          ? '<div class="gmu">Clock in opens at ' + esc(T ? T.fmtTime(opens) : '') + '.</div>'
           : '') +
         // The visit log comes before the clock stops, so the running shift
         // says which step it is on instead of offering a Clock out the server

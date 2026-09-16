@@ -1,6 +1,26 @@
 // Session 5.4: every console.* line is scrubbed of PHI before it leaves the
-// process. Installed before anything else can log.
+// process. Installed before anything else can log — and it stays the FIRST
+// require, which `test/audit_log.test.js` enforces. The timezone line below
+// deliberately sits second: the scrubber's invariant is about PHI reaching a
+// log, the timezone's is about a date being FORMATTED, and the scrubber
+// formats none. Safety first, then correctness.
 require('./logScrubber').install(console);
+
+// EVERY time this process renders for a person is Eastern (owner rule,
+// 2026-09-16). Set before the rest of the requires, because Node caches the
+// zone on first use and a module that formatted at load time would capture the
+// old one.
+//
+// This one line covers the whole tree — the shift notices, the PDF signature
+// timestamps, the CSV exports, and any call site a later session adds without
+// remembering the rule. It is safe because `toISOString()` and every `getUTC*`
+// accessor ignore TZ entirely, and `schedulingRepository.js` does its date
+// arithmetic in explicit UTC: see public/gfc-time.js for the whole argument.
+//
+// The container runs UTC. Georgia is four hours behind it in summer and five
+// in winter, which is exactly how a 9:00 AM shift went out as "1:00:00 PM".
+const practiceTime = require('./public/gfc-time');
+process.env.TZ = practiceTime.PRACTICE_TIMEZONE;
 const { contentDisposition } = require('./contentDisposition');
 const express = require('express');
 const cors = require('cors');
@@ -6128,11 +6148,16 @@ const visitDisplayRow = (v) => {
   const when = v.scheduledAt || v.date || null;
   const d = when ? new Date(when) : null;
   const valid = d && !isNaN(d.getTime());
-  const today = valid && d.toDateString() === new Date().toDateString();
+  // The DAY is read in Eastern too, not only the time. `getDay()` answers for
+  // whatever zone the process runs in, so an evening visit in Georgia lands on
+  // tomorrow in UTC and the card names the wrong weekday — and "Today" stops
+  // being today at 8pm. Both come from the same Eastern reading.
+  const parts = valid ? practiceTime.zonedParts(d) : null;
+  const today = !!parts && parts.isoDate === practiceTime.zonedParts(new Date()).isoDate;
   return {
     id: v.id,
-    day: valid ? (today ? 'Today' : DAY_NAMES[d.getDay()]) : (v.day || ''),
-    time: v.time || (valid ? d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : ''),
+    day: parts ? (today ? 'Today' : DAY_NAMES[parts.weekdayIndex]) : (v.day || ''),
+    time: v.time || (valid ? practiceTime.fmtTime(d) : ''),
     type: v.type || 'Visit',
     with: v.caregiverName || v.with || 'Your care team',
     duration: v.duration || null,

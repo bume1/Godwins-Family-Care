@@ -22,6 +22,7 @@
 // ============================================================================
 
 const cg = require('./caregiverRepository');
+const practiceTime = require('./public/gfc-time');   // every time read or shown is Eastern
 
 // ---- Availability ----------------------------------------------------------
 // Caregivers and clinicians submit availability at least 30 days in advance so
@@ -132,12 +133,20 @@ function availabilityCoversShift(availability, shift) {
   const end = new Date(shift.end);
   if (isNaN(start.getTime()) || isNaN(end.getTime())) return false;
 
-  const date = start.toISOString().slice(0, 10);
+  // READ IN EASTERN, not UTC. A caregiver who says "Tuesdays, 9am to 5pm" means
+  // Georgia time; `getUTCDay()` puts a Tuesday 8pm shift on WEDNESDAY at 00:00
+  // and matches it against the wrong window — or against none, which reads as
+  // "outside their availability" for a shift squarely inside it. Same for the
+  // blackout date and the effective date: both are days a person named.
+  const parts = practiceTime.zonedParts(start);
+  if (!parts) return false;
+
+  const date = parts.isoDate;
   if (availability.effectiveFrom && date < availability.effectiveFrom) return false;
   if (Array.isArray(availability.blackoutDates) && availability.blackoutDates.includes(date)) return false;
 
-  const day = DAYS[start.getUTCDay()];
-  const shiftStart = start.getUTCHours() * 60 + start.getUTCMinutes();
+  const day = DAYS[parts.weekdayIndex];
+  const shiftStart = parts.minutesOfDay;
   const shiftEnd = shiftStart + Math.round((end.getTime() - start.getTime()) / 60000);
 
   return (availability.windows || []).some(w => {

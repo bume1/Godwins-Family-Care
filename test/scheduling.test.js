@@ -108,19 +108,58 @@ test('day names are accepted in the forms people actually type', () => {
   assert.strictEqual(sched.normalizeDay('someday'), null);
 });
 
-test('availabilityCoversShift respects windows, blackout dates and the effective date', () => {
+// REPOINTED 2026-09-16, not patched to pass. This test asserted the UTC
+// reading: it expected 14:00Z to be "14:00", inside a 13:00-19:00 window. But a
+// caregiver who writes "Thu 13:00-19:00" means Georgia, and 14:00Z is 10:00 AM
+// there — outside it. The old assertion encoded the defect, so the fixture is
+// restated in Eastern with the offset written out, and the case that exposes
+// the bug is added below.
+test('availabilityCoversShift reads the shift in EASTERN, not UTC', () => {
   const avail = {
     effectiveFrom: '2026-09-01',
     windows: [{ day: 'Thu', start: '13:00', end: '19:00' }],
     blackoutDates: ['2026-10-08']
   };
-  assert.ok(sched.availabilityCoversShift(avail, { start: '2026-10-01T14:00:00Z', end: '2026-10-01T18:00:00Z' }));
-  assert.ok(!sched.availabilityCoversShift(avail, { start: '2026-10-01T20:00:00Z', end: '2026-10-01T22:00:00Z' }),
+  // Thursday 1pm-5pm in Georgia, stored as the instant it really is.
+  assert.ok(sched.availabilityCoversShift(avail,
+    { start: '2026-10-01T13:00:00-04:00', end: '2026-10-01T17:00:00-04:00' }),
+    'a shift inside the stated window is covered');
+
+  // 14:00Z is 10:00 AM in Georgia — BEFORE the window opens. This is the
+  // assertion that used to pass for the wrong reason.
+  assert.ok(!sched.availabilityCoversShift(avail,
+    { start: '2026-10-01T14:00:00Z', end: '2026-10-01T18:00:00Z' }),
+    '10am Eastern is outside a 1pm-7pm window, however it reads in UTC');
+
+  assert.ok(!sched.availabilityCoversShift(avail,
+    { start: '2026-10-01T20:00:00-04:00', end: '2026-10-01T22:00:00-04:00' }),
     'a shift outside the window is not covered');
-  assert.ok(!sched.availabilityCoversShift(avail, { start: '2026-10-08T14:00:00Z', end: '2026-10-08T18:00:00Z' }),
+  assert.ok(!sched.availabilityCoversShift(avail,
+    { start: '2026-10-08T14:00:00-04:00', end: '2026-10-08T18:00:00-04:00' }),
     'a blackout date is not covered');
-  assert.ok(!sched.availabilityCoversShift(avail, { start: '2026-08-27T14:00:00Z', end: '2026-08-27T18:00:00Z' }),
+  assert.ok(!sched.availabilityCoversShift(avail,
+    { start: '2026-08-27T14:00:00-04:00', end: '2026-08-27T18:00:00-04:00' }),
     'before the effective date is not covered');
+});
+
+test('an evening shift keeps its OWN weekday and date, not the next one in UTC', () => {
+  // The case the UTC reading got wrong in three ways at once. A Tuesday 8pm
+  // shift in Georgia is Wednesday 00:00 UTC: wrong weekday, wrong hour, and
+  // wrong calendar date for the blackout and effective-date checks.
+  const tuesdayEvening = { start: '2026-09-15T20:00:00-04:00', end: '2026-09-15T22:00:00-04:00' };
+
+  assert.ok(sched.availabilityCoversShift(
+    { effectiveFrom: '2026-09-01', windows: [{ day: 'Tue', start: '18:00', end: '23:00' }] },
+    tuesdayEvening), 'a Tuesday evening shift matches the TUESDAY window');
+
+  assert.ok(!sched.availabilityCoversShift(
+    { effectiveFrom: '2026-09-01', windows: [{ day: 'Wed', start: '00:00', end: '06:00' }] },
+    tuesdayEvening), 'and does not match Wednesday, which is only where UTC put it');
+
+  assert.ok(!sched.availabilityCoversShift(
+    { effectiveFrom: '2026-09-01', windows: [{ day: 'Tue', start: '18:00', end: '23:00' }],
+      blackoutDates: ['2026-09-15'] },
+    tuesdayEvening), 'the blackout is matched on the Georgia date the caregiver named');
 });
 
 // ============================================================================
