@@ -1250,12 +1250,25 @@
       const fileRef = React.useRef(null);
 
       const load = React.useCallback(async () => {
+        // OWNER REPORT, 2026-09-14: documents uploaded for one caregiver were
+        // showing on every other caregiver's form. The list is fetched per
+        // caregiver correctly — but this component is not remounted when the
+        // admin opens a different user, so the PREVIOUS caregiver's rows stayed
+        // in state. They stayed for good if the new fetch failed, because a
+        // failed fetch resolves to { error } and never calls setDocs.
+        //
+        // So the list is cleared FIRST, on every caregiver change. An empty
+        // list while the fetch is in flight is honest; somebody else's
+        // paperwork under this caregiver's name is not.
+        setDocs([]);
+        setMsg(null);
         if (!caregiverId) return;   // not saved yet — there is nothing to file against
         const [d, k] = await Promise.all([
           api.listCaregiverDocs(token, caregiverId),
           api.getCaregiverDocKinds(token)
         ]);
         if (d && Array.isArray(d.documents)) setDocs(d.documents);
+        else if (d && d.error) setMsg({ ok: false, text: `Could not load this caregiver's documents: ${d.error}` });
         if (k && Array.isArray(k.kinds)) {
           setKinds(k.kinds);
           // The catalog decides the default, so no kind is named in this page.

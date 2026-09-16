@@ -49,7 +49,11 @@ module.exports = function createSchedulingRoutes(deps) {
     const packet = packets.find(r => r && r.caregiver_id === caregiver.id) || null;
     const documents = ((await db.get('caregiver_documents')) || [])
       .filter(r => r && r.caregiver_id === caregiver.id);
-    const checklist = wpRepo.buildChecklist((packet || {}).data, documents, (packet || {}).office);
+    // The signable forms count toward shift clearance like every other item.
+    // Omitting them here would refuse a caregiver who is genuinely cleared.
+    const attestations = ((await db.get('caregiver_attestations')) || [])
+      .filter(r => r && r.caregiver_id === caregiver.id);
+    const checklist = wpRepo.buildChecklist((packet || {}).data, documents, (packet || {}).office, attestations);
     return { packet, checklist };
   };
 
