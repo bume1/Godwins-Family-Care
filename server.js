@@ -887,10 +887,30 @@ function getPoolGroupsForTemplate(templateId) {
 // POOL RESOLVER FUNCTIONS — Build variable values from entity data
 // ============================================================
 
+// THE HOST EVERY EMAIL LINK IS BUILT ON.
+//
+// This used to fall back to `https://godwinsfamilycarellc.com` — the MARKETING
+// SITE, a lab-era default. The app is at app.godwinsfamilycarellc.com, so with
+// the stored domain unset every CTA in every notice pointed at a public
+// website with no portal on it. Owner-reported 2026-09-16.
+//
+// Order: an explicit env value, then the domain an admin saved in settings,
+// then the app's real host. The env wins because a deployment knows where it
+// is; the stored setting stays because the admin screen that writes it has
+// shipped for months and silently ignoring it would be worse than the bug.
+//
+// A stored value carrying its own scheme is used AS IS. Prefixing `https://`
+// unconditionally turned an admin who pasted a full URL into
+// `https://https://app…` — a dead link nobody would think to check for.
+const DEFAULT_APP_BASE_URL = 'https://app.godwinsfamilycarellc.com';
 async function getAppBaseUrl() {
-  const domain = await db.get('client_portal_domain');
-  if (domain) return `https://${domain}`;
-  return 'https://godwinsfamilycarellc.com';
+  const fromEnv = String(process.env.APP_BASE_URL || '').trim().replace(/\/+$/, '');
+  if (/^https?:\/\//i.test(fromEnv)) return fromEnv;
+
+  const stored = String((await db.get('client_portal_domain')) || '').trim().replace(/\/+$/, '');
+  if (stored) return /^https?:\/\//i.test(stored) ? stored : `https://${stored}`;
+
+  return DEFAULT_APP_BASE_URL;
 }
 
 function resolveSystemVars(appBaseUrl) {

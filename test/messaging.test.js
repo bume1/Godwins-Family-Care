@@ -433,7 +433,15 @@ test('SAFETY: every messaging route authenticates and carries a role guard', () 
 test('the notification carries NO message body — a notification is not a copy of the PHI', () => {
   const notify = routeSrc.slice(routeSrc.indexOf('async function notifyThread'));
   assert.ok(!/message\.body/.test(notify), 'the body must not be emailed out of the app');
-  assert.ok(/Open the portal to read it/.test(notify), 'it says a message is waiting instead');
+  // REPOINTED 2026-09-16. This asserted the literal "Open the portal to read
+  // it". That wording was wrong for three of the five roles who receive this
+  // notice — messaging mounts on four surfaces and the sentence named only the
+  // client's. The rule being protected is "say a message is waiting, do not
+  // carry it", so that is what is asserted; the destination is `messagesFor`,
+  // guarded in test/app_links.test.js.
+  assert.match(notify, /sent you a message about/, 'it says a message is waiting');
+  assert.match(notify, /to read it/, 'and points the reader at the app rather than quoting the message');
+  assert.match(notify, /links\.messagesFor\(u\)/, 'to the surface THAT recipient reads messages on');
 });
 
 test('a behavioral escalation writes to SESSION 6\'s store, in Session 6\'s shape', () => {

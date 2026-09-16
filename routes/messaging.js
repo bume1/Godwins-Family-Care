@@ -25,6 +25,7 @@
 // ============================================================================
 
 const express = require('express');
+const links = require('../appLinks');   // where each person actually goes
 const msg = require('../messagingRepository');
 const caregiverRepo = require('../caregiverRepository');
 
@@ -552,8 +553,12 @@ module.exports = function createMessagingRoutes(deps) {
           // The BODY is deliberately not in the email. A notification that
           // carries the message carries PHI into an inbox; one that says a
           // message is waiting does not.
-          body: `${message.display_name} sent you a message about ${thread.client_name}. Open the portal to read it.`,
-          ctaUrl: '/portal', ctaLabel: 'Open messages'
+          // WHERE THIS PERSON READS MESSAGES, not where a client does.
+          // Messaging mounts on four surfaces; this notice goes to whoever is
+          // on the thread, so a single `/portal` sent caregivers, clinicians,
+          // case managers and admins to the CLIENT's portal.
+          body: `${message.display_name} sent you a message about ${thread.client_name}. Open the app to read it.`,
+          ctaUrl: links.messagesFor(u), ctaLabel: 'Open messages'
         },
         { relatedEntityId: message.id, relatedEntityType: 'message', createdBy: senderId });
     }

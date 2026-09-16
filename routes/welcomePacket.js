@@ -20,6 +20,7 @@
 // ============================================================================
 
 const express = require('express');
+const links = require('../appLinks');   // where each person actually goes
 const cg = require('../caregiverRepository');
 const wp = require('../welcomePacketRepository');
 const gate = require('../caregiverOnboardingGate');
@@ -403,7 +404,7 @@ module.exports = function createWelcomePacketRoutes(deps) {
           body: `${caregiver.name || printed} has completed their caregiver welcome packet. Their document checklist is in the admin hub.`,
           relatedEntityId: packet.id,
           ctaLabel: 'Open the caregiver queue',
-          ctaUrl: '/admin-hub'
+          ctaUrl: links.PATHS.ADMIN
         }).catch(e => console.error('[WELCOME PACKET] notify failed (non-fatal):', e.message));
       }
 
