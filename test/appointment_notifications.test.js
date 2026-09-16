@@ -139,8 +139,12 @@ function loadGetClientVisits({ visitLogs = [], shifts = [], users = [] }) {
   const to = SERVER_SRC.indexOf('// The interim message shaper lived here');
   assert.ok(from !== -1 && to > from, 'could not lift getClientVisits out of server.js');
   const db = { get: async (k) => (k === 'visit_logs' ? visitLogs : k === 'shifts' ? shifts : null) };
-  return new Function('db', 'getUsers', `${SERVER_SRC.slice(from, to)}\nreturn getClientVisits;`)(
-    db, async () => users
+  // `practiceTime` is injected because server.js requires it at the top and the
+  // lifted block uses it to read a visit's day and time in Eastern. A harness
+  // that omits what production supplies exercises a different function — the
+  // rule the cross-client leak and the Drive fake both bought the hard way.
+  return new Function('db', 'getUsers', 'practiceTime', `${SERVER_SRC.slice(from, to)}\nreturn getClientVisits;`)(
+    db, async () => users, require('../public/gfc-time')
   );
 }
 

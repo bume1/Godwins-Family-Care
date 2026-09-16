@@ -8,6 +8,14 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.1.0/dist/tabler-icons.min.css">
+  <!-- EVERY time this app shows is Eastern, on both sides (owner rule,
+       2026-09-16). Loaded before the page's own scripts so nothing can format a
+       date before the default is in place. `installDefaultTimeZone()` fills in
+       the zone where a caller passed none; the shift and visit sites also call
+       GFC_TIME's helpers explicitly, because code that says what it means
+       outlives a shim. See public/gfc-time.js. -->
+  <script src="/gfc-time.js"></script>
+  <script>window.GFC_TIME && window.GFC_TIME.installDefaultTimeZone();</script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
@@ -270,8 +278,10 @@ const fmtDate = (iso) => {
   if (!iso) return '';
   const d = new Date(iso);
   if (isNaN(d.getTime())) return '';
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' · ' +
-         d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  // Eastern, always — see public/gfc-time.js.
+  return window.GFC_TIME
+    ? window.GFC_TIME.fmtDate(d).replace(/\/\d{4}$/, '') + ' · ' + window.GFC_TIME.fmtTime(d)
+    : '';
 };
 const titleize = (s) => String(s || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 
@@ -405,8 +415,17 @@ const MessagingEntry = ({ onOpen }) => (
 // Mirrors CLOCK_IN_WINDOW_MINUTES. Display only — the server is what refuses
 // an early clock-in; this just decides which sentence to show.
 const CLOCK_IN_WINDOW_MINUTES = 120;
-const hhmm = (d) => isNaN(d.getTime()) ? '' : d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-const isSameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+const hhmm = (d) => (isNaN(d.getTime()) || !window.GFC_TIME) ? '' : window.GFC_TIME.fmtTime(d);
+// Same day IN GEORGIA. `getDate()` answers for the device's zone, so a
+// caregiver on a trip would see "Today" against their own midnight rather than
+// the one the shift belongs to. The timezone shim deliberately does not patch
+// the getters — they feed arithmetic, and a silently shifted calendar is worse
+// than a shifted label — so this asks GFC_TIME directly.
+const isSameDay = (a, b) => {
+  if (!window.GFC_TIME) return false;
+  const pa = window.GFC_TIME.zonedParts(a), pb = window.GFC_TIME.zonedParts(b);
+  return !!pa && !!pb && pa.isoDate === pb.isoDate;
+};
 
 // The card reflects the caregiver's ACTUAL state: clocked in, due to start,
 // too early to start, or nothing scheduled. It takes shifts as a PROP and
@@ -454,7 +473,7 @@ const ShiftCard = ({ clients, shifts, onSchedule }) => {
     const tooEarly = now < opens;
     return (
       <div className="shift">
-        <div className="e">{today ? 'Today' : start.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}</div>
+        <div className="e">{today ? 'Today' : (window.GFC_TIME ? window.GFC_TIME.fmtLongDayTime(start).split(' at ')[0] : '')}</div>
         <div className="nm">{next.clientName || 'Your client'}</div>
         <div className="mt">{hhmm(start)} – {hhmm(new Date(next.end))}</div>
         <button className="shiftlink" onClick={onSchedule}>
