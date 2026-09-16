@@ -2122,7 +2122,20 @@ const App = () => {
   // Read so Home can show the caregiver's ACTUAL clock state. Session 7's
   // component owns every clock ACTION; this is the same board, read only.
   const [shifts, setShifts] = useState([]);
-  const [tab, setTab] = useState('home');
+  // A shift email links to /caregiver#schedule, so the caregiver lands on the
+  // shift they were just told about rather than on Home having to go find it.
+  // Read ONCE at mount: a later hash change is the person navigating inside
+  // the app, and yanking the tab out from under them would be worse than
+  // ignoring it. An unknown fragment falls back to Home rather than rendering
+  // a tab that does not exist.
+  const TAB_IDS = ['home', 'schedule', 'feed', 'clients', 'more'];
+  const tabFromHash = () => {
+    try {
+      const want = String(window.location.hash || '').replace(/^#/, '').toLowerCase();
+      return TAB_IDS.includes(want) ? want : 'home';
+    } catch (e) { return 'home'; }
+  };
+  const [tab, setTab] = useState(tabFromHash);
   const [screen, setScreen] = useState(null);         // 'visitLog' | 'flag' | null
   // Set when a clock-out was refused for want of a visit log: carries which
   // shift and client the log has to be filed against, so the form is not a
