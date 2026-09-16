@@ -2671,7 +2671,7 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       // Optional at creation (a clinical-only client signs neither of those
       // two), and it goes through the SAME builder the enrollment route uses so
       // the two paths cannot start accepting different things.
-      if (rateAgreement && Object.keys(rateAgreement).length) {
+      if (rateAgreementSupplied(rateAgreement)) {
         const built = buildRateAgreement(rateAgreement, req.user);
         if (built.error) return res.status(400).json({ error: built.error, code: built.code });
         newUser.rateAgreement = built.rateAgreement;
@@ -11334,7 +11334,7 @@ app.get('/api/gfc/admin/enrollment/:clientId', authenticateToken, requireEnrollm
 // nobody finds out by accident — and it is already what the intake save calls.
 // This route is the staff-facing door onto the same function, which is the only
 // way the two paths cannot drift.
-app.put('/api/gfc/admin/enrollment/:clientId/service-line', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+app.put('/api/gfc/admin/enrollment/:clientId/service-line', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -11416,7 +11416,7 @@ app.get('/api/gfc/admin/enrollment/:clientId/documents', authenticateToken, requ
 // Items may be registry kinds or a one-off (`custom:<slug>`), so a request for
 // something the registry never anticipated still lands in the same checklist
 // rather than in an email nobody can audit.
-app.post('/api/gfc/admin/enrollment/:clientId/documents/request', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/documents/request', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const users = await getUsers();
     const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -11470,7 +11470,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/request', authenticateTo
 // POST /api/gfc/admin/enrollment/:clientId/documents/remind — chase what is open.
 // Every reminder is stamped on the request, so "we asked three times" is a fact
 // on the record rather than a recollection.
-app.post('/api/gfc/admin/enrollment/:clientId/documents/remind', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/documents/remind', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const users = await getUsers();
     const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -11506,7 +11506,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/remind', authenticateTok
 // or reject what arrived. Rejecting REOPENS the ask, so an unreadable photo of
 // an insurance card goes back on the client's checklist with the reason on it
 // instead of sitting in a folder marked received.
-app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const decision = String((req.body || {}).decision || '').toLowerCase();
     if (!['accepted', 'rejected'].includes(decision)) {
@@ -11564,7 +11564,7 @@ app.get('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/file', authenti
 });
 
 // POST /api/gfc/admin/enrollment/:clientId/review — record a review (no state change).
-app.post('/api/gfc/admin/enrollment/:clientId/review', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/review', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -11586,7 +11586,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/review', authenticateToken, requir
 
 // POST /api/gfc/admin/enrollment/:clientId/follow-up — request patient action.
 // body: { items: [key1, key2, ...] }  (keys are consent types or field keys)
-app.post('/api/gfc/admin/enrollment/:clientId/follow-up', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/follow-up', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { items } = req.body || {};
     if (!Array.isArray(items) || !items.length) {
@@ -11927,6 +11927,18 @@ app.get('/api/gfc/admin/enrollment/meta/consent-registry', authenticateToken, re
 // service-line route calls applyServiceLineChange: two copies of "what a valid
 // rate is" is how one path starts accepting what the other refuses.
 // Returns { error, code } on a bad rate and writes nothing.
+// Was a rate actually supplied? The Add-User form ships both boxes empty, so
+// an admin who deliberately SKIPS the rate — a clinical-only patient signs
+// neither money document — posts empty strings, not an absent object. Reading
+// that as an invalid rate is what refused every client added without one.
+// A HALF-filled rate is still an error: one number without the other is a slip,
+// not a decision, and it is caught by buildRateAgreement below.
+function rateAgreementSupplied(body) {
+  const b = body || {};
+  const given = (v) => v !== undefined && v !== null && String(v).trim() !== '';
+  return given(b.hourlyRate) || given(b.dailyMinimumHours);
+}
+
 function buildRateAgreement(body, actor) {
   const b = body || {};
   const hourlyRate = Number(b.hourlyRate);
@@ -11947,6 +11959,134 @@ function buildRateAgreement(body, actor) {
     }
   };
 }
+
+// The two cards at the top of the enrollment detail view, and nothing else.
+// An ALLOW-LIST: a key this list does not carry never reaches the client
+// record, so an edit form on the enrollment page cannot start writing the rest
+// of a client. The agreed rate is deliberately absent — it has its own route
+// and its own re-signature rule, and two writers for one agreed price is how
+// the two start disagreeing.
+const ENROLLMENT_DETAIL_FIELDS = ['dob', 'gender', 'primaryLanguage', 'phone'];
+const ENROLLMENT_CONTACT_FIELDS = ['name', 'relationship', 'phone', 'email'];
+
+// PUT /api/gfc/admin/enrollment/:clientId/details — admin fills in or corrects
+// the client's own details from the enrollment page.
+//
+// ADMIN ONLY, like every other write on this surface. A clinician or case
+// manager reads this page; they do not edit the record behind it.
+//
+// Why it exists: a client added by an admin has no intake behind them, so the
+// Client and Primary contact cards read "—" across the board with no way to
+// fill them in — and those blanks are what block a consent from being
+// presentable. The client's own intake wizard was the only writer.
+app.put('/api/gfc/admin/enrollment/:clientId/details', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const users = await getUsers();
+    const idx = users.findIndex(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (idx === -1) return res.status(404).json({ error: 'Client not found' });
+    const client = users[idx];
+
+    // Captured BEFORE anything is mutated — the signed-consent comparison below
+    // needs the record as it stood when those consents were signed.
+    const priorClient = { ...client, intake: { ...(client.intake || {}) } };
+
+    const str = (v) => (v === undefined || v === null) ? undefined : String(v).trim();
+    const next = { ...(client.intake || {}) };
+    const changed = [];
+
+    ENROLLMENT_DETAIL_FIELDS.forEach(f => {
+      const v = str(body[f]);
+      if (v === undefined) return;              // absent means "leave this alone"
+      if (String(next[f] || '') === v) return;  // unchanged is not a change
+      next[f] = v;
+      changed.push(f);
+    });
+    if (body.primaryContact && typeof body.primaryContact === 'object') {
+      const pc = { ...(next.primaryContact || {}) };
+      ENROLLMENT_CONTACT_FIELDS.forEach(f => {
+        const v = str(body.primaryContact[f]);
+        if (v === undefined) return;
+        if (String(pc[f] || '') === v) return;
+        pc[f] = v;
+        changed.push(`primaryContact.${f}`);
+      });
+      next.primaryContact = pc;
+    }
+
+    // Validated by the SAME function the intake wizard and offline onboarding
+    // use, so a date this page accepts is a date those two would accept.
+    const fieldErrors = validateClientCoreFields(next);
+    if (Object.keys(fieldErrors).length) {
+      return res.status(400).json({ error: 'Some client details need correcting.', code: 'INTAKE_INVALID', fieldErrors });
+    }
+
+    // The login email is the account's identity, so it is checked against every
+    // other account BEFORE it is taken, never after.
+    let emailChanged = null;
+    const email = str(body.email);
+    if (email !== undefined && email.toLowerCase() !== String(client.email || '').toLowerCase()) {
+      if (!email) return res.status(400).json({ error: 'Email cannot be blank.', code: 'EMAIL_REQUIRED' });
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(400).json({ error: 'Enter a valid email address.', code: 'EMAIL_INVALID' });
+      }
+      if (users.some((u, i) => i !== idx && u.email && u.email.toLowerCase() === email.toLowerCase())) {
+        return res.status(400).json({ error: 'Another account already uses that email address.', code: 'EMAIL_TAKEN' });
+      }
+      emailChanged = email.toLowerCase();
+      changed.push('email');
+    }
+
+    if (!changed.length) {
+      return res.json({ message: 'Nothing changed', changed: [], client: enrollmentDetail(client) });
+    }
+
+    next.age = deriveAge(next.dob);
+    client.intake = next;
+    if (emailChanged) client.email = emailChanged;
+    if (changed.includes('phone')) client.phone = next.phone || '';
+    // ONE writer for intake → client profile. This page does not get its own
+    // idea of the shape the matching and billing engines read.
+    mirrorIntakeToClientProfile(client, next, undefined, undefined);
+
+    // A signed consent copy is RENDERED from this record, so correcting a value
+    // one of them prints changes what that signed document says. The correction
+    // is still right — a typo in a date of birth has to be fixable — but it is
+    // never silent. Rather than keep a second map of which field feeds which
+    // document, ask the documents: resolve each signed consent before and after
+    // and keep the ones that now read differently.
+    const nowStale = GFC_CONSENT_DEFS
+      .filter(d => isConsentSatisfied((client.consents || {})[d.type]))
+      .filter(d => JSON.stringify(consentRender.resolveForConsent(consentText, d.type, priorClient))
+                !== JSON.stringify(consentRender.resolveForConsent(consentText, d.type, client)))
+      .map(d => d.type);
+    if (nowStale.length) {
+      client.consentActionRequired = {
+        reason: 'client_details_changed', at: new Date().toISOString(),
+        consents: nowStale,
+        titles: nowStale.map(t => (GFC_CONSENT_DEFS.find(d => d.type === t) || {}).title || t),
+        fields: changed
+      };
+    }
+
+    // Filling in details is NOT the client submitting their intake, so the
+    // enrollment status is deliberately left where it is. Approving is its own
+    // deliberate act, by an admin, on its own button.
+    users[idx] = client;
+    await db.set('users', users);
+    invalidateUsersCache();
+    // WHICH fields changed, never what they changed to. A date of birth and a
+    // phone number belong to the patient; an audit trail is not a second copy
+    // of them. (Same rule the client-location route follows.)
+    await logActivity(req.user.id, req.user.name || req.user.email, 'client_details_updated', 'enrollment', client.id, {
+      fields: changed, consentsNeedingResignature: nowStale
+    });
+    res.json({ message: 'Client details saved', changed, consentsNeedingResignature: nowStale, client: enrollmentDetail(client) });
+  } catch (error) {
+    console.error('GFC client details update error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
 
 // PUT /api/gfc/admin/enrollment/:clientId/rate — set the agreed rate (Scope B2).
 //
@@ -12046,7 +12186,7 @@ app.get('/api/gfc/admin/enrollment/:clientId/consent/:type/blank.pdf', authentic
 // The scan is the evidence and it is REQUIRED. A paper consent recorded with no
 // document behind it is the same provenance-free record Scope E1 found, just
 // entered by a different hand.
-app.post('/api/gfc/admin/enrollment/:clientId/consent/:type/offline', authenticateToken, requireEnrollmentStaff, uploadLimiter, upload.single('file'), async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/consent/:type/offline', authenticateToken, requireAdmin, uploadLimiter, upload.single('file'), async (req, res) => {
   try {
     const type = req.params.type;
     const users = await getUsers();

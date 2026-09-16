@@ -144,6 +144,9 @@
       setRate: (id, body) => authedFetch(`/api/gfc/admin/enrollment/${id}/rate`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
       }),
+      setClientDetails: (id, body) => authedFetch(`/api/gfc/admin/enrollment/${id}/details`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      }),
       // Record a consent the client signed on paper. Multipart — the scan is
       // the evidence and the server requires it.
       recordOfflineConsent: (url, formData) => {
@@ -339,7 +342,7 @@
     // The staff half of the two-way exchange: what we asked for, what arrived,
     // and whether it is usable. Same checklist the client sees, built by the
     // same server function, so the two views cannot drift apart.
-    const DocumentExchange = ({ clientId }) => {
+    const DocumentExchange = ({ clientId, canEdit }) => {
       const [state, setState] = useState(null);
       const [err, setErr] = useState('');
       const [busy, setBusy] = useState(false);
@@ -391,10 +394,12 @@
       return (
         <Section title={`Documents from the client${outstanding ? ` — ${outstanding} outstanding` : ''}`}>
           {err && <div className="bg-danger-50 text-danger-600 text-sm rounded-lg px-4 py-2 mb-3">{err}</div>}
-          <div className="flex gap-2 mb-3 flex-wrap">
-            <button className="btn btn-ghost" disabled={busy} onClick={() => setAsking(v => !v)}>Request documents</button>
-            <button className="btn btn-ghost" disabled={busy || !outstanding} onClick={remind}>Send reminder</button>
-          </div>
+          {canEdit && (
+            <div className="flex gap-2 mb-3 flex-wrap">
+              <button className="btn btn-ghost" disabled={busy} onClick={() => setAsking(v => !v)}>Request documents</button>
+              <button className="btn btn-ghost" disabled={busy || !outstanding} onClick={remind}>Send reminder</button>
+            </div>
+          )}
 
           {asking && (
             <div className="border border-gray-200 rounded-lg p-3 mb-4">
@@ -455,8 +460,8 @@
                         ? <span className="text-success-600">Accepted</span>
                         : (
                           <span className="flex gap-2">
-                            <button className="text-success-600" disabled={busy} onClick={() => review(f.id, 'accepted')}>Accept</button>
-                            <button className="text-danger-500" disabled={busy} onClick={() => review(f.id, 'rejected')}>Reject</button>
+                            {canEdit && <button className="text-success-600" disabled={busy} onClick={() => review(f.id, 'accepted')}>Accept</button>}
+                            {canEdit && <button className="text-danger-500" disabled={busy} onClick={() => review(f.id, 'rejected')}>Reject</button>}
                           </span>
                         )}
                   </div>
@@ -472,7 +477,7 @@
     // a homebound client. Until this existed, `signed_offline` could only be
     // written while CREATING a client, so an existing client's only route to a
     // satisfied consent was logging into the portal and e-signing it themselves.
-    const RecordPaperSignature = ({ consent, onDone }) => {
+    const RecordPaperSignature = ({ consent, onDone, canEdit }) => {
       const [open, setOpen] = useState(false);
       const [signedAt, setSignedAt] = useState('');
       const [file, setFile] = useState(null);
@@ -506,7 +511,7 @@
           {!open && (
             <div className="flex items-center gap-3 text-xs">
               <a className="text-primary-500 underline" href={consent.blankCopyUrl} target="_blank" rel="noreferrer">Print for signature</a>
-              <button className="text-primary-500 underline" onClick={() => setOpen(true)}>Record paper signature</button>
+              {canEdit && <button className="text-primary-500 underline" onClick={() => setOpen(true)}>Record paper signature</button>}
             </div>
           )}
           {open && (
@@ -537,6 +542,100 @@
     // this table, so until it exists neither is presentable and the client is
     // stopped at their first signature. Set it here, at intake, not at the
     // kitchen table.
+    // The client's own details, editable by an admin from this page.
+    //
+    // A client an admin added by hand has no intake behind them, so these cards
+    // read "—" across the board and there was no writer but the client's own
+    // intake wizard. The field list mirrors the server's allow-list exactly; it
+    // does not invent one of its own.
+    const ClientDetailsEditor = ({ client, canEdit, onSaved }) => {
+      const i = client.intake || {};
+      const pc = i.primaryContact || {};
+      const [open, setOpen] = useState(false);
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      const [fieldErrors, setFieldErrors] = useState({});
+      const [f, setF] = useState({
+        dob: i.dob || client.dob || '',
+        email: client.email || '',
+        gender: i.gender || '',
+        primaryLanguage: i.primaryLanguage || '',
+        phone: i.phone || client.phone || '',
+        primaryContact: {
+          name: pc.name || '', relationship: pc.relationship || '',
+          phone: pc.phone || '', email: pc.email || ''
+        }
+      });
+      const set = (k, v) => setF(prev => ({ ...prev, [k]: v }));
+      const setPc = (k, v) => setF(prev => ({ ...prev, primaryContact: { ...prev.primaryContact, [k]: v } }));
+
+      const save = () => {
+        setBusy(true); setErr(''); setFieldErrors({});
+        api.setClientDetails(client.id, f)
+          // Re-read rather than trust local state: age, the client-profile
+          // mirror and the re-signature flag are all resolved server-side.
+          .then(() => { setOpen(false); onSaved(); })
+          .catch(e => {
+            setErr(e.message);
+            setFieldErrors((e.data && e.data.fieldErrors) || {});
+          })
+          .finally(() => setBusy(false));
+      };
+
+      if (!open) {
+        return (
+          <div>
+            <dl className="text-sm space-y-1.5">
+              <div className="flex justify-between"><dt className="text-gray-500">Date of birth</dt><dd>{(i.dob || client.dob) || '—'}{client.age != null ? ` (age ${client.age})` : ''}</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500">Email</dt><dd>{client.email || '—'}</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500">Gender</dt><dd>{i.gender || '—'}</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500">Primary language</dt><dd>{i.primaryLanguage || '—'}</dd></div>
+              <div className="flex justify-between"><dt className="text-gray-500">Phone</dt><dd>{(i.phone || client.phone) || '—'}</dd></div>
+            </dl>
+            {canEdit && <button className="btn btn-ghost mt-3" onClick={() => setOpen(true)}>Edit details</button>}
+          </div>
+        );
+      }
+
+      return (
+        <div>
+          {err && <div className="bg-danger-50 text-danger-600 text-sm rounded-lg px-4 py-2 mb-3">{err}</div>}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="label">Date of birth</label>
+              <input className="input" type="date" value={f.dob} onChange={e => set('dob', e.target.value)} />
+              {fieldErrors.dob && <p className="text-xs text-danger-500 mt-1">{fieldErrors.dob}</p>}
+            </div>
+            <div>
+              <label className="label">Email (their login)</label>
+              <input className="input" type="email" value={f.email} onChange={e => set('email', e.target.value)} />
+            </div>
+            <div><label className="label">Gender</label><input className="input" value={f.gender} onChange={e => set('gender', e.target.value)} /></div>
+            <div><label className="label">Primary language</label><input className="input" value={f.primaryLanguage} onChange={e => set('primaryLanguage', e.target.value)} /></div>
+            <div><label className="label">Phone</label><input className="input" value={f.phone} onChange={e => set('phone', e.target.value)} /></div>
+          </div>
+          <p className="lbl font-semibold text-sm mt-4 mb-2">Primary contact</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div><label className="label">Name</label><input className="input" value={f.primaryContact.name} onChange={e => setPc('name', e.target.value)} /></div>
+            <div>
+              <label className="label">Relationship</label>
+              <input className="input" value={f.primaryContact.relationship} onChange={e => setPc('relationship', e.target.value)} />
+              {fieldErrors.primaryContactRelationship && <p className="text-xs text-danger-500 mt-1">{fieldErrors.primaryContactRelationship}</p>}
+            </div>
+            <div><label className="label">Phone</label><input className="input" value={f.primaryContact.phone} onChange={e => setPc('phone', e.target.value)} /></div>
+            <div><label className="label">Email</label><input className="input" type="email" value={f.primaryContact.email} onChange={e => setPc('email', e.target.value)} /></div>
+          </div>
+          <p className="text-xs text-gray-500 mt-3">
+            A consent they have already signed is rendered from this record, so correcting something one of them prints flags it for re-signature. It does not change what they signed against.
+          </p>
+          <div className="flex gap-2 mt-3">
+            <button className="btn btn-primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save details'}</button>
+            <button className="btn btn-ghost" disabled={busy} onClick={() => setOpen(false)}>Cancel</button>
+          </div>
+        </div>
+      );
+    };
+
     const RateEditor = ({ client, canEdit, onSaved }) => {
       const existing = client.rateAgreement || {};
       const [open, setOpen] = useState(false);
@@ -604,7 +703,7 @@
     };
     // One consent row. Main's markup, lifted into a component so the staged
     // grouping below can reuse it instead of keeping a second, thinner copy.
-    const ConsentRow = ({ c, onDone }) => (
+    const ConsentRow = ({ c, onDone, canEdit }) => (
         <div className="flex items-center justify-between text-sm border-b border-gray-100 pb-2 last:border-0 last:pb-0">
           <div>
             <div className="font-medium">
@@ -622,7 +721,7 @@
             {!c.provenanceComplete && <div className="text-xs text-danger-600">No timestamp or IP on this record — review by hand.</div>}
             {!c.presentable && <div className="text-xs text-danger-600">{c.blockedMessage}</div>}
             {c.scanUrl && <div className="text-xs"><a className="text-primary-500 underline" href={c.scanUrl} target="_blank" rel="noreferrer">signed scan on file</a></div>}
-            {!c.satisfied && <RecordPaperSignature consent={c} onDone={onDone} />}
+            {!c.satisfied && <RecordPaperSignature consent={c} onDone={onDone} canEdit={canEdit} />}
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
             {c.provenance && <span className="badge bg-gray-100 text-gray-500">{c.provenance === 'signed_offline' ? 'Paper' : 'In-app'}</span>}
@@ -634,6 +733,10 @@
     );
 
     const DetailView = ({ clientId, user, onBack }) => {
+      // Every write on this surface is admin-only at the API, so the page asks
+      // the question once and every control reads the same answer. A screen
+      // that offers what the server will refuse is worse than a read-only one.
+      const canEdit = isAdminRole(user);
       const [client, setClient] = useState(null);
       const [loading, setLoading] = useState(true);
       const [err, setErr] = useState('');
@@ -693,11 +796,21 @@
                 <span className="badge bg-gray-100 text-gray-600">{client.source === 'offline' ? 'Offline-onboarded' : 'In-app'}</span>
               </div>
             </div>
+            {/* Every write on this surface is admin-only at the API. A button
+                that is going to answer 403 is worse than no button, so a
+                clinician or case manager sees the page read-only and is told
+                so rather than left guessing why nothing works. */}
             <div className="flex gap-2 flex-wrap">
-              <button className="btn btn-ghost" disabled={busy} onClick={doReview}>Mark as reviewed</button>
-              <button className="btn btn-ghost" disabled={busy} onClick={() => setShowFollowUp(v => !v)}>Request follow-up</button>
-              <button className="btn btn-ghost" disabled={busy} onClick={() => { setLineChoice(client.serviceLineResolved || 'PHC'); setLineOpen(v => !v); }}>Change service line</button>
-              {isAdminRole(user) && <button className="btn btn-primary" disabled={busy} onClick={() => doApprove(null)}>Approve enrollment</button>}
+              {canEdit ? (
+                <React.Fragment>
+                  <button className="btn btn-ghost" disabled={busy} onClick={doReview}>Mark as reviewed</button>
+                  <button className="btn btn-ghost" disabled={busy} onClick={() => setShowFollowUp(v => !v)}>Request follow-up</button>
+                  <button className="btn btn-ghost" disabled={busy} onClick={() => { setLineChoice(client.serviceLineResolved || 'PHC'); setLineOpen(v => !v); }}>Change service line</button>
+                  <button className="btn btn-primary" disabled={busy} onClick={() => doApprove(null)}>Approve enrollment</button>
+                </React.Fragment>
+              ) : (
+                <span className="badge bg-gray-100 text-gray-600">Read-only — an admin makes changes here</span>
+              )}
             </div>
           </div>
 
@@ -850,13 +963,7 @@
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <Section title="Client">
-              <dl className="text-sm space-y-1.5">
-                <div className="flex justify-between"><dt className="text-gray-500">Date of birth</dt><dd>{client.dob || '—'}{client.age != null ? ` (age ${client.age})` : ''}</dd></div>
-                <div className="flex justify-between"><dt className="text-gray-500">Email</dt><dd>{client.email || '—'}</dd></div>
-                <div className="flex justify-between"><dt className="text-gray-500">Gender</dt><dd>{(client.intake || {}).gender || '—'}</dd></div>
-                <div className="flex justify-between"><dt className="text-gray-500">Primary language</dt><dd>{(client.intake || {}).primaryLanguage || '—'}</dd></div>
-                <div className="flex justify-between"><dt className="text-gray-500">Phone</dt><dd>{(client.intake || {}).phone || '—'}</dd></div>
-              </dl>
+              <ClientDetailsEditor client={client} canEdit={canEdit} onSaved={load} />
             </Section>
 
             <Section title="Primary contact">
@@ -867,7 +974,7 @@
                   <div className="flex justify-between"><dt className="text-gray-500">Phone</dt><dd>{client.intake.primaryContact.phone || '—'}</dd></div>
                   <div className="flex justify-between"><dt className="text-gray-500">Email</dt><dd>{client.intake.primaryContact.email || '—'}</dd></div>
                 </dl>
-              ) : <span className="text-sm text-gray-400">Not on file</span>}
+              ) : <span className="text-sm text-gray-400">Not on file — set it under Client → Edit details</span>}
             </Section>
 
             <Section title="Consents">
@@ -898,7 +1005,7 @@
                             <div className="text-xs uppercase tracking-wide text-gray-500 font-medium">{g.label}</div>
                             <span className="badge bg-gray-100 text-gray-500">{done}/{items.length}</span>
                           </div>
-                          <div className="space-y-2">{items.map(c => <ConsentRow key={c.type} c={c} onDone={load} />)}</div>
+                          <div className="space-y-2">{items.map(c => <ConsentRow key={c.type} c={c} onDone={load} canEdit={canEdit} />)}</div>
                         </div>
                       );
                     })}
@@ -907,7 +1014,7 @@
                         <div className="text-xs uppercase tracking-wide text-gray-500 font-medium mb-2">
                           Signed previously — no longer required on this service line
                         </div>
-                        <div className="space-y-2">{retained.map(c => <ConsentRow key={c.type} c={c} onDone={load} />)}</div>
+                        <div className="space-y-2">{retained.map(c => <ConsentRow key={c.type} c={c} onDone={load} canEdit={canEdit} />)}</div>
                       </div>
                     )}
                   </div>
@@ -959,7 +1066,7 @@
             </Section>
 
             <div className="lg:col-span-2">
-              <DocumentExchange clientId={clientId} />
+              <DocumentExchange clientId={clientId} canEdit={canEdit} />
             </div>
           </div>
         </div>
