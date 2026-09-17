@@ -83,6 +83,62 @@
       } catch { return null; }
     };
 
+    // A DOWNLOAD IS A REQUEST LIKE ANY OTHER, AND IT NEEDS THE TOKEN.
+    //
+    // These were plain <a href> links, so the browser navigated straight to the
+    // API carrying no Authorization header and the server answered
+    // AUTH_MISSING — a page of raw JSON where a consent PDF should have been.
+    // Reported live from a phone, 2026-09-17.
+    //
+    // The token rides in the HEADER, not in the URL. The routes do accept
+    // ?token=, which would have been the shorter fix, but these are PHI
+    // documents and a token in a URL lands in browser history, in the server's
+    // access log and in any Referer the page sends. The client portal already
+    // fetches its own copies this way.
+    const openDocument = async (url, { asDownload } = {}) => {
+      const token = getToken();
+      if (!token) throw new Error('You are signed out. Sign in again and retry the download.');
+      const res = await fetch(url.startsWith('http') ? url : `${API_URL}${url}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (!res.ok) {
+        // Say what the SERVER said. "Could not download" covers an expired
+        // session, a consent nobody has signed and a client that no longer
+        // exists, and those are three different things to do next.
+        let msg = `The download failed (HTTP ${res.status}).`;
+        try {
+          const data = await res.json();
+          if (data && data.error) msg = data.error;
+        } catch { /* not JSON — the status is all there is */ }
+        if (res.status === 401) msg = 'Your session has expired. Sign in again and retry the download.';
+        throw new Error(msg);
+      }
+      const blobUrl = URL.createObjectURL(await res.blob());
+      // Handed over as a download rather than window.open: this is opened from
+      // a phone as often as a desktop, and a popup opened after an await is
+      // blocked by mobile Safari. A file that lands in Downloads always works.
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = filenameFromResponse(res, asDownload || 'document.pdf');
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      // Revoked late — the browser needs time to read it.
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+    };
+
+    // The server already sends a proper filename (RFC 6266: an ASCII-safe
+    // `filename=` plus `filename*=UTF-8''…` carrying the real one). Read it
+    // back rather than inventing one, or a client called O'Brien downloads
+    // something called "document".
+    const filenameFromResponse = (res, fallback) => {
+      const cd = res.headers.get('Content-Disposition') || '';
+      const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+      if (utf8) { try { return decodeURIComponent(utf8[1]); } catch { /* fall through */ } }
+      const plain = /filename="([^"]+)"/i.exec(cd);
+      return (plain && plain[1]) || fallback;
+    };
+
     const handleResponse = async (response) => {
       if (!response.ok) {
         let data = null;
@@ -510,7 +566,8 @@
         <div className="mt-1">
           {!open && (
             <div className="flex items-center gap-3 text-xs">
-              <a className="text-primary-500 underline" href={consent.blankCopyUrl} target="_blank" rel="noreferrer">Print for signature</a>
+              <button type="button" className="text-primary-500 underline" disabled={busy}
+                onClick={() => { setErr(''); openDocument(consent.blankCopyUrl).catch(e => setErr(e.message)); }}>Print for signature</button>
               {canEdit && <button className="text-primary-500 underline" onClick={() => setOpen(true)}>Record paper signature</button>}
             </div>
           )}
@@ -703,12 +760,13 @@
     };
     // One consent row. Main's markup, lifted into a component so the staged
     // grouping below can reuse it instead of keeping a second, thinner copy.
-    const ConsentRow = ({ c, onDone, canEdit }) => (
+    const ConsentRow = ({ c, onDone, canEdit, onDownloadError }) => (
         <div className="flex items-center justify-between text-sm border-b border-gray-100 pb-2 last:border-0 last:pb-0">
           <div>
             <div className="font-medium">
               {c.title}{c.required && <span className="text-danger-500"> *</span>}
-              {c.signedCopyUrl && <a className="text-primary-500 underline ml-2 text-xs" href={c.signedCopyUrl} target="_blank" rel="noreferrer">copy</a>}
+              {c.signedCopyUrl && <button type="button" className="text-primary-500 underline ml-2 text-xs"
+                onClick={() => { onDownloadError(''); openDocument(c.signedCopyUrl).catch(e => onDownloadError(e.message)); }}>copy</button>}
             </div>
             <div className="text-xs text-gray-400">
               {c.laneLabel}
@@ -748,6 +806,9 @@
       const [lineOpen, setLineOpen] = useState(false);
       const [lineChoice, setLineChoice] = useState('');
       const [lineResult, setLineResult] = useState(null);
+      // Deliberately NOT `err`: that one REPLACES the whole detail view, so a
+      // failed download would blank the client's record to show a sentence.
+      const [downloadErr, setDownloadErr] = useState('');
 
       const load = useCallback(() => {
         setLoading(true); setErr('');
@@ -978,11 +1039,13 @@
             </Section>
 
             <Section title="Consents">
+              {downloadErr && <div className="bg-danger-50 text-danger-600 text-sm rounded-lg px-4 py-2 mb-3">{downloadErr}</div>}
               <p className="text-xs text-gray-400 mb-2">
                 Outstanding: {client.consents.filter(c => c.outstanding).length === 0
                   ? 'none'
                   : client.consents.filter(c => c.outstanding).map(c => `${c.title} (${c.laneLabel})`).join(' · ')}
-                {client.packetZipUrl && <span> · <a className="text-primary-500 underline" href={client.packetZipUrl}>download all signed copies</a></span>}
+                {client.packetZipUrl && <span> · <button type="button" className="text-primary-500 underline"
+                  onClick={() => { setDownloadErr(''); openDocument(client.packetZipUrl, { asDownload: 'enrollment-packet.zip' }).catch(e => setDownloadErr(e.message)); }}>download all signed copies</button></span>}
               </p>
               {(() => {
                 // Grouped by the visit each packet is signed at, so a BOTH
@@ -1005,7 +1068,7 @@
                             <div className="text-xs uppercase tracking-wide text-gray-500 font-medium">{g.label}</div>
                             <span className="badge bg-gray-100 text-gray-500">{done}/{items.length}</span>
                           </div>
-                          <div className="space-y-2">{items.map(c => <ConsentRow key={c.type} c={c} onDone={load} canEdit={canEdit} />)}</div>
+                          <div className="space-y-2">{items.map(c => <ConsentRow key={c.type} c={c} onDone={load} canEdit={canEdit} onDownloadError={setDownloadErr} />)}</div>
                         </div>
                       );
                     })}
@@ -1014,7 +1077,7 @@
                         <div className="text-xs uppercase tracking-wide text-gray-500 font-medium mb-2">
                           Signed previously — no longer required on this service line
                         </div>
-                        <div className="space-y-2">{retained.map(c => <ConsentRow key={c.type} c={c} onDone={load} canEdit={canEdit} />)}</div>
+                        <div className="space-y-2">{retained.map(c => <ConsentRow key={c.type} c={c} onDone={load} canEdit={canEdit} onDownloadError={setDownloadErr} />)}</div>
                       </div>
                     )}
                   </div>
