@@ -83,6 +83,62 @@
       } catch { return null; }
     };
 
+    // A DOWNLOAD IS A REQUEST LIKE ANY OTHER, AND IT NEEDS THE TOKEN.
+    //
+    // These were plain <a href> links, so the browser navigated straight to the
+    // API carrying no Authorization header and the server answered
+    // AUTH_MISSING — a page of raw JSON where a consent PDF should have been.
+    // Reported live from a phone, 2026-09-17.
+    //
+    // The token rides in the HEADER, not in the URL. The routes do accept
+    // ?token=, which would have been the shorter fix, but these are PHI
+    // documents and a token in a URL lands in browser history, in the server's
+    // access log and in any Referer the page sends. The client portal already
+    // fetches its own copies this way.
+    const openDocument = async (url, { asDownload } = {}) => {
+      const token = getToken();
+      if (!token) throw new Error('You are signed out. Sign in again and retry the download.');
+      const res = await fetch(url.startsWith('http') ? url : `${API_URL}${url}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (!res.ok) {
+        // Say what the SERVER said. "Could not download" covers an expired
+        // session, a consent nobody has signed and a client that no longer
+        // exists, and those are three different things to do next.
+        let msg = `The download failed (HTTP ${res.status}).`;
+        try {
+          const data = await res.json();
+          if (data && data.error) msg = data.error;
+        } catch { /* not JSON — the status is all there is */ }
+        if (res.status === 401) msg = 'Your session has expired. Sign in again and retry the download.';
+        throw new Error(msg);
+      }
+      const blobUrl = URL.createObjectURL(await res.blob());
+      // Handed over as a download rather than window.open: this is opened from
+      // a phone as often as a desktop, and a popup opened after an await is
+      // blocked by mobile Safari. A file that lands in Downloads always works.
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = filenameFromResponse(res, asDownload || 'document.pdf');
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      // Revoked late — the browser needs time to read it.
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+    };
+
+    // The server already sends a proper filename (RFC 6266: an ASCII-safe
+    // `filename=` plus `filename*=UTF-8''…` carrying the real one). Read it
+    // back rather than inventing one, or a client called O'Brien downloads
+    // something called "document".
+    const filenameFromResponse = (res, fallback) => {
+      const cd = res.headers.get('Content-Disposition') || '';
+      const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+      if (utf8) { try { return decodeURIComponent(utf8[1]); } catch { /* fall through */ } }
+      const plain = /filename="([^"]+)"/i.exec(cd);
+      return (plain && plain[1]) || fallback;
+    };
+
     const handleResponse = async (response) => {
       if (!response.ok) {
         let data = null;
@@ -142,6 +198,9 @@
       // own copy and the two had already drifted apart.
       consentRegistry: (serviceLine) => authedFetch(`/api/gfc/admin/enrollment/meta/consent-registry?serviceLine=${encodeURIComponent(serviceLine || '')}`),
       setRate: (id, body) => authedFetch(`/api/gfc/admin/enrollment/${id}/rate`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      }),
+      setClientDetails: (id, body) => authedFetch(`/api/gfc/admin/enrollment/${id}/details`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
       }),
       // Record a consent the client signed on paper. Multipart — the scan is
@@ -339,7 +398,7 @@
     // The staff half of the two-way exchange: what we asked for, what arrived,
     // and whether it is usable. Same checklist the client sees, built by the
     // same server function, so the two views cannot drift apart.
-    const DocumentExchange = ({ clientId }) => {
+    const DocumentExchange = ({ clientId, canEdit }) => {
       const [state, setState] = useState(null);
       const [err, setErr] = useState('');
       const [busy, setBusy] = useState(false);
@@ -391,10 +450,12 @@
       return (
         <Section title={`Documents from the client${outstanding ? ` — ${outstanding} outstanding` : ''}`}>
           {err && <div className="bg-danger-50 text-danger-600 text-sm rounded-lg px-4 py-2 mb-3">{err}</div>}
-          <div className="flex gap-2 mb-3 flex-wrap">
-            <button className="btn btn-ghost" disabled={busy} onClick={() => setAsking(v => !v)}>Request documents</button>
-            <button className="btn btn-ghost" disabled={busy || !outstanding} onClick={remind}>Send reminder</button>
-          </div>
+          {canEdit && (
+            <div className="flex gap-2 mb-3 flex-wrap">
+              <button className="btn btn-ghost" disabled={busy} onClick={() => setAsking(v => !v)}>Request documents</button>
+              <button className="btn btn-ghost" disabled={busy || !outstanding} onClick={remind}>Send reminder</button>
+            </div>
+          )}
 
           {asking && (
             <div className="border border-gray-200 rounded-lg p-3 mb-4">
@@ -455,8 +516,8 @@
                         ? <span className="text-success-600">Accepted</span>
                         : (
                           <span className="flex gap-2">
-                            <button className="text-success-600" disabled={busy} onClick={() => review(f.id, 'accepted')}>Accept</button>
-                            <button className="text-danger-500" disabled={busy} onClick={() => review(f.id, 'rejected')}>Reject</button>
+                            {canEdit && <button className="text-success-600" disabled={busy} onClick={() => review(f.id, 'accepted')}>Accept</button>}
+                            {canEdit && <button className="text-danger-500" disabled={busy} onClick={() => review(f.id, 'rejected')}>Reject</button>}
                           </span>
                         )}
                   </div>
@@ -472,7 +533,7 @@
     // a homebound client. Until this existed, `signed_offline` could only be
     // written while CREATING a client, so an existing client's only route to a
     // satisfied consent was logging into the portal and e-signing it themselves.
-    const RecordPaperSignature = ({ consent, onDone }) => {
+    const RecordPaperSignature = ({ consent, onDone, canEdit }) => {
       const [open, setOpen] = useState(false);
       const [signedAt, setSignedAt] = useState('');
       const [file, setFile] = useState(null);
@@ -505,8 +566,9 @@
         <div className="mt-1">
           {!open && (
             <div className="flex items-center gap-3 text-xs">
-              <a className="text-primary-500 underline" href={consent.blankCopyUrl} target="_blank" rel="noreferrer">Print for signature</a>
-              <button className="text-primary-500 underline" onClick={() => setOpen(true)}>Record paper signature</button>
+              <button type="button" className="text-primary-500 underline" disabled={busy}
+                onClick={() => { setErr(''); openDocument(consent.blankCopyUrl).catch(e => setErr(e.message)); }}>Print for signature</button>
+              {canEdit && <button className="text-primary-500 underline" onClick={() => setOpen(true)}>Record paper signature</button>}
             </div>
           )}
           {open && (
@@ -537,6 +599,223 @@
     // this table, so until it exists neither is presentable and the client is
     // stopped at their first signature. Set it here, at intake, not at the
     // kitchen table.
+    // ── The enrollment submission, editable by an admin or a clinician ──────
+    //
+    // The client's own intake wizard used to be the ONLY writer of this data, so
+    // a client an admin added by hand read "—" forever and a client who typed
+    // their pharmacy wrong had to be sent back into the wizard to fix it.
+    //
+    // The section list mirrors the server's allow-list path for path; it does
+    // not invent one of its own. Four values are deliberately absent because
+    // each has its own writer: the name, the service line, the care tier and
+    // the agreed rate.
+    const SUBMISSION_SECTIONS = [
+      { title: 'Client', fields: [
+        { path: 'dob', label: 'Date of birth', type: 'date' },
+        { path: 'email', label: 'Email (their login)', type: 'email', account: true },
+        { path: 'gender', label: 'Gender' },
+        { path: 'primaryLanguage', label: 'Primary language' },
+        { path: 'phone', label: 'Phone', type: 'tel' },
+        { path: 'address.line1', label: 'Street address' },
+        { path: 'address.line2', label: 'Apartment / unit' },
+        { path: 'address.city', label: 'City' },
+        { path: 'address.state', label: 'State' },
+        { path: 'address.zip', label: 'ZIP' }
+      ] },
+      { title: 'Primary contact', fields: [
+        { path: 'primaryContact.name', label: 'Name' },
+        { path: 'primaryContact.relationship', label: 'Relationship', errorKey: 'primaryContactRelationship' },
+        { path: 'primaryContact.phone', label: 'Phone', type: 'tel' },
+        { path: 'primaryContact.email', label: 'Email', type: 'email' }
+      ] },
+      { title: 'Emergency', note: 'The crisis protocol prints the call order, and the notify-first contact heads it.',
+        fields: [{ path: 'crisisNotify', label: 'Notify first in a crisis' }],
+        list: 'emergencyContacts' },
+      { title: 'Medical', note: 'Each of these prints onto the face sheet the caregiver carries.', fields: [
+        { path: 'allergies', label: 'Allergies (or “none”)' },
+        { path: 'advanceDirective.status', label: 'Advance directive', type: 'select',
+          options: ['', 'Yes — DNR in place', 'Yes — advance directive / living will', 'Yes — healthcare proxy / POA', 'No', 'Unknown'] },
+        { path: 'medicalTeam.pcpName', label: 'Primary care provider' },
+        { path: 'medicalTeam.pcpPractice', label: 'Their practice / clinic' },
+        { path: 'medicalTeam.pcpPhone', label: 'Their phone', type: 'tel' },
+        { path: 'medicalTeam.specialist1Name', label: 'Specialist' },
+        { path: 'medicalTeam.specialist1Phone', label: 'Specialist phone', type: 'tel' },
+        { path: 'medicalTeam.specialist2Name', label: 'Second specialist' },
+        { path: 'medicalTeam.preferredPharmacy', label: 'Preferred pharmacy' },
+        { path: 'medicalTeam.pharmacyPhone', label: 'Pharmacy phone', type: 'tel' },
+        { path: 'medicalTeam.preferredHospital', label: 'Preferred hospital' }
+      ] },
+      { title: 'Medications', list: 'medications' },
+      { title: 'Insurance', fields: [
+        { path: 'payerType', label: 'How care is paid for', type: 'select',
+          options: ['', 'Private pay', 'LTC insurance', 'Medicaid waiver', 'VA', 'Medicare Part B', 'Dual eligible', 'Commercial', 'Combination'] },
+        { path: 'ltc.carrier', label: 'Long term care carrier' },
+        { path: 'ltc.policyNum', label: 'Policy number' },
+        { path: 'ltc.policyHolder', label: 'Policy holder' }
+      ], list: 'insuranceIds' }
+    ];
+
+    // The repeating blocks, same keys the server will accept and no others.
+    const SUBMISSION_LISTS = {
+      medications:       { label: 'Medication', keys: [['name', 'Name'], ['dose', 'Dose'], ['route', 'Route'], ['frequency', 'Frequency'], ['prescriber', 'Prescriber'], ['pharmacy', 'Pharmacy']] },
+      emergencyContacts: { label: 'Emergency contact', keys: [['name', 'Name'], ['relationship', 'Relationship'], ['phone', 'Phone'], ['email', 'Email'], ['address', 'Address']] },
+      insuranceIds:      { label: 'Insurance', keys: [['carrier', 'Carrier'], ['memberId', 'Member ID'], ['group', 'Group']] }
+    };
+
+    const readAt = (obj, path) => String(path).split('.').reduce((o, k) => (o === null || o === undefined ? undefined : o[k]), obj);
+    // The flat form is expanded back into the nested shape the API reads, so
+    // the page and the route agree on one set of paths.
+    const expandPaths = (flat) => {
+      const out = {};
+      Object.entries(flat).forEach(([path, value]) => {
+        const parts = path.split('.');
+        const last = parts.pop();
+        let cur = out;
+        parts.forEach(k => { cur[k] = cur[k] || {}; cur = cur[k]; });
+        cur[last] = value;
+      });
+      return out;
+    };
+
+    const SubmissionEditor = ({ client, canEdit, onSaved }) => {
+      const i = client.intake || {};
+      const [open, setOpen] = useState(false);
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      const [saved, setSaved] = useState('');
+      const [fieldErrors, setFieldErrors] = useState({});
+      const initial = () => {
+        const flat = {};
+        SUBMISSION_SECTIONS.forEach(sec => (sec.fields || []).forEach(f => {
+          if (f.account) { flat[f.path] = client[f.path] || ''; return; }
+          const v = readAt(i, f.path);
+          if (v === undefined || v === null || v === '') {
+            flat[f.path] = f.path === 'dob' ? (client.dob || '') : f.path === 'phone' ? (client.phone || '') : '';
+            return;
+          }
+          // A value this form cannot represent is LEFT OUT rather than shown
+          // blank: an absent key means "leave this alone", and a blank one
+          // would clear whatever is there on the next save.
+          if (typeof v === 'object') return;
+          flat[f.path] = String(v);
+        }));
+        return flat;
+      };
+      const initialLists = () => {
+        const out = {};
+        Object.keys(SUBMISSION_LISTS).forEach(name => {
+          const rows = Array.isArray(i[name]) ? i[name] : (name === 'medications' && Array.isArray(client.medications) ? client.medications : []);
+          out[name] = rows.map(r => ({ ...(r || {}) }));
+        });
+        return out;
+      };
+      const [f, setF] = useState(initial);
+      const [lists, setLists] = useState(initialLists);
+      const set = (path, v) => setF(prev => ({ ...prev, [path]: v }));
+      const setRow = (name, idx, key, v) => setLists(prev => {
+        const rows = [...(prev[name] || [])];
+        rows[idx] = { ...(rows[idx] || {}), [key]: v };
+        return { ...prev, [name]: rows };
+      });
+      const addRow = (name) => setLists(prev => ({ ...prev, [name]: [...(prev[name] || []), {}] }));
+      const dropRow = (name, idx) => setLists(prev => ({ ...prev, [name]: (prev[name] || []).filter((_, n) => n !== idx) }));
+
+      const openEditor = () => {
+        setF(initial()); setLists(initialLists());
+        setErr(''); setSaved(''); setFieldErrors({}); setOpen(true);
+      };
+
+      const save = () => {
+        setBusy(true); setErr(''); setSaved(''); setFieldErrors({});
+        api.setClientDetails(client.id, { ...expandPaths(f), ...lists })
+          // Re-read rather than trust local state: the age, the client-profile
+          // mirror, the ROI provider list and the re-signature flag are all
+          // resolved server-side.
+          .then(r => { setOpen(false); setSaved(r.message || 'Saved'); onSaved(); })
+          .catch(e => {
+            setErr(e.message);
+            setFieldErrors((e.data && e.data.fieldErrors) || {});
+          })
+          .finally(() => setBusy(false));
+      };
+
+      if (!canEdit) return null;
+      if (!open) {
+        return (
+          <div className="flex items-center gap-3 flex-wrap">
+            <button className="btn btn-ghost" onClick={openEditor}>Edit submission</button>
+            <span className="text-xs text-gray-500">
+              Correct what the client submitted, or fill in what an office-added client never had.
+            </span>
+            {saved && <span className="badge bg-success-50 text-success-600">{saved}</span>}
+          </div>
+        );
+      }
+
+      return (
+        <div>
+          {err && <div className="bg-danger-50 text-danger-600 text-sm rounded-lg px-4 py-2 mb-3">{err}</div>}
+          {SUBMISSION_SECTIONS.map(sec => (
+            <div key={sec.title} className="mb-5">
+              <p className="font-semibold text-sm mb-1">{sec.title}</p>
+              {sec.note && <p className="text-xs text-gray-500 mb-2">{sec.note}</p>}
+              {!!(sec.fields || []).length && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {sec.fields.map(fd => (
+                    <div key={fd.path}>
+                      <label className="label">{fd.label}</label>
+                      {fd.type === 'select' ? (
+                        <select className="input" value={f[fd.path] || ''} onChange={e => set(fd.path, e.target.value)}>
+                          {/* A stored value this list does not carry is added to
+                              it, or the select would show blank and quietly
+                              rewrite what the client actually answered. */}
+                          {(fd.options.includes(f[fd.path] || '') ? fd.options : [...fd.options, f[fd.path]])
+                            .map(o => <option key={o} value={o}>{o || '—'}</option>)}
+                        </select>
+                      ) : (
+                        <input className="input" type={fd.type || 'text'} value={f[fd.path] || ''} onChange={e => set(fd.path, e.target.value)} />
+                      )}
+                      {fieldErrors[fd.errorKey || fd.path] && (
+                        <p className="text-xs text-danger-500 mt-1">{fieldErrors[fd.errorKey || fd.path]}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {sec.list && (
+                <div className="mt-3">
+                  {(lists[sec.list] || []).map((row, idx) => (
+                    <div key={idx} className="border border-gray-100 rounded-lg p-3 mb-2">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                        {SUBMISSION_LISTS[sec.list].keys.map(([k, label]) => (
+                          <div key={k}>
+                            <label className="label">{label}</label>
+                            <input className="input" value={row[k] || ''} onChange={e => setRow(sec.list, idx, k, e.target.value)} />
+                          </div>
+                        ))}
+                      </div>
+                      {fieldErrors[`emergencyContacts.${idx}.relationship`] && sec.list === 'emergencyContacts' && (
+                        <p className="text-xs text-danger-500 mt-1">{fieldErrors[`emergencyContacts.${idx}.relationship`]}</p>
+                      )}
+                      <button className="btn btn-ghost mt-2" onClick={() => dropRow(sec.list, idx)}>Remove</button>
+                    </div>
+                  ))}
+                  <button className="btn btn-ghost" onClick={() => addRow(sec.list)}>+ Add {SUBMISSION_LISTS[sec.list].label.toLowerCase()}</button>
+                </div>
+              )}
+            </div>
+          ))}
+          <p className="text-xs text-gray-500 mt-3">
+            A consent they have already signed is rendered from this record, so correcting something one of them prints flags it for re-signature. It does not change what they signed against.
+          </p>
+          <div className="flex gap-2 mt-3">
+            <button className="btn btn-primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save submission'}</button>
+            <button className="btn btn-ghost" disabled={busy} onClick={() => setOpen(false)}>Cancel</button>
+          </div>
+        </div>
+      );
+    };
+
     const RateEditor = ({ client, canEdit, onSaved }) => {
       const existing = client.rateAgreement || {};
       const [open, setOpen] = useState(false);
@@ -604,12 +883,13 @@
     };
     // One consent row. Main's markup, lifted into a component so the staged
     // grouping below can reuse it instead of keeping a second, thinner copy.
-    const ConsentRow = ({ c, onDone }) => (
+    const ConsentRow = ({ c, onDone, canEdit, onDownloadError }) => (
         <div className="flex items-center justify-between text-sm border-b border-gray-100 pb-2 last:border-0 last:pb-0">
           <div>
             <div className="font-medium">
               {c.title}{c.required && <span className="text-danger-500"> *</span>}
-              {c.signedCopyUrl && <a className="text-primary-500 underline ml-2 text-xs" href={c.signedCopyUrl} target="_blank" rel="noreferrer">copy</a>}
+              {c.signedCopyUrl && <button type="button" className="text-primary-500 underline ml-2 text-xs"
+                onClick={() => { onDownloadError(''); openDocument(c.signedCopyUrl).catch(e => onDownloadError(e.message)); }}>copy</button>}
             </div>
             <div className="text-xs text-gray-400">
               {c.laneLabel}
@@ -622,7 +902,7 @@
             {!c.provenanceComplete && <div className="text-xs text-danger-600">No timestamp or IP on this record — review by hand.</div>}
             {!c.presentable && <div className="text-xs text-danger-600">{c.blockedMessage}</div>}
             {c.scanUrl && <div className="text-xs"><a className="text-primary-500 underline" href={c.scanUrl} target="_blank" rel="noreferrer">signed scan on file</a></div>}
-            {!c.satisfied && <RecordPaperSignature consent={c} onDone={onDone} />}
+            {!c.satisfied && <RecordPaperSignature consent={c} onDone={onDone} canEdit={canEdit} />}
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
             {c.provenance && <span className="badge bg-gray-100 text-gray-500">{c.provenance === 'signed_offline' ? 'Paper' : 'In-app'}</span>}
@@ -634,6 +914,16 @@
     );
 
     const DetailView = ({ clientId, user, onBack }) => {
+      // TWO answers, because the API gives two, and each is asked once so no
+      // control can drift from the route behind it. A screen that offers what
+      // the server will refuse is worse than a read-only one.
+      //   canEdit           — the workflow writes: approve, service line,
+      //                       documents, paper signature. ADMIN ONLY.
+      //   canEditSubmission — correcting the submission itself. Admin OR
+      //                       clinician, and answered BY THE SERVER on the
+      //                       record it just served rather than inferred here
+      //                       from a login stored in this browser months ago.
+      const canEdit = isAdminRole(user);
       const [client, setClient] = useState(null);
       const [loading, setLoading] = useState(true);
       const [err, setErr] = useState('');
@@ -645,11 +935,15 @@
       const [lineOpen, setLineOpen] = useState(false);
       const [lineChoice, setLineChoice] = useState('');
       const [lineResult, setLineResult] = useState(null);
+      // Deliberately NOT `err`: that one REPLACES the whole detail view, so a
+      // failed download would blank the client's record to show a sentence.
+      const [downloadErr, setDownloadErr] = useState('');
 
       const load = useCallback(() => {
         setLoading(true); setErr('');
         api.detail(clientId).then(d => setClient(d.client)).catch(e => setErr(e.message)).finally(() => setLoading(false));
       }, [clientId]);
+      const canEditSubmission = !!(client && client.canEdit);
       useEffect(() => { load(); }, [load]);
 
       const doReview = () => { setBusy(true); api.review(clientId).then(load).catch(e => setErr(e.message)).finally(() => setBusy(false)); };
@@ -693,11 +987,25 @@
                 <span className="badge bg-gray-100 text-gray-600">{client.source === 'offline' ? 'Offline-onboarded' : 'In-app'}</span>
               </div>
             </div>
+            {/* The workflow writes are admin-only at the API. A button that is
+                going to answer 403 is worse than no button, so anyone else is
+                TOLD which of the two states they are in rather than left
+                guessing why nothing works. */}
             <div className="flex gap-2 flex-wrap">
-              <button className="btn btn-ghost" disabled={busy} onClick={doReview}>Mark as reviewed</button>
-              <button className="btn btn-ghost" disabled={busy} onClick={() => setShowFollowUp(v => !v)}>Request follow-up</button>
-              <button className="btn btn-ghost" disabled={busy} onClick={() => { setLineChoice(client.serviceLineResolved || 'PHC'); setLineOpen(v => !v); }}>Change service line</button>
-              {isAdminRole(user) && <button className="btn btn-primary" disabled={busy} onClick={() => doApprove(null)}>Approve enrollment</button>}
+              {canEdit ? (
+                <React.Fragment>
+                  <button className="btn btn-ghost" disabled={busy} onClick={doReview}>Mark as reviewed</button>
+                  <button className="btn btn-ghost" disabled={busy} onClick={() => setShowFollowUp(v => !v)}>Request follow-up</button>
+                  <button className="btn btn-ghost" disabled={busy} onClick={() => { setLineChoice(client.serviceLineResolved || 'PHC'); setLineOpen(v => !v); }}>Change service line</button>
+                  <button className="btn btn-primary" disabled={busy} onClick={() => doApprove(null)}>Approve enrollment</button>
+                </React.Fragment>
+              ) : (
+                <span className="badge bg-gray-100 text-gray-600">
+                  {canEditSubmission
+                    ? 'You can correct this submission — approving and the service line are an admin’s'
+                    : 'Read-only — an admin or clinician makes changes here'}
+                </span>
+              )}
             </div>
           </div>
 
@@ -848,15 +1156,52 @@
             </Section>
           )}
 
+          {/* One editor, full width, for the whole submission. It renders
+              nothing at all for a viewer who may not write, and the read cards
+              below still show them everything. */}
+          {canEditSubmission && (
+            <Section title="Enrollment submission">
+              <SubmissionEditor client={client} canEdit={canEditSubmission} onSaved={load} />
+            </Section>
+          )}
+
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <Section title="Client">
               <dl className="text-sm space-y-1.5">
-                <div className="flex justify-between"><dt className="text-gray-500">Date of birth</dt><dd>{client.dob || '—'}{client.age != null ? ` (age ${client.age})` : ''}</dd></div>
+                <div className="flex justify-between"><dt className="text-gray-500">Date of birth</dt><dd>{(client.intake.dob || client.dob) || '—'}{client.age != null ? ` (age ${client.age})` : ''}</dd></div>
                 <div className="flex justify-between"><dt className="text-gray-500">Email</dt><dd>{client.email || '—'}</dd></div>
-                <div className="flex justify-between"><dt className="text-gray-500">Gender</dt><dd>{(client.intake || {}).gender || '—'}</dd></div>
-                <div className="flex justify-between"><dt className="text-gray-500">Primary language</dt><dd>{(client.intake || {}).primaryLanguage || '—'}</dd></div>
-                <div className="flex justify-between"><dt className="text-gray-500">Phone</dt><dd>{(client.intake || {}).phone || '—'}</dd></div>
+                <div className="flex justify-between"><dt className="text-gray-500">Gender</dt><dd>{client.intake.gender || '—'}</dd></div>
+                <div className="flex justify-between"><dt className="text-gray-500">Primary language</dt><dd>{client.intake.primaryLanguage || '—'}</dd></div>
+                <div className="flex justify-between"><dt className="text-gray-500">Phone</dt><dd>{(client.intake.phone || client.phone) || '—'}</dd></div>
+                <div className="flex justify-between gap-4"><dt className="text-gray-500">Address</dt><dd className="text-right">{(() => {
+                  const a = client.intake.address || {};
+                  const line = [a.line1, a.line2].filter(Boolean).join(', ');
+                  const rest = [a.city, [a.state, a.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+                  return [line, rest].filter(Boolean).join(' · ') || '—';
+                })()}</dd></div>
               </dl>
+            </Section>
+
+            {/* Everything a consent or the face sheet prints that no card on
+                this page used to show — so a reader can check it, and the
+                checklist's "missing" line has somewhere to point. */}
+            <Section title="Medical and emergency">
+              <dl className="text-sm space-y-1.5">
+                <div className="flex justify-between gap-4"><dt className="text-gray-500">Allergies</dt><dd className="text-right">{client.intake.allergies || '—'}</dd></div>
+                <div className="flex justify-between gap-4"><dt className="text-gray-500">Advance directive</dt><dd className="text-right">{(client.intake.advanceDirective && client.intake.advanceDirective.status) || '—'}</dd></div>
+                <div className="flex justify-between gap-4"><dt className="text-gray-500">Notify first</dt><dd className="text-right">{client.intake.crisisNotify || '—'}</dd></div>
+                <div className="flex justify-between gap-4"><dt className="text-gray-500">Primary care provider</dt><dd className="text-right">{(client.intake.medicalTeam && (client.intake.medicalTeam.pcpName || client.intake.medicalTeam.pcpPractice)) || '—'}</dd></div>
+                <div className="flex justify-between gap-4"><dt className="text-gray-500">Pharmacy</dt><dd className="text-right">{(client.intake.medicalTeam && client.intake.medicalTeam.preferredPharmacy) || '—'}</dd></div>
+                <div className="flex justify-between gap-4"><dt className="text-gray-500">Preferred hospital</dt><dd className="text-right">{(client.intake.medicalTeam && client.intake.medicalTeam.preferredHospital) || '—'}</dd></div>
+              </dl>
+              <p className="lbl font-semibold text-sm mt-4 mb-1">Emergency contacts</p>
+              {(client.intake.emergencyContacts || []).filter(c => c && c.name).length ? (
+                <div className="space-y-1.5 text-sm">
+                  {(client.intake.emergencyContacts || []).filter(c => c && c.name).map((c, n) => (
+                    <div key={n}>{c.name}{c.relationship ? ` — ${c.relationship}` : ''}{c.phone ? ` · ${c.phone}` : ''}</div>
+                  ))}
+                </div>
+              ) : <span className="text-sm text-gray-400">None on file</span>}
             </Section>
 
             <Section title="Primary contact">
@@ -867,15 +1212,17 @@
                   <div className="flex justify-between"><dt className="text-gray-500">Phone</dt><dd>{client.intake.primaryContact.phone || '—'}</dd></div>
                   <div className="flex justify-between"><dt className="text-gray-500">Email</dt><dd>{client.intake.primaryContact.email || '—'}</dd></div>
                 </dl>
-              ) : <span className="text-sm text-gray-400">Not on file</span>}
+              ) : <span className="text-sm text-gray-400">Not on file — set it under Enrollment submission → Edit submission</span>}
             </Section>
 
             <Section title="Consents">
+              {downloadErr && <div className="bg-danger-50 text-danger-600 text-sm rounded-lg px-4 py-2 mb-3">{downloadErr}</div>}
               <p className="text-xs text-gray-400 mb-2">
                 Outstanding: {client.consents.filter(c => c.outstanding).length === 0
                   ? 'none'
                   : client.consents.filter(c => c.outstanding).map(c => `${c.title} (${c.laneLabel})`).join(' · ')}
-                {client.packetZipUrl && <span> · <a className="text-primary-500 underline" href={client.packetZipUrl}>download all signed copies</a></span>}
+                {client.packetZipUrl && <span> · <button type="button" className="text-primary-500 underline"
+                  onClick={() => { setDownloadErr(''); openDocument(client.packetZipUrl, { asDownload: 'enrollment-packet.zip' }).catch(e => setDownloadErr(e.message)); }}>download all signed copies</button></span>}
               </p>
               {(() => {
                 // Grouped by the visit each packet is signed at, so a BOTH
@@ -898,7 +1245,7 @@
                             <div className="text-xs uppercase tracking-wide text-gray-500 font-medium">{g.label}</div>
                             <span className="badge bg-gray-100 text-gray-500">{done}/{items.length}</span>
                           </div>
-                          <div className="space-y-2">{items.map(c => <ConsentRow key={c.type} c={c} onDone={load} />)}</div>
+                          <div className="space-y-2">{items.map(c => <ConsentRow key={c.type} c={c} onDone={load} canEdit={canEdit} onDownloadError={setDownloadErr} />)}</div>
                         </div>
                       );
                     })}
@@ -907,7 +1254,7 @@
                         <div className="text-xs uppercase tracking-wide text-gray-500 font-medium mb-2">
                           Signed previously — no longer required on this service line
                         </div>
-                        <div className="space-y-2">{retained.map(c => <ConsentRow key={c.type} c={c} onDone={load} />)}</div>
+                        <div className="space-y-2">{retained.map(c => <ConsentRow key={c.type} c={c} onDone={load} canEdit={canEdit} onDownloadError={setDownloadErr} />)}</div>
                       </div>
                     )}
                   </div>
@@ -959,7 +1306,7 @@
             </Section>
 
             <div className="lg:col-span-2">
-              <DocumentExchange clientId={clientId} />
+              <DocumentExchange clientId={clientId} canEdit={canEdit} />
             </div>
           </div>
         </div>
