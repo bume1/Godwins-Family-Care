@@ -101,13 +101,17 @@
             if (redirectErr.message.includes('Session expired')) throw redirectErr;
           }
         }
+        // The server's own sentence is the useful part. It used to be thrown
+        // INSIDE a try whose own catch replaced it with the status code, so
+        // every failure on this page read "HTTP error 400" and named nothing.
+        // Read the body first, throw after — a throw cannot be swallowed by
+        // the block that was only there to handle a non-JSON body.
+        let serverMessage = '';
         try {
           const errorData = await response.json();
-          throw new Error(errorData.error || `HTTP error ${response.status}`);
-        } catch (e) {
-          if (e.message.includes('HTTP error') || e.message.includes('Session expired')) throw e;
-          throw new Error(`HTTP error ${response.status}`);
-        }
+          if (errorData && errorData.error) serverMessage = String(errorData.error);
+        } catch (e) { /* no JSON body — fall back to the status below */ }
+        throw new Error(serverMessage || `HTTP error ${response.status}`);
       }
       return response.json();
     };

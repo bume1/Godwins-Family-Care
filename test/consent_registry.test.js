@@ -486,7 +486,11 @@ test('recording a paper signature requires the scan, a real past date, and an ac
     serverSrc.indexOf("// GET /api/gfc/admin/enrollment/:clientId/enrollment-packet.zip")
   );
   assert.ok(route.length > 500, 'found the record-paper-signature route');
-  assert.ok(route.includes('requireEnrollmentStaff'), 'staff-gated at the API layer');
+  // Owner rule, 2026-09-16: every WRITE on the enrollment surface is admin
+  // only. Recording a paper signature is a write — it puts a signature on a
+  // client's file — so it moved off the staff gate onto requireAdmin.
+  assert.ok(route.includes('requireAdmin'), 'admin-gated at the API layer');
+  assert.ok(!route.includes('requireEnrollmentStaff'), 'not the wider staff gate');
   assert.ok(route.includes('CONSENT_SCAN_REQUIRED'), 'the scan is the evidence and is required');
   assert.ok(route.includes('CONSENT_SIGNED_DATE_REQUIRED'));
   assert.ok(route.includes('CONSENT_SIGNED_DATE_INVALID'), 'a future signing date is refused');
