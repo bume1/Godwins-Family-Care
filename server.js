@@ -10568,6 +10568,31 @@ const mirrorIntakeToClientProfile = (client, intake, meds, priorProviders) => {
   }
 };
 
+// The ROI's prior-provider list, recomputed from the medical-team fields.
+//
+// ONE derivation, called by the client's own intake save AND by the staff
+// editor on the enrollment page. A provider added by hand or captured from a
+// signed ROI is preserved untouched; the 'intake_prefill' entries are rebuilt
+// from the current medical team on every save, so correcting a PCP on the
+// enrollment page does not leave the Transfer-of-Care ROI offering the old one.
+const resolvePriorProviders = (client, intake) => {
+  const existing = Array.isArray(client.priorProviders) ? client.priorProviders : [];
+  const preserved = existing.filter(p => p.addedFrom === 'manual' || p.addedFrom === 'roi_form');
+  const explicitPrefill = Array.isArray(intake.priorProviders)
+    ? normalizePriorProviders(intake.priorProviders, 'intake_prefill') : [];
+  const derivedPrefill = deriveProvidersFromMedicalTeam(intake.medicalTeam)
+    .map(p => ({ ...p, addedFrom: 'intake_prefill' }));
+  const seen = new Set(preserved.map(p => (p.name || '').toLowerCase()));
+  const merged = [];
+  [...explicitPrefill, ...derivedPrefill].forEach(p => {
+    const key = (p.name || '').toLowerCase();
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    merged.push(p);
+  });
+  return normalizePriorProviders([...preserved, ...merged], 'intake_prefill');
+};
+
 // Helper to load the fresh client user record + its index for mutation.
 const loadClientForMutation = async (userId) => {
   const users = await getUsers();
@@ -10685,19 +10710,7 @@ app.post('/api/gfc/intake', authenticateToken, requireClientForIntake, async (re
     // ROI (addedFrom 'manual' | 'roi_form') are preserved untouched; the
     // 'intake_prefill' entries are recomputed fresh from the current
     // medical-team fields on every save so edits stay in sync.
-    const existingProviders = Array.isArray(users[idx].priorProviders) ? users[idx].priorProviders : [];
-    const preservedProviders = existingProviders.filter(p => p.addedFrom === 'manual' || p.addedFrom === 'roi_form');
-    const explicitPrefill = Array.isArray(intake.priorProviders) ? normalizePriorProviders(intake.priorProviders, 'intake_prefill') : [];
-    const derivedPrefill = deriveProvidersFromMedicalTeam(intake.medicalTeam).map(p => ({ ...p, addedFrom: 'intake_prefill' }));
-    const seenNames = new Set(preservedProviders.map(p => (p.name || '').toLowerCase()));
-    const mergedPrefill = [];
-    [...explicitPrefill, ...derivedPrefill].forEach(p => {
-      const key = (p.name || '').toLowerCase();
-      if (!key || seenNames.has(key)) return;
-      seenNames.add(key);
-      mergedPrefill.push(p);
-    });
-    const priorProviders = normalizePriorProviders([...preservedProviders, ...mergedPrefill], 'intake_prefill');
+    const priorProviders = resolvePriorProviders(users[idx], intake);
 
     const merged = {
       ...(users[idx].intake || {}),
@@ -10990,6 +11003,25 @@ const requireEnrollmentStaff = (req, res, next) => {
     return next();
   }
   return res.status(403).json({ error: 'Staff access required for the enrollment view.', code: 'ENROLLMENT_STAFF_ONLY' });
+};
+
+// Who may EDIT the submission behind the enrollment view (owner, 2026-09-18:
+// "admin or clinician"). The workflow writes — approve, change the service
+// line, accept a document, record a paper signature — stay ADMIN ONLY, because
+// those are decisions about the file rather than corrections to what is in it.
+//
+// "Clinician" is not a new vocabulary: canClinicalWrite is the answer this app
+// already gives to "is this person licensed to write". An admin resolves to
+// `provider` there, and a CASE MANAGER resolves to `readOnly` and stays a
+// reader — the 4.3 scoped-read rule this must not regress.
+const canEditEnrollment = (user) => !!user &&
+  (user.role === config.ROLES.ADMIN || patientRead.canClinicalWrite(user));
+const requireEnrollmentEditor = (req, res, next) => {
+  if (canEditEnrollment(req.user)) return next();
+  return res.status(403).json({
+    error: 'An admin or a clinician makes changes here.',
+    code: 'ENROLLMENT_EDITOR_ONLY'
+  });
 };
 
 // Required structured intake fields for a complete submission (intake spec §2A).
@@ -11309,7 +11341,10 @@ app.get('/api/gfc/admin/enrollment/:clientId', authenticateToken, requireEnrollm
     const users = await getUsers();
     const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
     if (!client) return res.status(404).json({ error: 'Client not found' });
-    res.json({ client: enrollmentDetail(client) });
+    // Whether THIS viewer may edit is answered by the server, from the same
+    // predicate the write gate uses — never inferred by the page from a stored
+    // login, which is how a screen starts offering a button the API refuses.
+    res.json({ client: { ...enrollmentDetail(client), canEdit: canEditEnrollment(req.user) } });
   } catch (error) {
     console.error('GFC enrollment detail error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -11960,26 +11995,118 @@ function buildRateAgreement(body, actor) {
   };
 }
 
-// The two cards at the top of the enrollment detail view, and nothing else.
-// An ALLOW-LIST: a key this list does not carry never reaches the client
-// record, so an edit form on the enrollment page cannot start writing the rest
-// of a client. The agreed rate is deliberately absent — it has its own route
-// and its own re-signature rule, and two writers for one agreed price is how
-// the two start disagreeing.
-const ENROLLMENT_DETAIL_FIELDS = ['dob', 'gender', 'primaryLanguage', 'phone'];
-const ENROLLMENT_CONTACT_FIELDS = ['name', 'relationship', 'phone', 'email'];
+// ── What staff may change on an enrollment submission ────────────────────
+//
+// An ALLOW-LIST of PATHS into the intake. A path this list does not carry never
+// reaches the client record, so the editor on the enrollment page cannot start
+// writing the rest of a client.
+//
+// The list is what the enrollment page SHOWS plus what its own checklist calls
+// missing — those are the values staff are looking at when they need to correct
+// something, and most of them PRINT INTO A CONSENT. Four required fields are
+// deliberately absent because each already has its own writer, and two writers
+// for one value is how the two start disagreeing: the client's NAME (the user
+// form), the SERVICE LINE (its own route, which recomputes the consent set),
+// the CARE TIER (the clinician's triage at the H&P) and the AGREED RATE (its
+// own route, with its own re-signature rule).
+const ENROLLMENT_EDITABLE_PATHS = Object.freeze([
+  // Client
+  'dob', 'gender', 'primaryLanguage', 'phone',
+  'address.line1', 'address.line2', 'address.city', 'address.state', 'address.zip',
+  // Contacts
+  'primaryContact.name', 'primaryContact.relationship', 'primaryContact.phone', 'primaryContact.email',
+  'crisisNotify',
+  // Medical — each of these prints into a consent or onto the face sheet
+  'allergies',
+  'advanceDirective.status',
+  'medicalTeam.pcpName', 'medicalTeam.pcpPractice', 'medicalTeam.pcpPhone',
+  'medicalTeam.specialist1Name', 'medicalTeam.specialist1Phone', 'medicalTeam.specialist2Name',
+  'medicalTeam.preferredPharmacy', 'medicalTeam.pharmacyPhone', 'medicalTeam.preferredHospital',
+  // Payer
+  'payerType', 'ltc.carrier', 'ltc.policyNum', 'ltc.policyHolder'
+]);
 
-// PUT /api/gfc/admin/enrollment/:clientId/details — admin fills in or corrects
-// the client's own details from the enrollment page.
+// The repeating blocks. Each names the keys ONE row may carry — a key outside
+// the list is dropped rather than stored, the same rule as the paths above —
+// and `requires` names what makes a row real, so an empty row a form left
+// behind is discarded instead of stored as a blank medication. The key sets
+// match the intake wizard's own shapes exactly; this editor does not invent a
+// second shape for a row the client may have filled in themselves.
+const ENROLLMENT_EDITABLE_LISTS = Object.freeze({
+  medications:       { keys: ['name', 'dose', 'route', 'frequency', 'prescriber', 'pharmacy'], requires: ['name'] },
+  emergencyContacts: { keys: ['name', 'relationship', 'phone', 'email', 'address'], requires: ['name'] },
+  insuranceIds:      { keys: ['carrier', 'memberId', 'group'], requires: ['carrier', 'memberId'] }
+});
+
+// A body may carry a value either nested (`{address:{city}}`, which is what the
+// page sends) or as a flat dotted key (`{'address.city': …}`, which is what a
+// script or a curl reaches for). BOTH are read, because the failure mode of
+// accepting only one is a request that answers 200 and changes nothing.
+const readIntakePath = (obj, path) => {
+  if (obj && Object.prototype.hasOwnProperty.call(obj, path)) return obj[path];
+  return path.split('.').reduce((o, k) => (o === null || o === undefined ? undefined : o[k]), obj);
+};
+
+// Writes CLONE each container on the way down, so the edited intake never
+// shares a nested object with the record it was copied from.
+const writeIntakePath = (obj, path, value) => {
+  const parts = path.split('.');
+  const last = parts.pop();
+  let cur = obj;
+  parts.forEach(k => {
+    const existing = (cur[k] && typeof cur[k] === 'object' && !Array.isArray(cur[k])) ? cur[k] : {};
+    cur[k] = { ...existing };
+    cur = cur[k];
+  });
+  cur[last] = value;
+};
+
+// Apply an edit to the intake IN PLACE and report which paths actually moved.
+// An absent key means "leave this alone" — a form that posts one section must
+// not blank the sections it did not show.
+const applyEnrollmentEdits = (intake, body) => {
+  const changed = [];
+  const str = (v) => (v === undefined || v === null) ? undefined : String(v).trim();
+
+  ENROLLMENT_EDITABLE_PATHS.forEach(path => {
+    const v = str(readIntakePath(body, path));
+    if (v === undefined) return;
+    if (String(readIntakePath(intake, path) || '') === v) return;
+    writeIntakePath(intake, path, v);
+    changed.push(path);
+  });
+
+  Object.entries(ENROLLMENT_EDITABLE_LISTS).forEach(([name, spec]) => {
+    const rows = body[name];
+    if (!Array.isArray(rows)) return;
+    const nextRows = rows.map(r => {
+      const row = {};
+      spec.keys.forEach(k => { row[k] = str((r || {})[k]) || ''; });
+      return row;
+    }).filter(r => spec.requires.some(k => r[k]));
+    if (JSON.stringify(intake[name] || []) === JSON.stringify(nextRows)) return;
+    intake[name] = nextRows;
+    changed.push(name);
+  });
+
+  return changed;
+};
+
+// PUT /api/gfc/admin/enrollment/:clientId/details — staff fill in or correct
+// the enrollment submission from the enrollment page.
 //
-// ADMIN ONLY, like every other write on this surface. A clinician or case
-// manager reads this page; they do not edit the record behind it.
+// ADMIN OR CLINICIAN (owner, 2026-09-18). The workflow writes on this surface
+// stay admin-only: approving, changing the service line, accepting a document
+// and recording a paper signature are decisions about the file, while this is a
+// correction to what is in it, and the clinician sitting with the client is
+// the person who finds the wrong pharmacy or the missing allergy.
 //
-// Why it exists: a client added by an admin has no intake behind them, so the
-// Client and Primary contact cards read "—" across the board with no way to
-// fill them in — and those blanks are what block a consent from being
-// presentable. The client's own intake wizard was the only writer.
-app.put('/api/gfc/admin/enrollment/:clientId/details', authenticateToken, requireAdmin, async (req, res) => {
+// Why it exists: the client's own intake wizard was the ONLY writer of this
+// data. A client an admin added by hand has no intake behind them, so the cards
+// read "—" across the board forever — and those blanks are what block a consent
+// from being presentable. A client who typed their pharmacy wrong had no way to
+// have it fixed but to be sent back into the wizard.
+app.put('/api/gfc/admin/enrollment/:clientId/details', authenticateToken, requireEnrollmentEditor, async (req, res) => {
   try {
     const body = req.body || {};
     const users = await getUsers();
@@ -11987,44 +12114,27 @@ app.put('/api/gfc/admin/enrollment/:clientId/details', authenticateToken, requir
     if (idx === -1) return res.status(404).json({ error: 'Client not found' });
     const client = users[idx];
 
-    // Captured BEFORE anything is mutated — the signed-consent comparison below
-    // needs the record as it stood when those consents were signed.
-    const priorClient = { ...client, intake: { ...(client.intake || {}) } };
+    // A DEEP copy, taken before anything is mutated. The signed-consent
+    // comparison at the bottom asks what those documents said BEFORE this edit;
+    // a shallow copy would share `address`, `medicalTeam` and every other
+    // nested block with the record being edited, so each comparison would read
+    // "unchanged" and the re-signature flag would never once fire.
+    const priorClient = JSON.parse(JSON.stringify(client));
 
-    const str = (v) => (v === undefined || v === null) ? undefined : String(v).trim();
     const next = { ...(client.intake || {}) };
-    const changed = [];
-
-    ENROLLMENT_DETAIL_FIELDS.forEach(f => {
-      const v = str(body[f]);
-      if (v === undefined) return;              // absent means "leave this alone"
-      if (String(next[f] || '') === v) return;  // unchanged is not a change
-      next[f] = v;
-      changed.push(f);
-    });
-    if (body.primaryContact && typeof body.primaryContact === 'object') {
-      const pc = { ...(next.primaryContact || {}) };
-      ENROLLMENT_CONTACT_FIELDS.forEach(f => {
-        const v = str(body.primaryContact[f]);
-        if (v === undefined) return;
-        if (String(pc[f] || '') === v) return;
-        pc[f] = v;
-        changed.push(`primaryContact.${f}`);
-      });
-      next.primaryContact = pc;
-    }
+    const changed = applyEnrollmentEdits(next, body);
 
     // Validated by the SAME function the intake wizard and offline onboarding
     // use, so a date this page accepts is a date those two would accept.
     const fieldErrors = validateClientCoreFields(next);
     if (Object.keys(fieldErrors).length) {
-      return res.status(400).json({ error: 'Some client details need correcting.', code: 'INTAKE_INVALID', fieldErrors });
+      return res.status(400).json({ error: 'Some details need correcting.', code: 'INTAKE_INVALID', fieldErrors });
     }
 
     // The login email is the account's identity, so it is checked against every
     // other account BEFORE it is taken, never after.
     let emailChanged = null;
-    const email = str(body.email);
+    const email = body.email === undefined || body.email === null ? undefined : String(body.email).trim();
     if (email !== undefined && email.toLowerCase() !== String(client.email || '').toLowerCase()) {
       if (!email) return res.status(400).json({ error: 'Email cannot be blank.', code: 'EMAIL_REQUIRED' });
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -12041,13 +12151,39 @@ app.put('/api/gfc/admin/enrollment/:clientId/details', authenticateToken, requir
       return res.json({ message: 'Nothing changed', changed: [], client: enrollmentDetail(client) });
     }
 
+    // The payer block is stored twice by design: the wizard's structured fields
+    // on the intake, and the assembled summary on the client record that
+    // billing reads. The mirror only assembles that summary when the intake
+    // carries no payer object of its own, so an edit MERGES into the object
+    // rather than leaving the two disagreeing.
+    if (changed.some(p => p === 'payerType' || p === 'insuranceIds' || p.startsWith('ltc.'))) {
+      const base = { ...(client.payer || {}), ...(next.payer || {}) };
+      next.payer = {
+        ...base,
+        type: codeFrom('payerType', next.payerType) || base.type || null,
+        insuranceIds: Array.isArray(next.insuranceIds) ? next.insuranceIds : (base.insuranceIds || []),
+        ltc: { ...(base.ltc || {}), ...(next.ltc || {}) }
+      };
+    }
+
     next.age = deriveAge(next.dob);
+    next.updatedAt = new Date().toISOString();
     client.intake = next;
     if (emailChanged) client.email = emailChanged;
     if (changed.includes('phone')) client.phone = next.phone || '';
+
+    // The ROI's provider list is DERIVED from the medical team, so correcting a
+    // PCP here has to rebuild it — otherwise the Transfer-of-Care form keeps
+    // offering the provider that was just corrected. Same derivation the
+    // client's own intake save calls.
+    const priorProviders = resolvePriorProviders(client, next);
     // ONE writer for intake → client profile. This page does not get its own
     // idea of the shape the matching and billing engines read.
-    mirrorIntakeToClientProfile(client, next, undefined, undefined);
+    mirrorIntakeToClientProfile(
+      client, next,
+      Array.isArray(next.medications) ? next.medications : undefined,
+      priorProviders
+    );
 
     // A signed consent copy is RENDERED from this record, so correcting a value
     // one of them prints changes what that signed document says. The correction
@@ -12069,21 +12205,24 @@ app.put('/api/gfc/admin/enrollment/:clientId/details', authenticateToken, requir
       };
     }
 
-    // Filling in details is NOT the client submitting their intake, so the
-    // enrollment status is deliberately left where it is. Approving is its own
-    // deliberate act, by an admin, on its own button.
+    // Correcting the submission is NOT the client submitting it, so the
+    // enrollment status is deliberately left where it is. Approving stays its
+    // own deliberate act, by an admin, on its own button.
     users[idx] = client;
     await db.set('users', users);
     invalidateUsersCache();
-    // WHICH fields changed, never what they changed to. A date of birth and a
+    // WHICH paths changed, never what they changed to. A date of birth and a
     // phone number belong to the patient; an audit trail is not a second copy
     // of them. (Same rule the client-location route follows.)
     await logActivity(req.user.id, req.user.name || req.user.email, 'client_details_updated', 'enrollment', client.id, {
-      fields: changed, consentsNeedingResignature: nowStale
+      fields: changed, role: req.user.role, consentsNeedingResignature: nowStale
     });
-    res.json({ message: 'Client details saved', changed, consentsNeedingResignature: nowStale, client: enrollmentDetail(client) });
+    res.json({
+      message: 'Submission saved', changed, consentsNeedingResignature: nowStale,
+      client: { ...enrollmentDetail(client), canEdit: true }
+    });
   } catch (error) {
-    console.error('GFC client details update error:', error);
+    console.error('GFC enrollment submission update error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });

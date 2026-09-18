@@ -4,9 +4,11 @@
 //   DATA_STORE=memory MFA_ENFORCE=false JWT_SECRET=probe PORT=3199 node server.js
 //   GFC_PROBE_BASE=http://localhost:3199 node scripts/verify_enrollment_admin_edit.js
 //
-// Covers the two owner-directed changes of 2026-09-16: a client can be added
-// with the agreed rate deliberately skipped, and the enrollment surface is read
-// for clinicians and case managers but write for admin only.
+// Covers the owner-directed changes of 2026-09-16 (a client can be added with
+// the agreed rate deliberately skipped; the enrollment WORKFLOW is admin-only)
+// and of 2026-09-18 (an admin OR A CLINICIAN may edit the submission itself,
+// and every part of it saves — the mirror, the ROI provider list, the payer
+// summary and the re-signature flag included).
 const BASE = process.env.GFC_PROBE_BASE || 'http://localhost:3199';
 const ADMIN_EMAIL = process.env.GFC_PROBE_ADMIN || 'admin@godwinsfamilycarellc.com';
 const ADMIN_PW = process.env.GFC_PROBE_PW || 'gfcforever2026';
@@ -127,7 +129,7 @@ const call = async (method, path, token, body) => {
       'the flag is on the record for the page to show');
   }
 
-  console.log('\nG. A clinician reads the enrollment page and cannot write to it');
+  console.log('\nG. A clinician reads the page, EDITS the submission, and is still refused the workflow');
   const cEmail = `probe.clin.${uniq}@example.com`;
   const clin = await call('POST', '/api/users', admin, {
     name: 'Probe Clinician', email: cEmail, password: 'Temp12345!', role: 'user',
@@ -141,21 +143,106 @@ const call = async (method, path, token, body) => {
   } else {
     const read = await call('GET', `/api/gfc/admin/enrollment/${skippedId}`, ct);
     eq(read.status, 200, 'the clinician can still READ the enrollment detail');
+    eq(read.body.client.canEdit, true, 'and the page is TOLD they may edit');
     const list = await call('GET', '/api/gfc/admin/enrollment/list', ct);
     eq(list.status, 200, 'and the list');
+
+    // The correction itself — the whole point of the change.
+    const byClinician = await call('PUT', `/api/gfc/admin/enrollment/${skippedId}/details`, ct, {
+      allergies: 'Penicillin, latex',
+      medicalTeam: { pcpName: 'Dr Adeyemi', preferredPharmacy: 'CVS Main St', preferredHospital: 'Wellstar Cobb' }
+    });
+    eq(byClinician.status, 200, 'the clinician CAN correct the submission');
+    const afterClin = await call('GET', `/api/gfc/admin/enrollment/${skippedId}`, admin);
+    eq(afterClin.body.client.intake.allergies, 'Penicillin, latex', 'the allergy is stored, read back');
+    eq(afterClin.body.client.intake.medicalTeam.preferredPharmacy, 'CVS Main St', 'the pharmacy too');
+
+    // Still not theirs: the decisions about the file.
     for (const [method, path, what] of [
       ['POST', `/api/gfc/admin/enrollment/${skippedId}/review`, 'mark reviewed'],
       ['POST', `/api/gfc/admin/enrollment/${skippedId}/follow-up`, 'request follow-up'],
       ['PUT',  `/api/gfc/admin/enrollment/${skippedId}/service-line`, 'change service line'],
       ['POST', `/api/gfc/admin/enrollment/${skippedId}/documents/request`, 'request documents'],
       ['POST', `/api/gfc/admin/enrollment/${skippedId}/documents/remind`, 'send a reminder'],
-      ['PUT',  `/api/gfc/admin/enrollment/${skippedId}/details`, 'edit the details']
+      ['POST', `/api/gfc/admin/enrollment/${skippedId}/approve`, 'approve enrollment']
     ]) {
-      const r = await call(method, path, ct, { items: [], line: 'BOTH', dob: '1950-01-01' });
-      eq(r.status, 403, `the clinician is refused: ${what}`);
+      const r = await call(method, path, ct, { items: [], line: 'BOTH' });
+      eq(r.status, 403, `the clinician is still refused: ${what}`);
     }
+  }
+
+  console.log('\nH. A case manager reads and is refused the edit, and the refusal writes nothing');
+  const mEmail = `probe.cm.${uniq}@example.com`;
+  const cm = await call('POST', '/api/users', admin, {
+    name: 'Probe CaseManager', email: mEmail, password: 'Temp12345!', role: 'caseManager',
+    sendWelcomeEmail: false
+  });
+  eq(cm.status, 200, 'case manager created');
+  const mLogin = await call('POST', '/api/auth/login', null, { email: mEmail, password: 'Temp12345!' });
+  const mt = mLogin.body && mLogin.body.token;
+  if (!mt) {
+    console.log('  --   case-manager login unavailable (MFA?), checks skipped');
+  } else {
+    const read = await call('GET', `/api/gfc/admin/enrollment/${skippedId}`, mt);
+    eq(read.status, 200, 'the case manager keeps their scoped READ');
+    eq(read.body.client.canEdit, false, 'and the page is told they may not edit');
+    const refused = await call('PUT', `/api/gfc/admin/enrollment/${skippedId}/details`, mt, { allergies: 'WRONG' });
+    eq(refused.status, 403, 'the edit is refused');
+    eq(refused.body.code, 'ENROLLMENT_EDITOR_ONLY', 'with its own code');
     const untouched = await call('GET', `/api/gfc/admin/enrollment/${skippedId}`, admin);
-    ok(untouched.body.client.dob !== '1950-01-01', 'and the refused edit wrote nothing');
+    ok(untouched.body.client.intake.allergies !== 'WRONG', 'and nothing was written');
+  }
+
+  console.log('\nI. The whole submission saves, and every derived copy follows it');
+  const full = await call('PUT', `/api/gfc/admin/enrollment/${skippedId}/details`, admin, {
+    address: { line1: '18 Paces Ferry Rd', line2: 'Apt 4', city: 'Vinings', state: 'GA', zip: '30339' },
+    crisisNotify: 'Dana Guess',
+    advanceDirective: { status: 'Yes — DNR in place' },
+    medicalTeam: { pcpName: 'Dr Osei', pcpPhone: '4045550111', preferredPharmacy: 'Walgreens Paces' },
+    medications: [
+      { name: '  Lisinopril ', dose: '10mg', frequency: 'daily', smuggled: 'dropped' },
+      { name: '', dose: '' },
+      { name: 'Metformin', route: 'oral' }
+    ],
+    emergencyContacts: [{ name: 'Ada Nwosu', relationship: 'Daughter', phone: '4045550100' }, {}],
+    payerType: 'LTC insurance',
+    insuranceIds: [{ carrier: 'Aetna', memberId: 'W1234', group: 'G9' }],
+    ltc: { carrier: 'Genworth', policyNum: 'LTC-77' }
+  });
+  eq(full.status, 200, 'the whole submission is accepted');
+  const d = (await call('GET', `/api/gfc/admin/enrollment/${skippedId}`, admin)).body.client;
+  eq(d.intake.address.city, 'Vinings', 'address stored, read back');
+  eq(d.intake.crisisNotify, 'Dana Guess', 'the notify-first contact stored');
+  eq(d.intake.advanceDirective.status, 'Yes — DNR in place', 'the directive status stored');
+  eq(d.intake.medicalTeam.pcpName, 'Dr Osei', 'the PCP correction stored');
+  eq(d.medications.length, 2, 'the empty medication row was dropped');
+  eq(d.medications[0].name, 'Lisinopril', 'and the rest trimmed');
+  ok(d.medications[0].smuggled === undefined, 'a key outside the allow-list never landed');
+  eq(d.intake.emergencyContacts.length, 1, 'the empty emergency contact was dropped');
+  eq(d.intake.emergencyContacts[0].name, 'Ada Nwosu', 'the real one stored');
+  // The billing summary on the client record, not just the wizard's own fields.
+  ok(!!d.payer, 'the payer summary exists');
+  eq((d.payer.insuranceIds || [])[0].carrier, 'Aetna', 'the carrier reached the billing copy');
+  eq((d.payer.ltc || {}).policyNum, 'LTC-77', 'and the LTC policy number');
+  // The checklist is derived, so a filled-in field leaves the missing list.
+  ok(!(d.missing.fields || []).includes('Address'), 'the checklist no longer calls the address missing');
+  ok(!(d.missing.fields || []).includes('Preferred pharmacy'), 'nor the pharmacy');
+
+  console.log('\nJ. A corrected PCP rebuilds the ROI provider list the client is offered');
+  // Read it through the route the Transfer-of-Care form itself calls, as that
+  // client — asserting against a projection that omits the field would let an
+  // empty list pass for "the old one is gone".
+  const roiToken = clientLogin.body && clientLogin.body.token;
+  if (!roiToken) {
+    console.log('  --   client login unavailable, ROI check skipped');
+  } else {
+    const roi = await call('GET', '/api/gfc/transfer-roi', roiToken);
+    eq(roi.status, 200, 'the Transfer-of-Care prefill reads');
+    const names = (roi.body.priorProviders || []).map(p => String(p.name || ''));
+    ok(names.length > 0, 'the list is not empty — an empty one proves nothing either way',
+      JSON.stringify(names));
+    ok(names.some(n => /Osei/.test(n)), 'the corrected PCP is what the form now offers', JSON.stringify(names));
+    ok(!names.some(n => /Adeyemi/.test(n)), 'and the one it replaced is gone', JSON.stringify(names));
   }
 
   console.log(`\n${pass}/${pass + fail} assertions passed${fail ? ` — ${fail} FAILED` : ''}`);

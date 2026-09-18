@@ -4,6 +4,210 @@
 
 ---
 
+### Version 3.0.1 - September 18, 2026
+
+#### Bug Fixes
+- Sign four packet forms in the app; fix the schedule loop and document scoping
+- Fix an assignment picker that never worked, and give payroll paperwork a home
+- Fix the bouncing admin address and brand every queued notice
+
+#### Documentation
+- backfill PR #96 as merged for Session 4.8
+
+#### Changes
+- Send the login with the consent downloads
+- Let a client be added without a rate, and lock enrollment writes to admin
+- Pin the caregiver Feed's scoping
+- Point every email link at the app, and at a page that exists
+- Show every time in Eastern, on both the server and the app
+- Give the welcome packet a banner, and its fields their full width
+- Read a packet somebody typed on without flattening it
+- Make the welcome packet the caregiver app's front door
+- Session 4.8: credential-scoped clinical roles and standing orders
+- Stop a real filename from 500-ing every document download
+- Record that the host is EC2 + Docker, not ECS
+- Record the EVV session in the running status
+- Make a failed Drive read say which failure it was
+- Backfill PR #87 in the running status, and pin its suite figure to it
+- Make the Home shift bar live instead of static
+- Close the holes around the no-visit-log-no-clock-out rule
+- Backfill PR #90 into the running status
+- Put Drive back on its feet, and let caregivers send a file
+- Backfill PR #88 in the running status, and correct the test-count claim
+- Prove the repair script's --apply path end to end
+- Show the client a visit that is happening right now
+
+
+### Version 3.0.1 - September 18, 2026
+
+#### Bug Fixes
+- Sign four packet forms in the app; fix the schedule loop and document scoping
+- Fix an assignment picker that never worked, and give payroll paperwork a home
+- Fix the bouncing admin address and brand every queued notice
+
+#### Documentation
+- backfill PR #96 as merged for Session 4.8
+
+#### Changes
+- Send the login with the consent downloads
+- Let a client be added without a rate, and lock enrollment writes to admin
+- Pin the caregiver Feed's scoping
+- Point every email link at the app, and at a page that exists
+- Show every time in Eastern, on both the server and the app
+- Give the welcome packet a banner, and its fields their full width
+- Read a packet somebody typed on without flattening it
+- Make the welcome packet the caregiver app's front door
+- Session 4.8: credential-scoped clinical roles and standing orders
+- Stop a real filename from 500-ing every document download
+- Record that the host is EC2 + Docker, not ECS
+- Record the EVV session in the running status
+- Make a failed Drive read say which failure it was
+- Backfill PR #87 in the running status, and pin its suite figure to it
+- Make the Home shift bar live instead of static
+- Close the holes around the no-visit-log-no-clock-out rule
+- Backfill PR #90 into the running status
+- Put Drive back on its feet, and let caregivers send a file
+- Backfill PR #88 in the running status, and correct the test-count claim
+- Prove the repair script's --apply path end to end
+- Show the client a visit that is happening right now
+
+
+### Version 3.0.1 - September 18, 2026
+
+#### Bug Fixes
+- Sign four packet forms in the app; fix the schedule loop and document scoping
+- Fix an assignment picker that never worked, and give payroll paperwork a home
+- Fix the bouncing admin address and brand every queued notice
+
+#### Documentation
+- backfill PR #96 as merged for Session 4.8
+
+#### Changes
+- Send the login with the consent downloads
+- Let a client be added without a rate, and lock enrollment writes to admin
+- Pin the caregiver Feed's scoping
+- Point every email link at the app, and at a page that exists
+- Show every time in Eastern, on both the server and the app
+- Give the welcome packet a banner, and its fields their full width
+- Read a packet somebody typed on without flattening it
+- Make the welcome packet the caregiver app's front door
+- Session 4.8: credential-scoped clinical roles and standing orders
+- Stop a real filename from 500-ing every document download
+- Record that the host is EC2 + Docker, not ECS
+- Record the EVV session in the running status
+- Make a failed Drive read say which failure it was
+- Backfill PR #87 in the running status, and pin its suite figure to it
+- Make the Home shift bar live instead of static
+- Close the holes around the no-visit-log-no-clock-out rule
+- Backfill PR #90 into the running status
+- Put Drive back on its feet, and let caregivers send a file
+- Backfill PR #88 in the running status, and correct the test-count claim
+- Prove the repair script's --apply path end to end
+- Show the client a visit that is happening right now
+
+
+### Version 3.0.1 - September 18, 2026
+
+#### Bug Fixes
+- Sign four packet forms in the app; fix the schedule loop and document scoping
+- Fix an assignment picker that never worked, and give payroll paperwork a home
+- Fix the bouncing admin address and brand every queued notice
+
+#### Documentation
+- backfill PR #96 as merged for Session 4.8
+
+#### Changes
+- Send the login with the consent downloads
+- Let a client be added without a rate, and lock enrollment writes to admin
+- Pin the caregiver Feed's scoping
+- Point every email link at the app, and at a page that exists
+- Show every time in Eastern, on both the server and the app
+- Give the welcome packet a banner, and its fields their full width
+- Read a packet somebody typed on without flattening it
+- Make the welcome packet the caregiver app's front door
+- Session 4.8: credential-scoped clinical roles and standing orders
+- Stop a real filename from 500-ing every document download
+- Record that the host is EC2 + Docker, not ECS
+- Record the EVV session in the running status
+- Make a failed Drive read say which failure it was
+- Backfill PR #87 in the running status, and pin its suite figure to it
+- Make the Home shift bar live instead of static
+- Close the holes around the no-visit-log-no-clock-out rule
+- Backfill PR #90 into the running status
+- Put Drive back on its feet, and let caregivers send a file
+- Backfill PR #88 in the running status, and correct the test-count claim
+- Prove the repair script's --apply path end to end
+- Show the client a visit that is happening right now
+
+
+### Version 3.0.1 - September 18, 2026
+
+#### Bug Fixes
+- Sign four packet forms in the app; fix the schedule loop and document scoping
+- Fix an assignment picker that never worked, and give payroll paperwork a home
+- Fix the bouncing admin address and brand every queued notice
+
+#### Documentation
+- backfill PR #96 as merged for Session 4.8
+
+#### Changes
+- Send the login with the consent downloads
+- Let a client be added without a rate, and lock enrollment writes to admin
+- Pin the caregiver Feed's scoping
+- Point every email link at the app, and at a page that exists
+- Show every time in Eastern, on both the server and the app
+- Give the welcome packet a banner, and its fields their full width
+- Read a packet somebody typed on without flattening it
+- Make the welcome packet the caregiver app's front door
+- Session 4.8: credential-scoped clinical roles and standing orders
+- Stop a real filename from 500-ing every document download
+- Record that the host is EC2 + Docker, not ECS
+- Record the EVV session in the running status
+- Make a failed Drive read say which failure it was
+- Backfill PR #87 in the running status, and pin its suite figure to it
+- Make the Home shift bar live instead of static
+- Close the holes around the no-visit-log-no-clock-out rule
+- Backfill PR #90 into the running status
+- Put Drive back on its feet, and let caregivers send a file
+- Backfill PR #88 in the running status, and correct the test-count claim
+- Prove the repair script's --apply path end to end
+- Show the client a visit that is happening right now
+
+
+### Version 3.0.1 - September 18, 2026
+
+#### Bug Fixes
+- Sign four packet forms in the app; fix the schedule loop and document scoping
+- Fix an assignment picker that never worked, and give payroll paperwork a home
+- Fix the bouncing admin address and brand every queued notice
+
+#### Documentation
+- backfill PR #96 as merged for Session 4.8
+
+#### Changes
+- Send the login with the consent downloads
+- Let a client be added without a rate, and lock enrollment writes to admin
+- Pin the caregiver Feed's scoping
+- Point every email link at the app, and at a page that exists
+- Show every time in Eastern, on both the server and the app
+- Give the welcome packet a banner, and its fields their full width
+- Read a packet somebody typed on without flattening it
+- Make the welcome packet the caregiver app's front door
+- Session 4.8: credential-scoped clinical roles and standing orders
+- Stop a real filename from 500-ing every document download
+- Record that the host is EC2 + Docker, not ECS
+- Record the EVV session in the running status
+- Make a failed Drive read say which failure it was
+- Backfill PR #87 in the running status, and pin its suite figure to it
+- Make the Home shift bar live instead of static
+- Close the holes around the no-visit-log-no-clock-out rule
+- Backfill PR #90 into the running status
+- Put Drive back on its feet, and let caregivers send a file
+- Backfill PR #88 in the running status, and correct the test-count claim
+- Prove the repair script's --apply path end to end
+- Show the client a visit that is happening right now
+
+
 ### Version 3.0.1 - September 16, 2026
 
 #### Bug Fixes

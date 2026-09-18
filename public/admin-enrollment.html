@@ -599,39 +599,139 @@
     // this table, so until it exists neither is presentable and the client is
     // stopped at their first signature. Set it here, at intake, not at the
     // kitchen table.
-    // The client's own details, editable by an admin from this page.
+    // ── The enrollment submission, editable by an admin or a clinician ──────
     //
-    // A client an admin added by hand has no intake behind them, so these cards
-    // read "—" across the board and there was no writer but the client's own
-    // intake wizard. The field list mirrors the server's allow-list exactly; it
-    // does not invent one of its own.
-    const ClientDetailsEditor = ({ client, canEdit, onSaved }) => {
+    // The client's own intake wizard used to be the ONLY writer of this data, so
+    // a client an admin added by hand read "—" forever and a client who typed
+    // their pharmacy wrong had to be sent back into the wizard to fix it.
+    //
+    // The section list mirrors the server's allow-list path for path; it does
+    // not invent one of its own. Four values are deliberately absent because
+    // each has its own writer: the name, the service line, the care tier and
+    // the agreed rate.
+    const SUBMISSION_SECTIONS = [
+      { title: 'Client', fields: [
+        { path: 'dob', label: 'Date of birth', type: 'date' },
+        { path: 'email', label: 'Email (their login)', type: 'email', account: true },
+        { path: 'gender', label: 'Gender' },
+        { path: 'primaryLanguage', label: 'Primary language' },
+        { path: 'phone', label: 'Phone', type: 'tel' },
+        { path: 'address.line1', label: 'Street address' },
+        { path: 'address.line2', label: 'Apartment / unit' },
+        { path: 'address.city', label: 'City' },
+        { path: 'address.state', label: 'State' },
+        { path: 'address.zip', label: 'ZIP' }
+      ] },
+      { title: 'Primary contact', fields: [
+        { path: 'primaryContact.name', label: 'Name' },
+        { path: 'primaryContact.relationship', label: 'Relationship', errorKey: 'primaryContactRelationship' },
+        { path: 'primaryContact.phone', label: 'Phone', type: 'tel' },
+        { path: 'primaryContact.email', label: 'Email', type: 'email' }
+      ] },
+      { title: 'Emergency', note: 'The crisis protocol prints the call order, and the notify-first contact heads it.',
+        fields: [{ path: 'crisisNotify', label: 'Notify first in a crisis' }],
+        list: 'emergencyContacts' },
+      { title: 'Medical', note: 'Each of these prints onto the face sheet the caregiver carries.', fields: [
+        { path: 'allergies', label: 'Allergies (or “none”)' },
+        { path: 'advanceDirective.status', label: 'Advance directive', type: 'select',
+          options: ['', 'Yes — DNR in place', 'Yes — advance directive / living will', 'Yes — healthcare proxy / POA', 'No', 'Unknown'] },
+        { path: 'medicalTeam.pcpName', label: 'Primary care provider' },
+        { path: 'medicalTeam.pcpPractice', label: 'Their practice / clinic' },
+        { path: 'medicalTeam.pcpPhone', label: 'Their phone', type: 'tel' },
+        { path: 'medicalTeam.specialist1Name', label: 'Specialist' },
+        { path: 'medicalTeam.specialist1Phone', label: 'Specialist phone', type: 'tel' },
+        { path: 'medicalTeam.specialist2Name', label: 'Second specialist' },
+        { path: 'medicalTeam.preferredPharmacy', label: 'Preferred pharmacy' },
+        { path: 'medicalTeam.pharmacyPhone', label: 'Pharmacy phone', type: 'tel' },
+        { path: 'medicalTeam.preferredHospital', label: 'Preferred hospital' }
+      ] },
+      { title: 'Medications', list: 'medications' },
+      { title: 'Insurance', fields: [
+        { path: 'payerType', label: 'How care is paid for', type: 'select',
+          options: ['', 'Private pay', 'LTC insurance', 'Medicaid waiver', 'VA', 'Medicare Part B', 'Dual eligible', 'Commercial', 'Combination'] },
+        { path: 'ltc.carrier', label: 'Long term care carrier' },
+        { path: 'ltc.policyNum', label: 'Policy number' },
+        { path: 'ltc.policyHolder', label: 'Policy holder' }
+      ], list: 'insuranceIds' }
+    ];
+
+    // The repeating blocks, same keys the server will accept and no others.
+    const SUBMISSION_LISTS = {
+      medications:       { label: 'Medication', keys: [['name', 'Name'], ['dose', 'Dose'], ['route', 'Route'], ['frequency', 'Frequency'], ['prescriber', 'Prescriber'], ['pharmacy', 'Pharmacy']] },
+      emergencyContacts: { label: 'Emergency contact', keys: [['name', 'Name'], ['relationship', 'Relationship'], ['phone', 'Phone'], ['email', 'Email'], ['address', 'Address']] },
+      insuranceIds:      { label: 'Insurance', keys: [['carrier', 'Carrier'], ['memberId', 'Member ID'], ['group', 'Group']] }
+    };
+
+    const readAt = (obj, path) => String(path).split('.').reduce((o, k) => (o === null || o === undefined ? undefined : o[k]), obj);
+    // The flat form is expanded back into the nested shape the API reads, so
+    // the page and the route agree on one set of paths.
+    const expandPaths = (flat) => {
+      const out = {};
+      Object.entries(flat).forEach(([path, value]) => {
+        const parts = path.split('.');
+        const last = parts.pop();
+        let cur = out;
+        parts.forEach(k => { cur[k] = cur[k] || {}; cur = cur[k]; });
+        cur[last] = value;
+      });
+      return out;
+    };
+
+    const SubmissionEditor = ({ client, canEdit, onSaved }) => {
       const i = client.intake || {};
-      const pc = i.primaryContact || {};
       const [open, setOpen] = useState(false);
       const [busy, setBusy] = useState(false);
       const [err, setErr] = useState('');
+      const [saved, setSaved] = useState('');
       const [fieldErrors, setFieldErrors] = useState({});
-      const [f, setF] = useState({
-        dob: i.dob || client.dob || '',
-        email: client.email || '',
-        gender: i.gender || '',
-        primaryLanguage: i.primaryLanguage || '',
-        phone: i.phone || client.phone || '',
-        primaryContact: {
-          name: pc.name || '', relationship: pc.relationship || '',
-          phone: pc.phone || '', email: pc.email || ''
-        }
+      const initial = () => {
+        const flat = {};
+        SUBMISSION_SECTIONS.forEach(sec => (sec.fields || []).forEach(f => {
+          if (f.account) { flat[f.path] = client[f.path] || ''; return; }
+          const v = readAt(i, f.path);
+          if (v === undefined || v === null || v === '') {
+            flat[f.path] = f.path === 'dob' ? (client.dob || '') : f.path === 'phone' ? (client.phone || '') : '';
+            return;
+          }
+          // A value this form cannot represent is LEFT OUT rather than shown
+          // blank: an absent key means "leave this alone", and a blank one
+          // would clear whatever is there on the next save.
+          if (typeof v === 'object') return;
+          flat[f.path] = String(v);
+        }));
+        return flat;
+      };
+      const initialLists = () => {
+        const out = {};
+        Object.keys(SUBMISSION_LISTS).forEach(name => {
+          const rows = Array.isArray(i[name]) ? i[name] : (name === 'medications' && Array.isArray(client.medications) ? client.medications : []);
+          out[name] = rows.map(r => ({ ...(r || {}) }));
+        });
+        return out;
+      };
+      const [f, setF] = useState(initial);
+      const [lists, setLists] = useState(initialLists);
+      const set = (path, v) => setF(prev => ({ ...prev, [path]: v }));
+      const setRow = (name, idx, key, v) => setLists(prev => {
+        const rows = [...(prev[name] || [])];
+        rows[idx] = { ...(rows[idx] || {}), [key]: v };
+        return { ...prev, [name]: rows };
       });
-      const set = (k, v) => setF(prev => ({ ...prev, [k]: v }));
-      const setPc = (k, v) => setF(prev => ({ ...prev, primaryContact: { ...prev.primaryContact, [k]: v } }));
+      const addRow = (name) => setLists(prev => ({ ...prev, [name]: [...(prev[name] || []), {}] }));
+      const dropRow = (name, idx) => setLists(prev => ({ ...prev, [name]: (prev[name] || []).filter((_, n) => n !== idx) }));
+
+      const openEditor = () => {
+        setF(initial()); setLists(initialLists());
+        setErr(''); setSaved(''); setFieldErrors({}); setOpen(true);
+      };
 
       const save = () => {
-        setBusy(true); setErr(''); setFieldErrors({});
-        api.setClientDetails(client.id, f)
-          // Re-read rather than trust local state: age, the client-profile
-          // mirror and the re-signature flag are all resolved server-side.
-          .then(() => { setOpen(false); onSaved(); })
+        setBusy(true); setErr(''); setSaved(''); setFieldErrors({});
+        api.setClientDetails(client.id, { ...expandPaths(f), ...lists })
+          // Re-read rather than trust local state: the age, the client-profile
+          // mirror, the ROI provider list and the re-signature flag are all
+          // resolved server-side.
+          .then(r => { setOpen(false); setSaved(r.message || 'Saved'); onSaved(); })
           .catch(e => {
             setErr(e.message);
             setFieldErrors((e.data && e.data.fieldErrors) || {});
@@ -639,17 +739,15 @@
           .finally(() => setBusy(false));
       };
 
+      if (!canEdit) return null;
       if (!open) {
         return (
-          <div>
-            <dl className="text-sm space-y-1.5">
-              <div className="flex justify-between"><dt className="text-gray-500">Date of birth</dt><dd>{(i.dob || client.dob) || '—'}{client.age != null ? ` (age ${client.age})` : ''}</dd></div>
-              <div className="flex justify-between"><dt className="text-gray-500">Email</dt><dd>{client.email || '—'}</dd></div>
-              <div className="flex justify-between"><dt className="text-gray-500">Gender</dt><dd>{i.gender || '—'}</dd></div>
-              <div className="flex justify-between"><dt className="text-gray-500">Primary language</dt><dd>{i.primaryLanguage || '—'}</dd></div>
-              <div className="flex justify-between"><dt className="text-gray-500">Phone</dt><dd>{(i.phone || client.phone) || '—'}</dd></div>
-            </dl>
-            {canEdit && <button className="btn btn-ghost mt-3" onClick={() => setOpen(true)}>Edit details</button>}
+          <div className="flex items-center gap-3 flex-wrap">
+            <button className="btn btn-ghost" onClick={openEditor}>Edit submission</button>
+            <span className="text-xs text-gray-500">
+              Correct what the client submitted, or fill in what an office-added client never had.
+            </span>
+            {saved && <span className="badge bg-success-50 text-success-600">{saved}</span>}
           </div>
         );
       }
@@ -657,36 +755,61 @@
       return (
         <div>
           {err && <div className="bg-danger-50 text-danger-600 text-sm rounded-lg px-4 py-2 mb-3">{err}</div>}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className="label">Date of birth</label>
-              <input className="input" type="date" value={f.dob} onChange={e => set('dob', e.target.value)} />
-              {fieldErrors.dob && <p className="text-xs text-danger-500 mt-1">{fieldErrors.dob}</p>}
+          {SUBMISSION_SECTIONS.map(sec => (
+            <div key={sec.title} className="mb-5">
+              <p className="font-semibold text-sm mb-1">{sec.title}</p>
+              {sec.note && <p className="text-xs text-gray-500 mb-2">{sec.note}</p>}
+              {!!(sec.fields || []).length && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {sec.fields.map(fd => (
+                    <div key={fd.path}>
+                      <label className="label">{fd.label}</label>
+                      {fd.type === 'select' ? (
+                        <select className="input" value={f[fd.path] || ''} onChange={e => set(fd.path, e.target.value)}>
+                          {/* A stored value this list does not carry is added to
+                              it, or the select would show blank and quietly
+                              rewrite what the client actually answered. */}
+                          {(fd.options.includes(f[fd.path] || '') ? fd.options : [...fd.options, f[fd.path]])
+                            .map(o => <option key={o} value={o}>{o || '—'}</option>)}
+                        </select>
+                      ) : (
+                        <input className="input" type={fd.type || 'text'} value={f[fd.path] || ''} onChange={e => set(fd.path, e.target.value)} />
+                      )}
+                      {fieldErrors[fd.errorKey || fd.path] && (
+                        <p className="text-xs text-danger-500 mt-1">{fieldErrors[fd.errorKey || fd.path]}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {sec.list && (
+                <div className="mt-3">
+                  {(lists[sec.list] || []).map((row, idx) => (
+                    <div key={idx} className="border border-gray-100 rounded-lg p-3 mb-2">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                        {SUBMISSION_LISTS[sec.list].keys.map(([k, label]) => (
+                          <div key={k}>
+                            <label className="label">{label}</label>
+                            <input className="input" value={row[k] || ''} onChange={e => setRow(sec.list, idx, k, e.target.value)} />
+                          </div>
+                        ))}
+                      </div>
+                      {fieldErrors[`emergencyContacts.${idx}.relationship`] && sec.list === 'emergencyContacts' && (
+                        <p className="text-xs text-danger-500 mt-1">{fieldErrors[`emergencyContacts.${idx}.relationship`]}</p>
+                      )}
+                      <button className="btn btn-ghost mt-2" onClick={() => dropRow(sec.list, idx)}>Remove</button>
+                    </div>
+                  ))}
+                  <button className="btn btn-ghost" onClick={() => addRow(sec.list)}>+ Add {SUBMISSION_LISTS[sec.list].label.toLowerCase()}</button>
+                </div>
+              )}
             </div>
-            <div>
-              <label className="label">Email (their login)</label>
-              <input className="input" type="email" value={f.email} onChange={e => set('email', e.target.value)} />
-            </div>
-            <div><label className="label">Gender</label><input className="input" value={f.gender} onChange={e => set('gender', e.target.value)} /></div>
-            <div><label className="label">Primary language</label><input className="input" value={f.primaryLanguage} onChange={e => set('primaryLanguage', e.target.value)} /></div>
-            <div><label className="label">Phone</label><input className="input" value={f.phone} onChange={e => set('phone', e.target.value)} /></div>
-          </div>
-          <p className="lbl font-semibold text-sm mt-4 mb-2">Primary contact</p>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div><label className="label">Name</label><input className="input" value={f.primaryContact.name} onChange={e => setPc('name', e.target.value)} /></div>
-            <div>
-              <label className="label">Relationship</label>
-              <input className="input" value={f.primaryContact.relationship} onChange={e => setPc('relationship', e.target.value)} />
-              {fieldErrors.primaryContactRelationship && <p className="text-xs text-danger-500 mt-1">{fieldErrors.primaryContactRelationship}</p>}
-            </div>
-            <div><label className="label">Phone</label><input className="input" value={f.primaryContact.phone} onChange={e => setPc('phone', e.target.value)} /></div>
-            <div><label className="label">Email</label><input className="input" type="email" value={f.primaryContact.email} onChange={e => setPc('email', e.target.value)} /></div>
-          </div>
+          ))}
           <p className="text-xs text-gray-500 mt-3">
             A consent they have already signed is rendered from this record, so correcting something one of them prints flags it for re-signature. It does not change what they signed against.
           </p>
           <div className="flex gap-2 mt-3">
-            <button className="btn btn-primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save details'}</button>
+            <button className="btn btn-primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save submission'}</button>
             <button className="btn btn-ghost" disabled={busy} onClick={() => setOpen(false)}>Cancel</button>
           </div>
         </div>
@@ -791,9 +914,15 @@
     );
 
     const DetailView = ({ clientId, user, onBack }) => {
-      // Every write on this surface is admin-only at the API, so the page asks
-      // the question once and every control reads the same answer. A screen
-      // that offers what the server will refuse is worse than a read-only one.
+      // TWO answers, because the API gives two, and each is asked once so no
+      // control can drift from the route behind it. A screen that offers what
+      // the server will refuse is worse than a read-only one.
+      //   canEdit           — the workflow writes: approve, service line,
+      //                       documents, paper signature. ADMIN ONLY.
+      //   canEditSubmission — correcting the submission itself. Admin OR
+      //                       clinician, and answered BY THE SERVER on the
+      //                       record it just served rather than inferred here
+      //                       from a login stored in this browser months ago.
       const canEdit = isAdminRole(user);
       const [client, setClient] = useState(null);
       const [loading, setLoading] = useState(true);
@@ -814,6 +943,7 @@
         setLoading(true); setErr('');
         api.detail(clientId).then(d => setClient(d.client)).catch(e => setErr(e.message)).finally(() => setLoading(false));
       }, [clientId]);
+      const canEditSubmission = !!(client && client.canEdit);
       useEffect(() => { load(); }, [load]);
 
       const doReview = () => { setBusy(true); api.review(clientId).then(load).catch(e => setErr(e.message)).finally(() => setBusy(false)); };
@@ -857,10 +987,10 @@
                 <span className="badge bg-gray-100 text-gray-600">{client.source === 'offline' ? 'Offline-onboarded' : 'In-app'}</span>
               </div>
             </div>
-            {/* Every write on this surface is admin-only at the API. A button
-                that is going to answer 403 is worse than no button, so a
-                clinician or case manager sees the page read-only and is told
-                so rather than left guessing why nothing works. */}
+            {/* The workflow writes are admin-only at the API. A button that is
+                going to answer 403 is worse than no button, so anyone else is
+                TOLD which of the two states they are in rather than left
+                guessing why nothing works. */}
             <div className="flex gap-2 flex-wrap">
               {canEdit ? (
                 <React.Fragment>
@@ -870,7 +1000,11 @@
                   <button className="btn btn-primary" disabled={busy} onClick={() => doApprove(null)}>Approve enrollment</button>
                 </React.Fragment>
               ) : (
-                <span className="badge bg-gray-100 text-gray-600">Read-only — an admin makes changes here</span>
+                <span className="badge bg-gray-100 text-gray-600">
+                  {canEditSubmission
+                    ? 'You can correct this submission — approving and the service line are an admin’s'
+                    : 'Read-only — an admin or clinician makes changes here'}
+                </span>
               )}
             </div>
           </div>
@@ -1022,9 +1156,52 @@
             </Section>
           )}
 
+          {/* One editor, full width, for the whole submission. It renders
+              nothing at all for a viewer who may not write, and the read cards
+              below still show them everything. */}
+          {canEditSubmission && (
+            <Section title="Enrollment submission">
+              <SubmissionEditor client={client} canEdit={canEditSubmission} onSaved={load} />
+            </Section>
+          )}
+
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <Section title="Client">
-              <ClientDetailsEditor client={client} canEdit={canEdit} onSaved={load} />
+              <dl className="text-sm space-y-1.5">
+                <div className="flex justify-between"><dt className="text-gray-500">Date of birth</dt><dd>{(client.intake.dob || client.dob) || '—'}{client.age != null ? ` (age ${client.age})` : ''}</dd></div>
+                <div className="flex justify-between"><dt className="text-gray-500">Email</dt><dd>{client.email || '—'}</dd></div>
+                <div className="flex justify-between"><dt className="text-gray-500">Gender</dt><dd>{client.intake.gender || '—'}</dd></div>
+                <div className="flex justify-between"><dt className="text-gray-500">Primary language</dt><dd>{client.intake.primaryLanguage || '—'}</dd></div>
+                <div className="flex justify-between"><dt className="text-gray-500">Phone</dt><dd>{(client.intake.phone || client.phone) || '—'}</dd></div>
+                <div className="flex justify-between gap-4"><dt className="text-gray-500">Address</dt><dd className="text-right">{(() => {
+                  const a = client.intake.address || {};
+                  const line = [a.line1, a.line2].filter(Boolean).join(', ');
+                  const rest = [a.city, [a.state, a.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+                  return [line, rest].filter(Boolean).join(' · ') || '—';
+                })()}</dd></div>
+              </dl>
+            </Section>
+
+            {/* Everything a consent or the face sheet prints that no card on
+                this page used to show — so a reader can check it, and the
+                checklist's "missing" line has somewhere to point. */}
+            <Section title="Medical and emergency">
+              <dl className="text-sm space-y-1.5">
+                <div className="flex justify-between gap-4"><dt className="text-gray-500">Allergies</dt><dd className="text-right">{client.intake.allergies || '—'}</dd></div>
+                <div className="flex justify-between gap-4"><dt className="text-gray-500">Advance directive</dt><dd className="text-right">{(client.intake.advanceDirective && client.intake.advanceDirective.status) || '—'}</dd></div>
+                <div className="flex justify-between gap-4"><dt className="text-gray-500">Notify first</dt><dd className="text-right">{client.intake.crisisNotify || '—'}</dd></div>
+                <div className="flex justify-between gap-4"><dt className="text-gray-500">Primary care provider</dt><dd className="text-right">{(client.intake.medicalTeam && (client.intake.medicalTeam.pcpName || client.intake.medicalTeam.pcpPractice)) || '—'}</dd></div>
+                <div className="flex justify-between gap-4"><dt className="text-gray-500">Pharmacy</dt><dd className="text-right">{(client.intake.medicalTeam && client.intake.medicalTeam.preferredPharmacy) || '—'}</dd></div>
+                <div className="flex justify-between gap-4"><dt className="text-gray-500">Preferred hospital</dt><dd className="text-right">{(client.intake.medicalTeam && client.intake.medicalTeam.preferredHospital) || '—'}</dd></div>
+              </dl>
+              <p className="lbl font-semibold text-sm mt-4 mb-1">Emergency contacts</p>
+              {(client.intake.emergencyContacts || []).filter(c => c && c.name).length ? (
+                <div className="space-y-1.5 text-sm">
+                  {(client.intake.emergencyContacts || []).filter(c => c && c.name).map((c, n) => (
+                    <div key={n}>{c.name}{c.relationship ? ` — ${c.relationship}` : ''}{c.phone ? ` · ${c.phone}` : ''}</div>
+                  ))}
+                </div>
+              ) : <span className="text-sm text-gray-400">None on file</span>}
             </Section>
 
             <Section title="Primary contact">
@@ -1035,7 +1212,7 @@
                   <div className="flex justify-between"><dt className="text-gray-500">Phone</dt><dd>{client.intake.primaryContact.phone || '—'}</dd></div>
                   <div className="flex justify-between"><dt className="text-gray-500">Email</dt><dd>{client.intake.primaryContact.email || '—'}</dd></div>
                 </dl>
-              ) : <span className="text-sm text-gray-400">Not on file — set it under Client → Edit details</span>}
+              ) : <span className="text-sm text-gray-400">Not on file — set it under Enrollment submission → Edit submission</span>}
             </Section>
 
             <Section title="Consents">
