@@ -73,6 +73,33 @@ module.exports = function createSchedulingRoutes(deps) {
     return res.status(403).json({ error: 'Administrator access required.', code: 'ADMIN_ONLY' });
   };
 
+  // WHO RUNS THE BOARD (owner instruction, 2026-09-20): "editable by admin and
+  // manager". Scheduling had been admin-only throughout, and the 2026-09-13
+  // dashboard entry left the manager question open for the owner precisely
+  // here. This is that question answered, so `isManager` now means something on
+  // this surface rather than collapsing silently into admin.
+  //
+  // It covers THE WORK OF SCHEDULING — posting, editing, assigning, approving a
+  // claim, cancelling, and reading the board to do any of it. It deliberately
+  // does NOT cover three things that are admin's alone:
+  //   the money      — payroll and billing exports, manual hours, time-log
+  //                    corrections: those are payroll attestations, not shifts;
+  //   the client record — the location/geofence write edits a client, and a
+  //                    scheduling role has no business in a client's address;
+  //   the overrides  — scheduling a client who is not enrolled, or a caregiver
+  //                    who is not cleared, is a compliance decision, not a
+  //                    scheduling one.
+  // A manager who tries one is refused by the route, not merely by a hidden
+  // button, and every one of those lines is build-enforced.
+  const isScheduleManager = (u) => !!u && (u.role === ROLES.ADMIN || !!u.isManager);
+
+  const requireScheduleManager = (req, res, next) => {
+    if (isScheduleManager(req.user)) return next();
+    return res.status(403).json({
+      error: 'An administrator or a manager schedules shifts.', code: 'SCHEDULE_MANAGER_ONLY'
+    });
+  };
+
   // Who may submit availability and hold a shift: caregivers, and clinicians
   // (the brief says "caregivers and clinicians submit availability").
   const isSchedulable = (u) => cg.isCaregiver(u) || !!(u && u.hasClinicalAccess);
@@ -189,12 +216,12 @@ module.exports = function createSchedulingRoutes(deps) {
   // GET /api/scheduling/availability — own rows; admin sees everyone's.
   router.get('/api/scheduling/availability', authenticateToken, async (req, res) => {
     try {
-      if (!isAdmin(req.user) && !isSchedulable(req.user)) {
+      if (!isScheduleManager(req.user) && !isSchedulable(req.user)) {
         return res.status(403).json({ error: 'Caregiver or clinical access required.', code: 'SCHEDULING_STAFF_ONLY' });
       }
       const rows = await readRows('caregiver_availability');
-      let mine = isAdmin(req.user) ? rows : rows.filter(r => r && r.caregiver_id === req.user.id);
-      if (isAdmin(req.user) && req.query.caregiverId) {
+      let mine = isScheduleManager(req.user) ? rows : rows.filter(r => r && r.caregiver_id === req.user.id);
+      if (isScheduleManager(req.user) && req.query.caregiverId) {
         mine = mine.filter(r => r.caregiver_id === String(req.query.caregiverId));
       }
       mine = mine.slice().sort((a, b) => String(b.submitted_at || '').localeCompare(String(a.submitted_at || '')));
@@ -206,7 +233,7 @@ module.exports = function createSchedulingRoutes(deps) {
   });
 
   // POST /api/scheduling/availability/:id/review — admin marks it reviewed.
-  router.post('/api/scheduling/availability/:id/review', authenticateToken, requireAdmin, async (req, res) => {
+  router.post('/api/scheduling/availability/:id/review', authenticateToken, requireScheduleManager, async (req, res) => {
     try {
       const rows = await readRows('caregiver_availability');
       const idx = rows.findIndex(r => r && r.id === req.params.id);
@@ -235,7 +262,7 @@ module.exports = function createSchedulingRoutes(deps) {
       let clientId = null;
       if (req.user.role === ROLES.CLIENT) clientId = req.user.id;
       else if (req.user.role === ROLES.FAMILY) clientId = req.user.familyOfClientId || null;
-      else if (isAdmin(req.user)) clientId = body.clientId || null;
+      else if (isScheduleManager(req.user)) clientId = body.clientId || null;
       else return res.status(403).json({ error: 'Only a client, their family, or an administrator can request a shift.', code: 'REQUEST_NOT_PERMITTED' });
 
       if (!clientId) return res.status(400).json({ error: 'No client on file for this request.', code: 'CLIENT_REQUIRED' });
@@ -302,7 +329,7 @@ module.exports = function createSchedulingRoutes(deps) {
     try {
       const rows = await readRows('shift_requests');
       let mine;
-      if (isAdmin(req.user)) mine = rows;
+      if (isScheduleManager(req.user)) mine = rows;
       else if (req.user.role === ROLES.CLIENT) mine = rows.filter(r => r && r.client_id === req.user.id);
       else if (req.user.role === ROLES.FAMILY) mine = rows.filter(r => r && r.client_id === req.user.familyOfClientId);
       else return res.status(403).json({ error: 'Access denied.', code: 'REQUEST_READ_DENIED' });
@@ -329,7 +356,7 @@ module.exports = function createSchedulingRoutes(deps) {
   //
   // Eligibility and overlap are checked BEFORE anything is written, so a
   // refused direct post leaves no orphan open shift behind.
-  router.post('/api/scheduling/shifts', authenticateToken, requireAdmin, async (req, res) => {
+  router.post('/api/scheduling/shifts', authenticateToken, requireScheduleManager, async (req, res) => {
     try {
       const { valid, errors, clean } = sched.validateShift(req.body);
       if (!valid) return res.status(400).json({ error: 'Some shift details need correcting.', code: 'SHIFT_INVALID', errors });
@@ -455,19 +482,434 @@ module.exports = function createSchedulingRoutes(deps) {
     }
   });
 
+  // PUT /api/scheduling/shifts/:id — correct a shift that is already posted.
+  //
+  // Owner instruction, 2026-09-20: "make the schedules and shifts editable by
+  // admin and manager after posting. Previous shifts too when we need to update
+  // the time." Until now the only way to move a shift was to cancel it and post
+  // another, which throws away the claim, the assignment and the caregiver's
+  // acceptance in order to fix a typo — and leaves a cancelled tombstone
+  // implying the visit was called off when it was not.
+  //
+  // A PAST shift is editable on purpose; correcting last Tuesday is the stated
+  // reason this exists. What is refused is a shift that was CANCELLED, which
+  // did not happen and has nothing on it to correct.
+  router.put('/api/scheduling/shifts/:id', authenticateToken, requireScheduleManager, async (req, res) => {
+    try {
+      const rows = await readRows('shifts');
+      const idx = rows.findIndex(r => r && r.id === req.params.id);
+      if (idx === -1) return res.status(404).json({ error: 'Shift not found.', code: 'SHIFT_NOT_FOUND' });
+      const before = rows[idx];
+
+      if (!sched.canEditShift(before)) {
+        return res.status(409).json({
+          error: 'A cancelled shift cannot be edited. Post a new one.',
+          code: 'SHIFT_NOT_EDITABLE', status: before.status
+        });
+      }
+
+      const { valid, errors, clean, changes } = sched.validateShiftEdit(before, req.body);
+      if (!valid) return res.status(400).json({ error: 'Some shift details need correcting.', code: 'SHIFT_INVALID', errors });
+      if (changes.length === 0) {
+        return res.json({ shift: publicShift(before), changed: [], message: 'Nothing changed.' });
+      }
+
+      // The row as it WILL read, built before anything is written, so every
+      // re-check below asks about the shift that is about to exist rather than
+      // the one that exists now.
+      const after = { ...before };
+      changes.forEach(k => { after[sched.SHIFT_EDIT_COLUMN[k]] = clean[k]; });
+
+      // Whoever is holding this shift agreed to a particular piece of work. If
+      // the edit takes it outside what they may do — a raised licence
+      // requirement, or a narrowing to the care team they are not on — the edit
+      // is REFUSED rather than quietly releasing them. Releasing somebody from
+      // work they accepted is a decision for a person, not a side effect of
+      // correcting a time.
+      if (after.caregiver_id) {
+        const holder = await freshUser(after.caregiver_id);
+        const client = await loadClient(after.client_id);
+        if (holder && !sched.isEligibleForShift(holder, after, client)) {
+          return res.status(409).json({
+            error: `${holder.name} could not hold the shift as edited.`,
+            code: 'SHIFT_HOLDER_INELIGIBLE',
+            reason: sched.eligibilityReason(holder, after, client),
+            hint: 'Cancel the shift, or release the caregiver first, then make this change.'
+          });
+        }
+        if (holder && (changes.includes('start') || changes.includes('end'))) {
+          const conflict = sched.findShiftConflict(rows, holder.id, after);
+          if (conflict) {
+            return res.status(409).json({
+              error: `${holder.name} already holds an overlapping shift at the new time.`,
+              code: 'SHIFT_CONFLICT',
+              conflict: { id: conflict.id, start: conflict.start, end: conflict.end, clientName: conflict.client_name }
+            });
+          }
+        }
+      }
+
+      changes.forEach(k => { rows[idx][sched.SHIFT_EDIT_COLUMN[k]] = clean[k]; });
+      rows[idx].edited_at = nowIso();
+      rows[idx].edited_by_id = req.user.id;
+      rows[idx].edited_by_name = req.user.name || req.user.email;
+      rows[idx].edit_count = (Number(rows[idx].edit_count) || 0) + 1;
+      await db.set('shifts', rows);
+
+      // THE TIME LOG CARRIES ITS OWN COPY OF THE SCHEDULE, and payroll reads
+      // that copy rather than the shift. Leaving it behind means the board and
+      // the timesheet disagree about the same visit, which is the failure this
+      // repo keeps paying for: two writers, one value. So the log follows —
+      // and the flags DERIVED from the schedule are re-derived with it, because
+      // a "late clock-in" measured against a time that was wrong is a mark the
+      // caregiver did not earn. The geofence verdicts are observations of where
+      // somebody stood and are never rewritten. See rederiveScheduleFlags.
+      let logsTouched = 0;
+      if (changes.includes('start') || changes.includes('end')) {
+        const logs = await readRows('time_logs');
+        let dirty = false;
+        logs.forEach(l => {
+          if (!l || String(l.shift_id) !== String(rows[idx].id)) return;
+          l.scheduled_start = rows[idx].start;
+          l.scheduled_end = rows[idx].end;
+          l.flags = sched.rederiveScheduleFlags(l, rows[idx]);
+          l.schedule_corrected_at = nowIso();
+          l.schedule_corrected_by_name = rows[idx].edited_by_name;
+          dirty = true; logsTouched += 1;
+        });
+        if (dirty) await db.set('time_logs', logs);
+      }
+
+      // WHAT changed, never a client's detail. Times and a licence level are
+      // operational facts about a shift, so the before/after is recorded; the
+      // client is named by id, as every other row in this log names them.
+      await logActivity(req.user.id, rows[idx].edited_by_name, 'shift_edited', 'shift', rows[idx].id,
+        {
+          clientId: rows[idx].client_id, fields: changes, status: rows[idx].status,
+          before: { start: before.start, end: before.end, requiredLicenseLevel: before.required_license_level },
+          after: { start: rows[idx].start, end: rows[idx].end, requiredLicenseLevel: rows[idx].required_license_level },
+          timeLogsUpdated: logsTouched, role: req.user.role
+        });
+
+      // TELLING PEOPLE IS THE POINT OF MOVING A TIME. A caregiver who is not
+      // told turns up at the old hour. It goes out only when the time actually
+      // moved and only while the shift is still ahead of us: an email about a
+      // correction to last week's paperwork is noise, and the client is told
+      // only about a visit they had already been promised.
+      const timeMoved = changes.includes('start') || changes.includes('end');
+      const stillAhead = new Date(rows[idx].start).getTime() > Date.now();
+      let notified = [];
+      if (timeMoved && stillAhead) {
+        const when = time.fmtDateTime(rows[idx].start);
+        const holder = rows[idx].caregiver_id ? await freshUser(rows[idx].caregiver_id) : null;
+        if (holder && holder.email) {
+          await queueNotification('shift_time_changed', holder.id, holder.email, holder.name,
+            {
+              subject: `Shift time changed — ${rows[idx].client_name}`,
+              body: `Your shift for ${rows[idx].client_name} has moved. It now starts ${when} and ends ${time.fmtTime(rows[idx].end)}. The previous time was ${time.fmtDateTime(before.start)}.`,
+              ctaUrl: links.shiftFor(), ctaLabel: 'View the shift'
+            },
+            { relatedEntityId: `${rows[idx].id}:edited:${rows[idx].edit_count}`, relatedEntityType: 'shift', createdBy: req.user.id });
+          notified.push(holder.name);
+        }
+        if (['confirmed', 'in_progress'].includes(rows[idx].status)) {
+          const client = await loadClient(rows[idx].client_id);
+          if (client && client.email) {
+            await queueNotification('shift_time_changed_client', client.id, client.email, client.name,
+              {
+                subject: 'Your care visit has been rescheduled',
+                body: `Your visit has moved to ${when}. It was previously ${time.fmtDateTime(before.start)}.`,
+                ctaUrl: links.PATHS.PORTAL, ctaLabel: 'Open your portal'
+              },
+              { relatedEntityId: `${rows[idx].id}:edited-client:${rows[idx].edit_count}`, relatedEntityType: 'shift', createdBy: req.user.id });
+            notified.push(client.name);
+          }
+        }
+      }
+
+      res.json({
+        shift: publicShift(rows[idx]),
+        changed: changes,
+        timeLogsUpdated: logsTouched,
+        message: notified.length
+          ? `Shift updated. ${notified.join(' and ')} ${notified.length > 1 ? 'have' : 'has'} been told the time changed.`
+          : (timeMoved && !stillAhead
+            ? `Shift updated.${logsTouched ? ` ${logsTouched} time log${logsTouched > 1 ? 's' : ''} moved with it.` : ''} Nobody was emailed: this shift has already happened.`
+            : 'Shift updated.')
+      });
+    } catch (error) {
+      console.error('Shift edit error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // POST /api/scheduling/shifts/bulk — one standing pattern, many shifts.
+  //
+  // Owner instruction, 2026-09-20. "Mon, Wed and Fri, 9 to 1, through the end
+  // of November" is how home care is actually scheduled, and posting it a row
+  // at a time is forty identical form fills.
+  //
+  // THE TEMPLATE IS ALL-OR-NOTHING; THE OCCURRENCES ARE NOT. A bad client or a
+  // bad licence level writes nothing at all — the same rule the single post
+  // follows, and the reason a refused post leaves no orphan behind. But one
+  // date in forty clashing with a shift the caregiver already holds should not
+  // refuse the other thirty-nine: those are reported, skipped, and named.
+  router.post('/api/scheduling/shifts/bulk', authenticateToken, requireScheduleManager, async (req, res) => {
+    try {
+      const body = req.body || {};
+      const expanded = sched.expandRecurrence(body);
+      if (!expanded.valid) {
+        return res.status(400).json({ error: 'Some details need correcting.', code: 'RECURRENCE_INVALID', errors: expanded.errors });
+      }
+
+      // The shift fields are validated ONCE, through the same validateShift the
+      // single post uses, against the first occurrence. A second copy of "what
+      // a valid shift is" is how the two start accepting different things.
+      const first = expanded.occurrences[0];
+      const template = { ...body, start: first.start, end: first.end };
+      const { valid, errors } = sched.validateShift(template);
+      if (!valid) return res.status(400).json({ error: 'Some shift details need correcting.', code: 'SHIFT_INVALID', errors });
+
+      const client = await loadClient(body.clientId);
+      if (!client) return res.status(404).json({ error: 'Client not found.', code: 'CLIENT_NOT_FOUND' });
+
+      const bulkOverride = gateScheduling(req, res, client);
+      if (bulkOverride === false) return;
+
+      const assignToId = String(body.assignToCaregiverId || '').trim();
+      let assignee = null;
+      if (assignToId) {
+        assignee = await freshUser(assignToId);
+        if (!assignee || !isSchedulable(assignee)) {
+          return res.status(400).json({ error: 'Pick a caregiver with a license level on file.', code: 'CAREGIVER_INVALID' });
+        }
+      }
+
+      const required = sched.normalizeLicenseRequirement(body.requiredLicenseLevel);
+      const visibility = body.poolVisibility || 'all_eligible';
+      const payRate = cg.normalizePayRate(body.payRate);
+      const notes = String(body.notes || '').trim().slice(0, 2000);
+      const careTier = body.careTier ? String(body.careTier).trim().slice(0, 20) : (client.careTier || null);
+
+      const rows = await readRows('shifts');
+      const created = [];
+      const skipped = [];
+
+      for (const occ of expanded.occurrences) {
+        const row = {
+          id: uuidv4(),
+          client_id: client.id, client_name: client.name,
+          caregiver_id: null, caregiver_name: null,
+          start: occ.start, end: occ.end,
+          required_license_level: required.level,
+          pool_visibility: visibility,
+          care_tier: careTier,
+          notes,
+          pay_rate: payRate,
+          status: 'open',
+          created_by: req.user.id,
+          created_by_name: req.user.name || req.user.email,
+          created_at: nowIso(),
+          // Every row says which batch made it, so a mistaken bulk post can be
+          // found and removed as the one thing it was.
+          bulk_batch_id: null,
+          claimed_at: null, assigned_at: null, confirmed_at: null,
+          started_at: null, completed_at: null, cancelled_at: null, reopened_at: null,
+          enrollment_override: bulkOverride
+        };
+
+        // Clicking Post twice is the commonest way to get two of everything.
+        const dup = sched.findDuplicateShift(rows, client.id, row.start, row.end);
+        if (dup) { skipped.push({ date: occ.date, start: occ.start, reason: 'A shift already exists for this client at that time.', code: 'DUPLICATE', shiftId: dup.id }); continue; }
+
+        if (assignee) {
+          if (!sched.isEligibleForShift(assignee, row, client)) {
+            skipped.push({ date: occ.date, start: occ.start, reason: sched.eligibilityReason(assignee, row, client), code: 'NOT_ELIGIBLE' });
+            continue;
+          }
+          const conflict = sched.findShiftConflict(rows, assignee.id, row);
+          if (conflict) {
+            skipped.push({ date: occ.date, start: occ.start, reason: `${assignee.name} already holds an overlapping shift.`, code: 'CONFLICT' });
+            continue;
+          }
+          row.status = 'assigned';
+          row.assigned_at = nowIso();
+          row.caregiver_id = assignee.id;
+          row.caregiver_name = assignee.name;
+        }
+
+        rows.push(row);
+        created.push(row);
+      }
+
+      if (created.length === 0) {
+        return res.status(409).json({
+          error: 'None of those shifts could be posted.', code: 'BULK_NOTHING_POSTED',
+          created: [], skipped
+        });
+      }
+
+      const batchId = uuidv4();
+      created.forEach(r => { r.bulk_batch_id = batchId; });
+      await db.set('shifts', rows);
+
+      await logActivity(req.user.id, req.user.name || req.user.email, 'shifts_bulk_posted', 'shift', batchId,
+        {
+          clientId: client.id, count: created.length, skipped: skipped.length,
+          from: body.startDate, to: body.endDate, days: body.daysOfWeek,
+          assignedTo: assignee ? assignee.id : null, role: req.user.role,
+          enrollmentOverride: bulkOverride ? { reason: bulkOverride.reason, enrollmentStatus: bulkOverride.enrollmentStatus } : null
+        });
+
+      // ONE email for the batch, not forty. A caregiver assigned eighteen
+      // shifts does not need eighteen identical messages, and a mailbox full of
+      // them is a mailbox nobody reads.
+      if (assignee && assignee.email) {
+        await queueNotification('shift_assigned', assignee.id, assignee.email, assignee.name,
+          {
+            subject: `${created.length} new shift${created.length > 1 ? 's' : ''} offered — ${client.name}`,
+            body: `You have been offered ${created.length} shift${created.length > 1 ? 's' : ''} for ${client.name}, starting ${time.fmtDateTime(created[0].start)}. Accept or decline each one in your schedule.`,
+            ctaUrl: links.shiftFor(), ctaLabel: 'View the shifts'
+          },
+          { relatedEntityId: batchId, relatedEntityType: 'shift', createdBy: req.user.id });
+      }
+
+      res.json({
+        batchId,
+        created: created.map(publicShift),
+        skipped,
+        message: `${created.length} shift${created.length > 1 ? 's' : ''} posted${assignee ? ` to ${assignee.name}` : ' to the open pool'}.` +
+          (skipped.length ? ` ${skipped.length} skipped — see the list.` : '')
+      });
+    } catch (error) {
+      console.error('Bulk shift post error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // POST /api/scheduling/shifts/bulk-remove — take several shifts off the board
+  // in one go, with a reason.
+  //
+  // REMOVING IS TWO DIFFERENT ACTS and the route does not make the caller guess
+  // which. A shift somebody claimed, accepted, worked or was promised is
+  // CANCELLED: it leaves its tombstone and its reason, because care that was
+  // promised and called off is a fact. A shift still sitting open that nobody
+  // ever held is a typo — most often one row of a bulk post aimed at the wrong
+  // week — and it is DELETED, because forty tombstones for a mistake nobody
+  // saw buries the cancellations that matter. The whole row is written to the
+  // activity log first, so a delete is still recoverable from the record.
+  router.post('/api/scheduling/shifts/bulk-remove', authenticateToken, requireScheduleManager, async (req, res) => {
+    try {
+      const body = req.body || {};
+      const reason = String(body.reason || '').trim();
+      if (!reason) return res.status(400).json({ error: 'Say why these shifts are being removed.', code: 'CANCEL_REASON_REQUIRED' });
+
+      const ids = Array.isArray(body.shiftIds) ? body.shiftIds.map(v => String(v)).filter(Boolean) : [];
+      if (ids.length === 0) return res.status(400).json({ error: 'Pick at least one shift.', code: 'NO_SHIFTS_SELECTED' });
+      if (ids.length > sched.MAX_BULK_OCCURRENCES) {
+        return res.status(400).json({
+          error: `Remove at most ${sched.MAX_BULK_OCCURRENCES} shifts at a time.`, code: 'TOO_MANY_SHIFTS'
+        });
+      }
+
+      const rows = await readRows('shifts');
+      const timeLogs = await readRows('time_logs');
+      const cancelled = [];
+      const deleted = [];
+      const refused = [];
+      const removeIds = new Set();
+
+      for (const id of ids) {
+        const row = rows.find(r => r && r.id === id);
+        if (!row) { refused.push({ shiftId: id, reason: 'Shift not found.', code: 'SHIFT_NOT_FOUND' }); continue; }
+
+        if (sched.isNeverHeld(row, timeLogs)) {
+          removeIds.add(row.id);
+          deleted.push({ shiftId: row.id, start: row.start, end: row.end, clientName: row.client_name });
+          await logActivity(req.user.id, req.user.name || req.user.email, 'shift_deleted', 'shift', row.id,
+            { clientId: row.client_id, reason, role: req.user.role, row });
+          continue;
+        }
+
+        if (!sched.canTransitionShift(row.status, 'cancelled')) {
+          // The state machine's own wording, not a second sentence written
+          // here: "that shift is finished" and "it is under way" are different
+          // facts and the person reading the list has to be able to tell them
+          // apart.
+          const refusal = sched.transitionRefusal(row.status, 'cancelled');
+          refused.push({
+            shiftId: row.id, start: row.start, clientName: row.client_name,
+            reason: (refusal && refusal.message) || `A ${row.status} shift cannot be cancelled.`,
+            code: (refusal && refusal.code) || 'SHIFT_TRANSITION_INVALID', status: row.status
+          });
+          continue;
+        }
+
+        row.status = 'cancelled';
+        row.cancelled_at = nowIso();
+        row.cancel_reason = reason.slice(0, 1000);
+        cancelled.push({ shiftId: row.id, start: row.start, end: row.end, clientName: row.client_name, caregiverName: row.caregiver_name });
+        await logActivity(req.user.id, req.user.name || req.user.email, 'shift_cancelled', 'shift', row.id,
+          { clientId: row.client_id, reason, bulk: true, role: req.user.role });
+      }
+
+      if (cancelled.length === 0 && deleted.length === 0) {
+        return res.status(409).json({ error: 'Nothing was removed.', code: 'BULK_NOTHING_REMOVED', cancelled: [], deleted: [], refused });
+      }
+
+      const kept = rows.filter(r => !removeIds.has(r.id));
+      await db.set('shifts', kept);
+
+      // A caregiver who was holding one of these needs to know, and they need
+      // ONE message rather than one per shift. A deleted row had nobody on it
+      // by definition, so nothing is sent for those.
+      const byCaregiver = new Map();
+      cancelled.forEach(c => {
+        const row = rows.find(r => r.id === c.shiftId);
+        if (row && row.caregiver_id) {
+          if (!byCaregiver.has(row.caregiver_id)) byCaregiver.set(row.caregiver_id, []);
+          byCaregiver.get(row.caregiver_id).push(row);
+        }
+      });
+      for (const [caregiverId, list] of byCaregiver) {
+        const holder = await freshUser(caregiverId);
+        if (!holder || !holder.email) continue;
+        await queueNotification('shift_cancelled', holder.id, holder.email, holder.name,
+          {
+            subject: `${list.length} shift${list.length > 1 ? 's' : ''} cancelled — ${list[0].client_name}`,
+            body: `${list.length} of your shifts for ${list[0].client_name} ${list.length > 1 ? 'have' : 'has'} been cancelled, starting with ${time.fmtDateTime(list[0].start)}. Reason: ${reason}`,
+            ctaUrl: links.shiftFor(), ctaLabel: 'View your schedule'
+          },
+          { relatedEntityId: `${list[0].id}:bulk-cancelled`, relatedEntityType: 'shift', createdBy: req.user.id });
+      }
+
+      res.json({
+        cancelled, deleted, refused,
+        message: [
+          cancelled.length ? `${cancelled.length} cancelled` : '',
+          deleted.length ? `${deleted.length} removed (never claimed by anyone)` : '',
+          refused.length ? `${refused.length} left alone` : ''
+        ].filter(Boolean).join(', ') + '.'
+      });
+    } catch (error) {
+      console.error('Bulk shift remove error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   // GET /api/scheduling/shifts — the master calendar for admin; for a caregiver,
   // ONLY their own shifts. A caregiver cannot read another caregiver's shifts.
   router.get('/api/scheduling/shifts', authenticateToken, async (req, res) => {
     try {
-      if (!isAdmin(req.user) && !isSchedulable(req.user)) {
+      if (!isScheduleManager(req.user) && !isSchedulable(req.user)) {
         return res.status(403).json({ error: 'Caregiver or clinical access required.', code: 'SCHEDULING_STAFF_ONLY' });
       }
       const rows = await readRows('shifts');
-      let mine = isAdmin(req.user) ? rows : rows.filter(r => r && r.caregiver_id === req.user.id);
+      let mine = isScheduleManager(req.user) ? rows : rows.filter(r => r && r.caregiver_id === req.user.id);
       if (req.query.status) mine = mine.filter(r => r.status === String(req.query.status));
       if (req.query.from) mine = mine.filter(r => String(r.start) >= String(req.query.from));
       if (req.query.to) mine = mine.filter(r => String(r.start) <= String(req.query.to));
-      if (isAdmin(req.user) && req.query.clientId) mine = mine.filter(r => r.client_id === String(req.query.clientId));
+      if (isScheduleManager(req.user) && req.query.clientId) mine = mine.filter(r => r.client_id === String(req.query.clientId));
       mine = mine.slice().sort((a, b) => String(a.start).localeCompare(String(b.start)));
 
       // Whether the visit log is already filed is a fact the clock-out gate
@@ -661,7 +1103,7 @@ module.exports = function createSchedulingRoutes(deps) {
   });
 
   // Admin approves a claim → confirmed. Both parties notified.
-  router.post('/api/scheduling/shifts/:id/approve', authenticateToken, requireAdmin, async (req, res) => {
+  router.post('/api/scheduling/shifts/:id/approve', authenticateToken, requireScheduleManager, async (req, res) => {
     try {
       const result = await moveShift({
         shiftId: req.params.id, to: 'confirmed', actor: req.user,
@@ -679,7 +1121,7 @@ module.exports = function createSchedulingRoutes(deps) {
   });
 
   // Admin declines a claim → back to the open pool, caregiver cleared.
-  router.post('/api/scheduling/shifts/:id/decline-claim', authenticateToken, requireAdmin, async (req, res) => {
+  router.post('/api/scheduling/shifts/:id/decline-claim', authenticateToken, requireScheduleManager, async (req, res) => {
     try {
       const result = await moveShift({
         shiftId: req.params.id, to: 'open', actor: req.user,
@@ -697,7 +1139,7 @@ module.exports = function createSchedulingRoutes(deps) {
   });
 
   // --- Pathway B: admin assigns directly; the caregiver accepts or declines ---
-  router.post('/api/scheduling/shifts/:id/assign', authenticateToken, requireAdmin, async (req, res) => {
+  router.post('/api/scheduling/shifts/:id/assign', authenticateToken, requireScheduleManager, async (req, res) => {
     try {
       const caregiverId = String((req.body || {}).caregiverId || '');
       const caregiver = await freshUser(caregiverId);
@@ -824,7 +1266,7 @@ module.exports = function createSchedulingRoutes(deps) {
   });
 
   // Admin cancels a shift.
-  router.post('/api/scheduling/shifts/:id/cancel', authenticateToken, requireAdmin, async (req, res) => {
+  router.post('/api/scheduling/shifts/:id/cancel', authenticateToken, requireScheduleManager, async (req, res) => {
     try {
       const reason = String((req.body || {}).reason || '').trim();
       if (!reason) return res.status(400).json({ error: 'Say why the shift is cancelled.', code: 'CANCEL_REASON_REQUIRED' });
@@ -1050,12 +1492,12 @@ module.exports = function createSchedulingRoutes(deps) {
   // GET /api/scheduling/time-logs — a caregiver sees THEIR OWN history only.
   router.get('/api/scheduling/time-logs', authenticateToken, async (req, res) => {
     try {
-      if (!isAdmin(req.user) && !isSchedulable(req.user)) {
+      if (!isScheduleManager(req.user) && !isSchedulable(req.user)) {
         return res.status(403).json({ error: 'Caregiver or clinical access required.', code: 'SCHEDULING_STAFF_ONLY' });
       }
       const logs = await readRows('time_logs');
-      let mine = isAdmin(req.user) ? logs : logs.filter(l => l && l.caregiver_id === req.user.id);
-      if (isAdmin(req.user) && req.query.caregiverId) mine = mine.filter(l => l.caregiver_id === String(req.query.caregiverId));
+      let mine = isScheduleManager(req.user) ? logs : logs.filter(l => l && l.caregiver_id === req.user.id);
+      if (isScheduleManager(req.user) && req.query.caregiverId) mine = mine.filter(l => l.caregiver_id === String(req.query.caregiverId));
       if (req.query.from) mine = mine.filter(l => String(l.clock_in_at) >= String(req.query.from));
       if (req.query.to) mine = mine.filter(l => String(l.clock_in_at) <= `${req.query.to}T23:59:59.999Z`);
       if (req.query.flagged === 'true') mine = mine.filter(l => (l.flags || []).length > 0);
@@ -1439,7 +1881,7 @@ module.exports = function createSchedulingRoutes(deps) {
   // names where to go and answer it. Counts only: no client names, no
   // caregiver names, no addresses. A dashboard tile is a glance, and a glance
   // does not need PHI on it.
-  router.get('/api/scheduling/summary', authenticateToken, requireAdmin, async (req, res) => {
+  router.get('/api/scheduling/summary', authenticateToken, requireScheduleManager, async (req, res) => {
     try {
       const [shifts, logs, users] = await Promise.all([
         readRows('shifts'), readRows('time_logs'), getUsers()
@@ -1481,7 +1923,7 @@ module.exports = function createSchedulingRoutes(deps) {
   });
 
   // GET /api/scheduling/caregivers — admin picker: who can hold a shift.
-  router.get('/api/scheduling/caregivers', authenticateToken, requireAdmin, async (req, res) => {
+  router.get('/api/scheduling/caregivers', authenticateToken, requireScheduleManager, async (req, res) => {
     try {
       const users = await getUsers();
       res.json({
@@ -1498,7 +1940,21 @@ module.exports = function createSchedulingRoutes(deps) {
           hasCoordinates: !!sched.clientCoords(u),
           coordinates: sched.clientCoords(u),
           addressLine: addressLine(u)
-        }))
+        })),
+        // WHAT THIS VIEWER MAY DO, answered by the server on every request.
+        // Reading it off the login stored in the browser would mean a role an
+        // admin narrowed this morning keeps its buttons until the next sign-in
+        // — the trap `req.user.clinicalRole` was fixed for in 4.8. A manager is
+        // told which controls are not theirs rather than handed buttons that
+        // answer 403.
+        access: {
+          role: req.user.role,
+          isManager: !!req.user.isManager,
+          manageSchedule: isScheduleManager(req.user),
+          managePay: isAdmin(req.user),
+          manageLocations: isAdmin(req.user),
+          canOverrideGates: isAdmin(req.user)
+        }
       });
     } catch (error) {
       console.error('Scheduling roster error:', error);
@@ -1603,6 +2059,15 @@ module.exports = function createSchedulingRoutes(deps) {
     cancelledAt: r.cancelled_at, cancelReason: r.cancel_reason || null,
     reopenedAt: r.reopened_at,
     releasedFromName: r.released_from_name || null, releasedReason: r.released_reason || null,
+    // A shift that has been corrected says so on the board. An edit that leaves
+    // no trace is the same silent rewrite the append-only rules exist to stop:
+    // a caregiver who remembers a different time has to be able to see that the
+    // time moved, and who moved it.
+    editedAt: r.edited_at || null, editedByName: r.edited_by_name || null,
+    editCount: Number(r.edit_count) || 0,
+    // Which batch posted it, so a mistaken bulk post can be found as the one
+    // thing it was rather than forty unrelated rows.
+    bulkBatchId: r.bulk_batch_id || null,
     // An override that lives only in the store is barely better than a silent
     // one. It reaches every reader of the board so the shift itself says the
     // client was not enrolled when it was posted.

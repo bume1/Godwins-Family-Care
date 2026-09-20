@@ -245,6 +245,10 @@
   <!-- The approved consent bodies, shared with the server and the PDF generator.
        One text, three readers — see the header of public/consent-text.js. -->
   <script src="/consent-text.js"></script>
+  <!-- One declaration of the intake questions and their option lists. The staff
+       enrollment editor renders from the same file, so an option a client was
+       offered is the same string staff can correct it to. -->
+  <script src="/intake-fields.js"></script>
   <script type="text/babel">
     const { useState, useEffect, useRef, useCallback } = React;
     
@@ -4207,63 +4211,18 @@
     };
 
     const ROUTE_OPTS = ['Oral', 'Topical', 'Injection', 'Inhaled', 'Patch', 'Other'];
-    const ADL_LEVELS = ['Independent', 'Needs verbal cues', 'Needs physical assistance', 'Fully dependent'];
+    const ADL_LEVELS = window.GFC_INTAKE_FIELDS.OPTIONS.adlLevels;
 
     // ── Intake option lists — mirror the legacy WordPress intake form field-for-field
     //    (docs/source-forms/template-gfc-intake-3.php) so the app captures the same
     //    information; stored in the app's structured shape for the matching/billing engines.
-    const IO = {
-      gender: ['Female', 'Male', 'Non-binary', 'Prefer not to say'],
-      livesWith: ['Lives alone', 'Spouse / partner', 'Adult child', 'Other family member', 'Assisted living / memory care'],
-      contactRelationship: ['Spouse / Partner', 'Adult child', 'Sibling', 'Legal guardian', 'Other family member'],
-      contactPreference: ['Phone call', 'Text message', 'Email'],
-      decisionAuthority: ['Yes — legal (POA/guardianship)', 'Yes — family decision-maker, informal', 'No — client decides', 'Shared'],
-      servicePath: ['Home Care', 'In-Home Primary Care', 'Both', 'Not sure'],
-      adlLevel: ['Independent', 'Some help', 'A lot of help', 'Total assistance'],
-      helpNeeded: ['Companionship & socialization', 'Personal care / bathing / dressing', 'Medication reminders', 'Mobility & transfer assistance', 'Meal preparation', 'Transportation to appointments', 'Overnight or 24/7 care', 'Memory care / dementia support', 'Skilled nursing at home', 'Hospice or end-of-life support'],
-      appointmentAccess: ['No difficulty', 'Somewhat difficult', 'Very difficult', 'Cannot attend'],
-      ongoingConditions: ['Diabetes', 'Heart condition / CHF', 'COPD / breathing issues', "Dementia / Alzheimer's", 'Stroke / neurological', 'Recent hospitalization', 'Multiple chronic conditions', 'None / generally healthy'],
-      hasPCP: ['Yes', 'No', 'Unsure'],
-      cognitionLevel: ['None', 'Mild', 'Moderate', 'Significant'],
-      urgency: ['Immediately', 'Within a week', 'Within a month', 'Just exploring'],
-      preferredDays: ['Weekday mornings', 'Weekday afternoons', 'Weekday evenings', 'Weekends', 'Overnight', '24/7 continuous'],
-      recurring: ['Recurring', 'One-time', 'Not sure'],
-      paymentExpectation: ['Private pay', 'Insurance', 'Medicaid', 'Medicare', 'Combination', 'Not sure'],
-      serviceInterests: ['Case management', 'Behavioral health support', 'Continuous Care Program', 'Not interested in add-on services'],
-      caregiverStress: ['Managing fine', 'Stretched thin', 'Overwhelmed', 'Breaking point'],
-      homebound: ['Completely homebound', 'Leaves with assistance', 'Leaves occasionally', 'Independent'],
-      appointmentDifficulty: ['Cannot attend', 'Very difficult', 'Somewhat difficult', 'No difficulty'],
-      currentServices: ['Home health', 'Hospice', 'Palliative care', 'Skilled nursing (private)', 'Outpatient PT/OT', 'None'],
-      hbpcInterests: ['In-home primary care visits', 'Telehealth visits', 'Medication management', 'Chronic disease management', 'Labs drawn at home', 'Mobile imaging', 'Care coordination across providers'],
-      diagnoses: ["Dementia / Alzheimer's", "Parkinson's disease", 'Stroke / TIA', 'Depression', 'Anxiety', 'COPD / respiratory', 'Heart failure / cardiac', 'Diabetes', 'Cancer', 'Arthritis', 'Osteoporosis', 'Renal disease', 'Bipolar disorder', 'Schizophrenia', 'PTSD', 'Substance use history'],
-      dnr: ['Yes — DNR in place', 'Yes — advance directive / living will', 'Yes — healthcare proxy / POA', 'No', 'Unknown'],
-      skilledTasks: ['Wound care', 'Injections', 'Catheter care', 'Ostomy care', 'Tube feeding', 'Oxygen management', 'Suctioning', 'Tracheostomy care', 'IV therapy', 'Blood glucose monitoring', 'Blood pressure monitoring', 'Medication administration', 'Behavioral supervision', 'Seizure monitoring', 'None'],
-      recentEvents: ['Hospitalized in past 30 days', 'SNF or rehab stay in past 90 days', 'Recent falls', 'Recent infections', 'New medications since discharge', 'Difficulty following discharge instructions', 'Concern for readmission'],
-      adlWalking: ['Independent', 'Uses walker / cane', 'Needs physical assistance', 'Wheelchair — self-propels', 'Wheelchair — pushed', 'Bed-bound'],
-      adlToileting: ['Independent', 'Needs verbal cues', 'Needs physical assistance', 'Incontinent — needs full care'],
-      adlTransfers: ['Independent', 'Standby assist', 'Hands-on assist', 'Two-person assist / mechanical lift'],
-      fallRisk: ['Low', 'Moderate', 'High'],
-      equipment: ['Walker', 'Cane', 'Wheelchair', 'Hoyer lift', 'Hospital bed', 'Grab bars', 'Shower chair', 'Stair lift'],
-      iadl: ['Meal preparation', 'Grocery shopping', 'Light housekeeping', 'Laundry', 'Medication reminders', 'Transportation to appointments', 'Errands', 'Companionship', 'Phone / technology help', 'Managing mail / paperwork'],
-      cognitiveStatus: ['Intact', 'Mild impairment', 'Moderate dementia', 'Severe dementia', 'Mental health diagnosis affecting cognition'],
-      dementiaStage: ['Early / mild', 'Moderate', 'Late / severe', 'Unknown / undiagnosed'],
-      behavioral: ['Wandering', 'Agitation / aggression', 'Sundowning', 'Sleep disturbances', 'Hallucinations', 'Mood swings', 'Resistance to care', 'Self-harm risk', 'Suicidal ideation history'],
-      functionalRisk6mo: ['Fallen', 'Wandered from home', 'Been hospitalized', 'Significant weight loss', 'Missed medications', 'Left stove/appliances running', 'Become aggressive', 'Missed important appointments', 'Experienced dehydration', 'None'],
-      homeSafety: ['Smokers in home', 'Pets in home', 'Firearms in home', 'Hoarding or clutter', 'Pest issues', 'Stairs required', 'Oxygen tanks', 'Working utilities', 'Other household substance use', 'None'],
-      twoPersonAssist: ['No', 'Sometimes', 'Yes routinely'],
-      decisionMaking: ['Client independently', 'Shared with family', 'Surrogate decision-maker needed', 'Capacity concerns'],
-      legalDocs: ['Healthcare POA activated', 'Financial POA activated', 'Guardianship', 'Healthcare surrogate designated', 'Advance directive on file', 'None'],
-      personality: ['Quiet and reserved', 'Warm and chatty', 'Likes structure and routine', 'Prefers independence', 'Can get anxious', 'Resistant to care'],
-      genderPref: ['No preference', 'Female preferred', 'Male preferred', 'Female — strong', 'Male — strong'],
-      caregiverExp: ['Entry-level OK', 'Some experience', 'Experienced', 'Dementia-trained', 'Behavioral support certified'],
-      insuranceTypes: ['Medicare Part A & B', 'Medicare Advantage', 'Medicaid', 'Dual eligible', 'VA benefits', 'Commercial insurance', 'Managed care organization', 'Long-term care insurance', 'Private pay only'],
-      medicareType: ['Part A & B', 'Medicare Advantage (Part C)', 'Dual eligible', 'Not applicable'],
-      medicaidWaiver: ['CCSP', 'ICWP', 'SOURCE', 'Katie Beckett', 'Other waiver', 'Not on a waiver'],
-      policyHolderRel: ['Self', 'Spouse', 'Parent', 'Child', 'Other'],
-      homeBenefit: ['Covered — verified', 'Covered — unverified', 'Not covered', 'Unknown'],
-      ltcCarrier: ['Genworth', 'Mutual of Omaha', 'Northwestern Mutual', 'John Hancock', 'Transamerica', 'Other', 'Not applicable'],
-      auth911: ['Yes — authorized', 'Yes — call family first if time allows', 'No — always call family first']
-    };
+    // The option catalogs moved to public/intake-fields.js (2026-09-20), where
+    // the staff enrollment editor reads them too. They were declared here and
+    // restated there, which is two lists that drift: a select offering an
+    // option the validator refuses, or a validator refusing what this wizard
+    // just saved. One declaration, three readers — the same rule consent-text
+    // and gfc-time already follow.
+    const IO = window.GFC_INTAKE_FIELDS.OPTIONS;
 
     // Small textarea field matching the .fld/label convention used across the wizard.
     const TextArea = ({ label, hint, value, onChange, placeholder }) => (

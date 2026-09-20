@@ -221,16 +221,26 @@ function detailsRoute() {
 // moves — a slice that silently grabs the wrong region proves nothing. (Brace
 // counting is what broke the download extractor: a destructured parameter
 // closes the first brace before the body opens.)
+// The allow-list and the function that applies it are lifted out of server.js
+// and RUN, rather than read — requiring server.js boots a server. The slice is
+// anchored at both ends and asserts loudly if either anchor moves, so it can
+// never quietly grab the wrong region and prove nothing.
+//
+// Since 2026-09-20 the list itself lives in public/intake-fields.js, which the
+// client's wizard and this editor both read; the slice therefore runs a real
+// `require` of that module rather than a copy of it. Asserting against a copy
+// would be asserting against the wrong file.
 function loadEditSpec() {
-  const start = SERVER.indexOf('const ENROLLMENT_EDITABLE_PATHS = Object.freeze([');
-  assert.notStrictEqual(start, -1, 'the editable-path allow-list is gone');
+  const start = SERVER.indexOf("const intakeFields = require('./public/intake-fields');");
+  assert.notStrictEqual(start, -1, 'the editor no longer reads the shared field map');
   const end = SERVER.indexOf('// PUT /api/gfc/admin/enrollment/:clientId/details — staff fill in', start);
   assert.ok(end > start, 'the allow-list no longer sits above the route it guards');
+  const rootRequire = (id) => require(id.replace('./', '../'));
   // eslint-disable-next-line no-new-func
-  return new Function(
+  return new Function('require',
     `${SERVER.slice(start, end)}
-     return { PATHS: ENROLLMENT_EDITABLE_PATHS, LISTS: ENROLLMENT_EDITABLE_LISTS, apply: applyEnrollmentEdits };`
-  )();
+     return { PATHS: ENROLLMENT_EDITABLE_PATHS, LISTS: ENROLLMENT_EDITABLE_LISTS, apply: applyEnrollmentEdits, fields: intakeFields };`
+  )(rootRequire);
 }
 const loadApplyEdits = () => loadEditSpec().apply;
 
@@ -249,6 +259,18 @@ test('the route writes an allow-list of paths and nothing else', () => {
   }
   assert.deepStrictEqual(Object.keys(spec.LISTS).sort(),
     ['emergencyContacts', 'insuranceIds', 'medications']);
+  // WIDENED 2026-09-20 to the whole submission, on the owner's instruction.
+  // The paths above are the ones the enrollment page displays; these are the
+  // wizard's other steps, which had no staff writer at all until now.
+  for (const path of ['situation.mainReason', 'schedule.startDate', 'schedule.urgency',
+                      'homebound', 'conditions', 'adl.bathing', 'fallRisk',
+                      'behavioralFlags', 'homeSafetyFlags', 'matching.genderPreference',
+                      'matching.personality', 'medicare.id', 'medicaid.waiver',
+                      'commercial.carrier', 'auth911', 'clientFirst', 'preferredName']) {
+    assert.ok(spec.PATHS.includes(path), `the whole submission must be editable: ${path}`);
+  }
+  assert.ok(spec.PATHS.length > 100,
+    `the editor covers the submission, not a corner of it (found ${spec.PATHS.length})`);
   // Four values have their own writer, and two writers for one value is how the
   // two start disagreeing.
   for (const forbidden of ['rateAgreement', 'serviceLine', 'careTier', 'name']) {
@@ -428,22 +450,190 @@ test('the form never silently rewrites a value it cannot represent', () => {
   assert.match(ENROL, /if \(typeof v === 'object'\) return;/);
   //   and a stored option the select does not list is ADDED to the list, or the
   //   select shows blank and saves that blank over the client's own answer.
-  assert.match(ENROL, /fd\.options\.includes\(f\[fd\.path\] \|\| ''\) \? fd\.options : \[\.\.\.fd\.options, f\[fd\.path\]\]/);
+  //   (Repointed 2026-09-20: the options come from the shared field map now, so
+  //   the check reads the map's catalog rather than an inline array.)
+  assert.match(ENROL, /held && !opts\.includes\(held\) \? opts\.concat\(\[held\]\) : opts/);
+  //   The same rule for a checkbox group, which is the shape the widened editor
+  //   added: an option the client picked before the list changed is still their
+  //   answer, so it is shown and kept rather than dropped on the next save.
+  assert.match(ENROL, /\(f\[fd\.path\] \|\| \[\]\)\.filter\(v => !FIELD_MAP\.optionsFor\(fd\)\.includes\(v\)\)/);
 });
 
-test('the page names no editable field the server would drop', () => {
-  // The section list mirrors the server's allow-list; a form that offers a field
-  // the route refuses is a field somebody fills in and loses.
+// REPOINTED 2026-09-20, and the rule got STRICTER rather than looser. It used
+// to compare the page's own inline field list against the server's allow-list,
+// because a form offering a field the route refuses is a field somebody fills
+// in and loses. The page no longer has a list: it renders from the same
+// declaration the server validates against, so the two cannot differ at all.
+// What needs guarding now is that it stays that way.
+test('the page declares no question of its own — it renders the shared map', () => {
   const spec = loadEditSpec();
-  const paths = [...ENROL.matchAll(/\{ path: '([^']+)'/g)].map(m => m[1]);
-  assert.ok(paths.length >= 20, `expected the section list, found ${paths.length} paths`);
-  for (const path of paths) {
-    if (path === 'email') continue;   // the account's own identity, not an intake key
-    assert.ok(spec.PATHS.includes(path), `the page offers '${path}', which the server drops`);
-  }
-  // And every list the page edits is a list the server accepts.
+  assert.ok(ENROL.includes('window.GFC_INTAKE_FIELDS'),
+    'the editor must read the shared field map');
+  assert.ok(ENROL.includes('FIELD_MAP.SECTIONS.map('),
+    'the sections are served, not restated');
+  assert.ok(ENROL.includes('const SUBMISSION_LISTS = FIELD_MAP.LISTS;'),
+    'the repeating blocks come from the map too');
+
+  // One field of its own, and exactly one: the login email, which is an account
+  // detail rather than an answer on the submission. Any OTHER hardcoded path is
+  // the drift this test exists to stop.
+  const declared = [...ENROL.matchAll(/\{ path: '([^']+)'/g)].map(m => m[1]);
+  assert.deepStrictEqual(declared, ['email'],
+    `the page must name no intake field of its own, found ${JSON.stringify(declared)}`);
+
+  // And no option list may be restated in the page either — that was the second
+  // copy that drifted.
+  assert.ok(!/options: \[\s*'/.test(ENROL),
+    'an option list in the page is a second catalog that will drift from the wizard');
+
   for (const name of ['medications', 'emergencyContacts', 'insuranceIds']) {
-    assert.ok(ENROL.includes(`${name}:`), `the page must edit ${name}`);
-    assert.ok(Object.keys(spec.LISTS).includes(name));
+    assert.ok(Object.keys(spec.LISTS).includes(name), `${name} must still be editable`);
   }
+});
+
+test('a checkbox group saves as an array, and an empty one is a real answer', () => {
+  const apply = loadApplyEdits();
+  const intake = { conditions: ['Diabetes'] };
+  // "None of these" and "never asked" must stay different stored values: the
+  // matching engine reads them, and an empty string would be neither.
+  assert.deepStrictEqual(apply(intake, { conditions: [] }), ['conditions']);
+  assert.deepStrictEqual(intake.conditions, []);
+
+  const second = { conditions: [] };
+  assert.deepStrictEqual(apply(second, { conditions: ['Diabetes', 'Cancer'] }), ['conditions']);
+  assert.deepStrictEqual(second.conditions, ['Diabetes', 'Cancer']);
+
+  // Absent still means leave alone, for an array as for anything else.
+  const third = { conditions: ['Diabetes'] };
+  assert.deepStrictEqual(apply(third, { allergies: 'None' }), ['allergies']);
+  assert.deepStrictEqual(third.conditions, ['Diabetes']);
+});
+
+test('an option the client was never offered is refused BY NAME, not dropped', () => {
+  const apply = loadApplyEdits();
+  const intake = {};
+  const rejected = [];
+  apply(intake, { conditions: ['Diabetes', 'Lycanthropy'] }, rejected);
+  assert.deepStrictEqual(intake.conditions, ['Diabetes'],
+    'the client picked from a fixed list; staff do not get to invent a diagnosis');
+  // Silence is the worst of the three answers: somebody types a correction, the
+  // screen says saved, and the old value is still there.
+  assert.deepStrictEqual(rejected.map(r => r.value), ['Lycanthropy']);
+
+  const sel = { fallRisk: 'Low' };
+  const rejected2 = [];
+  assert.deepStrictEqual(apply(sel, { fallRisk: 'Catastrophic' }, rejected2), [],
+    'a closed select is held to its own catalog too');
+  assert.strictEqual(sel.fallRisk, 'Low', 'and the stored answer is left alone');
+  assert.deepStrictEqual(rejected2.map(r => r.path), ['fallRisk']);
+  assert.ok(rejected2[0].options.includes('Low'), 'the refusal carries what IS on offer');
+});
+
+test('an OPEN select takes a typed answer — those four were free-text boxes', () => {
+  const apply = loadApplyEdits();
+  const fields = require('../public/intake-fields');
+  // Staff transcribing from a phone call write "Daughter" where the wizard
+  // offers "Adult child". Every one of these was a plain input on the staff
+  // editor before the fields were declared centrally, so making them closed
+  // vocabularies would have narrowed the office silently.
+  assert.deepStrictEqual(fields.VALUE_FIELDS.filter(f => f.open).map(f => f.path).sort(),
+    ['address.state', 'gender', 'ltc.carrier', 'primaryContact.relationship']);
+  const intake = {};
+  const rejected = [];
+  const changed = apply(intake, {
+    primaryContact: { relationship: 'Daughter' },
+    ltc: { carrier: 'A carrier nobody listed' }
+  }, rejected);
+  assert.deepStrictEqual(rejected, [], 'an open select refuses nothing');
+  assert.strictEqual(intake.primaryContact.relationship, 'Daughter');
+  assert.strictEqual(intake.ltc.carrier, 'A carrier nobody listed');
+  assert.ok(changed.includes('primaryContact.relationship'));
+});
+
+test('a stored option the catalog no longer lists survives, and can be cleared', () => {
+  const apply = loadApplyEdits();
+  // Somebody's real answer from before a list changed. Saving the rest of the
+  // form must not wipe it, and staff must be able to remove it deliberately.
+  const intake = { fallRisk: 'Extremely high (retired wording)', allergies: 'None' };
+  assert.deepStrictEqual(apply(intake, { allergies: 'Penicillin' }), ['allergies']);
+  assert.strictEqual(intake.fallRisk, 'Extremely high (retired wording)',
+    'a stale option is not collateral damage of editing another field');
+  assert.deepStrictEqual(apply(intake, { fallRisk: '' }), ['fallRisk']);
+  assert.strictEqual(intake.fallRisk, '', 'clearing a wrong answer is always allowed');
+});
+
+test('duplicates in a checkbox group are collapsed', () => {
+  const apply = loadApplyEdits();
+  const intake = {};
+  apply(intake, { equipment: ['Walker', 'Walker', 'Cane'] });
+  assert.deepStrictEqual(intake.equipment, ['Walker', 'Cane']);
+});
+
+test('the whole submission round-trips: every declared field is writable', () => {
+  const apply = loadApplyEdits();
+  const fields = require('../public/intake-fields');
+  const intake = {};
+  const body = {};
+  fields.VALUE_FIELDS.forEach(f => {
+    if (f.type === 'multi') { body[f.path] = fields.optionsFor(f).slice(0, 1); return; }
+    if (f.type === 'select') { body[f.path] = fields.optionsFor(f)[0]; return; }
+    body[f.path] = `v-${f.path}`;
+  });
+  const changed = apply(intake, body);
+  // Every field the map declares must actually land. A path that silently does
+  // nothing is a question somebody answers and loses.
+  const missed = fields.EDITABLE_PATHS.filter(p => !changed.includes(p));
+  assert.deepStrictEqual(missed, [], `these declared paths did not save: ${missed.join(', ')}`);
+
+  // And each one reads back at its own path, nested correctly.
+  const read = (o, p) => p.split('.').reduce((x, k) => (x === null || x === undefined ? undefined : x[k]), o);
+  fields.VALUE_FIELDS.forEach(f => {
+    assert.notStrictEqual(read(intake, f.path), undefined, `${f.path} did not reach the record`);
+  });
+});
+
+test('the four values with another writer are still outside the map', () => {
+  const fields = require('../public/intake-fields');
+  for (const forbidden of ['name', 'clientName', 'serviceLine', 'careTier', 'rateAgreement',
+                           'consents', 'consentMeta', 'uploads', 'age', 'priorProviders',
+                           'enrollmentStatus', 'submittedAt', 'updatedAt']) {
+    assert.ok(!fields.EDITABLE_PATHS.includes(forbidden),
+      `${forbidden} has its own writer, or is derived, and must not be staff-editable here`);
+    assert.ok(!Object.keys(fields.LISTS).includes(forbidden));
+  }
+  // Named, so the refusal can say WHY rather than "unknown field".
+  assert.ok(fields.HAS_ANOTHER_WRITER.rateAgreement.includes('own route'));
+  assert.ok(fields.HAS_ANOTHER_WRITER.careTier.includes('triage'));
+});
+
+test('every declared path is unique — a duplicate would shadow one of the two', () => {
+  const fields = require('../public/intake-fields');
+  const seen = new Set();
+  const dupes = [];
+  fields.ALL_FIELDS.forEach(f => { if (seen.has(f.path)) dupes.push(f.path); seen.add(f.path); });
+  assert.deepStrictEqual(dupes, []);
+});
+
+test('the wizard and the staff editor read ONE option catalog', () => {
+  const portal = fs.readFileSync(path.join(__dirname, '..', 'public', 'portal.html'), 'utf8');
+  assert.ok(portal.includes('const IO = window.GFC_INTAKE_FIELDS.OPTIONS;'),
+    'the intake wizard must read the shared catalog, not its own copy');
+  assert.ok(portal.includes('<script src="/intake-fields.js">'),
+    'the wizard page must load the shared map');
+  assert.ok(ENROL.includes('<script src="/intake-fields.js">'),
+    'the enrollment page must load the shared map');
+
+  // The module is the one that must not drift from the server's allow-list.
+  const fields = require('../public/intake-fields');
+  const spec = loadEditSpec();
+  assert.deepStrictEqual(spec.PATHS.slice(), fields.EDITABLE_PATHS.slice(),
+    'the server validates against the same declaration the pages render');
+  // Every select and checkbox group resolves to a real catalog. A field naming a
+  // catalog that does not exist renders an empty dropdown and refuses every
+  // value posted into it — silently.
+  fields.VALUE_FIELDS.forEach(f => {
+    if (!f.options) return;
+    assert.ok(fields.OPTIONS[f.options] && fields.OPTIONS[f.options].length,
+      `${f.path} names the option list '${f.options}', which is empty or missing`);
+  });
 });

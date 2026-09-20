@@ -12009,34 +12009,24 @@ function buildRateAgreement(body, actor) {
 // form), the SERVICE LINE (its own route, which recomputes the consent set),
 // the CARE TIER (the clinician's triage at the H&P) and the AGREED RATE (its
 // own route, with its own re-signature rule).
-const ENROLLMENT_EDITABLE_PATHS = Object.freeze([
-  // Client
-  'dob', 'gender', 'primaryLanguage', 'phone',
-  'address.line1', 'address.line2', 'address.city', 'address.state', 'address.zip',
-  // Contacts
-  'primaryContact.name', 'primaryContact.relationship', 'primaryContact.phone', 'primaryContact.email',
-  'crisisNotify',
-  // Medical — each of these prints into a consent or onto the face sheet
-  'allergies',
-  'advanceDirective.status',
-  'medicalTeam.pcpName', 'medicalTeam.pcpPractice', 'medicalTeam.pcpPhone',
-  'medicalTeam.specialist1Name', 'medicalTeam.specialist1Phone', 'medicalTeam.specialist2Name',
-  'medicalTeam.preferredPharmacy', 'medicalTeam.pharmacyPhone', 'medicalTeam.preferredHospital',
-  // Payer
-  'payerType', 'ltc.carrier', 'ltc.policyNum', 'ltc.policyHolder'
-]);
+// ---- WHAT A STAFF EDITOR MAY CORRECT -------------------------------------
+// The whole submission (owner, 2026-09-20: "make sure the entire enrollment
+// editable by admin and clinicians essentially"). Until that instruction this
+// list was about thirty values — the ones the enrollment page happened to
+// display — and the wizard's other hundred and twenty answers could be
+// corrected by nobody but the client, in the wizard.
+//
+// The declaration itself lives in `public/intake-fields.js`, next to the option
+// catalogs, because the client's wizard renders from the same file. One
+// declaration, three readers: the wizard asks the questions, the staff editor
+// renders the same questions, and this route refuses anything the file does not
+// carry. A field added to the wizard is NOT staff-writable until somebody adds
+// it there, which is the allow-list guarantee kept rather than traded away for
+// reach.
+const intakeFields = require('./public/intake-fields');
 
-// The repeating blocks. Each names the keys ONE row may carry — a key outside
-// the list is dropped rather than stored, the same rule as the paths above —
-// and `requires` names what makes a row real, so an empty row a form left
-// behind is discarded instead of stored as a blank medication. The key sets
-// match the intake wizard's own shapes exactly; this editor does not invent a
-// second shape for a row the client may have filled in themselves.
-const ENROLLMENT_EDITABLE_LISTS = Object.freeze({
-  medications:       { keys: ['name', 'dose', 'route', 'frequency', 'prescriber', 'pharmacy'], requires: ['name'] },
-  emergencyContacts: { keys: ['name', 'relationship', 'phone', 'email', 'address'], requires: ['name'] },
-  insuranceIds:      { keys: ['carrier', 'memberId', 'group'], requires: ['carrier', 'memberId'] }
-});
+const ENROLLMENT_EDITABLE_PATHS = intakeFields.EDITABLE_PATHS;
+const ENROLLMENT_EDITABLE_LISTS = intakeFields.LISTS;
 
 // A body may carry a value either nested (`{address:{city}}`, which is what the
 // page sends) or as a flat dotted key (`{'address.city': …}`, which is what a
@@ -12064,13 +12054,64 @@ const writeIntakePath = (obj, path, value) => {
 // Apply an edit to the intake IN PLACE and report which paths actually moved.
 // An absent key means "leave this alone" — a form that posts one section must
 // not blank the sections it did not show.
-const applyEnrollmentEdits = (intake, body) => {
+const applyEnrollmentEdits = (intake, body, rejected = []) => {
   const changed = [];
   const str = (v) => (v === undefined || v === null) ? undefined : String(v).trim();
 
   ENROLLMENT_EDITABLE_PATHS.forEach(path => {
-    const v = str(readIntakePath(body, path));
+    const raw = readIntakePath(body, path);
+    if (raw === undefined) return;
+    const field = intakeFields.fieldAt(path) || {};
+
+    // A CHECKBOX GROUP is a list of the options that were ticked, so it is
+    // stored as an array and an empty array is a real answer: "none of these".
+    // Flattening it to a string would make "no conditions selected" and "not
+    // asked" the same stored value, and the matching engine reads these.
+    if (field.type === 'multi') {
+      if (raw === null) return;
+      const allowed = intakeFields.optionsFor(field);
+      const next = (Array.isArray(raw) ? raw : [raw])
+        .map(v => String(v === null || v === undefined ? '' : v).trim())
+        .filter(Boolean)
+        // An option the catalog does not carry does not reach the record. The
+        // client was offered a fixed list; a staff editor does not get to
+        // invent an eighteenth diagnosis by posting one at the API — and it is
+        // reported rather than dropped in silence.
+        .filter(v => {
+          if (allowed.length === 0 || allowed.includes(v)) return true;
+          rejected.push({ path, value: v, options: allowed });
+          return false;
+        });
+      const seen = [];
+      next.forEach(v => { if (!seen.includes(v)) seen.push(v); });
+      if (JSON.stringify(readIntakePath(intake, path) || []) === JSON.stringify(seen)) return;
+      writeIntakePath(intake, path, seen);
+      changed.push(path);
+      return;
+    }
+
+    const v = str(raw);
     if (v === undefined) return;
+    // A CLOSED SELECT is held to its own catalog, and a value outside it is
+    // REFUSED BY NAME rather than dropped. Silence is the worst of the three
+    // possible answers: somebody types a correction, the screen says saved, and
+    // the old value is still there.
+    //
+    // Clearing is always allowed — removing a wrong answer is a correction, and
+    // an empty string is in no catalog. A stored option the catalog no longer
+    // lists needs no special case: an absent key leaves it alone, re-posting it
+    // unchanged falls out at the equality check below, and clearing it works.
+    //
+    // An `open` select is a suggestion list, not a vocabulary. Those four were
+    // free-text boxes before the fields were declared centrally, and narrowing
+    // them would have quietly taken away what the office could already record.
+    if (field.type === 'select' && v !== '' && !field.open) {
+      const allowed = intakeFields.optionsFor(field);
+      if (allowed.length && !allowed.includes(v)) {
+        rejected.push({ path, value: v, options: allowed });
+        return;
+      }
+    }
     if (String(readIntakePath(intake, path) || '') === v) return;
     writeIntakePath(intake, path, v);
     changed.push(path);
@@ -12122,7 +12163,22 @@ app.put('/api/gfc/admin/enrollment/:clientId/details', authenticateToken, requir
     const priorClient = JSON.parse(JSON.stringify(client));
 
     const next = { ...(client.intake || {}) };
-    const changed = applyEnrollmentEdits(next, body);
+    // A value the field map does not recognize is REPORTED, never swallowed.
+    // "Saved" over a value that did not save is the failure mode this whole
+    // editor exists to remove.
+    const rejectedValues = [];
+    const changed = applyEnrollmentEdits(next, body, rejectedValues);
+    if (rejectedValues.length) {
+      const fieldErrors = {};
+      rejectedValues.forEach(r => {
+        const label = (intakeFields.fieldAt(r.path) || {}).label || r.path;
+        fieldErrors[r.path] = `"${r.value}" is not one of the answers offered for ${label}.`;
+      });
+      return res.status(400).json({
+        error: 'Some answers are not on the list for their question.',
+        code: 'INTAKE_OPTION_INVALID', fieldErrors
+      });
+    }
 
     // Validated by the SAME function the intake wizard and offline onboarding
     // use, so a date this page accepts is a date those two would accept.
