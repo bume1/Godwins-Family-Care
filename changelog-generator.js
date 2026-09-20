@@ -233,6 +233,45 @@ function generateMarkdownChangelog(version, date, sections) {
   return md;
 }
 
+// Every section already written for this version ON THIS DATE, removed.
+//
+// KEYED ON VERSION **AND** DATE, and that is the whole correctness of it. This
+// file carries `### Version 3.1.0` under five different dates — February,
+// June, and three days in September — which are five real releases that were
+// never given distinct version numbers. A stripper keyed on the version alone
+// deletes four of them. The first version of this fix did exactly that, and it
+// was caught by reading the diff before committing rather than by a test.
+//
+// What IS a duplicate is the same version on the same date: the generator runs
+// on every app boot, so a day with five boots left five identical sections.
+// Those collapse; anything with a different date is somebody's real release.
+//
+// A section runs from its own heading to the next heading at that level, or to
+// the end. Split on the headings rather than matching a whole section with one
+// regex: a body can contain anything, including a line that starts with `###`,
+// and a greedy match across the file is how a fix like this eats the entries
+// either side of its target.
+function stripVersionSections(entries, version, date) {
+  // `String(undefined)` is the seven-character word "undefined", not an empty
+  // string — writing that into the file would put it on the served page.
+  if (entries === null || entries === undefined || entries === '') return '';
+  // Without a date this cannot tell a duplicate from a distinct release, so it
+  // removes nothing. Silently falling back to version-only matching is the
+  // data loss this function exists to avoid.
+  if (!date) return String(entries);
+
+  const target = `### ${version} - ${date}`;
+  const HEADING = /^### .+? - /;
+  const lines = String(entries).split('\n');
+  const out = [];
+  let dropping = false;
+  lines.forEach(line => {
+    if (HEADING.test(line)) dropping = line.trim() === target;
+    if (!dropping) out.push(line);
+  });
+  return out.join('\n');
+}
+
 // Update changelog.md file
 async function updateChangelogMd(version, date, sections) {
   const changelogPath = path.join(__dirname, 'public', 'changelog.md');
@@ -250,8 +289,16 @@ async function updateChangelogMd(version, date, sections) {
       // Generate new entry
       const newEntry = generateMarkdownChangelog(version, date, sections);
 
-      // Combine: header + new entry + existing entries
-      const updatedContent = header + newEntry + existingEntries;
+      // REGENERATING TODAY'S ENTRY REPLACES IT; IT DOES NOT STACK ANOTHER COPY.
+      // This used to be `header + newEntry + existingEntries` unconditionally,
+      // so every app boot prepended the same section again — one day in
+      // September left five identical copies — on a page the app serves to
+      // people, and every session found the working tree dirty for a file
+      // nobody had edited.
+      //
+      // Only the same version on the SAME DATE is replaced. A different date
+      // under the same version number is a different release, not a duplicate.
+      const updatedContent = header + newEntry + stripVersionSections(existingEntries, version, date);
 
       await fs.writeFile(changelogPath, updatedContent, 'utf-8');
       console.log(`✅ Updated changelog.md with version ${version}`);
@@ -549,5 +596,10 @@ module.exports = {
   compareVersions,
   updateReadmeVersion,
   syncAllChangelogFiles,
-  shouldExcludeCommit
+  shouldExcludeCommit,
+  stripVersionSections,
+  // Exported so the idempotence guard can DRIVE the write path rather than
+  // read it: a correct helper the writer never calls is a fix that passes its
+  // own tests and changes nothing in production.
+  updateChangelogMd
 };

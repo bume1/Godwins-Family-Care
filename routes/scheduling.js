@@ -499,7 +499,14 @@ module.exports = function createSchedulingRoutes(deps) {
       const rows = await readRows('shifts');
       const idx = rows.findIndex(r => r && r.id === req.params.id);
       if (idx === -1) return res.status(404).json({ error: 'Shift not found.', code: 'SHIFT_NOT_FOUND' });
-      const before = rows[idx];
+      // A SNAPSHOT, not a reference to the live row. `rows[idx]` is mutated in
+      // place a few lines down, so `const before = rows[idx]` aliases it: every
+      // "the previous time was …" line would print the NEW time, and the audit
+      // log's before/after pair would read identical. A shallow copy is enough
+      // — every value compared here is a primitive — but it has to be a copy.
+      // Same class as the enrollment editor's shallow before/after (PR #103),
+      // and it hid behind a test that asserted the PHRASE rather than the value.
+      const before = { ...rows[idx] };
 
       if (!sched.canEditShift(before)) {
         return res.status(409).json({
@@ -591,28 +598,49 @@ module.exports = function createSchedulingRoutes(deps) {
           timeLogsUpdated: logsTouched, role: req.user.role
         });
 
-      // TELLING PEOPLE IS THE POINT OF MOVING A TIME. A caregiver who is not
-      // told turns up at the old hour. It goes out only when the time actually
-      // moved and only while the shift is still ahead of us: an email about a
-      // correction to last week's paperwork is noise, and the client is told
-      // only about a visit they had already been promised.
+      // TELLING THE CAREGIVER IS THE POINT OF MOVING A TIME, AND THAT INCLUDES
+      // A SHIFT THAT HAS ALREADY HAPPENED (owner instruction, 2026-09-20).
+      //
+      // An earlier version emailed only about a shift still ahead of us, on the
+      // reasoning that a correction to last week is paperwork. That was wrong,
+      // and the reason is payroll: the time log's copy of the schedule moves
+      // with the shift, so correcting a past visit changes what that
+      // caregiver's timesheet says about a day they already worked. Somebody
+      // whose pay record changes has to be told it changed.
+      //
+      // THE TWO CASES NEED DIFFERENT SENTENCES. "Your shift has moved" is an
+      // instruction about where to be, and it is nonsense about last Tuesday —
+      // a caregiver reading it would think they had missed something. A past
+      // shift says the RECORD was corrected and that their clocked hours are
+      // untouched, which is the question they will actually have.
       const timeMoved = changes.includes('start') || changes.includes('end');
       const stillAhead = new Date(rows[idx].start).getTime() > Date.now();
       let notified = [];
-      if (timeMoved && stillAhead) {
+      if (timeMoved) {
         const when = time.fmtDateTime(rows[idx].start);
         const holder = rows[idx].caregiver_id ? await freshUser(rows[idx].caregiver_id) : null;
         if (holder && holder.email) {
           await queueNotification('shift_time_changed', holder.id, holder.email, holder.name,
             {
-              subject: `Shift time changed — ${rows[idx].client_name}`,
-              body: `Your shift for ${rows[idx].client_name} has moved. It now starts ${when} and ends ${time.fmtTime(rows[idx].end)}. The previous time was ${time.fmtDateTime(before.start)}.`,
-              ctaUrl: links.shiftFor(), ctaLabel: 'View the shift'
+              subject: stillAhead
+                ? `Shift time changed — ${rows[idx].client_name}`
+                : `Shift record corrected — ${rows[idx].client_name}`,
+              body: stillAhead
+                ? `Your shift for ${rows[idx].client_name} has moved. It now starts ${when} and ends ${time.fmtTime(rows[idx].end)}. The previous time was ${time.fmtDateTime(before.start)}.`
+                : `The record of your shift for ${rows[idx].client_name} has been corrected by ${rows[idx].edited_by_name}. It now reads ${when} to ${time.fmtTime(rows[idx].end)}; it previously read ${time.fmtDateTime(before.start)} to ${time.fmtTime(before.end)}.`
+                  + (logsTouched
+                    ? ' Your timesheet for that visit has been updated to match. The hours you clocked have not changed.'
+                    : ' The hours you clocked have not changed.'),
+              ctaUrl: links.shiftFor(), ctaLabel: stillAhead ? 'View the shift' : 'View your schedule'
             },
             { relatedEntityId: `${rows[idx].id}:edited:${rows[idx].edit_count}`, relatedEntityType: 'shift', createdBy: req.user.id });
           notified.push(holder.name);
         }
-        if (['confirmed', 'in_progress'].includes(rows[idx].status)) {
+        // THE CLIENT IS TOLD ONLY ABOUT A VISIT STILL TO COME, and only one
+        // they were already promised. "Your visit has been rescheduled" is
+        // false about a visit that already happened, and a client has nothing
+        // to do about a correction to our own timesheet.
+        if (stillAhead && ['confirmed', 'in_progress'].includes(rows[idx].status)) {
           const client = await loadClient(rows[idx].client_id);
           if (client && client.email) {
             await queueNotification('shift_time_changed_client', client.id, client.email, client.name,
@@ -632,9 +660,10 @@ module.exports = function createSchedulingRoutes(deps) {
         changed: changes,
         timeLogsUpdated: logsTouched,
         message: notified.length
-          ? `Shift updated. ${notified.join(' and ')} ${notified.length > 1 ? 'have' : 'has'} been told the time changed.`
-          : (timeMoved && !stillAhead
-            ? `Shift updated.${logsTouched ? ` ${logsTouched} time log${logsTouched > 1 ? 's' : ''} moved with it.` : ''} Nobody was emailed: this shift has already happened.`
+          ? `Shift updated. ${notified.join(' and ')} ${notified.length > 1 ? 'have' : 'has'} been told${stillAhead ? ' the time changed' : ' the record was corrected'}.`
+          + (logsTouched ? ` ${logsTouched} time log${logsTouched > 1 ? 's' : ''} moved with it.` : '')
+          : (timeMoved
+            ? `Shift updated.${logsTouched ? ` ${logsTouched} time log${logsTouched > 1 ? 's' : ''} moved with it.` : ''} Nobody was emailed: no caregiver is on this shift.`
             : 'Shift updated.')
       });
     } catch (error) {
