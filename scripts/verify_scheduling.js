@@ -919,7 +919,6 @@ const minsFromNow = (n) => new Date(Date.now() + n * 60000).toISOString();
   });
   await db.set('time_logs', logRows);
 
-  const noticesBefore = ((await db.get('pending_notifications')) || []).length;
   const fixPast = await call('PUT', `/api/scheduling/shifts/${histId}`, {
     as: 'mgr-1', body: { start: '2026-01-06T18:00:00.000Z', end: '2026-01-06T22:00:00.000Z' } });
   check('a manager corrects a shift that has already happened', fixPast.status === 200, JSON.stringify(fixPast.data));
@@ -932,8 +931,24 @@ const minsFromNow = (n) => new Date(Date.now() + n * 60000).toISOString();
   check('STORED: the geofence verdict is an observation and survives',
     fixedLog.flags.includes('outside_geofence'));
   check('STORED: hours worked come from the clock and did not move', fixedLog.total_minutes === 240);
-  check('nobody was emailed about a correction to a visit that already happened',
-    ((await db.get('pending_notifications')) || []).length === noticesBefore);
+  // Owner instruction, 2026-09-20: an old shift edited emails the caregiver
+  // too. The reason is payroll — the timesheet above just changed under them.
+  const pastNotices = ((await db.get('pending_notifications')) || [])
+    .filter(n => n.type === 'shift_time_changed' && String(n.relatedEntityId).startsWith(histId));
+  check('QUEUED: the caregiver is told their past shift record was corrected',
+    pastNotices.length === 1, JSON.stringify(pastNotices.map(n => n.type)));
+  check('and the wording is the CORRECTION one, not "your shift has moved"',
+    pastNotices.length === 1 && /corrected/i.test(pastNotices[0].templateData.body) &&
+    !/has moved/i.test(pastNotices[0].templateData.body),
+    pastNotices.length ? pastNotices[0].templateData.body : 'no notice');
+  check('and it says their clocked hours did not change',
+    pastNotices.length === 1 && /clocked have not changed/i.test(pastNotices[0].templateData.body));
+  check('and it carries the OLD time, not two copies of the new one',
+    pastNotices.length === 1 && /9:00/.test(pastNotices[0].templateData.body),
+    pastNotices.length ? pastNotices[0].templateData.body : 'no notice');
+  check('the CLIENT is NOT emailed about a visit that already happened',
+    ((await db.get('pending_notifications')) || [])
+      .filter(n => n.type === 'shift_time_changed_client' && String(n.relatedEntityId).startsWith(histId)).length === 0);
 
   // ==========================================================================
   section('N. Bulk posting and bulk removal');

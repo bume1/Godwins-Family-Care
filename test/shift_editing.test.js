@@ -264,7 +264,7 @@ const USERS = [
   CLIENT
 ];
 
-function harness(seed = {}) {
+function harness(seed = {}, hooks = {}) {
   const store = new Map(Object.entries({ users: USERS, ...seed }));
   const db = {
     get: async (k) => (store.has(k) ? JSON.parse(JSON.stringify(store.get(k))) : null),
@@ -274,7 +274,7 @@ function harness(seed = {}) {
   let who = 'admin-1';
   const router = require('../routes/scheduling')({
     db, config: require('../config'),
-    logActivity: async () => {},
+    logActivity: async (...a) => { if (hooks.onActivity) hooks.onActivity(...a); },
     queueNotification: async (type, id, email, name, tpl) => { notifications.push({ type, email, tpl }); },
     getUsers: async () => await db.get('users'),
     invalidateUsersCache: () => {},
@@ -336,7 +336,13 @@ test('a MANAGER edits a posted shift; a caregiver and a case manager cannot', as
   } finally { h.close(); }
 });
 
-test('editing a PAST shift succeeds and emails nobody', async () => {
+// REPOINTED 2026-09-20 on the owner's instruction: "make sure that old shifts
+// edited also email the caregiver." This asserted the opposite — that a
+// correction to last week was paperwork nobody needed telling about. The reason
+// it was wrong is payroll: the time log's copy of the schedule moves with the
+// shift, so correcting a past visit changes what that caregiver's timesheet
+// says about a day they already worked.
+test('editing a PAST shift emails the CAREGIVER, and not the client', async () => {
   const past = { ...POSTED(), status: 'completed', caregiver_id: 'cna-1', caregiver_name: 'Cam CNA',
     start: '2026-01-06T14:00:00.000Z', end: '2026-01-06T18:00:00.000Z' };
   const h = harness({ shifts: [past] });
@@ -345,9 +351,75 @@ test('editing a PAST shift succeeds and emails nobody', async () => {
       { start: '2026-01-06T18:00:00.000Z', end: '2026-01-06T22:00:00.000Z' });
     assert.strictEqual(res.status, 200, JSON.stringify(res.body));
     assert.strictEqual((await h.db.get('shifts'))[0].start, '2026-01-06T18:00:00.000Z');
-    assert.strictEqual(h.notifications.length, 0,
-      'an email about a correction to a visit that already happened is noise');
-    assert.ok(/already happened/.test(res.body.message), 'and the screen says why nobody was told');
+
+    const types = h.notifications.map(n => n.type);
+    assert.deepStrictEqual(types, ['shift_time_changed'],
+      'the caregiver whose timesheet just changed is told; the client is not');
+
+    const body = h.notifications[0].tpl.body;
+    // "Your shift has moved" is an instruction about where to be, and it is
+    // nonsense about last Tuesday. A past shift says the RECORD was corrected.
+    assert.ok(/corrected/i.test(body), `past wording expected, got: ${body}`);
+    assert.ok(!/has moved/i.test(body), 'a past shift did not "move" anywhere');
+    assert.ok(/clocked have not changed/i.test(body),
+      'the question they will actually have is whether their pay changed');
+    assert.ok(/record corrected/i.test(h.notifications[0].tpl.subject));
+  } finally { h.close(); }
+});
+
+test('a past correction with NO caregiver on it emails nobody', async () => {
+  const orphan = { ...POSTED(), status: 'cancelled' };
+  const past = { ...POSTED(), id: 'shift-2', status: 'completed', caregiver_id: null, caregiver_name: null,
+    start: '2026-01-06T14:00:00.000Z', end: '2026-01-06T18:00:00.000Z' };
+  const h = harness({ shifts: [orphan, past] });
+  try {
+    const res = await h.call('PUT', '/api/scheduling/shifts/shift-2',
+      { start: '2026-01-06T18:00:00.000Z', end: '2026-01-06T22:00:00.000Z' });
+    assert.strictEqual(res.status, 200, JSON.stringify(res.body));
+    assert.strictEqual(h.notifications.length, 0);
+    assert.ok(/no caregiver is on this shift/i.test(res.body.message),
+      'and the screen says WHY nobody was told, rather than staying silent');
+  } finally { h.close(); }
+});
+
+test('the "previous time" in the email is the OLD time, not the new one', async () => {
+  // `const before = rows[idx]` aliases the live row, which is mutated in place
+  // a few lines later — so every "previously" line printed the NEW time and the
+  // audit log's before/after read identical. It hid behind an assertion that
+  // checked for the PHRASE rather than the value.
+  const past = { ...POSTED(), status: 'completed', caregiver_id: 'cna-1', caregiver_name: 'Cam CNA',
+    start: '2026-01-06T14:00:00.000Z', end: '2026-01-06T18:00:00.000Z' };
+  const h = harness({ shifts: [past] });
+  try {
+    await h.call('PUT', '/api/scheduling/shifts/shift-1',
+      { start: '2026-01-06T20:00:00.000Z', end: '2026-01-07T00:00:00.000Z' });
+    const body = h.notifications[0].tpl.body;
+    // 14:00Z is 9:00 AM in Georgia; 20:00Z is 3:00 PM. Both strings must be in
+    // the message, and they must be different.
+    assert.ok(/9:00\u202fAM|9:00 AM/.test(body), `the old time must appear: ${body}`);
+    assert.ok(/3:00\u202fPM|3:00 PM/.test(body), `the new time must appear: ${body}`);
+  } finally { h.close(); }
+});
+
+test('the audit log records the real before/after, not two copies of after', async () => {
+  const logged = [];
+  const past = { ...POSTED(), status: 'completed', caregiver_id: 'cna-1', caregiver_name: 'Cam CNA',
+    start: '2026-01-06T14:00:00.000Z', end: '2026-01-06T18:00:00.000Z' };
+  const h = harness({ shifts: [past] }, { onActivity: (...a) => logged.push(a) });
+  try {
+    // Both ends move: a start pushed past the stored end is refused, and a
+    // refused edit audits nothing — which would make this test pass for the
+    // wrong reason if the assertion below were any weaker.
+    const res = await h.call('PUT', '/api/scheduling/shifts/shift-1',
+      { start: '2026-01-06T20:00:00.000Z', end: '2026-01-07T00:00:00.000Z' });
+    assert.strictEqual(res.status, 200, JSON.stringify(res.body));
+    const entry = logged.find(a => a[2] === 'shift_edited');
+    assert.ok(entry, 'the edit must be audited');
+    const details = entry[5];
+    assert.strictEqual(details.before.start, '2026-01-06T14:00:00.000Z');
+    assert.strictEqual(details.after.start, '2026-01-06T20:00:00.000Z');
+    assert.notStrictEqual(details.before.start, details.after.start,
+      'an audit pair that reads identical records nothing');
   } finally { h.close(); }
 });
 
@@ -362,6 +434,10 @@ test('moving a FUTURE shift tells the caregiver, and the client once confirmed',
     const toCaregiver = h.notifications.find(n => n.type === 'shift_time_changed');
     assert.ok(/previous time was/i.test(toCaregiver.tpl.body),
       'the old time is in the message — "your shift moved" without it is unusable');
+    // The VALUE, not just the phrase. 13:00Z is 9:00 AM in Georgia and 15:00Z
+    // is 11:00 AM; a message printing the new time twice says nothing.
+    assert.ok(/9:00\u202fAM|9:00 AM/.test(toCaregiver.tpl.body),
+      `the previous time must be the OLD one: ${toCaregiver.tpl.body}`);
   } finally { h.close(); }
 });
 
