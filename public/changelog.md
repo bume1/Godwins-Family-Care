@@ -12,12 +12,12 @@
 #### Bug Fixes
 - Email the caregiver when a past shift is corrected, and fix the aliased before/after
 - Sign four packet forms in the app; fix the schedule loop and document scoping
-- Fix an assignment picker that never worked, and give payroll paperwork a home
 
 #### Documentation
 - backfill PR #96 as merged for Session 4.8
 
 #### Changes
+- Stop the changelog stacking a fresh copy of today's entry on every boot
 - Backfill PR #103, and flag the half of an earlier entry it supersedes
 - Regenerate the changelog for this session's commit
 - Let an admin or a clinician edit an enrollment submission
