@@ -62,6 +62,45 @@
     .chip.completed{background:#e7edf0;color:var(--navy)}
     .chip.cancelled{background:#f3eaea;color:var(--red)}
     .chip.flag{background:#fdeeee;color:var(--red)}
+
+    /* ---- Calendar view (2026-09-20) ------------------------------------- */
+    .calhdr{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px}
+    .calhdr h2{flex:1 1 auto}
+    .calgrid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:4px}
+    .calgrid.calhead{margin-bottom:4px}
+    .caldow{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#8a8378;padding:2px 4px}
+    .calcell{min-height:92px;border:1px solid #e9e3d8;border-radius:8px;padding:4px;background:#fff;overflow:hidden}
+    .calcell.blank{background:transparent;border-color:transparent}
+    .calcell.istoday{border-color:var(--gold);box-shadow:inset 0 0 0 1px var(--gold)}
+    .caldate{font-size:11px;color:#8a8378;margin-bottom:3px}
+    .calshift{display:block;width:100%;text-align:left;border:0;border-radius:5px;cursor:pointer;
+      font-size:11px;line-height:1.3;padding:3px 5px;margin-bottom:3px;font-family:inherit;
+      white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .calshift.picked{outline:2px solid var(--navy)}
+    .calwho{opacity:.75}
+    .calshift.open{background:#eee8db;color:#6d675d}
+    .calshift.claimed,.calshift.assigned{background:#fdf3dd;color:#8a6a1e}
+    .calshift.confirmed{background:#eef3f0;color:var(--green)}
+    .calshift.in_progress{background:var(--navy);color:var(--gold)}
+    .calshift.completed{background:#e7edf0;color:var(--navy)}
+    .calshift.cancelled{background:#f3eaea;color:var(--red);text-decoration:line-through}
+    .callegend{display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;font-size:11.5px;color:#8a8378}
+    .callegend .dot{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:middle}
+    .callegend .dot.open{background:#eee8db}
+    .callegend .dot.claimed,.callegend .dot.assigned{background:#fdf3dd}
+    .callegend .dot.confirmed{background:#eef3f0;border:1px solid var(--green)}
+    .callegend .dot.in_progress{background:var(--navy)}
+    .callegend .dot.completed{background:#e7edf0}
+    .callegend .dot.cancelled{background:#f3eaea}
+    .row.flash{animation:gfcflash 1.6s ease-out}
+    @keyframes gfcflash{0%{background:#fdf3dd}100%{background:transparent}}
+    /* A phone shows the month as a readable strip rather than seven columns of
+       four-pixel cells. */
+    @media (max-width:640px){
+      .calcell{min-height:64px;padding:3px}
+      .calshift{font-size:10px;padding:2px 3px}
+      .caldate{font-size:10px}
+    }
     .err{background:#fdeeee;border:1px solid #e7bcbc;color:#7d2020;border-radius:9px;padding:11px;font-size:14px;margin-bottom:12px}
     .ok{background:#f2f8f6;border:1px solid #b8ddd0;color:#0d5744;border-radius:9px;padding:11px;font-size:14px;margin-bottom:12px}
     .empty{text-align:center;padding:30px;color:var(--mut)}
@@ -106,6 +145,27 @@ const fmtRange = (a, b) => {
 };
 const titleize = (s) => String(s || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 const todayPlus = (days) => new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
+
+// THE CALENDAR BUCKETS BY THE DAY IT IS IN GEORGIA, never by the device's.
+// `new Date(iso).getDate()` is the viewer's own midnight, so an 8pm Tuesday
+// shift files under Wednesday for anyone east of Eastern and "today" means a
+// different day to a laptop set to UTC. gfc-time answers the practice's date.
+// This is the same trap the app's isSameDay was fixed for on 2026-09-16.
+const easternDayKey = (iso) => {
+  const p = window.GFC_TIME && window.GFC_TIME.zonedParts(iso);
+  return p ? p.isoDate : '';
+};
+const easternMinutes = (iso) => {
+  const p = window.GFC_TIME && window.GFC_TIME.zonedParts(iso);
+  return p ? p.minutesOfDay : 0;
+};
+// A plain calendar date has no timezone of its own, so its parts are read in
+// UTC deliberately — mixing the two is how a grid loses a day at the edges.
+const dayKeyOf = (y, m, d) =>
+  `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December'];
+const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 const Empty = ({ icon, children }) => (
   <div className="empty"><i className={`ti ti-${icon}`}></i>{children}</div>
@@ -289,9 +349,10 @@ const PostShift = ({ roster, onPosted, setErr, setOk }) => {
 // ============================================================================
 // Master calendar + lifecycle actions
 // ============================================================================
-const ShiftRow = ({ s, roster, act }) => {
+const ShiftRow = ({ s, roster, act, onEdited, setErr, setOk, selected, onToggleSelect, selecting }) => {
   const [assignee, setAssignee] = useState('');
   const [reason, setReason] = useState('');
+  const [editing, setEditing] = useState(false);
   const eligible = roster.caregivers.filter(c => {
     if (!s.requiredLicenseLevel) return true;
     const rank = { sitter: 0, pca: 1, cna: 2, lpn: 3 };
@@ -299,8 +360,17 @@ const ShiftRow = ({ s, roster, act }) => {
   });
 
   return (
-    <div className="row" style={{ display: 'block' }}>
-      <div><b>{fmtRange(s.start, s.end)}</b> <span className={`chip ${s.status}`}>{titleize(s.status)}</span></div>
+    <div className="row" id={`shift-${s.id}`} style={{ display: 'block' }}>
+      <div>
+        {selecting && (
+          <input type="checkbox" checked={selected} onChange={() => onToggleSelect(s.id)}
+            style={{ marginRight: 8 }} aria-label="Select this shift" />
+        )}
+        <b>{fmtRange(s.start, s.end)}</b> <span className={`chip ${s.status}`}>{titleize(s.status)}</span>
+        {s.editedByName && (
+          <span className="mu"> · edited by {s.editedByName} {fmtWhen(s.editedAt)}</span>
+        )}
+      </div>
       <div className="mu">
         {s.clientName}
         {s.levelRequirementLabel ? ` · ${s.levelRequirementLabel}` : ''}
@@ -317,6 +387,16 @@ const ShiftRow = ({ s, roster, act }) => {
           {s.enrollmentOverride.byName} went ahead on {fmtWhen(s.enrollmentOverride.at)} — “{s.enrollmentOverride.reason}”
         </div>
       )}
+
+      {editing ? (
+        <EditShift s={s} setErr={setErr} setOk={setOk}
+          onCancel={() => setEditing(false)}
+          onSaved={async () => { setEditing(false); await onEdited(); }} />
+      ) : (s.status !== 'cancelled' && (
+        <div className="btns">
+          <button className="btn ghost" onClick={() => setEditing(true)}>Edit time and details</button>
+        </div>
+      ))}
 
       {s.status === 'claimed' && (
         <div className="btns">
@@ -346,6 +426,342 @@ const ShiftRow = ({ s, roster, act }) => {
           <button className="btn danger" disabled={!reason.trim()} onClick={() => act(s.id, 'cancel', { reason })}>
             Cancel shift
           </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ============================================================================
+// Calendar view (owner request, 2026-09-20)
+// ============================================================================
+// The board has only ever been a list, which answers "what is posted" and not
+// "what does next week look like" — and the second question is the one you ask
+// before you post anything. A month grid answers it at a glance: where the gaps
+// are, which days are already double-booked, which client has nothing.
+//
+// It reads the SAME shifts the list reads. No second fetch, no second filter,
+// so the two views cannot disagree about what exists.
+const ShiftCalendar = ({ shifts, onOpen, selected, onToggleSelect, selecting }) => {
+  const today = window.GFC_TIME ? window.GFC_TIME.zonedParts(new Date().toISOString()) : null;
+  const [cursor, setCursor] = useState(() => ({
+    year: today ? today.year : new Date().getFullYear(),
+    month: today ? today.month - 1 : new Date().getMonth()
+  }));
+
+  const byDay = {};
+  shifts.forEach(sh => {
+    const k = easternDayKey(sh.start);
+    if (!k) return;
+    (byDay[k] = byDay[k] || []).push(sh);
+  });
+  Object.values(byDay).forEach(list => list.sort((a, b) => easternMinutes(a.start) - easternMinutes(b.start)));
+
+  const first = new Date(Date.UTC(cursor.year, cursor.month, 1));
+  const lead = first.getUTCDay();
+  const daysInMonth = new Date(Date.UTC(cursor.year, cursor.month + 1, 0)).getUTCDate();
+  const cells = [];
+  for (let n = 0; n < lead; n++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+  while (cells.length % 7 !== 0) cells.push(null);
+
+  const step = (delta) => setCursor(c => {
+    const m = c.month + delta;
+    return { year: c.year + Math.floor(m / 12), month: ((m % 12) + 12) % 12 };
+  });
+  const todayKey = today ? today.isoDate : '';
+  const monthShifts = shifts.filter(sh => easternDayKey(sh.start).slice(0, 7) ===
+    `${cursor.year}-${String(cursor.month + 1).padStart(2, '0')}`);
+
+  return (
+    <div className="card">
+      <div className="calhdr">
+        <button className="btn ghost" onClick={() => step(-1)}>‹ Previous</button>
+        <h2 style={{ margin: 0 }}>{MONTHS[cursor.month]} {cursor.year}</h2>
+        <button className="btn ghost" onClick={() => step(1)}>Next ›</button>
+        <button className="btn ghost" onClick={() => setCursor({
+          year: today ? today.year : new Date().getFullYear(),
+          month: today ? today.month - 1 : new Date().getMonth()
+        })}>Today</button>
+      </div>
+      <p className="sub">
+        {monthShifts.length === 0
+          ? 'Nothing posted this month.'
+          : `${monthShifts.length} shift${monthShifts.length > 1 ? 's' : ''} this month. Every time is Eastern.`}
+      </p>
+      <div className="calgrid calhead">
+        {DOW.map(d => <div key={d} className="caldow">{d}</div>)}
+      </div>
+      <div className="calgrid">
+        {cells.map((d, n) => {
+          if (d === null) return <div key={`b${n}`} className="calcell blank" />;
+          const key = dayKeyOf(cursor.year, cursor.month, d);
+          const list = byDay[key] || [];
+          return (
+            <div key={key} className={`calcell${key === todayKey ? ' istoday' : ''}`}>
+              <div className="caldate">{d}</div>
+              {list.map(sh => (
+                <button key={sh.id}
+                  className={`calshift ${sh.status}${selected.includes(sh.id) ? ' picked' : ''}`}
+                  title={`${sh.clientName} · ${fmtRange(sh.start, sh.end)} · ${titleize(sh.status)}${sh.caregiverName ? ` · ${sh.caregiverName}` : ''}`}
+                  onClick={() => (selecting ? onToggleSelect(sh.id) : onOpen(sh.id))}>
+                  <b>{window.GFC_TIME ? window.GFC_TIME.fmtTime(sh.start) : ''}</b>{' '}
+                  {sh.clientName}
+                  {sh.caregiverName ? <span className="calwho"> · {sh.caregiverName.split(' ')[0]}</span> : ''}
+                </button>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+      <div className="callegend">
+        {['open', 'claimed', 'assigned', 'confirmed', 'in_progress', 'completed', 'cancelled'].map(st => (
+          <span key={st}><i className={`dot ${st}`} /> {titleize(st)}</span>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
+// Editing a posted shift
+// ============================================================================
+// Owner request, 2026-09-20: "editable by admin and manager after posting.
+// Previous shifts too when we need to update the time." A past shift is
+// editable on purpose — correcting last Tuesday is the reason this exists.
+const EditShift = ({ s, onSaved, onCancel, setErr, setOk }) => {
+  const toDate = (iso) => { const p = window.GFC_TIME.zonedParts(iso); return p ? p.isoDate : ''; };
+  const toTime = (iso) => {
+    const p = window.GFC_TIME.zonedParts(iso);
+    return p ? `${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}` : '';
+  };
+  const [date, setDate] = useState(toDate(s.start));
+  const [start, setStart] = useState(toTime(s.start));
+  const [endDate, setEndDate] = useState(toDate(s.end));
+  const [end, setEnd] = useState(toTime(s.end));
+  const [level, setLevel] = useState(s.openToAllLevels ? 'any' : (s.requiredLicenseLevel || 'any'));
+  const [visibility, setVisibility] = useState(s.poolVisibility || 'all_eligible');
+  const [notes, setNotes] = useState(s.notes || '');
+  const [payRate, setPayRate] = useState(s.payRate === null || s.payRate === undefined ? '' : String(s.payRate));
+  const [busy, setBusy] = useState(false);
+
+  const save = async () => {
+    setErr(''); setOk(''); setBusy(true);
+    try {
+      // Built through the shared Eastern converter, not `new Date(local)`:
+      // the admin's own browser zone must not decide what 9am means.
+      const res = await api(`/api/scheduling/shifts/${s.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          start: window.GFC_TIME.instantFromZoned(date, start),
+          end: window.GFC_TIME.instantFromZoned(endDate || date, end),
+          requiredLicenseLevel: level,
+          poolVisibility: visibility,
+          notes,
+          payRate: payRate === '' ? null : payRate
+        })
+      });
+      setOk((res && res.message) || 'Shift updated.');
+      await onSaved();
+    } catch (e) {
+      const d = e.data || {};
+      setErr([d.errors ? d.errors.map(x => x.message).join(' ') : e.message, d.reason, d.hint]
+        .filter(Boolean).join(' — '));
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="note" style={{ margin: '8px 0' }}>
+      <b>Edit this shift</b>
+      <div className="grid" style={{ marginTop: 8 }}>
+        <div><label>Date</label><input type="date" value={date} onChange={e => { setDate(e.target.value); if (endDate === toDate(s.start)) setEndDate(e.target.value); }} /></div>
+        <div><label>Start</label><input type="time" value={start} onChange={e => setStart(e.target.value)} /></div>
+        <div><label>End date</label><input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} /></div>
+        <div><label>End</label><input type="time" value={end} onChange={e => setEnd(e.target.value)} /></div>
+        <div>
+          <label>Who can take it</label>
+          <select value={level} onChange={e => setLevel(e.target.value)}>
+            <option value="any">Anyone — all license levels</option>
+            <option value="sitter">Sitter and above</option>
+            <option value="pca">PCA and above</option>
+            <option value="cna">CNA and above</option>
+            <option value="lpn">LPN only</option>
+          </select>
+        </div>
+        <div>
+          <label>Visible to</label>
+          <select value={visibility} onChange={e => setVisibility(e.target.value)}>
+            <option value="all_eligible">All eligible caregivers</option>
+            <option value="care_team">This client's care team only</option>
+          </select>
+        </div>
+        <div>
+          <label>Pay rate ($/hour)</label>
+          <input type="number" min="0" step="0.01" placeholder="Each caregiver's own rate"
+            value={payRate} onChange={e => setPayRate(e.target.value)} />
+        </div>
+      </div>
+      <div style={{ marginTop: 8 }}>
+        <label>Notes for the caregiver</label>
+        <textarea value={notes} onChange={e => setNotes(e.target.value)} maxLength={2000} />
+      </div>
+      {s.caregiverName && (
+        <p className="sub" style={{ marginTop: 6 }}>
+          {s.caregiverName} is on this shift. Changing the time emails them, and the client too once it is
+          confirmed — unless the shift has already happened, in which case nobody is emailed about a correction.
+        </p>
+      )}
+      <p className="sub" style={{ marginTop: 4 }}>
+        The client cannot be changed here. Moving a shift to another client is a different shift — cancel this one and post it.
+      </p>
+      <div className="btns" style={{ marginTop: 8 }}>
+        <button className="btn gold" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save changes'}</button>
+        <button className="btn ghost" disabled={busy} onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
+// Bulk posting — one standing pattern, many shifts
+// ============================================================================
+const BulkPost = ({ roster, onPosted, setErr, setOk }) => {
+  const [clientId, setClientId] = useState('');
+  const [startDate, setStartDate] = useState(todayPlus(1));
+  const [endDate, setEndDate] = useState(todayPlus(28));
+  const [days, setDays] = useState([]);
+  const [start, setStart] = useState('09:00');
+  const [end, setEnd] = useState('13:00');
+  const [level, setLevel] = useState('');
+  const [visibility, setVisibility] = useState('all_eligible');
+  const [assignTo, setAssignTo] = useState('');
+  const [notes, setNotes] = useState('');
+  const [payRate, setPayRate] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);
+
+  const RANK = { sitter: 0, pca: 1, cna: 2, lpn: 3 };
+  const eligible = roster.caregivers.filter(c => !level || level === 'any' || RANK[c.licenseLevel] >= RANK[level]);
+  const toggleDay = (d) => setDays(cur => cur.includes(d) ? cur.filter(x => x !== d) : [...cur, d]);
+
+  // What the server will expand this into, counted here so nobody posts
+  // forty shifts to find out it was four hundred.
+  const estimate = () => {
+    if (!startDate || !endDate || days.length === 0) return 0;
+    let n = 0;
+    const a = Date.parse(`${startDate}T00:00:00Z`), b = Date.parse(`${endDate}T00:00:00Z`);
+    if (isNaN(a) || isNaN(b) || b < a) return 0;
+    for (let t = a; t <= b; t += 86400000) {
+      if (days.includes(DOW[new Date(t).getUTCDay()])) n += 1;
+      if (n > 400) break;
+    }
+    return n;
+  };
+  const count = estimate();
+
+  const post = async () => {
+    setErr(''); setOk(''); setBusy(true); setResult(null);
+    try {
+      const res = await api('/api/scheduling/shifts/bulk', {
+        method: 'POST',
+        body: JSON.stringify({
+          clientId, startDate, endDate, daysOfWeek: days,
+          startTime: start, endTime: end,
+          requiredLicenseLevel: level, poolVisibility: visibility,
+          assignToCaregiverId: assignTo || null,
+          payRate: payRate === '' ? null : payRate, notes
+        })
+      });
+      setOk(res.message || 'Shifts posted.');
+      setResult(res);
+      await onPosted();
+    } catch (e) {
+      const d = e.data || {};
+      setErr(d.errors ? d.errors.map(x => x.message).join(' ') : e.message);
+      if (d.skipped) setResult({ created: [], skipped: d.skipped });
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="card">
+      <h2>Post a repeating schedule</h2>
+      <p className="sub">
+        One pattern, every shift in the range. Times are Eastern and stay Eastern across the clock change,
+        so a 9am shift is 9am in November as well as July.
+      </p>
+      <div className="grid">
+        <div>
+          <label>Client</label>
+          <select value={clientId} onChange={e => setClientId(e.target.value)}>
+            <option value="">— Select —</option>
+            {roster.clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </div>
+        <div><label>First date</label><input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} /></div>
+        <div><label>Last date</label><input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} /></div>
+        <div><label>Start</label><input type="time" value={start} onChange={e => setStart(e.target.value)} /></div>
+        <div><label>End</label><input type="time" value={end} onChange={e => setEnd(e.target.value)} /></div>
+        <div>
+          <label>Who can take it</label>
+          <select value={level} onChange={e => { setLevel(e.target.value); setAssignTo(''); }}>
+            <option value="">— Choose —</option>
+            <option value="any">Anyone — all license levels</option>
+            <option value="sitter">Sitter and above</option>
+            <option value="pca">PCA and above</option>
+            <option value="cna">CNA and above</option>
+            <option value="lpn">LPN only</option>
+          </select>
+        </div>
+        <div>
+          <label>Visible to</label>
+          <select value={visibility} onChange={e => setVisibility(e.target.value)}>
+            <option value="all_eligible">All eligible caregivers</option>
+            <option value="care_team">This client's care team only</option>
+          </select>
+        </div>
+        <div>
+          <label>Post directly to (optional)</label>
+          <select value={assignTo} onChange={e => setAssignTo(e.target.value)} disabled={!level}>
+            <option value="">Open pool — anyone eligible can claim them</option>
+            {eligible.map(c => <option key={c.id} value={c.id}>{c.name}{c.licenseLabel ? ` — ${c.licenseLabel}` : ''}</option>)}
+          </select>
+        </div>
+      </div>
+      <div style={{ marginTop: 11 }}>
+        <label>Days</label>
+        <div className="btns" style={{ marginTop: 4 }}>
+          {DOW.map(d => (
+            <button key={d} className={`btn ${days.includes(d) ? 'gold' : 'ghost'}`} onClick={() => toggleDay(d)}>{d}</button>
+          ))}
+        </div>
+      </div>
+      <div style={{ marginTop: 11, maxWidth: 320 }}>
+        <label>Pay rate for these shifts ($/hour) — optional</label>
+        <input type="number" min="0" step="0.01" placeholder="Leave blank to use each caregiver's own rate"
+          value={payRate} onChange={e => setPayRate(e.target.value)} />
+      </div>
+      <div style={{ marginTop: 11 }}>
+        <label>Notes for the caregiver</label>
+        <textarea value={notes} onChange={e => setNotes(e.target.value)} maxLength={2000} />
+      </div>
+      {count > 0 && (
+        <div className="note">
+          <b>This posts {count} shift{count > 1 ? 's' : ''}.</b>
+          {end <= start ? ' Each one runs overnight into the next morning.' : ''}
+          {' '}A date that already has an identical shift is skipped rather than duplicated.
+        </div>
+      )}
+      <div className="btns">
+        <button className="btn gold" disabled={!clientId || !level || count === 0 || busy} onClick={post}>
+          {busy ? 'Posting…' : `Post ${count || ''} shift${count === 1 ? '' : 's'}`}
+        </button>
+      </div>
+      {result && (result.skipped || []).length > 0 && (
+        <div className="note" style={{ marginTop: 10 }}>
+          <b>{result.skipped.length} skipped.</b>
+          {result.skipped.map((sk, n) => (
+            <div className="mu" key={n}>{sk.date || fmtWhen(sk.start)} — {sk.reason}</div>
+          ))}
         </div>
       )}
     </div>
@@ -463,10 +879,14 @@ const TimeLogRow = ({ l, onEdit }) => {
       )}
       {l.edited && <div className="mu">Edited by {l.editedByName} — {l.editReason}</div>}
 
-      <div className="btns">
-        <button className="btn ghost" onClick={() => setOpen(!open)}>{open ? 'Close' : 'Correct times'}</button>
-      </div>
-      {open && (
+      {/* A time-log correction is a payroll attestation, so it stays with the
+          people who make those. No button rather than a button that 403s. */}
+      {onEdit && (
+        <div className="btns">
+          <button className="btn ghost" onClick={() => setOpen(!open)}>{open ? 'Close' : 'Correct times'}</button>
+        </div>
+      )}
+      {onEdit && open && (
         <div style={{ marginTop: 10 }}>
           <div className="grid">
             <div><label>Clock in</label><input type="datetime-local" value={clockInAt} onChange={e => setClockInAt(e.target.value)} /></div>
@@ -598,6 +1018,20 @@ const App = () => {
   const [timeLogs, setTimeLogs] = useState([]);
   const [totals, setTotals] = useState({ hours: null });
   const [flaggedOnly, setFlaggedOnly] = useState(false);
+  // Calendar or list — the same shifts either way, so the two cannot disagree.
+  const [view, setView] = useState('calendar');
+  const [selected, setSelected] = useState([]);
+  const [selecting, setSelecting] = useState(false);
+  const [removeReason, setRemoveReason] = useState('');
+  const [removeResult, setRemoveResult] = useState(null);
+  const [removing, setRemoving] = useState(false);
+  // Clicking a shift in the grid switches to the list and scrolls to it, rather
+  // than opening a second editor inside a calendar cell: one editor, one place.
+  const [openShiftId, setOpenShiftId] = useState(null);
+  // What THIS viewer may do, answered by the server rather than read off the
+  // login in the browser: a role an admin narrows this morning takes effect on
+  // the next request, not at the next sign-in.
+  const [access, setAccess] = useState({ manageSchedule: true, managePay: true, manageLocations: true });
   const [from, setFrom] = useState(todayPlus(-14));
   const [to, setTo] = useState(todayPlus(0));
   const [err, setErr] = useState('');
@@ -614,6 +1048,7 @@ const App = () => {
       api(`/api/scheduling/time-logs?from=${from}&to=${to}${flaggedOnly ? '&flagged=true' : ''}`).catch(() => ({ timeLogs: [] }))
     ]);
     setRoster(r);
+    if (r && r.access) setAccess(r.access);
     setShifts(s.shifts || []);
     setRequests(q.shiftRequests || []);
     setAvailability(a.availability || []);
@@ -632,6 +1067,20 @@ const App = () => {
       .finally(() => setLoading(false));
   }, [refresh]);
 
+  // The grid hands the list a shift to open; the list scrolls to it. Done as an
+  // effect rather than inside the click so it runs AFTER the list has rendered
+  // — otherwise the row it is looking for does not exist yet.
+  useEffect(() => {
+    if (!openShiftId || view !== 'list') return;
+    const el = document.getElementById(`shift-${openShiftId}`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.add('flash');
+      setTimeout(() => el.classList.remove('flash'), 1600);
+    }
+    setOpenShiftId(null);
+  }, [openShiftId, view, shifts]);
+
   const act = async (id, action, body = {}) => {
     setErr(''); setOk('');
     try {
@@ -644,6 +1093,24 @@ const App = () => {
       );
       await refresh();
     } catch (e) { setErr(e.message); }
+  };
+
+  const toggleSelect = (id) => setSelected(cur => cur.includes(id) ? cur.filter(x => x !== id) : [...cur, id]);
+
+  const bulkRemove = async () => {
+    setErr(''); setOk(''); setRemoving(true); setRemoveResult(null);
+    try {
+      const res = await api('/api/scheduling/shifts/bulk-remove', {
+        method: 'POST', body: JSON.stringify({ shiftIds: selected, reason: removeReason })
+      });
+      setOk(res.message || 'Removed.');
+      setRemoveResult(res);
+      setSelected([]); setRemoveReason('');
+      await refresh();
+    } catch (e) {
+      setErr(e.message);
+      if (e.data && e.data.refused) setRemoveResult(e.data);
+    } finally { setRemoving(false); }
   };
 
   const editLog = async (id, body) => {
@@ -673,8 +1140,8 @@ const App = () => {
       <div>
         <div className="hdr"><span className="t">Scheduling</span><a href="/admin">Admin hub</a></div>
         <div className="wrap"><div className="card">
-          <h2>Administrator access required</h2>
-          <p className="sub">Scheduling is managed by administrators. Caregivers see their own schedule in the caregiver app.</p>
+          <h2>Scheduling access required</h2>
+          <p className="sub">The board is run by administrators and managers. Caregivers see their own schedule in the caregiver app.</p>
         </div></div>
       </div>
     );
@@ -685,8 +1152,10 @@ const App = () => {
     { id: 'post', label: 'Post a shift' },
     { id: 'requests', label: `Requests${requests.filter(r => r.status === 'requested').length ? ` (${requests.filter(r => r.status === 'requested').length})` : ''}` },
     { id: 'availability', label: 'Availability' },
-    { id: 'time', label: 'Time & payroll' },
-    { id: 'locations', label: `Locations${roster.clients.filter(c => !c.hasCoordinates).length ? ` (${roster.clients.filter(c => !c.hasCoordinates).length})` : ''}` }
+    { id: 'time', label: access.managePay ? 'Time & payroll' : 'Time logs' },
+    ...(access.manageLocations
+      ? [{ id: 'locations', label: `Locations${roster.clients.filter(c => !c.hasCoordinates).length ? ` (${roster.clients.filter(c => !c.hasCoordinates).length})` : ''}` }]
+      : [])
   ];
 
   const pending = shifts.filter(s => s.status === 'claimed');
@@ -711,7 +1180,12 @@ const App = () => {
           ))}
         </div>
 
-        {tab === 'post' && <PostShift roster={roster} onPosted={refresh} setErr={setErr} setOk={setOk} />}
+        {tab === 'post' && (
+          <div>
+            <PostShift roster={roster} onPosted={refresh} setErr={setErr} setOk={setOk} />
+            <BulkPost roster={roster} onPosted={refresh} setErr={setErr} setOk={setOk} />
+          </div>
+        )}
 
         {tab === 'calendar' && (
           <div>
@@ -719,16 +1193,82 @@ const App = () => {
               <div className="card">
                 <h2>Claims waiting on you</h2>
                 <p className="sub">A claim does not confirm the shift. Nothing is booked until you approve it.</p>
-                {pending.map(s => <ShiftRow key={s.id} s={s} roster={roster} act={act} />)}
+                {pending.map(s => (
+                  <ShiftRow key={s.id} s={s} roster={roster} act={act} onEdited={refresh}
+                    setErr={setErr} setOk={setOk}
+                    selected={selected.includes(s.id)} onToggleSelect={toggleSelect} selecting={false} />
+                ))}
               </div>
             )}
+
             <div className="card">
-              <h2>Master calendar</h2>
-              <p className="sub">Every PHCP shift. Clinical visits are scheduled separately in the clinical workspace.</p>
-              {shifts.length === 0
-                ? <Empty icon="calendar-off">No shifts posted yet.</Empty>
-                : shifts.map(s => <ShiftRow key={s.id} s={s} roster={roster} act={act} />)}
+              <div className="calhdr">
+                <h2 style={{ margin: 0 }}>Master calendar</h2>
+                <div className="btns" style={{ margin: 0 }}>
+                  <button className={`btn ${view === 'calendar' ? 'gold' : 'ghost'}`} onClick={() => setView('calendar')}>Calendar</button>
+                  <button className={`btn ${view === 'list' ? 'gold' : 'ghost'}`} onClick={() => setView('list')}>List</button>
+                  <button className={`btn ${selecting ? 'gold' : 'ghost'}`}
+                    onClick={() => { setSelecting(v => !v); setSelected([]); setRemoveResult(null); }}>
+                    {selecting ? 'Done selecting' : 'Select to remove'}
+                  </button>
+                </div>
+              </div>
+              <p className="sub">
+                Every PHCP shift. Clinical visits are scheduled separately in the clinical workspace.
+                {selecting ? ' Tick the shifts to remove, then give a reason.' : ''}
+              </p>
             </div>
+
+            {/* REMOVING IS TWO DIFFERENT ACTS and the panel says so before
+                anything happens: a shift somebody holds is cancelled and keeps
+                its tombstone, while an open shift nobody ever claimed is a typo
+                and is taken off the board. */}
+            {selecting && (
+              <div className="card">
+                <h2>Remove {selected.length} selected shift{selected.length === 1 ? '' : 's'}</h2>
+                <p className="sub">
+                  A shift somebody claimed, accepted or worked is <b>cancelled</b> — it keeps its place on the board
+                  with the reason, and the caregiver is told. A shift still open that nobody ever held is
+                  <b> removed outright</b>, because that is a posting mistake rather than care that was called off.
+                </p>
+                <div className="btns">
+                  <input placeholder="Reason (required)" value={removeReason}
+                    onChange={e => setRemoveReason(e.target.value)} style={{ maxWidth: 360 }} />
+                  <button className="btn danger" disabled={!selected.length || !removeReason.trim() || removing}
+                    onClick={bulkRemove}>
+                    {removing ? 'Removing…' : `Remove ${selected.length || ''}`}
+                  </button>
+                  <button className="btn ghost" disabled={removing} onClick={() => setSelected([])}>Clear selection</button>
+                </div>
+                {removeResult && (
+                  <div className="note" style={{ marginTop: 10 }}>
+                    {(removeResult.cancelled || []).length > 0 &&
+                      <div className="mu">{removeResult.cancelled.length} cancelled — the caregiver on each has been told.</div>}
+                    {(removeResult.deleted || []).length > 0 &&
+                      <div className="mu">{removeResult.deleted.length} removed from the board — nobody had claimed them.</div>}
+                    {(removeResult.refused || []).map((r, n) => (
+                      <div className="mu" key={n}>Left alone — {r.clientName} {fmtWhen(r.start)}: {r.reason}</div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {view === 'calendar' ? (
+              <ShiftCalendar shifts={shifts} selected={selected} selecting={selecting}
+                onToggleSelect={toggleSelect}
+                onOpen={(id) => { setView('list'); setOpenShiftId(id); }} />
+            ) : (
+              <div className="card">
+                {shifts.length === 0
+                  ? <Empty icon="calendar-off">No shifts posted yet.</Empty>
+                  : shifts.map(s => (
+                    <ShiftRow key={s.id} s={s} roster={roster} act={act} onEdited={refresh}
+                      setErr={setErr} setOk={setOk}
+                      selected={selected.includes(s.id)} onToggleSelect={toggleSelect} selecting={selecting} />
+                  ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -802,23 +1342,35 @@ const App = () => {
                 <button className={`btn ${flaggedOnly ? '' : 'ghost'}`} onClick={() => setFlaggedOnly(!flaggedOnly)}>
                   {flaggedOnly ? 'Showing flagged only' : 'Show flagged only'}
                 </button>
-                <button className="btn gold" onClick={exportCsv}>Export payroll CSV</button>
-                <button className="btn" onClick={exportBillingCsv}>Export billing CSV</button>
+                {/* THE MONEY IS ADMIN'S. A manager runs the board and reads the
+                    hours behind it; payroll and billing are attestations about
+                    what people are paid and what clients owe, and those stayed
+                    where they were. The buttons are absent rather than present
+                    and answering 403. */}
+                {access.managePay && <button className="btn gold" onClick={exportCsv}>Export payroll CSV</button>}
+                {access.managePay && <button className="btn" onClick={exportBillingCsv}>Export billing CSV</button>}
               </div>
-              <div className="note">
-                <b>Two different questions.</b> Payroll is what caregivers are paid — every clock-in in
-                the range, including shifts still open, with edit details and the pay period.
-                Billing is what clients are invoiced — completed visits only, grouped by client, with
-                the billable hours, whether the visit location could be verified, and whether the visit
-                log was filed. Neither carries anything clinical.
-              </div>
+              {access.managePay ? (
+                <div className="note">
+                  <b>Two different questions.</b> Payroll is what caregivers are paid — every clock-in in
+                  the range, including shifts still open, with edit details and the pay period.
+                  Billing is what clients are invoiced — completed visits only, grouped by client, with
+                  the billable hours, whether the visit location could be verified, and whether the visit
+                  log was filed. Neither carries anything clinical.
+                </div>
+              ) : (
+                <div className="note">
+                  <b>Read-only.</b> You can see the hours behind the board. Correcting a time log, entering
+                  hours that were never clocked, and the payroll and billing exports are an administrator's.
+                </div>
+              )}
             </div>
             <div className="card">
               <h2>Time logs</h2>
-              <AddTimeEntry roster={roster} onAdded={refresh} setErr={setErr} setOk={setOk} />
+              {access.managePay && <AddTimeEntry roster={roster} onAdded={refresh} setErr={setErr} setOk={setOk} />}
               {timeLogs.length === 0
                 ? <Empty icon="clock-off">Nothing logged in this range.</Empty>
-                : timeLogs.map(l => <TimeLogRow key={l.id} l={l} onEdit={editLog} />)}
+                : timeLogs.map(l => <TimeLogRow key={l.id} l={l} onEdit={access.managePay ? editLog : null} />)}
             </div>
           </div>
         )}

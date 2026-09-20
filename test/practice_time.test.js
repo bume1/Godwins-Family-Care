@@ -197,9 +197,19 @@ test('no shift or visit surface formats a bare instant any more', () => {
 test('availability is matched on the Georgia weekday, not the UTC one', () => {
   // Comments stripped, same reason as above: the fix's own comment NAMES
   // getUTCDay to explain what it replaced.
-  const src = read('schedulingRepository.js');
-  const fn = codeOf('schedulingRepository.js')
-    .slice(codeOf('schedulingRepository.js').indexOf('function availabilityCoversShift'));
+  //
+  // BOUNDED TO THE FUNCTION, not to the rest of the file (fixed 2026-09-20).
+  // It used to slice from `availabilityCoversShift` to EOF, so it failed on the
+  // first later function that legitimately reads a bare calendar date in UTC —
+  // which is the correct way to read one, since a date string carries no zone
+  // of its own. A guard that grabs more than the code it is guarding stops
+  // being about the rule and starts being about what happens to sit below it.
+  const code = codeOf('schedulingRepository.js');
+  const from = code.indexOf('function availabilityCoversShift');
+  assert.ok(from !== -1, 'availabilityCoversShift must still exist');
+  const rest = code.slice(from + 1);
+  const nextTop = rest.search(/\n(?:function|const|module\.exports)\s/);
+  const fn = nextTop === -1 ? rest : rest.slice(0, nextTop);
   assert.ok(fn.includes('practiceTime.zonedParts'), 'it must read the shift in Eastern');
   assert.ok(!fn.includes('getUTCDay()'), 'getUTCDay put a Tuesday evening shift on Wednesday');
   assert.ok(!fn.includes('getUTCHours()'), 'and gave it the wrong hour of day');

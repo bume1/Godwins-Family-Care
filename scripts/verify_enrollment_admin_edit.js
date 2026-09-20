@@ -245,6 +245,91 @@ const call = async (method, path, token, body) => {
     ok(!names.some(n => /Adeyemi/.test(n)), 'and the one it replaced is gone', JSON.stringify(names));
   }
 
+  console.log('\nK. THE WHOLE SUBMISSION is editable, not the corner the page displays');
+  // Owner, 2026-09-20: "make sure the entire enrollment editable by admin and
+  // clinicians essentially." The wizard's other steps — the care situation, the
+  // schedule, function and safety, caregiver matching — had no staff writer at
+  // all until now.
+  const fieldMap = require('../public/intake-fields');
+  const wide = await call('PUT', `/api/gfc/admin/enrollment/${skippedId}/details`, admin, {
+    situation: { mainReason: 'Discharged Tuesday, daughter cannot cover mornings',
+                 adlLevel: 'A lot of help', cognitionLevel: 'Moderate' },
+    schedule: { startDate: '2026-10-05', hoursPerWeek: '20', urgency: 'Within a week' },
+    homebound: 'Leaves with assistance',
+    conditions: ['Diabetes', 'Stroke / TIA'],
+    helpNeeded: ['Meal preparation', 'Medication reminders'],
+    adl: { bathing: 'Needs physical assistance', ambulation: 'Uses walker / cane' },
+    fallRisk: 'High',
+    homeSafetyFlags: ['Stairs required', 'Pets in home'],
+    matching: { genderPreference: 'Female preferred', personality: ['Warm and chatty'] },
+    medicare: { id: '1EG4-TE5-MK73', type: 'Part A & B' },
+    auth911: 'Yes — authorized'
+  });
+  eq(wide.status, 200, 'a whole-submission edit is accepted');
+  const w = await call('GET', `/api/gfc/admin/enrollment/${skippedId}`, admin);
+  const wi = w.body.client.intake;
+  eq(wi.situation.mainReason, 'Discharged Tuesday, daughter cannot cover mornings', 'STORED: the care situation');
+  eq(wi.schedule.urgency, 'Within a week', 'STORED: the schedule step');
+  eq(wi.homebound, 'Leaves with assistance', 'STORED: the homebound answer');
+  eq(wi.fallRisk, 'High', 'STORED: function and safety');
+  eq(wi.adl.bathing, 'Needs physical assistance', 'STORED: a nested ADL level');
+  eq(wi.matching.genderPreference, 'Female preferred', 'STORED: a caregiver-matching preference');
+  eq(wi.medicare.id, '1EG4-TE5-MK73', 'STORED: the Medicare block');
+  eq(JSON.stringify(wi.conditions), JSON.stringify(['Diabetes', 'Stroke / TIA']),
+    'STORED: a checkbox group as an array');
+  eq(JSON.stringify(wi.homeSafetyFlags), JSON.stringify(['Stairs required', 'Pets in home']),
+    'STORED: and a second one');
+  eq(JSON.stringify(wi.matching.personality), JSON.stringify(['Warm and chatty']),
+    'STORED: a checkbox group nested inside a block');
+  // The earlier sections were not collateral damage.
+  eq(wi.medicalTeam.pcpName, 'Dr Osei', 'the medical team from the earlier edit is untouched');
+
+  console.log('\nL. What the editor REFUSES, and says so rather than swallowing');
+  const invented = await call('PUT', `/api/gfc/admin/enrollment/${skippedId}/details`, admin,
+    { fallRisk: 'Catastrophic' });
+  eq(invented.status, 400, 'an answer that was never on the list is refused');
+  eq(invented.body.code, 'INTAKE_OPTION_INVALID', 'with its own code');
+  ok((invented.body.fieldErrors || {}).fallRisk, 'and the field is named', JSON.stringify(invented.body.fieldErrors));
+  const untouched = await call('GET', `/api/gfc/admin/enrollment/${skippedId}`, admin);
+  eq(untouched.body.client.intake.fallRisk, 'High', 'STORED: and the real answer is still there');
+
+  const typed = await call('PUT', `/api/gfc/admin/enrollment/${skippedId}/details`, admin,
+    { primaryContact: { relationship: 'Great-niece' }, gender: 'Female' });
+  eq(typed.status, 200, 'an OPEN select takes what staff actually heard on the phone');
+  const t2 = await call('GET', `/api/gfc/admin/enrollment/${skippedId}`, admin);
+  eq(t2.body.client.intake.primaryContact.relationship, 'Great-niece',
+    'STORED: a relationship the wizard never offered');
+
+  const emptied = await call('PUT', `/api/gfc/admin/enrollment/${skippedId}/details`, admin,
+    { conditions: [] });
+  eq(emptied.status, 200, 'clearing a checkbox group is allowed');
+  const t3 = await call('GET', `/api/gfc/admin/enrollment/${skippedId}`, admin);
+  eq(JSON.stringify(t3.body.client.intake.conditions), '[]',
+    'STORED: "none of these" is a real answer, not an absent one');
+  eq(t3.body.client.intake.fallRisk, 'High', 'and one field did not blank another');
+
+  // Every path the map declares must actually be writable. A declared field
+  // that silently does nothing is a question somebody answers and loses.
+  const everything = {};
+  fieldMap.VALUE_FIELDS.forEach(f => {
+    if (f.path === 'dob' || f.path.startsWith('address.')) return;   // set above, and date-validated
+    if (f.type === 'multi') { everything[f.path] = fieldMap.optionsFor(f).slice(0, 1); return; }
+    if (f.type === 'select') { everything[f.path] = fieldMap.optionsFor(f)[0]; return; }
+    if (f.type === 'number') { everything[f.path] = '4'; return; }
+    if (f.type === 'date') { everything[f.path] = '2026-02-02'; return; }
+    everything[f.path] = `probe-${f.path}`;
+  });
+  const all = await call('PUT', `/api/gfc/admin/enrollment/${skippedId}/details`, admin, everything);
+  eq(all.status, 200, 'every declared field posts together', JSON.stringify(all.body).slice(0, 300));
+  const readAll = await call('GET', `/api/gfc/admin/enrollment/${skippedId}`, admin);
+  const at = (o, path) => path.split('.').reduce((x, k) => (x === null || x === undefined ? undefined : x[k]), o);
+  const lost = fieldMap.VALUE_FIELDS
+    .filter(f => f.path !== 'dob' && !f.path.startsWith('address.'))
+    .filter(f => at(readAll.body.client.intake, f.path) === undefined)
+    .map(f => f.path);
+  ok(lost.length === 0, `every declared field reached the record (${fieldMap.VALUE_FIELDS.length} of them)`,
+    `lost: ${lost.join(', ')}`);
+
   console.log(`\n${pass}/${pass + fail} assertions passed${fail ? ` — ${fail} FAILED` : ''}`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error('probe error:', e); process.exit(1); });

@@ -13,6 +13,11 @@
        GFC_TIME's helpers explicitly, because code that says what it means
        outlives a shim. See public/gfc-time.js. -->
   <script src="/gfc-time.js"></script>
+  <!-- The enrollment questions, the option catalogs behind them, and which
+       paths a staff editor may correct. The client's own intake wizard renders
+       from this same file and the save route validates against it, so the three
+       cannot drift. -->
+  <script src="/intake-fields.js"></script>
   <script>window.GFC_TIME && window.GFC_TIME.installDefaultTimeZone();</script>
   <script src="https://cdn.tailwindcss.com"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -609,57 +614,38 @@
     // not invent one of its own. Four values are deliberately absent because
     // each has its own writer: the name, the service line, the care tier and
     // the agreed rate.
-    const SUBMISSION_SECTIONS = [
-      { title: 'Client', fields: [
-        { path: 'dob', label: 'Date of birth', type: 'date' },
-        { path: 'email', label: 'Email (their login)', type: 'email', account: true },
-        { path: 'gender', label: 'Gender' },
-        { path: 'primaryLanguage', label: 'Primary language' },
-        { path: 'phone', label: 'Phone', type: 'tel' },
-        { path: 'address.line1', label: 'Street address' },
-        { path: 'address.line2', label: 'Apartment / unit' },
-        { path: 'address.city', label: 'City' },
-        { path: 'address.state', label: 'State' },
-        { path: 'address.zip', label: 'ZIP' }
-      ] },
-      { title: 'Primary contact', fields: [
-        { path: 'primaryContact.name', label: 'Name' },
-        { path: 'primaryContact.relationship', label: 'Relationship', errorKey: 'primaryContactRelationship' },
-        { path: 'primaryContact.phone', label: 'Phone', type: 'tel' },
-        { path: 'primaryContact.email', label: 'Email', type: 'email' }
-      ] },
-      { title: 'Emergency', note: 'The crisis protocol prints the call order, and the notify-first contact heads it.',
-        fields: [{ path: 'crisisNotify', label: 'Notify first in a crisis' }],
-        list: 'emergencyContacts' },
-      { title: 'Medical', note: 'Each of these prints onto the face sheet the caregiver carries.', fields: [
-        { path: 'allergies', label: 'Allergies (or “none”)' },
-        { path: 'advanceDirective.status', label: 'Advance directive', type: 'select',
-          options: ['', 'Yes — DNR in place', 'Yes — advance directive / living will', 'Yes — healthcare proxy / POA', 'No', 'Unknown'] },
-        { path: 'medicalTeam.pcpName', label: 'Primary care provider' },
-        { path: 'medicalTeam.pcpPractice', label: 'Their practice / clinic' },
-        { path: 'medicalTeam.pcpPhone', label: 'Their phone', type: 'tel' },
-        { path: 'medicalTeam.specialist1Name', label: 'Specialist' },
-        { path: 'medicalTeam.specialist1Phone', label: 'Specialist phone', type: 'tel' },
-        { path: 'medicalTeam.specialist2Name', label: 'Second specialist' },
-        { path: 'medicalTeam.preferredPharmacy', label: 'Preferred pharmacy' },
-        { path: 'medicalTeam.pharmacyPhone', label: 'Pharmacy phone', type: 'tel' },
-        { path: 'medicalTeam.preferredHospital', label: 'Preferred hospital' }
-      ] },
-      { title: 'Medications', list: 'medications' },
-      { title: 'Insurance', fields: [
-        { path: 'payerType', label: 'How care is paid for', type: 'select',
-          options: ['', 'Private pay', 'LTC insurance', 'Medicaid waiver', 'VA', 'Medicare Part B', 'Dual eligible', 'Commercial', 'Combination'] },
-        { path: 'ltc.carrier', label: 'Long term care carrier' },
-        { path: 'ltc.policyNum', label: 'Policy number' },
-        { path: 'ltc.policyHolder', label: 'Policy holder' }
-      ], list: 'insuranceIds' }
-    ];
+    // THE SECTIONS ARE SERVED, NOT RESTATED (owner, 2026-09-20: "make sure the
+    // entire enrollment editable by admin and clinicians essentially").
+    //
+    // `public/intake-fields.js` is the one declaration of what an enrollment
+    // asks — the same file the client's own wizard renders from and the same
+    // file the save route validates against. This page adds exactly one field
+    // of its own, the login email, because that is an account detail rather
+    // than an answer on the submission, and it is marked so it is read from the
+    // client record instead of the intake.
+    const FIELD_MAP = window.GFC_INTAKE_FIELDS;
 
-    // The repeating blocks, same keys the server will accept and no others.
-    const SUBMISSION_LISTS = {
-      medications:       { label: 'Medication', keys: [['name', 'Name'], ['dose', 'Dose'], ['route', 'Route'], ['frequency', 'Frequency'], ['prescriber', 'Prescriber'], ['pharmacy', 'Pharmacy']] },
-      emergencyContacts: { label: 'Emergency contact', keys: [['name', 'Name'], ['relationship', 'Relationship'], ['phone', 'Phone'], ['email', 'Email'], ['address', 'Address']] },
-      insuranceIds:      { label: 'Insurance', keys: [['carrier', 'Carrier'], ['memberId', 'Member ID'], ['group', 'Group']] }
+    const SUBMISSION_SECTIONS = FIELD_MAP.SECTIONS.map(sec => ({
+      key: sec.key,
+      title: sec.label,
+      note: sec.blurb || '',
+      fields: sec.fields
+        .filter(f => f.type !== 'list')
+        .map(f => Object.assign({}, f, {
+          // The one place the server's field errors are keyed differently from
+          // the path they came from.
+          errorKey: f.path === 'primaryContact.relationship' ? 'primaryContactRelationship' : undefined
+        }))
+        .concat(sec.key === 'client'
+          ? [{ path: 'email', label: 'Email (their login)', type: 'email', account: true }]
+          : []),
+      lists: sec.fields.filter(f => f.type === 'list').map(f => f.path)
+    }));
+
+    const SUBMISSION_LISTS = FIELD_MAP.LISTS;
+    const listLabel = (name) => {
+      const f = FIELD_MAP.fieldAt(name);
+      return f ? f.label : name;
     };
 
     const readAt = (obj, path) => String(path).split('.').reduce((o, k) => (o === null || o === undefined ? undefined : o[k]), obj);
@@ -686,18 +672,22 @@
       const [fieldErrors, setFieldErrors] = useState({});
       const initial = () => {
         const flat = {};
-        SUBMISSION_SECTIONS.forEach(sec => (sec.fields || []).forEach(f => {
-          if (f.account) { flat[f.path] = client[f.path] || ''; return; }
-          const v = readAt(i, f.path);
+        SUBMISSION_SECTIONS.forEach(sec => (sec.fields || []).forEach(fd => {
+          if (fd.account) { flat[fd.path] = client[fd.path] || ''; return; }
+          const v = readAt(i, fd.path);
+          // A CHECKBOX GROUP is always an array in the form state, so "ticked
+          // nothing" and "never asked" stay different things all the way to the
+          // save.
+          if (fd.type === 'multi') { flat[fd.path] = Array.isArray(v) ? v.slice() : []; return; }
           if (v === undefined || v === null || v === '') {
-            flat[f.path] = f.path === 'dob' ? (client.dob || '') : f.path === 'phone' ? (client.phone || '') : '';
+            flat[fd.path] = fd.path === 'dob' ? (client.dob || '') : fd.path === 'phone' ? (client.phone || '') : '';
             return;
           }
           // A value this form cannot represent is LEFT OUT rather than shown
           // blank: an absent key means "leave this alone", and a blank one
           // would clear whatever is there on the next save.
           if (typeof v === 'object') return;
-          flat[f.path] = String(v);
+          flat[fd.path] = String(v);
         }));
         return flat;
       };
@@ -711,7 +701,16 @@
       };
       const [f, setF] = useState(initial);
       const [lists, setLists] = useState(initialLists);
+      // Ten sections and a hundred and thirty answers do not fit on one screen
+      // legibly. One section at a time, with every section's values held in
+      // state and every one of them posted on save — so moving between them
+      // never drops an edit somebody made two sections ago.
+      const [section, setSection] = useState(SUBMISSION_SECTIONS[0].key);
       const set = (path, v) => setF(prev => ({ ...prev, [path]: v }));
+      const toggle = (path, option) => setF(prev => {
+        const cur = Array.isArray(prev[path]) ? prev[path] : [];
+        return { ...prev, [path]: cur.includes(option) ? cur.filter(x => x !== option) : [...cur, option] };
+      });
       const setRow = (name, idx, key, v) => setLists(prev => {
         const rows = [...(prev[name] || [])];
         rows[idx] = { ...(rows[idx] || {}), [key]: v };
@@ -722,7 +721,20 @@
 
       const openEditor = () => {
         setF(initial()); setLists(initialLists());
+        setSection(SUBMISSION_SECTIONS[0].key);
         setErr(''); setSaved(''); setFieldErrors({}); setOpen(true);
+      };
+
+      // Which sections have something the server refused, so a field error two
+      // sections away is findable rather than invisible behind a generic
+      // "some details need correcting".
+      const sectionsWithErrors = () => {
+        const keys = Object.keys(fieldErrors || {});
+        if (!keys.length) return [];
+        return SUBMISSION_SECTIONS.filter(sec =>
+          (sec.fields || []).some(fd => keys.includes(fd.errorKey || fd.path)) ||
+          (sec.lists || []).some(name => keys.some(k => k.indexOf(name + '.') === 0))
+        ).map(sec => sec.key);
       };
 
       const save = () => {
@@ -734,7 +746,13 @@
           .then(r => { setOpen(false); setSaved(r.message || 'Saved'); onSaved(); })
           .catch(e => {
             setErr(e.message);
-            setFieldErrors((e.data && e.data.fieldErrors) || {});
+            const fe = (e.data && e.data.fieldErrors) || {};
+            setFieldErrors(fe);
+            // Jump to where the problem is rather than leaving somebody hunting
+            // for a red line on a section they cannot see.
+            const first = SUBMISSION_SECTIONS.find(sec =>
+              (sec.fields || []).some(fd => Object.keys(fe).includes(fd.errorKey || fd.path)));
+            if (first) setSection(first.key);
           })
           .finally(() => setBusy(false));
       };
@@ -745,67 +763,122 @@
           <div className="flex items-center gap-3 flex-wrap">
             <button className="btn btn-ghost" onClick={openEditor}>Edit submission</button>
             <span className="text-xs text-gray-500">
-              Correct what the client submitted, or fill in what an office-added client never had.
+              Every answer on the enrollment, including what an office-added client never filled in.
             </span>
             {saved && <span className="badge bg-success-50 text-success-600">{saved}</span>}
           </div>
         );
       }
 
+      const errSections = sectionsWithErrors();
+      const current = SUBMISSION_SECTIONS.find(sec => sec.key === section) || SUBMISSION_SECTIONS[0];
+      const renderField = (fd) => (
+        <div key={fd.path} className={fd.type === 'textarea' || fd.type === 'multi' ? 'sm:col-span-2 lg:col-span-3' : ''}>
+          <label className="label">{fd.label}</label>
+          {fd.type === 'select' && fd.open ? (
+            /* AN OPEN SELECT IS A SUGGESTION LIST. These four were free-text
+               boxes before the fields were declared centrally, and staff
+               transcribing from a phone call write "Daughter" where the wizard
+               offers "Adult child". A datalist keeps the list one keystroke
+               away without refusing what somebody actually said. */
+            <React.Fragment>
+              <input className="input" list={`opts-${fd.path}`} value={f[fd.path] || ''}
+                onChange={e => set(fd.path, e.target.value)} />
+              <datalist id={`opts-${fd.path}`}>
+                {FIELD_MAP.optionsFor(fd).map(o => <option key={o} value={o} />)}
+              </datalist>
+            </React.Fragment>
+          ) : fd.type === 'select' ? (
+            <select className="input" value={f[fd.path] || ''} onChange={e => set(fd.path, e.target.value)}>
+              {/* A stored value this list does not carry is added to it, or the
+                  select would show blank and quietly rewrite what the client
+                  actually answered. */}
+              {(() => {
+                const opts = [''].concat(FIELD_MAP.optionsFor(fd));
+                const held = f[fd.path] || '';
+                return (held && !opts.includes(held) ? opts.concat([held]) : opts)
+                  .map(o => <option key={o} value={o}>{o || '—'}</option>);
+              })()}
+            </select>
+          ) : fd.type === 'textarea' ? (
+            <textarea className="input" rows={3} value={f[fd.path] || ''} onChange={e => set(fd.path, e.target.value)} />
+          ) : fd.type === 'multi' ? (
+            <div className="flex flex-wrap gap-2 mt-1">
+              {FIELD_MAP.optionsFor(fd).map(o => {
+                const on = (f[fd.path] || []).includes(o);
+                return (
+                  <button type="button" key={o}
+                    className={on ? 'badge bg-primary-50 text-primary-600 cursor-pointer' : 'badge bg-gray-50 text-gray-500 cursor-pointer'}
+                    onClick={() => toggle(fd.path, o)}>
+                    {on ? '✓ ' : ''}{o}
+                  </button>
+                );
+              })}
+              {/* An option the client picked before this list changed is still
+                  their answer. It is shown and kept rather than silently
+                  dropped on the next save. */}
+              {(f[fd.path] || []).filter(v => !FIELD_MAP.optionsFor(fd).includes(v)).map(o => (
+                <button type="button" key={o} className="badge bg-warning-50 text-warning-600 cursor-pointer"
+                  onClick={() => toggle(fd.path, o)}>✓ {o}</button>
+              ))}
+            </div>
+          ) : (
+            <input className="input" type={fd.type === 'tel' || fd.type === 'email' || fd.type === 'date' || fd.type === 'number' ? fd.type : 'text'}
+              value={f[fd.path] || ''} onChange={e => set(fd.path, e.target.value)} />
+          )}
+          {fieldErrors[fd.errorKey || fd.path] && (
+            <p className="text-xs text-danger-500 mt-1">{fieldErrors[fd.errorKey || fd.path]}</p>
+          )}
+        </div>
+      );
+
       return (
         <div>
           {err && <div className="bg-danger-50 text-danger-600 text-sm rounded-lg px-4 py-2 mb-3">{err}</div>}
-          {SUBMISSION_SECTIONS.map(sec => (
-            <div key={sec.title} className="mb-5">
-              <p className="font-semibold text-sm mb-1">{sec.title}</p>
-              {sec.note && <p className="text-xs text-gray-500 mb-2">{sec.note}</p>}
-              {!!(sec.fields || []).length && (
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {sec.fields.map(fd => (
-                    <div key={fd.path}>
-                      <label className="label">{fd.label}</label>
-                      {fd.type === 'select' ? (
-                        <select className="input" value={f[fd.path] || ''} onChange={e => set(fd.path, e.target.value)}>
-                          {/* A stored value this list does not carry is added to
-                              it, or the select would show blank and quietly
-                              rewrite what the client actually answered. */}
-                          {(fd.options.includes(f[fd.path] || '') ? fd.options : [...fd.options, f[fd.path]])
-                            .map(o => <option key={o} value={o}>{o || '—'}</option>)}
-                        </select>
-                      ) : (
-                        <input className="input" type={fd.type || 'text'} value={f[fd.path] || ''} onChange={e => set(fd.path, e.target.value)} />
-                      )}
-                      {fieldErrors[fd.errorKey || fd.path] && (
-                        <p className="text-xs text-danger-500 mt-1">{fieldErrors[fd.errorKey || fd.path]}</p>
-                      )}
+          <div className="flex flex-wrap gap-2 mb-4">
+            {SUBMISSION_SECTIONS.map(sec => (
+              <button type="button" key={sec.key}
+                className={sec.key === section ? 'btn btn-primary' : (errSections.includes(sec.key) ? 'btn btn-ghost text-danger-500' : 'btn btn-ghost')}
+                onClick={() => setSection(sec.key)}>
+                {sec.title}{errSections.includes(sec.key) ? ' •' : ''}
+              </button>
+            ))}
+          </div>
+
+          <div key={current.key} className="mb-5">
+            {current.note && <p className="text-xs text-gray-500 mb-2">{current.note}</p>}
+            {!!(current.fields || []).length && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {current.fields.map(renderField)}
+              </div>
+            )}
+            {(current.lists || []).map(name => (
+              <div className="mt-4" key={name}>
+                <p className="font-semibold text-sm mb-1">{listLabel(name)}</p>
+                {(lists[name] || []).map((row, idx) => (
+                  <div key={idx} className="border border-gray-100 rounded-lg p-3 mb-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                      {SUBMISSION_LISTS[name].columns.map(col => (
+                        <div key={col.key}>
+                          <label className="label">{col.label}</label>
+                          <input className="input" type={col.type === 'tel' || col.type === 'email' ? col.type : 'text'}
+                            value={row[col.key] || ''} onChange={e => setRow(name, idx, col.key, e.target.value)} />
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
-              )}
-              {sec.list && (
-                <div className="mt-3">
-                  {(lists[sec.list] || []).map((row, idx) => (
-                    <div key={idx} className="border border-gray-100 rounded-lg p-3 mb-2">
-                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                        {SUBMISSION_LISTS[sec.list].keys.map(([k, label]) => (
-                          <div key={k}>
-                            <label className="label">{label}</label>
-                            <input className="input" value={row[k] || ''} onChange={e => setRow(sec.list, idx, k, e.target.value)} />
-                          </div>
-                        ))}
-                      </div>
-                      {fieldErrors[`emergencyContacts.${idx}.relationship`] && sec.list === 'emergencyContacts' && (
-                        <p className="text-xs text-danger-500 mt-1">{fieldErrors[`emergencyContacts.${idx}.relationship`]}</p>
-                      )}
-                      <button className="btn btn-ghost mt-2" onClick={() => dropRow(sec.list, idx)}>Remove</button>
-                    </div>
-                  ))}
-                  <button className="btn btn-ghost" onClick={() => addRow(sec.list)}>+ Add {SUBMISSION_LISTS[sec.list].label.toLowerCase()}</button>
-                </div>
-              )}
-            </div>
-          ))}
+                    {fieldErrors[`${name}.${idx}.relationship`] && (
+                      <p className="text-xs text-danger-500 mt-1">{fieldErrors[`${name}.${idx}.relationship`]}</p>
+                    )}
+                    <button className="btn btn-ghost mt-2" onClick={() => dropRow(name, idx)}>Remove</button>
+                  </div>
+                ))}
+                <button className="btn btn-ghost" onClick={() => addRow(name)}>+ Add</button>
+              </div>
+            ))}
+          </div>
+
           <p className="text-xs text-gray-500 mt-3">
+            Every section is saved together, so a change you made on another tab is not lost.
             A consent they have already signed is rendered from this record, so correcting something one of them prints flags it for re-signature. It does not change what they signed against.
           </p>
           <div className="flex gap-2 mt-3">
