@@ -718,11 +718,291 @@ function validateShift(input) {
   };
 }
 
+// ============================================================================
+// EDITING A POSTED SHIFT (owner request, 2026-09-20)
+// ============================================================================
+// A shift was write-once: posted, then moved through its lifecycle, and the
+// only way to correct a wrong time was to cancel it and post another — which
+// loses the claim, the assignment and the caregiver's acceptance along with the
+// typo. The owner's ask is the plain one: fix the time, including on a shift
+// that has already happened.
+//
+// WHAT MAY BE EDITED IS AN ALLOW-LIST, for the same reason the enrollment
+// editor's is: a key the list does not carry never reaches the row. Two values
+// are deliberately outside it.
+//
+//   clientId — moving a shift to another client is not a correction, it is a
+//     different shift. It would have to re-run the enrollment gate, the
+//     geofence, the care-team visibility and the caregiver's eligibility, and
+//     any time log already filed against it names the old client. Cancel and
+//     repost.
+//   status — the lifecycle is a state machine with its own routes and its own
+//     refusals. An editor that can set a status is a second, quieter way to
+//     confirm a shift nobody accepted.
+const SHIFT_EDITABLE_FIELDS = Object.freeze([
+  'start', 'end', 'requiredLicenseLevel', 'poolVisibility', 'careTier', 'notes', 'payRate'
+]);
+
+// A cancelled shift is a tombstone: it did not happen, nothing is derived from
+// it and there is nothing on it to correct. Everything else is editable —
+// INCLUDING completed and in-progress, which is the owner's whole point.
+const EDITABLE_SHIFT_STATUSES = Object.freeze([
+  'open', 'claimed', 'assigned', 'confirmed', 'in_progress', 'completed'
+]);
+
+const canEditShift = (shift) => !!shift && EDITABLE_SHIFT_STATUSES.includes(shift.status);
+
+// The field on the row each editable key writes to.
+const SHIFT_EDIT_COLUMN = Object.freeze({
+  start: 'start', end: 'end', requiredLicenseLevel: 'required_license_level',
+  poolVisibility: 'pool_visibility', careTier: 'care_tier', notes: 'notes', payRate: 'pay_rate'
+});
+
+// An ABSENT key means "leave this alone"; a key present and empty means "clear
+// it". Collapsing the two is how an edit form that cannot show a field wipes
+// it — the trap the enrollment editor hit two days ago, one surface along.
+function validateShiftEdit(shift, input) {
+  const body = input && typeof input === 'object' ? input : {};
+  const errors = [];
+  const changes = [];
+  const next = {};
+
+  const has = (k) => Object.prototype.hasOwnProperty.call(body, k);
+
+  Object.keys(body).forEach(k => {
+    if (k === 'clientId' || k === 'status') {
+      errors.push({
+        field: k, code: k === 'clientId' ? 'CLIENT_NOT_EDITABLE' : 'STATUS_NOT_EDITABLE',
+        message: k === 'clientId'
+          ? 'A shift cannot be moved to a different client. Cancel it and post a new one.'
+          : 'Use the shift actions to move a shift through its lifecycle.'
+      });
+    }
+  });
+
+  // Times are validated as a PAIR against whatever the row will hold after the
+  // edit, so moving only the start still gets checked against the existing end.
+  const startIso = has('start') ? new Date(body.start).getTime() : new Date(shift.start).getTime();
+  const endIso = has('end') ? new Date(body.end).getTime() : new Date(shift.end).getTime();
+  if (has('start') && !isFinite(startIso)) errors.push({ field: 'start', code: 'START_INVALID', message: 'Give a start time.' });
+  if (has('end') && !isFinite(endIso)) errors.push({ field: 'end', code: 'END_INVALID', message: 'Give an end time.' });
+  if (isFinite(startIso) && isFinite(endIso)) {
+    if (endIso <= startIso) errors.push({ field: 'end', code: 'END_BEFORE_START', message: 'The shift ends before it starts.' });
+    else if (endIso - startIso > 24 * 3600 * 1000) {
+      errors.push({ field: 'end', code: 'SHIFT_TOO_LONG', message: 'A single shift cannot run longer than 24 hours. Book consecutive shifts.' });
+    }
+  }
+  // A time in the past is deliberately ACCEPTED. Correcting last Tuesday's
+  // shift is the owner's stated reason for this route existing.
+  if (has('start') && isFinite(startIso)) {
+    const iso = new Date(startIso).toISOString();
+    if (iso !== shift.start) { next.start = iso; changes.push('start'); }
+  }
+  if (has('end') && isFinite(endIso)) {
+    const iso = new Date(endIso).toISOString();
+    if (iso !== shift.end) { next.end = iso; changes.push('end'); }
+  }
+
+  if (has('requiredLicenseLevel')) {
+    const required = normalizeLicenseRequirement(body.requiredLicenseLevel);
+    if (!required.ok) {
+      errors.push({
+        field: 'requiredLicenseLevel', code: 'LICENSE_LEVEL_INVALID',
+        message: `"${body.requiredLicenseLevel}" is not a license level. Use a level, or "any" to open the shift to every caregiver.`
+      });
+    } else if ((required.level || null) !== (shift.required_license_level || null)) {
+      next.requiredLicenseLevel = required.level;
+      changes.push('requiredLicenseLevel');
+    }
+  }
+
+  if (has('poolVisibility')) {
+    const v = body.poolVisibility || 'all_eligible';
+    if (!['all_eligible', 'care_team'].includes(v)) {
+      errors.push({ field: 'poolVisibility', code: 'VISIBILITY_INVALID', message: 'Visibility is all_eligible or care_team.' });
+    } else if (v !== shift.pool_visibility) { next.poolVisibility = v; changes.push('poolVisibility'); }
+  }
+
+  if (has('careTier')) {
+    const v = body.careTier ? String(body.careTier).trim().slice(0, 20) : null;
+    if (v !== (shift.care_tier || null)) { next.careTier = v; changes.push('careTier'); }
+  }
+
+  if (has('notes')) {
+    const v = String(body.notes === null || body.notes === undefined ? '' : body.notes).trim().slice(0, 2000);
+    if (v !== (shift.notes || '')) { next.notes = v; changes.push('notes'); }
+  }
+
+  if (has('payRate')) {
+    const v = cg.normalizePayRate(body.payRate);
+    if (v !== cg.normalizePayRate(shift.pay_rate)) { next.payRate = v; changes.push('payRate'); }
+  }
+
+  return { valid: errors.length === 0, errors, clean: next, changes };
+}
+
+// ---- The flags a corrected schedule makes wrong -----------------------------
+// A time log carries two different kinds of flag and the difference decides
+// what an edit may touch. `late_clock_in`, `early_clock_out` and
+// `late_clock_out` are DERIVED — they are the gap between the schedule and what
+// the caregiver did, so correcting a schedule that was wrong makes them wrong
+// too. Somebody who arrived exactly on time for a 1pm visit posted at 9am is
+// carrying a four-hour "late" mark they did not earn, and that mark is the
+// whole reason the office is correcting the shift.
+//
+// The geofence verdicts, `no_clock_out`, `manual_entry` and `admin_edited` are
+// OBSERVATIONS. Where somebody stood is not a function of what the calendar
+// said, so an edit never rewrites them.
+const SCHEDULE_DERIVED_FLAGS = Object.freeze(['late_clock_in', 'early_clock_out', 'late_clock_out']);
+
+function rederiveScheduleFlags(log, shift, graceMinutes = DEFAULT_GRACE_MINUTES) {
+  const kept = (log && Array.isArray(log.flags) ? log.flags : [])
+    .filter(f => !SCHEDULE_DERIVED_FLAGS.includes(f));
+  const derived = [];
+  // `new Date(null)` is the EPOCH, not an invalid date, and the epoch is
+  // finite — so a visit still running, with no clock-out yet, computed as
+  // having clocked out in 1970 and earned an "early clock out". An empty value
+  // is rejected before a Date is ever constructed. Same trap as the formatter
+  // that printed "12/31/1969, 7:00 PM" for a missing time (2026-09-16).
+  const at = (v) => (v === null || v === undefined || v === '' ? NaN : new Date(v).getTime());
+  const start = at(shift && shift.start);
+  const end = at(shift && shift.end);
+  const inAt = at(log && log.clock_in_at);
+  const outAt = at(log && log.clock_out_at);
+
+  if (isFinite(start) && isFinite(inAt) && inAt > start + graceMinutes * 60000) derived.push('late_clock_in');
+  if (isFinite(end) && isFinite(outAt)) {
+    if (outAt < end - graceMinutes * 60000) derived.push('early_clock_out');
+    if (outAt > end + graceMinutes * 60000) derived.push('late_clock_out');
+  }
+  // Order is preserved so a diff of the row reads as a change of substance
+  // rather than a reshuffle.
+  return kept.concat(derived.filter(f => !kept.includes(f)));
+}
+
+// ============================================================================
+// BULK POSTING (owner request, 2026-09-20)
+// ============================================================================
+// Home care is a standing pattern — "Mon, Wed, Fri, 9 to 1, through the end of
+// November" — and posting it one row at a time is forty identical form fills
+// with forty chances to fat-finger one.
+//
+// The times are EASTERN WALL CLOCK, expanded here rather than in the browser.
+// "9am every Monday" is 13:00Z in October and 14:00Z in November: a generator
+// that adds seven days to an instant is an hour wrong for half the year, which
+// is the availability-matcher bug (2026-09-16) pointed at creation instead of
+// matching. Every occurrence is built from its own date through
+// instantFromZoned, so the clock is right on both sides of the transition.
+const MAX_BULK_OCCURRENCES = 200;
+
+function expandRecurrence(input) {
+  const body = input && typeof input === 'object' ? input : {};
+  const errors = [];
+
+  const startDate = String(body.startDate || '').trim();
+  const endDate = String(body.endDate || '').trim();
+  if (!isIsoDate(startDate)) errors.push({ field: 'startDate', code: 'START_DATE_INVALID', message: 'Give a first date.' });
+  if (!isIsoDate(endDate)) errors.push({ field: 'endDate', code: 'END_DATE_INVALID', message: 'Give a last date.' });
+  if (isIsoDate(startDate) && isIsoDate(endDate) && dayStartUtc(endDate) < dayStartUtc(startDate)) {
+    errors.push({ field: 'endDate', code: 'DATE_RANGE_BACKWARDS', message: 'The last date is before the first.' });
+  }
+
+  const startTime = String(body.startTime || '').trim();
+  const endTime = String(body.endTime || '').trim();
+  if (!isTime(startTime)) errors.push({ field: 'startTime', code: 'START_TIME_INVALID', message: 'Give a start time as HH:MM.' });
+  if (!isTime(endTime)) errors.push({ field: 'endTime', code: 'END_TIME_INVALID', message: 'Give an end time as HH:MM.' });
+
+  const rawDays = Array.isArray(body.daysOfWeek) ? body.daysOfWeek : [];
+  const days = [];
+  rawDays.forEach(d => {
+    const norm = normalizeDay(d);
+    if (!norm) errors.push({ field: 'daysOfWeek', code: 'DAY_INVALID', message: `"${d}" is not a day of the week.` });
+    else if (!days.includes(norm)) days.push(norm);
+  });
+  if (days.length === 0 && rawDays.length === 0) {
+    errors.push({ field: 'daysOfWeek', code: 'DAYS_REQUIRED', message: 'Pick at least one day of the week.' });
+  }
+
+  // An overnight shift is legitimate — 10pm to 6am is a real home-care shift —
+  // and it ends on the NEXT calendar day. Expressed here rather than refused,
+  // the same way availability already models an overnight window.
+  const overnight = isTime(startTime) && isTime(endTime) && minutesOfDay(endTime) <= minutesOfDay(startTime);
+
+  if (errors.length > 0) return { valid: false, errors, occurrences: [] };
+
+  const occurrences = [];
+  let truncated = false;
+  for (let ts = dayStartUtc(startDate); ts <= dayStartUtc(endDate); ts += DAY_MS) {
+    const date = new Date(ts).toISOString().slice(0, 10);
+    // The weekday of a plain calendar date, which has no timezone of its own.
+    const weekday = DAYS[new Date(`${date}T00:00:00Z`).getUTCDay()];
+    if (!days.includes(weekday)) continue;
+    if (occurrences.length >= MAX_BULK_OCCURRENCES) { truncated = true; break; }
+    const start = practiceTime.instantFromZoned(date, startTime);
+    const endDay = overnight ? new Date(ts + DAY_MS).toISOString().slice(0, 10) : date;
+    const end = practiceTime.instantFromZoned(endDay, endTime);
+    if (!start || !end) continue;
+    occurrences.push({ date, start, end });
+  }
+
+  if (occurrences.length === 0) {
+    return {
+      valid: false, occurrences: [],
+      errors: [{
+        field: 'daysOfWeek', code: 'NO_OCCURRENCES',
+        message: 'No dates in that range fall on the days you picked.'
+      }]
+    };
+  }
+  if (truncated) {
+    return {
+      valid: false, occurrences: [],
+      errors: [{
+        field: 'endDate', code: 'TOO_MANY_OCCURRENCES',
+        message: `That range is more than ${MAX_BULK_OCCURRENCES} shifts. Post it in shorter stretches.`
+      }]
+    };
+  }
+  return { valid: true, errors: [], occurrences, overnight };
+}
+
+// A shift that has already been posted twice for the same client at the same
+// time is somebody clicking Post twice, not two visits. Bulk posting skips it
+// rather than refusing the whole batch — and a CANCELLED row does not count,
+// because reposting a shift that was called off is a real thing to do.
+function findDuplicateShift(rows, clientId, start, end) {
+  return (rows || []).find(r =>
+    r && r.client_id === clientId && r.status !== 'cancelled' &&
+    r.start === start && r.end === end) || null;
+}
+
+// ---- Removing in bulk ------------------------------------------------------
+// Cancelling is the normal answer and it leaves a tombstone, because a shift
+// somebody was confirmed on is a record of care that was promised. But a batch
+// posted to the wrong client is a TYPO, and forty cancelled tombstones for a
+// mistake nobody ever saw is clutter that makes the real cancellations harder
+// to find.
+//
+// So a shift is deleted outright only when nobody has ever held it: still open,
+// never claimed, never assigned, no caregiver, and no time log against it.
+// Anything else cancels, with its reason, exactly as the single-shift route
+// already does. Which of the two happened is reported per row, never guessed at
+// by the caller.
+function isNeverHeld(shift, timeLogs) {
+  if (!shift || shift.status !== 'open') return false;
+  if (shift.caregiver_id || shift.claimed_at || shift.assigned_at || shift.confirmed_at) return false;
+  if (shift.started_at || shift.completed_at) return false;
+  return !(timeLogs || []).some(l => l && String(l.shift_id) === String(shift.id));
+}
+
 module.exports = {
   AVAILABILITY_LEAD_DAYS, DAYS, normalizeDay, isTime, minutesOfDay, isIsoDate, daysUntil,
   validateAvailability, availabilityCoversShift,
   SHIFT_STATUSES, SHIFT_TRANSITIONS, SHIFT_STATUS_TIMESTAMP,
   canTransitionShift, transitionRefusal, validateShift,
+  SHIFT_EDITABLE_FIELDS, EDITABLE_SHIFT_STATUSES, SHIFT_EDIT_COLUMN, canEditShift, validateShiftEdit,
+  SCHEDULE_DERIVED_FLAGS, rederiveScheduleFlags,
+  MAX_BULK_OCCURRENCES, expandRecurrence, findDuplicateShift, isNeverHeld,
   LICENSE_REQUIREMENT_ANY, normalizeLicenseRequirement, shiftLevelLabel, isOpenToAllLevels,
   isEligibleForShift, eligibilityReason, shiftVisibility, shiftsOverlap, findShiftConflict, BLOCKING_STATUSES,
   DEFAULT_GEOFENCE_METERS, DEFAULT_GRACE_MINUTES, distanceMeters, geofenceRadiusFor, clientCoords,

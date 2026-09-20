@@ -130,6 +130,42 @@
     };
   }
 
+  // ---- Eastern wall clock -> the instant it names ---------------------------
+  // "2026-11-01" + "09:00" is a time SOMEBODY TYPED ON A FORM. It means 9am in
+  // Georgia, and the instant that names moves with daylight time: an hour
+  // earlier in July than in December. `new Date("2026-11-01T09:00")` reads it
+  // in whatever zone the reader happens to sit in — the browser's, or the
+  // server's — so a bulk range spanning November 1 would silently shift by an
+  // hour halfway through, and an admin working from outside Georgia would post
+  // every shift at the wrong time.
+  //
+  // So the offset is MEASURED at the instant in question rather than assumed.
+  // Two passes: guess, read the guess back in practice time, correct by the
+  // gap. A second pass settles the case where the correction itself crosses a
+  // transition. A local time that does not exist (2:30am on the spring-forward
+  // Sunday) resolves to the nearest real instant rather than to nothing.
+  const pad2 = (n) => String(n).padStart(2, '0');
+
+  function instantFromZoned(isoDate, hhmm) {
+    if (EMPTY(isoDate) || EMPTY(hhmm)) return null;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(isoDate))) return null;
+    if (!/^([01]\d|2[0-3]):([0-5]\d)$/.test(String(hhmm))) return null;
+    const wanted = Date.parse(`${isoDate}T${hhmm}:00Z`);
+    if (isNaN(wanted)) return null;
+    let ts = wanted;
+    for (let i = 0; i < 2; i++) {
+      const p = zonedParts(new Date(ts));
+      if (!p) return null;
+      const readBack = Date.parse(
+        `${p.year}-${pad2(p.month)}-${pad2(p.day)}T${pad2(p.hour)}:${pad2(p.minute)}:00Z`);
+      if (isNaN(readBack)) return null;
+      const gap = wanted - readBack;
+      if (gap === 0) break;
+      ts += gap;
+    }
+    return new Date(ts).toISOString();
+  }
+
   // Browser only. Fills in `timeZone` where a caller passed none, so a page
   // that was written before this rule still renders Eastern. Idempotent, and
   // display-only by design: see the header.
@@ -153,6 +189,6 @@
   return {
     PRACTICE_TIMEZONE, LOCALE,
     fmtDateTime, fmtDate, fmtTime, fmtDayTime, fmtLongDayTime,
-    zonedParts, installDefaultTimeZone
+    zonedParts, instantFromZoned, installDefaultTimeZone
   };
 });

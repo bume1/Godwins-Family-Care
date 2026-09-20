@@ -26,6 +26,7 @@ const http = require('http');
 const config = require('../config');
 const schedulingRoutes = require('../routes/scheduling');
 const sched = require('../schedulingRepository');
+const time = require('../public/gfc-time');   // every time read back is Eastern
 
 const JWT_SECRET = config.JWT_SECRET;
 
@@ -40,6 +41,9 @@ const USERS = [
   { id: 'admin-1', name: 'GFC Admin (TEST DATA)', email: 'admin@test.local', role: 'admin' },
   { id: 'fnp-1', name: 'Bethel Godwins (TEST DATA)', email: 'fnp@test.local', role: 'user', hasClinicalAccess: true },
   { id: 'cm-1', name: 'Courtney Hale (TEST DATA)', email: 'cm@test.local', role: 'caseManager' },
+  // The manager flag is what the owner widened the board to on 2026-09-20. It
+  // is a `user` with isManager, which is exactly what the live records carry.
+  { id: 'mgr-1', name: 'Dana Manager (TEST DATA)', email: 'mgr@test.local', role: 'user', isManager: true },
   { id: 'sitter-1', name: 'Sam Sitter (TEST DATA)', email: 'sitter@test.local', role: 'vendor', licenseLevel: 'sitter' },
   { id: 'pca-1', name: 'Pat PCA (TEST DATA)', email: 'pca@test.local', role: 'vendor', licenseLevel: 'pca' },
   { id: 'pca-2', name: 'Robin PCA (TEST DATA)', email: 'pca2@test.local', role: 'vendor', licenseLevel: 'pca' },
@@ -57,6 +61,82 @@ const USERS = [
     enrollmentStatus: 'enrolled', careTier: 'A1', address: { line1: '9 Pine Rd', city: 'Marietta', state: 'GA' }, careTeam: {} }
 ];
 store.set('users', USERS);
+
+// ---- Cleared to work — TEST DATA ONLY --------------------------------------
+// Georgia requires a caregiver to be fully cleared before they set foot in a
+// client's home, and caregiverOnboardingGate.js enforces that on every claim
+// and assignment. Seeding caregivers with no welcome packet meant the gate
+// refused EVERY claim from section C onward, and the probe then crashed on a
+// time log that was never written — so sections C through K had been reporting
+// nothing about anything for as long as that gate has existed.
+//
+// This is the second time this probe has been silently gutted by a gate added
+// after it was written (the enrollment gate did it at section B, 2026-09-13).
+// So the fixture is DERIVED from the checklist rather than hand-listed: it asks
+// the real repository what is outstanding and satisfies each item the way the
+// app would, which means an item added next session is cleared automatically
+// instead of quietly stopping the run again.
+const wpRepo = require('../welcomePacketRepository');
+const attestations = require('../caregiverAttestations');
+
+function seedCleared(caregiverIds) {
+  const packets = [];
+  const documents = [];
+  const attRows = [];
+  caregiverIds.forEach(id => {
+    const data = {
+      legalFirstName: 'Test', legalLastName: 'Caregiver',
+      emergencyName: 'Pat Kin', emergencyRelationship: 'Sibling', emergencyPhone: '770-555-0100'
+    };
+    const office = {};
+    // Ask the real checklist what is still outstanding, then satisfy it.
+    wpRepo.buildChecklist(data, [], office, []).forEach(row => {
+      if (!row.required || row.status === 'complete') return;
+      if (row.sign) {
+        attRows.push({
+          id: `att-${id}-${row.kind}`, caregiver_id: id, kind: row.kind,
+          version: attestations.CURRENT_VERSION, signed_at: '2026-09-01T12:00:00.000Z'
+        });
+        return;
+      }
+      if (row.source === 'office') {
+        office[row.kind] = { status: 'done', at: '2026-09-01T12:00:00.000Z', byName: 'GFC Admin (TEST DATA)' };
+        return;
+      }
+      documents.push({
+        id: `doc-${id}-${row.kind}`, caregiver_id: id, kind: row.kind,
+        file_name: `${row.kind}.pdf`, status: 'accepted',
+        uploaded_at: '2026-09-01T12:00:00.000Z', uploaded_by_office: false
+      });
+    });
+    packets.push({
+      id: `wp-${id}`, caregiver_id: id, status: 'submitted',
+      version: wpRepo.PACKET_VERSION, data, office,
+      signed_at: '2026-09-01T12:00:00.000Z'
+    });
+  });
+  store.set('welcome_packets', packets);
+  store.set('caregiver_documents', documents);
+  store.set('caregiver_attestations', attRows);
+
+  // The fixture is only worth having if it actually clears the gate. Proven
+  // here, at seed time, rather than discovered forty assertions later as a
+  // wall of refusals that look like a code defect.
+  const gate = require('../caregiverOnboardingGate');
+  caregiverIds.forEach(id => {
+    const packet = packets.find(r => r.caregiver_id === id);
+    const checklist = wpRepo.buildChecklist(packet.data, documents.filter(d => d.caregiver_id === id),
+      packet.office, attRows.filter(a => a.caregiver_id === id));
+    const verdict = gate.checkClearanceAllowed(
+      USERS.find(u => u.id === id), packet, checklist, {}, { role: 'admin' }, true);
+    if (!verdict.ok || verdict.override) {
+      throw new Error(`fixture does not clear ${id}: ${verdict.code || 'override applied'} — ` +
+        JSON.stringify((verdict.outstanding || []).map(o => o.title)));
+    }
+  });
+}
+
+seedCleared(['sitter-1', 'pca-1', 'pca-2', 'cna-1']);
 
 const getUsers = async () => await db.get('users');
 const invalidateUsersCache = () => {};
@@ -85,6 +165,11 @@ const authenticateToken = async (req, res, next) => {
   if (!u) return res.status(403).json({ error: 'User not found', code: 'AUTH_INVALID' });
   req.user = {
     id: u.id, email: u.email, name: u.name, role: u.role,
+    // Production's authenticateToken carries this, and the board's manager gate
+    // reads it. A harness missing a field production supplies is a harness
+    // exercising a different function — the shape that cost this repo the
+    // cross-client leak, the Drive fake and actorFromReq.
+    isManager: u.isManager || false,
     hasClinicalAccess: u.hasClinicalAccess || false,
     licenseLevel: u.licenseLevel || null,
     assignedClients: u.assignedClients || [],
@@ -741,6 +826,212 @@ const minsFromNow = (n) => new Date(Date.now() + n * 60000).toISOString();
     'shift_assigned', 'clock_in', 'clock_out', 'time_log_edited']) {
     check(`activity_log carries "${action}"`, acts.some(a => a.action === action));
   }
+
+  // ==========================================================================
+  section('L. Editing a posted shift — admin AND manager (2026-09-20)');
+  // ==========================================================================
+  const editable = await call('POST', '/api/scheduling/shifts', {
+    as: 'admin-1', body: { clientId: 'client-1', start: at(60, '09:00'), end: at(60, '13:00'), requiredLicenseLevel: 'any' }
+  });
+  const editId = editable.data.shift.id;
+
+  const mgrEdit = await call('PUT', `/api/scheduling/shifts/${editId}`, {
+    as: 'mgr-1', body: { start: at(60, '11:00'), end: at(60, '15:00'), notes: 'Front door code 4821' }
+  });
+  check('a MANAGER edits a posted shift', mgrEdit.status === 200, JSON.stringify(mgrEdit.data));
+  const editedRow = await stored('shifts', r => r.id === editId);
+  check('STORED: the new time is on the row', editedRow.start === at(60, '11:00') && editedRow.end === at(60, '15:00'));
+  check('STORED: the notes went with it', editedRow.notes === 'Front door code 4821');
+  check('STORED: who edited it and when', editedRow.edited_by_name === 'Dana Manager (TEST DATA)' && !!editedRow.edited_at);
+  check('the board PROJECTS the edit, not just the store',
+    mgrEdit.data.shift.editedByName === 'Dana Manager (TEST DATA)' && mgrEdit.data.shift.editCount === 1);
+
+  const cgShiftEdit = await call('PUT', `/api/scheduling/shifts/${editId}`, { as: 'pca-1', body: { notes: 'mine now' } });
+  check('a caregiver cannot edit the board',
+    cgShiftEdit.status === 403 && cgShiftEdit.data.code === 'SCHEDULE_MANAGER_ONLY', JSON.stringify(cgShiftEdit.data));
+  const cmEdit = await call('PUT', `/api/scheduling/shifts/${editId}`, { as: 'cm-1', body: { notes: 'mine now' } });
+  check('nor can a case manager', cmEdit.status === 403);
+  check('STORED: and neither refusal wrote anything',
+    (await stored('shifts', r => r.id === editId)).notes === 'Front door code 4821');
+
+  const noop = await call('PUT', `/api/scheduling/shifts/${editId}`, {
+    as: 'admin-1', body: { start: at(60, '11:00'), end: at(60, '15:00'), notes: 'Front door code 4821' }
+  });
+  check('resaving the same values reports no change', noop.status === 200 && noop.data.changed.length === 0);
+  check('STORED: and did not bump the edit count',
+    (await stored('shifts', r => r.id === editId)).edit_count === 1);
+
+  const badEdit = await call('PUT', `/api/scheduling/shifts/${editId}`, {
+    as: 'admin-1', body: { end: at(60, '10:00') } });
+  check('an end before the start is refused', badEdit.status === 400 && badEdit.data.code === 'SHIFT_INVALID');
+  const moveClient = await call('PUT', `/api/scheduling/shifts/${editId}`, {
+    as: 'admin-1', body: { clientId: 'client-2' } });
+  check('the client cannot be changed from the editor',
+    moveClient.status === 400 && moveClient.data.errors.some(e => e.code === 'CLIENT_NOT_EDITABLE'));
+  check('STORED: it is still the same client\'s shift',
+    (await stored('shifts', r => r.id === editId)).client_id === 'client-1');
+
+  // A shift somebody is holding, whose licence requirement is then raised.
+  await call('POST', `/api/scheduling/shifts/${editId}/assign`, { as: 'admin-1', body: { caregiverId: 'pca-1' } });
+  await call('POST', `/api/scheduling/shifts/${editId}/accept`, { as: 'pca-1' });
+  const squeeze = await call('PUT', `/api/scheduling/shifts/${editId}`, {
+    as: 'admin-1', body: { requiredLicenseLevel: 'lpn' } });
+  check('an edit that would push the holder out of scope is REFUSED',
+    squeeze.status === 409 && squeeze.data.code === 'SHIFT_HOLDER_INELIGIBLE', JSON.stringify(squeeze.data));
+  const stillHeld = await stored('shifts', r => r.id === editId);
+  check('STORED: the caregiver was not silently released',
+    stillHeld.caregiver_id === 'pca-1' && stillHeld.required_license_level === null);
+
+  const moved = await call('PUT', `/api/scheduling/shifts/${editId}`, {
+    as: 'admin-1', body: { start: at(61, '09:00'), end: at(61, '13:00') } });
+  check('moving a confirmed shift succeeds', moved.status === 200, JSON.stringify(moved.data));
+  const notices = ((await db.get('pending_notifications')) || []).filter(n => n.type === 'shift_time_changed');
+  check('QUEUED: the caregiver is told the time moved', notices.length === 1);
+  check('and the message carries the OLD time as well as the new',
+    notices.length === 1 && /previous time was/i.test(notices[0].templateData.body));
+
+  // ==========================================================================
+  section('M. A PAST shift is editable — the owner\'s stated reason');
+  // ==========================================================================
+  // Posted at the wrong hour and already worked: the caregiver turned up when
+  // they were actually due, and carries a "late" mark for it.
+  const histId = uuidv4();
+  const shiftRows = (await db.get('shifts')) || [];
+  shiftRows.push({
+    id: histId, client_id: 'client-1', client_name: 'Margaret Whitfield (TEST DATA)',
+    caregiver_id: 'pca-1', caregiver_name: 'Pat PCA (TEST DATA)',
+    start: '2026-01-06T14:00:00.000Z', end: '2026-01-06T18:00:00.000Z',
+    required_license_level: null, pool_visibility: 'all_eligible', status: 'completed',
+    created_by: 'admin-1', created_by_name: 'GFC Admin (TEST DATA)', created_at: '2026-01-01T00:00:00.000Z',
+    claimed_at: null, assigned_at: null, confirmed_at: '2026-01-02T00:00:00.000Z',
+    started_at: '2026-01-06T18:00:00.000Z', completed_at: '2026-01-06T22:00:00.000Z',
+    cancelled_at: null, reopened_at: null, notes: '', pay_rate: null
+  });
+  await db.set('shifts', shiftRows);
+  const logRows = (await db.get('time_logs')) || [];
+  logRows.push({
+    id: uuidv4(), shift_id: histId, client_id: 'client-1', client_name: 'Margaret Whitfield (TEST DATA)',
+    caregiver_id: 'pca-1', caregiver_name: 'Pat PCA (TEST DATA)',
+    scheduled_start: '2026-01-06T14:00:00.000Z', scheduled_end: '2026-01-06T18:00:00.000Z',
+    clock_in_at: '2026-01-06T18:00:00.000Z', clock_out_at: '2026-01-06T22:00:00.000Z',
+    total_minutes: 240, flags: ['late_clock_in', 'late_clock_out', 'outside_geofence'],
+    clock_in_geofence: { verdict: 'outside', distanceMeters: 3000 }
+  });
+  await db.set('time_logs', logRows);
+
+  const noticesBefore = ((await db.get('pending_notifications')) || []).length;
+  const fixPast = await call('PUT', `/api/scheduling/shifts/${histId}`, {
+    as: 'mgr-1', body: { start: '2026-01-06T18:00:00.000Z', end: '2026-01-06T22:00:00.000Z' } });
+  check('a manager corrects a shift that has already happened', fixPast.status === 200, JSON.stringify(fixPast.data));
+  const fixedLog = await stored('time_logs', l => l.shift_id === histId);
+  check('STORED: the time log\'s schedule followed the shift',
+    fixedLog.scheduled_start === '2026-01-06T18:00:00.000Z' && fixedLog.scheduled_end === '2026-01-06T22:00:00.000Z');
+  check('STORED: the late marks measured against the wrong time are gone',
+    !fixedLog.flags.includes('late_clock_in') && !fixedLog.flags.includes('late_clock_out'),
+    JSON.stringify(fixedLog.flags));
+  check('STORED: the geofence verdict is an observation and survives',
+    fixedLog.flags.includes('outside_geofence'));
+  check('STORED: hours worked come from the clock and did not move', fixedLog.total_minutes === 240);
+  check('nobody was emailed about a correction to a visit that already happened',
+    ((await db.get('pending_notifications')) || []).length === noticesBefore);
+
+  // ==========================================================================
+  section('N. Bulk posting and bulk removal');
+  // ==========================================================================
+  const bulk = await call('POST', '/api/scheduling/shifts/bulk', {
+    as: 'mgr-1',
+    body: {
+      clientId: 'client-2', startDate: '2099-10-26', endDate: '2099-11-06',
+      daysOfWeek: ['Mon', 'Wed', 'Fri'], startTime: '09:00', endTime: '13:00',
+      requiredLicenseLevel: 'any', poolVisibility: 'all_eligible'
+    }
+  });
+  check('a manager posts a repeating pattern', bulk.status === 200, JSON.stringify(bulk.data));
+  check('it created one shift per matching date', bulk.data.created.length === 6, String(bulk.data.created.length));
+  const bulkRows = ((await db.get('shifts')) || []).filter(r => r.bulk_batch_id === bulk.data.batchId);
+  check('STORED: every row is on the board with the batch id', bulkRows.length === 6);
+  const hours = bulkRows.map(r => time.zonedParts(r.start).hour);
+  check('STORED: every one starts at 9am EASTERN, either side of the clock change',
+    hours.every(h => h === 9), JSON.stringify(hours));
+  check('STORED: and the instants differ by the hour the clock moved',
+    bulkRows.some(r => r.start.endsWith('T13:00:00.000Z')) && bulkRows.some(r => r.start.endsWith('T14:00:00.000Z')));
+
+  const dupe = await call('POST', '/api/scheduling/shifts/bulk', {
+    as: 'admin-1',
+    body: {
+      clientId: 'client-2', startDate: '2099-10-26', endDate: '2099-11-06',
+      daysOfWeek: ['Mon', 'Wed', 'Fri'], startTime: '09:00', endTime: '13:00',
+      requiredLicenseLevel: 'any'
+    }
+  });
+  check('posting the identical pattern twice creates nothing',
+    dupe.status === 409 && dupe.data.code === 'BULK_NOTHING_POSTED' && dupe.data.skipped.length === 6);
+  check('STORED: the board still has six, not twelve',
+    ((await db.get('shifts')) || []).filter(r => r.bulk_batch_id === bulk.data.batchId).length === 6);
+
+  const badBulk = await call('POST', '/api/scheduling/shifts/bulk', {
+    as: 'admin-1',
+    body: { clientId: 'client-2', startDate: '2099-12-01', endDate: '2099-12-31',
+      daysOfWeek: ['Tue'], startTime: '09:00', endTime: '13:00', requiredLicenseLevel: 'brain surgeon' }
+  });
+  check('a bad template is refused', badBulk.status === 400 && badBulk.data.code === 'SHIFT_INVALID');
+  check('STORED: and wrote no rows at all',
+    ((await db.get('shifts')) || []).filter(r => String(r.start).startsWith('2099-12')).length === 0);
+
+  // Removal: one of the bulk rows is claimed, so it must CANCEL rather than go.
+  const keepId = bulkRows[0].id;
+  await call('POST', `/api/scheduling/shifts/${keepId}/claim`, { as: 'pca-1' });
+  await call('POST', `/api/scheduling/shifts/${keepId}/approve`, { as: 'admin-1' });
+
+  const noReasonRemove = await call('POST', '/api/scheduling/shifts/bulk-remove', {
+    as: 'mgr-1', body: { shiftIds: bulkRows.map(r => r.id), reason: '' } });
+  check('bulk removal without a reason is refused',
+    noReasonRemove.status === 400 && noReasonRemove.data.code === 'CANCEL_REASON_REQUIRED');
+  check('STORED: and removed nothing',
+    ((await db.get('shifts')) || []).filter(r => r.bulk_batch_id === bulk.data.batchId).length === 6);
+
+  const removed = await call('POST', '/api/scheduling/shifts/bulk-remove', {
+    as: 'mgr-1', body: { shiftIds: bulkRows.map(r => r.id), reason: 'Client moved to their daughter\'s' } });
+  check('a manager removes the batch', removed.status === 200, JSON.stringify(removed.data));
+  check('the one somebody held was CANCELLED, not deleted',
+    removed.data.cancelled.length === 1 && removed.data.cancelled[0].shiftId === keepId);
+  check('the five nobody ever held were removed outright', removed.data.deleted.length === 5);
+  const afterRemove = ((await db.get('shifts')) || []).filter(r => r.bulk_batch_id === bulk.data.batchId);
+  check('STORED: one row survives, as a cancelled tombstone',
+    afterRemove.length === 1 && afterRemove[0].status === 'cancelled');
+  check('STORED: carrying the reason it was called off',
+    afterRemove[0].cancel_reason === 'Client moved to their daughter\'s');
+  const cancelNotices = ((await db.get('pending_notifications')) || [])
+    .filter(n => n.type === 'shift_cancelled' && String(n.relatedEntityId).includes('bulk'));
+  check('QUEUED: the caregiver was told once, not once per shift', cancelNotices.length === 1);
+
+  // ==========================================================================
+  section('O. What a manager may NOT do');
+  // ==========================================================================
+  const roster = await call('GET', '/api/scheduling/caregivers', { as: 'mgr-1' });
+  check('a manager reads the roster', roster.status === 200);
+  check('and the SERVER tells the page what they may do',
+    roster.data.access.manageSchedule === true && roster.data.access.managePay === false &&
+    roster.data.access.manageLocations === false && roster.data.access.canOverrideGates === false,
+    JSON.stringify(roster.data.access));
+  const adminRoster = await call('GET', '/api/scheduling/caregivers', { as: 'admin-1' });
+  check('an admin is told they may do all of it',
+    adminRoster.data.access.managePay === true && adminRoster.data.access.manageLocations === true);
+
+  for (const [label, method, url, body] of [
+    ['the payroll export', 'GET', '/api/scheduling/payroll.csv', null],
+    ['the billing export', 'GET', '/api/scheduling/billing.csv', null],
+    ['typing in hours that were never clocked', 'POST', '/api/scheduling/time-logs',
+      { caregiverId: 'pca-1', clientId: 'client-1', clockInAt: at(1, '09:00'), clockOutAt: at(1, '13:00'), reason: 'dead phone' }],
+    ['writing a client\'s coordinates', 'PUT', '/api/scheduling/clients/client-1/location', { lat: 1, lng: 1 }]
+  ]) {
+    const res = await call(method, url, { as: 'mgr-1', body: body || undefined });
+    check(`a manager is refused ${label}`, res.status === 403, `${res.status} ${JSON.stringify(res.data)}`);
+  }
+  const mgrBoard = await call('GET', '/api/scheduling/shifts', { as: 'mgr-1' });
+  check('but a manager still reads the whole board', mgrBoard.status === 200 && mgrBoard.data.shifts.length > 1);
+  const mgrLogs = await call('GET', '/api/scheduling/time-logs', { as: 'mgr-1' });
+  check('and the hours behind it', mgrLogs.status === 200);
 
   // ==========================================================================
   console.log(`\n${'═'.repeat(66)}`);

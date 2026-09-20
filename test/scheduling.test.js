@@ -504,7 +504,7 @@ test('every /api/scheduling route authenticates and carries a role guard', () =>
   while ((m = re.exec(routeSrc)) !== null) {
     const [, method, routePath, middleware] = m;
     assert.ok(middleware.includes('authenticateToken'), `${method.toUpperCase()} ${routePath} must authenticate`);
-    const guarded = /requireAdmin|requireSchedulable/.test(middleware);
+    const guarded = /requireAdmin|requireScheduleManager|requireSchedulable/.test(middleware);
     // Three reads serve two audiences (admin sees all, a caregiver sees their
     // own) and branch inline. They must still branch, never return everything.
     const inlineGuarded = [
@@ -520,18 +520,66 @@ test('every /api/scheduling route authenticates and carries a role guard', () =>
   assert.ok(checked >= 12, `expected the scheduling route surface, found ${checked}`);
 });
 
-test('the payroll export and every write that changes the board are admin-only', () => {
+// REPOINTED 2026-09-20, not deleted. This asserted that every write on the
+// board was admin-only, which was right until the owner said "editable by admin
+// and manager". The rule it protected — a scheduling write is never open to
+// whoever happens to be signed in — did not go away; it grew a second tier, and
+// both halves are pinned here. Losing the test with the rule would have left
+// the narrower half unguarded.
+test('the money and the client record stay ADMIN-only', () => {
+  // Named by METHOD as well as path: GET /time-logs is a manager-readable list
+  // and POST /time-logs types in hours that were never clocked. Matching the
+  // path alone finds the read and proves nothing about the write.
+  for (const [method, route] of [
+    ['get', '/api/scheduling/payroll.csv'],
+    ['get', '/api/scheduling/billing.csv'],
+    ['post', '/api/scheduling/time-logs'],
+    ['put', '/api/scheduling/time-logs/:id'],
+    ['put', '/api/scheduling/clients/:clientId/location']
+  ]) {
+    const marker = `router.${method}('${route}'`;
+    const idx = routeSrc.indexOf(marker);
+    assert.ok(idx !== -1, `${marker} should exist`);
+    const decl = routeSrc.slice(idx, idx + 200);
+    assert.ok(decl.includes('requireAdmin') && !decl.includes('requireScheduleManager'),
+      `${method.toUpperCase()} ${route} must be admin-only: payroll and the client record are not a scheduling role's`);
+  }
+});
+
+test('running the board is admin OR manager, and never wider', () => {
   for (const route of [
-    "'/api/scheduling/payroll.csv'", "'/api/scheduling/shifts'",
+    "'/api/scheduling/shifts'", "'/api/scheduling/shifts/:id'",
+    "'/api/scheduling/shifts/bulk'", "'/api/scheduling/shifts/bulk-remove'",
     "'/api/scheduling/shifts/:id/approve'", "'/api/scheduling/shifts/:id/decline-claim'",
     "'/api/scheduling/shifts/:id/assign'", "'/api/scheduling/shifts/:id/cancel'",
-    "'/api/scheduling/time-logs/:id'", "'/api/scheduling/caregivers'"
+    "'/api/scheduling/availability/:id/review'",
+    "'/api/scheduling/summary'", "'/api/scheduling/caregivers'"
   ]) {
-    const idx = routeSrc.indexOf(route);
-    assert.ok(idx !== -1, `${route} should exist`);
-    const decl = routeSrc.slice(idx, idx + 160);
-    assert.ok(decl.includes('requireAdmin'), `${route} must be admin-only`);
+    // The POST and the PUT on '/api/scheduling/shifts' share a path, so each
+    // declaration is checked rather than only the first one found.
+    const re = new RegExp(`router\\.(get|post|put)\\(\\s*${route.replace(/[/:.']/g, ch => '\\' + ch)}\\s*,([^)]*?)\\(req`, 'g');
+    let m, found = 0;
+    while ((m = re.exec(routeSrc)) !== null) {
+      const middleware = m[2];
+      // A GET that serves two audiences branches inline; the writes must carry
+      // the guard itself.
+      if (m[1] === 'get' && route === "'/api/scheduling/shifts'") { found++; continue; }
+      assert.ok(middleware.includes('requireScheduleManager'),
+        `${m[1].toUpperCase()} ${route} must be admin-or-manager`);
+      assert.ok(!middleware.includes('requireSchedulable'),
+        `${m[1].toUpperCase()} ${route} must not be open to every caregiver`);
+      found++;
+    }
+    assert.ok(found > 0, `${route} should exist`);
   }
+  // The gate itself is what makes those two lines mean anything.
+  assert.ok(/const isScheduleManager = \(u\) => !!u && \(u\.role === ROLES\.ADMIN \|\| !!u\.isManager\)/.test(routeSrc),
+    'the manager gate must be admin OR the manager flag, and nothing else');
+  // An override is a compliance decision, not a scheduling one.
+  assert.ok(/gate\.checkSchedulingAllowed\(client, req\.body \|\| \{\}, req\.user, isAdmin\(req\.user\)\)/.test(routeSrc),
+    'the enrollment override stays ADMIN-only — isAdmin, never isScheduleManager');
+  assert.ok(/req\.user, req\.user\.role === ROLES\.ADMIN\)/.test(routeSrc),
+    'the caregiver-clearance override stays ADMIN-only too');
 });
 
 test('client coordinates: a real point is accepted, nonsense is refused', () => {
@@ -1075,7 +1123,11 @@ test('the dashboard summary route is admin-only, and RETURNS ONLY COUNTS', async
   }
 });
 
-test('a NON-admin is refused the summary at the route', async () => {
+// REPOINTED 2026-09-20. This test's own comment read "widening it is an owner
+// decision". The owner made it — "editable by admin and manager" — so a manager
+// now reads the board, and what still needs pinning is that the widening stopped
+// at the manager flag rather than reaching every signed-in staff account.
+test('a manager reads the board; anyone else is still refused', async () => {
   const express = require('express');
   const db = { get: async () => [], set: async () => {} };
   const router = require('../routes/scheduling')({
@@ -1084,7 +1136,7 @@ test('a NON-admin is refused the summary at the route', async () => {
     getUsers: async () => [], invalidateUsersCache: () => {},
     // A "manager" is the legacy lab-era isManager flag — NOT an admin. Today
     // that means no scheduling read at all; widening it is an owner decision.
-    authenticateToken: (req, _res, next) => { req.user = { id: 'm1', role: 'user', isManager: true }; next(); },
+    authenticateToken: (req, _res, next) => { req.user = { id: 'm1', role: req.headers['x-role'] || 'user', isManager: req.headers['x-role'] ? false : true }; next(); },
     uuidv4: () => 'x'
   });
   const app = express();
@@ -1094,8 +1146,7 @@ test('a NON-admin is refused the summary at the route', async () => {
   try {
     const port = server.address().port;
     const res = await fetch(`http://127.0.0.1:${port}/api/scheduling/summary`);
-    assert.strictEqual(res.status, 403);
-    assert.strictEqual((await res.json()).code, 'ADMIN_ONLY');
+    assert.strictEqual(res.status, 200, 'a manager runs the board and sees what is waiting on it');
   } finally {
     server.close();
   }
