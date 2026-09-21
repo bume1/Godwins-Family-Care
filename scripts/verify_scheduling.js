@@ -885,6 +885,12 @@ const minsFromNow = (n) => new Date(Date.now() + n * 60000).toISOString();
   const moved = await call('PUT', `/api/scheduling/shifts/${editId}`, {
     as: 'admin-1', body: { start: at(61, '09:00'), end: at(61, '13:00') } });
   check('moving a confirmed shift succeeds', moved.status === 200, JSON.stringify(moved.data));
+  // Asserted because extracting the shared editor renamed this key and the
+  // route silently returned `undefined` — the probe was green either way,
+  // because it had never read it. A probe that does not assert a value is not
+  // evidence about that value.
+  check('the response reports how many time logs moved with it',
+    typeof moved.data.timeLogsUpdated === 'number', JSON.stringify(moved.data));
   const notices = ((await db.get('pending_notifications')) || []).filter(n => n.type === 'shift_time_changed');
   check('QUEUED: the caregiver is told the time moved', notices.length === 1);
   check('and the message carries the OLD time as well as the new',
@@ -1047,6 +1053,139 @@ const minsFromNow = (n) => new Date(Date.now() + n * 60000).toISOString();
   check('but a manager still reads the whole board', mgrBoard.status === 200 && mgrBoard.data.shifts.length > 1);
   const mgrLogs = await call('GET', '/api/scheduling/time-logs', { as: 'mgr-1' });
   check('and the hours behind it', mgrLogs.status === 200);
+
+
+  // ==========================================================================
+  section('P. A caregiver asks for a shift to change (2026-09-21)');
+  // ==========================================================================
+  // Posted far enough out to clear the notice minimum, then accepted, so the
+  // caregiver is holding a CONFIRMED shift — the only state this route covers.
+  const crPost = await call('POST', '/api/scheduling/shifts', {
+    as: 'admin-1', body: { clientId: 'client-1', start: at(40, '09:00'), end: at(40, '13:00'), requiredLicenseLevel: 'any' }
+  });
+  const crShiftId = crPost.data.shift.id;
+  await call('POST', `/api/scheduling/shifts/${crShiftId}/assign`, { as: 'admin-1', body: { caregiverId: 'pca-1' } });
+  await call('POST', `/api/scheduling/shifts/${crShiftId}/accept`, { as: 'pca-1' });
+
+  const board = await call('GET', '/api/scheduling/shifts', { as: 'pca-1' });
+  const boardRow = board.data.shifts.find(s => s.id === crShiftId);
+  check('the board tells the caregiver this shift CAN be asked about',
+    boardRow && boardRow.changeRequestable === true, JSON.stringify(boardRow && boardRow.changeRequestBlockedReason));
+
+  const asked = await call('POST', `/api/scheduling/shifts/${crShiftId}/change-request`, {
+    as: 'pca-1', body: { kind: 'time_change', proposedStart: at(40, '11:00'), proposedEnd: at(40, '15:00'), reason: 'School run — I can start two hours later.' }
+  });
+  check('the caregiver holding it can ask to move it', asked.status === 200, JSON.stringify(asked.data));
+  const askedRow = await stored('shifts', r => r.id === crShiftId);
+  check('STORED: the ask moved NOTHING — the shift is where it was',
+    askedRow.start === at(40, '09:00') && askedRow.end === at(40, '13:00'));
+  check('STORED: and they still hold it', askedRow.caregiver_id === 'pca-1');
+  const crRow = await stored('shift_change_requests', r => r.shift_id === crShiftId);
+  check('STORED: the request is pending, with the reason and the snapshot',
+    crRow.status === 'pending' && /School run/.test(crRow.reason) && crRow.shift_start_at_request === at(40, '09:00'));
+
+  const cr_dupe = await call('POST', `/api/scheduling/shifts/${crShiftId}/change-request`, {
+    as: 'pca-1', body: { kind: 'drop', reason: 'again' } });
+  check('a second open ask on the same shift is refused',
+    cr_dupe.status === 409 && cr_dupe.data.code === 'CHANGE_REQUEST_ALREADY_OPEN');
+
+  const cr_notMine = await call('POST', `/api/scheduling/shifts/${crShiftId}/change-request`, {
+    as: 'cna-1', body: { kind: 'drop', reason: 'not mine' } });
+  check('another caregiver cannot ask about it',
+    cr_notMine.status === 403 && cr_notMine.data.code === 'SHIFT_NOT_YOURS');
+
+  const cgApprove = await call('POST', `/api/scheduling/change-requests/${crRow.id}/approve`, { as: 'pca-1' });
+  check('a caregiver cannot approve their own request', cgApprove.status === 403);
+  check('STORED: and it is still pending',
+    (await stored('shift_change_requests', r => r.id === crRow.id)).status === 'pending');
+
+  const bareDecline = await call('POST', `/api/scheduling/change-requests/${crRow.id}/decline`, { as: 'mgr-1', body: {} });
+  check('a decline without a reason is refused',
+    bareDecline.status === 400 && bareDecline.data.code === 'DECLINE_NOTE_REQUIRED');
+
+  const approved = await call('POST', `/api/scheduling/change-requests/${crRow.id}/approve`, { as: 'mgr-1', body: {} });
+  check('a MANAGER approves it', approved.status === 200, JSON.stringify(approved.data));
+  const movedRow = await stored('shifts', r => r.id === crShiftId);
+  check('STORED: the shift actually moved to the time they asked for',
+    movedRow.start === at(40, '11:00') && movedRow.end === at(40, '15:00'));
+  check('STORED: through the SHARED editor — it carries the edit stamp',
+    movedRow.edited_by_name === 'Dana Manager (TEST DATA)' && movedRow.edit_count === 1);
+  check('STORED: and the caregiver kept the shift', movedRow.caregiver_id === 'pca-1');
+  check('STORED: the request reads approved, by whom',
+    (await stored('shift_change_requests', r => r.id === crRow.id)).status === 'approved');
+  const crNotices = ((await db.get('pending_notifications')) || []).filter(n => n.type === 'shift_time_changed');
+  check('QUEUED: the caregiver is told once, by the shared editor', crNotices.length >= 1);
+
+  const reApprove = await call('POST', `/api/scheduling/change-requests/${crRow.id}/approve`, { as: 'mgr-1', body: {} });
+  check('an answered request cannot be answered twice',
+    reApprove.status === 409 && reApprove.data.code === 'CHANGE_REQUEST_DECIDED');
+
+  // A hand-back: approving must put it in the open pool and clear the holder.
+  const dropPost = await call('POST', '/api/scheduling/shifts', {
+    as: 'admin-1', body: { clientId: 'client-1', start: at(42, '09:00'), end: at(42, '13:00'), requiredLicenseLevel: 'any' } });
+  const dropId = dropPost.data.shift.id;
+  await call('POST', `/api/scheduling/shifts/${dropId}/assign`, { as: 'admin-1', body: { caregiverId: 'pca-1' } });
+  await call('POST', `/api/scheduling/shifts/${dropId}/accept`, { as: 'pca-1' });
+  const dropAsk = await call('POST', `/api/scheduling/shifts/${dropId}/change-request`, {
+    as: 'pca-1', body: { kind: 'drop', reason: 'Hospital appointment came through.' } });
+  check('the caregiver can ask to hand a shift back', dropAsk.status === 200, JSON.stringify(dropAsk.data));
+  const dropRow = await stored('shift_change_requests', r => r.shift_id === dropId);
+  const dropApproved = await call('POST', `/api/scheduling/change-requests/${dropRow.id}/approve`, { as: 'admin-1', body: {} });
+  check('approving the hand-back succeeds', dropApproved.status === 200, JSON.stringify(dropApproved.data));
+  const released = await stored('shifts', r => r.id === dropId);
+  check('STORED: it is back in the open pool with nobody on it',
+    released.status === 'open' && !released.caregiver_id);
+  check('STORED: but WHO let it go is kept',
+    released.released_from_name === 'Pat PCA (TEST DATA)' && /Hospital appointment/.test(String(released.released_reason)));
+
+  // Inside the notice window the ask is refused AND pointed at the office.
+  const latePost = await call('POST', '/api/scheduling/shifts', {
+    as: 'admin-1', body: { clientId: 'client-1', start: minsFromNow(180), end: minsFromNow(420), requiredLicenseLevel: 'any' } });
+  const lateId = latePost.data.shift.id;
+  await call('POST', `/api/scheduling/shifts/${lateId}/assign`, { as: 'admin-1', body: { caregiverId: 'pca-1' } });
+  await call('POST', `/api/scheduling/shifts/${lateId}/accept`, { as: 'pca-1' });
+  const tooLate = await call('POST', `/api/scheduling/shifts/${lateId}/change-request`, {
+    as: 'pca-1', body: { kind: 'drop', reason: 'I am unwell' } });
+  check('inside the notice window the ask is refused',
+    tooLate.status === 409 && tooLate.data.code === 'CHANGE_REQUEST_TOO_LATE', JSON.stringify(tooLate.data));
+  check('and the refusal hands over the office number rather than dead-ending',
+    typeof tooLate.data.office === 'string' && tooLate.data.office.length > 0);
+  const lateBoard = await call('GET', '/api/scheduling/shifts', { as: 'pca-1' });
+  const lateRow = lateBoard.data.shifts.find(s => s.id === lateId);
+  check('the BOARD says so too, so no button is offered that would fail',
+    lateRow && lateRow.changeRequestable === false && /\d/.test(String(lateRow.changeRequestBlockedReason)));
+
+  // A stale ask must never be applied to a shift that has since moved.
+  const stalePost = await call('POST', '/api/scheduling/shifts', {
+    as: 'admin-1', body: { clientId: 'client-1', start: at(44, '09:00'), end: at(44, '13:00'), requiredLicenseLevel: 'any' } });
+  const staleId = stalePost.data.shift.id;
+  await call('POST', `/api/scheduling/shifts/${staleId}/assign`, { as: 'admin-1', body: { caregiverId: 'pca-1' } });
+  await call('POST', `/api/scheduling/shifts/${staleId}/accept`, { as: 'pca-1' });
+  await call('POST', `/api/scheduling/shifts/${staleId}/change-request`, {
+    as: 'pca-1', body: { kind: 'time_change', proposedStart: at(44, '11:00'), proposedEnd: at(44, '15:00'), reason: 'later start' } });
+  const staleRow = await stored('shift_change_requests', r => r.shift_id === staleId);
+  await call('PUT', `/api/scheduling/shifts/${staleId}`, { as: 'admin-1', body: { start: at(45, '09:00'), end: at(45, '13:00') } });
+  const staleApprove = await call('POST', `/api/scheduling/change-requests/${staleRow.id}/approve`, { as: 'admin-1', body: {} });
+  check('approving an ask about a time the shift no longer has is REFUSED',
+    staleApprove.status === 409 && staleApprove.data.code === 'SHIFT_MOVED_SINCE_REQUEST', JSON.stringify(staleApprove.data));
+  const staleShift = await stored('shifts', r => r.id === staleId);
+  check('STORED: the admin\'s time stands, the stale ask was not applied',
+    staleShift.start === at(45, '09:00'));
+  check('STORED: and the request is still waiting, not marked approved',
+    (await stored('shift_change_requests', r => r.id === staleRow.id)).status === 'pending');
+
+  // Scoping: a caregiver reads their own, a manager reads the queue.
+  const mineList = await call('GET', '/api/scheduling/change-requests', { as: 'pca-1' });
+  check('a caregiver reads their own requests', mineList.status === 200 && mineList.data.requests.length >= 3);
+  check('and every one of them is theirs',
+    mineList.data.requests.every(r => r.caregiverId === 'pca-1'));
+  const widen = await call('GET', '/api/scheduling/change-requests?caregiverId=cna-1', { as: 'pca-1' });
+  check('a caregiver cannot widen the read with a query parameter',
+    widen.data.requests.every(r => r.caregiverId === 'pca-1'));
+  const queue = await call('GET', '/api/scheduling/change-requests', { as: 'mgr-1' });
+  check('a manager reads the whole queue', queue.status === 200 && queue.data.requests.length >= 3);
+  const cmQueue = await call('GET', '/api/scheduling/change-requests', { as: 'cm-1' });
+  check('a case manager reaches none of it', cmQueue.status === 403);
 
   // ==========================================================================
   console.log(`\n${'═'.repeat(66)}`);

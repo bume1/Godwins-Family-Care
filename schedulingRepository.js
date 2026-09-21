@@ -841,6 +841,166 @@ function validateShiftEdit(shift, input) {
   return { valid: errors.length === 0, errors, clean: next, changes };
 }
 
+
+// ---- A caregiver asks for a shift to change --------------------------------
+// Owner-directed, 2026-09-21: "caregivers should be able to request adjustments
+// in scheduled shift times in the app."
+//
+// Before this, a caregiver holding a confirmed shift had NO route at all. They
+// could decline an offer they had not yet accepted, and after that the only
+// lever was phoning the office — so the ask left no record, and the pattern of
+// who asks for what was invisible. This is the ask, in the app, with an answer
+// that comes back to them.
+//
+// AN ASK IS NOT A CHANGE. The request writes nothing to the shift. An admin or
+// a manager approves it, and the approval runs through the SAME editor a
+// hand-typed correction runs through — the holder's eligibility, the overlap
+// check, the time log following the shift, the derived flags being re-derived.
+// A second writer for one value is how the board and the timesheet start
+// disagreeing, which is the failure this repo keeps paying for.
+const CHANGE_REQUEST_KINDS = Object.freeze(['time_change', 'drop']);
+
+// Only a shift they have actually ACCEPTED. An `assigned` shift is an offer
+// they have not answered yet and it already has accept/decline — giving it a
+// second, quieter door would mean two ways to hand back the same shift, and
+// one of them would drift. A started or finished shift is not a schedule
+// question any more; that is a timesheet correction, which is admin's own
+// route with its own mandatory reason.
+const REQUESTABLE_SHIFT_STATUSES = Object.freeze(['confirmed']);
+
+// OWNER DECISION, 2026-09-21: a request needs a notice minimum, and inside it
+// the caregiver phones instead. ONE constant — change this line to change the
+// policy. The refusal deliberately names the office and says to call rather
+// than just saying no: a dead end is how a control gets worked around, and a
+// caregiver who cannot tell us at all is worse than one who tells us late.
+const CHANGE_REQUEST_NOTICE_MINUTES = 24 * 60;
+
+const CHANGE_REQUEST_STATUSES = Object.freeze(['pending', 'approved', 'declined', 'withdrawn']);
+
+// Can this caregiver ask about this shift, right now? Split out from the route
+// so the SCREEN and the API answer the same question — the app must never
+// offer a control the server is going to refuse.
+function canRequestShiftChange(shift, at = new Date()) {
+  if (!shift) return { ok: false, code: 'SHIFT_NOT_FOUND', message: 'Shift not found.' };
+  if (!REQUESTABLE_SHIFT_STATUSES.includes(shift.status)) {
+    return {
+      ok: false, code: 'SHIFT_NOT_REQUESTABLE', status: shift.status,
+      message: shift.status === 'assigned'
+        ? 'This shift is still an offer. Accept it, or decline it, from the offer itself.'
+        : `A ${String(shift.status).replace(/_/g, ' ')} shift cannot be changed by request. Speak to the office.`
+    };
+  }
+  const startMs = shift.start ? new Date(shift.start).getTime() : NaN;
+  if (!isFinite(startMs)) return { ok: false, code: 'SHIFT_START_INVALID', message: 'That shift has no usable start time.' };
+
+  // `new Date(null)` is the EPOCH and the epoch is finite, so an empty `at`
+  // would read as 1970 and make every shift look like it had decades of
+  // notice. Same trap the flag re-derivation hit on 2026-09-20.
+  const nowMs = (at === null || at === undefined || at === '') ? NaN : new Date(at).getTime();
+  if (!isFinite(nowMs)) return { ok: false, code: 'NOW_INVALID', message: 'Could not read the current time.' };
+
+  const minutesOfNotice = Math.floor((startMs - nowMs) / 60000);
+  if (minutesOfNotice <= 0) {
+    return {
+      ok: false, code: 'SHIFT_ALREADY_STARTED', minutesOfNotice,
+      message: 'That shift has already started. Speak to the office.'
+    };
+  }
+  if (minutesOfNotice < CHANGE_REQUEST_NOTICE_MINUTES) {
+    return {
+      ok: false, code: 'CHANGE_REQUEST_TOO_LATE', minutesOfNotice,
+      requiredMinutes: CHANGE_REQUEST_NOTICE_MINUTES,
+      message: `A change is requested at least ${Math.round(CHANGE_REQUEST_NOTICE_MINUTES / 60)} hours ahead, and that shift starts in ${describeNotice(minutesOfNotice)}. Call the office so somebody can act on it today.`
+    };
+  }
+  return { ok: true, minutesOfNotice };
+}
+
+// "in 3 hours", "in 45 minutes" — a caregiver reading a refusal on a phone
+// needs to know how short they were, not a raw minute count.
+function describeNotice(minutes) {
+  const m = Math.max(0, Math.floor(Number(minutes) || 0));
+  if (m < 60) return `${m} minute${m === 1 ? '' : 's'}`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} hour${h === 1 ? '' : 's'}`;
+  const d = Math.floor(h / 24);
+  return `${d} day${d === 1 ? '' : 's'}`;
+}
+
+// What the caregiver is asking for. A `time_change` carries a proposed start
+// and end; a `drop` carries neither and means "I cannot work this one".
+//
+// A REASON IS REQUIRED ON BOTH. The office is being asked to move a client's
+// care or find a replacement, and "no reason given" is not something anyone can
+// act on or weigh. It is also the only field that makes a repeated pattern
+// readable later.
+function validateChangeRequest(shift, input) {
+  const body = input && typeof input === 'object' ? input : {};
+  const errors = [];
+  const clean = {};
+
+  const kind = String(body.kind || '').trim();
+  if (!CHANGE_REQUEST_KINDS.includes(kind)) {
+    errors.push({
+      field: 'kind', code: 'KIND_INVALID',
+      message: 'Say whether you are asking to change the time or to hand the shift back.',
+      options: CHANGE_REQUEST_KINDS.slice()
+    });
+  } else {
+    clean.kind = kind;
+  }
+
+  const reason = String(body.reason === null || body.reason === undefined ? '' : body.reason).trim();
+  if (!reason) {
+    errors.push({ field: 'reason', code: 'REASON_REQUIRED', message: 'Tell the office why, in a sentence.' });
+  } else {
+    clean.reason = reason.slice(0, 1000);
+  }
+
+  if (kind === 'time_change') {
+    const startMs = body.proposedStart ? new Date(body.proposedStart).getTime() : NaN;
+    const endMs = body.proposedEnd ? new Date(body.proposedEnd).getTime() : NaN;
+    if (!isFinite(startMs)) errors.push({ field: 'proposedStart', code: 'START_INVALID', message: 'Give the start time you are asking for.' });
+    if (!isFinite(endMs)) errors.push({ field: 'proposedEnd', code: 'END_INVALID', message: 'Give the end time you are asking for.' });
+    if (isFinite(startMs) && isFinite(endMs)) {
+      if (endMs <= startMs) {
+        errors.push({ field: 'proposedEnd', code: 'END_BEFORE_START', message: 'That ends before it starts.' });
+      } else if (endMs - startMs > 24 * 3600 * 1000) {
+        errors.push({ field: 'proposedEnd', code: 'SHIFT_TOO_LONG', message: 'A single shift cannot run longer than 24 hours.' });
+      } else if (startMs <= Date.now()) {
+        errors.push({ field: 'proposedStart', code: 'START_IN_PAST', message: 'Ask for a time that has not already passed.' });
+      } else {
+        const sIso = new Date(startMs).toISOString();
+        const eIso = new Date(endMs).toISOString();
+        // An ask that matches what is already on the board is not an ask. It
+        // would sit in the queue, get approved, change nothing, and read to
+        // everyone as though something had been done.
+        if (sIso === shift.start && eIso === shift.end) {
+          errors.push({
+            field: 'proposedStart', code: 'NO_CHANGE_REQUESTED',
+            message: 'That is the time the shift already has.'
+          });
+        } else {
+          clean.proposedStart = sIso;
+          clean.proposedEnd = eIso;
+        }
+      }
+    }
+  }
+
+  return { valid: errors.length === 0, errors, clean };
+}
+
+// An open request is one still waiting on somebody. ONE per shift at a time:
+// clicking Ask twice is the commonest way to get two of everything, and two
+// pending asks about one shift means whoever works the queue answers the same
+// question twice and the second answer overwrites the first.
+const isOpenChangeRequest = (row) => !!row && row.status === 'pending';
+
+function findOpenChangeRequest(rows, shiftId) {
+  return (Array.isArray(rows) ? rows : []).find(r => isOpenChangeRequest(r) && String(r.shift_id) === String(shiftId)) || null;
+}
+
 // ---- The flags a corrected schedule makes wrong -----------------------------
 // A time log carries two different kinds of flag and the difference decides
 // what an edit may touch. `late_clock_in`, `early_clock_out` and
@@ -1002,6 +1162,9 @@ module.exports = {
   canTransitionShift, transitionRefusal, validateShift,
   SHIFT_EDITABLE_FIELDS, EDITABLE_SHIFT_STATUSES, SHIFT_EDIT_COLUMN, canEditShift, validateShiftEdit,
   SCHEDULE_DERIVED_FLAGS, rederiveScheduleFlags,
+  CHANGE_REQUEST_KINDS, CHANGE_REQUEST_STATUSES, CHANGE_REQUEST_NOTICE_MINUTES,
+  REQUESTABLE_SHIFT_STATUSES, canRequestShiftChange, validateChangeRequest,
+  describeNotice, isOpenChangeRequest, findOpenChangeRequest,
   MAX_BULK_OCCURRENCES, expandRecurrence, findDuplicateShift, isNeverHeld,
   LICENSE_REQUIREMENT_ANY, normalizeLicenseRequirement, shiftLevelLabel, isOpenToAllLevels,
   isEligibleForShift, eligibilityReason, shiftVisibility, shiftsOverlap, findShiftConflict, BLOCKING_STATUSES,
