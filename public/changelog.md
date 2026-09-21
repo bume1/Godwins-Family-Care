@@ -17,6 +17,7 @@
 - backfill PR #96 as merged for Session 4.8
 
 #### Changes
+- A time change can be asked about an unaccepted offer, and asking is agreeing
 - Let a caregiver ask for a shift to change, and say which availability is in force
 - Backfill PR #104 and #105, and record the changelog fix
 - Stop the changelog stacking a fresh copy of today's entry on every boot
