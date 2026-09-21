@@ -1187,6 +1187,95 @@ const minsFromNow = (n) => new Date(Date.now() + n * 60000).toISOString();
   const cmQueue = await call('GET', '/api/scheduling/change-requests', { as: 'cm-1' });
   check('a case manager reaches none of it', cmQueue.status === 403);
 
+
+  // ==========================================================================
+  section('Q. A change asked about an OFFER — asking is agreeing (2026-09-21)');
+  // ==========================================================================
+  // An offer the caregiver has NOT accepted. Asking for a different time is
+  // their agreement to work it at that time, so approving confirms it onto
+  // their schedule rather than sending it back for a second acceptance.
+  const offPost = await call('POST', '/api/scheduling/shifts', {
+    as: 'admin-1', body: { clientId: 'client-1', start: at(50, '09:00'), end: at(50, '13:00'), requiredLicenseLevel: 'any' } });
+  const offId = offPost.data.shift.id;
+  await call('POST', `/api/scheduling/shifts/${offId}/assign`, { as: 'admin-1', body: { caregiverId: 'pca-1' } });
+
+  const offBoard = await call('GET', '/api/scheduling/shifts', { as: 'pca-1' });
+  const offRow = offBoard.data.shifts.find(s => s.id === offId);
+  check('an unaccepted OFFER can be asked about', offRow && offRow.changeRequestable === true);
+  check('and the board serves only the kinds that offer takes',
+    offRow && Array.isArray(offRow.changeRequestKinds)
+      && offRow.changeRequestKinds.length === 1 && offRow.changeRequestKinds[0] === 'time_change',
+    JSON.stringify(offRow && offRow.changeRequestKinds));
+
+  const offDrop = await call('POST', `/api/scheduling/shifts/${offId}/change-request`, {
+    as: 'pca-1', body: { kind: 'drop', reason: 'cannot do it' } });
+  check('handing back an OFFER is refused — that is Decline',
+    offDrop.status === 400 && offDrop.data.errors.some(e => e.code === 'KIND_NOT_FOR_THIS_SHIFT'),
+    JSON.stringify(offDrop.data));
+
+  const offAsk = await call('POST', `/api/scheduling/shifts/${offId}/change-request`, {
+    as: 'pca-1', body: { kind: 'time_change', proposedStart: at(50, '11:00'), proposedEnd: at(50, '15:00'), reason: 'School run — I can do it later.' } });
+  check('asking for a different time on an offer is accepted', offAsk.status === 200, JSON.stringify(offAsk.data));
+  const offStill = await stored('shifts', r => r.id === offId);
+  check('STORED: asking neither accepted the offer nor moved it',
+    offStill.status === 'assigned' && offStill.start === at(50, '09:00'));
+
+  const offReq = await stored('shift_change_requests', r => r.shift_id === offId);
+  const offApproved = await call('POST', `/api/scheduling/change-requests/${offReq.id}/approve`, { as: 'mgr-1', body: {} });
+  check('the office approves it', offApproved.status === 200, JSON.stringify(offApproved.data));
+  const offAfter = await stored('shifts', r => r.id === offId);
+  check('STORED: the shift moved to the time they asked for',
+    offAfter.start === at(50, '11:00') && offAfter.end === at(50, '15:00'));
+  check('STORED: and it is CONFIRMED — asking was the agreement',
+    offAfter.status === 'confirmed', `status=${offAfter.status}`);
+  check('STORED: with the caregiver on it', offAfter.caregiver_id === 'pca-1');
+  check('STORED: through the state machine, so the confirm is stamped', !!offAfter.confirmed_at);
+  check('the office is told it is STAFFED, not merely approved', offApproved.data.confirmed === true);
+  const offNotices = ((await db.get('pending_notifications')) || [])
+    .filter(n => n.type === 'shift_time_changed' && /confirmed and on your schedule/i.test(n.templateData.body));
+  check('QUEUED: the caregiver is told it is theirs, not asked to accept again',
+    offNotices.length === 1, `${offNotices.length}`);
+
+  // Denied: the ORIGINAL offer stands and is still awaiting their answer.
+  const denyPost = await call('POST', '/api/scheduling/shifts', {
+    as: 'admin-1', body: { clientId: 'client-1', start: at(52, '09:00'), end: at(52, '13:00'), requiredLicenseLevel: 'any' } });
+  const denyId = denyPost.data.shift.id;
+  await call('POST', `/api/scheduling/shifts/${denyId}/assign`, { as: 'admin-1', body: { caregiverId: 'pca-1' } });
+  await call('POST', `/api/scheduling/shifts/${denyId}/change-request`, {
+    as: 'pca-1', body: { kind: 'time_change', proposedStart: at(52, '11:00'), proposedEnd: at(52, '15:00'), reason: 'later please' } });
+  const denyReq = await stored('shift_change_requests', r => r.shift_id === denyId);
+  const denied = await call('POST', `/api/scheduling/change-requests/${denyReq.id}/decline`, {
+    as: 'mgr-1', body: { note: 'Margaret needs the morning slot.' } });
+  check('the office can deny it', denied.status === 200, JSON.stringify(denied.data));
+  const denyAfter = await stored('shifts', r => r.id === denyId);
+  check('STORED: the ORIGINAL offer duration stands',
+    denyAfter.start === at(52, '09:00') && denyAfter.end === at(52, '13:00'));
+  check('STORED: and it is still an offer awaiting their answer', denyAfter.status === 'assigned');
+  const denyNotice = ((await db.get('pending_notifications')) || [])
+    .filter(n => n.type === 'shift_change_declined' && /original offer stands/i.test(n.templateData.body));
+  check('QUEUED: and the wording does not call an unaccepted offer "yours"', denyNotice.length === 1);
+
+  // They can still accept the original after a denial — nothing was consumed.
+  const acceptAfterDeny = await call('POST', `/api/scheduling/shifts/${denyId}/accept`, { as: 'pca-1' });
+  check('the caregiver can still accept the original offer after a denial',
+    acceptAfterDeny.status === 200, JSON.stringify(acceptAfterDeny.data));
+  check('STORED: which confirms it at the original time',
+    (await stored('shifts', r => r.id === denyId)).status === 'confirmed');
+
+  // Declining the offer outright closes a request about it.
+  const lapsePost = await call('POST', '/api/scheduling/shifts', {
+    as: 'admin-1', body: { clientId: 'client-1', start: at(54, '09:00'), end: at(54, '13:00'), requiredLicenseLevel: 'any' } });
+  const lapseId = lapsePost.data.shift.id;
+  await call('POST', `/api/scheduling/shifts/${lapseId}/assign`, { as: 'admin-1', body: { caregiverId: 'pca-1' } });
+  await call('POST', `/api/scheduling/shifts/${lapseId}/change-request`, {
+    as: 'pca-1', body: { kind: 'time_change', proposedStart: at(54, '11:00'), proposedEnd: at(54, '15:00'), reason: 'later' } });
+  await call('POST', `/api/scheduling/shifts/${lapseId}/decline`, { as: 'pca-1', body: { reason: 'cannot do it at all' } });
+  const lapsed = await stored('shift_change_requests', r => r.shift_id === lapseId);
+  check('STORED: declining the offer CLOSES the request about it',
+    lapsed.status === 'closed', `status=${lapsed.status}`);
+  check('STORED: and the shift is back in the open pool',
+    (await stored('shifts', r => r.id === lapseId)).status === 'open');
+
   // ==========================================================================
   console.log(`\n${'═'.repeat(66)}`);
   console.log(`  ${pass} passed · ${fail} failed  (${pass + fail} assertions)`);

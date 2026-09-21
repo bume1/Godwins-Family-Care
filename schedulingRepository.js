@@ -860,13 +860,31 @@ function validateShiftEdit(shift, input) {
 // disagreeing, which is the failure this repo keeps paying for.
 const CHANGE_REQUEST_KINDS = Object.freeze(['time_change', 'drop']);
 
-// Only a shift they have actually ACCEPTED. An `assigned` shift is an offer
-// they have not answered yet and it already has accept/decline — giving it a
-// second, quieter door would mean two ways to hand back the same shift, and
-// one of them would drift. A started or finished shift is not a schedule
-// question any more; that is a timesheet correction, which is admin's own
-// route with its own mandatory reason.
-const REQUESTABLE_SHIFT_STATUSES = Object.freeze(['confirmed']);
+// A shift they hold, OR an offer still waiting on their answer (owner-directed,
+// 2026-09-21: "the caregiver should be able to request time changes for shifts
+// they haven't accepted, too").
+//
+// An offer is exactly where a time question is cheapest to answer: the
+// alternative to negotiating is the caregiver declining outright, and then the
+// office has lost them and still has the shift. Approving a change on an offer
+// leaves it AN OFFER — it goes back for their acceptance, it is not confirmed
+// on their behalf.
+//
+// A started or finished shift is not a schedule question any more; that is a
+// timesheet correction, which is admin's own route with its own mandatory
+// reason.
+const REQUESTABLE_SHIFT_STATUSES = Object.freeze(['confirmed', 'assigned']);
+
+// WHICH KINDS MAKE SENSE IN WHICH STATE. Handing back an offer is what Decline
+// already does — a second, quieter door to do the same thing is how two paths
+// drift, and one of them stops sending the notification the other sends. So on
+// an offer the only ask is a time change, and the refusal points at Decline
+// rather than pretending the option does not exist.
+const KINDS_BY_SHIFT_STATUS = Object.freeze({
+  confirmed: Object.freeze(['time_change', 'drop']),
+  assigned: Object.freeze(['time_change'])
+});
+const kindsFor = (status) => KINDS_BY_SHIFT_STATUS[status] || [];
 
 // OWNER DECISION, 2026-09-21: a request needs a notice minimum, and inside it
 // the caregiver phones instead. ONE constant — change this line to change the
@@ -875,7 +893,12 @@ const REQUESTABLE_SHIFT_STATUSES = Object.freeze(['confirmed']);
 // caregiver who cannot tell us at all is worse than one who tells us late.
 const CHANGE_REQUEST_NOTICE_MINUTES = 24 * 60;
 
-const CHANGE_REQUEST_STATUSES = Object.freeze(['pending', 'approved', 'declined', 'withdrawn']);
+// `closed` is not a decision anybody made: it is what a pending request becomes
+// when the shift it is about no longer has that caregiver on it — they declined
+// the offer, or the office released them. Leaving it pending would fill the
+// office queue with questions nobody can act on, and answering it would act on
+// a shift that has moved on.
+const CHANGE_REQUEST_STATUSES = Object.freeze(['pending', 'approved', 'declined', 'withdrawn', 'closed']);
 
 // Can this caregiver ask about this shift, right now? Split out from the route
 // so the SCREEN and the API answer the same question — the app must never
@@ -940,11 +963,22 @@ function validateChangeRequest(shift, input) {
   const clean = {};
 
   const kind = String(body.kind || '').trim();
+  const allowedKinds = kindsFor(shift && shift.status);
   if (!CHANGE_REQUEST_KINDS.includes(kind)) {
     errors.push({
       field: 'kind', code: 'KIND_INVALID',
       message: 'Say whether you are asking to change the time or to hand the shift back.',
-      options: CHANGE_REQUEST_KINDS.slice()
+      options: allowedKinds.slice()
+    });
+  } else if (!allowedKinds.includes(kind)) {
+    // Refused BY NAME with what to do instead. Silently dropping it would read
+    // as "sent" and nothing would happen.
+    errors.push({
+      field: 'kind', code: 'KIND_NOT_FOR_THIS_SHIFT',
+      message: kind === 'drop' && shift && shift.status === 'assigned'
+        ? 'You have not accepted this shift yet — decline the offer instead of asking to hand it back.'
+        : `That is not something you can ask about a ${String(shift && shift.status).replace(/_/g, ' ')} shift.`,
+      options: allowedKinds.slice()
     });
   } else {
     clean.kind = kind;
@@ -1163,7 +1197,8 @@ module.exports = {
   SHIFT_EDITABLE_FIELDS, EDITABLE_SHIFT_STATUSES, SHIFT_EDIT_COLUMN, canEditShift, validateShiftEdit,
   SCHEDULE_DERIVED_FLAGS, rederiveScheduleFlags,
   CHANGE_REQUEST_KINDS, CHANGE_REQUEST_STATUSES, CHANGE_REQUEST_NOTICE_MINUTES,
-  REQUESTABLE_SHIFT_STATUSES, canRequestShiftChange, validateChangeRequest,
+  REQUESTABLE_SHIFT_STATUSES, KINDS_BY_SHIFT_STATUS, kindsFor,
+  canRequestShiftChange, validateChangeRequest,
   describeNotice, isOpenChangeRequest, findOpenChangeRequest,
   MAX_BULK_OCCURRENCES, expandRecurrence, findDuplicateShift, isNeverHeld,
   LICENSE_REQUIREMENT_ANY, normalizeLicenseRequirement, shiftLevelLabel, isOpenToAllLevels,

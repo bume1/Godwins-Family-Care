@@ -303,12 +303,26 @@
       var pad = function (n) { return String(n).padStart(2, '0'); };
       return p.year + '-' + pad(p.month) + '-' + pad(p.day) + 'T' + pad(p.hour) + ':' + pad(p.minute);
     };
+    // Rendered from the kinds the SERVER named for this shift. An offer takes a
+    // time change only — handing an offer back is Decline, which is already on
+    // the row — so the page must not restate the list and drift from the
+    // validator that refuses what it offers.
+    var kinds = s.changeRequestKinds && s.changeRequestKinds.length
+      ? s.changeRequestKinds : ['time_change'];
+    var LABELS = {
+      time_change: 'A different time for this shift',
+      drop: 'I cannot work this shift'
+    };
+    var offer = s.status === 'assigned';
     return '<div class="gask">' +
-      '<div class="gfield"><label>What are you asking for?</label>' +
-        '<select id="gfcs-cr-kind" data-cr-kind="1">' +
-          '<option value="time_change">A different time for this shift</option>' +
-          '<option value="drop">I cannot work this shift</option>' +
-        '</select></div>' +
+      (kinds.length > 1
+        ? '<div class="gfield"><label>What are you asking for?</label>' +
+            '<select id="gfcs-cr-kind" data-cr-kind="1">' +
+              kinds.map(function (k) {
+                return '<option value="' + esc(k) + '">' + esc(LABELS[k] || k) + '</option>';
+              }).join('') +
+            '</select></div>'
+        : '<input type="hidden" id="gfcs-cr-kind" value="' + esc(kinds[0]) + '">') +
       '<div id="gfcs-cr-times">' +
         '<div class="gfield"><label>New start</label>' +
           '<input type="datetime-local" id="gfcs-cr-start" value="' + esc(local(s.start)) + '"></div>' +
@@ -317,7 +331,12 @@
       '</div>' +
       '<div class="gfield"><label>Why? The office needs a sentence.</label>' +
         '<textarea id="gfcs-cr-reason" rows="2" placeholder="School run — I can start two hours later."></textarea></div>' +
-      '<p class="gmu">Nothing changes until the office answers. Keep the shift until they do.</p>' +
+      // ASKING IS AGREEING, and the form has to say so before they send it.
+      // The office confirms the shift onto their schedule on approval, so a
+      // caregiver who meant "only if" must know that before they ask.
+      '<p class="gmu">' + (offer
+        ? 'Nothing changes until the office answers. If they approve the new time, the shift becomes yours at that time and goes on your schedule — so only ask if you will work it. If they say no, the original offer still stands and you can accept or decline it.'
+        : 'Nothing changes until the office answers. Keep the shift until they do.') + '</p>' +
       '<div class="gbtns">' +
         '<button class="gbtn gold" data-act="send-ask" data-id="' + esc(s.id) + '">Send the request</button>' +
         '<button class="gbtn ghost" data-act="cancel-ask">Cancel</button>' +
@@ -332,10 +351,27 @@
         '<div class="gwhen">' + esc(fmtRange(s.start, s.end)) + '</div>' +
         '<div class="gmu">' + esc(s.clientName || '') + '</div>' +
         (s.notes ? '<div class="gmu">' + esc(s.notes) + '</div>' : '') +
+        // An offer at the wrong time is where a change is cheapest to ask
+        // about: the alternative is declining outright, and then the office
+        // has lost the caregiver AND still has the shift.
+        (s.openChangeRequest
+          ? '<div class="gmu"><span class="gchip">Asked to change the time</span> — waiting on the office.</div>'
+          : '') +
+        (state.asking === s.id ? askForm(s) : '') +
         '<div class="gbtns">' +
           '<button class="gbtn" data-act="accept" data-id="' + s.id + '">Accept</button>' +
           '<button class="gbtn ghost" data-act="decline" data-id="' + s.id + '">Decline</button>' +
+          (s.changeRequestable && !s.openChangeRequest
+            ? '<button class="gbtn ghost" data-act="ask-change" data-id="' + esc(s.id) + '">Ask for a different time</button>'
+            : '') +
+          (s.openChangeRequest
+            ? '<button class="gbtn ghost" data-act="withdraw-change" data-id="' +
+                esc(s.openChangeRequest.id) + '">Withdraw</button>'
+            : '') +
         '</div>' +
+        (!s.changeRequestable && !s.openChangeRequest && s.changeRequestBlockedReason
+          ? '<div class="gwhy">' + esc(s.changeRequestBlockedReason) + '</div>'
+          : '') +
       '</div>';
     }).join('') + '</div>';
   }

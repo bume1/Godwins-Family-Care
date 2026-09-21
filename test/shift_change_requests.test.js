@@ -152,14 +152,110 @@ test('a caregiver cannot ask about somebody else\'s shift', async () => {
   } finally { h.close(); }
 });
 
-test('an OFFER is not requestable — it already has accept and decline', async () => {
+// REPOINTED 2026-09-21 by owner decision, not deleted. This asserted that an
+// offer was not requestable at all. The owner widened it: "the caregiver should
+// be able to request time changes for shifts they haven't accepted, too." The
+// rule underneath — there is exactly ONE way to hand a shift back, and it is
+// Decline — did not go away, so that half is pinned here instead.
+test('an OFFER takes a time change, but handing it back is still Decline', async () => {
+  const offered = CONFIRMED({ status: 'assigned' });
+  const h = harness({ shifts: [offered] });
+  try {
+    const dropped = await h.call(...ask({ kind: 'drop', reason: 'cannot make it' }));
+    assert.strictEqual(dropped.status, 400, JSON.stringify(dropped.body));
+    const err = dropped.body.errors.find(e => e.code === 'KIND_NOT_FOR_THIS_SHIFT');
+    assert.ok(err, JSON.stringify(dropped.body));
+    assert.match(err.message, /decline the offer/i,
+      'the refusal must point at the route that does exist');
+    assert.deepStrictEqual(err.options, ['time_change']);
+
+    const timed = await h.call(...ask({
+      kind: 'time_change', proposedStart: hoursOut(76), proposedEnd: hoursOut(80),
+      reason: 'I could do it two hours later.'
+    }));
+    assert.strictEqual(timed.status, 200, JSON.stringify(timed.body));
+    const shift = (await h.db.get('shifts'))[0];
+    assert.strictEqual(shift.status, 'assigned', 'asking does not accept the offer');
+    assert.strictEqual(shift.start, offered.start, 'nor move it');
+  } finally { h.close(); }
+});
+
+test('APPROVING a time change on an offer confirms it — asking WAS the agreement', async () => {
+  const newStart = hoursOut(76), newEnd = hoursOut(80);
   const h = harness({ shifts: [CONFIRMED({ status: 'assigned' })] });
   try {
-    const res = await h.call(...ask({ kind: 'drop', reason: 'cannot make it' }));
-    assert.strictEqual(res.status, 409);
-    assert.strictEqual(res.body.code, 'SHIFT_NOT_REQUESTABLE');
-    assert.match(res.body.error, /Accept it, or decline it/,
-      'the refusal must point at the route that does exist');
+    const made = await h.call(...ask({
+      kind: 'time_change', proposedStart: newStart, proposedEnd: newEnd, reason: 'School run'
+    }));
+    const res = await h.call('POST', `/api/scheduling/change-requests/${made.body.request.id}/approve`, {}, 'mgr-1');
+    assert.strictEqual(res.status, 200, JSON.stringify(res.body));
+
+    const shift = (await h.db.get('shifts'))[0];
+    assert.strictEqual(shift.start, newStart, 'the time moved');
+    assert.strictEqual(shift.status, 'confirmed',
+      'and it is CONFIRMED — the caregiver asked for this time, so they have agreed to it');
+    assert.strictEqual(shift.caregiver_id, 'cna-1');
+    assert.strictEqual(res.body.confirmed, true,
+      'the office must be told it is staffed, not just "approved"');
+
+    // One email, and it must not tell them to accept something already theirs.
+    const told = h.notifications.filter(n => n.type === 'shift_time_changed');
+    assert.strictEqual(told.length, 1);
+    assert.match(told[0].tpl.body, /approved your request/i);
+    assert.match(told[0].tpl.body, /confirmed and on your schedule/i);
+    assert.ok(!/accept it or decline it/i.test(told[0].tpl.body),
+      'it is theirs now — telling them to accept it again is the bug this rule exists to stop');
+  } finally { h.close(); }
+});
+
+test('DECLINING a request on an offer leaves the original offer standing', async () => {
+  const h = harness({ shifts: [CONFIRMED({ status: 'assigned' })] });
+  try {
+    const original = (await h.db.get('shifts'))[0];
+    const made = await h.call(...ask({
+      kind: 'time_change', proposedStart: hoursOut(76), proposedEnd: hoursOut(80), reason: 'School run'
+    }));
+    const res = await h.call('POST', `/api/scheduling/change-requests/${made.body.request.id}/decline`,
+      { note: 'Margaret needs the morning slot.' }, 'mgr-1');
+    assert.strictEqual(res.status, 200, JSON.stringify(res.body));
+
+    const shift = (await h.db.get('shifts'))[0];
+    assert.strictEqual(shift.start, original.start, 'the original duration stands');
+    assert.strictEqual(shift.end, original.end);
+    assert.strictEqual(shift.status, 'assigned', 'and it is still an offer awaiting their answer');
+
+    const told = h.notifications.find(n => n.type === 'shift_change_declined');
+    assert.ok(told);
+    assert.match(told.tpl.body, /original offer stands/i);
+    assert.ok(!/still yours/i.test(told.tpl.body),
+      'an offer they never accepted is not "still yours"');
+  } finally { h.close(); }
+});
+
+test('a confirmed shift stays confirmed — approving does not re-run the transition', async () => {
+  const h = harness({ shifts: [CONFIRMED()] });
+  try {
+    const made = await h.call(...ask({
+      kind: 'time_change', proposedStart: hoursOut(76), proposedEnd: hoursOut(80), reason: 'x'
+    }));
+    const res = await h.call('POST', `/api/scheduling/change-requests/${made.body.request.id}/approve`, {}, 'mgr-1');
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.body.confirmed, false, 'it was already confirmed; nothing to confirm');
+    assert.strictEqual((await h.db.get('shifts'))[0].status, 'confirmed');
+  } finally { h.close(); }
+});
+
+test('declining the OFFER closes a request about it — no unanswerable queue items', async () => {
+  const h = harness({ shifts: [CONFIRMED({ status: 'assigned' })] });
+  try {
+    await h.call(...ask({
+      kind: 'time_change', proposedStart: hoursOut(76), proposedEnd: hoursOut(80), reason: 'x'
+    }));
+    await h.call('POST', '/api/scheduling/shifts/shift-1/decline', { reason: 'cannot do it at all' }, 'cna-1');
+    const stored = (await h.db.get('shift_change_requests'))[0];
+    assert.strictEqual(stored.status, 'closed',
+      'the person who asked is no longer on the shift, so the question lapsed');
+    assert.strictEqual((await h.db.get('shifts'))[0].status, 'open');
   } finally { h.close(); }
 });
 
@@ -664,4 +760,58 @@ test('both screens say which availability is in force, rather than deriving it',
   // is how a caregiver and the office end up looking at different rotas.
   assert.ok(!/submittedAt[\s\S]{0,80}sort/.test(COMPONENT),
     'the component must not re-sort to decide which is current');
+});
+
+test('the caregiver screen offers the ask on an OFFER, and only the kinds served', () => {
+  const offers = COMPONENT.slice(COMPONENT.indexOf('function renderOffers'),
+    COMPONENT.indexOf('function renderOpen'));
+  assert.ok(/data-act="ask-change"/.test(offers),
+    'an offer at the wrong time is where a change is cheapest to ask about');
+  assert.ok(/s\.changeRequestable/.test(offers), 'and still gated on the server\'s answer');
+  // The form must not restate the kind list: an offer takes a time change
+  // only, and a page offering "I cannot work this" there would be refused.
+  // The served list must be what the CONDITION tests, not merely a string that
+  // appears somewhere. Replacing the condition with `false` left the name in
+  // the untaken branch and the first version of this guard stayed green.
+  assert.ok(/changeRequestKinds[\s\S]{0,40}\?/.test(COMPONENT),
+    'the kinds must be served and actually drive the form, not hardcoded');
+  assert.ok(/kinds\.map\(/.test(COMPONENT), 'and the options are rendered from them');
+  const form = COMPONENT.slice(COMPONENT.indexOf('function askForm'),
+    COMPONENT.indexOf('function renderOffers'));
+  assert.ok(!/value="drop"/.test(form),
+    'the page must not hardcode an option the server may not allow for this shift');
+});
+
+test('the form warns that asking IS agreeing, before they send it', () => {
+  const form = COMPONENT.slice(COMPONENT.indexOf('function askForm'),
+    COMPONENT.indexOf('function renderOffers'));
+  // Approving puts the shift on their schedule with no second acceptance, so a
+  // caregiver who meant "only if" has to know that before they ask.
+  assert.ok(/goes on your schedule/.test(form), 'the consequence must be stated on the form');
+  assert.ok(/original offer still stands/.test(form), 'and what a refusal means');
+});
+
+test('the office is told whether the shift is now STAFFED, not merely approved', () => {
+  const APPROVE_DECL = "router.post('/api/scheduling/change-requests/:id/approve'";
+  const at = ROUTE_SRC.indexOf(APPROVE_DECL);
+  const body = ROUTE_SRC.slice(at, ROUTE_SRC.indexOf('router.post(', at + APPROVE_DECL.length));
+  assert.ok(/confirmed: confirmedNow/.test(body),
+    '"Approved" alone does not tell an office whether to keep chasing the shift');
+  // And the confirm must go through the state machine, not a hand-written
+  // status write, or a shift confirmed this way loses the stamps and the
+  // client notification that Accept produces.
+  assert.ok(/moveShift\(\{/.test(body), 'the confirm must use the shared transition');
+  // Whitespace-tolerant: the first version of this matched only the spaced
+  // form, so `rs[i].status='confirmed'` walked straight past it.
+  assert.ok(!/\.status\s*=\s*['"]confirmed['"]/.test(body),
+    'never a hand-written status write — it loses the stamps and the client email');
+  assert.ok(/notifyConfirmed\(/.test(body), 'and the client is told, exactly as Accept tells them');
+});
+
+test('a failed confirm after a successful edit is reported, never called success', () => {
+  const APPROVE_DECL = "router.post('/api/scheduling/change-requests/:id/approve'";
+  const at = ROUTE_SRC.indexOf(APPROVE_DECL);
+  const body = ROUTE_SRC.slice(at, ROUTE_SRC.indexOf('router.post(', at + APPROVE_DECL.length));
+  assert.ok(/CHANGE_APPLIED_NOT_CONFIRMED/.test(body),
+    'the time has already moved — silently returning 200 leaves an unconfirmed shift nobody is watching');
 });

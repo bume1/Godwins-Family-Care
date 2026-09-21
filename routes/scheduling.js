@@ -530,7 +530,10 @@ module.exports = function createSchedulingRoutes(deps) {
   // in the office's name, which is accurate: the office moved the shift.
   //
   // Returns { shift, changes, logsTouched, message } or { error: { status, body } }.
-  async function applyShiftEdit({ shiftId, body, actor }) {
+  // `context` lets the caller say WHY the shift is moving, so the one email
+  // this function sends can be accurate. It never changes what is written —
+  // only the sentence the caregiver reads.
+  async function applyShiftEdit({ shiftId, body, actor, context }) {
     const ERR = (status, errBody) => ({ error: { status, body: errBody } });
     const rows = await readRows('shifts');
     const idx = rows.findIndex(r => r && r.id === shiftId);
@@ -651,6 +654,20 @@ module.exports = function createSchedulingRoutes(deps) {
     // untouched, which is the question they will actually have.
     const timeMoved = changes.includes('start') || changes.includes('end');
     const stillAhead = new Date(rows[idx].start).getTime() > Date.now();
+    // THREE CASES, THREE SENTENCES, and picking the wrong one is worse than
+    // sending nothing. An `assigned` shift is an OFFER the caregiver has not
+    // answered — "your shift has moved" tells them they are committed to work
+    // they never agreed to, and they would stop looking for the Accept button.
+    // A past shift is a record correction, not an instruction about where to
+    // be. Only a confirmed future shift has actually moved.
+    const isOffer = rows[idx].status === 'assigned';
+    // APPROVING A CAREGIVER'S OWN REQUEST IS A DIFFERENT MESSAGE from the
+    // office moving a shift unprompted. They asked for this time, so the news
+    // is the ANSWER — and when they asked about an offer, asking was their
+    // agreement to work it, so the approval confirms it onto their schedule
+    // rather than sending it back round for a second acceptance.
+    const approvedRequest = !!(context && context.approvedRequest);
+    const willConfirm = !!(context && context.willConfirm);
     let notified = [];
     if (timeMoved) {
       const when = time.fmtDateTime(rows[idx].start);
@@ -658,16 +675,30 @@ module.exports = function createSchedulingRoutes(deps) {
       if (holder && holder.email) {
         await queueNotification('shift_time_changed', holder.id, holder.email, holder.name,
           {
-            subject: stillAhead
-              ? `Shift time changed — ${rows[idx].client_name}`
-              : `Shift record corrected — ${rows[idx].client_name}`,
-            body: stillAhead
-              ? `Your shift for ${rows[idx].client_name} has moved. It now starts ${when} and ends ${time.fmtTime(rows[idx].end)}. The previous time was ${time.fmtDateTime(before.start)}.`
-              : `The record of your shift for ${rows[idx].client_name} has been corrected by ${rows[idx].edited_by_name}. It now reads ${when} to ${time.fmtTime(rows[idx].end)}; it previously read ${time.fmtDateTime(before.start)} to ${time.fmtTime(before.end)}.`
-                + (logsTouched
-                  ? ' Your timesheet for that visit has been updated to match. The hours you clocked have not changed.'
-                  : ' The hours you clocked have not changed.'),
-            ctaUrl: links.shiftFor(), ctaLabel: stillAhead ? 'View the shift' : 'View your schedule'
+            subject: approvedRequest
+              ? `Your shift change was approved — ${rows[idx].client_name}`
+              : (isOffer
+                ? `Shift offer updated — still needs your answer`
+                : (stillAhead
+                  ? `Shift time changed — ${rows[idx].client_name}`
+                  : `Shift record corrected — ${rows[idx].client_name}`)),
+            body: approvedRequest
+              ? `The office approved your request. Your shift for ${rows[idx].client_name} is now ${when}–${time.fmtTime(rows[idx].end)}; it was previously ${time.fmtDateTime(before.start)}–${time.fmtTime(before.end)}.`
+                + (willConfirm
+                  ? ' It is confirmed and on your schedule — you do not need to accept it again.'
+                  : '')
+              : (isOffer
+              ? `The offer for ${rows[idx].client_name} has been updated to ${when}–${time.fmtTime(rows[idx].end)}; it was previously ${time.fmtDateTime(before.start)}–${time.fmtTime(before.end)}. It is still an offer — accept it or decline it in the app. You are not scheduled for it until you accept.`
+              : (stillAhead
+                ? `Your shift for ${rows[idx].client_name} has moved. It now starts ${when} and ends ${time.fmtTime(rows[idx].end)}. The previous time was ${time.fmtDateTime(before.start)}.`
+                : `The record of your shift for ${rows[idx].client_name} has been corrected by ${rows[idx].edited_by_name}. It now reads ${when} to ${time.fmtTime(rows[idx].end)}; it previously read ${time.fmtDateTime(before.start)} to ${time.fmtTime(before.end)}.`
+                  + (logsTouched
+                    ? ' Your timesheet for that visit has been updated to match. The hours you clocked have not changed.'
+                    : ' The hours you clocked have not changed.'))),
+            ctaUrl: links.shiftFor(),
+            ctaLabel: approvedRequest
+              ? 'View your schedule'
+              : (isOffer ? 'Answer the offer' : (stillAhead ? 'View the shift' : 'View your schedule'))
           },
           { relatedEntityId: `${rows[idx].id}:edited:${rows[idx].edit_count}`, relatedEntityType: 'shift', createdBy: actor.id });
         notified.push(holder.name);
@@ -1018,6 +1049,10 @@ module.exports = function createSchedulingRoutes(deps) {
             ? `${askable.message} ${ORG.phone}`
             : askable.message);
         out.changeRequestBlockedCode = askable.ok ? null : askable.code;
+        // Which kinds this shift takes, served rather than restated in the
+        // page — an offer takes a time change only, and a form offering
+        // "I cannot work this" on an offer would be refused at the API.
+        out.changeRequestKinds = askable.ok ? sched.kindsFor(r.status) : [];
         const open = sched.findOpenChangeRequest(changeRequests, r.id);
         out.openChangeRequest = open
           ? { id: open.id, kind: open.kind, status: open.status, requestedAt: open.requested_at }
@@ -1392,6 +1427,23 @@ module.exports = function createSchedulingRoutes(deps) {
     rows[idx].caregiver_id = null;
     rows[idx].caregiver_name = null;
     await db.set('shifts', rows);
+
+    // A PENDING CHANGE REQUEST ABOUT THIS SHIFT IS NOW UNANSWERABLE. The person
+    // who asked is no longer on it — they declined the offer, or the office
+    // released them — so approving it would act on somebody else's shift and
+    // leaving it pending fills the office queue with questions nobody can act
+    // on. `closed` says plainly that nobody decided it; it lapsed.
+    const crRows = await readRows('shift_change_requests');
+    let closed = false;
+    crRows.forEach(r => {
+      if (r && r.status === 'pending' && String(r.shift_id) === String(shiftId)) {
+        r.status = 'closed';
+        r.decided_at = nowIso();
+        r.decision_note = 'The shift is no longer assigned to you, so this request lapsed.';
+        closed = true;
+      }
+    });
+    if (closed) await db.set('shift_change_requests', crRows);
   };
 
   // ---- A caregiver asks for a shift to change -------------------------------
@@ -1593,13 +1645,18 @@ module.exports = function createSchedulingRoutes(deps) {
         });
       }
 
+      // Captured BEFORE the edit: approving a change on an offer leaves it an
+      // offer, and the answer to "what happens now" is different in each case.
+      const wasOffer = shift.status === 'assigned';
+
       let applied = null;
       if (row.kind === 'time_change') {
         // ONE writer. Every rule a hand-typed correction obeys, this obeys.
         applied = await applyShiftEdit({
           shiftId: shift.id,
           body: { start: row.proposed_start, end: row.proposed_end },
-          actor: req.user
+          actor: req.user,
+          context: { approvedRequest: true, willConfirm: wasOffer }
         });
         if (applied.error) {
           // The edit was refused — a conflict, an eligibility problem. The
@@ -1624,6 +1681,38 @@ module.exports = function createSchedulingRoutes(deps) {
         });
         if (moved.error) return res.status(moved.error.status).json(moved.error.body);
         await releaseCaregiver(moved.rows, shift.id, `Handed back with the office's approval: ${row.reason}`);
+      }
+
+      // ASKING FOR A TIME IS AGREEING TO WORK IT (owner rule, 2026-09-21).
+      // A caregiver only proposes a new time because they would take the shift
+      // at that time, so approving it puts the shift on their schedule rather
+      // than sending it back round for a second acceptance they have already
+      // given in substance. Sending it back would mean the office approves a
+      // change and still does not know whether the shift is staffed.
+      //
+      // Done through the state machine's own transition, so a shift confirmed
+      // this way is indistinguishable from one confirmed by Accept — same
+      // stamps, same client notification.
+      let confirmedNow = false;
+      if (wasOffer && row.kind === 'time_change') {
+        const conf = await moveShift({
+          shiftId: shift.id, to: 'confirmed', actor: req.user,
+          guard: (sh) => (sh.status === 'assigned' ? null : {
+            status: 409,
+            body: { error: `That shift is ${String(sh.status).replace(/_/g, ' ')} and could not be confirmed.`, code: 'SHIFT_NOT_ASSIGNED', from: sh.status }
+          })
+        });
+        if (conf.error) {
+          // The time HAS moved — reporting success here would leave an offer
+          // sitting at a new time that nobody knows is unconfirmed.
+          return res.status(conf.error.status).json({
+            ...conf.error.body,
+            code: 'CHANGE_APPLIED_NOT_CONFIRMED',
+            warning: 'The new time was saved, but the shift could not be confirmed. Confirm or reassign it by hand.'
+          });
+        }
+        confirmedNow = true;
+        await notifyConfirmed(conf.shift, req.user);
       }
 
       rows[idx].status = 'approved';
@@ -1652,12 +1741,18 @@ module.exports = function createSchedulingRoutes(deps) {
         }
       }
 
+      const afterRow = (await readRows('shifts')).find(r => r.id === shift.id);
       res.json({
         request: publicChangeRequest(rows[idx]),
-        shift: applied ? applied.shift : publicShift((await readRows('shifts')).find(r => r.id === shift.id)),
+        shift: applied ? applied.shift : publicShift(afterRow),
+        // Says plainly whether the shift is now STAFFED, because "Approved" on
+        // its own does not tell an office whether to keep chasing it.
+        confirmed: confirmedNow,
         message: row.kind === 'drop'
           ? `Approved. The shift is back in the open pool and ${row.caregiver_name} has been told.`
-          : (applied ? applied.message : 'Approved.')
+          : (confirmedNow
+            ? `Approved. The shift has moved and is confirmed to ${row.caregiver_name} — they asked for that time, so it is on their schedule and needs no further acceptance.`
+            : (applied ? applied.message : 'Approved.'))
       });
     } catch (error) {
       console.error('Change request approve error:', error);
@@ -1689,12 +1784,19 @@ module.exports = function createSchedulingRoutes(deps) {
       await logActivity(req.user.id, rows[idx].decided_by_name, 'shift_change_declined', 'shift', row.shift_id,
         { clientId: row.client_id, kind: row.kind, requestId: row.id, role: req.user.role });
 
+      const declinedShift = (await readRows('shifts')).find(r => r && r.id === row.shift_id) || null;
       const holder = await freshUser(row.caregiver_id);
       if (holder && holder.email) {
         await queueNotification('shift_change_declined', holder.id, holder.email, holder.name,
           {
             subject: `Your shift request was not approved — ${row.client_name}`,
-            body: `The office could not approve your request about the ${time.fmtDateTime(row.shift_start_at_request)} shift for ${row.client_name}. ${rows[idx].decided_by_name} said: "${rows[idx].decision_note}". The shift is unchanged and still yours.`,
+            // An OFFER is not "still yours" — they never accepted it, and the
+            // thing they need to know is that the original offer stands and is
+            // still waiting on their answer.
+            body: `The office could not approve your request about the ${time.fmtDateTime(row.shift_start_at_request)} shift for ${row.client_name}. ${rows[idx].decided_by_name} said: "${rows[idx].decision_note}".`
+              + (declinedShift && declinedShift.status === 'assigned'
+                ? ' The original offer stands — accept it or decline it in the app.'
+                : ' The shift is unchanged and still yours.'),
             ctaUrl: links.shiftFor(), ctaLabel: 'View your schedule'
           },
           { relatedEntityId: `${row.id}:declined`, relatedEntityType: 'shift', createdBy: req.user.id });
