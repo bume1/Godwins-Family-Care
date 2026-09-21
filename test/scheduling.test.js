@@ -510,7 +510,13 @@ test('every /api/scheduling route authenticates and carries a role guard', () =>
     const inlineGuarded = [
       '/api/scheduling/availability', '/api/scheduling/shifts',
       '/api/scheduling/time-logs', '/api/scheduling/shift-requests',
-      '/api/scheduling/my-upcoming-shifts'
+      '/api/scheduling/my-upcoming-shifts',
+      // Added 2026-09-21 with the caregiver change request. Same shape as
+      // /availability: a manager sees every row, a caregiver sees only their
+      // own, and the branch is inside the handler. That SCOPING is proven over
+      // real HTTP in test/shift_change_requests.test.js — a source scan cannot
+      // tell a real filter from a variable that happens to be named like one.
+      '/api/scheduling/change-requests'
     ].includes(routePath) && method === 'get';
     const clientFacing = routePath === '/api/scheduling/shift-requests' && method === 'post';
     assert.ok(guarded || inlineGuarded || clientFacing,

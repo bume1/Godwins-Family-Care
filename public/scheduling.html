@@ -44,6 +44,7 @@
     .row:last-child{border:none}
     .row b{color:var(--navy);font-weight:600}
     .mu{color:var(--mut);font-size:14px}
+    .why{font-size:13px;font-style:italic;color:var(--mut);margin-top:4px}
     .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:11px}
     label{display:block;font-size:11px;letter-spacing:.6px;text-transform:uppercase;color:var(--mut);font-weight:700;margin-bottom:5px}
     input,select,textarea{width:100%;border:1px solid #ddd3c0;border-radius:8px;padding:10px;font-size:15px;background:#fff;color:var(--ink)}
@@ -1015,6 +1016,7 @@ const App = () => {
   const [shifts, setShifts] = useState([]);
   const [requests, setRequests] = useState([]);
   const [availability, setAvailability] = useState([]);
+  const [changeRequests, setChangeRequests] = useState([]);
   const [timeLogs, setTimeLogs] = useState([]);
   const [totals, setTotals] = useState({ hours: null });
   const [flaggedOnly, setFlaggedOnly] = useState(false);
@@ -1040,12 +1042,13 @@ const App = () => {
   const [denied, setDenied] = useState(false);
 
   const refresh = useCallback(async () => {
-    const [r, s, q, a, t] = await Promise.all([
+    const [r, s, q, a, t, c] = await Promise.all([
       api('/api/scheduling/caregivers'),
       api('/api/scheduling/shifts').catch(() => ({ shifts: [] })),
       api('/api/scheduling/shift-requests').catch(() => ({ shiftRequests: [] })),
       api('/api/scheduling/availability').catch(() => ({ availability: [] })),
-      api(`/api/scheduling/time-logs?from=${from}&to=${to}${flaggedOnly ? '&flagged=true' : ''}`).catch(() => ({ timeLogs: [] }))
+      api(`/api/scheduling/time-logs?from=${from}&to=${to}${flaggedOnly ? '&flagged=true' : ''}`).catch(() => ({ timeLogs: [] })),
+      api('/api/scheduling/change-requests').catch(() => ({ requests: [] }))
     ]);
     setRoster(r);
     if (r && r.access) setAccess(r.access);
@@ -1054,6 +1057,7 @@ const App = () => {
     setAvailability(a.availability || []);
     setTimeLogs(t.timeLogs || []);
     setTotals({ hours: t.totalHours });
+    setChangeRequests(c.requests || []);
   }, [from, to, flaggedOnly]);
 
   useEffect(() => {
@@ -1152,6 +1156,7 @@ const App = () => {
     { id: 'post', label: 'Post a shift' },
     { id: 'requests', label: `Requests${requests.filter(r => r.status === 'requested').length ? ` (${requests.filter(r => r.status === 'requested').length})` : ''}` },
     { id: 'availability', label: 'Availability' },
+    { id: 'changes', label: `Shift changes${changeRequests.filter(r => r.status === 'pending').length ? ` (${changeRequests.filter(r => r.status === 'pending').length})` : ''}` },
     { id: 'time', label: access.managePay ? 'Time & payroll' : 'Time logs' },
     ...(access.manageLocations
       ? [{ id: 'locations', label: `Locations${roster.clients.filter(c => !c.hasCoordinates).length ? ` (${roster.clients.filter(c => !c.hasCoordinates).length})` : ''}` }]
@@ -1311,6 +1316,11 @@ const App = () => {
                     <b>{a.caregiverName}</b>
                     <span className="mu"> · from {a.effectiveFrom}</span>
                     {' '}<span className={`chip ${a.status === 'reviewed' ? 'confirmed' : 'open'}`}>{titleize(a.status)}</span>
+                    {/* Which row to schedule from. Availability is append-only,
+                        so an older submission sitting above a newer one in the
+                        list is exactly how somebody staffs from a rota that has
+                        been replaced. */}
+                    {' '}<span className={`chip ${a.current ? 'confirmed' : ''}`}>{a.current ? 'In force' : 'Superseded'}</span>
                   </div>
                   <div className="mu">{(a.windows || []).map(w => `${w.day} ${w.start}–${w.end}`).join(' · ')}</div>
                   {(a.blackoutDates || []).length > 0 && <div className="mu">Unavailable: {a.blackoutDates.join(', ')}</div>}
@@ -1320,6 +1330,74 @@ const App = () => {
                         await api(`/api/scheduling/availability/${a.id}/review`, { method: 'POST', body: '{}' });
                         await refresh();
                       }}>Mark reviewed</button>
+                    </div>
+                  )}
+                </div>
+              ))}
+          </div>
+        )}
+
+        {tab === 'changes' && (
+          <div className="card">
+            <h2>Shift change requests</h2>
+            <p className="sub">
+              A caregiver asking to move a shift or hand it back. Nothing has changed yet —
+              approving a time change moves the shift and its time log together and emails
+              the caregiver; approving a hand-back puts it in the open pool.
+            </p>
+            {changeRequests.length === 0
+              ? <Empty icon="calendar-plus">No requests.</Empty>
+              : changeRequests.map(r => (
+                <div className="row" style={{ display: 'block' }} key={r.id}>
+                  <div>
+                    <b>{r.caregiverName}</b>
+                    <span className="mu"> · {r.clientName}</span>
+                    {' '}<span className={`chip ${r.status === 'pending' ? 'open' : (r.status === 'approved' ? 'confirmed' : '')}`}>
+                      {titleize(r.status)}
+                    </span>
+                  </div>
+                  <div className="mu">
+                    {r.kind === 'drop' ? 'Cannot work' : 'Asked to move'} {fmtRange(r.shiftStart, r.shiftEnd)}
+                  </div>
+                  {r.kind === 'time_change' && r.proposedStart && (
+                    <div className="mu">Asking for {fmtRange(r.proposedStart, r.proposedEnd)}</div>
+                  )}
+                  <div className="why">“{r.reason}”</div>
+                  {/* How much notice they gave, so a pattern is readable without
+                      anybody keeping a private tally. */}
+                  {typeof r.minutesOfNotice === 'number' && (
+                    <div className="mu">{Math.floor(r.minutesOfNotice / 60)} hours notice</div>
+                  )}
+                  {r.status !== 'pending' && r.decidedByName && (
+                    <div className="mu">
+                      {titleize(r.status)} by {r.decidedByName}
+                      {r.decisionNote ? ` — “${r.decisionNote}”` : ''}
+                    </div>
+                  )}
+                  {r.status === 'pending' && access.manageSchedule && (
+                    <div className="btns">
+                      <button className="btn gold" onClick={async () => {
+                        try {
+                          const res = await api(`/api/scheduling/change-requests/${r.id}/approve`, { method: 'POST', body: '{}' });
+                          await refresh();
+                          if (res && res.message) window.alert(res.message);
+                        } catch (e) {
+                          // The server's own sentence — a conflict or a stale
+                          // request needs a specific answer, not "failed".
+                          window.alert(e.message);
+                        }
+                      }}>Approve</button>
+                      <button className="btn ghost" onClick={async () => {
+                        // A REASON IS REQUIRED and the caregiver is shown it.
+                        const note = window.prompt('Why not? The caregiver is shown this.');
+                        if (note === null) return;
+                        try {
+                          await api(`/api/scheduling/change-requests/${r.id}/decline`, {
+                            method: 'POST', body: JSON.stringify({ note })
+                          });
+                          await refresh();
+                        } catch (e) { window.alert(e.message); }
+                      }}>Decline</button>
                     </div>
                   )}
                 </div>

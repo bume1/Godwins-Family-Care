@@ -28,6 +28,10 @@ const wpRepo = require('../welcomePacketRepository');
 const onboardingGate = require('../caregiverOnboardingGate');
 const cg = require('../caregiverRepository');
 const gate = require('../enrollmentGate');
+// The office number. ORG in public/consent-text.js is the single source — it is
+// what prints into executed consent documents, so a refusal that tells a
+// caregiver to call cannot give a different number from the paperwork.
+const { ORG } = require('../public/consent-text');
 
 module.exports = function createSchedulingRoutes(deps) {
   const { db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4 } = deps;
@@ -225,7 +229,26 @@ module.exports = function createSchedulingRoutes(deps) {
         mine = mine.filter(r => r.caregiver_id === String(req.query.caregiverId));
       }
       mine = mine.slice().sort((a, b) => String(b.submitted_at || '').localeCompare(String(a.submitted_at || '')));
-      res.json({ availability: mine.slice(0, 200).map(publicAvailability) });
+
+      // WHICH SUBMISSION IS IN FORCE, answered once, on the server. Availability
+      // is append-only — "updating" it is a new row, which is right, because
+      // what somebody said in August must still be readable in October. But a
+      // caregiver looking at a growing list of identical-looking rows cannot
+      // tell whether their change took, and an office reading the same list
+      // could schedule from a superseded one. The newest submission per
+      // caregiver is the current one; deriving that on each screen separately
+      // is how the two start disagreeing about the same roster.
+      const newestPerCaregiver = new Map();
+      for (const r of mine) {
+        const key = String(r.caregiver_id);
+        if (!newestPerCaregiver.has(key)) newestPerCaregiver.set(key, r.id);
+      }
+      res.json({
+        availability: mine.slice(0, 200).map(r => ({
+          ...publicAvailability(r),
+          current: newestPerCaregiver.get(String(r.caregiver_id)) === r.id
+        }))
+      });
     } catch (error) {
       console.error('Availability list error:', error);
       res.status(500).json({ error: 'Server error' });
@@ -494,177 +517,233 @@ module.exports = function createSchedulingRoutes(deps) {
   // A PAST shift is editable on purpose; correcting last Tuesday is the stated
   // reason this exists. What is refused is a shift that was CANCELLED, which
   // did not happen and has nothing on it to correct.
-  router.put('/api/scheduling/shifts/:id', authenticateToken, requireScheduleManager, async (req, res) => {
-    try {
-      const rows = await readRows('shifts');
-      const idx = rows.findIndex(r => r && r.id === req.params.id);
-      if (idx === -1) return res.status(404).json({ error: 'Shift not found.', code: 'SHIFT_NOT_FOUND' });
-      // A SNAPSHOT, not a reference to the live row. `rows[idx]` is mutated in
-      // place a few lines down, so `const before = rows[idx]` aliases it: every
-      // "the previous time was …" line would print the NEW time, and the audit
-      // log's before/after pair would read identical. A shallow copy is enough
-      // — every value compared here is a primitive — but it has to be a copy.
-      // Same class as the enrollment editor's shallow before/after (PR #103),
-      // and it hid behind a test that asserted the PHRASE rather than the value.
-      const before = { ...rows[idx] };
+  // ---- ONE writer for a shift's time --------------------------------------
+  // Both doors onto changing a shift come through here: an admin or manager
+  // typing a correction (PUT below), and a manager APPROVING a caregiver's
+  // change request. They are the same act and they must obey the same rules —
+  // the holder's eligibility, the overlap check, the time log following the
+  // shift, the derived flags being re-derived, and who gets told.
+  //
+  // Restating any of that in the approve route is how the two start
+  // disagreeing about one value, which is the failure this repo keeps paying
+  // for. `actor` is whoever made the DECISION, so an approved request emails
+  // in the office's name, which is accurate: the office moved the shift.
+  //
+  // Returns { shift, changes, logsTouched, message } or { error: { status, body } }.
+  // `context` lets the caller say WHY the shift is moving, so the one email
+  // this function sends can be accurate. It never changes what is written —
+  // only the sentence the caregiver reads.
+  async function applyShiftEdit({ shiftId, body, actor, context }) {
+    const ERR = (status, errBody) => ({ error: { status, body: errBody } });
+    const rows = await readRows('shifts');
+    const idx = rows.findIndex(r => r && r.id === shiftId);
+    if (idx === -1) return ERR(404, { error: 'Shift not found.', code: 'SHIFT_NOT_FOUND' });
+    // A SNAPSHOT, not a reference to the live row. `rows[idx]` is mutated in
+    // place a few lines down, so `const before = rows[idx]` aliases it: every
+    // "the previous time was …" line would print the NEW time, and the audit
+    // log's before/after pair would read identical. A shallow copy is enough
+    // — every value compared here is a primitive — but it has to be a copy.
+    // Same class as the enrollment editor's shallow before/after (PR #103),
+    // and it hid behind a test that asserted the PHRASE rather than the value.
+    const before = { ...rows[idx] };
 
-      if (!sched.canEditShift(before)) {
-        return res.status(409).json({
-          error: 'A cancelled shift cannot be edited. Post a new one.',
-          code: 'SHIFT_NOT_EDITABLE', status: before.status
+    if (!sched.canEditShift(before)) {
+      return ERR(409, {
+        error: 'A cancelled shift cannot be edited. Post a new one.',
+        code: 'SHIFT_NOT_EDITABLE', status: before.status
+      });
+    }
+
+    const { valid, errors, clean, changes } = sched.validateShiftEdit(before, body);
+    if (!valid) return ERR(400, { error: 'Some shift details need correcting.', code: 'SHIFT_INVALID', errors });
+    if (changes.length === 0) {
+      return { shift: publicShift(before), changes: [], logsTouched: 0, message: 'Nothing changed.' };
+    }
+
+    // The row as it WILL read, built before anything is written, so every
+    // re-check below asks about the shift that is about to exist rather than
+    // the one that exists now.
+    const after = { ...before };
+    changes.forEach(k => { after[sched.SHIFT_EDIT_COLUMN[k]] = clean[k]; });
+
+    // Whoever is holding this shift agreed to a particular piece of work. If
+    // the edit takes it outside what they may do — a raised licence
+    // requirement, or a narrowing to the care team they are not on — the edit
+    // is REFUSED rather than quietly releasing them. Releasing somebody from
+    // work they accepted is a decision for a person, not a side effect of
+    // correcting a time.
+    if (after.caregiver_id) {
+      const holder = await freshUser(after.caregiver_id);
+      const client = await loadClient(after.client_id);
+      if (holder && !sched.isEligibleForShift(holder, after, client)) {
+        return ERR(409, {
+          error: `${holder.name} could not hold the shift as edited.`,
+          code: 'SHIFT_HOLDER_INELIGIBLE',
+          reason: sched.eligibilityReason(holder, after, client),
+          hint: 'Cancel the shift, or release the caregiver first, then make this change.'
         });
       }
-
-      const { valid, errors, clean, changes } = sched.validateShiftEdit(before, req.body);
-      if (!valid) return res.status(400).json({ error: 'Some shift details need correcting.', code: 'SHIFT_INVALID', errors });
-      if (changes.length === 0) {
-        return res.json({ shift: publicShift(before), changed: [], message: 'Nothing changed.' });
-      }
-
-      // The row as it WILL read, built before anything is written, so every
-      // re-check below asks about the shift that is about to exist rather than
-      // the one that exists now.
-      const after = { ...before };
-      changes.forEach(k => { after[sched.SHIFT_EDIT_COLUMN[k]] = clean[k]; });
-
-      // Whoever is holding this shift agreed to a particular piece of work. If
-      // the edit takes it outside what they may do — a raised licence
-      // requirement, or a narrowing to the care team they are not on — the edit
-      // is REFUSED rather than quietly releasing them. Releasing somebody from
-      // work they accepted is a decision for a person, not a side effect of
-      // correcting a time.
-      if (after.caregiver_id) {
-        const holder = await freshUser(after.caregiver_id);
-        const client = await loadClient(after.client_id);
-        if (holder && !sched.isEligibleForShift(holder, after, client)) {
-          return res.status(409).json({
-            error: `${holder.name} could not hold the shift as edited.`,
-            code: 'SHIFT_HOLDER_INELIGIBLE',
-            reason: sched.eligibilityReason(holder, after, client),
-            hint: 'Cancel the shift, or release the caregiver first, then make this change.'
+      if (holder && (changes.includes('start') || changes.includes('end'))) {
+        const conflict = sched.findShiftConflict(rows, holder.id, after);
+        if (conflict) {
+          return ERR(409, {
+            error: `${holder.name} already holds an overlapping shift at the new time.`,
+            code: 'SHIFT_CONFLICT',
+            conflict: { id: conflict.id, start: conflict.start, end: conflict.end, clientName: conflict.client_name }
           });
         }
-        if (holder && (changes.includes('start') || changes.includes('end'))) {
-          const conflict = sched.findShiftConflict(rows, holder.id, after);
-          if (conflict) {
-            return res.status(409).json({
-              error: `${holder.name} already holds an overlapping shift at the new time.`,
-              code: 'SHIFT_CONFLICT',
-              conflict: { id: conflict.id, start: conflict.start, end: conflict.end, clientName: conflict.client_name }
-            });
-          }
-        }
       }
+    }
 
-      changes.forEach(k => { rows[idx][sched.SHIFT_EDIT_COLUMN[k]] = clean[k]; });
-      rows[idx].edited_at = nowIso();
-      rows[idx].edited_by_id = req.user.id;
-      rows[idx].edited_by_name = req.user.name || req.user.email;
-      rows[idx].edit_count = (Number(rows[idx].edit_count) || 0) + 1;
-      await db.set('shifts', rows);
+    changes.forEach(k => { rows[idx][sched.SHIFT_EDIT_COLUMN[k]] = clean[k]; });
+    rows[idx].edited_at = nowIso();
+    rows[idx].edited_by_id = actor.id;
+    rows[idx].edited_by_name = actor.name || actor.email;
+    rows[idx].edit_count = (Number(rows[idx].edit_count) || 0) + 1;
+    await db.set('shifts', rows);
 
-      // THE TIME LOG CARRIES ITS OWN COPY OF THE SCHEDULE, and payroll reads
-      // that copy rather than the shift. Leaving it behind means the board and
-      // the timesheet disagree about the same visit, which is the failure this
-      // repo keeps paying for: two writers, one value. So the log follows —
-      // and the flags DERIVED from the schedule are re-derived with it, because
-      // a "late clock-in" measured against a time that was wrong is a mark the
-      // caregiver did not earn. The geofence verdicts are observations of where
-      // somebody stood and are never rewritten. See rederiveScheduleFlags.
-      let logsTouched = 0;
-      if (changes.includes('start') || changes.includes('end')) {
-        const logs = await readRows('time_logs');
-        let dirty = false;
-        logs.forEach(l => {
-          if (!l || String(l.shift_id) !== String(rows[idx].id)) return;
-          l.scheduled_start = rows[idx].start;
-          l.scheduled_end = rows[idx].end;
-          l.flags = sched.rederiveScheduleFlags(l, rows[idx]);
-          l.schedule_corrected_at = nowIso();
-          l.schedule_corrected_by_name = rows[idx].edited_by_name;
-          dirty = true; logsTouched += 1;
-        });
-        if (dirty) await db.set('time_logs', logs);
-      }
+    // THE TIME LOG CARRIES ITS OWN COPY OF THE SCHEDULE, and payroll reads
+    // that copy rather than the shift. Leaving it behind means the board and
+    // the timesheet disagree about the same visit, which is the failure this
+    // repo keeps paying for: two writers, one value. So the log follows —
+    // and the flags DERIVED from the schedule are re-derived with it, because
+    // a "late clock-in" measured against a time that was wrong is a mark the
+    // caregiver did not earn. The geofence verdicts are observations of where
+    // somebody stood and are never rewritten. See rederiveScheduleFlags.
+    let logsTouched = 0;
+    if (changes.includes('start') || changes.includes('end')) {
+      const logs = await readRows('time_logs');
+      let dirty = false;
+      logs.forEach(l => {
+        if (!l || String(l.shift_id) !== String(rows[idx].id)) return;
+        l.scheduled_start = rows[idx].start;
+        l.scheduled_end = rows[idx].end;
+        l.flags = sched.rederiveScheduleFlags(l, rows[idx]);
+        l.schedule_corrected_at = nowIso();
+        l.schedule_corrected_by_name = rows[idx].edited_by_name;
+        dirty = true; logsTouched += 1;
+      });
+      if (dirty) await db.set('time_logs', logs);
+    }
 
-      // WHAT changed, never a client's detail. Times and a licence level are
-      // operational facts about a shift, so the before/after is recorded; the
-      // client is named by id, as every other row in this log names them.
-      await logActivity(req.user.id, rows[idx].edited_by_name, 'shift_edited', 'shift', rows[idx].id,
-        {
-          clientId: rows[idx].client_id, fields: changes, status: rows[idx].status,
-          before: { start: before.start, end: before.end, requiredLicenseLevel: before.required_license_level },
-          after: { start: rows[idx].start, end: rows[idx].end, requiredLicenseLevel: rows[idx].required_license_level },
-          timeLogsUpdated: logsTouched, role: req.user.role
-        });
+    // WHAT changed, never a client's detail. Times and a licence level are
+    // operational facts about a shift, so the before/after is recorded; the
+    // client is named by id, as every other row in this log names them.
+    await logActivity(actor.id, rows[idx].edited_by_name, 'shift_edited', 'shift', rows[idx].id,
+      {
+        clientId: rows[idx].client_id, fields: changes, status: rows[idx].status,
+        before: { start: before.start, end: before.end, requiredLicenseLevel: before.required_license_level },
+        after: { start: rows[idx].start, end: rows[idx].end, requiredLicenseLevel: rows[idx].required_license_level },
+        timeLogsUpdated: logsTouched, role: actor.role
+      });
 
-      // TELLING THE CAREGIVER IS THE POINT OF MOVING A TIME, AND THAT INCLUDES
-      // A SHIFT THAT HAS ALREADY HAPPENED (owner instruction, 2026-09-20).
-      //
-      // An earlier version emailed only about a shift still ahead of us, on the
-      // reasoning that a correction to last week is paperwork. That was wrong,
-      // and the reason is payroll: the time log's copy of the schedule moves
-      // with the shift, so correcting a past visit changes what that
-      // caregiver's timesheet says about a day they already worked. Somebody
-      // whose pay record changes has to be told it changed.
-      //
-      // THE TWO CASES NEED DIFFERENT SENTENCES. "Your shift has moved" is an
-      // instruction about where to be, and it is nonsense about last Tuesday —
-      // a caregiver reading it would think they had missed something. A past
-      // shift says the RECORD was corrected and that their clocked hours are
-      // untouched, which is the question they will actually have.
-      const timeMoved = changes.includes('start') || changes.includes('end');
-      const stillAhead = new Date(rows[idx].start).getTime() > Date.now();
-      let notified = [];
-      if (timeMoved) {
-        const when = time.fmtDateTime(rows[idx].start);
-        const holder = rows[idx].caregiver_id ? await freshUser(rows[idx].caregiver_id) : null;
-        if (holder && holder.email) {
-          await queueNotification('shift_time_changed', holder.id, holder.email, holder.name,
-            {
-              subject: stillAhead
-                ? `Shift time changed — ${rows[idx].client_name}`
-                : `Shift record corrected — ${rows[idx].client_name}`,
-              body: stillAhead
+    // TELLING THE CAREGIVER IS THE POINT OF MOVING A TIME, AND THAT INCLUDES
+    // A SHIFT THAT HAS ALREADY HAPPENED (owner instruction, 2026-09-20).
+    //
+    // An earlier version emailed only about a shift still ahead of us, on the
+    // reasoning that a correction to last week is paperwork. That was wrong,
+    // and the reason is payroll: the time log's copy of the schedule moves
+    // with the shift, so correcting a past visit changes what that
+    // caregiver's timesheet says about a day they already worked. Somebody
+    // whose pay record changes has to be told it changed.
+    //
+    // THE TWO CASES NEED DIFFERENT SENTENCES. "Your shift has moved" is an
+    // instruction about where to be, and it is nonsense about last Tuesday —
+    // a caregiver reading it would think they had missed something. A past
+    // shift says the RECORD was corrected and that their clocked hours are
+    // untouched, which is the question they will actually have.
+    const timeMoved = changes.includes('start') || changes.includes('end');
+    const stillAhead = new Date(rows[idx].start).getTime() > Date.now();
+    // THREE CASES, THREE SENTENCES, and picking the wrong one is worse than
+    // sending nothing. An `assigned` shift is an OFFER the caregiver has not
+    // answered — "your shift has moved" tells them they are committed to work
+    // they never agreed to, and they would stop looking for the Accept button.
+    // A past shift is a record correction, not an instruction about where to
+    // be. Only a confirmed future shift has actually moved.
+    const isOffer = rows[idx].status === 'assigned';
+    // APPROVING A CAREGIVER'S OWN REQUEST IS A DIFFERENT MESSAGE from the
+    // office moving a shift unprompted. They asked for this time, so the news
+    // is the ANSWER — and when they asked about an offer, asking was their
+    // agreement to work it, so the approval confirms it onto their schedule
+    // rather than sending it back round for a second acceptance.
+    const approvedRequest = !!(context && context.approvedRequest);
+    const willConfirm = !!(context && context.willConfirm);
+    let notified = [];
+    if (timeMoved) {
+      const when = time.fmtDateTime(rows[idx].start);
+      const holder = rows[idx].caregiver_id ? await freshUser(rows[idx].caregiver_id) : null;
+      if (holder && holder.email) {
+        await queueNotification('shift_time_changed', holder.id, holder.email, holder.name,
+          {
+            subject: approvedRequest
+              ? `Your shift change was approved — ${rows[idx].client_name}`
+              : (isOffer
+                ? `Shift offer updated — still needs your answer`
+                : (stillAhead
+                  ? `Shift time changed — ${rows[idx].client_name}`
+                  : `Shift record corrected — ${rows[idx].client_name}`)),
+            body: approvedRequest
+              ? `The office approved your request. Your shift for ${rows[idx].client_name} is now ${when}–${time.fmtTime(rows[idx].end)}; it was previously ${time.fmtDateTime(before.start)}–${time.fmtTime(before.end)}.`
+                + (willConfirm
+                  ? ' It is confirmed and on your schedule — you do not need to accept it again.'
+                  : '')
+              : (isOffer
+              ? `The offer for ${rows[idx].client_name} has been updated to ${when}–${time.fmtTime(rows[idx].end)}; it was previously ${time.fmtDateTime(before.start)}–${time.fmtTime(before.end)}. It is still an offer — accept it or decline it in the app. You are not scheduled for it until you accept.`
+              : (stillAhead
                 ? `Your shift for ${rows[idx].client_name} has moved. It now starts ${when} and ends ${time.fmtTime(rows[idx].end)}. The previous time was ${time.fmtDateTime(before.start)}.`
                 : `The record of your shift for ${rows[idx].client_name} has been corrected by ${rows[idx].edited_by_name}. It now reads ${when} to ${time.fmtTime(rows[idx].end)}; it previously read ${time.fmtDateTime(before.start)} to ${time.fmtTime(before.end)}.`
                   + (logsTouched
                     ? ' Your timesheet for that visit has been updated to match. The hours you clocked have not changed.'
-                    : ' The hours you clocked have not changed.'),
-              ctaUrl: links.shiftFor(), ctaLabel: stillAhead ? 'View the shift' : 'View your schedule'
+                    : ' The hours you clocked have not changed.'))),
+            ctaUrl: links.shiftFor(),
+            ctaLabel: approvedRequest
+              ? 'View your schedule'
+              : (isOffer ? 'Answer the offer' : (stillAhead ? 'View the shift' : 'View your schedule'))
+          },
+          { relatedEntityId: `${rows[idx].id}:edited:${rows[idx].edit_count}`, relatedEntityType: 'shift', createdBy: actor.id });
+        notified.push(holder.name);
+      }
+      // THE CLIENT IS TOLD ONLY ABOUT A VISIT STILL TO COME, and only one
+      // they were already promised. "Your visit has been rescheduled" is
+      // false about a visit that already happened, and a client has nothing
+      // to do about a correction to our own timesheet.
+      if (stillAhead && ['confirmed', 'in_progress'].includes(rows[idx].status)) {
+        const client = await loadClient(rows[idx].client_id);
+        if (client && client.email) {
+          await queueNotification('shift_time_changed_client', client.id, client.email, client.name,
+            {
+              subject: 'Your care visit has been rescheduled',
+              body: `Your visit has moved to ${when}. It was previously ${time.fmtDateTime(before.start)}.`,
+              ctaUrl: links.PATHS.PORTAL, ctaLabel: 'Open your portal'
             },
-            { relatedEntityId: `${rows[idx].id}:edited:${rows[idx].edit_count}`, relatedEntityType: 'shift', createdBy: req.user.id });
-          notified.push(holder.name);
-        }
-        // THE CLIENT IS TOLD ONLY ABOUT A VISIT STILL TO COME, and only one
-        // they were already promised. "Your visit has been rescheduled" is
-        // false about a visit that already happened, and a client has nothing
-        // to do about a correction to our own timesheet.
-        if (stillAhead && ['confirmed', 'in_progress'].includes(rows[idx].status)) {
-          const client = await loadClient(rows[idx].client_id);
-          if (client && client.email) {
-            await queueNotification('shift_time_changed_client', client.id, client.email, client.name,
-              {
-                subject: 'Your care visit has been rescheduled',
-                body: `Your visit has moved to ${when}. It was previously ${time.fmtDateTime(before.start)}.`,
-                ctaUrl: links.PATHS.PORTAL, ctaLabel: 'Open your portal'
-              },
-              { relatedEntityId: `${rows[idx].id}:edited-client:${rows[idx].edit_count}`, relatedEntityType: 'shift', createdBy: req.user.id });
-            notified.push(client.name);
-          }
+            { relatedEntityId: `${rows[idx].id}:edited-client:${rows[idx].edit_count}`, relatedEntityType: 'shift', createdBy: actor.id });
+          notified.push(client.name);
         }
       }
+    }
 
+    return {
+      shift: publicShift(rows[idx]),
+      changes,
+      logsTouched,
+      message: notified.length
+        ? `Shift updated. ${notified.join(' and ')} ${notified.length > 1 ? 'have' : 'has'} been told${stillAhead ? ' the time changed' : ' the record was corrected'}.`
+        + (logsTouched ? ` ${logsTouched} time log${logsTouched > 1 ? 's' : ''} moved with it.` : '')
+        : (timeMoved
+          ? `Shift updated.${logsTouched ? ` ${logsTouched} time log${logsTouched > 1 ? 's' : ''} moved with it.` : ''} Nobody was emailed: no caregiver is on this shift.`
+          : 'Shift updated.')
+    };
+  }
+
+  router.put('/api/scheduling/shifts/:id', authenticateToken, requireScheduleManager, async (req, res) => {
+    try {
+      const result = await applyShiftEdit({ shiftId: req.params.id, body: req.body, actor: req.user });
+      if (result.error) return res.status(result.error.status).json(result.error.body);
       res.json({
-        shift: publicShift(rows[idx]),
-        changed: changes,
-        timeLogsUpdated: logsTouched,
-        message: notified.length
-          ? `Shift updated. ${notified.join(' and ')} ${notified.length > 1 ? 'have' : 'has'} been told${stillAhead ? ' the time changed' : ' the record was corrected'}.`
-          + (logsTouched ? ` ${logsTouched} time log${logsTouched > 1 ? 's' : ''} moved with it.` : '')
-          : (timeMoved
-            ? `Shift updated.${logsTouched ? ` ${logsTouched} time log${logsTouched > 1 ? 's' : ''} moved with it.` : ''} Nobody was emailed: no caregiver is on this shift.`
-            : 'Shift updated.')
+        shift: result.shift,
+        changed: result.changes,
+        timeLogsUpdated: result.logsTouched,
+        message: result.message
       });
     } catch (error) {
       console.error('Shift edit error:', error);
@@ -947,12 +1026,36 @@ module.exports = function createSchedulingRoutes(deps) {
       // an in-progress shift with no log says so, and a shift that is not
       // running carries null rather than a guess.
       const filedLogs = await readRows('caregiver_visit_logs');
+      // Same rule for the change request: the SERVER says whether this shift
+      // can be asked about right now, and why not when it cannot. The screen
+      // renders that answer instead of computing its own — a button that is
+      // going to answer 409 is worse than no button, and a caregiver told
+      // "too late" needs the office number, not a disabled control.
+      const changeRequests = await readRows('shift_change_requests');
       const page = mine.slice(0, 500).map((r) => {
         const out = publicShift(r);
         out.visitLogFiled = r.status === 'in_progress'
           ? filedLogs.some(v => v && String(v.shift_id) === String(r.id) &&
               String(v.caregiver_id) === String(r.caregiver_id) &&
               String(v.client_id) === String(r.client_id))
+          : null;
+        const askable = sched.canRequestShiftChange(r);
+        out.changeRequestable = askable.ok;
+        // The office number rides IN the reason for the one refusal a caregiver
+        // can act on today, so the screen has a single string to print and
+        // cannot show a different number from the one the consents carry.
+        out.changeRequestBlockedReason = askable.ok ? null
+          : (askable.code === 'CHANGE_REQUEST_TOO_LATE' && ORG.phone
+            ? `${askable.message} ${ORG.phone}`
+            : askable.message);
+        out.changeRequestBlockedCode = askable.ok ? null : askable.code;
+        // Which kinds this shift takes, served rather than restated in the
+        // page — an offer takes a time change only, and a form offering
+        // "I cannot work this" on an offer would be refused at the API.
+        out.changeRequestKinds = askable.ok ? sched.kindsFor(r.status) : [];
+        const open = sched.findOpenChangeRequest(changeRequests, r.id);
+        out.openChangeRequest = open
+          ? { id: open.id, kind: open.kind, status: open.status, requestedAt: open.requested_at }
           : null;
         return out;
       });
@@ -1324,7 +1427,412 @@ module.exports = function createSchedulingRoutes(deps) {
     rows[idx].caregiver_id = null;
     rows[idx].caregiver_name = null;
     await db.set('shifts', rows);
+
+    // A PENDING CHANGE REQUEST ABOUT THIS SHIFT IS NOW UNANSWERABLE. The person
+    // who asked is no longer on it — they declined the offer, or the office
+    // released them — so approving it would act on somebody else's shift and
+    // leaving it pending fills the office queue with questions nobody can act
+    // on. `closed` says plainly that nobody decided it; it lapsed.
+    const crRows = await readRows('shift_change_requests');
+    let closed = false;
+    crRows.forEach(r => {
+      if (r && r.status === 'pending' && String(r.shift_id) === String(shiftId)) {
+        r.status = 'closed';
+        r.decided_at = nowIso();
+        r.decision_note = 'The shift is no longer assigned to you, so this request lapsed.';
+        closed = true;
+      }
+    });
+    if (closed) await db.set('shift_change_requests', crRows);
   };
+
+  // ---- A caregiver asks for a shift to change -------------------------------
+  // Owner-directed, 2026-09-21. Until now a caregiver holding a CONFIRMED shift
+  // had no route at all: they could decline an offer they had not yet accepted,
+  // and after that the only lever was phoning the office. So the ask left no
+  // record, and whether somebody asks every week was invisible.
+  //
+  // THE ASK WRITES NOTHING TO THE SHIFT. It is a request, and a person answers
+  // it. Approving runs through `applyShiftEdit` — the same editor a hand-typed
+  // correction runs through — so the holder's eligibility, the overlap check,
+  // the time log following the shift and the caregiver's email all happen once,
+  // in one place, however the change was asked for.
+  const publicChangeRequest = (r) => r && ({
+    id: r.id,
+    shiftId: r.shift_id,
+    kind: r.kind,
+    status: r.status,
+    reason: r.reason,
+    clientName: r.client_name,
+    caregiverId: r.caregiver_id,
+    caregiverName: r.caregiver_name,
+    // The shift AS IT WAS when they asked. Kept on the row rather than read
+    // back from the shift, because the whole point of showing it is to say
+    // what they were looking at — and the shift may have moved since.
+    shiftStart: r.shift_start_at_request,
+    shiftEnd: r.shift_end_at_request,
+    proposedStart: r.proposed_start,
+    proposedEnd: r.proposed_end,
+    minutesOfNotice: r.minutes_of_notice,
+    requestedAt: r.requested_at,
+    decidedAt: r.decided_at,
+    decidedByName: r.decided_by_name,
+    decisionNote: r.decision_note
+  });
+
+  // POST …/shifts/:id/change-request — the caregiver holding it asks.
+  router.post('/api/scheduling/shifts/:id/change-request', authenticateToken, requireSchedulable, async (req, res) => {
+    try {
+      const shifts = await readRows('shifts');
+      const shift = shifts.find(r => r && r.id === req.params.id);
+      if (!shift) return res.status(404).json({ error: 'Shift not found.', code: 'SHIFT_NOT_FOUND' });
+
+      // Only the person holding it. Asking about somebody else's shift is not a
+      // thing that has a meaning here.
+      if (String(shift.caregiver_id || '') !== String(req.user.id)) {
+        return res.status(403).json({ error: 'That shift is not yours.', code: 'SHIFT_NOT_YOURS' });
+      }
+
+      // Status and notice, answered by the SAME function the screen asks, so
+      // the app never offers a button the server is going to refuse.
+      const allowed = sched.canRequestShiftChange(shift);
+      if (!allowed.ok) {
+        return res.status(409).json({
+          error: allowed.message, code: allowed.code,
+          minutesOfNotice: allowed.minutesOfNotice,
+          requiredMinutes: allowed.requiredMinutes,
+          // A DEAD END IS HOW A CONTROL GETS WORKED AROUND. Inside the notice
+          // window there is still a real problem to solve today, so the refusal
+          // hands over the office number instead of just saying no.
+          office: ORG.phone || null
+        });
+      }
+
+      const { valid, errors, clean } = sched.validateChangeRequest(shift, req.body);
+      if (!valid) return res.status(400).json({ error: 'That request needs correcting.', code: 'CHANGE_REQUEST_INVALID', errors });
+
+      const rows = await readRows('shift_change_requests');
+      // ONE open request per shift. Tapping Ask twice is the commonest way to
+      // get two of everything, and two pending asks about one shift means the
+      // office answers the same question twice.
+      const open = sched.findOpenChangeRequest(rows, shift.id);
+      if (open) {
+        return res.status(409).json({
+          error: 'You already have a request waiting on the office for this shift.',
+          code: 'CHANGE_REQUEST_ALREADY_OPEN', request: publicChangeRequest(open)
+        });
+      }
+
+      const row = {
+        id: uuidv4(),
+        shift_id: shift.id,
+        client_id: shift.client_id,
+        client_name: shift.client_name,
+        caregiver_id: req.user.id,
+        caregiver_name: req.user.name || req.user.email,
+        kind: clean.kind,
+        reason: clean.reason,
+        proposed_start: clean.proposedStart || null,
+        proposed_end: clean.proposedEnd || null,
+        // A SNAPSHOT of the shift as it was asked about. If an admin moves the
+        // shift before anyone answers, approving must not silently apply an old
+        // ask to a different shift — the approve route compares these back.
+        shift_start_at_request: shift.start,
+        shift_end_at_request: shift.end,
+        minutes_of_notice: allowed.minutesOfNotice,
+        status: 'pending',
+        requested_at: nowIso(),
+        decided_at: null,
+        decided_by_id: null,
+        decided_by_name: null,
+        decision_note: null
+      };
+      rows.push(row);
+      await db.set('shift_change_requests', rows);
+
+      await logActivity(req.user.id, row.caregiver_name, 'shift_change_requested', 'shift', shift.id,
+        { clientId: shift.client_id, kind: row.kind, minutesOfNotice: row.minutes_of_notice, role: req.user.role });
+
+      const when = time.fmtDateTime(shift.start);
+      for (const admin of (await getUsers()).filter(u => u.role === ROLES.ADMIN && u.email)) {
+        await queueNotification('shift_change_requested', admin.id, admin.email, admin.name,
+          {
+            subject: row.kind === 'drop'
+              ? `${row.caregiver_name} cannot work a shift — ${row.client_name}`
+              : `${row.caregiver_name} asked to move a shift — ${row.client_name}`,
+            body: row.kind === 'drop'
+              ? `${row.caregiver_name} has asked to hand back the ${when} shift for ${row.client_name}. Their reason: "${row.reason}". Nothing has changed yet — approving it puts the shift back in the open pool.`
+              : `${row.caregiver_name} has asked to move the ${when} shift for ${row.client_name} to ${time.fmtDateTime(row.proposed_start)}–${time.fmtTime(row.proposed_end)}. Their reason: "${row.reason}". Nothing has changed yet.`,
+            ctaUrl: links.PATHS.SCHEDULING, ctaLabel: 'Open scheduling'
+          },
+          { relatedEntityId: `${row.id}:requested`, relatedEntityType: 'shift', createdBy: req.user.id });
+      }
+
+      res.json({
+        request: publicChangeRequest(row),
+        message: row.kind === 'drop'
+          ? 'Sent. The office will let you know — keep the shift until they do.'
+          : 'Sent. The office will let you know — the shift has not moved yet.'
+      });
+    } catch (error) {
+      console.error('Shift change request error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // GET …/change-requests — a caregiver sees their own; a manager sees them all.
+  router.get('/api/scheduling/change-requests', authenticateToken, async (req, res) => {
+    try {
+      if (!isScheduleManager(req.user) && !isSchedulable(req.user)) {
+        return res.status(403).json({ error: 'Caregiver or scheduling access required.', code: 'SCHEDULING_STAFF_ONLY' });
+      }
+      const rows = await readRows('shift_change_requests');
+      // A caregiver cannot widen this with a query parameter: the filter is the
+      // manager's, and passing somebody else's id still returns your own rows.
+      let mine = isScheduleManager(req.user) ? rows : rows.filter(r => r && String(r.caregiver_id) === String(req.user.id));
+      if (isScheduleManager(req.user) && req.query.status) {
+        mine = mine.filter(r => r && r.status === String(req.query.status));
+      }
+      mine = mine.slice().sort((a, b) => String(b.requested_at || '').localeCompare(String(a.requested_at || '')));
+      res.json({ requests: mine.slice(0, 200).map(publicChangeRequest) });
+    } catch (error) {
+      console.error('Change request list error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // Shared by approve and decline: find it, and refuse anything already answered.
+  const loadPendingRequest = async (id) => {
+    const rows = await readRows('shift_change_requests');
+    const idx = rows.findIndex(r => r && r.id === id);
+    if (idx === -1) return { error: { status: 404, body: { error: 'Request not found.', code: 'CHANGE_REQUEST_NOT_FOUND' } } };
+    if (rows[idx].status !== 'pending') {
+      return { error: { status: 409, body: {
+        error: `That request was already ${rows[idx].status}${rows[idx].decided_by_name ? ` by ${rows[idx].decided_by_name}` : ''}.`,
+        code: 'CHANGE_REQUEST_DECIDED', status: rows[idx].status
+      } } };
+    }
+    return { rows, idx, row: rows[idx] };
+  };
+
+  // POST …/change-requests/:id/approve — a manager says yes, and it happens.
+  router.post('/api/scheduling/change-requests/:id/approve', authenticateToken, requireScheduleManager, async (req, res) => {
+    try {
+      const found = await loadPendingRequest(req.params.id);
+      if (found.error) return res.status(found.error.status).json(found.error.body);
+      const { rows, idx, row } = found;
+
+      const shifts = await readRows('shifts');
+      const shift = shifts.find(r => r && r.id === row.shift_id);
+      if (!shift) return res.status(404).json({ error: 'The shift this request is about no longer exists.', code: 'SHIFT_NOT_FOUND' });
+
+      // THE SHIFT MAY HAVE MOVED SINCE THEY ASKED. Approving a stale ask would
+      // apply a caregiver's reasoning about one time to a different one, which
+      // is worse than refusing: nobody would know it had happened.
+      if (shift.start !== row.shift_start_at_request || shift.end !== row.shift_end_at_request) {
+        return res.status(409).json({
+          error: 'This shift has changed since the request was made. Ask them to send a fresh request against the new time.',
+          code: 'SHIFT_MOVED_SINCE_REQUEST',
+          requestedAgainst: { start: row.shift_start_at_request, end: row.shift_end_at_request },
+          current: { start: shift.start, end: shift.end }
+        });
+      }
+      // The caregiver must still be the one holding it.
+      if (String(shift.caregiver_id || '') !== String(row.caregiver_id)) {
+        return res.status(409).json({
+          error: `${row.caregiver_name} is no longer on this shift.`,
+          code: 'SHIFT_HOLDER_CHANGED'
+        });
+      }
+
+      // Captured BEFORE the edit: approving a change on an offer leaves it an
+      // offer, and the answer to "what happens now" is different in each case.
+      const wasOffer = shift.status === 'assigned';
+
+      let applied = null;
+      if (row.kind === 'time_change') {
+        // ONE writer. Every rule a hand-typed correction obeys, this obeys.
+        applied = await applyShiftEdit({
+          shiftId: shift.id,
+          body: { start: row.proposed_start, end: row.proposed_end },
+          actor: req.user,
+          context: { approvedRequest: true, willConfirm: wasOffer }
+        });
+        if (applied.error) {
+          // The edit was refused — a conflict, an eligibility problem. The
+          // request stays PENDING rather than being marked approved against a
+          // change that did not happen.
+          return res.status(applied.error.status).json({
+            ...applied.error.body,
+            code: applied.error.body.code || 'CHANGE_NOT_APPLIED',
+            hint: 'The request is still waiting. Resolve this, then approve it again, or decline it.'
+          });
+        }
+      } else {
+        // A DROP hands the shift back to the open pool. Same machinery the
+        // decline route uses, so a shift released this way is indistinguishable
+        // from one released any other way — including keeping WHO let it go.
+        const moved = await moveShift({
+          shiftId: shift.id, to: 'open', actor: req.user,
+          guard: (s) => (s.status === 'confirmed' ? null : {
+            status: 409,
+            body: { error: `That shift is ${String(s.status).replace(/_/g, ' ')} and cannot be handed back.`, code: 'SHIFT_NOT_RELEASABLE', from: s.status }
+          })
+        });
+        if (moved.error) return res.status(moved.error.status).json(moved.error.body);
+        await releaseCaregiver(moved.rows, shift.id, `Handed back with the office's approval: ${row.reason}`);
+      }
+
+      // ASKING FOR A TIME IS AGREEING TO WORK IT (owner rule, 2026-09-21).
+      // A caregiver only proposes a new time because they would take the shift
+      // at that time, so approving it puts the shift on their schedule rather
+      // than sending it back round for a second acceptance they have already
+      // given in substance. Sending it back would mean the office approves a
+      // change and still does not know whether the shift is staffed.
+      //
+      // Done through the state machine's own transition, so a shift confirmed
+      // this way is indistinguishable from one confirmed by Accept — same
+      // stamps, same client notification.
+      let confirmedNow = false;
+      if (wasOffer && row.kind === 'time_change') {
+        const conf = await moveShift({
+          shiftId: shift.id, to: 'confirmed', actor: req.user,
+          guard: (sh) => (sh.status === 'assigned' ? null : {
+            status: 409,
+            body: { error: `That shift is ${String(sh.status).replace(/_/g, ' ')} and could not be confirmed.`, code: 'SHIFT_NOT_ASSIGNED', from: sh.status }
+          })
+        });
+        if (conf.error) {
+          // The time HAS moved — reporting success here would leave an offer
+          // sitting at a new time that nobody knows is unconfirmed.
+          return res.status(conf.error.status).json({
+            ...conf.error.body,
+            code: 'CHANGE_APPLIED_NOT_CONFIRMED',
+            warning: 'The new time was saved, but the shift could not be confirmed. Confirm or reassign it by hand.'
+          });
+        }
+        confirmedNow = true;
+        await notifyConfirmed(conf.shift, req.user);
+      }
+
+      rows[idx].status = 'approved';
+      rows[idx].decided_at = nowIso();
+      rows[idx].decided_by_id = req.user.id;
+      rows[idx].decided_by_name = req.user.name || req.user.email;
+      rows[idx].decision_note = String((req.body || {}).note || '').trim().slice(0, 1000) || null;
+      await db.set('shift_change_requests', rows);
+
+      await logActivity(req.user.id, rows[idx].decided_by_name, 'shift_change_approved', 'shift', shift.id,
+        { clientId: shift.client_id, kind: row.kind, requestId: row.id, role: req.user.role });
+
+      // A time change already emailed the caregiver through the shared editor —
+      // emailing again here would tell them the same thing twice. A drop did
+      // not, so it says so here.
+      if (row.kind === 'drop') {
+        const holder = await freshUser(row.caregiver_id);
+        if (holder && holder.email) {
+          await queueNotification('shift_change_approved', holder.id, holder.email, holder.name,
+            {
+              subject: `You are off the ${time.fmtDateTime(row.shift_start_at_request)} shift`,
+              body: `The office has approved handing back your ${time.fmtDateTime(row.shift_start_at_request)} shift for ${row.client_name}. It is open for another caregiver and you are no longer scheduled for it.`,
+              ctaUrl: links.shiftFor(), ctaLabel: 'View your schedule'
+            },
+            { relatedEntityId: `${row.id}:approved`, relatedEntityType: 'shift', createdBy: req.user.id });
+        }
+      }
+
+      const afterRow = (await readRows('shifts')).find(r => r.id === shift.id);
+      res.json({
+        request: publicChangeRequest(rows[idx]),
+        shift: applied ? applied.shift : publicShift(afterRow),
+        // Says plainly whether the shift is now STAFFED, because "Approved" on
+        // its own does not tell an office whether to keep chasing it.
+        confirmed: confirmedNow,
+        message: row.kind === 'drop'
+          ? `Approved. The shift is back in the open pool and ${row.caregiver_name} has been told.`
+          : (confirmedNow
+            ? `Approved. The shift has moved and is confirmed to ${row.caregiver_name} — they asked for that time, so it is on their schedule and needs no further acceptance.`
+            : (applied ? applied.message : 'Approved.'))
+      });
+    } catch (error) {
+      console.error('Change request approve error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // POST …/change-requests/:id/decline — a manager says no, and says why.
+  router.post('/api/scheduling/change-requests/:id/decline', authenticateToken, requireScheduleManager, async (req, res) => {
+    try {
+      const note = String((req.body || {}).note || '').trim();
+      // A REASON IS REQUIRED. A caregiver told only "no" asks again, or stops
+      // asking and just does not turn up — the same rule the rejected document
+      // upload follows.
+      if (!note) {
+        return res.status(400).json({ error: 'Say why, so they know where they stand.', code: 'DECLINE_NOTE_REQUIRED' });
+      }
+      const found = await loadPendingRequest(req.params.id);
+      if (found.error) return res.status(found.error.status).json(found.error.body);
+      const { rows, idx, row } = found;
+
+      rows[idx].status = 'declined';
+      rows[idx].decided_at = nowIso();
+      rows[idx].decided_by_id = req.user.id;
+      rows[idx].decided_by_name = req.user.name || req.user.email;
+      rows[idx].decision_note = note.slice(0, 1000);
+      await db.set('shift_change_requests', rows);
+
+      await logActivity(req.user.id, rows[idx].decided_by_name, 'shift_change_declined', 'shift', row.shift_id,
+        { clientId: row.client_id, kind: row.kind, requestId: row.id, role: req.user.role });
+
+      const declinedShift = (await readRows('shifts')).find(r => r && r.id === row.shift_id) || null;
+      const holder = await freshUser(row.caregiver_id);
+      if (holder && holder.email) {
+        await queueNotification('shift_change_declined', holder.id, holder.email, holder.name,
+          {
+            subject: `Your shift request was not approved — ${row.client_name}`,
+            // An OFFER is not "still yours" — they never accepted it, and the
+            // thing they need to know is that the original offer stands and is
+            // still waiting on their answer.
+            body: `The office could not approve your request about the ${time.fmtDateTime(row.shift_start_at_request)} shift for ${row.client_name}. ${rows[idx].decided_by_name} said: "${rows[idx].decision_note}".`
+              + (declinedShift && declinedShift.status === 'assigned'
+                ? ' The original offer stands — accept it or decline it in the app.'
+                : ' The shift is unchanged and still yours.'),
+            ctaUrl: links.shiftFor(), ctaLabel: 'View your schedule'
+          },
+          { relatedEntityId: `${row.id}:declined`, relatedEntityType: 'shift', createdBy: req.user.id });
+      }
+
+      res.json({ request: publicChangeRequest(rows[idx]), message: `Declined. ${row.caregiver_name} has been told, with your reason.` });
+    } catch (error) {
+      console.error('Change request decline error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // POST …/change-requests/:id/withdraw — the caregiver changes their mind.
+  // Their own request only: sorting itself out before anyone acts is the best
+  // outcome, and it should not need an admin to clear the queue.
+  router.post('/api/scheduling/change-requests/:id/withdraw', authenticateToken, requireSchedulable, async (req, res) => {
+    try {
+      const found = await loadPendingRequest(req.params.id);
+      if (found.error) return res.status(found.error.status).json(found.error.body);
+      const { rows, idx, row } = found;
+      if (String(row.caregiver_id) !== String(req.user.id)) {
+        return res.status(403).json({ error: 'That request is not yours.', code: 'REQUEST_NOT_YOURS' });
+      }
+      rows[idx].status = 'withdrawn';
+      rows[idx].decided_at = nowIso();
+      rows[idx].decided_by_id = req.user.id;
+      rows[idx].decided_by_name = req.user.name || req.user.email;
+      await db.set('shift_change_requests', rows);
+      await logActivity(req.user.id, rows[idx].decided_by_name, 'shift_change_withdrawn', 'shift', row.shift_id,
+        { clientId: row.client_id, kind: row.kind, requestId: row.id, role: req.user.role });
+      res.json({ request: publicChangeRequest(rows[idx]), message: 'Withdrawn. The office will not see it any more.' });
+    } catch (error) {
+      console.error('Change request withdraw error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
 
   // Both parties are told on confirmation — the caregiver and the client.
   const notifyConfirmed = async (shift, actor) => {

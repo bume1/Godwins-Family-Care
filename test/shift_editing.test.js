@@ -695,7 +695,13 @@ test('an edit leaves a trace on the board, and the projection carries it', () =>
 });
 
 test('the audit records WHICH fields moved and the times, never a client detail', () => {
-  const route = ROUTE_SRC.slice(ROUTE_SRC.indexOf("router.put('/api/scheduling/shifts/:id'"),
+  // REPOINTED, not deleted (2026-09-21). The edit logic moved out of the PUT
+  // route into `applyShiftEdit` so that approving a caregiver's change request
+  // runs through exactly the same rules. The old slice started at the route and
+  // therefore stopped seeing the code the moment it moved — *a bounded scan is
+  // a guard that works on the code it was written against*, fourth time. The
+  // rule it protects did not change, so the slice follows the code.
+  const route = ROUTE_SRC.slice(ROUTE_SRC.indexOf('async function applyShiftEdit'),
     ROUTE_SRC.indexOf("router.post('/api/scheduling/shifts/bulk'"));
   assert.ok(route.includes("'shift_edited'"));
   assert.ok(route.includes('fields: changes'));
@@ -712,4 +718,36 @@ test('the client can never be moved between shifts from the editor', () => {
   sched.SHIFT_EDITABLE_FIELDS.forEach(k => {
     assert.ok(sched.SHIFT_EDIT_COLUMN[k], `${k} has no column to write to`);
   });
+});
+
+test('there is ONE writer for a shift time, and every door comes through it', () => {
+  // Two ways to change a shift exist now: an admin typing a correction, and a
+  // manager approving a caregiver's request. If either restates the rules
+  // instead of calling the shared editor, the holder-eligibility check, the
+  // conflict check, the time log following the shift and the re-derived flags
+  // all become things one path does and the other forgets.
+  assert.ok(/async function applyShiftEdit\(/.test(ROUTE_SRC), 'the shared editor must exist');
+
+  const put = ROUTE_SRC.slice(ROUTE_SRC.indexOf("router.put('/api/scheduling/shifts/:id'"),
+    ROUTE_SRC.indexOf("router.post('/api/scheduling/shifts/bulk'"));
+  assert.ok(put.includes('applyShiftEdit('), 'the PUT route must delegate to it');
+  // The route is a thin wrapper: it must not have grown its own copy of the
+  // guards back.
+  assert.ok(!put.includes('rederiveScheduleFlags'), 'the PUT route must not re-derive flags itself');
+  assert.ok(!put.includes('SHIFT_HOLDER_INELIGIBLE'), 'the PUT route must not restate the holder check');
+
+  // Anchored on the ROUTE DECLARATION, not on the path as prose. The first
+  // draft of this guard sliced from the path string and landed on the comment
+  // above the route, so it read 68 characters and proved nothing — *a guard
+  // that silently grabs the wrong slice proves nothing*, and this one caught
+  // itself. Match a shape only code can have.
+  const APPROVE_DECL = "router.post('/api/scheduling/change-requests/:id/approve'";
+  const approveAt = ROUTE_SRC.indexOf(APPROVE_DECL);
+  assert.ok(approveAt !== -1, 'the approve route must exist under that exact path');
+  const approve = ROUTE_SRC.slice(approveAt + APPROVE_DECL.length);
+  const nextRoute = approve.indexOf('router.post(');
+  assert.ok(nextRoute > 0, 'the slice must end at the next route, not run to EOF');
+  const approveBody = approve.slice(0, nextRoute);
+  assert.ok(approveBody.includes('applyShiftEdit('),
+    'approving a time-change request must go through the shared editor, never its own write');
 });
