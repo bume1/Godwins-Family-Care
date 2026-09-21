@@ -132,6 +132,10 @@
   function fmtWhen(iso) {
     return T ? T.fmtDayTime(iso) : '';
   }
+  // Date only, no time — for "corrected on 9/17/2026", not a full timestamp.
+  function fmtDate(iso) {
+    return T ? T.fmtDate(iso) : '';
+  }
   function fmtRange(a, b) {
     var end = new Date(b);
     if (!T || isNaN(end.getTime())) return fmtWhen(a);
@@ -477,14 +481,27 @@
         '<button class="gbtn ghost" data-act="download-hours">Download my hours (CSV)</button>' +
       '</div>' +
       state.timeLogs.map(function (l) {
+        // `admin_edited` is the office correcting a mistake, not the caregiver
+        // making one — it does not belong beside Outside Geofence and Late
+        // Clock In, which ARE things the caregiver did. Rendering it red said
+        // otherwise, and gave no reason: someone opening their hours saw a
+        // different number and a warning chip with no idea why either changed.
+        var faultFlags = (l.flags || []).filter(function (f) { return f !== 'admin_edited'; });
         return '<div class="grow" style="display:block">' +
           '<div class="gwhen">' + esc(fmtWhen(l.clockInAt)) + '</div>' +
           '<div class="gmu">' + esc(l.clientName || '') + ' · ' +
             (l.totalHours === null || l.totalHours === undefined ? 'still open' : esc(l.totalHours) + ' h') + '</div>' +
-          ((l.flags || []).length
-            ? '<div class="gmu">' + l.flags.map(function (f) {
+          (faultFlags.length
+            ? '<div class="gmu">' + faultFlags.map(function (f) {
                 return '<span class="gchip warn">' + esc(titleize(f)) + '</span>';
               }).join(' ') + '</div>'
+            : '') +
+          (l.edited
+            ? '<div class="gwhy">Corrected by the office' +
+                (l.editedByName ? ' — ' + esc(l.editedByName) : '') +
+                (l.editedAt ? ', ' + esc(fmtDate(l.editedAt)) : '') +
+                (l.editReason ? ': ' + esc(l.editReason) : '') +
+              '</div>'
             : '') +
         '</div>';
       }).join('') + '</div>';
