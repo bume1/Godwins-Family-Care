@@ -88,6 +88,9 @@ const COLLECTION_REGISTRY = Object.freeze([
   // ---- scheduling (Session 7) ----
   { key: 'shifts', phi: true, owner: '7' },
   { key: 'shift_requests', phi: true, owner: '7' },
+  // A caregiver's ask to move or hand back a shift. PHI: it names the client
+  // the visit is for, and carries the caregiver's reason in free text.
+  { key: 'shift_change_requests', phi: true, owner: '7' },
   { key: 'caregiver_availability', phi: false, owner: '7' },
   { key: 'time_logs', phi: true, owner: '7', note: 'GPS clock-in at a client address' },
   { key: 'time_log_edits', phi: true, owner: '7' },

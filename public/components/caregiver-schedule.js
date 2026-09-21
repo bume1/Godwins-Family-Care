@@ -80,6 +80,7 @@
     '.gfcs .gpay{font-size:14px;font-weight:600;color:var(--navy);margin-top:3px}',
     '.gfcs .gblocked{opacity:.55}',
     '.gfcs .gwhy{font-size:13px;color:var(--mut);font-style:italic;margin-top:5px}',
+    '.gfcs .gask{margin-top:10px;padding:12px;border-radius:10px;background:var(--cream,#faf7f0);border:1px solid rgba(0,0,0,.08)}',
     '.gfcs .gempty{text-align:center;padding:22px 12px;color:var(--mut);font-size:15px}',
     '.gfcs .gerr{background:#fdeeee;border:1px solid #e7bcbc;color:#7d2020;border-radius:9px;padding:11px;font-size:15px;margin-bottom:10px}',
     '.gfcs .gok{background:#f2f8f6;border:1px solid #b8ddd0;color:#0d5744;border-radius:9px;padding:11px;font-size:15px;margin-bottom:10px}',
@@ -224,6 +225,16 @@
         (running && s.visitLogFiled === false
           ? '<div class="gmu">The visit log is not filed yet.</div>'
           : '') +
+        // An ask already waiting on the office is shown as a STATE, not as a
+        // second button: asking twice is refused server-side, and a caregiver
+        // who cannot see that they already asked will ask again.
+        (state.asking === s.id ? askForm(s) : '') +
+        (s.openChangeRequest
+          ? '<div class="gmu"><span class="gchip">' +
+              (s.openChangeRequest.kind === 'drop'
+                ? 'Asked to hand this back' : 'Asked to change the time') +
+            '</span> — waiting on the office.</div>'
+          : '') +
         '<div class="gbtns">' +
           (running
             ? (s.visitLogFiled === false
@@ -231,9 +242,106 @@
               : '<button class="gbtn danger" data-act="clock-out" data-id="' + s.id + '">Clock out</button>')
             : '<button class="gbtn gold" data-act="clock-in" data-id="' + s.id + '"' +
               (tooEarly ? ' disabled' : '') + '>Clock in</button>') +
+          // Offered only where the SERVER says it can be asked about. Where it
+          // cannot, the reason is printed — including the office number when
+          // the shift is inside the notice window, because there is still a
+          // real problem to solve and a dead end is how a control gets worked
+          // around.
+          (!running && s.changeRequestable && !s.openChangeRequest
+            ? '<button class="gbtn ghost" data-act="ask-change" data-id="' + esc(s.id) + '">Ask to change</button>'
+            : '') +
+          (!running && s.openChangeRequest
+            ? '<button class="gbtn ghost" data-act="withdraw-change" data-id="' +
+                esc(s.openChangeRequest.id) + '">Withdraw the request</button>'
+            : '') +
         '</div>' +
+        (!running && !s.changeRequestable && !s.openChangeRequest && s.changeRequestBlockedReason
+          ? '<div class="gwhy">' + esc(s.changeRequestBlockedReason) + '</div>'
+          : '') +
+      '</div>';
+    }).join('') + '</div>' + renderMyRequests(state);
+  }
+
+  // WHERE AN ANSWER IS READ. A declined request carries the office's reason,
+  // and a caregiver told only "no" asks again or stops telling us at all — the
+  // same rule the rejected document upload follows. Withdrawn and approved
+  // rows fall off after their shift has passed; a pending one always shows.
+  function renderMyRequests(state) {
+    var rows = (state.changeRequests || []).filter(function (r) {
+      if (r.status === 'pending') return true;
+      return r.decidedAt && (Date.now() - new Date(r.decidedAt).getTime()) < 21 * 86400000;
+    });
+    if (!rows.length) return '';
+    return '<div class="gcard"><h3>My requests</h3>' + rows.map(function (r) {
+      var label = r.kind === 'drop' ? 'Asked to hand back' : 'Asked to change the time';
+      var chip = r.status === 'approved' ? 'ok' : (r.status === 'declined' ? 'warn' : '');
+      return '<div class="grow" style="display:block">' +
+        '<div class="gwhen">' + esc(fmtRange(r.shiftStart, r.shiftEnd)) + '</div>' +
+        '<div class="gmu">' + esc(r.clientName || '') + ' · ' + esc(label) + '</div>' +
+        (r.kind === 'time_change' && r.proposedStart
+          ? '<div class="gmu">You asked for ' + esc(fmtRange(r.proposedStart, r.proposedEnd)) + '</div>'
+          : '') +
+        '<div class="gmu"><span class="gchip ' + chip + '">' + esc(titleize(r.status)) + '</span>' +
+          (r.decidedByName ? ' by ' + esc(r.decidedByName) : '') + '</div>' +
+        (r.decisionNote
+          ? '<div class="gwhy">' + esc(r.decisionNote) + '</div>'
+          : '') +
       '</div>';
     }).join('') + '</div>';
+  }
+
+  // The ask form. Two kinds, and the time boxes only exist for the one that
+  // needs them — a "I cannot work this" form asking for a new start time is a
+  // form nobody can answer.
+  function askForm(s) {
+    var local = function (iso) {
+      // Pre-filled with the shift's OWN time in Georgia, so a caregiver
+      // adjusting by an hour edits rather than retypes.
+      if (!T || !T.zonedParts) return '';
+      var p = T.zonedParts(new Date(iso));
+      if (!p) return '';
+      var pad = function (n) { return String(n).padStart(2, '0'); };
+      return p.year + '-' + pad(p.month) + '-' + pad(p.day) + 'T' + pad(p.hour) + ':' + pad(p.minute);
+    };
+    // Rendered from the kinds the SERVER named for this shift. An offer takes a
+    // time change only — handing an offer back is Decline, which is already on
+    // the row — so the page must not restate the list and drift from the
+    // validator that refuses what it offers.
+    var kinds = s.changeRequestKinds && s.changeRequestKinds.length
+      ? s.changeRequestKinds : ['time_change'];
+    var LABELS = {
+      time_change: 'A different time for this shift',
+      drop: 'I cannot work this shift'
+    };
+    var offer = s.status === 'assigned';
+    return '<div class="gask">' +
+      (kinds.length > 1
+        ? '<div class="gfield"><label>What are you asking for?</label>' +
+            '<select id="gfcs-cr-kind" data-cr-kind="1">' +
+              kinds.map(function (k) {
+                return '<option value="' + esc(k) + '">' + esc(LABELS[k] || k) + '</option>';
+              }).join('') +
+            '</select></div>'
+        : '<input type="hidden" id="gfcs-cr-kind" value="' + esc(kinds[0]) + '">') +
+      '<div id="gfcs-cr-times">' +
+        '<div class="gfield"><label>New start</label>' +
+          '<input type="datetime-local" id="gfcs-cr-start" value="' + esc(local(s.start)) + '"></div>' +
+        '<div class="gfield"><label>New end</label>' +
+          '<input type="datetime-local" id="gfcs-cr-end" value="' + esc(local(s.end)) + '"></div>' +
+      '</div>' +
+      '<div class="gfield"><label>Why? The office needs a sentence.</label>' +
+        '<textarea id="gfcs-cr-reason" rows="2" placeholder="School run — I can start two hours later."></textarea></div>' +
+      // ASKING IS AGREEING, and the form has to say so before they send it.
+      // The office confirms the shift onto their schedule on approval, so a
+      // caregiver who meant "only if" must know that before they ask.
+      '<p class="gmu">' + (offer
+        ? 'Nothing changes until the office answers. If they approve the new time, the shift becomes yours at that time and goes on your schedule — so only ask if you will work it. If they say no, the original offer still stands and you can accept or decline it.'
+        : 'Nothing changes until the office answers. Keep the shift until they do.') + '</p>' +
+      '<div class="gbtns">' +
+        '<button class="gbtn gold" data-act="send-ask" data-id="' + esc(s.id) + '">Send the request</button>' +
+        '<button class="gbtn ghost" data-act="cancel-ask">Cancel</button>' +
+      '</div>' +
+    '</div>';
   }
 
   function renderOffers(state) {
@@ -243,10 +351,27 @@
         '<div class="gwhen">' + esc(fmtRange(s.start, s.end)) + '</div>' +
         '<div class="gmu">' + esc(s.clientName || '') + '</div>' +
         (s.notes ? '<div class="gmu">' + esc(s.notes) + '</div>' : '') +
+        // An offer at the wrong time is where a change is cheapest to ask
+        // about: the alternative is declining outright, and then the office
+        // has lost the caregiver AND still has the shift.
+        (s.openChangeRequest
+          ? '<div class="gmu"><span class="gchip">Asked to change the time</span> — waiting on the office.</div>'
+          : '') +
+        (state.asking === s.id ? askForm(s) : '') +
         '<div class="gbtns">' +
           '<button class="gbtn" data-act="accept" data-id="' + s.id + '">Accept</button>' +
           '<button class="gbtn ghost" data-act="decline" data-id="' + s.id + '">Decline</button>' +
+          (s.changeRequestable && !s.openChangeRequest
+            ? '<button class="gbtn ghost" data-act="ask-change" data-id="' + esc(s.id) + '">Ask for a different time</button>'
+            : '') +
+          (s.openChangeRequest
+            ? '<button class="gbtn ghost" data-act="withdraw-change" data-id="' +
+                esc(s.openChangeRequest.id) + '">Withdraw</button>'
+            : '') +
         '</div>' +
+        (!s.changeRequestable && !s.openChangeRequest && s.changeRequestBlockedReason
+          ? '<div class="gwhy">' + esc(s.changeRequestBlockedReason) + '</div>'
+          : '') +
       '</div>';
     }).join('') + '</div>';
   }
@@ -294,7 +419,8 @@
     var earliest = new Date(Date.now() + LEAD_DAYS * 86400000).toISOString().slice(0, 10);
     var html = '<div class="gcard"><h3>Submit availability</h3>' +
       '<p class="gmu" style="margin-bottom:10px">Availability is submitted at least ' + LEAD_DAYS +
-      ' days ahead, so the office can build the schedule around it. The earliest you can start is ' + esc(earliest) + '.</p>' +
+      ' days ahead, so the office can build the schedule around it. The earliest you can start is ' + esc(earliest) + '. ' +
+      'Submitting again replaces what you have now — the office works from your most recent one.</p>' +
       '<div class="gfield"><label>Starts from</label>' +
       '<input type="date" id="gfcs-eff" min="' + esc(earliest) + '" value="' + esc(state.draft.effectiveFrom || earliest) + '"></div>';
 
@@ -325,7 +451,14 @@
           '<div class="gmu">' + (a.windows || []).map(function (w) {
             return esc(w.day + ' ' + w.start + '–' + w.end);
           }).join(' · ') + '</div>' +
-          '<div class="gmu"><span class="gchip' + (a.status === 'reviewed' ? ' ok' : '') + '">' + esc(titleize(a.status)) + '</span></div>' +
+          '<div class="gmu"><span class="gchip' + (a.status === 'reviewed' ? ' ok' : '') + '">' + esc(titleize(a.status)) + '</span>' +
+            // Which one is actually in force. Submitting again does not erase
+            // what you said before — it supersedes it — and without saying so
+            // a caregiver cannot tell whether their update took.
+            (a.current
+              ? ' <span class="gchip ok">In force</span>'
+              : ' <span class="gchip">Superseded</span>') +
+          '</div>' +
         '</div>';
       }).join('') + '</div>';
     }
@@ -374,6 +507,14 @@
       });
     });
 
+    var kindSel = root.querySelector('[data-cr-kind]');
+    if (kindSel) {
+      kindSel.addEventListener('change', function () {
+        var times = root.querySelector('#gfcs-cr-times');
+        if (times) times.style.display = kindSel.value === 'drop' ? 'none' : '';
+      });
+    }
+
     var eff = root.querySelector('#gfcs-eff');
     if (eff) eff.addEventListener('change', function () { state.draft.effectiveFrom = eff.value; });
 
@@ -407,12 +548,63 @@
           if (state.onVisitLogRequired) state.onVisitLogRequired(pending || { id: id });
           return;
         }
+        if (act === 'ask-change') { state.asking = id; state.error = ''; state.notice = ''; return render(state); }
+        if (act === 'cancel-ask') { state.asking = null; return render(state); }
+        if (act === 'send-ask') { btn.disabled = true; return sendChangeRequest(state, root, id); }
+        if (act === 'withdraw-change') {
+          btn.disabled = true;
+          return api(state, '/api/scheduling/change-requests/' + id + '/withdraw', { method: 'POST' })
+            .then(function () { state.notice = 'Request withdrawn.'; return refresh(state); })
+            .catch(function (err) { state.error = err.message; render(state); });
+        }
         btn.disabled = true;
         act === 'clock-in' || act === 'clock-out'
           ? clock(state, id, act)
           : shiftAction(state, id, act);
       });
     });
+  }
+
+  // Asking is a REQUEST, and the wording says so: nothing moves until the
+  // office answers. A caregiver who believes the shift already changed is the
+  // failure mode here, so neither the form nor the confirmation ever implies it.
+  function sendChangeRequest(state, root, shiftId) {
+    var kindEl = root.querySelector('#gfcs-cr-kind');
+    var kind = kindEl ? kindEl.value : 'time_change';
+    var reasonEl = root.querySelector('#gfcs-cr-reason');
+    var startEl = root.querySelector('#gfcs-cr-start');
+    var endEl = root.querySelector('#gfcs-cr-end');
+    var body = { kind: kind, reason: reasonEl ? reasonEl.value : '' };
+    if (kind === 'time_change') {
+      // Built from the LOCAL datetime boxes through the shared clock, so a
+      // caregiver picking 1pm gets 1pm in Georgia whatever their device says.
+      body.proposedStart = startEl && startEl.value ? localToIso(startEl.value) : null;
+      body.proposedEnd = endEl && endEl.value ? localToIso(endEl.value) : null;
+    }
+    state.error = ''; state.notice = '';
+    api(state, '/api/scheduling/shifts/' + shiftId + '/change-request', { method: 'POST', body: body })
+      .then(function (r) {
+        state.asking = null;
+        state.notice = (r && r.message) || 'Sent. The office will let you know.';
+        return refresh(state);
+      })
+      .catch(function (err) {
+        // The server's own sentence — including the office number when the
+        // shift is inside the notice window.
+        state.error = err.message;
+        render(state);
+      });
+  }
+
+  // A `datetime-local` value is wall-clock with no zone. Reading it with
+  // `new Date()` uses the DEVICE's zone, so a caregiver travelling, or a phone
+  // set wrong, would ask for a different hour than the one they typed. Every
+  // time in this app is Eastern, so it is resolved through the shared clock.
+  function localToIso(v) {
+    var m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(String(v || ''));
+    if (!m) return null;
+    if (T && T.instantFromZoned) return T.instantFromZoned(m[1], m[2]);
+    return null;
   }
 
   function submitAvailability(state, root) {
@@ -487,7 +679,8 @@
       api(state, '/api/scheduling/shifts').catch(function () { return { shifts: [] }; }),
       api(state, '/api/scheduling/shifts/open').catch(function () { return { shifts: [] }; }),
       api(state, '/api/scheduling/availability').catch(function () { return { availability: [] }; }),
-      api(state, '/api/scheduling/time-logs').catch(function () { return { timeLogs: [] }; })
+      api(state, '/api/scheduling/time-logs').catch(function () { return { timeLogs: [] }; }),
+      api(state, '/api/scheduling/change-requests').catch(function () { return { requests: [] }; })
     ]).then(function (r) {
       var mine = r[0].shifts || [];
       state.mine = mine;
@@ -496,6 +689,7 @@
       state.availability = r[2].availability || [];
       state.timeLogs = r[3].timeLogs || [];
       state.totalHours = r[3].totalHours;
+      state.changeRequests = (r[4] && r[4].requests) || [];
       state.loading = false;
       render(state);
       if (typeof state.onChange === 'function') {
@@ -530,6 +724,7 @@
       loading: true,
       error: '', notice: '',
       mine: [], offers: [], open: [], availability: [], timeLogs: [], totalHours: null,
+      asking: null, changeRequests: [],
       draft: { effectiveFrom: earliest, windows: [{ day: 'Mon', start: '09:00', end: '17:00' }], blackoutDates: [] }
     };
     instances[elementId] = state;
