@@ -60,7 +60,20 @@ const patientRead = require('./patientReadRepository');
 const clinicalRoles = require('./clinicalRoles');
 const standingOrders = require('./standingOrders');   // signed, versioned, expiring protocols (4.8 Scope C)
 const clinicalInbox = require('./clinicalInbox');     // what is waiting on a clinician (4.9)
+// Session 4.10 — orders that leave the building. The app GENERATES, a person
+// TRANSMITS: there is no fax API here and there never claims to be one.
+const orderReq = require('./orderRequisitions');      // referrals, DME, requisitions, sends, overdue (4.10 A)
+const controlled = require('./controlledSubstances'); // the Schedule II guard (4.10 B)
+const clinicalResults = require('./clinicalResults'); // the RESULTS path — received documents and their
+                                                      // acknowledgment. Distinct from 4.9's clinicalInbox,
+                                                      // which is what is waiting on a clinician INSIDE the
+                                                      // app (unsigned notes, pending co-signs). See the
+                                                      // note in clinicalResults.js on why they stay apart.
+// Session 4.11 — the day-before visit reminder, CAPTURED AT WRITE TIME because
+// per-clinician OpenEMR auth means no background job can read the calendar.
+const visitReminders = require('./visitReminders');
 const consentText = require('./public/consent-text'); // approved consent bodies, versioned (Session 4.6)
+const appLinks = require('./appLinks');               // the ONE place that answers "where does this person go?"
 const consentRegistry = require('./consentRegistry'); // THE consent registry: lanes, statuses, provenance (4.6)
 const consentRender = require('./consentRender');     // consent data blocks resolved from the client record (4.6)
 const zipWriter = require('./zipWriter');             // dependency-free ZIP for the signed-consent packet (4.6)
@@ -1495,9 +1508,64 @@ const scanAndQueueNotifications = async () => {
       }
     }
 
+    // ── Session 4.11: the day-before visit reminders that are now due ──────
+    // It rides THE EXISTING SCANNER rather than a new timer: a second timer is a
+    // second thing to keep alive, and this one already runs on a schedule the
+    // owner controls.
+    await sendDueVisitReminders();
+
     console.log('[SCANNER] Notification trigger scan completed');
   } catch (err) {
     console.error('[SCANNER] Error scanning for notifications:', err);
+  }
+};
+
+// ── The reminder send (Session 4.11) ──────────────────────────────────────
+//
+// TWO OUTCOMES, AND THEY ARE DIFFERENT ACTIONS. A reminder whose send time has
+// arrived is sent. One more than MISSED_WINDOW_HOURS past — the server was down
+// over the window — is VOIDED, never sent late: a reminder that arrives after
+// the visit tells somebody to expect a clinician who has already been and gone,
+// which is worse than no reminder at all.
+//
+// Wrapped in its own try/catch so a reminder problem never takes the rest of the
+// scan down with it.
+const sendDueVisitReminders = async () => {
+  try {
+    const rows = (await db.get('visit_reminders')) || [];
+    const { due, missed } = visitReminders.dueReminders(rows);
+    if (!due.length && !missed.length) return;
+
+    const byId = new Map(rows.map((r, i) => [r && r.id, i]));
+    let dirty = false;
+
+    for (const r of missed) {
+      const i = byId.get(r.id);
+      if (i === undefined) continue;
+      rows[i] = { ...rows[i], status: 'void', voidReason: 'missed_window', voidedAt: new Date().toISOString() };
+      dirty = true;
+      console.log(`[REMINDER] Voided ${r.id} — more than ${visitReminders.MISSED_WINDOW_HOURS}h past its send window; a late reminder is worse than none.`);
+    }
+
+    for (const r of due) {
+      const out = await notify.visitReminder({ reminder: r, orgPhone: consentText.ORG.phone });
+      const i = byId.get(r.id);
+      if (i === undefined) continue;
+      // MARKED 'sent' ONLY AFTER THE QUEUE ACCEPTS IT. A skip (the recipient
+      // unsubscribed, or there is no address) is still a closed reminder — it is
+      // not going to succeed on a later scan — so it is marked too, with the
+      // reason, rather than retried forever.
+      rows[i] = {
+        ...rows[i], status: 'sent', sentAt: new Date().toISOString(),
+        notified: out.notified || 0,
+        sendNote: out.notified ? null : (out.reason || 'no recipient accepted it')
+      };
+      dirty = true;
+    }
+
+    if (dirty) await db.set('visit_reminders', rows);
+  } catch (err) {
+    console.error('[REMINDER] Send sweep failed (non-fatal):', err.message);
   }
 };
 
@@ -2595,7 +2663,7 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       existingPortalSlug, phone, sendWelcomeEmail: shouldSendWelcome = true,
       licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
       familyIsPoa, openEmrProviderId, npi, payRate, clientPayRates, rateAgreement,
-      clinicalRole
+      clinicalRole, prescriberCredential, deaNumber, deaSchedules, deaExpiresAt, medicareEnrollment
     } = req.body;
 
     // Managers can only create client users
@@ -2639,6 +2707,29 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       openEmrProviderId: openEmrProviderId || null,
       // Clinician NPI for attribution stamps (Session 4.4)
       npi: normalizeNpi(npi),
+      // ── Session 4.10 ── WHAT this prescriber is, and WHAT they are enrolled
+      // and registered to do. `clinicalRole: 'provider'` covers an MD and an NP
+      // alike and cannot tell them apart, and `licenseLevel` is free text that
+      // gates nothing — so both of these are structured fields, admin-set, and
+      // nothing infers either of them.
+      prescriberCredential: controlled.PRESCRIBER_CREDENTIALS.includes(String(prescriberCredential || '')) ? String(prescriberCredential) : null,
+      deaNumber: controlled.normalizeDea(deaNumber),
+      deaSchedules: controlled.normalizeDeaSchedules(deaSchedules),
+      deaExpiresAt: /^\d{4}-\d{2}-\d{2}$/.test(String(deaExpiresAt || '')) ? String(deaExpiresAt) : null,
+      // 42 CFR 424.507 — whether the LAB's, IMAGING CENTRE's or SUPPLIER's claim
+      // for an order this person places will be denied.
+      //
+      // STAMPED WITH WHO SAID SO AND WHEN, on create as well as on edit. A status
+      // typed two years ago that nobody has re-checked is what 424.507 denials
+      // are actually made of, so the stamp is the point of the field — and a
+      // record created with a status and no stamp is one nobody can age out.
+      // Found by the probe: the edit path stamped it and the create path did not.
+      medicareEnrollment: (() => {
+        const m = orderReq.normalizeMedicareEnrollment(medicareEnrollment);
+        return m.status
+          ? { ...m, verifiedAt: new Date().toISOString(), verifiedBy: req.user.name || req.user.email }
+          : m;
+      })(),
       // What WE PAY a caregiver (owner request, 2026-09-13) — never the same
       // number as the client's rateAgreement; the gap between them is the margin.
       payRate: caregiverRepo.normalizePayRate(payRate),
@@ -3454,6 +3545,23 @@ app.get('/api/users', authenticateToken, async (req, res) => {
       familyIsPoa: u.familyIsPoa || false,
       openEmrProviderId: u.openEmrProviderId || null,
       npi: u.npi || null,
+      // Session 4.10 — returned for the same reason clinicalRole is: a field the
+      // GET omits is a field the round-tripped admin form silently wipes on save,
+      // and for a DEA registration that is a prescriber who can no longer record
+      // a controlled substance with nobody having decided that.
+      prescriberCredential: u.prescriberCredential || null,
+      deaNumber: u.deaNumber || null,
+      deaSchedules: Array.isArray(u.deaSchedules) ? u.deaSchedules : [],
+      deaExpiresAt: u.deaExpiresAt || null,
+      medicareEnrollment: orderReq.normalizeMedicareEnrollment(u.medicareEnrollment),
+      // Session 4.11 B2 — A BLANK CREDENTIAL IS A DATA GAP AND IT SHOULD BE
+      // VISIBLE. A clinician mapped to an OpenEMR provider with nothing on file
+      // has their name shown to patients with no title at all, and nobody finds
+      // that out from the code. Answered by the SERVER so the page cannot drift
+      // from the formatter that decides it; same shape as 4.8's role banner.
+      patientFacingLabel: visitReminders.visitClinicianLabel(u),
+      patientFacingCredentialMissing: !!u.openEmrProviderId &&
+        !String(u.prescriberCredential || '').trim() && !String(u.licenseLevel || u.credential || '').trim(),
       // Verified competencies decide which fields a caregiver's visit log shows
       // (Session 6). Read-only here — the admin form saves them through
       // PUT /api/caregiver/admin/caregivers/:userId/competencies, and the user
@@ -3520,7 +3628,8 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
       hasServicePortalAccess, hasAdminHubAccess, hasImplementationsAccess, hasClientPortalAdminAccess,
       isManager, assignedClients, phone, accountStatus, emailUnsubscribed,
       licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
-      familyIsPoa, openEmrProviderId, npi, payRate, clientPayRates, clinicalRole
+      familyIsPoa, openEmrProviderId, npi, payRate, clientPayRates, clinicalRole,
+      prescriberCredential, deaNumber, deaSchedules, deaExpiresAt, medicareEnrollment
     } = req.body;
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === userId);
@@ -3566,6 +3675,48 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
 
     // GFC extended fields
     if (licenseLevel !== undefined) users[idx].licenseLevel = licenseLevel;
+    // ── Session 4.10 — prescribing credential, DEA registration, Medicare ──
+    // Each is REFUSED BY NAME on a bad value rather than silently dropped: a
+    // DEA number that fails its own checksum is a transposed digit belonging to
+    // somebody else, and storing nothing while the form says saved leaves an
+    // admin believing a prescriber is registered when the record says they are
+    // not. Blank CLEARS, which is how a lapsed registration is removed.
+    if (prescriberCredential !== undefined) {
+      const wanted = prescriberCredential === null || prescriberCredential === '' ? null : String(prescriberCredential);
+      if (wanted !== null && !controlled.PRESCRIBER_CREDENTIALS.includes(wanted)) {
+        return res.status(400).json({ error: `prescriberCredential must be one of ${controlled.PRESCRIBER_CREDENTIALS.join(', ')} (or empty for none)`, code: 'PRESCRIBER_CREDENTIAL_INVALID' });
+      }
+      users[idx].prescriberCredential = wanted;
+    }
+    if (deaNumber !== undefined) {
+      if (String(deaNumber || '').trim() === '') users[idx].deaNumber = null;
+      else {
+        const dea = controlled.normalizeDea(deaNumber);
+        if (!dea) return res.status(400).json({ error: 'A DEA number is two letters followed by seven digits, and the last digit is a checksum. Check it against the registration certificate.', code: 'DEA_INVALID' });
+        users[idx].deaNumber = dea;
+      }
+    }
+    if (deaSchedules !== undefined) users[idx].deaSchedules = controlled.normalizeDeaSchedules(deaSchedules);
+    if (deaExpiresAt !== undefined) {
+      if (String(deaExpiresAt || '').trim() === '') users[idx].deaExpiresAt = null;
+      else if (!/^\d{4}-\d{2}-\d{2}$/.test(String(deaExpiresAt))) {
+        return res.status(400).json({ error: 'The DEA expiry date must be YYYY-MM-DD', code: 'DEA_EXPIRY_INVALID' });
+      } else users[idx].deaExpiresAt = String(deaExpiresAt);
+    }
+    if (medicareEnrollment !== undefined) {
+      const m = orderReq.normalizeMedicareEnrollment(medicareEnrollment);
+      if (medicareEnrollment && medicareEnrollment.status && !m.status) {
+        return res.status(400).json({ error: `Medicare enrolment status must be one of ${orderReq.ENROLLMENT_STATUSES.join(', ')}`, code: 'MEDICARE_STATUS_INVALID' });
+      }
+      // WHO verified it and WHEN is the point of the field. An enrolment status
+      // somebody typed two years ago and nobody has checked since is what 424.507
+      // denials are actually made of, so the stamp is written here rather than
+      // asked for on the form.
+      users[idx].medicareEnrollment = { ...m, verifiedAt: new Date().toISOString(), verifiedBy: req.user.name || req.user.email };
+      await logActivity(req.user.id, req.user.name || req.user.email, 'medicare_enrollment_set', 'user', users[idx].id, {
+        status: m.status, effectiveDate: m.effectiveDate, targetName: users[idx].name
+      });
+    }
     // Session 4.8: the clinical role decides, and `hasClinicalAccess` follows
     // it. An empty string clears the role (no clinical access at all); an
     // unrecognised value is REFUSED rather than silently dropped — silently
@@ -5822,6 +5973,44 @@ async function migrateClinicalRoles() {
   }
 }
 
+// ── Session 4.10: seed the return fax number, ONLY IF UNSET ───────────────
+//
+// The requisition's "Return results to:" line. The owner-confirmed value is
+// seeded FROM `consentText.ORG.fax` rather than restated here: that block is
+// already the one declaration of GFC's identity and it is what prints onto every
+// executed consent, so a second copy in this file is a second copy that drifts.
+//
+// IDEMPOTENT, AND IT NEVER OVERWRITES AN ADMIN'S VALUE. A re-run does nothing; a
+// boot after somebody has changed the number in admin does nothing. The decision
+// is stated in one pure function (`seedReturnFax`) so this path and the test
+// exercise the same rule rather than two copies of it.
+async function seedRequisitionReturnFax() {
+  const stored = (await db.get('requisition_settings')) || {};
+  const out = orderReq.seedReturnFax(stored, consentText.ORG.fax);
+  if (out.changed) {
+    await db.set('requisition_settings', out.settings);
+    console.log(`[4.10] Requisition return fax ${out.reason}.`);
+  } else {
+    console.log(`[4.10] Requisition return fax not seeded: ${out.reason}.`);
+  }
+  return out;
+}
+
+// ── Session 4.10 B6: prescriptions that predate the schedule field ────────
+// FLAGGED as "unclassified", never guessed. A schedule inferred from a drug
+// string and then stored looks identical to one a clinician declared, and the
+// declaration is the whole control. Reading them is not blocked.
+async function migratePrescriptionSchedules() {
+  const rows = (await db.get('prescriptions')) || [];
+  const { rows: next, flagged } = controlled.applyPrescriptionScheduleMigration(rows);
+  if (flagged.length) {
+    await db.set('prescriptions', next);
+    const warning = controlled.buildUnclassifiedWarning(flagged);
+    if (warning) console.warn(warning);
+  }
+  return { flagged: flagged.length };
+}
+
 async function migrateConsentLaneSplit() {
   if (String(process.env.CONSENT_LANE_SPLIT_MIGRATION_APPLIED).toLowerCase() === 'true') {
     return { skipped: true };
@@ -6397,7 +6586,17 @@ const GFC_EXPECTED_DOCUMENTS = [
     hint: 'A pharmacy printout or photos of the bottles — whichever you have.' },
   { kind: 'priorRecords',     scope: 'IHPC', required: false,
     label: 'Records from a prior provider',
-    hint: 'Discharge paperwork, recent labs, or a visit summary. We can also request these for you with a record release.' }
+    hint: 'Discharge paperwork, recent labs, or a visit summary. We can also request these for you with a record release.' },
+  // Neither of the next two is ever CHASED — they arrive, they are not demanded
+  // — but a document with no kind lands in a bucket no checklist reads, and
+  // then nobody sees it. They exist so a referral faxed in by a doctor's office
+  // and an order signed by a physician each have somewhere to go.
+  { kind: 'referral',         scope: 'IHPC', required: false,
+    label: 'Referral or face sheet from another provider',
+    hint: 'A referral letter or the face sheet a clinic sends over with a new patient.' },
+  { kind: 'physicianOrder',   scope: 'IHPC', required: false,
+    label: 'Physician order or plan of care',
+    hint: 'A signed order for services — home health, therapy, or a plan of care from a physician.' }
 ];
 
 // Which of the registry applies to a service line. Mirrors consentDefsForServiceLine.
@@ -8552,16 +8751,72 @@ const formatVisitWhen = (date, startTime) => {
 // The clinician's name from OUR user records, matched on the provider id the
 // appointment carries. Never the acting user: an admin books for a clinician,
 // and naming the wrong person in a patient's email is worse than naming none.
+//
+// SESSION 4.11 — this used to render `name, licenseLevel`, which assumed the
+// patient knew what "FNP" meant and said nothing at all when the field was
+// blank. A patient opening their front door should know a nurse practitioner is
+// coming, so the label now carries a plain-English role — and it comes from ONE
+// shared formatter used by booking, reschedule, cancel AND the reminder, because
+// four copies of "how a clinician is described to a patient" is four copies that
+// drift silently.
 const clinicianNameForProviderId = async (providerId) => {
   if (!providerId) return null;
   const users = await getUsers();
   const u = users.find(x => x && String(x.openEmrProviderId || '') === String(providerId));
-  return u ? [u.name, u.licenseLevel || u.credential].filter(Boolean).join(', ') : null;
+  return u ? visitReminders.visitClinicianLabel(u) : null;
 };
 
 const VISIT_PLACE_LABEL = Object.freeze({
   home: 'Your home', telehealth: 'By video visit', office: 'Our office'
 });
+
+// ── Session 4.11: the day-before reminder, captured at WRITE time ──────────
+//
+// Best-effort in exactly the way the booking notice is: a failure to schedule a
+// reminder must never undo an appointment that is already on the calendar. A
+// SKIP is a normal outcome and is logged as one — the commonest skip is a visit
+// booked so close to the day that the booking email already covers it, and
+// logging that as an error would make the log useless.
+const scheduleVisitReminder = async ({ clientId, eid, visitDate, startTime, when, clinician, place, actorId }) => {
+  try {
+    const built = visitReminders.buildVisitReminder({
+      id: uuidv4(), clientId, eid, visitDate, startTime, when, clinician, place
+    });
+    if (built.skipped) {
+      console.log(`[REMINDER] No reminder for appointment ${eid}: ${built.reason}`);
+      return { scheduled: false, reason: built.reason };
+    }
+    const rows = (await db.get('visit_reminders')) || [];
+    rows.push(built.reminder);
+    await db.set('visit_reminders', rows);
+    await logActivity(actorId || 'system', 'system', 'visit_reminder_scheduled', 'client', clientId, {
+      appointmentEid: String(eid), visitDate, sendAt: built.reminder.sendAt
+    });
+    return { scheduled: true, sendAt: built.reminder.sendAt };
+  } catch (e) {
+    console.error('[REMINDER] scheduling failed (non-fatal):', e.message);
+    return { scheduled: false, reason: e.message };
+  }
+};
+
+// Voiding is keyed on the OLD eid. The tombstone swap CHANGES the eid on a
+// reschedule, so keying it on the new one would leave the old reminder live and
+// send a patient to yesterday's time.
+const voidVisitReminders = async ({ eid, reason, clientId, actorId }) => {
+  try {
+    const rows = (await db.get('visit_reminders')) || [];
+    const out = visitReminders.voidRemindersForEid(rows, eid, reason);
+    if (!out.voided) return { voided: 0 };
+    await db.set('visit_reminders', out.rows);
+    await logActivity(actorId || 'system', 'system', 'visit_reminder_voided', 'client', clientId || null, {
+      appointmentEid: String(eid), reason, voided: out.voided
+    });
+    return { voided: out.voided };
+  } catch (e) {
+    console.error('[REMINDER] voiding failed (non-fatal):', e.message);
+    return { voided: 0, reason: e.message };
+  }
+};
 
 const clinicalClientsByPuuid = async () => {
   const users = await getUsers();
@@ -8787,13 +9042,22 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
     });
     // Tell the patient. Best-effort by design: a notification failure must
     // never undo an appointment that is already on the calendar.
+    const bookedWhen = formatVisitWhen(body.date, body.startTime);
+    const bookedClinician = await clinicianNameForProviderId(providerId);
+    const bookedPlace = VISIT_PLACE_LABEL[built.location] || null;
     await notify.appointmentBooked({
       client,
       eid: String(eid),
-      when: formatVisitWhen(body.date, body.startTime),
-      clinician: await clinicianNameForProviderId(providerId),
-      place: VISIT_PLACE_LABEL[built.location] || null,
+      when: bookedWhen,
+      clinician: bookedClinician,
+      place: bookedPlace,
       actorId: req.user.id
+    });
+    // 4.11: and the day-before reminder, from the facts we already hold. Nothing
+    // here reads OpenEMR back — that is what makes a background send possible.
+    await scheduleVisitReminder({
+      clientId: client.id, eid: String(eid), visitDate: body.date, startTime: body.startTime,
+      when: bookedWhen, clinician: bookedClinician, place: bookedPlace, actorId: req.user.id
     });
 
     // Read-back proves the round-trip (acceptance requirement); the single-row
@@ -8866,14 +9130,26 @@ app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requir
       providerId, supersededRowRemoved: swap.deleted
     });
     if (appClient) {
+      const movedTo = formatVisitWhen(body.date, body.startTime);
+      const movedClinician = await clinicianNameForProviderId(providerId);
+      const movedPlace = VISIT_PLACE_LABEL[built.location] || null;
       await notify.appointmentRescheduled({
         client: { id: appClient.clientId, name: appClient.name },
         eid: String(newEid),
         from: formatVisitWhen(row.pc_eventDate, row.pc_startTime),
-        to: formatVisitWhen(body.date, body.startTime),
-        clinician: await clinicianNameForProviderId(providerId),
-        place: VISIT_PLACE_LABEL[built.location] || null,
+        to: movedTo,
+        clinician: movedClinician,
+        place: movedPlace,
         actorId: req.user.id
+      });
+      // 4.11: VOID THE OLD EID, CREATE ON THE NEW ONE. The tombstone swap gives
+      // the moved visit a different eid, so the void has to key on the eid the
+      // reminder was written against — the OLD one — or yesterday's reminder
+      // stays live and sends the patient to a time nobody is coming at.
+      await voidVisitReminders({ eid: String(row.pc_eid), reason: 'rescheduled', clientId: appClient.clientId, actorId: req.user.id });
+      await scheduleVisitReminder({
+        clientId: appClient.clientId, eid: String(newEid), visitDate: body.date, startTime: body.startTime,
+        when: movedTo, clinician: movedClinician, place: movedPlace, actorId: req.user.id
       });
     }
     res.json({
@@ -8923,6 +9199,8 @@ app.post('/api/clinical/appointments/:eid/cancel', authenticateToken, requireCli
         clinician: await clinicianNameForProviderId(row.pc_aid),
         actorId: req.user.id
       });
+      // 4.11: a cancelled visit must not keep reminding anybody about it.
+      await voidVisitReminders({ eid: String(row.pc_eid), reason: 'cancelled', clientId: appClient.clientId, actorId: req.user.id });
     }
     res.json({
       message: 'Appointment cancelled — it stays on the calendar as a cancelled entry with the reason',
@@ -9015,6 +9293,18 @@ const getPayerCredentialing = async () => {
     updatedBy: stored.updatedBy || null
   };
 };
+// ── Session 4.10: the requisition block ───────────────────────────────────
+// "Return results to:" on every requisition. THE NUMBER LIVES IN THE DATABASE.
+// It changes the day GFC has an org fax line, and that must be a settings edit,
+// not a deploy — which is exactly why no source file outside the seed migration
+// and its test may carry it as a literal (test/return_fax_seed.test.js greps for
+// it). The ORG block seeds it; `normalizeRequisitionSettings` never falls back to
+// a literal, so an unset value prints "not configured" rather than a wrong number.
+const getRequisitionSettings = async () => {
+  const stored = (await db.get('requisition_settings')) || {};
+  return orderReq.normalizeRequisitionSettings(stored, { phone: consentText.ORG.phone });
+};
+
 const getClinicalSettings = async () => {
   const stored = (await db.get('clinical_settings')) || {};
   const favorites = Array.isArray(stored.serviceCodeFavorites)
@@ -9037,6 +9327,15 @@ const NO_PROVIDER_ID_WARNING = 'This visit was filed under the practice default 
 // this. Same shape as the fake that was missing what server.js injects
 // (2026-09-13) and the cross-client leak before it: AN OBJECT THAT IS MISSING
 // WHAT PRODUCTION SUPPLIES EXERCISES A DIFFERENT FUNCTION.
+// Today's date IN GEORGIA, as YYYY-MM-DD. Built from the practice clock's own
+// parts rather than `toISOString().slice(0,10)`: for four hours of every evening
+// UTC is already tomorrow, so an expiry judged in UTC expires a day early. Used
+// by the DEA expiry check and the PDMP attestation date.
+const practiceToday = () => {
+  const p = practiceTime.zonedParts(new Date());
+  return (p && p.isoDate) || new Date().toISOString().slice(0, 10);
+};
+
 const actorFromReq = (req) => ({
   id: req.user.id, name: req.user.name, licenseLevel: req.user.licenseLevel || null,
   npi: req.user.npi || null, openEmrProviderId: req.user.openEmrProviderId || null, role: req.user.role, email: req.user.email,
@@ -9220,11 +9519,14 @@ const refuseIfClosed = (ctx, res) => {
 // the UI can warn before a real encounter). PUT (admin only): edit them.
 app.get('/api/clinical/settings', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
-    const [payer, settings] = await Promise.all([getPayerCredentialing(), getClinicalSettings()]);
+    const [payer, settings, requisition] = await Promise.all([getPayerCredentialing(), getClinicalSettings(), getRequisitionSettings()]);
     res.json({
       billingNpiUsed: payer.billing_npi_used, billingProviderName: payer.billing_provider_name, billingNpiSource: payer.source,
       billingUpdatedAt: payer.updatedAt, billingUpdatedBy: payer.updatedBy,
       serviceCodeFavorites: settings.serviceCodeFavorites, favoritesSource: settings.favoritesSource,
+      // 4.10: the "Return results to:" block. Admin-editable, stored, never a
+      // literal in a source file.
+      requisition,
       me: { name: req.user.name, npi: req.user.npi || null, licenseLevel: req.user.licenseLevel || null, openEmrProviderId: req.user.openEmrProviderId || null },
       isAdmin: req.user.role === config.ROLES.ADMIN,
     });
@@ -9262,6 +9564,34 @@ app.put('/api/clinical/settings', authenticateToken, requireAdmin, async (req, r
       stored.updatedAt = new Date().toISOString(); stored.updatedBy = req.user.name;
       await db.set('clinical_settings', stored);
       changed.serviceCodeFavorites = stored.serviceCodeFavorites.length;
+    }
+    if (body.requisition !== undefined) {
+      const r = (body.requisition && typeof body.requisition === 'object') ? body.requisition : {};
+      const stored = (await db.get('requisition_settings')) || {};
+      if (r.returnFax !== undefined) {
+        // A blank CLEARS it deliberately — the requisition then says the number
+        // is not configured rather than printing a stale one. Anything else must
+        // be a real 10-digit US number: a mistyped fax number is a misdirected
+        // PHI disclosure, so it is refused rather than stored and discovered
+        // later by whoever does not get the result back.
+        if (String(r.returnFax || '').trim() === '') stored.returnFax = null;
+        else {
+          const fax = orderReq.normalizeFax(r.returnFax);
+          if (!fax) return res.status(400).json({ error: 'The return fax number must be a 10-digit US number', code: 'BAD_FAX' });
+          stored.returnFax = fax;
+        }
+        changed.returnFax = stored.returnFax ? 'set' : 'cleared';
+      }
+      if (r.returnFaxLabel !== undefined) {
+        stored.returnFaxLabel = String(r.returnFaxLabel || '').trim().slice(0, 120) || null;
+        changed.returnFaxLabel = stored.returnFaxLabel;
+      }
+      if (r.requisitionPhone !== undefined) {
+        stored.requisitionPhone = String(r.requisitionPhone || '').trim().slice(0, 40) || null;
+        changed.requisitionPhone = stored.requisitionPhone;
+      }
+      stored.updatedAt = new Date().toISOString(); stored.updatedBy = req.user.name;
+      await db.set('requisition_settings', stored);
     }
     await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_settings_updated', 'settings', 'clinical', changed);
     res.json({ message: 'Clinical settings saved', changed });
@@ -9568,7 +9898,31 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
       me: { name: req.user.name, npi: req.user.npi || null, licenseLevel: req.user.licenseLevel || null },
       warnings: [...attestationWarnings, ...(record.structuredNoteError ? [`GFC structured note not synced to OpenEMR: ${record.structuredNoteError}`] : [])],
       orderTypes: clinicalRepo.ORDER_TYPES, orderPriorities: clinicalRepo.ORDER_PRIORITIES, orderStatuses: clinicalRepo.ORDER_STATUSES, orderTransitions: clinicalRepo.ORDER_TRANSITIONS,
-      rxRoutes: clinicalRepo.RX_ROUTES
+      rxRoutes: clinicalRepo.RX_ROUTES,
+      // ── Session 4.10 ── every vocabulary is SERVED, never restated in the
+      // page. A form that names its own options drifts from the validator that
+      // refuses one it did not offer, silently — the rule the competency catalog
+      // and intake-fields.js already set.
+      referralTransitions: orderReq.REFERRAL_TRANSITIONS,
+      documentOrderTypes: orderReq.DOCUMENT_ORDER_TYPES,
+      sendChannels: orderReq.SEND_CHANNELS,
+      sendChannelLabels: orderReq.SEND_CHANNEL_LABELS,
+      defaultSendChannel: orderReq.DEFAULT_SEND_CHANNEL,
+      faxSendChannels: orderReq.FAX_SEND_CHANNELS,
+      rxSchedules: controlled.SCHEDULES,
+      rxScheduleLabels: controlled.SCHEDULE_LABELS,
+      resultInterpretations: clinicalResults.INTERPRETATIONS,
+      resultInterpretationLabels: clinicalResults.INTERPRETATION_LABELS,
+      // What the VIEWER's own prescribing credential is, so the Rx form can say
+      // "a Georgia NP may not prescribe Schedule II" BEFORE the click rather
+      // than after a 403. The server is still the control.
+      prescriber: {
+        prescriberCredential: req.user.prescriberCredential || null,
+        scheduleIIProhibited: controlled.SCHEDULE_II_PROHIBITED_CREDENTIALS.includes(String(req.user.prescriberCredential || '')),
+        deaOnFile: !!controlled.normalizeDea(req.user.deaNumber),
+        deaSchedules: controlled.normalizeDeaSchedules(req.user.deaSchedules),
+        deaExpiresAt: req.user.deaExpiresAt || null
+      }
     });
   } catch (error) {
     console.error('Clinical encounter detail error:', error);
@@ -9651,9 +10005,48 @@ app.put('/api/clinical/patients/:clientId/encounters/:euuid/coding', authenticat
 // ── Prescriptions (Scope C) — record only; transmission stays as today ───
 app.post('/api/clinical/patients/:clientId/encounters/:euuid/prescriptions', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.PRESCRIBE), async (req, res) => {
   try {
+    // ── Session 4.10 Scope B: certification gates the SCHEDULE ────────────
+    // Georgia APRNs may not prescribe Schedule I or II substances. There is no
+    // eRx here, so the app is not the prescription — IT IS THE CHART SAYING A
+    // PRESCRIPTION WAS WRITTEN, which is the same exposure 4.8 closed for RNs.
+    //
+    // The user record is read FRESH rather than taken from the token: a
+    // credential an admin corrected this morning must take effect on the next
+    // request, which is the rule POA status and clinicalRole already follow.
+    const rxUsers = await getUsers();
+    const prescriber = rxUsers.find(u => u && u.id === req.user.id) || req.user;
+    const verdict = controlled.evaluatePrescription({
+      user: prescriber,
+      drug: (req.body || {}).drug,
+      schedule: (req.body || {}).schedule,
+      pdmp: (req.body || {}).pdmp,
+      // The date in GEORGIA. The server is pinned to Eastern, so this is the day
+      // an expiring DEA registration is judged against — UTC is a different date
+      // for four hours of every evening.
+      today: practiceToday()
+    });
+    if (!verdict.ok) {
+      // 403 where it is a SCOPE refusal (the credential may not do this at all),
+      // 400 where the submission is wrong or incomplete. A clinician reading the
+      // response has to be able to tell "not you" from "not like that".
+      const scopeCodes = ['APRN_SCHEDULE_II_PROHIBITED', 'PRESCRIBER_CREDENTIAL_UNKNOWN',
+        'DEA_NOT_ON_FILE', 'DEA_EXPIRED', 'DEA_SCHEDULE_NOT_COVERED'];
+      return res.status(scopeCodes.includes(verdict.code) ? 403 : 400).json({
+        error: verdict.error, code: verdict.code,
+        ...(verdict.matchedTerm ? { matchedTerm: verdict.matchedTerm } : {}),
+        ...(verdict.covers ? { covers: verdict.covers } : {}),
+        ...(verdict.prescriberCredential ? { prescriberCredential: verdict.prescriberCredential } : {})
+      });
+    }
+    // THE SCOPE CHECK IS FIRST, AND DELIBERATELY SO. It depends on the
+    // prescriber and the drug, not on the patient — so running it before the
+    // encounter is resolved means an NP asking for a Schedule II is told that,
+    // rather than told the patient could not be found when both are true. A
+    // refusal that names the wrong problem sends the next person at the wrong
+    // layer, which is the lesson the swallowed `HTTP error 400` bought.
     const ctx = await loadEncounterContext(req, res);
     if (!ctx || refuseIfClosed(ctx, res)) return;
-    const built = clinicalRepo.buildPrescription({ id: uuidv4(), clientId: ctx.client.id, puuid: ctx.client.openEmrPatientId, encounterUuid: ctx.encounterUuid, input: req.body, actor: ctx.actor });
+    const built = clinicalRepo.buildPrescription({ id: uuidv4(), clientId: ctx.client.id, puuid: ctx.client.openEmrPatientId, encounterUuid: ctx.encounterUuid, input: { ...req.body, authority: verdict }, actor: ctx.actor });
     if (built.error) return res.status(400).json({ error: built.error, code: built.code });
     const rx = built.prescription;
     const warnings = [];
@@ -9670,7 +10063,15 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/prescriptions', aut
     const syncWarning = await syncStructuredNote(ctx.emr, ctx.client, ctx.record);
     if (syncWarning) warnings.push(syncWarning);
     await saveBillingRecord(ctx.rows, ctx.record);
-    await logActivity(req.user.id, req.user.name || req.user.email, 'prescription_recorded', 'client', ctx.client.id, { encounterUuid: ctx.encounterUuid, prescriptionId: rx.id, kind: rx.kind, drug: rx.drug, prescriberNpi: ctx.actor.npi || null, transmission: 'none' });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'prescription_recorded', 'client', ctx.client.id, {
+      encounterUuid: ctx.encounterUuid, prescriptionId: rx.id, kind: rx.kind, drug: rx.drug,
+      prescriberNpi: ctx.actor.npi || null, transmission: 'none',
+      // 4.10: what schedule, under which credential, and whether the PDMP was
+      // attested. A controlled prescription with no trail of those three is the
+      // record this session exists to stop producing.
+      schedule: rx.schedule, prescriberCredential: rx.prescriberCredential,
+      pdmpChecked: !!(rx.pdmpAttestation && rx.pdmpAttestation.checked)
+    });
     res.json({ message: 'Prescription recorded (not transmitted)', prescription: rx, warnings });
   } catch (error) {
     console.error('Clinical prescription error:', error);
@@ -9681,10 +10082,35 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/prescriptions', aut
 // ── Orders (Scope D) — labs / imaging / procedures; no HL7 ───────────────
 app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
+    // ── DIRECT AUTHORITY IS CHECKED FIRST, for the same reason the Schedule II
+    // scope check is: it depends on the CALLER and on whether a protocol was
+    // named, not on the patient. An RN told "client not found" when the real
+    // answer is "execute it under a standing order instead" goes looking in the
+    // wrong place. The standing-order half still runs after the order is built,
+    // because it has to check the tests and the diagnoses against the protocol.
+    if (!String((req.body || {}).standingOrderId || '').trim() &&
+        !clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.ORDER_DIRECT)) {
+      return res.status(403).json(clinicalRoles.refusalFor(req.user, clinicalRoles.CAPABILITIES.ORDER_DIRECT));
+    }
     const ctx = await loadEncounterContext(req, res);
     if (!ctx || refuseIfClosed(ctx, res)) return;
-    const built = clinicalRepo.buildOrder({ id: uuidv4(), clientId: ctx.client.id, puuid: ctx.client.openEmrPatientId, encounterUuid: ctx.encounterUuid, input: req.body, actor: ctx.actor, encounterDiagnoses: ctx.record.diagnoses });
-    if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+    // ── Session 4.10: three builders, one envelope ────────────────────────
+    // A referral and a DME order carry a PAYLOAD rather than a list of tests, so
+    // they have their own builders. `buildOrder` still requires a non-empty
+    // `tests` array and was deliberately not contorted into taking neither.
+    const orderType = String((req.body || {}).orderType || '').trim();
+    const orderId = uuidv4();
+    const buildArgs = {
+      id: orderId, clientId: ctx.client.id, puuid: ctx.client.openEmrPatientId,
+      encounterUuid: ctx.encounterUuid, input: req.body, actor: ctx.actor,
+      encounterDiagnoses: ctx.record.diagnoses
+    };
+    const built = orderType === orderReq.REFERRAL
+      ? orderReq.buildReferral(buildArgs)
+      : orderType === orderReq.DME
+        ? orderReq.buildDmeOrder({ ...buildArgs, client: ctx.client })
+        : clinicalRepo.buildOrder(buildArgs);
+    if (built.error) return res.status(400).json({ error: built.error, code: built.code, ...(built.windowStart ? { windowStart: built.windowStart, windowEnd: built.windowEnd } : {}) });
     const warnings = [];
 
     // ── Session 4.8: direct authority, or authority granted by a protocol ──
@@ -9721,7 +10147,11 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authentica
       }
     } else {
       // No protocol named — this is the clinician's own authority, so it is a
-      // provider-only action. An RN gets a 403 naming the alternative.
+      // provider-only action. Checked at the top of the route as well, before the
+      // patient is resolved, so the refusal names the credential rather than the
+      // patient; kept HERE too because this is the branch that decides what the
+      // order records, and a gate stated only at the top is a gate a later
+      // refactor moves the branch out from under.
       if (!clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.ORDER_DIRECT)) {
         return res.status(403).json(clinicalRoles.refusalFor(req.user, clinicalRoles.CAPABILITIES.ORDER_DIRECT));
       }
@@ -9733,6 +10163,41 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authentica
       built.order.coSignedAt = null;
       built.order.coSignedBy = null;
     }
+    // ── Session 4.10: 42 CFR 424.507 — the ordering practitioner's enrolment ──
+    //
+    // When the practitioner who ORDERED a lab test, imaging study or DMEPOS item
+    // is not enrolled in Medicare in approved status, the LAB's, IMAGING CENTRE's
+    // or SUPPLIER's claim is denied. It is not GFC's claim, which is exactly why
+    // it gets forgotten — and it is still GFC's problem, because the supplier
+    // rings the patient and the equipment does not arrive.
+    //
+    // UNDER A STANDING ORDER THE ORDERING CLINICIAN IS THE AUTHORIZING PROVIDER,
+    // so it is THEIR enrolment that is checked, not the executing nurse's — 4.8
+    // already files the order that way, and re-deriving the rule here is how the
+    // two would start disagreeing.
+    //
+    // WARN AND RECORD, NEVER HARD-BLOCK: commercial patients exist and urgent
+    // care exists. What is not acceptable is it happening silently.
+    const enrollUsers = await getUsers();
+    const orderingUserId = built.order.orderingClinician && built.order.orderingClinician.id;
+    const orderingUser = enrollUsers.find(u => u && u.id === orderingUserId) ||
+      (orderingUserId === req.user.id ? req.user : null);
+    const enroll = orderReq.checkOrderingEnrollment({
+      orderType: built.order.orderType, client: ctx.client, orderingUser,
+      acknowledgment: (req.body || {}).enrollmentAcknowledgment
+    });
+    if (!enroll.ok) {
+      return res.status(409).json({
+        error: enroll.error, code: enroll.code, needsReason: true,
+        enrollmentStatus: (enroll.enrollment && enroll.enrollment.status) || null,
+        orderingClinicianName: (orderingUser && orderingUser.name) || null
+      });
+    }
+    if (enroll.acknowledgment) {
+      built.order.medicareEnrollmentAcknowledgment = { ...enroll.acknowledgment, at: new Date().toISOString() };
+      warnings.push('Placed with an acknowledged 42 CFR 424.507 warning: the ordering clinician is not enrolled in Medicare in approved status, so the performing party\'s claim is expected to be denied.');
+    }
+
     // Session 4.5 / Phase 6B: the order now lands in OpenEMR's procedure_order
     // table and on the encounter, not only in the app. user/procedure.write
     // does not exist on 8.4, so this goes through the patched route.
@@ -9788,7 +10253,9 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authentica
       orderingNpi: (built.order.orderingClinician && built.order.orderingClinician.npi) || null,
       executedByUserId: execution ? execution.executedBy.id : null,
       executedByClinicalRole: execution ? execution.executedBy.clinicalRole : null,
-      transmission: 'manual'
+      transmission: 'manual',
+      orderReference: built.order.orderReference,
+      medicareEnrollmentAcknowledged: !!built.order.medicareEnrollmentAcknowledgment
     });
     res.json({
       message: execution
@@ -9850,10 +10317,448 @@ app.get('/api/clinical/patients/:clientId/orders', authenticateToken, requireCli
     res.json({
       orders: orders.filter(o => o && o.clientId === client.id).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
       prescriptions: rx.filter(p => p && p.clientId === client.id).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
-      orderTransitions: clinicalRepo.ORDER_TRANSITIONS
+      orderTransitions: clinicalRepo.ORDER_TRANSITIONS,
+      referralTransitions: orderReq.REFERRAL_TRANSITIONS,
+      sendChannels: orderReq.SEND_CHANNELS,
+      sendChannelLabels: orderReq.SEND_CHANNEL_LABELS,
+      defaultSendChannel: orderReq.DEFAULT_SEND_CHANNEL,
+      faxSendChannels: orderReq.FAX_SEND_CHANNELS,
+      resultInterpretations: clinicalResults.INTERPRETATIONS
     });
   } catch (error) {
     console.error('Clinical orders list error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// SESSION 4.10 — ORDERS THAT LEAVE THE BUILDING
+//
+// THE APP GENERATES. A PERSON TRANSMITS. There is no fax API here and nothing
+// below ever claims a fax was sent: a clinician opens the requisition on their
+// phone, hands it to Doximity through the share sheet, and then tells us it went
+// — which is what "Mark as faxed" records, with provenance.
+// ══════════════════════════════════════════════════════════════════════════
+
+// One place that loads an order and the client it belongs to, so nine routes
+// cannot drift on which of them refuses a missing order or a wrong service line.
+const loadOrderForActor = async (orderId, res) => {
+  const rows = await loadRows('clinical_orders');
+  const idx = rows.findIndex(o => o && o.id === orderId);
+  if (idx === -1) { res.status(404).json({ error: 'Order not found', code: 'ORDER_NOT_FOUND' }); return null; }
+  const order = rows[idx];
+  const { client, wrongLine } = await loadClinicalClient(order.clientId);
+  if (!client) {
+    res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    return null;
+  }
+  return { rows, idx, order, client };
+};
+
+// ── GET …/orders/:orderId/requisition.pdf — the fax-ready document ────────
+//
+// ON A PHONE THIS MUST OPEN IN THE BROWSER'S PDF VIEWER so the SHARE SHEET is
+// one tap away — that is the entire workflow: generate, share to Doximity, send.
+// So it is served `inline`, not `attachment`: an attachment downloads to Files
+// and the share sheet is three taps further off.
+app.get('/api/clinical/orders/:orderId/requisition.pdf', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const found = await loadOrderForActor(req.params.orderId, res);
+    if (!found) return;
+    const { rows, idx, order, client } = found;
+    const [settings, users, billing] = await Promise.all([
+      getRequisitionSettings(), getUsers(), loadRows('encounter_billing')
+    ]);
+    // The ordering clinician OF RECORD — under a standing order that is the
+    // authorizing provider, whose NPI and credential live on THEIR user record.
+    const oc = order.orderingClinician || {};
+    const ocUser = users.find(u => u && u.id === oc.id) || null;
+    const orderingClinician = {
+      name: oc.name || (ocUser && ocUser.name) || null,
+      licenseLevel: oc.licenseLevel || (ocUser && ocUser.licenseLevel) || null,
+      npi: oc.npi || (ocUser && ocUser.npi) || null
+    };
+    // ICD-10 code PLUS DESCRIPTION. A bare code on a requisition makes the
+    // performing lab look it up, and a wrong lookup is a wrong medical necessity
+    // justification. The descriptions are the ones the clinician coded on this
+    // encounter.
+    const record = findBillingRecord(billing, order.encounterUuid);
+    const dxByCode = new Map(((record && record.diagnoses) || []).map(d => [d.code, d.description || '']));
+    const diagnoses = (order.diagnosisCodes || []).map(c => ({ code: c, description: dxByCode.get(c) || '' }));
+    let standingOrder = null;
+    if (order.standingOrder && order.standingOrder.id) {
+      standingOrder = (await loadRows('standing_orders')).find(o => o && o.id === order.standingOrder.id) || order.standingOrder;
+    }
+    // Referral attachments — chart items the clinician chose, appended after the
+    // letter in the order they picked them.
+    const attachments = [];
+    for (const a of ((order.referral && order.referral.attachments) || [])) {
+      if (a.kind !== 'result') continue;
+      try {
+        const results = await loadRows('clinical_results');
+        const r = results.find(x => x && x.id === a.id && x.clientId === client.id);
+        if (r && r.document && r.document.emrDocumentId && client.openEmrPatientId && openemr.isConfigured()) {
+          const read = await openemr.forActor(req.user).getPatientDocument(client.openEmrPatientId, r.document.emrDocumentId);
+          if (read && read.doc && read.doc.buffer) attachments.push(read.doc.buffer);
+        }
+      } catch { /* an attachment that cannot be fetched is skipped, not fatal */ }
+    }
+
+    const generatedAt = new Date().toISOString();
+    let buffer;
+    try {
+      buffer = await pdfGenerator.generateRequisitionPDF({
+        order, client, orderingClinician, requisitionSettings: settings, diagnoses, standingOrder, attachments, generatedAt
+      });
+    } catch (e) {
+      // A REFUSAL, NAMED. A requisition with no signature is a document a lab
+      // cannot act on and a supplier cannot bill against; handing one over reads
+      // as complete.
+      if (e.code === 'REQUISITION_NO_NPI') return res.status(409).json({ error: e.message, code: e.code });
+      throw e;
+    }
+
+    // THE CHART MUST HOLD EXACTLY WHAT WAS SENT. Regenerating after an edit files
+    // a NEW copy and the old one is kept — a superseded requisition is evidence
+    // of what the supplier was holding at the time.
+    let emrFiled = false;
+    const fileName = orderReq.requisitionFileName(order, client);
+    if (client.openEmrPatientId && openemr.isConfigured()) {
+      try {
+        await openemr.forActor(req.user).uploadPatientDocument(
+          client.openEmrPatientId, fileName, buffer, 'application/pdf', orderReq.REQUISITION_CATEGORY);
+        emrFiled = true;
+      } catch (e) {
+        console.error('Requisition chart filing failed:', e.message);
+      }
+    }
+    rows[idx] = {
+      ...order,
+      requisitionGeneratedAt: generatedAt,
+      requisitionGeneratedBy: { id: req.user.id, name: req.user.name },
+      requisitionCount: (order.requisitionCount || 0) + 1,
+      requisitionFiledInChart: emrFiled || !!order.requisitionFiledInChart,
+      updatedAt: generatedAt
+    };
+    await db.set('clinical_orders', rows);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'order_requisition_generated', 'client', client.id, {
+      orderId: order.id, orderType: order.orderType, orderReference: order.orderReference,
+      filedInChart: emrFiled, pageAttachments: attachments.length
+    });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', contentDisposition('inline', fileName));
+    res.setHeader('X-GFC-Order-Reference', order.orderReference || '');
+    res.send(buffer);
+  } catch (error) {
+    console.error('Requisition error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── POST …/orders/:orderId/sent — "Mark as faxed" ─────────────────────────
+// The ONLY door onto 'sent'. A bare status click recorded that somebody believed
+// the order had gone; this records WHERE it went, to WHICH number, on WHAT
+// channel, by WHOM and WHEN — which, when the recipient is a fax number, IS the
+// disclosure record.
+app.post('/api/clinical/orders/:orderId/sent', authenticateToken, requireClinicalWrite,
+  requireCapability(clinicalRoles.CAPABILITIES.ORDER_STATUS_ADVANCE), async (req, res) => {
+  try {
+    const found = await loadOrderForActor(req.params.orderId, res);
+    if (!found) return;
+    const { rows, idx, order, client } = found;
+    const applied = orderReq.applySend({ order, input: req.body, actor: actorFromReq(req) });
+    if (applied.error) return res.status(applied.status || 400).json({ error: applied.error, code: applied.code });
+    rows[idx] = applied.order;
+    await db.set('clinical_orders', rows);
+    const warnings = [];
+    if (applied.order.emrOrderId && client.openEmrPatientId && openemr.isConfigured()) {
+      try {
+        await openemr.forActor(req.user).updateOrderStatus(
+          client.openEmrPatientId, applied.order.encounterUuid, applied.order.emrOrderId,
+          clinicalRepo.orderStatusToEmr('sent'));
+      } catch (e) {
+        warnings.push(`Recorded in the chart but OpenEMR's copy did not follow (${e.message.slice(0, 140)}).`);
+      }
+    }
+    await logActivity(req.user.id, req.user.name || req.user.email, 'order_sent', 'client', client.id, {
+      orderId: order.id, orderType: order.orderType, orderReference: order.orderReference,
+      channel: applied.send.channel, recipientName: applied.send.recipientName,
+      // The fax number IS the record of who the PHI went to. It belongs in the
+      // audit trail for exactly the reason a patient's date of birth does not.
+      recipientFax: applied.send.recipientFax, resend: applied.resend
+    });
+    res.json({
+      message: `${applied.resend ? 'Re-sent' : 'Sent'} by ${applied.send.channelLabel} to ${applied.send.recipientName}`,
+      order: applied.order, send: applied.send, resend: applied.resend, warnings
+    });
+  } catch (error) {
+    console.error('Order send error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── POST …/orders/:orderId/scheduled — a referral's appointment ───────────
+// The state a lab order has no equivalent of. Without it a referral sits at
+// "sent" for six weeks with nothing saying an appointment exists.
+app.post('/api/clinical/orders/:orderId/scheduled', authenticateToken, requireClinicalWrite,
+  requireCapability(clinicalRoles.CAPABILITIES.ORDER_STATUS_ADVANCE), async (req, res) => {
+  try {
+    const found = await loadOrderForActor(req.params.orderId, res);
+    if (!found) return;
+    const { rows, idx, order, client } = found;
+    const applied = orderReq.applyReferralScheduled({
+      order, appointmentDate: (req.body || {}).appointmentDate, actor: actorFromReq(req)
+    });
+    if (applied.error) return res.status(applied.status || 400).json({ error: applied.error, code: applied.code });
+    rows[idx] = applied.order;
+    await db.set('clinical_orders', rows);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'referral_scheduled', 'client', client.id, {
+      orderId: order.id, orderReference: order.orderReference, appointmentDate: applied.order.referral.appointmentDate
+    });
+    res.json({ message: `Referral scheduled for ${applied.order.referral.appointmentDate}`, order: applied.order });
+  } catch (error) {
+    console.error('Referral schedule error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Receiving a result ────────────────────────────────────────────────────
+//
+// One handler behind two routes, because a result attached TO AN ORDER and an
+// unmatched inbound document differ only in whether an order was found. Two
+// handlers would be two copies of the file sniff, the chart filing and the inbox
+// row — and one of them would drift.
+const receiveClinicalResult = async (req, res, { order, rows, idx, client }) => {
+  if (!req.file || !req.file.buffer) {
+    return res.status(400).json({ error: 'The result document is required', code: 'RESULT_NO_FILE' });
+  }
+  // MAGIC-BYTE SNIFF, reusing the same detector the ROI upload uses. A declared
+  // mime type is what the uploader claims; the bytes are what it is.
+  const mime = detectFileType(req.file.buffer);
+  if (!mime) {
+    return res.status(400).json({ error: 'That file is not a PDF, JPEG or PNG', code: 'RESULT_BAD_FILE_TYPE' });
+  }
+  const body = req.body || {};
+  const resultId = uuidv4();
+  const built = clinicalResults.buildResult({
+    id: resultId, clientId: client.id, puuid: client.openEmrPatientId, order, input: body,
+    actor: actorFromReq(req),
+    file: { fileName: req.file.originalname || 'result.pdf', mimeType: mime, byteLength: req.file.buffer.length }
+  });
+  if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+  const result = built.result;
+
+  // INTO THE CHART, NOT GOOGLE DRIVE. Drive is not configured, and a record
+  // RECEIVED FOR CARE belongs in the chart by the document-routing rule in the
+  // OpenEMR setup guide. The category follows what the document IS.
+  const warnings = [];
+  if (client.openEmrPatientId && openemr.isConfigured()) {
+    try {
+      const filed = await openemr.forActor(req.user).uploadPatientDocument(
+        client.openEmrPatientId, result.document.fileName, req.file.buffer, mime, result.document.emrCategory);
+      result.document.emrFiled = true;
+      result.document.emrDocumentId = filed && (filed.id || filed.uuid) ? String(filed.id || filed.uuid) : null;
+    } catch (e) {
+      // The row is still written. A result that arrived and could not be filed is
+      // a filing problem; losing the record of its arrival would be worse, and
+      // the inbox is what puts it in front of a clinician either way.
+      result.document.emrError = e.message.slice(0, 300);
+      warnings.push(`The result is recorded and in the inbox but did not file into the chart (${e.message.slice(0, 140)}). Re-file it from the chart's Documents card.`);
+    }
+  } else {
+    warnings.push('OpenEMR is not reachable, so the result is recorded in the app and not yet filed in the chart.');
+  }
+
+  const results = await loadRows('clinical_results');
+  results.push(result);
+  await db.set('clinical_results', results);
+
+  // STATUS FOLLOWS EVIDENCE. Attaching the result is what moves the order.
+  let updatedOrder = null;
+  if (order) {
+    const moved = clinicalResults.applyResultToOrder({ order, result, actor: actorFromReq(req) });
+    if (moved.error) return res.status(moved.status || 409).json({ error: moved.error, code: moved.code });
+    rows[idx] = moved.order;
+    updatedOrder = moved.order;
+    await db.set('clinical_orders', rows);
+    if (moved.order.emrOrderId && client.openEmrPatientId && openemr.isConfigured()) {
+      try {
+        await openemr.forActor(req.user).updateOrderStatus(
+          client.openEmrPatientId, moved.order.encounterUuid, moved.order.emrOrderId,
+          clinicalRepo.orderStatusToEmr('resulted'));
+      } catch (e) { warnings.push(`OpenEMR's order status did not follow (${e.message.slice(0, 140)}).`); }
+    }
+  }
+
+  // A CRITICAL RESULT PAGES THE ORDERING CLINICIAN IMMEDIATELY, and the notice
+  // CARRIES NO PHI — not the value, not the patient's name, not what the test
+  // was. It says a critical result is waiting and where to go. The destination
+  // comes from appLinks, never a literal here.
+  if (result.interpretation === 'critical' && result.routeTo && result.routeTo.userId) {
+    const users = await getUsers();
+    const to = users.find(u => u && u.id === result.routeTo.userId);
+    if (to && to.email) {
+      const notice = clinicalResults.buildCriticalNotice();
+      await queueNotification('critical_result_waiting', to.id, to.email, to.name || to.email, {
+        subject: notice.subject, heading: notice.heading, body: notice.body,
+        ctaLabel: notice.ctaLabel, ctaUrl: appLinks.PATHS.CLINICAL
+      }, { relatedEntityId: result.id });
+    }
+  }
+
+  await logActivity(req.user.id, req.user.name || req.user.email, 'result_received', 'client', client.id, {
+    resultId: result.id, orderId: result.orderId, orderReference: result.orderReference,
+    // The interpretation and the performer are workflow facts; the SUMMARY is
+    // clinical content and does not go in the audit trail.
+    interpretation: result.interpretation, performedBy: result.performedBy,
+    unmatched: result.unmatched, emrFiled: result.document.emrFiled,
+    routedToUserId: (result.routeTo && result.routeTo.userId) || null,
+    routedVia: (result.routeTo && result.routeTo.via) || null
+  });
+  res.json({
+    message: result.unmatched
+      ? 'Document received and waiting for review'
+      : `${clinicalResults.INTERPRETATION_LABELS[result.interpretation]} result filed; the order is ${updatedOrder ? updatedOrder.status : 'unchanged'}`,
+    result, order: updatedOrder, warnings
+  });
+};
+
+// Attach a result to an order.
+app.post('/api/clinical/orders/:orderId/result', authenticateToken, requireClinicalWrite, uploadLimiter,
+  upload.single('file'), async (req, res) => {
+  try {
+    const found = await loadOrderForActor(req.params.orderId, res);
+    if (!found) return;
+    await receiveClinicalResult(req, res, found);
+  } catch (error) {
+    console.error('Result attach error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── UNMATCHED INBOUND ─────────────────────────────────────────────────────
+// A fax arrives that matches no order — a hospital discharge summary, a result
+// from an outside provider. It attaches to the PATIENT and lands in the SAME
+// inbox: a second place for documents nobody opens is how a discharge summary
+// goes unread. `orderReference` is tried FIRST, because the reference is printed
+// on every requisition for exactly this.
+app.post('/api/clinical/patients/:clientId/results', authenticateToken, requireClinicalWrite, uploadLimiter,
+  upload.single('file'), async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    const ref = orderReq.parseOrderReference((req.body || {}).orderReference);
+    let found = { order: null, rows: null, idx: -1, client };
+    if (ref) {
+      const rows = await loadRows('clinical_orders');
+      const idx = rows.findIndex(o => o && o.orderReference === ref);
+      if (idx === -1) {
+        return res.status(404).json({
+          error: `No order carries the reference ${ref}. Check the reference on the fax, or file it without one.`,
+          code: 'ORDER_REFERENCE_NOT_FOUND'
+        });
+      }
+      // A reference belonging to ANOTHER patient's order is refused rather than
+      // quietly filed here: matching it would put one patient's result on
+      // another's order, which is the cross-client failure this repo has already
+      // paid for once.
+      if (rows[idx].clientId !== client.id) {
+        return res.status(409).json({
+          error: `${ref} belongs to a different patient's order. File it on that patient, or without a reference.`,
+          code: 'ORDER_REFERENCE_WRONG_PATIENT'
+        });
+      }
+      found = { order: rows[idx], rows, idx, client };
+    }
+    await receiveClinicalResult(req, res, found);
+  } catch (error) {
+    console.error('Unmatched result error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── GET /api/clinical/results/inbox — where acknowledgeAbnormalResult finally
+//    gets a route ──────────────────────────────────────────────────────────
+// Critical pinned first, then abnormal, then normal; oldest first within each,
+// because the oldest unanswered result is the one most likely to have been
+// forgotten.
+app.get('/api/clinical/results/inbox', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const [results, users] = await Promise.all([loadRows('clinical_results'), getUsers()]);
+    const isAdmin = req.user.role === config.ROLES.ADMIN;
+    const rows = clinicalResults.buildInbox(results, { user: req.user, isAdmin });
+    const nameOf = (id) => { const u = users.find(x => x && x.id === id); return (u && u.name) || null; };
+    res.json({
+      results: rows.map(r => ({
+        ...r,
+        clientName: nameOf(r.clientId),
+        // What the VIEWER may do with this row, answered by the server. The page
+        // must not offer an Acknowledge button the API will refuse — the rule
+        // `visitLogFiled` set on the caregiver board.
+        canAcknowledge: clinicalResults.canAcknowledge(req.user, r.interpretation),
+        followUpRequired: clinicalResults.needsClinicalJudgement(r.interpretation)
+      })),
+      escalations: isAdmin ? clinicalResults.buildEscalations(results) : [],
+      interpretations: clinicalResults.INTERPRETATIONS,
+      interpretationLabels: clinicalResults.INTERPRETATION_LABELS,
+      thresholds: {
+        abnormalBusinessDays: clinicalResults.ABNORMAL_ESCALATION_BUSINESS_DAYS,
+        criticalHours: clinicalResults.CRITICAL_ESCALATION_HOURS
+      }
+    });
+  } catch (error) {
+    console.error('Results inbox error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── POST /api/clinical/results/:resultId/acknowledge ──────────────────────
+// Abnormal and critical need the ACKNOWLEDGE_ABNORMAL_RESULT capability AND a
+// follow-up note saying what is being done. Any provider may acknowledge a
+// normal one, or the inbox is one nobody but a provider can ever empty.
+app.post('/api/clinical/results/:resultId/acknowledge', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const results = await loadRows('clinical_results');
+    const idx = results.findIndex(r => r && r.id === req.params.resultId);
+    if (idx === -1) return res.status(404).json({ error: 'Result not found', code: 'RESULT_NOT_FOUND' });
+    const applied = clinicalResults.applyAcknowledgement({
+      result: results[idx], actor: actorFromReq(req), input: req.body
+    });
+    if (applied.error) {
+      return res.status(applied.status || 400).json({ error: applied.error, code: applied.code, ...(applied.capability ? { capability: applied.capability, clinicalRole: applied.clinicalRole } : {}) });
+    }
+    results[idx] = applied.result;
+    await db.set('clinical_results', results);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'result_acknowledged', 'client', applied.result.clientId, {
+      resultId: applied.result.id, orderId: applied.result.orderId, interpretation: applied.result.interpretation,
+      // THAT a follow-up plan was recorded, never the plan itself: an audit trail
+      // is not a second copy of the clinical record.
+      followUpRecorded: !!applied.result.followUpNote,
+      wasRoutedTo: (applied.result.routeTo && applied.result.routeTo.userId) || null
+    });
+    res.json({ message: 'Result acknowledged', result: applied.result });
+  } catch (error) {
+    console.error('Result acknowledge error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── GET /api/clinical/orders/overdue — THE LOST FAX ───────────────────────
+// The single most useful screen in this session. An order sent and never
+// answered looks exactly like one working its way through a lab, and the harm is
+// not that it was lost — it is that nobody noticed. The recipient and the fax
+// number it went to are on the row so somebody can pick up the phone.
+app.get('/api/clinical/orders/overdue', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const [orders, users] = await Promise.all([loadRows('clinical_orders'), getUsers()]);
+    const rows = orderReq.buildOverdueList(orders);
+    const nameOf = (id) => { const u = users.find(x => x && x.id === id); return (u && u.name) || null; };
+    res.json({
+      orders: rows.map(o => ({ ...o, clientName: nameOf(o.clientId) })),
+      thresholds: orderReq.OVERDUE_DAYS
+    });
+  } catch (error) {
+    console.error('Overdue orders error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -11682,6 +12587,248 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/upload', authenticateTok
   }
 });
 
+// ── Reading a scanned document into proposals ─────────────────────────────
+//
+// Owner ask, 2026-09-22: scanned documents should populate the record. What is
+// built here reads a document and proposes; a PERSON decides. Nothing on this
+// path writes to a client record without a review, and that is enforced in the
+// module rather than promised here.
+//
+// The engine is INERT until Bedrock is wired. That is not a stub: the boundary
+// refusal is the honest state, it names every missing setting, and the screen
+// shows it — so the day the owner sets three variables this path works with no
+// code change. A fake that pretended to extract would be worse than nothing,
+// because a reviewer would trust it.
+const modelEngine = require('./modelEngine');
+const documentExtraction = require('./documentExtraction');
+
+const gfcModelEngine = modelEngine.createEngine({
+  env: process.env,
+  // No transport yet. `invoke` refuses and says Bedrock is not connected, which
+  // is exactly what is true.
+  transport: null,
+  logActivity
+});
+
+// Reads a value out of the intake by the same dotted path the editor writes.
+const intakeValueAt = (client, path) => readIntakePath(client.intake || {}, path);
+
+// GET …/enrollment/:clientId/extraction — what the scanner can read, and
+// whether it can read anything at all right now.
+//
+// A READ, on the staff read gate, while the two routes below it are on the
+// editor gate. A case manager scoped to their own clients should be able to see
+// that a document is waiting on somebody without being able to decide it —
+// narrowing the writes must not take the view away from the people whose job is
+// to read it. Caught by that guard on the first run, which is what it is for.
+//
+// The SCREEN asks the server both questions rather than deciding either. A page
+// that lists the extractable kinds itself drifts from the module that refuses
+// one, and a page that decides the boundary is satisfied would offer a button
+// the route then refuses.
+app.get('/api/gfc/admin/enrollment/:clientId/extraction', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+    const all = (await db.get('document_extractions')) || [];
+    const mine = all.filter(x => x.clientId === client.id && x.status === 'pending');
+    const st = gfcModelEngine.status();
+    res.json({
+      // `configured` is not a claim that AWS accepts anything, and the payload
+      // says so in its own words rather than leaving the screen to assume.
+      available: st.configured,
+      blockers: st.blockers,
+      proof: st.proof,
+      extractableKinds: documentExtraction.extractableKinds(),
+      pending: mine.map(x => ({
+        id: x.id, docId: x.docId, kind: x.kind, at: x.at,
+        fileName: x.fileName || null,
+        rows: x.rows, identityConflicts: x.identityConflicts || [],
+        reviewCount: x.reviewCount || 0
+      }))
+    });
+  } catch (error) {
+    console.error('Extraction status error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST …/enrollment/:clientId/documents/:docId/extract — read a filed document.
+//
+// The document must ALREADY BE FILED. Extraction is a second pass over
+// something that is on the record, never a step in the upload: a Drive failure
+// must refuse the filing on its own terms, and a model failure must not be able
+// to lose a document somebody just scanned.
+app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/extract', authenticateToken, requireEnrollmentEditor, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+
+    const uploads = (await db.get('client_document_uploads')) || [];
+    const doc = uploads.find(u => u.id === req.params.docId && u.clientId === client.id);
+    if (!doc) return res.status(404).json({ error: 'Document not found', code: 'DOCUMENT_NOT_FOUND' });
+    if (!documentExtraction.isExtractable(doc.kind)) {
+      return res.status(400).json({
+        error: `There is nothing declared to read out of a ${doc.kind}.`,
+        code: 'EXTRACTION_KIND_UNSUPPORTED'
+      });
+    }
+
+    const schema = documentExtraction.schemaFor(doc.kind);
+    let result;
+    try {
+      const bytes = await googledrive.downloadFileBuffer(doc.driveFileId);
+      result = await gfcModelEngine.invoke({
+        purpose: modelEngine.PURPOSES.DOCUMENT_EXTRACTION,
+        input: { mimeType: doc.mimeType, bytes },
+        schema, actor: req.user, patientId: client.id, feature: `extract:${doc.kind}`
+      });
+    } catch (e) {
+      if (e && e.code === 'MODEL_BOUNDARY_REFUSED') {
+        // 503, not 500. Nothing is broken — the boundary is not satisfied, and
+        // the blockers say which settings would satisfy it.
+        return res.status(503).json({
+          error: 'Document reading is not switched on yet.',
+          code: e.code, blockers: e.blockers || []
+        });
+      }
+      console.error('[EXTRACTION] failed:', e.message);
+      return res.status(502).json({ error: e.message, code: e.code || 'EXTRACTION_FAILED' });
+    }
+
+    const built = documentExtraction.buildProposals({
+      kind: doc.kind, docId: doc.id, extracted: result.proposal,
+      confidence: result.confidence,
+      readValue: (path) => intakeValueAt(client, path)
+    });
+    if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+
+    const row = {
+      id: `ext_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      clientId: client.id, docId: doc.id, fileName: doc.fileName, kind: doc.kind,
+      invocationId: result.invocationId, modelId: result.modelId,
+      at: built.at, snapshotAt: built.snapshotAt,
+      rows: built.rows, identityConflicts: built.identityConflicts,
+      reviewCount: built.reviewCount,
+      status: 'pending',
+      createdById: req.user.id, createdByName: req.user.name || req.user.email
+    };
+    const all = (await db.get('document_extractions')) || [];
+    await db.set('document_extractions', [...all, row]);
+    // WHICH document, never what was read out of it.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'document_extraction_proposed', 'document', client.id,
+      { docId: doc.id, kind: doc.kind, proposed: built.rows.length, invocationId: result.invocationId });
+
+    res.json({
+      message: 'Read — nothing has been saved yet. Check each value before it counts.',
+      extraction: { id: row.id, kind: row.kind, rows: row.rows, identityConflicts: row.identityConflicts, reviewCount: row.reviewCount }
+    });
+  } catch (error) {
+    console.error('Document extraction error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST …/enrollment/:clientId/extraction/:id/review — a person decides.
+//
+// This is the only door an extracted value has onto a client record, and what
+// lands is stamped STAFF-VERIFIED: the provenance of an accepted value is the
+// human who accepted it, not the model that offered it.
+app.post('/api/gfc/admin/enrollment/:clientId/extraction/:id/review', authenticateToken, requireEnrollmentEditor, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const idx = users.findIndex(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (idx === -1) return res.status(404).json({ error: 'Client not found' });
+    const client = users[idx];
+
+    const all = (await db.get('document_extractions')) || [];
+    const i = all.findIndex(x => x.id === req.params.id && x.clientId === client.id);
+    if (i === -1) return res.status(404).json({ error: 'Nothing to review', code: 'EXTRACTION_NOT_FOUND' });
+    const stored = all[i];
+    if (stored.status !== 'pending') {
+      return res.status(409).json({ error: 'That has already been reviewed.', code: 'EXTRACTION_ALREADY_REVIEWED' });
+    }
+
+    const review = documentExtraction.applyReview({
+      proposal: stored,
+      decisions: (req.body || {}).decisions || {},
+      readValue: (path) => intakeValueAt(client, path),
+      actor: req.user
+    });
+    if (review.error) return res.status(400).json({ error: review.error, code: review.code });
+
+    let changed = [];
+    let nowStale = [];
+    if (review.writes.length) {
+      const priorClient = JSON.parse(JSON.stringify(client));
+      const next = { ...(client.intake || {}) };
+      // Flat dotted keys are one of the two shapes the editor already reads, so
+      // an accepted extraction goes through the SAME allow-list, the same
+      // option catalogs and the same validation a typed correction does. A
+      // second writer for a client record is how the two start disagreeing.
+      const body = review.writes.reduce((m, w) => { m[w.path] = w.value; return m; }, {});
+      const rejectedValues = [];
+      changed = applyEnrollmentEdits(next, body, rejectedValues);
+      if (rejectedValues.length) {
+        return res.status(400).json({
+          error: 'Some values are not on the list for their question.',
+          code: 'INTAKE_OPTION_INVALID', rejected: rejectedValues
+        });
+      }
+      const fieldErrors = validateClientCoreFields(next);
+      if (Object.keys(fieldErrors).length) {
+        return res.status(400).json({ error: 'Some values need correcting before they can be saved.', code: 'INTAKE_INVALID', fieldErrors });
+      }
+      ({ nowStale } = commitEnrollmentSubmission({ client, priorClient, next, changed, emailChanged: null }));
+      users[idx] = client;
+      await db.set('users', users);
+      invalidateUsersCache();
+    }
+
+    // A review that left anything undecided has NOT finished, so the row stays
+    // pending and the ledger rows stay outstanding. An enrollment must not be
+    // able to complete on a half-read scan.
+    all[i] = {
+      ...stored,
+      status: review.complete ? 'reviewed' : 'pending',
+      rows: stored.rows.map(r => ({ ...r, decision: ((req.body || {}).decisions || {})[r.path]?.decision || r.decision })),
+      reviewedAt: review.complete ? new Date().toISOString() : null,
+      reviewedById: review.complete ? req.user.id : null,
+      reviewedByName: review.complete ? (req.user.name || req.user.email) : null,
+      outcome: review.complete ? review.outcome : null
+    };
+    await db.set('document_extractions', all);
+
+    // The accept / edit / discard signal §10.3 asks for. A signal nobody
+    // records is a signal that does not exist.
+    if (review.complete && stored.invocationId) {
+      await gfcModelEngine.recordOutcome({
+        invocationId: stored.invocationId, outcome: review.outcome,
+        actor: req.user, patientId: client.id
+      }).catch(() => {});
+    }
+    await logActivity(req.user.id, req.user.name || req.user.email, 'document_extraction_reviewed', 'document', client.id, {
+      extractionId: stored.id, docId: stored.docId, fields: changed,
+      counts: review.counts, complete: review.complete
+    });
+
+    res.json({
+      message: review.complete
+        ? `Saved ${changed.length} value(s) from the document.`
+        : `Saved ${changed.length} value(s). ${review.undecided.length} still need a decision.`,
+      changed, refused: review.refused, undecided: review.undecided,
+      counts: review.counts, complete: review.complete,
+      consentsNeedingResignature: nowStale,
+      client: { ...enrollmentDetail(client), canEdit: true }
+    });
+  } catch (error) {
+    console.error('Extraction review error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.post('/api/gfc/admin/enrollment/:clientId/documents/request', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const users = await getUsers();
@@ -12367,6 +13514,75 @@ const applyEnrollmentEdits = (intake, body, rejected = []) => {
 // PUT /api/gfc/admin/enrollment/:clientId/details — staff fill in or correct
 // the enrollment submission from the enrollment page.
 //
+// EVERYTHING A SUBMISSION EDIT HAS TO CARRY WITH IT, in ONE place.
+//
+// "Saves properly" is four separate things and three of them are derived: the
+// payer summary billing reads, the client-profile mirror the matching engine
+// reads, the ROI's prior-provider list, and the re-signature flag on any signed
+// consent whose text now reads differently. A second copy of this is how a
+// correction lands on the record and leaves the Transfer-of-Care form still
+// offering the provider that was just corrected.
+//
+// Called by the staff submission editor and by the document-extraction review,
+// because an accepted extraction IS a submission edit — it is just one a person
+// approved off a scan rather than typed from a phone call.
+const commitEnrollmentSubmission = ({ client, priorClient, next, changed, emailChanged }) => {
+  // The payer block is stored twice by design: the wizard's structured fields
+  // on the intake, and the assembled summary on the client record that billing
+  // reads. The mirror only assembles that summary when the intake carries no
+  // payer object of its own, so an edit MERGES into the object rather than
+  // leaving the two disagreeing.
+  if (changed.some(p => p === 'payerType' || p === 'insuranceIds' || p.startsWith('ltc.'))) {
+    const base = { ...(client.payer || {}), ...(next.payer || {}) };
+    next.payer = {
+      ...base,
+      type: codeFrom('payerType', next.payerType) || base.type || null,
+      insuranceIds: Array.isArray(next.insuranceIds) ? next.insuranceIds : (base.insuranceIds || []),
+      ltc: { ...(base.ltc || {}), ...(next.ltc || {}) }
+    };
+  }
+
+  next.age = deriveAge(next.dob);
+  next.updatedAt = new Date().toISOString();
+  client.intake = next;
+  if (emailChanged) client.email = emailChanged;
+  if (changed.includes('phone')) client.phone = next.phone || '';
+
+  // The ROI's provider list is DERIVED from the medical team, so correcting a
+  // PCP here has to rebuild it — otherwise the Transfer-of-Care form keeps
+  // offering the provider that was just corrected. Same derivation the client's
+  // own intake save calls.
+  const priorProviders = resolvePriorProviders(client, next);
+  // ONE writer for intake → client profile. No caller gets its own idea of the
+  // shape the matching and billing engines read.
+  mirrorIntakeToClientProfile(
+    client, next,
+    Array.isArray(next.medications) ? next.medications : undefined,
+    priorProviders
+  );
+
+  // A signed consent copy is RENDERED from this record, so correcting a value
+  // one of them prints changes what that signed document says. The correction
+  // is still right — a typo in a date of birth has to be fixable — but it is
+  // never silent. Rather than keep a second map of which field feeds which
+  // document, ask the documents: resolve each signed consent before and after
+  // and keep the ones that now read differently.
+  const nowStale = GFC_CONSENT_DEFS
+    .filter(d => isConsentSatisfied((client.consents || {})[d.type]))
+    .filter(d => JSON.stringify(consentRender.resolveForConsent(consentText, d.type, priorClient))
+              !== JSON.stringify(consentRender.resolveForConsent(consentText, d.type, client)))
+    .map(d => d.type);
+  if (nowStale.length) {
+    client.consentActionRequired = {
+      reason: 'client_details_changed', at: new Date().toISOString(),
+      consents: nowStale,
+      titles: nowStale.map(t => (GFC_CONSENT_DEFS.find(d => d.type === t) || {}).title || t),
+      fields: changed
+    };
+  }
+  return { nowStale, priorProviders };
+};
+
 // ADMIN OR CLINICIAN (owner, 2026-09-18). The workflow writes on this surface
 // stay admin-only: approving, changing the service line, accepting a document
 // and recording a paper signature are decisions about the file, while this is a
@@ -12438,59 +13654,7 @@ app.put('/api/gfc/admin/enrollment/:clientId/details', authenticateToken, requir
       return res.json({ message: 'Nothing changed', changed: [], client: enrollmentDetail(client) });
     }
 
-    // The payer block is stored twice by design: the wizard's structured fields
-    // on the intake, and the assembled summary on the client record that
-    // billing reads. The mirror only assembles that summary when the intake
-    // carries no payer object of its own, so an edit MERGES into the object
-    // rather than leaving the two disagreeing.
-    if (changed.some(p => p === 'payerType' || p === 'insuranceIds' || p.startsWith('ltc.'))) {
-      const base = { ...(client.payer || {}), ...(next.payer || {}) };
-      next.payer = {
-        ...base,
-        type: codeFrom('payerType', next.payerType) || base.type || null,
-        insuranceIds: Array.isArray(next.insuranceIds) ? next.insuranceIds : (base.insuranceIds || []),
-        ltc: { ...(base.ltc || {}), ...(next.ltc || {}) }
-      };
-    }
-
-    next.age = deriveAge(next.dob);
-    next.updatedAt = new Date().toISOString();
-    client.intake = next;
-    if (emailChanged) client.email = emailChanged;
-    if (changed.includes('phone')) client.phone = next.phone || '';
-
-    // The ROI's provider list is DERIVED from the medical team, so correcting a
-    // PCP here has to rebuild it — otherwise the Transfer-of-Care form keeps
-    // offering the provider that was just corrected. Same derivation the
-    // client's own intake save calls.
-    const priorProviders = resolvePriorProviders(client, next);
-    // ONE writer for intake → client profile. This page does not get its own
-    // idea of the shape the matching and billing engines read.
-    mirrorIntakeToClientProfile(
-      client, next,
-      Array.isArray(next.medications) ? next.medications : undefined,
-      priorProviders
-    );
-
-    // A signed consent copy is RENDERED from this record, so correcting a value
-    // one of them prints changes what that signed document says. The correction
-    // is still right — a typo in a date of birth has to be fixable — but it is
-    // never silent. Rather than keep a second map of which field feeds which
-    // document, ask the documents: resolve each signed consent before and after
-    // and keep the ones that now read differently.
-    const nowStale = GFC_CONSENT_DEFS
-      .filter(d => isConsentSatisfied((client.consents || {})[d.type]))
-      .filter(d => JSON.stringify(consentRender.resolveForConsent(consentText, d.type, priorClient))
-                !== JSON.stringify(consentRender.resolveForConsent(consentText, d.type, client)))
-      .map(d => d.type);
-    if (nowStale.length) {
-      client.consentActionRequired = {
-        reason: 'client_details_changed', at: new Date().toISOString(),
-        consents: nowStale,
-        titles: nowStale.map(t => (GFC_CONSENT_DEFS.find(d => d.type === t) || {}).title || t),
-        fields: changed
-      };
-    }
+    const { nowStale } = commitEnrollmentSubmission({ client, priorClient, next, changed, emailChanged });
 
     // Correcting the submission is NOT the client submitting it, so the
     // enrollment status is deliberately left where it is. Approving stays its
@@ -18798,6 +19962,16 @@ app.listen(PORT, () => {
       await migrateClinicalRoles();
     } catch (err) {
       console.error('Clinical-role migration failed (non-fatal):', err.message);
+    }
+    try {
+      await seedRequisitionReturnFax();
+    } catch (err) {
+      console.error('Return-fax seed failed (non-fatal):', err.message);
+    }
+    try {
+      await migratePrescriptionSchedules();
+    } catch (err) {
+      console.error('Prescription-schedule migration failed (non-fatal):', err.message);
     }
   })();
 

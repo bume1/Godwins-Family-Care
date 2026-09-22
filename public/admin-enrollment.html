@@ -441,6 +441,184 @@
       );
     };
 
+    // ── Reading a scanned document ────────────────────────────────────────
+    //
+    // The owner asked for scanned documents to populate the record. THIS SCREEN
+    // is the part that makes that safe: everything read off a document lands
+    // here as a proposal and stays outstanding until a person decides it. The
+    // page decides no rule of its own — it asks the server which kinds can be
+    // read and whether reading is switched on at all, so a narrowed target list
+    // or an unsatisfied boundary takes effect on the next request rather than
+    // offering a button the route then refuses.
+    //
+    // At module scope, not nested: a component declared inside another is a new
+    // function identity on every render, so React remounts it and the caret
+    // dies on the first keystroke of an edit.
+    const ExtractionRow = ({ row, decision, onDecide }) => {
+      const [draft, setDraft] = useState(row.value);
+      const chosen = decision && decision.decision;
+      if (row.verifyOnly) {
+        const conflicts = row.snapshot && row.snapshot !== row.value;
+        return (
+          <div className="py-2 border-b border-gray-100">
+            <div className="text-sm font-medium">{row.label}</div>
+            <div className={`text-xs mt-1 ${conflicts ? 'text-danger-500' : 'text-gray-500'}`}>
+              On the document: <strong>{row.value}</strong>
+              {row.snapshot ? <> · on file: <strong>{row.snapshot}</strong></> : ' · nothing on file to compare'}
+            </div>
+            {/* Never writable, at any confidence. Say so, or a reviewer looking
+                at a disagreement will look for the button that fixes it. */}
+            <div className="text-xs text-gray-400 mt-1">
+              Read to check this document is about this client. It is never saved from here.
+            </div>
+          </div>
+        );
+      }
+      return (
+        <div className="py-2 border-b border-gray-100">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-sm font-medium">{row.label}</div>
+              <div className="text-xs text-gray-600 mt-1">
+                From the document: <strong>{row.value}</strong>
+                {typeof row.confidence === 'number' && (
+                  <span className="text-gray-400"> · read with {Math.round(row.confidence * 100)}% confidence</span>
+                )}
+              </div>
+              <div className="text-xs text-gray-500">
+                {row.snapshot ? <>Currently on file: <strong>{row.snapshot}</strong></> : 'Nothing on file yet'}
+                {row.agrees && <span className="text-success-600"> · agrees with the record</span>}
+              </div>
+            </div>
+            <div className="flex gap-2 shrink-0 text-xs">
+              <button className={`underline ${chosen === 'accept' ? 'text-success-600 font-semibold' : 'text-primary-500'}`}
+                onClick={() => onDecide(row.path, { decision: 'accept' })}>Use this</button>
+              <button className={`underline ${chosen === 'edit' ? 'text-success-600 font-semibold' : 'text-primary-500'}`}
+                onClick={() => onDecide(row.path, { decision: 'edit', value: draft })}>Change</button>
+              <button className={`underline ${chosen === 'discard' ? 'text-gray-600 font-semibold' : 'text-gray-500'}`}
+                onClick={() => onDecide(row.path, { decision: 'discard' })}>Skip</button>
+            </div>
+          </div>
+          {chosen === 'edit' && (
+            <input className="input mt-2 text-sm" value={draft}
+              onChange={(e) => { setDraft(e.target.value); onDecide(row.path, { decision: 'edit', value: e.target.value }); }} />
+          )}
+        </div>
+      );
+    };
+
+    const ExtractionReview = ({ clientId, extraction, onDone, onCancel }) => {
+      const [decisions, setDecisions] = useState({});
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      const [refused, setRefused] = useState([]);
+      const decide = (path, d) => setDecisions(prev => ({ ...prev, [path]: d }));
+      const rows = (extraction.rows || []).filter(r => !r.verifyOnly);
+      const left = rows.filter(r => !decisions[r.path]).length;
+
+      const save = async () => {
+        setBusy(true); setErr(''); setRefused([]);
+        try {
+          const res = await fetch(`/api/gfc/admin/enrollment/${clientId}/extraction/${extraction.id}/review`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}` },
+            body: JSON.stringify({ decisions })
+          });
+          const data = await res.json();
+          if (!res.ok) { setErr(data.error || 'That could not be saved.'); return; }
+          // A refusal is shown, never swallowed: a value that did not land and
+          // a screen that says "saved" is the failure this whole review exists
+          // to remove.
+          if ((data.refused || []).length) setRefused(data.refused);
+          if (data.complete && !(data.refused || []).length) onDone(data);
+          else onDone(data, true);
+        } catch (e) { setErr('Network error — nothing was saved.'); }
+        finally { setBusy(false); }
+      };
+
+      return (
+        <div className="border border-primary-200 rounded-lg p-4 bg-primary-50 mt-3">
+          <div className="flex items-center justify-between">
+            <div className="font-semibold text-sm">Read from {extraction.fileName || 'the document'}</div>
+            <button className="text-xs text-gray-500 underline" onClick={onCancel}>Close</button>
+          </div>
+          {/* The sentence that makes the whole feature safe to use. */}
+          <div className="text-xs text-gray-600 mt-1">
+            Nothing here has been saved. Check each value — what you keep is recorded as checked by you.
+          </div>
+
+          {(extraction.identityConflicts || []).length > 0 && (
+            <div className="mt-3 p-3 rounded bg-danger-50 border border-danger-200">
+              <div className="text-sm font-semibold text-danger-600">This document may not be about this client</div>
+              {extraction.identityConflicts.map(c => (
+                <div key={c.path} className="text-xs text-danger-600 mt-1">
+                  {c.label}: the document says <strong>{c.onDocument}</strong>, the record says <strong>{c.onFile}</strong>.
+                </div>
+              ))}
+              <div className="text-xs text-gray-600 mt-2">Confirm whose document this is before keeping anything from it.</div>
+            </div>
+          )}
+
+          <div className="mt-3">
+            {(extraction.rows || []).map(r => (
+              <ExtractionRow key={r.path} row={r} decision={decisions[r.path]} onDecide={decide} />
+            ))}
+            {!(extraction.rows || []).length && (
+              <div className="text-sm text-gray-500 py-2">Nothing could be read out of this document.</div>
+            )}
+          </div>
+
+          {refused.length > 0 && (
+            <div className="mt-3 text-xs text-danger-500">
+              {refused.map((x, i) => <div key={i}>{x.label}: {x.reason}</div>)}
+            </div>
+          )}
+          {err && <div className="mt-3 text-xs text-danger-500">{err}</div>}
+
+          <div className="flex items-center gap-3 mt-3">
+            <button className="btn btn-primary text-sm" disabled={busy || !rows.length} onClick={save}>
+              {busy ? 'Saving…' : 'Save what I kept'}
+            </button>
+            <span className="text-xs text-gray-500">
+              {left ? `${left} still need a decision` : 'All decided'}
+            </span>
+          </div>
+        </div>
+      );
+    };
+
+    const ReadDocumentButton = ({ clientId, doc, extraction, onRead }) => {
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      if (!extraction || !extraction.extractableKinds.includes(doc.kind)) return null;
+      const run = async () => {
+        setBusy(true); setErr('');
+        try {
+          const res = await fetch(`/api/gfc/admin/enrollment/${clientId}/documents/${doc.id}/extract`, {
+            method: 'POST', headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+          });
+          const data = await res.json();
+          if (!res.ok) { setErr(data.error || 'That could not be read.'); return; }
+          onRead(data.extraction);
+        } catch (e) { setErr('Network error.'); }
+        finally { setBusy(false); }
+      };
+      if (!extraction.available) {
+        // Not a hidden button. "Not switched on" and "nothing to read here" are
+        // different facts, and the person looking at this is the one who can
+        // get the first one fixed.
+        return <span className="text-gray-400" title={(extraction.blockers || []).join('\n')}>Reading not switched on</span>;
+      }
+      return (
+        <span>
+          <button className="text-primary-500 underline" disabled={busy} onClick={run}>
+            {busy ? 'Reading…' : 'Read this document'}
+          </button>
+          {err && <span className="text-danger-500 ml-2">{err}</span>}
+        </span>
+      );
+    };
+
     const DocumentExchange = ({ clientId, canEdit }) => {
       const [state, setState] = useState(null);
       const [err, setErr] = useState('');
@@ -450,9 +628,17 @@
       const [asking, setAsking] = useState(false);
       const [dueAt, setDueAt] = useState('');
       const [customLabel, setCustomLabel] = useState('');
+      // Which kinds can be read, and whether reading is switched on at all.
+      // ASKED OF THE SERVER, never decided here: a page that lists the readable
+      // kinds itself drifts from the module that refuses one.
+      const [extraction, setExtraction] = useState(null);
+      const [reviewing, setReviewing] = useState(null);
 
       const load = useCallback(() => {
         api.documents(clientId).then(setState).catch(e => setErr(e.message));
+        fetch(`/api/gfc/admin/enrollment/${clientId}/extraction`, {
+          headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+        }).then(r => r.ok ? r.json() : null).then(d => { if (d) setExtraction(d); }).catch(() => {});
       }, [clientId]);
       useEffect(() => { load(); }, [load]);
 
@@ -557,21 +743,35 @@
                   </span>
                 </div>
                 {(r.files || []).map(f => (
-                  <div key={f.id} className="flex items-center gap-2 mt-2 text-xs">
-                    <button className="text-primary-500 underline" onClick={() => openStoredDoc(`/api/gfc/admin/enrollment/${clientId}/documents/${f.id}/file`)}>
-                      {f.fileName}
-                    </button>
-                    <span className="text-gray-400">{new Date(f.uploadedAt).toLocaleDateString()}</span>
-                    {f.status === 'rejected'
-                      ? <span className="text-danger-500">Rejected — {f.rejectionReason}</span>
-                      : f.status === 'accepted'
-                        ? <span className="text-success-600">Accepted</span>
-                        : (
-                          <span className="flex gap-2">
-                            {canEdit && <button className="text-success-600" disabled={busy} onClick={() => review(f.id, 'accepted')}>Accept</button>}
-                            {canEdit && <button className="text-danger-500" disabled={busy} onClick={() => review(f.id, 'rejected')}>Reject</button>}
-                          </span>
-                        )}
+                  <div key={f.id}>
+                    <div className="flex items-center gap-2 mt-2 text-xs flex-wrap">
+                      <button className="text-primary-500 underline" onClick={() => openStoredDoc(`/api/gfc/admin/enrollment/${clientId}/documents/${f.id}/file`)}>
+                        {f.fileName}
+                      </button>
+                      <span className="text-gray-400">{new Date(f.uploadedAt).toLocaleDateString()}</span>
+                      {f.status === 'rejected'
+                        ? <span className="text-danger-500">Rejected — {f.rejectionReason}</span>
+                        : f.status === 'accepted'
+                          ? <span className="text-success-600">Accepted</span>
+                          : (
+                            <span className="flex gap-2">
+                              {canEdit && <button className="text-success-600" disabled={busy} onClick={() => review(f.id, 'accepted')}>Accept</button>}
+                              {canEdit && <button className="text-danger-500" disabled={busy} onClick={() => review(f.id, 'rejected')}>Reject</button>}
+                            </span>
+                          )}
+                      {/* A rejected file is not read: it is not going on the
+                          record, so proposing values out of it is work nobody
+                          asked for on a document we are sending back. */}
+                      {canEdit && f.status !== 'rejected' && (
+                        <ReadDocumentButton clientId={clientId} doc={{ ...f, kind: r.kind }} extraction={extraction}
+                          onRead={(ex) => setReviewing({ ...ex, fileName: f.fileName })} />
+                      )}
+                    </div>
+                    {reviewing && reviewing.docId === f.id && (
+                      <ExtractionReview clientId={clientId} extraction={reviewing}
+                        onCancel={() => setReviewing(null)}
+                        onDone={(data, stillOpen) => { if (!stillOpen) setReviewing(null); load(); }} />
+                    )}
                   </div>
                 ))}
               </div>

@@ -47,6 +47,7 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'visit_logs', phi: true, owner: '3.5/6', note: 'portal display rows' },
   { key: 'gfc_messages', phi: true, owner: '3.5', note: 'interim messages; migrated into message_threads/messages by Session 9, source retained' },
   { key: 'client_document_uploads', phi: true, owner: '4.6+' },
+  { key: 'document_extractions', phi: true, owner: '4.9' },
   { key: 'client_document_requests', phi: true, owner: '4.6+' },
   { key: 'caregiver_documents', phi: false, owner: '6+', note: 'employment paperwork (timesheets, certs) — pointers only, bytes in Drive' },
   // The caregiver welcome packet: their profile answers, their signature, and
@@ -77,6 +78,9 @@ const COLLECTION_REGISTRY = Object.freeze([
   // diagnoses. Versions are immutable, so this collection only ever grows.
   { key: 'standing_orders', phi: true, owner: '4.8', note: 'versions are immutable — a revision is a new row' },
   { key: 'standing_order_executions', phi: true, owner: '4.8', note: 'the audit trail: who acted under whose authority, under which version' },
+  { key: 'clinical_results', phi: true, owner: '4.10', note: 'received results: the interpretation, the chart pointer, and who acknowledged it' },
+  { key: 'requisition_settings', phi: false, owner: '4.10', note: 'the return fax number and label printed on every requisition — org config, not PHI' },
+  { key: 'visit_reminders', phi: true, owner: '4.11', note: 'day-before reminders, captured at booking time — carries the visit date and clinician' },
   { key: 'gfc_payer_credentialing', phi: false, owner: '4.4' },
   // An H&P still being typed. PHI, and deliberately short-lived: filing the
   // note to the chart deletes the draft, so this collection holds only work in

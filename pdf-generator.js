@@ -4,9 +4,14 @@
  */
 
 const PDFDocument = require('pdfkit');
-const { PDFDocument: PDFLib } = require('pdf-lib');
+const { PDFDocument: PDFLib, StandardFonts, rgb } = require('pdf-lib');
 const consentText = require('./public/consent-text');   // approved consent bodies, versioned (Session 4.6)
 const consentRender = require('./consentRender');       // client-record values a body renders (4.6)
+const gfcTime = require('./public/gfc-time');           // the single source of the clock — Eastern, both sides
+// Fax formatting comes from the order module rather than a second copy here: a
+// requisition printing a number in a different shape from the screen that sent
+// it is how two records of one disclosure start disagreeing.
+const { formatFax: reqFmtFax } = require('./orderRequisitions');
 
 /**
  * Fetch a URL with a timeout so hung external requests (e.g. dead Google Drive
@@ -1506,6 +1511,383 @@ async function generateCarePlanPDF(d) {
   });
 }
 
+// ============================================================================
+// THE REQUISITION — Session 4.10, Scope A6. One generator, every order type.
+// ============================================================================
+//
+// FAX-SAFE RENDERING, and every rule below is there because faxing destroys
+// anything subtle. This document is opened on a phone, handed to Doximity
+// through the share sheet, and comes out of a machine in a lab or a supplier's
+// back office at 200dpi in one bit per pixel.
+//
+//   • BLACK ON WHITE. No brand colour carrying meaning — a navy heading faxes
+//     to a black heading, so the colour said nothing and cost contrast. No
+//     light greys: they drop out entirely, which turns a printed field label
+//     into a blank line. No background fills behind text, because a filled
+//     panel faxes to a black box with the text gone.
+//   • 10pt body minimum, 12pt for the identifiers, so a second-generation fax
+//     is still readable.
+//   • ONE PAGE is the target. Attachments are what push it longer, and then
+//     every page is numbered "Page N of M" — a fax that arrives short has to be
+//     detectable as short.
+//   • PATIENT NAME, DOB AND MBI ON EVERY PAGE, TOP AND BOTTOM. Fax pages
+//     separate, get re-stacked and get re-scanned. A page with no identifiers is
+//     a page that ends up in the wrong chart.
+//   • THE ORDER REFERENCE, LARGE, ON EVERY PAGE, with the sentence asking for it
+//     back. That reference is the whole matching mechanism for an inbound result
+//     (Scope C) and it only works if it survives the round trip.
+//   • NO COVER SHEET. Doximity supplies one. Two cover sheets is noise, and the
+//     second one buries the first.
+const REQ = {
+  L: 48,                       // left margin
+  R: 612 - 48,                 // right edge (LETTER width 612)
+  TOP: 34,                     // identifier strip sits above the content
+  BODY: 10,                    // minimum body size — never smaller
+  ID: 12,                      // identifiers
+  ink: '#000000',              // the only ink there is
+  rule: '#000000'              // high-contrast rules only
+};
+REQ.W = REQ.R - REQ.L;
+
+const reqDash = (v) => {
+  const s = String(v == null ? '' : v).trim();
+  return s || '—';
+};
+
+// STAMPED AFTER THE MERGE, WITH pdf-lib, AND THAT IS THE WHOLE POINT.
+//
+// The first version stamped with pdfkit's buffered pages, which covers the pages
+// pdfkit itself wrote and NOTHING ELSE. So a referral with an attached consult
+// note produced a two-page fax whose second page carried no patient name, no
+// DOB, no MBI and no order reference — exactly the page that ends up in the
+// wrong chart — and whose first page still said nothing about pagination, so a
+// fax that lost the attachment arrived looking complete. Caught by reading the
+// rendered document back, not by reading the code.
+//
+// Doing it here means there is ONE stamper and it provably reaches every page of
+// whatever is actually being sent. Positions come from each page's own box, so an
+// attachment on A4 is stamped correctly rather than off the edge.
+async function stampRequisitionPages(bytes, ids) {
+  const doc = await PDFLib.load(bytes);
+  const bold = await doc.embedFont(StandardFonts.HelveticaBold);
+  const plain = await doc.embedFont(StandardFonts.Helvetica);
+  const pages = doc.getPages();
+  const total = pages.length;
+  const line = `${reqDash(ids.patientName)}   ·   DOB ${reqDash(ids.dob)}   ·   MBI ${reqDash(ids.mbi)}`;
+  const ref = String(ids.reference || '');
+  const black = rgb(0, 0, 0);
+  pages.forEach((page, i) => {
+    const { width, height } = page.getSize();
+    const L = REQ.L;
+    const R = width - REQ.L;
+    const W = R - L;
+    // A blank strip behind the stamp, so an attachment's own header cannot
+    // collide with the identifiers. WHITE, never grey — a fill behind text faxes
+    // to a black box with the text gone.
+    const white = rgb(1, 1, 1);
+    page.drawRectangle({ x: 0, y: height - 30, width, height: 30, color: white });
+    page.drawRectangle({ x: 0, y: 0, width, height: 54, color: white });
+
+    page.drawText(line, { x: L, y: height - 20, size: REQ.BODY, font: bold, color: black });
+    page.drawText(ref, { x: R - bold.widthOfTextAtSize(ref, REQ.ID), y: height - 21, size: REQ.ID, font: bold, color: black });
+    page.drawLine({ start: { x: L, y: height - 27 }, end: { x: R, y: height - 27 }, thickness: 1, color: black });
+
+    page.drawLine({ start: { x: L, y: 46 }, end: { x: R, y: 46 }, thickness: 1, color: black });
+    page.drawText(line, { x: L, y: 34, size: REQ.BODY, font: bold, color: black });
+    page.drawText(ref, { x: R - bold.widthOfTextAtSize(ref, REQ.ID), y: 33, size: REQ.ID, font: bold, color: black });
+    const ask = 'Please include this reference when returning results.';
+    page.drawText(ask, { x: L, y: 20, size: 9, font: plain, color: black });
+    // A SINGLE-PAGE requisition says nothing about pagination; a multi-page one
+    // must, or a fax that loses its last page arrives looking complete.
+    if (total > 1) {
+      const label = `Page ${i + 1} of ${total}`;
+      page.drawText(label, { x: R - bold.widthOfTextAtSize(label, 9), y: 20, size: 9, font: bold, color: black });
+    }
+    void W;
+  });
+  return Buffer.from(await doc.save());
+}
+
+/**
+ * generateRequisitionPDF — the fax-ready document for one order.
+ *
+ * REFUSES rather than renders when the ordering clinician has no NPI on file: a
+ * requisition with no signature is a document a lab cannot act on and a
+ * supplier cannot bill against, and handing one over reads as complete.
+ *
+ * @param {object} d
+ *   order, client, orderingClinician, requisitionSettings { returnFax, returnFaxFormatted, returnFaxLabel, requisitionPhone },
+ *   standingOrder (optional), attachments (optional array of PDF Buffers)
+ */
+async function generateRequisitionPDF(d) {
+  const order = (d && d.order) || {};
+  const client = (d && d.client) || {};
+  const clinician = (d && d.orderingClinician) || order.orderingClinician || {};
+  const settings = (d && d.requisitionSettings) || {};
+  const intake = client.intake || {};
+  const orderType = String(order.orderType || 'lab');
+
+  if (!clinician.npi) {
+    const err = new Error(`${clinician.name || 'The ordering clinician'} has no NPI on file, so this requisition cannot carry an electronic signature. An admin records the NPI on the user record.`);
+    err.code = 'REQUISITION_NO_NPI';
+    throw err;
+  }
+
+  const patientName = client.name || [intake.firstName, intake.lastName].filter(Boolean).join(' ') || 'Unknown patient';
+  const dob = intake.dob || client.dob || '';
+  const mbi = (order.dme && order.dme.mbi) || client.mbi || intake.mbi || ((client.payer || {}).memberId) || '';
+  const reference = order.orderReference || '(no reference)';
+
+  const base = await new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({
+        size: 'LETTER',
+        // Margins leave room for the identifier strips top and bottom.
+        margins: { top: REQ.TOP + 14, bottom: 62, left: REQ.L, right: REQ.L },
+        bufferPages: true
+      });
+      const chunks = [];
+      doc.on('data', c => chunks.push(c));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+
+      let y = REQ.TOP + 14;
+      const room = (need) => {
+        if (y + (need || 16) > doc.page.height - 74) { doc.addPage(); y = REQ.TOP + 14; }
+      };
+      const heading = (text) => {
+        room(26);
+        doc.font('Helvetica-Bold').fontSize(11).fillColor(REQ.ink)
+          .text(String(text).toUpperCase(), REQ.L, y, { width: REQ.W, characterSpacing: 0.5 });
+        y += 11;
+        doc.moveTo(REQ.L, y).lineTo(REQ.R, y).lineWidth(0.9).strokeColor(REQ.rule).stroke();
+        y += 5;
+      };
+      // A labelled value. The LABEL is small and bold rather than grey, because
+      // grey does not survive a fax; the VALUE is 12pt where it is an identifier.
+      const pair = (label, value, opts) => {
+        const o = opts || {};
+        const w = o.width || REQ.W;
+        const size = o.id ? REQ.ID : REQ.BODY;
+        const text = reqDash(value);
+        const h = doc.font('Helvetica').fontSize(size).heightOfString(text, { width: w });
+        // `noRoom` is how the two-column helper stays correct. Letting the FIRST
+        // column trigger a page break and then restoring `y` for the second one
+        // draws the second column onto the NEW page at the OLD y — off the
+        // bottom — and every later room() check then adds another page. That is
+        // what produced a four-page DME order with three near-empty pages;
+        // caught by reading the rendered document back, not by reading the code.
+        if (!o.noRoom) room(h + 14);
+        doc.font('Helvetica-Bold').fontSize(8).fillColor(REQ.ink)
+          .text(String(label).toUpperCase(), o.x == null ? REQ.L : o.x, y, { width: w, characterSpacing: 0.4 });
+        doc.font(o.bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(size)
+          .text(text, o.x == null ? REQ.L : o.x, y + 9, { width: w });
+        if (o.inline) return h + 9;
+        y += h + 12;
+        return h + 12;
+      };
+      const twoUp = (a, b) => {
+        const colW = (REQ.W - 18) / 2;
+        // Measure BOTH columns, make room for the taller, and only then draw —
+        // so neither column can move the page under the other.
+        const ha = doc.font('Helvetica').fontSize(a.id ? REQ.ID : REQ.BODY).heightOfString(reqDash(a.value), { width: colW });
+        const hb = doc.font('Helvetica').fontSize(b.id ? REQ.ID : REQ.BODY).heightOfString(reqDash(b.value), { width: colW });
+        room(Math.max(ha, hb) + 12);
+        const startY = y;
+        pair(a.label, a.value, { x: REQ.L, width: colW, inline: true, noRoom: true, id: a.id, bold: a.bold });
+        y = startY;
+        pair(b.label, b.value, { x: REQ.L + colW + 18, width: colW, inline: true, noRoom: true, id: b.id, bold: b.bold });
+        y = startY + Math.max(ha, hb) + 12;
+      };
+      const para = (text, opts) => {
+        const o = opts || {};
+        const t = String(text || '').trim();
+        if (!t) return;
+        const h = doc.font(o.bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(o.size || REQ.BODY).heightOfString(t, { width: REQ.W });
+        room(h + 6);
+        doc.font(o.bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(o.size || REQ.BODY).fillColor(REQ.ink)
+          .text(t, REQ.L, y, { width: REQ.W });
+        y += h + (o.gap == null ? 6 : o.gap);
+      };
+
+      // ── Title ─────────────────────────────────────────────────────────
+      const TITLES = {
+        lab: 'Laboratory Requisition',
+        imaging: 'Imaging Requisition',
+        procedure: 'Procedure Order',
+        referral: 'Referral',
+        dme: 'Standard Written Order — Durable Medical Equipment'
+      };
+      doc.font('Helvetica-Bold').fontSize(16).fillColor(REQ.ink)
+        .text(TITLES[orderType] || 'Clinical Order', REQ.L, y, { width: REQ.W });
+      y += 21;
+      doc.font('Helvetica-Bold').fontSize(REQ.BODY)
+        .text(consentText.ORG.name, REQ.L, y, { width: REQ.W });
+      y += 12;
+      doc.font('Helvetica').fontSize(9)
+        .text(`${consentText.ORG.address}   ·   Tel ${settings.requisitionPhone || consentText.ORG.phone}`, REQ.L, y, { width: REQ.W });
+      y += 16;
+      doc.moveTo(REQ.L, y).lineTo(REQ.R, y).lineWidth(1.6).strokeColor(REQ.rule).stroke();
+      y += 10;
+
+      // ── WRITTEN ORDER PRIOR TO DELIVERY ───────────────────────────────
+      // Printed prominently because the SUPPLIER MAY NOT DELIVER before they
+      // hold it — power mobility devices are the statutory case. An outlined
+      // box, never a filled one: a filled panel faxes to a black rectangle.
+      if (orderType === 'dme' && order.dme && order.dme.requiresWOPD) {
+        room(30);
+        doc.rect(REQ.L, y, REQ.W, 23).lineWidth(1.6).strokeColor(REQ.rule).stroke();
+        doc.font('Helvetica-Bold').fontSize(13).fillColor(REQ.ink)
+          .text('WRITTEN ORDER PRIOR TO DELIVERY', REQ.L, y + 6, { width: REQ.W, align: 'center' });
+        y += 29;
+      }
+      // Priority, printed LARGE when it is urgent or stat. A routine order says
+      // routine in the body; an urgent one has to be readable across a desk.
+      const urgency = String((order.referral && order.referral.urgency) || order.priority || 'routine');
+      if (urgency === 'urgent' || urgency === 'stat') {
+        room(28);
+        doc.rect(REQ.L, y, REQ.W, 22).lineWidth(1.6).strokeColor(REQ.rule).stroke();
+        doc.font('Helvetica-Bold').fontSize(14).fillColor(REQ.ink)
+          .text(urgency.toUpperCase(), REQ.L, y + 5, { width: REQ.W, align: 'center' });
+        y += 28;
+      }
+
+      // ── Patient ───────────────────────────────────────────────────────
+      heading('Patient');
+      twoUp({ label: 'Name', value: patientName, id: true, bold: true }, { label: 'Date of birth', value: dob, id: true });
+      const addr = client.address || intake.address || {};
+      const addrLine = [addr.line1 || addr.street, addr.line2, [addr.city, addr.state].filter(Boolean).join(', '), addr.zip || addr.postalCode]
+        .filter(Boolean).join(' ');
+      twoUp({ label: 'Sex', value: intake.gender || client.gender }, { label: 'Phone', value: client.phone || intake.phone });
+      pair('Address', addrLine);
+      const payer = client.payer || {};
+      twoUp({ label: 'MBI / Medicare id', value: mbi, id: true }, { label: 'Primary payer', value: [payer.primaryName || payer.name, payer.memberId].filter(Boolean).join(' — ') });
+      if (payer.secondaryName || payer.secondaryMemberId) {
+        pair('Secondary payer', [payer.secondaryName, payer.secondaryMemberId].filter(Boolean).join(' — '));
+      }
+
+      // ── Diagnoses ─────────────────────────────────────────────────────
+      heading('Diagnoses (ICD-10-CM)');
+      const dxRows = (d.diagnoses && d.diagnoses.length ? d.diagnoses : (order.diagnosisCodes || []).map(c => ({ code: c, description: '' })));
+      if (!dxRows.length) para('—');
+      for (const dx of dxRows) {
+        const line = `${dx.code}${dx.description ? `   ${dx.description}` : ''}`;
+        const h = doc.font('Helvetica').fontSize(REQ.BODY).heightOfString(line, { width: REQ.W - 14 });
+        room(h + 5);
+        doc.font('Helvetica-Bold').fontSize(REQ.BODY).fillColor(REQ.ink).text('•', REQ.L, y, { lineBreak: false });
+        doc.font('Helvetica').fontSize(REQ.BODY).text(line, REQ.L + 12, y, { width: REQ.W - 14 });
+        y += h + 4;
+      }
+      y += 4;
+
+      // ── The order itself, per type ────────────────────────────────────
+      if (orderType === 'referral') {
+        const r = order.referral || {};
+        heading('Referral to');
+        twoUp({ label: 'Specialty', value: r.specialty, bold: true }, { label: 'Practice / provider', value: [r.receivingPractice, r.receivingProvider].filter(Boolean).join(' — ') });
+        twoUp({ label: 'Fax', value: reqFmtFax(r.receivingFax), id: true }, { label: 'Phone', value: r.receivingPhone });
+        pair('Urgency', (r.urgency || 'routine').toUpperCase());
+        if (r.priorAuthRequired) {
+          pair('Prior authorization', r.priorAuthNumber
+            ? `REQUIRED — authorization ${r.priorAuthNumber}`
+            : 'REQUIRED — authorization number not yet obtained', { bold: true });
+        }
+        heading('Reason for referral');
+        para(r.reason);
+        heading('Clinical summary and the question asked');
+        para(r.clinicalSummary);
+      } else if (orderType === 'dme') {
+        const m = order.dme || {};
+        heading('Item ordered');
+        pair('Item', [m.itemDescription, m.hcpcsCode ? `(HCPCS ${m.hcpcsCode})` : null].filter(Boolean).join(' '), { id: true, bold: true });
+        twoUp({ label: 'Quantity to be dispensed', value: String(m.quantity), id: true }, { label: 'Length of need', value: m.lengthOfNeed, id: true });
+        twoUp({ label: 'Order date', value: m.orderDate, id: true }, { label: 'Beneficiary', value: [m.beneficiaryName, m.mbi ? `MBI ${m.mbi}` : null].filter(Boolean).join(' · ') });
+        heading('Supplier');
+        twoUp({ label: 'Supplier', value: m.supplierName, bold: true }, { label: 'Supplier fax', value: reqFmtFax(m.supplierFax), id: true });
+        if (m.supplierPhone) pair('Supplier phone', m.supplierPhone);
+        if (m.requiresF2F) {
+          heading('Face-to-face encounter');
+          pair('Encounter date', m.faceToFaceDate, { id: true });
+          para('This item requires a face-to-face encounter. The encounter above is within the six months before the order date and is documented in the patient\'s record.');
+        }
+      } else {
+        heading(orderType === 'imaging' ? 'Studies requested' : orderType === 'procedure' ? 'Procedure requested' : 'Tests requested');
+        const tests = order.tests || [];
+        if (!tests.length) para('—');
+        for (const t of tests) {
+          const label = typeof t === 'string' ? t : (t && (t.name || t.description)) || '';
+          const h = doc.font('Helvetica').fontSize(REQ.ID).heightOfString(label, { width: REQ.W - 14 });
+          room(h + 5);
+          doc.font('Helvetica-Bold').fontSize(REQ.ID).fillColor(REQ.ink).text('•', REQ.L, y, { lineBreak: false });
+          doc.font('Helvetica').fontSize(REQ.ID).text(label, REQ.L + 14, y, { width: REQ.W - 14 });
+          y += h + 4;
+        }
+        y += 4;
+        pair('Priority', urgency.toUpperCase());
+      }
+
+      if (order.notes) { heading('Notes'); para(order.notes); }
+
+      // ── Ordering clinician and the signature ──────────────────────────
+      heading('Ordering clinician');
+      twoUp(
+        { label: 'Name and credential', value: [clinician.name, clinician.licenseLevel].filter(Boolean).join(', '), id: true, bold: true },
+        { label: 'NPI', value: clinician.npi, id: true }
+      );
+      // UNDER A STANDING ORDER THE AUTHORIZING PROVIDER IS THE ORDERING
+      // CLINICIAN, and the document says so plainly — the person who carried it
+      // out is named too, because a requisition that hides the execution is a
+      // requisition nobody can reconstruct.
+      if (d.standingOrder) {
+        const so = d.standingOrder;
+        para(`Executed under standing order "${so.title}" v${so.version} by ${[(order.executedBy || {}).name, (order.executedBy || {}).credential].filter(Boolean).join(', ') || 'a member of the clinical team'}.`);
+      }
+      // THE ELECTRONIC SIGNATURE. For a DME order this satisfies SWO element 6 —
+      // the treating practitioner's signature — and the wording is the standard
+      // attestation form rather than a picture of a signature, which would not
+      // survive a fax legibly anyway.
+      const signedAt = gfcTime.fmtDateTime(d.generatedAt || new Date().toISOString());
+      room(34);
+      doc.rect(REQ.L, y, REQ.W, 26).lineWidth(1.2).strokeColor(REQ.rule).stroke();
+      doc.font('Helvetica-Bold').fontSize(REQ.BODY).fillColor(REQ.ink)
+        .text(`Electronically signed by ${[clinician.name, clinician.licenseLevel].filter(Boolean).join(', ')}, NPI ${clinician.npi}, on ${signedAt} ET.`,
+          REQ.L + 8, y + 7, { width: REQ.W - 16 });
+      y += 32;
+
+      // ── Where the answer goes ─────────────────────────────────────────
+      heading('Return results to');
+      pair(settings.returnFaxLabel || consentText.ORG.name, settings.returnFaxFormatted
+        ? `Fax ${settings.returnFaxFormatted}`
+        : 'Fax number not configured — call the number below', { id: true, bold: true });
+      twoUp(
+        { label: 'Telephone', value: settings.requisitionPhone || consentText.ORG.phone, id: true },
+        { label: 'Attention', value: [clinician.name, clinician.licenseLevel].filter(Boolean).join(', ') }
+      );
+      para(`Generated ${signedAt} ET. Please include ${reference} on every page returned.`, { size: 9, gap: 0 });
+
+      doc.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+
+  // ── Attachments ────────────────────────────────────────────────────────
+  // Appended AFTER the letter, in the order they were selected. mergePDFBuffers
+  // already exists for the service-report path; a buffer it cannot parse is
+  // SKIPPED rather than failing the whole requisition — losing an attachment is
+  // recoverable, losing the order is a visit that does not happen.
+  const attachments = (d.attachments || []).filter(Buffer.isBuffer);
+  let merged = base;
+  if (attachments.length) {
+    // A buffer pdf-lib cannot parse is SKIPPED rather than failing the whole
+    // requisition: losing an attachment is recoverable, losing the order is a
+    // visit that does not happen.
+    try { merged = await mergePDFBuffers([base, ...attachments]); }
+    catch { merged = base; }
+  }
+  return stampRequisitionPages(merged, { patientName, dob, mbi, reference });
+}
+
 module.exports = {
   generateServiceReportPDF,
   generateServiceReportWithAttachments,
@@ -1515,5 +1897,6 @@ module.exports = {
   renderConsentBody,
   generateProviderROIPDF,
   generateCarePlanPDF,
+  generateRequisitionPDF,
   ROI_CATEGORY_LABELS
 };
