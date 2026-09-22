@@ -17,6 +17,7 @@
 - backfill PR #96 as merged for Session 4.8
 
 #### Changes
+- Let staff and clinicians file a document into a client's file
 - Build the clinical inbox — five pending states nothing ever showed
 - Save a half-finished H&P, and give the facility assignment a screen
 - A time change can be asked about an unaccepted offer, and asking is agreeing
@@ -40,7 +41,6 @@
 - Record the EVV session in the running status
 - Make a failed Drive read say which failure it was
 - Backfill PR #87 in the running status, and pin its suite figure to it
-- Make the Home shift bar live instead of static
 
 
 ### Version 3.1.0 - September 21, 2026
