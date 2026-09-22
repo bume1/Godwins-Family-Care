@@ -134,6 +134,13 @@
       getDraft: (id) => authedFetch(`/api/clinical/patients/${id}/visit/draft`),
       saveDraft: (id, draft) => authedFetch(`/api/clinical/patients/${id}/visit/draft`, { method: 'PUT', body: JSON.stringify({ draft }) }),
       discardDraft: (id) => authedFetch(`/api/clinical/patients/${id}/visit/draft`, { method: 'DELETE' }),
+      // Scanning a document into the patient's file from the chart. The route
+      // is the enrollment one on purpose — ONE store for a client's documents,
+      // so what a clinician scans in is what the office and the client see.
+      fileClientDocument: (clientId, body) => authedFetch(`/api/gfc/admin/enrollment/${clientId}/documents/upload`, {
+        method: 'POST', body: JSON.stringify(body)
+      }),
+      documentKinds: (clientId) => authedFetch(`/api/gfc/admin/enrollment/${clientId}/documents`),
       facilities: () => authedFetch('/api/clinical/facilities'),
       assignFacility: (id, facilityId) => authedFetch(`/api/clinical/patients/${id}/facility`, { method: 'PUT', body: JSON.stringify({ facilityId }) }),
       medrec: (id) => authedFetch(`/api/clinical/patients/${id}/medrec`),
@@ -306,7 +313,73 @@
     // empty chart for a patient whose record is full. Rows carry where they can
     // be read from, and an EMR row that cannot be opened here SAYS SO rather
     // than being dropped — a missing row reads as "no such document".
-    const ChartDocuments = ({ docs, clientId }) => {
+    // Scanning into the chart (2026-09-22, owner-directed). Until now the
+    // clinical area had NO file input at all — a document handed over at a home
+    // visit, or faxed by a doctor's office, had nowhere to go from here.
+    //
+    // It files into the CLIENT's document store, the same one the enrollment
+    // screen and the client's portal read, so a scan taken at the bedside ticks
+    // the office's checklist and the client sees it. A second clinical-only
+    // store would mean the office chasing a document a clinician already holds.
+    const ChartScanIn = ({ clientId, onFiled }) => {
+      const [kinds, setKinds] = useState(null);
+      const [kind, setKind] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [msg, setMsg] = useState(null);
+      useEffect(() => {
+        let live = true;
+        api.documentKinds(clientId)
+          .then(r => {
+            if (!live) return;
+            const list = (r && r.catalog) || [];
+            setKinds(list);
+            // The page names no document kind of its own — the catalog is
+            // served, so the picker cannot drift from the validator that
+            // refuses one it does not know.
+            if (list.length) setKind(list[0].kind);
+          })
+          .catch(e => { if (live) setMsg({ ok: false, text: e.message }); });
+        return () => { live = false; };
+      }, [clientId]);
+
+      const pick = (file) => {
+        if (!file || !kind) return;
+        setBusy(true); setMsg(null);
+        const reader = new FileReader();
+        reader.onload = () => {
+          api.fileClientDocument(clientId, { kind, fileName: file.name, fileDataB64: String(reader.result) })
+            .then(r => { setMsg({ ok: true, text: r.message }); onFiled && onFiled(); })
+            .catch(e => setMsg({ ok: false, text: e.message }))
+            .finally(() => setBusy(false));
+        };
+        reader.onerror = () => { setMsg({ ok: false, text: 'That file could not be read.' }); setBusy(false); };
+        reader.readAsDataURL(file);
+      };
+
+      return (
+        <div className="border-t border-stone-100 mt-3 pt-3">
+          <div className="text-[13px] font-semibold text-primary mb-2">Scan a document into this file</div>
+          <div className="flex flex-wrap items-center gap-2">
+            <select className="inp max-w-[260px]" value={kind} disabled={busy || !kinds} onChange={e => setKind(e.target.value)}>
+              {(kinds || []).map(k => <option key={k.kind} value={k.kind}>{k.label}</option>)}
+            </select>
+            <label className={`btn ghost ${busy || !kind ? 'opacity-50' : 'cursor-pointer'}`}>
+              <i className="ti ti-scan" />{busy ? 'Filing…' : 'Choose file'}
+              <input type="file" className="hidden" accept=".pdf,.jpg,.jpeg,.png" disabled={busy || !kind}
+                onChange={e => { pick((e.target.files || [])[0]); e.target.value = ''; }} />
+            </label>
+          </div>
+          {!kinds && !msg && <p className="text-[11px] text-stone-400 mt-2">Reading the document list…</p>}
+          <p className="text-[11px] text-stone-400 mt-2">
+            Filed to the client's documents — it ticks the office checklist and the client sees it on their portal.
+            PDF, JPG or PNG.
+          </p>
+          {msg && <p className={`text-xs mt-1 ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
+        </div>
+      );
+    };
+
+    const ChartDocuments = ({ docs, clientId, onRefresh }) => {
       const [busy, setBusy] = useState('');
       const [err, setErr] = useState('');
 
@@ -378,6 +451,7 @@
               </div>
             ))}
           </div>
+          {clientId && <ChartScanIn clientId={clientId} onFiled={onRefresh} />}
         </div>
       );
     };
@@ -554,7 +628,7 @@
       );
     };
 
-    const SummaryTab = ({ chart, patient, onLink, linking, linkCandidates, onDismissCandidates, isAdmin, onFacilityChanged }) => {
+    const SummaryTab = ({ chart, patient, onLink, linking, linkCandidates, onDismissCandidates, isAdmin, onChartChanged }) => {
       const canWrite = useCanWrite();
       const [showLinkExisting, setShowLinkExisting] = useState(false);
       const [existingId, setExistingId] = useState('');
@@ -669,7 +743,7 @@
               </div>
             </div>
           )}
-          {chart.linked && <FacilityCard patient={patient} isAdmin={isAdmin} onChanged={onFacilityChanged} />}
+          {chart.linked && <FacilityCard patient={patient} isAdmin={isAdmin} onChanged={onChartChanged} />}
           <div className="grid md:grid-cols-2 gap-0 md:gap-4">
             <div>
               <Sec title="Problem list" icon="ti-list-details" data={emr.problems}
@@ -691,7 +765,7 @@
                   full. This list is assembled server-side from what the app
                   holds, merged with whatever the EMR does return, and each row
                   says where it can be read from. */}
-              <ChartDocuments docs={chart.chartDocuments || []} clientId={patient && patient.id} />
+              <ChartDocuments docs={chart.chartDocuments || []} clientId={patient && patient.id} onRefresh={onChartChanged} />
             </div>
           </div>
         </div>
@@ -2598,7 +2672,7 @@
                 <div className="p-4 lg:p-7">
                   {tab === 'summary' && <SummaryTab chart={chart} patient={sel} onLink={link} linking={linking}
                     linkCandidates={linkCandidates} onDismissCandidates={() => { setLinkCandidates([]); setErr(''); }}
-                    isAdmin={access.role === 'admin'} onFacilityChanged={() => { loadPatients(); refreshChart(); }} />}
+                    isAdmin={access.role === 'admin'} onChartChanged={() => { loadPatients(); refreshChart(); }} />}
                   {tab === 'appts' && <ApptsTab patient={sel} patients={patients || []} chart={chart} onDocumentHp={(eid) => { setHpApptEid(eid); setTab('visit'); }}
                     onEncounterCreated={(euuid) => { setEncTarget(euuid); setTab('encounters'); }} />}
                   {tab === 'encounters' && <EncountersTab patient={sel} chart={chart} initialEuuid={encTarget} onOpened={() => setEncTarget(null)} />}

@@ -6549,34 +6549,86 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
 // at a file that does not exist, which is the same silent-success trap this
 // codebase has now hit five times in OpenEMR. If we cannot store it, we did not
 // receive it.
+// ---- Filing a document into a CLIENT's file (2026-09-22) ----
+//
+// Two doors onto one act: the client sends it from their portal, and staff
+// file one they were handed on paper, faxed, or scanned at the office. Until
+// now only the first existed, so a document that arrived any other way for an
+// existing client had nowhere to go.
+//
+// The mechanics live here once. Two copies of "what a valid document upload
+// is" is how one door starts accepting what the other refuses — and this one
+// decides what reaches a patient's file.
+const prepareClientDocument = ({ kind, fileName, fileDataB64 }) => {
+  if (!kind || !fileName || !fileDataB64) {
+    return { error: 'kind, fileName and fileDataB64 are required', status: 400 };
+  }
+  let buffer;
+  try {
+    const b64 = String(fileDataB64).startsWith('data:')
+      ? String(fileDataB64).slice(String(fileDataB64).indexOf(',') + 1) : String(fileDataB64);
+    buffer = Buffer.from(b64, 'base64');
+  } catch (e) { return { error: 'File data is not valid base64.', status: 400 }; }
+  if (!buffer.length) return { error: 'File is empty.', status: 400 };
+  if (buffer.length > config.MAX_FILE_SIZE) return { error: 'File exceeds 10 MB limit.', status: 400 };
+  // Typed by its BYTES, never by what the caller claimed it is.
+  const sniffedType = detectFileType(buffer);
+  if (!sniffedType) return { error: 'Only PDF, JPG, and PNG files are accepted.', status: 400 };
+  return { buffer, sniffedType };
+};
+
+// A kind nobody asked for lands in a bucket no checklist reads, so nobody ever
+// sees it. Known registry kind, or an open staff request, or refused.
+const resolveDocumentKind = (kind, clientId, requests) => {
+  const known = new Set(GFC_EXPECTED_DOCUMENTS.map(d => d.kind));
+  const openAsk = (requests || []).find(r => r.clientId === clientId && r.kind === kind && r.status === 'open');
+  if (!known.has(kind) && !openAsk) {
+    return { error: 'Unknown document type', code: 'DOCUMENT_KIND_UNKNOWN', status: 400 };
+  }
+  return { openAsk: openAsk || null };
+};
+
+const buildClientDocumentRow = ({ client, kind, fileName, stored, safeName, buffer, sniffedType, actor, source }) => ({
+  id: `doc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+  clientId: client.id,
+  kind,
+  fileName: String(fileName).slice(0, 200),
+  storedName: safeName,
+  mimeType: sniffedType,
+  size: buffer.length,
+  driveFileId: stored.fileId,
+  driveUrl: stored.webViewLink || stored.webContentLink || null,
+  uploadedAt: new Date().toISOString(),
+  uploadedById: actor.id,
+  uploadedByName: actor.name || actor.email,
+  // "The client sent this" and "the office filed it for them" are different
+  // facts, and for a chased document that difference is the whole point.
+  source: source === 'staff' ? 'staff' : 'client',
+  // An office-filed document did not arrive needing review — the office IS the
+  // reviewer. So it lands accepted and ticks its own checklist item, rather
+  // than sitting at "with the office" waiting on a review nobody will do.
+  // The caregiver document store settled this on 2026-09-14; same rule here.
+  status: source === 'staff' ? 'accepted' : 'received',
+  ...(source === 'staff' ? { reviewedAt: new Date().toISOString(), reviewedByName: actor.name || actor.email } : {})
+});
+
 app.post('/api/gfc/documents/upload', authenticateToken, requireClientForIntake, async (req, res) => {
   try {
     const { kind, fileName, fileDataB64 } = req.body || {};
-    if (!kind || !fileName || !fileDataB64) {
-      return res.status(400).json({ error: 'kind, fileName and fileDataB64 are required' });
-    }
-    let buffer;
-    try {
-      const b64 = fileDataB64.startsWith('data:') ? fileDataB64.slice(fileDataB64.indexOf(',') + 1) : fileDataB64;
-      buffer = Buffer.from(b64, 'base64');
-    } catch (e) { return res.status(400).json({ error: 'File data is not valid base64.' }); }
-    if (!buffer.length) return res.status(400).json({ error: 'File is empty.' });
-    if (buffer.length > config.MAX_FILE_SIZE) return res.status(400).json({ error: 'File exceeds 10 MB limit.' });
-    const sniffedType = detectFileType(buffer);
-    if (!sniffedType) return res.status(400).json({ error: 'Only PDF, JPG, and PNG files are accepted.' });
+    // Shared with the staff filing route — one definition of what a valid
+    // document upload is, so the two doors cannot start disagreeing.
+    const prepared = prepareClientDocument({ kind, fileName, fileDataB64 });
+    if (prepared.error) return res.status(prepared.status).json({ error: prepared.error });
+    const buffer = prepared.buffer;
+    const sniffedType = prepared.sniffedType;
 
     const client = await resolveGfcClientRecord(req.user);
     if (!client) return res.status(404).json({ error: 'No client record on file' });
 
-    // The kind must be something we actually asked for — a registry entry for
-    // their line, or an open staff request. Otherwise an upload lands in a
-    // bucket no checklist reads and nobody ever sees it.
     const requests = (await db.get('client_document_requests')) || [];
-    const known = new Set(GFC_EXPECTED_DOCUMENTS.map(d => d.kind));
-    const openAsk = requests.find(r => r.clientId === client.id && r.kind === kind && r.status === 'open');
-    if (!known.has(kind) && !openAsk) {
-      return res.status(400).json({ error: 'Unknown document type', code: 'DOCUMENT_KIND_UNKNOWN' });
-    }
+    const resolved = resolveDocumentKind(kind, client.id, requests);
+    if (resolved.error) return res.status(resolved.status).json({ error: resolved.error, code: resolved.code });
+    const openAsk = resolved.openAsk;
 
     const safeName = `${kind}_${(client.slug || client.id)}_${Date.now()}_${String(fileName).replace(/[^a-zA-Z0-9._-]/g, '_')}`;
     let stored;
@@ -6590,21 +6642,10 @@ app.post('/api/gfc/documents/upload', authenticateToken, requireClientForIntake,
       });
     }
 
-    const row = {
-      id: `doc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      clientId: client.id,
-      kind,
-      fileName: String(fileName).slice(0, 200),
-      storedName: safeName,
-      mimeType: sniffedType,
-      size: buffer.length,
-      driveFileId: stored.fileId,
-      driveUrl: stored.webViewLink || stored.webContentLink || null,
-      uploadedAt: new Date().toISOString(),
-      uploadedById: req.user.id,
-      uploadedByName: req.user.name || req.user.email,
-      status: 'received'
-    };
+    const row = buildClientDocumentRow({
+      client, kind, fileName, stored, safeName, buffer, sniffedType,
+      actor: req.user, source: 'client'
+    });
     const uploads = (await db.get('client_document_uploads')) || [];
     await db.set('client_document_uploads', [...uploads, row]);
 
@@ -11566,6 +11607,81 @@ app.get('/api/gfc/admin/enrollment/:clientId/documents', authenticateToken, requ
 // Items may be registry kinds or a one-off (`custom:<slug>`), so a request for
 // something the registry never anticipated still lands in the same checklist
 // rather than in an email nobody can audit.
+// POST …/enrollment/:clientId/documents/upload — STAFF file a document into a
+// client's file (2026-09-22, owner-directed).
+//
+// The gap this closes: the only writer of a client's documents was the CLIENT,
+// from their own portal. A document handed over on paper at a home visit,
+// faxed in by a doctor's office, or scanned at the desk had nowhere to go for
+// a client already on file — staff could ask for it, chase it and accept it,
+// but never file one themselves.
+//
+// Admin OR licensed clinician, because the clinician sitting with the patient
+// is often the person holding the document. Same gate as the submission
+// editor; the WORKFLOW decisions (approve, service line) stay admin-only.
+app.post('/api/gfc/admin/enrollment/:clientId/documents/upload', authenticateToken, requireEnrollmentEditor, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+
+    const { kind, fileName, fileDataB64 } = req.body || {};
+    const prepared = prepareClientDocument({ kind, fileName, fileDataB64 });
+    if (prepared.error) return res.status(prepared.status).json({ error: prepared.error });
+
+    const requests = (await db.get('client_document_requests')) || [];
+    const resolved = resolveDocumentKind(kind, client.id, requests);
+    if (resolved.error) return res.status(resolved.status).json({ error: resolved.error, code: resolved.code });
+
+    const safeName = `${kind}_${(client.slug || client.id)}_${Date.now()}_${String(fileName).replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+    let stored;
+    try {
+      stored = await googledrive.uploadClientDocumentFile(client.name || 'Client', safeName, prepared.buffer, prepared.sniffedType);
+    } catch (e) {
+      // A Drive failure REFUSES the upload. A row pointing at a file that does
+      // not exist is worse than no row: the checklist would tick and the
+      // document would not be there.
+      console.error('[DOCUMENTS] Staff Drive upload failed:', e.message);
+      return res.status(502).json({
+        error: 'We could not store that file, so nothing was filed. Try again.',
+        code: 'DOCUMENT_STORAGE_UNAVAILABLE',
+        ...(googledrive.describeDriveError ? googledrive.describeDriveError(e) : {})
+      });
+    }
+
+    const row = buildClientDocumentRow({
+      client, kind, fileName, stored, safeName,
+      buffer: prepared.buffer, sniffedType: prepared.sniffedType,
+      actor: req.user, source: 'staff'
+    });
+    const uploads = (await db.get('client_document_uploads')) || [];
+    await db.set('client_document_uploads', [...uploads, row]);
+
+    // The ask is answered however it was answered — a document the office
+    // filed itself must not keep chasing the client for the same thing.
+    if (resolved.openAsk) {
+      const i = requests.findIndex(r => r.id === resolved.openAsk.id);
+      requests[i] = { ...resolved.openAsk, status: 'fulfilled', fulfilledAt: row.uploadedAt, fulfilledBy: row.id };
+      await db.set('client_document_requests', requests);
+    }
+
+    await logActivity(req.user.id, row.uploadedByName, 'client_document_filed_by_staff', 'document', client.id, { kind });
+    const [allUploads, allRequests] = await Promise.all([
+      db.get('client_document_uploads'), db.get('client_document_requests')
+    ]);
+    res.json({
+      message: `Filed to ${client.name || 'the client'}'s documents`,
+      document: { id: row.id, kind, fileName: row.fileName, uploadedAt: row.uploadedAt, status: row.status, source: row.source },
+      // The checklist is DERIVED, so it is returned here rather than left for
+      // the screen to guess at — the item this filing ticked is ticked now.
+      checklist: buildDocumentChecklist(client, allUploads || [], allRequests || [])
+    });
+  } catch (error) {
+    console.error('Staff document upload error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.post('/api/gfc/admin/enrollment/:clientId/documents/request', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const users = await getUsers();

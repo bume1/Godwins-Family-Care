@@ -17,6 +17,7 @@
 - backfill PR #96 as merged for Session 4.8
 
 #### Changes
+- Build the clinical inbox — five pending states nothing ever showed
 - Save a half-finished H&P, and give the facility assignment a screen
 - A time change can be asked about an unaccepted offer, and asking is agreeing
 - Let a caregiver ask for a shift to change, and say which availability is in force
