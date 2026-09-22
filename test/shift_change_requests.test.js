@@ -815,3 +815,36 @@ test('a failed confirm after a successful edit is reported, never called success
   assert.ok(/CHANGE_APPLIED_NOT_CONFIRMED/.test(body),
     'the time has already moved — silently returning 200 leaves an unconfirmed shift nobody is watching');
 });
+
+// ----------------------------------------------------------------------------
+// A caregiver's "My hours" tab (owner report, 2026-09-21): an admin correction
+// carried its `admin_edited` flag straight into the same red chip row as
+// Outside Geofence and Late Clock In — a caregiver saw a different number and
+// a warning that looked like their own fault, with no reason attached. The
+// server already sends who corrected it, when, and why (publicTimeLog);
+// nothing displayed it.
+// ----------------------------------------------------------------------------
+test('an admin correction is never rendered as a fault chip', () => {
+  const fn = COMPONENT.slice(COMPONENT.indexOf('function renderTime(state)'),
+    COMPONENT.indexOf('function bind(state, root)'));
+  assert.ok(fn.length > 40, 'renderTime must be found');
+  // The fault-chip loop must run over a list with admin_edited filtered out,
+  // not the raw flags array — a mutation that drops the filter must fail this.
+  assert.ok(/filter\(function \(f\) \{ return f !== 'admin_edited'; \}\)/.test(fn),
+    'admin_edited must be stripped before the red-chip loop runs');
+  const chipLoop = fn.slice(fn.indexOf('faultFlags.length'), fn.indexOf('l.edited'));
+  assert.ok(chipLoop.includes('faultFlags.map'), 'the chip loop must iterate the filtered list, not l.flags directly');
+  assert.ok(!/l\.flags\.map/.test(chipLoop), 'the raw flags array must not reach the chip loop');
+});
+
+test('a correction is shown neutrally, with who, when and why — never as a chip', () => {
+  const fn = COMPONENT.slice(COMPONENT.indexOf('function renderTime(state)'),
+    COMPONENT.indexOf('function bind(state, root)'));
+  const note = fn.slice(fn.indexOf('l.edited'));
+  assert.ok(/class="gwhy"/.test(note), 'a neutral style, not a chip — this is not a fault');
+  assert.ok(!/gchip warn/.test(note), 'must not reuse the red fault-chip class');
+  assert.ok(/Corrected by the office/.test(note));
+  assert.ok(/l\.editedByName/.test(note), 'who made the correction');
+  assert.ok(/fmtDate\(l\.editedAt\)/.test(note), 'and when — a date, not a bare timestamp');
+  assert.ok(/l\.editReason/.test(note), 'and why — the field the server already sends and nothing showed');
+});
