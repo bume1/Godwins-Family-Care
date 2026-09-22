@@ -7819,6 +7819,81 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
 // visit (H&P) per intake spec §2C → Encounter + vitals + structured SOAP note
 // written to OpenEMR. Records the checklist stamp and (optionally) the RN
 // Track assignment on the app record.
+// ── H&P note drafts (2026-09-22) ─────────────────────────────────────────
+// Documentation IN PROGRESS. A draft never reaches OpenEMR — it exists so a
+// clinician can save a half-written assessment, close the laptop, and finish
+// it later. Until now the H&P was write-once: a browser reload in the middle
+// of a home visit lost the entire note.
+//
+// Scoped to the ACTING CLINICIAN, never to the patient alone. Two clinicians
+// documenting one patient on one day — an on-site assessment and a virtual
+// one — is routine here, and a patient-keyed draft would have each of them
+// silently overwriting the other's work.
+const loadNoteDrafts = () => loadRows('clinical_note_drafts');
+const clearNoteDraft = async (clientId, clinicianId) => {
+  const id = clinicalRepo.noteDraftId(clientId, clinicianId);
+  const rows = await loadNoteDrafts();
+  const next = rows.filter(r => r.id !== id);
+  if (next.length !== rows.length) await db.set('clinical_note_drafts', next);
+  return rows.length - next.length;
+};
+
+// Reading YOUR OWN draft is a read, so it registers as one (the 4.3 split).
+// What keeps it to people who actually document is the NURSING_NOTE
+// capability, not the middleware: a case manager holds no such capability and
+// is refused there, and the row is keyed to the caller either way.
+app.get('/api/clinical/patients/:clientId/visit/draft', authenticateToken, requireClinicalRead, requireCapability(clinicalRoles.CAPABILITIES.NURSING_NOTE), async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    const id = clinicalRepo.noteDraftId(client.id, req.user.id);
+    const row = (await loadNoteDrafts()).find(r => r.id === id) || null;
+    res.json({ draft: row ? row.draft : null, updatedAt: (row && row.updatedAt) || null });
+  } catch (error) {
+    console.error('Note draft read error:', error);
+    res.status(500).json({ error: 'Could not read your draft' });
+  }
+});
+
+app.put('/api/clinical/patients/:clientId/visit/draft', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.NURSING_NOTE), async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    // Deliberately NOT buildHpWrites: a draft is incomplete by definition, so
+    // the both-arms BP rule does not apply until the note is filed.
+    const clean = clinicalRepo.sanitizeNoteDraft(req.body && req.body.draft);
+    if (clean.error) return res.status(400).json({ error: clean.error, code: clean.code });
+    const rows = await loadNoteDrafts();
+    const id = clinicalRepo.noteDraftId(client.id, req.user.id);
+    const existing = rows.find(r => r.id === id) || null;
+    const row = clinicalRepo.buildNoteDraft({
+      clientId: client.id, actor: actorFromReq(req), draft: clean.draft,
+      at: new Date().toISOString(), existing
+    });
+    await db.set('clinical_note_drafts', existing ? rows.map(r => (r.id === id ? row : r)) : rows.concat([row]));
+    // The activity trail records THAT a draft was saved, never its content —
+    // an audit log is not a second copy of the patient's assessment.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_note_draft_saved', 'client', client.id, {});
+    res.json({ message: 'Draft saved', updatedAt: row.updatedAt });
+  } catch (error) {
+    console.error('Note draft save error:', error);
+    res.status(500).json({ error: 'Could not save your draft' });
+  }
+});
+
+app.delete('/api/clinical/patients/:clientId/visit/draft', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.NURSING_NOTE), async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    const removed = await clearNoteDraft(client.id, req.user.id);
+    if (removed) await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_note_draft_discarded', 'client', client.id, {});
+    res.json({ message: removed ? 'Draft discarded' : 'There was no draft to discard', discarded: removed > 0 });
+  } catch (error) {
+    console.error('Note draft discard error:', error);
+    res.status(500).json({ error: 'Could not discard your draft' });
+  }
+});
+
 app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.NURSING_NOTE), async (req, res) => {
   try {
     const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
@@ -7916,6 +7991,10 @@ app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireCli
     if (triage.track) users[idx].careTier = triage.track;
     await db.set('users', users);
     invalidateUsersCache();
+    // The note is in the chart now, so the draft that produced it goes. Leaving
+    // it would resurrect a stale half-note over a filed one the next time this
+    // clinician opens the patient.
+    await clearNoteDraft(client.id, req.user.id);
     await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_hp_documented', 'client', client.id, { encounterUuid, track: triage.track || null, warnings: warnings.length, appointmentEid: linkedAppointment ? String(linkedAppointment.pc_eid) : null });
     res.json({ message: 'Initial visit documented to OpenEMR', encounterUuid, at, warnings, vitalsRowWritten });
   } catch (error) {
