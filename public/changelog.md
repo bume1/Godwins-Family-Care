@@ -17,6 +17,7 @@
 - backfill PR #96 as merged for Session 4.8
 
 #### Changes
+- Rescue the reconciliation spec, and build the enrollment ledger
 - Correct the stale "Drive: NOT CONFIGURED" line
 - Let staff and clinicians file a document into a client's file
 - Build the clinical inbox — five pending states nothing ever showed
