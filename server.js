@@ -6586,7 +6586,17 @@ const GFC_EXPECTED_DOCUMENTS = [
     hint: 'A pharmacy printout or photos of the bottles — whichever you have.' },
   { kind: 'priorRecords',     scope: 'IHPC', required: false,
     label: 'Records from a prior provider',
-    hint: 'Discharge paperwork, recent labs, or a visit summary. We can also request these for you with a record release.' }
+    hint: 'Discharge paperwork, recent labs, or a visit summary. We can also request these for you with a record release.' },
+  // Neither of the next two is ever CHASED — they arrive, they are not demanded
+  // — but a document with no kind lands in a bucket no checklist reads, and
+  // then nobody sees it. They exist so a referral faxed in by a doctor's office
+  // and an order signed by a physician each have somewhere to go.
+  { kind: 'referral',         scope: 'IHPC', required: false,
+    label: 'Referral or face sheet from another provider',
+    hint: 'A referral letter or the face sheet a clinic sends over with a new patient.' },
+  { kind: 'physicianOrder',   scope: 'IHPC', required: false,
+    label: 'Physician order or plan of care',
+    hint: 'A signed order for services — home health, therapy, or a plan of care from a physician.' }
 ];
 
 // Which of the registry applies to a service line. Mirrors consentDefsForServiceLine.
@@ -12577,6 +12587,248 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/upload', authenticateTok
   }
 });
 
+// ── Reading a scanned document into proposals ─────────────────────────────
+//
+// Owner ask, 2026-09-22: scanned documents should populate the record. What is
+// built here reads a document and proposes; a PERSON decides. Nothing on this
+// path writes to a client record without a review, and that is enforced in the
+// module rather than promised here.
+//
+// The engine is INERT until Bedrock is wired. That is not a stub: the boundary
+// refusal is the honest state, it names every missing setting, and the screen
+// shows it — so the day the owner sets three variables this path works with no
+// code change. A fake that pretended to extract would be worse than nothing,
+// because a reviewer would trust it.
+const modelEngine = require('./modelEngine');
+const documentExtraction = require('./documentExtraction');
+
+const gfcModelEngine = modelEngine.createEngine({
+  env: process.env,
+  // No transport yet. `invoke` refuses and says Bedrock is not connected, which
+  // is exactly what is true.
+  transport: null,
+  logActivity
+});
+
+// Reads a value out of the intake by the same dotted path the editor writes.
+const intakeValueAt = (client, path) => readIntakePath(client.intake || {}, path);
+
+// GET …/enrollment/:clientId/extraction — what the scanner can read, and
+// whether it can read anything at all right now.
+//
+// A READ, on the staff read gate, while the two routes below it are on the
+// editor gate. A case manager scoped to their own clients should be able to see
+// that a document is waiting on somebody without being able to decide it —
+// narrowing the writes must not take the view away from the people whose job is
+// to read it. Caught by that guard on the first run, which is what it is for.
+//
+// The SCREEN asks the server both questions rather than deciding either. A page
+// that lists the extractable kinds itself drifts from the module that refuses
+// one, and a page that decides the boundary is satisfied would offer a button
+// the route then refuses.
+app.get('/api/gfc/admin/enrollment/:clientId/extraction', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+    const all = (await db.get('document_extractions')) || [];
+    const mine = all.filter(x => x.clientId === client.id && x.status === 'pending');
+    const st = gfcModelEngine.status();
+    res.json({
+      // `configured` is not a claim that AWS accepts anything, and the payload
+      // says so in its own words rather than leaving the screen to assume.
+      available: st.configured,
+      blockers: st.blockers,
+      proof: st.proof,
+      extractableKinds: documentExtraction.extractableKinds(),
+      pending: mine.map(x => ({
+        id: x.id, docId: x.docId, kind: x.kind, at: x.at,
+        fileName: x.fileName || null,
+        rows: x.rows, identityConflicts: x.identityConflicts || [],
+        reviewCount: x.reviewCount || 0
+      }))
+    });
+  } catch (error) {
+    console.error('Extraction status error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST …/enrollment/:clientId/documents/:docId/extract — read a filed document.
+//
+// The document must ALREADY BE FILED. Extraction is a second pass over
+// something that is on the record, never a step in the upload: a Drive failure
+// must refuse the filing on its own terms, and a model failure must not be able
+// to lose a document somebody just scanned.
+app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/extract', authenticateToken, requireEnrollmentEditor, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+
+    const uploads = (await db.get('client_document_uploads')) || [];
+    const doc = uploads.find(u => u.id === req.params.docId && u.clientId === client.id);
+    if (!doc) return res.status(404).json({ error: 'Document not found', code: 'DOCUMENT_NOT_FOUND' });
+    if (!documentExtraction.isExtractable(doc.kind)) {
+      return res.status(400).json({
+        error: `There is nothing declared to read out of a ${doc.kind}.`,
+        code: 'EXTRACTION_KIND_UNSUPPORTED'
+      });
+    }
+
+    const schema = documentExtraction.schemaFor(doc.kind);
+    let result;
+    try {
+      const bytes = await googledrive.downloadFileBuffer(doc.driveFileId);
+      result = await gfcModelEngine.invoke({
+        purpose: modelEngine.PURPOSES.DOCUMENT_EXTRACTION,
+        input: { mimeType: doc.mimeType, bytes },
+        schema, actor: req.user, patientId: client.id, feature: `extract:${doc.kind}`
+      });
+    } catch (e) {
+      if (e && e.code === 'MODEL_BOUNDARY_REFUSED') {
+        // 503, not 500. Nothing is broken — the boundary is not satisfied, and
+        // the blockers say which settings would satisfy it.
+        return res.status(503).json({
+          error: 'Document reading is not switched on yet.',
+          code: e.code, blockers: e.blockers || []
+        });
+      }
+      console.error('[EXTRACTION] failed:', e.message);
+      return res.status(502).json({ error: e.message, code: e.code || 'EXTRACTION_FAILED' });
+    }
+
+    const built = documentExtraction.buildProposals({
+      kind: doc.kind, docId: doc.id, extracted: result.proposal,
+      confidence: result.confidence,
+      readValue: (path) => intakeValueAt(client, path)
+    });
+    if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+
+    const row = {
+      id: `ext_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      clientId: client.id, docId: doc.id, fileName: doc.fileName, kind: doc.kind,
+      invocationId: result.invocationId, modelId: result.modelId,
+      at: built.at, snapshotAt: built.snapshotAt,
+      rows: built.rows, identityConflicts: built.identityConflicts,
+      reviewCount: built.reviewCount,
+      status: 'pending',
+      createdById: req.user.id, createdByName: req.user.name || req.user.email
+    };
+    const all = (await db.get('document_extractions')) || [];
+    await db.set('document_extractions', [...all, row]);
+    // WHICH document, never what was read out of it.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'document_extraction_proposed', 'document', client.id,
+      { docId: doc.id, kind: doc.kind, proposed: built.rows.length, invocationId: result.invocationId });
+
+    res.json({
+      message: 'Read — nothing has been saved yet. Check each value before it counts.',
+      extraction: { id: row.id, kind: row.kind, rows: row.rows, identityConflicts: row.identityConflicts, reviewCount: row.reviewCount }
+    });
+  } catch (error) {
+    console.error('Document extraction error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST …/enrollment/:clientId/extraction/:id/review — a person decides.
+//
+// This is the only door an extracted value has onto a client record, and what
+// lands is stamped STAFF-VERIFIED: the provenance of an accepted value is the
+// human who accepted it, not the model that offered it.
+app.post('/api/gfc/admin/enrollment/:clientId/extraction/:id/review', authenticateToken, requireEnrollmentEditor, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const idx = users.findIndex(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (idx === -1) return res.status(404).json({ error: 'Client not found' });
+    const client = users[idx];
+
+    const all = (await db.get('document_extractions')) || [];
+    const i = all.findIndex(x => x.id === req.params.id && x.clientId === client.id);
+    if (i === -1) return res.status(404).json({ error: 'Nothing to review', code: 'EXTRACTION_NOT_FOUND' });
+    const stored = all[i];
+    if (stored.status !== 'pending') {
+      return res.status(409).json({ error: 'That has already been reviewed.', code: 'EXTRACTION_ALREADY_REVIEWED' });
+    }
+
+    const review = documentExtraction.applyReview({
+      proposal: stored,
+      decisions: (req.body || {}).decisions || {},
+      readValue: (path) => intakeValueAt(client, path),
+      actor: req.user
+    });
+    if (review.error) return res.status(400).json({ error: review.error, code: review.code });
+
+    let changed = [];
+    let nowStale = [];
+    if (review.writes.length) {
+      const priorClient = JSON.parse(JSON.stringify(client));
+      const next = { ...(client.intake || {}) };
+      // Flat dotted keys are one of the two shapes the editor already reads, so
+      // an accepted extraction goes through the SAME allow-list, the same
+      // option catalogs and the same validation a typed correction does. A
+      // second writer for a client record is how the two start disagreeing.
+      const body = review.writes.reduce((m, w) => { m[w.path] = w.value; return m; }, {});
+      const rejectedValues = [];
+      changed = applyEnrollmentEdits(next, body, rejectedValues);
+      if (rejectedValues.length) {
+        return res.status(400).json({
+          error: 'Some values are not on the list for their question.',
+          code: 'INTAKE_OPTION_INVALID', rejected: rejectedValues
+        });
+      }
+      const fieldErrors = validateClientCoreFields(next);
+      if (Object.keys(fieldErrors).length) {
+        return res.status(400).json({ error: 'Some values need correcting before they can be saved.', code: 'INTAKE_INVALID', fieldErrors });
+      }
+      ({ nowStale } = commitEnrollmentSubmission({ client, priorClient, next, changed, emailChanged: null }));
+      users[idx] = client;
+      await db.set('users', users);
+      invalidateUsersCache();
+    }
+
+    // A review that left anything undecided has NOT finished, so the row stays
+    // pending and the ledger rows stay outstanding. An enrollment must not be
+    // able to complete on a half-read scan.
+    all[i] = {
+      ...stored,
+      status: review.complete ? 'reviewed' : 'pending',
+      rows: stored.rows.map(r => ({ ...r, decision: ((req.body || {}).decisions || {})[r.path]?.decision || r.decision })),
+      reviewedAt: review.complete ? new Date().toISOString() : null,
+      reviewedById: review.complete ? req.user.id : null,
+      reviewedByName: review.complete ? (req.user.name || req.user.email) : null,
+      outcome: review.complete ? review.outcome : null
+    };
+    await db.set('document_extractions', all);
+
+    // The accept / edit / discard signal §10.3 asks for. A signal nobody
+    // records is a signal that does not exist.
+    if (review.complete && stored.invocationId) {
+      await gfcModelEngine.recordOutcome({
+        invocationId: stored.invocationId, outcome: review.outcome,
+        actor: req.user, patientId: client.id
+      }).catch(() => {});
+    }
+    await logActivity(req.user.id, req.user.name || req.user.email, 'document_extraction_reviewed', 'document', client.id, {
+      extractionId: stored.id, docId: stored.docId, fields: changed,
+      counts: review.counts, complete: review.complete
+    });
+
+    res.json({
+      message: review.complete
+        ? `Saved ${changed.length} value(s) from the document.`
+        : `Saved ${changed.length} value(s). ${review.undecided.length} still need a decision.`,
+      changed, refused: review.refused, undecided: review.undecided,
+      counts: review.counts, complete: review.complete,
+      consentsNeedingResignature: nowStale,
+      client: { ...enrollmentDetail(client), canEdit: true }
+    });
+  } catch (error) {
+    console.error('Extraction review error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.post('/api/gfc/admin/enrollment/:clientId/documents/request', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const users = await getUsers();
@@ -13262,6 +13514,75 @@ const applyEnrollmentEdits = (intake, body, rejected = []) => {
 // PUT /api/gfc/admin/enrollment/:clientId/details — staff fill in or correct
 // the enrollment submission from the enrollment page.
 //
+// EVERYTHING A SUBMISSION EDIT HAS TO CARRY WITH IT, in ONE place.
+//
+// "Saves properly" is four separate things and three of them are derived: the
+// payer summary billing reads, the client-profile mirror the matching engine
+// reads, the ROI's prior-provider list, and the re-signature flag on any signed
+// consent whose text now reads differently. A second copy of this is how a
+// correction lands on the record and leaves the Transfer-of-Care form still
+// offering the provider that was just corrected.
+//
+// Called by the staff submission editor and by the document-extraction review,
+// because an accepted extraction IS a submission edit — it is just one a person
+// approved off a scan rather than typed from a phone call.
+const commitEnrollmentSubmission = ({ client, priorClient, next, changed, emailChanged }) => {
+  // The payer block is stored twice by design: the wizard's structured fields
+  // on the intake, and the assembled summary on the client record that billing
+  // reads. The mirror only assembles that summary when the intake carries no
+  // payer object of its own, so an edit MERGES into the object rather than
+  // leaving the two disagreeing.
+  if (changed.some(p => p === 'payerType' || p === 'insuranceIds' || p.startsWith('ltc.'))) {
+    const base = { ...(client.payer || {}), ...(next.payer || {}) };
+    next.payer = {
+      ...base,
+      type: codeFrom('payerType', next.payerType) || base.type || null,
+      insuranceIds: Array.isArray(next.insuranceIds) ? next.insuranceIds : (base.insuranceIds || []),
+      ltc: { ...(base.ltc || {}), ...(next.ltc || {}) }
+    };
+  }
+
+  next.age = deriveAge(next.dob);
+  next.updatedAt = new Date().toISOString();
+  client.intake = next;
+  if (emailChanged) client.email = emailChanged;
+  if (changed.includes('phone')) client.phone = next.phone || '';
+
+  // The ROI's provider list is DERIVED from the medical team, so correcting a
+  // PCP here has to rebuild it — otherwise the Transfer-of-Care form keeps
+  // offering the provider that was just corrected. Same derivation the client's
+  // own intake save calls.
+  const priorProviders = resolvePriorProviders(client, next);
+  // ONE writer for intake → client profile. No caller gets its own idea of the
+  // shape the matching and billing engines read.
+  mirrorIntakeToClientProfile(
+    client, next,
+    Array.isArray(next.medications) ? next.medications : undefined,
+    priorProviders
+  );
+
+  // A signed consent copy is RENDERED from this record, so correcting a value
+  // one of them prints changes what that signed document says. The correction
+  // is still right — a typo in a date of birth has to be fixable — but it is
+  // never silent. Rather than keep a second map of which field feeds which
+  // document, ask the documents: resolve each signed consent before and after
+  // and keep the ones that now read differently.
+  const nowStale = GFC_CONSENT_DEFS
+    .filter(d => isConsentSatisfied((client.consents || {})[d.type]))
+    .filter(d => JSON.stringify(consentRender.resolveForConsent(consentText, d.type, priorClient))
+              !== JSON.stringify(consentRender.resolveForConsent(consentText, d.type, client)))
+    .map(d => d.type);
+  if (nowStale.length) {
+    client.consentActionRequired = {
+      reason: 'client_details_changed', at: new Date().toISOString(),
+      consents: nowStale,
+      titles: nowStale.map(t => (GFC_CONSENT_DEFS.find(d => d.type === t) || {}).title || t),
+      fields: changed
+    };
+  }
+  return { nowStale, priorProviders };
+};
+
 // ADMIN OR CLINICIAN (owner, 2026-09-18). The workflow writes on this surface
 // stay admin-only: approving, changing the service line, accepting a document
 // and recording a paper signature are decisions about the file, while this is a
@@ -13333,59 +13654,7 @@ app.put('/api/gfc/admin/enrollment/:clientId/details', authenticateToken, requir
       return res.json({ message: 'Nothing changed', changed: [], client: enrollmentDetail(client) });
     }
 
-    // The payer block is stored twice by design: the wizard's structured fields
-    // on the intake, and the assembled summary on the client record that
-    // billing reads. The mirror only assembles that summary when the intake
-    // carries no payer object of its own, so an edit MERGES into the object
-    // rather than leaving the two disagreeing.
-    if (changed.some(p => p === 'payerType' || p === 'insuranceIds' || p.startsWith('ltc.'))) {
-      const base = { ...(client.payer || {}), ...(next.payer || {}) };
-      next.payer = {
-        ...base,
-        type: codeFrom('payerType', next.payerType) || base.type || null,
-        insuranceIds: Array.isArray(next.insuranceIds) ? next.insuranceIds : (base.insuranceIds || []),
-        ltc: { ...(base.ltc || {}), ...(next.ltc || {}) }
-      };
-    }
-
-    next.age = deriveAge(next.dob);
-    next.updatedAt = new Date().toISOString();
-    client.intake = next;
-    if (emailChanged) client.email = emailChanged;
-    if (changed.includes('phone')) client.phone = next.phone || '';
-
-    // The ROI's provider list is DERIVED from the medical team, so correcting a
-    // PCP here has to rebuild it — otherwise the Transfer-of-Care form keeps
-    // offering the provider that was just corrected. Same derivation the
-    // client's own intake save calls.
-    const priorProviders = resolvePriorProviders(client, next);
-    // ONE writer for intake → client profile. This page does not get its own
-    // idea of the shape the matching and billing engines read.
-    mirrorIntakeToClientProfile(
-      client, next,
-      Array.isArray(next.medications) ? next.medications : undefined,
-      priorProviders
-    );
-
-    // A signed consent copy is RENDERED from this record, so correcting a value
-    // one of them prints changes what that signed document says. The correction
-    // is still right — a typo in a date of birth has to be fixable — but it is
-    // never silent. Rather than keep a second map of which field feeds which
-    // document, ask the documents: resolve each signed consent before and after
-    // and keep the ones that now read differently.
-    const nowStale = GFC_CONSENT_DEFS
-      .filter(d => isConsentSatisfied((client.consents || {})[d.type]))
-      .filter(d => JSON.stringify(consentRender.resolveForConsent(consentText, d.type, priorClient))
-                !== JSON.stringify(consentRender.resolveForConsent(consentText, d.type, client)))
-      .map(d => d.type);
-    if (nowStale.length) {
-      client.consentActionRequired = {
-        reason: 'client_details_changed', at: new Date().toISOString(),
-        consents: nowStale,
-        titles: nowStale.map(t => (GFC_CONSENT_DEFS.find(d => d.type === t) || {}).title || t),
-        fields: changed
-      };
-    }
+    const { nowStale } = commitEnrollmentSubmission({ client, priorClient, next, changed, emailChanged });
 
     // Correcting the submission is NOT the client submitting it, so the
     // enrollment status is deliberately left where it is. Approving stays its
