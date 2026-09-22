@@ -13,10 +13,12 @@
 - Email the caregiver when a past shift is corrected, and fix the aliased before/after
 - Sign four packet forms in the app; fix the schedule loop and document scoping
 
-#### Documentation
-- backfill PR #96 as merged for Session 4.8
-
 #### Changes
+- Stop the admin seeders writing a one-account roster over everyone
+- Stop logging everyone out when the user directory cannot be read
+- Regenerate today's changelog section against main
+- Backfill the merged PR numbers, and record the extraction pipeline
+- Dedupe the CLAUDE.md header and backfill PR #110
 - Remind a patient the day before, and say what the clinician is
 - Read a scanned document into proposals — a person decides, never the model
 - Let orders leave the building: requisitions, referrals, DME, results
@@ -39,8 +41,6 @@
 - Point every email link at the app, and at a page that exists
 - Show every time in Eastern, on both the server and the app
 - Give the welcome packet a banner, and its fields their full width
-- Read a packet somebody typed on without flattening it
-- Make the welcome packet the caregiver app's front door
 
 
 ### Version 3.1.0 - September 21, 2026
