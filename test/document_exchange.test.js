@@ -18,6 +18,7 @@ const path = require('path');
 
 const registry = require('../consentRegistry');
 const SERVER = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+const CLINICAL_PAGE = require('fs').readFileSync(require('path').join(__dirname, '..', 'public', 'clinical.html'), 'utf8');
 const PORTAL = fs.readFileSync(path.join(__dirname, '..', 'public', 'portal.html'), 'utf8');
 const ADMIN = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-enrollment.html'), 'utf8');
 
@@ -164,9 +165,77 @@ test('a document we cannot store is a document we did not receive', () => {
   assert.match(route, /code: 'DOCUMENT_STORAGE_UNAVAILABLE'/);
   assert.ok(route.indexOf('DOCUMENT_STORAGE_UNAVAILABLE') < route.indexOf("db.set('client_document_uploads'"),
     'the failure must short-circuit before anything is recorded');
-  assert.match(route, /detectFileType\(buffer\)/, 'typed by its bytes, not its declared type');
-  assert.match(route, /code: 'DOCUMENT_KIND_UNKNOWN'/,
+  // REPOINTED 2026-09-22, not deleted. Byte-typing moved into the shared
+  // `prepareClientDocument` when staff got a door of their own; a scan bounded
+  // to this one route stopped seeing it. The rule did not go away, so neither
+  // does its guard — and it now covers BOTH doors, which is stricter than it
+  // was when only one existed.
+  assert.match(route, /prepareClientDocument\(/, 'the client door must use the shared checks');
+  assert.match(route, /resolveDocumentKind\(/,
     'a file filed under a kind no checklist reads is a file nobody sees again');
+});
+
+test('both doors onto a client file type by BYTES and refuse an unknown kind', () => {
+  // One definition of "a valid document upload", shared. Two copies is how the
+  // staff door starts accepting what the client door refuses — and this is the
+  // check that decides what reaches a patient's file.
+  const helper = SERVER.slice(
+    SERVER.indexOf('const prepareClientDocument = ('),
+    SERVER.indexOf('const buildClientDocumentRow = (')
+  );
+  assert.ok(helper.length > 200, 'the shared preparer must exist');
+  assert.match(helper, /detectFileType\(buffer\)/, 'typed by its bytes, not its declared type');
+  assert.match(helper, /MAX_FILE_SIZE/, 'the size ceiling belongs in the shared check too');
+  const kindResolver = SERVER.slice(
+    SERVER.indexOf('const resolveDocumentKind = ('),
+    SERVER.indexOf('const buildClientDocumentRow = (')
+  );
+  assert.match(kindResolver, /code: 'DOCUMENT_KIND_UNKNOWN'/,
+    'an unknown kind must still be refused, wherever the check now lives');
+
+  const staff = SERVER.slice(
+    SERVER.indexOf("app.post('/api/gfc/admin/enrollment/:clientId/documents/upload'"),
+    SERVER.indexOf("app.post('/api/gfc/admin/enrollment/:clientId/documents/request'")
+  );
+  assert.ok(staff.length > 200, 'the staff filing route must exist');
+  assert.match(staff, /prepareClientDocument\(/, 'the staff door must use the same checks');
+  assert.match(staff, /resolveDocumentKind\(/, 'and the same kind resolution');
+  assert.match(staff, /code: 'DOCUMENT_STORAGE_UNAVAILABLE'/);
+  assert.ok(staff.indexOf('DOCUMENT_STORAGE_UNAVAILABLE') < staff.indexOf("db.set('client_document_uploads'"),
+    'a Drive failure must short-circuit before any row is written — a ticked checklist pointing at nothing is worse than no row');
+});
+
+test('a staff-filed document is ACCEPTED, so it ticks its own checklist item', () => {
+  // It did not arrive needing review: the office IS the reviewer. Landing it
+  // as `received` would leave the item reading "with the office", chasing a
+  // review nobody will do, for a document the office filed itself. The
+  // caregiver document store settled this on 2026-09-14; same rule here.
+  const builder = SERVER.slice(
+    SERVER.indexOf('const buildClientDocumentRow = ('),
+    SERVER.indexOf("app.post('/api/gfc/documents/upload'")
+  );
+  assert.match(builder, /source === 'staff' \? 'accepted' : 'received'/,
+    'office-filed lands accepted; client-sent lands received');
+  assert.match(builder, /source: source === 'staff' \? 'staff' : 'client'/,
+    '"the client sent this" and "the office filed it" are different facts');
+});
+
+test('a staff filing answers the open request rather than leaving it chasing', () => {
+  const staff = SERVER.slice(
+    SERVER.indexOf("app.post('/api/gfc/admin/enrollment/:clientId/documents/upload'"),
+    SERVER.indexOf("app.post('/api/gfc/admin/enrollment/:clientId/documents/request'")
+  );
+  assert.match(staff, /status: 'fulfilled'/,
+    'the office must not keep asking the client for a document it filed itself');
+});
+
+test('the staff filing door is admin OR clinician, never the wider staff gate', () => {
+  const line = (SERVER.match(/app\.post\('\/api\/gfc\/admin\/enrollment\/:clientId\/documents\/upload'[^\n]*/) || [])[0];
+  assert.ok(line, 'the staff filing route is missing');
+  assert.ok(line.includes('requireEnrollmentEditor'),
+    'the clinician holding the document must be able to file it');
+  assert.ok(!line.includes('requireEnrollmentStaff'),
+    'a case manager reads this surface; filing into a patient file is a write');
 });
 
 test('the checklist is derived, never stored', () => {
@@ -268,4 +337,34 @@ test('an un-cosigned plan is filed as authored, never as signed', () => {
     SERVER.indexOf('const fileCarePlanToChart =')
   );
   assert.match(builder, /state: ev \? 'signed' : 'authored'/);
+});
+
+
+test('the clinical scanner names no document kind of its own', () => {
+  // The catalog is SERVED. A page that restates it drifts from the validator
+  // that refuses a kind it does not know — silently, and the file lands in a
+  // bucket no checklist reads. Same rule as the competency catalog and the
+  // caregiver document kinds.
+  const comp = CLINICAL_PAGE.slice(
+    CLINICAL_PAGE.indexOf('const ChartScanIn = ('),
+    CLINICAL_PAGE.indexOf('const ChartDocuments = (')
+  );
+  assert.ok(comp.length > 200, 'the chart scanner must exist');
+  assert.match(comp, /api\.documentKinds\(/, 'the kinds must be fetched, not listed');
+  assert.match(comp, /r && r\.catalog/, 'it must render the served catalog');
+  // No literal kind/label pair may be built in the page.
+  assert.ok(!/kind:\s*'[a-z_]+'/.test(comp),
+    'the page must not name a document kind of its own');
+});
+
+test('scanning from the chart files into the CLIENT document store', () => {
+  // A clinical-only store would mean the office chasing a document a clinician
+  // already holds, and the client never seeing it. One store, three readers.
+  const comp = CLINICAL_PAGE.slice(
+    CLINICAL_PAGE.indexOf('const ChartScanIn = ('),
+    CLINICAL_PAGE.indexOf('const ChartDocuments = (')
+  );
+  assert.match(comp, /api\.fileClientDocument\(/, 'it must file through the shared client-document route');
+  assert.match(CLINICAL_PAGE, /fileClientDocument: \(clientId, body\) => authedFetch\(`\/api\/gfc\/admin\/enrollment\/\$\{clientId\}\/documents\/upload`/,
+    'and that route is the enrollment one — one store for a client\'s documents');
 });

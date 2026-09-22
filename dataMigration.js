@@ -78,6 +78,10 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'standing_orders', phi: true, owner: '4.8', note: 'versions are immutable — a revision is a new row' },
   { key: 'standing_order_executions', phi: true, owner: '4.8', note: 'the audit trail: who acted under whose authority, under which version' },
   { key: 'gfc_payer_credentialing', phi: false, owner: '4.4' },
+  // An H&P still being typed. PHI, and deliberately short-lived: filing the
+  // note to the chart deletes the draft, so this collection holds only work in
+  // progress and never a second copy of a note that already exists in OpenEMR.
+  { key: 'clinical_note_drafts', phi: true, owner: '4.9', note: 'one per clinician per patient; cleared when the note is filed' },
   // ---- caregiver app (Session 6) ----
   { key: 'caregiver_visit_logs', phi: true, owner: '6' },
   { key: 'caregiver_visit_log_reviews', phi: true, owner: '6' },
