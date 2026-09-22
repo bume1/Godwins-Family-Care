@@ -253,9 +253,54 @@ app.get('/thrive365labslaunch', (req, res) => {
 // later write silently discards the earlier one. That is how the Session 4.6
 // consent migration came to log its corrections and persist none of them — it
 // finished first and the admin initializer overwrote the record a moment later.
+// THE ONE PLACE ALLOWED TO SEE AN EMPTY ROSTER — and therefore the one place a
+// failed read can do catastrophic damage.
+//
+// Both admin seeders read the roster, and if they do not find the default admin
+// they push it and write the whole array back. On a genuinely fresh store that
+// is right. After a read that came back empty when it should not have, it
+// writes a ONE-ACCOUNT roster over every account in the system — and the boot
+// seeder runs at EVERY container start, so a single bad read during a deploy
+// would silently delete everyone.
+//
+// `getUsers()` refuses an empty roster outright, but a seeder cannot use it: on
+// a first boot the roster really is empty. So this distinguishes the two states
+// rather than assuming either.
+//
+//   1. A THROW is a failure. It propagates and the caller writes nothing.
+//   2. An empty read is CONFIRMED by a second read before it is believed. A
+//      transient blip does not usually repeat; a fresh store answers empty
+//      twice.
+//   3. An empty roster is cross-checked against a WITNESS collection. The
+//      activity log is written on essentially every action, so on a real
+//      deployment it has rows and on a fresh install it has none. Rows there
+//      plus an empty roster is not a fresh install — it is a bad read, and the
+//      seeder refuses rather than writing.
+//
+// Refusing costs a restart with no admin seeded, which is visible and
+// recoverable. Writing costs every account, silently.
+const readUsersForSeeding = async () => {
+  const first = await db.get('users');            // a throw propagates, by design
+  if (Array.isArray(first) && first.length) return first;
+
+  const second = await db.get('users');
+  if (Array.isArray(second) && second.length) return second;
+
+  let witness = [];
+  try { witness = (await db.get('activity_log')) || []; } catch (e) { witness = []; }
+  if (Array.isArray(witness) && witness.length) {
+    throw new Error(
+      'The user roster read back empty while the activity log holds ' + witness.length +
+      ' row(s). That is not a fresh install, so this is a failed read — refusing to seed, ' +
+      'because writing here would replace every account with the default admin.'
+    );
+  }
+  return [];
+};
+
 const adminInitReady = (async () => {
   try {
-    let users = await db.get('users') || [];
+    let users = await readUsersForSeeding();
     let changed = false;
 
     // Ensure the GFC default admin exists
@@ -2970,7 +3015,7 @@ app.post('/api/bootstrap-admin', async (req, res) => {
     if (!token || token !== process.env.JWT_SECRET) {
       return res.status(403).json({ error: 'Forbidden' });
     }
-    let users = await db.get('users') || [];
+    let users = await readUsersForSeeding();
     let changed = false;
 
     if (!users.find(u => u.email === config.DEFAULT_ADMIN.EMAIL)) {
