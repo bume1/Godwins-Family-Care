@@ -17,11 +17,8 @@
 - backfill PR #96 as merged for Session 4.8
 
 #### Changes
-- Rescue the reconciliation spec, and build the enrollment ledger
-- Correct the stale "Drive: NOT CONFIGURED" line
-- Let staff and clinicians file a document into a client's file
-- Build the clinical inbox — five pending states nothing ever showed
-- Save a half-finished H&P, and give the facility assignment a screen
+- Remind a patient the day before, and say what the clinician is
+- Let orders leave the building: requisitions, referrals, DME, results
 - A time change can be asked about an unaccepted offer, and asking is agreeing
 - Let a caregiver ask for a shift to change, and say which availability is in force
 - Backfill PR #104 and #105, and record the changelog fix
@@ -42,6 +39,8 @@
 - Record that the host is EC2 + Docker, not ECS
 - Record the EVV session in the running status
 - Make a failed Drive read say which failure it was
+- Backfill PR #87 in the running status, and pin its suite figure to it
+- Make the Home shift bar live instead of static
 
 
 ### Version 3.1.0 - September 21, 2026
