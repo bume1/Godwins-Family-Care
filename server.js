@@ -59,6 +59,7 @@ const patientRead = require('./patientReadRepository');
 // caregiver vocabulary lives in caregiverRepository.js.
 const clinicalRoles = require('./clinicalRoles');
 const standingOrders = require('./standingOrders');   // signed, versioned, expiring protocols (4.8 Scope C)
+const clinicalInbox = require('./clinicalInbox');     // what is waiting on a clinician (4.9)
 const consentText = require('./public/consent-text'); // approved consent bodies, versioned (Session 4.6)
 const consentRegistry = require('./consentRegistry'); // THE consent registry: lanes, statuses, provenance (4.6)
 const consentRender = require('./consentRender');     // consent data blocks resolved from the client record (4.6)
@@ -10376,6 +10377,41 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/resync', authentica
 
 // ── Staff coding queue (spec §2.6): every encounter that is not yet coded /
 // signed, across the panel, from OpenEMR's whole-instance encounter feed ───
+// GET /api/clinical/inbox — the clinical inbox (2026-09-22).
+//
+// Session 4.8 left four pending states and Session 6 a fifth, and NOTHING on
+// screen showed any of them: an encounter an LMSW signed with its charge held,
+// a standing-order execution with a co-sign due date running, an IHPC care
+// plan waiting on a provider, a caregiver's skilled note awaiting review, and
+// now an H&P filed but unsigned. A pending state nobody can see is a field
+// left inert.
+//
+// A READ, so a case manager sees the queue their clients are in. What they may
+// ACT on is decided per item by clinicalInbox, which asks clinicalRoles — the
+// inbox never offers a button the route would refuse.
+app.get('/api/clinical/inbox', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const [records, attestations, orders, visitLogs, users] = await Promise.all([
+      loadRows('encounter_billing'), loadRows('encounter_attestations'),
+      loadRows('clinical_orders'), loadRows('caregiver_visit_logs'), getUsers()
+    ]);
+    const clients = users.filter(u => u.role === config.ROLES.CLIENT);
+    const patientNames = new Map(clients.map(c => [String(c.id), c.name || null]));
+    // Only clinical-line clients carry a care plan that needs a provider's
+    // signature; a home-care plan is complete when the RN signs it.
+    const carePlanClients = clients.filter(c => isClinicalServiceLine(c.serviceLine));
+    const built = clinicalInbox.buildInbox({
+      viewer: actorFromReq(req),
+      encounterRecords: records, attestations, orders,
+      carePlanClients, visitLogs, patientNames, now: new Date().toISOString()
+    });
+    res.json(built);
+  } catch (error) {
+    console.error('Clinical inbox error:', error);
+    res.status(500).json({ error: 'Could not build the clinical inbox' });
+  }
+});
+
 app.get('/api/clinical/encounters/queue', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     const filter = ['not_coded', 'coded', 'signed', 'open', 'all'].includes(String(req.query.state)) ? String(req.query.state) : 'open';

@@ -172,7 +172,8 @@
       sign: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/sign`, { method: 'POST', body: JSON.stringify({ attest: true }) }),
       addAddendum: (id, euuid, text) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/addenda`, { method: 'POST', body: JSON.stringify({ text }) }),
       resync: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/resync`, { method: 'POST' }),
-      queue: (state) => authedFetch(`/api/clinical/encounters/queue?state=${encodeURIComponent(state || 'open')}`)
+      queue: (state) => authedFetch(`/api/clinical/encounters/queue?state=${encodeURIComponent(state || 'open')}`),
+      inbox: () => authedFetch('/api/clinical/inbox')
     };
 
     const fmtDate = (iso) => iso ? new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
@@ -476,6 +477,78 @@
                 {rows.billingFacilityWarning ? ` ${rows.billingFacilityWarning}` : ''}
               </p>
             )}
+          </div>
+        </div>
+      );
+    };
+
+    // The clinical inbox — what is waiting on a clinician. Every row says WHO
+    // it is waiting on, because a count that does not is a number nobody can
+    // act on. Whether YOU can act on a row is decided by the server against
+    // the same matrix the routes enforce, never re-derived here.
+    const INBOX_ICONS = {
+      encounter_co_sign: 'ti-writing-sign',
+      order_co_sign: 'ti-flask',
+      care_plan_co_sign: 'ti-clipboard-heart',
+      visit_log_review: 'ti-notes',
+      encounter_unsigned: 'ti-file-pencil'
+    };
+    const InboxView = ({ onOpenEncounter, onOpenChart }) => {
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState('');
+      const [mineOnly, setMineOnly] = useState(true);
+      const load = () => api.inbox().then(r => { setData(r); setErr(''); }).catch(e => setErr(e.message));
+      useEffect(() => { load(); }, []);
+      if (err) return <div className="p-6"><p className="text-sm text-red-600">{err}</p></div>;
+      if (!data) return <div className="p-10 text-stone-400 text-sm">Loading your inbox…</div>;
+      const shown = mineOnly ? data.items.filter(i => i.actionable) : data.items;
+      const c = data.counts;
+      return (
+        <div className="p-4 lg:p-7">
+          <div className="flex flex-wrap items-center gap-2 mb-4">
+            <div className="serif text-lg text-primary font-semibold">Inbox</div>
+            {c.overdue > 0 && <span className="chip bg-red-50 text-red-700">{c.overdue} overdue</span>}
+            <span className="chip bg-primary-50 text-primary">{c.actionable} waiting on you</span>
+            <span className="chip bg-stone-100 text-stone-600">{c.total} in total</span>
+            <div className="flex rounded-lg border border-stone-200 overflow-hidden ml-auto">
+              <button className={`px-3 py-1.5 text-xs font-semibold ${mineOnly ? 'bg-primary text-white' : 'bg-white text-primary'}`}
+                onClick={() => setMineOnly(true)}>Waiting on me</button>
+              <button className={`px-3 py-1.5 text-xs font-semibold ${!mineOnly ? 'bg-primary text-white' : 'bg-white text-primary'}`}
+                onClick={() => setMineOnly(false)}>Everything</button>
+            </div>
+            <button className="btn ghost !py-1.5" onClick={load}><i className="ti ti-refresh" />Refresh</button>
+          </div>
+          {!shown.length && (
+            <div className="card p-6 text-sm text-stone-500">
+              {mineOnly
+                ? (c.total ? `Nothing is waiting on you. ${c.total} item${c.total > 1 ? 's are' : ' is'} waiting on someone else — switch to Everything to see them.`
+                           : 'Nothing is waiting on you.')
+                : 'Nothing is waiting on anyone.'}
+            </div>
+          )}
+          <div className="grid gap-2">
+            {shown.map(i => (
+              <div key={`${i.kind}:${i.id}`} className={`card p-3 flex flex-wrap items-center gap-3 ${i.overdue ? 'border-red-200' : ''}`}>
+                <i className={`ti ${INBOX_ICONS[i.kind] || 'ti-inbox'} text-accent text-lg`} />
+                <div className="min-w-0 flex-1">
+                  <div className="text-[13px] font-semibold text-primary">
+                    {i.label}
+                    {i.overdue && <span className="chip bg-red-50 text-red-700 ml-2">Overdue</span>}
+                  </div>
+                  <div className="text-xs text-stone-500">
+                    {i.patientName || 'Unknown patient'} · {i.at ? fmtTs(i.at) : 'no date'}
+                    {i.dueAt ? ` · due ${fmtTs(i.dueAt)}` : ''}
+                  </div>
+                  {i.detail && <div className="text-[11px] text-stone-400 mt-0.5">{i.detail}</div>}
+                </div>
+                <span className={`chip ${i.actionable ? 'bg-amber-50 text-amber-800' : 'bg-stone-100 text-stone-500'}`}>
+                  {i.actionable ? 'Waiting on you' : `Waiting on ${i.waitingOn}`}
+                </span>
+                {i.encounterUuid
+                  ? <button className="btn ghost !py-1.5" onClick={() => onOpenEncounter(i.clientId, i.encounterUuid)}>Open encounter</button>
+                  : <button className="btn ghost !py-1.5" onClick={() => onOpenChart(i.clientId)}>Open chart</button>}
+              </div>
+            ))}
           </div>
         </div>
       );
@@ -2370,7 +2443,7 @@
             <div className="bg-white border-b border-stone-200 px-4 lg:px-7 py-3 flex items-center justify-between gap-3">
               <div className="flex items-center gap-3">
                 <button className="lg:hidden btn ghost !px-2.5 !py-1.5" onClick={() => setListOpen(true)}><i className="ti ti-users" /></button>
-                <div className="serif text-lg text-primary font-semibold">{view === 'schedule' ? 'Schedule' : view === 'queue' ? 'Coding Queue' : 'Patient Chart'}</div>
+                <div className="serif text-lg text-primary font-semibold">{view === 'schedule' ? 'Schedule' : view === 'queue' ? 'Coding Queue' : view === 'inbox' ? 'Inbox' : 'Patient Chart'}</div>
                 <div className="flex rounded-lg border border-stone-200 overflow-hidden ml-1">
                   <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'charts' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
                     onClick={() => setView('charts')}><i className="ti ti-folder-open mr-1" />Charts</button>
@@ -2378,6 +2451,8 @@
                     onClick={() => { setView('schedule'); setListOpen(false); }}><i className="ti ti-calendar-week mr-1" />Schedule</button>
                   <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'queue' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
                     onClick={() => { setView('queue'); setListOpen(false); }}><i className="ti ti-receipt mr-1" />Coding queue</button>
+                  <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'inbox' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
+                    onClick={() => { setView('inbox'); setListOpen(false); }}><i className="ti ti-inbox mr-1" />Inbox</button>
                 </div>
               </div>
               <div className="flex items-center gap-2">
@@ -2483,6 +2558,11 @@
             {err && <p className="text-red-600 text-sm px-7 pt-3">{err}</p>}
             {view === 'queue' && (
               <CodingQueueView onOpenEncounter={(clientId, euuid) => openChartById(clientId, { tab: 'encounters', encounterUuid: euuid })} />
+            )}
+            {view === 'inbox' && (
+              <InboxView
+                onOpenEncounter={(clientId, euuid) => openChartById(clientId, { tab: 'encounters', encounterUuid: euuid })}
+                onOpenChart={(clientId) => openChartById(clientId)} />
             )}
             {view === 'schedule' && (
               <ScheduleView user={user} patients={patients || []}
