@@ -17,11 +17,14 @@
 - backfill PR #96 as merged for Session 4.8
 
 #### Changes
+- Build the model engine — one call site, fail-closed at the boundary
 - Rescue the reconciliation spec, and build the enrollment ledger
 - Correct the stale "Drive: NOT CONFIGURED" line
 - Let staff and clinicians file a document into a client's file
 - Build the clinical inbox — five pending states nothing ever showed
 - Save a half-finished H&P, and give the facility assignment a screen
+- Show an admin's hours correction as a neutral note, not a fault chip
+- Backfill PR #106 for the caregiver shift-change request
 - A time change can be asked about an unaccepted offer, and asking is agreeing
 - Let a caregiver ask for a shift to change, and say which availability is in force
 - Backfill PR #104 and #105, and record the changelog fix
@@ -39,9 +42,6 @@
 - Make the welcome packet the caregiver app's front door
 - Session 4.8: credential-scoped clinical roles and standing orders
 - Stop a real filename from 500-ing every document download
-- Record that the host is EC2 + Docker, not ECS
-- Record the EVV session in the running status
-- Make a failed Drive read say which failure it was
 
 
 ### Version 3.1.0 - September 21, 2026
