@@ -299,12 +299,55 @@ const adminInitReady = (async () => {
 let _usersCache = { data: null, lastRefresh: 0 };
 const USERS_CACHE_TTL = config.USERS_CACHE_TTL;
 
+// A READ THAT FAILED IS NOT AN EMPTY ROSTER, and this line used to say it was.
+//
+// `(await db.get('users')) || []` turned a transient store failure into "there
+// are no users", CACHED it, and handed it to `authenticateToken`, whose
+// `users.find(...)` then missed and answered 403 AUTH_INVALID — which
+// `session-guard.js` reads as "this session is dead", so it cleared the
+// browser's tokens and redirected to /login?reason=invalid. Every signed-in
+// person, on every screen, for the length of the cache TTL. Reported live
+// 2026-09-22 as being logged out on opening a patient: that screen fires
+// several authenticated requests at once where a list fires one, so it is
+// where a transient read is most likely to land.
+//
+// THE SECOND CONSEQUENCE IS WORSE THAN THE LOGOUT. Roughly forty call sites do
+// `const users = await getUsers(); … ; await db.set('users', users)`. Handed an
+// empty array from a failed read, that pattern writes the empty array back and
+// DELETES EVERY ACCOUNT IN THE SYSTEM. Refusing here is what makes that
+// impossible.
+//
+// An empty roster is treated as a failed read rather than a real answer,
+// deliberately: a running app always has at least the seeded admin, so zero
+// users is not a state this store can legitimately be in. *An empty result is
+// not a diagnosis* — the same rule the ICD-10 correction and the dead
+// `/api/clients` endpoint each bought.
+class UserDirectoryUnavailable extends Error {
+  constructor(cause) {
+    super('The user directory could not be read.');
+    this.name = 'UserDirectoryUnavailable';
+    this.code = 'USER_DIRECTORY_UNAVAILABLE';
+    this.cause = cause || null;
+  }
+}
+
 const getUsers = async () => {
   const now = Date.now();
   if (_usersCache.data && (now - _usersCache.lastRefresh < USERS_CACHE_TTL)) {
     return _usersCache.data;
   }
-  const users = (await db.get('users')) || [];
+  let users;
+  try {
+    users = await db.get('users');
+  } catch (e) {
+    throw new UserDirectoryUnavailable(e);
+  }
+  // Not an array, or an impossible-in-production empty one. Either way this is
+  // a read that did not answer the question, so NOTHING is cached — caching it
+  // would make one bad read into TTL seconds of bad answers.
+  if (!Array.isArray(users) || users.length === 0) {
+    throw new UserDirectoryUnavailable(new Error(Array.isArray(users) ? 'the roster read back empty' : 'the roster read back as ' + typeof users));
+  }
   _usersCache = { data: users, lastRefresh: now };
   return users;
 };
@@ -2206,6 +2249,16 @@ const authenticateToken = async (req, res, next) => {
       next();
     } catch (error) {
       console.error('Auth middleware error:', error);
+      // "This user does not exist" and "we could not check whether this user
+      // exists" are DIFFERENT FACTS, and only the first is a reason to sign
+      // somebody out. A 503 here carries a code the session guard does not act
+      // on, so a store hiccup costs one retry instead of everyone's session.
+      if (error instanceof UserDirectoryUnavailable) {
+        return res.status(503).json({
+          error: 'We could not verify your account just now. Please try that again.',
+          code: 'USER_DIRECTORY_UNAVAILABLE'
+        });
+      }
       res.status(500).json({ error: 'Authentication error' });
     }
   });
