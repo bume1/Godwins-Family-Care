@@ -190,6 +190,11 @@
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items, dueAt })
       }),
       remindDocuments: (id) => authedFetch(`/api/gfc/admin/enrollment/${id}/documents/remind`, { method: 'POST' }),
+      // Staff file a document INTO the client's file — a scan handed over on
+      // paper, faxed in, or taken at the desk. The client door is their portal.
+      fileDocument: (id, body) => authedFetch(`/api/gfc/admin/enrollment/${id}/documents/upload`, {
+        method: 'POST', body: JSON.stringify(body)
+      }),
       reviewDocument: (id, uploadId, decision, reason) => authedFetch(`/api/gfc/admin/enrollment/${id}/documents/${uploadId}/review`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision, reason })
       }),
@@ -403,6 +408,39 @@
     // The staff half of the two-way exchange: what we asked for, what arrived,
     // and whether it is usable. Same checklist the client sees, built by the
     // same server function, so the two views cannot drift apart.
+    // Staff filing a scan into a client's file. Module scope on purpose: a
+    // component declared inside its parent is a new function identity on every
+    // render, so React remounts it and the chosen file is dropped.
+    const FileScanButton = ({ clientId, kind, label, onFiled }) => {
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      const pick = (file) => {
+        if (!file) return;
+        setBusy(true); setErr('');
+        const reader = new FileReader();
+        reader.onload = () => {
+          api.fileDocument(clientId, { kind, fileName: file.name, fileDataB64: String(reader.result) })
+            .then(r => { onFiled && onFiled(r); })
+            // The server's own sentence, never a status code — a Drive problem
+            // and a rejected file type need different actions.
+            .catch(e => setErr(e.message))
+            .finally(() => setBusy(false));
+        };
+        reader.onerror = () => { setErr('That file could not be read.'); setBusy(false); };
+        reader.readAsDataURL(file);
+      };
+      return (
+        <span className="inline-flex flex-col items-start">
+          <label className="btn btn-ghost text-xs cursor-pointer mb-0">
+            {busy ? 'Filing…' : 'File a scan'}
+            <input type="file" className="hidden" accept=".pdf,.jpg,.jpeg,.png" disabled={busy}
+              onChange={e => { pick((e.target.files || [])[0]); e.target.value = ''; }} />
+          </label>
+          {err && <span className="text-[11px] text-danger-600 mt-1">{err}</span>}
+        </span>
+      );
+    };
+
     const DocumentExchange = ({ clientId, canEdit }) => {
       const [state, setState] = useState(null);
       const [err, setErr] = useState('');
@@ -485,6 +523,9 @@
               <p className="text-xs text-gray-500 mt-2">
                 The client gets one email and the items appear on their portal checklist.
               </p>
+              <p className="text-xs text-gray-500 mt-1">
+                A document you file yourself ticks its own item and stops the chasing — the client sees it on their portal too.
+              </p>
             </div>
           )}
 
@@ -497,6 +538,12 @@
                     <div className="text-sm font-medium">
                       {r.label}{r.required && <span className="text-danger-500"> *</span>}
                     </div>
+                    {canEdit && r.status !== 'accepted' && (
+                      <div className="mt-1">
+                        <FileScanButton clientId={clientId} kind={r.kind} label={r.label}
+                          onFiled={(res) => { if (res && res.checklist) setState(st => ({ ...st, checklist: res.checklist })); else load(); }} />
+                      </div>
+                    )}
                     <div className="text-xs text-gray-500">
                       {r.requestedAt
                         ? `Requested by ${r.requestedBy} on ${new Date(r.requestedAt).toLocaleDateString()}`
