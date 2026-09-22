@@ -521,7 +521,7 @@
         try {
           const res = await fetch(`/api/gfc/admin/enrollment/${clientId}/extraction/${extraction.id}/review`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}` },
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
             body: JSON.stringify({ decisions })
           });
           const data = await res.json();
@@ -595,7 +595,7 @@
         setBusy(true); setErr('');
         try {
           const res = await fetch(`/api/gfc/admin/enrollment/${clientId}/documents/${doc.id}/extract`, {
-            method: 'POST', headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+            method: 'POST', headers: { Authorization: `Bearer ${getToken()}` }
           });
           const data = await res.json();
           if (!res.ok) { setErr(data.error || 'That could not be read.'); return; }
@@ -637,7 +637,7 @@
       const load = useCallback(() => {
         api.documents(clientId).then(setState).catch(e => setErr(e.message));
         fetch(`/api/gfc/admin/enrollment/${clientId}/extraction`, {
-          headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+          headers: { Authorization: `Bearer ${getToken()}` }
         }).then(r => r.ok ? r.json() : null).then(d => { if (d) setExtraction(d); }).catch(() => {});
       }, [clientId]);
       useEffect(() => { load(); }, [load]);

@@ -2203,7 +2203,13 @@ const authenticateToken = async (req, res, next) => {
       const expired = err.name === 'TokenExpiredError';
       return res.status(403).json({
         error: expired ? 'Your session has expired. Please sign in again.' : 'Invalid token',
-        code: expired ? 'AUTH_EXPIRED' : 'AUTH_INVALID'
+        code: expired ? 'AUTH_EXPIRED' : 'AUTH_INVALID',
+        // Three separate things answer AUTH_INVALID and they all used to reach
+        // the browser as the identical `/login?reason=invalid`. One of them was
+        // a page sending the literal string "Bearer null"; finding out WHICH
+        // took hours it should not have. `detail` names the layer — never a
+        // value, never a token, never anything about the person.
+        detail: expired ? 'token_expired' : 'token_rejected'
       });
     }
     try {
@@ -2213,7 +2219,7 @@ const authenticateToken = async (req, res, next) => {
       // answer has its own code so the client can say WHY it is signing you
       // out; all of them belong to the "back to login" family, never to the
       // permission-403 family.
-      if (!tokenUser.sid) return res.status(403).json({ error: 'Your session is no longer valid. Please sign in again.', code: 'AUTH_INVALID' });
+      if (!tokenUser.sid) return res.status(403).json({ error: 'Your session is no longer valid. Please sign in again.', code: 'AUTH_INVALID', detail: 'token_predates_sessions' });
       const sess = await sessions.check(tokenUser.sid);
       if (!sess.ok) {
         const msg = sess.code === 'AUTH_IDLE' ? `You were signed out after ${config.SESSION_IDLE_MINUTES} minutes of inactivity. Please sign in again.`
@@ -2225,7 +2231,7 @@ const authenticateToken = async (req, res, next) => {
       // Fetch fresh user data from database to get current role and permissions
       const users = await getUsers();
       const freshUser = users.find(u => u.id === tokenUser.id);
-      if (!freshUser) return res.status(403).json({ error: 'User not found', code: 'AUTH_INVALID' });
+      if (!freshUser) return res.status(403).json({ error: 'User not found', code: 'AUTH_INVALID', detail: 'no_account_for_token' });
       // Block inactive accounts
       if (freshUser.accountStatus === 'inactive') return res.status(403).json({ error: 'Account is inactive. Please contact an administrator.', code: 'AUTH_INACTIVE' });
       // Defense in depth: a session for an MFA-required role is only ever

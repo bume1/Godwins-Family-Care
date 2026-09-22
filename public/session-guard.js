@@ -24,12 +24,12 @@
   let last = Date.now(); let warned = null; let done = false;
 
   const clearTokens = () => { TOKEN_KEYS.forEach(k => { try { localStorage.removeItem(k); } catch (e) { /* ignore */ } }); try { sessionStorage.clear(); } catch (e) { /* ignore */ } };
-  const signOut = async (reason, { callServer = true } = {}) => {
+  const signOut = async (reason, { callServer = true, why = null } = {}) => {
     if (done) return; done = true;
     const token = ['unified_token', 'admin_token', 'portal_token'].map(k => { try { return localStorage.getItem(k); } catch (e) { return null; } }).find(Boolean);
     if (callServer && token) { try { await fetch('/api/auth/logout', { method: 'POST', headers: { Authorization: `Bearer ${token}` } }); } catch (e) { /* the server-side idle rule catches it anyway */ } }
     clearTokens();
-    window.location.replace(`/login?reason=${encodeURIComponent(reason)}`);
+    window.location.replace(`/login?reason=${encodeURIComponent(reason)}${why ? `&why=${encodeURIComponent(why)}` : ''}`);
   };
   const touch = () => { last = Date.now(); if (warned) { warned.remove(); warned = null; } };
   ['pointerdown', 'keydown', 'touchstart', 'scroll', 'mousemove'].forEach(ev => window.addEventListener(ev, touch, { passive: true }));
@@ -51,6 +51,19 @@
     if (idle >= IDLE_MS - WARN_MS) showWarning(Math.max(1, Math.round((IDLE_MS - idle) / 1000)));
   }, 5000);
 
+  // A page with no stored token still sends the header — `Bearer ${getToken()}`
+  // with nothing in localStorage goes out as the literal string "Bearer null".
+  // The server cannot tell that from a forged token, so it answers the same
+  // AUTH_INVALID a genuinely bad session gets, and the person lands on
+  // `?reason=invalid` reading that their session went wrong when the truth is
+  // that this browser never had one. That ambiguity is what made a sign-out on
+  // one screen look like a second bug on the next.
+  const MISSING = ['null', 'undefined', ''];
+  const bearerIsMissing = (auth) => {
+    const m = /^Bearer\s*(.*)$/i.exec(String(auth || ''));
+    return !!m && MISSING.includes(m[1].trim());
+  };
+
   // Auth-family responses → sign out. Only responses to requests that carried
   // a bearer token are considered, so a public page is never bounced.
   const realFetch = window.fetch;
@@ -63,7 +76,20 @@
       if (res.status === 401 || res.status === 403) {
         try {
           const data = await res.clone().json();
-          if (data && AUTH_CODES.includes(data.code)) signOut(data.code.toLowerCase().replace('auth_', ''), { callServer: false });
+          if (data && AUTH_CODES.includes(data.code)) {
+            // `detail` names WHICH of the server's several routes to this code
+            // fired, and it rides into the URL so the next person reads the
+            // cause off the address bar instead of guessing. It is a fixed
+            // vocabulary of layer names — never a value, never a token.
+            const why = typeof data.detail === 'string' && /^[a-z_]{1,40}$/.test(data.detail) ? data.detail : null;
+            // What the BROWSER sent outranks what the server guessed from it:
+            // the server saw an unverifiable token either way, but only this
+            // side knows there was never a credential to send.
+            signOut(data.code.toLowerCase().replace('auth_', ''), {
+              callServer: false,
+              why: bearerIsMissing(auth) ? 'no_token_in_browser' : why
+            });
+          }
         } catch (e) { /* not JSON */ }
       }
     }
