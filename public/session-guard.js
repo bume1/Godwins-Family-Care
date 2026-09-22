@@ -51,6 +51,19 @@
     if (idle >= IDLE_MS - WARN_MS) showWarning(Math.max(1, Math.round((IDLE_MS - idle) / 1000)));
   }, 5000);
 
+  // A page with no stored token still sends the header — `Bearer ${getToken()}`
+  // with nothing in localStorage goes out as the literal string "Bearer null".
+  // The server cannot tell that from a forged token, so it answers the same
+  // AUTH_INVALID a genuinely bad session gets, and the person lands on
+  // `?reason=invalid` reading that their session went wrong when the truth is
+  // that this browser never had one. That ambiguity is what made a sign-out on
+  // one screen look like a second bug on the next.
+  const MISSING = ['null', 'undefined', ''];
+  const bearerIsMissing = (auth) => {
+    const m = /^Bearer\s*(.*)$/i.exec(String(auth || ''));
+    return !!m && MISSING.includes(m[1].trim());
+  };
+
   // Auth-family responses → sign out. Only responses to requests that carried
   // a bearer token are considered, so a public page is never bounced.
   const realFetch = window.fetch;
@@ -69,7 +82,13 @@
             // cause off the address bar instead of guessing. It is a fixed
             // vocabulary of layer names — never a value, never a token.
             const why = typeof data.detail === 'string' && /^[a-z_]{1,40}$/.test(data.detail) ? data.detail : null;
-            signOut(data.code.toLowerCase().replace('auth_', ''), { callServer: false, why });
+            // What the BROWSER sent outranks what the server guessed from it:
+            // the server saw an unverifiable token either way, but only this
+            // side knows there was never a credential to send.
+            signOut(data.code.toLowerCase().replace('auth_', ''), {
+              callServer: false,
+              why: bearerIsMissing(auth) ? 'no_token_in_browser' : why
+            });
           }
         } catch (e) { /* not JSON */ }
       }

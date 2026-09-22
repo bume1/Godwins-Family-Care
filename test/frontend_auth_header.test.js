@@ -150,3 +150,31 @@ test('the sign-out carries the detail into the URL, and only a layer name', () =
   // must not turn this into a way to put it in browser history.
   assert.match(guard, /\/\^\[a-z_\]\{1,40\}\$\//, 'the detail is no longer shape-checked before it reaches the URL');
 });
+
+test('a sign-out caused by no stored token says so, instead of blaming the session', () => {
+  // `Bearer ${getToken()}` with nothing in localStorage goes out as the literal
+  // string "Bearer null". The server cannot tell that from a forged token, so
+  // it answers the same AUTH_INVALID — and the person reads `?reason=invalid`
+  // as "your session broke" when the truth is that this browser never had one.
+  // That is exactly what made the sign-out on one screen look like a second bug
+  // on the next. The browser knows which it was, so the browser says.
+  const guard = code(path.join(PUBLIC, 'session-guard.js'));
+  assert.match(guard, /bearerIsMissing/, 'the no-token case is no longer distinguished');
+  assert.match(guard, /'no_token_in_browser'/, 'the no-token reason is gone');
+
+  // Run the predicate rather than read it: what counts as a missing credential
+  // is the whole point, and a regex that matched nothing would read fine.
+  const m = /const MISSING = \[[^\]]*\];\s*const bearerIsMissing = \([\s\S]*?\n  \};/.exec(guard);
+  assert.ok(m, 'could not lift bearerIsMissing out of the guard');
+  const bearerIsMissing = new Function(`${m[0]} return bearerIsMissing;`)();
+
+  for (const sent of ['Bearer null', 'Bearer undefined', 'Bearer ', 'bearer null', 'Bearer  null  ']) {
+    assert.strictEqual(bearerIsMissing(sent), true, `should read as missing: ${JSON.stringify(sent)}`);
+  }
+  // 'X-Thing Bearer null' is here because without it the `^` anchor is not
+  // load-bearing and a mutation removing it survives: 'Basic null' fails to
+  // match either way, since it contains no "Bearer" at all.
+  for (const sent of ['Bearer eyJhbGciOiJIUzI1NiJ9.abc.def', 'Bearer nullify', 'Bearer undefinedX', 'Basic null', 'X-Thing Bearer null', '']) {
+    assert.strictEqual(bearerIsMissing(sent), false, `should read as a real credential: ${JSON.stringify(sent)}`);
+  }
+});
