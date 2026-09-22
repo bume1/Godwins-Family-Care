@@ -397,6 +397,86 @@ const kvLines = (obj) => Object.entries(obj || {})
   .filter(([, v]) => v !== null && v !== undefined && String(v).trim() !== '')
   .map(([k, v]) => `${k.replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase())}: ${Array.isArray(v) ? v.join(', ') : v}`);
 
+// ---- H&P note drafts (2026-09-22) ----
+//
+// A draft is documentation IN PROGRESS, so it is deliberately NOT held to the
+// rules `buildHpWrites` enforces: an incomplete note is the whole point, and
+// the both-arms BP rule applies when the note is FILED to the chart, never
+// while it is being typed. Refusing to save a half-finished assessment is how
+// a clinician loses an hour of work to a browser reload.
+//
+// The section vocabulary is DERIVED from HP_SECTION_LABELS rather than listed
+// a second time, so a section added to the H&P is draftable the day it lands
+// instead of being silently dropped by an allow-list nobody widened.
+const DRAFT_TEXT_FIELDS = ['visitDate', 'chiefConcern', 'subjective', 'assessment', 'plan'];
+const DRAFT_VITALS_FIELDS = ['bpRightSys', 'bpRightDia', 'bpLeftSys', 'bpLeftDia', 'hr', 'temp', 'rr', 'spo2', 'weight', 'height'];
+const DRAFT_MAX_FIELD = 8000;
+const DRAFT_MAX_SECTION_KEYS = 64;
+const DRAFT_MAX_TOTAL = 200000;
+
+const sanitizeNoteDraft = (form) => {
+  if (!form || typeof form !== 'object' || Array.isArray(form)) {
+    return { error: 'A draft payload is required', code: 'DRAFT_EMPTY' };
+  }
+  const str = (v) => String(v === null || v === undefined ? '' : v).slice(0, DRAFT_MAX_FIELD);
+  const draft = {};
+  for (const k of DRAFT_TEXT_FIELDS) {
+    if (form[k] !== undefined && form[k] !== null) draft[k] = str(form[k]);
+  }
+  if (form.vitals && typeof form.vitals === 'object' && !Array.isArray(form.vitals)) {
+    const v = {};
+    for (const k of DRAFT_VITALS_FIELDS) {
+      if (form.vitals[k] !== undefined && form.vitals[k] !== null) v[k] = str(form.vitals[k]).slice(0, 16);
+    }
+    if (Object.keys(v).length) draft.vitals = v;
+  }
+  for (const section of Object.keys(HP_SECTION_LABELS)) {
+    const src = form[section];
+    if (!src || typeof src !== 'object' || Array.isArray(src)) continue;
+    const out = {};
+    for (const [k, val] of Object.entries(src).slice(0, DRAFT_MAX_SECTION_KEYS)) {
+      // The filed note renders scalars through kvLines; a draft holds the same
+      // shape, so a nested object is dropped rather than stored as "[object Object]".
+      if (val === null || val === undefined || typeof val === 'object') continue;
+      out[String(k).slice(0, 64)] = str(val);
+    }
+    if (Object.keys(out).length) draft[section] = out;
+  }
+  if (Array.isArray(form.confirmedFields)) {
+    draft.confirmedFields = form.confirmedFields
+      .filter(x => typeof x === 'string').slice(0, 200).map(x => x.slice(0, 64));
+  }
+  if (form.appointmentEid !== undefined && form.appointmentEid !== null && String(form.appointmentEid).trim() !== '') {
+    draft.appointmentEid = str(form.appointmentEid).slice(0, 40);
+  }
+  if (!Object.keys(draft).length) return { error: 'There is nothing in this draft to save', code: 'DRAFT_EMPTY' };
+  if (JSON.stringify(draft).length > DRAFT_MAX_TOTAL) {
+    return { error: 'This draft is too large to save', code: 'DRAFT_TOO_LARGE' };
+  }
+  return { draft };
+};
+
+// One draft per clinician per patient. The id carries BOTH, because two
+// clinicians documenting the same patient on the same day is the normal case
+// here — an on-site assessment and a virtual one — and a draft keyed on the
+// patient alone would have each of them overwriting the other's note.
+const noteDraftId = (clientId, clinicianId) =>
+  `${String(clientId)}:${String(clinicianId || 'unknown')}`;
+
+const buildNoteDraft = ({ clientId, actor, draft, at, existing }) => {
+  const now = at || new Date().toISOString();
+  const who = actorRecord(actor);
+  return {
+    id: noteDraftId(clientId, who && who.id),
+    clientId: String(clientId),
+    clinicianId: (who && who.id) || null,
+    clinicianName: (who && who.name) || null,
+    draft,
+    createdAt: (existing && existing.createdAt) || now,
+    updatedAt: now
+  };
+};
+
 const buildHpWrites = (form, clinicianName) => {
   if (!form || typeof form !== 'object') return { error: 'H&P payload is required' };
   const v = form.vitals || {};
@@ -1665,6 +1745,9 @@ module.exports = {
   CHART_DOC_SOURCE,
   summarizeVitalObservation,
   buildHpWrites,
+  sanitizeNoteDraft,
+  buildNoteDraft,
+  noteDraftId,
   VALID_TRACKS,
   // Session 4.2 scheduling
   APPT_STATUS,

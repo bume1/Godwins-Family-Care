@@ -17,6 +17,7 @@
 - backfill PR #96 as merged for Session 4.8
 
 #### Changes
+- Remind a patient the day before, and say what the clinician is
 - Let orders leave the building: requisitions, referrals, DME, results
 - A time change can be asked about an unaccepted offer, and asking is agreeing
 - Let a caregiver ask for a shift to change, and say which availability is in force

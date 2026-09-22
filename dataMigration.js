@@ -81,6 +81,10 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'requisition_settings', phi: false, owner: '4.10', note: 'the return fax number and label printed on every requisition — org config, not PHI' },
   { key: 'visit_reminders', phi: true, owner: '4.11', note: 'day-before reminders, captured at booking time — carries the visit date and clinician' },
   { key: 'gfc_payer_credentialing', phi: false, owner: '4.4' },
+  // An H&P still being typed. PHI, and deliberately short-lived: filing the
+  // note to the chart deletes the draft, so this collection holds only work in
+  // progress and never a second copy of a note that already exists in OpenEMR.
+  { key: 'clinical_note_drafts', phi: true, owner: '4.9', note: 'one per clinician per patient; cleared when the note is filed' },
   // ---- caregiver app (Session 6) ----
   { key: 'caregiver_visit_logs', phi: true, owner: '6' },
   { key: 'caregiver_visit_log_reviews', phi: true, owner: '6' },
