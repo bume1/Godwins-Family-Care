@@ -4,6 +4,46 @@
 
 ---
 
+### Version 3.1.0 - September 22, 2026
+
+#### New Features
+- Make shifts editable after posting, add bulk and calendar, widen the enrollment editor
+
+#### Bug Fixes
+- Email the caregiver when a past shift is corrected, and fix the aliased before/after
+- Sign four packet forms in the app; fix the schedule loop and document scoping
+
+#### Documentation
+- backfill PR #96 as merged for Session 4.8
+
+#### Changes
+- Rescue the reconciliation spec, and build the enrollment ledger
+- Correct the stale "Drive: NOT CONFIGURED" line
+- Let staff and clinicians file a document into a client's file
+- Build the clinical inbox — five pending states nothing ever showed
+- Save a half-finished H&P, and give the facility assignment a screen
+- A time change can be asked about an unaccepted offer, and asking is agreeing
+- Let a caregiver ask for a shift to change, and say which availability is in force
+- Backfill PR #104 and #105, and record the changelog fix
+- Stop the changelog stacking a fresh copy of today's entry on every boot
+- Backfill PR #103, and flag the half of an earlier entry it supersedes
+- Regenerate the changelog for this session's commit
+- Let an admin or a clinician edit an enrollment submission
+- Send the login with the consent downloads
+- Let a client be added without a rate, and lock enrollment writes to admin
+- Pin the caregiver Feed's scoping
+- Point every email link at the app, and at a page that exists
+- Show every time in Eastern, on both the server and the app
+- Give the welcome packet a banner, and its fields their full width
+- Read a packet somebody typed on without flattening it
+- Make the welcome packet the caregiver app's front door
+- Session 4.8: credential-scoped clinical roles and standing orders
+- Stop a real filename from 500-ing every document download
+- Record that the host is EC2 + Docker, not ECS
+- Record the EVV session in the running status
+- Make a failed Drive read say which failure it was
+
+
 ### Version 3.1.0 - September 21, 2026
 
 #### New Features

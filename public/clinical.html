@@ -129,6 +129,20 @@
       link: (id, body) => authedFetch(`/api/clinical/patients/${id}/link`, { method: 'POST', body: JSON.stringify(body || {}) }),
       chart: (id) => authedFetch(`/api/clinical/patients/${id}/chart`),
       visit: (id, body) => authedFetch(`/api/clinical/patients/${id}/visit`, { method: 'POST', body: JSON.stringify(body) }),
+      // Drafts are per-clinician: you resume your own half-written note, never
+      // somebody else's. The server keys them that way too.
+      getDraft: (id) => authedFetch(`/api/clinical/patients/${id}/visit/draft`),
+      saveDraft: (id, draft) => authedFetch(`/api/clinical/patients/${id}/visit/draft`, { method: 'PUT', body: JSON.stringify({ draft }) }),
+      discardDraft: (id) => authedFetch(`/api/clinical/patients/${id}/visit/draft`, { method: 'DELETE' }),
+      // Scanning a document into the patient's file from the chart. The route
+      // is the enrollment one on purpose — ONE store for a client's documents,
+      // so what a clinician scans in is what the office and the client see.
+      fileClientDocument: (clientId, body) => authedFetch(`/api/gfc/admin/enrollment/${clientId}/documents/upload`, {
+        method: 'POST', body: JSON.stringify(body)
+      }),
+      documentKinds: (clientId) => authedFetch(`/api/gfc/admin/enrollment/${clientId}/documents`),
+      facilities: () => authedFetch('/api/clinical/facilities'),
+      assignFacility: (id, facilityId) => authedFetch(`/api/clinical/patients/${id}/facility`, { method: 'PUT', body: JSON.stringify({ facilityId }) }),
       medrec: (id) => authedFetch(`/api/clinical/patients/${id}/medrec`),
       medrecSave: (id, decisions) => authedFetch(`/api/clinical/patients/${id}/medrec`, { method: 'POST', body: JSON.stringify({ decisions }) }),
       addProblem: (id, body) => authedFetch(`/api/clinical/patients/${id}/problems`, { method: 'POST', body: JSON.stringify(body) }),
@@ -165,7 +179,8 @@
       sign: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/sign`, { method: 'POST', body: JSON.stringify({ attest: true }) }),
       addAddendum: (id, euuid, text) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/addenda`, { method: 'POST', body: JSON.stringify({ text }) }),
       resync: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/resync`, { method: 'POST' }),
-      queue: (state) => authedFetch(`/api/clinical/encounters/queue?state=${encodeURIComponent(state || 'open')}`)
+      queue: (state) => authedFetch(`/api/clinical/encounters/queue?state=${encodeURIComponent(state || 'open')}`),
+      inbox: () => authedFetch('/api/clinical/inbox')
     };
 
     const fmtDate = (iso) => iso ? new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
@@ -298,7 +313,73 @@
     // empty chart for a patient whose record is full. Rows carry where they can
     // be read from, and an EMR row that cannot be opened here SAYS SO rather
     // than being dropped — a missing row reads as "no such document".
-    const ChartDocuments = ({ docs, clientId }) => {
+    // Scanning into the chart (2026-09-22, owner-directed). Until now the
+    // clinical area had NO file input at all — a document handed over at a home
+    // visit, or faxed by a doctor's office, had nowhere to go from here.
+    //
+    // It files into the CLIENT's document store, the same one the enrollment
+    // screen and the client's portal read, so a scan taken at the bedside ticks
+    // the office's checklist and the client sees it. A second clinical-only
+    // store would mean the office chasing a document a clinician already holds.
+    const ChartScanIn = ({ clientId, onFiled }) => {
+      const [kinds, setKinds] = useState(null);
+      const [kind, setKind] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [msg, setMsg] = useState(null);
+      useEffect(() => {
+        let live = true;
+        api.documentKinds(clientId)
+          .then(r => {
+            if (!live) return;
+            const list = (r && r.catalog) || [];
+            setKinds(list);
+            // The page names no document kind of its own — the catalog is
+            // served, so the picker cannot drift from the validator that
+            // refuses one it does not know.
+            if (list.length) setKind(list[0].kind);
+          })
+          .catch(e => { if (live) setMsg({ ok: false, text: e.message }); });
+        return () => { live = false; };
+      }, [clientId]);
+
+      const pick = (file) => {
+        if (!file || !kind) return;
+        setBusy(true); setMsg(null);
+        const reader = new FileReader();
+        reader.onload = () => {
+          api.fileClientDocument(clientId, { kind, fileName: file.name, fileDataB64: String(reader.result) })
+            .then(r => { setMsg({ ok: true, text: r.message }); onFiled && onFiled(); })
+            .catch(e => setMsg({ ok: false, text: e.message }))
+            .finally(() => setBusy(false));
+        };
+        reader.onerror = () => { setMsg({ ok: false, text: 'That file could not be read.' }); setBusy(false); };
+        reader.readAsDataURL(file);
+      };
+
+      return (
+        <div className="border-t border-stone-100 mt-3 pt-3">
+          <div className="text-[13px] font-semibold text-primary mb-2">Scan a document into this file</div>
+          <div className="flex flex-wrap items-center gap-2">
+            <select className="inp max-w-[260px]" value={kind} disabled={busy || !kinds} onChange={e => setKind(e.target.value)}>
+              {(kinds || []).map(k => <option key={k.kind} value={k.kind}>{k.label}</option>)}
+            </select>
+            <label className={`btn ghost ${busy || !kind ? 'opacity-50' : 'cursor-pointer'}`}>
+              <i className="ti ti-scan" />{busy ? 'Filing…' : 'Choose file'}
+              <input type="file" className="hidden" accept=".pdf,.jpg,.jpeg,.png" disabled={busy || !kind}
+                onChange={e => { pick((e.target.files || [])[0]); e.target.value = ''; }} />
+            </label>
+          </div>
+          {!kinds && !msg && <p className="text-[11px] text-stone-400 mt-2">Reading the document list…</p>}
+          <p className="text-[11px] text-stone-400 mt-2">
+            Filed to the client's documents — it ticks the office checklist and the client sees it on their portal.
+            PDF, JPG or PNG.
+          </p>
+          {msg && <p className={`text-xs mt-1 ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
+        </div>
+      );
+    };
+
+    const ChartDocuments = ({ docs, clientId, onRefresh }) => {
       const [busy, setBusy] = useState('');
       const [err, setErr] = useState('');
 
@@ -370,12 +451,184 @@
               </div>
             ))}
           </div>
+          {clientId && <ChartScanIn clientId={clientId} onFiled={onRefresh} />}
         </div>
       );
     };
 
     // ── Chart summary tab ──
-    const SummaryTab = ({ chart, patient, onLink, linking, linkCandidates, onDismissCandidates }) => {
+    // Place of service comes from the PATIENT's facility assignment (Session
+    // 4.5), and until 2026-09-22 the route that sets it had no screen anywhere
+    // in the app — so every patient stayed unassigned and every encounter
+    // blocked at signing with SIGN_NO_FACILITY_POS. The route is admin-only,
+    // so this is too; a clinician sees the state read-only rather than a
+    // control that would 403.
+    const FacilityCard = ({ patient, isAdmin, onChanged }) => {
+      const [rows, setRows] = useState(null);
+      const [pick, setPick] = useState(String(patient.openEmrFacilityId || ''));
+      const [busy, setBusy] = useState(false);
+      const [msg, setMsg] = useState(null);
+      useEffect(() => { setPick(String(patient.openEmrFacilityId || '')); }, [patient.id, patient.openEmrFacilityId]);
+      useEffect(() => {
+        let live = true;
+        api.facilities()
+          .then(r => { if (live) setRows(r); })
+          .catch(e => { if (live) setMsg({ ok: false, text: `Could not read facilities from OpenEMR: ${e.message}` }); });
+        return () => { live = false; };
+      }, []);
+      const list = (rows && rows.facilities) || [];
+      const current = list.find(f => String(f.id) === String(patient.openEmrFacilityId || ''));
+      const assigned = !!patient.openEmrFacilityId;
+      // Assigned but no POS on the facility record is a DIFFERENT problem from
+      // not assigned at all, and it is fixed somewhere else (on the facility in
+      // OpenEMR, not here), so the two never share a message.
+      const posMissing = assigned && current && !current.posCode;
+      const notService = assigned && current && !current.serviceLocation;
+      const save = (value) => {
+        setBusy(true); setMsg(null);
+        api.assignFacility(patient.id, value)
+          .then(r => {
+            setMsg({ ok: true, text: [r.message, ...(r.warnings || [])].join(' ') });
+            onChanged && onChanged();
+          })
+          .catch(e => setMsg({ ok: false, text: e.message }))
+          .finally(() => setBusy(false));
+      };
+      return (
+        <div className="card mb-4">
+          <div className="card-h">
+            <h2><i className="ti ti-building-hospital mr-1 text-accent" />Place of service</h2>
+            {assigned && !posMissing && !notService
+              ? <span className="chip bg-emerald-50 text-emerald-700">POS {current ? current.posCode : '—'}</span>
+              : <span className="chip bg-amber-50 text-amber-800">Blocks signing</span>}
+          </div>
+          <div className="p-4 text-sm grid gap-3">
+            <div className="text-xs text-stone-600">
+              {assigned
+                ? <>This patient is assigned to <b>{current ? current.name : `facility ${patient.openEmrFacilityId}`}</b>
+                    {current && current.posCode ? <> · place of service <b>{current.posCode}</b></> : null}.</>
+                : <b className="text-amber-800">This patient is not assigned to an OpenEMR facility, so their visits cannot be signed.</b>}
+            </div>
+            {posMissing && (
+              <p className="text-xs text-amber-700">
+                <i className="ti ti-alert-triangle mr-1" />
+                "{current.name}" has no place-of-service code on its record in OpenEMR. Set it on the facility
+                (Administration → Facilities) — it cannot be set from here, and visits stay unsignable until it is.
+              </p>
+            )}
+            {notService && (
+              <p className="text-xs text-amber-700">
+                <i className="ti ti-alert-triangle mr-1" />
+                "{current.name}" is not marked as a Service Location in OpenEMR, so no encounter can be assigned there.
+                Tick Service Location on the facility record.
+              </p>
+            )}
+            {isAdmin ? (
+              <div className="flex flex-wrap items-end gap-2">
+                <Field label="OpenEMR facility" className="flex-1 min-w-[260px]">
+                  <select className="inp" value={pick} disabled={busy || !rows} onChange={e => setPick(e.target.value)}>
+                    <option value="">— not assigned —</option>
+                    {list.map(f => (
+                      <option key={f.id} value={f.id}>
+                        {f.name}{f.posCode ? ` · POS ${f.posCode}` : ' · no POS'}{f.serviceLocation ? '' : ' · not a service location'}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <button className="btn" disabled={busy || !rows || String(pick) === String(patient.openEmrFacilityId || '')} onClick={() => save(pick)}>
+                  {busy ? 'Saving…' : 'Save assignment'}
+                </button>
+                {assigned && <button className="btn ghost text-red-600" disabled={busy} onClick={() => save('')}>Clear</button>}
+              </div>
+            ) : (
+              <p className="text-[11px] text-stone-400">An admin sets this. It decides the place of service on the claim, so it is not a clinician's pick.</p>
+            )}
+            {!rows && !msg && <p className="text-[11px] text-stone-400">Reading facilities from OpenEMR…</p>}
+            {msg && <p className={`text-xs ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
+            {rows && rows.billingFacilityName && (
+              <p className="text-[10.5px] text-stone-400">
+                Billing entity (who bills, not where care happened): {rows.billingFacilityName}.
+                {rows.billingFacilityWarning ? ` ${rows.billingFacilityWarning}` : ''}
+              </p>
+            )}
+          </div>
+        </div>
+      );
+    };
+
+    // The clinical inbox — what is waiting on a clinician. Every row says WHO
+    // it is waiting on, because a count that does not is a number nobody can
+    // act on. Whether YOU can act on a row is decided by the server against
+    // the same matrix the routes enforce, never re-derived here.
+    const INBOX_ICONS = {
+      encounter_co_sign: 'ti-writing-sign',
+      order_co_sign: 'ti-flask',
+      care_plan_co_sign: 'ti-clipboard-heart',
+      visit_log_review: 'ti-notes',
+      encounter_unsigned: 'ti-file-pencil'
+    };
+    const InboxView = ({ onOpenEncounter, onOpenChart }) => {
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState('');
+      const [mineOnly, setMineOnly] = useState(true);
+      const load = () => api.inbox().then(r => { setData(r); setErr(''); }).catch(e => setErr(e.message));
+      useEffect(() => { load(); }, []);
+      if (err) return <div className="p-6"><p className="text-sm text-red-600">{err}</p></div>;
+      if (!data) return <div className="p-10 text-stone-400 text-sm">Loading your inbox…</div>;
+      const shown = mineOnly ? data.items.filter(i => i.actionable) : data.items;
+      const c = data.counts;
+      return (
+        <div className="p-4 lg:p-7">
+          <div className="flex flex-wrap items-center gap-2 mb-4">
+            <div className="serif text-lg text-primary font-semibold">Inbox</div>
+            {c.overdue > 0 && <span className="chip bg-red-50 text-red-700">{c.overdue} overdue</span>}
+            <span className="chip bg-primary-50 text-primary">{c.actionable} waiting on you</span>
+            <span className="chip bg-stone-100 text-stone-600">{c.total} in total</span>
+            <div className="flex rounded-lg border border-stone-200 overflow-hidden ml-auto">
+              <button className={`px-3 py-1.5 text-xs font-semibold ${mineOnly ? 'bg-primary text-white' : 'bg-white text-primary'}`}
+                onClick={() => setMineOnly(true)}>Waiting on me</button>
+              <button className={`px-3 py-1.5 text-xs font-semibold ${!mineOnly ? 'bg-primary text-white' : 'bg-white text-primary'}`}
+                onClick={() => setMineOnly(false)}>Everything</button>
+            </div>
+            <button className="btn ghost !py-1.5" onClick={load}><i className="ti ti-refresh" />Refresh</button>
+          </div>
+          {!shown.length && (
+            <div className="card p-6 text-sm text-stone-500">
+              {mineOnly
+                ? (c.total ? `Nothing is waiting on you. ${c.total} item${c.total > 1 ? 's are' : ' is'} waiting on someone else — switch to Everything to see them.`
+                           : 'Nothing is waiting on you.')
+                : 'Nothing is waiting on anyone.'}
+            </div>
+          )}
+          <div className="grid gap-2">
+            {shown.map(i => (
+              <div key={`${i.kind}:${i.id}`} className={`card p-3 flex flex-wrap items-center gap-3 ${i.overdue ? 'border-red-200' : ''}`}>
+                <i className={`ti ${INBOX_ICONS[i.kind] || 'ti-inbox'} text-accent text-lg`} />
+                <div className="min-w-0 flex-1">
+                  <div className="text-[13px] font-semibold text-primary">
+                    {i.label}
+                    {i.overdue && <span className="chip bg-red-50 text-red-700 ml-2">Overdue</span>}
+                  </div>
+                  <div className="text-xs text-stone-500">
+                    {i.patientName || 'Unknown patient'} · {i.at ? fmtTs(i.at) : 'no date'}
+                    {i.dueAt ? ` · due ${fmtTs(i.dueAt)}` : ''}
+                  </div>
+                  {i.detail && <div className="text-[11px] text-stone-400 mt-0.5">{i.detail}</div>}
+                </div>
+                <span className={`chip ${i.actionable ? 'bg-amber-50 text-amber-800' : 'bg-stone-100 text-stone-500'}`}>
+                  {i.actionable ? 'Waiting on you' : `Waiting on ${i.waitingOn}`}
+                </span>
+                {i.encounterUuid
+                  ? <button className="btn ghost !py-1.5" onClick={() => onOpenEncounter(i.clientId, i.encounterUuid)}>Open encounter</button>
+                  : <button className="btn ghost !py-1.5" onClick={() => onOpenChart(i.clientId)}>Open chart</button>}
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    };
+
+    const SummaryTab = ({ chart, patient, onLink, linking, linkCandidates, onDismissCandidates, isAdmin, onChartChanged }) => {
       const canWrite = useCanWrite();
       const [showLinkExisting, setShowLinkExisting] = useState(false);
       const [existingId, setExistingId] = useState('');
@@ -490,6 +743,7 @@
               </div>
             </div>
           )}
+          {chart.linked && <FacilityCard patient={patient} isAdmin={isAdmin} onChanged={onChartChanged} />}
           <div className="grid md:grid-cols-2 gap-0 md:gap-4">
             <div>
               <Sec title="Problem list" icon="ti-list-details" data={emr.problems}
@@ -511,7 +765,7 @@
                   full. This list is assembled server-side from what the app
                   holds, merged with whatever the EMR does return, and each row
                   says where it can be read from. */}
-              <ChartDocuments docs={chart.chartDocuments || []} clientId={patient && patient.id} />
+              <ChartDocuments docs={chart.chartDocuments || []} clientId={patient && patient.id} onRefresh={onChartChanged} />
             </div>
           </div>
         </div>
@@ -536,7 +790,7 @@
         <textarea className="inp" rows={rows || 2} value={path.split('.').reduce((o, k) => o[k], f)} onChange={e => set(path, e.target.value)} />
       </Field>
     );
-    const HpTab = ({ patient, chart, appointmentEid, onDone }) => {
+    const HpTab = ({ patient, chart, appointmentEid, onDone, onGoToEncounter }) => {
       const pf = (chart && chart.intakePrefill) || {};
       const [confirmed, setConfirmed] = useState([]);
       const confirm = (k) => setConfirmed(c => c.includes(k) ? c : [...c, k]);
@@ -556,10 +810,60 @@
         return { ...prev, [a]: { ...prev[a], [b]: v } };
       });
       const [busy, setBusy] = useState(false); const [msg, setMsg] = useState(null);
-      const submit = () => {
-        setBusy(true); setMsg(null);
+      const [draftAt, setDraftAt] = useState(null);
+      const [restored, setRestored] = useState(false);
+      // Resume YOUR OWN half-written note. Drafts are per clinician, so an
+      // on-site assessment and a virtual one of the same patient on the same
+      // day never overwrite each other.
+      useEffect(() => {
+        let live = true;
+        api.getDraft(patient.id).then(r => {
+          if (!live || !r || !r.draft) return;
+          const d = r.draft;
+          setF(prev => ({
+            ...prev, ...d,
+            vitals: { ...prev.vitals, ...(d.vitals || {}) },
+            systemsExam: { ...prev.systemsExam, ...(d.systemsExam || {}) },
+            skinWound: { ...prev.skinWound, ...(d.skinWound || {}) },
+            painAssessment: { ...prev.painAssessment, ...(d.painAssessment || {}) },
+            homeHazards: { ...prev.homeHazards, ...(d.homeHazards || {}) },
+            triage: { ...prev.triage, ...(d.triage || {}) }
+          }));
+          if (Array.isArray(d.confirmedFields)) setConfirmed(d.confirmedFields);
+          setDraftAt(r.updatedAt || null); setRestored(true);
+        }).catch(() => { /* no draft is the normal case, never an error on screen */ });
+        return () => { live = false; };
+      }, [patient.id]);
+
+      const saveDraft = () => {
+        setBusy('draft'); setMsg(null);
+        api.saveDraft(patient.id, { ...f, confirmedFields: confirmed, appointmentEid: appointmentEid || undefined })
+          .then(r => { setDraftAt(r.updatedAt); setMsg({ ok: true, text: 'Draft saved. Nothing is in the chart yet — you can close this and pick it up later.' }); })
+          .catch(e => setMsg({ ok: false, text: e.message }))
+          .finally(() => setBusy(false));
+      };
+
+      const discardDraft = () => {
+        setBusy('discard'); setMsg(null);
+        api.discardDraft(patient.id)
+          .then(() => { setDraftAt(null); setRestored(false); setMsg({ ok: true, text: 'Draft discarded. What is on screen is still here until you leave the page.' }); })
+          .catch(e => setMsg({ ok: false, text: e.message }))
+          .finally(() => setBusy(false));
+      };
+
+      // Filing writes the Encounter, the vitals row and the note to OpenEMR.
+      // It does NOT sign: an attestation needs diagnoses and service codes,
+      // which are captured on the encounter, not here. Saying otherwise on the
+      // button would tell a clinician they had signed when they had not.
+      const file = (thenGo) => {
+        setBusy(thenGo ? 'file-go' : 'file'); setMsg(null);
         api.visit(patient.id, { ...f, confirmedFields: confirmed, appointmentEid: appointmentEid || undefined })
-          .then(r => { setMsg({ ok: true, text: `${r.message} (${fmtTs(r.at)})` }); onDone && onDone(); })
+          .then(r => {
+            setDraftAt(null); setRestored(false);
+            setMsg({ ok: true, text: `${r.message} (${fmtTs(r.at)}). The note is in the chart but NOT signed yet — add diagnoses and service codes on the encounter, then sign.` });
+            onDone && onDone();
+            if (thenGo && r.encounterUuid && onGoToEncounter) onGoToEncounter(r.encounterUuid);
+          })
           .catch(e => setMsg({ ok: false, text: e.message }))
           .finally(() => setBusy(false));
       };
@@ -686,9 +990,30 @@
           </div>
 
           {msg && <p className={`text-sm mb-3 ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
-          <button className="btn" disabled={busy} onClick={submit}>
-            <i className="ti ti-writing-sign" />{busy ? 'Writing to OpenEMR…' : 'Sign & write to chart (Encounter + vitals + note)'}
-          </button>
+          <div className="card p-3 mb-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <button className="btn ghost" disabled={!!busy} onClick={saveDraft}>
+                <i className="ti ti-device-floppy" />{busy === 'draft' ? 'Saving…' : 'Save draft'}
+              </button>
+              <button className="btn" disabled={!!busy} onClick={() => file(false)}>
+                <i className="ti ti-file-check" />{busy === 'file' ? 'Filing to OpenEMR…' : 'Save & file note to chart'}
+              </button>
+              <button className="btn gold" disabled={!!busy} onClick={() => file(true)}>
+                <i className="ti ti-writing-sign" />{busy === 'file-go' ? 'Filing to OpenEMR…' : 'File note & go to coding / sign'}
+              </button>
+              {draftAt && (
+                <button className="btn ghost text-red-600" disabled={!!busy} onClick={discardDraft}>
+                  {busy === 'discard' ? 'Discarding…' : 'Discard draft'}
+                </button>
+              )}
+            </div>
+            <p className="text-[11px] text-stone-500 mt-2">
+              <b>Save draft</b> keeps this note on the server and writes nothing to the chart — safe to leave and come back.
+              <b> Save &amp; file</b> writes the Encounter, vitals and note into OpenEMR; the note is documented but <b>not signed</b>.
+              <b> File &amp; go to coding</b> does the same and takes you to the encounter, where diagnoses and service codes are added and the note is signed.
+            </p>
+            {draftAt && <p className="text-[11px] text-stone-400 mt-1">Draft last saved {fmtTs(draftAt)}{restored ? ' · restored into this form' : ''}.</p>}
+          </div>
         </div>
       );
     };
@@ -2192,7 +2517,7 @@
             <div className="bg-white border-b border-stone-200 px-4 lg:px-7 py-3 flex items-center justify-between gap-3">
               <div className="flex items-center gap-3">
                 <button className="lg:hidden btn ghost !px-2.5 !py-1.5" onClick={() => setListOpen(true)}><i className="ti ti-users" /></button>
-                <div className="serif text-lg text-primary font-semibold">{view === 'schedule' ? 'Schedule' : view === 'queue' ? 'Coding Queue' : 'Patient Chart'}</div>
+                <div className="serif text-lg text-primary font-semibold">{view === 'schedule' ? 'Schedule' : view === 'queue' ? 'Coding Queue' : view === 'inbox' ? 'Inbox' : 'Patient Chart'}</div>
                 <div className="flex rounded-lg border border-stone-200 overflow-hidden ml-1">
                   <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'charts' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
                     onClick={() => setView('charts')}><i className="ti ti-folder-open mr-1" />Charts</button>
@@ -2200,6 +2525,8 @@
                     onClick={() => { setView('schedule'); setListOpen(false); }}><i className="ti ti-calendar-week mr-1" />Schedule</button>
                   <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'queue' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
                     onClick={() => { setView('queue'); setListOpen(false); }}><i className="ti ti-receipt mr-1" />Coding queue</button>
+                  <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'inbox' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
+                    onClick={() => { setView('inbox'); setListOpen(false); }}><i className="ti ti-inbox mr-1" />Inbox</button>
                 </div>
               </div>
               <div className="flex items-center gap-2">
@@ -2306,6 +2633,11 @@
             {view === 'queue' && (
               <CodingQueueView onOpenEncounter={(clientId, euuid) => openChartById(clientId, { tab: 'encounters', encounterUuid: euuid })} />
             )}
+            {view === 'inbox' && (
+              <InboxView
+                onOpenEncounter={(clientId, euuid) => openChartById(clientId, { tab: 'encounters', encounterUuid: euuid })}
+                onOpenChart={(clientId) => openChartById(clientId)} />
+            )}
             {view === 'schedule' && (
               <ScheduleView user={user} patients={patients || []}
                 onOpenChart={(clientId) => openChartById(clientId)}
@@ -2339,11 +2671,12 @@
                 </div>
                 <div className="p-4 lg:p-7">
                   {tab === 'summary' && <SummaryTab chart={chart} patient={sel} onLink={link} linking={linking}
-                    linkCandidates={linkCandidates} onDismissCandidates={() => { setLinkCandidates([]); setErr(''); }} />}
+                    linkCandidates={linkCandidates} onDismissCandidates={() => { setLinkCandidates([]); setErr(''); }}
+                    isAdmin={access.role === 'admin'} onChartChanged={() => { loadPatients(); refreshChart(); }} />}
                   {tab === 'appts' && <ApptsTab patient={sel} patients={patients || []} chart={chart} onDocumentHp={(eid) => { setHpApptEid(eid); setTab('visit'); }}
                     onEncounterCreated={(euuid) => { setEncTarget(euuid); setTab('encounters'); }} />}
                   {tab === 'encounters' && <EncountersTab patient={sel} chart={chart} initialEuuid={encTarget} onOpened={() => setEncTarget(null)} />}
-                  {tab === 'visit' && (chart ? <HpTab patient={sel} chart={chart} appointmentEid={hpApptEid} onDone={() => { setHpApptEid(null); refreshChart(); loadPatients(); }} /> : <p className="text-sm text-stone-500">Loading…</p>)}
+                  {tab === 'visit' && (chart ? <HpTab patient={sel} chart={chart} appointmentEid={hpApptEid} onDone={() => { setHpApptEid(null); refreshChart(); loadPatients(); }} onGoToEncounter={(euuid) => { setEncTarget(euuid); setTab('encounters'); }} /> : <p className="text-sm text-stone-500">Loading…</p>)}
                   {tab === 'medrec' && <MedRecTab patient={sel} />}
                   {tab === 'careplan' && <CarePlanTab patient={sel} onSaved={loadPatients} />}
                   {tab === 'checklist' && <ChecklistTab patient={sel} onActivated={loadPatients} />}
