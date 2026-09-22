@@ -14,6 +14,9 @@
 - Sign four packet forms in the app; fix the schedule loop and document scoping
 
 #### Changes
+- Say when a sign-out was a browser with no token, not a bad session
+- Stop the enrollment screen signing the admin out on every client open
+- Regenerate today's changelog section against merged main
 - Stop the admin seeders writing a one-account roster over everyone
 - Stop logging everyone out when the user directory cannot be read
 - Regenerate today's changelog section against main
