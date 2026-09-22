@@ -164,7 +164,7 @@ This file is auto-loaded at the start of every Claude Code session. Read it firs
 | 4.5 | Native 8.4 writes · Phase 6B routes · retire workarounds · patient-driven facility/POS | ✅ Done | #42 (+ #41 preflight & defect fixes) |
 | 4.6 | Enrollment consent set — lane split · real consent text · signed copies · paper-signature path · one-pass intake | ✅ Done — 156 unit tests, 64 live HTTP assertions | #46 |
 | 4.8 | Credential-scoped clinical roles (`clinicalRole` enum) · standing orders · split sign action | ✅ Done — 41 unit tests (22 mutations), 57 live HTTP assertions | #96 |
-| 4.9 | Clinical documentation usability — H&P drafts · three note actions · facility assignment screen · clinical inbox · staff/clinician document filing | ✅ built · PR pending | — (pending) |
+| 4.9 | Clinical documentation usability — H&P drafts · three note actions · facility assignment screen · clinical inbox · staff/clinician document filing | ✅ Done | #108 |
 | 5 | Clinical HIPAA go-live (+ OpenEMR auth migration to authorization_code) | ✅ Done — 427 unit tests, 38 live HTTP assertions; **go-live itself is owner-run on the live boundary (runbook §8)** | #72 |
 | 6 | Caregiver app (4-tab mobile · tier-branched visit log · escalation · incident reports) | ✅ Done | #55 |
 | 7 | Scheduling · availability · time tracking (PHCP) | ✅ Done | #56 |
