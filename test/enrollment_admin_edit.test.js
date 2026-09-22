@@ -216,6 +216,24 @@ function detailsRoute() {
   return SERVER.slice(start, end);
 }
 
+// Everything an edit has to carry with it — the payer merge, the profile
+// mirror, the ROI derivation and the re-signature check — moved out of the
+// details route into ONE helper on 2026-09-22, so an accepted document
+// extraction goes through the same four steps a typed correction does.
+//
+// The four guards below used to slice the details route and stopped seeing this
+// code the moment it moved. A BOUNDED SCAN IS A GUARD THAT WORKS ON THE CODE IT
+// WAS WRITTEN AGAINST — the fifth time this repo has paid for that. They now
+// read the helper AND assert every caller delegates to it, which covers more
+// than they did when only one route existed.
+function commitHelper() {
+  const start = SERVER.indexOf('const commitEnrollmentSubmission = ({');
+  assert.notStrictEqual(start, -1, 'the shared submission-commit helper is gone');
+  const end = SERVER.indexOf('\n};', start);
+  assert.ok(end > start, 'the helper no longer ends where it did');
+  return SERVER.slice(start, end);
+}
+
 // The allow-list and the function that applies it, lifted out of server.js and
 // RUN. Anchored on the surrounding text at BOTH ends and loud if either anchor
 // moves — a slice that silently grabs the wrong region proves nothing. (Brace
@@ -371,7 +389,7 @@ test('the login email is checked against every other account before it is taken'
 });
 
 test('it mirrors through the one writer, so this page cannot store its own shape', () => {
-  const route = detailsRoute();
+  const route = commitHelper();
   assert.match(route, /mirrorIntakeToClientProfile\(\s*client, next,/);
   // The medications it just saved, so client.medications and intake.medications
   // cannot end up disagreeing about what the client takes.
@@ -379,7 +397,7 @@ test('it mirrors through the one writer, so this page cannot store its own shape
 });
 
 test('correcting a PCP rebuilds the ROI provider list through the one derivation', () => {
-  const route = detailsRoute();
+  const route = commitHelper();
   // Otherwise the Transfer-of-Care form keeps offering the provider that was
   // just corrected. Same function the client's own intake save calls.
   assert.match(route, /const priorProviders = resolvePriorProviders\(client, next\)/);
@@ -393,7 +411,7 @@ test('correcting a PCP rebuilds the ROI provider list through the one derivation
 });
 
 test('an edited payer merges rather than leaving the two shapes disagreeing', () => {
-  const route = detailsRoute();
+  const route = commitHelper();
   // The wizard's structured fields live on the intake; the assembled summary
   // lives on the client record and is what billing reads. The mirror only
   // assembles that summary when the intake carries no payer object of its own.
@@ -409,7 +427,7 @@ test('the before/after copy is DEEP, or the re-signature flag could never fire',
 });
 
 test('correcting a value a SIGNED consent prints flags it for re-signature', () => {
-  const route = detailsRoute();
+  const route = commitHelper();
   // A signed consent copy is rendered from this record, so the correction
   // changes what that document says. It is still allowed — a typo in a date of
   // birth has to be fixable — but it is never silent.
@@ -636,4 +654,55 @@ test('the wizard and the staff editor read ONE option catalog', () => {
     assert.ok(fields.OPTIONS[f.options] && fields.OPTIONS[f.options].length,
       `${f.path} names the option list '${f.options}', which is empty or missing`);
   });
+});
+
+test('every writer of a submission goes through the ONE commit helper', () => {
+  // The rule the four guards above were protecting did not go away when the
+  // code moved — it got a second caller. Two copies of "what an edit has to
+  // carry with it" is how a correction lands on the record and leaves the
+  // Transfer-of-Care form still offering the provider that was just corrected.
+  assert.match(detailsRoute(), /commitEnrollmentSubmission\(\{/,
+    'the details route must delegate, not restate');
+  const reviewStart = SERVER.indexOf("app.post('/api/gfc/admin/enrollment/:clientId/extraction/:id/review'");
+  assert.notStrictEqual(reviewStart, -1, 'the extraction review route is gone');
+  const review = SERVER.slice(reviewStart, SERVER.indexOf('\n});', reviewStart));
+  assert.match(review, /commitEnrollmentSubmission\(\{/,
+    'an accepted extraction is a submission edit and takes the same path');
+  // And neither may have re-grown the steps.
+  for (const route of [detailsRoute(), review]) {
+    assert.ok(!/mirrorIntakeToClientProfile\(/.test(route), 'the mirror belongs to the helper');
+    assert.ok(!/resolvePriorProviders\(/.test(route), 'so does the ROI derivation');
+    assert.ok(!/consentActionRequired/.test(route), 'and so does the re-signature check');
+  }
+  assert.strictEqual(SERVER.split('commitEnrollmentSubmission(').length - 1, 2,
+    'exactly two callers today — a third writer wants a deliberate decision, not a copy');
+});
+
+test('an accepted extraction is held to the same allow-list a typed correction is', () => {
+  // The review route builds flat dotted keys and hands them to the SAME
+  // applyEnrollmentEdits the staff editor uses, so a path the intake fields do
+  // not declare cannot reach a client record through the scanner either.
+  const reviewStart = SERVER.indexOf("app.post('/api/gfc/admin/enrollment/:clientId/extraction/:id/review'");
+  const review = SERVER.slice(reviewStart, SERVER.indexOf('\n});', reviewStart));
+  assert.match(review, /applyEnrollmentEdits\(next, body, rejectedValues\)/);
+  assert.match(review, /validateClientCoreFields\(next\)/);
+  assert.ok(!/writeIntakePath\(/.test(review),
+    'a second writer for a client record is how the two start disagreeing');
+});
+
+test('deciding what a scanned document says is a WRITE, never the read gate', () => {
+  // Caught by mutation: nothing pinned this, so the review route could be
+  // widened to the staff gate and a case manager — who resolves to readOnly and
+  // must stay a reader — would be deciding what lands on a client record off a
+  // scan. The READ above them is deliberately wider; these two are not.
+  for (const path of [
+    "app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/extract'",
+    "app.post('/api/gfc/admin/enrollment/:clientId/extraction/:id/review'"
+  ]) {
+    const at = SERVER.indexOf(path);
+    assert.notStrictEqual(at, -1, `${path} is gone`);
+    const line = SERVER.slice(at, SERVER.indexOf('\n', at));
+    assert.ok(line.includes('requireEnrollmentEditor'),
+      `${path} must be admin-or-clinician, not the wider staff gate: ${line}`);
+  }
 });
