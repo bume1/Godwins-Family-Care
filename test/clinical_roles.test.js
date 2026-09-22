@@ -82,12 +82,40 @@ test('the matrix is an ALLOW-LIST — a capability nobody was granted is refused
   }
 });
 
-test('results review has no route yet, so nothing can grant it by accident', () => {
-  // §7 puts results review out of scope. The capability exists so the gate is
-  // written the day the route is: this fails if a route is added without one.
-  assert.ok(!/acknowledgeAbnormalResult|ACKNOWLEDGE_ABNORMAL_RESULT/.test(
-    serverSrc.replace(/CAPABILITIES\.ACKNOWLEDGE_ABNORMAL_RESULT/g, '')),
-    'when results review is built, gate it on ACKNOWLEDGE_ABNORMAL_RESULT');
+// ── REPOINTED IN SESSION 4.10, NOT DELETED ────────────────────────────────
+// 4.8 wrote this as "results review has no route yet, so nothing can grant it
+// by accident": the capability existed with nothing behind it, and the test
+// failed the build if a route appeared without a gate. 4.10 built that route.
+//
+// The rule it protected — THE CAPABILITY IS WHAT DECIDES WHO CLINICALLY
+// ACKNOWLEDGES A RESULT — has not gone away, so the assertion turns around and
+// pins it from the other side. A protection that quietly disappears with the
+// code it happened to point at is a protection lost.
+test('the results route acknowledges through ACKNOWLEDGE_ABNORMAL_RESULT, never a role check of its own', () => {
+  const results = require('../clinicalResults');
+  // The decision lives in clinicalResults.canAcknowledge and it asks the
+  // capability matrix — it does not compare a clinicalRole string itself.
+  assert.ok(/ACKNOWLEDGE_ABNORMAL_RESULT/.test(fs.readFileSync(path.join(__dirname, '..', 'clinicalResults.js'), 'utf8')),
+    'the acknowledge decision must go through the capability, not a hand-rolled role list');
+  // An abnormal or critical result needs the capability; nobody without it may
+  // clinically acknowledge one, whatever else their credential carries.
+  for (const interpretation of ['abnormal', 'critical']) {
+    assert.equal(results.canAcknowledge(PROVIDER, interpretation), true);
+    assert.equal(results.canAcknowledge(RN, interpretation), false);
+    assert.equal(results.canAcknowledge(LCSW, interpretation), false);
+    assert.equal(results.canAcknowledge(LMSW, interpretation), false);
+    assert.equal(results.canAcknowledge(READ_ONLY, interpretation), false);
+    assert.equal(results.canAcknowledge(null, interpretation), false);
+  }
+  // A NORMAL result is acknowledged by anyone licensed to write in the chart —
+  // gating it on the provider capability too would leave an inbox nobody but a
+  // provider could ever empty, and an inbox that does not empty is one nobody
+  // reads. `readOnly` is still refused: it is not a licence.
+  assert.equal(results.canAcknowledge(RN, 'normal'), true);
+  assert.equal(results.canAcknowledge(READ_ONLY, 'normal'), false);
+  // And the server route still runs that decision rather than restating it.
+  assert.ok(/clinicalResults\.applyAcknowledgement/.test(serverSrc),
+    'the acknowledge route must delegate to applyAcknowledgement');
 });
 
 // ---- 2. Acceptance: prescribing and direct ordering ---------------------

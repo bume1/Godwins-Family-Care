@@ -77,6 +77,8 @@ const COLLECTION_REGISTRY = Object.freeze([
   // diagnoses. Versions are immutable, so this collection only ever grows.
   { key: 'standing_orders', phi: true, owner: '4.8', note: 'versions are immutable — a revision is a new row' },
   { key: 'standing_order_executions', phi: true, owner: '4.8', note: 'the audit trail: who acted under whose authority, under which version' },
+  { key: 'clinical_results', phi: true, owner: '4.10', note: 'received results: the interpretation, the chart pointer, and who acknowledged it' },
+  { key: 'requisition_settings', phi: false, owner: '4.10', note: 'the return fax number and label printed on every requisition — org config, not PHI' },
   { key: 'gfc_payer_credentialing', phi: false, owner: '4.4' },
   // ---- caregiver app (Session 6) ----
   { key: 'caregiver_visit_logs', phi: true, owner: '6' },

@@ -119,6 +119,15 @@
         opts.body && !(opts.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}, opts.headers || {});
       return fetch(`${API_URL}${path}`, Object.assign({}, opts, { headers })).then(handleResponse);
     };
+    // A multipart upload. `authedFetch` sets Content-Type for a JSON body and
+    // deliberately does not for FormData — the browser has to write the
+    // multipart boundary itself — so this exists to make that impossible to get
+    // wrong at a call site rather than to add anything else.
+    const authedUpload = (path, formData) => fetch(`${API_URL}${path}`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${getToken()}` },
+      body: formData
+    }).then(handleResponse);
     const api = {
       login: (email, password) => fetch(`${API_URL}/api/auth/login`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -162,6 +171,24 @@
       // ceiling, so the form never computes either.
       myStandingOrders: () => authedFetch('/api/clinical/standing-orders?executable=true'),
       orderStatus: (orderId, status, note) => authedFetch(`/api/clinical/orders/${orderId}/status`, { method: 'POST', body: JSON.stringify({ status, note }) }),
+      // ── Session 4.10 — orders that leave the building ────────────────────
+      // 'sent' and 'resulted' are deliberately absent from orderStatus above:
+      // each has its own route because each captures EVIDENCE. The page cannot
+      // reach them any other way, and neither can a curl.
+      markOrderSent: (orderId, body) => authedFetch(`/api/clinical/orders/${orderId}/sent`, { method: 'POST', body: JSON.stringify(body) }),
+      markReferralScheduled: (orderId, appointmentDate) => authedFetch(`/api/clinical/orders/${orderId}/scheduled`, { method: 'POST', body: JSON.stringify({ appointmentDate }) }),
+      attachResult: (orderId, formData) => authedUpload(`/api/clinical/orders/${orderId}/result`, formData),
+      attachUnmatchedResult: (clientId, formData) => authedUpload(`/api/clinical/patients/${clientId}/results`, formData),
+      resultsInbox: () => authedFetch('/api/clinical/results/inbox'),
+      acknowledgeResult: (resultId, followUpNote) => authedFetch(`/api/clinical/results/${resultId}/acknowledge`, { method: 'POST', body: JSON.stringify({ followUpNote }) }),
+      overdueOrders: () => authedFetch('/api/clinical/orders/overdue'),
+      // THE REQUISITION IS OPENED, NOT FETCHED. On a phone it must land in the
+      // browser's PDF viewer so the SHARE SHEET is one tap away — that is the
+      // whole workflow: generate, share to Doximity, send. The token rides as a
+      // query parameter here because a navigation carries no Authorization
+      // header (the enrollment-downloads lesson, PR #103) and `authenticateToken`
+      // accepts `?token=` for exactly this case.
+      requisitionUrl: (orderId) => `/api/clinical/orders/${orderId}/requisition.pdf?token=${encodeURIComponent(getToken() || '')}`,
       sign: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/sign`, { method: 'POST', body: JSON.stringify({ attest: true }) }),
       addAddendum: (id, euuid, text) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/addenda`, { method: 'POST', body: JSON.stringify({ text }) }),
       resync: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/resync`, { method: 'POST' }),
@@ -1575,10 +1602,27 @@
       );
     };
 
-    const RxForm = ({ routes, onSave, busy }) => {
-      const [f, setF] = useState({ kind: 'new', drug: '', dose: '', route: 'oral', frequency: '', quantity: '', refills: '0', date: todayYmd(), instructions: '' });
+    const RxForm = ({ routes, onSave, busy, schedules, scheduleLabels, prescriber }) => {
+      // ── Session 4.10 ── THE SCHEDULE HAS NO DEFAULT. The clinician chooses,
+      // because the whole control is that a person declared it — a pre-selected
+      // "not a controlled substance" is a declaration nobody made.
+      const [f, setF] = useState({ kind: 'new', drug: '', dose: '', route: 'oral', frequency: '', quantity: '', refills: '0', date: todayYmd(), instructions: '', schedule: '', pdmp: { checked: false, checkedOn: todayYmd() } });
+      const p = prescriber || {};
+      const controlled = f.schedule && f.schedule !== 'non_controlled';
+      // A Georgia NP or PA may not prescribe Schedule II. The SERVER refuses it;
+      // this says so before the click, so the answer is "route it to the
+      // collaborating physician" rather than a 403 with nothing to do about it.
+      const scheduleTwoBlocked = f.schedule === 'CII' && p.scheduleIIProhibited;
+      const deaMissing = controlled && !p.deaOnFile;
+      const deaUncovered = controlled && p.deaOnFile && (p.deaSchedules || []).length > 0 && !(p.deaSchedules || []).includes(f.schedule);
       return (
         <div className="grid gap-2 border-t border-stone-100 pt-3">
+          {!p.prescriberCredential && (
+            <p className="text-[11px] text-amber-800">
+              Your prescriber credential (MD, DO, NP or PA) is not on file, so a prescription cannot be recorded.
+              Georgia's scope rules differ by credential, so nothing is inferred — an admin sets it on your user record.
+            </p>
+          )}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
             <Field label="Type"><select className="inp" value={f.kind} onChange={e => setF({ ...f, kind: e.target.value })}><option value="new">New Rx</option><option value="refill">Refill</option></select></Field>
             <Field label="Drug" className="col-span-2"><input className="inp" value={f.drug} onChange={e => setF({ ...f, drug: e.target.value })} /></Field>
@@ -1589,19 +1633,133 @@
             <Field label="Refills"><input className="inp" inputMode="numeric" value={f.refills} onChange={e => setF({ ...f, refills: e.target.value.replace(/\D/g, '') })} /></Field>
             <Field label="Date"><input className="inp" type="date" value={f.date} onChange={e => setF({ ...f, date: e.target.value })} /></Field>
             <Field label="Instructions" className="col-span-2 md:col-span-3"><input className="inp" value={f.instructions} onChange={e => setF({ ...f, instructions: e.target.value })} /></Field>
+            <Field label="Schedule">
+              <select className="inp" value={f.schedule} onChange={e => setF({ ...f, schedule: e.target.value })}>
+                <option value="">Choose…</option>
+                {(schedules || []).map(sc => <option key={sc} value={sc}>{(scheduleLabels && scheduleLabels[sc]) || sc}</option>)}
+              </select>
+            </Field>
           </div>
-          <div className="flex justify-end"><button className="btn !py-1.5" disabled={busy || !f.drug || !f.dose || !f.frequency || !f.quantity} onClick={() => onSave(f)}>{busy ? 'Recording…' : 'Record prescription'}</button></div>
+          {scheduleTwoBlocked && (
+            <p className="text-[11px] text-red-700">
+              A Georgia {p.prescriberCredential} may not prescribe a Schedule I or II substance. Route this to the
+              collaborating physician, who can record it under their own credential.
+            </p>
+          )}
+          {deaMissing && <p className="text-[11px] text-amber-800">A controlled prescription needs a DEA registration on file. An admin records it on your user record.</p>}
+          {deaUncovered && <p className="text-[11px] text-amber-800">Your DEA registration covers {(p.deaSchedules || []).join(', ')} — it does not cover {f.schedule}.</p>}
+          {controlled && !scheduleTwoBlocked && (
+            <div className="grid gap-2 p-2.5 rounded border border-stone-200 bg-stone-50">
+              <label className="flex items-start gap-2 text-xs">
+                <input type="checkbox" className="mt-0.5" checked={!!f.pdmp.checked} onChange={e => setF({ ...f, pdmp: { ...f.pdmp, checked: e.target.checked } })} />
+                <span>I checked the Georgia PDMP before writing this prescription.</span>
+              </label>
+              {f.pdmp.checked && <Field label="Date checked"><input className="inp" type="date" value={f.pdmp.checkedOn} onChange={e => setF({ ...f, pdmp: { ...f.pdmp, checkedOn: e.target.value } })} /></Field>}
+            </div>
+          )}
+          <div className="flex justify-end">
+            <button className="btn !py-1.5"
+              disabled={busy || !f.drug || !f.dose || !f.frequency || !f.quantity || !f.schedule || !p.prescriberCredential ||
+                scheduleTwoBlocked || deaMissing || deaUncovered || (controlled && !f.pdmp.checked)}
+              onClick={() => onSave(f)}>{busy ? 'Recording…' : 'Record prescription'}</button>
+          </div>
+          <p className="text-[10.5px] text-stone-400">
+            The schedule is yours to declare. The server checks it against the drug name as a backstop and refuses a
+            declaration that contradicts a term it is confident about — it is not a formulary and never will be.
+          </p>
         </div>
       );
     };
+
+    // ── Session 4.10: a referral and a DME order carry a PAYLOAD, not tests ──
+    // Two separate sub-forms rather than one form that grows conditional
+    // branches: the SWO's six elements and a referral's clinical question have
+    // nothing in common, and a shared form would read as if they did.
+    //
+    // The fax fields are ten digits. The SERVER is the control — a mistyped fax
+    // number is a misdirected PHI disclosure, so it validates there — but the
+    // form says so before the click rather than after a 400.
+    const faxOk = (v) => /^\d{10}$/.test(String(v || '').replace(/\D/g, ''));
+
+    const ReferralFields = ({ f, setF }) => (
+      <React.Fragment>
+        <div className="grid grid-cols-2 gap-2">
+          <Field label="Specialty"><input className="inp" value={f.specialty || ''} onChange={e => setF({ ...f, specialty: e.target.value })} /></Field>
+          <Field label="Urgency"><select className="inp" value={f.urgency || 'routine'} onChange={e => setF({ ...f, urgency: e.target.value })}>{['routine', 'urgent', 'stat'].map(u => <option key={u} value={u}>{u}</option>)}</select></Field>
+          <Field label="Receiving practice"><input className="inp" value={f.receivingPractice || ''} onChange={e => setF({ ...f, receivingPractice: e.target.value })} /></Field>
+          <Field label="Receiving provider"><input className="inp" value={f.receivingProvider || ''} onChange={e => setF({ ...f, receivingProvider: e.target.value })} /></Field>
+          <Field label="Receiving fax (this is what gets faxed)">
+            <input className="inp" inputMode="tel" value={f.receivingFax || ''} onChange={e => setF({ ...f, receivingFax: e.target.value })} />
+            {f.receivingFax && !faxOk(f.receivingFax) && <p className="text-[11px] text-amber-700 mt-1">Ten digits. A mistyped fax number sends this patient's record to a stranger.</p>}
+          </Field>
+          <Field label="Receiving phone"><input className="inp" value={f.receivingPhone || ''} onChange={e => setF({ ...f, receivingPhone: e.target.value })} /></Field>
+        </div>
+        <Field label="Reason for referral"><input className="inp" value={f.reason || ''} onChange={e => setF({ ...f, reason: e.target.value })} /></Field>
+        <Field label="Clinical summary — the question you want answered">
+          <textarea className="inp" rows={3} value={f.clinicalSummary || ''} onChange={e => setF({ ...f, clinicalSummary: e.target.value })} />
+        </Field>
+        <label className="flex items-start gap-2 text-xs">
+          <input type="checkbox" className="mt-0.5" checked={!!f.priorAuthRequired} onChange={e => setF({ ...f, priorAuthRequired: e.target.checked })} />
+          <span>Prior authorization is required. <span className="text-stone-500">Medicare Advantage plans frequently require one; this is how it stops being forgotten.</span></span>
+        </label>
+        {f.priorAuthRequired && <Field label="Authorization number (if you already have it)"><input className="inp" value={f.priorAuthNumber || ''} onChange={e => setF({ ...f, priorAuthNumber: e.target.value })} /></Field>}
+      </React.Fragment>
+    );
+
+    const DmeFields = ({ f, setF }) => (
+      <React.Fragment>
+        <p className="text-[11px] text-stone-500">
+          CMS Standard Written Order. The beneficiary, the order date, the treating practitioner and the signature come
+          from the record and your user account; the four fields below are yours. The requisition is refused if any of the
+          six elements is missing.
+        </p>
+        <Field label="Item — narrative, HCPCS, or brand and model"><input className="inp" value={f.itemDescription || ''} onChange={e => setF({ ...f, itemDescription: e.target.value })} /></Field>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+          <Field label="HCPCS (optional)"><input className="inp" value={f.hcpcsCode || ''} onChange={e => setF({ ...f, hcpcsCode: e.target.value.toUpperCase() })} /></Field>
+          <Field label="Quantity"><input className="inp" inputMode="numeric" value={f.quantity || ''} onChange={e => setF({ ...f, quantity: e.target.value.replace(/\D/g, '') })} /></Field>
+          <Field label="Length of need"><input className="inp" placeholder="99 months" value={f.lengthOfNeed || ''} onChange={e => setF({ ...f, lengthOfNeed: e.target.value })} /></Field>
+          <Field label="Order date"><input className="inp" type="date" value={f.orderDate || todayYmd()} onChange={e => setF({ ...f, orderDate: e.target.value })} /></Field>
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <Field label="Supplier"><input className="inp" value={f.supplierName || ''} onChange={e => setF({ ...f, supplierName: e.target.value })} /></Field>
+          <Field label="Supplier fax">
+            <input className="inp" inputMode="tel" value={f.supplierFax || ''} onChange={e => setF({ ...f, supplierFax: e.target.value })} />
+            {f.supplierFax && !faxOk(f.supplierFax) && <p className="text-[11px] text-amber-700 mt-1">Ten digits.</p>}
+          </Field>
+        </div>
+        <label className="flex items-start gap-2 text-xs">
+          <input type="checkbox" className="mt-0.5" checked={!!f.requiresF2F} onChange={e => setF({ ...f, requiresF2F: e.target.checked })} />
+          <span>This item requires a face-to-face encounter.</span>
+        </label>
+        {f.requiresF2F && (
+          <Field label="Face-to-face encounter date — must be within the six months before the order date">
+            <input className="inp" type="date" value={f.faceToFaceDate || ''} onChange={e => setF({ ...f, faceToFaceDate: e.target.value })} />
+          </Field>
+        )}
+        <label className="flex items-start gap-2 text-xs">
+          <input type="checkbox" className="mt-0.5" checked={!!f.requiresWOPD} onChange={e => setF({ ...f, requiresWOPD: e.target.checked })} />
+          <span>Written order prior to delivery. <span className="text-stone-500">The supplier may not deliver before they hold it — power mobility devices are the statutory case.</span></span>
+        </label>
+        <p className="text-[11px] text-stone-500">
+          Which items need a face-to-face encounter or a written order prior to delivery is CMS's{' '}
+          <a className="underline" target="_blank" rel="noopener noreferrer"
+            href="https://www.cms.gov/medicare/regulations-guidance/dmepos-face-to-face-written-order-prior-delivery-power-mobility-devices-list">Required List</a>,
+          which changes. It is not embedded in this app — you set the flags.
+        </p>
+      </React.Fragment>
+    );
 
     // Session 4.8: the same form places a direct order (a provider's own
     // authority) and an order under a protocol. `requireStandingOrder` is set
     // for a credential that has no direct authority — the protocol picker then
     // has no blank option, and the TESTS come from the protocol's list rather
     // than a free-text box, because a test typed in is refused server-side.
-    const OrderForm = ({ diagnoses, types, priorities, onSave, busy, standingOrders, requireStandingOrder }) => {
+    const OrderForm = ({ diagnoses, types, priorities, onSave, busy, standingOrders, requireStandingOrder, docTypes }) => {
       const [f, setF] = useState({ orderType: 'lab', tests: '', priority: 'routine', diagnosisCodes: diagnoses.map(d => d.code), notes: '', standingOrderId: '' });
+      // 4.10: which types carry a payload rather than a list of tests. SERVED,
+      // never listed here — a form that names its own options drifts from the
+      // validator that refuses one it did not offer.
+      const isDoc = (docTypes || []).includes(f.orderType);
       const toggleDx = (c) => setF(p => ({ ...p, diagnosisCodes: p.diagnosisCodes.includes(c) ? p.diagnosisCodes.filter(x => x !== c) : [...p.diagnosisCodes, c] }));
       const protocols = (standingOrders || []).filter(o => o.executableByMe);
       const picked = protocols.find(o => o.id === f.standingOrderId) || null;
@@ -1633,7 +1791,9 @@
             <Field label="Order type"><select className="inp" value={f.orderType} onChange={e => setF({ ...f, orderType: e.target.value })}>{typeOptions.map(t => <option key={t} value={t}>{t}</option>)}</select></Field>
             <Field label="Priority"><select className="inp" value={f.priority} onChange={e => setF({ ...f, priority: e.target.value })}>{(priorities || []).map(t => <option key={t} value={t}>{t}</option>)}</select></Field>
           </div>
-          {picked
+          {isDoc
+            ? (f.orderType === 'referral' ? <ReferralFields f={f} setF={setF} /> : <DmeFields f={f} setF={setF} />)
+            : picked
             ? (
               <Field label="Tests / studies this protocol permits">
                 <div className="flex flex-wrap gap-1.5">
@@ -1653,7 +1813,274 @@
             ))}
           </div>
           <Field label="Notes"><input className="inp" value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} /></Field>
-          <div className="flex justify-end"><button className="btn !py-1.5" disabled={busy || !f.tests.trim() || !f.diagnosisCodes.length || (requireStandingOrder && !f.standingOrderId)} onClick={() => onSave({ ...f, tests: f.tests.split('\n').map(s => s.trim()).filter(Boolean) })}>{busy ? 'Recording…' : 'Record order'}</button></div>
+          <div className="flex justify-end">
+            <button className="btn !py-1.5"
+              disabled={busy || !f.diagnosisCodes.length || (requireStandingOrder && !f.standingOrderId) ||
+                (isDoc
+                  ? (f.orderType === 'referral'
+                    ? (!f.specialty || !f.reason || !f.clinicalSummary || !faxOk(f.receivingFax))
+                    : (!f.itemDescription || !f.quantity || !f.supplierName || !f.lengthOfNeed || !faxOk(f.supplierFax) || (f.requiresF2F && !f.faceToFaceDate)))
+                  : !f.tests.trim())}
+              onClick={() => onSave(isDoc ? f : { ...f, tests: f.tests.split('\n').map(s => s.trim()).filter(Boolean) })}>
+              {busy ? 'Recording…' : f.orderType === 'referral' ? 'Record referral' : f.orderType === 'dme' ? 'Record written order' : 'Record order'}
+            </button>
+          </div>
+        </div>
+      );
+    };
+
+    // ── Session 4.10: the hand-off to Doximity, and the evidence it leaves ──
+    //
+    // THE APP GENERATES. A PERSON TRANSMITS. This row is the whole workflow:
+    // open the requisition (it lands in the phone's PDF viewer, one tap from the
+    // share sheet), fax it from Doximity, then come back and say it went — which
+    // is what "Mark as faxed" records, with the number and the channel.
+    const OrderActions = ({ order, channels, channelLabels, defaultChannel, faxChannels, interpretations, onSent, onScheduled, onResult, busy }) => {
+      const [mode, setMode] = useState('');
+      const [send, setSend] = useState({
+        // SERVED, not named here. The default channel and which channels carry a
+        // fax number are both the server's answer — this form restating either
+        // would let it offer an option the validator refuses, silently.
+        channel: defaultChannel || '',
+        recipientName: (order.referral && (order.referral.receivingPractice || order.referral.receivingProvider || order.referral.specialty)) || (order.dme && order.dme.supplierName) || '',
+        recipientFax: (order.referral && order.referral.receivingFax) || (order.dme && order.dme.supplierFax) || '',
+        note: ''
+      });
+      const [appt, setAppt] = useState('');
+      const [res, setRes] = useState({ interpretation: 'normal', resultDate: todayYmd(), performedBy: '', summary: '', file: null });
+      const isFax = (faxChannels || []).includes(send.channel);
+      const sends = order.sends || [];
+      return (
+        <div className="mt-1.5">
+          <div className="flex flex-wrap gap-1.5">
+            <a className="chip border bg-white text-primary border-stone-200" href={api.requisitionUrl(order.id)} target="_blank" rel="noopener noreferrer">
+              <i className="ti ti-file-text" /> {order.requisitionGeneratedAt ? 'Open requisition again' : 'Open requisition'}
+            </a>
+            {['ordered', 'sent', 'scheduled'].includes(order.status) &&
+              <button className="chip border bg-white text-primary border-stone-200" onClick={() => setMode(mode === 'send' ? '' : 'send')}>
+                {sends.length ? 'Record another send' : 'Mark as faxed'}
+              </button>}
+            {order.orderType === 'referral' && ['sent'].includes(order.status) &&
+              <button className="chip border bg-white text-primary border-stone-200" onClick={() => setMode(mode === 'appt' ? '' : 'appt')}>Mark as scheduled</button>}
+            {!['cancelled', 'resulted', 'completed'].includes(order.status) &&
+              <button className="chip border bg-white text-primary border-stone-200" onClick={() => setMode(mode === 'result' ? '' : 'result')}>
+                {order.orderType === 'referral' ? 'Attach consult note' : 'Attach result'}
+              </button>}
+          </div>
+
+          {sends.map((sd, i) => (
+            <div key={i} className="text-[11px] text-stone-500 mt-1">
+              {i === 0 ? 'Sent' : 'Re-sent'} {fmtTs(sd.sentAt)} · {channelLabels && channelLabels[sd.channel] || sd.channel} → {sd.recipientName}
+              {sd.recipientFax ? ` at ${sd.recipientFax.replace(/(\d{3})(\d{3})(\d{4})/, '($1) $2-$3')}` : ''} · by {sd.sentBy && sd.sentBy.name}
+            </div>
+          ))}
+
+          {mode === 'send' && (
+            <div className="grid gap-2 mt-2 p-2.5 rounded border border-stone-200 bg-stone-50">
+              <p className="text-[11px] text-stone-600">
+                Open the requisition, fax it from Doximity, then record it here. This does not send anything — it records that you did.
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="Channel">
+                  <select className="inp" value={send.channel} onChange={e => setSend({ ...send, channel: e.target.value })}>
+                    {(channels || []).map(c => <option key={c} value={c}>{(channelLabels && channelLabels[c]) || c}</option>)}
+                  </select>
+                </Field>
+                <Field label="Sent to"><input className="inp" value={send.recipientName} onChange={e => setSend({ ...send, recipientName: e.target.value })} /></Field>
+              </div>
+              {isFax && (
+                <Field label="Fax number it went to">
+                  <input className="inp" inputMode="tel" value={send.recipientFax} onChange={e => setSend({ ...send, recipientFax: e.target.value })} />
+                  {send.recipientFax && !faxOk(send.recipientFax) && <p className="text-[11px] text-amber-700 mt-1">Ten digits. This is the record of who the PHI went to.</p>}
+                </Field>
+              )}
+              <Field label="Note (optional)"><input className="inp" value={send.note} onChange={e => setSend({ ...send, note: e.target.value })} /></Field>
+              <div className="flex justify-end">
+                <button className="btn !py-1.5" disabled={busy || !send.recipientName || (isFax && !faxOk(send.recipientFax))}
+                  onClick={() => onSent(send).then(() => setMode(''))}>{busy ? 'Recording…' : 'Record the send'}</button>
+              </div>
+            </div>
+          )}
+
+          {mode === 'appt' && (
+            <div className="grid gap-2 mt-2 p-2.5 rounded border border-stone-200 bg-stone-50">
+              <Field label="Appointment date the specialist's office gave"><input className="inp" type="date" value={appt} onChange={e => setAppt(e.target.value)} /></Field>
+              <div className="flex justify-end"><button className="btn !py-1.5" disabled={busy || !appt} onClick={() => onScheduled(appt).then(() => setMode(''))}>Record it</button></div>
+            </div>
+          )}
+
+          {mode === 'result' && (
+            <div className="grid gap-2 mt-2 p-2.5 rounded border border-stone-200 bg-stone-50">
+              <p className="text-[11px] text-stone-600">
+                The PDF is the record; the interpretation is what decides who this reaches and how fast. It files into the
+                patient's chart, never into Drive.
+              </p>
+              <Field label="Document (PDF, JPEG or PNG)">
+                <input className="inp" type="file" accept="application/pdf,image/jpeg,image/png" onChange={e => setRes({ ...res, file: e.target.files[0] || null })} />
+              </Field>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                <Field label="Interpretation">
+                  <select className="inp" value={res.interpretation} onChange={e => setRes({ ...res, interpretation: e.target.value })}>
+                    {(interpretations || ['normal', 'abnormal', 'critical']).map(i => <option key={i} value={i}>{i}</option>)}
+                  </select>
+                </Field>
+                <Field label="Result date"><input className="inp" type="date" value={res.resultDate} onChange={e => setRes({ ...res, resultDate: e.target.value })} /></Field>
+                <Field label="Performing lab / facility"><input className="inp" value={res.performedBy} onChange={e => setRes({ ...res, performedBy: e.target.value })} /></Field>
+              </div>
+              <Field label="Short summary"><input className="inp" value={res.summary} onChange={e => setRes({ ...res, summary: e.target.value })} /></Field>
+              {res.interpretation === 'critical' && <p className="text-[11px] text-amber-800">A critical result notifies the ordering clinician immediately. The notice carries no patient or clinical detail.</p>}
+              <div className="flex justify-end">
+                <button className="btn !py-1.5" disabled={busy || !res.file || !res.performedBy || !res.summary}
+                  onClick={() => onResult(res).then(() => setMode(''))}>{busy ? 'Filing…' : 'File the result'}</button>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    // ══════════════════════════════════════════════════════════════════════
+    // SESSION 4.10 — THE RESULTS INBOX
+    //
+    // `acknowledgeAbnormalResult` has existed as a capability since 4.8 with no
+    // route and no screen behind it. This is where it finally gets both.
+    //
+    // WITH RESULTS ARRIVING BY FAX TO ONE PERSON'S PHONE, the realistic harm is
+    // an ABNORMAL RESULT NOBODY WITH AUTHORITY EVER SAW. Critical pinned first,
+    // then abnormal, then normal; oldest first within each, because the oldest
+    // unanswered result is the one most likely to have been forgotten.
+    // ══════════════════════════════════════════════════════════════════════
+    const ResultsInbox = () => {
+      const [d, setD] = useState(null);
+      const [err, setErr] = useState('');
+      const [busy, setBusy] = useState('');
+      const [notes, setNotes] = useState({});
+      const load = useCallback(() => {
+        api.resultsInbox().then(r => { setD(r); setErr(''); }).catch(e => setErr(e.message));
+      }, []);
+      useEffect(load, [load]);
+      if (err) return <div className="p-7"><p className="text-red-600 text-sm">{err}</p></div>;
+      if (!d) return <div className="p-10 text-stone-400 text-sm">Loading the inbox…</div>;
+      const rows = d.results || [];
+      const ack = (r) => {
+        setBusy(r.id);
+        return api.acknowledgeResult(r.id, notes[r.id] || '')
+          .then(() => { setBusy(''); load(); })
+          .catch(e => { setBusy(''); setErr(e.message); });
+      };
+      const tone = { critical: 'bg-red-50 text-red-700 border-red-200', abnormal: 'bg-amber-50 text-amber-800 border-amber-200', normal: 'bg-stone-50 text-stone-600 border-stone-200' };
+      return (
+        <div className="p-4 lg:p-7">
+          <div className="card mb-4">
+            <div className="card-h">
+              <h2>Results waiting for review</h2>
+              <span className="chip bg-primary-50 text-primary">{rows.length}</span>
+            </div>
+            <div className="p-4 text-sm">
+              {rows.length === 0 && <p className="text-stone-500">Nothing is waiting on you.</p>}
+              {rows.map(r => (
+                <div key={r.id} className={`py-2.5 px-3 mb-2 rounded border ${tone[r.interpretation] || tone.normal}`}>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="font-semibold text-[13px]">
+                      {(d.interpretationLabels && d.interpretationLabels[r.interpretation]) || r.interpretation}
+                      {r.clientName ? ` · ${r.clientName}` : ''}
+                      {r.orderReference ? ` · ${r.orderReference}` : ''}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      {r.escalated && <span className="chip bg-red-600 text-white">escalated</span>}
+                      {r.unmatched && <span className="chip bg-white text-stone-600 border border-stone-200">no matching order</span>}
+                    </div>
+                  </div>
+                  <div className="text-xs mt-0.5">{r.summary}</div>
+                  <div className="text-[11px] mt-0.5 opacity-80">
+                    {r.performedBy} · result dated {r.resultDate} · received {fmtTs(r.receivedAt)}
+                    {r.routeTo && r.routeTo.name ? ` · routed to ${r.routeTo.name}${r.routeTo.via === 'authorizing_provider' ? ' (authorizing provider on the standing order)' : ''}` : ''}
+                    {r.document && !r.document.emrFiled ? ' · NOT filed in the chart' : ''}
+                  </div>
+                  {r.canAcknowledge ? (
+                    <div className="grid gap-1.5 mt-2">
+                      {r.followUpRequired && (
+                        <input className="inp" placeholder="What are you doing about it? (required)"
+                          value={notes[r.id] || ''} onChange={e => setNotes({ ...notes, [r.id]: e.target.value })} />
+                      )}
+                      <div className="flex justify-end">
+                        <button className="btn !py-1.5" disabled={busy === r.id || (r.followUpRequired && !(notes[r.id] || '').trim())}
+                          onClick={() => ack(r)}>{busy === r.id ? 'Recording…' : 'Acknowledge'}</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-[11px] mt-1.5 opacity-80">
+                      Clinically acknowledging a {r.interpretation} result is a provider's. It stays here until one does.
+                    </p>
+                  )}
+                </div>
+              ))}
+              <p className="text-[10.5px] text-stone-400 mt-2">
+                An unacknowledged critical result escalates to the office after {d.thresholds && d.thresholds.criticalHours} hours;
+                an abnormal one after {d.thresholds && d.thresholds.abnormalBusinessDays} business days.
+              </p>
+            </div>
+          </div>
+          {(d.escalations || []).length > 0 && (
+            <div className="card">
+              <div className="card-h"><h2>Escalated — nobody has answered these</h2><span className="chip bg-red-600 text-white">{d.escalations.length}</span></div>
+              <div className="p-4 text-sm">
+                {d.escalations.map(e => (
+                  <div key={e.id} className="py-1.5 border-b border-stone-100 last:border-0 text-xs">
+                    <b>{e.interpretation}</b>{e.orderReference ? ` · ${e.orderReference}` : ''} · received {fmtTs(e.receivedAt)} ·
+                    past its {e.thresholdDescription} · routed to {(e.routeTo && e.routeTo.name) || 'nobody'}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    // ══════════════════════════════════════════════════════════════════════
+    // SESSION 4.10 — OVERDUE ORDERS: THE LOST FAX
+    //
+    // The failure mode of a manual workflow, and the harm is not that a fax was
+    // lost — it is that nobody noticed. An order sent and never answered looks
+    // exactly like one working its way through a lab, so the recipient and the
+    // number it went to are on the row: the point of this screen is that
+    // somebody can pick up the phone.
+    // ══════════════════════════════════════════════════════════════════════
+    const OverdueOrders = () => {
+      const [d, setD] = useState(null);
+      const [err, setErr] = useState('');
+      useEffect(() => { api.overdueOrders().then(r => { setD(r); setErr(''); }).catch(e => setErr(e.message)); }, []);
+      if (err) return <div className="p-7"><p className="text-red-600 text-sm">{err}</p></div>;
+      if (!d) return <div className="p-10 text-stone-400 text-sm">Loading…</div>;
+      const rows = d.orders || [];
+      return (
+        <div className="p-4 lg:p-7">
+          <div className="card">
+            <div className="card-h"><h2>Sent and never answered</h2><span className="chip bg-amber-50 text-amber-800">{rows.length}</span></div>
+            <div className="p-4 text-sm">
+              {rows.length === 0 && <p className="text-stone-500">Nothing is overdue.</p>}
+              {rows.map(o => (
+                <div key={o.id} className="py-2 border-b border-stone-100 last:border-0">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="font-semibold text-[13px]">
+                      {o.orderType} · {o.clientName || o.clientId} {o.orderReference ? <span className="text-stone-500">· {o.orderReference}</span> : null}
+                    </div>
+                    <span className="chip bg-amber-50 text-amber-800">{o.ageDays} days · threshold {o.thresholdDays}</span>
+                  </div>
+                  <div className="text-xs text-stone-500">{(o.tests || []).join(', ')}</div>
+                  <div className="text-xs text-stone-600 mt-0.5">
+                    Sent {fmtTs(o.sentAt)} to <b>{o.recipientName || 'an unnamed recipient'}</b>
+                    {o.recipientFax ? <span> at <b>{String(o.recipientFax).replace(/(\d{3})(\d{3})(\d{4})/, '($1) $2-$3')}</b></span> : null}
+                    {o.orderingClinician && o.orderingClinician.name ? ` · ordered by ${o.orderingClinician.name}` : ''}
+                  </div>
+                </div>
+              ))}
+              <p className="text-[10.5px] text-stone-400 mt-2">
+                Thresholds: {Object.entries(d.thresholds || {}).map(([k, v]) => `${k} ${v}d`).join(' · ')}.
+              </p>
+            </div>
+          </div>
         </div>
       );
     };
@@ -1810,13 +2237,15 @@
                 {d.prescriptions.length === 0 && <p className="text-xs text-stone-400">None recorded on this encounter.</p>}
                 {d.prescriptions.map(r => (
                   <div key={r.id} className="py-1.5 border-b border-stone-100 last:border-0">
-                    <div className="font-semibold text-[13px]">{r.drug} {r.dose} · {r.route} · {r.frequency} <span className="chip bg-stone-100 text-stone-600 ml-1">{r.kind}</span></div>
+                    <div className="font-semibold text-[13px]">{r.drug} {r.dose} · {r.route} · {r.frequency} <span className="chip bg-stone-100 text-stone-600 ml-1">{r.kind}</span>
+                      {r.schedule && r.schedule !== 'non_controlled' && <span className="chip bg-amber-50 text-amber-800 ml-1">{r.schedule === 'unclassified' ? 'schedule not recorded' : r.schedule}</span>}
+                    </div>
                     <div className="text-xs text-stone-500">qty {r.quantity} · refills {r.refills} · {r.date} · {npiLabel(r.prescriber)}{r.emrMedicationId ? ' · on the OpenEMR med list' : (r.emrWriteError ? ' · OpenEMR med-list write failed' : '')} · <b>not transmitted</b></div>
                     {r.instructions && <div className="text-xs text-stone-500">{r.instructions}</div>}
                   </div>
                 ))}
                 {!locked && !canPrescribe && <p className="text-[11px] text-stone-400 mt-2">Prescribing is a provider's — your credential can read what was prescribed but not add to it.</p>}
-                {showRx && !locked && canPrescribe && <RxForm routes={d.rxRoutes} busy={busy === 'rx'} onSave={(f) => run('rx', () => api.addRx(patient.id, euuid, f)).then(() => setShowRx(false))} />}
+                {showRx && !locked && canPrescribe && <RxForm routes={d.rxRoutes} schedules={d.rxSchedules} scheduleLabels={d.rxScheduleLabels} prescriber={d.prescriber} busy={busy === 'rx'} onSave={(f) => run('rx', () => api.addRx(patient.id, euuid, f)).then(() => setShowRx(false))} />}
                 <p className="text-[10.5px] text-stone-400 mt-2">Record only — e-prescribing is out of scope; transmission continues as today.</p>
               </div>
             </div>
@@ -1824,27 +2253,66 @@
               <div className="card-h"><h2>Orders</h2>{!locked && (canOrderDirect || canOrderStanding) && <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={() => setShowOrder(v => !v)}>{showOrder ? 'Close' : '+ Record order'}</button>}</div>
               <div className="p-4 text-sm">
                 {d.orders.length === 0 && <p className="text-xs text-stone-400">None recorded on this encounter.</p>}
-                {d.orders.map(o => (
+                {d.orders.map(o => {
+                  // A referral's lifecycle is not a lab's, so the transitions
+                  // come from the map the SERVER chose for this order's type.
+                  const trans = (o.orderType === 'referral' ? d.referralTransitions : d.orderTransitions) || {};
+                  const headline = o.orderType === 'referral'
+                    ? `Referral · ${(o.referral && o.referral.specialty) || ''}${o.referral && o.referral.receivingPractice ? ` → ${o.referral.receivingPractice}` : ''}`
+                    : o.orderType === 'dme'
+                      ? `DME · ${(o.dme && o.dme.itemDescription) || ''}${o.dme && o.dme.quantity ? ` ×${o.dme.quantity}` : ''}`
+                      : `${o.orderType} · ${o.priority} — ${(o.tests || []).join(', ')}`;
+                  return (
                   <div key={o.id} className="py-1.5 border-b border-stone-100 last:border-0">
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="font-semibold text-[13px]">{o.orderType} · {o.priority} — {o.tests.join(', ')}</div>
-                      <span className={`chip ${o.status === 'resulted' ? 'bg-emerald-50 text-emerald-700' : o.status === 'cancelled' ? 'bg-stone-100 text-stone-500' : 'bg-primary-50 text-primary'}`}>{ORDER_LABEL[o.status] || o.status}</span>
+                      <div className="font-semibold text-[13px]">{headline}</div>
+                      <span className={`chip ${['resulted', 'completed'].includes(o.status) ? 'bg-emerald-50 text-emerald-700' : o.status === 'cancelled' ? 'bg-stone-100 text-stone-500' : 'bg-primary-50 text-primary'}`}>{ORDER_LABEL[o.status] || o.status}</span>
                     </div>
-                    <div className="text-xs text-stone-500">dx {o.diagnosisCodes.join(', ')} · {npiLabel(o.orderingClinician)} · {fmtTs(o.createdAt)}</div>
+                    <div className="text-xs text-stone-500">
+                      dx {o.diagnosisCodes.join(', ')} · {npiLabel(o.orderingClinician)} · {fmtTs(o.createdAt)}
+                      {o.orderReference && <span> · <b className="text-stone-700">{o.orderReference}</b></span>}
+                    </div>
+                    {o.orderType === 'dme' && o.dme && o.dme.requiresWOPD &&
+                      <div className="text-[11px] font-semibold text-amber-800 mt-0.5">Written order prior to delivery — the supplier may not deliver before they hold it.</div>}
+                    {o.orderType === 'referral' && o.referral && o.referral.priorAuthRequired &&
+                      <div className="text-[11px] text-amber-800 mt-0.5">Prior authorization required{o.referral.priorAuthNumber ? ` — ${o.referral.priorAuthNumber}` : ' — not yet obtained'}.</div>}
+                    {o.referral && o.referral.appointmentDate &&
+                      <div className="text-[11px] text-stone-600 mt-0.5">Appointment {o.referral.appointmentDate}.</div>}
+                    {o.medicareEnrollmentAcknowledgment &&
+                      <div className="text-[11px] text-amber-800 mt-0.5">Placed with an acknowledged 42 CFR 424.507 warning — {o.medicareEnrollmentAcknowledgment.reason}</div>}
+                    <OrderActions order={o} channels={d.sendChannels} channelLabels={d.sendChannelLabels}
+                      defaultChannel={d.defaultSendChannel} faxChannels={d.faxSendChannels}
+                      interpretations={d.resultInterpretations} busy={busy === `o${o.id}`}
+                      onSent={(body) => run(`o${o.id}`, () => api.markOrderSent(o.id, body))}
+                      onScheduled={(date) => run(`o${o.id}`, () => api.markReferralScheduled(o.id, date))}
+                      onResult={(r) => {
+                        const fd = new FormData();
+                        fd.append('file', r.file);
+                        ['interpretation', 'resultDate', 'performedBy', 'summary'].forEach(k => fd.append(k, r[k]));
+                        return run(`o${o.id}`, () => api.attachResult(o.id, fd));
+                      }} />
                     <div className="flex flex-wrap gap-1.5 mt-1">
-                      {canAdvanceOrders && (d.orderTransitions[o.status] || []).map(n => (
+                      {canAdvanceOrders && (trans[o.status] || [])
+                        // 4.10: only the statuses that carry NO evidence are
+                        // clickable. 'sent', 'scheduled', 'resulted' and
+                        // 'completed' have their own controls above; offering a
+                        // button the server refuses is worse than no button.
+                        .filter(n => n === 'cancelled')
+                        .map(n => (
                         <button key={n} className="chip border bg-white text-primary border-stone-200" disabled={busy === `o${o.id}`}
-                          onClick={() => run(`o${o.id}`, () => api.orderStatus(o.id, n))}>mark {ORDER_LABEL[n].toLowerCase()}</button>
+                          onClick={() => run(`o${o.id}`, () => api.orderStatus(o.id, n))}>mark {(ORDER_LABEL[n] || n).toLowerCase()}</button>
                       ))}
                     </div>
                   </div>
-                ))}
+                  );
+                })}
                 {showOrder && !locked && (canOrderDirect || canOrderStanding) &&
                   <OrderForm diagnoses={diagnoses} types={d.orderTypes} priorities={d.orderPriorities} busy={busy === 'order'}
+                    docTypes={d.documentOrderTypes}
                     standingOrders={standingOrders} requireStandingOrder={!canOrderDirect}
                     onSave={(f) => run('order', () => api.addOrder(patient.id, euuid, f)).then(() => setShowOrder(false))} />}
                 {!locked && !canOrderDirect && canOrderStanding && <p className="text-[11px] text-stone-400 mt-2">You place orders under a signed standing order. Pick the protocol, then the test it permits.</p>}
-                <p className="text-[10.5px] text-stone-400 mt-2">Transmission is manual (Quest portal / requisition); advance the status here as it moves. Status can still be advanced after the encounter is signed.</p>
+                <p className="text-[10.5px] text-stone-400 mt-2">The app generates; a person transmits. Open the requisition, fax it from Doximity, then record the send here — that is what moves an order to sent. Attaching the result is what moves it to resulted. Both still work after the encounter is signed.</p>
               </div>
             </div>
           </div>
@@ -2076,7 +2544,7 @@
       const [linkCandidates, setLinkCandidates] = useState([]);
       const [err, setErr] = useState('');
       const [listOpen, setListOpen] = useState(true);
-      const [view, setView] = useState('charts'); // 'charts' | 'schedule' (4.2) | 'queue' (4.4)
+      const [view, setView] = useState('charts'); // 'charts' | 'schedule' (4.2) | 'queue' (4.4) | 'results' | 'overdue' (4.10)
       const [hpApptEid, setHpApptEid] = useState(null); // H&P opened from an appointment
       const [encTarget, setEncTarget] = useState(null); // encounter to open on the Encounters tab (4.4)
 
@@ -2192,7 +2660,7 @@
             <div className="bg-white border-b border-stone-200 px-4 lg:px-7 py-3 flex items-center justify-between gap-3">
               <div className="flex items-center gap-3">
                 <button className="lg:hidden btn ghost !px-2.5 !py-1.5" onClick={() => setListOpen(true)}><i className="ti ti-users" /></button>
-                <div className="serif text-lg text-primary font-semibold">{view === 'schedule' ? 'Schedule' : view === 'queue' ? 'Coding Queue' : 'Patient Chart'}</div>
+                <div className="serif text-lg text-primary font-semibold">{view === 'schedule' ? 'Schedule' : view === 'queue' ? 'Coding Queue' : view === 'results' ? 'Results Inbox' : view === 'overdue' ? 'Overdue Orders' : 'Patient Chart'}</div>
                 <div className="flex rounded-lg border border-stone-200 overflow-hidden ml-1">
                   <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'charts' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
                     onClick={() => setView('charts')}><i className="ti ti-folder-open mr-1" />Charts</button>
@@ -2200,6 +2668,10 @@
                     onClick={() => { setView('schedule'); setListOpen(false); }}><i className="ti ti-calendar-week mr-1" />Schedule</button>
                   <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'queue' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
                     onClick={() => { setView('queue'); setListOpen(false); }}><i className="ti ti-receipt mr-1" />Coding queue</button>
+                  <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'results' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
+                    onClick={() => { setView('results'); setListOpen(false); }}><i className="ti ti-flask mr-1" />Results</button>
+                  <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'overdue' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
+                    onClick={() => { setView('overdue'); setListOpen(false); }}><i className="ti ti-clock-exclamation mr-1" />Overdue</button>
                 </div>
               </div>
               <div className="flex items-center gap-2">
@@ -2306,6 +2778,8 @@
             {view === 'queue' && (
               <CodingQueueView onOpenEncounter={(clientId, euuid) => openChartById(clientId, { tab: 'encounters', encounterUuid: euuid })} />
             )}
+            {view === 'results' && <ResultsInbox />}
+            {view === 'overdue' && <OverdueOrders />}
             {view === 'schedule' && (
               <ScheduleView user={user} patients={patients || []}
                 onOpenChart={(clientId) => openChartById(clientId)}

@@ -1458,6 +1458,14 @@
         familyIsPoa: false, // family role: designated Power of Attorney (client-equivalent portal access)
         openEmrProviderId: '', // clinician: OpenEMR provider (numeric id) their calendar maps to (4.2)
         npi: '', // clinician: individual NPI, stamped on every clinical write (4.4 attribution)
+        // ── Session 4.10 ── WHAT this prescriber is, and what they are
+        // registered and enrolled to do. `clinicalRole: 'provider'` covers an MD
+        // and an NP alike and cannot tell them apart; `licenseLevel` is free
+        // text that gates nothing. So both are structured, admin-set, and
+        // nothing in the app infers either.
+        prescriberCredential: '',
+        deaNumber: '', deaSchedules: [], deaExpiresAt: '',
+        medicareEnrollment: { status: '', effectiveDate: '' },
         // What WE PAY a caregiver — never the same number as the client's
         // billed rate below; the gap between them is the margin.
         payRate: '',
@@ -1616,6 +1624,20 @@
           familyIsPoa: user.familyIsPoa || false,
           openEmrProviderId: user.openEmrProviderId || '',
           npi: user.npi || '',
+          // Session 4.10 — round-tripped for the same reason clinicalRole is: a
+          // field the form does not carry is a field the save wipes, and wiping
+          // a DEA registration silently stops a prescriber recording a
+          // controlled substance with nobody having decided that.
+          prescriberCredential: user.prescriberCredential || '',
+          deaNumber: user.deaNumber || '',
+          deaSchedules: Array.isArray(user.deaSchedules) ? user.deaSchedules : [],
+          deaExpiresAt: user.deaExpiresAt || '',
+          medicareEnrollment: {
+            status: (user.medicareEnrollment && user.medicareEnrollment.status) || '',
+            effectiveDate: (user.medicareEnrollment && user.medicareEnrollment.effectiveDate) || ''
+          },
+          medicareEnrollmentVerified: (user.medicareEnrollment && user.medicareEnrollment.verifiedAt) || null,
+          medicareEnrollmentVerifiedBy: (user.medicareEnrollment && user.medicareEnrollment.verifiedBy) || null,
           payRate: user.payRate === null || user.payRate === undefined ? '' : String(user.payRate),
           clientPayRates: user.clientPayRates || {},
           // Read-only on EDIT: changing a signed rate has consent consequences
@@ -2156,6 +2178,92 @@
                             placeholder="10-digit NPI"
                             className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" />
                           <p className="text-xs text-gray-500 mt-1">Stamped as the rendering clinician on every note, order, prescription and signed encounter (Session 4.4 attribution). Leave blank if not credentialed.</p>
+                        </div>
+                      )}
+
+                      {/* ── Session 4.10: prescribing credential + DEA ──────
+                          Georgia APRNs may not prescribe Schedule I or II
+                          substances, and `clinicalRole: 'provider'` cannot tell
+                          an NP from an MD. Nothing is parsed out of the licence
+                          text: this is the field the guard reads, and absent
+                          means no prescription can be recorded at all. */}
+                      {formData.clinicalRole === 'provider' && (
+                        <div className="mt-3 p-3 bg-amber-50 rounded-lg">
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Prescriber credential</label>
+                          <select value={formData.prescriberCredential}
+                            onChange={(e) => setFormData({ ...formData, prescriberCredential: e.target.value })}
+                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
+                            <option value="">Not on file — cannot prescribe</option>
+                            {[['MD', 'MD — physician'], ['DO', 'DO — physician'], ['NP', 'NP / APRN — nurse practitioner'], ['PA', 'PA — physician associate']]
+                              .map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                          </select>
+                          <p className="text-xs text-gray-500 mt-1">
+                            A Georgia NP or PA may not prescribe a Schedule I or II substance. Absent, no prescription can
+                            be recorded at all — the app does not guess a credential from a licence string.
+                          </p>
+
+                          <label className="block text-sm font-medium text-gray-700 mb-1 mt-3">DEA number</label>
+                          <input type="text" maxLength={9} value={formData.deaNumber}
+                            onChange={(e) => setFormData({ ...formData, deaNumber: e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 9) })}
+                            placeholder="Two letters and seven digits"
+                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" />
+                          <p className="text-xs text-gray-500 mt-1">Required for any controlled prescription. The last digit is a checksum and is validated — a transposed digit is somebody else's registration.</p>
+
+                          <label className="block text-sm font-medium text-gray-700 mb-1 mt-3">Schedules the registration covers</label>
+                          <div className="flex flex-wrap gap-3">
+                            {['CII', 'CIII', 'CIV', 'CV'].map(sc => (
+                              <label key={sc} className="flex items-center gap-1.5 text-sm">
+                                <input type="checkbox" checked={(formData.deaSchedules || []).includes(sc)}
+                                  onChange={(e) => setFormData({
+                                    ...formData,
+                                    deaSchedules: e.target.checked
+                                      ? [...(formData.deaSchedules || []), sc]
+                                      : (formData.deaSchedules || []).filter(x => x !== sc)
+                                  })} />
+                                {sc}
+                              </label>
+                            ))}
+                          </div>
+
+                          <label className="block text-sm font-medium text-gray-700 mb-1 mt-3">DEA expires</label>
+                          <input type="date" value={formData.deaExpiresAt}
+                            onChange={(e) => setFormData({ ...formData, deaExpiresAt: e.target.value })}
+                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" />
+                        </div>
+                      )}
+
+                      {/* ── Session 4.10: 42 CFR 424.507 ───────────────────
+                          When the practitioner who ORDERED a lab test, imaging
+                          study or DMEPOS item is not enrolled in Medicare in
+                          approved status, the LAB's or SUPPLIER's claim is
+                          denied. Not GFC's claim — which is why it gets
+                          forgotten — and still GFC's problem. Admin-maintained;
+                          nothing infers it. */}
+                      {formData.hasClinicalAccess && (
+                        <div className="mt-3 p-3 bg-blue-50 rounded-lg">
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Medicare enrolment (42 CFR 424.507)</label>
+                          <select value={(formData.medicareEnrollment || {}).status || ''}
+                            onChange={(e) => setFormData({ ...formData, medicareEnrollment: { ...(formData.medicareEnrollment || {}), status: e.target.value } })}
+                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
+                            <option value="">Not recorded</option>
+                            <option value="approved">Enrolled — approved</option>
+                            <option value="pending">Enrolment pending</option>
+                            <option value="none">Not enrolled</option>
+                            <option value="opted_out">Opted out of Medicare</option>
+                          </select>
+                          <label className="block text-sm font-medium text-gray-700 mb-1 mt-3">Effective date</label>
+                          <input type="date" value={(formData.medicareEnrollment || {}).effectiveDate || ''}
+                            onChange={(e) => setFormData({ ...formData, medicareEnrollment: { ...(formData.medicareEnrollment || {}), effectiveDate: e.target.value } })}
+                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" />
+                          <p className="text-xs text-gray-500 mt-1">
+                            Until this reads approved (or opted out), their lab, imaging and DME orders for Medicare
+                            patients carry a warning the clinician has to acknowledge with a reason.
+                          </p>
+                          {formData.medicareEnrollmentVerified && (
+                            <p className="text-xs text-blue-800 mt-1">
+                              Last verified {new Date(formData.medicareEnrollmentVerified).toLocaleDateString()} by {formData.medicareEnrollmentVerifiedBy || 'an admin'}.
+                            </p>
+                          )}
                         </div>
                       )}
                     </div>

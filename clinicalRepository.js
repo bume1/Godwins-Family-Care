@@ -986,12 +986,29 @@ const buildPrescription = ({ id, clientId, puuid, encounterUuid, input, actor, a
   if (!Number.isInteger(refills) || refills < 0 || refills > 99) return { error: 'Refills must be 0–99', code: 'RX_BAD_REFILLS' };
   const kind = RX_KINDS.includes(i.kind) ? i.kind : 'new';
   const date = isDateStr(i.date) ? i.date : new Date().toISOString().slice(0, 10);
+  // ── Session 4.10: the schedule and the prescriber's credential ──────────
+  // `authority` is the answer controlledSubstances.evaluatePrescription gave the
+  // ROUTE. It is required here rather than optional: the whole point of Scope B
+  // is that a prescription cannot be recorded without the scope check having
+  // run, and a builder that quietly accepts a missing verdict is a builder a
+  // later route can call without one.
+  const auth = i.authority;
+  if (!auth || !auth.schedule || !auth.prescriberCredential) {
+    return { error: 'A prescription requires a declared schedule and a prescriber credential', code: 'RX_NO_SCHEDULE' };
+  }
   return {
     prescription: {
       id, clientId, puuid, encounterUuid: String(encounterUuid),
       kind, drug: drug.slice(0, 150), dose: dose.slice(0, 60), route, frequency: frequency.slice(0, 100),
       quantity, refills, date,
       instructions: String(i.instructions || '').trim().slice(0, 1000),
+      schedule: auth.schedule,
+      prescriberCredential: auth.prescriberCredential,
+      // The DEA number is recorded because a controlled prescription is written
+      // UNDER a registration and the chart has to say which one. Not for a
+      // non-controlled drug, where it is not part of the record.
+      deaNumber: (auth.dea && auth.dea.deaNumber) || null,
+      pdmpAttestation: auth.pdmpAttestation || null,
       prescriber: actorRecord(actor),
       transmission: 'none', // e-prescribing is out of scope by owner decision
       emrMedicationId: null, // OpenEMR medication-list row id once written
@@ -1027,7 +1044,15 @@ const buildPrescription = ({ id, clientId, puuid, encounterUuid, input, actor, a
 // so the sig is assembled first and the note is trimmed from the SIG end: the
 // prescriber stamp is attribution and must survive truncation intact.
 const prescriptionToEmrRow = (rx) => {
-  const tail = ` | ${rx.kind === 'refill' ? 'Refill' : 'New Rx'} | Prescriber: ${(rx.prescriber && rx.prescriber.name) || 'unknown'} (NPI ${(rx.prescriber && rx.prescriber.npi) || 'none'})`;
+  // 4.10: the schedule, the credential and the PDMP check ride in the note too.
+  // A controlled prescription recorded in the chart without its schedule is a
+  // record that does not say what it was, and the note is the only field on this
+  // instance that reliably persists free text (drug_route / drug_interval are
+  // empty option lists — see G5b below).
+  const sched = rx.schedule && rx.schedule !== 'non_controlled' ? ` | ${rx.schedule}` : '';
+  const cred = rx.prescriberCredential ? ` ${rx.prescriberCredential}` : '';
+  const pdmp = rx.pdmpAttestation && rx.pdmpAttestation.checked ? ` | PDMP checked ${rx.pdmpAttestation.checkedOn}` : '';
+  const tail = ` | ${rx.kind === 'refill' ? 'Refill' : 'New Rx'}${sched} | Prescriber: ${(rx.prescriber && rx.prescriber.name) || 'unknown'}${cred} (NPI ${(rx.prescriber && rx.prescriber.npi) || 'none'})${pdmp}`;
   const sig = [rx.dose, rx.route, rx.frequency].filter(Boolean).join(' ');
   const head = [sig ? `Sig: ${sig}` : null, rx.instructions].filter(Boolean).join('. ');
   return {
@@ -1259,9 +1284,15 @@ const buildOrderPayload = (order, { providerId } = {}) => ({
 });
 
 // ---- Order capture (Scope D — labs / imaging / procedures; no HL7) ----
-const ORDER_TYPES = ['lab', 'imaging', 'procedure'];
+//
+// SESSION 4.10 widened this. ORDER_TYPES now carries `referral` and `dme`, which
+// are DOCUMENT orders: they carry a payload rather than a list of tests, they are
+// built by their own builders in orderRequisitions.js, and a referral has its own
+// lifecycle. `TEST_ORDER_TYPES` is what `buildOrder` below still owns.
+const TEST_ORDER_TYPES = ['lab', 'imaging', 'procedure'];
+const ORDER_TYPES = [...TEST_ORDER_TYPES, 'referral', 'dme'];
 const ORDER_PRIORITIES = ['routine', 'urgent', 'stat'];
-const ORDER_STATUSES = ['ordered', 'sent', 'resulted', 'cancelled'];
+const ORDER_STATUSES = ['ordered', 'sent', 'scheduled', 'resulted', 'completed', 'cancelled'];
 // Status is advanced manually by staff. Terminal states never move.
 const ORDER_TRANSITIONS = Object.freeze({
   ordered: ['sent', 'resulted', 'cancelled'],
@@ -1269,9 +1300,40 @@ const ORDER_TRANSITIONS = Object.freeze({
   resulted: [],
   cancelled: []
 });
-const buildOrder = ({ id, clientId, puuid, encounterUuid, input, actor, encounterDiagnoses, at }) => {
+// A REFERRAL IS NOT A LAB. It is sent, the specialist's office schedules it, and
+// it completes when the consult note comes back. Declared in orderRequisitions.js
+// with the rest of the referral payload; resolved here so every consumer asks one
+// function which transitions apply to the order in front of it rather than
+// assuming the lab map.
+const transitionsFor = (order) => {
+  if (order && order.orderType === 'referral') return require('./orderRequisitions').REFERRAL_TRANSITIONS;
+  return ORDER_TRANSITIONS;
+};
+
+// ── Session 4.10: THREE STATUSES ARE NO LONGER CLICKABLE ──────────────────
+// `sent` used to be a bare button. Clicking it recorded that somebody believed
+// the order had gone — not where, not to which fax number, not on what channel.
+// `resulted` was the same: a label with no result behind it. `scheduled` needs an
+// appointment date or it says nothing.
+//
+// Each of those now has a route that captures the EVIDENCE, and the generic
+// status route refuses them BY NAME rather than dropping them as unknown —
+// naming the route to use is the difference between a refusal somebody can act
+// on and one that reads as a bug.
+const EVIDENCE_BACKED_STATUSES = Object.freeze({
+  sent: 'Record the send with "Mark as faxed", which captures who it went to, the fax number and the channel.',
+  resulted: 'Attach the result document — an order cannot be marked resulted without one.',
+  completed: 'A referral completes when its consult note is attached.',
+  scheduled: 'Record the appointment date with "Mark as scheduled".'
+});
+
+const buildOrder = ({ id, clientId, puuid, encounterUuid, input, actor, encounterDiagnoses, at, orderReference }) => {
   const i = input || {};
-  if (!ORDER_TYPES.includes(i.orderType)) return { error: `orderType must be one of ${ORDER_TYPES.join(', ')}`, code: 'ORDER_BAD_TYPE' };
+  if (!TEST_ORDER_TYPES.includes(i.orderType)) {
+    return ORDER_TYPES.includes(i.orderType)
+      ? { error: `A ${i.orderType} order carries its own details rather than a list of tests — it is built by its own route.`, code: 'ORDER_WRONG_BUILDER' }
+      : { error: `orderType must be one of ${ORDER_TYPES.join(', ')}`, code: 'ORDER_BAD_TYPE' };
+  }
   const tests = sanitizeStringArray(i.tests, 200, 30);
   if (!tests.length) return { error: 'At least one test / study is required', code: 'ORDER_NO_TESTS' };
   const priority = ORDER_PRIORITIES.includes(i.priority) ? i.priority : 'routine';
@@ -1285,10 +1347,16 @@ const buildOrder = ({ id, clientId, puuid, encounterUuid, input, actor, encounte
     order: {
       id, clientId, puuid, encounterUuid: String(encounterUuid),
       orderType: i.orderType, tests, priority, diagnosisCodes,
+      // 4.10: the reference printed on the requisition. It is how an inbound fax
+      // finds its way back to this order, so it is minted with the order rather
+      // than at print time — a reference that changes between two printings
+      // cannot match anything.
+      orderReference: orderReference || require('./orderRequisitions').buildOrderReference(),
       notes: String(i.notes || '').trim().slice(0, 2000),
       orderingClinician: actorRecord(actor),
       status: 'ordered',
       statusHistory: [{ status: 'ordered', at: now, by: actorRecord(actor), note: null }],
+      sends: [],
       transmission: 'manual', // Quest HL7 deferred by owner decision
       createdAt: now,
       updatedAt: now
@@ -1298,7 +1366,11 @@ const buildOrder = ({ id, clientId, puuid, encounterUuid, input, actor, encounte
 const advanceOrderStatus = (order, next, actor, note, at) => {
   if (!order) return { error: 'Order not found', code: 'ORDER_NOT_FOUND' };
   if (!ORDER_STATUSES.includes(next)) return { error: `Status must be one of ${ORDER_STATUSES.join(', ')}`, code: 'ORDER_BAD_STATUS' };
-  const allowed = ORDER_TRANSITIONS[order.status] || [];
+  // Refused BY NAME, with the route that does carry the evidence.
+  if (EVIDENCE_BACKED_STATUSES[next]) {
+    return { error: EVIDENCE_BACKED_STATUSES[next], code: 'ORDER_STATUS_NEEDS_EVIDENCE', status: 409 };
+  }
+  const allowed = transitionsFor(order)[order.status] || [];
   if (!allowed.includes(next)) {
     return { error: `An order that is "${order.status}" cannot move to "${next}"${allowed.length ? ` (allowed: ${allowed.join(', ')})` : ' — it is final'}`, code: 'ORDER_BAD_TRANSITION' };
   }
@@ -1640,10 +1712,13 @@ module.exports = {
   buildChargePayloads,
   buildOrderPayload,
   orderStatusToEmr,
+  TEST_ORDER_TYPES,
   ORDER_TYPES,
   ORDER_PRIORITIES,
   ORDER_STATUSES,
   ORDER_TRANSITIONS,
+  transitionsFor,
+  EVIDENCE_BACKED_STATUSES,
   buildOrder,
   advanceOrderStatus,
   buildCandidateDiagnoses,

@@ -175,7 +175,16 @@ test('addenda carry their own signer + timestamp and reject empty text', () => {
 
 // ---- 5. Rx + orders ----
 test('prescriptions are validated, stamped with the prescriber, and marked not transmitted', () => {
-  const bad = (input) => R.buildPrescription({ id: 'rx', clientId: 'c', puuid: 'p', encounterUuid: 'e', input, actor: FNP });
+  // Session 4.10: `authority` is the verdict controlledSubstances gave the
+  // ROUTE. It is required, so these fixtures carry a non-controlled one — the
+  // field checks below are about the drug, the dose and the route, not about
+  // scheduling, and the scheduling rules have their own file.
+  const AUTH = { schedule: 'non_controlled', prescriberCredential: 'NP', dea: null, pdmpAttestation: null };
+  const bad = (input) => R.buildPrescription({ id: 'rx', clientId: 'c', puuid: 'p', encounterUuid: 'e', input: { ...input, authority: AUTH }, actor: FNP });
+  // A prescription cannot be built without one. The whole point of Scope B is
+  // that the scope check has RUN; a builder that quietly accepts a missing
+  // verdict is a builder a later route can call without one.
+  assert.equal(R.buildPrescription({ id: 'rx', clientId: 'c', puuid: 'p', encounterUuid: 'e', input: { drug: 'Metformin', dose: '500 mg', frequency: 'BID', route: 'oral', quantity: 60 }, actor: FNP }).code, 'RX_NO_SCHEDULE');
   assert.equal(bad({}).code, 'RX_NO_DRUG');
   assert.equal(bad({ drug: 'Metformin' }).code, 'RX_NO_DOSE');
   assert.equal(bad({ drug: 'Metformin', dose: '500 mg' }).code, 'RX_NO_FREQUENCY');
@@ -220,6 +229,11 @@ test('orders require an encounter diagnosis and advance through gated statuses',
   const dx = R.buildEncounterDiagnoses(DX).diagnoses;
   const mk = (input) => R.buildOrder({ id: 'o-1', clientId: 'c', puuid: 'p', encounterUuid: 'e', input, actor: FNP, encounterDiagnoses: dx, at: '2026-09-04T10:00:00.000Z' });
   assert.equal(mk({ orderType: 'xray' }).code, 'ORDER_BAD_TYPE');
+  // Session 4.10: `referral` and `dme` ARE order types now, but they carry a
+  // payload rather than a list of tests, so this builder refuses them BY NAME
+  // and names the reason. Dropping them as unknown would read as a typo.
+  assert.equal(mk({ orderType: 'referral' }).code, 'ORDER_WRONG_BUILDER');
+  assert.equal(mk({ orderType: 'dme' }).code, 'ORDER_WRONG_BUILDER');
   assert.equal(mk({ orderType: 'lab' }).code, 'ORDER_NO_TESTS');
   assert.equal(mk({ orderType: 'lab', tests: ['A1c'] }).code, 'ORDER_NO_DIAGNOSIS');
   assert.equal(mk({ orderType: 'lab', tests: ['A1c'], diagnosisCodes: ['J45.909'] }).code, 'ORDER_DX_UNKNOWN');
@@ -228,14 +242,31 @@ test('orders require an encounter diagnosis and advance through gated statuses',
   assert.equal(o.transmission, 'manual');
   assert.equal(o.orderingClinician.npi, FNP.npi);
   assert.equal(o.statusHistory.length, 1);
-  const sent = R.advanceOrderStatus(o, 'sent', RN, 'faxed requisition', '2026-09-04T11:00:00.000Z').order;
-  assert.equal(sent.status, 'sent');
-  assert.equal(sent.statusHistory[1].by.name, 'Test Nurse');
-  assert.equal(sent.statusHistory[1].note, 'faxed requisition');
-  const resulted = R.advanceOrderStatus(sent, 'resulted', RN).order;
-  assert.equal(R.advanceOrderStatus(resulted, 'sent', RN).code, 'ORDER_BAD_TRANSITION');
-  assert.equal(R.advanceOrderStatus(R.advanceOrderStatus(o, 'cancelled', RN).order, 'sent', RN).code, 'ORDER_BAD_TRANSITION');
+  // ── SESSION 4.10 REPOINTED THIS, IT DID NOT DELETE IT ──────────────────
+  // This test used to advance an order to 'sent' and then to 'resulted' with a
+  // bare click. Both are now refused here BY NAME, because a bare click
+  // recorded that somebody BELIEVED the order had gone — not where it went, to
+  // which fax number, on what channel — and a 'resulted' label with no result
+  // behind it is a claim the chart cannot support. The rule this test protected
+  // (terminal states never move, an unknown status is refused) is unchanged and
+  // is still asserted below; what changed is which door reaches which status.
+  const needsEvidence = R.advanceOrderStatus(o, 'sent', RN, 'faxed requisition', '2026-09-04T11:00:00.000Z');
+  assert.equal(needsEvidence.code, 'ORDER_STATUS_NEEDS_EVIDENCE');
+  assert.match(needsEvidence.error, /Mark as faxed/, 'the refusal names the route that does carry the evidence');
+  assert.equal(R.advanceOrderStatus(o, 'resulted', RN).code, 'ORDER_STATUS_NEEDS_EVIDENCE');
+  assert.equal(R.advanceOrderStatus(o, 'scheduled', RN).code, 'ORDER_STATUS_NEEDS_EVIDENCE');
+  assert.equal(R.advanceOrderStatus(o, 'completed', RN).code, 'ORDER_STATUS_NEEDS_EVIDENCE');
+  // Cancelling is still a plain decision with no evidence to capture, so it is
+  // still this route's — and a cancelled order is still terminal.
+  const cancelled = R.advanceOrderStatus(o, 'cancelled', RN, 'patient declined').order;
+  assert.equal(cancelled.status, 'cancelled');
+  assert.equal(cancelled.statusHistory[1].by.name, 'Test Nurse');
+  assert.equal(cancelled.statusHistory[1].note, 'patient declined');
+  assert.equal(R.advanceOrderStatus(cancelled, 'cancelled', RN).code, 'ORDER_BAD_TRANSITION');
   assert.equal(R.advanceOrderStatus(o, 'lost', RN).code, 'ORDER_BAD_STATUS');
+  // Every order now carries the reference the requisition prints and an inbound
+  // fax is matched back by.
+  assert.match(o.orderReference, /^GFC-ORD-[34679ACDEFGHJKMNPQRTUVWXY]{6}$/);
 });
 
 // ---- 6. Coding assist T1 + T2 ----
@@ -395,7 +426,8 @@ test('G5: the prescriber stamp survives note truncation, the sig is what gets tr
     id: 'r1', clientId: 'c1', puuid: 'p1', encounterUuid: 'e1',
     input: {
       drug: 'Lisinopril', dose: '10 mg', route: 'oral', frequency: 'once daily',
-      quantity: 30, refills: 3, date: '2026-09-08', instructions: 'X'.repeat(900)
+      quantity: 30, refills: 3, date: '2026-09-08', instructions: 'X'.repeat(900),
+      authority: { schedule: 'non_controlled', prescriberCredential: 'NP', dea: null, pdmpAttestation: null }
     },
     actor: FNP
   }).prescription;
