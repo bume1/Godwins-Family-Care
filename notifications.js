@@ -50,6 +50,10 @@
 // ============================================================================
 
 const { renderGfcEmail } = require('./emailTemplates');
+// The reminder's copy lives with the rest of the reminder rules, not here: the
+// "Your visit" opening is load-bearing (see sendToClientSide) and it is tested
+// where the rule is declared.
+const reminders = require('./visitReminders');
 
 // Roles that receive staff-side PHC notices. Mirrors ENROLLMENT_STAFF_ROLES in
 // server.js — passed in rather than restated, so the two cannot drift.
@@ -348,6 +352,41 @@ function createNotifier(deps) {
     }
   }
 
+  // ---- 4d. The day-before reminder (Session 4.11) ---------------------------
+  //
+  // It goes out through THE SAME sendToClientSide path as the booking notice, so
+  // the recipient rules (the client plus a designated POA, never non-POA family),
+  // the unsubscribe honour, the house template and the transport-aware detail
+  // rule all apply unchanged. A second path would be a second set of all four.
+  //
+  // Everything it renders was SNAPSHOT AT BOOKING TIME. Nothing here reads
+  // OpenEMR, which is what makes a background send possible at all under
+  // per-clinician auth.
+  async function visitReminder({ reminder, orgPhone, actorId }) {
+    try {
+      const detail = transportAllowsDetail();
+      const copy = reminders.reminderCopy({ detail, when: reminder.when, orgPhone });
+      return await sendToClientSide({
+        clientId: reminder.clientId,
+        type: 'visit_reminder',
+        subject: copy.subject,
+        headline: copy.headline,
+        paragraphs: copy.paragraphs,
+        fields: visitFields(detail, { when: reminder.when, clinician: reminder.clinician, place: reminder.place }),
+        actorId,
+        // `${eid}:reminder` rather than the bare eid, for two reasons. It must not
+        // collide with the BOOKING notice's dedupe key — that would make a
+        // reminder look like a duplicate of the booking email and silently drop
+        // it. And it makes a second scan a no-op even if marking the row 'sent'
+        // failed, so a crash between the queue and the write cannot double-send.
+        entityId: `${reminder.eid}:reminder`
+      });
+    } catch (e) {
+      console.error('[APPT] reminder notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
   // ---- 5. Staff asked the client for documents (or chased them) ------------
   // This notice and the follow-up below used to go out through a raw sendEmail
   // call. Three things followed from that and none of them were intended: a
@@ -550,7 +589,7 @@ function createNotifier(deps) {
     documentUploaded, documentReviewed, consentSigned, carePlanCoSigned,
     documentsRequested, enrollmentFollowUp, enrollmentApproved,
     // clinical visits
-    appointmentBooked, appointmentRescheduled, appointmentCancelled
+    appointmentBooked, appointmentRescheduled, appointmentCancelled, visitReminder
   };
 }
 

@@ -1485,6 +1485,10 @@
 
       const selectedClinicalRole = clinicalRoleCatalog.find(r => r.value === formData.clinicalRole) || null;
       const pendingRoleReview = users.filter(u => u.clinicalRoleAutoAssigned && u.clinicalRole);
+      // Session 4.11 B2 — the same pattern, for the same reason: an owner item is
+      // only open for the owner once there is somewhere to do it. A console line
+      // is not where an admin works.
+      const missingPatientFacingCredential = users.filter(u => u.patientFacingCredentialMissing);
 
       const competencyFor = (task) => competencies.find(c => c.task === task) || null;
       const toggleCompetency = (task) => {
@@ -1874,6 +1878,28 @@
               </div>
             </div>
           )}
+          {/* Session 4.11 B2 — patients are told a name with no title */}
+          {missingPatientFacingCredential.length > 0 && (
+            <div className="bg-amber-50 border border-amber-300 p-4 rounded-xl">
+              <p className="font-semibold text-amber-900">
+                {missingPatientFacingCredential.length} clinician{missingPatientFacingCredential.length === 1 ? '' : 's'} appear
+                {missingPatientFacingCredential.length === 1 ? 's' : ''} to patients with no title
+              </p>
+              <p className="text-sm text-amber-800 mt-1">
+                Booking and reminder emails name the clinician who is coming. With no credential on file the patient is
+                told a name and nothing else — and a patient opening their front door should know a nurse practitioner is
+                coming. Open each person and set their credential; nothing is ever guessed from a licence string.
+              </p>
+              <div className="flex flex-wrap gap-2 mt-3">
+                {missingPatientFacingCredential.map(u => (
+                  <button key={u.id} onClick={() => handleEdit(u)}
+                    className="px-3 py-1.5 rounded-lg text-sm bg-white border border-amber-300 text-amber-900 hover:bg-amber-100">
+                    {u.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="bg-white p-6 rounded-xl shadow-sm">
             <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
               <div>
@@ -2161,6 +2187,23 @@
                           <p className="text-xs text-amber-700 mt-2">
                             This role was assigned automatically when clinical access stopped being one checkbox. Confirm
                             or change it — saving this form counts as confirming it.
+                          </p>
+                        )}
+                        {/* Session 4.11 B2: the patient-facing "Who" line. A blank
+                            credential means a patient is told a name with no title
+                            at all — a data gap nobody finds out about from the code.
+                            The SERVER answers whether it is missing, so this cannot
+                            drift from the formatter that decides it. */}
+                        {editingUser && editingUser.patientFacingCredentialMissing && (
+                          <p className="text-xs text-amber-700 mt-2">
+                            Patients see this clinician's name with no title. Set the prescriber credential or the licence
+                            level below and the reminder and booking emails will say what they are — "your nurse
+                            practitioner", "your physician". Saving a credential clears this.
+                          </p>
+                        )}
+                        {editingUser && editingUser.patientFacingLabel && !editingUser.patientFacingCredentialMissing && (
+                          <p className="text-xs text-gray-500 mt-2">
+                            Patients see: <b>{editingUser.patientFacingLabel}</b>
                           </p>
                         )}
                       </div>

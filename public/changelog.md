@@ -17,6 +17,7 @@
 - backfill PR #96 as merged for Session 4.8
 
 #### Changes
+- Let orders leave the building: requisitions, referrals, DME, results
 - A time change can be asked about an unaccepted offer, and asking is agreeing
 - Let a caregiver ask for a shift to change, and say which availability is in force
 - Backfill PR #104 and #105, and record the changelog fix
@@ -39,7 +40,6 @@
 - Make a failed Drive read say which failure it was
 - Backfill PR #87 in the running status, and pin its suite figure to it
 - Make the Home shift bar live instead of static
-- Close the holes around the no-visit-log-no-clock-out rule
 
 
 ### Version 3.1.0 - September 21, 2026

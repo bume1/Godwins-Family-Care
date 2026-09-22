@@ -64,6 +64,9 @@ const standingOrders = require('./standingOrders');   // signed, versioned, expi
 const orderReq = require('./orderRequisitions');      // referrals, DME, requisitions, sends, overdue (4.10 A)
 const controlled = require('./controlledSubstances'); // the Schedule II guard (4.10 B)
 const clinicalResults = require('./clinicalResults'); // the results path and its inbox (4.10 C)
+// Session 4.11 — the day-before visit reminder, CAPTURED AT WRITE TIME because
+// per-clinician OpenEMR auth means no background job can read the calendar.
+const visitReminders = require('./visitReminders');
 const consentText = require('./public/consent-text'); // approved consent bodies, versioned (Session 4.6)
 const appLinks = require('./appLinks');               // the ONE place that answers "where does this person go?"
 const consentRegistry = require('./consentRegistry'); // THE consent registry: lanes, statuses, provenance (4.6)
@@ -1500,9 +1503,64 @@ const scanAndQueueNotifications = async () => {
       }
     }
 
+    // ── Session 4.11: the day-before visit reminders that are now due ──────
+    // It rides THE EXISTING SCANNER rather than a new timer: a second timer is a
+    // second thing to keep alive, and this one already runs on a schedule the
+    // owner controls.
+    await sendDueVisitReminders();
+
     console.log('[SCANNER] Notification trigger scan completed');
   } catch (err) {
     console.error('[SCANNER] Error scanning for notifications:', err);
+  }
+};
+
+// ── The reminder send (Session 4.11) ──────────────────────────────────────
+//
+// TWO OUTCOMES, AND THEY ARE DIFFERENT ACTIONS. A reminder whose send time has
+// arrived is sent. One more than MISSED_WINDOW_HOURS past — the server was down
+// over the window — is VOIDED, never sent late: a reminder that arrives after
+// the visit tells somebody to expect a clinician who has already been and gone,
+// which is worse than no reminder at all.
+//
+// Wrapped in its own try/catch so a reminder problem never takes the rest of the
+// scan down with it.
+const sendDueVisitReminders = async () => {
+  try {
+    const rows = (await db.get('visit_reminders')) || [];
+    const { due, missed } = visitReminders.dueReminders(rows);
+    if (!due.length && !missed.length) return;
+
+    const byId = new Map(rows.map((r, i) => [r && r.id, i]));
+    let dirty = false;
+
+    for (const r of missed) {
+      const i = byId.get(r.id);
+      if (i === undefined) continue;
+      rows[i] = { ...rows[i], status: 'void', voidReason: 'missed_window', voidedAt: new Date().toISOString() };
+      dirty = true;
+      console.log(`[REMINDER] Voided ${r.id} — more than ${visitReminders.MISSED_WINDOW_HOURS}h past its send window; a late reminder is worse than none.`);
+    }
+
+    for (const r of due) {
+      const out = await notify.visitReminder({ reminder: r, orgPhone: consentText.ORG.phone });
+      const i = byId.get(r.id);
+      if (i === undefined) continue;
+      // MARKED 'sent' ONLY AFTER THE QUEUE ACCEPTS IT. A skip (the recipient
+      // unsubscribed, or there is no address) is still a closed reminder — it is
+      // not going to succeed on a later scan — so it is marked too, with the
+      // reason, rather than retried forever.
+      rows[i] = {
+        ...rows[i], status: 'sent', sentAt: new Date().toISOString(),
+        notified: out.notified || 0,
+        sendNote: out.notified ? null : (out.reason || 'no recipient accepted it')
+      };
+      dirty = true;
+    }
+
+    if (dirty) await db.set('visit_reminders', rows);
+  } catch (err) {
+    console.error('[REMINDER] Send sweep failed (non-fatal):', err.message);
   }
 };
 
@@ -3491,6 +3549,14 @@ app.get('/api/users', authenticateToken, async (req, res) => {
       deaSchedules: Array.isArray(u.deaSchedules) ? u.deaSchedules : [],
       deaExpiresAt: u.deaExpiresAt || null,
       medicareEnrollment: orderReq.normalizeMedicareEnrollment(u.medicareEnrollment),
+      // Session 4.11 B2 — A BLANK CREDENTIAL IS A DATA GAP AND IT SHOULD BE
+      // VISIBLE. A clinician mapped to an OpenEMR provider with nothing on file
+      // has their name shown to patients with no title at all, and nobody finds
+      // that out from the code. Answered by the SERVER so the page cannot drift
+      // from the formatter that decides it; same shape as 4.8's role banner.
+      patientFacingLabel: visitReminders.visitClinicianLabel(u),
+      patientFacingCredentialMissing: !!u.openEmrProviderId &&
+        !String(u.prescriberCredential || '').trim() && !String(u.licenseLevel || u.credential || '').trim(),
       // Verified competencies decide which fields a caregiver's visit log shows
       // (Session 6). Read-only here — the admin form saves them through
       // PUT /api/caregiver/admin/caregivers/:userId/competencies, and the user
@@ -8550,16 +8616,72 @@ const formatVisitWhen = (date, startTime) => {
 // The clinician's name from OUR user records, matched on the provider id the
 // appointment carries. Never the acting user: an admin books for a clinician,
 // and naming the wrong person in a patient's email is worse than naming none.
+//
+// SESSION 4.11 — this used to render `name, licenseLevel`, which assumed the
+// patient knew what "FNP" meant and said nothing at all when the field was
+// blank. A patient opening their front door should know a nurse practitioner is
+// coming, so the label now carries a plain-English role — and it comes from ONE
+// shared formatter used by booking, reschedule, cancel AND the reminder, because
+// four copies of "how a clinician is described to a patient" is four copies that
+// drift silently.
 const clinicianNameForProviderId = async (providerId) => {
   if (!providerId) return null;
   const users = await getUsers();
   const u = users.find(x => x && String(x.openEmrProviderId || '') === String(providerId));
-  return u ? [u.name, u.licenseLevel || u.credential].filter(Boolean).join(', ') : null;
+  return u ? visitReminders.visitClinicianLabel(u) : null;
 };
 
 const VISIT_PLACE_LABEL = Object.freeze({
   home: 'Your home', telehealth: 'By video visit', office: 'Our office'
 });
+
+// ── Session 4.11: the day-before reminder, captured at WRITE time ──────────
+//
+// Best-effort in exactly the way the booking notice is: a failure to schedule a
+// reminder must never undo an appointment that is already on the calendar. A
+// SKIP is a normal outcome and is logged as one — the commonest skip is a visit
+// booked so close to the day that the booking email already covers it, and
+// logging that as an error would make the log useless.
+const scheduleVisitReminder = async ({ clientId, eid, visitDate, startTime, when, clinician, place, actorId }) => {
+  try {
+    const built = visitReminders.buildVisitReminder({
+      id: uuidv4(), clientId, eid, visitDate, startTime, when, clinician, place
+    });
+    if (built.skipped) {
+      console.log(`[REMINDER] No reminder for appointment ${eid}: ${built.reason}`);
+      return { scheduled: false, reason: built.reason };
+    }
+    const rows = (await db.get('visit_reminders')) || [];
+    rows.push(built.reminder);
+    await db.set('visit_reminders', rows);
+    await logActivity(actorId || 'system', 'system', 'visit_reminder_scheduled', 'client', clientId, {
+      appointmentEid: String(eid), visitDate, sendAt: built.reminder.sendAt
+    });
+    return { scheduled: true, sendAt: built.reminder.sendAt };
+  } catch (e) {
+    console.error('[REMINDER] scheduling failed (non-fatal):', e.message);
+    return { scheduled: false, reason: e.message };
+  }
+};
+
+// Voiding is keyed on the OLD eid. The tombstone swap CHANGES the eid on a
+// reschedule, so keying it on the new one would leave the old reminder live and
+// send a patient to yesterday's time.
+const voidVisitReminders = async ({ eid, reason, clientId, actorId }) => {
+  try {
+    const rows = (await db.get('visit_reminders')) || [];
+    const out = visitReminders.voidRemindersForEid(rows, eid, reason);
+    if (!out.voided) return { voided: 0 };
+    await db.set('visit_reminders', out.rows);
+    await logActivity(actorId || 'system', 'system', 'visit_reminder_voided', 'client', clientId || null, {
+      appointmentEid: String(eid), reason, voided: out.voided
+    });
+    return { voided: out.voided };
+  } catch (e) {
+    console.error('[REMINDER] voiding failed (non-fatal):', e.message);
+    return { voided: 0, reason: e.message };
+  }
+};
 
 const clinicalClientsByPuuid = async () => {
   const users = await getUsers();
@@ -8785,13 +8907,22 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
     });
     // Tell the patient. Best-effort by design: a notification failure must
     // never undo an appointment that is already on the calendar.
+    const bookedWhen = formatVisitWhen(body.date, body.startTime);
+    const bookedClinician = await clinicianNameForProviderId(providerId);
+    const bookedPlace = VISIT_PLACE_LABEL[built.location] || null;
     await notify.appointmentBooked({
       client,
       eid: String(eid),
-      when: formatVisitWhen(body.date, body.startTime),
-      clinician: await clinicianNameForProviderId(providerId),
-      place: VISIT_PLACE_LABEL[built.location] || null,
+      when: bookedWhen,
+      clinician: bookedClinician,
+      place: bookedPlace,
       actorId: req.user.id
+    });
+    // 4.11: and the day-before reminder, from the facts we already hold. Nothing
+    // here reads OpenEMR back — that is what makes a background send possible.
+    await scheduleVisitReminder({
+      clientId: client.id, eid: String(eid), visitDate: body.date, startTime: body.startTime,
+      when: bookedWhen, clinician: bookedClinician, place: bookedPlace, actorId: req.user.id
     });
 
     // Read-back proves the round-trip (acceptance requirement); the single-row
@@ -8864,14 +8995,26 @@ app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requir
       providerId, supersededRowRemoved: swap.deleted
     });
     if (appClient) {
+      const movedTo = formatVisitWhen(body.date, body.startTime);
+      const movedClinician = await clinicianNameForProviderId(providerId);
+      const movedPlace = VISIT_PLACE_LABEL[built.location] || null;
       await notify.appointmentRescheduled({
         client: { id: appClient.clientId, name: appClient.name },
         eid: String(newEid),
         from: formatVisitWhen(row.pc_eventDate, row.pc_startTime),
-        to: formatVisitWhen(body.date, body.startTime),
-        clinician: await clinicianNameForProviderId(providerId),
-        place: VISIT_PLACE_LABEL[built.location] || null,
+        to: movedTo,
+        clinician: movedClinician,
+        place: movedPlace,
         actorId: req.user.id
+      });
+      // 4.11: VOID THE OLD EID, CREATE ON THE NEW ONE. The tombstone swap gives
+      // the moved visit a different eid, so the void has to key on the eid the
+      // reminder was written against — the OLD one — or yesterday's reminder
+      // stays live and sends the patient to a time nobody is coming at.
+      await voidVisitReminders({ eid: String(row.pc_eid), reason: 'rescheduled', clientId: appClient.clientId, actorId: req.user.id });
+      await scheduleVisitReminder({
+        clientId: appClient.clientId, eid: String(newEid), visitDate: body.date, startTime: body.startTime,
+        when: movedTo, clinician: movedClinician, place: movedPlace, actorId: req.user.id
       });
     }
     res.json({
@@ -8921,6 +9064,8 @@ app.post('/api/clinical/appointments/:eid/cancel', authenticateToken, requireCli
         clinician: await clinicianNameForProviderId(row.pc_aid),
         actorId: req.user.id
       });
+      // 4.11: a cancelled visit must not keep reminding anybody about it.
+      await voidVisitReminders({ eid: String(row.pc_eid), reason: 'cancelled', clientId: appClient.clientId, actorId: req.user.id });
     }
     res.json({
       message: 'Appointment cancelled — it stays on the calendar as a cancelled entry with the reason',
