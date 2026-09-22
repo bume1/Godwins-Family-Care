@@ -591,7 +591,13 @@ test('the assigned-clients picker no longer reads a route that does not exist', 
   const hub = read('public/admin-hub.html');
   assert.ok(!/fetch\('\/api\/clients'/.test(hub),
     'the dead endpoint must not be called');
-  const server = read('server.js');
+  // Comments are STRIPPED before this scan. A source search that cannot tell
+  // live code from prose ABOUT that code proves nothing — the sixth time this
+  // repo has paid for it, and this time the prose was a comment explaining
+  // that this very endpoint is dead. The `:` guard keeps `https://` intact.
+  const server = read('server.js')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
   assert.ok(!/['"`]\/api\/clients['"`]/.test(server),
     'and it still does not exist, so nothing may depend on it');
 });
