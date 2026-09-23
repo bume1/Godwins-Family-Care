@@ -182,6 +182,9 @@
       // the enrollment record (4.12 F1, owner 2026-09-23) — this page states
       // what the claim will say and names where it is fixed.
       placeOfService: (id) => authedFetch(`/api/clinical/patients/${id}/place-of-service`),
+      saveRisk: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/risk-assessment`, {
+        method: 'POST', body: JSON.stringify(body)
+      }),
       medrec: (id) => authedFetch(`/api/clinical/patients/${id}/medrec`),
       medrecSave: (id, decisions) => authedFetch(`/api/clinical/patients/${id}/medrec`, { method: 'POST', body: JSON.stringify({ decisions }) }),
       addProblem: (id, body) => authedFetch(`/api/clinical/patients/${id}/problems`, { method: 'POST', body: JSON.stringify(body) }),
@@ -2034,6 +2037,10 @@
         subjective: '', assessment: '', plan: '',
         vitals: { bpRightSys: '', bpRightDia: '', bpLeftSys: '', bpLeftDia: '', hr: '', temp: '', rr: '', spo2: '', weight: '', height: '' },
         systemsExam: { general: '', cardiovascular: '', respiratory: '', lungSounds: '', neuro: '', gi: '', gu: '', musculoskeletal: '' },
+        // Scope G — the exam variant, not a different note. Held in state on
+        // every visit and RENDERED only on a psychiatric one, so a patient
+        // whose type is set mid-visit does not lose what was already typed.
+        mentalStatusExam: { appearance: '', behavior: '', speech: '', mood: '', affect: '', thoughtProcess: '', thoughtContent: '', perception: '', cognition: '', insight: '', judgment: '' },
         skinWound: { findings: '', woundPresent: 'no', woundLocation: '', woundMeasurements: '' },
         painAssessment: { breathing: '', negativeVocalization: '', facialExpression: '', bodyLanguage: '', consolability: '', totalScore: '' },
         homeHazards: { smokeDetectors: '', coDetectors: '', grabBars: '', nonSkidSurfaces: '', runningWater: '', secondaryExit: '', notes: '' },
@@ -2059,6 +2066,7 @@
             ...prev, ...d,
             vitals: { ...prev.vitals, ...(d.vitals || {}) },
             systemsExam: { ...prev.systemsExam, ...(d.systemsExam || {}) },
+            mentalStatusExam: { ...prev.mentalStatusExam, ...(d.mentalStatusExam || {}) },
             skinWound: { ...prev.skinWound, ...(d.skinWound || {}) },
             painAssessment: { ...prev.painAssessment, ...(d.painAssessment || {}) },
             homeHazards: { ...prev.homeHazards, ...(d.homeHazards || {}) },
@@ -2147,6 +2155,24 @@
               ))}
             </div>
           </div>
+
+          {/* Offered where the encounter type says the visit is psychiatric,
+              and nowhere else. An empty MSE on every note trains people to
+              scroll past the section that matters. The SERVER answers whether
+              this patient is psychiatric — the page never reads a label and
+              decides for itself. */}
+          {patient.isPsychiatric && (
+            <div className="card mb-4">
+              <div className="card-h"><h2>Mental status exam</h2>
+                <span className="text-[10.5px] text-stone-500">the exam for this visit — the systems exam above still applies</span>
+              </div>
+              <div className="p-4 grid md:grid-cols-2 gap-3">
+                {Object.keys(f.mentalStatusExam).map(k => (
+                  <TextArea f={f} set={set} key={k} path={`mentalStatusExam.${k}`} label={k.replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase())} />
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="card mb-4">
             <div className="card-h"><h2>Skin &amp; wound</h2></div>
@@ -3675,6 +3701,106 @@
       { key: 'results', label: 'Results', icon: 'ti-flask' },
       { key: 'documents', label: 'Documents', icon: 'ti-file-text' }
     ];
+    // ── Session 4.12 Scope G — the risk assessment ─────────────────────────
+    // A psychiatric encounter cannot be SIGNED without one. Documenting is
+    // never blocked, which is why this is a card on the visit rather than a
+    // dialog in the way.
+    //
+    // The levels, the domains and WHICH of them need a plan are all SERVED.
+    // A page that carries its own list of risk levels drifts from the
+    // validator that refuses one it no longer knows, and the plan rule
+    // restated here would be a second answer to a clinical question.
+    const RISK_CHIP = {
+      none: 'bg-emerald-50 text-emerald-700', low: 'bg-emerald-50 text-emerald-700',
+      moderate: 'bg-amber-50 text-amber-800', high: 'bg-red-50 text-red-700', imminent: 'bg-red-600 text-white'
+    };
+    const RiskCard = ({ d, patient, euuid, locked, busy, onSave }) => {
+      const latest = d.riskAssessment;
+      const [open, setOpen] = useState(false);
+      const [f, setF] = useState(() => ({
+        suicide: (latest && latest.levels.suicide) || '', homicide: (latest && latest.levels.homicide) || '',
+        selfNeglect: (latest && latest.levels.selfNeglect) || '',
+        protectiveFactors: '', meansRestriction: '', plan: ''
+      }));
+      const set = (k, v) => setF(p => ({ ...p, [k]: v }));
+      // Whether a plan is needed is the SERVER's answer, read off the list it
+      // served. Deciding it here would be a second clinical rule to keep in
+      // step with the one that refuses the save.
+      const needsPlan = (d.riskDomains || []).some(k => (d.riskNeedsPlan || []).includes(f[k]));
+      return (
+        <div className="card mb-4">
+          <div className="card-h">
+            <h2><i className="ti ti-shield-exclamation mr-1 text-accent" />Risk assessment</h2>
+            {latest
+              ? <span className={`chip ${RISK_CHIP[highestOf(latest, d.riskDomains, d.riskLevels)] || 'bg-stone-100 text-stone-600'}`}>{highestOf(latest, d.riskDomains, d.riskLevels)}</span>
+              : <span className={`chip ${d.riskRequired ? 'bg-amber-50 text-amber-800' : 'bg-stone-100 text-stone-500'}`}>{d.riskRequired ? 'Required to sign' : 'Not recorded'}</span>}
+          </div>
+          <div className="p-4 text-sm grid gap-2">
+            {latest ? (
+              <div className="text-xs text-stone-600">
+                {(d.riskDomains || []).map(k => <span key={k} className="mr-3">{k}: <b>{latest.levels[k]}</b></span>)}
+                <div className="text-[11px] text-stone-500 mt-0.5">{npiLabel(latest.by)} · {fmtTs(latest.at)}</div>
+                {latest.plan && <div className="mt-1 whitespace-pre-wrap text-[13px]">{latest.plan}</div>}
+              </div>
+            ) : (
+              <p className="text-xs text-stone-500">
+                {d.riskRequired
+                  ? 'This is a psychiatric visit, so it cannot be signed until a risk assessment is recorded. Documenting the visit is not blocked.'
+                  : 'Not required for this visit type. Record one anyway if the visit warrants it.'}
+              </p>
+            )}
+            {/* Appended, never rewritten: risk changes inside one visit and
+                overwriting would lose that the clinician escalated. */}
+            {(d.riskHistory || []).length > 1 && (
+              <details className="text-[11px] text-stone-500">
+                <summary className="cursor-pointer">Earlier in this visit ({d.riskHistory.length - 1})</summary>
+                {d.riskHistory.slice(1).map(r => (
+                  <div key={r.id} className="mt-1">{highestOf(r, d.riskDomains, d.riskLevels)} · {npiLabel(r.by)} · {fmtTs(r.at)}</div>
+                ))}
+              </details>
+            )}
+            {!locked && !open && <button className="btn ghost !py-1 !px-2.5 text-xs w-fit" onClick={() => setOpen(true)}>{latest ? 'Record a change in risk' : 'Record risk assessment'}</button>}
+            {!locked && open && (
+              <div className="grid gap-3 border-t border-stone-100 pt-3">
+                <div className="grid md:grid-cols-3 gap-2">
+                  {(d.riskDomains || []).map(k => (
+                    <Field key={k} label={k.replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase())}>
+                      <select className="inp" value={f[k]} onChange={e => set(k, e.target.value)}>
+                        <option value="">— select —</option>
+                        {(d.riskLevels || []).map(l => <option key={l} value={l}>{l}</option>)}
+                      </select>
+                    </Field>
+                  ))}
+                </div>
+                <Field label="Protective factors"><textarea className="inp" rows={2} value={f.protectiveFactors} onChange={e => set('protectiveFactors', e.target.value)} /></Field>
+                <Field label="Means restriction"><textarea className="inp" rows={2} value={f.meansRestriction} onChange={e => set('meansRestriction', e.target.value)} /></Field>
+                <Field label={needsPlan ? 'Plan — required at this level of risk' : 'Plan'}>
+                  <textarea className="inp" rows={3} value={f.plan} onChange={e => set('plan', e.target.value)} />
+                </Field>
+                {needsPlan && <p className="text-[11px] text-amber-700"><i className="ti ti-alert-triangle mr-1" />An assessment with no plan records that the risk was seen, not that it was handled.</p>}
+                <div className="flex gap-2">
+                  <button className="btn w-fit" disabled={busy} onClick={() => onSave(f).then(() => setOpen(false)).catch(() => {})}>
+                    {busy ? 'Recording…' : 'Record assessment'}
+                  </button>
+                  <button className="btn ghost w-fit" disabled={busy} onClick={() => setOpen(false)}>Cancel</button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    };
+    // The worst of the domains, ranked by the order the SERVER SERVED THE
+    // LEVELS IN. A local copy of that order is a second answer to "which risk
+    // is worse", and it goes stale the day a level is added — the same reason
+    // the levels themselves are not listed here.
+    const highestOf = (a, domains, levels) => {
+      if (!a || !a.levels) return null;
+      const rank = (v) => (levels || []).indexOf(v);
+      return (domains || []).map(k => a.levels[k]).filter(Boolean)
+        .sort((x, y) => rank(y) - rank(x))[0] || null;
+    };
+
     const EncounterLookups = ({ patient, chart, onChartChanged }) => {
       const [open, setOpen] = useState(null);
       return (
@@ -3822,6 +3948,14 @@
               ))}
             </div>
           </div>}
+
+          {/* On the Visit step, where the clinician is reading the note and
+              deciding. Shown even when not required, so a risk that turns up
+              on a non-psychiatric visit has somewhere to go. */}
+          {on('visit') && (
+            <RiskCard d={d} patient={patient} euuid={euuid} locked={locked} busy={busy === 'risk'}
+              onSave={(form) => run('risk', () => api.saveRisk(patient.id, euuid, form))} />
+          )}
 
           {on('visit') && <EncounterLookups patient={patient} chart={chart} onChartChanged={onChartChanged} />}
 

@@ -404,11 +404,25 @@ const soapSection = (v, max) => {
 // writes. Pure so the mapping is testable without a live EMR.
 const HP_SECTION_LABELS = {
   systemsExam: 'Systems exam',
+  // Session 4.12 Scope G — psychiatry is the SAME ambulatory encounter with a
+  // different exam, not a different kind of note. So the MSE is a section of
+  // the H&P beside the systems exam, and it is offered ALONGSIDE it rather
+  // than instead of it: a psychiatric home visit still takes vitals and still
+  // looks at the home, and a note shape that dropped those would document
+  // less of a visit than the paper it replaced.
+  mentalStatusExam: 'Mental status exam',
   skinWound: 'Skin & wound (with measurements)',
   painAssessment: 'Pain assessment (PAINAD-style)',
   homeHazards: 'Home-hazard inventory',
   triage: 'RN triage / Track assignment'
 };
+// Which sections a given visit OFFERS. Everything non-psychiatric is offered
+// on every visit — a clinician who finds a skin tear on a psychiatric visit
+// documents it — and the MSE is offered only where the encounter type says
+// the visit is psychiatric, because an empty MSE on every note trains people
+// to scroll past the section that matters.
+const hpSectionsFor = (encounterType) => Object.keys(HP_SECTION_LABELS)
+  .filter(k => k !== 'mentalStatusExam' || isPsychiatricEncounterType(encounterType));
 
 const kvLines = (obj) => Object.entries(obj || {})
   .filter(([, v]) => v !== null && v !== undefined && String(v).trim() !== '')
@@ -537,6 +551,81 @@ const buildHpWrites = (form, clinicianName) => {
       .filter(Boolean).join('\n').slice(0, 8000)
   };
   return { encounter, vitals, soapNote };
+};
+
+// ============================================================
+// Session 4.12 Scope G — the risk assessment a psychiatric visit cannot be
+// signed without
+// ============================================================
+// A psychiatric note with no documented risk assessment is the standard-of-
+// care failure this exists to stop. So on a psychiatric encounter it is a
+// SIGNING blocker — documenting the visit is never blocked, the same rule
+// every other blocker in this file follows, because care happens whether or
+// not the paperwork is finished and it is the signature that is an assertion.
+//
+// REQUIRED ONLY WHERE THE ENCOUNTER TYPE IS PSYCHIATRIC. On every encounter
+// it would be noise, and noise is how a real refusal gets clicked past; on
+// none it is the gap. The encounter type is the fact that decides it, which
+// is the same stamp the place of service is checked against.
+const RISK_LEVELS = Object.freeze(['none', 'low', 'moderate', 'high', 'imminent']);
+// "None" IS an assessment and it satisfies the gate: the record is that
+// somebody asked. Refusing to accept it would push a clinician to skip the
+// section entirely, which records nothing at all.
+const RISK_NEEDS_PLAN = Object.freeze(['moderate', 'high', 'imminent']);
+const RISK_DOMAINS = Object.freeze(['suicide', 'homicide', 'selfNeglect']);
+
+const buildRiskAssessment = ({ id, clientId, encounterUuid, form, actor, at }) => {
+  const f = form || {};
+  const levels = {};
+  for (const d of RISK_DOMAINS) {
+    const v = String(f[d] || '').trim().toLowerCase();
+    if (!RISK_LEVELS.includes(v)) {
+      return { error: `${d} risk must be one of: ${RISK_LEVELS.join(', ')}`, code: 'RISK_LEVEL_REQUIRED' };
+    }
+    levels[d] = v;
+  }
+  const plan = String(f.plan || '').trim();
+  // A plan is required wherever any domain is at moderate or above. Recording
+  // "patient endorses suicidal ideation" with nothing about what is being
+  // done is a record that somebody SAW it, which is not a record that it was
+  // handled — the rule 4.10's abnormal-result follow-up note already sets.
+  const raised = RISK_DOMAINS.filter(d => RISK_NEEDS_PLAN.includes(levels[d]));
+  if (raised.length && plan.length < 10) {
+    return {
+      error: `Risk is ${raised.map(d => `${d}: ${levels[d]}`).join(', ')} — say what is being done about it. An assessment with no plan records that it was seen, not that it was handled.`,
+      code: 'RISK_PLAN_REQUIRED'
+    };
+  }
+  return {
+    assessment: {
+      id, clientId, encounterUuid: String(encounterUuid),
+      levels,
+      protectiveFactors: String(f.protectiveFactors || '').trim().slice(0, 4000),
+      meansRestriction: String(f.meansRestriction || '').trim().slice(0, 4000),
+      plan: plan.slice(0, 8000),
+      at: at || new Date().toISOString(),
+      by: actorRecord(actor)
+    }
+  };
+};
+
+// Revising is a NEW row, never a rewrite. Risk changes inside one visit, and
+// overwriting would lose that the clinician escalated — the same append-only
+// rule the care plan and the escalation trail follow. The latest row is what
+// the gate reads.
+const latestRiskAssessment = (rows, encounterUuid) =>
+  (rows || []).filter(r => r && r.encounterUuid === String(encounterUuid))
+    .sort((a, b) => String(b.at).localeCompare(String(a.at)))[0] || null;
+
+const riskAssessmentRequired = (encounterType) => isPsychiatricEncounterType(encounterType);
+const highestRisk = (assessment) => {
+  if (!assessment || !assessment.levels) return null;
+  let worst = null; let rank = -1;
+  for (const d of RISK_DOMAINS) {
+    const i = RISK_LEVELS.indexOf(assessment.levels[d]);
+    if (i > rank) { rank = i; worst = assessment.levels[d]; }
+  }
+  return worst;
 };
 
 // Valid Track assignments the RN can set from the H&P triage step.
@@ -1102,7 +1191,9 @@ const SIGN_BLOCKER_CODES = {
   // A POS that EXISTS but contradicts what kind of visit this was is a worse
   // failure than a missing one, because nothing about it looks wrong: the
   // claim goes out asserting care happened somewhere it did not.
-  encounter_type_pos: POS_DISAGREES
+  encounter_type_pos: POS_DISAGREES,
+  // Scope G. A psychiatric note signed with no documented risk assessment.
+  risk_assessment: 'SIGN_NO_RISK_ASSESSMENT'
 };
 const SIGN_BLOCKER_LABELS = {
   note: 'a documented note',
@@ -1110,7 +1201,8 @@ const SIGN_BLOCKER_LABELS = {
   service: 'at least one CPT/HCPCS service code',
   service_dx_link: 'every service linked to a diagnosis',
   billing_npi: 'the billing provider NPI configured in settings',
-  facility_pos: "a place of service — this patient has no OpenEMR facility assigned, or their facility has no POS code on its record. An admin fixes it on the patient or the facility, not here"
+  facility_pos: "a place of service — this patient has no OpenEMR facility assigned, or their facility has no POS code on its record. An admin fixes it on the patient or the facility, not here",
+  risk_assessment: 'a risk assessment — this is a psychiatric visit and it cannot be signed without one'
 };
 // `posCode` is the place of service the encounter actually carries, derived
 // from the patient's facility. Documenting a visit is never blocked on it —
@@ -1124,7 +1216,7 @@ const SIGN_BLOCKER_LABELS = {
 // signature naming both values — see checkEncounterTypeAgainstPos. That refusal
 // carries its own sentence rather than a label in the joined list, because the
 // reader has to know which of the two is wrong and neither is fixed from here.
-const checkSignReadiness = ({ hasNote, record, billingNpi, posCode, encounterType, facilityName }) => {
+const checkSignReadiness = ({ hasNote, record, billingNpi, posCode, encounterType, facilityName, riskAssessment }) => {
   const missing = [];
   if (!hasNote) missing.push('note');
   missing.push(...deriveCodingStatus(record).missing);
@@ -1138,6 +1230,7 @@ const checkSignReadiness = ({ hasNote, record, billingNpi, posCode, encounterTyp
     ? checkEncounterTypeAgainstPos({ encounterType, posCode: pos, facilityName })
     : { ok: true, error: null, code: null };
   if (!agreement.ok) missing.push('encounter_type_pos');
+  if (riskAssessmentRequired(encounterType) && !riskAssessment) missing.push('risk_assessment');
   const labelled = missing.filter(m => m !== 'encounter_type_pos');
   const sentences = [];
   if (labelled.length) sentences.push(`Cannot sign: the encounter needs ${labelled.map(m => SIGN_BLOCKER_LABELS[m]).join(', ')}.`);
@@ -2281,6 +2374,9 @@ module.exports = {
   SIGN_BLOCKER_CODES,
   checkSignReadiness,
   TELEHEALTH_MODIFIER, modifiersForCharge,
+  hpSectionsFor,
+  RISK_LEVELS, RISK_NEEDS_PLAN, RISK_DOMAINS, buildRiskAssessment,
+  latestRiskAssessment, riskAssessmentRequired, highestRisk,
   ATTESTATION_TEXT,
   buildAttestation,
   isEncounterClosed,

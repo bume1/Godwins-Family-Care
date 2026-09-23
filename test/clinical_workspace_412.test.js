@@ -1558,3 +1558,182 @@ test('F5: the drawer is at module scope, so opening it does not remount what is 
   assert.equal(chartPage.slice(chartPage.lastIndexOf('\n', railIdx) + 1, railIdx), '    ',
     'EncounterStepRail must be at module scope too');
 });
+
+// ── Session 4.12 Scope G — psychiatry on the same ambulatory encounter ──
+
+test('G: the MSE is an exam VARIANT, offered on a psychiatric visit and nowhere else', () => {
+  // The same encounter, the same note, the same steps, the same signature —
+  // a different exam. A separate note type would be a second thing to keep
+  // in step with the record.
+  assert.ok(R.HP_SECTION_LABELS ? true : true);
+  const home = R.hpSectionsFor('home_primary_care');
+  const psych = R.hpSectionsFor('psychiatric_home');
+  assert.ok(!home.includes('mentalStatusExam'), 'an empty MSE on every note trains people to scroll past it');
+  assert.ok(psych.includes('mentalStatusExam'));
+  // Offered ALONGSIDE the systems exam, not instead of it: a psychiatric home
+  // visit still takes vitals and still looks at the home.
+  for (const k of ['systemsExam', 'skinWound', 'painAssessment', 'homeHazards', 'triage']) {
+    assert.ok(psych.includes(k), `${k} must still be offered on a psychiatric visit`);
+  }
+  assert.deepEqual(home, psych.filter(k => k !== 'mentalStatusExam'),
+    'the psychiatric visit is the ordinary one plus the MSE, not a different list');
+  // Unset or unknown type is not psychiatric — the MSE is never guessed on.
+  assert.ok(!R.hpSectionsFor(null).includes('mentalStatusExam'));
+  assert.ok(!R.hpSectionsFor('not_a_type').includes('mentalStatusExam'));
+  assert.ok(R.hpSectionsFor('psychiatric_telehealth').includes('mentalStatusExam'));
+});
+
+test('G: a psychiatric encounter cannot be SIGNED without a risk assessment, and documenting is never blocked', () => {
+  const coded = R.applyCoding(
+    { clientId: 'c', encounterUuid: 'e', diagnoses: [], services: [] },
+    { diagnoses: [{ code: 'F32.9', description: 'MDD', primary: true }],
+      services: [{ code: '99348', units: 1, dxLinks: ['F32.9'] }] },
+    { id: 'u', name: 'FNP', npi: '1234567893' }, '1234567893'
+  ).record;
+  const base = { hasNote: true, record: coded, billingNpi: '1234567893', posCode: '12' };
+
+  const psychNoRisk = R.checkSignReadiness({ ...base, encounterType: 'psychiatric_home' });
+  assert.equal(psychNoRisk.ok, false);
+  assert.ok(psychNoRisk.codes.includes('SIGN_NO_RISK_ASSESSMENT'));
+  assert.match(psychNoRisk.message, /psychiatric visit/i);
+
+  const psychWithRisk = R.checkSignReadiness({ ...base, encounterType: 'psychiatric_home', riskAssessment: { id: 'r1' } });
+  assert.equal(psychWithRisk.ok, true);
+
+  // Required only where the type is psychiatric: on every encounter it would
+  // be noise, and noise is how a real refusal gets clicked past.
+  assert.equal(R.checkSignReadiness({ ...base, encounterType: 'home_primary_care' }).ok, true);
+  assert.equal(R.checkSignReadiness({ ...base, encounterType: null }).ok, true);
+  assert.equal(R.riskAssessmentRequired('psychiatric_telehealth'), true);
+  assert.equal(R.riskAssessmentRequired('telehealth'), false);
+  assert.equal(R.riskAssessmentRequired(null), false);
+});
+
+test('G: every domain must be answered, and an invented level is refused', () => {
+  const make = (form) => R.buildRiskAssessment({ id: 'r', clientId: 'c', encounterUuid: 'e', form, actor: { id: 'u', name: 'FNP' } });
+  assert.equal(make({ suicide: 'none', homicide: 'none' }).code, 'RISK_LEVEL_REQUIRED',
+    'a domain left blank is not an assessment of it');
+  assert.equal(make({ suicide: 'none', homicide: 'none', selfNeglect: 'catastrophic' }).code, 'RISK_LEVEL_REQUIRED');
+  assert.match(make({}).error, new RegExp(R.RISK_LEVELS.join('.*')), 'the refusal names what is on offer');
+  const ok = make({ suicide: 'none', homicide: 'none', selfNeglect: 'none' });
+  assert.ok(ok.assessment, '"none" IS an assessment — the record is that somebody asked');
+  assert.deepEqual(Object.keys(ok.assessment.levels).sort(), [...R.RISK_DOMAINS].sort());
+  assert.equal(R.highestRisk(ok.assessment), 'none');
+});
+
+test('G: risk at moderate or above requires a plan, and the refusal names which domain', () => {
+  const make = (form) => R.buildRiskAssessment({ id: 'r', clientId: 'c', encounterUuid: 'e', form, actor: { id: 'u', name: 'FNP' } });
+  for (const level of R.RISK_NEEDS_PLAN) {
+    const bad = make({ suicide: level, homicide: 'none', selfNeglect: 'none' });
+    assert.equal(bad.code, 'RISK_PLAN_REQUIRED', `${level} risk must require a plan`);
+    assert.match(bad.error, new RegExp(`suicide: ${level}`), 'the refusal must name the domain and the level');
+    // "Acknowledged" with no plan is a record that somebody SAW it, which is
+    // not a record that it was handled — the 4.10 follow-up-note rule.
+    assert.match(bad.error, /seen, not that it was handled/);
+    assert.ok(make({ suicide: level, homicide: 'none', selfNeglect: 'none', plan: 'Safety plan agreed; wife removing firearms today; crisis line given; seen again Thursday.' }).assessment);
+  }
+  // Low risk needs no plan: requiring one everywhere would make the plan box
+  // a formality somebody types "n/a" into.
+  for (const level of ['none', 'low']) {
+    assert.ok(make({ suicide: level, homicide: 'none', selfNeglect: 'none' }).assessment, `${level} must not demand a plan`);
+  }
+  // ANY domain at moderate or above triggers it, not only suicide.
+  assert.equal(make({ suicide: 'none', homicide: 'none', selfNeglect: 'high' }).code, 'RISK_PLAN_REQUIRED');
+  assert.equal(make({ suicide: 'none', homicide: 'imminent', selfNeglect: 'none' }).code, 'RISK_PLAN_REQUIRED');
+});
+
+test('G: assessments are append-only and the gate reads the latest', () => {
+  const rows = [
+    { id: 'a', encounterUuid: 'e1', levels: { suicide: 'low', homicide: 'none', selfNeglect: 'none' }, at: '2026-09-23T10:00:00.000Z' },
+    { id: 'b', encounterUuid: 'e1', levels: { suicide: 'high', homicide: 'none', selfNeglect: 'none' }, at: '2026-09-23T11:30:00.000Z' },
+    { id: 'c', encounterUuid: 'e2', levels: { suicide: 'none', homicide: 'none', selfNeglect: 'none' }, at: '2026-09-23T12:00:00.000Z' }
+  ];
+  // Risk changes inside one visit. Overwriting would lose that the clinician
+  // escalated, which is the single most important thing the row records.
+  const latest = R.latestRiskAssessment(rows, 'e1');
+  assert.equal(latest.id, 'b', 'the gate must read the most recent, not the first');
+  assert.equal(R.highestRisk(latest), 'high');
+  assert.equal(R.latestRiskAssessment(rows, 'e3'), null, 'an encounter with none is null, never a borrowed row');
+  // Never mixed between encounters.
+  assert.equal(R.latestRiskAssessment(rows, 'e2').id, 'c');
+});
+
+test('G build-enforced: the risk route is a clinical WRITE, refuses a closed encounter, and logs no risk narrative', () => {
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(server,
+    /app\.post\('\/api\/clinical\/patients\/:clientId\/encounters\/:euuid\/risk-assessment',\s*authenticateToken,\s*requireClinicalWrite,/,
+    'recording risk is a clinical write, not an admin action and not a read');
+  const route = server.slice(server.indexOf("/risk-assessment', authenticateToken"));
+  const body = route.slice(0, route.indexOf("// ── Addenda"));
+  assert.ok(body.length > 300, 'precondition: the route body was actually sliced');
+  // A closed encounter is read-only. Recording new risk against a signed note
+  // would change what was attested to.
+  assert.match(body, /ENCOUNTER_CLOSED/);
+  // The LEVEL goes in the audit trail; what somebody said about wanting to
+  // die does not. An audit trail is not a second copy of the record.
+  const log = body.slice(body.indexOf('logActivity'), body.indexOf('res.json'));
+  assert.match(log, /highestRisk/);
+  for (const k of ['plan', 'protectiveFactors', 'meansRestriction']) {
+    assert.ok(!log.includes(k), `the audit entry must not carry ${k}`);
+  }
+  // Appended, never replaced.
+  assert.match(body, /rows\.push\(built\.assessment\)/);
+  assert.ok(!/rows\s*=\s*rows\.filter/.test(body), 'a revision must not remove the previous row');
+});
+
+test('G build-enforced: the gate is actually reached — every sign check hands over the recorded assessment', () => {
+  // The refusal is worth nothing if the route does not pass what it gates on:
+  // the check would be correct and unreached, and a psychiatric encounter
+  // would sign clean. Same shape as the charge call sites, which survived
+  // their first mutation run for exactly this reason.
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const calls = server.match(/checkSignReadiness\(\{[\s\S]{0,400}?\}\)/g) || [];
+  assert.ok(calls.length >= 2, 'expected the sign route and the readiness preview');
+  for (const c of calls) {
+    assert.match(c, /riskAssessment:/, `every sign-readiness call must pass the recorded assessment: ${c.slice(0, 90)}…`);
+    assert.match(c, /encounterType:/, 'and the encounter type it is judged against');
+  }
+  // It has to be LOADED beside the encounter, or the field is always absent
+  // and the gate always fires.
+  assert.match(server, /riskAssessment: clinicalRepo\.latestRiskAssessment\(risks, encounterUuid\)/);
+});
+
+test('G build-enforced: the risk card is rendered inside the encounter', () => {
+  // A card that exists and is never mounted is a capability that does not
+  // exist — the lesson the facility route bought in 4.9.
+  const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'clinical.html'), 'utf8');
+  assert.match(page, /<RiskCard d=\{d\}/, 'the encounter must mount the risk card');
+  assert.match(page, /api\.saveRisk\(patient\.id, euuid, form\)/, 'and it must write through the risk route');
+  assert.ok(page.includes("saveRisk: (id, euuid, body)"), 'the route must have a caller');
+  // On the Visit step, where the clinician is reading the note and deciding.
+  const panel = page.slice(page.indexOf('const EncounterPanel = ('), page.indexOf('const EncountersTab = ('));
+  assert.match(panel, /\{on\('visit'\) && \(\s*\n\s*<RiskCard/);
+});
+
+test('G build-enforced: the screen restates no risk vocabulary and no clinical rule', () => {
+  const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'clinical.html'), 'utf8');
+  const card = page.slice(page.indexOf('const RiskCard = ('), page.indexOf('const EncounterLookups = ('));
+  assert.ok(card.length > 500, 'precondition: the card was sliced');
+  // The levels, the domains and which of them need a plan are all served. A
+  // page carrying its own list drifts from the validator that refuses one it
+  // no longer knows.
+  for (const level of R.RISK_LEVELS) {
+    assert.ok(!card.includes(`'${level}'`) && !card.includes(`"${level}"`),
+      `the card must not name the risk level ${level}; the list is served`);
+  }
+  for (const d of R.RISK_DOMAINS) {
+    assert.ok(!card.includes(`'${d}'`), `the card must not name the domain ${d}; they are served`);
+  }
+  assert.match(card, /d\.riskLevels \|\| \[\]/, 'the level dropdown renders the served list');
+  assert.match(card, /d\.riskDomains \|\| \[\]/, 'the domains come from the server');
+  assert.match(card, /\(d\.riskNeedsPlan \|\| \[\]\)\.includes/,
+    'whether a plan is needed is the server’s answer, not a second clinical rule here');
+  // Ranking "which risk is worse" also comes from the served order — a local
+  // copy goes stale the day a level is added.
+  assert.ok(!/RISK_ORDER/.test(page), 'no local ordering of risk levels may exist');
+  // The H&P asks the SERVER whether this patient is psychiatric rather than
+  // reading a label and deciding.
+  assert.match(page, /patient\.isPsychiatric && \(/);
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8'),
+    /isPsychiatric: clinicalRepo\.isPsychiatricEncounterType\(u\.encounterType\)/);
+});

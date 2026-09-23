@@ -7821,6 +7821,12 @@ app.get('/api/clinical/patients', authenticateToken, requireClinicalRead, async 
         // Where this patient is seen. Drives the encounter's facility and the
         // POS on their claim; surfaced so an admin can see who is unassigned.
         openEmrFacilityId: u.openEmrFacilityId || null,
+        // Scope G: what kind of visit this patient's visits are, so the H&P
+        // can offer the mental status exam where it belongs and nowhere else.
+        // Answered by the SERVER against the type catalog, never inferred on
+        // the page from a label.
+        encounterType: u.encounterType || null,
+        isPsychiatric: clinicalRepo.isPsychiatricEncounterType(u.encounterType),
         initialVisitAt: (u.clinicalInitialVisit && u.clinicalInitialVisit.at) || null,
         carePlanVersion: (u.carePlan && u.carePlan.version) || null,
         activatedAt: (u.clinicalEnrollment && u.clinicalEnrollment.activatedAt) || null
@@ -9531,14 +9537,19 @@ const saveBillingRecord = async (rows, record) => {
 };
 
 const loadEncounterSideRecords = async (encounterUuid) => {
-  const [rx, orders, attestations, addenda] = await Promise.all([
-    loadRows('prescriptions'), loadRows('clinical_orders'), loadRows('encounter_attestations'), loadRows('encounter_addenda')
+  const [rx, orders, attestations, addenda, risks] = await Promise.all([
+    loadRows('prescriptions'), loadRows('clinical_orders'), loadRows('encounter_attestations'), loadRows('encounter_addenda'),
+    loadRows('encounter_risk_assessments')
   ]);
   return {
     prescriptions: forEncounter(rx, encounterUuid).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))),
     orders: forEncounter(orders, encounterUuid).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))),
     attestation: forEncounter(attestations, encounterUuid)[0] || null,
-    addenda: forEncounter(addenda, encounterUuid).sort((a, b) => String(a.at).localeCompare(String(b.at)))
+    addenda: forEncounter(addenda, encounterUuid).sort((a, b) => String(a.at).localeCompare(String(b.at))),
+    // The LATEST row. Revisions are appended, so the gate reads what the
+    // clinician most recently assessed rather than what they first typed.
+    riskAssessment: clinicalRepo.latestRiskAssessment(risks, encounterUuid),
+    riskHistory: forEncounter(risks, encounterUuid).sort((a, b) => String(b.at).localeCompare(String(a.at)))
   };
 };
 
@@ -10073,8 +10084,13 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
       signReadiness: clinicalRepo.checkSignReadiness({
         hasNote, record, billingNpi: payer.billing_npi_used,
         posCode: emrRow && emrRow.pos_code,
-        encounterType: record.encounterType, facilityName: emrRow && emrRow.facility_name
+        encounterType: record.encounterType, facilityName: emrRow && emrRow.facility_name,
+        riskAssessment: ctx.riskAssessment
       }),
+      riskAssessment: ctx.riskAssessment, riskHistory: ctx.riskHistory,
+      riskRequired: clinicalRepo.riskAssessmentRequired(record.encounterType),
+      riskLevels: clinicalRepo.RISK_LEVELS, riskDomains: clinicalRepo.RISK_DOMAINS,
+      riskNeedsPlan: clinicalRepo.RISK_NEEDS_PLAN,
       encounterType: record.encounterType || null,
       encounterTypeLabel: (clinicalRepo.encounterTypeByKey(record.encounterType) || {}).label || null,
       candidates, candidatesError: cands.error,
@@ -10986,7 +11002,8 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
     } catch { encPos = null; encFacilityName = null; }
     const ready = clinicalRepo.checkSignReadiness({
       hasNote, record: ctx.record, billingNpi: payer.billing_npi_used, posCode: encPos,
-      encounterType: ctx.record.encounterType, facilityName: encFacilityName
+      encounterType: ctx.record.encounterType, facilityName: encFacilityName,
+      riskAssessment: ctx.riskAssessment
     });
     if (!ready.ok) return res.status(409).json({ error: ready.message, code: ready.codes[0], codes: ready.codes, missing: ready.missing });
 
@@ -12278,6 +12295,56 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/charges/repost', au
   } catch (error) {
     console.error('Charge repost error:', error);
     res.status(502).json({ error: `Re-post failed: ${error.message}` });
+  }
+});
+
+// ── Risk assessment (Session 4.12 Scope G) ────────────────────────────────
+// A psychiatric encounter cannot be SIGNED without one. Documenting the visit
+// is never blocked — the rule every blocker in this app follows, because care
+// happens whether or not the paperwork is finished and it is the signature
+// that is an assertion.
+//
+// APPEND-ONLY. A revision is a new row, never a rewrite: risk changes inside
+// one visit and overwriting would lose that the clinician escalated. The gate
+// reads the latest.
+//
+// The LEVELS and the plan rule are the module's, never restated here, and the
+// screen renders from what this route's sibling read serves — a page that
+// carries its own list of risk levels drifts from the validator that refuses
+// one it no longer knows.
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/risk-assessment', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res);
+    if (!ctx) return;
+    // A closed encounter is read-only, and a correction to it is an addendum —
+    // the same rule the coding follows. Recording a new risk assessment
+    // against a signed note would change what was attested to.
+    if (ctx.closed) {
+      return res.status(409).json({
+        error: `This encounter was signed and closed ${ctx.attestation.signedAt} by ${ctx.attestation.signedBy.name}. Record a change in risk as an addendum, or on the next encounter.`,
+        code: 'ENCOUNTER_CLOSED'
+      });
+    }
+    const built = clinicalRepo.buildRiskAssessment({
+      id: uuidv4(), clientId: ctx.client.id, encounterUuid: ctx.encounterUuid,
+      form: req.body || {}, actor: ctx.actor
+    });
+    if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+    const rows = await loadRows('encounter_risk_assessments');
+    rows.push(built.assessment);
+    await db.set('encounter_risk_assessments', rows);
+    // The LEVEL is recorded in the audit trail; the plan and the protective
+    // factors are not. An audit trail is not a second copy of what somebody
+    // said about wanting to die — the rule the client-location write and the
+    // 4.10 follow-up note already follow.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'encounter_risk_assessment', 'client', ctx.client.id, {
+      encounterUuid: ctx.encounterUuid, assessmentId: built.assessment.id,
+      highestRisk: clinicalRepo.highestRisk(built.assessment), revision: rows.filter(r => r && r.encounterUuid === ctx.encounterUuid).length
+    });
+    res.json({ message: 'Risk assessment recorded', assessment: built.assessment });
+  } catch (error) {
+    console.error('Risk assessment error:', error);
+    res.status(502).json({ error: `Risk assessment could not be saved: ${error.message}` });
   }
 });
 

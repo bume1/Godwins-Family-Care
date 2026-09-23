@@ -70,6 +70,9 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'clinical_orders', phi: true, owner: '4.4' },
   { key: 'encounter_attestations', phi: true, owner: '4.4' },
   { key: 'encounter_addenda', phi: true, owner: '4.4' },
+  // Scope G. Append-only: a revision is a new row, so escalation within one
+  // visit stays readable. PHI of the most sensitive kind this app holds.
+  { key: 'encounter_risk_assessments', phi: true, owner: '4.12' },
   { key: 'appointment_encounters', phi: true, owner: '4.2', note: 'pointers only' },
   { key: 'clinical_code_usage', phi: false, owner: '4.4', note: 'per-clinician code favorites' },
   { key: 'clinical_settings', phi: false, owner: '4.4' },
