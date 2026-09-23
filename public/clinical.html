@@ -253,6 +253,34 @@
       inbox: 'Inbox', results: 'Results Inbox', overdue: 'Overdue Orders'
     };
 
+    // The nav strip, DECLARED ONCE (owner report 2026-09-23: the top bar was
+    // clipping "Analytics" off the right edge). It was nine hand-written
+    // buttons, which is why the crowding had nine places to be fixed in and
+    // got fixed in none. `tab` is the short label the strip shows; the long
+    // one stays in VIEW_TITLES for the heading beside it, so the bar reads
+    // "Coding queue" while the heading says "Coding Queue" in full.
+    //
+    // `keepsPatient` is the one behavioural difference between them: opening
+    // Charts leaves the patient list showing on a phone, and every other view
+    // is full-width so it closes it.
+    const NAV_VIEWS = Object.freeze([
+      { key: 'myday', tab: 'My Day', icon: 'ti-sun' },
+      { key: 'charts', tab: 'Charts', icon: 'ti-folder-open', keepsPatient: true },
+      { key: 'schedule', tab: 'Schedule', icon: 'ti-calendar-week' },
+      { key: 'queue', tab: 'Coding', icon: 'ti-receipt' },
+      // 4.9's Inbox is what is waiting on a clinician INSIDE the app —
+      // unsigned encounters, pending co-signs, visit-log reviews. 4.10's
+      // Results is what has COME IN from outside and needs acknowledging, and
+      // Overdue is what went out and never came back. Three different
+      // questions, and each answers one; see the note where clinicalResults is
+      // required in server.js.
+      { key: 'inbox', tab: 'Inbox', icon: 'ti-inbox' },
+      { key: 'results', tab: 'Results', icon: 'ti-flask' },
+      { key: 'overdue', tab: 'Overdue', icon: 'ti-clock-exclamation' },
+      { key: 'queues', tab: 'Tasks', icon: 'ti-checkbox' },
+      { key: 'analytics', tab: 'Analytics', icon: 'ti-chart-bar' }
+    ]);
+
     const fmtDate = (iso) => iso ? new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
     const fmtTs = (iso) => iso ? new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
     const initials = (n) => String(n || '').split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join('') || 'GF';
@@ -1347,6 +1375,17 @@
       return (
         <div className="card">
           <div className="card-h"><h2><i className="ti ti-timeline mr-1 text-accent" />Timeline</h2></div>
+          {/* Same weight as My Day's calendar-read banner, and for the same
+              reason: an empty thread and a thread we could not load look
+              identical unless something says which one this is. This used to
+              be a small amber line easy to miss below a page of visit rows —
+              found live 2026-09-23 when a clinician read "no visits" off a
+              thread that had actually failed to load, not gone empty. */}
+          {data && data.emrNotice && (
+            <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] text-amber-900">
+              <b>Visits could not be read from OpenEMR.</b> {data.emrNotice} This is not an empty chart — it is a chart we could not load.
+            </div>
+          )}
           <div className="px-4 pt-3 flex gap-1.5 flex-wrap">
             {(data ? data.kinds : Object.keys(TIMELINE_LABELS)).map(k => (
               <button key={k}
@@ -1359,7 +1398,7 @@
           </div>
           <div className="p-4">
             {!data && <p className="text-sm text-stone-500">Loading…</p>}
-            {data && data.rows.length === 0 && (
+            {data && data.rows.length === 0 && !data.emrNotice && (
               <p className="text-sm text-stone-500">
                 {filter.length ? 'Nothing of that kind on this chart.' : 'Nothing on this chart yet.'}
               </p>
@@ -1381,7 +1420,6 @@
                 {data.undated} {data.undated === 1 ? 'item has' : 'items have'} no usable date and could not be placed on the thread.
               </p>
             )}
-            {data && data.emrNotice && <p className="text-[11.5px] text-amber-700 mt-2">{data.emrNotice}</p>}
           </div>
         </div>
       );
@@ -4476,6 +4514,19 @@
       const [linkCandidates, setLinkCandidates] = useState([]);
       const [err, setErr] = useState('');
       const [listOpen, setListOpen] = useState(true);
+      // Whether the patient panel is open, remembered per browser. A clinician
+      // who collapses it wants it collapsed next time; a preference like this is
+      // exactly what localStorage is for, and it is read in a try/catch because
+      // a private window or blocked site data makes the accessor throw. Open is
+      // the default, so a failed read gives the panel rather than hiding it.
+      const [panelOpen, setPanelOpen] = useState(() => {
+        try { return window.localStorage.getItem('gfc.clinical.panel') !== 'closed'; }
+        catch { return true; }
+      });
+      useEffect(() => {
+        try { window.localStorage.setItem('gfc.clinical.panel', panelOpen ? 'open' : 'closed'); }
+        catch { /* a preference that cannot be saved is not an error worth showing */ }
+      }, [panelOpen]);
       // Session 4.12 I1 — MY DAY is the default route after sign-in. The
       // workspace used to open on a patient list, which is not how a house-call
       // day starts.
@@ -4572,9 +4623,12 @@
       ];
       return (
         <AccessContext.Provider value={access}>
-        <div className="min-h-screen lg:grid lg:grid-cols-[290px_1fr]">
+        {/* The patient panel collapses (owner, 2026-09-23). The grid column
+            goes to zero rather than the aside being hidden inside a 290px
+            track, or the chart would keep a 290px gutter of nothing. */}
+        <div className={`min-h-screen lg:grid ${panelOpen ? 'lg:grid-cols-[290px_1fr]' : 'lg:grid-cols-[0_1fr]'}`}>
           {/* Patient list */}
-          <aside className={`bg-white border-r border-stone-200 ${listOpen ? '' : 'hidden'} lg:block`}>
+          <aside className={`bg-white border-r border-stone-200 ${listOpen ? '' : 'hidden'} ${panelOpen ? 'lg:block' : 'lg:hidden'}`}>
             <div className="bg-primary text-white px-5 py-4">
               <img src="/brand/logo-mark-transparent.png" alt="" className="h-10 mb-1.5" />
               <div className="text-[9px] tracking-[2px] uppercase text-accent font-bold">Clinical Workspace</div>
@@ -4609,41 +4663,58 @@
             </div>
           </aside>
 
-          {/* Chart */}
-          <main className={`${listOpen ? 'hidden' : ''} lg:block`}>
-            <div className="bg-white border-b border-stone-200 px-4 lg:px-7 py-3 flex items-center justify-between gap-3">
-              <div className="flex items-center gap-3">
+          {/* Chart. `lg:col-start-2` is load-bearing, not decoration: when the
+              panel is collapsed, `aside` gets `display:none` and CSS Grid
+              drops a display:none item from its item list entirely — so with
+              nothing pinning `main`, it auto-places into the now-empty FIRST
+              (0-width) track instead of the second, and the whole chart
+              renders at zero width. Found by measuring the live layout, not
+              by reading the CSS: `main`'s own bounding rect reported width 0
+              with the grid track correctly sized underneath it. */}
+          <main className={`${listOpen ? 'hidden' : ''} lg:block lg:col-start-2`}>
+            {/* WRAPS. Two groups in a `justify-between` row with nothing
+                allowed to wrap is why the right-hand group pushed the nav off
+                the edge instead of dropping below it. */}
+            <div className="bg-white border-b border-stone-200 px-4 lg:px-7 py-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+              <div className="flex items-center gap-3 min-w-0 flex-1">
                 <button className="lg:hidden btn ghost !px-2.5 !py-1.5" onClick={() => setListOpen(true)}><i className="ti ti-users" /></button>
-                <div className="serif text-lg text-primary font-semibold">{VIEW_TITLES[view] || 'Patient Chart'}</div>
-                <div className="flex rounded-lg border border-stone-200 overflow-hidden ml-1">
-                  <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'myday' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
-                    onClick={() => { setView('myday'); setListOpen(false); }}><i className="ti ti-sun mr-1" />My Day</button>
-                  <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'charts' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
-                    onClick={() => setView('charts')}><i className="ti ti-folder-open mr-1" />Charts</button>
-                  <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'schedule' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
-                    onClick={() => { setView('schedule'); setListOpen(false); }}><i className="ti ti-calendar-week mr-1" />Schedule</button>
-                  <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'queue' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
-                    onClick={() => { setView('queue'); setListOpen(false); }}><i className="ti ti-receipt mr-1" />Coding queue</button>
-                  {/* 4.9's Inbox is what is waiting on a clinician INSIDE the app —
-                      unsigned encounters, pending co-signs, visit-log reviews.
-                      4.10's Results is what has COME IN from outside and needs
-                      acknowledging, and Overdue is what went out and never came
-                      back. Three different questions, and each answers one; see
-                      the note where clinicalResults is required in server.js. */}
-                  <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'inbox' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
-                    onClick={() => { setView('inbox'); setListOpen(false); }}><i className="ti ti-inbox mr-1" />Inbox</button>
-                  <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'results' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
-                    onClick={() => { setView('results'); setListOpen(false); }}><i className="ti ti-flask mr-1" />Results</button>
-                  <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'overdue' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
-                    onClick={() => { setView('overdue'); setListOpen(false); }}><i className="ti ti-clock-exclamation mr-1" />Overdue</button>
-                  <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'queues' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
-                    onClick={() => { setView('queues'); setListOpen(false); }}><i className="ti ti-checkbox mr-1" />Tasks</button>
-                  <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'analytics' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
-                    onClick={() => { setView('analytics'); setListOpen(false); }}><i className="ti ti-chart-bar mr-1" />Analytics</button>
+                {/* The panel toggle is desktop-only: on a phone the list is a
+                    full-screen overlay with its own button to the left. */}
+                <button className="hidden lg:inline-flex btn ghost !px-2 !py-1.5 shrink-0"
+                  onClick={() => setPanelOpen(o => !o)}
+                  title={panelOpen ? 'Hide the patient list' : 'Show the patient list'}
+                  aria-label={panelOpen ? 'Hide the patient list' : 'Show the patient list'}
+                  aria-expanded={panelOpen}>
+                  <i className={`ti ${panelOpen ? 'ti-layout-sidebar-left-collapse' : 'ti-layout-sidebar-left-expand'}`} />
+                </button>
+                {/* The heading gives up its width before the nav does — it is
+                    a label, and the nav is the thing you click. */}
+                <div className="serif text-lg text-primary font-semibold truncate shrink">{VIEW_TITLES[view] || 'Patient Chart'}</div>
+                {/* WRAPS, never scrolls invisibly. The first version made this
+                    strip `overflow-x-auto`, which technically fit nine views —
+                    but a horizontal scrollbar on a nav bar is not a fix, it is
+                    the same clipping with an affordance nobody sees. Labels
+                    show only once there is genuinely room for all nine words
+                    (2xl, 1536px+); below that it is icons, which is what makes
+                    nine views actually fit on a laptop instead of technically
+                    scrolling past it. `flex-wrap` is the backstop under that —
+                    if even nine icons cannot fit (a narrow phone), the strip
+                    grows to a second row inside its own border rather than
+                    cutting the last button off at the edge. */}
+                <div className="flex flex-wrap rounded-lg border border-stone-200 ml-1 nav-strip">
+                  {NAV_VIEWS.map(v => (
+                    <button key={v.key}
+                      className={`px-2.5 py-1.5 text-xs font-semibold whitespace-nowrap ${view === v.key ? 'bg-primary text-white' : 'bg-white text-primary'}`}
+                      title={VIEW_TITLES[v.key]}
+                      onClick={() => { setView(v.key); if (!v.keepsPatient) setListOpen(false); }}>
+                      <i className={`ti ${v.icon}`} />
+                      <span className="hidden 2xl:inline ml-1">{v.tab}</span>
+                    </button>
+                  ))}
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                <div className="flex items-center gap-2 text-[11.5px] text-stone-500 bg-cream border border-stone-200 px-3 py-1.5 rounded-full">
+              <div className="flex items-center gap-2 shrink-0">
+                <div className="flex items-center gap-2 text-[11.5px] text-stone-500 bg-cream border border-stone-200 px-3 py-1.5 rounded-full whitespace-nowrap">
                   <span className={`w-2 h-2 rounded-full ${emrStatus === null ? 'bg-stone-300' : emrStatus.connected ? 'bg-emerald-500' : (emrStatus.reachable ? 'bg-amber-500' : 'bg-red-500')}`} />
                   {emrStatus === null ? 'OpenEMR…'
                     : !emrStatus.configured ? 'OpenEMR not configured'
@@ -4652,7 +4723,7 @@
                     : 'OpenEMR: not signed in'}
                 </div>
                 {emrStatus && emrStatus.serverStartedAt && (
-                  <span className="text-[10.5px] text-stone-400 hidden md:inline" title="When this server process started — older than your last deploy means it was never restarted.">
+                  <span className="text-[10.5px] text-stone-400 hidden 2xl:inline" title="When this server process started — older than your last deploy means it was never restarted.">
                     server up since {fmtTs(emrStatus.serverStartedAt)}
                   </span>
                 )}
