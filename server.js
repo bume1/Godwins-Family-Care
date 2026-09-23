@@ -6689,6 +6689,15 @@ const GFC_EXPECTED_DOCUMENTS = [
   { kind: 'advanceDirective', scope: 'ALL',  required: false,
     label: 'Advance directive or living will',
     hint: 'If you have one. We keep a copy so your wishes are on file before they are needed.' },
+  // A general drop spot (owner, 2026-09-23) — a contract, a letter, anything
+  // not named above. It is not chased and never required; it exists so
+  // nothing has to wait on a matching kind to have somewhere to go. It
+  // uploads to the SAME per-client Drive folder as everything else, so it is
+  // already in the right client's record — staff re-file or re-type it from
+  // there if it turns out to belong under a more specific kind.
+  { kind: 'otherDocument',    scope: 'ALL',  required: false,
+    label: 'Something else',
+    hint: 'A contract, a letter, or anything not listed above.' },
   { kind: 'dnrPolst',         scope: 'IHPC', required: false,
     label: 'DNR or POLST form',
     hint: 'If one has been completed and signed by a physician.' },
