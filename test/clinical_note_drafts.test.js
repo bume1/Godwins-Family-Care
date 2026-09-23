@@ -194,32 +194,57 @@ test('the three note actions all exist and do three different things', () => {
     'the third action must lead to where signing actually happens');
 });
 
-// The reason this whole session started: a route with no screen.
+// The reason THAT session started: a route with no screen. The rule did not
+// go away when 4.12 moved the facility picker off the clinician's chart and
+// onto the enrollment record (owner, 2026-09-23) — it points at the new
+// screen. Repointed, never deleted: a guard that quietly disappears with the
+// code it happened to be aimed at is a guard lost.
+const enrollPage = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-enrollment.html'), 'utf8');
+
 test('the facility assignment route is actually called from a page', () => {
   assert.match(server, /app\.put\('\/api\/clinical\/patients\/:clientId\/facility'/,
     'the facility route must exist');
-  assert.ok(clinicalPage.includes('assignFacility'),
+  assert.ok(enrollPage.includes('assignFacility'),
     'a route with no caller is a capability that does not exist — this blocked every signature');
-  assert.ok(clinicalPage.includes('<FacilityCard'), 'the facility card must be rendered');
+  assert.ok(enrollPage.includes('<PlaceOfServiceCard'), 'the enrollment screen must render the card that writes it');
+  // And the clinician still SEES the resolved state, or the move would have
+  // taken the information away along with the control.
+  assert.ok(clinicalPage.includes('<PlaceOfServiceCard'), 'the chart must still show where this patient is seen');
 });
 
 test('the facility picker is admin-only on screen, matching the route', () => {
-  const card = clinicalPage.slice(clinicalPage.indexOf('const FacilityCard = ('));
-  const body = card.slice(0, card.indexOf('const SummaryTab = ('));
-  assert.ok(body.includes('isAdmin ?'),
-    'a non-admin must see the state, not a control the server would 403');
+  const card = enrollPage.slice(enrollPage.indexOf('const PlaceOfServiceCard = ('));
+  const body = card.slice(0, card.indexOf('const DetailView = ('));
+  // COUNTED, not merely present. The card has two write controls — the
+  // facility and the encounter type — so `includes('canEdit &&')` cannot tell
+  // "both gated" from "one gated": the surviving gate satisfies it either way.
+  // That is the assertion-that-proves-nothing trap this repo keeps paying for,
+  // and the only way out of it is to count both sides and require they match.
+  const selects = body.match(/<select/g) || [];
+  // Matches both gate shapes the card uses — a bare `{canEdit && (` and the
+  // facility's `{canEdit && !data.degraded && (` — while excluding the
+  // `{!canEdit && …` read-only notice, which is not a gate around a control.
+  const gates = body.match(/\{canEdit &&[^\n]*\($/gm) || [];
+  assert.equal(selects.length, 2, 'the card writes exactly the facility and the encounter type');
+  assert.equal(gates.length, selects.length,
+    'every write control must sit behind its own admin gate — a non-admin must see the state, not a control the server would 403');
+  assert.ok(body.includes('Read-only'), 'a reader who may not write must be told which of the two states they are in');
   const route = server.slice(server.indexOf("app.put('/api/clinical/patients/:clientId/facility'"));
   assert.ok(route.slice(0, 200).includes('requireAdmin'), 'the route itself must stay admin-only');
+  // The chart carries no write at all now, so there is nothing there to gate.
+  const chartCard = clinicalPage.slice(clinicalPage.indexOf('const PlaceOfServiceCard = ('));
+  assert.ok(!/method:\s*'PUT'/.test(chartCard.slice(0, chartCard.indexOf('const SummaryTab = ('))),
+    'the chart card must not write anything');
 });
 
 test('an unassigned patient is told plainly that it blocks signing', () => {
-  const card = clinicalPage.slice(clinicalPage.indexOf('const FacilityCard = ('));
-  const body = card.slice(0, card.indexOf('const SummaryTab = ('));
+  const card = enrollPage.slice(enrollPage.indexOf('const PlaceOfServiceCard = ('));
+  const body = card.slice(0, card.indexOf('const DetailView = ('));
   assert.ok(/cannot be signed/i.test(body),
     'the card must name the consequence, not just show an empty field');
   // Assigned-but-no-POS is a different problem with a different fix, and the
   // fix is not on this screen. Telling someone to set it here would send them
   // looking for a control that does not exist.
-  assert.ok(/Administration → Facilities/.test(body),
+  assert.ok(/Administration &rarr; Facilities/.test(body),
     'a missing POS must point at OpenEMR, where it is actually set');
 });

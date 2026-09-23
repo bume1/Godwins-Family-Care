@@ -404,11 +404,22 @@ const soapSection = (v, max) => {
 // writes. Pure so the mapping is testable without a live EMR.
 const HP_SECTION_LABELS = {
   systemsExam: 'Systems exam',
+  // Session 4.12 Scope G — psychiatry is the SAME ambulatory encounter with a
+  // different exam, not a different kind of note. So the MSE is a section of
+  // the H&P beside the systems exam, and it is offered ALONGSIDE it rather
+  // than instead of it: a psychiatric home visit still takes vitals and still
+  // looks at the home, and a note shape that dropped those would document
+  // less of a visit than the paper it replaced.
+  mentalStatusExam: 'Mental status exam',
   skinWound: 'Skin & wound (with measurements)',
   painAssessment: 'Pain assessment (PAINAD-style)',
   homeHazards: 'Home-hazard inventory',
   triage: 'RN triage / Track assignment'
 };
+// NOTE: `hpSectionsFor` lived here and was DEAD from the moment it was
+// written — nothing ever called it, which is the inert-capability trap this
+// repo keeps paying for. `appointmentTypes.sectionsFor` answers this question
+// now, per visit rather than per patient, and is actually read.
 
 const kvLines = (obj) => Object.entries(obj || {})
   .filter(([, v]) => v !== null && v !== undefined && String(v).trim() !== '')
@@ -537,6 +548,84 @@ const buildHpWrites = (form, clinicianName) => {
       .filter(Boolean).join('\n').slice(0, 8000)
   };
   return { encounter, vitals, soapNote };
+};
+
+// ============================================================
+// Session 4.12 Scope G — the risk assessment a psychiatric visit cannot be
+// signed without
+// ============================================================
+// A psychiatric note with no documented risk assessment is the standard-of-
+// care failure this exists to stop. So on a psychiatric encounter it is a
+// SIGNING blocker — documenting the visit is never blocked, the same rule
+// every other blocker in this file follows, because care happens whether or
+// not the paperwork is finished and it is the signature that is an assertion.
+//
+// REQUIRED ONLY WHERE THE ENCOUNTER TYPE IS PSYCHIATRIC. On every encounter
+// it would be noise, and noise is how a real refusal gets clicked past; on
+// none it is the gap. The encounter type is the fact that decides it, which
+// is the same stamp the place of service is checked against.
+const RISK_LEVELS = Object.freeze(['none', 'low', 'moderate', 'high', 'imminent']);
+// "None" IS an assessment and it satisfies the gate: the record is that
+// somebody asked. Refusing to accept it would push a clinician to skip the
+// section entirely, which records nothing at all.
+const RISK_NEEDS_PLAN = Object.freeze(['moderate', 'high', 'imminent']);
+const RISK_DOMAINS = Object.freeze(['suicide', 'homicide', 'selfNeglect']);
+
+const buildRiskAssessment = ({ id, clientId, encounterUuid, form, actor, at }) => {
+  const f = form || {};
+  const levels = {};
+  for (const d of RISK_DOMAINS) {
+    const v = String(f[d] || '').trim().toLowerCase();
+    if (!RISK_LEVELS.includes(v)) {
+      return { error: `${d} risk must be one of: ${RISK_LEVELS.join(', ')}`, code: 'RISK_LEVEL_REQUIRED' };
+    }
+    levels[d] = v;
+  }
+  const plan = String(f.plan || '').trim();
+  // A plan is required wherever any domain is at moderate or above. Recording
+  // "patient endorses suicidal ideation" with nothing about what is being
+  // done is a record that somebody SAW it, which is not a record that it was
+  // handled — the rule 4.10's abnormal-result follow-up note already sets.
+  const raised = RISK_DOMAINS.filter(d => RISK_NEEDS_PLAN.includes(levels[d]));
+  if (raised.length && plan.length < 10) {
+    return {
+      error: `Risk is ${raised.map(d => `${d}: ${levels[d]}`).join(', ')} — say what is being done about it. An assessment with no plan records that it was seen, not that it was handled.`,
+      code: 'RISK_PLAN_REQUIRED'
+    };
+  }
+  return {
+    assessment: {
+      id, clientId, encounterUuid: String(encounterUuid),
+      levels,
+      protectiveFactors: String(f.protectiveFactors || '').trim().slice(0, 4000),
+      meansRestriction: String(f.meansRestriction || '').trim().slice(0, 4000),
+      plan: plan.slice(0, 8000),
+      at: at || new Date().toISOString(),
+      by: actorRecord(actor)
+    }
+  };
+};
+
+// Revising is a NEW row, never a rewrite. Risk changes inside one visit, and
+// overwriting would lose that the clinician escalated — the same append-only
+// rule the care plan and the escalation trail follow. The latest row is what
+// the gate reads.
+const latestRiskAssessment = (rows, encounterUuid) =>
+  (rows || []).filter(r => r && r.encounterUuid === String(encounterUuid))
+    .sort((a, b) => String(b.at).localeCompare(String(a.at)))[0] || null;
+
+// Asked of the VISIT, not the patient. A behavioural-health appointment type
+// is what makes a risk assessment mandatory; a patient's usual kind of visit
+// is not a fact about the one being signed.
+const riskAssessmentRequired = (visit) => isBehavioralVisit(visit);
+const highestRisk = (assessment) => {
+  if (!assessment || !assessment.levels) return null;
+  let worst = null; let rank = -1;
+  for (const d of RISK_DOMAINS) {
+    const i = RISK_LEVELS.indexOf(assessment.levels[d]);
+    if (i > rank) { rank = i; worst = assessment.levels[d]; }
+  }
+  return worst;
 };
 
 // Valid Track assignments the RN can set from the H&P triage step.
@@ -935,8 +1024,14 @@ const buildEncounterServices = (list, diagnoses) => {
 // encounter; created when the app documents the visit (or lazily when coding
 // opens on an older encounter). Billing provider NPI comes from CONFIG — the
 // caller passes it; it is never a literal here.
-const buildEncounterBillingRecord = ({ id, clientId, puuid, encounterUuid, encounterEid, reason, date, actor, billingNpi, narrativeNoteSid, at }) => ({
+// `encounterType` is stamped HERE, at creation, from the patient's admin-set
+// default resolved against the booking — not re-derived at signing. At signing
+// the stamp is checked against the POS OpenEMR actually holds, and two
+// independent facts are what make that check mean anything: re-deriving the
+// type from the encounter's own POS would make it agree with itself.
+const buildEncounterBillingRecord = ({ id, clientId, puuid, encounterUuid, encounterEid, reason, date, actor, billingNpi, narrativeNoteSid, visit, at }) => ({
   id,
+  visit: normalizeVisit(visit),
   clientId,
   puuid,
   encounterUuid: String(encounterUuid),
@@ -990,6 +1085,85 @@ const applyCoding = (record, { diagnoses, services }, actor, billingNpi, at) => 
   return { record: next };
 };
 
+// ============================================================
+// What a visit IS — Service + Appointment Type → Modality → Location
+// ============================================================
+// Owner config 2026-09-23. This REPLACES the flat `ENCOUNTER_TYPES` list,
+// which tangled "where did this happen" and "what kind of visit was it" into
+// one field and so needed a separate entry for every combination.
+//
+// The vocabulary, the place-of-service matrix, the code families and the note
+// templates all live in `appointmentTypes.js`. Nothing is restated here: a
+// second copy of which place of service a location carries is a second answer
+// to a question that decides a claim.
+const apptTypes = require('./appointmentTypes');
+
+const VISIT_POS_DISAGREES = 'VISIT_POS_MISMATCH';
+
+// The visit descriptor stamped on the encounter, normalised. A field the
+// catalog does not know becomes null rather than being stored, because an
+// invented appointment type reads back as a real one to everything
+// downstream and would never match a place of service.
+const normalizeVisit = (v) => {
+  const raw = v && typeof v === 'object' ? v : {};
+  const type = apptTypes.typeByKey(raw.appointmentType);
+  const modality = apptTypes.modalityByKey(raw.modality);
+  const location = apptTypes.locationByKey(raw.location);
+  return {
+    appointmentType: type ? type.key : null,
+    modality: modality ? modality.key : null,
+    location: location ? location.key : null
+  };
+};
+
+const visitLabel = (v) => {
+  const n = normalizeVisit(v);
+  const type = apptTypes.typeByKey(n.appointmentType);
+  const modality = apptTypes.modalityByKey(n.modality);
+  const location = apptTypes.locationByKey(n.location);
+  if (!type || !modality || !location) return null;
+  return `${type.label} · ${modality.label} · ${location.label}`;
+};
+
+// THE REFUSAL, AND IT NAMES BOTH VALUES. A signed encounter becomes a claim:
+// a telehealth visit billed at the patient's home place of service, or a
+// clinic visit billed as a home visit, is a false statement about where care
+// happened. What the visit SHOULD bill at is computed from its own modality
+// and location; what it DOES carry is read off the encounter OpenEMR holds.
+// Two independent facts, which is the only reason comparing them proves
+// anything.
+const checkVisitAgainstPos = ({ visit, posCode, facilityName, facilityPos }) => {
+  const n = normalizeVisit(visit);
+  if (!n.modality || !n.location) return { ok: true, error: null, code: null };
+  const expected = apptTypes.resolvePos({ modality: n.modality, location: n.location, facilityPos: facilityPos || posCode });
+  if (expected.error) return { ok: false, code: expected.code, error: expected.error };
+  const actual = String(posCode || '').trim();
+  if (!actual) {
+    return {
+      ok: false, code: 'VISIT_NO_POS',
+      error: `This visit is recorded as ${visitLabel(n) || 'an unresolved visit'}, which bills at place of service ${expected.pos}, but ${facilityName ? `the facility "${facilityName}"` : 'the encounter'} carries none. An admin sets it on the facility in OpenEMR.`
+    };
+  }
+  if (actual === expected.pos) return { ok: true, error: null, code: null };
+  return {
+    ok: false, code: VISIT_POS_DISAGREES,
+    error: `This visit is recorded as ${visitLabel(n)}, which bills at place of service ${expected.pos}, but the encounter carries place of service ${actual}. One of the two is wrong, and a signed encounter becomes a claim — correct the visit's modality and location, or the facility in OpenEMR.`
+  };
+};
+
+// Which sections this note must contain, answered by the catalog for THIS
+// visit: the same appointment type demands a physical exam in person and does
+// not over video.
+const requiredSectionsForVisit = (visit, { riskPositive } = {}) => {
+  const n = normalizeVisit(visit);
+  if (!n.appointmentType) return [];
+  return apptTypes.requiredSectionKeys(n.appointmentType, { modality: n.modality, riskPositive });
+};
+
+const isBehavioralVisit = (visit) => apptTypes.isBehavioralHealth(normalizeVisit(visit).appointmentType);
+const isTelehealthVisit = (visit) => normalizeVisit(visit).modality === 'telehealth';
+
+
 // ---- Sign & close (spec §3) ----
 const SIGN_BLOCKER_CODES = {
   note: 'SIGN_NO_NOTE',
@@ -999,7 +1173,15 @@ const SIGN_BLOCKER_CODES = {
   billing_npi: 'SIGN_NO_BILLING_NPI',
   // A signed encounter becomes a claim, and a claim needs a real place of
   // service. Documenting the visit is never blocked; billing it is.
-  facility_pos: 'SIGN_NO_FACILITY_POS'
+  facility_pos: 'SIGN_NO_FACILITY_POS',
+  // A POS that EXISTS but contradicts what kind of visit this was is a worse
+  // failure than a missing one, because nothing about it looks wrong: the
+  // claim goes out asserting care happened somewhere it did not.
+  encounter_type_pos: VISIT_POS_DISAGREES,
+  // Scope F/G: the note template this appointment type declares.
+  note_sections: 'SIGN_NOTE_SECTIONS_INCOMPLETE',
+  // Scope G. A psychiatric note signed with no documented risk assessment.
+  risk_assessment: 'SIGN_NO_RISK_ASSESSMENT'
 };
 const SIGN_BLOCKER_LABELS = {
   note: 'a documented note',
@@ -1007,24 +1189,68 @@ const SIGN_BLOCKER_LABELS = {
   service: 'at least one CPT/HCPCS service code',
   service_dx_link: 'every service linked to a diagnosis',
   billing_npi: 'the billing provider NPI configured in settings',
-  facility_pos: "a place of service — this patient has no OpenEMR facility assigned, or their facility has no POS code on its record. An admin fixes it on the patient or the facility, not here"
+  facility_pos: "a place of service — this patient has no OpenEMR facility assigned, or their facility has no POS code on its record. An admin fixes it on the patient or the facility, not here",
+  risk_assessment: 'a risk assessment — this is a psychiatric visit and it cannot be signed without one'
 };
 // `posCode` is the place of service the encounter actually carries, derived
 // from the patient's facility. Documenting a visit is never blocked on it —
 // care happens whether or not an admin has finished the facility setup — but
 // SIGNING is, because a signed encounter becomes a claim and a claim with an
 // unverified POS is the silent error this whole change exists to prevent.
-const checkSignReadiness = ({ hasNote, record, billingNpi, posCode }) => {
+//
+// `encounterType` is what the admin recorded this patient's visits as, resolved
+// against the booking. Where the type names a place of service, it is checked
+// against the one the facility resolved to, and a disagreement REFUSES the
+// signature naming both values — see checkEncounterTypeAgainstPos. That refusal
+// carries its own sentence rather than a label in the joined list, because the
+// reader has to know which of the two is wrong and neither is fixed from here.
+const checkSignReadiness = ({ hasNote, record, billingNpi, posCode, visit, facilityName, riskAssessment, completedSections }) => {
   const missing = [];
   if (!hasNote) missing.push('note');
   missing.push(...deriveCodingStatus(record).missing);
   if (!normalizeNpiValue(billingNpi)) missing.push('billing_npi');
-  if (!String(posCode || '').trim()) missing.push('facility_pos');
+  const pos = String(posCode || '').trim();
+  if (!pos) missing.push('facility_pos');
+  // Only asked where a POS actually resolved: with none, `facility_pos` above
+  // already blocks and saying it twice in two different sentences would send
+  // the reader at two layers for one problem.
+  const agreement = pos
+    ? checkVisitAgainstPos({ visit, posCode: pos, facilityName })
+    : { ok: true, error: null, code: null };
+  if (!agreement.ok) missing.push('encounter_type_pos');
+
+  // Scope G, asked of the VISIT: a behavioural-health appointment type cannot
+  // be signed without a risk assessment.
+  if (riskAssessmentRequired(visit) && !riskAssessment) missing.push('risk_assessment');
+
+  // Scope F: the appointment type's own note template, resolved for THIS
+  // visit — a physical exam is demanded in person and not over video. The
+  // SAFETY PLAN becomes required once the risk recorded on this encounter is
+  // not negative, which is why the risk row is read here rather than the
+  // template being fixed at the start of the visit.
+  const riskPositive = !!(riskAssessment && riskAssessment.levels &&
+    RISK_DOMAINS.some(d => RISK_NEEDS_PLAN.includes(riskAssessment.levels[d])));
+  const required = requiredSectionsForVisit(visit, { riskPositive });
+  const done = new Set((Array.isArray(completedSections) ? completedSections : []).map(String));
+  const openSections = required.filter(k => !done.has(k));
+  if (openSections.length) missing.push('note_sections');
+
+  const labelled = missing.filter(m => m !== 'encounter_type_pos' && m !== 'note_sections');
+  const sentences = [];
+  if (labelled.length) sentences.push(`Cannot sign: the encounter needs ${labelled.map(m => SIGN_BLOCKER_LABELS[m]).join(', ')}.`);
+  if (openSections.length) {
+    // NAMED, never counted. "3 sections outstanding" is a number a clinician
+    // has to go hunting through their own note for.
+    const type = apptTypes.typeByKey(normalizeVisit(visit).appointmentType);
+    sentences.push(`Cannot sign: this ${type ? type.label : 'visit'} note still needs ${openSections.map(k => apptTypes.SECTIONS[k]).join(', ')}.`);
+  }
+  if (!agreement.ok) sentences.push(`Cannot sign: ${agreement.error}`);
   return {
     ok: missing.length === 0,
     missing,
+    openSections,
     codes: missing.map(m => SIGN_BLOCKER_CODES[m]),
-    message: missing.length ? `Cannot sign: the encounter needs ${missing.map(m => SIGN_BLOCKER_LABELS[m]).join(', ')}.` : null
+    message: sentences.length ? sentences.join(' ') : null
   };
 };
 const ATTESTATION_TEXT = 'I attest that this encounter documentation is accurate and complete, that I personally performed or directly supervised the services recorded, and that the diagnoses and service codes are supported by the note.';
@@ -1259,6 +1485,7 @@ const resolveBillingFacility = ({ facilities, configuredId }) => {
   };
 };
 
+
 const FACILITY_UNASSIGNED = 'FACILITY_NOT_ASSIGNED';
 const resolveEncounterFacility = ({ patientFacilityId, telehealthFacilityId, appointmentLocation, facilities }) => {
   const byId = new Map((facilities || []).map(f => [String(f.id), f]));
@@ -1311,7 +1538,44 @@ const resolveEncounterFacility = ({ patientFacilityId, telehealthFacilityId, app
 //
 // billing_facility is deliberately absent: addBilling() has no such parameter
 // and the billing table no such column. It lives on form_encounter (Scope D).
-const buildChargePayloads = (record, { providerId } = {}) => {
+//
+// TWO KEYS WERE WRONG HERE AND BOTH FAILED SILENTLY (found 2026-09-23, fixed
+// with the encounter type). This function read `svc.modifier` and
+// `svc.linkedDiagnoses`; `buildEncounterServices` stores `modifiers` (an
+// array) and `dxLinks`. So EVERY modifier a clinician entered was dropped from
+// the charge — the field is on the form, validated, stored, and never reached
+// a claim — and the per-service diagnosis pointers NEVER fired, so every
+// service was billed against every encounter diagnosis. The second is the
+// worse one: a visit coded for diabetes and a separate service coded for
+// hypertension both went out pointing at both, which is a medical-necessity
+// misstatement. Same key-mismatch class that cost Phase 6B three acceptance
+// runs, and it returned 201 and looked right in Billing Manager either way.
+//
+// THE TELEHEALTH MODIFIER IS DERIVED, NOT TYPED. A telehealth encounter type
+// bills at POS 10 and carries modifier 95 (synchronous audio-video). It is
+// added from the encounter type for the same reason the POS is: a clinician
+// who forgets it produces a claim that reads as an in-person visit. GQ and 93
+// are deliberately NOT derived — the app cannot observe whether a visit was
+// store-and-forward or audio-only, and asserting audio-only about a video
+// visit is a false claim, so those stay a clinician's own entry.
+const TELEHEALTH_MODIFIER = '95';
+const modifiersForCharge = (svc, visit) => {
+  const own = Array.isArray(svc && svc.modifiers) ? svc.modifiers : [];
+  // Off the MODALITY, which is the fact that decides it. A telehealth visit
+  // carries the modifier wherever the patient was sitting.
+  const derived = isTelehealthVisit(visit) ? [TELEHEALTH_MODIFIER] : [];
+  // The clinician's own entry first: modifier ORDER is meaningful on a claim
+  // line, and a pricing modifier they put first must stay first.
+  const all = [];
+  for (const m of [...own, ...derived]) {
+    const v = String(m || '').trim().toUpperCase();
+    if (/^[A-Z0-9]{2}$/.test(v) && !all.includes(v)) all.push(v);
+  }
+  // X12 carries at most four modifiers on a line; OpenEMR stores them as one
+  // colon-joined string, the same shape its own Fee Sheet writes.
+  return all.slice(0, 4).join(':');
+};
+const buildChargePayloads = (record, { providerId, visit } = {}) => {
   const diagnoses = (record && record.diagnoses) || [];
   const services = (record && record.services) || [];
   const dxPointers = diagnoses.map(d => ({ code_type: 'ICD10', code: d.code }));
@@ -1320,12 +1584,14 @@ const buildChargePayloads = (record, { providerId } = {}) => {
     code: svc.code,                       // NEVER a diagnosis code
     code_text: String(svc.description || svc.label || '').slice(0, 255),
     units: svc.units && svc.units > 0 ? svc.units : 1,
-    modifier: svc.modifier || '',
+    modifier: modifiersForCharge(svc, visit),
     provider_id: providerId != null ? Number(providerId) : undefined,
-    // Link only the diagnoses this service was coded against, when the
-    // clinician linked them; otherwise every encounter diagnosis.
-    diagnoses: (Array.isArray(svc.linkedDiagnoses) && svc.linkedDiagnoses.length
-      ? svc.linkedDiagnoses.map(c => ({ code_type: 'ICD10', code: c }))
+    // Link only the diagnoses this service was coded against. `dxLinks` is
+    // what buildEncounterServices stores and it is never empty — it refuses a
+    // service with no link — so the fallback is for a record written before
+    // that rule, not a routine path.
+    diagnoses: (Array.isArray(svc.dxLinks) && svc.dxLinks.length
+      ? svc.dxLinks.map(c => ({ code_type: 'ICD10', code: c }))
       : dxPointers),
     authorized: 1
   }));
@@ -2119,6 +2385,9 @@ module.exports = {
   applyCoding,
   SIGN_BLOCKER_CODES,
   checkSignReadiness,
+  TELEHEALTH_MODIFIER, modifiersForCharge,
+  RISK_LEVELS, RISK_NEEDS_PLAN, RISK_DOMAINS, buildRiskAssessment,
+  latestRiskAssessment, riskAssessmentRequired, highestRisk,
   ATTESTATION_TEXT,
   buildAttestation,
   isEncounterClosed,
@@ -2129,6 +2398,8 @@ module.exports = {
   buildPrescription,
   prescriptionToEmrRow,
   resolveEncounterFacility,
+  normalizeVisit, visitLabel, checkVisitAgainstPos, requiredSectionsForVisit,
+  isBehavioralVisit, isTelehealthVisit, VISIT_POS_DISAGREES,
   FACILITY_UNASSIGNED,
   resolveBillingFacility,
   BILLING_FACILITY_UNRESOLVED,

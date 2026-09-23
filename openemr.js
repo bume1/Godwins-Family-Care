@@ -264,6 +264,49 @@ const forActor = (actor) => {
       return bundleResources(await fhirGet('Practitioner', 'Practitioner', null));
     },
 
+    // ---- Session 4.12 Scope J — the rest of the patient-scoped FHIR reads ----
+    //
+    // READS ONLY, and that is a decision rather than an omission. On 8.4 the
+    // FHIR API is read-only for clinical resources (the finding this whole
+    // transport is shaped around), so a write for any of these would have to
+    // go through the standard API or a patch route — a separate decision, per
+    // resource, that nothing has asked for yet. Adding a write here that
+    // silently no-ops is the trap this repo has already paid for six times.
+    //
+    // EVERY ONE OF THESE MAY 403 OR 404 ON THIS INSTANCE, and the two mean
+    // different things: 403 is the org-level ACL (the Phase 8.6 class of
+    // problem, fixed by widening a group), 404 is a route 8.4 does not serve
+    // at all. Neither is "the patient has none". The callers carry that
+    // distinction to the screen rather than rendering an empty list, because
+    // an empty result is not a diagnosis.
+    async getCoverage(puuid) {
+      return bundleResources(await fhirGet(`Coverage?patient=${encodeURIComponent(puuid)}`, 'Coverage', puuid));
+    },
+    async getImmunizations(puuid) {
+      return bundleResources(await fhirGet(`Immunization?patient=${encodeURIComponent(puuid)}`, 'Immunization', puuid));
+    },
+    async getCareTeams(puuid) {
+      return bundleResources(await fhirGet(`CareTeam?patient=${encodeURIComponent(puuid)}`, 'CareTeam', puuid));
+    },
+    async getRelatedPersons(puuid) {
+      return bundleResources(await fhirGet(`RelatedPerson?patient=${encodeURIComponent(puuid)}`, 'RelatedPerson', puuid));
+    },
+    async getGoals(puuid) {
+      return bundleResources(await fhirGet(`Goal?patient=${encodeURIComponent(puuid)}`, 'Goal', puuid));
+    },
+    async getDevices(puuid) {
+      return bundleResources(await fhirGet(`Device?patient=${encodeURIComponent(puuid)}`, 'Device', puuid));
+    },
+    async getMedia(puuid) {
+      return bundleResources(await fhirGet(`Media?patient=${encodeURIComponent(puuid)}`, 'Media', puuid));
+    },
+    async getQuestionnaireResponses(puuid) {
+      return bundleResources(await fhirGet(`QuestionnaireResponse?patient=${encodeURIComponent(puuid)}`, 'QuestionnaireResponse', puuid));
+    },
+    async getProcedures(puuid) {
+      return bundleResources(await fhirGet(`Procedure?patient=${encodeURIComponent(puuid)}`, 'Procedure', puuid));
+    },
+
     // ---- FHIR Patient create/update (the link step) ----
     async createPatient(fhirPatient) {
       const res = await rawRequest({ actor, method: 'POST', url: fhirUrl('Patient'), body: fhirPatient });

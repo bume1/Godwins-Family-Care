@@ -94,6 +94,21 @@ const totalVisitMinutes = (timing) => minutesBetween(timing && timing.startedAt,
 
 // The sentence that goes in the note. Built here, once, so the note and the
 // visit information block can never disagree about how long the visit was.
+//
+// ⚠️ OWNER RULE, 2026-09-23: THE CLINICIAN'S RECORDED START AND END OVERRIDE
+// ANY SCHEDULED OR EXPECTED TIME, AND THERE IS NO FALLBACK TO THE SCHEDULE.
+//
+// The appointment type carries a default duration and the calendar carries a
+// slot. Both are planning figures. Neither is evidence that anybody was in the
+// room for that long, and a time-based E/M level is an assertion about how
+// long the clinician actually spent. Billing 60 minutes because the slot said
+// 60, when the visit ran 35, is a false claim of exactly the kind this repo
+// has already found twice today in the charge writer.
+//
+// So when nothing was recorded the answer is NULL — "no time recorded" — and
+// never the scheduled duration. A fallback here would be indistinguishable
+// from a real measurement to everyone downstream, which is the whole problem.
+// Build-enforced: nothing in this function may read a scheduled figure.
 const timeStatement = (timing) => {
   const mins = totalVisitMinutes(timing);
   if (mins == null) return null;
@@ -106,6 +121,30 @@ const timeStatement = (timing) => {
       `${mins - therapy} minutes of evaluation and management, separate and distinct from the psychotherapy time.`;
   }
   return `Total visit time ${mins} minutes, including face-to-face time with the patient and time spent on this date reviewing the record and coordinating care.`;
+};
+
+// What a visit's time actually WAS, against what was planned. Both are
+// returned and they are labelled differently, because a clinician looking at
+// their day wants the plan and a claim wants the measurement, and the one
+// thing that must never happen is the plan being read as the measurement.
+const SCHEDULED_ONLY = 'scheduled_only';
+const visitTiming = (timing, { scheduledMinutes } = {}) => {
+  const actual = totalVisitMinutes(timing);
+  const planned = Number.isFinite(Number(scheduledMinutes)) && Number(scheduledMinutes) > 0
+    ? Math.round(Number(scheduledMinutes)) : null;
+  return {
+    actualMinutes: actual,
+    scheduledMinutes: planned,
+    // The one figure anything billable may read. Null when unrecorded — never
+    // `planned`, however tempting, and the field name says so.
+    billableMinutes: actual,
+    source: actual != null ? 'recorded' : (planned != null ? SCHEDULED_ONLY : 'none'),
+    // True when the clinician's own times contradict the diary. Not an error:
+    // visits run long and short, and the recorded time is the true one. It is
+    // surfaced so a schedule that is consistently wrong gets noticed.
+    overridesSchedule: actual != null && planned != null && actual !== planned,
+    statement: timeStatement(timing)
+  };
 };
 
 // ---- Drive time and distance ---------------------------------------------
@@ -450,6 +489,7 @@ module.exports = {
   VISIT_STATE, VISIT_STATE_LABELS, NON_VISIT_KINDS,
   deriveVisitState,
   timingId, minutesBetween, totalVisitMinutes, timeStatement, MAX_VISIT_MINUTES,
+  visitTiming, SCHEDULED_ONLY,
   DISTANCE_UNAVAILABLE, haversineMiles, coordsOf, addressLineOf,
   buildDayRow, buildUnsignedBacklog, buildMyDay,
   proposeRouteOrder,

@@ -368,3 +368,120 @@ test('scanning from the chart files into the CLIENT document store', () => {
   assert.match(CLINICAL_PAGE, /fileClientDocument: \(clientId, body\) => authedFetch\(`\/api\/gfc\/admin\/enrollment\/\$\{clientId\}\/documents\/upload`/,
     'and that route is the enrollment one — one store for a client\'s documents');
 });
+
+// ── Per-visit documents (Session 4.12, owner 2026-09-23) ──
+// "I do need the creation of documents specific to one visit like the
+// discharge summary and med list."
+const apptTypes412 = require('../appointmentTypes');
+
+test('per-visit kinds are in the ONE catalog, scoped so they never reach the client checklist', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const block = (src.match(/const GFC_EXPECTED_DOCUMENTS = \[[\s\S]*?\n\];/) || [''])[0];
+  assert.ok(block.length > 100, 'precondition: the catalog was found');
+  for (const kind of ['dischargeSummary', 'dischargeMedList', 'imeRecords', 'imeExamRequest']) {
+    assert.match(block, new RegExp(`kind: '${kind}',\\s*scope: 'VISIT'`),
+      `${kind} must be declared in the one catalog, scoped to a visit`);
+  }
+  // A second catalog would be a second set of the rules that make an upload
+  // safe — byte-typing, the size ceiling, the Drive path, the chart index.
+  assert.equal((src.match(/const GFC_EXPECTED_DOCUMENTS = \[/g) || []).length, 1);
+
+  // ⚠️ THE BUG THIS CLOSES, AND IT WAS ALREADY THERE. The service-line filter
+  // answered `true` for EVERYTHING on a dual-lane client, so a VISIT-scoped
+  // document would have appeared on a BOTH client's own checklist — asking a
+  // patient to produce their own discharge summary.
+  const filter = src.slice(src.indexOf('const expectedDocumentsForServiceLine'), src.indexOf('// The checklist the client sees'));
+  assert.match(filter, /d\.scope !== 'VISIT'/, 'visit documents must be excluded before the BOTH branch');
+  const visitExcludedFirst = filter.indexOf("d.scope !== 'VISIT'") < filter.indexOf("line === 'BOTH'");
+  assert.ok(visitExcludedFirst, 'the exclusion must come first, or the BOTH branch lets them through');
+});
+
+test('a visit document must name its visit, and a standing document must not', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // LIFTED OUT AND RUN, not grepped. The first version of this asserted the
+  // error codes appeared in the source — which still passed with the
+  // condition around them replaced by `if (false)`, leaving the strings in a
+  // branch nothing reaches. Both mutations survived. Requiring server.js
+  // boots a server, so the function is extracted and executed, which is the
+  // pattern this repo already uses for getAppBaseUrl and the welcome email.
+  const from = src.indexOf('const checkVisitDocumentPairing = (');
+  const to = src.indexOf('\n};', from) + 3;
+  assert.ok(from > 0 && to > from, 'the pairing rule must still be extractable');
+  // eslint-disable-next-line no-new-func
+  const checkPairing = new Function(`${src.slice(from, to)}; return checkVisitDocumentPairing;`)();
+  const isVisitKind = (k) => ['dischargeSummary', 'dischargeMedList', 'imeRecords', 'imeExamRequest'].includes(k);
+
+  // A discharge summary with no encounter lands in the client's standing file
+  // where nobody working that visit will look for it.
+  const orphan = checkPairing('dischargeSummary', '', isVisitKind);
+  assert.equal(orphan.ok, false);
+  assert.equal(orphan.code, 'VISIT_DOCUMENT_NEEDS_ENCOUNTER');
+  assert.match(orphan.error, /File it from the visit/);
+  assert.equal(checkPairing('imeRecords', null, isVisitKind).code, 'VISIT_DOCUMENT_NEEDS_ENCOUNTER');
+  assert.equal(checkPairing('dischargeMedList', '   ', isVisitKind).code, 'VISIT_DOCUMENT_NEEDS_ENCOUNTER',
+    'whitespace is not an encounter');
+
+  // And a photo ID filed against an encounter would sit on that visit's
+  // outstanding list forever.
+  const misfiled = checkPairing('photoId', 'enc-1', isVisitKind);
+  assert.equal(misfiled.ok, false);
+  assert.equal(misfiled.code, 'DOCUMENT_IS_NOT_PER_VISIT');
+
+  // The two legitimate pairings both pass, or the guard is refusing everything.
+  assert.equal(checkPairing('dischargeSummary', 'enc-1', isVisitKind).ok, true);
+  assert.equal(checkPairing('photoId', '', isVisitKind).ok, true);
+  assert.equal(checkPairing('photoId', null, isVisitKind).ok, true);
+
+  // And the route delegates rather than re-deriving it.
+  assert.match(src, /const pairing = checkVisitDocumentPairing\(kind, encounterUuid, isVisitDocumentKind\);/);
+  assert.match(src, /if \(!pairing\.ok\) return res\.status\(400\)/);
+  // The row carries the link, defaulting to null rather than to a string.
+  const row = src.slice(src.indexOf('const buildClientDocumentRow'), src.indexOf('const resolveDocumentKind') > src.indexOf('const buildClientDocumentRow') ? src.indexOf('const resolveDocumentKind') : src.indexOf('const buildClientDocumentRow') + 2000);
+  assert.match(src, /encounterUuid: encounterUuid \? String\(encounterUuid\) : null,/,
+    'a document that belongs to no visit must say null, not an empty string');
+  // The kind list is DERIVED from the catalog, never a second list.
+  assert.match(src, /GFC_EXPECTED_DOCUMENTS\.filter\(d => d\.scope === 'VISIT'\)\.map\(d => d\.kind\)/);
+});
+
+test('which documents a visit wants is derived from its appointment type', () => {
+  // No second list of "what a TCM visit needs" to keep in step with the
+  // appointment config.
+  const tcm = apptTypes412.visitDocumentsFor('pc_tcm', []);
+  assert.deepEqual(tcm.map(d => d.kind).sort(), ['dischargeMedList', 'dischargeSummary', 'priorRecords'].sort());
+  assert.deepEqual(apptTypes412.visitDocumentsOutstanding('pc_tcm', []).sort(),
+    ['dischargeMedList', 'dischargeSummary', 'priorRecords'].sort());
+  // Filing one takes it off the outstanding list and nothing else.
+  const partly = apptTypes412.visitDocumentsFor('pc_tcm', ['dischargeSummary']);
+  assert.equal(partly.find(d => d.kind === 'dischargeSummary').filed, true);
+  assert.equal(partly.find(d => d.kind === 'dischargeMedList').filed, false);
+  assert.deepEqual(apptTypes412.visitDocumentsOutstanding('pc_tcm', ['dischargeSummary', 'dischargeMedList', 'priorRecords']), []);
+
+  const ime = apptTypes412.visitDocumentsFor('ime_exam', []);
+  assert.deepEqual(ime.map(d => d.kind).sort(), ['imeExamRequest', 'imeRecords']);
+  // A visit type that wants none says so with an empty list, not by failing.
+  assert.deepEqual(apptTypes412.visitDocumentsFor('pc_follow_up', []), []);
+  assert.deepEqual(apptTypes412.visitDocumentsFor('made_up', []), []);
+});
+
+test('the visit-documents read is gated, audited, and hides nothing that was filed', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src,
+    /app\.get\('\/api\/clinical\/patients\/:clientId\/encounters\/:euuid\/documents',\s*authenticateToken,\s*requireClinicalRead,/,
+    'reading a visit’s documents is a clinical read');
+  const from = src.indexOf("/encounters/:euuid/documents', authenticateToken");
+  const body = src.slice(from, src.indexOf('// ── The rest of the record', from));
+  assert.ok(body.length > 400, 'precondition: the route body was sliced');
+  // Scoped to THIS encounter and THIS client — a document filed for another
+  // visit must not appear on this one.
+  assert.match(body, /u\.clientId === client\.id && u\.encounterUuid === encounterUuid/);
+  // Everything filed is listed, including a kind the type did not ask for. A
+  // document somebody attached must never become invisible because a list did
+  // not expect it.
+  assert.match(body, /filed: uploads\.map/);
+  assert.ok(!/filed: uploads\.filter\([^)]*wanted/.test(body), 'the filed list must not be narrowed to what was expected');
+  // Read back through the app so every read is audited; the Drive id stays
+  // server-side.
+  assert.match(body, /api\/gfc\/documents\/uploads\/\$\{u\.id\}\/file/);
+  assert.ok(!/driveFileId/.test(body), 'the Drive id must never be projected');
+  assert.match(body, /logActivity\(/, 'the read must be audited');
+});

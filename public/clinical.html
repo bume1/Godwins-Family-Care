@@ -66,7 +66,7 @@
 <body>
   <div id="root"></div>
   <script type="text/babel">
-    const { useState, useEffect, useRef, useCallback, useContext } = React;
+    const { useState, useEffect, useRef, useCallback, useContext , useMemo } = React;
     const API_URL = window.location.origin;
 
     // Session 4.3 — case-manager scoped read. The API enforces the split
@@ -178,8 +178,14 @@
         method: 'POST', body: JSON.stringify(body)
       }),
       documentKinds: (clientId) => authedFetch(`/api/gfc/admin/enrollment/${clientId}/documents`),
-      facilities: () => authedFetch('/api/clinical/facilities'),
-      assignFacility: (id, facilityId) => authedFetch(`/api/clinical/patients/${id}/facility`, { method: 'PUT', body: JSON.stringify({ facilityId }) }),
+      // Read-only here. The facility and the encounter type are ADMIN writes on
+      // the enrollment record (4.12 F1, owner 2026-09-23) — this page states
+      // what the claim will say and names where it is fixed.
+      placeOfService: (id) => authedFetch(`/api/clinical/patients/${id}/place-of-service`),
+      recordExtras: (id) => authedFetch(`/api/clinical/patients/${id}/record-extras`),
+      saveRisk: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/risk-assessment`, {
+        method: 'POST', body: JSON.stringify(body)
+      }),
       medrec: (id) => authedFetch(`/api/clinical/patients/${id}/medrec`),
       medrecSave: (id, decisions) => authedFetch(`/api/clinical/patients/${id}/medrec`, { method: 'POST', body: JSON.stringify({ decisions }) }),
       addProblem: (id, body) => authedFetch(`/api/clinical/patients/${id}/problems`, { method: 'POST', body: JSON.stringify(body) }),
@@ -682,100 +688,70 @@
     };
 
     // ── Chart summary tab ──
-    // Place of service comes from the PATIENT's facility assignment (Session
-    // 4.5), and until 2026-09-22 the route that sets it had no screen anywhere
-    // in the app — so every patient stayed unassigned and every encounter
-    // blocked at signing with SIGN_NO_FACILITY_POS. The route is admin-only,
-    // so this is too; a clinician sees the state read-only rather than a
-    // control that would 403.
-    const FacilityCard = ({ patient, isAdmin, onChanged }) => {
-      const [rows, setRows] = useState(null);
-      const [pick, setPick] = useState(String(patient.openEmrFacilityId || ''));
-      const [busy, setBusy] = useState(false);
-      const [msg, setMsg] = useState(null);
-      useEffect(() => { setPick(String(patient.openEmrFacilityId || '')); }, [patient.id, patient.openEmrFacilityId]);
+    // Place of service, READ-ONLY. Both halves of it — the facility (WHERE)
+    // and the encounter type (WHAT) — are set by an admin on the enrollment
+    // record, moved there on the owner's instruction 2026-09-23. The owner's
+    // 4.5 rule is that a clinician never chooses a POS, and an encounter type
+    // that decides one is the same decision; so the chart states what the
+    // claim will say and names the screen where it is fixed. It reads the SAME
+    // route the enrollment card writes through, so the two cannot drift.
+    const PlaceOfServiceCard = ({ patient }) => {
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState(null);
       useEffect(() => {
         let live = true;
-        api.facilities()
-          .then(r => { if (live) setRows(r); })
-          .catch(e => { if (live) setMsg({ ok: false, text: `Could not read facilities from OpenEMR: ${e.message}` }); });
+        setData(null); setErr(null);
+        api.placeOfService(patient.id)
+          .then(d => { if (live) setData(d); })
+          .catch(e => { if (live) setErr(e.message); });
         return () => { live = false; };
-      }, []);
-      const list = (rows && rows.facilities) || [];
-      const current = list.find(f => String(f.id) === String(patient.openEmrFacilityId || ''));
-      const assigned = !!patient.openEmrFacilityId;
-      // Assigned but no POS on the facility record is a DIFFERENT problem from
-      // not assigned at all, and it is fixed somewhere else (on the facility in
-      // OpenEMR, not here), so the two never share a message.
-      const posMissing = assigned && current && !current.posCode;
-      const notService = assigned && current && !current.serviceLocation;
-      const save = (value) => {
-        setBusy(true); setMsg(null);
-        api.assignFacility(patient.id, value)
-          .then(r => {
-            setMsg({ ok: true, text: [r.message, ...(r.warnings || [])].join(' ') });
-            onChanged && onChanged();
-          })
-          .catch(e => setMsg({ ok: false, text: e.message }))
-          .finally(() => setBusy(false));
-      };
+      }, [patient.id]);
+      if (err) return (
+        <div className="card mb-4"><div className="card-h"><h2><i className="ti ti-building-hospital mr-1 text-accent" />Place of service</h2></div>
+          <div className="p-4 text-xs text-red-600">{err}</div></div>
+      );
+      if (!data) return (
+        <div className="card mb-4"><div className="card-h"><h2><i className="ti ti-building-hospital mr-1 text-accent" />Place of service</h2></div>
+          <div className="p-4 text-[11px] text-stone-400">Reading…</div></div>
+      );
+      const assigned = !!data.facilityId;
+      const agree = data.agreement || { ok: true };
+      const posMissing = assigned && !data.posCode;
+      const ok = assigned && !posMissing && data.serviceLocation !== false && agree.ok;
       return (
         <div className="card mb-4">
           <div className="card-h">
             <h2><i className="ti ti-building-hospital mr-1 text-accent" />Place of service</h2>
-            {assigned && !posMissing && !notService
-              ? <span className="chip bg-emerald-50 text-emerald-700">POS {current ? current.posCode : '—'}</span>
+            {ok
+              ? <span className="chip bg-emerald-50 text-emerald-700">POS {data.posCode}</span>
               : <span className="chip bg-amber-50 text-amber-800">Blocks signing</span>}
           </div>
-          <div className="p-4 text-sm grid gap-3">
+          <div className="p-4 text-sm grid gap-2">
             <div className="text-xs text-stone-600">
               {assigned
-                ? <>This patient is assigned to <b>{current ? current.name : `facility ${patient.openEmrFacilityId}`}</b>
-                    {current && current.posCode ? <> · place of service <b>{current.posCode}</b></> : null}.</>
+                ? <>Seen at <b>{data.facilityName || `facility ${data.facilityId}`}</b>{data.posCode ? <> · place of service <b>{data.posCode}</b></> : null}.</>
                 : <b className="text-amber-800">This patient is not assigned to an OpenEMR facility, so their visits cannot be signed.</b>}
             </div>
+            <div className="text-xs text-stone-600">
+              {data.usualLocation
+                ? <>Usually seen at <b>{data.usualLocationLabel}</b>. Each visit says where it actually happened, and that is what bills.</>
+                : <>No usual location set, so every booking has to say where the visit happens.</>}
+            </div>
             {posMissing && (
-              <p className="text-xs text-amber-700">
-                <i className="ti ti-alert-triangle mr-1" />
-                "{current.name}" has no place-of-service code on its record in OpenEMR. Set it on the facility
-                (Administration → Facilities) — it cannot be set from here, and visits stay unsignable until it is.
+              <p className="text-xs text-amber-700"><i className="ti ti-alert-triangle mr-1" />
+                "{data.facilityName}" has no place-of-service code on its record in OpenEMR.
               </p>
             )}
-            {notService && (
-              <p className="text-xs text-amber-700">
-                <i className="ti ti-alert-triangle mr-1" />
-                "{current.name}" is not marked as a Service Location in OpenEMR, so no encounter can be assigned there.
-                Tick Service Location on the facility record.
+            {data.serviceLocation === false && (
+              <p className="text-xs text-amber-700"><i className="ti ti-alert-triangle mr-1" />
+                "{data.facilityName}" is not marked as a Service Location in OpenEMR, so no encounter can be assigned there.
               </p>
             )}
-            {isAdmin ? (
-              <div className="flex flex-wrap items-end gap-2">
-                <Field label="OpenEMR facility" className="flex-1 min-w-[260px]">
-                  <select className="inp" value={pick} disabled={busy || !rows} onChange={e => setPick(e.target.value)}>
-                    <option value="">— not assigned —</option>
-                    {list.map(f => (
-                      <option key={f.id} value={f.id}>
-                        {f.name}{f.posCode ? ` · POS ${f.posCode}` : ' · no POS'}{f.serviceLocation ? '' : ' · not a service location'}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-                <button className="btn" disabled={busy || !rows || String(pick) === String(patient.openEmrFacilityId || '')} onClick={() => save(pick)}>
-                  {busy ? 'Saving…' : 'Save assignment'}
-                </button>
-                {assigned && <button className="btn ghost text-red-600" disabled={busy} onClick={() => save('')}>Clear</button>}
-              </div>
-            ) : (
-              <p className="text-[11px] text-stone-400">An admin sets this. It decides the place of service on the claim, so it is not a clinician's pick.</p>
-            )}
-            {!rows && !msg && <p className="text-[11px] text-stone-400">Reading facilities from OpenEMR…</p>}
-            {msg && <p className={`text-xs ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
-            {rows && rows.billingFacilityName && (
-              <p className="text-[10.5px] text-stone-400">
-                Billing entity (who bills, not where care happened): {rows.billingFacilityName}.
-                {rows.billingFacilityWarning ? ` ${rows.billingFacilityWarning}` : ''}
-              </p>
-            )}
+            {!agree.ok && <p className="text-xs text-red-600"><i className="ti ti-alert-triangle mr-1" />{agree.error}</p>}
+            <p className="text-[11px] text-stone-400">
+              An admin sets both of these on the enrollment record (Enrollment → this client → Place of service).
+              It decides the place of service on the claim, so it is not a clinician's pick.
+            </p>
           </div>
         </div>
       );
@@ -1128,6 +1104,83 @@
         </div>
       );
     };
+
+    // ── Session 4.12 Scope J — the rest of the record ──────────────────────
+    // Nine resources the app had never asked OpenEMR for. EVERY SECTION SAYS
+    // WHY IT IS EMPTY, which is the whole value of the screen: a 403 (the org
+    // ACL, an admin fixes it), a 404 (8.4 does not serve this at all) and a
+    // genuine zero rows have three different fixes and looked identical as a
+    // blank panel. An empty result is not a diagnosis.
+    //
+    // The sections, their labels and the failure wording are all SERVED. The
+    // page restates none of them, so a resource added or a message reworded
+    // server-side reaches the screen without a second edit here.
+    const RecordExtrasTab = ({ patient }) => {
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState(null);
+      useEffect(() => {
+        let live = true;
+        setData(null); setErr(null);
+        api.recordExtras(patient.id)
+          .then(d => { if (live) setData(d); })
+          .catch(e => { if (live) setErr(e.message); });
+        return () => { live = false; };
+      }, [patient.id]);
+      if (err) return <p className="text-sm text-red-600">{err}</p>;
+      if (!data) return <p className="text-sm text-stone-500">Reading the rest of the record from OpenEMR…</p>;
+      return (
+        <div>
+          {data.unproven && (
+            <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2.5 mb-4">
+              <i className="ti ti-alert-triangle mr-1" />{data.unprovenNote}
+            </p>
+          )}
+          {data.sections.map(sec => (
+            <div className="card mb-4" key={sec.key}>
+              <div className="card-h">
+                <h2>{sec.label}</h2>
+                {sec.failure
+                  ? <span className="chip bg-amber-50 text-amber-800">could not be read</span>
+                  : <span className="chip bg-stone-100 text-stone-600">{sec.rows.length}</span>}
+              </div>
+              <div className="p-4 text-sm">
+                {/* The server's own sentence, naming the layer. A page that
+                    wrote its own would be a second answer to why this failed. */}
+                {sec.failure && <p className="text-xs text-amber-700">{sec.failure.message}</p>}
+                {!sec.failure && sec.rows.length === 0 && (
+                  <p className="text-xs text-stone-500">OpenEMR answered, and has nothing recorded here for this patient.</p>
+                )}
+                {!sec.failure && sec.rows.map((r, i) => (
+                  <div key={r.id || i} className="py-1.5 border-b border-stone-100 last:border-0">
+                    <div className="text-[13px] font-semibold">{fhirRowTitle(r)}</div>
+                    <div className="text-xs text-stone-500">{fhirRowDetail(r)}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      );
+    };
+    // Nine resource shapes, one renderer. FHIR puts a human-readable label in
+    // a different place in almost every one of them, so the fallbacks are
+    // walked in order and `text.div` is the last resort — which is where the
+    // allergen turned out to live in 4.1, after every allergy in the chart
+    // displayed as "Unknown" for months.
+    const codeableText = (c) => c && (c.text || ((c.coding || [])[0] || {}).display || ((c.coding || [])[0] || {}).code);
+    const fhirRowTitle = (r) => codeableText(r.vaccineCode) || codeableText(r.code) || codeableText(r.type)
+      || r.description || r.name || (r.payor && codeableText(r.payor[0]))
+      || (r.type && r.type.text) || (r.relationship && codeableText(r.relationship[0]))
+      || (r.description && r.description.text)
+      || String(r.resourceType || 'Record') + (r.id ? ` ${r.id}` : '');
+    const fhirRowDetail = (r) => [
+      r.status, r.occurrenceDateTime && fmtDate(r.occurrenceDateTime),
+      r.performedDateTime && fmtDate(r.performedDateTime),
+      r.period && r.period.start && `from ${fmtDate(r.period.start)}`,
+      r.authored && fmtDate(r.authored),
+      r.createdDateTime && fmtDate(r.createdDateTime),
+      r.lotNumber && `lot ${r.lotNumber}`
+    ].filter(Boolean).join(' · ') || '—';
 
     const DocumentsTab = ({ chart, patient, onChartChanged }) => (
       <ChartDocuments docs={(chart && chart.chartDocuments) || []} clientId={patient && patient.id} onRefresh={onChartChanged} />
@@ -1988,7 +2041,7 @@
               </div>
             </div>
           )}
-          {chart.linked && <FacilityCard patient={patient} isAdmin={isAdmin} onChanged={onChartChanged} />}
+          {chart.linked && <PlaceOfServiceCard patient={patient} />}
           {/* Session 4.12 Scope D — OVERVIEW is the at-a-glance. The problem
               list, medications, allergies, documents and the timeline each have
               their OWN place on the tab bar now, so nothing here is the
@@ -2062,6 +2115,10 @@
         subjective: '', assessment: '', plan: '',
         vitals: { bpRightSys: '', bpRightDia: '', bpLeftSys: '', bpLeftDia: '', hr: '', temp: '', rr: '', spo2: '', weight: '', height: '' },
         systemsExam: { general: '', cardiovascular: '', respiratory: '', lungSounds: '', neuro: '', gi: '', gu: '', musculoskeletal: '' },
+        // Scope G — the exam variant, not a different note. Held in state on
+        // every visit and RENDERED only on a psychiatric one, so a patient
+        // whose type is set mid-visit does not lose what was already typed.
+        mentalStatusExam: { appearance: '', behavior: '', speech: '', mood: '', affect: '', thoughtProcess: '', thoughtContent: '', perception: '', cognition: '', insight: '', judgment: '' },
         skinWound: { findings: '', woundPresent: 'no', woundLocation: '', woundMeasurements: '' },
         painAssessment: { breathing: '', negativeVocalization: '', facialExpression: '', bodyLanguage: '', consolability: '', totalScore: '' },
         homeHazards: { smokeDetectors: '', coDetectors: '', grabBars: '', nonSkidSurfaces: '', runningWater: '', secondaryExit: '', notes: '' },
@@ -2087,6 +2144,7 @@
             ...prev, ...d,
             vitals: { ...prev.vitals, ...(d.vitals || {}) },
             systemsExam: { ...prev.systemsExam, ...(d.systemsExam || {}) },
+            mentalStatusExam: { ...prev.mentalStatusExam, ...(d.mentalStatusExam || {}) },
             skinWound: { ...prev.skinWound, ...(d.skinWound || {}) },
             painAssessment: { ...prev.painAssessment, ...(d.painAssessment || {}) },
             homeHazards: { ...prev.homeHazards, ...(d.homeHazards || {}) },
@@ -2097,6 +2155,40 @@
         }).catch(() => { /* no draft is the normal case, never an error on screen */ });
         return () => { live = false; };
       }, [patient.id]);
+
+      // ── What kind of visit is this? (owner, 2026-09-23) ──────────────────
+      // The FIRST thing a clinician chooses, because it decides which note
+      // they are about to write. Not a property of the patient: somebody who
+      // normally has a primary-care visit can have a psych evaluation, and the
+      // note has to follow the visit rather than the chart.
+      const [visit, setVisit] = useState({ appointmentType: '', modality: 'in_person', location: '' });
+      const [catalog, setCatalog] = useState(null);
+      useEffect(() => {
+        let live = true;
+        api.placeOfService(patient.id)
+          .then(d => {
+            if (!live) return;
+            setCatalog(d);
+            // The patient's usual location is a DEFAULT the clinician
+            // confirms. Pre-filled, never locked.
+            if (d.usualLocation) setVisit(v => v.location ? v : { ...v, location: d.usualLocation });
+          })
+          .catch(() => { /* the picker still works; it just has no default */ });
+        return () => { live = false; };
+      }, [patient.id]);
+      const noteSections = useMemo(() => {
+        if (!catalog || !visit.appointmentType) return [];
+        const type = (catalog.appointmentTypes || []).find(t => t.key === visit.appointmentType);
+        if (!type) return [];
+        // The SERVER holds the templates; this only asks which sections this
+        // visit carries. Restating a template here would drift from the gate
+        // that refuses the signature.
+        return (catalog.noteTemplates && catalog.noteTemplates[visit.appointmentType]
+          ? catalog.noteTemplates[visit.appointmentType]
+          : []).filter(sec => sec.modality == null || sec.modality === visit.modality);
+      }, [catalog, visit.appointmentType, visit.modality]);
+      const noteHasSection = (key) => noteSections.some(s => s.key === key);
+      const visitType = catalog && (catalog.appointmentTypes || []).find(t => t.key === visit.appointmentType);
 
       const saveDraft = () => {
         setBusy('draft'); setMsg(null);
@@ -2140,8 +2232,54 @@
               Documenting from a scheduled appointment — the Encounter will be linked to it on the chart.
             </div>
           )}
+          {/* FIRST, because it decides everything below it. */}
           <div className="card mb-4">
-            <div className="card-h"><h2>Initial Visit · History &amp; Physical</h2></div>
+            <div className="card-h">
+              <h2><i className="ti ti-clipboard-list mr-1 text-accent" />What kind of visit is this?</h2>
+              {visitType && <span className="chip bg-primary-50 text-primary">{visitType.defaultMinutes} min</span>}
+            </div>
+            <div className="p-4 grid md:grid-cols-3 gap-3 text-sm">
+              <Field label="Appointment type">
+                <select className="inp" value={visit.appointmentType} onChange={e => setVisit(v => ({ ...v, appointmentType: e.target.value }))}>
+                  <option value="">— choose —</option>
+                  {(catalog ? catalog.services : []).map(svc => (
+                    <optgroup key={svc.key} label={svc.label}>
+                      {(catalog.appointmentTypes || []).filter(t => t.service === svc.key).map(t => (
+                        <option key={t.key} value={t.key}>{t.label}</option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Modality">
+                <select className="inp" value={visit.modality} onChange={e => setVisit(v => ({ ...v, modality: e.target.value }))}>
+                  {(catalog ? catalog.modalities : []).map(m => (
+                    <option key={m.key} value={m.key}
+                      disabled={m.key === 'telehealth' && visitType && !visitType.telehealthAllowed}>{m.label}</option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Location">
+                <select className="inp" value={visit.location} onChange={e => setVisit(v => ({ ...v, location: e.target.value }))}>
+                  <option value="">— choose —</option>
+                  {(catalog ? catalog.locations : []).map(l => <option key={l.key} value={l.key}>{l.label}</option>)}
+                </select>
+              </Field>
+            </div>
+            <div className="px-4 pb-4 text-[11px] text-stone-500 grid gap-1">
+              {!visit.appointmentType && <span>Choose a type and the note below will ask for what that visit needs.</span>}
+              {catalog && catalog.usualLocation && visit.location === catalog.usualLocation &&
+                <span>Location pre-filled from this patient's usual one. Change it if today is different.</span>}
+              {visit.modality === 'telehealth' && visitType && visitType.telehealthPayerCaveat &&
+                <span className="text-amber-700"><i className="ti ti-alert-triangle mr-1" />
+                  Telehealth for this visit type depends on current CMS flexibilities. Confirm with the payer before billing.</span>}
+              {visit.modality === 'telehealth' &&
+                <span>Vitals and exam findings recorded on a video visit are marked as patient-reported.</span>}
+            </div>
+          </div>
+
+          <div className="card mb-4">
+            <div className="card-h"><h2>{visitType ? visitType.label : 'Visit'} · Note</h2></div>
             <div className="p-4 grid gap-4">
               <Prefilled fieldKey="chiefConcern" confirmed={confirmed} onConfirm={confirm}>
                 <TextArea f={f} set={set} path="chiefConcern" label="Chief concern" />
@@ -2175,6 +2313,27 @@
               ))}
             </div>
           </div>
+
+          {/* Offered where the encounter type says the visit is psychiatric,
+              and nowhere else. An empty MSE on every note trains people to
+              scroll past the section that matters. The SERVER answers whether
+              this patient is psychiatric — the page never reads a label and
+              decides for itself. */}
+          {/* The MSE follows THIS VISIT's appointment type, not the patient's
+              usual one. A patient who normally has a primary-care visit can
+              have a psych evaluation, and the note has to follow the visit. */}
+          {noteHasSection('mentalStatusExam') && (
+            <div className="card mb-4">
+              <div className="card-h"><h2>Mental status exam</h2>
+                <span className="text-[10.5px] text-stone-500">the exam for this visit — the systems exam above still applies</span>
+              </div>
+              <div className="p-4 grid md:grid-cols-2 gap-3">
+                {Object.keys(f.mentalStatusExam).map(k => (
+                  <TextArea f={f} set={set} key={k} path={`mentalStatusExam.${k}`} label={k.replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase())} />
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="card mb-4">
             <div className="card-h"><h2>Skin &amp; wound</h2></div>
@@ -2872,6 +3031,91 @@
       coded: { label: 'Coded', chip: 'bg-primary-50 text-primary' },
       signed: { label: 'Signed & closed', chip: 'bg-emerald-50 text-emerald-700' }
     };
+    // ── Session 4.12 Scope F3 — the encounter, one step per screen on a phone ──
+    // The encounter panel is six cards on one scroll. At a desk that is the
+    // right shape: a reviewer wants the whole visit in front of them. In
+    // somebody's front room on a phone it is a long scroll with no sense of
+    // where you are or what is left.
+    //
+    // THE STEPS ARE THE CARDS THAT ALREADY EXIST. Nothing new is modelled: a
+    // second idea of "what an encounter consists of" would be a second thing
+    // to keep in step with the record.
+    //
+    // STEPPING IS DISPLAY ONLY, AND NO STEP GATES ANOTHER. A clinician in a
+    // home who has to record an order before finishing coding must be able
+    // to. The only gate is the signature's own readiness, which the SERVER
+    // answers and which was already there. A wizard that forces an order
+    // would make this slower than paper in the one place it has to be faster.
+    //
+    // 767px is Tailwind's `md` boundary, deliberately the same number the
+    // layout classes use: if the JS and the CSS disagreed about what a phone
+    // is, the stepper would hide a card the grid was still laying out.
+    const PHONE_QUERY = '(max-width: 767px)';
+    const useNarrowViewport = () => {
+      const [narrow, setNarrow] = useState(() =>
+        typeof window !== 'undefined' && window.matchMedia ? window.matchMedia(PHONE_QUERY).matches : false);
+      useEffect(() => {
+        if (typeof window === 'undefined' || !window.matchMedia) return;
+        const mq = window.matchMedia(PHONE_QUERY);
+        const on = e => setNarrow(e.matches);
+        setNarrow(mq.matches);
+        // SUBSCRIBED, not read once: rotating a phone changes the answer, and
+        // a stale one leaves a step hidden with no way back to it.
+        mq.addEventListener ? mq.addEventListener('change', on) : mq.addListener(on);
+        return () => { mq.removeEventListener ? mq.removeEventListener('change', on) : mq.removeListener(on); };
+      }, []);
+      return narrow;
+    };
+
+    const ENCOUNTER_STEPS = [
+      { key: 'visit', label: 'Visit', icon: 'ti-clipboard-text' },
+      { key: 'coding', label: 'Coding', icon: 'ti-code' },
+      { key: 'actions', label: 'Orders & Rx', icon: 'ti-flask' },
+      { key: 'sign', label: 'Sign', icon: 'ti-writing-sign' }
+    ];
+    // Which screen a blocker is fixed on. The LIST of blockers is the
+    // server's and is never re-derived here; this only decides where to put
+    // each one. An unrecognised blocker lands on Sign, where the server's full
+    // message is printed in words — a blocker that maps to no step would
+    // simply disappear, which is the worst of the three possible answers.
+    const STEP_FOR_BLOCKER = { note: 'visit', diagnosis: 'coding', service: 'coding', service_dx_link: 'coding' };
+    const stepForBlocker = (m) => STEP_FOR_BLOCKER[m] || 'sign';
+
+    const EncounterStepRail = ({ step, onStep, blockers, closed }) => {
+      const byStep = {};
+      for (const m of blockers || []) { const k = stepForBlocker(m); byStep[k] = (byStep[k] || 0) + 1; }
+      const i = Math.max(0, ENCOUNTER_STEPS.findIndex(s => s.key === step));
+      return (
+        <div className="mb-3">
+          <div className="flex gap-1.5">
+            {ENCOUNTER_STEPS.map(s => {
+              const on = s.key === step;
+              const n = byStep[s.key] || 0;
+              return (
+                <button key={s.key} onClick={() => onStep(s.key)}
+                  className={`flex-1 rounded-lg border px-1 py-1.5 text-[11px] leading-tight ${on ? 'bg-primary text-white border-primary' : 'bg-white border-stone-200 text-stone-600'}`}>
+                  <i className={`ti ${s.icon} block text-sm`} />
+                  {s.label}
+                  {/* Counted from the SERVER's blocker list. A tick the server
+                      would refuse is worse than no tick at all. */}
+                  {!closed && n > 0 && <span className={`block text-[10px] ${on ? 'text-white' : 'text-amber-700'}`}>{n} to do</span>}
+                  {!closed && n === 0 && <span className={`block text-[10px] ${on ? 'text-white/70' : 'text-emerald-700'}`}>done</span>}
+                </button>
+              );
+            })}
+          </div>
+          <div className="flex justify-between mt-2">
+            <button className="btn ghost !py-1 !px-2.5 text-xs" disabled={i === 0} onClick={() => onStep(ENCOUNTER_STEPS[i - 1].key)}>
+              <i className="ti ti-chevron-left" />Back
+            </button>
+            <button className="btn ghost !py-1 !px-2.5 text-xs" disabled={i === ENCOUNTER_STEPS.length - 1} onClick={() => onStep(ENCOUNTER_STEPS[i + 1].key)}>
+              Next<i className="ti ti-chevron-right" />
+            </button>
+          </div>
+        </div>
+      );
+    };
+
     const EncStateChip = ({ state }) => {
       const m = ENC_STATE_META[state] || ENC_STATE_META.not_coded;
       return <span className={`chip ${m.chip}`}>{m.label}</span>;
@@ -3597,7 +3841,161 @@
     };
 
     // The encounter panel: coding, Rx, orders, sign & close, addenda.
-    const EncounterPanel = ({ patient, euuid, onBack, onChanged }) => {
+    // ── Session 4.12 Scope F5 — act from inside the encounter ──────────────
+    // Mid-visit a clinician needs the rest of the chart: what this patient is
+    // allergic to before prescribing, what they are already taking, what the
+    // problem list says, whether the result that was chased has landed, and
+    // somewhere to put the document just handed over. Every one of those lived
+    // on a different tab, and getting to it meant leaving the encounter —
+    // which on a phone in someone's front room means losing your place in the
+    // visit you are documenting.
+    //
+    // IT MOUNTS THE EXISTING TAB COMPONENTS. Not a summary of them, not a
+    // second rendering: the same components, reading the same chart, writing
+    // through the same routes. A second view of "what is this patient
+    // allergic to" is how the two start disagreeing, which is the rule the
+    // allergy strip already follows one layer down.
+    const LOOKUPS = [
+      { key: 'allergies', label: 'Allergies', icon: 'ti-alert-triangle' },
+      { key: 'medications', label: 'Medications', icon: 'ti-pill' },
+      { key: 'problems', label: 'Problems', icon: 'ti-list-details' },
+      { key: 'results', label: 'Results', icon: 'ti-flask' },
+      { key: 'documents', label: 'Documents', icon: 'ti-file-text' }
+    ];
+    // ── Session 4.12 Scope G — the risk assessment ─────────────────────────
+    // A psychiatric encounter cannot be SIGNED without one. Documenting is
+    // never blocked, which is why this is a card on the visit rather than a
+    // dialog in the way.
+    //
+    // The levels, the domains and WHICH of them need a plan are all SERVED.
+    // A page that carries its own list of risk levels drifts from the
+    // validator that refuses one it no longer knows, and the plan rule
+    // restated here would be a second answer to a clinical question.
+    const RISK_CHIP = {
+      none: 'bg-emerald-50 text-emerald-700', low: 'bg-emerald-50 text-emerald-700',
+      moderate: 'bg-amber-50 text-amber-800', high: 'bg-red-50 text-red-700', imminent: 'bg-red-600 text-white'
+    };
+    const RiskCard = ({ d, patient, euuid, locked, busy, onSave }) => {
+      const latest = d.riskAssessment;
+      const [open, setOpen] = useState(false);
+      const [f, setF] = useState(() => ({
+        suicide: (latest && latest.levels.suicide) || '', homicide: (latest && latest.levels.homicide) || '',
+        selfNeglect: (latest && latest.levels.selfNeglect) || '',
+        protectiveFactors: '', meansRestriction: '', plan: ''
+      }));
+      const set = (k, v) => setF(p => ({ ...p, [k]: v }));
+      // Whether a plan is needed is the SERVER's answer, read off the list it
+      // served. Deciding it here would be a second clinical rule to keep in
+      // step with the one that refuses the save.
+      const needsPlan = (d.riskDomains || []).some(k => (d.riskNeedsPlan || []).includes(f[k]));
+      return (
+        <div className="card mb-4">
+          <div className="card-h">
+            <h2><i className="ti ti-shield-exclamation mr-1 text-accent" />Risk assessment</h2>
+            {latest
+              ? <span className={`chip ${RISK_CHIP[highestOf(latest, d.riskDomains, d.riskLevels)] || 'bg-stone-100 text-stone-600'}`}>{highestOf(latest, d.riskDomains, d.riskLevels)}</span>
+              : <span className={`chip ${d.riskRequired ? 'bg-amber-50 text-amber-800' : 'bg-stone-100 text-stone-500'}`}>{d.riskRequired ? 'Required to sign' : 'Not recorded'}</span>}
+          </div>
+          <div className="p-4 text-sm grid gap-2">
+            {latest ? (
+              <div className="text-xs text-stone-600">
+                {(d.riskDomains || []).map(k => <span key={k} className="mr-3">{k}: <b>{latest.levels[k]}</b></span>)}
+                <div className="text-[11px] text-stone-500 mt-0.5">{npiLabel(latest.by)} · {fmtTs(latest.at)}</div>
+                {latest.plan && <div className="mt-1 whitespace-pre-wrap text-[13px]">{latest.plan}</div>}
+              </div>
+            ) : (
+              <p className="text-xs text-stone-500">
+                {d.riskRequired
+                  ? 'This is a psychiatric visit, so it cannot be signed until a risk assessment is recorded. Documenting the visit is not blocked.'
+                  : 'Not required for this visit type. Record one anyway if the visit warrants it.'}
+              </p>
+            )}
+            {/* Appended, never rewritten: risk changes inside one visit and
+                overwriting would lose that the clinician escalated. */}
+            {(d.riskHistory || []).length > 1 && (
+              <details className="text-[11px] text-stone-500">
+                <summary className="cursor-pointer">Earlier in this visit ({d.riskHistory.length - 1})</summary>
+                {d.riskHistory.slice(1).map(r => (
+                  <div key={r.id} className="mt-1">{highestOf(r, d.riskDomains, d.riskLevels)} · {npiLabel(r.by)} · {fmtTs(r.at)}</div>
+                ))}
+              </details>
+            )}
+            {!locked && !open && <button className="btn ghost !py-1 !px-2.5 text-xs w-fit" onClick={() => setOpen(true)}>{latest ? 'Record a change in risk' : 'Record risk assessment'}</button>}
+            {!locked && open && (
+              <div className="grid gap-3 border-t border-stone-100 pt-3">
+                <div className="grid md:grid-cols-3 gap-2">
+                  {(d.riskDomains || []).map(k => (
+                    <Field key={k} label={k.replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase())}>
+                      <select className="inp" value={f[k]} onChange={e => set(k, e.target.value)}>
+                        <option value="">— select —</option>
+                        {(d.riskLevels || []).map(l => <option key={l} value={l}>{l}</option>)}
+                      </select>
+                    </Field>
+                  ))}
+                </div>
+                <Field label="Protective factors"><textarea className="inp" rows={2} value={f.protectiveFactors} onChange={e => set('protectiveFactors', e.target.value)} /></Field>
+                <Field label="Means restriction"><textarea className="inp" rows={2} value={f.meansRestriction} onChange={e => set('meansRestriction', e.target.value)} /></Field>
+                <Field label={needsPlan ? 'Plan — required at this level of risk' : 'Plan'}>
+                  <textarea className="inp" rows={3} value={f.plan} onChange={e => set('plan', e.target.value)} />
+                </Field>
+                {needsPlan && <p className="text-[11px] text-amber-700"><i className="ti ti-alert-triangle mr-1" />An assessment with no plan records that the risk was seen, not that it was handled.</p>}
+                <div className="flex gap-2">
+                  <button className="btn w-fit" disabled={busy} onClick={() => onSave(f).then(() => setOpen(false)).catch(() => {})}>
+                    {busy ? 'Recording…' : 'Record assessment'}
+                  </button>
+                  <button className="btn ghost w-fit" disabled={busy} onClick={() => setOpen(false)}>Cancel</button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    };
+    // The worst of the domains, ranked by the order the SERVER SERVED THE
+    // LEVELS IN. A local copy of that order is a second answer to "which risk
+    // is worse", and it goes stale the day a level is added — the same reason
+    // the levels themselves are not listed here.
+    const highestOf = (a, domains, levels) => {
+      if (!a || !a.levels) return null;
+      const rank = (v) => (levels || []).indexOf(v);
+      return (domains || []).map(k => a.levels[k]).filter(Boolean)
+        .sort((x, y) => rank(y) - rank(x))[0] || null;
+    };
+
+    const EncounterLookups = ({ patient, chart, onChartChanged }) => {
+      const [open, setOpen] = useState(null);
+      return (
+        <div className="card mb-4">
+          <div className="card-h">
+            <h2><i className="ti ti-stethoscope mr-1 text-accent" />The rest of the chart</h2>
+            {open && <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={() => setOpen(null)}>Close</button>}
+          </div>
+          <div className="p-4">
+            <div className="flex flex-wrap gap-1.5">
+              {LOOKUPS.map(l => (
+                <button key={l.key}
+                  className={`chip border ${open === l.key ? 'bg-primary text-white border-primary' : 'bg-white text-primary border-stone-200'}`}
+                  onClick={() => setOpen(v => v === l.key ? null : l.key)}>
+                  <i className={`ti ${l.icon} mr-1`} />{l.label}
+                </button>
+              ))}
+            </div>
+            {!open && <p className="text-[11px] text-stone-400 mt-2">Open any of these here — you stay in the encounter and nothing you have typed is lost.</p>}
+            {open && (
+              <div className="mt-3 border-t border-stone-100 pt-3">
+                {open === 'allergies' && <AllergiesTab chart={chart} />}
+                {open === 'medications' && <MedicationsTab chart={chart} patient={patient} />}
+                {open === 'problems' && <ProblemsTab chart={chart} />}
+                {open === 'results' && <ResultsTab patient={patient} />}
+                {open === 'documents' && <DocumentsTab chart={chart} patient={patient} onChartChanged={onChartChanged} />}
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    };
+
+    const EncounterPanel = ({ patient, euuid, chart, onChartChanged, onBack, onChanged }) => {
       const [d, setD] = useState(null);
       const [err, setErr] = useState('');
       const [busy, setBusy] = useState('');
@@ -3608,6 +4006,11 @@
       const [attest, setAttest] = useState(false);
       const [addendum, setAddendum] = useState('');
       const [showRx, setShowRx] = useState(false); const [showOrder, setShowOrder] = useState(false);
+      // F3: one step per screen on a phone. Presentation only — the panel is
+      // the SAME mounted component on every step, so nothing typed on one is
+      // lost by moving to another.
+      const narrow = useNarrowViewport();
+      const [step, setStep] = useState('visit');
       // 4.3: clinician-authored patient-facing text — the only visit text the
       // patient portal ever shows (never the narrative note)
       const [facing, setFacing] = useState({ patientSummary: '', followUpInstructions: '' });
@@ -3661,9 +4064,17 @@
       const facingDirty = (facing.patientSummary || '') !== (d.record.patientSummary || '') || (facing.followUpInstructions || '') !== (d.record.followUpInstructions || '');
       const dirty = JSON.stringify(diagnoses) !== JSON.stringify(d.record.diagnoses || []) || JSON.stringify(services) !== JSON.stringify(d.record.services || []) || facingDirty;
       const ORDER_LABEL = { ordered: 'Ordered', sent: 'Sent', resulted: 'Resulted', cancelled: 'Cancelled' };
+      // On a phone one step shows at a time; at a desk the whole encounter is
+      // one scroll, because a reviewer wants to see all of it at once. Two
+      // different jobs, so two different shapes rather than one compromise.
+      const on = (k) => !narrow || step === k;
       return (
         <div className="max-w-4xl">
           <button className="text-xs text-primary underline mb-2" onClick={onBack}><i className="ti ti-arrow-left" /> All encounters</button>
+          {narrow && <EncounterStepRail step={step} onStep={setStep} blockers={(d.signReadiness && d.signReadiness.missing) || []} closed={closed} />}
+          {/* The header is on every step: who this is and whether it is signed
+              is the context for all four, and hiding it would leave a screen
+              that does not say whose encounter it belongs to. */}
           <div className="card mb-4">
             <div className="card-h"><h2>{d.encounter.reason || 'Encounter'}</h2><EncStateChip state={d.state} /></div>
             <div className="p-4 text-sm grid gap-1">
@@ -3686,7 +4097,7 @@
             </div>
           </div>
 
-          <div className="card mb-4">
+          {on('visit') && <div className="card mb-4">
             <div className="card-h"><h2>Narrative note{d.narrativeNotes.length > 1 ? 's' : ''}</h2><span className="text-[10.5px] text-stone-500">as written to OpenEMR — never edited by the app</span></div>
             <div className="p-4 text-sm grid gap-3">
               {d.notesError && <p className="text-xs text-red-600">{d.notesError}</p>}
@@ -3697,9 +4108,19 @@
                 </div>
               ))}
             </div>
-          </div>
+          </div>}
 
-          <div className="card mb-4">
+          {/* On the Visit step, where the clinician is reading the note and
+              deciding. Shown even when not required, so a risk that turns up
+              on a non-psychiatric visit has somewhere to go. */}
+          {on('visit') && (
+            <RiskCard d={d} patient={patient} euuid={euuid} locked={locked} busy={busy === 'risk'}
+              onSave={(form) => run('risk', () => api.saveRisk(patient.id, euuid, form))} />
+          )}
+
+          {on('visit') && <EncounterLookups patient={patient} chart={chart} onChartChanged={onChartChanged} />}
+
+          {on('coding') && <div className="card mb-4">
             <div className="card-h"><h2>Coding — diagnoses &amp; services</h2>
               <span className={`chip ${d.record.codingStatus === 'coded' ? 'bg-primary-50 text-primary' : 'bg-amber-50 text-amber-800'}`}>{d.record.codingStatus === 'coded' ? 'CODED' : 'NOT CODED'}</span>
             </div>
@@ -3739,9 +4160,9 @@
                 </div>
               )}
             </div>
-          </div>
+          </div>}
 
-          <div className="grid md:grid-cols-2 gap-4 mb-4">
+          {on('actions') && <div className="grid md:grid-cols-2 gap-4 mb-4">
             <div className="card">
               <div className="card-h"><h2>Prescriptions</h2>{!locked && canPrescribe && <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={() => setShowRx(v => !v)}>{showRx ? 'Close' : '+ Record Rx'}</button>}</div>
               <div className="p-4 text-sm">
@@ -3826,9 +4247,9 @@
                 <p className="text-[10.5px] text-stone-400 mt-2">The app generates; a person transmits. Open the requisition, fax it from Doximity, then record the send here — that is what moves an order to sent. Attaching the result is what moves it to resulted. Both still work after the encounter is signed.</p>
               </div>
             </div>
-          </div>
+          </div>}
 
-          {!locked && !canSignThisEncounter && (
+          {on('sign') && !locked && !canSignThisEncounter && (
             <div className="card mb-4">
               <div className="card-h"><h2>Sign &amp; close encounter</h2></div>
               <div className="p-4 text-sm text-amber-800">
@@ -3837,7 +4258,7 @@
             </div>
           )}
 
-          {!locked && canSignThisEncounter && (
+          {on('sign') && !locked && canSignThisEncounter && (
             <div className="card mb-4">
               <div className="card-h"><h2>Sign &amp; close encounter</h2>
                 <span className={`chip ${d.signReadiness.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-800'}`}>{d.signReadiness.ok ? 'Ready to sign' : `${d.signReadiness.missing.length} blocker${d.signReadiness.missing.length > 1 ? 's' : ''}`}</span>
@@ -3857,7 +4278,7 @@
             </div>
           )}
 
-          {closed && (
+          {on('sign') && closed && (
             <div className="card mb-4">
               <div className="card-h"><h2>Attestation &amp; addenda</h2></div>
               <div className="p-4 grid gap-3 text-sm">
@@ -3882,7 +4303,7 @@
     };
 
     // Chart tab: this patient's encounters with coded / signed state.
-    const EncountersTab = ({ patient, chart, initialEuuid, onOpened }) => {
+    const EncountersTab = ({ patient, chart, initialEuuid, onOpened, onChartChanged }) => {
       const canWrite = useCanWrite();
       const [data, setData] = useState(null);
       const [err, setErr] = useState('');
@@ -3891,7 +4312,7 @@
       const load = useCallback(() => { api.encounters(patient.id).then(r => { setData(r); setErr(''); }).catch(e => setErr(e.message)); }, [patient.id]);
       useEffect(load, [load]);
       useEffect(() => { if (initialEuuid) { setOpen(initialEuuid); onOpened && onOpened(); } }, [initialEuuid]);
-      if (open) return <EncounterPanel patient={patient} euuid={open} onBack={() => { setOpen(null); load(); }} onChanged={load} />;
+      if (open) return <EncounterPanel patient={patient} euuid={open} chart={chart} onChartChanged={onChartChanged} onBack={() => { setOpen(null); load(); }} onChanged={load} />;
       if (err) return <p className="text-red-600 text-sm p-4">{err}</p>;
       if (!data) return <p className="text-sm text-stone-500 p-4">Loading encounters from OpenEMR…</p>;
       return (
@@ -4146,6 +4567,7 @@
         ['referrals', 'Referrals'],
         ['documents', 'Documents'],
         ['careplan', 'Care Plan'],
+        ['extras', 'Rest of the record'],
         ['messages', 'Messages']
       ];
       return (
@@ -4386,7 +4808,7 @@
                     isAdmin={access.role === 'admin'} onChartChanged={() => { loadPatients(); refreshChart(); }} />}
                   {tab === 'appts' && <ApptsTab patient={sel} patients={patients || []} chart={chart} onDocumentHp={(eid) => { setHpApptEid(eid); setTab('visit'); }}
                     onEncounterCreated={(euuid) => { setEncTarget(euuid); setTab('encounters'); }} />}
-                  {tab === 'encounters' && <EncountersTab patient={sel} chart={chart} initialEuuid={encTarget} onOpened={() => setEncTarget(null)} />}
+                  {tab === 'encounters' && <EncountersTab patient={sel} chart={chart} initialEuuid={encTarget} onOpened={() => setEncTarget(null)} onChartChanged={() => { loadPatients(); refreshChart(); }} />}
                   {tab === 'visit' && (chart ? <HpTab patient={sel} chart={chart} appointmentEid={hpApptEid} onDone={() => { setHpApptEid(null); refreshChart(); loadPatients(); }} onGoToEncounter={(euuid) => { setEncTarget(euuid); setTab('encounters'); }} /> : <p className="text-sm text-stone-500">Loading…</p>)}
                   {tab === 'timeline' && <TimelineTab patient={sel} />}
                   {tab === 'problems' && <ProblemsTab chart={chart} />}
@@ -4398,6 +4820,7 @@
                   {tab === 'referrals' && <ReferralsTab patient={sel} />}
                   {tab === 'documents' && <DocumentsTab chart={chart} patient={sel} onChartChanged={() => { loadPatients(); refreshChart(); }} />}
                   {tab === 'careplan' && <CarePlanTab patient={sel} onSaved={loadPatients} />}
+                  {tab === 'extras' && <RecordExtrasTab patient={sel} />}
                   {tab === 'messages' && <MessagesTab patient={sel} />}
                 </div>
               </div>
