@@ -50,7 +50,8 @@ const mfa = require('./mfa');                            // TOTP + recovery code
 const { createAuditLog } = require('./auditLog');        // durable append-only audit_log + PHI-route middleware (Session 5.4)
 const { createSessionStore } = require('./sessionStore'); // server-side sessions: idle timeout + revocation (Session 5.3)
 const QRCode = require('qrcode');                        // enrollment QR for the authenticator app (Session 5.3)
-const clinicalRepo = require('./clinicalRepository');  // clinical workspace pure helpers (Session 4.1)
+const clinicalRepo = require('./clinicalRepository');
+const apptTypes = require('./appointmentTypes');  // clinical workspace pure helpers (Session 4.1)
 // Session 4.3 — patient/family/POA clinical read rules + the case-manager read/write split
 const patientRead = require('./patientReadRepository');
 // Session 4.8 — the clinical role enum, capability matrix and credential
@@ -7825,8 +7826,9 @@ app.get('/api/clinical/patients', authenticateToken, requireClinicalRead, async 
         // can offer the mental status exam where it belongs and nowhere else.
         // Answered by the SERVER against the type catalog, never inferred on
         // the page from a label.
-        encounterType: u.encounterType || null,
-        isPsychiatric: clinicalRepo.isPsychiatricEncounterType(u.encounterType),
+        // The patient's USUAL location. A default the booking confirms or
+        // overrides, never a fact about the visit being documented.
+        usualLocation: u.usualLocation || null,
         initialVisitAt: (u.clinicalInitialVisit && u.clinicalInitialVisit.at) || null,
         carePlanVersion: (u.carePlan && u.carePlan.version) || null,
         activatedAt: (u.clinicalEnrollment && u.clinicalEnrollment.activatedAt) || null
@@ -8372,7 +8374,7 @@ app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireCli
       const record = clinicalRepo.buildEncounterBillingRecord({
         id: uuidv4(), clientId: client.id, puuid, encounterUuid, encounterEid: enc.eid,
         reason: plainReason, date: built.encounter.date, actor, billingNpi: payer.billing_npi_used, narrativeNoteSid: narrative.sid,
-        encounterType: place.encounterType
+        visit: place.visit
       });
       billingRows.push(record);
       await db.set('encounter_billing', billingRows);
@@ -9524,7 +9526,11 @@ const ensureBillingRecord = async (emr, client, encounterUuid, actor) => {
     // OpenEMR's own calendar. The patient's default is the only fact we have;
     // it is not evidence about what the visit actually was, so the agreement
     // check can still refuse it and an admin corrects one side or the other.
-    encounterType: client.encounterType || null
+    // Nothing stamped this encounter — it pre-dates the descriptor, or was
+    // created in OpenEMR's own calendar. The patient's usual location is the
+    // only fact we have; it is not evidence about what the visit was, so the
+    // POS agreement check can still refuse it and an admin corrects one side.
+    visit: { location: client.usualLocation || null }
   });
   rows.push(record);
   await db.set('encounter_billing', rows);
@@ -9613,15 +9619,21 @@ const loadDxCandidates = async (emr, client, excludeEncounterUuid) => {
 // are halves of one decision — what kind of visit this is, and where it bills.
 // Answering them in separate places is how a telehealth visit ends up stamped
 // at a home place of service with nothing saying which one is wrong.
-const resolveFacilityForVisit = async (emr, client, appointmentLocation) => {
-  const type = clinicalRepo.resolveEncounterType({
-    patientDefault: client.encounterType || null, appointmentLocation
+const resolveFacilityForVisit = async (emr, client, appointmentLocation, descriptor) => {
+  // What this visit IS. The booking is authoritative; the patient's usual
+  // location is only a default (owner rule, 2026-09-23).
+  const visit = apptTypes.resolveVisit({
+    appointmentType: descriptor && descriptor.appointmentType,
+    bookedModality: (descriptor && descriptor.modality) ||
+      (String(appointmentLocation || '').toLowerCase() === 'telehealth' ? 'telehealth' : 'in_person'),
+    bookedLocation: descriptor && descriptor.location,
+    patientDefaultLocation: client.usualLocation || null
   });
   let facilities = [];
   try { facilities = await emr.getFacilities(); }
   catch (e) {
     return { facilityId: null, posCode: null, facilityName: null, source: 'unavailable',
-      encounterType: type.key, encounterTypeLabel: type.label, encounterTypeSource: type.source,
+      visit, visitLabel: visit.label,
       error: 'FACILITY_LOOKUP_FAILED',
       warning: `OpenEMR's facility list could not be read (${e.message.slice(0, 120)}), so the place of service could not be derived.` };
   }
@@ -9633,12 +9645,12 @@ const resolveFacilityForVisit = async (emr, client, appointmentLocation) => {
   // Surfaced at CREATION as a warning, never a refusal: care is documented
   // whatever the paperwork says, and it is the SIGNATURE that is a claim. A
   // clinician who is told at the start of the visit has time to get it fixed.
-  const agree = clinicalRepo.checkEncounterTypeAgainstPos({
-    encounterType: type.key, posCode: place.posCode, facilityName: place.facilityName
+  const agree = clinicalRepo.checkVisitAgainstPos({
+    visit, posCode: place.posCode, facilityName: place.facilityName
   });
   return {
     ...place,
-    encounterType: type.key, encounterTypeLabel: type.label, encounterTypeSource: type.source,
+    visit, visitLabel: visit.label,
     warning: place.warning || (agree.ok ? null : agree.error)
   };
 };
@@ -9679,7 +9691,7 @@ const postEncounterCharges = async ({ emr, client, encounterUuid, record, warnin
   // The encounter type rides onto the charge: a telehealth visit carries
   // modifier 95, derived, never typed. Read off the stamp on the record, the
   // same value the signature checked against the POS.
-  const payloads = clinicalRepo.buildChargePayloads(record, { providerId, encounterType: record.encounterType });
+  const payloads = clinicalRepo.buildChargePayloads(record, { providerId, visit: record.visit });
   const posted = [];
   try {
     for (const payload of payloads) {
@@ -9974,7 +9986,7 @@ app.post('/api/clinical/patients/:clientId/encounters', authenticateToken, requi
     let record = clinicalRepo.buildEncounterBillingRecord({
       id: uuidv4(), clientId: client.id, puuid, encounterUuid, encounterEid: enc.eid,
       reason: built.reason, date: built.encounter.date, actor, billingNpi: payer.billing_npi_used, narrativeNoteSid: narrative.sid,
-      encounterType: place.encounterType
+      visit: place.visit
     });
     if (dx.diagnoses.length || svc.services.length) {
       const coded = clinicalRepo.applyCoding(record, { diagnoses: dx.diagnoses, services: svc.services }, actor, payer.billing_npi_used);
@@ -10084,15 +10096,23 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
       signReadiness: clinicalRepo.checkSignReadiness({
         hasNote, record, billingNpi: payer.billing_npi_used,
         posCode: emrRow && emrRow.pos_code,
-        encounterType: record.encounterType, facilityName: emrRow && emrRow.facility_name,
-        riskAssessment: ctx.riskAssessment
+        visit: record.visit, facilityName: emrRow && emrRow.facility_name,
+        riskAssessment: ctx.riskAssessment, completedSections: record.completedSections
       }),
       riskAssessment: ctx.riskAssessment, riskHistory: ctx.riskHistory,
-      riskRequired: clinicalRepo.riskAssessmentRequired(record.encounterType),
+      riskRequired: clinicalRepo.riskAssessmentRequired(record.visit),
       riskLevels: clinicalRepo.RISK_LEVELS, riskDomains: clinicalRepo.RISK_DOMAINS,
       riskNeedsPlan: clinicalRepo.RISK_NEEDS_PLAN,
-      encounterType: record.encounterType || null,
-      encounterTypeLabel: (clinicalRepo.encounterTypeByKey(record.encounterType) || {}).label || null,
+      visit: record.visit || null,
+      visitLabel: clinicalRepo.visitLabel(record.visit),
+      // The note template this appointment type declares, resolved for this
+      // visit's modality. The page renders it and decides none of it.
+      noteSections: apptTypes.sectionsFor((record.visit || {}).appointmentType, {
+        modality: (record.visit || {}).modality,
+        riskPositive: !!(ctx.riskAssessment && ctx.riskAssessment.levels &&
+          clinicalRepo.RISK_DOMAINS.some(d => clinicalRepo.RISK_NEEDS_PLAN.includes(ctx.riskAssessment.levels[d])))
+      }),
+      completedSections: record.completedSections || [],
       candidates, candidatesError: cands.error,
       favorites: {
         icd10: clinicalRepo.rankFavorites(usage, req.user.id, 'ICD10', 15),
@@ -11002,8 +11022,8 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
     } catch { encPos = null; encFacilityName = null; }
     const ready = clinicalRepo.checkSignReadiness({
       hasNote, record: ctx.record, billingNpi: payer.billing_npi_used, posCode: encPos,
-      encounterType: ctx.record.encounterType, facilityName: encFacilityName,
-      riskAssessment: ctx.riskAssessment
+      visit: ctx.record.visit, facilityName: encFacilityName,
+      riskAssessment: ctx.riskAssessment, completedSections: ctx.record.completedSections
     });
     if (!ready.ok) return res.status(409).json({ error: ready.message, code: ready.codes[0], codes: ready.codes, missing: ready.missing });
 
@@ -12117,58 +12137,55 @@ app.get('/api/clinical/patients/:clientId/record-extras', authenticateToken, req
   }
 });
 
-// ── Encounter type (Session 4.12 Scope F1) ────────────────────────────────
-// WHAT KIND OF VISIT THIS PATIENT'S VISITS ARE, set by an ADMIN on the
-// enrollment record (owner, 2026-09-23) rather than chosen by a clinician at
-// the start of each visit. It is the other half of the 4.5 place-of-service
-// decision — the facility says WHERE, the type says WHAT — so it is set on the
-// same screen, under the same admin gate, and a clinician sees both resolved
-// and read-only on the encounter.
+// ── The patient's usual location (Session 4.12 Scope F1, owner 2026-09-23) ─
+// WHERE THIS PATIENT IS USUALLY SEEN, set by an admin on the enrollment
+// record. It is a DEFAULT and nothing more: the booking confirms it and can
+// override it for a single visit, because a home patient seen in clinic once
+// is normal and the booking is where that is known.
 //
-// The vocabulary is SERVED, never restated in a page: a screen that carries its
-// own list drifts from the validator that refuses an option it no longer knows.
-app.put('/api/clinical/patients/:clientId/encounter-type', authenticateToken, requireAdmin, async (req, res) => {
+// What it is NOT is a fact about any particular visit. The visit's own
+// modality and location are stamped on the encounter, and those are what the
+// place of service and the code family come from. Storing "this patient is a
+// home patient" and then billing every visit from it is how a clinic visit
+// goes out as a home visit.
+//
+// The vocabulary is SERVED, never restated in a page.
+app.put('/api/clinical/patients/:clientId/usual-location', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
-    const raw = String((req.body || {}).encounterType ?? '').trim();
+    const raw = String((req.body || {}).usualLocation ?? '').trim();
     if (raw === '') {
-      users[idx].encounterType = null;
+      users[idx].usualLocation = null;
       await db.set('users', users);
-      await logActivity(req.user.id, req.user.name || req.user.email, 'patient_encounter_type_cleared', 'client', client.id, {});
-      return res.json({ message: 'Encounter type cleared. Visits for this patient will not assert a place of service of their own.', encounterType: null });
+      await logActivity(req.user.id, req.user.name || req.user.email, 'patient_usual_location_cleared', 'client', client.id, {});
+      return res.json({ message: 'Usual location cleared. Every visit for this patient will have to say where it happened at booking.', usualLocation: null });
     }
-    const chosen = clinicalRepo.encounterTypeByKey(raw);
+    const chosen = apptTypes.locationByKey(raw);
     if (!chosen) {
       return res.status(400).json({
-        error: `"${raw}" is not an encounter type. Choose one of: ${clinicalRepo.ENCOUNTER_TYPES.map(t => t.key).join(', ')}.`,
-        code: 'UNKNOWN_ENCOUNTER_TYPE'
+        error: `"${raw}" is not a location. Choose one of: ${apptTypes.LOCATIONS.map(l => l.key).join(', ')}.`,
+        code: 'UNKNOWN_LOCATION'
       });
     }
-    users[idx].encounterType = chosen.key;
+    users[idx].usualLocation = chosen.key;
     await db.set('users', users);
-    await logActivity(req.user.id, req.user.name || req.user.email, 'patient_encounter_type_set', 'client', client.id, {
-      encounterType: chosen.key, posAsserted: chosen.pos || null
+    await logActivity(req.user.id, req.user.name || req.user.email, 'patient_usual_location_set', 'client', client.id, {
+      usualLocation: chosen.key
     });
-    // Say straight away whether this contradicts the facility, rather than
-    // letting a clinician find out at the moment they try to sign.
-    let warnings = [];
-    if (chosen.pos) {
-      try {
-        const place = await resolveFacilityForVisit(openemr.forActor(req.user), { ...client, encounterType: chosen.key }, null);
-        const agree = clinicalRepo.checkEncounterTypeAgainstPos({
-          encounterType: chosen.key, posCode: place.posCode, facilityName: place.facilityName
-        });
-        if (!agree.ok) warnings = [agree.error];
-      } catch { /* the read is a courtesy; the setting still stands */ }
+    // A facility location whose facility carries no POS is worth saying now
+    // rather than at the moment somebody tries to sign.
+    const warnings = [];
+    if (chosen.fromFacilityRecord) {
+      warnings.push('The place of service for a facility visit comes from that facility\'s record in OpenEMR. Check the facility assigned to this patient has one set, or their visits cannot be signed.');
     }
     res.json({
-      message: `${client.name || 'Patient'}'s visits are recorded as ${chosen.label}${chosen.pos ? ` (place of service ${chosen.pos})` : ''}.`,
-      encounterType: chosen.key, warnings
+      message: `${client.name || 'Patient'} is usually seen at ${chosen.label.toLowerCase()}. Each booking confirms it and can change it for that visit.`,
+      usualLocation: chosen.key, warnings
     });
   } catch (error) {
-    console.error('Patient encounter type error:', error);
-    res.status(502).json({ error: `Encounter type could not be saved: ${error.message}` });
+    console.error('Patient usual location error:', error);
+    res.status(502).json({ error: `Usual location could not be saved: ${error.message}` });
   }
 });
 
@@ -12182,24 +12199,48 @@ app.get('/api/clinical/patients/:clientId/place-of-service', authenticateToken, 
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
     const canEdit = req.user.role === 'admin';
-    const encounterTypes = clinicalRepo.ENCOUNTER_TYPES.map(t => ({
-      key: t.key, label: t.label, pos: t.pos || null, telehealth: !!t.telehealth, psychiatric: !!t.psychiatric
+    // SERVED, never restated in a page: the locations an admin may choose and
+    // the appointment types a booking may use.
+    const locations = apptTypes.LOCATIONS.map(l => ({
+      key: l.key, label: l.label, pos: l.pos || null, fromFacilityRecord: !!l.fromFacilityRecord
     }));
+    const appointmentTypes = apptTypes.APPOINTMENT_TYPES.map(t => ({
+      key: t.key, label: t.label, service: t.service, defaultMinutes: t.defaultMinutes,
+      telehealthAllowed: !!t.telehealthAllowed, telehealthPayerCaveat: !!t.telehealthPayerCaveat
+    }));
+    const services = apptTypes.SERVICES.map(x => ({ key: x.key, label: x.label }));
+    const modalities = apptTypes.MODALITIES.map(x => ({ key: x.key, label: x.label }));
+    // The note TEMPLATES, per appointment type, resolved for each modality.
+    // Served rather than restated on the page: the template that shapes the
+    // form has to be the same one the sign gate refuses against, or a
+    // clinician fills in a note the server then says is incomplete.
+    const noteTemplates = {};
+    for (const t of apptTypes.APPOINTMENT_TYPES) {
+      const rows = [];
+      for (const m of apptTypes.MODALITIES) {
+        for (const sec of apptTypes.sectionsFor(t.key, { modality: m.key })) {
+          rows.push({ ...sec, modality: m.key });
+        }
+      }
+      noteTemplates[t.key] = rows;
+    }
     const base = {
-      canEdit, encounterTypes,
-      encounterType: client.encounterType || null,
-      encounterTypeLabel: (clinicalRepo.encounterTypeByKey(client.encounterType) || {}).label || null,
+      canEdit, locations, appointmentTypes, services, modalities, noteTemplates,
+      usualLocation: client.usualLocation || null,
+      usualLocationLabel: (apptTypes.locationByKey(client.usualLocation) || {}).label || null,
       facilityId: client.openEmrFacilityId ? String(client.openEmrFacilityId) : null
     };
     if (!openemr.isConfigured()) {
-      return res.json({ ...base, facilities: [], degraded: true, reason: 'OpenEMR is not configured', agreement: null });
+      return res.json({ ...base, facilities: [], degraded: true, reason: 'OpenEMR is not configured', agreement: null,
+        locations, appointmentTypes, services, modalities, noteTemplates });
     }
     const emr = openemr.forActor(req.user);
     let rows = [];
     try { rows = await emr.getFacilities(); }
     catch (e) {
       // An unreadable facility list is not evidence that nothing is assigned.
-      return res.json({ ...base, facilities: [], degraded: true, reason: `OpenEMR's facility list could not be read: ${e.message}`, agreement: null });
+      return res.json({ ...base, facilities: [], degraded: true, reason: `OpenEMR's facility list could not be read: ${e.message}`, agreement: null,
+        locations, appointmentTypes, services, modalities, noteTemplates });
     }
     const facilities = rows.map(f => ({
       id: String(f.id), name: f.name || '(unnamed facility)',
@@ -12213,12 +12254,16 @@ app.get('/api/clinical/patients/:clientId/place-of-service', authenticateToken, 
       facilityName: current ? current.name : null,
       posCode: current ? current.posCode : null,
       serviceLocation: current ? current.serviceLocation : null,
-      // The verdict the SIGNATURE will use, answered here so no screen has to
-      // work it out for itself.
-      agreement: clinicalRepo.checkEncounterTypeAgainstPos({
-        encounterType: client.encounterType || null,
+      // Does the patient's USUAL location agree with the facility they are
+      // assigned to? An admin-facing check and a different question from the
+      // one the signature asks: that one judges a particular VISIT, and this
+      // one catches "you have said this patient is usually seen at home, but
+      // their assigned facility bills at 11" before anybody books anything.
+      agreement: clinicalRepo.checkVisitAgainstPos({
+        visit: { modality: 'in_person', location: client.usualLocation || null },
         posCode: current ? current.posCode : null,
-        facilityName: current ? current.name : null
+        facilityName: current ? current.name : null,
+        facilityPos: current ? current.posCode : null
       }),
       billingFacilityName: billTo.facilityName || null,
       billingFacilityWarning: billTo.warning || null
@@ -12357,7 +12402,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/charges/repost', au
     const providerId = (ctx.record.renderingProvider && ctx.record.renderingProvider.openEmrProviderId) || ctx.actor.openEmrProviderId || null;
     if (!providerId) return res.status(409).json({ error: 'No OpenEMR provider id on file for the signing clinician. An admin sets it on the user record, then re-post.', code: 'NO_OPENEMR_PROVIDER_ID' });
     const alreadyPosted = new Set((ctx.record.postedCharges || []).map(c => `${c.codeType}:${c.code}`));
-    const payloads = clinicalRepo.buildChargePayloads(ctx.record, { providerId, encounterType: ctx.record.encounterType })
+    const payloads = clinicalRepo.buildChargePayloads(ctx.record, { providerId, visit: ctx.record.visit })
       .filter(p => !alreadyPosted.has(`${p.code_type}:${p.code}`));
     if (!payloads.length) return res.json({ message: 'Every charge line for this encounter is already posted', posted: [], record: ctx.record });
     const posted = [...(ctx.record.postedCharges || [])];

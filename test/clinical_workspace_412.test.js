@@ -22,6 +22,7 @@ const path = require('path');
 
 const repo = require("../clinicalRepository");
 const R = repo;
+const apptTypes = require('../appointmentTypes');
 
 const root = path.join(__dirname, '..');
 const serverSrc = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
@@ -44,11 +45,34 @@ const stripComments = (src) => src
 
 // A stripper that grabs the wrong slice proves nothing, so it says so out loud
 // rather than quietly handing every later assertion a truncated file.
+// REWRITTEN 2026-09-23. This used to assert that the stripper removed under
+// 45% of the file — a PROXY, and a bad one. It fired on myDay.js the moment a
+// legitimately long comment block landed, because a heavily commented file and
+// a file whose code has been swallowed look identical to a percentage.
+//
+// The real question is whether any CODE went missing, so it asks that: every
+// top-level declaration in the source must survive the strip. A block comment
+// opened by accident — the original bug, a `/*` inside a line comment — eats
+// whole declarations, and that is visible whatever the comment density.
+const TOP_LEVEL_DECL = /^(?:const|let|var|function|class|async function)\s+([A-Za-z_$][\w$]*)/gm;
+const declarationsIn = (src) => {
+  const out = new Set(); let m;
+  const re = new RegExp(TOP_LEVEL_DECL.source, 'gm');
+  while ((m = re.exec(src)) !== null) out.add(m[1]);
+  return out;
+};
 const strippedSafely = (src, label) => {
   const out = stripComments(src);
+  const before = declarationsIn(src);
+  const after = declarationsIn(out);
+  const lost = [...before].filter(n => !after.has(n));
+  assert.deepEqual(lost, [],
+    `stripComments swallowed ${lost.length} declaration(s) from ${label}: ${lost.join(', ')} — it has eaten code, not comments`);
+  // A loose backstop for the case where it eats statements without taking a
+  // whole declaration with them. Deliberately well clear of ordinary comment
+  // density in this repo, which runs high on purpose.
   const removed = 1 - out.length / src.length;
-  assert.ok(removed < 0.45,
-    `stripComments removed ${(removed * 100).toFixed(1)}% of ${label} — it has swallowed code, not comments`);
+  assert.ok(removed < 0.75, `stripComments removed ${(removed * 100).toFixed(1)}% of ${label}`);
   return out;
 };
 
@@ -1225,223 +1249,197 @@ test('the narrative fields stay plain textareas the device keyboard can dictate 
   assert.match(body, /<textarea className="inp"/);
 });
 
-// ── Session 4.12 Scope F1 — the encounter type, and the POS it decides ──
-// Owner, 2026-09-23: this is an ADMIN setting on the enrollment record, not a
-// clinician's pick at the start of a visit. It is the other half of the 4.5
-// place-of-service rule, so every guard below is about what reaches a CLAIM.
+// ── Session 4.12 Scope F — what a visit IS, and the POS it decides ──
+// REPOINTED 2026-09-23, not deleted. These guarded the flat `ENCOUNTER_TYPES`
+// list, which tangled "where did this happen" with "what kind of visit was
+// it". The rules did not go away when the owner split them into three axes —
+// they got sharper — so each one points at the new model. A guard that
+// quietly disappears with the code it happened to be aimed at is a guard lost.
 
-test('F1: the encounter type vocabulary is declared once, and each type either names a place of service or does not', () => {
-  const keys = R.ENCOUNTER_TYPES.map(t => t.key);
-  assert.equal(new Set(keys).size, keys.length, 'a duplicate key would make encounterTypeByKey silently pick one');
-  for (const t of R.ENCOUNTER_TYPES) {
-    assert.ok(t.label && t.label.trim(), `${t.key} must have a label a person can read`);
-    // pos is either a real two-character POS code or explicitly null. An empty
-    // string would read as "asserts a place" to nothing and as falsy to
-    // encounterTypeAssertsPos, which is two different answers to one question.
-    assert.ok(t.pos === null || /^\d{2}$/.test(t.pos), `${t.key} pos must be a 2-digit code or null, got ${JSON.stringify(t.pos)}`);
-    assert.equal(typeof t.telehealth, 'boolean');
+test('F: the visit descriptor is normalised, and an invented value is dropped rather than stored', () => {
+  const v = R.normalizeVisit({ appointmentType: 'pc_follow_up', modality: 'in_person', location: 'home' });
+  assert.deepEqual(v, { appointmentType: 'pc_follow_up', modality: 'in_person', location: 'home' });
+  // An invented appointment type reads back as a real one to everything
+  // downstream and would never match a place of service.
+  const bogus = R.normalizeVisit({ appointmentType: 'made_up', modality: 'beam', location: 'mars' });
+  assert.deepEqual(bogus, { appointmentType: null, modality: null, location: null });
+  assert.deepEqual(R.normalizeVisit(null), { appointmentType: null, modality: null, location: null });
+  assert.equal(R.visitLabel({ appointmentType: 'pc_follow_up', modality: 'telehealth', location: 'home' }),
+    'Follow-up · Telehealth · Private Home');
+  // A half-resolved visit has no label rather than a misleading partial one.
+  assert.equal(R.visitLabel({ appointmentType: 'pc_follow_up' }), null);
+});
+
+test('F: a visit whose place of service disagrees with the encounter is REFUSED, naming both values', () => {
+  const home = { appointmentType: 'pc_follow_up', modality: 'in_person', location: 'home' };
+  assert.equal(R.checkVisitAgainstPos({ visit: home, posCode: '12' }).ok, true);
+
+  const clash = R.checkVisitAgainstPos({ visit: home, posCode: '11', facilityName: 'Vinings' });
+  assert.equal(clash.ok, false);
+  assert.equal(clash.code, R.VISIT_POS_DISAGREES);
+  // BOTH values, or the reader cannot tell which of the two is wrong.
+  assert.match(clash.error, /\b12\b/, 'the error must name the POS the visit should carry');
+  assert.match(clash.error, /\b11\b/, 'the error must name the POS the encounter does carry');
+  assert.match(clash.error, /Follow-up · In-Person · Private Home/);
+
+  // ⚠️ The one that produces a FALSE CLAIM: a telehealth visit billed at the
+  // home place of service.
+  const tele = { appointmentType: 'pc_follow_up', modality: 'telehealth', location: 'home' };
+  assert.equal(R.checkVisitAgainstPos({ visit: tele, posCode: '10' }).ok, true);
+  assert.equal(R.checkVisitAgainstPos({ visit: tele, posCode: '12' }).code, R.VISIT_POS_DISAGREES);
+});
+
+test('F: an unresolved visit never conflicts, and a missing POS is its own refusal', () => {
+  // Half a descriptor cannot be judged, and inventing a verdict would refuse
+  // encounters that predate the field.
+  assert.equal(R.checkVisitAgainstPos({ visit: { appointmentType: 'pc_follow_up' }, posCode: '12' }).ok, true);
+  assert.equal(R.checkVisitAgainstPos({ visit: null, posCode: '12' }).ok, true);
+  // A resolved visit with no POS on the encounter is a DIFFERENT problem from
+  // a disagreement, fixed somewhere else, so it carries its own code.
+  const none = R.checkVisitAgainstPos({ visit: { appointmentType: 'pc_follow_up', modality: 'in_person', location: 'home' }, posCode: '' });
+  assert.equal(none.code, 'VISIT_NO_POS');
+  assert.notEqual(none.code, R.VISIT_POS_DISAGREES);
+});
+
+test('F: the note template is asked of the VISIT, so the same type demands different things in person and on video', () => {
+  const home = { appointmentType: 'pc_follow_up', modality: 'in_person', location: 'home' };
+  const tele = { appointmentType: 'pc_follow_up', modality: 'telehealth', location: 'home' };
+  const inPerson = R.requiredSectionsForVisit(home);
+  const video = R.requiredSectionsForVisit(tele);
+  assert.ok(inPerson.includes('vitals') && inPerson.includes('physicalExam'));
+  // You cannot take a blood pressure over video.
+  assert.ok(!video.includes('vitals') && !video.includes('physicalExam'));
+  assert.ok(video.length < inPerson.length);
+  // Everything that is not an examination is unchanged.
+  for (const k of ['assessment', 'plan', 'medReconciliation', 'followUp', 'mdmOrTime']) {
+    assert.ok(video.includes(k), `${k} must still be required over video`);
   }
-  // The four that name a place are the only ones that can conflict.
-  assert.deepEqual(
-    R.ENCOUNTER_TYPES.filter(t => R.encounterTypeAssertsPos(t.key)).map(t => t.key).sort(),
-    ['home_primary_care', 'office', 'psychiatric_home', 'psychiatric_telehealth', 'telehealth'].sort()
-  );
-  // Every telehealth type bills at a telehealth place of service. A telehealth
-  // type stamped at 11 or 12 is the exact false claim this scope exists to stop.
-  for (const t of R.ENCOUNTER_TYPES.filter(t => t.telehealth)) {
-    assert.equal(t.pos, '10', `${t.key} is telehealth so it must assert POS 10`);
-  }
-  assert.equal(R.encounterTypeByKey('not_a_type'), null);
-  assert.equal(R.encounterTypeByKey(''), null);
-  assert.equal(R.encounterTypeByKey(null), null);
+  assert.deepEqual(R.requiredSectionsForVisit({ appointmentType: null }), []);
 });
 
-test('F1: a type that names a place refuses a facility whose POS disagrees, naming BOTH values', () => {
-  const ok = R.checkEncounterTypeAgainstPos({ encounterType: 'home_primary_care', posCode: '12', facilityName: 'Private Residence' });
-  assert.equal(ok.ok, true);
-  assert.equal(ok.code, null);
-
-  const bad = R.checkEncounterTypeAgainstPos({ encounterType: 'telehealth', posCode: '12', facilityName: 'Private Residence' });
-  assert.equal(bad.ok, false);
-  assert.equal(bad.code, R.POS_DISAGREES);
-  // BOTH values, or the reader cannot tell which of the two is wrong — and
-  // neither is fixed from the screen they are reading.
-  assert.match(bad.error, /\b10\b/, 'the error must name the POS the type asserts');
-  assert.match(bad.error, /\b12\b/, 'the error must name the POS the facility resolved to');
-  assert.match(bad.error, /Telehealth/, 'the error must name the encounter type');
-  assert.match(bad.error, /Private Residence/, 'the error must name the facility');
-
-  // The mirror case, so the check is not accidentally one-directional.
-  const bad2 = R.checkEncounterTypeAgainstPos({ encounterType: 'home_primary_care', posCode: '10', facilityName: 'Telehealth' });
-  assert.equal(bad2.code, R.POS_DISAGREES);
-  assert.match(bad2.error, /\b12\b/);
-  assert.match(bad2.error, /\b10\b/);
-});
-
-test('F1: a type that names no place never conflicts, and an unset type never conflicts', () => {
-  // An annual wellness visit or a follow-up happens wherever the patient is
-  // seen. Refusing those on a POS would be noise, and noise is how a real
-  // refusal gets clicked past.
-  for (const key of ['annual_wellness', 'acute_visit', 'transitional_care', 'follow_up']) {
-    for (const pos of ['10', '11', '12', '13']) {
-      assert.equal(R.checkEncounterTypeAgainstPos({ encounterType: key, posCode: pos }).ok, true, `${key} at ${pos} must not conflict`);
-    }
-  }
-  assert.equal(R.checkEncounterTypeAgainstPos({ encounterType: null, posCode: '12' }).ok, true);
-  assert.equal(R.checkEncounterTypeAgainstPos({ encounterType: 'not_a_type', posCode: '12' }).ok, true);
-});
-
-test('F1: a type that names a place with NO POS resolved is its own refusal, pointing at the facility', () => {
-  const none = R.checkEncounterTypeAgainstPos({ encounterType: 'home_primary_care', posCode: '', facilityName: 'Hickory Log' });
-  assert.equal(none.ok, false);
-  // A different code from the disagreement, because it is a different problem
-  // with a different fix — the facility record in OpenEMR, not the type.
-  assert.equal(none.code, 'ENCOUNTER_TYPE_NO_POS');
-  assert.notEqual(none.code, R.POS_DISAGREES);
-  assert.match(none.error, /Hickory Log/);
-  assert.match(none.error, /facility/i);
-  assert.equal(R.checkEncounterTypeAgainstPos({ encounterType: 'home_primary_care', posCode: null }).code, 'ENCOUNTER_TYPE_NO_POS');
-});
-
-test('F1: the booking overrides the patient default, and a psychiatric patient booked by video stays psychiatric', () => {
-  assert.deepEqual(
-    R.resolveEncounterType({ patientDefault: 'home_primary_care', appointmentLocation: null }),
-    { key: 'home_primary_care', source: 'patient_default', label: 'Home Primary Care' }
-  );
-  // "Home visit Tuesday, telehealth Thursday" is the normal case. The booking
-  // is where that was decided, so it wins.
-  const booked = R.resolveEncounterType({ patientDefault: 'home_primary_care', appointmentLocation: 'telehealth' });
-  assert.equal(booked.key, 'telehealth');
-  assert.equal(booked.source, 'appointment');
-  // Collapsing a psychiatric patient's video visit to plain telehealth would
-  // drop the exam variant and the risk assessment the signature depends on.
-  const psych = R.resolveEncounterType({ patientDefault: 'psychiatric_home', appointmentLocation: 'telehealth' });
-  assert.equal(psych.key, 'psychiatric_telehealth');
-  assert.equal(R.isPsychiatricEncounterType(psych.key), true);
-  assert.equal(R.isPsychiatricEncounterType(booked.key), false);
-  // Nothing set is stated as nothing set, never guessed at.
-  assert.deepEqual(R.resolveEncounterType({ patientDefault: null, appointmentLocation: null }), { key: null, source: 'unset', label: null });
-  assert.equal(R.resolveEncounterType({ patientDefault: 'not_a_type', appointmentLocation: null }).source, 'unset');
-});
-
-test('F1: signing REFUSES an encounter whose type and resolved POS disagree, and says so in its own sentence', () => {
+test('F: signing REFUSES an unfinished note and NAMES the sections, never a count', () => {
   const coded = R.applyCoding(
-    { clientId: 'c1', encounterUuid: 'e1', diagnoses: [], services: [] },
+    { clientId: 'c', encounterUuid: 'e', diagnoses: [], services: [] },
     { diagnoses: [{ code: 'E11.9', description: 'T2DM', primary: true }],
       services: [{ code: '99348', units: 1, dxLinks: ['E11.9'] }] },
-    { id: 'u1', name: 'FNP', npi: '1234567893' }, '1234567893'
+    { id: 'u', name: 'FNP', npi: '1234567893' }, '1234567893'
   ).record;
-  const base = { hasNote: true, record: coded, billingNpi: '1234567893' };
+  const visit = { appointmentType: 'pc_follow_up', modality: 'in_person', location: 'home' };
+  const base = { hasNote: true, record: coded, billingNpi: '1234567893', posCode: '12', visit };
 
-  const agreeing = R.checkSignReadiness({ ...base, posCode: '12', encounterType: 'home_primary_care' });
-  assert.equal(agreeing.ok, true);
+  const empty = R.checkSignReadiness({ ...base, completedSections: [] });
+  assert.equal(empty.ok, false);
+  assert.ok(empty.codes.includes('SIGN_NOTE_SECTIONS_INCOMPLETE'));
+  // NAMED. "3 sections outstanding" is a number a clinician has to go hunting
+  // through their own note for.
+  assert.match(empty.message, /Interval History/);
+  assert.match(empty.message, /Physical Exam/);
+  assert.match(empty.message, /Follow-up/);
 
-  const clash = R.checkSignReadiness({ ...base, posCode: '12', encounterType: 'telehealth', facilityName: 'Private Residence' });
-  assert.equal(clash.ok, false);
-  assert.ok(clash.codes.includes(R.POS_DISAGREES));
-  assert.match(clash.message, /\b10\b/);
-  assert.match(clash.message, /\b12\b/);
+  const done = R.checkSignReadiness({ ...base, completedSections: R.requiredSectionsForVisit(visit) });
+  assert.equal(done.ok, true);
+  assert.deepEqual(done.openSections, []);
 
-  // A missing POS blocks on facility_pos ALONE. Saying it twice, in two
-  // different sentences, sends the reader at two layers for one problem.
-  const noPos = R.checkSignReadiness({ ...base, posCode: '', encounterType: 'telehealth' });
-  assert.deepEqual(noPos.codes, ['SIGN_NO_FACILITY_POS']);
-  assert.ok(!noPos.codes.includes(R.POS_DISAGREES));
-
-  // An unset type never blocks a signature: the facility decides alone, which
-  // is exactly what happened before this scope existed.
-  assert.equal(R.checkSignReadiness({ ...base, posCode: '12', encounterType: null }).ok, true);
-
-  // The mismatch travels beside the other blockers rather than replacing them.
-  const both = R.checkSignReadiness({ hasNote: false, record: { diagnoses: [], services: [] }, billingNpi: null, posCode: '10', encounterType: 'home_primary_care' });
-  assert.ok(both.codes.includes('SIGN_NO_NOTE'));
-  assert.ok(both.codes.includes(R.POS_DISAGREES));
-  assert.match(both.message, /a documented note/);
-  assert.match(both.message, /place of service 12/);
+  // A telehealth visit is ready without the exam sections.
+  const teleVisit = { appointmentType: 'pc_follow_up', modality: 'telehealth', location: 'home' };
+  const tele = R.checkSignReadiness({ hasNote: true, record: coded, billingNpi: '1234567893', posCode: '10',
+    visit: teleVisit, completedSections: R.requiredSectionsForVisit(teleVisit) });
+  assert.equal(tele.ok, true);
+  // And the SAME completed set does not satisfy the in-person visit.
+  const shortfall = R.checkSignReadiness({ ...base, completedSections: R.requiredSectionsForVisit(teleVisit) });
+  assert.equal(shortfall.ok, false);
+  assert.ok(shortfall.openSections.includes('vitals'));
 });
 
-test('F1: the encounter type is STAMPED on the billing record at creation, and an unknown one is refused rather than stored', () => {
+test('F: the visit descriptor is STAMPED on the billing record at creation', () => {
   const made = R.buildEncounterBillingRecord({
     id: 'r1', clientId: 'c1', puuid: 'p1', encounterUuid: 'e1', encounterEid: '7',
     reason: 'visit', date: '2026-09-23', actor: { id: 'u1', name: 'FNP' }, billingNpi: '1234567893',
-    encounterType: 'psychiatric_home', at: '2026-09-23T12:00:00.000Z'
+    visit: { appointmentType: 'bh_initial', modality: 'in_person', location: 'home' }
   });
-  assert.equal(made.encounterType, 'psychiatric_home');
-  // An invented type stored on a record would be read back as a real one by
-  // every consumer and would never match a POS, so it is dropped at the door.
+  assert.deepEqual(made.visit, { appointmentType: 'bh_initial', modality: 'in_person', location: 'home' });
+  // An invented descriptor is dropped at the door rather than stored.
   const bogus = R.buildEncounterBillingRecord({
     id: 'r2', clientId: 'c1', puuid: 'p1', encounterUuid: 'e2', encounterEid: '8',
     reason: 'visit', date: '2026-09-23', actor: { id: 'u1', name: 'FNP' }, billingNpi: '1234567893',
-    encounterType: 'made_up'
+    visit: { appointmentType: 'made_up', modality: 'in_person', location: 'home' }
   });
-  assert.equal(bogus.encounterType, null);
+  assert.equal(bogus.visit.appointmentType, null);
+  assert.equal(bogus.visit.location, 'home', 'the parts that ARE valid survive');
   const none = R.buildEncounterBillingRecord({
     id: 'r3', clientId: 'c1', puuid: 'p1', encounterUuid: 'e3', encounterEid: '9',
     reason: 'visit', date: '2026-09-23', actor: { id: 'u1', name: 'FNP' }, billingNpi: '1234567893'
   });
-  assert.equal(none.encounterType, null);
+  assert.deepEqual(none.visit, { appointmentType: null, modality: null, location: null });
 });
 
-test('F1 build-enforced: the encounter type is an ADMIN write on the enrollment surface, and the clinical chart only READS it', () => {
-  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  // The write is admin-only. requireClinicalWrite would hand it to any
-  // licensed clinician, which is the gate the owner moved it off.
-  assert.match(
-    server,
-    /app\.put\('\/api\/clinical\/patients\/:clientId\/encounter-type',\s*authenticateToken,\s*requireAdmin,/,
-    'the encounter-type write must be admin-only'
-  );
-  // The facility write keeps the same gate it always had.
-  assert.match(
-    server,
+test('F build-enforced: the USUAL LOCATION is an admin write on enrollment; what a visit IS is chosen on the note', () => {
+  const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+  // The patient's usual location is a billing default, so it keeps the admin
+  // gate the facility assignment has.
+  assert.match(server,
+    /app\.put\('\/api\/clinical\/patients\/:clientId\/usual-location',\s*authenticateToken,\s*requireAdmin,/,
+    'the usual-location write must be admin-only');
+  assert.match(server,
     /app\.put\('\/api\/clinical\/patients\/:clientId\/facility',\s*authenticateToken,\s*requireAdmin,/,
-    'the facility assignment must stay admin-only'
-  );
-  // The combined read is a READ, so a case manager can see what a patient's
-  // visits will bill as without being able to change it.
-  assert.match(
-    server,
+    'the facility assignment must stay admin-only');
+  assert.match(server,
     /app\.get\('\/api\/clinical\/patients\/:clientId\/place-of-service',\s*authenticateToken,\s*requireClinicalRead,/,
-    'the place-of-service read must be on the clinical READ gate'
-  );
+    'the read stays on the clinical READ gate');
+  // The OLD route is gone, not left beside the new one.
+  assert.ok(!server.includes('/encounter-type'), 'the superseded encounter-type route must be removed, not left running');
 
-  const chart = fs.readFileSync(path.join(__dirname, '..', 'public', 'clinical.html'), 'utf8');
-  // The clinician's chart must not carry a door onto either write. A button
-  // that is going to answer 403 is worse than no button.
-  assert.ok(!/\/encounter-type`/.test(chart), 'the clinical chart must not write the encounter type');
-  assert.ok(!/\/facility`,\s*\{\s*method:\s*'PUT'/.test(chart), 'the clinical chart must not write the facility assignment');
-  assert.ok(/placeOfService:\s*\(id\)/.test(chart), 'the chart reads the shared place-of-service route');
-  // And it names where the fix lives, rather than showing a dead field.
-  assert.match(chart, /An admin sets both of these on the enrollment record/);
+  const chart = fs.readFileSync(path.join(root, 'public', 'clinical.html'), 'utf8');
+  // ⚠️ THE OWNER'S CORRECTION: what kind of visit this is belongs on the
+  // CLINICIAN'S note, chosen before they start writing, because it decides
+  // which note they are about to write.
+  assert.match(chart, /What kind of visit is this\?/, 'the note must ask what kind of visit it is');
+  assert.match(chart, /setVisit\(v => \(\{ \.\.\.v, appointmentType: e\.target\.value \}\)\)/);
+  assert.match(chart, /setVisit\(v => \(\{ \.\.\.v, modality: e\.target\.value \}\)\)/);
+  assert.match(chart, /setVisit\(v => \(\{ \.\.\.v, location: e\.target\.value \}\)\)/);
+  // And the chart carries no write for either admin field.
+  assert.ok(!/\/usual-location`/.test(chart), 'the chart must not write the usual location');
 
-  const enroll = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-enrollment.html'), 'utf8');
-  assert.ok(/setEncounterType:\s*\(id,\s*encounterType\)/.test(enroll), 'the enrollment screen owns the encounter-type write');
-  assert.ok(/assignFacility:\s*\(id,\s*facilityId\)/.test(enroll), 'the enrollment screen owns the facility write');
-  // The page names no encounter type of its own — the list is served, so a
-  // type retired in the module cannot linger in a dropdown.
-  for (const t of R.ENCOUNTER_TYPES) {
-    assert.ok(!enroll.includes(`'${t.key}'`) && !enroll.includes(`"${t.key}"`),
-      `admin-enrollment.html must not restate the encounter type ${t.key}; the list is served`);
+  const enroll = fs.readFileSync(path.join(root, 'public', 'admin-enrollment.html'), 'utf8');
+  assert.ok(/setUsualLocation:\s*\(id,\s*usualLocation\)/.test(enroll), 'enrollment owns the usual-location write');
+  // Enrollment must NOT offer an appointment type — that is the clinician's.
+  for (const t of apptTypes.APPOINTMENT_TYPES) {
+    assert.ok(!enroll.includes(t.key), `the enrollment screen must not name the appointment type ${t.key}`);
   }
-  assert.ok(/data\.encounterTypes\.map/.test(enroll), 'the dropdown renders the served list');
+  // The location OPTIONS must come from the server. Asserted on the option
+  // markup rather than by banning the word — "facility" is also a legitimate
+  // busy-key on that page, and a guard that cannot tell those apart would
+  // fail on code that is correct.
+  assert.match(enroll, /data\.locations\.map/, 'the location dropdown renders the served list');
+  // And it SAYS where the visit type is chosen instead. A screen that simply
+  // omits something sends people hunting for a control that is not there —
+  // the rule the chart's place-of-service card already follows.
+  assert.match(enroll, /chosen at booking and on the note/,
+    'the enrollment screen must name where the kind of visit is decided');
+  for (const l of apptTypes.LOCATIONS) {
+    assert.ok(!new RegExp(`<option[^>]*value=["']${l.key}["']`).test(enroll),
+      `enrollment must not hardcode the location option ${l.key}; the list is served`);
+  }
 });
 
-test('F1 build-enforced: creating a visit stamps the RESOLVED type, and signing checks it against the POS OpenEMR holds', () => {
-  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  // One resolver answers WHERE and WHAT together. Two places answering the
-  // same question is how a telehealth visit gets stamped at a home POS.
-  assert.match(server, /resolveEncounterType\(\{\s*\n?\s*patientDefault: client\.encounterType/,
-    'resolveFacilityForVisit must resolve the encounter type from the patient default');
+test('F build-enforced: creating a visit stamps the descriptor, and signing checks it against the POS OpenEMR holds', () => {
+  const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+  // One resolver answers what the visit is and where it bills, together.
+  assert.match(server, /apptTypes\.resolveVisit\(\{/,
+    'resolveFacilityForVisit must resolve the visit descriptor');
+  // The BOOKING is authoritative and the patient's usual location is only a
+  // default — resolving the other way would bill the visit at the place the
+  // patient usually is rather than the place they were.
+  assert.match(server, /patientDefaultLocation: client\.usualLocation \|\| null/);
   // Both visit-creation paths stamp it.
-  const stamps = server.match(/encounterType: place\.encounterType/g) || [];
-  assert.equal(stamps.length, 2, 'both the H&P and the follow-up creation paths must stamp the resolved type');
-  // The signature compares the STAMP against the POS read off OpenEMR. Reading
-  // the type back off the same encounter row would make it agree with itself.
-  assert.match(server, /encounterType: ctx\.record\.encounterType/,
-    'the sign gate must read the type off the stored stamp');
-  assert.ok(!/encounterType:\s*clinicalRepo\.resolveEncounterType\([^)]*encRow/.test(server),
-    'the sign gate must not re-derive the type from the encounter row it is checking');
+  const stamps = server.match(/visit: place\.visit/g) || [];
+  assert.equal(stamps.length, 2, 'both the H&P and the follow-up creation paths must stamp the descriptor');
+  // The signature compares the STAMP against the POS read off OpenEMR.
+  assert.match(server, /visit: ctx\.record\.visit/, 'the sign gate must read the descriptor off the stored stamp');
+  assert.ok(!/visit:\s*apptTypes\.resolveVisit\([^)]*encRow/.test(server),
+    'the sign gate must not re-derive the visit from the encounter row it is checking');
 });
+
 
 // ── Session 4.12 Scope F3 / F5 — the encounter on a phone ──
 const chartPage = fs.readFileSync(path.join(__dirname, '..', 'public', 'clinical.html'), 'utf8');
@@ -1561,26 +1559,23 @@ test('F5: the drawer is at module scope, so opening it does not remount what is 
 
 // ── Session 4.12 Scope G — psychiatry on the same ambulatory encounter ──
 
-test('G: the MSE is an exam VARIANT, offered on a psychiatric visit and nowhere else', () => {
-  // The same encounter, the same note, the same steps, the same signature —
-  // a different exam. A separate note type would be a second thing to keep
-  // in step with the record.
-  assert.ok(R.HP_SECTION_LABELS ? true : true);
-  const home = R.hpSectionsFor('home_primary_care');
-  const psych = R.hpSectionsFor('psychiatric_home');
-  assert.ok(!home.includes('mentalStatusExam'), 'an empty MSE on every note trains people to scroll past it');
-  assert.ok(psych.includes('mentalStatusExam'));
-  // Offered ALONGSIDE the systems exam, not instead of it: a psychiatric home
-  // visit still takes vitals and still looks at the home.
-  for (const k of ['systemsExam', 'skinWound', 'painAssessment', 'homeHazards', 'triage']) {
-    assert.ok(psych.includes(k), `${k} must still be offered on a psychiatric visit`);
+test('G: the MSE follows the VISIT, not the patient', () => {
+  // REPOINTED. This used to ask `hpSectionsFor`, which was dead code nothing
+  // called, keyed on the PATIENT's stored type. The catalog answers it per
+  // visit now — and that matters: somebody who normally has a primary-care
+  // visit can have a psych evaluation, and the note has to follow the visit.
+  const sectionsOf = (type) => apptTypes.sectionsFor(type, { modality: 'in_person' }).map(s => s.key);
+  assert.ok(!sectionsOf('pc_follow_up').includes('mentalStatusExam'),
+    'an empty MSE on every note trains people to scroll past it');
+  for (const psych of ['bh_initial', 'bh_follow_up']) {
+    assert.ok(sectionsOf(psych).includes('mentalStatusExam'), `${psych} must carry the MSE`);
+    assert.ok(apptTypes.requiredSectionKeys(psych, { modality: 'in_person' }).includes('mentalStatusExam'),
+      `${psych} must REQUIRE the MSE, not merely offer it`);
   }
-  assert.deepEqual(home, psych.filter(k => k !== 'mentalStatusExam'),
-    'the psychiatric visit is the ordinary one plus the MSE, not a different list');
-  // Unset or unknown type is not psychiatric — the MSE is never guessed on.
-  assert.ok(!R.hpSectionsFor(null).includes('mentalStatusExam'));
-  assert.ok(!R.hpSectionsFor('not_a_type').includes('mentalStatusExam'));
-  assert.ok(R.hpSectionsFor('psychiatric_telehealth').includes('mentalStatusExam'));
+  // Never guessed on an unresolved visit.
+  assert.deepEqual(sectionsOf(null), []);
+  assert.deepEqual(sectionsOf('not_a_type'), []);
+  assert.ok(!R.requiredSectionsForVisit({ appointmentType: 'pc_acute', modality: 'in_person' }).includes('mentalStatusExam'));
 });
 
 test('G: a psychiatric encounter cannot be SIGNED without a risk assessment, and documenting is never blocked', () => {
@@ -1592,20 +1587,25 @@ test('G: a psychiatric encounter cannot be SIGNED without a risk assessment, and
   ).record;
   const base = { hasNote: true, record: coded, billingNpi: '1234567893', posCode: '12' };
 
-  const psychNoRisk = R.checkSignReadiness({ ...base, encounterType: 'psychiatric_home' });
+  const psychVisit = { appointmentType: 'bh_initial', modality: 'in_person', location: 'home' };
+  const allSections = R.requiredSectionsForVisit(psychVisit);
+  const psychNoRisk = R.checkSignReadiness({ ...base, visit: psychVisit, completedSections: allSections });
   assert.equal(psychNoRisk.ok, false);
   assert.ok(psychNoRisk.codes.includes('SIGN_NO_RISK_ASSESSMENT'));
   assert.match(psychNoRisk.message, /psychiatric visit/i);
 
-  const psychWithRisk = R.checkSignReadiness({ ...base, encounterType: 'psychiatric_home', riskAssessment: { id: 'r1' } });
+  const psychWithRisk = R.checkSignReadiness({ ...base, visit: psychVisit,
+    riskAssessment: { id: 'r1', levels: { suicide: 'none', homicide: 'none', selfNeglect: 'none' } },
+    completedSections: allSections });
   assert.equal(psychWithRisk.ok, true);
 
-  // Required only where the type is psychiatric: on every encounter it would
-  // be noise, and noise is how a real refusal gets clicked past.
-  assert.equal(R.checkSignReadiness({ ...base, encounterType: 'home_primary_care' }).ok, true);
-  assert.equal(R.checkSignReadiness({ ...base, encounterType: null }).ok, true);
-  assert.equal(R.riskAssessmentRequired('psychiatric_telehealth'), true);
-  assert.equal(R.riskAssessmentRequired('telehealth'), false);
+  // Required only on a BEHAVIOURAL-HEALTH appointment type: on every encounter
+  // it would be noise, and noise is how a real refusal gets clicked past.
+  const pcVisit = { appointmentType: 'pc_follow_up', modality: 'in_person', location: 'home' };
+  assert.equal(R.checkSignReadiness({ ...base, visit: pcVisit, completedSections: R.requiredSectionsForVisit(pcVisit) }).ok, true);
+  assert.equal(R.riskAssessmentRequired({ appointmentType: 'bh_follow_up' }), true);
+  assert.equal(R.riskAssessmentRequired({ appointmentType: 'pc_follow_up' }), false);
+  assert.equal(R.riskAssessmentRequired({ appointmentType: null }), false);
   assert.equal(R.riskAssessmentRequired(null), false);
 });
 
@@ -1691,7 +1691,8 @@ test('G build-enforced: the gate is actually reached — every sign check hands 
   assert.ok(calls.length >= 2, 'expected the sign route and the readiness preview');
   for (const c of calls) {
     assert.match(c, /riskAssessment:/, `every sign-readiness call must pass the recorded assessment: ${c.slice(0, 90)}…`);
-    assert.match(c, /encounterType:/, 'and the encounter type it is judged against');
+    assert.match(c, /visit:/, 'and the visit descriptor it is judged against');
+    assert.match(c, /completedSections:/, 'and what the clinician has actually filled in');
   }
   // It has to be LOADED beside the encounter, or the field is always absent
   // and the gate always fires.
@@ -1731,9 +1732,184 @@ test('G build-enforced: the screen restates no risk vocabulary and no clinical r
   // Ranking "which risk is worse" also comes from the served order — a local
   // copy goes stale the day a level is added.
   assert.ok(!/RISK_ORDER/.test(page), 'no local ordering of risk levels may exist');
-  // The H&P asks the SERVER whether this patient is psychiatric rather than
-  // reading a label and deciding.
-  assert.match(page, /patient\.isPsychiatric && \(/);
-  assert.match(fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8'),
-    /isPsychiatric: clinicalRepo\.isPsychiatricEncounterType\(u\.encounterType\)/);
+  // REPOINTED. This used to assert the H&P read a PATIENT flag to decide
+  // whether to show the mental status exam — the wrong signal, as the owner
+  // pointed out: a patient who normally has a primary-care visit can have a
+  // psych evaluation. The note follows the VISIT's appointment type now, and
+  // which sections that type carries is the server's answer, not the page's.
+  assert.match(page, /noteHasSection\('mentalStatusExam'\) && \(/,
+    'the MSE must be shown when THIS VISIT carries it, not when the patient is flagged');
+  assert.ok(!page.includes('isPsychiatric'), 'the superseded patient flag must be gone, not left beside it');
+  // And the page derives the section list from what the server served.
+  assert.match(page, /catalog\.noteTemplates\[visit\.appointmentType\]/,
+    'the note template comes from the server, so the form cannot drift from the gate that refuses the signature');
+});
+
+// ── The clinician's recorded time overrides the schedule (owner, 2026-09-23) ──
+
+
+test('TIME: the recorded start and end override the schedule, and there is NO fallback to it', () => {
+  // ⚠️ THE OWNER RULE. The appointment type carries a default duration and the
+  // calendar carries a slot. Both are planning figures. Neither is evidence
+  // that anybody was in the room for that long, and a time-based E/M level is
+  // an assertion about how long the clinician actually spent.
+  const ranShort = myDay.visitTiming(
+    { startedAt: '2026-09-23T14:00:00Z', endedAt: '2026-09-23T14:35:00Z' }, { scheduledMinutes: 60 });
+  assert.equal(ranShort.actualMinutes, 35);
+  assert.equal(ranShort.scheduledMinutes, 60);
+  assert.equal(ranShort.billableMinutes, 35, 'the recorded time is what bills, never the slot');
+  assert.equal(ranShort.source, 'recorded');
+  assert.equal(ranShort.overridesSchedule, true);
+
+  const ranLong = myDay.visitTiming(
+    { startedAt: '2026-09-23T14:00:00Z', endedAt: '2026-09-23T15:18:00Z' }, { scheduledMinutes: 60 });
+  assert.equal(ranLong.billableMinutes, 78, 'a visit that overran bills the time it took');
+  assert.equal(ranLong.overridesSchedule, true);
+
+  // ⚠️ NO FALLBACK. Billing 60 minutes because the slot said 60, when nobody
+  // recorded a time at all, is a false claim — and a fallback would be
+  // indistinguishable from a real measurement to everything downstream.
+  const unrecorded = myDay.visitTiming({}, { scheduledMinutes: 60 });
+  assert.equal(unrecorded.actualMinutes, null);
+  assert.equal(unrecorded.billableMinutes, null, 'NOTHING billable comes from the schedule');
+  assert.notEqual(unrecorded.billableMinutes, 60);
+  assert.equal(unrecorded.source, myDay.SCHEDULED_ONLY, 'and it says which of the two states it is in');
+  assert.equal(unrecorded.statement, null, 'no time statement can be written from a slot');
+
+  // A visit still running has a start and no end, so there is no duration yet.
+  const running = myDay.visitTiming({ startedAt: '2026-09-23T14:00:00Z' }, { scheduledMinutes: 60 });
+  assert.equal(running.billableMinutes, null);
+  assert.equal(running.statement, null);
+
+  // Matching the slot exactly is not an override, it is agreement.
+  assert.equal(myDay.visitTiming(
+    { startedAt: '2026-09-23T14:00:00Z', endedAt: '2026-09-23T15:00:00Z' }, { scheduledMinutes: 60 }
+  ).overridesSchedule, false);
+  // No schedule at all is fine; the recorded time still stands alone.
+  assert.equal(myDay.visitTiming({ startedAt: '2026-09-23T14:00:00Z', endedAt: '2026-09-23T14:40:00Z' }).billableMinutes, 40);
+});
+
+test('TIME build-enforced: nothing in the time statement can read a scheduled figure', () => {
+  const src = fs.readFileSync(path.join(root, 'myDay.js'), 'utf8');
+  const from = src.indexOf('const timeStatement');
+  const to = src.indexOf('const SCHEDULED_ONLY');
+  assert.ok(from > 0 && to > from, 'both anchors must still be present and in order');
+  const fn = src.slice(from, to);
+  // The statement is what a time-based E/M level is read off. A scheduled
+  // figure reaching it would be a plausible number from the wrong source,
+  // which is the exact class of defect the charge writer had twice today.
+  assert.ok(!/scheduled/i.test(fn), 'the time statement must not read anything scheduled');
+  assert.ok(!/defaultMinutes/.test(fn), 'nor an appointment type’s default duration');
+  assert.match(fn, /totalVisitMinutes\(timing\)/, 'it reads the recorded interval and nothing else');
+  // And the one field anything billable may read is named so it cannot be
+  // confused with the plan sitting beside it.
+  const vt = src.slice(src.indexOf('const visitTiming'), src.indexOf('// ---- Drive time'));
+  assert.match(vt, /billableMinutes: actual,/, 'billableMinutes is the recorded figure, with no coalesce');
+  assert.ok(!/billableMinutes:[^,\n]*\|\|/.test(vt), 'no `||` fallback may be added to it');
+});
+
+test('the sign gate pushes the POS disagreement, not just the checker', () => {
+  // The checker having the right verdict is worth nothing if the gate does not
+  // act on it. Survived its first mutation run for exactly that reason.
+  const coded = R.applyCoding(
+    { clientId: 'c', encounterUuid: 'e', diagnoses: [], services: [] },
+    { diagnoses: [{ code: 'E11.9', description: 'T2DM', primary: true }],
+      services: [{ code: '99348', units: 1, dxLinks: ['E11.9'] }] },
+    { id: 'u', name: 'FNP', npi: '1234567893' }, '1234567893'
+  ).record;
+  const visit = { appointmentType: 'pc_follow_up', modality: 'telehealth', location: 'home' };
+  const wrong = R.checkSignReadiness({
+    hasNote: true, record: coded, billingNpi: '1234567893', posCode: '12', visit,
+    completedSections: R.requiredSectionsForVisit(visit)
+  });
+  assert.equal(wrong.ok, false, 'a telehealth visit billed at the home POS must not sign');
+  assert.ok(wrong.codes.includes(R.VISIT_POS_DISAGREES));
+  assert.ok(wrong.missing.includes('encounter_type_pos'));
+  assert.match(wrong.message, /\b10\b/);
+  assert.match(wrong.message, /\b12\b/);
+  // Right POS, same everything else: signs.
+  assert.equal(R.checkSignReadiness({
+    hasNote: true, record: coded, billingNpi: '1234567893', posCode: '10', visit,
+    completedSections: R.requiredSectionsForVisit(visit)
+  }).ok, true);
+});
+
+test('the sign gate demands a safety plan once the RECORDED risk is positive', () => {
+  const coded = R.applyCoding(
+    { clientId: 'c', encounterUuid: 'e', diagnoses: [], services: [] },
+    { diagnoses: [{ code: 'F32.9', description: 'MDD', primary: true }],
+      services: [{ code: '99348', units: 1, dxLinks: ['F32.9'] }] },
+    { id: 'u', name: 'FNP', npi: '1234567893' }, '1234567893'
+  ).record;
+  const visit = { appointmentType: 'bh_initial', modality: 'in_person', location: 'home' };
+  const baseline = R.requiredSectionsForVisit(visit, { riskPositive: false });
+  assert.ok(!baseline.includes('safetyPlan'), 'precondition: not required at negative risk');
+  const common = { hasNote: true, record: coded, billingNpi: '1234567893', posCode: '12', visit, completedSections: baseline };
+
+  const negative = R.checkSignReadiness({ ...common,
+    riskAssessment: { id: 'r', levels: { suicide: 'none', homicide: 'none', selfNeglect: 'none' } } });
+  assert.equal(negative.ok, true, 'a negative risk assessment needs no safety plan');
+
+  // The gate reads the RECORDED risk row, so the template tightens the moment
+  // the clinician documents risk — not when the visit started.
+  const positive = R.checkSignReadiness({ ...common,
+    riskAssessment: { id: 'r', levels: { suicide: 'high', homicide: 'none', selfNeglect: 'none' } } });
+  assert.equal(positive.ok, false);
+  assert.deepEqual(positive.openSections, ['safetyPlan']);
+  assert.match(positive.message, /Safety Plan/);
+  // Any domain, not just suicide.
+  assert.deepEqual(R.checkSignReadiness({ ...common,
+    riskAssessment: { id: 'r', levels: { suicide: 'none', homicide: 'none', selfNeglect: 'moderate' } } }).openSections, ['safetyPlan']);
+  // Filed: signs.
+  assert.equal(R.checkSignReadiness({ ...common, completedSections: [...baseline, 'safetyPlan'],
+    riskAssessment: { id: 'r', levels: { suicide: 'high', homicide: 'none', selfNeglect: 'none' } } }).ok, true);
+});
+
+test('the booking is authoritative over the patient’s usual location', () => {
+  // The patient's enrollment record carries a DEFAULT. Resolving the other way
+  // round would bill the visit at the place the patient usually is rather than
+  // the place they were — a home patient seen in clinic once is normal.
+  const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+  const from = server.indexOf('const visit = apptTypes.resolveVisit({');
+  assert.ok(from > 0, 'the resolver call must still be there');
+  const call = server.slice(from, server.indexOf('});', from));
+  assert.match(call, /bookedLocation: descriptor && descriptor\.location/,
+    'the booked location must come from the booking, not from the patient record');
+  assert.match(call, /patientDefaultLocation: client\.usualLocation \|\| null/,
+    'and the patient record supplies only the default');
+  // The two must read DIFFERENT sources, or the override cannot happen.
+  const booked = call.match(/bookedLocation:([^\n]*)/)[1];
+  const fallback = call.match(/patientDefaultLocation:([^\n]*)/)[1];
+  assert.notEqual(booked.trim(), fallback.trim(), 'a booking that reads the patient default is not an override');
+  assert.ok(!/bookedLocation:[^\n]*usualLocation/.test(call), 'the booking must not read the patient default');
+});
+
+test('the note templates are SERVED, so the form cannot drift from the gate', () => {
+  const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+  // The template that shapes the form has to be the same one the signature is
+  // refused against, or a clinician fills in a note the server then calls
+  // incomplete.
+  assert.match(server, /const noteTemplates = \{\};/);
+  assert.match(server, /apptTypes\.sectionsFor\(t\.key, \{ modality: m\.key \}\)/);
+  // Scoped to THIS route. `/api/clinical/facilities` also has a degraded
+  // branch and legitimately serves no note templates — a guard that cannot
+  // tell two routes apart fails on code that is correct.
+  const from = server.indexOf("app.get('/api/clinical/patients/:clientId/place-of-service'");
+  const to = server.indexOf("app.get('/api/clinical/facilities'", from);
+  assert.ok(from > 0 && to > from, 'both anchors must still be present and in order');
+  const route = server.slice(from, to);
+  // Counted by the `res.json({` openers, because a non-greedy match to the
+  // first `});` stops inside a nested call and reads as a truncated response.
+  const openers = (route.match(/res\.json\(\{/g) || []).length;
+  assert.equal(openers, 3, 'expected the unconfigured, the unreadable and the normal response');
+  const served = (route.match(/noteTemplates/g) || []).length;
+  // Declared once, then in each of the three responses.
+  assert.ok(served >= 4,
+    `the templates must reach every response from this route — a page with no EMR still needs its picker (found ${served})`);
+  // The success response carries the whole catalog, not only the templates.
+  const success = route.slice(route.lastIndexOf('res.json({'));
+  for (const k of ['locations', 'appointmentTypes', 'services', 'modalities', 'noteTemplates']) {
+    assert.ok(success.includes(k) || route.includes(`canEdit, locations, appointmentTypes, services, modalities, noteTemplates`),
+      `the catalog must include ${k}`);
+  }
 });

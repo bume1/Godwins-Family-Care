@@ -411,10 +411,49 @@ const awvEligibility = ({ lastAwvDate, today } = {}) => {
     message: `Last annual wellness visit on file: ${last}, ${days} days ago. From the date on file, not from Medicare.` };
 };
 
+// ---- What this visit IS, resolved -----------------------------------------
+// Three fields travel together and are stamped on the encounter at creation:
+//
+//     { appointmentType, modality, location }
+//
+// The BOOKING is authoritative. The patient's enrollment record carries their
+// usual location, which is a default and nothing more: a home patient seen in
+// clinic once is normal, and the booking is where that was known. Resolving
+// the other way round would bill the visit at the place the patient usually
+// is rather than the place they were.
+const resolveVisit = ({ appointmentType, bookedModality, bookedLocation, patientDefaultLocation } = {}) => {
+  const type = typeByKey(appointmentType);
+  const modality = modalityByKey(bookedModality);
+  const booked = locationByKey(bookedLocation);
+  const fallback = locationByKey(patientDefaultLocation);
+  const location = booked || fallback || null;
+  const problems = [];
+  if (!type) problems.push({ field: 'appointmentType', code: 'APPOINTMENT_TYPE_REQUIRED', error: 'This visit has no appointment type, so nothing can say what note it produces or what it bills as.' });
+  if (!modality) problems.push({ field: 'modality', code: 'MODALITY_REQUIRED', error: 'This visit has no modality. In person and telehealth bill different code families, so it cannot be guessed.' });
+  if (!location) problems.push({ field: 'location', code: 'LOCATION_REQUIRED', error: 'This visit has no location, and none is recorded on the patient either. Location sets the place of service, so it is required before the visit can be saved.' });
+  if (type && modality && type.telehealthAllowed === false && modality.key === 'telehealth') {
+    problems.push({ field: 'modality', code: 'TELEHEALTH_NOT_ALLOWED', error: `${type.label} cannot be done by video.` });
+  }
+  return {
+    appointmentType: type ? type.key : null,
+    modality: modality ? modality.key : null,
+    location: location ? location.key : null,
+    locationSource: booked ? 'booking' : (fallback ? 'patient_default' : 'unset'),
+    label: type && modality && location ? `${type.label} · ${modality.label} · ${location.label}` : null,
+    problems, ok: problems.length === 0
+  };
+};
+
+const isBehavioralHealth = (appointmentType) => {
+  const t = typeByKey(appointmentType);
+  return !!(t && t.service === 'behavioral_health');
+};
+
 module.exports = {
   SECTIONS, REQUIRED, APPOINTMENT_TYPES,
   typeByKey, typesForService, sectionsFor, requiredSectionKeys,
   canBookType, canBeTelehealth, awvEligibility, AWV_INTERVAL_DAYS,
+  resolveVisit, isBehavioralHealth,
 
   SERVICES, MODALITIES, LOCATIONS, CODE_FAMILIES,
   TELEHEALTH_POS_PATIENT_HOME, TELEHEALTH_POS_ELSEWHERE,
