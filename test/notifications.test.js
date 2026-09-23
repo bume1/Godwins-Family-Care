@@ -318,13 +318,25 @@ test('the notifier does NOT restate the staff role list — it is passed in', ()
 test('each of these notices is wired to exactly one route', () => {
   const src = read('server.js');
   const wired = [
-    'documentUploaded', 'documentReviewed', 'consentSigned', 'carePlanCoSigned',
+    'documentReviewed', 'consentSigned', 'carePlanCoSigned',
     'appointmentBooked', 'appointmentRescheduled', 'appointmentCancelled'
   ];
   for (const fn of wired) {
     const n = (src.match(new RegExp(`notify\\.${fn}\\(`, 'g')) || []).length;
     assert.strictEqual(n, 1, `notify.${fn} should be called exactly once, found ${n}`);
   }
+});
+
+// documentUploaded is the same exception documentsRequested already is: "a
+// document arrived" is one event with two doors onto it now (2026-09-23) —
+// an authenticated client posting to their own upload route, and an
+// anonymous bearer of the no-login link posting to theirs. Both call the
+// SAME notifier with the same shape of arguments rather than each growing
+// their own copy of "who gets told a document arrived".
+test('documentUploaded is wired to exactly two routes — the authenticated upload and the no-login link', () => {
+  const src = read('server.js');
+  const n = (src.match(/notify\.documentUploaded\(/g) || []).length;
+  assert.strictEqual(n, 2, `notify.documentUploaded should be called exactly twice, found ${n}`);
 });
 
 test('a no-show never emails the patient', () => {

@@ -404,6 +404,21 @@
           body: JSON.stringify(payload)
         }).then(handleResponse).catch(asError),
 
+      // The branded, no-login upload link (2026-09-23) — get-or-create by
+      // default; `{ regenerate: true }` turns off the old one and mints a new.
+      getOrCreateUploadLink: (token, regenerate) =>
+        fetch(`${API_URL}/api/gfc/documents/upload-link`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ regenerate: !!regenerate })
+        }).then(handleResponse).catch(asError),
+
+      revokeUploadLink: (token) =>
+        fetch(`${API_URL}/api/gfc/documents/upload-link/revoke`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(asError),
+
       // ---- GFC enrollment intake (Stage 2) ----
       getGfcIntake: (token) =>
         fetch(`${API_URL}/api/gfc/intake`, {
@@ -5613,6 +5628,78 @@
       );
     };
 
+    // A branded link a family member can open WITHOUT signing in and send a
+    // document straight into this client's file (owner-directed, 2026-09-23).
+    // Read-only for family — this is the client's own door to open or turn
+    // off, the same rule availability and the upload-link revoke already
+    // follow elsewhere in the app.
+    const GfcShareUploadLink = ({ link, token, onChanged, readOnly }) => {
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      const [copied, setCopied] = useState(false);
+
+      if (readOnly) return null;
+
+      const create = async (regenerate) => {
+        setBusy(true); setErr('');
+        try {
+          const res = await api.getOrCreateUploadLink(token, regenerate);
+          if (res.error) setErr(res.error); else await onChanged();
+        } catch (e) { setErr('Could not set that up. Please try again.'); }
+        finally { setBusy(false); }
+      };
+
+      const turnOff = async () => {
+        setBusy(true); setErr('');
+        try {
+          const res = await api.revokeUploadLink(token);
+          if (res.error) setErr(res.error); else await onChanged();
+        } catch (e) { setErr('Could not turn that off. Please try again.'); }
+        finally { setBusy(false); }
+      };
+
+      const copy = () => {
+        if (!link) return;
+        navigator.clipboard.writeText(link.url).then(() => {
+          setCopied(true); setTimeout(() => setCopied(false), 2000);
+        });
+      };
+
+      return (
+        <React.Fragment>
+          <p className="lbl">Have someone else send a document</p>
+          {!link && (
+            <div className="doc" style={{ alignItems: 'flex-start' }}>
+              <i className="ti ti-link" style={{ marginTop: 2 }} />
+              <div style={{ flex: 1 }}>
+                <b>Get a link to share</b>
+                <span>Text or email it to whoever is holding the paperwork — a family member, for example. They can send a document straight into your file with no account or password.</span>
+                {err && <span style={{ color: 'var(--goldd)' }}>{err}</span>}
+                <button className="btn ghost" style={{ marginTop: 8, maxWidth: 220 }} disabled={busy} onClick={() => create(false)}>
+                  {busy ? 'Setting up…' : 'Get a link'}
+                </button>
+              </div>
+            </div>
+          )}
+          {link && (
+            <div className="doc" style={{ alignItems: 'flex-start' }}>
+              <i className="ti ti-link" style={{ marginTop: 2 }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <b>Your upload link is on</b>
+                <span style={{ wordBreak: 'break-all' }}>{link.url}</span>
+                {err && <span style={{ color: 'var(--goldd)' }}>{err}</span>}
+                <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+                  <button className="btn ghost" style={{ maxWidth: 160 }} disabled={busy} onClick={copy}>{copied ? 'Copied!' : 'Copy link'}</button>
+                  <button className="btn ghost" style={{ maxWidth: 160 }} disabled={busy} onClick={() => create(true)}>Get a new link</button>
+                  <button className="btn ghost" style={{ maxWidth: 140, color: 'var(--goldd)' }} disabled={busy} onClick={turnOff}>Turn off</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </React.Fragment>
+      );
+    };
+
     const GfcDocuments = ({ docs, readOnly, token, onOpenTransferRoi, onRefresh, clinicalDocs }) => {
       const signed = docs?.signedConsents || [];
       const files = docs?.documents || [];
@@ -5681,6 +5768,9 @@
               ))}
             </React.Fragment>
           )}
+
+          <GfcShareUploadLink link={docs?.uploadLink || null} token={token} readOnly={readOnly}
+            onChanged={onRefresh || (() => {})} />
 
           {!readOnly && onOpenTransferRoi && (
             <React.Fragment>
