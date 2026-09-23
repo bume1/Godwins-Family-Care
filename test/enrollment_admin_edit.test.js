@@ -656,6 +656,29 @@ test('the wizard and the staff editor read ONE option catalog', () => {
   });
 });
 
+
+// The extraction review handler's body. It is a named function rather than an
+// inline route callback so both surfaces can register the same one; slicing it
+// by name is what lets these guards follow it.
+const reviewHandler = () => {
+  const i = SERVER.indexOf('const extractionReviewHandler = async (req, res) => {');
+  assert.notStrictEqual(i, -1, 'the extraction review handler is gone');
+  const end = SERVER.indexOf('\n};\n', i);
+  assert.ok(end > i, 'the review handler does not close where expected');
+  return SERVER.slice(i, end);
+};
+
+// And it must stay registered on BOTH surfaces — the point of naming it.
+test('the extraction review is registered on both surfaces, from one handler', () => {
+  ['/api/gfc/admin/enrollment/:clientId/extraction/:id/review',
+    '/api/clinical/patients/:clientId/extraction/:id/review'].forEach(route => {
+    const i = SERVER.indexOf(`app.post('${route}'`);
+    assert.notStrictEqual(i, -1, `not registered: ${route}`);
+    assert.match(SERVER.slice(i, SERVER.indexOf('\n', i)), /extractionReviewHandler\)/,
+      `${route} must use the shared handler`);
+  });
+});
+
 test('every writer of a submission goes through the ONE commit helper', () => {
   // The rule the four guards above were protecting did not go away when the
   // code moved — it got a second caller. Two copies of "what an edit has to
@@ -663,9 +686,11 @@ test('every writer of a submission goes through the ONE commit helper', () => {
   // Transfer-of-Care form still offering the provider that was just corrected.
   assert.match(detailsRoute(), /commitEnrollmentSubmission\(\{/,
     'the details route must delegate, not restate');
-  const reviewStart = SERVER.indexOf("app.post('/api/gfc/admin/enrollment/:clientId/extraction/:id/review'");
-  assert.notStrictEqual(reviewStart, -1, 'the extraction review route is gone');
-  const review = SERVER.slice(reviewStart, SERVER.indexOf('\n});', reviewStart));
+  // REPOINTED for the chart surface (2026-09-23), not relaxed. The review is a
+  // named handler now so the clinical chart can register the SAME one rather
+  // than grow a second copy of what an extraction is — which is the very rule
+  // this test exists to protect, so it follows the code.
+  const review = reviewHandler();
   assert.match(review, /commitEnrollmentSubmission\(\{/,
     'an accepted extraction is a submission edit and takes the same path');
   // And neither may have re-grown the steps.
@@ -682,8 +707,7 @@ test('an accepted extraction is held to the same allow-list a typed correction i
   // The review route builds flat dotted keys and hands them to the SAME
   // applyEnrollmentEdits the staff editor uses, so a path the intake fields do
   // not declare cannot reach a client record through the scanner either.
-  const reviewStart = SERVER.indexOf("app.post('/api/gfc/admin/enrollment/:clientId/extraction/:id/review'");
-  const review = SERVER.slice(reviewStart, SERVER.indexOf('\n});', reviewStart));
+  const review = reviewHandler();
   assert.match(review, /applyEnrollmentEdits\(next, body, rejectedValues\)/);
   assert.match(review, /validateClientCoreFields\(next\)/);
   assert.ok(!/writeIntakePath\(/.test(review),

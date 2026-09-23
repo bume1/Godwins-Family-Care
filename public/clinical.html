@@ -143,6 +143,34 @@
       getDraft: (id) => authedFetch(`/api/clinical/patients/${id}/visit/draft`),
       saveDraft: (id, draft) => authedFetch(`/api/clinical/patients/${id}/visit/draft`, { method: 'PUT', body: JSON.stringify({ draft }) }),
       discardDraft: (id) => authedFetch(`/api/clinical/patients/${id}/visit/draft`, { method: 'DELETE' }),
+      // Home-visit standing facts (4.12 F4). On the PATIENT, never an encounter.
+      saveHomeVisit: (id, homeVisit) => authedFetch(`/api/clinical/patients/${id}/home-visit`, {
+        method: 'PUT', body: JSON.stringify({ homeVisit })
+      }),
+      // Session 4.12 — the day, the visit stamps, and the packet read in the car.
+      myDay: (date) => authedFetch(`/api/clinical/my-day?date=${encodeURIComponent(date)}`),
+      stampVisit: (eid, body) => authedFetch(`/api/clinical/visits/${eid}/timing`, {
+        method: 'POST', body: JSON.stringify(body)
+      }),
+      nearby: (clientId, radiusMiles) => authedFetch(`/api/clinical/nearby?clientId=${encodeURIComponent(clientId)}&radiusMiles=${radiusMiles}`),
+      workQueues: () => authedFetch('/api/clinical/work-queues'),
+      analytics: () => authedFetch('/api/clinical/analytics'),
+      // Reading a filed document into proposals, from the chart. The SAME three
+      // routes the enrollment screen uses, gated on requireClinicalWrite.
+      extractionStatus: (id) => authedFetch(`/api/clinical/patients/${id}/extraction`),
+      extractDocument: (id, docId) => authedFetch(`/api/clinical/patients/${id}/documents/${encodeURIComponent(docId)}/extract`, { method: 'POST' }),
+      reviewExtraction: (id, exId, decisions) => authedFetch(`/api/clinical/patients/${id}/extraction/${encodeURIComponent(exId)}/review`, {
+        method: 'POST', body: JSON.stringify({ decisions })
+      }),
+      patientOrders: (id) => authedFetch(`/api/clinical/patients/${id}/orders`),
+      patientResults: (id) => authedFetch(`/api/clinical/patients/${id}/results`),
+      timeline: (id, kinds) => authedFetch(`/api/clinical/patients/${id}/timeline${kinds && kinds.length ? `?kinds=${encodeURIComponent(kinds.join(','))}` : ''}`),
+      preVisit: (id, eid) => authedFetch(`/api/clinical/patients/${id}/pre-visit${eid ? `?eid=${encodeURIComponent(eid)}` : ''}`),
+      // PROPOSES an order. It never applies one — accepting rebooks through the
+      // existing appointment routes so the patient is told.
+      optimizeDay: (visits) => authedFetch('/api/clinical/my-day/optimize', {
+        method: 'POST', body: JSON.stringify({ visits })
+      }),
       // Scanning a document into the patient's file from the chart. The route
       // is the enrollment one on purpose — ONE store for a client's documents,
       // so what a clinician scans in is what the office and the client see.
@@ -215,7 +243,7 @@
     // chain is what collided when 4.9 and 4.10 both added a view, and a fifth
     // would collide again.
     const VIEW_TITLES = {
-      charts: 'Patient Chart', schedule: 'Schedule', queue: 'Coding Queue',
+      myday: 'My Day', queues: 'Work Queues', analytics: 'Analytics', charts: 'Patient Chart', schedule: 'Schedule', queue: 'Coding Queue',
       inbox: 'Inbox', results: 'Results Inbox', overdue: 'Overdue Orders'
     };
 
@@ -415,9 +443,162 @@
       );
     };
 
+    // ── Reading a document into proposals, from the CHART (2026-09-23) ─────
+    // The same three routes the enrollment screen uses, registered a second
+    // time under requireClinicalWrite. A clinician filing a referral or a face
+    // sheet at a visit reads it where they are, instead of going to the
+    // enrollment screen for it — and what comes back goes through exactly the
+    // review a staff-triggered read goes through.
+    //
+    // NOTHING ABOUT WHAT AN EXTRACTION IS LIVES HERE. The allow-list, the
+    // identity-conflict guard, the stale-field refusal and the staff-verified
+    // provenance are all server-side and shared; this renders the answer.
+    const ChartExtractionRow = ({ row, decision, onDecide }) => {
+      const [edited, setEdited] = useState(row.value);
+      useEffect(() => { setEdited(row.value); }, [row.value]);
+      const isEdit = decision && decision.decision === 'edit';
+      return (
+        <div className="border-b border-stone-100 py-2 last:border-0">
+          <div className="flex items-start justify-between gap-2 flex-wrap">
+            <div className="min-w-0">
+              <div className="lblu">{row.label}</div>
+              <div className="text-[13px] text-stone-800 break-words">
+                {isEdit
+                  ? <input className="inp !py-1 text-[13px]" value={edited}
+                    onChange={e => { setEdited(e.target.value); onDecide(row.path, { decision: 'edit', value: e.target.value }); }} />
+                  : row.value}
+              </div>
+              <div className="text-[11px] text-stone-500">
+                {[row.current ? `on file: ${row.current}` : 'nothing on file',
+                  row.confidence != null ? `${Math.round(row.confidence * 100)}% confident` : null
+                ].filter(Boolean).join(' · ')}
+              </div>
+            </div>
+            <div className="flex gap-1.5 shrink-0">
+              {[['accept', 'Keep'], ['edit', 'Edit'], ['discard', 'Discard']].map(([d, label]) => (
+                <button key={d}
+                  className={`chip border ${decision && decision.decision === d ? 'bg-primary text-white border-primary' : 'bg-white text-stone-600 border-stone-200'}`}
+                  onClick={() => onDecide(row.path, d === 'edit' ? { decision: 'edit', value: edited } : { decision: d })}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const ChartExtractionReview = ({ clientId, extraction, onDone, onCancel }) => {
+      const [decisions, setDecisions] = useState({});
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      const decide = (path, d) => setDecisions(prev => ({ ...prev, [path]: d }));
+      const rows = (extraction.rows || []).filter(r => !r.verifyOnly);
+      // A review with anything undecided is NOT complete — an enrollment must
+      // not finish on a half-read scan. The server enforces it; saying so here
+      // stops somebody hitting a refusal they could have seen coming.
+      const undecided = rows.filter(r => !decisions[r.path]).length;
+      const save = () => {
+        setBusy(true); setErr('');
+        api.reviewExtraction(clientId, extraction.id, decisions)
+          .then(() => onDone())
+          .catch(e => setErr(e.message))
+          .finally(() => setBusy(false));
+      };
+      return (
+        <div className="border border-accent rounded-lg p-3 bg-cream mt-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="font-semibold text-[13px] text-primary">Read from {extraction.fileName || 'the document'}</div>
+            <button className="text-[11.5px] text-stone-500 underline" onClick={onCancel}>Close</button>
+          </div>
+          <p className="text-[11.5px] text-stone-600 mt-1">
+            Nothing here has been saved. Check each value — what you keep is recorded as checked by you.
+          </p>
+          {extraction.source === 'ocr' && (
+            <div className="text-[11.5px] text-amber-900 bg-amber-50 border border-amber-200 rounded p-2 mt-2">
+              <b>Read from a picture.</b> This document had no text in it, so the words were recognised from the
+              image{extraction.ocrConfidence ? ` (about ${Math.round(extraction.ocrConfidence)}% legible)` : ''}.
+              Check every character before you keep it.
+            </div>
+          )}
+          {extraction.reader === 'template' && extraction.source !== 'ocr' && (
+            <p className="text-[11.5px] text-stone-500 mt-1">Read from the document's own text by matching its printed labels.</p>
+          )}
+          {extraction.readNotice && (
+            <div className="text-[11.5px] text-amber-900 bg-amber-50 border border-amber-200 rounded p-2 mt-2">
+              <b>Not all of this document was read.</b> {extraction.readNotice}
+            </div>
+          )}
+          {(extraction.identityConflicts || []).length > 0 && (
+            <div className="text-[12px] text-red-800 bg-red-50 border border-red-200 rounded p-2 mt-2">
+              <b>This document may not be about this patient.</b>
+              {extraction.identityConflicts.map((c, i) => (
+                <div key={i}>{c.label}: document says <b>{c.value}</b>, record says <b>{c.current || '—'}</b></div>
+              ))}
+            </div>
+          )}
+          <div className="mt-2">
+            {rows.map(r => (
+              <ChartExtractionRow key={r.path} row={r} decision={decisions[r.path]} onDecide={decide} />
+            ))}
+            {!rows.length && <p className="text-[12px] text-stone-500">Nothing in this document matched a field we record.</p>}
+          </div>
+          {err && <p className="text-[11.5px] text-red-600 mt-1">{err}</p>}
+          {rows.length > 0 && (
+            <div className="flex items-center gap-2 mt-2">
+              <button className="btn gold !py-1 !px-3 text-xs" disabled={busy || undecided > 0} onClick={save}>
+                {busy ? 'Saving…' : 'Save what I kept'}
+              </button>
+              {undecided > 0 && <span className="text-[11.5px] text-stone-500">{undecided} still to decide</span>}
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    const ChartReadButton = ({ clientId, doc, status, onRead }) => {
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      const access = useContext(AccessContext);
+      // Only an UPLOAD can be read, and only a kind the server declares. Both
+      // facts are SERVED — a page that decides either drifts from the module
+      // that refuses one.
+      if (!access.canWrite || !status || !doc.uploadId) return null;
+      if (!doc.kind || !(status.extractableKinds || []).includes(doc.kind)) return null;
+      if (!status.available) {
+        return <span className="chip bg-stone-100 text-stone-500" title={(status.blockers || []).join('\n')}>Reading not switched on</span>;
+      }
+      const run = () => {
+        setBusy(true); setErr('');
+        api.extractDocument(clientId, doc.uploadId)
+          .then(r => onRead({ ...r.extraction, fileName: doc.title }))
+          .catch(e => setErr(e.message))
+          .finally(() => setBusy(false));
+      };
+      return (
+        <span className="flex items-center gap-1.5">
+          <button className="chip border border-accent text-primary bg-white" disabled={busy} onClick={run}>
+            {busy ? 'Reading…' : 'Read this'}
+          </button>
+          {err && <span className="text-[11px] text-red-600">{err}</span>}
+        </span>
+      );
+    };
+
     const ChartDocuments = ({ docs, clientId, onRefresh }) => {
       const [busy, setBusy] = useState('');
       const [err, setErr] = useState('');
+      // Which kinds can be read, and whether reading is on at all. ASKED OF THE
+      // SERVER: a page that lists the readable kinds itself drifts from the
+      // module that refuses one.
+      const [readStatus, setReadStatus] = useState(null);
+      const [reviewing, setReviewing] = useState(null);
+      useEffect(() => {
+        if (!clientId) return;
+        let live = true;
+        api.extractionStatus(clientId).then(r => { if (live) setReadStatus(r); }).catch(() => {});
+        return () => { live = false; };
+      }, [clientId]);
 
       const open = async (d) => {
         if (!d.openable || !clientId) return;
@@ -479,11 +660,19 @@
                       </div>
                     </div>
                     <div className="shrink-0 flex items-center gap-1.5">
+                      {d.filedBy && <span className="chip bg-stone-100 text-stone-600">{d.filedBy === 'staff' ? 'Filed by the office' : 'From the client'}</span>}
                       {d.inChart && <span className="chip bg-emerald-50 text-emerald-700">In EMR</span>}
                       {!d.openable && <span className="chip bg-amber-50 text-amber-800">Open in OpenEMR</span>}
+                      <ChartReadButton clientId={clientId} doc={d} status={readStatus}
+                        onRead={(ex) => setReviewing(ex)} />
                     </div>
                   </div>
                 ))}
+                {reviewing && g.rows.some(d => d.uploadId === reviewing.docId) && (
+                  <ChartExtractionReview clientId={clientId} extraction={reviewing}
+                    onDone={() => { setReviewing(null); onRefresh && onRefresh(); }}
+                    onCancel={() => setReviewing(null)} />
+                )}
               </div>
             ))}
           </div>
@@ -664,42 +853,1062 @@
       );
     };
 
+    // ── Session 4.12 — the persistent patient banner (Scope C) ─────────────
+    // Never a tab. It sits above every chart tab and every encounter step, so
+    // name, age, DOB, MRN, MBI and allergies are on screen at a front door
+    // instead of buried a click away. Every value is SERVED — the page decides
+    // no clinical fact of its own, so the strip cannot drift from the record.
+    //
+    // The allergy strip has three states and they are three different
+    // sentences. An empty strip must never be what says "none on file", and a
+    // strip reading "No known allergies" when the list simply failed to load is
+    // worse still: it tells a clinician something untrue at the moment it
+    // matters most. See clinicalRepository.buildAllergyStrip.
+    const AllergyStrip = ({ allergies }) => {
+      const a = allergies || { state: 'unavailable', rows: [], reason: 'No allergy information was returned.' };
+      if (a.state === 'listed') {
+        return (
+          <div className="bg-red-50 border border-red-200 text-red-800 rounded-lg px-3 py-1.5 text-[12.5px] font-semibold flex items-start gap-2">
+            <i className="ti ti-alert-triangle-filled mt-[1px] shrink-0" />
+            <span className="min-w-0">
+              {a.rows.join(' · ').toUpperCase()}
+              {a.source === 'intake' && <span className="font-normal normal-case"> — reported at intake, not reconciled</span>}
+            </span>
+          </div>
+        );
+      }
+      if (a.state === 'none_known') {
+        return (
+          <div className="bg-stone-50 border border-stone-200 text-stone-600 rounded-lg px-3 py-1.5 text-[12.5px] font-semibold flex items-center gap-2">
+            <i className="ti ti-circle-check" />No known allergies
+          </div>
+        );
+      }
+      return (
+        <div className="bg-amber-50 border border-amber-300 text-amber-900 rounded-lg px-3 py-1.5 text-[12.5px] flex items-start gap-2">
+          <i className="ti ti-alert-circle mt-[1px] shrink-0" />
+          <span className="min-w-0"><b>Allergies unknown.</b> {a.reason}</span>
+        </div>
+      );
+    };
+
+    const BannerFact = ({ label, value, children }) => (
+      <div className="min-w-0">
+        <div className="lblu">{label}</div>
+        <div className="text-[12.5px] text-stone-700 break-words">{children || value || '—'}</div>
+      </div>
+    );
+
+    // The home-visit standing facts (Scope F4). Read from the PATIENT record —
+    // never from an encounter — so they survive to the next visit and to the
+    // covering clinician who has never been to the house.
+    const HomeVisitFacts = ({ homeVisit, fields }) => {
+      const hv = homeVisit || {};
+      const rows = (fields || []).filter(([k]) => hv[k]);
+      if (!rows.length) return null;
+      return (
+        <div className="bg-cream border border-creamdeep rounded-lg p-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {rows.map(([k, label]) => (
+            <div key={k} className="min-w-0">
+              <div className="lblu">{label}</div>
+              <div className="text-[12.5px] text-stone-700 break-words">{hv[k]}</div>
+            </div>
+          ))}
+        </div>
+      );
+    };
+
+    const HomeVisitEditor = ({ patient, homeVisit, fields, onSaved }) => {
+      const [open, setOpen] = useState(false);
+      const [f, setF] = useState(homeVisit || {});
+      const [busy, setBusy] = useState(false);
+      const [msg, setMsg] = useState(null);
+      useEffect(() => { setF(homeVisit || {}); }, [homeVisit]);
+      const save = () => {
+        setBusy(true); setMsg(null);
+        api.saveHomeVisit(patient.id, f)
+          .then(r => { setMsg({ ok: true, text: r.message }); setOpen(false); onSaved && onSaved(r.homeVisit); })
+          .catch(e => setMsg({ ok: false, text: e.message }))
+          .finally(() => setBusy(false));
+      };
+      if (!open) {
+        return (
+          <div>
+            <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" onClick={() => setOpen(true)}>
+              <i className="ti ti-home-edit" />{(fields || []).some(([k]) => (homeVisit || {})[k]) ? 'Edit home visit notes' : 'Add home visit notes'}
+            </button>
+            {msg && <p className={`text-[11.5px] mt-1 ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
+          </div>
+        );
+      }
+      return (
+        <div className="border border-creamdeep rounded-lg p-3 bg-white">
+          <p className="text-[11.5px] text-stone-500 mb-2">
+            These stay on the patient, so they are here at the next visit and for whoever covers. Record what changed
+            <i> today</i> in the visit note instead.
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {(fields || []).map(([k, label]) => (
+              <Field key={k} label={label}>
+                <textarea className="inp" rows="2" value={f[k] || ''} onChange={e => setF({ ...f, [k]: e.target.value })} />
+              </Field>
+            ))}
+          </div>
+          <div className="flex gap-2 mt-3">
+            <button className="btn gold !py-1.5 !px-3 text-xs" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save'}</button>
+            <button className="btn ghost !py-1.5 !px-3 text-xs" disabled={busy} onClick={() => { setF(homeVisit || {}); setOpen(false); }}>Cancel</button>
+          </div>
+          {msg && !msg.ok && <p className="text-[11.5px] mt-1 text-red-600">{msg.text}</p>}
+        </div>
+      );
+    };
+
+    const PatientBanner = ({ banner, patient, homeVisitFields, visitDraft, onStartVisit, onHomeVisitSaved }) => {
+      const [open, setOpen] = useState(false);
+      const access = useContext(AccessContext);
+      const b = banner || {};
+      const name = b.name || (patient && patient.name) || '—';
+      // The identity line, and it never collapses — not on a phone, not on any
+      // tab. It is the line that stops a note being written in the wrong chart.
+      const idBits = [
+        b.age != null ? `${b.age}` : null,
+        b.sex || null,
+        b.dob ? `DOB ${b.dob}` : null,
+        b.mrn ? `MRN ${b.mrn}` : null,
+        b.mbi ? `MBI ${b.mbi}` : null
+      ].filter(Boolean);
+      const draftOpen = !!(visitDraft && visitDraft.open);
+      return (
+        <div className="bg-white border-b border-stone-200 px-4 lg:px-7 pt-3 pb-3">
+          <div className="flex items-start gap-3">
+            <div className="w-11 h-11 rounded-full bg-accent text-primary hidden sm:flex items-center justify-center font-bold border border-stone-200 shrink-0">{initials(name)}</div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="serif text-xl text-primary font-semibold leading-tight">{name}</span>
+                {b.preferredName && <span className="text-[12px] text-stone-500">("{b.preferredName}")</span>}
+                {b.codeStatus && <span className="chip bg-red-100 text-red-800">{b.codeStatus}</span>}
+                {b.serviceLine && <span className="chip bg-primary text-white hidden sm:inline">{b.serviceLine}</span>}
+                {b.activatedAt && <span className="chip bg-emerald-50 text-emerald-700 hidden sm:inline">ACTIVATED</span>}
+              </div>
+              <div className="text-[12px] text-stone-600 mt-0.5 break-words">{idBits.length ? idBits.join(' • ') : 'No identifiers on file'}</div>
+            </div>
+            {onStartVisit && access.canWrite && (
+              <button className={`btn ${draftOpen ? 'gold' : ''} !py-1.5 !px-3 text-xs shrink-0`} onClick={onStartVisit}>
+                <i className={`ti ${draftOpen ? 'ti-writing' : 'ti-player-play'}`} />{draftOpen ? 'Resume draft' : 'Start visit'}
+              </button>
+            )}
+          </div>
+          <div className="mt-2"><AllergyStrip allergies={b.allergies} /></div>
+          <button className="text-[11.5px] text-primary font-semibold mt-2 flex items-center gap-1" onClick={() => setOpen(!open)}>
+            <i className={`ti ti-chevron-${open ? 'up' : 'down'}`} />{open ? 'Hide details' : 'Address, contacts, insurance'}
+          </button>
+          {open && (
+            <div className="mt-2 space-y-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                <BannerFact label="Home address">
+                  {b.address && (b.address.line1 || b.address.city)
+                    ? <span>{[b.address.line1, b.address.line2].filter(Boolean).join(', ')}<br />{[b.address.city, b.address.state, b.address.zip].filter(Boolean).join(' ')}</span>
+                    : (b.addressLine || '—')}
+                </BannerFact>
+                <BannerFact label="Phone" value={b.phone} />
+                <BannerFact label={`Responsible party${b.responsibleParty && b.responsibleParty.relationship ? ` · ${b.responsibleParty.relationship}` : ''}`}>
+                  {b.responsibleParty && b.responsibleParty.name
+                    ? <span>{b.responsibleParty.name}{b.responsibleParty.phone ? <><br />{b.responsibleParty.phone}</> : null}{b.responsibleParty.authority ? <><br /><span className="text-stone-500">{b.responsibleParty.authority}</span></> : null}</span>
+                    : '—'}
+                </BannerFact>
+                <BannerFact label="Existing PCP">
+                  {b.pcp && b.pcp.name
+                    ? <span>{b.pcp.name}{b.pcp.practice ? <><br />{b.pcp.practice}</> : null}{b.pcp.phone ? <><br />{b.pcp.phone}</> : null}</span>
+                    : '—'}
+                </BannerFact>
+                <BannerFact label="Insurance">
+                  <span>
+                    {(b.insurance && b.insurance.primary) || '—'}
+                    {b.insurance && b.insurance.secondary ? <><br /><span className="text-stone-500">2nd: {b.insurance.secondary}</span></> : null}
+                    {b.insurance && b.insurance.medicareAdvantage ? <><br /><span className="chip bg-amber-100 text-amber-800">MEDICARE ADVANTAGE</span></> : null}
+                    {b.insurance && b.insurance.qmb ? <><br /><span className="chip bg-amber-100 text-amber-800">QMB</span></> : null}
+                  </span>
+                </BannerFact>
+                <BannerFact label="Facility &amp; POS">
+                  {b.facility && b.facility.name
+                    ? <span>{b.facility.name}<br />POS {b.facility.posCode || <span className="text-amber-700">not set</span>}</span>
+                    : <span className="text-amber-700">Not assigned — visits cannot be signed</span>}
+                </BannerFact>
+                <BannerFact label="Last visit" value={b.lastVisitAt} />
+                <BannerFact label="Track" value={b.careTierLabel} />
+              </div>
+              <HomeVisitFacts homeVisit={b.homeVisit} fields={homeVisitFields} />
+              {access.canWrite && (
+                <HomeVisitEditor patient={patient} homeVisit={b.homeVisit} fields={homeVisitFields} onSaved={onHomeVisitSaved} />
+              )}
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    // ── Session 4.12 Scope D — CHART NAVIGATION: PLACES, NOT ACTIONS ───────
+    // Every tab is somewhere in the record. No workflow is a tab: the H&P opens
+    // as a visit from the banner, and med reconciliation is a step inside the
+    // encounter and a section under MEDICATIONS rather than a sibling of it.
+    //
+    // ChartSection and chartRow live at MODULE scope so every place can render
+    // the same way. A component declared inside another is a new function
+    // identity on every render, which remounts it and loses the caret — the
+    // trap test/react_input_focus.test.js exists to catch.
+    const ChartSection = ({ title, data, render, icon, linked, children }) => (
+      <div className="card mb-4">
+        <div className="card-h"><h2><i className={`ti ${icon} mr-1 text-accent`} />{title}</h2>
+          {/* A pending org-level read grant is a setup step, not a fault —
+              badge it differently so a real failure still stands out. */}
+          {data && !data.ok && data.permissionPending && <span className="chip bg-amber-50 text-amber-800">Not enabled yet</span>}
+          {data && !data.ok && !data.permissionPending && <span className="chip bg-red-50 text-red-700">EMR read failed</span>}
+        </div>
+        <div className="p-4 text-sm">
+          {children}
+          {!linked && <p className="text-stone-400 text-xs">Link this patient to OpenEMR to read live data.</p>}
+          {linked && data && data.ok && data.rows.length === 0 && <p className="text-stone-400 text-xs">Nothing on file in OpenEMR.</p>}
+          {linked && data && data.ok && data.rows.map((r, i) => render(r, i))}
+          {linked && data && !data.ok && data.permissionPending && (
+            <p className="text-amber-800 text-xs">
+              OpenEMR has not granted this app org-level read access to {title.toLowerCase()} yet.
+              An administrator enables it under Administration → Access → the <code className="font-mono">gfc-app-api</code> group.
+              Nothing is wrong with this patient's record.
+            </p>
+          )}
+          {linked && data && !data.ok && !data.permissionPending && <p className="text-red-600 text-xs">{data.error}</p>}
+        </div>
+      </div>
+    );
+
+    const chartRow = (main, sub, right, key) => (
+      <div key={key} className="flex items-start justify-between py-1.5 border-b border-stone-100 last:border-0 gap-2">
+        <div className="min-w-0"><div className="font-semibold text-[13px]">{main}</div>{sub && <div className="text-xs text-stone-500">{sub}</div>}</div>
+        {right && <span className="chip bg-primary-50 text-primary shrink-0">{right}</span>}
+      </div>
+    );
+
+    // An empty place says so in a sentence. A blank panel and a place with
+    // nothing in it are indistinguishable, and only one of them is correct —
+    // the rule the clinical inbox set and Scope I3 restates for navigation.
+    const EmptyPlace = ({ children }) => (
+      <div className="card p-6 text-center text-sm text-stone-500">{children}</div>
+    );
+
+    const ProblemsTab = ({ chart }) => {
+      const emr = (chart && chart.emr) || {};
+      return <ChartSection title="Problem list" icon="ti-list-details" data={emr.problems} linked={chart && chart.linked}
+        render={(r, i) => chartRow(r.title, [r.code, r.onset && `since ${fmtDate(r.onset)}`].filter(Boolean).join(' · '), r.status, i)} />;
+    };
+
+    const AllergiesTab = ({ chart }) => {
+      const emr = (chart && chart.emr) || {};
+      return (
+        <div>
+          {/* The same strip the banner carries, and deliberately the same
+              component: two renderings of "what is this patient allergic to"
+              is how the two start disagreeing. */}
+          <div className="mb-4"><AllergyStrip allergies={chart && chart.banner && chart.banner.allergies} /></div>
+          <ChartSection title="Allergies" icon="ti-alert-triangle" data={emr.allergies} linked={chart && chart.linked}
+            render={(r, i) => chartRow(r.title, r.criticality && `criticality: ${r.criticality}`, r.status, i)} />
+        </div>
+      );
+    };
+
+    // D4: med reconciliation is a SECTION under MEDICATIONS, not a tab beside
+    // it. Reconciling is something you do to the medication list; it is not a
+    // different place in the record.
+    const MedicationsTab = ({ chart, patient }) => {
+      const emr = (chart && chart.emr) || {};
+      return (
+        <div>
+          <ChartSection title="Medications" icon="ti-pill" data={emr.medications} linked={chart && chart.linked}
+            render={(r, i) => chartRow(r.title, r.instructions || (r.authoredOn && fmtDate(r.authoredOn)), r.status, i)} />
+          <MedRecTab patient={patient} />
+        </div>
+      );
+    };
+
+    const DocumentsTab = ({ chart, patient, onChartChanged }) => (
+      <ChartDocuments docs={(chart && chart.chartDocuments) || []} clientId={patient && patient.id} onRefresh={onChartChanged} />
+    );
+
+    // ---- Orders, Referrals, Imaging and Results, wired to what 4.10 built ---
+    // Not placeholders. 4.10 shipped the orders, the requisitions, the referral
+    // lifecycle and the results path with per-patient reads and no per-patient
+    // PLACE to read them in.
+    const useChartOrders = (clientId) => {
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState('');
+      const load = useCallback(() => {
+        if (!clientId) return;
+        api.patientOrders(clientId).then(r => { setData(r); setErr(''); }).catch(e => setErr(e.message));
+      }, [clientId]);
+      useEffect(() => { load(); }, [load]);
+      return { data, err, reload: load };
+    };
+
+    const OrderList = ({ rows, empty, err }) => {
+      if (err) return <div className="card p-4 text-sm text-red-600">{err}</div>;
+      if (!rows) return <div className="card p-4 text-sm text-stone-500">Loading…</div>;
+      if (!rows.length) return <EmptyPlace>{empty}</EmptyPlace>;
+      return (
+        <div className="card">
+          <div className="p-4">
+            {rows.map(o => (
+              <div key={o.id} className="py-2 border-b border-stone-100 last:border-0">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className="font-semibold text-[13px]">
+                    {o.orderType === 'referral' ? (o.specialty || 'Referral')
+                      : o.orderType === 'dme' ? (o.itemDescription || 'DME')
+                        : ((o.tests && o.tests.join(', ')) || o.orderType)}
+                  </span>
+                  <span className="chip bg-primary-50 text-primary">{String(o.status || '').toUpperCase()}</span>
+                </div>
+                <div className="text-[11.5px] text-stone-500">
+                  {[o.orderReference, o.priority, o.createdAt && fmtDate(o.createdAt)].filter(Boolean).join(' · ')}
+                </div>
+                {Array.isArray(o.sends) && o.sends.length > 0 && (
+                  <div className="text-[11.5px] text-stone-500">
+                    Last sent {fmtTs(o.sends[o.sends.length - 1].at)} to {o.sends[o.sends.length - 1].recipient || 'recipient not recorded'}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    };
+
+    const OrdersTab = ({ patient }) => {
+      const { data, err } = useChartOrders(patient && patient.id);
+      // Referrals and DME have their own places. This is the diagnostic half.
+      const rows = data ? (data.orders || []).filter(o => !['referral'].includes(o.orderType)) : null;
+      return <OrderList rows={rows} err={err}
+        empty="No orders on this chart yet. Orders are placed from inside an encounter." />;
+    };
+
+    const ReferralsTab = ({ patient }) => {
+      const { data, err } = useChartOrders(patient && patient.id);
+      const rows = data ? (data.orders || []).filter(o => o.orderType === 'referral') : null;
+      return <OrderList rows={rows} err={err}
+        empty="No referrals on this chart yet. A referral is placed from inside an encounter." />;
+    };
+
+    // D3: IMAGING lists imaging orders AND the result documents attached to
+    // them, so a study and its report are read in one place rather than two.
+    const ImagingTab = ({ patient }) => {
+      const { data, err } = useChartOrders(patient && patient.id);
+      const [results, setResults] = useState(null);
+      useEffect(() => {
+        if (!patient || !patient.id) return;
+        let live = true;
+        api.patientResults(patient.id).then(r => { if (live) setResults(r.results || []); }).catch(() => { if (live) setResults([]); });
+        return () => { live = false; };
+      }, [patient && patient.id]);
+      const rows = data ? (data.orders || []).filter(o => o.orderType === 'imaging') : null;
+      if (err) return <div className="card p-4 text-sm text-red-600">{err}</div>;
+      if (!rows) return <div className="card p-4 text-sm text-stone-500">Loading…</div>;
+      if (!rows.length) return <EmptyPlace>No imaging on this chart yet.</EmptyPlace>;
+      return (
+        <div className="card"><div className="p-4">
+          {rows.map(o => {
+            const attached = (results || []).filter(r => String(r.orderId) === String(o.id));
+            return (
+              <div key={o.id} className="py-2 border-b border-stone-100 last:border-0">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className="font-semibold text-[13px]">{(o.tests && o.tests.join(', ')) || 'Imaging'}</span>
+                  <span className="chip bg-primary-50 text-primary">{String(o.status || '').toUpperCase()}</span>
+                </div>
+                <div className="text-[11.5px] text-stone-500">{[o.orderReference, o.createdAt && fmtDate(o.createdAt)].filter(Boolean).join(' · ')}</div>
+                {attached.length === 0
+                  ? <div className="text-[11.5px] text-stone-400 mt-0.5">No report attached yet.</div>
+                  : attached.map(r => (
+                    <div key={r.id} className="text-[11.5px] text-stone-700 mt-0.5">
+                      <i className="ti ti-report-medical mr-1" />{r.label || r.documentName || 'Report'}
+                      {r.interpretation ? ` — ${r.interpretation}` : ''}
+                    </div>
+                  ))}
+              </div>
+            );
+          })}
+        </div></div>
+      );
+    };
+
+    const ResultsTab = ({ patient }) => {
+      const [rows, setRows] = useState(null);
+      const [err, setErr] = useState('');
+      useEffect(() => {
+        if (!patient || !patient.id) return;
+        let live = true;
+        api.patientResults(patient.id).then(r => { if (live) setRows(r.results || []); })
+          .catch(e => { if (live) setErr(e.message); });
+        return () => { live = false; };
+      }, [patient && patient.id]);
+      if (err) return <div className="card p-4 text-sm text-red-600">{err}</div>;
+      if (!rows) return <div className="card p-4 text-sm text-stone-500">Loading…</div>;
+      if (!rows.length) return <EmptyPlace>No results on this chart yet.</EmptyPlace>;
+      return (
+        <div className="card"><div className="p-4">
+          {rows.map(r => (
+            <div key={r.id} className="py-2 border-b border-stone-100 last:border-0">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span className="font-semibold text-[13px]">{r.label || r.documentName || 'Result'}</span>
+                <span className={`chip ${r.interpretation === 'critical' ? 'bg-red-100 text-red-800'
+                  : r.interpretation === 'abnormal' ? 'bg-amber-100 text-amber-800' : 'bg-stone-100 text-stone-600'}`}>
+                  {String(r.interpretation || 'unread').toUpperCase()}
+                </span>
+              </div>
+              <div className="text-[11.5px] text-stone-500">
+                {[r.receivedAt && fmtDate(r.receivedAt),
+                  r.order && r.order.reference,
+                  r.acknowledgedAt ? `acknowledged ${fmtDate(r.acknowledgedAt)}` : 'not yet acknowledged'
+                ].filter(Boolean).join(' · ')}
+              </div>
+            </div>
+          ))}
+        </div></div>
+      );
+    };
+
+    // ---- D5 TIMELINE -------------------------------------------------------
+    const TIMELINE_LABELS = {
+      visit: 'Visits', message: 'Messages', medication: 'Medications', order: 'Orders',
+      result: 'Results', referral: 'Referrals', document: 'Documents', hospitalization: 'Hospitalizations'
+    };
+
+    const TimelineTab = ({ patient }) => {
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState('');
+      const [filter, setFilter] = useState([]);
+      useEffect(() => {
+        if (!patient || !patient.id) return;
+        let live = true;
+        api.timeline(patient.id, filter).then(r => { if (live) { setData(r); setErr(''); } })
+          .catch(e => { if (live) setErr(e.message); });
+        return () => { live = false; };
+      }, [patient && patient.id, filter.join(',')]);
+      const toggle = (k) => setFilter(f => f.includes(k) ? f.filter(x => x !== k) : [...f, k]);
+      if (err) return <div className="card p-4 text-sm text-red-600">{err}</div>;
+      return (
+        <div className="card">
+          <div className="card-h"><h2><i className="ti ti-timeline mr-1 text-accent" />Timeline</h2></div>
+          <div className="px-4 pt-3 flex gap-1.5 flex-wrap">
+            {(data ? data.kinds : Object.keys(TIMELINE_LABELS)).map(k => (
+              <button key={k}
+                className={`chip border ${filter.includes(k) ? 'bg-primary text-white border-primary' : 'bg-white text-stone-600 border-stone-200'}`}
+                onClick={() => toggle(k)}>{TIMELINE_LABELS[k] || k}</button>
+            ))}
+            {filter.length > 0 && (
+              <button className="chip bg-stone-100 text-stone-600" onClick={() => setFilter([])}>Clear</button>
+            )}
+          </div>
+          <div className="p-4">
+            {!data && <p className="text-sm text-stone-500">Loading…</p>}
+            {data && data.rows.length === 0 && (
+              <p className="text-sm text-stone-500">
+                {filter.length ? 'Nothing of that kind on this chart.' : 'Nothing on this chart yet.'}
+              </p>
+            )}
+            {data && data.rows.map((r, i) => (
+              <div key={`${r.kind}-${r.id || i}`} className="flex gap-3 py-2 border-b border-stone-100 last:border-0">
+                <div className="w-[84px] shrink-0 text-[12px] text-stone-500 pt-0.5">{r.date}</div>
+                <div className="w-5 shrink-0 text-accent pt-0.5"><i className={`ti ti-${r.icon}`} /></div>
+                <div className="min-w-0">
+                  <div className="text-[13px] font-semibold text-stone-800">{r.title}</div>
+                  {r.detail && <div className="text-[11.5px] text-stone-500">{r.detail}</div>}
+                </div>
+              </div>
+            ))}
+            {/* "Nothing here" and "four things could not be placed" are
+                different facts, and only one of them is a data gap. */}
+            {data && data.undated > 0 && (
+              <p className="text-[11.5px] text-amber-700 mt-2">
+                {data.undated} {data.undated === 1 ? 'item has' : 'items have'} no usable date and could not be placed on the thread.
+              </p>
+            )}
+            {data && data.emrNotice && <p className="text-[11.5px] text-amber-700 mt-2">{data.emrNotice}</p>}
+          </div>
+        </div>
+      );
+    };
+
+    // ── Session 4.12 Scope I — WORK QUEUES and ANALYTICS ──────────────────
+    // I2: the cross-patient destinations are work queues, not chart tabs.
+    // I3: a destination with nothing in it renders an empty state SAYING SO —
+    // it is never hidden, because a missing menu item is indistinguishable
+    // from a broken one.
+    const QueueCard = ({ title, icon, rows, empty, render }) => (
+      <div className="card mb-4">
+        <div className="card-h">
+          <h2><i className={`ti ${icon} mr-1 text-accent`} />{title}</h2>
+          {rows && <span className="chip bg-primary-50 text-primary">{rows.length}</span>}
+        </div>
+        <div className="p-4 text-sm">
+          {!rows && <p className="text-stone-500 text-xs">Loading…</p>}
+          {rows && rows.length === 0 && <p className="text-stone-500 text-[12.5px]">{empty}</p>}
+          {rows && rows.map(render)}
+        </div>
+      </div>
+    );
+
+    const WorkQueuesView = ({ onOpenChart, onOpenEncounter }) => {
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState('');
+      useEffect(() => {
+        let live = true;
+        api.workQueues().then(r => { if (live) { setData(r); setErr(''); } })
+          .catch(e => { if (live) setErr(e.message); });
+        return () => { live = false; };
+      }, []);
+      if (err) return <div className="p-4 lg:p-7"><div className="card p-4 text-sm text-red-600">{err}</div></div>;
+      const q = (data && data.queues) || {};
+      const line = (main, sub, onClick, key) => (
+        <div key={key} className="flex items-center justify-between gap-2 py-1.5 border-b border-stone-100 last:border-0">
+          <div className="min-w-0">
+            <div className="text-[13px] font-semibold truncate">{main}</div>
+            {sub && <div className="text-[11.5px] text-stone-500">{sub}</div>}
+          </div>
+          {onClick && <button className="btn ghost !py-0.5 !px-2 text-[11px] shrink-0" onClick={onClick}>Open</button>}
+        </div>
+      );
+      return (
+        <div className="p-4 lg:p-7 max-w-3xl">
+          <QueueCard title="Unsigned encounters" icon="ti-signature" rows={data ? q.unsignedEncounters : null}
+            empty="Every documented encounter is signed. Nothing is waiting here."
+            render={(r) => line(r.patientName || 'Unnamed patient',
+              [r.date, r.codingStatus].filter(Boolean).join(' · '),
+              () => onOpenEncounter(r.clientId, r.encounterUuid), r.encounterUuid)} />
+          <QueueCard title="Results to acknowledge" icon="ti-flask" rows={data ? q.unacknowledgedResults : null}
+            empty="No results are waiting to be acknowledged."
+            render={(r) => line(`${r.patientName || 'Unnamed patient'} — ${r.label}`,
+              [r.interpretation, r.receivedAt && fmtDate(r.receivedAt)].filter(Boolean).join(' · '),
+              () => onOpenChart(r.clientId), r.id)} />
+          <QueueCard title="Open referrals" icon="ti-share" rows={data ? q.openReferrals : null}
+            empty="No referrals are outstanding."
+            render={(r) => line(`${r.patientName || 'Unnamed patient'} — ${r.specialty || 'Referral'}`,
+              [r.status, r.orderReference, r.createdAt && fmtDate(r.createdAt)].filter(Boolean).join(' · '),
+              () => onOpenChart(r.clientId), r.id)} />
+          <QueueCard title="Overdue orders" icon="ti-clock-exclamation" rows={data ? q.overdueOrders : null}
+            empty="Nothing is overdue."
+            render={(r) => line(`${r.patientName || 'Unnamed patient'} — ${r.orderType || 'Order'}`,
+              [r.daysOverdue != null ? `${r.daysOverdue} days overdue` : null,
+                r.recipient, r.faxNumber].filter(Boolean).join(' · '),
+              () => onOpenChart(r.clientId), r.id)} />
+          {data && data.overdueThresholds && (
+            <p className="text-[11.5px] text-stone-400">
+              Overdue after {Object.entries(data.overdueThresholds).map(([k, v]) => `${k} ${v}d`).join(' · ')}.
+            </p>
+          )}
+        </div>
+      );
+    };
+
+    const Metric = ({ label, value, sub, unavailable, reason }) => (
+      <div className="card p-4">
+        <div className="lblu">{label}</div>
+        {unavailable
+          ? <div className="text-[12.5px] text-amber-700 mt-1">Not available — {String(reason || '').replace(/_/g, ' ')}</div>
+          : <div className="serif text-2xl text-primary font-semibold mt-0.5">{value == null ? '—' : value}</div>}
+        {!unavailable && sub && <div className="text-[11.5px] text-stone-500">{sub}</div>}
+      </div>
+    );
+
+    const AnalyticsView = () => {
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState('');
+      useEffect(() => {
+        let live = true;
+        api.analytics().then(r => { if (live) { setData(r); setErr(''); } })
+          .catch(e => { if (live) setErr(e.message); });
+        return () => { live = false; };
+      }, []);
+      if (err) return <div className="p-4 lg:p-7"><div className="card p-4 text-sm text-red-600">{err}</div></div>;
+      if (!data) return <div className="p-4 lg:p-7 text-sm text-stone-500">Loading…</div>;
+      const m = data.metrics;
+      const weeks = m.visitsPerWeek || [];
+      const peak = Math.max(1, ...weeks.map(w => w.total));
+      return (
+        <div className="p-4 lg:p-7 max-w-3xl">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-4">
+            <Metric label="Average visit length"
+              value={m.averageVisitMinutes.value == null ? null : `${m.averageVisitMinutes.value} min`}
+              sub={`from ${m.averageVisitMinutes.sampleSize} finished ${m.averageVisitMinutes.sampleSize === 1 ? 'visit' : 'visits'}`} />
+            <Metric label="Unsigned notes" value={m.unsignedNotesAgeing.count}
+              sub={m.unsignedNotesAgeing.oldestDays != null ? `oldest ${m.unsignedNotesAgeing.oldestDays} days` : null} />
+            <Metric label="Open orders" value={m.openOrdersAgeing.count}
+              sub={m.openOrdersAgeing.oldestDays != null ? `oldest ${m.openOrdersAgeing.oldestDays} days` : null} />
+            {/* Two metrics this app cannot observe yet. Reported as unavailable
+                with the reason rather than as a zero somebody would read as
+                "nobody drove anywhere" or "no screenings are done". */}
+            <Metric label="Miles driven" unavailable={m.milesDriven.unavailable} reason={m.milesDriven.reason} />
+            <Metric label="Screening completion"
+              unavailable={m.screeningCompletionRate.unavailable} reason={m.screeningCompletionRate.reason} />
+          </div>
+          <div className="card">
+            <div className="card-h"><h2><i className="ti ti-chart-bar mr-1 text-accent" />Visits per week</h2></div>
+            <div className="p-4">
+              {weeks.length === 0 && <p className="text-[12.5px] text-stone-500">No documented visits in the last eight weeks.</p>}
+              {weeks.map(w => (
+                <div key={w.week} className="flex items-center gap-2 py-1">
+                  <span className="text-[11.5px] text-stone-500 w-[84px] shrink-0">{w.week}</span>
+                  <div className="flex-1 bg-stone-100 rounded h-3 overflow-hidden">
+                    <div className="bg-accent h-3" style={{ width: `${Math.round((w.total / peak) * 100)}%` }} />
+                  </div>
+                  <span className="text-[11.5px] text-stone-700 w-6 text-right">{w.total}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // ── Session 4.12 Scope B — the day, plotted (B2/B3) ───────────────────
+    // NO MAP TILES, DELIBERATELY. A tile provider would receive the coordinates
+    // of every patient's home on every render — a disclosure of where people
+    // live to a third party with no BAA — and for the question this screen
+    // answers ("in what order should I see these people") a street map adds
+    // nothing a relative plot does not. The brief's own sketch is dots joined
+    // by lines. Everything here is drawn from coordinates the app already
+    // holds, and nothing leaves the boundary.
+    const DayMap = ({ plot }) => {
+      // SERVED, not computed here. The module that places a stop reaches into
+      // the scheduling module for the one coordinate reader, and that chain
+      // does not load in a page — so the page renders the server's answer and
+      // decides no geometry of its own.
+      if (!plot || !plot.points || !plot.points.length) {
+        return (
+          <div className="p-4 text-[12.5px] text-amber-700">
+            None of today's visits has address coordinates, so there is nothing to plot.
+            An admin sets them under Scheduling → Locations.
+          </div>
+        );
+      }
+      return (
+        <div className="p-4">
+          <svg viewBox="0 0 100 100" className="w-full max-w-md mx-auto block" style={{ aspectRatio: '1 / 1' }}
+            role="img" aria-label="Today's stops, plotted by relative position">
+            {plot.points.slice(0, -1).map((p, i) => {
+              const n = plot.points[i + 1];
+              return <line key={`l${p.eid}`} x1={p.x} y1={p.y} x2={n.x} y2={n.y}
+                stroke="#C9A44A" strokeWidth="0.8" strokeDasharray="2 1.5" />;
+            })}
+            {plot.points.map(p => (
+              <g key={p.eid}>
+                <circle cx={p.x} cy={p.y} r="3.2" fill="#033D50" />
+                <text x={p.x} y={p.y + 1.1} textAnchor="middle" fill="#fff"
+                  style={{ fontSize: '3px', fontWeight: 700 }}>{p.order}</text>
+                <text x={p.x} y={p.y - 4.6} textAnchor="middle" fill="#2b2b28"
+                  style={{ fontSize: '3.2px' }}>{p.label}</text>
+              </g>
+            ))}
+          </svg>
+          <p className="text-[11px] text-stone-400 text-center mt-2">
+            Relative positions only — north is up. Not a street map, and no coordinates leave this app.
+          </p>
+          {plot.unplaceable > 0 && (
+            <p className="text-[11.5px] text-amber-700 text-center mt-1">
+              {plot.unplaceable} {plot.unplaceable === 1 ? 'stop has' : 'stops have'} no coordinates and could not be plotted.
+            </p>
+          )}
+        </div>
+      );
+    };
+
+    // B5 — who else lives near this address and is due to be seen. A house call
+    // is mostly driving, so a trip that fills two slots instead of one is the
+    // biggest lever there is on a day.
+    const NearbyDue = ({ clientId, onOpenChart }) => {
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState('');
+      const [radius, setRadius] = useState(10);
+      useEffect(() => {
+        if (!clientId) return;
+        let live = true;
+        api.nearby(clientId, radius).then(r => { if (live) { setData(r); setErr(''); } })
+          .catch(e => { if (live) setErr(e.message); });
+        return () => { live = false; };
+      }, [clientId, radius]);
+      if (err) return <p className="text-[12px] text-red-600">{err}</p>;
+      if (!data) return <p className="text-[12px] text-stone-500">Looking…</p>;
+      if (data.notice) return <p className="text-[12px] text-amber-700">{data.notice}</p>;
+      return (
+        <div>
+          <div className="flex items-center gap-2 mb-2">
+            <span className="lblu">Within</span>
+            <select className="inp !w-auto !py-0.5 text-[11.5px]" value={radius} onChange={e => setRadius(Number(e.target.value))}>
+              {[5, 10, 15, 25].map(r => <option key={r} value={r}>{r} miles</option>)}
+            </select>
+            <span className="text-[11px] text-stone-400">straight line</span>
+          </div>
+          {data.nearby.length === 0
+            ? <p className="text-[12px] text-stone-500">
+              Nobody else within {data.radiusMiles} miles is due to be seen.
+            </p>
+            : data.nearby.map(n => (
+              <div key={n.clientId} className="flex items-center justify-between gap-2 py-1.5 border-b border-stone-100 last:border-0">
+                <div className="min-w-0">
+                  <div className="text-[13px] font-semibold truncate">{n.name}</div>
+                  <div className="text-[11.5px] text-stone-500">
+                    {[`${n.miles} mi`,
+                      n.reason === 'never_seen' ? 'never seen' : `last seen ${n.lastVisitAt} (${n.daysSinceLastVisit}d)`,
+                      n.address].filter(Boolean).join(' · ')}
+                  </div>
+                </div>
+                <button className="btn ghost !py-0.5 !px-2 text-[11px] shrink-0" onClick={() => onOpenChart(n.clientId)}>Open</button>
+              </div>
+            ))}
+          <p className="text-[11px] text-stone-400 mt-2">
+            "Due" means no visit on file, or none in the last {data.dueAfterDays} days.
+          </p>
+        </div>
+      );
+    };
+
+    // ── Session 4.12 — MY DAY (Scope A) ────────────────────────────────────
+    // The default landing screen. A house-call clinician does not start the day
+    // by looking up a patient; they start it by looking at the day. Every row
+    // carries what you read in the car: who, when, where, how to get in, and
+    // who will be there.
+    const VISIT_STATE_STYLE = {
+      scheduled: 'bg-stone-100 text-stone-600',
+      en_route: 'bg-sky-100 text-sky-800',
+      arrived: 'bg-amber-100 text-amber-800',
+      in_progress: 'bg-emerald-100 text-emerald-800',
+      signed: 'bg-primary text-white',
+      cancelled: 'bg-stone-200 text-stone-500',
+      no_show: 'bg-red-100 text-red-700'
+    };
+
+    // NAVIGATE hands off to the device's own map app rather than drawing a map
+    // in a browser tab: the clinician is about to drive, and the phone's map has
+    // their traffic, their voice guidance and their car.
+    const navigateHref = (address) =>
+      `https://maps.google.com/?q=${encodeURIComponent(String(address || ''))}`;
+
+    const DayDistance = ({ distance }) => {
+      const d = distance || {};
+      if (d.reason === 'first_stop') return <span className="text-[11.5px] text-stone-400">First stop</span>;
+      if (d.reason === 'no_coordinates') {
+        return <span className="text-[11.5px] text-amber-700">No address coordinates — distance cannot be shown</span>;
+      }
+      if (typeof d.miles !== 'number') return null;
+      // LABELLED as straight-line, deliberately. A 3-mile straight line across a
+      // river is a 20-minute drive, and a clinician planning a day around a
+      // number called "drive time" that is really a crow's flight will be late.
+      return <span className="text-[11.5px] text-stone-500">{d.miles} mi in a straight line from the last stop</span>;
+    };
+
+    const DayVisitRow = ({ v, onOpenChart, onPacket, onStamp, busy, canWrite }) => (
+      <div className={`border-b border-stone-100 py-3 ${v.state === 'cancelled' ? 'opacity-50' : ''}`}>
+        <div className="flex items-start gap-3">
+          <div className="w-[68px] shrink-0 text-right">
+            <div className="text-[13.5px] font-bold text-primary">{v.time || '—'}</div>
+            {v.endTime && <div className="text-[10.5px] text-stone-400">to {v.endTime}</div>}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-semibold text-[14px] text-stone-800">{v.patientName || 'Unnamed patient'}</span>
+              <span className={`chip ${VISIT_STATE_STYLE[v.state] || 'bg-stone-100 text-stone-600'}`}>
+                {(v.state || '').replace(/_/g, ' ').toUpperCase()}
+              </span>
+            </div>
+            <div className="text-[12px] text-stone-600">
+              {[v.visitType, v.serviceLine].filter(Boolean).join(' • ')}
+            </div>
+            {v.address && <div className="text-[12px] text-stone-500 mt-0.5">{v.address}</div>}
+            <div className="mt-0.5"><DayDistance distance={v.distance} /></div>
+            {/* A2 — access notes and who will be there. From the PATIENT record,
+                so they are here for whoever covers, not just whoever entered
+                them. This is what you read before getting out of the car. */}
+            {v.homeVisit && v.homeVisit.length > 0 && (
+              <div className="mt-2 bg-cream border border-creamdeep rounded-lg px-3 py-2 space-y-1">
+                {v.homeVisit.map(h => (
+                  <div key={h.key} className="text-[12px] text-stone-700">
+                    <span className="lblu mr-1.5">{h.label}</span>{h.value}
+                  </div>
+                ))}
+              </div>
+            )}
+            {v.timing && (v.timing.arrivedAt || v.timing.startedAt) && (
+              <div className="text-[11px] text-stone-500 mt-1">
+                {v.timing.arrivedAt && <>Arrived {fmtTs(v.timing.arrivedAt)}. </>}
+                {v.timing.startedAt && <>Started {fmtTs(v.timing.startedAt)}. </>}
+                {v.timing.totalMinutes != null && <b>{v.timing.totalMinutes} min total.</b>}
+              </div>
+            )}
+            <div className="flex gap-2 mt-2 flex-wrap">
+              {v.address && (
+                <a className="btn ghost !py-1 !px-2.5 text-[11.5px]" href={navigateHref(v.address)}
+                  target="_blank" rel="noopener noreferrer"><i className="ti ti-navigation" />Navigate</a>
+              )}
+              <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" onClick={() => onPacket(v)}>
+                <i className="ti ti-file-description" />Pre-visit
+              </button>
+              <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" onClick={() => onOpenChart(v.clientId)}>
+                <i className="ti ti-folder-open" />Open chart
+              </button>
+              {canWrite && v.state === 'scheduled' && (
+                <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" disabled={busy === v.eid}
+                  onClick={() => onStamp(v, 'en_route')}><i className="ti ti-car" />En route</button>
+              )}
+              {canWrite && ['scheduled', 'en_route'].includes(v.state) && (
+                <button className="btn gold !py-1 !px-2.5 text-[11.5px]" disabled={busy === v.eid}
+                  onClick={() => onStamp(v, 'arrive')}><i className="ti ti-door-enter" />Arrive</button>
+              )}
+              {canWrite && v.state === 'arrived' && (
+                <button className="btn !py-1 !px-2.5 text-[11.5px]" disabled={busy === v.eid}
+                  onClick={() => onStamp(v, 'start')}><i className="ti ti-player-play" />Start visit</button>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+
+    const PreVisitPacket = ({ clientId, eid, onClose, onOpenChart }) => {
+      const [p, setP] = useState(null);
+      const [err, setErr] = useState('');
+      useEffect(() => {
+        let live = true;
+        api.preVisit(clientId, eid).then(r => { if (live) setP(r); })
+          .catch(e => { if (live) setErr(e.message); });
+        return () => { live = false; };
+      }, [clientId, eid]);
+      if (err) return <div className="card p-4"><p className="text-red-600 text-sm">{err}</p>
+        <button className="btn ghost !py-1 !px-2.5 text-xs mt-2" onClick={onClose}>Close</button></div>;
+      if (!p) return <div className="card p-4 text-sm text-stone-500">Loading the packet…</div>;
+      const k = p.packet || {};
+      const b = k.banner || {};
+      const Row = ({ label, children }) => (
+        <div className="flex gap-2 py-1 border-b border-stone-100 last:border-0">
+          <div className="lblu w-[130px] shrink-0 pt-0.5">{label}</div>
+          <div className="text-[12.5px] text-stone-700 min-w-0">{children}</div>
+        </div>
+      );
+      return (
+        <div className="card">
+          <div className="card-h">
+            <h2>{k.patientName} — today's visit</h2>
+            <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={onClose}>Close</button>
+          </div>
+          <div className="p-4 space-y-3">
+            <AllergyStrip allergies={b.allergies} />
+            <div>
+              <Row label="Reason">{k.reason || '—'}</Row>
+              <Row label="Last visit">{k.lastVisitAt || '—'}</Row>
+              <Row label="Last vitals">
+                {k.lastVitals ? [k.lastVitals.label, k.lastVitals.value].filter(Boolean).join(' ') : '—'}
+              </Row>
+              <Row label="Active problems">
+                {k.activeProblems && k.activeProblems.length
+                  ? k.activeProblems.map(x => x.description || x.title || x.code).filter(Boolean).join(' • ')
+                  : '—'}
+              </Row>
+              <Row label="Recent results">
+                {k.recentResults && k.recentResults.length
+                  ? k.recentResults.map(r => `${r.label}${r.interpretation ? ` (${r.interpretation})` : ''}`).join(' • ')
+                  : '—'}
+              </Row>
+            </div>
+            {k.openItems && k.openItems.length > 0 && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                <div className="lblu mb-1">Open items</div>
+                {k.openItems.map((it, i) => (
+                  <div key={i} className="text-[12.5px] text-amber-900 flex gap-1.5">
+                    <i className="ti ti-alert-triangle mt-[2px]" /><span>{it.text}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {k.homeVisit && k.homeVisit.length > 0 && (
+              <div className="bg-cream border border-creamdeep rounded-lg p-3 space-y-1">
+                {k.homeVisit.map(h => (
+                  <div key={h.key} className="text-[12.5px] text-stone-700">
+                    <span className="lblu mr-1.5">{h.label}</span>{h.value}
+                  </div>
+                ))}
+              </div>
+            )}
+            {p.emrNotice && <p className="text-[11.5px] text-amber-700">{p.emrNotice}</p>}
+            <button className="btn gold w-full justify-center" onClick={() => onOpenChart(k.clientId)}>
+              <i className="ti ti-player-play" />Start visit
+            </button>
+            {/* B5 — a house call is mostly driving, so filling a trip is the
+                biggest lever there is on a day. Surfaced here because this is
+                where a clinician is already deciding what the trip is for. */}
+            <div className="border-t border-stone-100 pt-3">
+              <div className="lblu mb-1.5">Also due nearby</div>
+              <NearbyDue clientId={k.clientId} onOpenChart={onOpenChart} />
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const MyDayView = ({ user, onOpenChart }) => {
+      const access = useContext(AccessContext);
+      const [date, setDate] = useState(() => GFC_TIME.zonedParts(new Date()).isoDate);
+      const [day, setDay] = useState(null);
+      const [err, setErr] = useState('');
+      const [busy, setBusy] = useState(null);
+      const [packet, setPacket] = useState(null);
+      const [proposal, setProposal] = useState(null);
+      const [mode, setMode] = useState('list'); // B1 list | B2 map
+      const load = useCallback(() => {
+        setErr('');
+        api.myDay(date).then(setDay).catch(e => { setErr(e.message); setDay(null); });
+      }, [date]);
+      useEffect(() => { load(); }, [load]);
+
+      const stamp = (v, event) => {
+        setBusy(v.eid); setErr('');
+        api.stampVisit(v.eid, { event, clientId: v.clientId })
+          .then(() => load())
+          .catch(e => setErr(e.message))
+          .finally(() => setBusy(null));
+      };
+      const optimize = () => {
+        api.optimizeDay((day && day.visits) || [])
+          .then(setProposal).catch(e => setErr(e.message));
+      };
+
+      const greeting = (() => {
+        const h = Number(GFC_TIME.zonedParts(new Date()).hour);
+        return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
+      })();
+      // A bare calendar date carries no zone, so it is read at MIDDAY UTC and
+      // rendered in UTC. Reading it in Eastern would make "2026-09-23" the
+      // evening of the 22nd and print the wrong weekday — the same trap the
+      // bulk-shift generator paid for on 2026-09-20.
+      const longDate = new Date(`${date}T12:00:00Z`).toLocaleDateString('en-US',
+        { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
+
+      if (packet) {
+        return (
+          <div className="p-4 lg:p-7 max-w-2xl">
+            <PreVisitPacket clientId={packet.clientId} eid={packet.eid}
+              onClose={() => setPacket(null)} onOpenChart={onOpenChart} />
+          </div>
+        );
+      }
+      return (
+        <div className="p-4 lg:p-7 max-w-3xl">
+          <div className="card mb-4">
+            <div className="bg-primary text-white px-4 py-3 rounded-t-[11px]">
+              <div className="serif text-xl font-semibold">{greeting}, {String(user && user.name || '').split(' ')[0] || 'there'}</div>
+              <div className="text-[12px] text-accent">{longDate}</div>
+            </div>
+            <div className="px-4 py-2 border-b border-stone-100 flex items-center gap-2 flex-wrap">
+              <input className="inp !w-auto !py-1 text-xs" type="date" value={date} onChange={e => setDate(e.target.value)} />
+              {/* B1 + B2 — the same day, two ways of reading it. Both render
+                  the SAME visits from the SAME fetch, so the list and the map
+                  cannot disagree about what exists. */}
+              <div className="inline-flex rounded-lg overflow-hidden border border-primary">
+                {[['list', 'ti-list', 'List'], ['map', 'ti-map-2', 'Map']].map(([k, icon, label]) => (
+                  <button key={k} className={`px-2.5 py-1 text-[11.5px] font-semibold ${mode === k ? 'bg-primary text-white' : 'bg-white text-primary'}`}
+                    onClick={() => setMode(k)}><i className={`ti ${icon} mr-1`} />{label}</button>
+                ))}
+              </div>
+              <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" onClick={load}><i className="ti ti-refresh" />Refresh</button>
+              {access.canWrite && day && day.visits && day.visits.length > 1 && (
+                <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" onClick={optimize}>
+                  <i className="ti ti-route" />Optimize route
+                </button>
+              )}
+            </div>
+            {err && <p className="text-red-600 text-sm px-4 py-2">{err}</p>}
+            {day && day.calendar && !day.calendar.ok && (
+              <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] text-amber-900">
+                <b>The calendar could not be read.</b> {day.calendar.error} This is not an empty day — it is a day we could not load.
+              </div>
+            )}
+            {/* An unsigned note from an earlier day is the practice's biggest
+                silent risk: nothing chases it, and the longer it sits the less
+                anybody remembers of the visit. Pinned at the top, in red. */}
+            {day && day.unsigned && day.unsigned.length > 0 && (
+              <div className="bg-red-50 border-b border-red-200 px-4 py-3">
+                <div className="text-[12px] font-bold text-red-800 mb-1">
+                  <i className="ti ti-alert-triangle-filled mr-1" />
+                  {day.unsigned.length} unsigned {day.unsigned.length === 1 ? 'note' : 'notes'} from earlier days
+                </div>
+                {day.unsigned.map(u => (
+                  <div key={u.eid} className="text-[12.5px] text-red-900 flex items-center justify-between gap-2 py-0.5">
+                    <span>{u.date} · {u.patientName} · {u.visitType} <span className="text-red-600">({u.daysOld}d)</span></span>
+                    <button className="btn ghost !py-0.5 !px-2 text-[11px]" onClick={() => onOpenChart(u.clientId)}>Open</button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {mode === 'map' && day && <DayMap plot={day.plot} />}
+            <div className="px-4">
+              {!day && !err && <p className="text-sm text-stone-500 py-4">Loading your day…</p>}
+              {day && day.visits.length === 0 && (
+                <p className="text-sm text-stone-500 py-6">No visits scheduled for this day.</p>
+              )}
+              {day && mode === 'list' && day.visits.map(v => (
+                <DayVisitRow key={v.eid} v={v} busy={busy} canWrite={access.canWrite}
+                  onOpenChart={onOpenChart}
+                  onPacket={(vv) => setPacket({ clientId: vv.clientId, eid: vv.eid })}
+                  onStamp={stamp} />
+              ))}
+            </div>
+            {day && (
+              <div className="bg-cream border-t border-creamdeep px-4 py-3 text-[12px] text-stone-700 flex gap-4 flex-wrap">
+                <span><b>{day.totals.visits}</b> {day.totals.visits === 1 ? 'visit' : 'visits'}</span>
+                <span>
+                  {day.totals.miles != null
+                    ? <><b>{day.totals.miles}</b> mi straight-line{day.totals.milesPartial ? ` (${day.totals.unplaceableStops} stop${day.totals.unplaceableStops === 1 ? '' : 's'} without coordinates)` : ''}</>
+                    : <span className="text-amber-700">Distances unavailable — no address coordinates</span>}
+                </span>
+                <span><b>{day.totals.openTasks}</b> open {day.totals.openTasks === 1 ? 'task' : 'tasks'}</span>
+              </div>
+            )}
+          </div>
+
+          {proposal && (
+            <div className="card">
+              <div className="card-h">
+                <h2>Proposed order</h2>
+                <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={() => setProposal(null)}>Discard</button>
+              </div>
+              <div className="p-4">
+                {!proposal.proposal && <p className="text-sm text-stone-500">Nothing to reorder.</p>}
+                {proposal.proposal && (
+                  <>
+                    <p className="text-[12px] text-stone-500 mb-2">{proposal.proposal.caveat}</p>
+                    {proposal.proposal.unchanged
+                      ? <p className="text-[13px] text-stone-700">The day is already in proximity order.</p>
+                      : proposal.proposal.order.map((o, i) => (
+                        <div key={o.eid} className="text-[13px] py-1 border-b border-stone-100 last:border-0">
+                          <b>{i + 1}.</b> {o.patientName} <span className="text-stone-500">({o.fromTime} → {o.toTime})</span>
+                        </div>
+                      ))}
+                    {/* NEVER auto-applied. Accepting rebooks through the
+                        appointment routes so the patient is told. */}
+                    <p className="text-[11.5px] text-amber-700 mt-3">
+                      Nothing has changed yet. Accepting this rebooks each visit through the normal reschedule
+                      route, which emails the patient. Accepting is not built in this pass — the order above is a
+                      proposal to work from.
+                    </p>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    };
+
     const SummaryTab = ({ chart, patient, onLink, linking, linkCandidates, onDismissCandidates, isAdmin, onChartChanged }) => {
       const canWrite = useCanWrite();
       const [showLinkExisting, setShowLinkExisting] = useState(false);
       const [existingId, setExistingId] = useState('');
       const d = chart && chart.demographics;
       if (!chart) return <p className="text-sm text-stone-500 p-4">Loading chart…</p>;
-      const Sec = ({ title, data, render, icon }) => (
-        <div className="card mb-4">
-          <div className="card-h"><h2><i className={`ti ${icon} mr-1 text-accent`} />{title}</h2>
-            {/* A pending org-level read grant is a setup step, not a fault —
-                badge it differently so a real failure still stands out. */}
-            {data && !data.ok && data.permissionPending && <span className="chip bg-amber-50 text-amber-800">Not enabled yet</span>}
-            {data && !data.ok && !data.permissionPending && <span className="chip bg-red-50 text-red-700">EMR read failed</span>}
-          </div>
-          <div className="p-4 text-sm">
-            {!chart.linked && <p className="text-stone-400 text-xs">Link this patient to OpenEMR to read live data.</p>}
-            {chart.linked && data && data.ok && data.rows.length === 0 && <p className="text-stone-400 text-xs">Nothing on file in OpenEMR.</p>}
-            {chart.linked && data && data.ok && data.rows.map((r, i) => render(r, i))}
-            {chart.linked && data && !data.ok && data.permissionPending && (
-              <p className="text-amber-800 text-xs">
-                OpenEMR has not granted this app org-level read access to {title.toLowerCase()} yet.
-                An administrator enables it under Administration → Access → the <code className="font-mono">gfc-app-api</code> group.
-                Nothing is wrong with this patient's record.
-              </p>
-            )}
-            {chart.linked && data && !data.ok && !data.permissionPending && <p className="text-red-600 text-xs">{data.error}</p>}
-          </div>
-        </div>
-      );
       const emr = chart.emr || {};
-      const row = (main, sub, right) => (
-        <div className="flex items-start justify-between py-1.5 border-b border-stone-100 last:border-0">
-          <div><div className="font-semibold text-[13px]">{main}</div>{sub && <div className="text-xs text-stone-500">{sub}</div>}</div>
-          {right && <span className="chip bg-primary-50 text-primary">{right}</span>}
-        </div>
-      );
       return (
         <div>
           {!chart.linked && !canWrite && (
@@ -780,28 +1989,22 @@
             </div>
           )}
           {chart.linked && <FacilityCard patient={patient} isAdmin={isAdmin} onChanged={onChartChanged} />}
+          {/* Session 4.12 Scope D — OVERVIEW is the at-a-glance. The problem
+              list, medications, allergies, documents and the timeline each have
+              their OWN place on the tab bar now, so nothing here is the
+              authoritative copy and nothing is rendered twice. */}
           <div className="grid md:grid-cols-2 gap-0 md:gap-4">
             <div>
-              <Sec title="Problem list" icon="ti-list-details" data={emr.problems}
-                render={(r, i) => <div key={i}>{row(r.title, [r.code, r.onset && `since ${fmtDate(r.onset)}`].filter(Boolean).join(' · '), r.status)}</div>} />
-              <Sec title="Medications" icon="ti-pill" data={emr.medications}
-                render={(r, i) => <div key={i}>{row(r.title, r.instructions || (r.authoredOn && fmtDate(r.authoredOn)), r.status)}</div>} />
-              <Sec title="Allergies" icon="ti-alert-triangle" data={emr.allergies}
-                render={(r, i) => <div key={i}>{row(r.title, r.criticality && `criticality: ${r.criticality}`, r.status)}</div>} />
+              <ChartSection title="Problem list" icon="ti-list-details" data={emr.problems} linked={chart.linked}
+                render={(r, i) => chartRow(r.title, [r.code, r.onset && `since ${fmtDate(r.onset)}`].filter(Boolean).join(' · '), r.status, i)} />
+              <ChartSection title="Medications" icon="ti-pill" data={emr.medications} linked={chart.linked}
+                render={(r, i) => chartRow(r.title, r.instructions || (r.authoredOn && fmtDate(r.authoredOn)), r.status, i)} />
             </div>
             <div>
-              <Sec title="Encounters" icon="ti-stethoscope" data={emr.encounters}
-                render={(r, i) => <div key={i}>{row(r.type, [r.provider, r.start && fmtTs(r.start)].filter(Boolean).join(' · '), r.status)}</div>} />
-              <Sec title="Vitals (recent)" icon="ti-heart-rate-monitor" data={emr.vitals}
-                render={(r, i) => <div key={i}>{row(r.name, r.at && fmtTs(r.at), r.value)}</div>} />
-              {/* Documents is NOT a `Sec` fed by emr.documents any more. On this
-                  instance OpenEMR returns nothing for a chart's documents (FHIR
-                  total 0, no list route, read-by-id 500s), so a section wired to
-                  that read shows an empty chart for a patient whose record is
-                  full. This list is assembled server-side from what the app
-                  holds, merged with whatever the EMR does return, and each row
-                  says where it can be read from. */}
-              <ChartDocuments docs={chart.chartDocuments || []} clientId={patient && patient.id} onRefresh={onChartChanged} />
+              <ChartSection title="Encounters" icon="ti-stethoscope" data={emr.encounters} linked={chart.linked}
+                render={(r, i) => chartRow(r.type, [r.provider, r.start && fmtTs(r.start)].filter(Boolean).join(' · '), r.status, i)} />
+              <ChartSection title="Vitals (recent)" icon="ti-heart-rate-monitor" data={emr.vitals} linked={chart.linked}
+                render={(r, i) => chartRow(r.name, r.at && fmtTs(r.at), r.value, i)} />
             </div>
           </div>
         </div>
@@ -821,6 +2024,30 @@
         <input className="inp" value={f.vitals[k]} onChange={e => set(`vitals.${k}`, e.target.value)} />
       </Field>
     );
+    // ── Dictation (Scope F5), and the one option deliberately NOT taken ────
+    // The browser's Web Speech API is not wired and must not be. In Chrome its
+    // implementation streams the audio to Google's servers, which would put a
+    // clinician dictating an assessment about a named patient outside the BAA —
+    // a PHI disclosure with no agreement behind it, from a feature that looks
+    // free.
+    //
+    // What works today needs no code and no vendor at all: the DEVICE
+    // KEYBOARD's own microphone dictates into any ordinary textarea, and on iOS
+    // it is on-device for supported languages. So every narrative field stays a
+    // plain textarea — `speech` and `dictation` attributes left alone — and the
+    // form simply says so, once, rather than shipping a button that would send
+    // a patient's history to a third party.
+    //
+    // When Amazon Transcribe Medical is available inside the AWS boundary it
+    // slots in behind an IAM role with zero data retention confirmed, the same
+    // way §10.3 governs Bedrock. That is a configuration, not a rewrite.
+    const DictationHint = () => (
+      <p className="text-[11px] text-stone-400 mb-2">
+        <i className="ti ti-microphone mr-1" />
+        To dictate, use the microphone on your phone or tablet keyboard — it types straight into any box here.
+      </p>
+    );
+
     const TextArea = ({ path, label, rows, f, set }) => (
       <Field label={label}>
         <textarea className="inp" rows={rows || 2} value={path.split('.').reduce((o, k) => o[k], f)} onChange={e => set(path, e.target.value)} />
@@ -925,13 +2152,14 @@
                   <div className="flex flex-wrap gap-1.5">{pf.conditions.map((c, i) => <span key={i} className="chip bg-primary-50 text-primary">{c}</span>)}</div>
                 </Prefilled>
               )}
+              <DictationHint />
               <TextArea f={f} set={set} path="subjective" label="Subjective / history" rows={3} />
             </div>
           </div>
 
           <div className="card mb-4">
             <div className="card-h"><h2>Vitals</h2><span className="text-[10.5px] text-stone-500">BP required in both arms (§2C)</span></div>
-            <div className="p-4 grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="p-4 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
               <VitalInput f={f} set={set} k="bpRightSys" label="BP right — sys" /><VitalInput f={f} set={set} k="bpRightDia" label="BP right — dia" />
               <VitalInput f={f} set={set} k="bpLeftSys" label="BP left — sys" /><VitalInput f={f} set={set} k="bpLeftDia" label="BP left — dia" />
               <VitalInput f={f} set={set} k="hr" label="Heart rate" /><VitalInput f={f} set={set} k="temp" label="Temp (°F)" /><VitalInput f={f} set={set} k="rr" label="Resp rate" /><VitalInput f={f} set={set} k="spo2" label="SpO₂ (%)" />
@@ -968,7 +2196,7 @@
 
           <div className="card mb-4">
             <div className="card-h"><h2>Pain assessment (PAINAD-style)</h2><span className="text-[10.5px] text-stone-500">0–2 each</span></div>
-            <div className="p-4 grid grid-cols-2 md:grid-cols-3 gap-3">
+            <div className="p-4 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
               {painFields.map(k => (
                 <Field key={k} label={k.replace(/([A-Z])/g, ' $1')}>
                   <select className="inp" value={f.painAssessment[k]} onChange={e => set(`painAssessment.${k}`, e.target.value)}>
@@ -991,7 +2219,7 @@
                   <div className="flex flex-wrap gap-1.5">{pf.homeSafetyFlags.map((c, i) => <span key={i} className="chip bg-amber-50 text-amber-800">{c}</span>)}</div>
                 </Prefilled>
               )}
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mt-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 mt-3">
                 {hazardFields.map(([k, label]) => (
                   <Field key={k} label={label}>
                     <select className="inp" value={f.homeHazards[k]} onChange={e => set(`homeHazards.${k}`, e.target.value)}>
@@ -1284,7 +2512,7 @@
                   <input className="inp" disabled value={(providersData && (providersData.providers || []).filter(p => p.id === f.providerId).map(p => p.name)[0]) || `Provider ${f.providerId || '—'}`} />
                 )}
               </Field>
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
                 <Field label="Date"><input className="inp" type="date" value={f.date} onChange={e => setF({ ...f, date: e.target.value })} /></Field>
                 <Field label="Start"><input className="inp" type="time" value={f.startTime} onChange={e => setF({ ...f, startTime: e.target.value })} /></Field>
                 <Field label="Duration">
@@ -1856,7 +3084,7 @@
               <Field label="Subjective"><textarea className="inp" rows={2} value={f.subjective} onChange={e => setF({ ...f, subjective: e.target.value })} /></Field>
               <div>
                 <span className="lblu block mb-1">Vitals (optional — preserved verbatim in the note)</span>
-                <div className="grid grid-cols-3 md:grid-cols-5 gap-2">
+                <div className="grid grid-cols-1 sm:grid-cols-3 md:grid-cols-5 gap-2">
                   <FollowUpVital f={f} setV={setV} k="bpSys" label="BP sys" /><FollowUpVital f={f} setV={setV} k="bpDia" label="BP dia" /><FollowUpVital f={f} setV={setV} k="hr" label="HR" /><FollowUpVital f={f} setV={setV} k="temp" label="Temp °F" /><FollowUpVital f={f} setV={setV} k="rr" label="RR" />
                   <FollowUpVital f={f} setV={setV} k="spo2" label="SpO₂ %" /><FollowUpVital f={f} setV={setV} k="weight" label="Wt lb" /><FollowUpVital f={f} setV={setV} k="height" label="Ht in" /><FollowUpVital f={f} setV={setV} k="pain" label="Pain /10" />
                 </div>
@@ -1906,16 +3134,16 @@
               Georgia's scope rules differ by credential, so nothing is inferred — an admin sets it on your user record.
             </p>
           )}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2">
             <Field label="Type"><select className="inp" value={f.kind} onChange={e => setF({ ...f, kind: e.target.value })}><option value="new">New Rx</option><option value="refill">Refill</option></select></Field>
-            <Field label="Drug" className="col-span-2"><input className="inp" value={f.drug} onChange={e => setF({ ...f, drug: e.target.value })} /></Field>
+            <Field label="Drug" className="sm:col-span-2"><input className="inp" value={f.drug} onChange={e => setF({ ...f, drug: e.target.value })} /></Field>
             <Field label="Dose"><input className="inp" placeholder="500 mg" value={f.dose} onChange={e => setF({ ...f, dose: e.target.value })} /></Field>
             <Field label="Route"><select className="inp" value={f.route} onChange={e => setF({ ...f, route: e.target.value })}>{(routes || ['oral']).map(r => <option key={r} value={r}>{r}</option>)}</select></Field>
             <Field label="Frequency"><input className="inp" placeholder="BID" value={f.frequency} onChange={e => setF({ ...f, frequency: e.target.value })} /></Field>
             <Field label="Quantity"><input className="inp" inputMode="numeric" value={f.quantity} onChange={e => setF({ ...f, quantity: e.target.value.replace(/\D/g, '') })} /></Field>
             <Field label="Refills"><input className="inp" inputMode="numeric" value={f.refills} onChange={e => setF({ ...f, refills: e.target.value.replace(/\D/g, '') })} /></Field>
             <Field label="Date"><input className="inp" type="date" value={f.date} onChange={e => setF({ ...f, date: e.target.value })} /></Field>
-            <Field label="Instructions" className="col-span-2 md:col-span-3"><input className="inp" value={f.instructions} onChange={e => setF({ ...f, instructions: e.target.value })} /></Field>
+            <Field label="Instructions" className="sm:col-span-2 md:col-span-3"><input className="inp" value={f.instructions} onChange={e => setF({ ...f, instructions: e.target.value })} /></Field>
             <Field label="Schedule">
               <select className="inp" value={f.schedule} onChange={e => setF({ ...f, schedule: e.target.value })}>
                 <option value="">Choose…</option>
@@ -1966,7 +3194,7 @@
 
     const ReferralFields = ({ f, setF }) => (
       <React.Fragment>
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           <Field label="Specialty"><input className="inp" value={f.specialty || ''} onChange={e => setF({ ...f, specialty: e.target.value })} /></Field>
           <Field label="Urgency"><select className="inp" value={f.urgency || 'routine'} onChange={e => setF({ ...f, urgency: e.target.value })}>{['routine', 'urgent', 'stat'].map(u => <option key={u} value={u}>{u}</option>)}</select></Field>
           <Field label="Receiving practice"><input className="inp" value={f.receivingPractice || ''} onChange={e => setF({ ...f, receivingPractice: e.target.value })} /></Field>
@@ -1997,13 +3225,13 @@
           six elements is missing.
         </p>
         <Field label="Item — narrative, HCPCS, or brand and model"><input className="inp" value={f.itemDescription || ''} onChange={e => setF({ ...f, itemDescription: e.target.value })} /></Field>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2">
           <Field label="HCPCS (optional)"><input className="inp" value={f.hcpcsCode || ''} onChange={e => setF({ ...f, hcpcsCode: e.target.value.toUpperCase() })} /></Field>
           <Field label="Quantity"><input className="inp" inputMode="numeric" value={f.quantity || ''} onChange={e => setF({ ...f, quantity: e.target.value.replace(/\D/g, '') })} /></Field>
           <Field label="Length of need"><input className="inp" placeholder="99 months" value={f.lengthOfNeed || ''} onChange={e => setF({ ...f, lengthOfNeed: e.target.value })} /></Field>
           <Field label="Order date"><input className="inp" type="date" value={f.orderDate || todayYmd()} onChange={e => setF({ ...f, orderDate: e.target.value })} /></Field>
         </div>
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           <Field label="Supplier"><input className="inp" value={f.supplierName || ''} onChange={e => setF({ ...f, supplierName: e.target.value })} /></Field>
           <Field label="Supplier fax">
             <input className="inp" inputMode="tel" value={f.supplierFax || ''} onChange={e => setF({ ...f, supplierFax: e.target.value })} />
@@ -2070,7 +3298,7 @@
               {picked && <p className="text-[11px] text-stone-500 mt-1">Ordering clinician of record: {picked.authorizingProvider && picked.authorizingProvider.name}. Expires {String(picked.expiresAt || '').slice(0, 10)}.</p>}
             </Field>
           )}
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             <Field label="Order type"><select className="inp" value={f.orderType} onChange={e => setF({ ...f, orderType: e.target.value })}>{typeOptions.map(t => <option key={t} value={t}>{t}</option>)}</select></Field>
             <Field label="Priority"><select className="inp" value={f.priority} onChange={e => setF({ ...f, priority: e.target.value })}>{(priorities || []).map(t => <option key={t} value={t}>{t}</option>)}</select></Field>
           </div>
@@ -2163,7 +3391,7 @@
               <p className="text-[11px] text-stone-600">
                 Open the requisition, fax it from Doximity, then record it here. This does not send anything — it records that you did.
               </p>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <Field label="Channel">
                   <select className="inp" value={send.channel} onChange={e => setSend({ ...send, channel: e.target.value })}>
                     {(channels || []).map(c => <option key={c} value={c}>{(channelLabels && channelLabels[c]) || c}</option>)}
@@ -2201,7 +3429,7 @@
               <Field label="Document (PDF, JPEG or PNG)">
                 <input className="inp" type="file" accept="application/pdf,image/jpeg,image/png" onChange={e => setRes({ ...res, file: e.target.files[0] || null })} />
               </Field>
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
                 <Field label="Interpretation">
                   <select className="inp" value={res.interpretation} onChange={e => setRes({ ...res, interpretation: e.target.value })}>
                     {(interpretations || ['normal', 'abnormal', 'critical']).map(i => <option key={i} value={i}>{i}</option>)}
@@ -2827,7 +4055,10 @@
       const [linkCandidates, setLinkCandidates] = useState([]);
       const [err, setErr] = useState('');
       const [listOpen, setListOpen] = useState(true);
-      const [view, setView] = useState('charts'); // 'charts' | 'schedule' (4.2) | 'queue' (4.4) | 'inbox' (4.9) | 'results' | 'overdue' (4.10)
+      // Session 4.12 I1 — MY DAY is the default route after sign-in. The
+      // workspace used to open on a patient list, which is not how a house-call
+      // day starts.
+      const [view, setView] = useState('myday'); // 'myday' (4.12) | 'charts' | 'schedule' (4.2) | 'queue' (4.4) | 'inbox' (4.9) | 'results' | 'overdue' (4.10)
       const [hpApptEid, setHpApptEid] = useState(null); // H&P opened from an appointment
       const [encTarget, setEncTarget] = useState(null); // encounter to open on the Encounters tab (4.4)
 
@@ -2893,10 +4124,28 @@
         clinicalRole: (emrStatus && emrStatus.access && emrStatus.access.clinicalRole) || null,
         clinicalRoleLabel: (emrStatus && emrStatus.access && emrStatus.access.clinicalRoleLabel) || null
       };
+      // Session 4.12 Scope D — every one of these is a PLACE in the record.
+      // No workflow is a tab: the H&P opens as a visit from the banner's Start
+      // visit action, and med reconciliation is a section under MEDICATIONS
+      // rather than a sibling of it. Enrollment left for Admin in PR #116.
+      //
+      // Appointments is kept as a place alongside the brief's twelve because it
+      // is the per-patient calendar — removing a working surface is not what a
+      // reorganisation is for.
       const tabs = [
-        ['summary', 'Chart'], ['appts', 'Appointments'], ['encounters', 'Encounters'],
-        ...(canWrite ? [['visit', 'Initial Visit (H&P)']] : []),
-        ['medrec', 'Med Rec'], ['careplan', 'Care Plan'],
+        ['summary', 'Overview'],
+        ['timeline', 'Timeline'],
+        ['encounters', 'Encounters'],
+        ['appts', 'Appointments'],
+        ['problems', 'Problems'],
+        ['medications', 'Medications'],
+        ['allergies', 'Allergies'],
+        ['orders', 'Orders'],
+        ['results', 'Results'],
+        ['imaging', 'Imaging'],
+        ['referrals', 'Referrals'],
+        ['documents', 'Documents'],
+        ['careplan', 'Care Plan'],
         ['messages', 'Messages']
       ];
       return (
@@ -2945,6 +4194,8 @@
                 <button className="lg:hidden btn ghost !px-2.5 !py-1.5" onClick={() => setListOpen(true)}><i className="ti ti-users" /></button>
                 <div className="serif text-lg text-primary font-semibold">{VIEW_TITLES[view] || 'Patient Chart'}</div>
                 <div className="flex rounded-lg border border-stone-200 overflow-hidden ml-1">
+                  <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'myday' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
+                    onClick={() => { setView('myday'); setListOpen(false); }}><i className="ti ti-sun mr-1" />My Day</button>
                   <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'charts' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
                     onClick={() => setView('charts')}><i className="ti ti-folder-open mr-1" />Charts</button>
                   <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'schedule' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
@@ -2963,6 +4214,10 @@
                     onClick={() => { setView('results'); setListOpen(false); }}><i className="ti ti-flask mr-1" />Results</button>
                   <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'overdue' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
                     onClick={() => { setView('overdue'); setListOpen(false); }}><i className="ti ti-clock-exclamation mr-1" />Overdue</button>
+                  <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'queues' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
+                    onClick={() => { setView('queues'); setListOpen(false); }}><i className="ti ti-checkbox mr-1" />Tasks</button>
+                  <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'analytics' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
+                    onClick={() => { setView('analytics'); setListOpen(false); }}><i className="ti ti-chart-bar mr-1" />Analytics</button>
                 </div>
               </div>
               <div className="flex items-center gap-2">
@@ -3066,6 +4321,15 @@
               </div>
             )}
             {err && <p className="text-red-600 text-sm px-7 pt-3">{err}</p>}
+            {view === 'myday' && (
+              <MyDayView user={user} onOpenChart={(clientId) => openChartById(clientId)} />
+            )}
+            {view === 'queues' && (
+              <WorkQueuesView
+                onOpenChart={(clientId) => openChartById(clientId)}
+                onOpenEncounter={(clientId, euuid) => openChartById(clientId, { tab: 'encounters', encounterUuid: euuid })} />
+            )}
+            {view === 'analytics' && <AnalyticsView />}
             {view === 'queue' && (
               <CodingQueueView onOpenEncounter={(clientId, euuid) => openChartById(clientId, { tab: 'encounters', encounterUuid: euuid })} />
             )}
@@ -3084,23 +4348,32 @@
             {view === 'charts' && !sel && <div className="p-10 text-stone-400 text-sm">Select a patient to open their chart, or switch to Schedule for the calendar.</div>}
             {view === 'charts' && sel && (
               <div>
-                <div className="bg-white border-b border-stone-200 px-4 lg:px-7 pt-4">
-                  <div className="flex items-center gap-4 pb-3">
-                    <div className="w-12 h-12 rounded-full bg-accent text-primary flex items-center justify-center font-bold border border-stone-200">{initials(sel.name)}</div>
-                    <div>
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="serif text-xl text-primary font-semibold">{sel.name}</span>
-                        <span className="chip bg-primary text-white">{sel.serviceLine}</span>
-                        {sel.activatedAt && <span className="chip bg-emerald-50 text-emerald-700">ACTIVATED</span>}
-                      </div>
-                      <div className="text-xs text-stone-500 flex gap-3 flex-wrap mt-0.5">
-                        <span>DOB <b>{chart && chart.demographics.dob ? chart.demographics.dob : '—'}</b></span>
-                        <span>Track <b>{(chart && chart.demographics.careTierLabel) || sel.careTierLabel || sel.careTier || '—'}</b></span>
-                        <span>OpenEMR <b>{(chart && chart.demographics.openEmrPatientId) ? `${chart.demographics.openEmrPatientId.slice(0, 8)}…` : 'not linked'}</b></span>
-                        {chart && chart.demographics.payerType && <span>Payer <b>{chart.demographics.payerType}</b></span>}
-                      </div>
-                    </div>
+                {/* Session 4.12 — the banner, above the tab bar and therefore
+                    present on EVERY tab. It replaced a header that showed DOB,
+                    Track and a truncated OpenEMR uuid and no age, MRN, MBI or
+                    allergies: the five things read first at a front door. */}
+                <PatientBanner
+                  banner={chart ? chart.banner : null}
+                  patient={sel}
+                  homeVisitFields={(emrStatus && emrStatus.homeVisitFields) || []}
+                  visitDraft={chart ? chart.visitDraft : null}
+                  onStartVisit={canWrite ? () => setTab('visit') : null}
+                  onHomeVisitSaved={refreshChart} />
+                {/* The H&P is NOT a tab (Scope D1) — it opens as a visit from
+                    the banner. So when one is open nothing on the tab bar is
+                    highlighted, and a clinician needs to be told where they are
+                    and how to get back. */}
+                {tab === 'visit' && (
+                  <div className="bg-accent/20 border-b border-accent px-4 lg:px-7 py-2 flex items-center justify-between gap-2 flex-wrap">
+                    <span className="text-[12.5px] text-primary font-semibold">
+                      <i className="ti ti-writing mr-1" />Documenting a visit
+                    </span>
+                    <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" onClick={() => setTab('summary')}>
+                      <i className="ti ti-arrow-left" />Back to the chart
+                    </button>
                   </div>
+                )}
+                <div className="bg-white border-b border-stone-200 px-4 lg:px-7">
                   <div className="flex overflow-x-auto -mb-px">
                     {tabs.map(([k, label]) => (
                       <div key={k} className={`tabbtn ${tab === k ? 'on' : ''}`} onClick={() => setTab(k)}>{label}</div>
@@ -3115,7 +4388,15 @@
                     onEncounterCreated={(euuid) => { setEncTarget(euuid); setTab('encounters'); }} />}
                   {tab === 'encounters' && <EncountersTab patient={sel} chart={chart} initialEuuid={encTarget} onOpened={() => setEncTarget(null)} />}
                   {tab === 'visit' && (chart ? <HpTab patient={sel} chart={chart} appointmentEid={hpApptEid} onDone={() => { setHpApptEid(null); refreshChart(); loadPatients(); }} onGoToEncounter={(euuid) => { setEncTarget(euuid); setTab('encounters'); }} /> : <p className="text-sm text-stone-500">Loading…</p>)}
-                  {tab === 'medrec' && <MedRecTab patient={sel} />}
+                  {tab === 'timeline' && <TimelineTab patient={sel} />}
+                  {tab === 'problems' && <ProblemsTab chart={chart} />}
+                  {tab === 'medications' && <MedicationsTab chart={chart} patient={sel} />}
+                  {tab === 'allergies' && <AllergiesTab chart={chart} />}
+                  {tab === 'orders' && <OrdersTab patient={sel} />}
+                  {tab === 'results' && <ResultsTab patient={sel} />}
+                  {tab === 'imaging' && <ImagingTab patient={sel} />}
+                  {tab === 'referrals' && <ReferralsTab patient={sel} />}
+                  {tab === 'documents' && <DocumentsTab chart={chart} patient={sel} onChartChanged={() => { loadPatients(); refreshChart(); }} />}
                   {tab === 'careplan' && <CarePlanTab patient={sel} onSaved={loadPatients} />}
                   {tab === 'messages' && <MessagesTab patient={sel} />}
                 </div>

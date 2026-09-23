@@ -321,6 +321,10 @@ const buildChartDocumentIndex = (input) => {
   //    of anything and showing it in a chart would mislead.
   for (const u of clientUploads) {
     if (!u || u.clientId !== client.id || u.status === 'rejected') continue;
+    // This is also what makes a `readable` flag unnecessary on the row below: a
+    // rejected document never reaches the chart at all, so nothing downstream
+    // can offer to read one. A field that is always true reads like a guard and
+    // is not one.
     rows.push({
       id: `upload:${u.id}`,
       title: u.fileName || 'Client document',
@@ -330,6 +334,19 @@ const buildChartDocumentIndex = (input) => {
       source: CHART_DOC_SOURCE.APP,
       openable: true,
       inChart: false,
+      // Only an UPLOAD row can be read into proposals: it is the one kind that
+      // corresponds to a stored file the extractor can fetch. A consent, a care
+      // plan and a record release are documents this app GENERATED from the
+      // record, so reading them back would propose the record to itself.
+      //
+      // `uploadId` and `kind` are carried so the chart can offer the control
+      // without re-deriving either from the composite id — parsing an id back
+      // apart in a page is how a prefix change becomes a silent breakage.
+      uploadId: u.id,
+      kind: u.kind || null,
+      // WHO FILED IT. A reviewer weighs a document the client sent differently
+      // from one the office scanned in, and the read should say which it is.
+      filedBy: u.source === 'staff' ? 'staff' : 'client',
       note: u.status === 'accepted' ? null : 'Not yet reviewed'
     });
   }
@@ -1728,7 +1745,330 @@ const patientSearchParams = (key) => {
   return params;
 };
 
+
+// ============================================================
+// Session 4.12 — the persistent patient banner
+// ============================================================
+// Owner-directed after a live home visit, 2026-09-23: name, age, DOB, MRN, MBI
+// and allergies were buried inside a chart tab, so the first thing a clinician
+// needs at a front door was the one thing the screen never showed. The banner
+// is never a tab — it renders above every chart tab and every encounter step.
+//
+// THE DERIVATION LIVES HERE, NOT IN THE PAGE, for the reason every other rule
+// in this repo does: a screen that decides what "no known allergies" means is a
+// screen that drifts from the record. This function is pure — `today` is passed
+// in rather than read, so age is computed against the PRACTICE clock (Georgia)
+// and the tests are deterministic.
+
+// An allergy strip has THREE states and collapsing them is the whole danger.
+//   listed       — we read the chart and there are allergies; show them.
+//   none_known   — we read the chart and it is empty; say so IN WORDS.
+//   unavailable  — we could not read. Say THAT, and never "no known allergies".
+// C2 is written as "the absence of the strip must never be what communicates
+// 'none on file'". The inverse is worse and is the one a bug produces: a strip
+// reading "No known allergies" on a patient whose allergy list simply failed to
+// load tells a clinician something untrue at the moment it matters most.
+const ALLERGY_STATE = Object.freeze({
+  LISTED: 'listed',
+  NONE_KNOWN: 'none_known',
+  UNAVAILABLE: 'unavailable'
+});
+
+// An allergy that has been resolved or entered in error is not an active
+// allergy and does not belong on a strip a clinician reads in two seconds.
+const INACTIVE_ALLERGY_STATUSES = ['inactive', 'resolved', 'entered-in-error', 'refuted'];
+
+const isActiveAllergy = (row) => {
+  if (!row || typeof row !== 'object') return false;
+  const status = String(row.status || row.clinicalStatus || '').trim().toLowerCase();
+  if (!status) return true; // no status recorded is not evidence of resolution
+  return !INACTIVE_ALLERGY_STATUSES.includes(status);
+};
+
+const buildAllergyStrip = ({ linked, emrAllergies, reportedAllergies }) => {
+  // Not linked to a chart at all: the EMR has nothing to say, but the client's
+  // own intake may. Report intake as intake — it is what the family told us,
+  // not a reconciled allergy list, and the strip says which it is.
+  const reported = String(reportedAllergies == null ? '' : reportedAllergies).trim();
+  if (!linked || !emrAllergies || emrAllergies.ok !== true) {
+    if (reported) {
+      return {
+        state: ALLERGY_STATE.LISTED, source: 'intake', rows: [reported],
+        reason: !linked
+          ? 'Not linked to an OpenEMR chart — this is what the client reported at intake, not a reconciled allergy list.'
+          : 'The chart\'s allergy list could not be read, so this is what the client reported at intake.'
+      };
+    }
+    return {
+      state: ALLERGY_STATE.UNAVAILABLE, source: null, rows: [],
+      reason: !linked
+        ? 'Not linked to an OpenEMR chart, so no allergy list could be read.'
+        : ((emrAllergies && emrAllergies.error) || 'The chart\'s allergy list could not be read.')
+    };
+  }
+  const rows = (emrAllergies.rows || []).filter(isActiveAllergy)
+    .map(r => String((r && (r.allergen || r.name || r.description)) || '').trim())
+    .filter(Boolean);
+  if (rows.length) return { state: ALLERGY_STATE.LISTED, source: 'chart', rows, reason: null };
+  return { state: ALLERGY_STATE.NONE_KNOWN, source: 'chart', rows: [], reason: null };
+};
+
+// Age in whole years on `today`, both as YYYY-MM-DD in the practice timezone.
+// Never `new Date()` here: for four hours of every evening UTC is already
+// tomorrow, which would age a patient a day early on their birthday.
+const isCalendarDate = (v) => {
+  // The shape AND the ranges. `1948-13-99` passes a YYYY-MM-DD regex and then
+  // reads as "the birthday has not happened yet", which turns garbage into a
+  // plausible age — and an age on a banner is read at a glance and never
+  // questioned. A wrong one is worse than none.
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(v || ''))) return false;
+  const [y, m, d] = String(v).split('-').map(Number);
+  if (m < 1 || m > 12 || d < 1 || d > 31 || y < 1800) return false;
+  // Round-tripping through Date catches 31 February and the like. Built in UTC
+  // deliberately: this is a calendar question with no zone in it.
+  const probe = new Date(Date.UTC(y, m - 1, d));
+  return probe.getUTCFullYear() === y && probe.getUTCMonth() === m - 1 && probe.getUTCDate() === d;
+};
+
+const ageOn = (dob, today) => {
+  // No slicing: `'1948-13-99x'` must be refused, not trimmed into something
+  // that parses.
+  const d = String(dob == null ? '' : dob).trim();
+  const t = String(today == null ? '' : today).trim();
+  if (!isCalendarDate(d) || !isCalendarDate(t)) return null;
+  const [by, bm, bd] = d.split('-').map(Number);
+  const [ty, tm, td] = t.split('-').map(Number);
+  let age = ty - by;
+  if (tm < bm || (tm === bm && td < bd)) age -= 1;
+  return age >= 0 && age < 150 ? age : null;
+};
+
+// The most recent encounter date on the chart. Used by the banner and the
+// pre-visit packet. Rows with no usable date are skipped rather than sorted to
+// the top as an empty string, which is what makes "last visit: —" read as a
+// data gap instead of as today.
+//
+// It lives ABOVE the standing-facts region deliberately: this IS an
+// encounter-derived value, and the guard on that region asserts nothing
+// inside it reads an encounter at all.
+const lastVisitDateOf = (encounters) => {
+  const dates = (encounters || [])
+    .map(e => String((e && (e.date || e.start || e.period_start)) || '').slice(0, 10))
+    .filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d))
+    .sort();
+  return dates.length ? dates[dates.length - 1] : null;
+};
+
+
+// ============================================================
+// Session 4.12 Scope D5 — the chart TIMELINE
+// ============================================================
+// One chronological thread of everything that happened to this patient. For
+// somebody seen repeatedly at home this is how a clinician reconstructs the
+// interval since the last visit — which is otherwise reassembled by opening
+// five tabs and holding the dates in your head.
+//
+// PURE. Every source is passed in already read; this decides only what a row
+// looks like and what order the rows go in.
+
+const TIMELINE_KINDS = Object.freeze([
+  'visit', 'message', 'medication', 'order', 'result', 'referral', 'document', 'hospitalization'
+]);
+
+const TIMELINE_ICONS = Object.freeze({
+  visit: 'home', message: 'message', medication: 'pill', order: 'flask',
+  result: 'report-medical', referral: 'share', document: 'file', hospitalization: 'building-hospital'
+});
+
+// A row with no usable date cannot be placed on a timeline. It is COUNTED and
+// reported rather than dropped silently or sorted to the top as an empty
+// string — "there is nothing here" and "we could not place four things" are
+// different facts, and only one of them is a data gap worth chasing.
+const timelineDate = (v) => {
+  const d = String(v == null ? '' : v).slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : null;
+};
+
+const buildTimeline = ({
+  encounters, appointments, messages, prescriptions, orders, results, documents, kinds
+}) => {
+  const rows = [];
+  let undated = 0;
+  const push = (kind, date, title, detail, id) => {
+    const d = timelineDate(date);
+    if (!d) { undated += 1; return; }
+    rows.push({ kind, date: d, title, detail: detail || null, id: id || null, icon: TIMELINE_ICONS[kind] });
+  };
+
+  (encounters || []).forEach(e => push('visit', e.date || e.start,
+    e.type || 'Visit', [e.provider, e.status].filter(Boolean).join(' · '), e.id));
+  // An appointment that produced an encounter is already on the thread as a
+  // visit. Adding it again would show every documented visit twice — the trap
+  // the portal's "upcoming and recent" merge already paid for.
+  (appointments || []).filter(a => a && !a.encounterUuid).forEach(a => push('visit', a.date,
+    a.title || 'Appointment', [a.state, a.location].filter(Boolean).join(' · '), a.eid));
+  (messages || []).forEach(m => push('message', m.date || m.createdAt,
+    m.subject || 'Message', m.channel || null, m.id));
+  (prescriptions || []).forEach(rx => push('medication', rx.date || rx.createdAt,
+    rx.drug || rx.name || 'Medication', [rx.dose, rx.kind].filter(Boolean).join(' · '), rx.id));
+  (orders || []).forEach(o => {
+    const kind = o.orderType === 'referral' ? 'referral' : 'order';
+    push(kind, o.createdAt || o.orderedAt,
+      kind === 'referral' ? `${o.specialty || 'Referral'} referral` : ((o.tests && o.tests[0]) || o.orderType || 'Order'),
+      o.status || null, o.id);
+  });
+  (results || []).forEach(r => push('result', r.receivedAt || r.createdAt,
+    r.label || r.documentName || 'Result', r.interpretation || null, r.id));
+  (documents || []).forEach(d => push('document', d.date,
+    d.description || 'Document', d.source || null, d.id));
+
+  const wanted = Array.isArray(kinds) && kinds.length
+    ? new Set(kinds.filter(k => TIMELINE_KINDS.includes(k)))
+    : null;
+  const filtered = wanted ? rows.filter(r => wanted.has(r.kind)) : rows;
+  // Newest first: on a timeline the question is almost always "what has
+  // happened since I last saw them", and that is read from the top.
+  filtered.sort((a, b) => b.date.localeCompare(a.date));
+  return { rows: filtered, undated, kinds: TIMELINE_KINDS };
+};
+
+// ---- Home-visit standing facts (Scope F4) --------------------------------
+// "Use the side entrance." "Daughter Angela will be present." These are facts
+// about the PATIENT, not about one visit, and they live on the patient record
+// for exactly that reason: re-entering the side entrance every visit is how it
+// stops being entered at all. Surfaced in three places — the My Day row, the
+// banner, and the pre-visit packet — all reading this one field. The encounter
+// records only what DIFFERED today.
+const HOME_VISIT_FIELDS = Object.freeze([
+  ['accessInstructions', 'Access instructions'],
+  ['caregiverPresent', 'Who will be there'],
+  ['patientPreferences', 'Patient preferences'],
+  ['safetyNotes', 'Safety / environment']
+]);
+const HOME_VISIT_MAX = 600;
+
+const sanitizeHomeVisitNotes = (input) => {
+  const src = input && typeof input === 'object' ? input : {};
+  const out = {};
+  HOME_VISIT_FIELDS.forEach(([k]) => {
+    const v = String(src[k] == null ? '' : src[k]).trim().slice(0, HOME_VISIT_MAX);
+    if (v) out[k] = v;
+  });
+  return out;
+};
+
+const homeVisitNotesOf = (client) => sanitizeHomeVisitNotes(client && client.homeVisit);
+
+const hasHomeVisitNotes = (notes) => !!notes && HOME_VISIT_FIELDS.some(([k]) => !!notes[k]);
+
+// ---- Insurance, as a clinician needs to read it at a front door -----------
+// Not the whole payer block: the primary, the secondary, and the two flags that
+// change what can be ordered — a Medicare Advantage plan (prior authorization)
+// and QMB status (the patient may not be billed cost-share at all).
+const summarizePayerForBanner = (client) => {
+  const intake = (client && client.intake) || {};
+  const payer = (client && client.payer) || {};
+  const medicare = intake.medicare || {};
+  const medicaid = intake.medicaid || {};
+  const commercial = intake.commercial || {};
+  const types = Array.isArray(intake.insuranceTypes) ? intake.insuranceTypes : [];
+  const label = (name, id) => {
+    const n = String(name || '').trim();
+    const i = String(id || '').trim();
+    if (!n && !i) return null;
+    return i ? `${n || 'Coverage'} · ${i}` : n;
+  };
+  const candidates = [
+    medicare.id || medicare.type ? label(medicare.advantagePlan || medicare.type || 'Medicare', medicare.advMemberId || medicare.id) : null,
+    medicaid.memberId || medicaid.plan ? label(medicaid.plan || 'Medicaid', medicaid.memberId) : null,
+    commercial.carrier || commercial.memberId ? label(commercial.carrier || commercial.planName, commercial.memberId) : null
+  ].filter(Boolean);
+  return {
+    primary: candidates[0] || payer.summary || payer.type || null,
+    secondary: candidates[1] || null,
+    medicareAdvantage: !!String(medicare.advantagePlan || '').trim(),
+    // QMB is not asked as its own question, so it is reported only when it is
+    // actually recorded. Inferring it from "has Medicare and Medicaid" would
+    // tell a clinician the patient cannot be billed when we do not know that.
+    qmb: payer.qmb === true || intake.qmb === true,
+    types
+  };
+};
+
+// `careTierLabel` is PASSED IN, not derived: the label lives in server.js and
+// this module is pure. Reaching for it here compiles and then throws a
+// ReferenceError the first time a chart is opened.
+const buildPatientBanner = ({ client, linked, emrAllergies, facility, lastVisitAt, today, careTierLabel }) => {
+  const c = client || {};
+  const intake = c.intake || {};
+  const medicare = intake.medicare || {};
+  const advance = intake.advanceDirective || {};
+  const team = intake.medicalTeam || {};
+  const contact = intake.primaryContact || {};
+  const dob = intake.dob || c.dob || null;
+  return {
+    id: c.id || null,
+    name: c.name || null,
+    preferredName: c.preferredName || intake.preferredName || null,
+    dob,
+    age: ageOn(dob, today),
+    sex: intake.gender || null,
+    // The OpenEMR record number. We hold the patient's uuid; the numeric record
+    // number is resolved by the caller where the EMR is reachable and is null
+    // rather than invented when it is not — a made-up MRN is worse than none.
+    mrn: c.openEmrRecordNumber || null,
+    openEmrPatientId: c.openEmrPatientId || null,
+    mbi: String(medicare.id || '').trim() || null,
+    codeStatus: String(advance.status || '').trim() || null,
+    allergies: buildAllergyStrip({
+      linked: linked !== false && !!c.openEmrPatientId,
+      emrAllergies,
+      reportedAllergies: c.allergies || intake.allergies || null
+    }),
+    phone: intake.phone || c.phone || null,
+    address: intake.address || null,
+    addressLine: intake.addressLine1 || null,
+    homeVisit: homeVisitNotesOf(c),
+    responsibleParty: {
+      name: String(contact.name || '').trim() || null,
+      relationship: String(contact.relationship || '').trim() || null,
+      phone: String(contact.phone || '').trim() || null,
+      authority: String(intake.decisionAuthority || '').trim() || null
+    },
+    pcp: {
+      name: String(team.pcpName || '').trim() || null,
+      practice: String(team.pcpPractice || '').trim() || null,
+      phone: String(team.pcpPhone || '').trim() || null
+    },
+    insurance: summarizePayerForBanner(c),
+    facility: facility
+      ? { id: facility.facilityId || null, name: facility.facilityName || null,
+        posCode: facility.posCode || null, warning: facility.warning || null }
+      : null,
+    lastVisitAt: lastVisitAt || null,
+    serviceLine: c.serviceLine || null,
+    careTierLabel: careTierLabel || null,
+    activatedAt: c.activatedAt || null
+  };
+};
+
 module.exports = {
+  // Session 4.12 — the persistent patient banner and the home-visit facts
+  ALLERGY_STATE,
+  buildAllergyStrip,
+  isActiveAllergy,
+  ageOn,
+  isCalendarDate,
+  HOME_VISIT_FIELDS,
+  sanitizeHomeVisitNotes,
+  homeVisitNotesOf,
+  hasHomeVisitNotes,
+  summarizePayerForBanner,
+  buildPatientBanner,
+  TIMELINE_KINDS,
+  buildTimeline,
+  timelineDate,
+  lastVisitDateOf,
   CARE_PLAN_FIELDS,
   buildCarePlanVersion,
   CLINICAL_ENROLLMENT_STEPS,
