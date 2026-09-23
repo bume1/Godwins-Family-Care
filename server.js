@@ -12032,6 +12032,91 @@ app.put('/api/clinical/patients/:clientId/facility', authenticateToken, requireA
   }
 });
 
+// ── The rest of the record (Session 4.12 Scope J) ─────────────────────────
+// Nine FHIR resources this app had never asked OpenEMR for. Coverage,
+// immunizations, the care team OpenEMR believes in, related persons, goals,
+// devices, media, questionnaire responses and procedures — every one of them
+// something a clinician might reasonably expect to see in a chart and could
+// not, because nothing read it.
+//
+// EACH SECTION SAYS WHY IT IS EMPTY, and that is the whole value of this
+// route. Three different things produce an empty list and they have three
+// different fixes:
+//   403  the org-level ACL — an admin widens the group (the Phase 8.6 class)
+//   404  8.4 does not route this resource at all — nothing to fix here
+//   200  with no rows: the patient genuinely has none
+// Rendering all three as a blank panel is how "the read is broken" and "there
+// is nothing here" become indistinguishable, which is the mistake the ICD-10
+// correction turned into a house rule: an empty result is not a diagnosis.
+//
+// NONE OF THESE HAS BEEN RUN AGAINST A LIVE INSTANCE, and the catalog says so
+// in writing (docs/OPENEMR_COVERAGE.md, status `wired_unproven`). The screen
+// says so too, rather than letting an empty section read as a clean bill.
+const EXTENDED_READS = Object.freeze([
+  { key: 'coverage', label: 'Insurance on file in OpenEMR', call: 'getCoverage' },
+  { key: 'immunizations', label: 'Immunizations', call: 'getImmunizations' },
+  { key: 'careTeam', label: "OpenEMR's care team", call: 'getCareTeams' },
+  { key: 'relatedPersons', label: 'Related persons', call: 'getRelatedPersons' },
+  { key: 'goals', label: 'Goals', call: 'getGoals' },
+  { key: 'devices', label: 'Devices', call: 'getDevices' },
+  { key: 'media', label: 'Images and media', call: 'getMedia' },
+  { key: 'questionnaires', label: 'Questionnaire responses', call: 'getQuestionnaireResponses' },
+  { key: 'procedures', label: 'Procedures', call: 'getProcedures' }
+]);
+
+// The sentence a clinician reads. It names the LAYER, never "unavailable" —
+// the failure the Drive read taught this repo, where one message covered five
+// unrelated causes and pointed the investigation at the innocent one.
+const describeEmrReadFailure = (e) => {
+  const status = e && e.status;
+  if (status === 403) {
+    return { reason: 'ACL', message: "OpenEMR refused this read at the organization policy layer. An admin widens the gfc-app-api ACL group in OpenEMR — it is not a problem with this patient's record." };
+  }
+  if (status === 404) {
+    return { reason: 'NOT_ROUTED', message: 'OpenEMR 8.4 does not serve this resource over its API. Nothing here can fix that; it is an EMR-side gap.' };
+  }
+  if (status === 401) {
+    return { reason: 'AUTH', message: 'Your OpenEMR sign-in has expired — reconnect from the workspace.' };
+  }
+  return { reason: 'ERROR', message: `OpenEMR could not be read: ${String((e && e.message) || 'unknown error').slice(0, 200)}` };
+};
+
+app.get('/api/clinical/patients/:clientId/record-extras', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    if (!client.openEmrPatientId) {
+      return res.status(409).json({ error: 'Link this client to an OpenEMR patient first', code: 'EMR_NOT_LINKED' });
+    }
+    const emr = openemr.forActor(req.user);
+    // One failing section never takes the others with it: a 404 on Media says
+    // nothing about whether Immunization returns.
+    const sections = await Promise.all(EXTENDED_READS.map(async (r) => {
+      try {
+        const rows = await emr[r.call](client.openEmrPatientId);
+        return { key: r.key, label: r.label, rows: rows || [], failure: null };
+      } catch (e) {
+        return { key: r.key, label: r.label, rows: [], failure: describeEmrReadFailure(e) };
+      }
+    }));
+    await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_record_extras_read', 'client', client.id, {
+      patientId: client.openEmrPatientId,
+      // WHICH sections failed, never what any of them contained.
+      failed: sections.filter(s => s.failure).map(s => s.key)
+    });
+    res.json({
+      sections,
+      // Stated on the screen, not only in a document. An empty section here
+      // is not evidence that the patient has none of these.
+      unproven: true,
+      unprovenNote: 'These reads have not been run against a live OpenEMR yet. An empty section may mean the patient has none, or that OpenEMR does not serve this resource — each section says which it got.'
+    });
+  } catch (error) {
+    console.error('Record extras read error:', error);
+    res.status(502).json({ error: `The rest of the record could not be read: ${error.message}` });
+  }
+});
+
 // ── Encounter type (Session 4.12 Scope F1) ────────────────────────────────
 // WHAT KIND OF VISIT THIS PATIENT'S VISITS ARE, set by an ADMIN on the
 // enrollment record (owner, 2026-09-23) rather than chosen by a clinician at
