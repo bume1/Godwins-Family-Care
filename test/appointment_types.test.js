@@ -305,10 +305,10 @@ test('something declared NEW has to say why nothing existing covers it', () => {
   // Asserted NON-EMPTY first, and against known contents. A loop over an empty
   // list passes vacuously — the same trap, twice in one file.
   const unbuilt = A.unbuiltIntake();
-  assert.ok(unbuilt.length >= 10, `expected the screening instruments and visit documents, found ${unbuilt.length}`);
+  assert.ok(unbuilt.length >= 8, `expected the screening instruments, found ${unbuilt.length}`);
   const keys = unbuilt.map(u => u.key);
-  for (const expected of ['phq9', 'gad7', 'substance_use', 'hra', 'discharge_summary', 'records_received']) {
-    assert.ok(keys.includes(expected), `${expected} is genuinely missing and must appear in the unbuilt list`);
+  for (const expected of ['phq9', 'gad7', 'substance_use', 'hra']) {
+    assert.ok(keys.includes(expected), `${expected} is not satisfied yet and must appear`);
   }
   // It is DERIVED from the config, so a type that stops wanting one drops out.
   assert.deepEqual(unbuilt.find(u => u.key === 'gad7').types.sort(), ['bh_follow_up', 'bh_initial']);
@@ -377,11 +377,19 @@ test('a screening instrument is declared as OpenEMR’s, not as something to bui
     assert.ok(surfaced.includes(k), `${k} is an OpenEMR template — it must be surfaced, not rebuilt`);
     assert.ok(!building.includes(k), `${k} must NOT be on the build list; OpenEMR already holds it`);
   }
-  // What genuinely has nowhere to live is documents, not questionnaires.
-  for (const k of ['discharge_summary', 'records_received']) {
-    assert.ok(building.includes(k), `${k} is a per-visit document with no home yet`);
-    assert.ok(!surfaced.includes(k));
+  // The per-visit documents USED to be on the build list. They have a home
+  // now — real kinds in GFC_EXPECTED_DOCUMENTS, scoped to a visit — so they
+  // are referenced as documents rather than declared missing. Asserted as a
+  // reference, not by an empty build list, because "nothing is outstanding"
+  // and "nothing is checked" look identical otherwise.
+  const docRefs = A.APPOINTMENT_TYPES.flatMap(t => t.intake).filter(r => r.from === 'document').map(r => r.kind);
+  for (const k of ['dischargeSummary', 'dischargeMedList', 'imeRecords', 'imeExamRequest']) {
+    assert.ok(docRefs.includes(k), `${k} must be referenced as a real document kind`);
+    assert.ok(A.EXPECTED_DOCUMENT_KINDS.includes(k), `${k} must exist in the document catalog`);
+    assert.ok(!building.includes(k) && !surfaced.includes(k), `${k} has a home; it is not outstanding`);
   }
+  // Everything still outstanding is an instrument, not a document.
+  assert.deepEqual(building, [], 'the per-visit documents were the whole build list; they are built');
   // The two lists never overlap — an item is one or the other, or "what is
   // outstanding" has two different answers.
   assert.deepEqual(surfaced.filter(k => building.includes(k)), []);

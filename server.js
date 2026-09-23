@@ -6706,14 +6706,72 @@ const GFC_EXPECTED_DOCUMENTS = [
     hint: 'A referral letter or the face sheet a clinic sends over with a new patient.' },
   { kind: 'physicianOrder',   scope: 'IHPC', required: false,
     label: 'Physician order or plan of care',
-    hint: 'A signed order for services — home health, therapy, or a plan of care from a physician.' }
+    hint: 'A signed order for services — home health, therapy, or a plan of care from a physician.' },
+
+  // ── Per-visit documents (Session 4.12, owner 2026-09-23) ────────────────
+  // `scope: 'VISIT'` means these belong to ONE ENCOUNTER, not to the client's
+  // standing file, so they never appear on the client's checklist. That
+  // distinction is the point: a client is not asked to produce a discharge
+  // summary. A hospital sends it, or the office chases the hospital, and
+  // chasing the patient for it would be asking the wrong person.
+  //
+  // Declared HERE rather than in a second catalog, because everything that
+  // makes a document upload safe already lives around this list — the
+  // byte-typing, the size ceiling, the Drive path and the chart index. A
+  // parallel store would be a parallel set of those rules.
+  { kind: 'dischargeSummary',  scope: 'VISIT', required: false,
+    label: 'Discharge summary',
+    hint: 'The summary from the hospital or facility the patient was discharged from. Needed for a transitional care visit.' },
+  { kind: 'dischargeMedList',  scope: 'VISIT', required: false,
+    label: 'Discharge medication list',
+    hint: 'The medication list as at discharge. This is what the reconciliation is done against.' },
+  { kind: 'imeRecords',        scope: 'VISIT', required: false,
+    label: 'Records received for the exam',
+    hint: 'The file the contracting entity sent for review before an IME or C&P exam.' },
+  { kind: 'imeExamRequest',    scope: 'VISIT', required: false,
+    label: 'Exam request or DBQ forms',
+    hint: 'The request letter and any Disability Benefits Questionnaires to be completed.' }
 ];
+
+// The kinds that belong to a visit rather than to the client's standing file.
+const VISIT_DOCUMENT_KINDS = Object.freeze(
+  GFC_EXPECTED_DOCUMENTS.filter(d => d.scope === 'VISIT').map(d => d.kind)
+);
+const isVisitDocumentKind = (kind) => VISIT_DOCUMENT_KINDS.includes(String(kind || ''));
+
+// A document belongs to a visit or to the client's standing file, and it must
+// say which. Extracted as a pure function so a test can RUN it rather than
+// read it: a guard asserted by grepping for its error code still passes when
+// the condition around it is disabled, which is how both of these survived
+// their first mutation run.
+const checkVisitDocumentPairing = (kind, encounterUuid, isVisitKind) => {
+  const perVisit = isVisitKind(kind);
+  const named = String(encounterUuid || '').trim() !== '';
+  if (perVisit && !named) {
+    return {
+      ok: false, code: 'VISIT_DOCUMENT_NEEDS_ENCOUNTER',
+      error: `"${kind}" belongs to a particular visit, so it needs the encounter it was filed for. File it from the visit rather than from the client's documents.`
+    };
+  }
+  if (!perVisit && named) {
+    return {
+      ok: false, code: 'DOCUMENT_IS_NOT_PER_VISIT',
+      error: `"${kind}" belongs to the client's standing file, not to one visit.`
+    };
+  }
+  return { ok: true, code: null, error: null };
+};
 
 // Which of the registry applies to a service line. Mirrors consentDefsForServiceLine.
 const expectedDocumentsForServiceLine = (serviceLine) => {
   const line = (serviceLine || 'PHC').toUpperCase();
   return GFC_EXPECTED_DOCUMENTS.filter(d =>
-    d.scope === 'ALL' || (line === 'BOTH' ? true : d.scope === line));
+    // VISIT documents belong to an encounter and are never on the client's
+    // checklist. Excluded FIRST, because the BOTH branch below answers `true`
+    // for everything — without this, a dual-lane client would be asked to
+    // produce their own discharge summary.
+    d.scope !== 'VISIT' &&
+    (d.scope === 'ALL' || (line === 'BOTH' ? true : d.scope === line)));
 };
 
 // The checklist the client sees and staff track: the applicable registry entries
@@ -6897,10 +6955,14 @@ const resolveDocumentKind = (kind, clientId, requests) => {
   return { openAsk: openAsk || null };
 };
 
-const buildClientDocumentRow = ({ client, kind, fileName, stored, safeName, buffer, sniffedType, actor, source }) => ({
+const buildClientDocumentRow = ({ client, kind, fileName, stored, safeName, buffer, sniffedType, actor, source, encounterUuid }) => ({
   id: `doc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
   clientId: client.id,
   kind,
+  // Which VISIT this document belongs to, when it belongs to one. A discharge
+  // summary is about a particular transitional care visit; a photo ID is not
+  // about any visit at all, and null is the honest answer for it.
+  encounterUuid: encounterUuid ? String(encounterUuid) : null,
   fileName: String(fileName).slice(0, 200),
   storedName: safeName,
   mimeType: sniffedType,
@@ -12052,6 +12114,69 @@ app.put('/api/clinical/patients/:clientId/facility', authenticateToken, requireA
   }
 });
 
+// ── Documents for ONE visit (Session 4.12, owner 2026-09-23) ──────────────
+// "I do need the creation of documents specific to one visit like the
+// discharge summary and med list."
+//
+// A transitional care visit is worked FROM the discharge paperwork, and an IME
+// from the file the contracting entity sent. Neither is the client's to
+// produce, so neither belongs on the client's checklist — chasing a patient
+// for their own discharge summary is asking the wrong person.
+//
+// They ride the document pipeline that already exists rather than a second
+// one: the same byte-typing, the same size ceiling, the same Drive path, the
+// same store, so they appear in the chart with everything else. What is new
+// is that a row can belong to an ENCOUNTER, and that which documents a visit
+// wants is derived from its appointment type rather than listed again.
+app.get('/api/clinical/patients/:clientId/encounters/:euuid/documents', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    const encounterUuid = String(req.params.euuid || '');
+    const rows = await loadRows('encounter_billing');
+    const record = findBillingRecord(rows, encounterUuid);
+    const uploads = ((await db.get('client_document_uploads')) || [])
+      .filter(u => u && u.clientId === client.id && u.encounterUuid === encounterUuid);
+
+    const appointmentType = (record && record.visit && record.visit.appointmentType) || null;
+    const wanted = apptTypes.visitDocumentsFor(appointmentType, uploads.map(u => u.kind));
+    const catalog = new Map(GFC_EXPECTED_DOCUMENTS.map(d => [d.kind, d]));
+
+    await logActivity(req.user.id, req.user.name || req.user.email, 'visit_documents_read', 'client', client.id,
+      { encounterUuid, filed: uploads.length });
+    res.json({
+      encounterUuid, appointmentType,
+      // What this visit ASKS FOR, each saying whether it is in yet. A visit
+      // type that wants none says so plainly rather than rendering an empty
+      // panel nobody can interpret.
+      required: wanted.map(w => ({
+        kind: w.kind, filed: w.filed,
+        label: (catalog.get(w.kind) || {}).label || w.kind,
+        hint: (catalog.get(w.kind) || {}).hint || null
+      })),
+      outstanding: wanted.filter(w => !w.filed).map(w => w.kind),
+      // Everything actually filed against this visit, including anything
+      // filed that the type did not ask for — a document somebody attached
+      // must never become invisible because a list did not expect it.
+      filed: uploads.map(u => ({
+        id: u.id, kind: u.kind,
+        label: (catalog.get(u.kind) || {}).label || u.kind,
+        fileName: u.fileName, uploadedAt: u.uploadedAt, uploadedByName: u.uploadedByName,
+        status: u.status,
+        // Read back through the app so every read is audited; the Drive id
+        // never leaves the server.
+        url: `/api/gfc/documents/uploads/${u.id}/file`
+      })),
+      kinds: VISIT_DOCUMENT_KINDS.map(k => ({
+        kind: k, label: (catalog.get(k) || {}).label || k, hint: (catalog.get(k) || {}).hint || null
+      }))
+    });
+  } catch (error) {
+    console.error('Visit documents read error:', error);
+    res.status(502).json({ error: `This visit's documents could not be read: ${error.message}` });
+  }
+});
+
 // ── The rest of the record (Session 4.12 Scope J) ─────────────────────────
 // Nine FHIR resources this app had never asked OpenEMR for. Coverage,
 // immunizations, the care team OpenEMR believes in, related persons, goals,
@@ -13726,9 +13851,16 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/upload', authenticateTok
     const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
     if (!client) return res.status(404).json({ error: 'Client not found' });
 
-    const { kind, fileName, fileDataB64 } = req.body || {};
+    const { kind, fileName, fileDataB64, encounterUuid } = req.body || {};
     const prepared = prepareClientDocument({ kind, fileName, fileDataB64 });
     if (prepared.error) return res.status(prepared.status).json({ error: prepared.error });
+    // A per-visit document must SAY which visit, or it lands in the client's
+    // standing file where nobody working that visit will look for it. And a
+    // standing document must not claim to belong to one: a photo ID is not
+    // about a particular encounter, and filing it against one would put it on
+    // that visit's outstanding list forever.
+    const pairing = checkVisitDocumentPairing(kind, encounterUuid, isVisitDocumentKind);
+    if (!pairing.ok) return res.status(400).json({ error: pairing.error, code: pairing.code });
 
     const requests = (await db.get('client_document_requests')) || [];
     const resolved = resolveDocumentKind(kind, client.id, requests);
@@ -13753,7 +13885,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/upload', authenticateTok
     const row = buildClientDocumentRow({
       client, kind, fileName, stored, safeName,
       buffer: prepared.buffer, sniffedType: prepared.sniffedType,
-      actor: req.user, source: 'staff'
+      actor: req.user, source: 'staff', encounterUuid
     });
     const uploads = (await db.get('client_document_uploads')) || [];
     await db.set('client_document_uploads', [...uploads, row]);
@@ -13766,7 +13898,8 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/upload', authenticateTok
       await db.set('client_document_requests', requests);
     }
 
-    await logActivity(req.user.id, row.uploadedByName, 'client_document_filed_by_staff', 'document', client.id, { kind });
+    await logActivity(req.user.id, row.uploadedByName, 'client_document_filed_by_staff', 'document', client.id,
+      { kind, ...(row.encounterUuid ? { encounterUuid: row.encounterUuid } : {}) });
     const [allUploads, allRequests] = await Promise.all([
       db.get('client_document_uploads'), db.get('client_document_requests')
     ]);

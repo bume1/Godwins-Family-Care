@@ -263,7 +263,11 @@ const EXPECTED_DOCUMENT_KINDS = Object.freeze([
   // Added in 4.9b for a faxed face sheet and a signed order. Missed out of
   // the first draft of this mirror, and caught by the test that compares the
   // two — which is the entire reason that test exists.
-  'referral', 'physicianOrder'
+  'referral', 'physicianOrder',
+  // Per-visit (scope VISIT, 2026-09-23). These belong to ONE encounter and
+  // never appear on the client's checklist — a patient is not asked to
+  // produce their own discharge summary.
+  'dischargeSummary', 'dischargeMedList', 'imeRecords', 'imeExamRequest'
 ]);
 
 const intakeFieldPaths = () => new Set(
@@ -384,8 +388,8 @@ const APPOINTMENT_TYPES = Object.freeze([
     intake: [
       F('medications'),
       D('priorRecords'),
-      I('discharge_summary', 'The discharge summary itself, and the discharging facility. No per-visit document slot exists today.'),
-      I('discharge_medication_list', 'The med list as at discharge, which is what the reconciliation is against.')
+      D('dischargeSummary'),
+      D('dischargeMedList')
     ],
     sections: [
       t('dischargeDateFacility', R.ALWAYS), t('twoDayContact', R.ALWAYS), t('hospitalCourse', R.ALWAYS),
@@ -447,9 +451,8 @@ const APPOINTMENT_TYPES = Object.freeze([
     intake: [
       // An IME is not treatment: nothing about it comes from the client's own
       // enrollment record, and it is billed to the contracting entity.
-      I('records_received', 'The records the contracting entity sent.'),
-      I('exam_request', 'The exam request or DBQ forms to be completed.'),
-      I('identity_verification', 'Photo identity check at the door.')
+      D('imeRecords'),
+      D('imeExamRequest'),
     ],
     sections: [
       t('examRequest', R.ALWAYS), t('identityVerification', R.ALWAYS), t('recordsReviewed', R.ALWAYS),
@@ -619,6 +622,21 @@ const resolveVisit = ({ appointmentType, bookedModality, bookedLocation, patient
   };
 };
 
+// Which documents THIS visit needs in hand, and which are already filed.
+// Derived from the appointment type's own intake list, so a type that stops
+// needing one stops asking for it — no second list of "what a TCM visit
+// wants" to keep in step.
+const visitDocumentsFor = (appointmentType, filedKinds) => {
+  const type = typeByKey(appointmentType);
+  if (!type) return [];
+  const filed = new Set((filedKinds || []).map(String));
+  return (type.intake || [])
+    .filter(r => r.from === 'document')
+    .map(r => ({ kind: r.kind, filed: filed.has(r.kind) }));
+};
+const visitDocumentsOutstanding = (appointmentType, filedKinds) =>
+  visitDocumentsFor(appointmentType, filedKinds).filter(d => !d.filed).map(d => d.kind);
+
 const isBehavioralHealth = (appointmentType) => {
   const t = typeByKey(appointmentType);
   return !!(t && t.service === 'behavioral_health');
@@ -628,7 +646,7 @@ module.exports = {
   SECTIONS, REQUIRED, APPOINTMENT_TYPES,
   typeByKey, typesForService, sectionsFor, requiredSectionKeys,
   canBookType, canBeTelehealth, awvEligibility, AWV_INTERVAL_DAYS,
-  resolveVisit, isBehavioralHealth,
+  resolveVisit, isBehavioralHealth, visitDocumentsFor, visitDocumentsOutstanding,
   resolveIntakeRef, assertIntakeIsDeclared, unbuiltIntake, toSurface, toBuild, EXPECTED_DOCUMENT_KINDS,
 
   SERVICES, MODALITIES, LOCATIONS, CODE_FAMILIES,
