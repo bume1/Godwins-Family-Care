@@ -228,7 +228,17 @@
       clinicalMarkStep: (id, step, done) => authedFetch(`/api/clinical/patients/${id}/checklist/${step}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ done })
       }),
-      clinicalActivate: (id) => authedFetch(`/api/clinical/patients/${id}/activate`, { method: 'POST' })
+      clinicalActivate: (id) => authedFetch(`/api/clinical/patients/${id}/activate`, { method: 'POST' }),
+      // What this patient's visits bill as — the facility (WHERE) and the
+      // encounter type (WHAT). One route answers both, and the same one the
+      // clinician's chart reads, so the two screens cannot disagree.
+      placeOfService: (id) => authedFetch(`/api/clinical/patients/${id}/place-of-service`),
+      assignFacility: (id, facilityId) => authedFetch(`/api/clinical/patients/${id}/facility`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ facilityId })
+      }),
+      setUsualLocation: (id, usualLocation) => authedFetch(`/api/clinical/patients/${id}/usual-location`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ usualLocation })
+      })
     };
 
     // ── Login screen (shared shape with admin-hub, minimal) ─────────────
@@ -1367,6 +1377,134 @@
       );
     };
 
+    // ── Place of service (Session 4.12 Scope F1, owner-directed 2026-09-23) ──
+    // WHERE this patient is seen and WHAT KIND of visit it is. Both decide the
+    // place of service on the claim, which is why the owner's 4.5 rule — "a
+    // clinician never sees or chooses a POS" — puts both here, on the
+    // enrollment record, under the admin gate, rather than on the chart. The
+    // facility half MOVED here from the clinician's chart in this change; the
+    // encounter type is new.
+    //
+    // The screen names no encounter type of its own. The list is served, and a
+    // page that restates it drifts from the validator that refuses an option
+    // it no longer knows — the rule the consent registry and the competency
+    // catalog already follow.
+    const PlaceOfServiceCard = ({ clientId, canEdit }) => {
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState('');
+      const [busy, setBusy] = useState('');
+      const [msg, setMsg] = useState(null);
+      const load = useCallback(() => {
+        api.placeOfService(clientId).then(d => { setData(d); setErr(''); }).catch(e => setErr(e.message));
+      }, [clientId]);
+      useEffect(() => { load(); }, [load]);
+
+      if (err) return <Section title="Place of service"><div className="text-sm text-danger-600">{err}</div></Section>;
+      if (!data) return <Section title="Place of service"><div className="text-sm text-gray-400">Loading…</div></Section>;
+
+      const save = (what, fn) => {
+        setBusy(what); setMsg(null);
+        fn().then(r => { setMsg({ ok: true, text: [r.message, ...(r.warnings || [])].join(' ') }); load(); })
+          .catch(e => setMsg({ ok: false, text: e.message }))
+          .finally(() => setBusy(''));
+      };
+      const assigned = !!data.facilityId;
+      const agree = data.agreement || { ok: true };
+      // Assigned-but-no-POS and not-assigned-at-all are different problems with
+      // different fixes, and the POS one is not fixed on this screen at all —
+      // it lives on the facility record in OpenEMR. They never share a message.
+      const posMissing = assigned && !data.posCode;
+      const notService = assigned && data.serviceLocation === false;
+
+      return (
+        <Section title="Place of service">
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-xs text-gray-500 max-w-md">
+              What this patient&rsquo;s visits bill as. A clinician sees this resolved on the chart and cannot change it —
+              it decides the place of service on the claim.
+            </p>
+            {assigned && !posMissing && !notService && agree.ok
+              ? <span className="badge bg-success-50 text-success-600 shrink-0">POS {data.posCode}</span>
+              : <span className="badge bg-warning-50 text-warning-600 shrink-0">Blocks signing</span>}
+          </div>
+
+          {data.degraded && (
+            <p className="text-xs text-warning-600 mb-3">
+              {data.reason}. The assignment below is what is on file; it could not be checked against OpenEMR.
+            </p>
+          )}
+
+          <div className="text-sm mb-1 font-medium">Where care happens</div>
+          <div className="text-xs text-gray-500 mb-2">
+            {assigned
+              ? <>Assigned to <b>{data.facilityName || `facility ${data.facilityId}`}</b>{data.posCode ? <> &middot; place of service <b>{data.posCode}</b></> : null}.</>
+              : <b className="text-warning-600">Not assigned to an OpenEMR facility, so this patient&rsquo;s visits cannot be signed.</b>}
+          </div>
+          {posMissing && (
+            <p className="text-xs text-warning-600 mb-2">
+              &ldquo;{data.facilityName}&rdquo; has no place-of-service code on its record in OpenEMR. Set it on the facility
+              (Administration &rarr; Facilities) &mdash; it cannot be set from here, and visits stay unsignable until it is.
+            </p>
+          )}
+          {notService && (
+            <p className="text-xs text-warning-600 mb-2">
+              &ldquo;{data.facilityName}&rdquo; is not marked as a Service Location in OpenEMR, so no encounter can be assigned there.
+              Tick Service Location on the facility record.
+            </p>
+          )}
+          {canEdit && !data.degraded && (
+            <div className="flex flex-wrap items-end gap-2 mb-4">
+              <select className="inp flex-1 min-w-[240px]" value={data.facilityId || ''} disabled={busy === 'facility'}
+                onChange={e => save('facility', () => api.assignFacility(clientId, e.target.value))}>
+                <option value="">&mdash; not assigned &mdash;</option>
+                {data.facilities.map(f => (
+                  <option key={f.id} value={f.id}>
+                    {f.name}{f.posCode ? ` · POS ${f.posCode}` : ' · no POS'}{f.serviceLocation ? '' : ' · not a service location'}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          <div className="text-sm mb-1 font-medium">Where this patient is usually seen</div>
+          <div className="text-xs text-gray-500 mb-2">
+            {data.usualLocation
+              ? <>Usually seen at <b>{data.usualLocationLabel}</b>. This is a <b>default</b> &mdash; every booking confirms it and can change it for that visit.</>
+              : <>Not set. Every booking will have to say where the visit happens before it can be saved.</>}
+          </div>
+          {canEdit && (
+            <div className="flex flex-wrap items-end gap-2">
+              <select className="inp flex-1 min-w-[240px]" value={data.usualLocation || ''} disabled={busy === 'type'}
+                onChange={e => save('type', () => api.setUsualLocation(clientId, e.target.value))}>
+                <option value="">&mdash; not set &mdash;</option>
+                {data.locations.map(l => (
+                  <option key={l.key} value={l.key}>{l.label}{l.pos ? ` · POS ${l.pos}` : ' · place of service from the facility record'}</option>
+                ))}
+              </select>
+            </div>
+          )}
+          {/* What the visit IS lives on the visit, not here. Said plainly so
+              nobody looks for the appointment type on this screen. */}
+          <p className="text-xs text-gray-400 mt-2">
+            The kind of visit and whether it is in person or by video are chosen at booking and on the note,
+            not here. Those decide which codes apply; this decides the place of service.
+          </p>
+
+          {!agree.ok && (
+            <p className="text-sm text-danger-600 mt-3"><b>These two disagree.</b> {agree.error}</p>
+          )}
+          {msg && <p className={`text-sm mt-3 ${msg.ok ? 'text-success-600' : 'text-danger-600'}`}>{msg.text}</p>}
+          {!canEdit && <p className="text-xs text-gray-400 mt-3">Read-only &mdash; an admin sets both of these.</p>}
+          {data.billingFacilityName && (
+            <p className="text-xs text-gray-400 mt-2">
+              Billing entity (who bills, not where care happened): {data.billingFacilityName}.
+              {data.billingFacilityWarning ? ` ${data.billingFacilityWarning}` : ''}
+            </p>
+          )}
+        </Section>
+      );
+    };
+
     const DetailView = ({ clientId, user, onBack }) => {
       // TWO answers, because the API gives two, and each is asked once so no
       // control can drift from the route behind it. A screen that offers what
@@ -1624,7 +1762,10 @@
               underneath; this just keeps the section off a client it can
               never apply to. */}
           {(client.serviceLineResolved === 'IHPC' || client.serviceLineResolved === 'BOTH') && (
-            <ClinicalEnrollmentChecklist clientId={clientId} canEdit={canEdit} onActivated={load} />
+            <>
+              <PlaceOfServiceCard clientId={clientId} canEdit={canEdit} />
+              <ClinicalEnrollmentChecklist clientId={clientId} canEdit={canEdit} onActivated={load} />
+            </>
           )}
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

@@ -20,7 +20,9 @@ const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
 
-const repo = require('../clinicalRepository');
+const repo = require("../clinicalRepository");
+const R = repo;
+const apptTypes = require('../appointmentTypes');
 
 const root = path.join(__dirname, '..');
 const serverSrc = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
@@ -43,11 +45,34 @@ const stripComments = (src) => src
 
 // A stripper that grabs the wrong slice proves nothing, so it says so out loud
 // rather than quietly handing every later assertion a truncated file.
+// REWRITTEN 2026-09-23. This used to assert that the stripper removed under
+// 45% of the file — a PROXY, and a bad one. It fired on myDay.js the moment a
+// legitimately long comment block landed, because a heavily commented file and
+// a file whose code has been swallowed look identical to a percentage.
+//
+// The real question is whether any CODE went missing, so it asks that: every
+// top-level declaration in the source must survive the strip. A block comment
+// opened by accident — the original bug, a `/*` inside a line comment — eats
+// whole declarations, and that is visible whatever the comment density.
+const TOP_LEVEL_DECL = /^(?:const|let|var|function|class|async function)\s+([A-Za-z_$][\w$]*)/gm;
+const declarationsIn = (src) => {
+  const out = new Set(); let m;
+  const re = new RegExp(TOP_LEVEL_DECL.source, 'gm');
+  while ((m = re.exec(src)) !== null) out.add(m[1]);
+  return out;
+};
 const strippedSafely = (src, label) => {
   const out = stripComments(src);
+  const before = declarationsIn(src);
+  const after = declarationsIn(out);
+  const lost = [...before].filter(n => !after.has(n));
+  assert.deepEqual(lost, [],
+    `stripComments swallowed ${lost.length} declaration(s) from ${label}: ${lost.join(', ')} — it has eaten code, not comments`);
+  // A loose backstop for the case where it eats statements without taking a
+  // whole declaration with them. Deliberately well clear of ordinary comment
+  // density in this repo, which runs high on purpose.
   const removed = 1 - out.length / src.length;
-  assert.ok(removed < 0.45,
-    `stripComments removed ${(removed * 100).toFixed(1)}% of ${label} — it has swallowed code, not comments`);
+  assert.ok(removed < 0.75, `stripComments removed ${(removed * 100).toFixed(1)}% of ${label}`);
   return out;
 };
 
@@ -1222,4 +1247,669 @@ test('the narrative fields stay plain textareas the device keyboard can dictate 
   const i = pageCode.indexOf('const TextArea = ');
   const body = pageCode.slice(i, i + 400);
   assert.match(body, /<textarea className="inp"/);
+});
+
+// ── Session 4.12 Scope F — what a visit IS, and the POS it decides ──
+// REPOINTED 2026-09-23, not deleted. These guarded the flat `ENCOUNTER_TYPES`
+// list, which tangled "where did this happen" with "what kind of visit was
+// it". The rules did not go away when the owner split them into three axes —
+// they got sharper — so each one points at the new model. A guard that
+// quietly disappears with the code it happened to be aimed at is a guard lost.
+
+test('F: the visit descriptor is normalised, and an invented value is dropped rather than stored', () => {
+  const v = R.normalizeVisit({ appointmentType: 'pc_follow_up', modality: 'in_person', location: 'home' });
+  assert.deepEqual(v, { appointmentType: 'pc_follow_up', modality: 'in_person', location: 'home' });
+  // An invented appointment type reads back as a real one to everything
+  // downstream and would never match a place of service.
+  const bogus = R.normalizeVisit({ appointmentType: 'made_up', modality: 'beam', location: 'mars' });
+  assert.deepEqual(bogus, { appointmentType: null, modality: null, location: null });
+  assert.deepEqual(R.normalizeVisit(null), { appointmentType: null, modality: null, location: null });
+  assert.equal(R.visitLabel({ appointmentType: 'pc_follow_up', modality: 'telehealth', location: 'home' }),
+    'Follow-up · Telehealth · Private Home');
+  // A half-resolved visit has no label rather than a misleading partial one.
+  assert.equal(R.visitLabel({ appointmentType: 'pc_follow_up' }), null);
+});
+
+test('F: a visit whose place of service disagrees with the encounter is REFUSED, naming both values', () => {
+  const home = { appointmentType: 'pc_follow_up', modality: 'in_person', location: 'home' };
+  assert.equal(R.checkVisitAgainstPos({ visit: home, posCode: '12' }).ok, true);
+
+  const clash = R.checkVisitAgainstPos({ visit: home, posCode: '11', facilityName: 'Vinings' });
+  assert.equal(clash.ok, false);
+  assert.equal(clash.code, R.VISIT_POS_DISAGREES);
+  // BOTH values, or the reader cannot tell which of the two is wrong.
+  assert.match(clash.error, /\b12\b/, 'the error must name the POS the visit should carry');
+  assert.match(clash.error, /\b11\b/, 'the error must name the POS the encounter does carry');
+  assert.match(clash.error, /Follow-up · In-Person · Private Home/);
+
+  // ⚠️ The one that produces a FALSE CLAIM: a telehealth visit billed at the
+  // home place of service.
+  const tele = { appointmentType: 'pc_follow_up', modality: 'telehealth', location: 'home' };
+  assert.equal(R.checkVisitAgainstPos({ visit: tele, posCode: '10' }).ok, true);
+  assert.equal(R.checkVisitAgainstPos({ visit: tele, posCode: '12' }).code, R.VISIT_POS_DISAGREES);
+});
+
+test('F: an unresolved visit never conflicts, and a missing POS is its own refusal', () => {
+  // Half a descriptor cannot be judged, and inventing a verdict would refuse
+  // encounters that predate the field.
+  assert.equal(R.checkVisitAgainstPos({ visit: { appointmentType: 'pc_follow_up' }, posCode: '12' }).ok, true);
+  assert.equal(R.checkVisitAgainstPos({ visit: null, posCode: '12' }).ok, true);
+  // A resolved visit with no POS on the encounter is a DIFFERENT problem from
+  // a disagreement, fixed somewhere else, so it carries its own code.
+  const none = R.checkVisitAgainstPos({ visit: { appointmentType: 'pc_follow_up', modality: 'in_person', location: 'home' }, posCode: '' });
+  assert.equal(none.code, 'VISIT_NO_POS');
+  assert.notEqual(none.code, R.VISIT_POS_DISAGREES);
+});
+
+test('F: the note template is asked of the VISIT, so the same type demands different things in person and on video', () => {
+  const home = { appointmentType: 'pc_follow_up', modality: 'in_person', location: 'home' };
+  const tele = { appointmentType: 'pc_follow_up', modality: 'telehealth', location: 'home' };
+  const inPerson = R.requiredSectionsForVisit(home);
+  const video = R.requiredSectionsForVisit(tele);
+  assert.ok(inPerson.includes('vitals') && inPerson.includes('physicalExam'));
+  // You cannot take a blood pressure over video.
+  assert.ok(!video.includes('vitals') && !video.includes('physicalExam'));
+  assert.ok(video.length < inPerson.length);
+  // Everything that is not an examination is unchanged.
+  for (const k of ['assessment', 'plan', 'medReconciliation', 'followUp', 'mdmOrTime']) {
+    assert.ok(video.includes(k), `${k} must still be required over video`);
+  }
+  assert.deepEqual(R.requiredSectionsForVisit({ appointmentType: null }), []);
+});
+
+test('F: signing REFUSES an unfinished note and NAMES the sections, never a count', () => {
+  const coded = R.applyCoding(
+    { clientId: 'c', encounterUuid: 'e', diagnoses: [], services: [] },
+    { diagnoses: [{ code: 'E11.9', description: 'T2DM', primary: true }],
+      services: [{ code: '99348', units: 1, dxLinks: ['E11.9'] }] },
+    { id: 'u', name: 'FNP', npi: '1234567893' }, '1234567893'
+  ).record;
+  const visit = { appointmentType: 'pc_follow_up', modality: 'in_person', location: 'home' };
+  const base = { hasNote: true, record: coded, billingNpi: '1234567893', posCode: '12', visit };
+
+  const empty = R.checkSignReadiness({ ...base, completedSections: [] });
+  assert.equal(empty.ok, false);
+  assert.ok(empty.codes.includes('SIGN_NOTE_SECTIONS_INCOMPLETE'));
+  // NAMED. "3 sections outstanding" is a number a clinician has to go hunting
+  // through their own note for.
+  assert.match(empty.message, /Interval History/);
+  assert.match(empty.message, /Physical Exam/);
+  assert.match(empty.message, /Follow-up/);
+
+  const done = R.checkSignReadiness({ ...base, completedSections: R.requiredSectionsForVisit(visit) });
+  assert.equal(done.ok, true);
+  assert.deepEqual(done.openSections, []);
+
+  // A telehealth visit is ready without the exam sections.
+  const teleVisit = { appointmentType: 'pc_follow_up', modality: 'telehealth', location: 'home' };
+  const tele = R.checkSignReadiness({ hasNote: true, record: coded, billingNpi: '1234567893', posCode: '10',
+    visit: teleVisit, completedSections: R.requiredSectionsForVisit(teleVisit) });
+  assert.equal(tele.ok, true);
+  // And the SAME completed set does not satisfy the in-person visit.
+  const shortfall = R.checkSignReadiness({ ...base, completedSections: R.requiredSectionsForVisit(teleVisit) });
+  assert.equal(shortfall.ok, false);
+  assert.ok(shortfall.openSections.includes('vitals'));
+});
+
+test('F: the visit descriptor is STAMPED on the billing record at creation', () => {
+  const made = R.buildEncounterBillingRecord({
+    id: 'r1', clientId: 'c1', puuid: 'p1', encounterUuid: 'e1', encounterEid: '7',
+    reason: 'visit', date: '2026-09-23', actor: { id: 'u1', name: 'FNP' }, billingNpi: '1234567893',
+    visit: { appointmentType: 'bh_initial', modality: 'in_person', location: 'home' }
+  });
+  assert.deepEqual(made.visit, { appointmentType: 'bh_initial', modality: 'in_person', location: 'home' });
+  // An invented descriptor is dropped at the door rather than stored.
+  const bogus = R.buildEncounterBillingRecord({
+    id: 'r2', clientId: 'c1', puuid: 'p1', encounterUuid: 'e2', encounterEid: '8',
+    reason: 'visit', date: '2026-09-23', actor: { id: 'u1', name: 'FNP' }, billingNpi: '1234567893',
+    visit: { appointmentType: 'made_up', modality: 'in_person', location: 'home' }
+  });
+  assert.equal(bogus.visit.appointmentType, null);
+  assert.equal(bogus.visit.location, 'home', 'the parts that ARE valid survive');
+  const none = R.buildEncounterBillingRecord({
+    id: 'r3', clientId: 'c1', puuid: 'p1', encounterUuid: 'e3', encounterEid: '9',
+    reason: 'visit', date: '2026-09-23', actor: { id: 'u1', name: 'FNP' }, billingNpi: '1234567893'
+  });
+  assert.deepEqual(none.visit, { appointmentType: null, modality: null, location: null });
+});
+
+test('F build-enforced: the USUAL LOCATION is an admin write on enrollment; what a visit IS is chosen on the note', () => {
+  const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+  // The patient's usual location is a billing default, so it keeps the admin
+  // gate the facility assignment has.
+  assert.match(server,
+    /app\.put\('\/api\/clinical\/patients\/:clientId\/usual-location',\s*authenticateToken,\s*requireAdmin,/,
+    'the usual-location write must be admin-only');
+  assert.match(server,
+    /app\.put\('\/api\/clinical\/patients\/:clientId\/facility',\s*authenticateToken,\s*requireAdmin,/,
+    'the facility assignment must stay admin-only');
+  assert.match(server,
+    /app\.get\('\/api\/clinical\/patients\/:clientId\/place-of-service',\s*authenticateToken,\s*requireClinicalRead,/,
+    'the read stays on the clinical READ gate');
+  // The OLD route is gone, not left beside the new one.
+  assert.ok(!server.includes('/encounter-type'), 'the superseded encounter-type route must be removed, not left running');
+
+  const chart = fs.readFileSync(path.join(root, 'public', 'clinical.html'), 'utf8');
+  // ⚠️ THE OWNER'S CORRECTION: what kind of visit this is belongs on the
+  // CLINICIAN'S note, chosen before they start writing, because it decides
+  // which note they are about to write.
+  assert.match(chart, /What kind of visit is this\?/, 'the note must ask what kind of visit it is');
+  assert.match(chart, /setVisit\(v => \(\{ \.\.\.v, appointmentType: e\.target\.value \}\)\)/);
+  assert.match(chart, /setVisit\(v => \(\{ \.\.\.v, modality: e\.target\.value \}\)\)/);
+  assert.match(chart, /setVisit\(v => \(\{ \.\.\.v, location: e\.target\.value \}\)\)/);
+  // And the chart carries no write for either admin field.
+  assert.ok(!/\/usual-location`/.test(chart), 'the chart must not write the usual location');
+
+  const enroll = fs.readFileSync(path.join(root, 'public', 'admin-enrollment.html'), 'utf8');
+  assert.ok(/setUsualLocation:\s*\(id,\s*usualLocation\)/.test(enroll), 'enrollment owns the usual-location write');
+  // Enrollment must NOT offer an appointment type — that is the clinician's.
+  for (const t of apptTypes.APPOINTMENT_TYPES) {
+    assert.ok(!enroll.includes(t.key), `the enrollment screen must not name the appointment type ${t.key}`);
+  }
+  // The location OPTIONS must come from the server. Asserted on the option
+  // markup rather than by banning the word — "facility" is also a legitimate
+  // busy-key on that page, and a guard that cannot tell those apart would
+  // fail on code that is correct.
+  assert.match(enroll, /data\.locations\.map/, 'the location dropdown renders the served list');
+  // And it SAYS where the visit type is chosen instead. A screen that simply
+  // omits something sends people hunting for a control that is not there —
+  // the rule the chart's place-of-service card already follows.
+  assert.match(enroll, /chosen at booking and on the note/,
+    'the enrollment screen must name where the kind of visit is decided');
+  for (const l of apptTypes.LOCATIONS) {
+    assert.ok(!new RegExp(`<option[^>]*value=["']${l.key}["']`).test(enroll),
+      `enrollment must not hardcode the location option ${l.key}; the list is served`);
+  }
+});
+
+test('F build-enforced: creating a visit stamps the descriptor, and signing checks it against the POS OpenEMR holds', () => {
+  const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+  // One resolver answers what the visit is and where it bills, together.
+  assert.match(server, /apptTypes\.resolveVisit\(\{/,
+    'resolveFacilityForVisit must resolve the visit descriptor');
+  // The BOOKING is authoritative and the patient's usual location is only a
+  // default — resolving the other way would bill the visit at the place the
+  // patient usually is rather than the place they were.
+  assert.match(server, /patientDefaultLocation: client\.usualLocation \|\| null/);
+  // Both visit-creation paths stamp it.
+  const stamps = server.match(/visit: place\.visit/g) || [];
+  assert.equal(stamps.length, 2, 'both the H&P and the follow-up creation paths must stamp the descriptor');
+  // The signature compares the STAMP against the POS read off OpenEMR.
+  assert.match(server, /visit: ctx\.record\.visit/, 'the sign gate must read the descriptor off the stored stamp');
+  assert.ok(!/visit:\s*apptTypes\.resolveVisit\([^)]*encRow/.test(server),
+    'the sign gate must not re-derive the visit from the encounter row it is checking');
+});
+
+
+// ── Session 4.12 Scope F3 / F5 — the encounter on a phone ──
+const chartPage = fs.readFileSync(path.join(__dirname, '..', 'public', 'clinical.html'), 'utf8');
+const encounterPanel = (() => {
+  const from = chartPage.indexOf('const EncounterPanel = (');
+  const to = chartPage.indexOf('const EncountersTab = (', from);
+  assert.ok(from > 0 && to > from, 'anchors for the encounter panel must still be present');
+  return chartPage.slice(from, to);
+})();
+
+test('F3: the encounter shows one step at a time on a phone and stays one scroll at a desk', () => {
+  // Two different jobs. At a kitchen table you want the one thing in front of
+  // you; reviewing at a desk you want the whole visit at once. `on()` is what
+  // expresses that, and it must be viewport-conditional rather than a plain
+  // step comparison — a bare `step === k` would break the desktop.
+  assert.match(encounterPanel, /const on = \(k\) => !narrow \|\| step === k;/,
+    'a pane shows when the viewport is wide OR it is the current step');
+  assert.match(encounterPanel, /const narrow = useNarrowViewport\(\);/);
+  // The rail is a phone control; on a desktop there are no steps to walk.
+  assert.match(encounterPanel, /\{narrow && <EncounterStepRail/);
+  // Each step owns at least one pane, or a step exists that shows nothing.
+  for (const key of ['visit', 'coding', 'actions', 'sign']) {
+    assert.ok(encounterPanel.includes(`on('${key}')`), `the ${key} step must gate at least one pane`);
+  }
+  // The header is deliberately ungated: a screen that does not say whose
+  // encounter it is, or whether it is signed, is a screen you cannot act on.
+  // Looked for BEFORE the header, which is where a gate would be added — the
+  // first version of this sliced forward from the chip and so could not see
+  // the one thing it was checking for.
+  const chip = encounterPanel.indexOf('<EncStateChip state={d.state} />');
+  assert.ok(chip > 0, 'precondition: the header chip is still there');
+  const openerLine = encounterPanel.lastIndexOf('<div className="card mb-4">', chip);
+  const lineStart = encounterPanel.lastIndexOf('\n', openerLine) + 1;
+  assert.equal(encounterPanel.slice(lineStart, openerLine).trim(), '',
+    'the encounter header must show on every step — nothing may gate it');
+});
+
+test('F3: the viewport is watched, not sampled once, and the JS agrees with the CSS about what a phone is', () => {
+  const hook = chartPage.slice(chartPage.indexOf('const useNarrowViewport = ('), chartPage.indexOf('const ENCOUNTER_STEPS'));
+  // Rotating a phone changes the answer. A one-shot read leaves a step hidden
+  // with no way back to it.
+  assert.match(hook, /addEventListener/, 'the media query must be subscribed to');
+  assert.match(hook, /removeEventListener|removeListener/, 'and unsubscribed on unmount');
+  // 767px is Tailwind's md boundary. If the two disagreed the stepper would
+  // hide a card the grid was still laying out.
+  assert.match(chartPage, /const PHONE_QUERY = '\(max-width: 767px\)';/);
+  assert.ok(chartPage.includes('md:grid-cols-2'), 'precondition: the layout uses the md breakpoint this number matches');
+});
+
+test('F3: no step gates another — the only gate is the server-answered signature readiness', () => {
+  // A clinician in a home who must record an order before finishing coding
+  // has to be able to. A wizard that forces an order would make this slower
+  // than paper in the one place it has to be faster.
+  const rail = chartPage.slice(chartPage.indexOf('const EncounterStepRail = ('), chartPage.indexOf('const EncStateChip = ('));
+  // Asserted on the STEP BUTTONS themselves, not by keyword. A first version
+  // of this looked for the word "blocker" in a `disabled=`, and a mutation
+  // that gated Sign on the coding count sailed through — it never used that
+  // word. The only thing that distinguishes the two states is whether the
+  // step button carries a `disabled` at all.
+  const stepButtons = rail.slice(rail.indexOf('{ENCOUNTER_STEPS.map('), rail.indexOf('</div>\n          <div className="flex justify-between'));
+  assert.ok(stepButtons.length > 100, 'precondition: the step-button block was actually sliced');
+  assert.ok(!/disabled/.test(stepButtons), 'no step button may be disabled — no step gates another');
+  // Back/Next are bounded by the ends of the list, which is not a gate.
+  assert.match(rail, /disabled=\{i === 0\}/);
+  assert.match(rail, /disabled=\{i === ENCOUNTER_STEPS\.length - 1\}/);
+  // The counts come from the SERVER's blocker list. A tick the server would
+  // refuse is worse than no tick.
+  assert.match(encounterPanel, /blockers=\{\(d\.signReadiness && d\.signReadiness\.missing\) \|\| \[\]\}/);
+  // Counted over the WHOLE list, unfiltered. Same correction: naming the
+  // variable the rail does not use proved nothing, so this pins the loop.
+  assert.match(rail, /for \(const m of blockers \|\| \[\]\) \{/,
+    'the rail must count every blocker the server named, filtering none of them out');
+});
+
+test('F3: a blocker the page does not recognise lands on a step, never disappears', () => {
+  const map = chartPage.slice(chartPage.indexOf('const STEP_FOR_BLOCKER'), chartPage.indexOf('const EncounterStepRail'));
+  // Falling through to nothing would silently drop a blocker off every step
+  // while the server still refuses the signature — the worst of the three
+  // possible answers. Sign is where the server's full message is printed.
+  assert.match(map, /STEP_FOR_BLOCKER\[m\] \|\| 'sign'/);
+  // Every blocker the sign gate can raise resolves to a real step.
+  const steps = new Set(['visit', 'coding', 'actions', 'sign']);
+  const mapped = { note: 'visit', diagnosis: 'coding', service: 'coding', service_dx_link: 'coding' };
+  for (const m of ['note', 'diagnosis', 'service', 'service_dx_link', 'billing_npi', 'facility_pos', 'encounter_type_pos']) {
+    assert.ok(steps.has(mapped[m] || 'sign'), `${m} must map to a step that exists`);
+  }
+});
+
+test('F5: the rest of the chart opens inside the encounter, and it is the SAME components', () => {
+  const drawer = chartPage.slice(chartPage.indexOf('const EncounterLookups = ('), chartPage.indexOf('const EncounterPanel = ('));
+  // Mounted, not re-rendered. A second view of "what is this patient allergic
+  // to" is how the two start disagreeing — the rule the allergy strip already
+  // follows one layer down.
+  for (const c of ['AllergiesTab', 'MedicationsTab', 'ProblemsTab', 'ResultsTab', 'DocumentsTab']) {
+    assert.ok(drawer.includes(`<${c} `), `the drawer must mount the existing ${c}`);
+    assert.ok(chartPage.includes(`const ${c} = (`), `${c} must be the chart's own component, defined once`);
+  }
+  // It fetches nothing of its own: the chart is already loaded by the parent,
+  // and a second read is a second answer.
+  assert.ok(!/api\./.test(drawer), 'the drawer must not call the API itself — it passes the chart it was given');
+  // Rendered inside the panel, on the step where a clinician is reading the
+  // note and deciding what to do next.
+  assert.match(encounterPanel, /\{on\('visit'\) && <EncounterLookups patient=\{patient\} chart=\{chart\}/);
+});
+
+test('F5: the drawer is at module scope, so opening it does not remount what is under it', () => {
+  // A component declared inside another is a new function identity on every
+  // render: React tears it down and rebuilds it, and any input inside loses
+  // the caret on the first keystroke. This repo has paid for that twice.
+  const idx = chartPage.indexOf('const EncounterLookups = (');
+  const line = chartPage.slice(chartPage.lastIndexOf('\n', idx) + 1, idx);
+  assert.equal(line, '    ', 'EncounterLookups must be declared at module scope, not nested in a component');
+  const railIdx = chartPage.indexOf('const EncounterStepRail = (');
+  assert.equal(chartPage.slice(chartPage.lastIndexOf('\n', railIdx) + 1, railIdx), '    ',
+    'EncounterStepRail must be at module scope too');
+});
+
+// ── Session 4.12 Scope G — psychiatry on the same ambulatory encounter ──
+
+test('G: the MSE follows the VISIT, not the patient', () => {
+  // REPOINTED. This used to ask `hpSectionsFor`, which was dead code nothing
+  // called, keyed on the PATIENT's stored type. The catalog answers it per
+  // visit now — and that matters: somebody who normally has a primary-care
+  // visit can have a psych evaluation, and the note has to follow the visit.
+  const sectionsOf = (type) => apptTypes.sectionsFor(type, { modality: 'in_person' }).map(s => s.key);
+  assert.ok(!sectionsOf('pc_follow_up').includes('mentalStatusExam'),
+    'an empty MSE on every note trains people to scroll past it');
+  for (const psych of ['bh_initial', 'bh_follow_up']) {
+    assert.ok(sectionsOf(psych).includes('mentalStatusExam'), `${psych} must carry the MSE`);
+    assert.ok(apptTypes.requiredSectionKeys(psych, { modality: 'in_person' }).includes('mentalStatusExam'),
+      `${psych} must REQUIRE the MSE, not merely offer it`);
+  }
+  // Never guessed on an unresolved visit.
+  assert.deepEqual(sectionsOf(null), []);
+  assert.deepEqual(sectionsOf('not_a_type'), []);
+  assert.ok(!R.requiredSectionsForVisit({ appointmentType: 'pc_acute', modality: 'in_person' }).includes('mentalStatusExam'));
+});
+
+test('G: a psychiatric encounter cannot be SIGNED without a risk assessment, and documenting is never blocked', () => {
+  const coded = R.applyCoding(
+    { clientId: 'c', encounterUuid: 'e', diagnoses: [], services: [] },
+    { diagnoses: [{ code: 'F32.9', description: 'MDD', primary: true }],
+      services: [{ code: '99348', units: 1, dxLinks: ['F32.9'] }] },
+    { id: 'u', name: 'FNP', npi: '1234567893' }, '1234567893'
+  ).record;
+  const base = { hasNote: true, record: coded, billingNpi: '1234567893', posCode: '12' };
+
+  const psychVisit = { appointmentType: 'bh_initial', modality: 'in_person', location: 'home' };
+  const allSections = R.requiredSectionsForVisit(psychVisit);
+  const psychNoRisk = R.checkSignReadiness({ ...base, visit: psychVisit, completedSections: allSections });
+  assert.equal(psychNoRisk.ok, false);
+  assert.ok(psychNoRisk.codes.includes('SIGN_NO_RISK_ASSESSMENT'));
+  assert.match(psychNoRisk.message, /psychiatric visit/i);
+
+  const psychWithRisk = R.checkSignReadiness({ ...base, visit: psychVisit,
+    riskAssessment: { id: 'r1', levels: { suicide: 'none', homicide: 'none', selfNeglect: 'none' } },
+    completedSections: allSections });
+  assert.equal(psychWithRisk.ok, true);
+
+  // Required only on a BEHAVIOURAL-HEALTH appointment type: on every encounter
+  // it would be noise, and noise is how a real refusal gets clicked past.
+  const pcVisit = { appointmentType: 'pc_follow_up', modality: 'in_person', location: 'home' };
+  assert.equal(R.checkSignReadiness({ ...base, visit: pcVisit, completedSections: R.requiredSectionsForVisit(pcVisit) }).ok, true);
+  assert.equal(R.riskAssessmentRequired({ appointmentType: 'bh_follow_up' }), true);
+  assert.equal(R.riskAssessmentRequired({ appointmentType: 'pc_follow_up' }), false);
+  assert.equal(R.riskAssessmentRequired({ appointmentType: null }), false);
+  assert.equal(R.riskAssessmentRequired(null), false);
+});
+
+test('G: every domain must be answered, and an invented level is refused', () => {
+  const make = (form) => R.buildRiskAssessment({ id: 'r', clientId: 'c', encounterUuid: 'e', form, actor: { id: 'u', name: 'FNP' } });
+  assert.equal(make({ suicide: 'none', homicide: 'none' }).code, 'RISK_LEVEL_REQUIRED',
+    'a domain left blank is not an assessment of it');
+  assert.equal(make({ suicide: 'none', homicide: 'none', selfNeglect: 'catastrophic' }).code, 'RISK_LEVEL_REQUIRED');
+  assert.match(make({}).error, new RegExp(R.RISK_LEVELS.join('.*')), 'the refusal names what is on offer');
+  const ok = make({ suicide: 'none', homicide: 'none', selfNeglect: 'none' });
+  assert.ok(ok.assessment, '"none" IS an assessment — the record is that somebody asked');
+  assert.deepEqual(Object.keys(ok.assessment.levels).sort(), [...R.RISK_DOMAINS].sort());
+  assert.equal(R.highestRisk(ok.assessment), 'none');
+});
+
+test('G: risk at moderate or above requires a plan, and the refusal names which domain', () => {
+  const make = (form) => R.buildRiskAssessment({ id: 'r', clientId: 'c', encounterUuid: 'e', form, actor: { id: 'u', name: 'FNP' } });
+  for (const level of R.RISK_NEEDS_PLAN) {
+    const bad = make({ suicide: level, homicide: 'none', selfNeglect: 'none' });
+    assert.equal(bad.code, 'RISK_PLAN_REQUIRED', `${level} risk must require a plan`);
+    assert.match(bad.error, new RegExp(`suicide: ${level}`), 'the refusal must name the domain and the level');
+    // "Acknowledged" with no plan is a record that somebody SAW it, which is
+    // not a record that it was handled — the 4.10 follow-up-note rule.
+    assert.match(bad.error, /seen, not that it was handled/);
+    assert.ok(make({ suicide: level, homicide: 'none', selfNeglect: 'none', plan: 'Safety plan agreed; wife removing firearms today; crisis line given; seen again Thursday.' }).assessment);
+  }
+  // Low risk needs no plan: requiring one everywhere would make the plan box
+  // a formality somebody types "n/a" into.
+  for (const level of ['none', 'low']) {
+    assert.ok(make({ suicide: level, homicide: 'none', selfNeglect: 'none' }).assessment, `${level} must not demand a plan`);
+  }
+  // ANY domain at moderate or above triggers it, not only suicide.
+  assert.equal(make({ suicide: 'none', homicide: 'none', selfNeglect: 'high' }).code, 'RISK_PLAN_REQUIRED');
+  assert.equal(make({ suicide: 'none', homicide: 'imminent', selfNeglect: 'none' }).code, 'RISK_PLAN_REQUIRED');
+});
+
+test('G: assessments are append-only and the gate reads the latest', () => {
+  const rows = [
+    { id: 'a', encounterUuid: 'e1', levels: { suicide: 'low', homicide: 'none', selfNeglect: 'none' }, at: '2026-09-23T10:00:00.000Z' },
+    { id: 'b', encounterUuid: 'e1', levels: { suicide: 'high', homicide: 'none', selfNeglect: 'none' }, at: '2026-09-23T11:30:00.000Z' },
+    { id: 'c', encounterUuid: 'e2', levels: { suicide: 'none', homicide: 'none', selfNeglect: 'none' }, at: '2026-09-23T12:00:00.000Z' }
+  ];
+  // Risk changes inside one visit. Overwriting would lose that the clinician
+  // escalated, which is the single most important thing the row records.
+  const latest = R.latestRiskAssessment(rows, 'e1');
+  assert.equal(latest.id, 'b', 'the gate must read the most recent, not the first');
+  assert.equal(R.highestRisk(latest), 'high');
+  assert.equal(R.latestRiskAssessment(rows, 'e3'), null, 'an encounter with none is null, never a borrowed row');
+  // Never mixed between encounters.
+  assert.equal(R.latestRiskAssessment(rows, 'e2').id, 'c');
+});
+
+test('G build-enforced: the risk route is a clinical WRITE, refuses a closed encounter, and logs no risk narrative', () => {
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(server,
+    /app\.post\('\/api\/clinical\/patients\/:clientId\/encounters\/:euuid\/risk-assessment',\s*authenticateToken,\s*requireClinicalWrite,/,
+    'recording risk is a clinical write, not an admin action and not a read');
+  const route = server.slice(server.indexOf("/risk-assessment', authenticateToken"));
+  const body = route.slice(0, route.indexOf("// ── Addenda"));
+  assert.ok(body.length > 300, 'precondition: the route body was actually sliced');
+  // A closed encounter is read-only. Recording new risk against a signed note
+  // would change what was attested to.
+  assert.match(body, /ENCOUNTER_CLOSED/);
+  // The LEVEL goes in the audit trail; what somebody said about wanting to
+  // die does not. An audit trail is not a second copy of the record.
+  const log = body.slice(body.indexOf('logActivity'), body.indexOf('res.json'));
+  assert.match(log, /highestRisk/);
+  for (const k of ['plan', 'protectiveFactors', 'meansRestriction']) {
+    assert.ok(!log.includes(k), `the audit entry must not carry ${k}`);
+  }
+  // Appended, never replaced.
+  assert.match(body, /rows\.push\(built\.assessment\)/);
+  assert.ok(!/rows\s*=\s*rows\.filter/.test(body), 'a revision must not remove the previous row');
+});
+
+test('G build-enforced: the gate is actually reached — every sign check hands over the recorded assessment', () => {
+  // The refusal is worth nothing if the route does not pass what it gates on:
+  // the check would be correct and unreached, and a psychiatric encounter
+  // would sign clean. Same shape as the charge call sites, which survived
+  // their first mutation run for exactly this reason.
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const calls = server.match(/checkSignReadiness\(\{[\s\S]{0,400}?\}\)/g) || [];
+  assert.ok(calls.length >= 2, 'expected the sign route and the readiness preview');
+  for (const c of calls) {
+    assert.match(c, /riskAssessment:/, `every sign-readiness call must pass the recorded assessment: ${c.slice(0, 90)}…`);
+    assert.match(c, /visit:/, 'and the visit descriptor it is judged against');
+    assert.match(c, /completedSections:/, 'and what the clinician has actually filled in');
+  }
+  // It has to be LOADED beside the encounter, or the field is always absent
+  // and the gate always fires.
+  assert.match(server, /riskAssessment: clinicalRepo\.latestRiskAssessment\(risks, encounterUuid\)/);
+});
+
+test('G build-enforced: the risk card is rendered inside the encounter', () => {
+  // A card that exists and is never mounted is a capability that does not
+  // exist — the lesson the facility route bought in 4.9.
+  const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'clinical.html'), 'utf8');
+  assert.match(page, /<RiskCard d=\{d\}/, 'the encounter must mount the risk card');
+  assert.match(page, /api\.saveRisk\(patient\.id, euuid, form\)/, 'and it must write through the risk route');
+  assert.ok(page.includes("saveRisk: (id, euuid, body)"), 'the route must have a caller');
+  // On the Visit step, where the clinician is reading the note and deciding.
+  const panel = page.slice(page.indexOf('const EncounterPanel = ('), page.indexOf('const EncountersTab = ('));
+  assert.match(panel, /\{on\('visit'\) && \(\s*\n\s*<RiskCard/);
+});
+
+test('G build-enforced: the screen restates no risk vocabulary and no clinical rule', () => {
+  const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'clinical.html'), 'utf8');
+  const card = page.slice(page.indexOf('const RiskCard = ('), page.indexOf('const EncounterLookups = ('));
+  assert.ok(card.length > 500, 'precondition: the card was sliced');
+  // The levels, the domains and which of them need a plan are all served. A
+  // page carrying its own list drifts from the validator that refuses one it
+  // no longer knows.
+  for (const level of R.RISK_LEVELS) {
+    assert.ok(!card.includes(`'${level}'`) && !card.includes(`"${level}"`),
+      `the card must not name the risk level ${level}; the list is served`);
+  }
+  for (const d of R.RISK_DOMAINS) {
+    assert.ok(!card.includes(`'${d}'`), `the card must not name the domain ${d}; they are served`);
+  }
+  assert.match(card, /d\.riskLevels \|\| \[\]/, 'the level dropdown renders the served list');
+  assert.match(card, /d\.riskDomains \|\| \[\]/, 'the domains come from the server');
+  assert.match(card, /\(d\.riskNeedsPlan \|\| \[\]\)\.includes/,
+    'whether a plan is needed is the server’s answer, not a second clinical rule here');
+  // Ranking "which risk is worse" also comes from the served order — a local
+  // copy goes stale the day a level is added.
+  assert.ok(!/RISK_ORDER/.test(page), 'no local ordering of risk levels may exist');
+  // REPOINTED. This used to assert the H&P read a PATIENT flag to decide
+  // whether to show the mental status exam — the wrong signal, as the owner
+  // pointed out: a patient who normally has a primary-care visit can have a
+  // psych evaluation. The note follows the VISIT's appointment type now, and
+  // which sections that type carries is the server's answer, not the page's.
+  assert.match(page, /noteHasSection\('mentalStatusExam'\) && \(/,
+    'the MSE must be shown when THIS VISIT carries it, not when the patient is flagged');
+  assert.ok(!page.includes('isPsychiatric'), 'the superseded patient flag must be gone, not left beside it');
+  // And the page derives the section list from what the server served.
+  assert.match(page, /catalog\.noteTemplates\[visit\.appointmentType\]/,
+    'the note template comes from the server, so the form cannot drift from the gate that refuses the signature');
+});
+
+// ── The clinician's recorded time overrides the schedule (owner, 2026-09-23) ──
+
+
+test('TIME: the recorded start and end override the schedule, and there is NO fallback to it', () => {
+  // ⚠️ THE OWNER RULE. The appointment type carries a default duration and the
+  // calendar carries a slot. Both are planning figures. Neither is evidence
+  // that anybody was in the room for that long, and a time-based E/M level is
+  // an assertion about how long the clinician actually spent.
+  const ranShort = myDay.visitTiming(
+    { startedAt: '2026-09-23T14:00:00Z', endedAt: '2026-09-23T14:35:00Z' }, { scheduledMinutes: 60 });
+  assert.equal(ranShort.actualMinutes, 35);
+  assert.equal(ranShort.scheduledMinutes, 60);
+  assert.equal(ranShort.billableMinutes, 35, 'the recorded time is what bills, never the slot');
+  assert.equal(ranShort.source, 'recorded');
+  assert.equal(ranShort.overridesSchedule, true);
+
+  const ranLong = myDay.visitTiming(
+    { startedAt: '2026-09-23T14:00:00Z', endedAt: '2026-09-23T15:18:00Z' }, { scheduledMinutes: 60 });
+  assert.equal(ranLong.billableMinutes, 78, 'a visit that overran bills the time it took');
+  assert.equal(ranLong.overridesSchedule, true);
+
+  // ⚠️ NO FALLBACK. Billing 60 minutes because the slot said 60, when nobody
+  // recorded a time at all, is a false claim — and a fallback would be
+  // indistinguishable from a real measurement to everything downstream.
+  const unrecorded = myDay.visitTiming({}, { scheduledMinutes: 60 });
+  assert.equal(unrecorded.actualMinutes, null);
+  assert.equal(unrecorded.billableMinutes, null, 'NOTHING billable comes from the schedule');
+  assert.notEqual(unrecorded.billableMinutes, 60);
+  assert.equal(unrecorded.source, myDay.SCHEDULED_ONLY, 'and it says which of the two states it is in');
+  assert.equal(unrecorded.statement, null, 'no time statement can be written from a slot');
+
+  // A visit still running has a start and no end, so there is no duration yet.
+  const running = myDay.visitTiming({ startedAt: '2026-09-23T14:00:00Z' }, { scheduledMinutes: 60 });
+  assert.equal(running.billableMinutes, null);
+  assert.equal(running.statement, null);
+
+  // Matching the slot exactly is not an override, it is agreement.
+  assert.equal(myDay.visitTiming(
+    { startedAt: '2026-09-23T14:00:00Z', endedAt: '2026-09-23T15:00:00Z' }, { scheduledMinutes: 60 }
+  ).overridesSchedule, false);
+  // No schedule at all is fine; the recorded time still stands alone.
+  assert.equal(myDay.visitTiming({ startedAt: '2026-09-23T14:00:00Z', endedAt: '2026-09-23T14:40:00Z' }).billableMinutes, 40);
+});
+
+test('TIME build-enforced: nothing in the time statement can read a scheduled figure', () => {
+  const src = fs.readFileSync(path.join(root, 'myDay.js'), 'utf8');
+  const from = src.indexOf('const timeStatement');
+  const to = src.indexOf('const SCHEDULED_ONLY');
+  assert.ok(from > 0 && to > from, 'both anchors must still be present and in order');
+  const fn = src.slice(from, to);
+  // The statement is what a time-based E/M level is read off. A scheduled
+  // figure reaching it would be a plausible number from the wrong source,
+  // which is the exact class of defect the charge writer had twice today.
+  assert.ok(!/scheduled/i.test(fn), 'the time statement must not read anything scheduled');
+  assert.ok(!/defaultMinutes/.test(fn), 'nor an appointment type’s default duration');
+  assert.match(fn, /totalVisitMinutes\(timing\)/, 'it reads the recorded interval and nothing else');
+  // And the one field anything billable may read is named so it cannot be
+  // confused with the plan sitting beside it.
+  const vt = src.slice(src.indexOf('const visitTiming'), src.indexOf('// ---- Drive time'));
+  assert.match(vt, /billableMinutes: actual,/, 'billableMinutes is the recorded figure, with no coalesce');
+  assert.ok(!/billableMinutes:[^,\n]*\|\|/.test(vt), 'no `||` fallback may be added to it');
+});
+
+test('the sign gate pushes the POS disagreement, not just the checker', () => {
+  // The checker having the right verdict is worth nothing if the gate does not
+  // act on it. Survived its first mutation run for exactly that reason.
+  const coded = R.applyCoding(
+    { clientId: 'c', encounterUuid: 'e', diagnoses: [], services: [] },
+    { diagnoses: [{ code: 'E11.9', description: 'T2DM', primary: true }],
+      services: [{ code: '99348', units: 1, dxLinks: ['E11.9'] }] },
+    { id: 'u', name: 'FNP', npi: '1234567893' }, '1234567893'
+  ).record;
+  const visit = { appointmentType: 'pc_follow_up', modality: 'telehealth', location: 'home' };
+  const wrong = R.checkSignReadiness({
+    hasNote: true, record: coded, billingNpi: '1234567893', posCode: '12', visit,
+    completedSections: R.requiredSectionsForVisit(visit)
+  });
+  assert.equal(wrong.ok, false, 'a telehealth visit billed at the home POS must not sign');
+  assert.ok(wrong.codes.includes(R.VISIT_POS_DISAGREES));
+  assert.ok(wrong.missing.includes('encounter_type_pos'));
+  assert.match(wrong.message, /\b10\b/);
+  assert.match(wrong.message, /\b12\b/);
+  // Right POS, same everything else: signs.
+  assert.equal(R.checkSignReadiness({
+    hasNote: true, record: coded, billingNpi: '1234567893', posCode: '10', visit,
+    completedSections: R.requiredSectionsForVisit(visit)
+  }).ok, true);
+});
+
+test('the sign gate demands a safety plan once the RECORDED risk is positive', () => {
+  const coded = R.applyCoding(
+    { clientId: 'c', encounterUuid: 'e', diagnoses: [], services: [] },
+    { diagnoses: [{ code: 'F32.9', description: 'MDD', primary: true }],
+      services: [{ code: '99348', units: 1, dxLinks: ['F32.9'] }] },
+    { id: 'u', name: 'FNP', npi: '1234567893' }, '1234567893'
+  ).record;
+  const visit = { appointmentType: 'bh_initial', modality: 'in_person', location: 'home' };
+  const baseline = R.requiredSectionsForVisit(visit, { riskPositive: false });
+  assert.ok(!baseline.includes('safetyPlan'), 'precondition: not required at negative risk');
+  const common = { hasNote: true, record: coded, billingNpi: '1234567893', posCode: '12', visit, completedSections: baseline };
+
+  const negative = R.checkSignReadiness({ ...common,
+    riskAssessment: { id: 'r', levels: { suicide: 'none', homicide: 'none', selfNeglect: 'none' } } });
+  assert.equal(negative.ok, true, 'a negative risk assessment needs no safety plan');
+
+  // The gate reads the RECORDED risk row, so the template tightens the moment
+  // the clinician documents risk — not when the visit started.
+  const positive = R.checkSignReadiness({ ...common,
+    riskAssessment: { id: 'r', levels: { suicide: 'high', homicide: 'none', selfNeglect: 'none' } } });
+  assert.equal(positive.ok, false);
+  assert.deepEqual(positive.openSections, ['safetyPlan']);
+  assert.match(positive.message, /Safety Plan/);
+  // Any domain, not just suicide.
+  assert.deepEqual(R.checkSignReadiness({ ...common,
+    riskAssessment: { id: 'r', levels: { suicide: 'none', homicide: 'none', selfNeglect: 'moderate' } } }).openSections, ['safetyPlan']);
+  // Filed: signs.
+  assert.equal(R.checkSignReadiness({ ...common, completedSections: [...baseline, 'safetyPlan'],
+    riskAssessment: { id: 'r', levels: { suicide: 'high', homicide: 'none', selfNeglect: 'none' } } }).ok, true);
+});
+
+test('the booking is authoritative over the patient’s usual location', () => {
+  // The patient's enrollment record carries a DEFAULT. Resolving the other way
+  // round would bill the visit at the place the patient usually is rather than
+  // the place they were — a home patient seen in clinic once is normal.
+  const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+  const from = server.indexOf('const visit = apptTypes.resolveVisit({');
+  assert.ok(from > 0, 'the resolver call must still be there');
+  const call = server.slice(from, server.indexOf('});', from));
+  assert.match(call, /bookedLocation: descriptor && descriptor\.location/,
+    'the booked location must come from the booking, not from the patient record');
+  assert.match(call, /patientDefaultLocation: client\.usualLocation \|\| null/,
+    'and the patient record supplies only the default');
+  // The two must read DIFFERENT sources, or the override cannot happen.
+  const booked = call.match(/bookedLocation:([^\n]*)/)[1];
+  const fallback = call.match(/patientDefaultLocation:([^\n]*)/)[1];
+  assert.notEqual(booked.trim(), fallback.trim(), 'a booking that reads the patient default is not an override');
+  assert.ok(!/bookedLocation:[^\n]*usualLocation/.test(call), 'the booking must not read the patient default');
+});
+
+test('the note templates are SERVED, so the form cannot drift from the gate', () => {
+  const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+  // The template that shapes the form has to be the same one the signature is
+  // refused against, or a clinician fills in a note the server then calls
+  // incomplete.
+  assert.match(server, /const noteTemplates = \{\};/);
+  assert.match(server, /apptTypes\.sectionsFor\(t\.key, \{ modality: m\.key \}\)/);
+  // Scoped to THIS route. `/api/clinical/facilities` also has a degraded
+  // branch and legitimately serves no note templates — a guard that cannot
+  // tell two routes apart fails on code that is correct.
+  const from = server.indexOf("app.get('/api/clinical/patients/:clientId/place-of-service'");
+  const to = server.indexOf("app.get('/api/clinical/facilities'", from);
+  assert.ok(from > 0 && to > from, 'both anchors must still be present and in order');
+  const route = server.slice(from, to);
+  // Counted by the `res.json({` openers, because a non-greedy match to the
+  // first `});` stops inside a nested call and reads as a truncated response.
+  const openers = (route.match(/res\.json\(\{/g) || []).length;
+  assert.equal(openers, 3, 'expected the unconfigured, the unreadable and the normal response');
+  const served = (route.match(/noteTemplates/g) || []).length;
+  // Declared once, then in each of the three responses.
+  assert.ok(served >= 4,
+    `the templates must reach every response from this route — a page with no EMR still needs its picker (found ${served})`);
+  // The success response carries the whole catalog, not only the templates.
+  const success = route.slice(route.lastIndexOf('res.json({'));
+  for (const k of ['locations', 'appointmentTypes', 'services', 'modalities', 'noteTemplates']) {
+    assert.ok(success.includes(k) || route.includes(`canEdit, locations, appointmentTypes, services, modalities, noteTemplates`),
+      `the catalog must include ${k}`);
+  }
 });
