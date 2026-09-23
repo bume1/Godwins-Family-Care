@@ -3206,6 +3206,24 @@ app.get('/api/auth/sessions', authenticateToken, async (req, res) => {
   res.json({ sessions: rows.map(r => ({ id: r.id, current: r.id === req.session.id, createdAt: r.createdAt, lastSeenAt: r.lastSeenAt, revokedAt: r.revokedAt, revokedReason: r.revokedReason, surface: r.surface, userAgent: r.userAgent, mfaVerified: r.mfaVerified })) });
 });
 
+// The 15-minute idle limit is judged entirely by the SERVER's `lastSeenAt`
+// (sessions.check(), called inside authenticateToken above) — it moves only
+// when a real request reaches it. `session-guard.js` is the browser's own
+// activity clock (pointer/key/touch/scroll), and until 2026-09-23 the two
+// never spoke: someone typing into a long form with nothing yet to save
+// reset the BROWSER clock on every keystroke while the SERVER's sat
+// untouched, so the person saw no warning and was handed AUTH_IDLE — and an
+// emptied form — the moment they finally clicked Save.
+//
+// This route does nothing but pass through authenticateToken, so hitting it
+// IS the touch. `session-guard.js` calls it about once a minute while its
+// own clock says the person is present (never once they have crossed into
+// its warning window), so a genuinely active session no longer looks idle
+// to the server just because nothing else happened to phone home.
+app.get('/api/auth/heartbeat', authenticateToken, (req, res) => {
+  res.json({ ok: true });
+});
+
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;

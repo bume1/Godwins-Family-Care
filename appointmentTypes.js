@@ -264,6 +264,9 @@ const EXPECTED_DOCUMENT_KINDS = Object.freeze([
   // the first draft of this mirror, and caught by the test that compares the
   // two — which is the entire reason that test exists.
   'referral', 'physicianOrder',
+  // The general drop spot (2026-09-23) — a contract, a letter, anything not
+  // named above.
+  'otherDocument',
   // Per-visit (scope VISIT, 2026-09-23). These belong to ONE encounter and
   // never appear on the client's checklist — a patient is not asked to
   // produce their own discharge summary.
