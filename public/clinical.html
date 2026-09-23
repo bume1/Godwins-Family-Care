@@ -157,9 +157,10 @@
       addProblem: (id, body) => authedFetch(`/api/clinical/patients/${id}/problems`, { method: 'POST', body: JSON.stringify(body) }),
       carePlan: (id) => authedFetch(`/api/clinical/patients/${id}/care-plan`),
       saveCarePlan: (id, body) => authedFetch(`/api/clinical/patients/${id}/care-plan`, { method: 'POST', body: JSON.stringify(body) }),
-      checklist: (id) => authedFetch(`/api/clinical/patients/${id}/checklist`),
-      markStep: (id, step, done) => authedFetch(`/api/clinical/patients/${id}/checklist/${step}`, { method: 'POST', body: JSON.stringify({ done }) }),
-      activate: (id) => authedFetch(`/api/clinical/patients/${id}/activate`, { method: 'POST' }),
+      // The clinical enrollment sequence (checklist/mark/activate) moved to
+      // /admin/enrollment — it duplicated that screen's own approval gate and
+      // both wrote the same client.enrollmentStatus independently. See
+      // admin-enrollment.html.
       // Session 4.2 — scheduling (OpenEMR is the appointment ledger)
       providers: () => authedFetch('/api/clinical/providers'),
       appointments: (params) => authedFetch(`/api/clinical/appointments?${new URLSearchParams(params).toString()}`),
@@ -1214,65 +1215,14 @@
       );
     };
 
-    // ── Enrollment checklist tab (Scope E) ──
-    const ChecklistTab = ({ patient, onActivated }) => {
-      const canWrite = useCanWrite();
-      const [data, setData] = useState(null);
-      const [busy, setBusy] = useState(''); const [msg, setMsg] = useState(null);
-      const load = useCallback(() => { api.checklist(patient.id).then(setData).catch(e => setMsg({ ok: false, text: e.message })); }, [patient.id]);
-      useEffect(load, [load]);
-      if (!data) return <p className="text-sm text-stone-500 p-4">Loading…</p>;
-      const mark = (key, done) => {
-        setBusy(key);
-        api.markStep(patient.id, key, done).then(load).catch(e => setMsg({ ok: false, text: e.message })).finally(() => setBusy(''));
-      };
-      const activate = () => {
-        setBusy('activate'); setMsg(null);
-        api.activate(patient.id)
-          .then(r => { setMsg({ ok: true, text: r.message }); load(); onActivated && onActivated(); })
-          .catch(e => setMsg({ ok: false, text: e.data && e.data.missing ? `${e.message}: ${e.data.missing.join(' · ')}` : e.message }))
-          .finally(() => setBusy(''));
-      };
-      return (
-        <div className="max-w-2xl">
-          <div className="card">
-            <div className="card-h"><h2>Clinical enrollment sequence</h2>
-              {data.activated
-                ? <span className="chip bg-emerald-50 text-emerald-700">ACTIVATED {fmtDate(data.activatedAt)}</span>
-                : <span className="chip bg-amber-50 text-amber-800">{data.steps.filter(s => s.done).length}/{data.steps.length} complete</span>}
-            </div>
-            <div className="p-4">
-              {data.steps.map(s => (
-                <div key={s.key} className="flex items-start justify-between gap-3 py-3 border-b border-stone-100 last:border-0">
-                  <div className="flex items-start gap-2.5">
-                    <i className={`ti mt-0.5 text-lg ${s.done ? 'ti-circle-check text-emerald-600' : 'ti-circle text-stone-300'}`} />
-                    <div>
-                      <div className="font-semibold text-[13.5px]">{s.label}</div>
-                      <div className="text-xs text-stone-500">
-                        {s.done ? [s.by, s.at && fmtTs(s.at)].filter(Boolean).join(' · ') || 'Done' : (s.by || 'Pending')}
-                      </div>
-                    </div>
-                  </div>
-                  {canWrite && s.kind === 'manual' && !data.activated && (
-                    <button className="btn ghost !py-1 !px-2.5 text-xs" disabled={busy === s.key}
-                      onClick={() => mark(s.key, !s.done)}>
-                      {s.done ? 'Un-mark' : 'Mark done'}
-                    </button>
-                  )}
-                </div>
-              ))}
-              {msg && <p className={`text-sm mt-3 ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
-              {canWrite && !data.activated && (
-                <button className="btn gold mt-4" disabled={!data.allDone || busy === 'activate'} onClick={activate}>
-                  <i className="ti ti-rosette-discount-check" />{busy === 'activate' ? 'Activating…' : 'ACTIVATE IHPC enrollment'}
-                </button>
-              )}
-              <p className="text-[11px] text-stone-400 mt-2">Payer verification is a manual mark until B1 (Availity eligibility) lands. Records/ROI, initial visit, care plan, and consents derive from the record and cannot be hand-set.</p>
-            </div>
-          </div>
-        </div>
-      );
-    };
+    // The clinical enrollment sequence (checklist + ACTIVATE) used to live
+    // here as its own tab. Moved to /admin/enrollment (owner-directed,
+    // 2026-09-23): it is a second admin workflow gate, same shape as
+    // "Approve enrollment", and both wrote client.enrollmentStatus
+    // independently with no relationship to each other — a clinician working
+    // a chart has no reason to see it, and an admin working enrollment
+    // shouldn't have to leave that screen to find it. See DetailView's
+    // "Clinical enrollment sequence" section in admin-enrollment.html.
 
     // ── Session 4.2 — Clinical scheduling (OpenEMR-tied) ──
     // OpenEMR is the appointment ledger; every view below renders its LIVE
@@ -2946,7 +2896,7 @@
       const tabs = [
         ['summary', 'Chart'], ['appts', 'Appointments'], ['encounters', 'Encounters'],
         ...(canWrite ? [['visit', 'Initial Visit (H&P)']] : []),
-        ['medrec', 'Med Rec'], ['careplan', 'Care Plan'], ['checklist', 'Enrollment'],
+        ['medrec', 'Med Rec'], ['careplan', 'Care Plan'],
         ['messages', 'Messages']
       ];
       return (
@@ -3167,7 +3117,6 @@
                   {tab === 'visit' && (chart ? <HpTab patient={sel} chart={chart} appointmentEid={hpApptEid} onDone={() => { setHpApptEid(null); refreshChart(); loadPatients(); }} onGoToEncounter={(euuid) => { setEncTarget(euuid); setTab('encounters'); }} /> : <p className="text-sm text-stone-500">Loading…</p>)}
                   {tab === 'medrec' && <MedRecTab patient={sel} />}
                   {tab === 'careplan' && <CarePlanTab patient={sel} onSaved={loadPatients} />}
-                  {tab === 'checklist' && <ChecklistTab patient={sel} onActivated={loadPatients} />}
                   {tab === 'messages' && <MessagesTab patient={sel} />}
                 </div>
               </div>
