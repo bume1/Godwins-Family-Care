@@ -60,6 +60,8 @@ const patientRead = require('./patientReadRepository');
 const clinicalRoles = require('./clinicalRoles');
 const standingOrders = require('./standingOrders');   // signed, versioned, expiring protocols (4.8 Scope C)
 const clinicalInbox = require('./clinicalInbox');     // what is waiting on a clinician (4.9)
+const myDay = require('./myDay');                     // the day, the visit stamps and the pre-visit
+                                                      // packet (4.12). Pure — the clock is passed in.
 // Session 4.10 — orders that leave the building. The app GENERATES, a person
 // TRANSMITS: there is no fax API here and there never claims to be one.
 const orderReq = require('./orderRequisitions');      // referrals, DME, requisitions, sends, overdue (4.10 A)
@@ -8084,7 +8086,15 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
         client, linked: false, emrAllergies: null, facility: null, lastVisitAt: null,
         today: practiceToday(), careTierLabel: careTierLabelFor(client.careTier)
       });
-      return res.json({ demographics, intakePrefill, banner, emr: null, linked: !!client.openEmrPatientId });
+      // The draft is THIS app's row and has nothing to do with the EMR link, so
+      // it is reported here too. Leaving it out meant the banner's action could
+      // never read "Resume draft" on an unlinked patient — the patients a
+      // clinician is most likely to be part-way through a note on.
+      const unlinkedDraft = (await loadNoteDrafts()).find(r => r && r.id === clinicalRepo.noteDraftId(client.id, req.user.id)) || null;
+      return res.json({
+        demographics, intakePrefill, banner, emr: null, linked: !!client.openEmrPatientId,
+        visitDraft: { open: !!unlinkedDraft, savedAt: (unlinkedDraft && unlinkedDraft.updatedAt) || null }
+      });
     }
     const emr = openemr.forActor(req.user);
     const puuid = client.openEmrPatientId;
@@ -11218,6 +11228,307 @@ app.post('/api/clinical/orders/:orderId/co-sign', authenticateToken, requireClin
     res.json({ message: 'Order co-signed', order: next.order });
   } catch (error) {
     console.error('Order co-sign error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// Session 4.12 — My Day, visit timings and the pre-visit packet
+// ══════════════════════════════════════════════════════════════════════════
+// The workspace opened on a patient list. A house-call clinician does not start
+// the day by looking up a patient; they start it by looking at the day.
+
+const loadVisitTimings = () => loadRows('visit_timings');
+
+// A visit is SIGNED when its encounter carries an attestation. Resolved from
+// the appointment→encounter pointers so My Day and the chart cannot disagree
+// about which visits are still open.
+const signedEidsFrom = (linkRows, attestations) => {
+  const signedEncounters = new Set((attestations || [])
+    .filter(a => a && a.encounterUuid && a.signedAt)
+    .map(a => String(a.encounterUuid)));
+  return new Set((linkRows || [])
+    .filter(l => l && l.eid != null && signedEncounters.has(String(l.encounterUuid)))
+    .map(l => String(l.eid)));
+};
+
+// GET /api/clinical/my-day?date=YYYY-MM-DD — the default landing screen.
+// Eastern, always: the date defaults to today IN GEORGIA, never to the
+// container's UTC day, which for four hours of every evening is tomorrow and
+// would show a clinician an empty schedule at 8pm.
+app.get('/api/clinical/my-day', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.date || ''))
+      ? String(req.query.date) : practiceToday();
+    // A scope problem is a CALENDAR problem, not a reason to refuse the day.
+    // The unsigned backlog, the open-task count and the home-visit facts all
+    // come from this app's own store and are exactly what a clinician whose
+    // provider id is unset still needs to see.
+    const scope = resolveProviderScope(req.user, req.query.providerId);
+    const scopeProblem = scope.error ? { error: scope.error, code: scope.code } : null;
+
+    const [timingRows, linkRows, attestations, orderRows, resultRows, users] = await Promise.all([
+      loadVisitTimings(), getAppointmentLinkage(), loadRows('encounter_attestations'),
+      loadRows('clinical_orders'), loadRows('clinical_results'), getUsers()
+    ]);
+    const clientsById = new Map(users
+      .filter(u => u.role === config.ROLES.CLIENT)
+      .map(u => [String(u.id), u]));
+
+    // The calendar is OpenEMR's. When it cannot be read the day is REPORTED as
+    // unavailable rather than rendered empty — an empty day and an unreachable
+    // calendar look identical on screen and are opposite facts.
+    let appointments = [];
+    let calendar = { ok: true, error: null };
+    if (scopeProblem) {
+      calendar = { ok: false, error: scopeProblem.error, code: scopeProblem.code };
+    } else if (!openemr.isConfigured()) {
+      calendar = { ok: false, error: 'OpenEMR is not configured, so the calendar could not be read.' };
+    } else {
+      try {
+        const rows = await openemr.forActor(req.user).listAppointmentRows();
+        appointments = await summarizeCalendarRows(rows, r =>
+          (!scope.providerId || String(r.pc_aid) === scope.providerId));
+      } catch (e) {
+        calendar = { ok: false, error: `OpenEMR calendar could not be read: ${e.message}` };
+      }
+    }
+
+    const signedEids = signedEidsFrom(linkRows, attestations);
+    const timingsByEid = new Map((timingRows || [])
+      .filter(t => t && t.eid != null).map(t => [String(t.eid), t]));
+
+    const forDate = appointments.filter(a => String(a.date) === date);
+    // An unsigned visit from an EARLIER day is the practice's biggest silent
+    // risk, so it is pinned at the top rather than left to be remembered.
+    const earlier = appointments
+      .filter(a => String(a.date) < date)
+      .filter(a => a.state !== 'cancelled' && a.status !== '?' )
+      .filter(a => !signedEids.has(String(a.eid)))
+      .filter(a => a.encounterUuid || (timingsByEid.get(String(a.eid)) || {}).arrivedAt)
+      .map(a => {
+        const client = clientsById.get(String(a.clientId)) || null;
+        return {
+          eid: a.eid, clientId: a.clientId, date: a.date, time: a.startTime,
+          patientName: (client && client.name) || a.patientName || null,
+          visitType: a.title || 'Clinical visit',
+          encounterUuid: a.encounterUuid || null,
+          daysOld: Math.max(0, Math.round(
+            (new Date(`${date}T00:00:00Z`) - new Date(`${a.date}T00:00:00Z`)) / 86400000))
+        };
+      });
+
+    // Open tasks, counted from what is actually waiting: orders still out and
+    // results nobody has acknowledged. A count that comes from nowhere is a
+    // number nobody can act on.
+    const mine = (r) => !scope.providerId ||
+      String((r && (r.orderingClinicianProviderId || r.providerId)) || '') === String(scope.providerId);
+    const openOrders = (orderRows || []).filter(o => o &&
+      ['ordered', 'sent', 'scheduled'].includes(String(o.status)));
+    const unacked = (resultRows || []).filter(r => r && !r.acknowledgedAt);
+    const openTasks = openOrders.filter(mine).length + unacked.filter(mine).length;
+
+    const day = myDay.buildMyDay({
+      date,
+      appointments: forDate,
+      clientsById,
+      timingsByEid,
+      signedEids,
+      unsignedEarlier: earlier,
+      openTasks,
+      blocks: [],
+      homeVisitFields: clinicalRepo.HOME_VISIT_FIELDS,
+      startCoords: null
+    });
+    res.json({ ...day, calendar, providerId: scope.providerId || null, locked: !!scope.locked });
+  } catch (error) {
+    console.error('My Day error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/clinical/visits/:eid/timing — the arrival, start and end stamps
+// (Scope F2). One route, one vocabulary, so the page cannot invent an event the
+// server does not know.
+//
+// TOTAL TIME IS WHAT SUPPORTS TIME-BASED E/M LEVELING. The billing guide
+// requires a time statement in every note and there was no field for it at all.
+const VISIT_TIMING_EVENTS = Object.freeze({
+  en_route: 'enRouteAt', arrive: 'arrivedAt', start: 'startedAt', end: 'endedAt'
+});
+
+app.post('/api/clinical/visits/:eid/timing', authenticateToken, requireClinicalWrite,
+  requireCapability(clinicalRoles.CAPABILITIES.NURSING_NOTE), async (req, res) => {
+    try {
+      const eid = String(req.params.eid || '').trim();
+      if (!/^\d+$/.test(eid)) return res.status(400).json({ error: 'A numeric appointment id is required', code: 'BAD_EID' });
+      const event = String((req.body || {}).event || '').trim();
+      const field = VISIT_TIMING_EVENTS[event];
+      if (!field) {
+        return res.status(400).json({
+          error: `Unknown visit event "${event}". One of: ${Object.keys(VISIT_TIMING_EVENTS).join(', ')}.`,
+          code: 'BAD_VISIT_EVENT'
+        });
+      }
+      const clientId = String((req.body || {}).clientId || '').trim();
+      const { client, wrongLine } = clientId ? await loadClinicalClient(clientId) : { client: null };
+      if (clientId && !client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+
+      const rows = await loadVisitTimings();
+      const id = myDay.timingId(eid);
+      const idx = rows.findIndex(r => r && r.id === id);
+      const existing = idx >= 0 ? rows[idx] : null;
+
+      // An end time is EDITABLE and a correction requires a reason, the same
+      // rule every other time correction in this app follows. Re-stamping
+      // arrival or start silently would quietly change how long a visit was.
+      const reason = String((req.body || {}).reason || '').trim();
+      if (existing && existing[field] && !reason) {
+        return res.status(409).json({
+          error: `This visit already has a ${event} time (${existing[field]}). Correcting it needs a reason.`,
+          code: 'TIMING_ALREADY_SET'
+        });
+      }
+      const at = String((req.body || {}).at || '').trim() || new Date().toISOString();
+      if (isNaN(new Date(at))) return res.status(400).json({ error: 'That is not a usable time', code: 'BAD_TIME' });
+
+      const next = {
+        ...(existing || { id, eid, createdAt: new Date().toISOString() }),
+        clientId: clientId || (existing && existing.clientId) || null,
+        providerId: req.user.openEmrProviderId ? String(req.user.openEmrProviderId) : null,
+        [field]: at,
+        updatedAt: new Date().toISOString(),
+        byId: req.user.id, byName: req.user.name || req.user.email
+      };
+      if (existing && existing[field] && reason) {
+        next.corrections = [...(existing.corrections || []), {
+          field, from: existing[field], to: at, reason,
+          byId: req.user.id, byName: req.user.name || req.user.email, at: new Date().toISOString()
+        }];
+      }
+      if (idx >= 0) rows[idx] = next; else rows.push(next);
+      await db.set('visit_timings', rows);
+      await logActivity(req.user.id, req.user.name || req.user.email, `visit_${event}`, 'client', next.clientId, {
+        eid, at, corrected: !!(existing && existing[field])
+      });
+      res.json({
+        message: `Recorded.`,
+        timing: { ...next, totalMinutes: myDay.totalVisitMinutes(next), timeStatement: myDay.timeStatement(next) }
+      });
+    } catch (error) {
+      console.error('Visit timing error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+// GET /api/clinical/visits/:eid/timing — what is stamped so far.
+app.get('/api/clinical/visits/:eid/timing', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const row = (await loadVisitTimings()).find(r => r && r.id === myDay.timingId(req.params.eid)) || null;
+    res.json({
+      timing: row ? { ...row, totalMinutes: myDay.totalVisitMinutes(row), timeStatement: myDay.timeStatement(row) } : null
+    });
+  } catch (error) {
+    console.error('Visit timing read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/clinical/my-day/optimize — PROPOSES an order and never applies one
+// (Scope B4). Accepting rebooks through the existing appointment routes, so the
+// patient is told; a schedule that silently rewrote itself would move a visit
+// somebody is expecting without anybody deciding to.
+app.post('/api/clinical/my-day/optimize', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const visits = Array.isArray((req.body || {}).visits) ? req.body.visits : null;
+    if (!visits) return res.status(400).json({ error: 'The day\'s visits are required', code: 'NO_VISITS' });
+    const out = myDay.proposeRouteOrder({ visits, startCoords: (req.body || {}).startCoords || null });
+    res.json({ ...out, applied: false });
+  } catch (error) {
+    console.error('Route optimize error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/clinical/patients/:clientId/pre-visit?eid= — the packet a clinician
+// reads in the car (Scope E). ONE request: it is read on a phone before getting
+// out, so it must not wait on the full chart.
+app.get('/api/clinical/patients/:clientId/pre-visit', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    const eid = String(req.query.eid || '').trim();
+
+    const [orderRows, resultRows, linkRows] = await Promise.all([
+      loadRows('clinical_orders'), loadRows('clinical_results'), getAppointmentLinkage()
+    ]);
+    const mine = (r) => r && String(r.clientId) === String(client.id);
+    const openOrders = (orderRows || []).filter(mine)
+      .filter(o => ['ordered', 'sent', 'scheduled'].includes(String(o.status)))
+      .map(o => ({ id: o.id, label: (o.tests && o.tests[0]) || o.orderType, orderType: o.orderType, orderedAt: o.createdAt || o.orderedAt }));
+    const openReferrals = openOrders.filter(o => o.orderType === 'referral')
+      .map(o => ({ id: o.id, specialty: o.label, status: 'pending' }));
+    const unacknowledged = (resultRows || []).filter(mine).filter(r => !r.acknowledgedAt)
+      .map(r => ({ id: r.id, label: r.label || r.documentName || 'Result', interpretation: r.interpretation || null }));
+
+    let banner = null, lastVitals = null, activeProblems = [], medicationChanges = [], lastVisitAt = null, appointment = null;
+    let emrNotice = null;
+    if (client.openEmrPatientId && openemr.isConfigured()) {
+      const emr = openemr.forActor(req.user);
+      const [problems, allergies, encounters, vitals] = await Promise.allSettled([
+        emr.getProblems(client.openEmrPatientId), emr.getAllergies(client.openEmrPatientId),
+        emr.getEncounters(client.openEmrPatientId), emr.getVitalObservations(client.openEmrPatientId)
+      ]);
+      const take = (r, fn) => r.status === 'fulfilled'
+        ? { ok: true, rows: r.value.map(fn) }
+        : { ok: false, error: r.reason && r.reason.message, permissionPending: (r.reason && r.reason.status) === 403 };
+      const encRows = encounters.status === 'fulfilled' ? encounters.value.map(clinicalRepo.summarizeEncounter) : [];
+      lastVisitAt = clinicalRepo.lastVisitDateOf(encRows);
+      const problemsTake = take(problems, clinicalRepo.summarizeCondition);
+      activeProblems = problemsTake.ok ? problemsTake.rows.slice(0, 12) : [];
+      if (!problemsTake.ok) emrNotice = 'Some chart sections could not be read.';
+      const vitalsTake = take(vitals, clinicalRepo.summarizeVitalObservation);
+      lastVitals = vitalsTake.ok && vitalsTake.rows.length ? vitalsTake.rows[vitalsTake.rows.length - 1] : null;
+      banner = clinicalRepo.buildPatientBanner({
+        client, linked: true, emrAllergies: take(allergies, clinicalRepo.summarizeAllergy),
+        facility: null, lastVisitAt, today: practiceToday(),
+        careTierLabel: careTierLabelFor(client.careTier)
+      });
+      if (eid) {
+        try {
+          const row = await emr.getAppointmentRow(client.openEmrPatientId, eid);
+          if (row) appointment = clinicalRepo.summarizeAppointmentRow(row, linkageByEid(linkRows).get(String(eid)) || null);
+        } catch { /* the packet is still worth reading without the slot */ }
+      }
+    } else {
+      banner = clinicalRepo.buildPatientBanner({
+        client, linked: false, emrAllergies: null, facility: null, lastVisitAt: null,
+        today: practiceToday(), careTierLabel: careTierLabelFor(client.careTier)
+      });
+      emrNotice = client.openEmrPatientId ? 'OpenEMR is not configured.' : 'This patient is not linked to an OpenEMR chart.';
+    }
+
+    const plan = client.carePlan || null;
+    const goalsUnmet = plan && Array.isArray(plan.goals) ? plan.goals.slice(0, 5) : [];
+
+    res.json({
+      packet: myDay.buildPreVisitPacket({
+        client, appointment, banner, lastVisitAt, lastVitals, activeProblems,
+        recentResults: (resultRows || []).filter(mine).slice(-3).map(r => ({
+          id: r.id, label: r.label || r.documentName || 'Result',
+          interpretation: r.interpretation || null, receivedAt: r.receivedAt || null
+        })),
+        medicationChanges,
+        openOrders: openOrders.filter(o => o.orderType !== 'referral'),
+        unacknowledgedResults: unacknowledged,
+        openReferrals,
+        carePlanGoalsUnmet: goalsUnmet,
+        homeVisitFields: clinicalRepo.HOME_VISIT_FIELDS
+      }),
+      emrNotice
+    });
+  } catch (error) {
+    console.error('Pre-visit packet error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });

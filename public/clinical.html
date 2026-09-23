@@ -147,6 +147,17 @@
       saveHomeVisit: (id, homeVisit) => authedFetch(`/api/clinical/patients/${id}/home-visit`, {
         method: 'PUT', body: JSON.stringify({ homeVisit })
       }),
+      // Session 4.12 — the day, the visit stamps, and the packet read in the car.
+      myDay: (date) => authedFetch(`/api/clinical/my-day?date=${encodeURIComponent(date)}`),
+      stampVisit: (eid, body) => authedFetch(`/api/clinical/visits/${eid}/timing`, {
+        method: 'POST', body: JSON.stringify(body)
+      }),
+      preVisit: (id, eid) => authedFetch(`/api/clinical/patients/${id}/pre-visit${eid ? `?eid=${encodeURIComponent(eid)}` : ''}`),
+      // PROPOSES an order. It never applies one — accepting rebooks through the
+      // existing appointment routes so the patient is told.
+      optimizeDay: (visits) => authedFetch('/api/clinical/my-day/optimize', {
+        method: 'POST', body: JSON.stringify({ visits })
+      }),
       // Scanning a document into the patient's file from the chart. The route
       // is the enrollment one on purpose — ONE store for a client's documents,
       // so what a clinician scans in is what the office and the client see.
@@ -219,7 +230,7 @@
     // chain is what collided when 4.9 and 4.10 both added a view, and a fifth
     // would collide again.
     const VIEW_TITLES = {
-      charts: 'Patient Chart', schedule: 'Schedule', queue: 'Coding Queue',
+      myday: 'My Day', charts: 'Patient Chart', schedule: 'Schedule', queue: 'Coding Queue',
       inbox: 'Inbox', results: 'Results Inbox', overdue: 'Overdue Orders'
     };
 
@@ -856,6 +867,323 @@
               {access.canWrite && (
                 <HomeVisitEditor patient={patient} homeVisit={b.homeVisit} fields={homeVisitFields} onSaved={onHomeVisitSaved} />
               )}
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    // ── Session 4.12 — MY DAY (Scope A) ────────────────────────────────────
+    // The default landing screen. A house-call clinician does not start the day
+    // by looking up a patient; they start it by looking at the day. Every row
+    // carries what you read in the car: who, when, where, how to get in, and
+    // who will be there.
+    const VISIT_STATE_STYLE = {
+      scheduled: 'bg-stone-100 text-stone-600',
+      en_route: 'bg-sky-100 text-sky-800',
+      arrived: 'bg-amber-100 text-amber-800',
+      in_progress: 'bg-emerald-100 text-emerald-800',
+      signed: 'bg-primary text-white',
+      cancelled: 'bg-stone-200 text-stone-500',
+      no_show: 'bg-red-100 text-red-700'
+    };
+
+    // NAVIGATE hands off to the device's own map app rather than drawing a map
+    // in a browser tab: the clinician is about to drive, and the phone's map has
+    // their traffic, their voice guidance and their car.
+    const navigateHref = (address) =>
+      `https://maps.google.com/?q=${encodeURIComponent(String(address || ''))}`;
+
+    const DayDistance = ({ distance }) => {
+      const d = distance || {};
+      if (d.reason === 'first_stop') return <span className="text-[11.5px] text-stone-400">First stop</span>;
+      if (d.reason === 'no_coordinates') {
+        return <span className="text-[11.5px] text-amber-700">No address coordinates — distance cannot be shown</span>;
+      }
+      if (typeof d.miles !== 'number') return null;
+      // LABELLED as straight-line, deliberately. A 3-mile straight line across a
+      // river is a 20-minute drive, and a clinician planning a day around a
+      // number called "drive time" that is really a crow's flight will be late.
+      return <span className="text-[11.5px] text-stone-500">{d.miles} mi in a straight line from the last stop</span>;
+    };
+
+    const DayVisitRow = ({ v, onOpenChart, onPacket, onStamp, busy, canWrite }) => (
+      <div className={`border-b border-stone-100 py-3 ${v.state === 'cancelled' ? 'opacity-50' : ''}`}>
+        <div className="flex items-start gap-3">
+          <div className="w-[68px] shrink-0 text-right">
+            <div className="text-[13.5px] font-bold text-primary">{v.time || '—'}</div>
+            {v.endTime && <div className="text-[10.5px] text-stone-400">to {v.endTime}</div>}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-semibold text-[14px] text-stone-800">{v.patientName || 'Unnamed patient'}</span>
+              <span className={`chip ${VISIT_STATE_STYLE[v.state] || 'bg-stone-100 text-stone-600'}`}>
+                {(v.state || '').replace(/_/g, ' ').toUpperCase()}
+              </span>
+            </div>
+            <div className="text-[12px] text-stone-600">
+              {[v.visitType, v.serviceLine].filter(Boolean).join(' • ')}
+            </div>
+            {v.address && <div className="text-[12px] text-stone-500 mt-0.5">{v.address}</div>}
+            <div className="mt-0.5"><DayDistance distance={v.distance} /></div>
+            {/* A2 — access notes and who will be there. From the PATIENT record,
+                so they are here for whoever covers, not just whoever entered
+                them. This is what you read before getting out of the car. */}
+            {v.homeVisit && v.homeVisit.length > 0 && (
+              <div className="mt-2 bg-cream border border-creamdeep rounded-lg px-3 py-2 space-y-1">
+                {v.homeVisit.map(h => (
+                  <div key={h.key} className="text-[12px] text-stone-700">
+                    <span className="lblu mr-1.5">{h.label}</span>{h.value}
+                  </div>
+                ))}
+              </div>
+            )}
+            {v.timing && (v.timing.arrivedAt || v.timing.startedAt) && (
+              <div className="text-[11px] text-stone-500 mt-1">
+                {v.timing.arrivedAt && <>Arrived {fmtTs(v.timing.arrivedAt)}. </>}
+                {v.timing.startedAt && <>Started {fmtTs(v.timing.startedAt)}. </>}
+                {v.timing.totalMinutes != null && <b>{v.timing.totalMinutes} min total.</b>}
+              </div>
+            )}
+            <div className="flex gap-2 mt-2 flex-wrap">
+              {v.address && (
+                <a className="btn ghost !py-1 !px-2.5 text-[11.5px]" href={navigateHref(v.address)}
+                  target="_blank" rel="noopener noreferrer"><i className="ti ti-navigation" />Navigate</a>
+              )}
+              <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" onClick={() => onPacket(v)}>
+                <i className="ti ti-file-description" />Pre-visit
+              </button>
+              <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" onClick={() => onOpenChart(v.clientId)}>
+                <i className="ti ti-folder-open" />Open chart
+              </button>
+              {canWrite && v.state === 'scheduled' && (
+                <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" disabled={busy === v.eid}
+                  onClick={() => onStamp(v, 'en_route')}><i className="ti ti-car" />En route</button>
+              )}
+              {canWrite && ['scheduled', 'en_route'].includes(v.state) && (
+                <button className="btn gold !py-1 !px-2.5 text-[11.5px]" disabled={busy === v.eid}
+                  onClick={() => onStamp(v, 'arrive')}><i className="ti ti-door-enter" />Arrive</button>
+              )}
+              {canWrite && v.state === 'arrived' && (
+                <button className="btn !py-1 !px-2.5 text-[11.5px]" disabled={busy === v.eid}
+                  onClick={() => onStamp(v, 'start')}><i className="ti ti-player-play" />Start visit</button>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+
+    const PreVisitPacket = ({ clientId, eid, onClose, onOpenChart }) => {
+      const [p, setP] = useState(null);
+      const [err, setErr] = useState('');
+      useEffect(() => {
+        let live = true;
+        api.preVisit(clientId, eid).then(r => { if (live) setP(r); })
+          .catch(e => { if (live) setErr(e.message); });
+        return () => { live = false; };
+      }, [clientId, eid]);
+      if (err) return <div className="card p-4"><p className="text-red-600 text-sm">{err}</p>
+        <button className="btn ghost !py-1 !px-2.5 text-xs mt-2" onClick={onClose}>Close</button></div>;
+      if (!p) return <div className="card p-4 text-sm text-stone-500">Loading the packet…</div>;
+      const k = p.packet || {};
+      const b = k.banner || {};
+      const Row = ({ label, children }) => (
+        <div className="flex gap-2 py-1 border-b border-stone-100 last:border-0">
+          <div className="lblu w-[130px] shrink-0 pt-0.5">{label}</div>
+          <div className="text-[12.5px] text-stone-700 min-w-0">{children}</div>
+        </div>
+      );
+      return (
+        <div className="card">
+          <div className="card-h">
+            <h2>{k.patientName} — today's visit</h2>
+            <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={onClose}>Close</button>
+          </div>
+          <div className="p-4 space-y-3">
+            <AllergyStrip allergies={b.allergies} />
+            <div>
+              <Row label="Reason">{k.reason || '—'}</Row>
+              <Row label="Last visit">{k.lastVisitAt || '—'}</Row>
+              <Row label="Last vitals">
+                {k.lastVitals ? [k.lastVitals.label, k.lastVitals.value].filter(Boolean).join(' ') : '—'}
+              </Row>
+              <Row label="Active problems">
+                {k.activeProblems && k.activeProblems.length
+                  ? k.activeProblems.map(x => x.description || x.title || x.code).filter(Boolean).join(' • ')
+                  : '—'}
+              </Row>
+              <Row label="Recent results">
+                {k.recentResults && k.recentResults.length
+                  ? k.recentResults.map(r => `${r.label}${r.interpretation ? ` (${r.interpretation})` : ''}`).join(' • ')
+                  : '—'}
+              </Row>
+            </div>
+            {k.openItems && k.openItems.length > 0 && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                <div className="lblu mb-1">Open items</div>
+                {k.openItems.map((it, i) => (
+                  <div key={i} className="text-[12.5px] text-amber-900 flex gap-1.5">
+                    <i className="ti ti-alert-triangle mt-[2px]" /><span>{it.text}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {k.homeVisit && k.homeVisit.length > 0 && (
+              <div className="bg-cream border border-creamdeep rounded-lg p-3 space-y-1">
+                {k.homeVisit.map(h => (
+                  <div key={h.key} className="text-[12.5px] text-stone-700">
+                    <span className="lblu mr-1.5">{h.label}</span>{h.value}
+                  </div>
+                ))}
+              </div>
+            )}
+            {p.emrNotice && <p className="text-[11.5px] text-amber-700">{p.emrNotice}</p>}
+            <button className="btn gold w-full justify-center" onClick={() => onOpenChart(k.clientId)}>
+              <i className="ti ti-player-play" />Start visit
+            </button>
+          </div>
+        </div>
+      );
+    };
+
+    const MyDayView = ({ user, onOpenChart }) => {
+      const access = useContext(AccessContext);
+      const [date, setDate] = useState(() => GFC_TIME.zonedParts(new Date()).isoDate);
+      const [day, setDay] = useState(null);
+      const [err, setErr] = useState('');
+      const [busy, setBusy] = useState(null);
+      const [packet, setPacket] = useState(null);
+      const [proposal, setProposal] = useState(null);
+      const load = useCallback(() => {
+        setErr('');
+        api.myDay(date).then(setDay).catch(e => { setErr(e.message); setDay(null); });
+      }, [date]);
+      useEffect(() => { load(); }, [load]);
+
+      const stamp = (v, event) => {
+        setBusy(v.eid); setErr('');
+        api.stampVisit(v.eid, { event, clientId: v.clientId })
+          .then(() => load())
+          .catch(e => setErr(e.message))
+          .finally(() => setBusy(null));
+      };
+      const optimize = () => {
+        api.optimizeDay((day && day.visits) || [])
+          .then(setProposal).catch(e => setErr(e.message));
+      };
+
+      const greeting = (() => {
+        const h = Number(GFC_TIME.zonedParts(new Date()).hour);
+        return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
+      })();
+      // A bare calendar date carries no zone, so it is read at MIDDAY UTC and
+      // rendered in UTC. Reading it in Eastern would make "2026-09-23" the
+      // evening of the 22nd and print the wrong weekday — the same trap the
+      // bulk-shift generator paid for on 2026-09-20.
+      const longDate = new Date(`${date}T12:00:00Z`).toLocaleDateString('en-US',
+        { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
+
+      if (packet) {
+        return (
+          <div className="p-4 lg:p-7 max-w-2xl">
+            <PreVisitPacket clientId={packet.clientId} eid={packet.eid}
+              onClose={() => setPacket(null)} onOpenChart={onOpenChart} />
+          </div>
+        );
+      }
+      return (
+        <div className="p-4 lg:p-7 max-w-3xl">
+          <div className="card mb-4">
+            <div className="bg-primary text-white px-4 py-3 rounded-t-[11px]">
+              <div className="serif text-xl font-semibold">{greeting}, {String(user && user.name || '').split(' ')[0] || 'there'}</div>
+              <div className="text-[12px] text-accent">{longDate}</div>
+            </div>
+            <div className="px-4 py-2 border-b border-stone-100 flex items-center gap-2 flex-wrap">
+              <input className="inp !w-auto !py-1 text-xs" type="date" value={date} onChange={e => setDate(e.target.value)} />
+              <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" onClick={load}><i className="ti ti-refresh" />Refresh</button>
+              {access.canWrite && day && day.visits && day.visits.length > 1 && (
+                <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" onClick={optimize}>
+                  <i className="ti ti-route" />Optimize route
+                </button>
+              )}
+            </div>
+            {err && <p className="text-red-600 text-sm px-4 py-2">{err}</p>}
+            {day && day.calendar && !day.calendar.ok && (
+              <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] text-amber-900">
+                <b>The calendar could not be read.</b> {day.calendar.error} This is not an empty day — it is a day we could not load.
+              </div>
+            )}
+            {/* An unsigned note from an earlier day is the practice's biggest
+                silent risk: nothing chases it, and the longer it sits the less
+                anybody remembers of the visit. Pinned at the top, in red. */}
+            {day && day.unsigned && day.unsigned.length > 0 && (
+              <div className="bg-red-50 border-b border-red-200 px-4 py-3">
+                <div className="text-[12px] font-bold text-red-800 mb-1">
+                  <i className="ti ti-alert-triangle-filled mr-1" />
+                  {day.unsigned.length} unsigned {day.unsigned.length === 1 ? 'note' : 'notes'} from earlier days
+                </div>
+                {day.unsigned.map(u => (
+                  <div key={u.eid} className="text-[12.5px] text-red-900 flex items-center justify-between gap-2 py-0.5">
+                    <span>{u.date} · {u.patientName} · {u.visitType} <span className="text-red-600">({u.daysOld}d)</span></span>
+                    <button className="btn ghost !py-0.5 !px-2 text-[11px]" onClick={() => onOpenChart(u.clientId)}>Open</button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="px-4">
+              {!day && !err && <p className="text-sm text-stone-500 py-4">Loading your day…</p>}
+              {day && day.visits.length === 0 && (
+                <p className="text-sm text-stone-500 py-6">No visits scheduled for this day.</p>
+              )}
+              {day && day.visits.map(v => (
+                <DayVisitRow key={v.eid} v={v} busy={busy} canWrite={access.canWrite}
+                  onOpenChart={onOpenChart}
+                  onPacket={(vv) => setPacket({ clientId: vv.clientId, eid: vv.eid })}
+                  onStamp={stamp} />
+              ))}
+            </div>
+            {day && (
+              <div className="bg-cream border-t border-creamdeep px-4 py-3 text-[12px] text-stone-700 flex gap-4 flex-wrap">
+                <span><b>{day.totals.visits}</b> {day.totals.visits === 1 ? 'visit' : 'visits'}</span>
+                <span>
+                  {day.totals.miles != null
+                    ? <><b>{day.totals.miles}</b> mi straight-line{day.totals.milesPartial ? ` (${day.totals.unplaceableStops} stop${day.totals.unplaceableStops === 1 ? '' : 's'} without coordinates)` : ''}</>
+                    : <span className="text-amber-700">Distances unavailable — no address coordinates</span>}
+                </span>
+                <span><b>{day.totals.openTasks}</b> open {day.totals.openTasks === 1 ? 'task' : 'tasks'}</span>
+              </div>
+            )}
+          </div>
+
+          {proposal && (
+            <div className="card">
+              <div className="card-h">
+                <h2>Proposed order</h2>
+                <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={() => setProposal(null)}>Discard</button>
+              </div>
+              <div className="p-4">
+                {!proposal.proposal && <p className="text-sm text-stone-500">Nothing to reorder.</p>}
+                {proposal.proposal && (
+                  <>
+                    <p className="text-[12px] text-stone-500 mb-2">{proposal.proposal.caveat}</p>
+                    {proposal.proposal.unchanged
+                      ? <p className="text-[13px] text-stone-700">The day is already in proximity order.</p>
+                      : proposal.proposal.order.map((o, i) => (
+                        <div key={o.eid} className="text-[13px] py-1 border-b border-stone-100 last:border-0">
+                          <b>{i + 1}.</b> {o.patientName} <span className="text-stone-500">({o.fromTime} → {o.toTime})</span>
+                        </div>
+                      ))}
+                    {/* NEVER auto-applied. Accepting rebooks through the
+                        appointment routes so the patient is told. */}
+                    <p className="text-[11.5px] text-amber-700 mt-3">
+                      Nothing has changed yet. Accepting this rebooks each visit through the normal reschedule
+                      route, which emails the patient. Accepting is not built in this pass — the order above is a
+                      proposal to work from.
+                    </p>
+                  </>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -3025,7 +3353,10 @@
       const [linkCandidates, setLinkCandidates] = useState([]);
       const [err, setErr] = useState('');
       const [listOpen, setListOpen] = useState(true);
-      const [view, setView] = useState('charts'); // 'charts' | 'schedule' (4.2) | 'queue' (4.4) | 'inbox' (4.9) | 'results' | 'overdue' (4.10)
+      // Session 4.12 I1 — MY DAY is the default route after sign-in. The
+      // workspace used to open on a patient list, which is not how a house-call
+      // day starts.
+      const [view, setView] = useState('myday'); // 'myday' (4.12) | 'charts' | 'schedule' (4.2) | 'queue' (4.4) | 'inbox' (4.9) | 'results' | 'overdue' (4.10)
       const [hpApptEid, setHpApptEid] = useState(null); // H&P opened from an appointment
       const [encTarget, setEncTarget] = useState(null); // encounter to open on the Encounters tab (4.4)
 
@@ -3143,6 +3474,8 @@
                 <button className="lg:hidden btn ghost !px-2.5 !py-1.5" onClick={() => setListOpen(true)}><i className="ti ti-users" /></button>
                 <div className="serif text-lg text-primary font-semibold">{VIEW_TITLES[view] || 'Patient Chart'}</div>
                 <div className="flex rounded-lg border border-stone-200 overflow-hidden ml-1">
+                  <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'myday' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
+                    onClick={() => { setView('myday'); setListOpen(false); }}><i className="ti ti-sun mr-1" />My Day</button>
                   <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'charts' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
                     onClick={() => setView('charts')}><i className="ti ti-folder-open mr-1" />Charts</button>
                   <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'schedule' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
@@ -3264,6 +3597,9 @@
               </div>
             )}
             {err && <p className="text-red-600 text-sm px-7 pt-3">{err}</p>}
+            {view === 'myday' && (
+              <MyDayView user={user} onOpenChart={(clientId) => openChartById(clientId)} />
+            )}
             {view === 'queue' && (
               <CodingQueueView onOpenEncounter={(clientId, euuid) => openChartById(clientId, { tab: 'encounters', encounterUuid: euuid })} />
             )}

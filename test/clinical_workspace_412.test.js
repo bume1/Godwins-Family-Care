@@ -379,3 +379,381 @@ test('stripComments removes comments and not code', () => {
     'a stray /* inside a line comment must not swallow the rest of the file');
   assert.ok(!out.includes('a real block'), 'a genuine block comment is removed');
 });
+
+// ===========================================================================
+// 8. SCOPE A — MY DAY
+// ===========================================================================
+
+const myDay = require('../myDay');
+const pageCodeLines = pageCode.split('\n');
+
+test('the day advances through its own states, and the record beats the stamps', () => {
+  const st = (timing, signed, appointment) =>
+    myDay.deriveVisitState({ appointment: appointment || {}, timing, signed });
+  assert.strictEqual(st(null, false), 'scheduled');
+  assert.strictEqual(st({ enRouteAt: 'x' }, false), 'en_route');
+  assert.strictEqual(st({ enRouteAt: 'x', arrivedAt: 'y' }, false), 'arrived');
+  assert.strictEqual(st({ arrivedAt: 'y', startedAt: 'z' }, false), 'in_progress');
+  // A visit documented from the office afterwards never had an Arrive pressed.
+  // Signed is the record's own answer and outranks every stamp.
+  assert.strictEqual(st({ startedAt: 'z' }, true), 'signed');
+  assert.strictEqual(st(null, true), 'signed');
+  // And a cancelled visit outranks even that.
+  assert.strictEqual(st({ startedAt: 'z' }, true, { status: 'x' }), 'cancelled');
+  assert.strictEqual(st(null, false, { status: '?' }), 'no_show');
+});
+
+test('a visit still running has NO total, not a total of zero', () => {
+  // `new Date(null)` is the epoch and the epoch is finite. This repo has paid
+  // for that twice — a 1970 clock-out that earned an "early clock out" flag,
+  // and a formatter that printed 12/31/1969.
+  assert.strictEqual(myDay.totalVisitMinutes({ startedAt: '2026-09-23T14:05:00Z' }), null);
+  assert.strictEqual(myDay.totalVisitMinutes({}), null);
+  assert.strictEqual(myDay.totalVisitMinutes(null), null);
+  assert.strictEqual(myDay.minutesBetween(null, null), null);
+  assert.strictEqual(myDay.minutesBetween('2026-09-23T14:05:00Z', '2026-09-23T14:47:00Z'), 42);
+});
+
+test('an impossible duration is refused rather than recorded', () => {
+  // Backwards, and longer than any home visit. Both are a mis-stamp, and a
+  // mis-stamp that becomes a time statement becomes a billed E/M level.
+  assert.strictEqual(myDay.minutesBetween('2026-09-23T15:00:00Z', '2026-09-23T14:00:00Z'), null);
+  assert.strictEqual(myDay.minutesBetween('2026-09-23T00:00:00Z', '2026-09-25T00:00:00Z'), null);
+});
+
+test('the time statement never counts a minute twice', () => {
+  // Psychotherapy minutes are documented separately from E/M minutes and the
+  // same minute is never both (billing guide). The E/M figure is net.
+  const s = myDay.timeStatement({
+    startedAt: '2026-09-23T14:00:00Z', endedAt: '2026-09-23T15:00:00Z', psychotherapyMinutes: 30
+  });
+  assert.match(s, /60 minutes/);
+  assert.match(s, /30 minutes of psychotherapy/);
+  assert.match(s, /30 minutes of evaluation and management/);
+  assert.match(s, /separate and distinct/);
+});
+
+test('an unfinished visit produces no time statement at all', () => {
+  assert.strictEqual(myDay.timeStatement({ startedAt: '2026-09-23T14:00:00Z' }), null);
+});
+
+test('psychotherapy minutes longer than the visit are ignored, not subtracted', () => {
+  // Otherwise the E/M figure goes negative and the note asserts something
+  // impossible about a visit.
+  const s = myDay.timeStatement({
+    startedAt: '2026-09-23T14:00:00Z', endedAt: '2026-09-23T14:20:00Z', psychotherapyMinutes: 45
+  });
+  assert.match(s, /20 minutes/);
+  assert.ok(!/-\d+ minutes/.test(s), 'the statement must never show negative E/M minutes');
+});
+
+test('no coordinates yields no distance, never zero miles', () => {
+  // The rule the ICD-10 correction bought and the geofence followed: the app
+  // must not claim a state it cannot observe.
+  assert.strictEqual(myDay.haversineMiles(null, { lat: 33.9, lng: -84.3 }), null);
+  assert.strictEqual(myDay.haversineMiles({ lat: 33.9, lng: -84.3 }, null), null);
+  // 0,0 is an unset field, not a location in the Gulf of Guinea.
+  assert.strictEqual(myDay.haversineMiles({ lat: 0, lng: 0 }, { lat: 33.9, lng: -84.3 }), null);
+  assert.strictEqual(myDay.coordsOf({ intake: { address: { lat: 0, lng: 0 } } }), null);
+  assert.strictEqual(myDay.coordsOf({ intake: { address: { lat: '', lng: '' } } }), null);
+  assert.deepStrictEqual(myDay.coordsOf({ intake: { address: { lat: 33.9, lng: -84.3 } } }), { lat: 33.9, lng: -84.3 });
+});
+
+test('a distance is LABELLED straight-line and never presented as drive time', () => {
+  // A 3-mile straight line across a river is a 20-minute drive. A clinician
+  // planning a day around a number called "drive time" that is really a crow's
+  // flight will be late, so the label and the missing provider are both stated.
+  const row = myDay.buildDayRow({
+    appointment: { eid: '2', startTime: '10:15' },
+    client: { id: 'c2', name: 'Robert Williams', intake: { address: { lat: 33.94, lng: -84.35 } } },
+    previousCoords: { lat: 33.88, lng: -84.47 }
+  });
+  assert.strictEqual(row.distance.kind, 'straight_line');
+  assert.strictEqual(row.distance.driveMinutes, null);
+  assert.strictEqual(row.distance.reason, myDay.DISTANCE_UNAVAILABLE);
+  assert.ok(typeof row.distance.miles === 'number' && row.distance.miles > 0);
+});
+
+test('the first stop and an unplaceable stop are different facts', () => {
+  const first = myDay.buildDayRow({
+    appointment: { eid: '1' }, client: { id: 'c1', intake: { address: { lat: 33.8, lng: -84.4 } } },
+    previousCoords: null
+  });
+  assert.strictEqual(first.distance.reason, 'first_stop');
+  const noCoords = myDay.buildDayRow({
+    appointment: { eid: '2' }, client: { id: 'c2', intake: {} },
+    previousCoords: { lat: 33.8, lng: -84.4 }
+  });
+  assert.strictEqual(noCoords.distance.reason, 'no_coordinates');
+  assert.strictEqual(noCoords.distance.miles, null);
+});
+
+test('a cancelled visit is not a leg, and the mileage total says when it is partial', () => {
+  const day = myDay.buildMyDay({
+    date: '2026-09-23',
+    appointments: [
+      { eid: '1', clientId: 'c1', startTime: '08:30', date: '2026-09-23' },
+      { eid: '2', clientId: 'c2', startTime: '10:15', date: '2026-09-23', status: 'x' },
+      { eid: '3', clientId: 'c3', startTime: '13:30', date: '2026-09-23' },
+      { eid: '4', clientId: 'c4', startTime: '15:00', date: '2026-09-23' }
+    ],
+    clientsById: new Map([
+      ['c1', { id: 'c1', name: 'A', intake: { address: { lat: 33.80, lng: -84.40 } } }],
+      // c2 is cancelled and 200 miles away — measuring it as a leg would
+      // inflate every mile after it.
+      ['c2', { id: 'c2', name: 'B', intake: { address: { lat: 31.00, lng: -84.40 } } }],
+      // c3 MUST have coordinates, or the leg from the cancelled stop is never
+      // measured and this fixture cannot tell the two states apart — which is
+      // exactly what the first version of it did.
+      ['c3', { id: 'c3', name: 'C', intake: { address: { lat: 33.82, lng: -84.41 } } }],
+      ['c4', { id: 'c4', name: 'D', intake: {} }]
+    ]),
+    timingsByEid: new Map(), signedEids: new Set(),
+    unsignedEarlier: [], openTasks: 0, blocks: [], homeVisitFields: []
+  });
+  assert.strictEqual(day.totals.visits, 3, 'a cancelled visit is not counted');
+  assert.strictEqual(day.totals.milesPartial, true);
+  assert.strictEqual(day.totals.unplaceableStops, 1, 'c4 has no coordinates');
+  assert.strictEqual(day.totals.driveMinutes, null);
+  assert.strictEqual(day.totals.driveMinutesReason, myDay.DISTANCE_UNAVAILABLE);
+  // Nothing after the cancelled stop was measured from 200 miles south.
+  assert.ok((day.totals.miles || 0) < 50, `mileage inflated by the cancelled stop: ${day.totals.miles}`);
+  // c1 → c3 is a couple of miles. Measuring through the cancelled c2 would be
+  // roughly four hundred, so the fixture can now tell the two states apart.
+  assert.ok((day.totals.miles || 0) > 0, 'a real leg must be measured, or this proves nothing');
+});
+
+test('the day is ordered by time, whatever order the calendar returned', () => {
+  const day = myDay.buildMyDay({
+    date: '2026-09-23',
+    appointments: [
+      { eid: '3', clientId: 'c3', startTime: '13:30', date: '2026-09-23' },
+      { eid: '1', clientId: 'c1', startTime: '08:30', date: '2026-09-23' },
+      { eid: '2', clientId: 'c2', startTime: '10:15', date: '2026-09-23' }
+    ],
+    clientsById: new Map(), timingsByEid: new Map(), signedEids: new Set(),
+    unsignedEarlier: [], openTasks: 0, blocks: [], homeVisitFields: []
+  });
+  assert.deepStrictEqual(day.visits.map(v => v.time), ['08:30', '10:15', '13:30']);
+});
+
+test('an unsigned note from an earlier day is pinned, oldest first', () => {
+  const day = myDay.buildMyDay({
+    date: '2026-09-23',
+    appointments: [], clientsById: new Map(), timingsByEid: new Map(), signedEids: new Set(),
+    unsignedEarlier: [
+      { eid: '9', date: '2026-09-20', patientName: 'Later' },
+      { eid: '8', date: '2026-09-11', patientName: 'Oldest' },
+      // Today's own visit is not backlog, however unsigned it is.
+      { eid: '7', date: '2026-09-23', patientName: 'Today' }
+    ],
+    openTasks: 0, blocks: [], homeVisitFields: []
+  });
+  assert.deepStrictEqual(day.unsigned.map(u => u.patientName), ['Oldest', 'Later'],
+    'oldest first, and today is not backlog');
+});
+
+test('the My Day row reads the home-visit facts off the patient', () => {
+  const row = myDay.buildDayRow({
+    appointment: { eid: '1' },
+    client: { id: 'c1', name: 'Mary', homeVisit: { accessInstructions: 'Use side entrance.' } },
+    homeVisitFields: [['accessInstructions', 'Access instructions'], ['caregiverPresent', 'Who will be there']]
+  });
+  assert.deepStrictEqual(row.homeVisit,
+    [{ key: 'accessInstructions', label: 'Access instructions', value: 'Use side entrance.' }]);
+});
+
+test('route optimisation PROPOSES and never applies', () => {
+  const visits = [
+    { eid: '1', clientId: 'c1', patientName: 'Far', time: '08:30', state: 'scheduled', coords: { lat: 34.30, lng: -84.40 } },
+    { eid: '2', clientId: 'c2', patientName: 'Near', time: '10:15', state: 'scheduled', coords: { lat: 33.81, lng: -84.40 } },
+    { eid: '3', clientId: 'c3', patientName: 'Mid', time: '13:30', state: 'scheduled', coords: { lat: 33.95, lng: -84.40 } }
+  ];
+  const out = myDay.proposeRouteOrder({ visits, startCoords: { lat: 33.80, lng: -84.40 } });
+  assert.deepStrictEqual(out.proposal.order.map(o => o.patientName), ['Near', 'Mid', 'Far']);
+  assert.match(out.proposal.caveat, /routing provider/i);
+  assert.strictEqual(out.proposal.kind, 'straight_line_nearest_neighbour');
+  // The module hands back a proposal and holds no power to apply one.
+  assert.ok(!('applied' in out.proposal));
+});
+
+test('a visit already started is never reordered out from under the clinician', () => {
+  const visits = [
+    { eid: '1', patientName: 'Started', time: '08:30', state: 'in_progress', coords: { lat: 34.3, lng: -84.4 } },
+    { eid: '2', patientName: 'A', time: '10:15', state: 'scheduled', coords: { lat: 33.81, lng: -84.4 } },
+    { eid: '3', patientName: 'B', time: '13:30', state: 'scheduled', coords: { lat: 33.95, lng: -84.4 } }
+  ];
+  const out = myDay.proposeRouteOrder({ visits, startCoords: { lat: 33.8, lng: -84.4 } });
+  assert.ok(!out.proposal.order.some(o => o.eid === '1'), 'a started visit is a fixed stop');
+  assert.deepStrictEqual(out.proposal.fixedStops, [{ eid: '1', state: 'in_progress' }]);
+});
+
+test('the optimize route never writes and says it did not', () => {
+  const body = routeBody(serverCode, "app.post('/api/clinical/my-day/optimize'");
+  assert.ok(!/db\.set/.test(body), 'proposing an order must not write anything');
+  assert.ok(!/reschedule|swapAppointment/.test(body), 'it must not rebook on its own');
+  assert.match(body, /applied:\s*false/);
+});
+
+// Slice a route from its registration to the NEXT one, rather than by a
+// character count. A fixed window is a guard that works only on the code it was
+// written against, and this one had already fallen short of its own subject.
+const routeBody = (src, needle) => {
+  const i = src.indexOf(needle);
+  assert.ok(i > 0, `route not registered: ${needle}`);
+  const rest = src.slice(i + needle.length);
+  const next = rest.search(/\napp\.(get|post|put|delete)\(/);
+  return rest.slice(0, next > 0 ? next : rest.length);
+};
+
+test('a re-stamp of a time already recorded needs a reason', () => {
+  const body = routeBody(serverCode, "app.post('/api/clinical/visits/:eid/timing'");
+  assert.match(body, /TIMING_ALREADY_SET/);
+  assert.match(body, /!reason/, 'a correction without a reason is refused');
+  // The correction keeps the value it replaced, who changed it and why — the
+  // same rule every other time correction in this app follows.
+  assert.match(body, /next\.corrections = \[/, 'corrections are appended, never overwritten');
+  assert.match(body, /from: existing\[field\]/, 'the value being replaced is kept');
+  assert.match(body, /reason,/, 'the reason is kept on the correction');
+  assert.match(body, /requireClinicalWrite/);
+});
+
+test('the timing route refuses an event it does not know, by name', () => {
+  const body = routeBody(serverCode, "app.post('/api/clinical/visits/:eid/timing'");
+  assert.match(body, /BAD_VISIT_EVENT/);
+  assert.match(body, /Object\.keys\(VISIT_TIMING_EVENTS\)/,
+    'the refusal names the events that do work rather than dead-ending');
+});
+
+test('My Day is the default landing view', () => {
+  assert.match(pageCode, /useState\('myday'\)/,
+    'the workspace must open on the day, not on a patient list');
+  assert.match(pageCode, /<MyDayView/);
+});
+
+test('an unreadable calendar is reported, never rendered as an empty day', () => {
+  // An empty day and an unreachable calendar look identical on screen and are
+  // opposite facts. Same rule as the Drive read and the ICD-10 correction.
+  const body = routeBody(serverCode, "app.get('/api/clinical/my-day'");
+  // BOTH failure branches, and asserted separately. The first version matched
+  // `calendar = { ok: false` once, so gutting the catch block still passed on
+  // the not-configured branch — it could not tell the two states apart.
+  assert.match(body, /is not configured, so the calendar could not be read/,
+    'no EMR configured is reported');
+  assert.match(body, /catch \(e\) \{\s*calendar = \{ ok: false/,
+    'a calendar READ FAILURE must set ok:false, not silently leave an empty day');
+  // THREE ways the calendar can fail, and each reports rather than falling
+  // through to an empty day: the caller is not mapped to a provider, no EMR is
+  // configured, or the read itself failed.
+  assert.match(body, /if \(scopeProblem\) \{\s*calendar = \{ ok: false/,
+    'an unmapped provider is reported');
+  assert.strictEqual((body.match(/calendar = \{ ok: false/g) || []).length, 3,
+    'every failure branch reports, and none falls through to an empty day');
+  const pageIdx = pageCode.indexOf('The calendar could not be read');
+  assert.ok(pageIdx > 0, 'the screen must say the calendar failed');
+  assert.match(pageCode.slice(pageIdx, pageIdx + 400), /not an empty day/);
+});
+
+test('the day defaults to today in GEORGIA, not to the container day', () => {
+  const body = routeBody(serverCode, "app.get('/api/clinical/my-day'");
+  assert.match(body, /practiceToday\(\)/);
+  assert.ok(!/toISOString\(\)\.slice\(0, ?10\)/.test(body),
+    'for four hours of every evening UTC is already tomorrow');
+});
+
+test('NAVIGATE hands off to the device map app', () => {
+  assert.match(pageCode, /const navigateHref = /);
+  assert.match(pageCode, /maps\.google\.com/);
+  const at = pageCode.indexOf('navigateHref(v.address)');
+  assert.ok(at > 0, 'the row must offer Navigate');
+  // The whole anchor element, not the one line the href happens to sit on.
+  const el = pageCode.slice(pageCode.lastIndexOf('<a ', at), pageCode.indexOf('</a>', at));
+  assert.match(el, /target="_blank"/);
+  assert.match(el, /rel="noopener noreferrer"/);
+});
+
+// ===========================================================================
+// 9. SCOPE E — the pre-visit packet
+// ===========================================================================
+
+test('everything on the packet is derived; nothing is typed twice', () => {
+  const packet = myDay.buildPreVisitPacket({
+    client: { id: 'c1', name: 'Mary Johnson', homeVisit: { accessInstructions: 'Call daughter before arrival.' } },
+    appointment: { title: 'CHF follow-up', date: '2026-09-23', startTime: '08:30' },
+    banner: { allergies: { state: 'listed', rows: ['Penicillin'] } },
+    lastVisitAt: '2026-09-03',
+    activeProblems: [{ description: 'CHF' }, { description: 'DM2' }],
+    openOrders: [{ id: 'o1', label: 'BMP', orderType: 'lab', orderedAt: '2026-09-18T00:00:00Z' }],
+    unacknowledgedResults: [{ id: 'r1', label: 'BMP', interpretation: 'abnormal' }],
+    openReferrals: [{ id: 'f1', specialty: 'Cardiology', status: 'pending' }],
+    carePlanGoalsUnmet: ['Weight under 180 lb'],
+    homeVisitFields: [['accessInstructions', 'Access instructions']]
+  });
+  assert.strictEqual(packet.reason, 'CHF follow-up');
+  assert.strictEqual(packet.lastVisitAt, '2026-09-03');
+  assert.deepStrictEqual(packet.homeVisit,
+    [{ key: 'accessInstructions', label: 'Access instructions', value: 'Call daughter before arrival.' }]);
+  const kinds = packet.openItems.map(i => i.kind);
+  assert.deepStrictEqual(kinds, ['referral', 'order', 'result', 'goal'],
+    'open items pull from pending orders, unacknowledged results, open referrals and unmet goals');
+  assert.match(packet.openItems[0].text, /Cardiology/);
+});
+
+test('the packet loads as ONE request', () => {
+  // E3: it is read on a phone in a car, so it must not wait on the full chart.
+  assert.match(pageCode, /preVisit: \(id, eid\) =>/);
+  const i = pageCode.indexOf('const PreVisitPacket');
+  const body = pageCode.slice(i, pageCode.indexOf('\n    const MyDayView'));
+  const calls = (body.match(/api\.[a-zA-Z]+\(/g) || []);
+  assert.deepStrictEqual([...new Set(calls)], ['api.preVisit('],
+    `the packet must make exactly one kind of call, saw ${JSON.stringify(calls)}`);
+});
+
+test('the packet carries the allergy strip, with its three states intact', () => {
+  const i = pageCode.indexOf('const PreVisitPacket');
+  const body = pageCode.slice(i, pageCode.indexOf('\n    const MyDayView'));
+  assert.match(body, /<AllergyStrip allergies=/,
+    'the packet reuses the banner strip rather than restating what an allergy means');
+});
+
+test('visit_timings is claimed in the collection registry', () => {
+  // Session 5's guard: a collection nobody claimed fails the migration before a
+  // single value is copied.
+  const reg = fs.readFileSync(path.join(root, 'dataMigration.js'), 'utf8');
+  assert.match(reg, /key: 'visit_timings', phi: true/);
+});
+
+// ===========================================================================
+// 10. Two defects the LIVE PROBE found and unit tests did not
+// ===========================================================================
+
+test('an unmapped provider id degrades the calendar, it does not refuse the day', () => {
+  // My Day 409'd for any clinician whose openEmrProviderId is unset — which is
+  // every clinician on their first day. The DEFAULT LANDING SCREEN refused to
+  // load over one unset field. The backlog, the open-task count and the
+  // standing facts all come from this app's own store and are exactly what
+  // that clinician still needs.
+  const body = routeBody(serverCode, "app.get('/api/clinical/my-day'");
+  assert.ok(!/if \(scope\.error\) return res\.status\(409\)/.test(body),
+    'a scope problem must not refuse the landing screen');
+  assert.match(body, /scopeProblem/, 'it is reported as a calendar problem instead');
+  assert.match(body, /if \(scopeProblem\) \{\s*calendar = \{ ok: false/);
+});
+
+test('the chart reports the draft state whether or not the patient is EMR-linked', () => {
+  // The draft is this app's own row. Leaving it out of the unlinked branch
+  // meant the banner's action could never read "Resume draft" on exactly the
+  // patients a clinician is most likely to be part-way through a note on.
+  const body = routeBody(serverCode, "app.get('/api/clinical/patients/:clientId/chart'");
+  // The negative lookahead matters: a bare /visitDraft/ also matches
+  // `visitDraftDisabled`, so renaming the key away survived this guard on its
+  // first run. It could not distinguish the two states.
+  assert.ok((body.match(/visitDraft(?![A-Za-z])/g) || []).length >= 3,
+    'both the linked and the unlinked return must carry a visitDraft key');
+  assert.match(body, /linked: true, banner, visitDraft,/, 'the linked chart carries it');
+  assert.match(body, /visitDraft: \{ open: !!unlinkedDraft/, 'the unlinked chart carries it');
+  assert.match(body, /unlinkedDraft/);
+  // Both keyed to the CALLER, so a colleague's half-written note is never
+  // offered here as something to resume.
+  assert.strictEqual((body.match(/noteDraftId\(client\.id, req\.user\.id\)/g) || []).length, 2);
+});
