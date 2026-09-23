@@ -1011,9 +1011,19 @@
                   </span>
                 </BannerFact>
                 <BannerFact label="Facility &amp; POS">
-                  {b.facility && b.facility.name
-                    ? <span>{b.facility.name}<br />POS {b.facility.posCode || <span className="text-amber-700">not set</span>}</span>
-                    : <span className="text-amber-700">Not assigned — visits cannot be signed</span>}
+                  {b.facility && b.facility.name ? (
+                    <span>{b.facility.name}<br />POS {b.facility.posCode || <span className="text-amber-700">not set</span>}</span>
+                  ) : b.facility && b.facility.id ? (
+                    // Assigned, but this read couldn't confirm it — a stale
+                    // facility id, or OpenEMR's facility list couldn't be
+                    // read for this reader. That is a DIFFERENT fact from
+                    // "nobody ever assigned a facility," and saying "Not
+                    // assigned" here would be telling the reader something
+                    // false rather than something unconfirmed.
+                    <span className="text-amber-700">Assigned (facility {b.facility.id}) — {b.facility.warning || 'could not be confirmed against OpenEMR right now'}</span>
+                  ) : (
+                    <span className="text-amber-700">Not assigned — visits cannot be signed</span>
+                  )}
                 </BannerFact>
                 <BannerFact label="Last visit" value={b.lastVisitAt} />
                 <BannerFact label="Track" value={b.careTierLabel} />
