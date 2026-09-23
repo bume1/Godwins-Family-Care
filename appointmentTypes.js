@@ -208,13 +208,96 @@ const R = REQUIRED;
 
 const t = (key, required) => ({ key, required });
 
+// ---- What must be in hand before the visit -------------------------------
+// ⚠️ THE MISTAKE THIS REPLACES, RECORDED SO IT IS NOT REPEATED. The first
+// version of this file listed intake as free strings transcribed straight out
+// of the owner's config table — `demographics`, `insurance`, `allergies`,
+// `consent_to_treat` and thirty more. SEVENTEEN OF THEM ALREADY EXISTED under
+// different names: the enrollment wizard has collected demographics, payer,
+// conditions, medications, allergies, contacts and the medical team since
+// 3.2, and consentToTreat and practiceNpp are consents in the registry. That
+// made a THIRD vocabulary for things the app already had, which is precisely
+// the drift `intake-fields.js` was created to end.
+//
+// So an intake requirement is no longer a string. It is a REFERENCE into a
+// vocabulary that already owns the answer:
+//
+//   F('medications')   a declared intake field — public/intake-fields.js
+//   C('consentToTreat') a consent — consentRegistry.js
+//   D('priorRecords')  an expected document — GFC_EXPECTED_DOCUMENTS
+//   I('phq9', why)     genuinely NEW, with what it is and why nothing covers it
+//
+// `assertIntakeIsDeclared()` runs at load and refuses a reference that does
+// not resolve, so naming a field this app does not have fails the build rather
+// than sitting in a config nobody cross-checks. `I()` is the only escape, and
+// it has to say in words why it is not one of the other three — which is what
+// makes a genuinely missing instrument visible instead of hidden among names
+// that merely look new.
+const intakeFields = require('./public/intake-fields.js');
+const consentRegistry = require('./consentRegistry.js');
+
+const F = (path) => ({ from: 'intake', path });
+const C = (type) => ({ from: 'consent', type });
+const D = (kind) => ({ from: 'document', kind });
+const I = (key, why) => ({ from: 'new', key, why });
+
+// The document kinds live in server.js's GFC_EXPECTED_DOCUMENTS, which this
+// pure module must not require. Mirrored as the small fixed list it is, and a
+// test asserts the two agree — a mirror that can drift silently is the same
+// mistake one layer along.
+const EXPECTED_DOCUMENT_KINDS = Object.freeze([
+  'photoId', 'insuranceCard', 'poaGuardianship', 'advanceDirective',
+  'dnrPolst', 'medicationList', 'priorRecords',
+  // Added in 4.9b for a faxed face sheet and a signed order. Missed out of
+  // the first draft of this mirror, and caught by the test that compares the
+  // two — which is the entire reason that test exists.
+  'referral', 'physicianOrder'
+]);
+
+const intakeFieldPaths = () => new Set(
+  (intakeFields.ALL_FIELDS || []).map(f => f && f.path).filter(Boolean)
+    .map(p => String(p).split('.')[0])
+);
+const consentTypes = () => new Set((consentRegistry.GFC_CONSENT_DEFS || []).map(d => d.type));
+
+const resolveIntakeRef = (ref) => {
+  if (!ref || typeof ref !== 'object') return { ok: false, why: 'not a reference' };
+  if (ref.from === 'intake') {
+    return intakeFieldPaths().has(String(ref.path).split('.')[0])
+      ? { ok: true } : { ok: false, why: `no intake field "${ref.path}" is declared in public/intake-fields.js` };
+  }
+  if (ref.from === 'consent') {
+    return consentTypes().has(ref.type)
+      ? { ok: true } : { ok: false, why: `no consent "${ref.type}" is in the registry` };
+  }
+  if (ref.from === 'document') {
+    return EXPECTED_DOCUMENT_KINDS.includes(ref.kind)
+      ? { ok: true } : { ok: false, why: `no expected document kind "${ref.kind}"` };
+  }
+  if (ref.from === 'new') {
+    return String(ref.why || '').trim().length > 15
+      ? { ok: true } : { ok: false, why: `"${ref.key}" is declared new but does not say why nothing existing covers it` };
+  }
+  return { ok: false, why: `unknown reference source "${ref.from}"` };
+};
+
+
+
 const APPOINTMENT_TYPES = Object.freeze([
   {
     key: 'pc_new_patient', service: 'primary_care', label: 'New Patient',
     defaultMinutes: 60, telehealthAllowed: true, telehealthPayerCaveat: true,
     credentials: ['MD', 'DO', 'NP'], specialty: null,
-    intake: ['demographics', 'insurance', 'consent_to_treat', 'hipaa_acknowledgment', 'medical_history',
-      'medication_list', 'allergies', 'phq2', 'emergency_contact', 'preferred_pharmacy'],
+    intake: [
+      // Already collected at enrollment — referenced, never renamed.
+      F('dob'), F('gender'), F('primaryLanguage'), F('phone'), F('address'),
+      F('payerType'), F('insuranceTypes'),
+      F('conditions'), F('additionalDiagnoses'), F('medications'), F('allergies'),
+      F('emergencyContacts'), F('primaryContact'), F('medicalTeam'),
+      C('consentToTreat'), C('practiceNpp'),
+      // Genuinely new: this app scores nothing today.
+      I('phq2', 'Depression screen, 2-item. No screening instrument exists in this app yet.')
+    ],
     sections: [
       t('chiefComplaint', R.ALWAYS), t('hpi', R.ALWAYS), t('pmhSurgical', R.ALWAYS),
       t('familyHistory', R.OPTIONAL), t('socialHistory', R.ALWAYS), t('medReconciliation', R.ALWAYS),
@@ -227,7 +310,10 @@ const APPOINTMENT_TYPES = Object.freeze([
     key: 'pc_follow_up', service: 'primary_care', label: 'Follow-up',
     defaultMinutes: 30, telehealthAllowed: true, telehealthPayerCaveat: true,
     credentials: ['MD', 'DO', 'NP'], specialty: null,
-    intake: ['confirm_demographics', 'confirm_insurance', 'medication_changes'],
+    intake: [
+      // A follow-up CONFIRMS what is on file rather than collecting it again.
+      F('dob'), F('phone'), F('payerType'), F('medications')
+    ],
     sections: [
       t('reasonForVisit', R.ALWAYS), t('intervalHistory', R.ALWAYS), t('medReconciliation', R.ALWAYS),
       t('ros', R.OPTIONAL), t('vitals', R.IN_PERSON), t('physicalExam', R.IN_PERSON),
@@ -239,7 +325,11 @@ const APPOINTMENT_TYPES = Object.freeze([
     key: 'pc_acute', service: 'primary_care', label: 'Acute / Sick',
     defaultMinutes: 30, telehealthAllowed: true, telehealthPayerCaveat: true,
     credentials: ['MD', 'DO', 'NP'], specialty: null,
-    intake: ['reason_for_visit', 'symptom_onset', 'current_medications'],
+    intake: [
+      // The reason and the onset are the note's own chief complaint and HPI,
+      // so they are not restated here as intake.
+      F('medications')
+    ],
     sections: [
       t('chiefComplaint', R.ALWAYS), t('hpi', R.ALWAYS), t('pertinentRos', R.ALWAYS),
       t('vitals', R.IN_PERSON), t('focusedExam', R.IN_PERSON), t('medicationReview', R.OPTIONAL),
@@ -254,8 +344,11 @@ const APPOINTMENT_TYPES = Object.freeze([
     // See awvEligibility(): this app cannot ASK Medicare. It warns from a
     // recorded date and says where the date came from.
     priorVisitWarning: true,
-    intake: ['health_risk_assessment', 'medication_list', 'providers_and_suppliers',
-      'phq2_phq9', 'fall_risk_screen', 'functional_adl_screen'],
+    intake: [
+      F('medications'), F('medicalTeam'), F('fallRisk'), F('adl'),
+      I('hra', 'Medicare Health Risk Assessment. Not collected anywhere today.'),
+      I('phq9', 'Depression screen, 9-item. No screening instrument exists in this app yet.')
+    ],
     sections: [
       t('hraReview', R.ALWAYS), t('historyUpdate', R.ALWAYS), t('providersSuppliers', R.ALWAYS),
       // Height, weight, BMI and BP are the AWV's own required element set, so
@@ -272,7 +365,12 @@ const APPOINTMENT_TYPES = Object.freeze([
     defaultMinutes: 60, telehealthAllowed: true, telehealthPayerCaveat: true,
     credentials: ['MD', 'DO', 'NP'], specialty: null,
     requiresDischargeDate: true,
-    intake: ['discharge_summary', 'discharge_medication_list', 'discharging_facility'],
+    intake: [
+      F('medications'),
+      D('priorRecords'),
+      I('discharge_summary', 'The discharge summary itself, and the discharging facility. No per-visit document slot exists today.'),
+      I('discharge_medication_list', 'The med list as at discharge, which is what the reconciliation is against.')
+    ],
     sections: [
       t('dischargeDateFacility', R.ALWAYS), t('twoDayContact', R.ALWAYS), t('hospitalCourse', R.ALWAYS),
       t('dischargeRecordsReviewed', R.ALWAYS), t('medReconciliation', R.ALWAYS), t('pendingTests', R.ALWAYS),
@@ -287,8 +385,15 @@ const APPOINTMENT_TYPES = Object.freeze([
     // A PMHNP is an NP; a psychiatrist is an MD. The SPECIALTY is what makes
     // either one a psych prescriber — see canBookType.
     credentials: ['MD', 'DO', 'NP'], specialty: 'behavioral_health',
-    intake: ['psych_intake_questionnaire', 'phq9', 'gad7', 'substance_use_screen',
-      'consent', 'current_medications', 'prior_psych_treatment'],
+    intake: [
+      F('medications'), F('conditions'), F('allergies'),
+      C('consentToTreat'),
+      I('psych_intake', 'Psychiatric intake questionnaire. Not collected anywhere today.'),
+      I('phq9', 'Depression screen, 9-item.'),
+      I('gad7', 'Anxiety screen, 7-item.'),
+      I('substance_use', 'Substance use screen.'),
+      I('prior_psych_treatment', 'Previous psychiatric treatment and medication trials.')
+    ],
     sections: [
       t('chiefComplaint', R.ALWAYS), t('hpi', R.ALWAYS), t('psychiatricHistory', R.ALWAYS),
       t('medicalHistory', R.OPTIONAL), t('medicationHistory', R.ALWAYS), t('substanceUse', R.ALWAYS),
@@ -302,7 +407,12 @@ const APPOINTMENT_TYPES = Object.freeze([
     key: 'bh_follow_up', service: 'behavioral_health', label: 'Psych Follow-up / Med Mgmt',
     defaultMinutes: 30, telehealthAllowed: true, telehealthPayerCaveat: false,
     credentials: ['MD', 'DO', 'NP'], specialty: 'behavioral_health',
-    intake: ['phq9', 'gad7', 'medication_adherence_and_side_effects'],
+    intake: [
+      F('medications'),
+      I('phq9', 'Depression screen, 9-item.'),
+      I('gad7', 'Anxiety screen, 7-item.'),
+      I('medication_adherence', 'Adherence and side effects since the last visit.')
+    ],
     sections: [
       t('intervalHistory', R.ALWAYS), t('medicationAdherence', R.ALWAYS), t('mentalStatusExam', R.ALWAYS),
       t('riskAssessment', R.ALWAYS), t('screeningScores', R.OPTIONAL),
@@ -318,7 +428,13 @@ const APPOINTMENT_TYPES = Object.freeze([
     // Medicare claim. Build-enforced downstream; declared here so the rule
     // travels with the type rather than living only in a comment.
     neverMedicare: true,
-    intake: ['records_received', 'dbq_or_exam_request', 'identity_verification'],
+    intake: [
+      // An IME is not treatment: nothing about it comes from the client's own
+      // enrollment record, and it is billed to the contracting entity.
+      I('records_received', 'The records the contracting entity sent.'),
+      I('exam_request', 'The exam request or DBQ forms to be completed.'),
+      I('identity_verification', 'Photo identity check at the door.')
+    ],
     sections: [
       t('examRequest', R.ALWAYS), t('identityVerification', R.ALWAYS), t('recordsReviewed', R.ALWAYS),
       t('history', R.ALWAYS), t('examination', R.ALWAYS), t('dbqForms', R.ALWAYS),
@@ -326,6 +442,40 @@ const APPOINTMENT_TYPES = Object.freeze([
     ]
   }
 ]);
+
+// Runs at LOAD. A requirement that names something this app does not have is
+// a promise the booking screen cannot keep, and it must not be discoverable
+// only by somebody reading the config against three other files by hand.
+// Takes the types so it can be GIVEN a bad set. Called with none it checks
+// the real config; a test that could only ever hand it a valid one could not
+// distinguish a working assertion from a deleted one.
+const assertIntakeIsDeclared = (types = APPOINTMENT_TYPES) => {
+  const bad = [];
+  for (const type of types) {
+    for (const ref of type.intake || []) {
+      const r = resolveIntakeRef(ref);
+      if (!r.ok) bad.push(`${type.key}: ${r.why}`);
+    }
+  }
+  if (bad.length) {
+    throw new Error(`appointmentTypes.js declares intake this app cannot satisfy:\n  ${bad.join('\n  ')}`);
+  }
+};
+assertIntakeIsDeclared();
+
+// What is genuinely missing, gathered from the `I()` references. This is the
+// build list for the screening instruments and per-visit documents, and it is
+// DERIVED rather than kept as a second list that goes stale.
+const unbuiltIntake = () => {
+  const out = new Map();
+  for (const type of APPOINTMENT_TYPES) {
+    for (const ref of (type.intake || []).filter(r => r.from === 'new')) {
+      if (!out.has(ref.key)) out.set(ref.key, { key: ref.key, why: ref.why, types: [] });
+      out.get(ref.key).types.push(type.key);
+    }
+  }
+  return [...out.values()];
+};
 
 const typeByKey = (k) => APPOINTMENT_TYPES.find(a => a.key === String(k || '')) || null;
 const typesForService = (svc) => APPOINTMENT_TYPES.filter(a => a.service === String(svc || ''));
@@ -454,6 +604,7 @@ module.exports = {
   typeByKey, typesForService, sectionsFor, requiredSectionKeys,
   canBookType, canBeTelehealth, awvEligibility, AWV_INTERVAL_DAYS,
   resolveVisit, isBehavioralHealth,
+  resolveIntakeRef, assertIntakeIsDeclared, unbuiltIntake, EXPECTED_DOCUMENT_KINDS,
 
   SERVICES, MODALITIES, LOCATIONS, CODE_FAMILIES,
   TELEHEALTH_POS_PATIENT_HOME, TELEHEALTH_POS_ELSEWHERE,

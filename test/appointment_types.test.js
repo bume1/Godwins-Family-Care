@@ -230,3 +230,137 @@ test('transitional care declares the discharge date it cannot be booked without'
     assert.ok(!t.requiresDischargeDate, `${t.key} must not demand a discharge date`);
   }
 });
+
+// ── Intake references something that already exists, or says it is new ──
+// ⚠️ THE MISTAKE THESE GUARD. The first version of this config listed intake
+// as free strings copied out of the owner's table — `demographics`,
+// `insurance`, `allergies`, `consent_to_treat` and thirty more. SEVENTEEN
+// already existed under other names: the enrollment wizard has collected
+// demographics, payer, conditions, medications, allergies, contacts and the
+// medical team since 3.2, and consentToTreat and practiceNpp are consents in
+// the registry. It was a third vocabulary for things the app already had —
+// exactly the drift `intake-fields.js` exists to end — and nothing would have
+// caught it except somebody reading four files side by side.
+const intakeFields = require('../public/intake-fields.js');
+const consentRegistry = require('../consentRegistry.js');
+
+test('every intake requirement resolves to a vocabulary that already owns the answer', () => {
+  // Load-time assertion, re-run here so the failure names the type — and
+  // GIVEN a bad set, because "it did not throw" on a valid config says nothing
+  // about whether it still checks anything. That survived its first mutation.
+  assert.doesNotThrow(() => A.assertIntakeIsDeclared());
+  assert.throws(() => A.assertIntakeIsDeclared([
+    { key: 'made_up', intake: [{ from: 'intake', path: 'demographics' }] }
+  ]), /cannot satisfy/, 'the assertion must refuse a field this app does not declare');
+  assert.throws(() => A.assertIntakeIsDeclared([
+    { key: 'made_up', intake: [{ from: 'consent', type: 'hipaa_acknowledgment' }] }
+  ]), /cannot satisfy/);
+  assert.throws(() => A.assertIntakeIsDeclared([
+    { key: 'made_up', intake: [{ from: 'new', key: 'x', why: 'no' }] }
+  ]), /cannot satisfy/, 'and something declared new with no real reason');
+  for (const type of A.APPOINTMENT_TYPES) {
+    assert.ok(type.intake.length > 0, `${type.key} declares no intake`);
+    for (const ref of type.intake) {
+      const r = A.resolveIntakeRef(ref);
+      assert.ok(r.ok, `${type.key}: ${r.why}`);
+      assert.ok(['intake', 'consent', 'document', 'new'].includes(ref.from),
+        `${type.key} uses an unknown reference source "${ref.from}"`);
+      // A bare string is the mistake itself and can never come back.
+      assert.notEqual(typeof ref, 'string', `${type.key} has a free-string intake item`);
+    }
+  }
+});
+
+test('an intake reference to something this app does not have FAILS, in every vocabulary', () => {
+  // The guard has to be GIVEN something to find, or "it resolved" says nothing
+  // about whether it still checks.
+  assert.equal(A.resolveIntakeRef({ from: 'intake', path: 'demographics' }).ok, false,
+    '"demographics" is not a declared intake field — it was one of the invented names');
+  assert.equal(A.resolveIntakeRef({ from: 'intake', path: 'insurance' }).ok, false);
+  assert.equal(A.resolveIntakeRef({ from: 'intake', path: 'medical_history' }).ok, false);
+  assert.equal(A.resolveIntakeRef({ from: 'consent', type: 'hipaa_acknowledgment' }).ok, false,
+    'the consent is called practiceNpp; the invented name must not resolve');
+  assert.equal(A.resolveIntakeRef({ from: 'document', kind: 'discharge_summary' }).ok, false);
+  assert.equal(A.resolveIntakeRef({ from: 'sideways', key: 'x' }).ok, false);
+  assert.equal(A.resolveIntakeRef('medications').ok, false, 'a bare string is not a reference');
+  assert.equal(A.resolveIntakeRef(null).ok, false);
+
+  // And the real ones do resolve, or the guard is refusing everything.
+  assert.equal(A.resolveIntakeRef({ from: 'intake', path: 'medications' }).ok, true);
+  assert.equal(A.resolveIntakeRef({ from: 'intake', path: 'medicalTeam.preferredPharmacy' }).ok, true,
+    'a nested path resolves through its top-level field');
+  assert.equal(A.resolveIntakeRef({ from: 'consent', type: 'consentToTreat' }).ok, true);
+  assert.equal(A.resolveIntakeRef({ from: 'consent', type: 'practiceNpp' }).ok, true);
+  assert.equal(A.resolveIntakeRef({ from: 'document', kind: 'priorRecords' }).ok, true);
+});
+
+test('something declared NEW has to say why nothing existing covers it', () => {
+  // `I()` is the only escape from the three real vocabularies, so it is the
+  // one that could hide a duplicate. Requiring a reason is what makes a
+  // genuinely missing instrument visible rather than lost among names that
+  // merely look new.
+  assert.equal(A.resolveIntakeRef({ from: 'new', key: 'phq9' }).ok, false, 'no reason given');
+  assert.equal(A.resolveIntakeRef({ from: 'new', key: 'phq9', why: 'because' }).ok, false, 'not a reason');
+  assert.equal(A.resolveIntakeRef({ from: 'new', key: 'phq9', why: 'Depression screen, 9-item.' }).ok, true);
+  // Asserted NON-EMPTY first, and against known contents. A loop over an empty
+  // list passes vacuously — the same trap, twice in one file.
+  const unbuilt = A.unbuiltIntake();
+  assert.ok(unbuilt.length >= 10, `expected the screening instruments and visit documents, found ${unbuilt.length}`);
+  const keys = unbuilt.map(u => u.key);
+  for (const expected of ['phq9', 'gad7', 'substance_use', 'hra', 'discharge_summary', 'records_received']) {
+    assert.ok(keys.includes(expected), `${expected} is genuinely missing and must appear in the unbuilt list`);
+  }
+  // It is DERIVED from the config, so a type that stops wanting one drops out.
+  assert.deepEqual(unbuilt.find(u => u.key === 'gad7').types.sort(), ['bh_follow_up', 'bh_initial']);
+  assert.deepEqual(unbuilt.find(u => u.key === 'hra').types, ['pc_awv']);
+  for (const u of unbuilt) {
+    assert.ok(u.why.length > 15, `${u.key} must say what it is and why it is new`);
+    assert.ok(u.types.length > 0, `${u.key} must be wanted by at least one appointment type`);
+  }
+});
+
+test('the 17 names that were invented are all gone, and the things they duplicated are referenced', () => {
+  const src = fs.readFileSync(path.join(root, 'appointmentTypes.js'), 'utf8')
+    .split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
+  // Each of these named something the app already had.
+  const invented = ['demographics', 'insurance', 'medical_history', 'medication_list',
+    'emergency_contact', 'preferred_pharmacy', 'fall_risk_screen', 'functional_adl_screen',
+    'confirm_demographics', 'confirm_insurance', 'current_medications', 'medication_changes',
+    'providers_and_suppliers', 'consent_to_treat', 'hipaa_acknowledgment', 'reason_for_visit', 'symptom_onset'];
+  for (const name of invented) {
+    assert.ok(!src.includes(`'${name}'`), `"${name}" was a second name for something that already exists — it must not come back`);
+  }
+  // And what they stood for is referenced through the real vocabularies.
+  const refs = A.APPOINTMENT_TYPES.flatMap(t => t.intake);
+  const fieldPaths = refs.filter(r => r.from === 'intake').map(r => r.path);
+  for (const p of ['medications', 'allergies', 'payerType', 'conditions', 'emergencyContacts', 'medicalTeam', 'fallRisk', 'adl']) {
+    assert.ok(fieldPaths.includes(p), `${p} must be referenced, not renamed`);
+  }
+  assert.ok(refs.some(r => r.from === 'consent' && r.type === 'consentToTreat'));
+  assert.ok(refs.some(r => r.from === 'consent' && r.type === 'practiceNpp'));
+});
+
+test('the mirrored document kinds agree with the ones server.js actually declares', () => {
+  // This module is pure and must not require server.js, so the kinds are
+  // mirrored. A mirror that can drift silently is the same mistake one layer
+  // along, so the two are compared.
+  const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+  const block = (server.match(/const GFC_EXPECTED_DOCUMENTS = \[[\s\S]*?\n\];/) || [''])[0];
+  assert.ok(block.length > 50, 'precondition: the document catalog was found in server.js');
+  const real = [...block.matchAll(/kind: '([a-zA-Z_]+)'/g)].map(m => m[1]);
+  assert.ok(real.length > 0, 'precondition: kinds were parsed');
+  assert.deepEqual([...A.EXPECTED_DOCUMENT_KINDS].sort(), real.sort(),
+    'the mirrored document kinds have drifted from GFC_EXPECTED_DOCUMENTS');
+});
+
+test('the intake vocabularies are READ, not copied — this file declares none of its own', () => {
+  const src = fs.readFileSync(path.join(root, 'appointmentTypes.js'), 'utf8');
+  // It must reach for the real declarations rather than listing them.
+  assert.match(src, /require\('\.\/public\/intake-fields\.js'\)/);
+  assert.match(src, /require\('\.\/consentRegistry\.js'\)/);
+  assert.match(src, /intakeFields\.ALL_FIELDS/, 'intake paths come from the declaration the wizard renders');
+  assert.match(src, /consentRegistry\.GFC_CONSENT_DEFS/, 'consent types come from the registry');
+  // Precondition: those exports are real, or this test asserts against nothing.
+  assert.ok(Array.isArray(intakeFields.ALL_FIELDS) && intakeFields.ALL_FIELDS.length > 50);
+  assert.ok(Array.isArray(consentRegistry.GFC_CONSENT_DEFS) && consentRegistry.GFC_CONSENT_DEFS.length > 10);
+});
