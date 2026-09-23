@@ -38,6 +38,24 @@ const { PDFDocument, PDFName, PDFRawStream } = require('pdf-lib');
 // vendor/tesseract and pointed at explicitly, so OCR runs offline.
 const LANG_PATH = path.join(__dirname, 'vendor', 'tesseract');
 
+// WHICH LANGUAGE SET, AND WHY THE SMALL ONE — measured, not assumed.
+// Tesseract ships three: `tessdata_fast` (5MB, what is committed here),
+// `tessdata` (23MB) and `tessdata_best` (15MB). Benchmarked on a clean
+// screenshot and on a phone photograph, `fast` and the 23MB standard set
+// produced IDENTICAL text on the photograph and differed by one word on the
+// screenshot, at the same confidence and the same speed. `tessdata_best`
+// cannot be used at all with the WASM core tesseract.js ships — it needs a
+// SIMD build and aborts on `DotProductSSE`.
+//
+// The argument that settles it: the format rules in documentTemplates REJECT a
+// value that does not look like what it claims to be, so a worse read costs
+// COMPLETENESS, not CORRECTNESS. A misread MBI never becomes a claim; it
+// becomes a blank somebody fills in. Starting small is therefore safe.
+//
+// TO SWAP: replace vendor/tesseract/eng.traineddata with the file from
+// github.com/tesseract-ocr/tessdata and change nothing else. The first real
+// fax that reads badly is the test that should decide it — not a screenshot.
+
 // Below this, a word is more likely to be noise than text. It is not a hard
 // gate on the page — a single bad word should not discard a good document — but
 // such words are dropped from the runs so they cannot become a value.
