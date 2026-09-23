@@ -4,6 +4,47 @@
 
 ---
 
+### Version 3.1.0 - September 23, 2026
+
+#### New Features
+- Make shifts editable after posting, add bulk and calendar, widen the enrollment editor
+
+#### Bug Fixes
+- Record today's logout fix in the served changelog
+- Email the caregiver when a past shift is corrected, and fix the aliased before/after
+
+#### Changes
+- Move the clinical enrollment sequence off the clinician's chart, onto admin enrollment
+- Say when a sign-out was a browser with no token, not a bad session
+- Stop the enrollment screen signing the admin out on every client open
+- Regenerate today's changelog section against merged main
+- Stop the admin seeders writing a one-account roster over everyone
+- Stop logging everyone out when the user directory cannot be read
+- Regenerate today's changelog section against main
+- Backfill the merged PR numbers, and record the extraction pipeline
+- Dedupe the CLAUDE.md header and backfill PR #110
+- Remind a patient the day before, and say what the clinician is
+- Read a scanned document into proposals — a person decides, never the model
+- Let orders leave the building: requisitions, referrals, DME, results
+- Build the model engine — one call site, fail-closed at the boundary
+- Rescue the reconciliation spec, and build the enrollment ledger
+- Correct the stale "Drive: NOT CONFIGURED" line
+- Let staff and clinicians file a document into a client's file
+- Build the clinical inbox — five pending states nothing ever showed
+- Save a half-finished H&P, and give the facility assignment a screen
+- A time change can be asked about an unaccepted offer, and asking is agreeing
+- Let a caregiver ask for a shift to change, and say which availability is in force
+- Backfill PR #104 and #105, and record the changelog fix
+- Stop the changelog stacking a fresh copy of today's entry on every boot
+- Backfill PR #103, and flag the half of an earlier entry it supersedes
+- Regenerate the changelog for this session's commit
+- Let an admin or a clinician edit an enrollment submission
+- Send the login with the consent downloads
+- Let a client be added without a rate, and lock enrollment writes to admin
+- Pin the caregiver Feed's scoping
+- Point every email link at the app, and at a page that exists
+
+
 ### Version 3.1.0 - September 22, 2026
 
 #### New Features

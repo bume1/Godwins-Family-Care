@@ -7787,7 +7787,11 @@ app.get('/api/clinical/status', authenticateToken, requireClinicalRead, async (r
     // Session 4.4 deploy diagnostics: billing NPI (spec §2.5) + the caller's
     // own NPI for attribution (spec §4). Never hardcoded — both are config.
     billingNpiConfigured: !!payer.billing_npi_used,
-    myNpi: req.user.npi || null
+    myNpi: req.user.npi || null,
+    // Session 4.12 — the home-visit standing facts, SERVED rather than named in
+    // the page. A screen that restates the list drifts from the sanitizer that
+    // decides which keys actually reach a patient record.
+    homeVisitFields: clinicalRepo.HOME_VISIT_FIELDS
   });
 });
 
@@ -8072,10 +8076,23 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
       skilledTasksNeeded: client.skilledTasksNeeded || []
     };
     if (!client.openEmrPatientId || !openemr.isConfigured()) {
-      return res.json({ demographics, intakePrefill, emr: null, linked: !!client.openEmrPatientId });
+      // Unlinked, or no EMR configured. The banner still renders — name, age,
+      // MBI, code status and the home-visit facts all come from the app's own
+      // record — and the allergy strip says plainly that nothing could be read
+      // rather than implying there are none.
+      const banner = clinicalRepo.buildPatientBanner({
+        client, linked: false, emrAllergies: null, facility: null, lastVisitAt: null,
+        today: practiceToday(), careTierLabel: careTierLabelFor(client.careTier)
+      });
+      return res.json({ demographics, intakePrefill, banner, emr: null, linked: !!client.openEmrPatientId });
     }
     const emr = openemr.forActor(req.user);
     const puuid = client.openEmrPatientId;
+    // Started here rather than awaited at banner-build time: the banner needs
+    // the facility's place-of-service code, and a sequential round trip to
+    // OpenEMR on every chart open is a second of a clinician's day for a value
+    // the reads below are already waiting on anyway.
+    const facilityPromise = resolveFacilityForVisit(emr, client, null).catch(() => null);
     const [problems, allergies, meds, encounters, carePlans, documents, vitals] = await Promise.allSettled([
       emr.getProblems(puuid), emr.getAllergies(puuid), emr.getMedicationRequests(puuid),
       emr.getEncounters(puuid), emr.getCarePlans(puuid), emr.getDocumentReferences(puuid),
@@ -8140,12 +8157,31 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
       consentSatisfied: isConsentSatisfied
     });
 
+    const emrAllergies = take(allergies, clinicalRepo.summarizeAllergy);
+    // Session 4.12 — the banner. Built from the SAME allergy read the chart's
+    // own Allergies section uses, so the strip and the section can never
+    // disagree about what this patient is allergic to.
+    const encounterRows = encounters.status === 'fulfilled'
+      ? encounters.value.map(clinicalRepo.summarizeEncounter) : [];
+    const banner = clinicalRepo.buildPatientBanner({
+      client, linked: true, emrAllergies,
+      facility: await facilityPromise,
+      lastVisitAt: clinicalRepo.lastVisitDateOf(encounterRows),
+      today: practiceToday(),
+      careTierLabel: careTierLabelFor(client.careTier)
+    });
+    // The banner's primary action reads START VISIT or RESUME DRAFT, so it has
+    // to know whether THIS clinician has a draft open on THIS patient. Keyed to
+    // the caller, the same way the draft routes are — a colleague's half-written
+    // note is never offered here as something to resume.
+    const ownDraft = (await loadNoteDrafts()).find(r => r && r.id === clinicalRepo.noteDraftId(client.id, req.user.id)) || null;
+    const visitDraft = { open: !!ownDraft, savedAt: (ownDraft && ownDraft.updatedAt) || null };
     res.json({
-      demographics, intakePrefill, linked: true,
+      demographics, intakePrefill, linked: true, banner, visitDraft,
       chartDocuments,
       emr: {
         problems: take(problems, clinicalRepo.summarizeCondition),
-        allergies: take(allergies, clinicalRepo.summarizeAllergy),
+        allergies: emrAllergies,
         medications: take(meds, clinicalRepo.summarizeMedicationRequest),
         encounters: take(encounters, clinicalRepo.summarizeEncounter),
         carePlans: take(carePlans, r => ({ id: r.id, status: r.status, description: r.description || null })),
@@ -11182,6 +11218,41 @@ app.post('/api/clinical/orders/:orderId/co-sign', authenticateToken, requireClin
     res.json({ message: 'Order co-signed', order: next.order });
   } catch (error) {
     console.error('Order co-sign error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Home-visit standing facts (Session 4.12, Scope F4) ────────────────────
+// "Use the side entrance." "Daughter Angela will be present." "Dog secured
+// before arrival."
+//
+// THESE ARE FACTS ABOUT THE PATIENT, NOT ABOUT ONE VISIT, and that is the whole
+// design decision. Storing them on the encounter would mean re-typing the side
+// entrance at every visit, which is how it stops being typed at all — and the
+// clinician who most needs it is the covering one who has never been to the
+// house. They live on the patient record, are surfaced in three places that all
+// read this one field (the My Day row, the banner, the pre-visit packet), and
+// the encounter records only what DIFFERED today.
+//
+// A clinical WRITE, not an admin one: the person who finds out that the front
+// gate is locked is the clinician standing at it, and a note they cannot record
+// until an admin is back at a desk is a note that never gets recorded.
+app.put('/api/clinical/patients/:clientId/home-visit', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    const notes = clinicalRepo.sanitizeHomeVisitNotes(req.body && req.body.homeVisit);
+    const before = clinicalRepo.homeVisitNotesOf(client);
+    users[idx].homeVisit = notes;
+    await db.set('users', users);
+    // WHICH facts changed, never what they say. These carry a patient's home
+    // and household in them; an audit trail is not a second copy of that.
+    const changed = clinicalRepo.HOME_VISIT_FIELDS
+      .map(([k]) => k).filter(k => (before[k] || '') !== (notes[k] || ''));
+    await logActivity(req.user.id, req.user.name || req.user.email, 'patient_home_visit_notes_updated', 'client', client.id, { fields: changed });
+    res.json({ message: changed.length ? 'Home visit notes saved.' : 'No changes.', homeVisit: notes, changed });
+  } catch (error) {
+    console.error('Home visit notes error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
