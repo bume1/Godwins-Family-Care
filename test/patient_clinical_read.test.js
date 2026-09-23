@@ -310,3 +310,100 @@ test('no patient-, family- or POA-facing route reaches an OpenEMR write method',
     assert.ok(!block.includes(`.${w}(`), `patient-facing block must not call openemr ${w}`);
   }
 });
+
+// ── Session 4.12: none of what 4.12 added reaches a patient or family ──
+// Every new route is under /api/clinical behind a clinical gate, and nothing
+// patient-facing references any of it. That is true by construction today and
+// this is what keeps it true: the most dangerous single field this app holds
+// is a recorded suicide risk, and a family member reading one in a portal is
+// a harm no consent covers.
+const apptTypesFor412 = require('../appointmentTypes');
+
+test('4.12: the risk assessment can NEVER reach a patient, family or POA payload', () => {
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+
+  // 1. No patient-facing route may touch the collection at all.
+  const gfcRoutes = server.split('\n').filter(l => /app\.(get|post|put|delete)\('\/api\/gfc/.test(l));
+  assert.ok(gfcRoutes.length > 10, 'precondition: the patient-facing routes were found');
+  for (const line of gfcRoutes) {
+    assert.ok(!/risk/i.test(line), `no patient-facing route may serve risk: ${line.trim().slice(0, 100)}`);
+  }
+  // 2. Every route that reads the collection is a clinical one.
+  const reads = server.split('\n')
+    .map((l, i) => ({ l, i }))
+    .filter(x => x.l.includes('encounter_risk_assessments'));
+  assert.ok(reads.length > 0, 'precondition: something reads the collection');
+  for (const r of reads) {
+    // Walk back to the route that contains it.
+    const before = server.split('\n').slice(0, r.i).reverse();
+    const route = before.find(l => /^app\.(get|post|put|delete)\(/.test(l));
+    assert.ok(route, `could not find the route containing line ${r.i}`);
+    assert.ok(!route.includes('/api/gfc'), `a patient-facing route reads risk assessments: ${route.slice(0, 90)}`);
+    assert.match(route, /requireClinical(Read|Write)|requireAdmin/,
+      `risk assessments may only be read behind a clinical gate: ${route.slice(0, 90)}`);
+  }
+  // 3. The sharing filter is an ALLOW-LIST and carries no risk section, so
+  //    even a route that fetched one could not project it.
+  assert.equal(R.FILTER_MAP.risk, undefined, 'FILTER_MAP must have no risk section');
+  assert.equal(R.FILTER_MAP.riskAssessment, undefined);
+  const flat = JSON.stringify(R.FILTER_MAP);
+  for (const k of ['suicide', 'homicide', 'selfNeglect', 'safetyPlan', 'meansRestriction', 'protectiveFactors', 'levels']) {
+    assert.ok(!flat.includes(k), `"${k}" must never appear in the patient sharing filter`);
+  }
+});
+
+test('4.12: the visit descriptor and note plumbing stay clinician-only', () => {
+  // The appointment type, modality, completed sections and note templates are
+  // billing and documentation plumbing. A patient's visit card says what the
+  // visit was about in the clinician's own patient-facing words; it does not
+  // carry the coding apparatus behind it.
+  const flat = JSON.stringify(R.FILTER_MAP);
+  for (const k of ['appointmentType', 'modality', 'completedSections', 'noteTemplates', 'noteSections', 'visitLabel', 'usualLocation']) {
+    assert.ok(!flat.includes(k), `"${k}" must not be in the patient sharing filter`);
+  }
+  // Every appointment type key, too — a portal that named the billing type
+  // would be showing the claim rather than the care.
+  for (const t of apptTypesFor412.APPOINTMENT_TYPES) {
+    assert.ok(!flat.includes(t.key), `the appointment type ${t.key} must not reach a patient payload`);
+  }
+  // A visit summary built from a record carrying ALL of it projects none.
+  const summary = R.buildVisitSummary({
+    encounterUuid: 'e1', encounter: { date: '2026-09-23', reason: 'Follow-up' },
+    record: {
+      clientId: 'c1', encounterUuid: 'e1', encounterEid: '42',
+      visit: { appointmentType: 'bh_initial', modality: 'telehealth', location: 'home' },
+      completedSections: ['mentalStatusExam', 'riskAssessment', 'safetyPlan'],
+      diagnoses: [{ code: 'F32.9', description: 'MDD' }],
+      services: [{ code: '99348', units: 1, dxLinks: ['F32.9'], modifiers: ['25', '95'] }],
+      patientSummary: 'We talked about how you have been feeling.'
+    },
+    attestation: { signedAt: '2026-09-23T15:00:00Z', signedBy: { name: 'Dr X', npi: '1234567893' } },
+    prescriptions: [], orders: [], providerFallbackName: 'Your care team'
+  });
+  for (const level of ['full', 'summary']) {
+    const out = JSON.stringify(R.filterRow('visit', level, summary));
+    for (const k of ['appointmentType', 'modality', 'completedSections', 'bh_initial', 'mentalStatusExam', 'riskAssessment', '99348', 'encounterEid']) {
+      assert.ok(!out.includes(k), `"${k}" leaked into a ${level} patient visit payload`);
+    }
+  }
+});
+
+test('4.12: the rest-of-the-record read is clinician-only, and nothing new is patient-facing', () => {
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // Coverage, immunizations, related persons and the rest are an EMR-surfacing
+  // read for a clinician. Releasing any of them to a patient is a separate
+  // decision about release timing that has not been made — the same rule
+  // 4.10 set for results.
+  for (const route of ['record-extras', 'place-of-service', 'risk-assessment', 'usual-location']) {
+    const line = server.split('\n').find(l => l.includes(`/${route}'`) && /^app\./.test(l));
+    assert.ok(line, `route ${route} must exist`);
+    assert.ok(!line.includes('/api/gfc'), `${route} must not be patient-facing`);
+    assert.match(line, /\/api\/clinical\//, `${route} must live under the clinical prefix`);
+    assert.match(line, /requireClinical(Read|Write)|requireAdmin/, `${route} must be gated`);
+  }
+  // And the client portal page asks for none of it.
+  const portal = fs.readFileSync(path.join(__dirname, '..', 'public', 'portal.html'), 'utf8');
+  for (const k of ['record-extras', 'place-of-service', 'risk-assessment', 'usual-location', 'noteTemplates', 'appointmentType']) {
+    assert.ok(!portal.includes(k), `the client portal must not reference ${k}`);
+  }
+});
