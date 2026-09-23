@@ -13439,6 +13439,8 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/upload', authenticateTok
 // because a reviewer would trust it.
 const modelEngine = require('./modelEngine');
 const documentExtraction = require('./documentExtraction');
+const documentTemplates = require('./documentTemplates');   // reading a document WITHOUT a model,
+                                                            // out of the text it already carries.
 
 const gfcModelEngine = modelEngine.createEngine({
   env: process.env,
@@ -13472,10 +13474,24 @@ app.get('/api/gfc/admin/enrollment/:clientId/extraction', authenticateToken, req
     const all = (await db.get('document_extractions')) || [];
     const mine = all.filter(x => x.clientId === client.id && x.status === 'pending');
     const st = gfcModelEngine.status();
+    // READING NO LONGER DEPENDS ON THE MODEL (2026-09-23). Documents are read
+    // deterministically out of the text they carry, and photographed ones
+    // through OCR running in this container — so the control is offered
+    // whenever the document KIND has something declared to read, not only when
+    // the model boundary is satisfied.
+    //
+    // `modelAvailable` is kept separate and truthful: a reviewer and an admin
+    // both need to know WHICH reader produced a value, and the boundary
+    // blockers are still worth showing to whoever can clear them.
+    const templateKinds = Object.keys(documentTemplates.TEMPLATES);
     res.json({
-      // `configured` is not a claim that AWS accepts anything, and the payload
-      // says so in its own words rather than leaving the screen to assume.
-      available: st.configured,
+      available: st.configured || templateKinds.length > 0,
+      modelAvailable: st.configured,
+      readers: [
+        ...(st.configured ? ['model'] : []),
+        ...(templateKinds.length ? ['template'] : [])
+      ],
+      templateKinds,
       blockers: st.blockers,
       proof: st.proof,
       extractableKinds: documentExtraction.extractableKinds(),
@@ -13483,7 +13499,9 @@ app.get('/api/gfc/admin/enrollment/:clientId/extraction', authenticateToken, req
         id: x.id, docId: x.docId, kind: x.kind, at: x.at,
         fileName: x.fileName || null,
         rows: x.rows, identityConflicts: x.identityConflicts || [],
-        reviewCount: x.reviewCount || 0
+        reviewCount: x.reviewCount || 0,
+        reader: x.reader || 'model', source: x.source || null,
+        skippedReads: x.skippedReads || null
       }))
     });
   } catch (error) {
@@ -13516,8 +13534,13 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/extract', authent
 
     const schema = documentExtraction.schemaFor(doc.kind);
     let result;
+    let bytes;
     try {
-      const bytes = await googledrive.downloadFileBuffer(doc.driveFileId);
+      bytes = await googledrive.downloadFileBuffer(doc.driveFileId);
+    } catch (e) {
+      return res.status(502).json({ error: `That document could not be read back from storage: ${e.message}`, code: 'DOCUMENT_UNREADABLE' });
+    }
+    try {
       result = await gfcModelEngine.invoke({
         purpose: modelEngine.PURPOSES.DOCUMENT_EXTRACTION,
         input: { mimeType: doc.mimeType, bytes },
@@ -13525,15 +13548,53 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/extract', authent
       });
     } catch (e) {
       if (e && e.code === 'MODEL_BOUNDARY_REFUSED') {
-        // 503, not 500. Nothing is broken — the boundary is not satisfied, and
-        // the blockers say which settings would satisfy it.
-        return res.status(503).json({
-          error: 'Document reading is not switched on yet.',
-          code: e.code, blockers: e.blockers || []
-        });
+        // THE MODEL IS NOT THE ONLY READER ANY MORE (2026-09-23). Everything
+        // that makes this safe — the allow-list, the identity guard, the
+        // stale-field refusal, the review — takes a plain { path: value } map
+        // and does not care what produced it. So when the boundary is not
+        // satisfied we read the document DETERMINISTICALLY, out of the text it
+        // already carries, and the proposals go through exactly the same
+        // review a model's would.
+        //
+        // This is not a stopgap. For a form the office receives a hundred
+        // times a declared label beats a model: cheaper, auditable,
+        // reproducible, and it cannot invent a member ID.
+        const read = await documentTemplates.readDocument({ bytes, kind: doc.kind, mimeType: doc.mimeType }).catch(err => ({
+          source: documentTemplates.SOURCE.NONE, extracted: {}, matches: [], skipped: [],
+          notice: `That document could not be read: ${err.message}`
+        }));
+        if (read.source === documentTemplates.SOURCE.NONE) {
+          // 503 still, because nothing could be read — but the reason now says
+          // WHICH of the two it is: an unsatisfied model boundary, or a
+          // document with no text in it at all. They need different actions.
+          return res.status(503).json({
+            error: read.notice || 'Nothing could be read out of that document.',
+            code: 'EXTRACTION_NOTHING_READABLE',
+            modelBlockers: e.blockers || [],
+            source: read.source
+          });
+        }
+        result = {
+          proposal: read.extracted,
+          confidence: read.confidence,
+          invocationId: null,
+          // WHAT READ IT, recorded truthfully. A reviewer must be able to tell
+          // a declared-label match from a model's guess, and the audit row must
+          // not imply a model ran when none did.
+          modelId: null,
+          reader: 'template',
+          // text layer or OCR. A recognised value can be wrong in ways a read
+          // one cannot, and a reviewer approving a member ID needs to know
+          // which they are looking at.
+          source: read.source,
+          ocrConfidence: read.ocrConfidence || null,
+          matches: read.matches,
+          skipped: read.skipped
+        };
+      } else {
+        console.error('[EXTRACTION] failed:', e.message);
+        return res.status(502).json({ error: e.message, code: e.code || 'EXTRACTION_FAILED' });
       }
-      console.error('[EXTRACTION] failed:', e.message);
-      return res.status(502).json({ error: e.message, code: e.code || 'EXTRACTION_FAILED' });
     }
 
     const built = documentExtraction.buildProposals({
@@ -13547,6 +13608,13 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/extract', authent
       id: `ext_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       clientId: client.id, docId: doc.id, fileName: doc.fileName, kind: doc.kind,
       invocationId: result.invocationId, modelId: result.modelId,
+      // 'model' or 'template'. A reviewer has to be able to tell a declared
+      // label match from a model's guess, and so does the audit.
+      reader: result.reader || 'model',
+      source: result.source || null,
+      ocrConfidence: result.ocrConfidence || null,
+      matches: result.matches || null,
+      skippedReads: result.skipped || null,
       at: built.at, snapshotAt: built.snapshotAt,
       rows: built.rows, identityConflicts: built.identityConflicts,
       reviewCount: built.reviewCount,
@@ -13557,7 +13625,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/extract', authent
     await db.set('document_extractions', [...all, row]);
     // WHICH document, never what was read out of it.
     await logActivity(req.user.id, req.user.name || req.user.email, 'document_extraction_proposed', 'document', client.id,
-      { docId: doc.id, kind: doc.kind, proposed: built.rows.length, invocationId: result.invocationId });
+      { docId: doc.id, kind: doc.kind, proposed: built.rows.length, invocationId: result.invocationId, reader: result.reader || 'model' });
 
     res.json({
       message: 'Read — nothing has been saved yet. Check each value before it counts.',

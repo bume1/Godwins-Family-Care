@@ -14,6 +14,7 @@
 - Email the caregiver when a past shift is corrected, and fix the aliased before/after
 
 #### Changes
+- Plot the day and fill the trip, with no vendor and no tiles
 - Read a client's coordinates from where the app actually stores them
 - Make the chart a set of places, and give the cross-patient work a queue
 - Open the workspace on the day, not on a patient list
