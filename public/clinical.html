@@ -2844,6 +2844,91 @@
       coded: { label: 'Coded', chip: 'bg-primary-50 text-primary' },
       signed: { label: 'Signed & closed', chip: 'bg-emerald-50 text-emerald-700' }
     };
+    // ── Session 4.12 Scope F3 — the encounter, one step per screen on a phone ──
+    // The encounter panel is six cards on one scroll. At a desk that is the
+    // right shape: a reviewer wants the whole visit in front of them. In
+    // somebody's front room on a phone it is a long scroll with no sense of
+    // where you are or what is left.
+    //
+    // THE STEPS ARE THE CARDS THAT ALREADY EXIST. Nothing new is modelled: a
+    // second idea of "what an encounter consists of" would be a second thing
+    // to keep in step with the record.
+    //
+    // STEPPING IS DISPLAY ONLY, AND NO STEP GATES ANOTHER. A clinician in a
+    // home who has to record an order before finishing coding must be able
+    // to. The only gate is the signature's own readiness, which the SERVER
+    // answers and which was already there. A wizard that forces an order
+    // would make this slower than paper in the one place it has to be faster.
+    //
+    // 767px is Tailwind's `md` boundary, deliberately the same number the
+    // layout classes use: if the JS and the CSS disagreed about what a phone
+    // is, the stepper would hide a card the grid was still laying out.
+    const PHONE_QUERY = '(max-width: 767px)';
+    const useNarrowViewport = () => {
+      const [narrow, setNarrow] = useState(() =>
+        typeof window !== 'undefined' && window.matchMedia ? window.matchMedia(PHONE_QUERY).matches : false);
+      useEffect(() => {
+        if (typeof window === 'undefined' || !window.matchMedia) return;
+        const mq = window.matchMedia(PHONE_QUERY);
+        const on = e => setNarrow(e.matches);
+        setNarrow(mq.matches);
+        // SUBSCRIBED, not read once: rotating a phone changes the answer, and
+        // a stale one leaves a step hidden with no way back to it.
+        mq.addEventListener ? mq.addEventListener('change', on) : mq.addListener(on);
+        return () => { mq.removeEventListener ? mq.removeEventListener('change', on) : mq.removeListener(on); };
+      }, []);
+      return narrow;
+    };
+
+    const ENCOUNTER_STEPS = [
+      { key: 'visit', label: 'Visit', icon: 'ti-clipboard-text' },
+      { key: 'coding', label: 'Coding', icon: 'ti-code' },
+      { key: 'actions', label: 'Orders & Rx', icon: 'ti-flask' },
+      { key: 'sign', label: 'Sign', icon: 'ti-writing-sign' }
+    ];
+    // Which screen a blocker is fixed on. The LIST of blockers is the
+    // server's and is never re-derived here; this only decides where to put
+    // each one. An unrecognised blocker lands on Sign, where the server's full
+    // message is printed in words — a blocker that maps to no step would
+    // simply disappear, which is the worst of the three possible answers.
+    const STEP_FOR_BLOCKER = { note: 'visit', diagnosis: 'coding', service: 'coding', service_dx_link: 'coding' };
+    const stepForBlocker = (m) => STEP_FOR_BLOCKER[m] || 'sign';
+
+    const EncounterStepRail = ({ step, onStep, blockers, closed }) => {
+      const byStep = {};
+      for (const m of blockers || []) { const k = stepForBlocker(m); byStep[k] = (byStep[k] || 0) + 1; }
+      const i = Math.max(0, ENCOUNTER_STEPS.findIndex(s => s.key === step));
+      return (
+        <div className="mb-3">
+          <div className="flex gap-1.5">
+            {ENCOUNTER_STEPS.map(s => {
+              const on = s.key === step;
+              const n = byStep[s.key] || 0;
+              return (
+                <button key={s.key} onClick={() => onStep(s.key)}
+                  className={`flex-1 rounded-lg border px-1 py-1.5 text-[11px] leading-tight ${on ? 'bg-primary text-white border-primary' : 'bg-white border-stone-200 text-stone-600'}`}>
+                  <i className={`ti ${s.icon} block text-sm`} />
+                  {s.label}
+                  {/* Counted from the SERVER's blocker list. A tick the server
+                      would refuse is worse than no tick at all. */}
+                  {!closed && n > 0 && <span className={`block text-[10px] ${on ? 'text-white' : 'text-amber-700'}`}>{n} to do</span>}
+                  {!closed && n === 0 && <span className={`block text-[10px] ${on ? 'text-white/70' : 'text-emerald-700'}`}>done</span>}
+                </button>
+              );
+            })}
+          </div>
+          <div className="flex justify-between mt-2">
+            <button className="btn ghost !py-1 !px-2.5 text-xs" disabled={i === 0} onClick={() => onStep(ENCOUNTER_STEPS[i - 1].key)}>
+              <i className="ti ti-chevron-left" />Back
+            </button>
+            <button className="btn ghost !py-1 !px-2.5 text-xs" disabled={i === ENCOUNTER_STEPS.length - 1} onClick={() => onStep(ENCOUNTER_STEPS[i + 1].key)}>
+              Next<i className="ti ti-chevron-right" />
+            </button>
+          </div>
+        </div>
+      );
+    };
+
     const EncStateChip = ({ state }) => {
       const m = ENC_STATE_META[state] || ENC_STATE_META.not_coded;
       return <span className={`chip ${m.chip}`}>{m.label}</span>;
@@ -3569,7 +3654,61 @@
     };
 
     // The encounter panel: coding, Rx, orders, sign & close, addenda.
-    const EncounterPanel = ({ patient, euuid, onBack, onChanged }) => {
+    // ── Session 4.12 Scope F5 — act from inside the encounter ──────────────
+    // Mid-visit a clinician needs the rest of the chart: what this patient is
+    // allergic to before prescribing, what they are already taking, what the
+    // problem list says, whether the result that was chased has landed, and
+    // somewhere to put the document just handed over. Every one of those lived
+    // on a different tab, and getting to it meant leaving the encounter —
+    // which on a phone in someone's front room means losing your place in the
+    // visit you are documenting.
+    //
+    // IT MOUNTS THE EXISTING TAB COMPONENTS. Not a summary of them, not a
+    // second rendering: the same components, reading the same chart, writing
+    // through the same routes. A second view of "what is this patient
+    // allergic to" is how the two start disagreeing, which is the rule the
+    // allergy strip already follows one layer down.
+    const LOOKUPS = [
+      { key: 'allergies', label: 'Allergies', icon: 'ti-alert-triangle' },
+      { key: 'medications', label: 'Medications', icon: 'ti-pill' },
+      { key: 'problems', label: 'Problems', icon: 'ti-list-details' },
+      { key: 'results', label: 'Results', icon: 'ti-flask' },
+      { key: 'documents', label: 'Documents', icon: 'ti-file-text' }
+    ];
+    const EncounterLookups = ({ patient, chart, onChartChanged }) => {
+      const [open, setOpen] = useState(null);
+      return (
+        <div className="card mb-4">
+          <div className="card-h">
+            <h2><i className="ti ti-stethoscope mr-1 text-accent" />The rest of the chart</h2>
+            {open && <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={() => setOpen(null)}>Close</button>}
+          </div>
+          <div className="p-4">
+            <div className="flex flex-wrap gap-1.5">
+              {LOOKUPS.map(l => (
+                <button key={l.key}
+                  className={`chip border ${open === l.key ? 'bg-primary text-white border-primary' : 'bg-white text-primary border-stone-200'}`}
+                  onClick={() => setOpen(v => v === l.key ? null : l.key)}>
+                  <i className={`ti ${l.icon} mr-1`} />{l.label}
+                </button>
+              ))}
+            </div>
+            {!open && <p className="text-[11px] text-stone-400 mt-2">Open any of these here — you stay in the encounter and nothing you have typed is lost.</p>}
+            {open && (
+              <div className="mt-3 border-t border-stone-100 pt-3">
+                {open === 'allergies' && <AllergiesTab chart={chart} />}
+                {open === 'medications' && <MedicationsTab chart={chart} patient={patient} />}
+                {open === 'problems' && <ProblemsTab chart={chart} />}
+                {open === 'results' && <ResultsTab patient={patient} />}
+                {open === 'documents' && <DocumentsTab chart={chart} patient={patient} onChartChanged={onChartChanged} />}
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    };
+
+    const EncounterPanel = ({ patient, euuid, chart, onChartChanged, onBack, onChanged }) => {
       const [d, setD] = useState(null);
       const [err, setErr] = useState('');
       const [busy, setBusy] = useState('');
@@ -3580,6 +3719,11 @@
       const [attest, setAttest] = useState(false);
       const [addendum, setAddendum] = useState('');
       const [showRx, setShowRx] = useState(false); const [showOrder, setShowOrder] = useState(false);
+      // F3: one step per screen on a phone. Presentation only — the panel is
+      // the SAME mounted component on every step, so nothing typed on one is
+      // lost by moving to another.
+      const narrow = useNarrowViewport();
+      const [step, setStep] = useState('visit');
       // 4.3: clinician-authored patient-facing text — the only visit text the
       // patient portal ever shows (never the narrative note)
       const [facing, setFacing] = useState({ patientSummary: '', followUpInstructions: '' });
@@ -3633,9 +3777,17 @@
       const facingDirty = (facing.patientSummary || '') !== (d.record.patientSummary || '') || (facing.followUpInstructions || '') !== (d.record.followUpInstructions || '');
       const dirty = JSON.stringify(diagnoses) !== JSON.stringify(d.record.diagnoses || []) || JSON.stringify(services) !== JSON.stringify(d.record.services || []) || facingDirty;
       const ORDER_LABEL = { ordered: 'Ordered', sent: 'Sent', resulted: 'Resulted', cancelled: 'Cancelled' };
+      // On a phone one step shows at a time; at a desk the whole encounter is
+      // one scroll, because a reviewer wants to see all of it at once. Two
+      // different jobs, so two different shapes rather than one compromise.
+      const on = (k) => !narrow || step === k;
       return (
         <div className="max-w-4xl">
           <button className="text-xs text-primary underline mb-2" onClick={onBack}><i className="ti ti-arrow-left" /> All encounters</button>
+          {narrow && <EncounterStepRail step={step} onStep={setStep} blockers={(d.signReadiness && d.signReadiness.missing) || []} closed={closed} />}
+          {/* The header is on every step: who this is and whether it is signed
+              is the context for all four, and hiding it would leave a screen
+              that does not say whose encounter it belongs to. */}
           <div className="card mb-4">
             <div className="card-h"><h2>{d.encounter.reason || 'Encounter'}</h2><EncStateChip state={d.state} /></div>
             <div className="p-4 text-sm grid gap-1">
@@ -3658,7 +3810,7 @@
             </div>
           </div>
 
-          <div className="card mb-4">
+          {on('visit') && <div className="card mb-4">
             <div className="card-h"><h2>Narrative note{d.narrativeNotes.length > 1 ? 's' : ''}</h2><span className="text-[10.5px] text-stone-500">as written to OpenEMR — never edited by the app</span></div>
             <div className="p-4 text-sm grid gap-3">
               {d.notesError && <p className="text-xs text-red-600">{d.notesError}</p>}
@@ -3669,9 +3821,11 @@
                 </div>
               ))}
             </div>
-          </div>
+          </div>}
 
-          <div className="card mb-4">
+          {on('visit') && <EncounterLookups patient={patient} chart={chart} onChartChanged={onChartChanged} />}
+
+          {on('coding') && <div className="card mb-4">
             <div className="card-h"><h2>Coding — diagnoses &amp; services</h2>
               <span className={`chip ${d.record.codingStatus === 'coded' ? 'bg-primary-50 text-primary' : 'bg-amber-50 text-amber-800'}`}>{d.record.codingStatus === 'coded' ? 'CODED' : 'NOT CODED'}</span>
             </div>
@@ -3711,9 +3865,9 @@
                 </div>
               )}
             </div>
-          </div>
+          </div>}
 
-          <div className="grid md:grid-cols-2 gap-4 mb-4">
+          {on('actions') && <div className="grid md:grid-cols-2 gap-4 mb-4">
             <div className="card">
               <div className="card-h"><h2>Prescriptions</h2>{!locked && canPrescribe && <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={() => setShowRx(v => !v)}>{showRx ? 'Close' : '+ Record Rx'}</button>}</div>
               <div className="p-4 text-sm">
@@ -3798,9 +3952,9 @@
                 <p className="text-[10.5px] text-stone-400 mt-2">The app generates; a person transmits. Open the requisition, fax it from Doximity, then record the send here — that is what moves an order to sent. Attaching the result is what moves it to resulted. Both still work after the encounter is signed.</p>
               </div>
             </div>
-          </div>
+          </div>}
 
-          {!locked && !canSignThisEncounter && (
+          {on('sign') && !locked && !canSignThisEncounter && (
             <div className="card mb-4">
               <div className="card-h"><h2>Sign &amp; close encounter</h2></div>
               <div className="p-4 text-sm text-amber-800">
@@ -3809,7 +3963,7 @@
             </div>
           )}
 
-          {!locked && canSignThisEncounter && (
+          {on('sign') && !locked && canSignThisEncounter && (
             <div className="card mb-4">
               <div className="card-h"><h2>Sign &amp; close encounter</h2>
                 <span className={`chip ${d.signReadiness.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-800'}`}>{d.signReadiness.ok ? 'Ready to sign' : `${d.signReadiness.missing.length} blocker${d.signReadiness.missing.length > 1 ? 's' : ''}`}</span>
@@ -3829,7 +3983,7 @@
             </div>
           )}
 
-          {closed && (
+          {on('sign') && closed && (
             <div className="card mb-4">
               <div className="card-h"><h2>Attestation &amp; addenda</h2></div>
               <div className="p-4 grid gap-3 text-sm">
@@ -3854,7 +4008,7 @@
     };
 
     // Chart tab: this patient's encounters with coded / signed state.
-    const EncountersTab = ({ patient, chart, initialEuuid, onOpened }) => {
+    const EncountersTab = ({ patient, chart, initialEuuid, onOpened, onChartChanged }) => {
       const canWrite = useCanWrite();
       const [data, setData] = useState(null);
       const [err, setErr] = useState('');
@@ -3863,7 +4017,7 @@
       const load = useCallback(() => { api.encounters(patient.id).then(r => { setData(r); setErr(''); }).catch(e => setErr(e.message)); }, [patient.id]);
       useEffect(load, [load]);
       useEffect(() => { if (initialEuuid) { setOpen(initialEuuid); onOpened && onOpened(); } }, [initialEuuid]);
-      if (open) return <EncounterPanel patient={patient} euuid={open} onBack={() => { setOpen(null); load(); }} onChanged={load} />;
+      if (open) return <EncounterPanel patient={patient} euuid={open} chart={chart} onChartChanged={onChartChanged} onBack={() => { setOpen(null); load(); }} onChanged={load} />;
       if (err) return <p className="text-red-600 text-sm p-4">{err}</p>;
       if (!data) return <p className="text-sm text-stone-500 p-4">Loading encounters from OpenEMR…</p>;
       return (
@@ -4358,7 +4512,7 @@
                     isAdmin={access.role === 'admin'} onChartChanged={() => { loadPatients(); refreshChart(); }} />}
                   {tab === 'appts' && <ApptsTab patient={sel} patients={patients || []} chart={chart} onDocumentHp={(eid) => { setHpApptEid(eid); setTab('visit'); }}
                     onEncounterCreated={(euuid) => { setEncTarget(euuid); setTab('encounters'); }} />}
-                  {tab === 'encounters' && <EncountersTab patient={sel} chart={chart} initialEuuid={encTarget} onOpened={() => setEncTarget(null)} />}
+                  {tab === 'encounters' && <EncountersTab patient={sel} chart={chart} initialEuuid={encTarget} onOpened={() => setEncTarget(null)} onChartChanged={() => { loadPatients(); refreshChart(); }} />}
                   {tab === 'visit' && (chart ? <HpTab patient={sel} chart={chart} appointmentEid={hpApptEid} onDone={() => { setHpApptEid(null); refreshChart(); loadPatients(); }} onGoToEncounter={(euuid) => { setEncTarget(euuid); setTab('encounters'); }} /> : <p className="text-sm text-stone-500">Loading…</p>)}
                   {tab === 'timeline' && <TimelineTab patient={sel} />}
                   {tab === 'problems' && <ProblemsTab chart={chart} />}

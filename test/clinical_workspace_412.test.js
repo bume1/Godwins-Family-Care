@@ -1442,3 +1442,119 @@ test('F1 build-enforced: creating a visit stamps the RESOLVED type, and signing 
   assert.ok(!/encounterType:\s*clinicalRepo\.resolveEncounterType\([^)]*encRow/.test(server),
     'the sign gate must not re-derive the type from the encounter row it is checking');
 });
+
+// ── Session 4.12 Scope F3 / F5 — the encounter on a phone ──
+const chartPage = fs.readFileSync(path.join(__dirname, '..', 'public', 'clinical.html'), 'utf8');
+const encounterPanel = (() => {
+  const from = chartPage.indexOf('const EncounterPanel = (');
+  const to = chartPage.indexOf('const EncountersTab = (', from);
+  assert.ok(from > 0 && to > from, 'anchors for the encounter panel must still be present');
+  return chartPage.slice(from, to);
+})();
+
+test('F3: the encounter shows one step at a time on a phone and stays one scroll at a desk', () => {
+  // Two different jobs. At a kitchen table you want the one thing in front of
+  // you; reviewing at a desk you want the whole visit at once. `on()` is what
+  // expresses that, and it must be viewport-conditional rather than a plain
+  // step comparison — a bare `step === k` would break the desktop.
+  assert.match(encounterPanel, /const on = \(k\) => !narrow \|\| step === k;/,
+    'a pane shows when the viewport is wide OR it is the current step');
+  assert.match(encounterPanel, /const narrow = useNarrowViewport\(\);/);
+  // The rail is a phone control; on a desktop there are no steps to walk.
+  assert.match(encounterPanel, /\{narrow && <EncounterStepRail/);
+  // Each step owns at least one pane, or a step exists that shows nothing.
+  for (const key of ['visit', 'coding', 'actions', 'sign']) {
+    assert.ok(encounterPanel.includes(`on('${key}')`), `the ${key} step must gate at least one pane`);
+  }
+  // The header is deliberately ungated: a screen that does not say whose
+  // encounter it is, or whether it is signed, is a screen you cannot act on.
+  // Looked for BEFORE the header, which is where a gate would be added — the
+  // first version of this sliced forward from the chip and so could not see
+  // the one thing it was checking for.
+  const chip = encounterPanel.indexOf('<EncStateChip state={d.state} />');
+  assert.ok(chip > 0, 'precondition: the header chip is still there');
+  const openerLine = encounterPanel.lastIndexOf('<div className="card mb-4">', chip);
+  const lineStart = encounterPanel.lastIndexOf('\n', openerLine) + 1;
+  assert.equal(encounterPanel.slice(lineStart, openerLine).trim(), '',
+    'the encounter header must show on every step — nothing may gate it');
+});
+
+test('F3: the viewport is watched, not sampled once, and the JS agrees with the CSS about what a phone is', () => {
+  const hook = chartPage.slice(chartPage.indexOf('const useNarrowViewport = ('), chartPage.indexOf('const ENCOUNTER_STEPS'));
+  // Rotating a phone changes the answer. A one-shot read leaves a step hidden
+  // with no way back to it.
+  assert.match(hook, /addEventListener/, 'the media query must be subscribed to');
+  assert.match(hook, /removeEventListener|removeListener/, 'and unsubscribed on unmount');
+  // 767px is Tailwind's md boundary. If the two disagreed the stepper would
+  // hide a card the grid was still laying out.
+  assert.match(chartPage, /const PHONE_QUERY = '\(max-width: 767px\)';/);
+  assert.ok(chartPage.includes('md:grid-cols-2'), 'precondition: the layout uses the md breakpoint this number matches');
+});
+
+test('F3: no step gates another — the only gate is the server-answered signature readiness', () => {
+  // A clinician in a home who must record an order before finishing coding
+  // has to be able to. A wizard that forces an order would make this slower
+  // than paper in the one place it has to be faster.
+  const rail = chartPage.slice(chartPage.indexOf('const EncounterStepRail = ('), chartPage.indexOf('const EncStateChip = ('));
+  // Asserted on the STEP BUTTONS themselves, not by keyword. A first version
+  // of this looked for the word "blocker" in a `disabled=`, and a mutation
+  // that gated Sign on the coding count sailed through — it never used that
+  // word. The only thing that distinguishes the two states is whether the
+  // step button carries a `disabled` at all.
+  const stepButtons = rail.slice(rail.indexOf('{ENCOUNTER_STEPS.map('), rail.indexOf('</div>\n          <div className="flex justify-between'));
+  assert.ok(stepButtons.length > 100, 'precondition: the step-button block was actually sliced');
+  assert.ok(!/disabled/.test(stepButtons), 'no step button may be disabled — no step gates another');
+  // Back/Next are bounded by the ends of the list, which is not a gate.
+  assert.match(rail, /disabled=\{i === 0\}/);
+  assert.match(rail, /disabled=\{i === ENCOUNTER_STEPS\.length - 1\}/);
+  // The counts come from the SERVER's blocker list. A tick the server would
+  // refuse is worse than no tick.
+  assert.match(encounterPanel, /blockers=\{\(d\.signReadiness && d\.signReadiness\.missing\) \|\| \[\]\}/);
+  // Counted over the WHOLE list, unfiltered. Same correction: naming the
+  // variable the rail does not use proved nothing, so this pins the loop.
+  assert.match(rail, /for \(const m of blockers \|\| \[\]\) \{/,
+    'the rail must count every blocker the server named, filtering none of them out');
+});
+
+test('F3: a blocker the page does not recognise lands on a step, never disappears', () => {
+  const map = chartPage.slice(chartPage.indexOf('const STEP_FOR_BLOCKER'), chartPage.indexOf('const EncounterStepRail'));
+  // Falling through to nothing would silently drop a blocker off every step
+  // while the server still refuses the signature — the worst of the three
+  // possible answers. Sign is where the server's full message is printed.
+  assert.match(map, /STEP_FOR_BLOCKER\[m\] \|\| 'sign'/);
+  // Every blocker the sign gate can raise resolves to a real step.
+  const steps = new Set(['visit', 'coding', 'actions', 'sign']);
+  const mapped = { note: 'visit', diagnosis: 'coding', service: 'coding', service_dx_link: 'coding' };
+  for (const m of ['note', 'diagnosis', 'service', 'service_dx_link', 'billing_npi', 'facility_pos', 'encounter_type_pos']) {
+    assert.ok(steps.has(mapped[m] || 'sign'), `${m} must map to a step that exists`);
+  }
+});
+
+test('F5: the rest of the chart opens inside the encounter, and it is the SAME components', () => {
+  const drawer = chartPage.slice(chartPage.indexOf('const EncounterLookups = ('), chartPage.indexOf('const EncounterPanel = ('));
+  // Mounted, not re-rendered. A second view of "what is this patient allergic
+  // to" is how the two start disagreeing — the rule the allergy strip already
+  // follows one layer down.
+  for (const c of ['AllergiesTab', 'MedicationsTab', 'ProblemsTab', 'ResultsTab', 'DocumentsTab']) {
+    assert.ok(drawer.includes(`<${c} `), `the drawer must mount the existing ${c}`);
+    assert.ok(chartPage.includes(`const ${c} = (`), `${c} must be the chart's own component, defined once`);
+  }
+  // It fetches nothing of its own: the chart is already loaded by the parent,
+  // and a second read is a second answer.
+  assert.ok(!/api\./.test(drawer), 'the drawer must not call the API itself — it passes the chart it was given');
+  // Rendered inside the panel, on the step where a clinician is reading the
+  // note and deciding what to do next.
+  assert.match(encounterPanel, /\{on\('visit'\) && <EncounterLookups patient=\{patient\} chart=\{chart\}/);
+});
+
+test('F5: the drawer is at module scope, so opening it does not remount what is under it', () => {
+  // A component declared inside another is a new function identity on every
+  // render: React tears it down and rebuilds it, and any input inside loses
+  // the caret on the first keystroke. This repo has paid for that twice.
+  const idx = chartPage.indexOf('const EncounterLookups = (');
+  const line = chartPage.slice(chartPage.lastIndexOf('\n', idx) + 1, idx);
+  assert.equal(line, '    ', 'EncounterLookups must be declared at module scope, not nested in a component');
+  const railIdx = chartPage.indexOf('const EncounterStepRail = (');
+  assert.equal(chartPage.slice(chartPage.lastIndexOf('\n', railIdx) + 1, railIdx), '    ',
+    'EncounterStepRail must be at module scope too');
+});
