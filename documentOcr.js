@@ -192,9 +192,57 @@ const embeddedImages = async (pdf) => {
   return { images: found, undecodable: [...undecodable] };
 };
 
-// How many pages of a document to OCR. A fifty-page fax would hold a request
-// open for a minute; the fields being looked for are on the face sheet.
-const MAX_OCR_PAGES = 4;
+// HOW FAR TO READ INTO A DOCUMENT: ALL OF IT (owner, 2026-09-23).
+//
+// The original cap was four pages, on the reasoning that the fields being
+// looked for sit on a face sheet. That is true of a face sheet and false of
+// everything else: a discharge summary, a hospital packet or a multi-page
+// referral puts the insurance block wherever it puts it, and a reader that
+// stops early reports "none of these fields" about a document that plainly has
+// them — the exact wrong diagnosis this module exists to avoid.
+//
+// A time budget was tried and REMOVED at the owner's instruction: a partial
+// read is the failure mode being fixed, and trading it for a different partial
+// read solves nothing. Every page is read.
+//
+// THE CONSEQUENCE, STATED PLAINLY: a long document holds the request open for
+// roughly a second a page (measured: half a second for a clean page, ~1.6s for
+// a dense one). A forty-page packet is therefore a request of about a minute.
+// `OCR_MAX_PAGES` exists as an operator escape hatch if that ever needs
+// bounding in production; it is UNSET by default, which means no limit.
+const MAX_OCR_PAGES = Number(process.env.OCR_MAX_PAGES) > 0
+  ? Number(process.env.OCR_MAX_PAGES)
+  : Infinity;
+
+// WHAT HAPPENED TO THE PAGES, as a pure function.
+//
+// It is lifted out so it can be DRIVEN. The first version of this lived inline
+// and was guarded by scanning the source for its own strings — which meant
+// `if (false)` in front of either branch still matched, and two mutations
+// walked straight through. A source scan cannot see behaviour.
+//
+//   total     — pages found in the document
+//   attempted — pages we were willing to read (an operator ceiling may cut it)
+//   read      — pages that actually produced text
+//
+// Three outcomes, and they are three different sentences. A page skipped by
+// policy and a page that failed to decode send somebody at different problems,
+// and "we read all of it" must not be reported as either.
+const describeRead = ({ total, attempted, read }) => {
+  if (total > attempted) {
+    return {
+      stoppedBecause: 'page_limit',
+      notice: `This document has ${total} pages and the first ${attempted} were read, because a page limit is configured. Anything after page ${attempted} was not looked at.`
+    };
+  }
+  if (read < attempted) {
+    return {
+      stoppedBecause: 'unreadable_pages',
+      notice: `${read} of this document's ${total} pages could be read; ${total - read} could not.`
+    };
+  }
+  return { stoppedBecause: null, notice: null };
+};
 
 const ocrDocumentRuns = async ({ bytes, mimeType, createWorker }) => {
   if (isImageMime(mimeType)) {
@@ -218,27 +266,33 @@ const ocrDocumentRuns = async ({ bytes, mimeType, createWorker }) => {
   }
   const runs = [];
   let best = null;
-  const slice = images.slice(0, MAX_OCR_PAGES);
+  const slice = Number.isFinite(MAX_OCR_PAGES) ? images.slice(0, MAX_OCR_PAGES) : images;
+  let read = 0;
+  let stoppedBecause = null;
   for (let i = 0; i < slice.length; i++) {
     try {
       const page = await ocrImageRuns({ bytes: slice[i].bytes, page: i, createWorker });
       runs.push(...page.runs);
+      read += 1;
       if (page.confidence != null) best = best == null ? page.confidence : Math.max(best, page.confidence);
     } catch (e) {
       // One unreadable page does not discard the pages that did read.
       continue;
     }
   }
+  const { stoppedBecause: why, notice } = describeRead({
+    total: images.length, attempted: slice.length, read
+  });
+  stoppedBecause = why;
   return {
-    runs, pages: slice.length, confidence: best, undecodable,
-    notice: images.length > MAX_OCR_PAGES
-      ? `Only the first ${MAX_OCR_PAGES} pages were read.`
-      : null
+    runs, pages: read, pagesTotal: images.length, stoppedBecause,
+    confidence: best, undecodable, notice
   };
 };
 
 module.exports = {
   LANG_PATH,
+  describeRead,
   groupWordLines,
   MIN_WORD_CONFIDENCE, OCR_TIMEOUT_MS, MAX_OCR_PAGES, SUPPORTED_IMAGE_FILTERS,
   isImageMime, wordsFrom, runsFromWords, ocrImageRuns, embeddedImages, ocrDocumentRuns

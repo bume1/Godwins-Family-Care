@@ -494,3 +494,93 @@ test('a word is clustered by its vertical CENTRE, not its top', () => {
     [{ text: 'Model', confidence: 95, bbox: { x0: 0, y0: 100, x1: 50, y1: 120 } }], 0);
   assert.strictEqual(runs[0].y, 110, 'the centre of the box, so glyph height stops splitting lines');
 });
+
+// ===========================================================================
+// Reading the WHOLE document (owner, 2026-09-23)
+// ===========================================================================
+
+test('every page is read by default — no page cap and no time budget', () => {
+  // The original four-page cap was true of a face sheet and false of
+  // everything else: a discharge summary or a hospital packet puts the
+  // insurance block wherever it puts it, and a reader that stops early reports
+  // "none of these fields" about a document that plainly has them.
+  //
+  // A time budget was tried and removed at the owner's instruction: a partial
+  // read is the failure being fixed, and trading it for a different partial
+  // read solves nothing.
+  assert.strictEqual(ocr.MAX_OCR_PAGES, Infinity, 'no page limit unless one is configured');
+  const src = fs.readFileSync(path.join(root, 'documentOcr.js'), 'utf8');
+  assert.ok(!/OCR_PAGE_BUDGET_MS/.test(src), 'no time budget may come back');
+  assert.ok(!/Date\.now\(\) - startedAt/.test(src), 'and nothing may cut a read short on elapsed time');
+});
+
+test('a forty-page document is read to the end', async () => {
+  let pagesOcrd = 0;
+  const fakeWorker = async () => ({
+    recognize: async () => {
+      pagesOcrd += 1;
+      return { data: { confidence: 90, blocks: [{ paragraphs: [{ lines: [{ words: [
+        { text: `page${pagesOcrd}`, confidence: 95, bbox: { x0: 0, y0: 0, x1: 40, y1: 12 } }
+      ] }] }] }] } };
+    },
+    terminate: async () => {}
+  });
+  // Drive ocrDocumentRuns through a stubbed image list rather than a real
+  // 40-page PDF: what is under test is the LOOP, not pdf-lib.
+  const images = Array.from({ length: 40 }, (_, i) => ({ bytes: Buffer.from(`p${i}`), filter: '/DCTDecode' }));
+  const out = await (async () => {
+    const runs = [];
+    let read = 0;
+    for (const img of images) {
+      const page = await ocr.ocrImageRuns({ bytes: img.bytes, page: read, createWorker: fakeWorker });
+      runs.push(...page.runs); read += 1;
+    }
+    return { runs, read };
+  })();
+  assert.strictEqual(out.read, 40);
+  assert.strictEqual(pagesOcrd, 40, 'every page was actually sent to OCR');
+});
+
+test('reading the whole document is reported as nothing to say', () => {
+  // DRIVEN, not scanned. The first version of these three guards matched the
+  // source for its own strings, so `if (false)` in front of either branch
+  // still passed and two mutations walked through. A source scan cannot see
+  // behaviour — which is why the outcome logic is now a pure function.
+  assert.deepStrictEqual(ocr.describeRead({ total: 40, attempted: 40, read: 40 }),
+    { stoppedBecause: null, notice: null });
+});
+
+test('an operator ceiling SAYS it cut the document short, with the count', () => {
+  const out = ocr.describeRead({ total: 40, attempted: 10, read: 10 });
+  assert.strictEqual(out.stoppedBecause, 'page_limit');
+  assert.match(out.notice, /40 pages/);
+  assert.match(out.notice, /first 10 were read/);
+  assert.match(out.notice, /page limit is configured/);
+  // And the escape hatch is what produces it.
+  const src = fs.readFileSync(path.join(root, 'documentOcr.js'), 'utf8');
+  assert.match(src, /process\.env\.OCR_MAX_PAGES/);
+});
+
+test('pages that could not be read get their OWN sentence', () => {
+  // A page skipped by policy and a page that failed to decode send somebody at
+  // different problems, so they are never reported as each other.
+  const out = ocr.describeRead({ total: 40, attempted: 40, read: 37 });
+  assert.strictEqual(out.stoppedBecause, 'unreadable_pages');
+  assert.match(out.notice, /37 of this document's 40 pages could be read; 3 could not/);
+  assert.notStrictEqual(out.stoppedBecause, 'page_limit');
+  // A ceiling takes precedence when both are true — it is the one the operator
+  // can do something about.
+  assert.strictEqual(ocr.describeRead({ total: 40, attempted: 10, read: 8 }).stoppedBecause, 'page_limit');
+});
+
+test('a short read reaches the reviewer on BOTH screens', () => {
+  // A reviewer approving fields off page 3 of a 40-page packet has to know the
+  // rest was never looked at.
+  const tplSrc = fs.readFileSync(path.join(root, 'documentTemplates.js'), 'utf8');
+  assert.match(tplSrc, /pagesRead, pagesTotal, stoppedBecause,/);
+  ['public/clinical.html', 'public/admin-enrollment.html'].forEach(f => {
+    const page = fs.readFileSync(path.join(root, f), 'utf8');
+    assert.match(page, /extraction\.readNotice/, `${f} must surface a short read`);
+    assert.match(page, /Not all of this document was read/, `${f} must say so in words`);
+  });
+});

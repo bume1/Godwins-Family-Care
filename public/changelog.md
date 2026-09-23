@@ -14,6 +14,7 @@
 - Email the caregiver when a past shift is corrected, and fix the aliased before/after
 
 #### Changes
+- Put OCR'd words back in reading order
 - Record why the small OCR language set is the right one
 - Read scanned documents without a model, and without a vendor
 - Plot the day and fill the trip, with no vendor and no tiles
@@ -45,7 +46,6 @@
 - Stop the changelog stacking a fresh copy of today's entry on every boot
 - Backfill PR #103, and flag the half of an earlier entry it supersedes
 - Regenerate the changelog for this session's commit
-- Let an admin or a clinician edit an enrollment submission
 
 
 ### Version 3.1.0 - September 22, 2026

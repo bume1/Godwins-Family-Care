@@ -321,6 +321,10 @@ const buildChartDocumentIndex = (input) => {
   //    of anything and showing it in a chart would mislead.
   for (const u of clientUploads) {
     if (!u || u.clientId !== client.id || u.status === 'rejected') continue;
+    // This is also what makes a `readable` flag unnecessary on the row below: a
+    // rejected document never reaches the chart at all, so nothing downstream
+    // can offer to read one. A field that is always true reads like a guard and
+    // is not one.
     rows.push({
       id: `upload:${u.id}`,
       title: u.fileName || 'Client document',
@@ -330,6 +334,19 @@ const buildChartDocumentIndex = (input) => {
       source: CHART_DOC_SOURCE.APP,
       openable: true,
       inChart: false,
+      // Only an UPLOAD row can be read into proposals: it is the one kind that
+      // corresponds to a stored file the extractor can fetch. A consent, a care
+      // plan and a record release are documents this app GENERATED from the
+      // record, so reading them back would propose the record to itself.
+      //
+      // `uploadId` and `kind` are carried so the chart can offer the control
+      // without re-deriving either from the composite id — parsing an id back
+      // apart in a page is how a prefix change becomes a silent breakage.
+      uploadId: u.id,
+      kind: u.kind || null,
+      // WHO FILED IT. A reviewer weighs a document the client sent differently
+      // from one the office scanned in, and the read should say which it is.
+      filedBy: u.source === 'staff' ? 'staff' : 'client',
       note: u.status === 'accepted' ? null : 'Not yet reviewed'
     });
   }

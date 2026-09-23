@@ -178,6 +178,62 @@ const login = async (email, password) => {
     }
   }
 
+  // ---- 6. The SAME reading, from the clinical chart --------------------
+  console.log('\n--- 6. the chart reads a document too, on its own gate ---');
+  const clinician = await call('POST', '/api/users', admin, {
+    email: `docread.clin.${stamp}@example.test`, password: 'Probe12345!',
+    name: 'Reading Clinician (TEST DATA)', role: 'user', clinicalRole: 'provider',
+    licenseLevel: 'FNP', sendWelcomeEmail: false
+  });
+  const reader = await call('POST', '/api/users', admin, {
+    email: `docread.cm.${stamp}@example.test`, password: 'Probe12345!',
+    name: 'Reading Case Manager (TEST DATA)', role: 'caseManager', clinicalRole: 'readOnly',
+    sendWelcomeEmail: false
+  });
+  const cTok = await login(`docread.clin.${stamp}@example.test`, 'Probe12345!');
+  const rTok = await login(`docread.cm.${stamp}@example.test`, 'Probe12345!');
+  ok('the probe clinician and case manager exist', !!cTok && !!rTok);
+
+  // The chart routes refuse a client who is not on a clinical service line.
+  const notClinical = await call('GET', `/api/clinical/patients/${clientId}/extraction`, cTok);
+  ok('a home-care-only client is refused by the CHART routes',
+    notClinical.status === 409 && notClinical.body.code === 'NOT_CLINICAL_LINE', notClinical.body);
+
+  const lined = await call('PUT', `/api/gfc/admin/enrollment/${clientId}/service-line`, admin, { serviceLine: 'IHPC' });
+  ok('putting the client on the clinical line succeeds', lined.status === 200, lined.body);
+
+  const chartStatus = await call('GET', `/api/clinical/patients/${clientId}/extraction`, cTok);
+  ok('the chart reports what it can read', chartStatus.status === 200, chartStatus.body);
+  ok('  reading is available with no model configured', chartStatus.body.available === true, chartStatus.body.available);
+  ok('  and it is the SAME payload the enrollment screen gets',
+    JSON.stringify(chartStatus.body.templateKinds) === JSON.stringify(st.body.templateKinds),
+    [chartStatus.body.templateKinds, st.body.templateKinds]);
+
+  ok('a case manager may READ the chart status',
+    (await call('GET', `/api/clinical/patients/${clientId}/extraction`, rTok)).status === 200);
+  const cmExtract = await call('POST', `/api/clinical/patients/${clientId}/documents/nope/extract`, rTok);
+  ok('a case manager may NOT trigger a read', cmExtract.status === 403, cmExtract.status);
+  const cmReview = await call('POST', `/api/clinical/patients/${clientId}/extraction/nope/review`, rTok, { decisions: {} });
+  ok('a case manager may NOT approve proposals', cmReview.status === 403, cmReview.status);
+
+  // ---- 7. A client reaches none of it ------------------------------------
+  console.log('\n--- 7. the subject of the record never approves proposals about themselves ---');
+  const clientTok = await login(`docread.${stamp}@example.test`, 'Probe12345!');
+  if (clientTok) {
+    for (const [label, m, path] of [
+      ['the chart status', 'GET', `/api/clinical/patients/${clientId}/extraction`],
+      ['a chart read', 'POST', `/api/clinical/patients/${clientId}/documents/x/extract`],
+      ['a chart review', 'POST', `/api/clinical/patients/${clientId}/extraction/x/review`],
+      ['the enrollment read', 'POST', `/api/gfc/admin/enrollment/${clientId}/documents/x/extract`],
+      ['the enrollment review', 'POST', `/api/gfc/admin/enrollment/${clientId}/extraction/x/review`]
+    ]) {
+      const r = await call(m, path, clientTok, m === 'GET' ? undefined : {});
+      ok(`a client is refused: ${label}`, r.status === 403, `${r.status} ${JSON.stringify(r.body)}`);
+    }
+  } else {
+    ok('the probe client can sign in (needed for the refusal checks)', false, 'login failed');
+  }
+
   console.log(`\n${pass}/${pass + fail} assertions passed${fail ? ` — ${fail} FAILED` : ''}`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error('Probe crashed:', e); process.exit(1); });

@@ -318,6 +318,9 @@ const readDocument = async ({ bytes, kind, mimeType, createWorker, allowOcr = tr
   let source = SOURCE.TEXT;
   let ocrConfidence = null;
   let notice = null;
+  let pagesRead = null;
+  let pagesTotal = null;
+  let stoppedBecause = null;
 
   if (!directImage) {
     let pdf;
@@ -356,6 +359,9 @@ const readDocument = async ({ bytes, kind, mimeType, createWorker, allowOcr = tr
     source = SOURCE.OCR;
     ocrConfidence = read.confidence;
     notice = read.notice;
+    pagesRead = read.pages;
+    pagesTotal = read.pagesTotal || read.pages;
+    stoppedBecause = read.stoppedBecause || null;
     if (!lines.length) return nothing('Nothing legible could be recognised in that picture.');
   }
 
@@ -363,6 +369,7 @@ const readDocument = async ({ bytes, kind, mimeType, createWorker, allowOcr = tr
   if (out.error) return nothing(out.error);
   return {
     ...out, source, lineCount: lines.length, ocrConfidence,
+    pagesRead, pagesTotal, stoppedBecause,
     // An OCR'd read is evidence, not transcription. The confidence a reviewer
     // sees is scaled down for it so a recognised member ID is never presented
     // as firmly as one read out of a real text layer.

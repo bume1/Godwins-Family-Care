@@ -11808,6 +11808,8 @@ app.get('/api/clinical/nearby', authenticateToken, requireClinicalRead, async (r
   }
 });
 
+
+
 // GET /api/clinical/patients/:clientId/timeline?kinds=visit,result — Scope D5.
 // One chronological thread of everything. For somebody seen repeatedly at home
 // this is how a clinician reconstructs the interval since the last visit, which
@@ -13466,7 +13468,7 @@ const intakeValueAt = (client, path) => readIntakePath(client.intake || {}, path
 // that lists the extractable kinds itself drifts from the module that refuses
 // one, and a page that decides the boundary is satisfied would offer a button
 // the route then refuses.
-app.get('/api/gfc/admin/enrollment/:clientId/extraction', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+const extractionStatusHandler = async (req, res) => {
   try {
     const users = await getUsers();
     const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -13501,6 +13503,8 @@ app.get('/api/gfc/admin/enrollment/:clientId/extraction', authenticateToken, req
         rows: x.rows, identityConflicts: x.identityConflicts || [],
         reviewCount: x.reviewCount || 0,
         reader: x.reader || 'model', source: x.source || null,
+        stoppedBecause: x.stoppedBecause || null, readNotice: x.readNotice || null,
+        pagesRead: x.pagesRead || null, pagesTotal: x.pagesTotal || null,
         skippedReads: x.skippedReads || null
       }))
     });
@@ -13508,7 +13512,7 @@ app.get('/api/gfc/admin/enrollment/:clientId/extraction', authenticateToken, req
     console.error('Extraction status error:', error);
     res.status(500).json({ error: 'Server error' });
   }
-});
+};
 
 // POST …/enrollment/:clientId/documents/:docId/extract — read a filed document.
 //
@@ -13516,7 +13520,7 @@ app.get('/api/gfc/admin/enrollment/:clientId/extraction', authenticateToken, req
 // something that is on the record, never a step in the upload: a Drive failure
 // must refuse the filing on its own terms, and a model failure must not be able
 // to lose a document somebody just scanned.
-app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/extract', authenticateToken, requireEnrollmentEditor, async (req, res) => {
+const extractDocumentHandler = async (req, res) => {
   try {
     const users = await getUsers();
     const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -13588,6 +13592,10 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/extract', authent
           // which they are looking at.
           source: read.source,
           ocrConfidence: read.ocrConfidence || null,
+          pagesRead: read.pagesRead || null,
+          pagesTotal: read.pagesTotal || null,
+          stoppedBecause: read.stoppedBecause || null,
+          readNotice: read.notice || null,
           matches: read.matches,
           skipped: read.skipped
         };
@@ -13613,6 +13621,10 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/extract', authent
       reader: result.reader || 'model',
       source: result.source || null,
       ocrConfidence: result.ocrConfidence || null,
+      pagesRead: result.pagesRead || null,
+      pagesTotal: result.pagesTotal || null,
+      stoppedBecause: result.stoppedBecause || null,
+      readNotice: result.readNotice || null,
       matches: result.matches || null,
       skippedReads: result.skipped || null,
       at: built.at, snapshotAt: built.snapshotAt,
@@ -13635,14 +13647,14 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/extract', authent
     console.error('Document extraction error:', error);
     res.status(500).json({ error: 'Server error' });
   }
-});
+};
 
 // POST …/enrollment/:clientId/extraction/:id/review — a person decides.
 //
 // This is the only door an extracted value has onto a client record, and what
 // lands is stamped STAFF-VERIFIED: the provenance of an accepted value is the
 // human who accepted it, not the model that offered it.
-app.post('/api/gfc/admin/enrollment/:clientId/extraction/:id/review', authenticateToken, requireEnrollmentEditor, async (req, res) => {
+const extractionReviewHandler = async (req, res) => {
   try {
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -13733,7 +13745,51 @@ app.post('/api/gfc/admin/enrollment/:clientId/extraction/:id/review', authentica
     console.error('Extraction review error:', error);
     res.status(500).json({ error: 'Server error' });
   }
-});
+};
+
+// ── The three extraction routes, registered on TWO surfaces ───────────────
+// The handlers above are shared deliberately. What an extraction is — the path
+// allow-list, the identity-conflict guard, the stale-field refusal, the
+// staff-verified provenance and the review ledger — has exactly one
+// implementation, and a second surface must not grow a second copy of it.
+//
+// What differs per surface is only WHO may do it:
+//   • Enrollment: admin or a licensed clinician (requireEnrollmentEditor);
+//     the STATUS read stays on the wider staff gate so a case manager can see
+//     what is waiting without being able to approve any of it.
+//   • The clinical chart: requireClinicalWrite, and the patient must be on a
+//     clinical service line — a clinician filing a referral at a visit reads it
+//     there rather than going to the enrollment screen for it.
+//
+// A CLIENT REACHES NEITHER. A proposal is a change to a client's own record and
+// the entire design is that a person other than the subject approves it. The
+// client's own upload is read by STAFF, from the list it already appears on.
+app.get('/api/gfc/admin/enrollment/:clientId/extraction', authenticateToken, requireEnrollmentStaff, extractionStatusHandler);
+app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/extract', authenticateToken, requireEnrollmentEditor, extractDocumentHandler);
+app.post('/api/gfc/admin/enrollment/:clientId/extraction/:id/review', authenticateToken, requireEnrollmentEditor, extractionReviewHandler);
+
+// The clinical chart. `requireClinicalOnLine` refuses a patient who is not on a
+// clinical service line BEFORE the handler runs, so the clinical routes can
+// never be used as a side door onto a home-care-only client's record.
+const requireClinicalOnLine = async (req, res, next) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) {
+      return res.status(wrongLine ? 409 : 404).json({
+        error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found',
+        code: wrongLine ? 'NOT_CLINICAL_LINE' : 'CLIENT_NOT_FOUND'
+      });
+    }
+    return next();
+  } catch (error) {
+    console.error('Clinical extraction gate error:', error);
+    return res.status(500).json({ error: 'Server error' });
+  }
+};
+
+app.get('/api/clinical/patients/:clientId/extraction', authenticateToken, requireClinicalRead, requireClinicalOnLine, extractionStatusHandler);
+app.post('/api/clinical/patients/:clientId/documents/:docId/extract', authenticateToken, requireClinicalWrite, requireClinicalOnLine, extractDocumentHandler);
+app.post('/api/clinical/patients/:clientId/extraction/:id/review', authenticateToken, requireClinicalWrite, requireClinicalOnLine, extractionReviewHandler);
 
 app.post('/api/gfc/admin/enrollment/:clientId/documents/request', authenticateToken, requireAdmin, async (req, res) => {
   try {

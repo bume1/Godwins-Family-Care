@@ -570,6 +570,11 @@
               Read from the document's own text by matching the labels printed on it.
             </div>
           )}
+          {extraction.readNotice && (
+            <div className="text-xs text-warning-700 bg-warning-50 border border-warning-200 rounded p-2 mt-2">
+              <b>Not all of this document was read.</b> {extraction.readNotice}
+            </div>
+          )}
           {/* Anything the reader FOUND and refused. A value that did not look
               like what it claimed to be is dropped rather than proposed, and
               saying so stops somebody hunting for a field that was there. */}

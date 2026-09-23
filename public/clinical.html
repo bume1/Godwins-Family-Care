@@ -155,6 +155,13 @@
       nearby: (clientId, radiusMiles) => authedFetch(`/api/clinical/nearby?clientId=${encodeURIComponent(clientId)}&radiusMiles=${radiusMiles}`),
       workQueues: () => authedFetch('/api/clinical/work-queues'),
       analytics: () => authedFetch('/api/clinical/analytics'),
+      // Reading a filed document into proposals, from the chart. The SAME three
+      // routes the enrollment screen uses, gated on requireClinicalWrite.
+      extractionStatus: (id) => authedFetch(`/api/clinical/patients/${id}/extraction`),
+      extractDocument: (id, docId) => authedFetch(`/api/clinical/patients/${id}/documents/${encodeURIComponent(docId)}/extract`, { method: 'POST' }),
+      reviewExtraction: (id, exId, decisions) => authedFetch(`/api/clinical/patients/${id}/extraction/${encodeURIComponent(exId)}/review`, {
+        method: 'POST', body: JSON.stringify({ decisions })
+      }),
       patientOrders: (id) => authedFetch(`/api/clinical/patients/${id}/orders`),
       patientResults: (id) => authedFetch(`/api/clinical/patients/${id}/results`),
       timeline: (id, kinds) => authedFetch(`/api/clinical/patients/${id}/timeline${kinds && kinds.length ? `?kinds=${encodeURIComponent(kinds.join(','))}` : ''}`),
@@ -436,9 +443,162 @@
       );
     };
 
+    // ── Reading a document into proposals, from the CHART (2026-09-23) ─────
+    // The same three routes the enrollment screen uses, registered a second
+    // time under requireClinicalWrite. A clinician filing a referral or a face
+    // sheet at a visit reads it where they are, instead of going to the
+    // enrollment screen for it — and what comes back goes through exactly the
+    // review a staff-triggered read goes through.
+    //
+    // NOTHING ABOUT WHAT AN EXTRACTION IS LIVES HERE. The allow-list, the
+    // identity-conflict guard, the stale-field refusal and the staff-verified
+    // provenance are all server-side and shared; this renders the answer.
+    const ChartExtractionRow = ({ row, decision, onDecide }) => {
+      const [edited, setEdited] = useState(row.value);
+      useEffect(() => { setEdited(row.value); }, [row.value]);
+      const isEdit = decision && decision.decision === 'edit';
+      return (
+        <div className="border-b border-stone-100 py-2 last:border-0">
+          <div className="flex items-start justify-between gap-2 flex-wrap">
+            <div className="min-w-0">
+              <div className="lblu">{row.label}</div>
+              <div className="text-[13px] text-stone-800 break-words">
+                {isEdit
+                  ? <input className="inp !py-1 text-[13px]" value={edited}
+                    onChange={e => { setEdited(e.target.value); onDecide(row.path, { decision: 'edit', value: e.target.value }); }} />
+                  : row.value}
+              </div>
+              <div className="text-[11px] text-stone-500">
+                {[row.current ? `on file: ${row.current}` : 'nothing on file',
+                  row.confidence != null ? `${Math.round(row.confidence * 100)}% confident` : null
+                ].filter(Boolean).join(' · ')}
+              </div>
+            </div>
+            <div className="flex gap-1.5 shrink-0">
+              {[['accept', 'Keep'], ['edit', 'Edit'], ['discard', 'Discard']].map(([d, label]) => (
+                <button key={d}
+                  className={`chip border ${decision && decision.decision === d ? 'bg-primary text-white border-primary' : 'bg-white text-stone-600 border-stone-200'}`}
+                  onClick={() => onDecide(row.path, d === 'edit' ? { decision: 'edit', value: edited } : { decision: d })}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const ChartExtractionReview = ({ clientId, extraction, onDone, onCancel }) => {
+      const [decisions, setDecisions] = useState({});
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      const decide = (path, d) => setDecisions(prev => ({ ...prev, [path]: d }));
+      const rows = (extraction.rows || []).filter(r => !r.verifyOnly);
+      // A review with anything undecided is NOT complete — an enrollment must
+      // not finish on a half-read scan. The server enforces it; saying so here
+      // stops somebody hitting a refusal they could have seen coming.
+      const undecided = rows.filter(r => !decisions[r.path]).length;
+      const save = () => {
+        setBusy(true); setErr('');
+        api.reviewExtraction(clientId, extraction.id, decisions)
+          .then(() => onDone())
+          .catch(e => setErr(e.message))
+          .finally(() => setBusy(false));
+      };
+      return (
+        <div className="border border-accent rounded-lg p-3 bg-cream mt-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="font-semibold text-[13px] text-primary">Read from {extraction.fileName || 'the document'}</div>
+            <button className="text-[11.5px] text-stone-500 underline" onClick={onCancel}>Close</button>
+          </div>
+          <p className="text-[11.5px] text-stone-600 mt-1">
+            Nothing here has been saved. Check each value — what you keep is recorded as checked by you.
+          </p>
+          {extraction.source === 'ocr' && (
+            <div className="text-[11.5px] text-amber-900 bg-amber-50 border border-amber-200 rounded p-2 mt-2">
+              <b>Read from a picture.</b> This document had no text in it, so the words were recognised from the
+              image{extraction.ocrConfidence ? ` (about ${Math.round(extraction.ocrConfidence)}% legible)` : ''}.
+              Check every character before you keep it.
+            </div>
+          )}
+          {extraction.reader === 'template' && extraction.source !== 'ocr' && (
+            <p className="text-[11.5px] text-stone-500 mt-1">Read from the document's own text by matching its printed labels.</p>
+          )}
+          {extraction.readNotice && (
+            <div className="text-[11.5px] text-amber-900 bg-amber-50 border border-amber-200 rounded p-2 mt-2">
+              <b>Not all of this document was read.</b> {extraction.readNotice}
+            </div>
+          )}
+          {(extraction.identityConflicts || []).length > 0 && (
+            <div className="text-[12px] text-red-800 bg-red-50 border border-red-200 rounded p-2 mt-2">
+              <b>This document may not be about this patient.</b>
+              {extraction.identityConflicts.map((c, i) => (
+                <div key={i}>{c.label}: document says <b>{c.value}</b>, record says <b>{c.current || '—'}</b></div>
+              ))}
+            </div>
+          )}
+          <div className="mt-2">
+            {rows.map(r => (
+              <ChartExtractionRow key={r.path} row={r} decision={decisions[r.path]} onDecide={decide} />
+            ))}
+            {!rows.length && <p className="text-[12px] text-stone-500">Nothing in this document matched a field we record.</p>}
+          </div>
+          {err && <p className="text-[11.5px] text-red-600 mt-1">{err}</p>}
+          {rows.length > 0 && (
+            <div className="flex items-center gap-2 mt-2">
+              <button className="btn gold !py-1 !px-3 text-xs" disabled={busy || undecided > 0} onClick={save}>
+                {busy ? 'Saving…' : 'Save what I kept'}
+              </button>
+              {undecided > 0 && <span className="text-[11.5px] text-stone-500">{undecided} still to decide</span>}
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    const ChartReadButton = ({ clientId, doc, status, onRead }) => {
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      const access = useContext(AccessContext);
+      // Only an UPLOAD can be read, and only a kind the server declares. Both
+      // facts are SERVED — a page that decides either drifts from the module
+      // that refuses one.
+      if (!access.canWrite || !status || !doc.uploadId) return null;
+      if (!doc.kind || !(status.extractableKinds || []).includes(doc.kind)) return null;
+      if (!status.available) {
+        return <span className="chip bg-stone-100 text-stone-500" title={(status.blockers || []).join('\n')}>Reading not switched on</span>;
+      }
+      const run = () => {
+        setBusy(true); setErr('');
+        api.extractDocument(clientId, doc.uploadId)
+          .then(r => onRead({ ...r.extraction, fileName: doc.title }))
+          .catch(e => setErr(e.message))
+          .finally(() => setBusy(false));
+      };
+      return (
+        <span className="flex items-center gap-1.5">
+          <button className="chip border border-accent text-primary bg-white" disabled={busy} onClick={run}>
+            {busy ? 'Reading…' : 'Read this'}
+          </button>
+          {err && <span className="text-[11px] text-red-600">{err}</span>}
+        </span>
+      );
+    };
+
     const ChartDocuments = ({ docs, clientId, onRefresh }) => {
       const [busy, setBusy] = useState('');
       const [err, setErr] = useState('');
+      // Which kinds can be read, and whether reading is on at all. ASKED OF THE
+      // SERVER: a page that lists the readable kinds itself drifts from the
+      // module that refuses one.
+      const [readStatus, setReadStatus] = useState(null);
+      const [reviewing, setReviewing] = useState(null);
+      useEffect(() => {
+        if (!clientId) return;
+        let live = true;
+        api.extractionStatus(clientId).then(r => { if (live) setReadStatus(r); }).catch(() => {});
+        return () => { live = false; };
+      }, [clientId]);
 
       const open = async (d) => {
         if (!d.openable || !clientId) return;
@@ -500,11 +660,19 @@
                       </div>
                     </div>
                     <div className="shrink-0 flex items-center gap-1.5">
+                      {d.filedBy && <span className="chip bg-stone-100 text-stone-600">{d.filedBy === 'staff' ? 'Filed by the office' : 'From the client'}</span>}
                       {d.inChart && <span className="chip bg-emerald-50 text-emerald-700">In EMR</span>}
                       {!d.openable && <span className="chip bg-amber-50 text-amber-800">Open in OpenEMR</span>}
+                      <ChartReadButton clientId={clientId} doc={d} status={readStatus}
+                        onRead={(ex) => setReviewing(ex)} />
                     </div>
                   </div>
                 ))}
+                {reviewing && g.rows.some(d => d.uploadId === reviewing.docId) && (
+                  <ChartExtractionReview clientId={clientId} extraction={reviewing}
+                    onDone={() => { setReviewing(null); onRefresh && onRefresh(); }}
+                    onCancel={() => setReviewing(null)} />
+                )}
               </div>
             ))}
           </div>
