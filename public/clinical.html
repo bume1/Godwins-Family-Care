@@ -755,6 +755,11 @@
               : <span className="chip bg-amber-50 text-amber-800">Blocks signing</span>}
           </div>
           <div className="p-4 text-sm grid gap-2">
+            {data.degraded && (
+              <p className="text-xs text-amber-700"><i className="ti ti-alert-triangle mr-1" />
+                {data.reason}. What is shown below is what is on file; it could not be checked against OpenEMR just now.
+              </p>
+            )}
             <div className="text-xs text-stone-600">
               {assigned
                 ? <>Seen at <b>{data.facilityName || `facility ${data.facilityId}`}</b>{data.posCode ? <> · place of service <b>{data.posCode}</b></> : null}.</>
@@ -765,9 +770,9 @@
                 ? <>Usually seen at <b>{data.usualLocationLabel}</b>. Each visit says where it actually happened, and that is what bills.</>
                 : <>No usual location set, so every booking has to say where the visit happens.</>}
             </div>
-            {posMissing && (
+            {posMissing && !data.degraded && (
               <p className="text-xs text-amber-700"><i className="ti ti-alert-triangle mr-1" />
-                "{data.facilityName}" has no place-of-service code on its record in OpenEMR.
+                "{data.facilityName || `facility ${data.facilityId}`}" has no place-of-service code on its record in OpenEMR.
               </p>
             )}
             {data.serviceLocation === false && (
@@ -1034,9 +1039,19 @@
                   </span>
                 </BannerFact>
                 <BannerFact label="Facility &amp; POS">
-                  {b.facility && b.facility.name
-                    ? <span>{b.facility.name}<br />POS {b.facility.posCode || <span className="text-amber-700">not set</span>}</span>
-                    : <span className="text-amber-700">Not assigned — visits cannot be signed</span>}
+                  {b.facility && b.facility.name ? (
+                    <span>{b.facility.name}<br />POS {b.facility.posCode || <span className="text-amber-700">not set</span>}</span>
+                  ) : b.facility && b.facility.id ? (
+                    // Assigned, but this read couldn't confirm it — a stale
+                    // facility id, or OpenEMR's facility list couldn't be
+                    // read for this reader. That is a DIFFERENT fact from
+                    // "nobody ever assigned a facility," and saying "Not
+                    // assigned" here would be telling the reader something
+                    // false rather than something unconfirmed.
+                    <span className="text-amber-700">Assigned (facility {b.facility.id}) — {b.facility.warning || 'could not be confirmed against OpenEMR right now'}</span>
+                  ) : (
+                    <span className="text-amber-700">Not assigned — visits cannot be signed</span>
+                  )}
                 </BannerFact>
                 <BannerFact label="Last visit" value={b.lastVisitAt} />
                 <BannerFact label="Track" value={b.careTierLabel} />

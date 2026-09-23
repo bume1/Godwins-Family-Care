@@ -80,6 +80,7 @@ const appLinks = require('./appLinks');               // the ONE place that answ
 const consentRegistry = require('./consentRegistry'); // THE consent registry: lanes, statuses, provenance (4.6)
 const consentRender = require('./consentRender');     // consent data blocks resolved from the client record (4.6)
 const zipWriter = require('./zipWriter');             // dependency-free ZIP for the signed-consent packet (4.6)
+const uploadLinks = require('./uploadLinks');         // the branded, no-login document upload link (2026-09-23)
 // The caregiver vocabulary — licence levels, competencies, and pay-rate
 // resolution. Required, never restated: a second copy of what a pay rate means
 // is how the admin form and payroll start disagreeing about someone's wages.
@@ -3203,6 +3204,24 @@ app.post('/api/auth/logout', authenticateToken, async (req, res) => {
 app.get('/api/auth/sessions', authenticateToken, async (req, res) => {
   const rows = await sessions.listForUser(req.user.id);
   res.json({ sessions: rows.map(r => ({ id: r.id, current: r.id === req.session.id, createdAt: r.createdAt, lastSeenAt: r.lastSeenAt, revokedAt: r.revokedAt, revokedReason: r.revokedReason, surface: r.surface, userAgent: r.userAgent, mfaVerified: r.mfaVerified })) });
+});
+
+// The 15-minute idle limit is judged entirely by the SERVER's `lastSeenAt`
+// (sessions.check(), called inside authenticateToken above) — it moves only
+// when a real request reaches it. `session-guard.js` is the browser's own
+// activity clock (pointer/key/touch/scroll), and until 2026-09-23 the two
+// never spoke: someone typing into a long form with nothing yet to save
+// reset the BROWSER clock on every keystroke while the SERVER's sat
+// untouched, so the person saw no warning and was handed AUTH_IDLE — and an
+// emptied form — the moment they finally clicked Save.
+//
+// This route does nothing but pass through authenticateToken, so hitting it
+// IS the touch. `session-guard.js` calls it about once a minute while its
+// own clock says the person is present (never once they have crossed into
+// its warning window), so a genuinely active session no longer looks idle
+// to the server just because nothing else happened to phone home.
+app.get('/api/auth/heartbeat', authenticateToken, (req, res) => {
+  res.json({ ok: true });
 });
 
 app.post('/api/auth/login', async (req, res) => {
@@ -6688,6 +6707,15 @@ const GFC_EXPECTED_DOCUMENTS = [
   { kind: 'advanceDirective', scope: 'ALL',  required: false,
     label: 'Advance directive or living will',
     hint: 'If you have one. We keep a copy so your wishes are on file before they are needed.' },
+  // A general drop spot (owner, 2026-09-23) — a contract, a letter, anything
+  // not named above. It is not chased and never required; it exists so
+  // nothing has to wait on a matching kind to have somewhere to go. It
+  // uploads to the SAME per-client Drive folder as everything else, so it is
+  // already in the right client's record — staff re-file or re-type it from
+  // there if it turns out to belong under a more specific kind.
+  { kind: 'otherDocument',    scope: 'ALL',  required: false,
+    label: 'Something else',
+    hint: 'A contract, a letter, or anything not listed above.' },
   { kind: 'dnrPolst',         scope: 'IHPC', required: false,
     label: 'DNR or POLST form',
     hint: 'If one has been completed and signed by a physician.' },
@@ -6888,6 +6916,8 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
     const uploads = (await db.get('client_document_uploads')) || [];
     const requests = (await db.get('client_document_requests')) || [];
     const checklist = buildDocumentChecklist(client, uploads, requests);
+    const links = (await db.get('client_upload_links')) || [];
+    const liveUploadLink = uploadLinks.liveLinkFor(client.id, links);
 
     res.json({
       signedConsents, documents: clientDocs, enrollmentPacket, faceSheet, offlinePacketFiles,
@@ -6895,7 +6925,13 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
       consentPacketZip: hasSignedConsents ? { title: 'All signed consents', url: '/api/gfc/enrollment-packet.zip' } : null,
       checklist,
       outstanding: checklist.filter(r => r.status === 'missing' && (r.required || r.requested)).length,
-      serviceLine: client.serviceLine || 'PHC'
+      serviceLine: client.serviceLine || 'PHC',
+      // A branded, no-login link this client can hand to a family member so
+      // a document can come back without anyone signing in. Null until they
+      // (or staff) generate one.
+      uploadLink: liveUploadLink
+        ? { url: uploadLinks.buildUrl(await getAppBaseUrl(), liveUploadLink.token), createdAt: liveUploadLink.createdAt }
+        : null
     });
   } catch (error) {
     console.error('GFC documents error:', error);
@@ -6955,7 +6991,7 @@ const resolveDocumentKind = (kind, clientId, requests) => {
   return { openAsk: openAsk || null };
 };
 
-const buildClientDocumentRow = ({ client, kind, fileName, stored, safeName, buffer, sniffedType, actor, source, encounterUuid }) => ({
+const buildClientDocumentRow = ({ client, kind, fileName, stored, safeName, buffer, sniffedType, actor, source, encounterUuid, channel }) => ({
   id: `doc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
   clientId: client.id,
   kind,
@@ -6975,6 +7011,12 @@ const buildClientDocumentRow = ({ client, kind, fileName, stored, safeName, buff
   // "The client sent this" and "the office filed it for them" are different
   // facts, and for a chased document that difference is the whole point.
   source: source === 'staff' ? 'staff' : 'client',
+  // WHICH DOOR it came through, additive to `source` above rather than a
+  // third value inside it — a no-login-link submission is still the client's
+  // own document, it just did not carry a session. Kept distinct so the rate
+  // limiter and any future audit of the link can find only these rows
+  // without having to also exclude an authenticated client's own uploads.
+  channel: channel === 'link' ? 'link' : 'app',
   // An office-filed document did not arrive needing review — the office IS the
   // reviewer. So it lands accepted and ticks its own checklist item, rather
   // than sitting at "with the office" waiting on a review nobody will do.
@@ -13815,13 +13857,18 @@ app.get('/api/gfc/admin/enrollment/:clientId/documents', authenticateToken, requ
     const uploads = (await db.get('client_document_uploads')) || [];
     const requests = (await db.get('client_document_requests')) || [];
     const checklist = buildDocumentChecklist(client, uploads, requests);
+    const links = (await db.get('client_upload_links')) || [];
+    const liveUploadLink = uploadLinks.liveLinkFor(client.id, links);
     res.json({
       checklist,
       outstanding: checklist.filter(r => r.status === 'missing' && (r.required || r.requested)).length,
       awaitingReview: checklist.filter(r => r.status === 'received').length,
       catalog: expectedDocumentsForServiceLine(client.serviceLine)
         .map(d => ({ kind: d.kind, label: d.label })),
-      clientEmail: client.email || null
+      clientEmail: client.email || null,
+      uploadLink: liveUploadLink
+        ? { url: uploadLinks.buildUrl(await getAppBaseUrl(), liveUploadLink.token), createdAt: liveUploadLink.createdAt }
+        : null
     });
   } catch (error) {
     console.error('GFC staff documents error:', error);
@@ -14423,6 +14470,247 @@ app.get('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/file', authenti
     await serveStoredDocument(res, row, req.user);
   } catch (error) {
     console.error('GFC staff document read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── The branded, no-login upload link (owner-directed, 2026-09-23) ─────────
+//
+// Everything above requires a login. This is the one door that deliberately
+// does not: a family member handing over an insurance card should not need
+// a portal password to do it. The safety therefore lives in the token
+// (uploadLinks.js — 192 bits, constant-time compared, one live token per
+// client, revoked ones tombstoned) rather than in a session, and the channel
+// is upload-only: there is no route here that reads anything back.
+//
+// What arrives through it lands in the SAME `client_document_uploads` an
+// authenticated client's own upload lands in, through the SAME
+// `prepareClientDocument` / `resolveDocumentKind` / `buildClientDocumentRow`
+// three call sites above already share — a fourth copy of "what a valid
+// document upload is" is exactly how this door would start accepting what
+// the other two refuse.
+
+// Read-only projection for an anonymous bearer of the link: kind, label,
+// hint, whether it is required, and whether one is already on file. Never
+// the reviewer's name, never a rejection reason, never a file list or a
+// download URL — those stay behind a login. Collapsing "received" and
+// "accepted" into one `have: true` is deliberate: the review STATE of a
+// document is not this person's to see.
+const publicUploadChecklist = (client, uploads) => {
+  const mine = (uploads || []).filter(u => u.clientId === client.id && u.status !== 'rejected');
+  return expectedDocumentsForServiceLine(client.serviceLine || (client.intake && client.intake.serviceLine) || 'PHC')
+    .map(d => ({
+      kind: d.kind, label: d.label, hint: d.hint || '', required: !!d.required,
+      have: mine.some(u => u.kind === d.kind)
+    }));
+};
+
+// GET/POST/revoke — the CLIENT's own door onto their own link. Same gate as
+// their own document upload (`requireClientForIntake`, not
+// `requireEnrolledClient` — most of what this link is FOR is needed before
+// enrollment is approved).
+app.post('/api/gfc/documents/upload-link', authenticateToken, requireClientForIntake, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const regenerate = !!(req.body && req.body.regenerate);
+
+    const links = (await db.get('client_upload_links')) || [];
+    let live = uploadLinks.liveLinkFor(client.id, links);
+    if (live && !regenerate) {
+      return res.json({
+        link: { url: uploadLinks.buildUrl(await getAppBaseUrl(), live.token), createdAt: live.createdAt },
+        created: false
+      });
+    }
+    const next = links.map(l => (live && l.id === live.id) ? uploadLinks.revoke(l, req.user) : l);
+    const created = uploadLinks.buildLink({ clientId: client.id, actor: req.user });
+    await db.set('client_upload_links', [...next, created]);
+    await logActivity(req.user.id, req.user.name || req.user.email,
+      live ? 'client_upload_link_regenerated' : 'client_upload_link_created', 'document', client.id, {});
+    res.json({
+      link: { url: uploadLinks.buildUrl(await getAppBaseUrl(), created.token), createdAt: created.createdAt },
+      created: true
+    });
+  } catch (error) {
+    console.error('GFC upload-link create error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/gfc/documents/upload-link/revoke', authenticateToken, requireClientForIntake, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const links = (await db.get('client_upload_links')) || [];
+    const live = uploadLinks.liveLinkFor(client.id, links);
+    if (!live) return res.status(404).json({ error: 'No active upload link to turn off.', code: 'NO_ACTIVE_LINK' });
+    await db.set('client_upload_links', links.map(l => l.id === live.id ? uploadLinks.revoke(l, req.user) : l));
+    await logActivity(req.user.id, req.user.name || req.user.email, 'client_upload_link_revoked', 'document', client.id, {});
+    res.json({ message: 'Upload link turned off. The old link no longer works.' });
+  } catch (error) {
+    console.error('GFC upload-link revoke error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// STAFF's door onto the same link — admin only, matching every other
+// WORKFLOW decision on this surface (approve, change service line, accept a
+// document). Generating an unauthenticated access channel into a client's
+// file is that kind of decision, not a correction, so it does not widen to
+// the clinician editor gate the way a field correction does.
+app.post('/api/gfc/admin/enrollment/:clientId/documents/upload-link', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+    const regenerate = !!(req.body && req.body.regenerate);
+
+    const links = (await db.get('client_upload_links')) || [];
+    let live = uploadLinks.liveLinkFor(client.id, links);
+    if (live && !regenerate) {
+      return res.json({
+        link: { url: uploadLinks.buildUrl(await getAppBaseUrl(), live.token), createdAt: live.createdAt },
+        created: false
+      });
+    }
+    const next = links.map(l => (live && l.id === live.id) ? uploadLinks.revoke(l, req.user) : l);
+    const created = uploadLinks.buildLink({ clientId: client.id, actor: req.user });
+    await db.set('client_upload_links', [...next, created]);
+    await logActivity(req.user.id, req.user.name || req.user.email,
+      live ? 'client_upload_link_regenerated' : 'client_upload_link_created', 'document', client.id, {});
+    res.json({
+      link: { url: uploadLinks.buildUrl(await getAppBaseUrl(), created.token), createdAt: created.createdAt },
+      created: true
+    });
+  } catch (error) {
+    console.error('GFC staff upload-link create error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/gfc/admin/enrollment/:clientId/documents/upload-link/revoke', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+    const links = (await db.get('client_upload_links')) || [];
+    const live = uploadLinks.liveLinkFor(client.id, links);
+    if (!live) return res.status(404).json({ error: 'No active upload link to turn off.', code: 'NO_ACTIVE_LINK' });
+    await db.set('client_upload_links', links.map(l => l.id === live.id ? uploadLinks.revoke(l, req.user) : l));
+    await logActivity(req.user.id, req.user.name || req.user.email, 'client_upload_link_revoked', 'document', client.id, {});
+    res.json({ message: 'Upload link turned off. The old link no longer works.' });
+  } catch (error) {
+    console.error('GFC staff upload-link revoke error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── The PUBLIC side — no `authenticateToken`, on purpose. This pair is the
+// only place in the app where a request with no Bearer header is expected
+// and correct, so both routes look up identity from the TOKEN alone and
+// never from `req.user`, which does not exist here.
+//
+// 404 for a token that never existed, 410 for one that did and was revoked —
+// the same distinction `password-reset-:token` already draws, because
+// "this link is wrong" and "this link was turned off" want a different next
+// step from whoever is holding it.
+app.get('/api/gfc/upload/:token', async (req, res) => {
+  try {
+    const links = (await db.get('client_upload_links')) || [];
+    const found = uploadLinks.findByToken(req.params.token, links);
+    if (!found) return res.status(404).json({ error: 'This upload link is not valid.', code: 'LINK_NOT_FOUND' });
+    if (found.revokedAt) return res.status(410).json({ error: 'This upload link has been turned off. Ask your care team for a new one.', code: 'LINK_REVOKED' });
+
+    const users = await getUsers();
+    const client = users.find(u => u.id === found.clientId && u.role === config.ROLES.CLIENT);
+    if (!client) return res.status(404).json({ error: 'This upload link is not valid.', code: 'LINK_NOT_FOUND' });
+
+    const uploads = (await db.get('client_document_uploads')) || [];
+    res.json({
+      ...uploadLinks.identityHint(client.name),
+      orgName: config.BRAND.COMPANY_NAME,
+      checklist: publicUploadChecklist(client, uploads)
+    });
+  } catch (error) {
+    console.error('GFC public upload-link lookup error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/gfc/upload/:token', async (req, res) => {
+  try {
+    const links = (await db.get('client_upload_links')) || [];
+    const found = uploadLinks.findByToken(req.params.token, links);
+    if (!found) return res.status(404).json({ error: 'This upload link is not valid.', code: 'LINK_NOT_FOUND' });
+    if (found.revokedAt) return res.status(410).json({ error: 'This upload link has been turned off. Ask your care team for a new one.', code: 'LINK_REVOKED' });
+
+    const users = await getUsers();
+    const client = users.find(u => u.id === found.clientId && u.role === config.ROLES.CLIENT);
+    if (!client) return res.status(404).json({ error: 'This upload link is not valid.', code: 'LINK_NOT_FOUND' });
+
+    const { kind, fileName, fileDataB64 } = req.body || {};
+    // A per-visit document needs an encounter and a clinician's context that
+    // an anonymous link does not have. Refused by name rather than silently
+    // filed against the standing file, which is where checkVisitDocumentPairing
+    // would otherwise happily put it.
+    if (isVisitDocumentKind(kind)) {
+      return res.status(400).json({
+        error: 'That document belongs to a particular visit and cannot be sent through this link. Ask your care team how to send it.',
+        code: 'LINK_VISIT_DOCUMENT_NOT_ALLOWED'
+      });
+    }
+    const prepared = prepareClientDocument({ kind, fileName, fileDataB64 });
+    if (prepared.error) return res.status(prepared.status).json({ error: prepared.error });
+
+    const requests = (await db.get('client_document_requests')) || [];
+    const resolved = resolveDocumentKind(kind, client.id, requests);
+    if (resolved.error) return res.status(resolved.status).json({ error: resolved.error, code: resolved.code });
+
+    const uploads = (await db.get('client_document_uploads')) || [];
+    if (uploadLinks.rateLimited(client.id, uploads)) {
+      return res.status(429).json({
+        error: 'Too many uploads through this link in the last day. Please contact your care team directly.',
+        code: 'LINK_RATE_LIMITED'
+      });
+    }
+
+    const safeName = `${kind}_${(client.slug || client.id)}_${Date.now()}_${String(fileName).replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+    let stored;
+    try {
+      stored = await googledrive.uploadClientDocumentFile(client.name || 'Client', safeName, prepared.buffer, prepared.sniffedType);
+    } catch (e) {
+      console.error('[DOCUMENTS] Link upload Drive failure:', e.message);
+      return res.status(502).json({
+        error: 'We could not store that file. Please try again.',
+        code: 'DOCUMENT_STORAGE_UNAVAILABLE'
+      });
+    }
+
+    const row = buildClientDocumentRow({
+      client, kind, fileName, stored, safeName,
+      buffer: prepared.buffer, sniffedType: prepared.sniffedType,
+      // There is no logged-in actor here — the row's `uploadedById` names
+      // the CLIENT the link belongs to, never a synthetic or null id, so
+      // every reader of `client_document_uploads` (the checklist, the chart
+      // index) that expects an actor keeps working unchanged.
+      actor: { id: client.id, name: client.name || client.email },
+      source: 'client', channel: 'link'
+    });
+    await db.set('client_document_uploads', [...uploads, row]);
+
+    if (resolved.openAsk) {
+      const i = requests.findIndex(r => r.id === resolved.openAsk.id);
+      requests[i] = { ...resolved.openAsk, status: 'fulfilled', fulfilledAt: row.uploadedAt, fulfilledBy: row.id };
+      await db.set('client_document_requests', requests);
+    }
+
+    await logActivity(null, 'Upload link (no sign-in)', 'client_document_uploaded_via_link', 'document', client.id, { kind });
+    await notify.documentUploaded({ client, kind, label: row.label || kind, uploadId: row.id, actorId: null });
+
+    res.json({ message: 'Document received', document: { id: row.id, kind, fileName: row.fileName, uploadedAt: row.uploadedAt, status: row.status } });
+  } catch (error) {
+    console.error('GFC public upload-link submit error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -20187,6 +20475,13 @@ app.get('/changelog', (req, res) => {
 // Password reset link page (public)
 app.get('/password-reset-:token', (req, res) => {
   res.sendFile(__dirname + '/public/password-reset.html');
+});
+
+// The branded, no-login document upload link (public, 2026-09-23). The page
+// itself carries no identity — it reads the token out of the URL and asks
+// `/api/gfc/upload/:token`, exactly like the password-reset page above.
+app.get('/upload/:token', (req, res) => {
+  res.sendFile(__dirname + '/public/upload-link.html');
 });
 
 // ============== CHANGELOG API ==============

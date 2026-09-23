@@ -195,7 +195,7 @@ test('the enrollment page offers no control the API will refuse', () => {
   assert.match(ENROL, /You can correct this submission/);
   // Note the arrow function in the onClick — [^>]* would stop at its ">".
   assert.match(ENROL, /\{canEdit && <button [\s\S]{0,120}?>Record paper signature<\/button>\}/);
-  assert.match(ENROL, /<DocumentExchange clientId=\{clientId\} canEdit=\{canEdit\} \/>/);
+  assert.match(ENROL, /<DocumentExchange clientId=\{clientId\} canEdit=\{canEdit\} isAdmin=\{isAdminRole\(user\)\} \/>/);
 });
 
 test('printing a blank consent stays open to staff — it is a read', () => {
