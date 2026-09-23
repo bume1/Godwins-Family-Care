@@ -60,6 +60,8 @@ const patientRead = require('./patientReadRepository');
 const clinicalRoles = require('./clinicalRoles');
 const standingOrders = require('./standingOrders');   // signed, versioned, expiring protocols (4.8 Scope C)
 const clinicalInbox = require('./clinicalInbox');     // what is waiting on a clinician (4.9)
+const myDay = require('./myDay');                     // the day, the visit stamps and the pre-visit
+                                                      // packet (4.12). Pure — the clock is passed in.
 // Session 4.10 — orders that leave the building. The app GENERATES, a person
 // TRANSMITS: there is no fax API here and there never claims to be one.
 const orderReq = require('./orderRequisitions');      // referrals, DME, requisitions, sends, overdue (4.10 A)
@@ -84,6 +86,9 @@ const caregiverRepo = require('./caregiverRepository');
 const caregiverRoutes = require('./routes/caregiver'); // caregiver app: visit log + escalation (Session 6)
 const schedulingRoutes = require('./routes/scheduling');
 const welcomePacketRoutes = require('./routes/welcomePacket'); // caregiver onboarding packet + gate (2026-09)
+const messagingRepo = require('./messagingRepository'); // the ONE answer to "may this person read
+                                                       // this conversation" (PR #88). The chart
+                                                       // timeline asks it rather than restating it.
 const messagingRoutes = require('./routes/messaging'); // channel matrix + role-scoped threads (Session 9) // PHCP shifts, availability, time tracking (Session 7)
 
 const upload = multer({
@@ -7787,7 +7792,11 @@ app.get('/api/clinical/status', authenticateToken, requireClinicalRead, async (r
     // Session 4.4 deploy diagnostics: billing NPI (spec §2.5) + the caller's
     // own NPI for attribution (spec §4). Never hardcoded — both are config.
     billingNpiConfigured: !!payer.billing_npi_used,
-    myNpi: req.user.npi || null
+    myNpi: req.user.npi || null,
+    // Session 4.12 — the home-visit standing facts, SERVED rather than named in
+    // the page. A screen that restates the list drifts from the sanitizer that
+    // decides which keys actually reach a patient record.
+    homeVisitFields: clinicalRepo.HOME_VISIT_FIELDS
   });
 });
 
@@ -8072,10 +8081,31 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
       skilledTasksNeeded: client.skilledTasksNeeded || []
     };
     if (!client.openEmrPatientId || !openemr.isConfigured()) {
-      return res.json({ demographics, intakePrefill, emr: null, linked: !!client.openEmrPatientId });
+      // Unlinked, or no EMR configured. The banner still renders — name, age,
+      // MBI, code status and the home-visit facts all come from the app's own
+      // record — and the allergy strip says plainly that nothing could be read
+      // rather than implying there are none.
+      const banner = clinicalRepo.buildPatientBanner({
+        client, linked: false, emrAllergies: null, facility: null, lastVisitAt: null,
+        today: practiceToday(), careTierLabel: careTierLabelFor(client.careTier)
+      });
+      // The draft is THIS app's row and has nothing to do with the EMR link, so
+      // it is reported here too. Leaving it out meant the banner's action could
+      // never read "Resume draft" on an unlinked patient — the patients a
+      // clinician is most likely to be part-way through a note on.
+      const unlinkedDraft = (await loadNoteDrafts()).find(r => r && r.id === clinicalRepo.noteDraftId(client.id, req.user.id)) || null;
+      return res.json({
+        demographics, intakePrefill, banner, emr: null, linked: !!client.openEmrPatientId,
+        visitDraft: { open: !!unlinkedDraft, savedAt: (unlinkedDraft && unlinkedDraft.updatedAt) || null }
+      });
     }
     const emr = openemr.forActor(req.user);
     const puuid = client.openEmrPatientId;
+    // Started here rather than awaited at banner-build time: the banner needs
+    // the facility's place-of-service code, and a sequential round trip to
+    // OpenEMR on every chart open is a second of a clinician's day for a value
+    // the reads below are already waiting on anyway.
+    const facilityPromise = resolveFacilityForVisit(emr, client, null).catch(() => null);
     const [problems, allergies, meds, encounters, carePlans, documents, vitals] = await Promise.allSettled([
       emr.getProblems(puuid), emr.getAllergies(puuid), emr.getMedicationRequests(puuid),
       emr.getEncounters(puuid), emr.getCarePlans(puuid), emr.getDocumentReferences(puuid),
@@ -8140,12 +8170,31 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
       consentSatisfied: isConsentSatisfied
     });
 
+    const emrAllergies = take(allergies, clinicalRepo.summarizeAllergy);
+    // Session 4.12 — the banner. Built from the SAME allergy read the chart's
+    // own Allergies section uses, so the strip and the section can never
+    // disagree about what this patient is allergic to.
+    const encounterRows = encounters.status === 'fulfilled'
+      ? encounters.value.map(clinicalRepo.summarizeEncounter) : [];
+    const banner = clinicalRepo.buildPatientBanner({
+      client, linked: true, emrAllergies,
+      facility: await facilityPromise,
+      lastVisitAt: clinicalRepo.lastVisitDateOf(encounterRows),
+      today: practiceToday(),
+      careTierLabel: careTierLabelFor(client.careTier)
+    });
+    // The banner's primary action reads START VISIT or RESUME DRAFT, so it has
+    // to know whether THIS clinician has a draft open on THIS patient. Keyed to
+    // the caller, the same way the draft routes are — a colleague's half-written
+    // note is never offered here as something to resume.
+    const ownDraft = (await loadNoteDrafts()).find(r => r && r.id === clinicalRepo.noteDraftId(client.id, req.user.id)) || null;
+    const visitDraft = { open: !!ownDraft, savedAt: (ownDraft && ownDraft.updatedAt) || null };
     res.json({
-      demographics, intakePrefill, linked: true,
+      demographics, intakePrefill, linked: true, banner, visitDraft,
       chartDocuments,
       emr: {
         problems: take(problems, clinicalRepo.summarizeCondition),
-        allergies: take(allergies, clinicalRepo.summarizeAllergy),
+        allergies: emrAllergies,
         medications: take(meds, clinicalRepo.summarizeMedicationRequest),
         encounters: take(encounters, clinicalRepo.summarizeEncounter),
         carePlans: take(carePlans, r => ({ id: r.id, status: r.status, description: r.description || null })),
@@ -11186,6 +11235,693 @@ app.post('/api/clinical/orders/:orderId/co-sign', authenticateToken, requireClin
   }
 });
 
+// ══════════════════════════════════════════════════════════════════════════
+// Session 4.12 — My Day, visit timings and the pre-visit packet
+// ══════════════════════════════════════════════════════════════════════════
+// The workspace opened on a patient list. A house-call clinician does not start
+// the day by looking up a patient; they start it by looking at the day.
+
+const loadVisitTimings = () => loadRows('visit_timings');
+
+// A visit is SIGNED when its encounter carries an attestation. Resolved from
+// the appointment→encounter pointers so My Day and the chart cannot disagree
+// about which visits are still open.
+const signedEidsFrom = (linkRows, attestations) => {
+  const signedEncounters = new Set((attestations || [])
+    .filter(a => a && a.encounterUuid && a.signedAt)
+    .map(a => String(a.encounterUuid)));
+  return new Set((linkRows || [])
+    .filter(l => l && l.eid != null && signedEncounters.has(String(l.encounterUuid)))
+    .map(l => String(l.eid)));
+};
+
+// GET /api/clinical/my-day?date=YYYY-MM-DD — the default landing screen.
+// Eastern, always: the date defaults to today IN GEORGIA, never to the
+// container's UTC day, which for four hours of every evening is tomorrow and
+// would show a clinician an empty schedule at 8pm.
+app.get('/api/clinical/my-day', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.date || ''))
+      ? String(req.query.date) : practiceToday();
+    // A scope problem is a CALENDAR problem, not a reason to refuse the day.
+    // The unsigned backlog, the open-task count and the home-visit facts all
+    // come from this app's own store and are exactly what a clinician whose
+    // provider id is unset still needs to see.
+    const scope = resolveProviderScope(req.user, req.query.providerId);
+    const scopeProblem = scope.error ? { error: scope.error, code: scope.code } : null;
+
+    const [timingRows, linkRows, attestations, orderRows, resultRows, users] = await Promise.all([
+      loadVisitTimings(), getAppointmentLinkage(), loadRows('encounter_attestations'),
+      loadRows('clinical_orders'), loadRows('clinical_results'), getUsers()
+    ]);
+    const clientsById = new Map(users
+      .filter(u => u.role === config.ROLES.CLIENT)
+      .map(u => [String(u.id), u]));
+
+    // The calendar is OpenEMR's. When it cannot be read the day is REPORTED as
+    // unavailable rather than rendered empty — an empty day and an unreachable
+    // calendar look identical on screen and are opposite facts.
+    let appointments = [];
+    let calendar = { ok: true, error: null };
+    if (scopeProblem) {
+      calendar = { ok: false, error: scopeProblem.error, code: scopeProblem.code };
+    } else if (!openemr.isConfigured()) {
+      calendar = { ok: false, error: 'OpenEMR is not configured, so the calendar could not be read.' };
+    } else {
+      try {
+        const rows = await openemr.forActor(req.user).listAppointmentRows();
+        appointments = await summarizeCalendarRows(rows, r =>
+          (!scope.providerId || String(r.pc_aid) === scope.providerId));
+      } catch (e) {
+        calendar = { ok: false, error: `OpenEMR calendar could not be read: ${e.message}` };
+      }
+    }
+
+    const signedEids = signedEidsFrom(linkRows, attestations);
+    const timingsByEid = new Map((timingRows || [])
+      .filter(t => t && t.eid != null).map(t => [String(t.eid), t]));
+
+    const forDate = appointments.filter(a => String(a.date) === date);
+    // An unsigned visit from an EARLIER day is the practice's biggest silent
+    // risk, so it is pinned at the top rather than left to be remembered.
+    const earlier = appointments
+      .filter(a => String(a.date) < date)
+      .filter(a => a.state !== 'cancelled' && a.status !== '?' )
+      .filter(a => !signedEids.has(String(a.eid)))
+      .filter(a => a.encounterUuid || (timingsByEid.get(String(a.eid)) || {}).arrivedAt)
+      .map(a => {
+        const client = clientsById.get(String(a.clientId)) || null;
+        return {
+          eid: a.eid, clientId: a.clientId, date: a.date, time: a.startTime,
+          patientName: (client && client.name) || a.patientName || null,
+          visitType: a.title || 'Clinical visit',
+          encounterUuid: a.encounterUuid || null,
+          daysOld: Math.max(0, Math.round(
+            (new Date(`${date}T00:00:00Z`) - new Date(`${a.date}T00:00:00Z`)) / 86400000))
+        };
+      });
+
+    // Open tasks, counted from what is actually waiting: orders still out and
+    // results nobody has acknowledged. A count that comes from nowhere is a
+    // number nobody can act on.
+    const mine = (r) => !scope.providerId ||
+      String((r && (r.orderingClinicianProviderId || r.providerId)) || '') === String(scope.providerId);
+    const openOrders = (orderRows || []).filter(o => o &&
+      ['ordered', 'sent', 'scheduled'].includes(String(o.status)));
+    const unacked = (resultRows || []).filter(r => r && !r.acknowledgedAt);
+    const openTasks = openOrders.filter(mine).length + unacked.filter(mine).length;
+
+    const day = myDay.buildMyDay({
+      date,
+      appointments: forDate,
+      clientsById,
+      timingsByEid,
+      signedEids,
+      unsignedEarlier: earlier,
+      openTasks,
+      blocks: [],
+      homeVisitFields: clinicalRepo.HOME_VISIT_FIELDS,
+      startCoords: null
+    });
+    // The plot is computed HERE, not in the browser: myDay.js reaches into the
+    // scheduling module for the one coordinate reader, and that chain does not
+    // load in a page. One implementation beats a second one that drifts.
+    const plot = myDay.plotStops({
+      stops: day.visits.filter(v => v.state !== myDay.VISIT_STATE.CANCELLED),
+      width: 100, height: 100
+    });
+    res.json({ ...day, plot, calendar, providerId: scope.providerId || null, locked: !!scope.locked });
+  } catch (error) {
+    console.error('My Day error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/clinical/visits/:eid/timing — the arrival, start and end stamps
+// (Scope F2). One route, one vocabulary, so the page cannot invent an event the
+// server does not know.
+//
+// TOTAL TIME IS WHAT SUPPORTS TIME-BASED E/M LEVELING. The billing guide
+// requires a time statement in every note and there was no field for it at all.
+const VISIT_TIMING_EVENTS = Object.freeze({
+  en_route: 'enRouteAt', arrive: 'arrivedAt', start: 'startedAt', end: 'endedAt'
+});
+
+app.post('/api/clinical/visits/:eid/timing', authenticateToken, requireClinicalWrite,
+  requireCapability(clinicalRoles.CAPABILITIES.NURSING_NOTE), async (req, res) => {
+    try {
+      const eid = String(req.params.eid || '').trim();
+      if (!/^\d+$/.test(eid)) return res.status(400).json({ error: 'A numeric appointment id is required', code: 'BAD_EID' });
+      const event = String((req.body || {}).event || '').trim();
+      const field = VISIT_TIMING_EVENTS[event];
+      if (!field) {
+        return res.status(400).json({
+          error: `Unknown visit event "${event}". One of: ${Object.keys(VISIT_TIMING_EVENTS).join(', ')}.`,
+          code: 'BAD_VISIT_EVENT'
+        });
+      }
+      const clientId = String((req.body || {}).clientId || '').trim();
+      const { client, wrongLine } = clientId ? await loadClinicalClient(clientId) : { client: null };
+      if (clientId && !client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+
+      const rows = await loadVisitTimings();
+      const id = myDay.timingId(eid);
+      const idx = rows.findIndex(r => r && r.id === id);
+      const existing = idx >= 0 ? rows[idx] : null;
+
+      // An end time is EDITABLE and a correction requires a reason, the same
+      // rule every other time correction in this app follows. Re-stamping
+      // arrival or start silently would quietly change how long a visit was.
+      const reason = String((req.body || {}).reason || '').trim();
+      if (existing && existing[field] && !reason) {
+        return res.status(409).json({
+          error: `This visit already has a ${event} time (${existing[field]}). Correcting it needs a reason.`,
+          code: 'TIMING_ALREADY_SET'
+        });
+      }
+      const at = String((req.body || {}).at || '').trim() || new Date().toISOString();
+      if (isNaN(new Date(at))) return res.status(400).json({ error: 'That is not a usable time', code: 'BAD_TIME' });
+
+      const next = {
+        ...(existing || { id, eid, createdAt: new Date().toISOString() }),
+        clientId: clientId || (existing && existing.clientId) || null,
+        providerId: req.user.openEmrProviderId ? String(req.user.openEmrProviderId) : null,
+        [field]: at,
+        updatedAt: new Date().toISOString(),
+        byId: req.user.id, byName: req.user.name || req.user.email
+      };
+      if (existing && existing[field] && reason) {
+        next.corrections = [...(existing.corrections || []), {
+          field, from: existing[field], to: at, reason,
+          byId: req.user.id, byName: req.user.name || req.user.email, at: new Date().toISOString()
+        }];
+      }
+      if (idx >= 0) rows[idx] = next; else rows.push(next);
+      await db.set('visit_timings', rows);
+      await logActivity(req.user.id, req.user.name || req.user.email, `visit_${event}`, 'client', next.clientId, {
+        eid, at, corrected: !!(existing && existing[field])
+      });
+      res.json({
+        message: `Recorded.`,
+        timing: { ...next, totalMinutes: myDay.totalVisitMinutes(next), timeStatement: myDay.timeStatement(next) }
+      });
+    } catch (error) {
+      console.error('Visit timing error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+// GET /api/clinical/visits/:eid/timing — what is stamped so far.
+app.get('/api/clinical/visits/:eid/timing', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const row = (await loadVisitTimings()).find(r => r && r.id === myDay.timingId(req.params.eid)) || null;
+    res.json({
+      timing: row ? { ...row, totalMinutes: myDay.totalVisitMinutes(row), timeStatement: myDay.timeStatement(row) } : null
+    });
+  } catch (error) {
+    console.error('Visit timing read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/clinical/my-day/optimize — PROPOSES an order and never applies one
+// (Scope B4). Accepting rebooks through the existing appointment routes, so the
+// patient is told; a schedule that silently rewrote itself would move a visit
+// somebody is expecting without anybody deciding to.
+app.post('/api/clinical/my-day/optimize', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const visits = Array.isArray((req.body || {}).visits) ? req.body.visits : null;
+    if (!visits) return res.status(400).json({ error: 'The day\'s visits are required', code: 'NO_VISITS' });
+    const out = myDay.proposeRouteOrder({ visits, startCoords: (req.body || {}).startCoords || null });
+    res.json({ ...out, applied: false });
+  } catch (error) {
+    console.error('Route optimize error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/clinical/patients/:clientId/pre-visit?eid= — the packet a clinician
+// reads in the car (Scope E). ONE request: it is read on a phone before getting
+// out, so it must not wait on the full chart.
+app.get('/api/clinical/patients/:clientId/pre-visit', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    const eid = String(req.query.eid || '').trim();
+
+    const [orderRows, resultRows, linkRows] = await Promise.all([
+      loadRows('clinical_orders'), loadRows('clinical_results'), getAppointmentLinkage()
+    ]);
+    const mine = (r) => r && String(r.clientId) === String(client.id);
+    const openOrders = (orderRows || []).filter(mine)
+      .filter(o => ['ordered', 'sent', 'scheduled'].includes(String(o.status)))
+      .map(o => ({ id: o.id, label: (o.tests && o.tests[0]) || o.orderType, orderType: o.orderType, orderedAt: o.createdAt || o.orderedAt }));
+    const openReferrals = openOrders.filter(o => o.orderType === 'referral')
+      .map(o => ({ id: o.id, specialty: o.label, status: 'pending' }));
+    const unacknowledged = (resultRows || []).filter(mine).filter(r => !r.acknowledgedAt)
+      .map(r => ({ id: r.id, label: r.label || r.documentName || 'Result', interpretation: r.interpretation || null }));
+
+    let banner = null, lastVitals = null, activeProblems = [], medicationChanges = [], lastVisitAt = null, appointment = null;
+    let emrNotice = null;
+    if (client.openEmrPatientId && openemr.isConfigured()) {
+      const emr = openemr.forActor(req.user);
+      const [problems, allergies, encounters, vitals] = await Promise.allSettled([
+        emr.getProblems(client.openEmrPatientId), emr.getAllergies(client.openEmrPatientId),
+        emr.getEncounters(client.openEmrPatientId), emr.getVitalObservations(client.openEmrPatientId)
+      ]);
+      const take = (r, fn) => r.status === 'fulfilled'
+        ? { ok: true, rows: r.value.map(fn) }
+        : { ok: false, error: r.reason && r.reason.message, permissionPending: (r.reason && r.reason.status) === 403 };
+      const encRows = encounters.status === 'fulfilled' ? encounters.value.map(clinicalRepo.summarizeEncounter) : [];
+      lastVisitAt = clinicalRepo.lastVisitDateOf(encRows);
+      const problemsTake = take(problems, clinicalRepo.summarizeCondition);
+      activeProblems = problemsTake.ok ? problemsTake.rows.slice(0, 12) : [];
+      if (!problemsTake.ok) emrNotice = 'Some chart sections could not be read.';
+      const vitalsTake = take(vitals, clinicalRepo.summarizeVitalObservation);
+      lastVitals = vitalsTake.ok && vitalsTake.rows.length ? vitalsTake.rows[vitalsTake.rows.length - 1] : null;
+      banner = clinicalRepo.buildPatientBanner({
+        client, linked: true, emrAllergies: take(allergies, clinicalRepo.summarizeAllergy),
+        facility: null, lastVisitAt, today: practiceToday(),
+        careTierLabel: careTierLabelFor(client.careTier)
+      });
+      if (eid) {
+        try {
+          const row = await emr.getAppointmentRow(client.openEmrPatientId, eid);
+          if (row) appointment = clinicalRepo.summarizeAppointmentRow(row, linkageByEid(linkRows).get(String(eid)) || null);
+        } catch { /* the packet is still worth reading without the slot */ }
+      }
+    } else {
+      banner = clinicalRepo.buildPatientBanner({
+        client, linked: false, emrAllergies: null, facility: null, lastVisitAt: null,
+        today: practiceToday(), careTierLabel: careTierLabelFor(client.careTier)
+      });
+      emrNotice = client.openEmrPatientId ? 'OpenEMR is not configured.' : 'This patient is not linked to an OpenEMR chart.';
+    }
+
+    const plan = client.carePlan || null;
+    const goalsUnmet = plan && Array.isArray(plan.goals) ? plan.goals.slice(0, 5) : [];
+
+    res.json({
+      packet: myDay.buildPreVisitPacket({
+        client, appointment, banner, lastVisitAt, lastVitals, activeProblems,
+        recentResults: (resultRows || []).filter(mine).slice(-3).map(r => ({
+          id: r.id, label: r.label || r.documentName || 'Result',
+          interpretation: r.interpretation || null, receivedAt: r.receivedAt || null
+        })),
+        medicationChanges,
+        openOrders: openOrders.filter(o => o.orderType !== 'referral'),
+        unacknowledgedResults: unacknowledged,
+        openReferrals,
+        carePlanGoalsUnmet: goalsUnmet,
+        homeVisitFields: clinicalRepo.HOME_VISIT_FIELDS
+      }),
+      emrNotice
+    });
+  } catch (error) {
+    console.error('Pre-visit packet error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// Session 4.12 Scope I — WORK QUEUES and ANALYTICS
+// ══════════════════════════════════════════════════════════════════════════
+// I2: the cross-patient destinations are WORK QUEUES, not chart tabs — every
+// unsigned encounter, every unacknowledged result, every open referral and
+// every overdue order, across the whole panel.
+//
+// I3: a destination with nothing in it renders an empty state SAYING SO. It is
+// never hidden, because a missing menu item is indistinguishable from a broken
+// one — the rule the disabled messaging channel and the clinical inbox set.
+app.get('/api/clinical/work-queues', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const today = practiceToday();
+    const [orderRows, resultRows, attestations, billing, linkRows, users] = await Promise.all([
+      loadRows('clinical_orders'), loadRows('clinical_results'), loadRows('encounter_attestations'),
+      loadRows('encounter_billing'), getAppointmentLinkage(), getUsers()
+    ]);
+    const nameOf = (clientId) => {
+      const u = users.find(x => x && x.id === clientId);
+      return (u && u.name) || null;
+    };
+    const signed = new Set((attestations || [])
+      .filter(a => a && a.encounterUuid && a.signedAt).map(a => String(a.encounterUuid)));
+
+    // An encounter with a billing record and no attestation is documented and
+    // unsigned. That is the practice's biggest silent risk and it is what this
+    // queue exists for.
+    const unsignedEncounters = (billing || [])
+      .filter(r => r && r.encounterUuid && !signed.has(String(r.encounterUuid)))
+      .map(r => ({
+        encounterUuid: r.encounterUuid, clientId: r.clientId,
+        patientName: nameOf(r.clientId),
+        date: String(r.createdAt || '').slice(0, 10) || null,
+        codingStatus: r.codingStatus || null
+      }))
+      .sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+
+    const unacknowledgedResults = (resultRows || [])
+      .filter(r => r && !r.acknowledgedAt)
+      .map(r => ({
+        id: r.id, clientId: r.clientId, patientName: nameOf(r.clientId),
+        label: r.label || r.documentName || 'Result',
+        interpretation: r.interpretation || null,
+        receivedAt: r.receivedAt || null
+      }))
+      // Critical first, then abnormal, then the rest, OLDEST FIRST within each.
+      // The same ordering 4.10's inbox uses, for the same reason: the oldest
+      // unanswered result is the one most likely to have been forgotten.
+      .sort((a, b) => {
+        const rank = (x) => ({ critical: 0, abnormal: 1 }[String(x.interpretation)] ?? 2);
+        return rank(a) - rank(b) || String(a.receivedAt || '').localeCompare(String(b.receivedAt || ''));
+      });
+
+    const openReferrals = (orderRows || [])
+      .filter(o => o && o.orderType === 'referral' && !['completed', 'cancelled'].includes(String(o.status)))
+      .map(o => ({
+        id: o.id, clientId: o.clientId, patientName: nameOf(o.clientId),
+        specialty: o.specialty || null, status: o.status || null,
+        orderReference: o.orderReference || null, createdAt: o.createdAt || null
+      }))
+      .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+
+    // Overdue reuses 4.10's OWN builder and thresholds rather than restating
+    // them — a second copy of "how long is too long" is a second copy that
+    // drifts. Called directly and NOT behind a `typeof` guard: the first
+    // version of this line guarded a function name that does not exist, so the
+    // overdue queue would have been permanently empty and nothing would have
+    // said so. A defensive check that hides a missing function is worse than
+    // the crash it prevents.
+    const overdue = orderReq.buildOverdueList(orderRows || []);
+
+    res.json({
+      today,
+      overdueThresholds: orderReq.OVERDUE_DAYS,
+      queues: {
+        unsignedEncounters, unacknowledgedResults, openReferrals,
+        overdueOrders: overdue.map(o => ({ ...o, patientName: nameOf(o.clientId) }))
+      }
+    });
+  } catch (error) {
+    console.error('Work queues error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/clinical/analytics — Scope I4. Six metrics, and the frame they sit
+// in. Every one is COUNTED from what the app actually holds: a metric derived
+// from nothing is a number nobody can act on, and one this app cannot observe
+// is reported as unavailable rather than guessed.
+app.get('/api/clinical/analytics', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const today = practiceToday();
+    const since = new Date(`${today}T00:00:00Z`);
+    since.setUTCDate(since.getUTCDate() - 56); // eight weeks
+    const sinceYmd = since.toISOString().slice(0, 10);
+
+    const [timingRows, attestations, billing, orderRows] = await Promise.all([
+      loadVisitTimings(), loadRows('encounter_attestations'), loadRows('encounter_billing'),
+      loadRows('clinical_orders')
+    ]);
+
+    const finished = (timingRows || []).filter(t => t && t.startedAt && t.endedAt);
+    const lengths = finished.map(t => myDay.totalVisitMinutes(t)).filter(m => typeof m === 'number');
+    const avgVisitMinutes = lengths.length
+      ? Math.round(lengths.reduce((a, b) => a + b, 0) / lengths.length) : null;
+
+    // Visits per week by type, from the encounters the app has coded.
+    const weekOf = (ymd) => {
+      const d = new Date(`${ymd}T00:00:00Z`);
+      d.setUTCDate(d.getUTCDate() - d.getUTCDay());
+      return d.toISOString().slice(0, 10);
+    };
+    const perWeek = {};
+    (billing || []).forEach(r => {
+      const ymd = String(r && r.createdAt || '').slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd) || ymd < sinceYmd) return;
+      const w = weekOf(ymd);
+      perWeek[w] = perWeek[w] || { week: w, total: 0 };
+      perWeek[w].total += 1;
+    });
+
+    const signed = new Set((attestations || [])
+      .filter(a => a && a.encounterUuid && a.signedAt).map(a => String(a.encounterUuid)));
+    const unsignedAges = (billing || [])
+      .filter(r => r && r.encounterUuid && !signed.has(String(r.encounterUuid)))
+      .map(r => {
+        const ymd = String(r.createdAt || '').slice(0, 10);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return null;
+        return Math.max(0, Math.round((new Date(`${today}T00:00:00Z`) - new Date(`${ymd}T00:00:00Z`)) / 86400000));
+      })
+      .filter(n => n != null);
+
+    const openOrderAges = (orderRows || [])
+      .filter(o => o && ['ordered', 'sent', 'scheduled'].includes(String(o.status)))
+      .map(o => {
+        const ymd = String(o.createdAt || '').slice(0, 10);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return null;
+        return Math.max(0, Math.round((new Date(`${today}T00:00:00Z`) - new Date(`${ymd}T00:00:00Z`)) / 86400000));
+      })
+      .filter(n => n != null);
+
+    const bucket = (ages) => ({
+      count: ages.length,
+      oldestDays: ages.length ? Math.max(...ages) : null,
+      medianDays: ages.length ? ages.slice().sort((a, b) => a - b)[Math.floor(ages.length / 2)] : null
+    });
+
+    res.json({
+      today, since: sinceYmd,
+      metrics: {
+        visitsPerWeek: Object.values(perWeek).sort((a, b) => a.week.localeCompare(b.week)),
+        // MILES DRIVEN needs a routing provider, which is an open owner
+        // decision. Reported as unavailable with its reason rather than as a
+        // zero somebody would read as "nobody drove anywhere".
+        milesDriven: { value: null, unavailable: true, reason: myDay.DISTANCE_UNAVAILABLE },
+        averageVisitMinutes: { value: avgVisitMinutes, sampleSize: lengths.length },
+        unsignedNotesAgeing: bucket(unsignedAges),
+        openOrdersAgeing: bucket(openOrderAges),
+        // SCREENING COMPLETION needs the Questionnaire surfacing of Scope J,
+        // which is not built. Saying so beats a rate computed from nothing.
+        screeningCompletionRate: { value: null, unavailable: true, reason: 'no_screening_source' }
+      }
+    });
+  } catch (error) {
+    console.error('Clinical analytics error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/clinical/patients/:clientId/results — the RESULTS place on the
+// chart (Scope D). Session 4.10 built the results path and the cross-patient
+// inbox; what it had no read for was "show me this patient's results", which is
+// the question a clinician asks with the chart already open.
+//
+// A READ, so a case manager sees their client's results without being able to
+// acknowledge one — the 4.3 split, unchanged.
+app.get('/api/clinical/patients/:clientId/results', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    const [rows, orders] = await Promise.all([loadRows('clinical_results'), loadRows('clinical_orders')]);
+    const byId = new Map((orders || []).map(o => [String(o.id), o]));
+    const results = (rows || [])
+      .filter(r => r && String(r.clientId) === String(client.id))
+      .map(r => ({
+        ...r,
+        // The order it answers, so a result is readable as the reply to
+        // something rather than as a loose document.
+        order: r.orderId && byId.has(String(r.orderId))
+          ? { id: r.orderId, orderType: byId.get(String(r.orderId)).orderType,
+            reference: byId.get(String(r.orderId)).orderReference || null }
+          : null
+      }))
+      // Critical first, then abnormal, then the rest — and OLDEST FIRST within
+      // each, because the oldest unanswered result is the one most likely to
+      // have been forgotten. The same ordering 4.10's inbox uses.
+      .sort((a, b) => {
+        const rank = (x) => ({ critical: 0, abnormal: 1 }[String(x.interpretation)] ?? 2);
+        return rank(a) - rank(b) || String(a.receivedAt || '').localeCompare(String(b.receivedAt || ''));
+      });
+    res.json({ results, interpretations: clinicalResults.INTERPRETATIONS });
+  } catch (error) {
+    console.error('Patient results list error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/clinical/nearby?clientId=&radiusMiles= — Scope B5, geographic
+// clustering. When a visit is being booked, who else lives near that address
+// and is due to be seen? A house call is mostly driving, so a trip that fills
+// two slots instead of one is the single biggest lever there is on a day.
+//
+// A READ over the clinical panel, so a case manager can see it. It carries a
+// name, an address and a last-visit date — the minimum needed to decide
+// whether to add somebody to a trip, and nothing clinical.
+app.get('/api/clinical/nearby', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(String(req.query.clientId || ''));
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    const origin = myDay.coordsOf(client);
+    if (!origin) {
+      // Not an error and not an empty list: those are different facts, and an
+      // empty list here would read as "nobody lives nearby".
+      return res.json({
+        nearby: [], radiusMiles: null, origin: null,
+        notice: `${client.name || 'This patient'} has no address coordinates, so nobody can be placed near them. An admin sets them under Scheduling → Locations.`
+      });
+    }
+    const radiusMiles = Math.min(50, Math.max(1, Number(req.query.radiusMiles) || 10));
+    const users = await getUsers();
+    const billing = await loadRows('encounter_billing');
+    const lastVisitByClient = new Map();
+    (billing || []).forEach(r => {
+      const ymd = String((r && r.createdAt) || '').slice(0, 10);
+      if (!r || !r.clientId || !/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return;
+      const prev = lastVisitByClient.get(String(r.clientId));
+      if (!prev || ymd > prev) lastVisitByClient.set(String(r.clientId), ymd);
+    });
+    const candidates = users
+      .filter(u => u && u.role === config.ROLES.CLIENT && isClinicalServiceLine(u.serviceLine))
+      .map(u => ({
+        clientId: u.id, name: u.name || null,
+        coords: myDay.coordsOf(u),
+        address: myDay.addressLineOf(u),
+        lastVisitAt: lastVisitByClient.get(String(u.id)) || null
+      }));
+    const nearby = myDay.findNearbyDue({
+      origin, candidates, radiusMiles, today: practiceToday(),
+      excludeClientIds: [client.id]
+    });
+    res.json({
+      nearby, radiusMiles, origin: { placed: true },
+      dueAfterDays: myDay.DUE_AFTER_DAYS,
+      // Straight-line, and said so. Without a routing provider there is no
+      // drive time to sort by, and a radius drawn as the crow flies is honest
+      // about what it is.
+      distanceKind: 'straight_line',
+      notice: null
+    });
+  } catch (error) {
+    console.error('Nearby clients error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+
+
+// GET /api/clinical/patients/:clientId/timeline?kinds=visit,result — Scope D5.
+// One chronological thread of everything. For somebody seen repeatedly at home
+// this is how a clinician reconstructs the interval since the last visit, which
+// is otherwise reassembled by opening five tabs and holding the dates in mind.
+app.get('/api/clinical/patients/:clientId/timeline', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    const kinds = String(req.query.kinds || '').split(',').map(k => k.trim()).filter(Boolean);
+
+    const [orderRows, resultRows, rxRows, threadRows, linkRows] = await Promise.all([
+      loadRows('clinical_orders'), loadRows('clinical_results'), loadRows('prescriptions'),
+      loadRows('message_threads'), getAppointmentLinkage()
+    ]);
+    const mine = (r) => r && String(r.clientId) === String(client.id);
+
+    // MESSAGES GO THROUGH messagingRepository.threadVisibility, NEVER A COPY OF
+    // ITS RULE. That function is where the cross-client leak lived (PR #88) and
+    // a second implementation of "may this person read this conversation" is
+    // exactly how the next one gets written. Only the thread's EXISTENCE
+    // reaches the timeline — a date, a channel and a title. Never a body: a
+    // chart timeline is not a second inbox.
+    const visibleThreads = (threadRows || [])
+      .filter(t => t && String(t.client_id) === String(client.id))
+      .filter(t => {
+        const v = messagingRepo.threadVisibility(req.user, t, { client });
+        return !!(v && v.visible);
+      })
+      .map(t => ({
+        id: t.id, channel: t.channel,
+        subject: messagingRepo.threadTitle(t),
+        date: t.last_message_at || t.updated_at || t.created_at
+      }));
+
+    let encounters = [], appointments = [], documents = [];
+    let emrNotice = null;
+    if (client.openEmrPatientId && openemr.isConfigured()) {
+      const emr = openemr.forActor(req.user);
+      const [encRes, apptRes] = await Promise.allSettled([
+        emr.getEncounters(client.openEmrPatientId),
+        emr.getPatientAppointmentRows(client.openEmrPatientId)
+      ]);
+      if (encRes.status === 'fulfilled') encounters = encRes.value.map(clinicalRepo.summarizeEncounter);
+      else emrNotice = `Visits could not be read from OpenEMR: ${encRes.reason && encRes.reason.message}`;
+      if (apptRes.status === 'fulfilled') {
+        appointments = await summarizeCalendarRows(apptRes.value);
+      }
+      try {
+        const planVersions = await db.get('care_plan_versions');
+        documents = clinicalRepo.buildChartDocumentIndex({
+          client, emrReadSupported: false, emrRows: [],
+          carePlanVersions: planVersions || [], roiAuthorizations: [],
+          clientUploads: (await db.get('client_document_uploads')) || [],
+          consentDefs: consentDefsForServiceLine(client.serviceLine),
+          consentSatisfied: isConsentSatisfied
+        });
+      } catch (e) { console.error('Timeline document index failed (non-fatal):', e.message); }
+    } else {
+      emrNotice = client.openEmrPatientId
+        ? 'OpenEMR is not configured, so visits are not on this thread.'
+        : 'This patient is not linked to an OpenEMR chart, so visits are not on this thread.';
+    }
+
+    const timeline = clinicalRepo.buildTimeline({
+      encounters, appointments, messages: visibleThreads,
+      prescriptions: (rxRows || []).filter(mine),
+      orders: (orderRows || []).filter(mine),
+      results: (resultRows || []).filter(mine),
+      documents, kinds
+    });
+    res.json({ ...timeline, emrNotice });
+  } catch (error) {
+    console.error('Chart timeline error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Home-visit standing facts (Session 4.12, Scope F4) ────────────────────
+// "Use the side entrance." "Daughter Angela will be present." "Dog secured
+// before arrival."
+//
+// THESE ARE FACTS ABOUT THE PATIENT, NOT ABOUT ONE VISIT, and that is the whole
+// design decision. Storing them on the encounter would mean re-typing the side
+// entrance at every visit, which is how it stops being typed at all — and the
+// clinician who most needs it is the covering one who has never been to the
+// house. They live on the patient record, are surfaced in three places that all
+// read this one field (the My Day row, the banner, the pre-visit packet), and
+// the encounter records only what DIFFERED today.
+//
+// A clinical WRITE, not an admin one: the person who finds out that the front
+// gate is locked is the clinician standing at it, and a note they cannot record
+// until an admin is back at a desk is a note that never gets recorded.
+app.put('/api/clinical/patients/:clientId/home-visit', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    const notes = clinicalRepo.sanitizeHomeVisitNotes(req.body && req.body.homeVisit);
+    const before = clinicalRepo.homeVisitNotesOf(client);
+    users[idx].homeVisit = notes;
+    await db.set('users', users);
+    // WHICH facts changed, never what they say. These carry a patient's home
+    // and household in them; an audit trail is not a second copy of that.
+    const changed = clinicalRepo.HOME_VISIT_FIELDS
+      .map(([k]) => k).filter(k => (before[k] || '') !== (notes[k] || ''));
+    await logActivity(req.user.id, req.user.name || req.user.email, 'patient_home_visit_notes_updated', 'client', client.id, { fields: changed });
+    res.json({ message: changed.length ? 'Home visit notes saved.' : 'No changes.', homeVisit: notes, changed });
+  } catch (error) {
+    console.error('Home visit notes error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // ── The patient's facility assignment (Session 4.5, owner spec) ───────────
 // Each patient lives somewhere fixed, so each patient is assigned to an
 // OpenEMR facility: a Hickory Log resident to the Hickory Log record, an
@@ -12705,6 +13441,8 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/upload', authenticateTok
 // because a reviewer would trust it.
 const modelEngine = require('./modelEngine');
 const documentExtraction = require('./documentExtraction');
+const documentTemplates = require('./documentTemplates');   // reading a document WITHOUT a model,
+                                                            // out of the text it already carries.
 
 const gfcModelEngine = modelEngine.createEngine({
   env: process.env,
@@ -12730,7 +13468,7 @@ const intakeValueAt = (client, path) => readIntakePath(client.intake || {}, path
 // that lists the extractable kinds itself drifts from the module that refuses
 // one, and a page that decides the boundary is satisfied would offer a button
 // the route then refuses.
-app.get('/api/gfc/admin/enrollment/:clientId/extraction', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+const extractionStatusHandler = async (req, res) => {
   try {
     const users = await getUsers();
     const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -12738,10 +13476,24 @@ app.get('/api/gfc/admin/enrollment/:clientId/extraction', authenticateToken, req
     const all = (await db.get('document_extractions')) || [];
     const mine = all.filter(x => x.clientId === client.id && x.status === 'pending');
     const st = gfcModelEngine.status();
+    // READING NO LONGER DEPENDS ON THE MODEL (2026-09-23). Documents are read
+    // deterministically out of the text they carry, and photographed ones
+    // through OCR running in this container — so the control is offered
+    // whenever the document KIND has something declared to read, not only when
+    // the model boundary is satisfied.
+    //
+    // `modelAvailable` is kept separate and truthful: a reviewer and an admin
+    // both need to know WHICH reader produced a value, and the boundary
+    // blockers are still worth showing to whoever can clear them.
+    const templateKinds = Object.keys(documentTemplates.TEMPLATES);
     res.json({
-      // `configured` is not a claim that AWS accepts anything, and the payload
-      // says so in its own words rather than leaving the screen to assume.
-      available: st.configured,
+      available: st.configured || templateKinds.length > 0,
+      modelAvailable: st.configured,
+      readers: [
+        ...(st.configured ? ['model'] : []),
+        ...(templateKinds.length ? ['template'] : [])
+      ],
+      templateKinds,
       blockers: st.blockers,
       proof: st.proof,
       extractableKinds: documentExtraction.extractableKinds(),
@@ -12749,14 +13501,18 @@ app.get('/api/gfc/admin/enrollment/:clientId/extraction', authenticateToken, req
         id: x.id, docId: x.docId, kind: x.kind, at: x.at,
         fileName: x.fileName || null,
         rows: x.rows, identityConflicts: x.identityConflicts || [],
-        reviewCount: x.reviewCount || 0
+        reviewCount: x.reviewCount || 0,
+        reader: x.reader || 'model', source: x.source || null,
+        stoppedBecause: x.stoppedBecause || null, readNotice: x.readNotice || null,
+        pagesRead: x.pagesRead || null, pagesTotal: x.pagesTotal || null,
+        skippedReads: x.skippedReads || null
       }))
     });
   } catch (error) {
     console.error('Extraction status error:', error);
     res.status(500).json({ error: 'Server error' });
   }
-});
+};
 
 // POST …/enrollment/:clientId/documents/:docId/extract — read a filed document.
 //
@@ -12764,7 +13520,7 @@ app.get('/api/gfc/admin/enrollment/:clientId/extraction', authenticateToken, req
 // something that is on the record, never a step in the upload: a Drive failure
 // must refuse the filing on its own terms, and a model failure must not be able
 // to lose a document somebody just scanned.
-app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/extract', authenticateToken, requireEnrollmentEditor, async (req, res) => {
+const extractDocumentHandler = async (req, res) => {
   try {
     const users = await getUsers();
     const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -12782,8 +13538,13 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/extract', authent
 
     const schema = documentExtraction.schemaFor(doc.kind);
     let result;
+    let bytes;
     try {
-      const bytes = await googledrive.downloadFileBuffer(doc.driveFileId);
+      bytes = await googledrive.downloadFileBuffer(doc.driveFileId);
+    } catch (e) {
+      return res.status(502).json({ error: `That document could not be read back from storage: ${e.message}`, code: 'DOCUMENT_UNREADABLE' });
+    }
+    try {
       result = await gfcModelEngine.invoke({
         purpose: modelEngine.PURPOSES.DOCUMENT_EXTRACTION,
         input: { mimeType: doc.mimeType, bytes },
@@ -12791,15 +13552,57 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/extract', authent
       });
     } catch (e) {
       if (e && e.code === 'MODEL_BOUNDARY_REFUSED') {
-        // 503, not 500. Nothing is broken — the boundary is not satisfied, and
-        // the blockers say which settings would satisfy it.
-        return res.status(503).json({
-          error: 'Document reading is not switched on yet.',
-          code: e.code, blockers: e.blockers || []
-        });
+        // THE MODEL IS NOT THE ONLY READER ANY MORE (2026-09-23). Everything
+        // that makes this safe — the allow-list, the identity guard, the
+        // stale-field refusal, the review — takes a plain { path: value } map
+        // and does not care what produced it. So when the boundary is not
+        // satisfied we read the document DETERMINISTICALLY, out of the text it
+        // already carries, and the proposals go through exactly the same
+        // review a model's would.
+        //
+        // This is not a stopgap. For a form the office receives a hundred
+        // times a declared label beats a model: cheaper, auditable,
+        // reproducible, and it cannot invent a member ID.
+        const read = await documentTemplates.readDocument({ bytes, kind: doc.kind, mimeType: doc.mimeType }).catch(err => ({
+          source: documentTemplates.SOURCE.NONE, extracted: {}, matches: [], skipped: [],
+          notice: `That document could not be read: ${err.message}`
+        }));
+        if (read.source === documentTemplates.SOURCE.NONE) {
+          // 503 still, because nothing could be read — but the reason now says
+          // WHICH of the two it is: an unsatisfied model boundary, or a
+          // document with no text in it at all. They need different actions.
+          return res.status(503).json({
+            error: read.notice || 'Nothing could be read out of that document.',
+            code: 'EXTRACTION_NOTHING_READABLE',
+            modelBlockers: e.blockers || [],
+            source: read.source
+          });
+        }
+        result = {
+          proposal: read.extracted,
+          confidence: read.confidence,
+          invocationId: null,
+          // WHAT READ IT, recorded truthfully. A reviewer must be able to tell
+          // a declared-label match from a model's guess, and the audit row must
+          // not imply a model ran when none did.
+          modelId: null,
+          reader: 'template',
+          // text layer or OCR. A recognised value can be wrong in ways a read
+          // one cannot, and a reviewer approving a member ID needs to know
+          // which they are looking at.
+          source: read.source,
+          ocrConfidence: read.ocrConfidence || null,
+          pagesRead: read.pagesRead || null,
+          pagesTotal: read.pagesTotal || null,
+          stoppedBecause: read.stoppedBecause || null,
+          readNotice: read.notice || null,
+          matches: read.matches,
+          skipped: read.skipped
+        };
+      } else {
+        console.error('[EXTRACTION] failed:', e.message);
+        return res.status(502).json({ error: e.message, code: e.code || 'EXTRACTION_FAILED' });
       }
-      console.error('[EXTRACTION] failed:', e.message);
-      return res.status(502).json({ error: e.message, code: e.code || 'EXTRACTION_FAILED' });
     }
 
     const built = documentExtraction.buildProposals({
@@ -12813,6 +13616,17 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/extract', authent
       id: `ext_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       clientId: client.id, docId: doc.id, fileName: doc.fileName, kind: doc.kind,
       invocationId: result.invocationId, modelId: result.modelId,
+      // 'model' or 'template'. A reviewer has to be able to tell a declared
+      // label match from a model's guess, and so does the audit.
+      reader: result.reader || 'model',
+      source: result.source || null,
+      ocrConfidence: result.ocrConfidence || null,
+      pagesRead: result.pagesRead || null,
+      pagesTotal: result.pagesTotal || null,
+      stoppedBecause: result.stoppedBecause || null,
+      readNotice: result.readNotice || null,
+      matches: result.matches || null,
+      skippedReads: result.skipped || null,
       at: built.at, snapshotAt: built.snapshotAt,
       rows: built.rows, identityConflicts: built.identityConflicts,
       reviewCount: built.reviewCount,
@@ -12823,7 +13637,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/extract', authent
     await db.set('document_extractions', [...all, row]);
     // WHICH document, never what was read out of it.
     await logActivity(req.user.id, req.user.name || req.user.email, 'document_extraction_proposed', 'document', client.id,
-      { docId: doc.id, kind: doc.kind, proposed: built.rows.length, invocationId: result.invocationId });
+      { docId: doc.id, kind: doc.kind, proposed: built.rows.length, invocationId: result.invocationId, reader: result.reader || 'model' });
 
     res.json({
       message: 'Read — nothing has been saved yet. Check each value before it counts.',
@@ -12833,14 +13647,14 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/extract', authent
     console.error('Document extraction error:', error);
     res.status(500).json({ error: 'Server error' });
   }
-});
+};
 
 // POST …/enrollment/:clientId/extraction/:id/review — a person decides.
 //
 // This is the only door an extracted value has onto a client record, and what
 // lands is stamped STAFF-VERIFIED: the provenance of an accepted value is the
 // human who accepted it, not the model that offered it.
-app.post('/api/gfc/admin/enrollment/:clientId/extraction/:id/review', authenticateToken, requireEnrollmentEditor, async (req, res) => {
+const extractionReviewHandler = async (req, res) => {
   try {
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -12931,7 +13745,51 @@ app.post('/api/gfc/admin/enrollment/:clientId/extraction/:id/review', authentica
     console.error('Extraction review error:', error);
     res.status(500).json({ error: 'Server error' });
   }
-});
+};
+
+// ── The three extraction routes, registered on TWO surfaces ───────────────
+// The handlers above are shared deliberately. What an extraction is — the path
+// allow-list, the identity-conflict guard, the stale-field refusal, the
+// staff-verified provenance and the review ledger — has exactly one
+// implementation, and a second surface must not grow a second copy of it.
+//
+// What differs per surface is only WHO may do it:
+//   • Enrollment: admin or a licensed clinician (requireEnrollmentEditor);
+//     the STATUS read stays on the wider staff gate so a case manager can see
+//     what is waiting without being able to approve any of it.
+//   • The clinical chart: requireClinicalWrite, and the patient must be on a
+//     clinical service line — a clinician filing a referral at a visit reads it
+//     there rather than going to the enrollment screen for it.
+//
+// A CLIENT REACHES NEITHER. A proposal is a change to a client's own record and
+// the entire design is that a person other than the subject approves it. The
+// client's own upload is read by STAFF, from the list it already appears on.
+app.get('/api/gfc/admin/enrollment/:clientId/extraction', authenticateToken, requireEnrollmentStaff, extractionStatusHandler);
+app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/extract', authenticateToken, requireEnrollmentEditor, extractDocumentHandler);
+app.post('/api/gfc/admin/enrollment/:clientId/extraction/:id/review', authenticateToken, requireEnrollmentEditor, extractionReviewHandler);
+
+// The clinical chart. `requireClinicalOnLine` refuses a patient who is not on a
+// clinical service line BEFORE the handler runs, so the clinical routes can
+// never be used as a side door onto a home-care-only client's record.
+const requireClinicalOnLine = async (req, res, next) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) {
+      return res.status(wrongLine ? 409 : 404).json({
+        error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found',
+        code: wrongLine ? 'NOT_CLINICAL_LINE' : 'CLIENT_NOT_FOUND'
+      });
+    }
+    return next();
+  } catch (error) {
+    console.error('Clinical extraction gate error:', error);
+    return res.status(500).json({ error: 'Server error' });
+  }
+};
+
+app.get('/api/clinical/patients/:clientId/extraction', authenticateToken, requireClinicalRead, requireClinicalOnLine, extractionStatusHandler);
+app.post('/api/clinical/patients/:clientId/documents/:docId/extract', authenticateToken, requireClinicalWrite, requireClinicalOnLine, extractDocumentHandler);
+app.post('/api/clinical/patients/:clientId/extraction/:id/review', authenticateToken, requireClinicalWrite, requireClinicalOnLine, extractionReviewHandler);
 
 app.post('/api/gfc/admin/enrollment/:clientId/documents/request', authenticateToken, requireAdmin, async (req, res) => {
   try {

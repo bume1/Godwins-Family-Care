@@ -151,8 +151,19 @@ test('every chart document read is audited', () => {
 test('the chart panel is not wired to the FHIR document read', () => {
   // A panel fed by emr.documents shows an empty chart for a patient whose
   // record is full, because that read returns nothing on this instance.
-  assert.match(CLINICAL, /<ChartDocuments docs=\{chart\.chartDocuments \|\| \[\]\}/);
+  //
+  // REPOINTED for Session 4.12, not deleted: Documents became its own place on
+  // the chart (Scope D), so the panel moved into DocumentsTab. The rule it
+  // guards — the list comes from chartDocuments and never from emr.documents —
+  // is unchanged, and losing the test with the code it happened to point at
+  // would have been a protection lost.
+  assert.match(CLINICAL, /<ChartDocuments docs=\{\(chart && chart\.chartDocuments\) \|\| \[\]\}/,
+    'the panel reads chartDocuments');
+  assert.ok(!/ChartDocuments docs=\{[^}]*emr\.documents/.test(CLINICAL),
+    'it must never be fed by the FHIR document read');
   assert.ok(!/Sec title="Documents"/.test(CLINICAL), 'the old FHIR-fed section must be gone');
+  assert.ok(!/ChartSection title="Documents"/.test(CLINICAL),
+    'and it must not come back as a ChartSection either');
   // An unopenable row renders as text with a pointer to OpenEMR, not a link.
   assert.match(CLINICAL, /Open in OpenEMR/);
 });

@@ -85,6 +85,11 @@ const COLLECTION_REGISTRY = Object.freeze([
   // An H&P still being typed. PHI, and deliberately short-lived: filing the
   // note to the chart deletes the draft, so this collection holds only work in
   // progress and never a second copy of a note that already exists in OpenEMR.
+  // Arrival / start / end stamps for a visit (Session 4.12, Scope F2). PHI:
+  // it says this patient was seen, when, and for how long. Keyed by the
+  // APPOINTMENT, because Arrive is pressed at a front door minutes before any
+  // encounter exists.
+  { key: 'visit_timings', phi: true, owner: '4.12', note: 'one per appointment; arrival/start/end and the time statement' },
   { key: 'clinical_note_drafts', phi: true, owner: '4.9', note: 'one per clinician per patient; cleared when the note is filed' },
   // ---- caregiver app (Session 6) ----
   { key: 'caregiver_visit_logs', phi: true, owner: '6' },
