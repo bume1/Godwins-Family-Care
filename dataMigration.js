@@ -49,6 +49,11 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'client_document_uploads', phi: true, owner: '4.6+' },
   { key: 'document_extractions', phi: true, owner: '4.9' },
   { key: 'client_document_requests', phi: true, owner: '4.6+' },
+  // The branded no-login upload link: one live row per client, revoked ones
+  // kept as tombstones. The row is a pointer (a client id and a token), not
+  // a document — but the token is a standing door onto that client's file,
+  // so it moves with the same care as anything else naming a patient.
+  { key: 'client_upload_links', phi: true, owner: '4.13' },
   { key: 'caregiver_documents', phi: false, owner: '6+', note: 'employment paperwork (timesheets, certs) — pointers only, bytes in Drive' },
   // The caregiver welcome packet: their profile answers, their signature, and
   // the office's own onboarding checklist. NOT patient PHI — it is employment
