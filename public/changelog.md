@@ -4,6 +4,49 @@
 
 ---
 
+### Version 3.0.1 - September 23, 2026
+
+#### Bug Fixes
+- Fix the top bar and make the patient panel collapse
+- Record today's logout fix in the served changelog
+
+#### Changes
+- Record Session 4.12 in the session tables
+- Let a document belong to one visit
+- An instrument OpenEMR already holds is surfaced, never rebuilt
+- Point the appointment config at the intake this app already has
+- Keep 4.12 out of the patient and family portal, on purpose
+- Let the visit decide the note, and the clock beat the diary
+- Split what kind of visit from where it happened
+- Say in one place what this app has proven about OpenEMR, and what it hasn't
+- Let a psychiatric visit be the same visit, with the exam it needs
+- Walk the encounter one step at a time, and bring the chart to it
+- Send the modifier that says a visit was by video
+- Put the encounter type where the place of service is decided
+- Read a document from the chart too, without copying what a read is
+- Put OCR'd words back in reading order
+- Record why the small OCR language set is the right one
+- Read scanned documents without a model, and without a vendor
+- Plot the day and fill the trip, with no vendor and no tiles
+- Read a client's coordinates from where the app actually stores them
+- Make the chart a set of places, and give the cross-patient work a queue
+- Open the workspace on the day, not on a patient list
+- Put a patient banner above every chart tab, and collapse every form grid
+- Move the clinical enrollment sequence off the clinician's chart, onto admin enrollment
+- Say when a sign-out was a browser with no token, not a bad session
+- Stop the enrollment screen signing the admin out on every client open
+- Regenerate today's changelog section against merged main
+- Stop the admin seeders writing a one-account roster over everyone
+- Stop logging everyone out when the user directory cannot be read
+- Regenerate today's changelog section against main
+- Backfill the merged PR numbers, and record the extraction pipeline
+- Dedupe the CLAUDE.md header and backfill PR #110
+- Remind a patient the day before, and say what the clinician is
+- Read a scanned document into proposals — a person decides, never the model
+- Let orders leave the building: requisitions, referrals, DME, results
+- Build the model engine — one call site, fail-closed at the boundary
+
+
 ### Version 3.1.0 - September 23, 2026
 
 #### New Features
