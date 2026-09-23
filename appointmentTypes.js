@@ -240,6 +240,18 @@ const F = (path) => ({ from: 'intake', path });
 const C = (type) => ({ from: 'consent', type });
 const D = (kind) => ({ from: 'document', kind });
 const I = (key, why) => ({ from: 'new', key, why });
+// ⚠️ OWNER, 2026-09-23: "OpenEMR already has these templates so I don't want
+// to recreate but add." An instrument that exists in the EMR is NOT new, and
+// calling it new is how a second PHQ-9 gets built beside the real one — the
+// same mistake as the invented intake names, one layer along. `E()` says the
+// template exists and this app's job is to SURFACE it.
+//
+// No OpenEMR template identifier is written here. Nothing in this sandbox can
+// reach the EMR to check one, and inventing an id would be the third version
+// of exactly the error above. The identifier is supplied by whoever wires the
+// read, and `what` describes the instrument so the right template can be
+// matched to it.
+const E = (key, what) => ({ from: 'openemr', key, what });
 
 // The document kinds live in server.js's GFC_EXPECTED_DOCUMENTS, which this
 // pure module must not require. Mirrored as the small fixed list it is, and a
@@ -278,6 +290,10 @@ const resolveIntakeRef = (ref) => {
     return String(ref.why || '').trim().length > 15
       ? { ok: true } : { ok: false, why: `"${ref.key}" is declared new but does not say why nothing existing covers it` };
   }
+  if (ref.from === 'openemr') {
+    return String(ref.what || '').trim().length > 15
+      ? { ok: true } : { ok: false, why: `"${ref.key}" comes from OpenEMR but does not say what instrument it is` };
+  }
   return { ok: false, why: `unknown reference source "${ref.from}"` };
 };
 
@@ -296,7 +312,7 @@ const APPOINTMENT_TYPES = Object.freeze([
       F('emergencyContacts'), F('primaryContact'), F('medicalTeam'),
       C('consentToTreat'), C('practiceNpp'),
       // Genuinely new: this app scores nothing today.
-      I('phq2', 'Depression screen, 2-item. No screening instrument exists in this app yet.')
+      E('phq2', 'PHQ-2 depression screen. A template OpenEMR already holds; surface it, do not rebuild it.')
     ],
     sections: [
       t('chiefComplaint', R.ALWAYS), t('hpi', R.ALWAYS), t('pmhSurgical', R.ALWAYS),
@@ -346,8 +362,8 @@ const APPOINTMENT_TYPES = Object.freeze([
     priorVisitWarning: true,
     intake: [
       F('medications'), F('medicalTeam'), F('fallRisk'), F('adl'),
-      I('hra', 'Medicare Health Risk Assessment. Not collected anywhere today.'),
-      I('phq9', 'Depression screen, 9-item. No screening instrument exists in this app yet.')
+      E('hra', 'Medicare Health Risk Assessment for the annual wellness visit. Expected to be an existing OpenEMR template — confirm which.'),
+      E('phq9', 'PHQ-9 depression screen. A template OpenEMR already holds; surface it, do not rebuild it.')
     ],
     sections: [
       t('hraReview', R.ALWAYS), t('historyUpdate', R.ALWAYS), t('providersSuppliers', R.ALWAYS),
@@ -388,11 +404,11 @@ const APPOINTMENT_TYPES = Object.freeze([
     intake: [
       F('medications'), F('conditions'), F('allergies'),
       C('consentToTreat'),
-      I('psych_intake', 'Psychiatric intake questionnaire. Not collected anywhere today.'),
-      I('phq9', 'Depression screen, 9-item.'),
-      I('gad7', 'Anxiety screen, 7-item.'),
-      I('substance_use', 'Substance use screen.'),
-      I('prior_psych_treatment', 'Previous psychiatric treatment and medication trials.')
+      E('psych_intake', 'Psychiatric intake questionnaire. Expected to be an existing OpenEMR template — confirm which.'),
+      E('phq9', 'PHQ-9 depression screen. A template OpenEMR already holds; surface it, do not rebuild it.'),
+      E('gad7', 'GAD-7 anxiety screen. A template OpenEMR already holds; surface it, do not rebuild it.'),
+      E('substance_use', 'Substance use screen. Expected to be an existing OpenEMR template — confirm which.'),
+      E('prior_psych_treatment', 'Previous psychiatric treatment and medication trials, part of the psych intake questionnaire.')
     ],
     sections: [
       t('chiefComplaint', R.ALWAYS), t('hpi', R.ALWAYS), t('psychiatricHistory', R.ALWAYS),
@@ -409,9 +425,9 @@ const APPOINTMENT_TYPES = Object.freeze([
     credentials: ['MD', 'DO', 'NP'], specialty: 'behavioral_health',
     intake: [
       F('medications'),
-      I('phq9', 'Depression screen, 9-item.'),
-      I('gad7', 'Anxiety screen, 7-item.'),
-      I('medication_adherence', 'Adherence and side effects since the last visit.')
+      E('phq9', 'PHQ-9 depression screen. A template OpenEMR already holds; surface it, do not rebuild it.'),
+      E('gad7', 'GAD-7 anxiety screen. A template OpenEMR already holds; surface it, do not rebuild it.'),
+      E('medication_adherence', 'Adherence and side effects since the last visit, asked on the psych follow-up template.')
     ],
     sections: [
       t('intervalHistory', R.ALWAYS), t('medicationAdherence', R.ALWAYS), t('mentalStatusExam', R.ALWAYS),
@@ -463,19 +479,28 @@ const assertIntakeIsDeclared = (types = APPOINTMENT_TYPES) => {
 };
 assertIntakeIsDeclared();
 
-// What is genuinely missing, gathered from the `I()` references. This is the
-// build list for the screening instruments and per-visit documents, and it is
-// DERIVED rather than kept as a second list that goes stale.
-const unbuiltIntake = () => {
+// What is not satisfied yet, DERIVED rather than kept as a second list that
+// goes stale — and split in two, because they are different jobs.
+//
+//   toSurface()  the instrument EXISTS in OpenEMR. The work is a read, and
+//                building a second copy here would be the duplicate this
+//                whole file was just corrected for.
+//   toBuild()    genuinely nothing anywhere. The per-visit documents.
+const gather = (from, describe) => {
   const out = new Map();
   for (const type of APPOINTMENT_TYPES) {
-    for (const ref of (type.intake || []).filter(r => r.from === 'new')) {
-      if (!out.has(ref.key)) out.set(ref.key, { key: ref.key, why: ref.why, types: [] });
+    for (const ref of (type.intake || []).filter(r => r.from === from)) {
+      if (!out.has(ref.key)) out.set(ref.key, { key: ref.key, description: describe(ref), types: [] });
       out.get(ref.key).types.push(type.key);
     }
   }
   return [...out.values()];
 };
+const toSurface = () => gather('openemr', r => r.what);
+const toBuild = () => gather('new', r => r.why);
+// Kept as the union so nothing reading "what is outstanding" silently loses
+// half of it when only one of the two is consulted.
+const unbuiltIntake = () => [...toSurface(), ...toBuild()];
 
 const typeByKey = (k) => APPOINTMENT_TYPES.find(a => a.key === String(k || '')) || null;
 const typesForService = (svc) => APPOINTMENT_TYPES.filter(a => a.service === String(svc || ''));
@@ -604,7 +629,7 @@ module.exports = {
   typeByKey, typesForService, sectionsFor, requiredSectionKeys,
   canBookType, canBeTelehealth, awvEligibility, AWV_INTERVAL_DAYS,
   resolveVisit, isBehavioralHealth,
-  resolveIntakeRef, assertIntakeIsDeclared, unbuiltIntake, EXPECTED_DOCUMENT_KINDS,
+  resolveIntakeRef, assertIntakeIsDeclared, unbuiltIntake, toSurface, toBuild, EXPECTED_DOCUMENT_KINDS,
 
   SERVICES, MODALITIES, LOCATIONS, CODE_FAMILIES,
   TELEHEALTH_POS_PATIENT_HOME, TELEHEALTH_POS_ELSEWHERE,

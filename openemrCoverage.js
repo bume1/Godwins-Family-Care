@@ -72,7 +72,7 @@ const CATALOG = Object.freeze([
   { resource: 'Media', kind: 'read', status: 'wired_unproven', since: '4.12',
     note: 'Wound photographs are the realistic content. 8.4 may not route it at all; the chart says which failure it got.' },
   { resource: 'QuestionnaireResponse', kind: 'read', status: 'wired_unproven', since: '4.12',
-    note: 'Screening instruments (PHQ-9, GAD-7) if they are ever entered in OpenEMR. The app does not write them.' },
+    note: 'OWNER 2026-09-23: OpenEMR ALREADY HOLDS these templates — PHQ-9, GAD-7 and the rest — so this read is how they surface and the app must not rebuild them. Unproven only in that nobody has run the read yet; that the templates exist is not in doubt.' },
   { resource: 'Procedure', kind: 'read', status: 'wired_unproven', since: '4.12',
     note: 'Orders file into procedure_order through the 6B patch, not through FHIR. Whether they surface here is unknown.' },
 
@@ -111,7 +111,7 @@ const CATALOG = Object.freeze([
   { resource: 'Immunization', kind: 'write', status: 'not_wired', since: '—',
     note: 'DELIBERATE — recording an administration needs lot, site, route and a VIS date, which nothing in the app collects. A half-recorded immunization is worse than none.' },
   { resource: 'Questionnaire', kind: 'write', status: 'not_wired', since: '—',
-    note: 'DELIBERATE — screening instruments are scored, and a score written without the instrument that produced it is a number nobody can check.' },
+    note: 'DELIBERATE, and the reason is now stronger: the templates EXIST in OpenEMR (owner, 2026-09-23), so writing one from here would create a second copy of an instrument that already has an authoritative version. Scores are read; the instrument stays the EMR\'s.' },
   { resource: 'Media', kind: 'write', status: 'not_wired', since: '—',
     note: 'DELIBERATE — a wound photograph goes to the chart as a document through the route that already exists and is proven, rather than through a second unproven path.' },
   { resource: 'Goal', kind: 'write', status: 'not_wired', since: '—',

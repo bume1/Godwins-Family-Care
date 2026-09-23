@@ -47,7 +47,7 @@ The code exists and is called. **Nobody has run it against a real EMR.** It may 
 | `Goal` | read | 4.12 | Care-plan goals are authored in the app. This read exists so a goal entered directly in OpenEMR is visible rather than invisible. |
 | `Device` | read | 4.12 | DME ordered through 4.10 is app-side and does not write here. A device recorded in OpenEMR would otherwise be unreadable from the app. |
 | `Media` | read | 4.12 | Wound photographs are the realistic content. 8.4 may not route it at all; the chart says which failure it got. |
-| `QuestionnaireResponse` | read | 4.12 | Screening instruments (PHQ-9, GAD-7) if they are ever entered in OpenEMR. The app does not write them. |
+| `QuestionnaireResponse` | read | 4.12 | OWNER 2026-09-23: OpenEMR ALREADY HOLDS these templates — PHQ-9, GAD-7 and the rest — so this read is how they surface and the app must not rebuild them. Unproven only in that nobody has run the read yet; that the templates exist is not in doubt. |
 | `Procedure` | read | 4.12 | Orders file into procedure_order through the 6B patch, not through FHIR. Whether they surface here is unknown. |
 
 ## Deliberately not wired (8)
@@ -59,7 +59,7 @@ A gap somebody **chose**, with the reason. That is a different fact from a gap n
 | `AuditEvent` | read | — | DELIBERATE — it 404s on 8.4, as do api/log and fhir/Provenance. An accounting of disclosures cannot be produced from OpenEMR; the app's own durable audit_log (Session 5.4) is the record. |
 | `Coverage` | write | — | DELIBERATE — eligibility is Track D / B1 (Availity). Writing a coverage row the app cannot verify would put an unchecked payer on a claim. |
 | `Immunization` | write | — | DELIBERATE — recording an administration needs lot, site, route and a VIS date, which nothing in the app collects. A half-recorded immunization is worse than none. |
-| `Questionnaire` | write | — | DELIBERATE — screening instruments are scored, and a score written without the instrument that produced it is a number nobody can check. |
+| `Questionnaire` | write | — | DELIBERATE, and the reason is now stronger: the templates EXIST in OpenEMR (owner, 2026-09-23), so writing one from here would create a second copy of an instrument that already has an authoritative version. Scores are read; the instrument stays the EMR's. |
 | `Media` | write | — | DELIBERATE — a wound photograph goes to the chart as a document through the route that already exists and is proven, rather than through a second unproven path. |
 | `Goal` | write | — | DELIBERATE — care-plan goals are authored and versioned in the app, and the signed plan is filed as a document. Two writers for one goal is how the two disagree. |
 | `CareTeam` | write | — | DELIBERATE — the app's careTeam routes escalations and decides visibility. Mirroring it into OpenEMR would create a second answer to who is on this patient's team. |

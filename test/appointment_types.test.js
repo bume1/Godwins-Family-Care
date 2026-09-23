@@ -263,7 +263,7 @@ test('every intake requirement resolves to a vocabulary that already owns the an
     for (const ref of type.intake) {
       const r = A.resolveIntakeRef(ref);
       assert.ok(r.ok, `${type.key}: ${r.why}`);
-      assert.ok(['intake', 'consent', 'document', 'new'].includes(ref.from),
+      assert.ok(['intake', 'consent', 'document', 'new', 'openemr'].includes(ref.from),
         `${type.key} uses an unknown reference source "${ref.from}"`);
       // A bare string is the mistake itself and can never come back.
       assert.notEqual(typeof ref, 'string', `${type.key} has a free-string intake item`);
@@ -314,7 +314,7 @@ test('something declared NEW has to say why nothing existing covers it', () => {
   assert.deepEqual(unbuilt.find(u => u.key === 'gad7').types.sort(), ['bh_follow_up', 'bh_initial']);
   assert.deepEqual(unbuilt.find(u => u.key === 'hra').types, ['pc_awv']);
   for (const u of unbuilt) {
-    assert.ok(u.why.length > 15, `${u.key} must say what it is and why it is new`);
+    assert.ok(u.description.length > 15, `${u.key} must say what it is`);
     assert.ok(u.types.length > 0, `${u.key} must be wanted by at least one appointment type`);
   }
 });
@@ -363,4 +363,68 @@ test('the intake vocabularies are READ, not copied — this file declares none o
   // Precondition: those exports are real, or this test asserts against nothing.
   assert.ok(Array.isArray(intakeFields.ALL_FIELDS) && intakeFields.ALL_FIELDS.length > 50);
   assert.ok(Array.isArray(consentRegistry.GFC_CONSENT_DEFS) && consentRegistry.GFC_CONSENT_DEFS.length > 10);
+});
+
+// ── An instrument OpenEMR already holds is SURFACED, never rebuilt ──
+// ⚠️ OWNER, 2026-09-23: "OpenEMR already has these templates so I don't want
+// to recreate but add." Declaring one NEW is how a second PHQ-9 gets built
+// beside the real one — the invented-intake-names mistake, one layer along.
+test('a screening instrument is declared as OpenEMR’s, not as something to build', () => {
+  const surfaced = A.toSurface().map(u => u.key);
+  const building = A.toBuild().map(u => u.key);
+  // Every instrument the note templates reference belongs to the EMR.
+  for (const k of ['phq2', 'phq9', 'gad7', 'substance_use', 'hra', 'psych_intake']) {
+    assert.ok(surfaced.includes(k), `${k} is an OpenEMR template — it must be surfaced, not rebuilt`);
+    assert.ok(!building.includes(k), `${k} must NOT be on the build list; OpenEMR already holds it`);
+  }
+  // What genuinely has nowhere to live is documents, not questionnaires.
+  for (const k of ['discharge_summary', 'records_received']) {
+    assert.ok(building.includes(k), `${k} is a per-visit document with no home yet`);
+    assert.ok(!surfaced.includes(k));
+  }
+  // The two lists never overlap — an item is one or the other, or "what is
+  // outstanding" has two different answers.
+  assert.deepEqual(surfaced.filter(k => building.includes(k)), []);
+  // And the union is what anything asking "what is outstanding" gets, so
+  // consulting one list alone cannot silently lose half of it.
+  assert.deepEqual(A.unbuiltIntake().map(u => u.key).sort(), [...surfaced, ...building].sort());
+});
+
+test('nothing here invents an OpenEMR template identifier', () => {
+  // Nothing in this sandbox can reach the EMR to check one, and a made-up id
+  // would be the third version of the same error. The reference says WHAT the
+  // instrument is so the right template can be matched to it by whoever wires
+  // the read; it does not assert which template that is.
+  for (const u of A.toSurface()) {
+    assert.ok(u.description.length > 15, `${u.key} must describe the instrument`);
+    // No LBF name, form id or FHIR resource id may be asserted from here.
+    assert.ok(!/\bLBF[a-zA-Z0-9_]*\b/.test(u.description), `${u.key} must not name an OpenEMR form id`);
+    assert.ok(!/questionnaire\/[a-z0-9-]+/i.test(u.description), `${u.key} must not assert a Questionnaire resource id`);
+  }
+  const src = fs.readFileSync(path.join(root, 'appointmentTypes.js'), 'utf8');
+  assert.match(src, /No OpenEMR template identifier is written here/,
+    'the reason must stay written down, or a later session supplies a guess');
+  // An OpenEMR reference still has to say what it is, same bar as a new one.
+  assert.equal(A.resolveIntakeRef({ from: 'openemr', key: 'phq9' }).ok, false);
+  assert.equal(A.resolveIntakeRef({ from: 'openemr', key: 'phq9', what: 'short' }).ok, false);
+  assert.equal(A.resolveIntakeRef({ from: 'openemr', key: 'phq9', what: 'PHQ-9 depression screen, held in OpenEMR.' }).ok, true);
+});
+
+test('the coverage catalog says the templates EXIST, and that writing one is refused because of it', () => {
+  const coverage = require('../openemrCoverage');
+  const read = coverage.CATALOG.find(r => r.resource === 'QuestionnaireResponse' && r.kind === 'read');
+  const write = coverage.CATALOG.find(r => r.resource === 'Questionnaire' && r.kind === 'write');
+  assert.ok(read && write);
+  // The note used to hedge — "if they are ever entered in OpenEMR" — which is
+  // now known to be wrong. A catalog that hedges about a fact somebody has
+  // confirmed is worse than one that says nothing.
+  // Asserted on what the note CLAIMS, not by banning a phrase — the first
+  // version of this matched the note's own account of the hedge it removed,
+  // which is a guard that cannot tell a statement from a description of one.
+  assert.match(read.note, /ALREADY HOLDS|already holds/, 'the read note must say the templates exist');
+  assert.match(read.note, /must not rebuild/i, 'and that this app does not rebuild them');
+  assert.ok(!/^.{0,120}\bif\b.{0,40}ever entered/i.test(read.note), 'the claim must not be conditional');
+  // And the write stays refused FOR THAT REASON, not despite it.
+  assert.equal(write.status, 'not_wired');
+  assert.match(write.note, /second copy|already/i, 'writing one would duplicate an instrument that has an authoritative version');
 });
