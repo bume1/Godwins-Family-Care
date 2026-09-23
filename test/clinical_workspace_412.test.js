@@ -1043,3 +1043,183 @@ test('the dependency runs clinical → scheduling, never the reverse', () => {
   assert.ok(!/require\(\s*['"][./]*openemr['"]\s*\)/i.test(schedSrc),
     'and pulling myDay in must not have dragged the EMR client into the scheduling lane');
 });
+
+// ===========================================================================
+// 14. SCOPE B — the day, plotted; and the trip, filled
+// ===========================================================================
+
+test('north is drawn above south', () => {
+  // Latitude increases northward and SVG y increases DOWNWARD. Without the
+  // inversion the day is drawn upside down and reads as a different route.
+  const plot = myDay.plotStops({
+    stops: [
+      { eid: '1', patientName: 'North', coords: { lat: 34.0, lng: -84.4 } },
+      { eid: '2', patientName: 'South', coords: { lat: 33.6, lng: -84.4 } }
+    ]
+  });
+  assert.ok(plot.points[0].y < plot.points[1].y, 'the northern stop must have the smaller y');
+});
+
+test('a single stop is CENTRED, not put in a corner', () => {
+  // A degenerate axis makes the ratio 0, which parked a one-visit day's only
+  // pin in the bottom-left. Flooring the span to 1 was not enough on its own.
+  assert.deepStrictEqual(
+    myDay.plotStops({ stops: [{ eid: '1', coords: { lat: 33.8, lng: -84.4 } }] }).points.map(p => [p.x, p.y]),
+    [[50, 50]]);
+  // Two patients at one address collapse both axes the same way.
+  const same = myDay.plotStops({
+    stops: [{ eid: '1', coords: { lat: 33.8, lng: -84.4 } }, { eid: '2', coords: { lat: 33.8, lng: -84.4 } }]
+  });
+  assert.deepStrictEqual(same.points.map(p => [p.x, p.y]), [[50, 50], [50, 50]]);
+  // And a column of stops keeps x centred rather than NaN.
+  const column = myDay.plotStops({
+    stops: [{ eid: '1', coords: { lat: 34.0, lng: -84.4 } }, { eid: '2', coords: { lat: 33.6, lng: -84.4 } }]
+  });
+  assert.deepStrictEqual(column.points.map(p => p.x), [50, 50]);
+  column.points.forEach(p => assert.ok(Number.isFinite(p.x) && Number.isFinite(p.y)));
+});
+
+test('every plotted point stays inside the box', () => {
+  const plot = myDay.plotStops({
+    stops: [
+      { eid: '1', coords: { lat: 34.5, lng: -85.0 } },
+      { eid: '2', coords: { lat: 33.0, lng: -83.5 } },
+      { eid: '3', coords: { lat: 33.9, lng: -84.2 } }
+    ]
+  });
+  plot.points.forEach(p => {
+    assert.ok(p.x >= 0 && p.x <= 100, `x out of the box: ${p.x}`);
+    assert.ok(p.y >= 0 && p.y <= 100, `y out of the box: ${p.y}`);
+  });
+});
+
+test('a stop with no coordinates is COUNTED, not silently missing from the map', () => {
+  const plot = myDay.plotStops({
+    stops: [{ eid: '1', coords: { lat: 33.8, lng: -84.4 } }, { eid: '2' }]
+  });
+  assert.strictEqual(plot.points.length, 1);
+  assert.strictEqual(plot.unplaceable, 1);
+  assert.match(pageCode, /could not be plotted/);
+});
+
+test('the map sends no coordinates to a tile provider, because there is no tile provider', () => {
+  // A tile provider would receive the coordinates of every patient's home on
+  // every render — a disclosure of where people live, to a third party with no
+  // BAA — and a street map answers nothing a relative plot does not.
+  const i = pageCode.indexOf('const DayMap');
+  const body = pageCode.slice(i, pageCode.indexOf('\n    const NearbyDue'));
+  assert.ok(!/tile\.|openstreetmap|mapbox|googleapis|leaflet|maps\.google/i.test(body),
+    'the day map must not load map tiles from anywhere');
+  assert.match(body, /<svg/, 'it is drawn from coordinates the app already holds');
+});
+
+test('the map and the list render the SAME visits from the SAME fetch', () => {
+  // Two fetches or two filters is how the two views start disagreeing about
+  // what exists — the rule the scheduling calendar settled on 2026-09-20.
+  const i = pageCode.indexOf('const MyDayView');
+  const body = pageCode.slice(i, pageCode.length);
+  assert.match(body, /<DayMap plot=\{day\.plot\}/);
+  assert.strictEqual((body.match(/api\.myDay\(/g) || []).length, 1,
+    'exactly one fetch feeds both views');
+});
+
+test('the plot is computed on the SERVER, not a second time in the page', () => {
+  const body = routeBody(serverCode, "app.get('/api/clinical/my-day'");
+  assert.match(body, /myDay\.plotStops\(/);
+  assert.ok(!/plotStops/.test(pageCode), 'the page renders the served answer and computes no geometry');
+});
+
+test('a cancelled visit is not plotted', () => {
+  const body = routeBody(serverCode, "app.get('/api/clinical/my-day'");
+  assert.match(body, /stops: day\.visits\.filter\(v => v\.state !== myDay\.VISIT_STATE\.CANCELLED\)/);
+});
+
+// ---- B5 geographic clustering --------------------------------------------
+
+test('nearby-and-due is nearest first, and a recently seen patient is not due', () => {
+  const out = myDay.findNearbyDue({
+    origin: { lat: 33.80, lng: -84.40 },
+    candidates: [
+      { clientId: 'far', name: 'Far', coords: { lat: 35.00, lng: -84.40 }, lastVisitAt: '2026-01-01' },
+      { clientId: 'mid', name: 'Mid', coords: { lat: 33.86, lng: -84.40 }, lastVisitAt: '2026-01-01' },
+      { clientId: 'recent', name: 'Seen last week', coords: { lat: 33.81, lng: -84.40 }, lastVisitAt: '2026-09-16' },
+      { clientId: 'near', name: 'Near', coords: { lat: 33.82, lng: -84.40 }, lastVisitAt: '2026-01-01' }
+    ],
+    radiusMiles: 10, today: '2026-09-23'
+  });
+  assert.deepStrictEqual(out.map(n => n.clientId), ['near', 'mid'],
+    'nearest first; the far one is outside the radius and the recent one is not due');
+});
+
+test('a patient never seen is DUE, and says which reason it is', () => {
+  // No visit on file is due, and it gets its own reason rather than being
+  // ranked against a number it does not have.
+  const out = myDay.findNearbyDue({
+    origin: { lat: 33.80, lng: -84.40 },
+    candidates: [{ clientId: 'new', coords: { lat: 33.81, lng: -84.40 } }],
+    radiusMiles: 10, today: '2026-09-23'
+  });
+  assert.strictEqual(out[0].reason, 'never_seen');
+  assert.strictEqual(out[0].daysSinceLastVisit, null);
+});
+
+test('the patient being booked is never offered as somebody to also visit', () => {
+  const out = myDay.findNearbyDue({
+    origin: { lat: 33.80, lng: -84.40 },
+    candidates: [{ clientId: 'self', coords: { lat: 33.80, lng: -84.40 } }],
+    radiusMiles: 10, today: '2026-09-23', excludeClientIds: ['self']
+  });
+  assert.deepStrictEqual(out, []);
+});
+
+test('a patient with no coordinates is never placed near anybody', () => {
+  const out = myDay.findNearbyDue({
+    origin: { lat: 33.80, lng: -84.40 },
+    candidates: [{ clientId: 'nocoords' }],
+    radiusMiles: 50, today: '2026-09-23'
+  });
+  assert.deepStrictEqual(out, []);
+});
+
+test('an origin with no coordinates is REPORTED, never an empty list', () => {
+  // An empty list here reads as "nobody lives nearby", which is a different
+  // and false statement.
+  const body = routeBody(serverCode, "app.get('/api/clinical/nearby'");
+  assert.match(body, /has no address coordinates/);
+  assert.match(body, /Scheduling → Locations/);
+  assert.match(body, /nearby: \[\], radiusMiles: null, origin: null/);
+  assert.match(body, /requireClinicalRead/);
+});
+
+test('the clustering radius is bounded and says it is straight-line', () => {
+  const body = routeBody(serverCode, "app.get('/api/clinical/nearby'");
+  assert.match(body, /Math\.min\(50, Math\.max\(1,/);
+  assert.match(body, /distanceKind: 'straight_line'/);
+});
+
+// ===========================================================================
+// 15. SCOPE F5 — dictation, and the option deliberately NOT taken
+// ===========================================================================
+
+test('the browser speech API is never wired', () => {
+  // In Chrome its implementation streams the audio to Google's servers, which
+  // would put a clinician dictating about a named patient outside the BAA — a
+  // PHI disclosure with no agreement behind it, from a feature that looks free.
+  // Build-enforced absent across every page, not just this one.
+  ['public/clinical.html', 'public/caregiver.html', 'public/portal.html'].forEach(f => {
+    const src = fs.readFileSync(path.join(root, f), 'utf8');
+    assert.ok(!/webkitSpeechRecognition|SpeechRecognition\s*\(|new\s+SpeechRecognition/.test(src),
+      `${f} must not use the browser speech API`);
+  });
+});
+
+test('the narrative fields stay plain textareas the device keyboard can dictate into', () => {
+  assert.match(pageCode, /const DictationHint = /);
+  assert.match(pageCode, /<DictationHint \/>/);
+  assert.match(pageCode, /microphone on your phone or tablet keyboard/);
+  // A plain textarea is what the keyboard mic types into. Anything that
+  // intercepts input would break the one dictation path that is safe today.
+  const i = pageCode.indexOf('const TextArea = ');
+  const body = pageCode.slice(i, i + 400);
+  assert.match(body, /<textarea className="inp"/);
+});

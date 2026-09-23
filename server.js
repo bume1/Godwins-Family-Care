@@ -11343,7 +11343,14 @@ app.get('/api/clinical/my-day', authenticateToken, requireClinicalRead, async (r
       homeVisitFields: clinicalRepo.HOME_VISIT_FIELDS,
       startCoords: null
     });
-    res.json({ ...day, calendar, providerId: scope.providerId || null, locked: !!scope.locked });
+    // The plot is computed HERE, not in the browser: myDay.js reaches into the
+    // scheduling module for the one coordinate reader, and that chain does not
+    // load in a page. One implementation beats a second one that drifts.
+    const plot = myDay.plotStops({
+      stops: day.visits.filter(v => v.state !== myDay.VISIT_STATE.CANCELLED),
+      width: 100, height: 100
+    });
+    res.json({ ...day, plot, calendar, providerId: scope.providerId || null, locked: !!scope.locked });
   } catch (error) {
     console.error('My Day error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -11739,6 +11746,64 @@ app.get('/api/clinical/patients/:clientId/results', authenticateToken, requireCl
     res.json({ results, interpretations: clinicalResults.INTERPRETATIONS });
   } catch (error) {
     console.error('Patient results list error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/clinical/nearby?clientId=&radiusMiles= — Scope B5, geographic
+// clustering. When a visit is being booked, who else lives near that address
+// and is due to be seen? A house call is mostly driving, so a trip that fills
+// two slots instead of one is the single biggest lever there is on a day.
+//
+// A READ over the clinical panel, so a case manager can see it. It carries a
+// name, an address and a last-visit date — the minimum needed to decide
+// whether to add somebody to a trip, and nothing clinical.
+app.get('/api/clinical/nearby', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(String(req.query.clientId || ''));
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    const origin = myDay.coordsOf(client);
+    if (!origin) {
+      // Not an error and not an empty list: those are different facts, and an
+      // empty list here would read as "nobody lives nearby".
+      return res.json({
+        nearby: [], radiusMiles: null, origin: null,
+        notice: `${client.name || 'This patient'} has no address coordinates, so nobody can be placed near them. An admin sets them under Scheduling → Locations.`
+      });
+    }
+    const radiusMiles = Math.min(50, Math.max(1, Number(req.query.radiusMiles) || 10));
+    const users = await getUsers();
+    const billing = await loadRows('encounter_billing');
+    const lastVisitByClient = new Map();
+    (billing || []).forEach(r => {
+      const ymd = String((r && r.createdAt) || '').slice(0, 10);
+      if (!r || !r.clientId || !/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return;
+      const prev = lastVisitByClient.get(String(r.clientId));
+      if (!prev || ymd > prev) lastVisitByClient.set(String(r.clientId), ymd);
+    });
+    const candidates = users
+      .filter(u => u && u.role === config.ROLES.CLIENT && isClinicalServiceLine(u.serviceLine))
+      .map(u => ({
+        clientId: u.id, name: u.name || null,
+        coords: myDay.coordsOf(u),
+        address: myDay.addressLineOf(u),
+        lastVisitAt: lastVisitByClient.get(String(u.id)) || null
+      }));
+    const nearby = myDay.findNearbyDue({
+      origin, candidates, radiusMiles, today: practiceToday(),
+      excludeClientIds: [client.id]
+    });
+    res.json({
+      nearby, radiusMiles, origin: { placed: true },
+      dueAfterDays: myDay.DUE_AFTER_DAYS,
+      // Straight-line, and said so. Without a routing provider there is no
+      // drive time to sort by, and a radius drawn as the crow flies is honest
+      // about what it is.
+      distanceKind: 'straight_line',
+      notice: null
+    });
+  } catch (error) {
+    console.error('Nearby clients error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });

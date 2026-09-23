@@ -165,6 +165,93 @@ const addressLineOf = (client) => {
   return structured || intake.addressLine1 || null;
 };
 
+
+// ---- Scope B2/B5: plotting the day, and filling a trip ---------------------
+// NO MAP TILES, DELIBERATELY. A tile provider would receive the coordinates of
+// every patient's home on every render, which is a disclosure of where people
+// live to a third party with no BAA — and for the question this screen answers
+// ("in what order should I see these people") a street map adds nothing a
+// relative plot does not. The brief's own sketch is dots joined by lines.
+//
+// So the plot is computed HERE and drawn as an SVG from coordinates the app
+// already holds. Nothing leaves the boundary.
+const MAP_PADDING = 0.08; // fraction of the box kept clear at each edge
+
+const plotStops = ({ stops, width = 100, height = 100 }) => {
+  const placed = (stops || []).filter(s => s && s.coords);
+  if (!placed.length) return { points: [], bounds: null, unplaceable: (stops || []).length };
+  const lats = placed.map(s => s.coords.lat);
+  const lngs = placed.map(s => s.coords.lng);
+  const minLat = Math.min(...lats), maxLat = Math.max(...lats);
+  const minLng = Math.min(...lngs), maxLng = Math.max(...lngs);
+  // A single stop, or several at one address, collapses the span to zero.
+  // Dividing by it is NaN, and flooring the span to 1 is not enough on its own:
+  // the ratio then reads 0 and every pin lands in a corner, which is what a
+  // one-visit day looked like. A degenerate axis is CENTRED instead.
+  const latSpan = maxLat - minLat;
+  const lngSpan = maxLng - minLng;
+  const ratio = (value, min, span) => (span > 0 ? (value - min) / span : 0.5);
+  const pad = MAP_PADDING;
+  const points = placed.map((s, i) => ({
+    eid: s.eid || null,
+    clientId: s.clientId || null,
+    label: s.patientName || null,
+    order: i + 1,
+    state: s.state || null,
+    time: s.time || null,
+    // Latitude increases NORTHWARD and SVG y increases DOWNWARD, so y is
+    // inverted. Without that the day is drawn upside down and reads as a
+    // completely different route.
+    x: Math.round((pad + (1 - 2 * pad) * ratio(s.coords.lng, minLng, lngSpan)) * width * 10) / 10,
+    y: Math.round((pad + (1 - 2 * pad) * (1 - ratio(s.coords.lat, minLat, latSpan))) * height * 10) / 10
+  }));
+  return {
+    points,
+    bounds: { minLat, maxLat, minLng, maxLng },
+    unplaceable: (stops || []).length - placed.length
+  };
+};
+
+// B5 — geographic clustering. When a visit is being booked, who else lives
+// near that address and is due to be seen? A house call is mostly driving, so
+// a trip that fills two slots instead of one is the single biggest lever there
+// is on a day.
+//
+// "DUE" IS DEFINED BY A LAST VISIT DATE AND NOTHING CLEVERER. A patient with
+// no visit on file is due; one seen last week is not. Inventing a recall
+// interval per patient would be a clinical judgement the app has no basis for.
+const DUE_AFTER_DAYS = 60;
+
+const daysBetweenYmd = (from, to) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(from || '')) || !/^\d{4}-\d{2}-\d{2}$/.test(String(to || ''))) return null;
+  return Math.round((new Date(`${to}T00:00:00Z`) - new Date(`${from}T00:00:00Z`)) / 86400000);
+};
+
+const findNearbyDue = ({ origin, candidates, radiusMiles = 10, today, dueAfterDays = DUE_AFTER_DAYS, excludeClientIds }) => {
+  const skip = new Set((excludeClientIds || []).map(String));
+  return (candidates || [])
+    .filter(c => c && !skip.has(String(c.clientId)))
+    .map(c => {
+      const miles = haversineMiles(origin, c.coords);
+      if (miles == null || miles > radiusMiles) return null;
+      const sinceDays = daysBetweenYmd(c.lastVisitAt, today);
+      // No visit on file is DUE, and says so as its own reason rather than
+      // being ranked against a number it does not have.
+      const due = c.lastVisitAt ? (sinceDays != null && sinceDays >= dueAfterDays) : true;
+      if (!due) return null;
+      return {
+        clientId: c.clientId, name: c.name || null, address: c.address || null,
+        miles, lastVisitAt: c.lastVisitAt || null,
+        daysSinceLastVisit: c.lastVisitAt ? sinceDays : null,
+        reason: c.lastVisitAt ? 'due_by_interval' : 'never_seen'
+      };
+    })
+    .filter(Boolean)
+    // Nearest first: the question is "who can I add to this trip", and the
+    // answer is ordered by how little extra driving it costs.
+    .sort((a, b) => a.miles - b.miles);
+};
+
 // ---- The day -------------------------------------------------------------
 
 // A non-visit block — lunch, travel, admin — rendered in the timeline so the
@@ -366,5 +453,7 @@ module.exports = {
   DISTANCE_UNAVAILABLE, haversineMiles, coordsOf, addressLineOf,
   buildDayRow, buildUnsignedBacklog, buildMyDay,
   proposeRouteOrder,
+  plotStops, MAP_PADDING,
+  findNearbyDue, DUE_AFTER_DAYS, daysBetweenYmd,
   buildPreVisitPacket
 };

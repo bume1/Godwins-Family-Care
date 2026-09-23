@@ -152,6 +152,7 @@
       stampVisit: (eid, body) => authedFetch(`/api/clinical/visits/${eid}/timing`, {
         method: 'POST', body: JSON.stringify(body)
       }),
+      nearby: (clientId, radiusMiles) => authedFetch(`/api/clinical/nearby?clientId=${encodeURIComponent(clientId)}&radiusMiles=${radiusMiles}`),
       workQueues: () => authedFetch('/api/clinical/work-queues'),
       analytics: () => authedFetch('/api/clinical/analytics'),
       patientOrders: (id) => authedFetch(`/api/clinical/patients/${id}/orders`),
@@ -1296,6 +1297,108 @@
       );
     };
 
+    // ── Session 4.12 Scope B — the day, plotted (B2/B3) ───────────────────
+    // NO MAP TILES, DELIBERATELY. A tile provider would receive the coordinates
+    // of every patient's home on every render — a disclosure of where people
+    // live to a third party with no BAA — and for the question this screen
+    // answers ("in what order should I see these people") a street map adds
+    // nothing a relative plot does not. The brief's own sketch is dots joined
+    // by lines. Everything here is drawn from coordinates the app already
+    // holds, and nothing leaves the boundary.
+    const DayMap = ({ plot }) => {
+      // SERVED, not computed here. The module that places a stop reaches into
+      // the scheduling module for the one coordinate reader, and that chain
+      // does not load in a page — so the page renders the server's answer and
+      // decides no geometry of its own.
+      if (!plot || !plot.points || !plot.points.length) {
+        return (
+          <div className="p-4 text-[12.5px] text-amber-700">
+            None of today's visits has address coordinates, so there is nothing to plot.
+            An admin sets them under Scheduling → Locations.
+          </div>
+        );
+      }
+      return (
+        <div className="p-4">
+          <svg viewBox="0 0 100 100" className="w-full max-w-md mx-auto block" style={{ aspectRatio: '1 / 1' }}
+            role="img" aria-label="Today's stops, plotted by relative position">
+            {plot.points.slice(0, -1).map((p, i) => {
+              const n = plot.points[i + 1];
+              return <line key={`l${p.eid}`} x1={p.x} y1={p.y} x2={n.x} y2={n.y}
+                stroke="#C9A44A" strokeWidth="0.8" strokeDasharray="2 1.5" />;
+            })}
+            {plot.points.map(p => (
+              <g key={p.eid}>
+                <circle cx={p.x} cy={p.y} r="3.2" fill="#033D50" />
+                <text x={p.x} y={p.y + 1.1} textAnchor="middle" fill="#fff"
+                  style={{ fontSize: '3px', fontWeight: 700 }}>{p.order}</text>
+                <text x={p.x} y={p.y - 4.6} textAnchor="middle" fill="#2b2b28"
+                  style={{ fontSize: '3.2px' }}>{p.label}</text>
+              </g>
+            ))}
+          </svg>
+          <p className="text-[11px] text-stone-400 text-center mt-2">
+            Relative positions only — north is up. Not a street map, and no coordinates leave this app.
+          </p>
+          {plot.unplaceable > 0 && (
+            <p className="text-[11.5px] text-amber-700 text-center mt-1">
+              {plot.unplaceable} {plot.unplaceable === 1 ? 'stop has' : 'stops have'} no coordinates and could not be plotted.
+            </p>
+          )}
+        </div>
+      );
+    };
+
+    // B5 — who else lives near this address and is due to be seen. A house call
+    // is mostly driving, so a trip that fills two slots instead of one is the
+    // biggest lever there is on a day.
+    const NearbyDue = ({ clientId, onOpenChart }) => {
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState('');
+      const [radius, setRadius] = useState(10);
+      useEffect(() => {
+        if (!clientId) return;
+        let live = true;
+        api.nearby(clientId, radius).then(r => { if (live) { setData(r); setErr(''); } })
+          .catch(e => { if (live) setErr(e.message); });
+        return () => { live = false; };
+      }, [clientId, radius]);
+      if (err) return <p className="text-[12px] text-red-600">{err}</p>;
+      if (!data) return <p className="text-[12px] text-stone-500">Looking…</p>;
+      if (data.notice) return <p className="text-[12px] text-amber-700">{data.notice}</p>;
+      return (
+        <div>
+          <div className="flex items-center gap-2 mb-2">
+            <span className="lblu">Within</span>
+            <select className="inp !w-auto !py-0.5 text-[11.5px]" value={radius} onChange={e => setRadius(Number(e.target.value))}>
+              {[5, 10, 15, 25].map(r => <option key={r} value={r}>{r} miles</option>)}
+            </select>
+            <span className="text-[11px] text-stone-400">straight line</span>
+          </div>
+          {data.nearby.length === 0
+            ? <p className="text-[12px] text-stone-500">
+              Nobody else within {data.radiusMiles} miles is due to be seen.
+            </p>
+            : data.nearby.map(n => (
+              <div key={n.clientId} className="flex items-center justify-between gap-2 py-1.5 border-b border-stone-100 last:border-0">
+                <div className="min-w-0">
+                  <div className="text-[13px] font-semibold truncate">{n.name}</div>
+                  <div className="text-[11.5px] text-stone-500">
+                    {[`${n.miles} mi`,
+                      n.reason === 'never_seen' ? 'never seen' : `last seen ${n.lastVisitAt} (${n.daysSinceLastVisit}d)`,
+                      n.address].filter(Boolean).join(' · ')}
+                  </div>
+                </div>
+                <button className="btn ghost !py-0.5 !px-2 text-[11px] shrink-0" onClick={() => onOpenChart(n.clientId)}>Open</button>
+              </div>
+            ))}
+          <p className="text-[11px] text-stone-400 mt-2">
+            "Due" means no visit on file, or none in the last {data.dueAfterDays} days.
+          </p>
+        </div>
+      );
+    };
+
     // ── Session 4.12 — MY DAY (Scope A) ────────────────────────────────────
     // The default landing screen. A house-call clinician does not start the day
     // by looking up a patient; they start it by looking at the day. Every row
@@ -1465,6 +1568,13 @@
             <button className="btn gold w-full justify-center" onClick={() => onOpenChart(k.clientId)}>
               <i className="ti ti-player-play" />Start visit
             </button>
+            {/* B5 — a house call is mostly driving, so filling a trip is the
+                biggest lever there is on a day. Surfaced here because this is
+                where a clinician is already deciding what the trip is for. */}
+            <div className="border-t border-stone-100 pt-3">
+              <div className="lblu mb-1.5">Also due nearby</div>
+              <NearbyDue clientId={k.clientId} onOpenChart={onOpenChart} />
+            </div>
           </div>
         </div>
       );
@@ -1478,6 +1588,7 @@
       const [busy, setBusy] = useState(null);
       const [packet, setPacket] = useState(null);
       const [proposal, setProposal] = useState(null);
+      const [mode, setMode] = useState('list'); // B1 list | B2 map
       const load = useCallback(() => {
         setErr('');
         api.myDay(date).then(setDay).catch(e => { setErr(e.message); setDay(null); });
@@ -1524,6 +1635,15 @@
             </div>
             <div className="px-4 py-2 border-b border-stone-100 flex items-center gap-2 flex-wrap">
               <input className="inp !w-auto !py-1 text-xs" type="date" value={date} onChange={e => setDate(e.target.value)} />
+              {/* B1 + B2 — the same day, two ways of reading it. Both render
+                  the SAME visits from the SAME fetch, so the list and the map
+                  cannot disagree about what exists. */}
+              <div className="inline-flex rounded-lg overflow-hidden border border-primary">
+                {[['list', 'ti-list', 'List'], ['map', 'ti-map-2', 'Map']].map(([k, icon, label]) => (
+                  <button key={k} className={`px-2.5 py-1 text-[11.5px] font-semibold ${mode === k ? 'bg-primary text-white' : 'bg-white text-primary'}`}
+                    onClick={() => setMode(k)}><i className={`ti ${icon} mr-1`} />{label}</button>
+                ))}
+              </div>
               <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" onClick={load}><i className="ti ti-refresh" />Refresh</button>
               {access.canWrite && day && day.visits && day.visits.length > 1 && (
                 <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" onClick={optimize}>
@@ -1554,12 +1674,13 @@
                 ))}
               </div>
             )}
+            {mode === 'map' && day && <DayMap plot={day.plot} />}
             <div className="px-4">
               {!day && !err && <p className="text-sm text-stone-500 py-4">Loading your day…</p>}
               {day && day.visits.length === 0 && (
                 <p className="text-sm text-stone-500 py-6">No visits scheduled for this day.</p>
               )}
-              {day && day.visits.map(v => (
+              {day && mode === 'list' && day.visits.map(v => (
                 <DayVisitRow key={v.eid} v={v} busy={busy} canWrite={access.canWrite}
                   onOpenChart={onOpenChart}
                   onPacket={(vv) => setPacket({ clientId: vv.clientId, eid: vv.eid })}
@@ -1735,6 +1856,30 @@
         <input className="inp" value={f.vitals[k]} onChange={e => set(`vitals.${k}`, e.target.value)} />
       </Field>
     );
+    // ── Dictation (Scope F5), and the one option deliberately NOT taken ────
+    // The browser's Web Speech API is not wired and must not be. In Chrome its
+    // implementation streams the audio to Google's servers, which would put a
+    // clinician dictating an assessment about a named patient outside the BAA —
+    // a PHI disclosure with no agreement behind it, from a feature that looks
+    // free.
+    //
+    // What works today needs no code and no vendor at all: the DEVICE
+    // KEYBOARD's own microphone dictates into any ordinary textarea, and on iOS
+    // it is on-device for supported languages. So every narrative field stays a
+    // plain textarea — `speech` and `dictation` attributes left alone — and the
+    // form simply says so, once, rather than shipping a button that would send
+    // a patient's history to a third party.
+    //
+    // When Amazon Transcribe Medical is available inside the AWS boundary it
+    // slots in behind an IAM role with zero data retention confirmed, the same
+    // way §10.3 governs Bedrock. That is a configuration, not a rewrite.
+    const DictationHint = () => (
+      <p className="text-[11px] text-stone-400 mb-2">
+        <i className="ti ti-microphone mr-1" />
+        To dictate, use the microphone on your phone or tablet keyboard — it types straight into any box here.
+      </p>
+    );
+
     const TextArea = ({ path, label, rows, f, set }) => (
       <Field label={label}>
         <textarea className="inp" rows={rows || 2} value={path.split('.').reduce((o, k) => o[k], f)} onChange={e => set(path, e.target.value)} />
@@ -1839,6 +1984,7 @@
                   <div className="flex flex-wrap gap-1.5">{pf.conditions.map((c, i) => <span key={i} className="chip bg-primary-50 text-primary">{c}</span>)}</div>
                 </Prefilled>
               )}
+              <DictationHint />
               <TextArea f={f} set={set} path="subjective" label="Subjective / history" rows={3} />
             </div>
           </div>

@@ -276,6 +276,53 @@ const makeUser = async (token, name, role, clinicalRole, extra) => {
   ok('  average visit length counts the visit this probe stamped',
     an.body.metrics.averageVisitMinutes.sampleSize >= 1, an.body.metrics.averageVisitMinutes);
 
+  // ---- 9. Scope B: the day plotted, and the trip filled ------------------
+  console.log('\n--- 9. the day plotted, and who else is due nearby ---');
+  const dayPlot = await call('GET', '/api/clinical/my-day?date=2026-09-23', cTok);
+  ok('the day carries a plot the page can draw', !!(dayPlot.body && dayPlot.body.plot), dayPlot.body && dayPlot.body.plot);
+  ok('  with an explicit count of what could not be placed',
+    typeof dayPlot.body.plot.unplaceable === 'number', dayPlot.body.plot);
+
+  // The coordinates the CAREGIVER side writes — one reader, one storage place.
+  const setLoc = await call('PUT', `/api/scheduling/clients/${patient.id}/location`, admin, { lat: 33.88, lng: -84.47 });
+  ok('the scheduling Locations route stores coordinates', setLoc.status === 200, setLoc.body);
+  ok('  and it reports the client as placed', setLoc.body.client && setLoc.body.client.hasCoordinates === true, setLoc.body.client);
+
+  const nearbyNone = await call('GET', `/api/clinical/nearby?clientId=${patient.id}&radiusMiles=10`, cTok);
+  ok('nearby answers once the patient has coordinates', nearbyNone.status === 200, nearbyNone.body);
+  ok('  the origin is placed, so no "set coordinates" notice is shown',
+    nearbyNone.body.notice === null, nearbyNone.body.notice);
+  ok('  and the radius is reported as straight-line',
+    nearbyNone.body.distanceKind === 'straight_line', nearbyNone.body.distanceKind);
+  ok('  the patient being booked is not offered as somebody to also visit',
+    !(nearbyNone.body.nearby || []).some(n => n.clientId === patient.id), nearbyNone.body.nearby);
+
+  // A second clinical patient a few miles away and never seen — the case B5
+  // exists for: a trip that fills two slots instead of one. Placed ~4.8 miles
+  // off so the radius boundary below is actually exercised; the first version
+  // of this fixture sat 0.7 miles away, which a 1-mile radius correctly
+  // includes, so the assertion failed on a fixture rather than on the code.
+  const neighbour = await makeUser(admin, 'Nearby Neighbour', 'client');
+  await call('PUT', `/api/gfc/admin/enrollment/${neighbour.id}/service-line`, admin, { serviceLine: 'IHPC' });
+  await call('PUT', `/api/scheduling/clients/${neighbour.id}/location`, admin, { lat: 33.95, lng: -84.47 });
+  const nearby = await call('GET', `/api/clinical/nearby?clientId=${patient.id}&radiusMiles=10`, cTok);
+  const hit = (nearby.body.nearby || []).find(n => n.clientId === neighbour.id);
+  ok('a never-seen patient a mile away IS offered', !!hit, nearby.body.nearby);
+  ok('  with its own reason rather than a made-up interval',
+    hit && hit.reason === 'never_seen' && hit.daysSinceLastVisit === null, hit);
+  ok('  and a real straight-line distance', hit && typeof hit.miles === 'number' && hit.miles > 0, hit && hit.miles);
+
+  ok('  a few miles away, not next door', hit && hit.miles > 3 && hit.miles < 6, hit && hit.miles);
+  const tooFar = await call('GET', `/api/clinical/nearby?clientId=${patient.id}&radiusMiles=1`, cTok);
+  ok('shrinking the radius to 1 mile drops them',
+    !(tooFar.body.nearby || []).some(n => n.clientId === neighbour.id), tooFar.body.nearby);
+
+  // And the coordinate reader the caregiver geofence uses is the one My Day
+  // reads — the bug the owner's question surfaced on 2026-09-23.
+  const dayWithCoords = await call('GET', '/api/clinical/my-day?date=2026-09-23', cTok);
+  ok('My Day reads the coordinates the Locations screen wrote',
+    dayWithCoords.status === 200, dayWithCoords.body && dayWithCoords.body.calendar);
+
   console.log(`\n${pass}/${pass + fail} assertions passed${fail ? ` — ${fail} FAILED` : ''}`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error('Probe crashed:', e); process.exit(1); });
