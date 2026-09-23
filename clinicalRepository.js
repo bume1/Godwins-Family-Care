@@ -2185,8 +2185,15 @@ const buildTimeline = ({
   });
   (results || []).forEach(r => push('result', r.receivedAt || r.createdAt,
     r.label || r.documentName || 'Result', r.interpretation || null, r.id));
+  // BUG (found 2026-09-23, live screenshot): every document on the timeline
+  // read "Document / app". `buildChartDocumentIndex` rows carry `title` and
+  // `category`, not `description` and `source` — `source` exists too, but it
+  // is `CHART_DOC_SOURCE.APP`/`'app'`, the internal enum that tells the reader
+  // whether OpenEMR or the app holds the file, never a human label. Reading it
+  // as if it were one put the literal word "app" on every row a client, a
+  // consent or a care plan actually produced.
   (documents || []).forEach(d => push('document', d.date,
-    d.description || 'Document', d.source || null, d.id));
+    d.title || 'Document', d.category || null, d.id));
 
   const wanted = Array.isArray(kinds) && kinds.length
     ? new Set(kinds.filter(k => TIMELINE_KINDS.includes(k)))

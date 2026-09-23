@@ -198,6 +198,13 @@
       reviewDocument: (id, uploadId, decision, reason) => authedFetch(`/api/gfc/admin/enrollment/${id}/documents/${uploadId}/review`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision, reason })
       }),
+      // The branded, no-login upload link (2026-09-23) — admin only, matching
+      // every other workflow decision on this surface. get-or-create by
+      // default; `{ regenerate: true }` turns off the old one and mints a new.
+      getOrCreateUploadLink: (id, regenerate) => authedFetch(`/api/gfc/admin/enrollment/${id}/documents/upload-link`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ regenerate: !!regenerate })
+      }),
+      revokeUploadLink: (id) => authedFetch(`/api/gfc/admin/enrollment/${id}/documents/upload-link/revoke`, { method: 'POST' }),
       createOffline: (formData) => {
         const token = getToken();
         return fetch(`${API_URL}/api/gfc/admin/enrollment/offline`, {
@@ -684,7 +691,7 @@
       );
     };
 
-    const DocumentExchange = ({ clientId, canEdit }) => {
+    const DocumentExchange = ({ clientId, canEdit, isAdmin }) => {
       const [state, setState] = useState(null);
       const [err, setErr] = useState('');
       const [busy, setBusy] = useState(false);
@@ -693,6 +700,10 @@
       const [asking, setAsking] = useState(false);
       const [dueAt, setDueAt] = useState('');
       const [customLabel, setCustomLabel] = useState('');
+      // The branded, no-login upload link (2026-09-23).
+      const [linkBusy, setLinkBusy] = useState(false);
+      const [linkErr, setLinkErr] = useState('');
+      const [copied, setCopied] = useState(false);
       // Which kinds can be read, and whether reading is switched on at all.
       // ASKED OF THE SERVER, never decided here: a page that lists the readable
       // kinds itself drifts from the module that refuses one.
@@ -725,6 +736,21 @@
           .catch(e => setErr(e.message)).finally(() => setBusy(false));
       };
 
+      const setLink = (regenerate) => {
+        setLinkBusy(true); setLinkErr('');
+        api.getOrCreateUploadLink(clientId, regenerate)
+          .then(load).catch(e => setLinkErr(e.message)).finally(() => setLinkBusy(false));
+      };
+      const turnOffLink = () => {
+        setLinkBusy(true); setLinkErr('');
+        api.revokeUploadLink(clientId)
+          .then(load).catch(e => setLinkErr(e.message)).finally(() => setLinkBusy(false));
+      };
+      const copyLink = () => {
+        if (!state || !state.uploadLink) return;
+        navigator.clipboard.writeText(state.uploadLink.url).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); });
+      };
+
       const review = (uploadId, decision) => {
         let reason = '';
         if (decision === 'rejected') {
@@ -750,6 +776,40 @@
               <button className="btn btn-ghost" disabled={busy || !outstanding} onClick={remind}>Send reminder</button>
             </div>
           )}
+
+          {/* A branded, no-login link — generate/regenerate/revoke stays admin
+              only, matching every other WORKFLOW decision on this surface
+              (approve, change service line, accept a document). A clinician
+              can still see whether one is on, since that read rides the same
+              gate as the rest of this panel. */}
+          <div className="border border-gray-200 rounded-lg p-3 mb-4">
+            <div className="text-sm font-medium mb-1">No-login upload link</div>
+            {linkErr && <div className="text-danger-500 text-xs mb-2">{linkErr}</div>}
+            {!state.uploadLink && (
+              <React.Fragment>
+                <p className="text-xs text-gray-500 mb-2">
+                  Text or email a link the client (or whoever is holding the paperwork) can open without signing in, to send a document straight into this file.
+                </p>
+                {isAdmin
+                  ? <button className="btn btn-ghost" disabled={linkBusy} onClick={() => setLink(false)}>{linkBusy ? 'Setting up…' : 'Get a link'}</button>
+                  : <span className="text-xs text-gray-400">Off — an admin turns this on.</span>}
+              </React.Fragment>
+            )}
+            {state.uploadLink && (
+              <React.Fragment>
+                <div className="text-xs break-all text-gray-700 bg-gray-50 rounded px-2 py-1.5 mb-2">{state.uploadLink.url}</div>
+                {isAdmin ? (
+                  <div className="flex gap-2 flex-wrap">
+                    <button className="btn btn-ghost" disabled={linkBusy} onClick={copyLink}>{copied ? 'Copied!' : 'Copy link'}</button>
+                    <button className="btn btn-ghost" disabled={linkBusy} onClick={() => setLink(true)}>Get a new link</button>
+                    <button className="btn btn-ghost text-danger-500" disabled={linkBusy} onClick={turnOffLink}>Turn off</button>
+                  </div>
+                ) : (
+                  <span className="text-xs text-gray-400">On — an admin manages this link.</span>
+                )}
+              </React.Fragment>
+            )}
+          </div>
 
           {asking && (
             <div className="border border-gray-200 rounded-lg p-3 mb-4">
@@ -1370,7 +1430,7 @@
               </button>
             )
           ) : (
-            <p className="text-xs text-gray-400 mt-3">Read-only — an admin activates IHPC enrollment.</p>
+            <p className="text-xs text-gray-400 mt-3">Read-only — an admin or clinician activates IHPC enrollment.</p>
           )}
           <p className="text-xs text-gray-400 mt-2">Payer verification is manual until B1 (Availity eligibility) lands. Records/ROI, initial visit, care plan, and consents derive from the record and cannot be hand-set.</p>
         </Section>
@@ -1506,16 +1566,28 @@
     };
 
     const DetailView = ({ clientId, user, onBack }) => {
-      // TWO answers, because the API gives two, and each is asked once so no
-      // control can drift from the route behind it. A screen that offers what
-      // the server will refuse is worse than a read-only one.
-      //   canEdit           — the workflow writes: approve, service line,
-      //                       documents, paper signature. ADMIN ONLY.
-      //   canEditSubmission — correcting the submission itself. Admin OR
-      //                       clinician, and answered BY THE SERVER on the
-      //                       record it just served rather than inferred here
-      //                       from a login stored in this browser months ago.
+      // THREE answers, because the API gives three shapes of "may write here",
+      // and each is asked once so no control can drift from the route behind
+      // it. A screen that offers what the server will refuse is worse than a
+      // read-only one.
+      //   canEdit             — the workflow writes: approve, service line,
+      //                         documents, paper signature, place of service.
+      //                         ADMIN ONLY (place of service is an owner rule:
+      //                         a clinician never sees or chooses a POS).
+      //   canEditSubmission   — correcting the submission itself. Admin OR
+      //                         clinician, and answered BY THE SERVER on the
+      //                         record it just served rather than inferred
+      //                         here from a login stored in this browser
+      //                         months ago.
+      //   canEditChecklist    — the clinical enrollment sequence (mark a step,
+      //                         activate IHPC). Its routes are
+      //                         `requireClinicalWrite` — admin OR any licensed
+      //                         clinician — so the button was answering 403
+      //                         for a provider who could see it and not use
+      //                         it. Matched to that gate rather than left on
+      //                         the admin-only `canEdit`.
       const canEdit = isAdminRole(user);
+      const canEditChecklist = canEdit || !!(user && user.hasClinicalAccess);
       const [client, setClient] = useState(null);
       const [loading, setLoading] = useState(true);
       const [err, setErr] = useState('');
@@ -1764,7 +1836,7 @@
           {(client.serviceLineResolved === 'IHPC' || client.serviceLineResolved === 'BOTH') && (
             <>
               <PlaceOfServiceCard clientId={clientId} canEdit={canEdit} />
-              <ClinicalEnrollmentChecklist clientId={clientId} canEdit={canEdit} onActivated={load} />
+              <ClinicalEnrollmentChecklist clientId={clientId} canEdit={canEditChecklist} onActivated={load} />
             </>
           )}
 
@@ -1909,7 +1981,7 @@
             </Section>
 
             <div className="lg:col-span-2">
-              <DocumentExchange clientId={clientId} canEdit={canEdit} />
+              <DocumentExchange clientId={clientId} canEdit={canEdit} isAdmin={isAdminRole(user)} />
             </div>
           </div>
         </div>

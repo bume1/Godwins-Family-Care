@@ -892,6 +892,82 @@ test('a documented appointment is not on the thread twice', () => {
   assert.strictEqual(t.rows.length, 2);
 });
 
+// LIVE BUG, FOUND FROM A SCREENSHOT 2026-09-23: every document on the
+// timeline read "Document / app". `buildTimeline`'s document mapping read
+// `d.description` and `d.source`; `buildChartDocumentIndex`'s rows carry
+// `title` and `category` — `source` exists too, but it is
+// `CHART_DOC_SOURCE.APP`, the internal flag saying which system holds the
+// file, never a human label. So every title fell back to the literal word
+// "Document" and every detail line showed the literal word "app". The
+// EXISTING test above used `description` in its own fixture — the same
+// wrong field — so it stayed green throughout, because it only asserted the
+// undated COUNT and never looked at what a dated row actually said.
+// ── Session 4.12 — top bar overflow and the collapsible patient panel ──
+// Owner report 2026-09-23, with a screenshot: the top bar clipped "Analytics"
+// off the right edge with no way to reach it, and the left patient panel
+// could not be collapsed.
+test('the nine views are declared once, so the overflow handling lives in one place', () => {
+  // The bug this replaces: nine hand-written buttons, so a crowding fix had
+  // nine places to land in and landed in none.
+  assert.match(pageCode, /const NAV_VIEWS = Object\.freeze\(\[/);
+  const keys = [...pageCode.matchAll(/\{ key: '(\w+)', tab: '/g)].map(m => m[1]);
+  assert.deepEqual(keys, ['myday', 'charts', 'schedule', 'queue', 'inbox', 'results', 'overdue', 'queues', 'analytics']);
+  assert.match(pageCode, /NAV_VIEWS\.map\(v =>/, 'the strip must render from the declared list, not repeat nine buttons');
+});
+
+test('the nav strip WRAPS rather than scrolling invisibly, and labels wait for real room', () => {
+  // A horizontal scrollbar on a nav bar is the same clipping with an
+  // affordance nobody sees. It must wrap to a second row instead.
+  const i = pageCode.indexOf('nav-strip');
+  const strip = pageCode.slice(i - 120, i + 100);
+  assert.match(strip, /flex-wrap/);
+  assert.ok(!/overflow-x-auto/.test(strip), 'the strip must not fall back to a scrolling container');
+  // Labels hide until 2xl (1536px) — below that it is icons only, which is
+  // what makes nine views fit a laptop instead of technically scrolling past it.
+  assert.match(pageCode, /<span className="hidden 2xl:inline ml-1">\{v\.tab\}<\/span>/);
+});
+
+test('the patient panel actually collapses in a real browser, not just in the markup', () => {
+  // LIFTED FROM A LIVE BUG. The panel toggle existed, `aside` got
+  // `display:none`, and the chart rendered at WIDTH 0 — because a
+  // `display:none` grid item drops out of CSS Grid's item list entirely, so
+  // `main`, with nothing pinning it, auto-placed into the now-empty FIRST
+  // (0-width) track instead of the second. Measured live: `main`'s own
+  // bounding rect reported width 0 with the grid track correctly sized
+  // underneath it — reading the CSS predicted nothing was wrong.
+  assert.match(pageCode, /<main className=\{`\$\{listOpen \? 'hidden' : ''\} lg:block lg:col-start-2`\}>/,
+    'main must be pinned to the second grid column — without it, collapsing the panel blanks the chart');
+  assert.match(pageCode, /const \[panelOpen, setPanelOpen\] = useState/);
+  assert.match(pageCode, /lg:grid-cols-\[290px_1fr\]/);
+  assert.match(pageCode, /lg:grid-cols-\[0_1fr\]/);
+  // Remembered per browser — a clinician who collapses it wants it collapsed
+  // next time — and read defensively, since a private window throws.
+  assert.match(pageCode, /localStorage\.getItem\('gfc\.clinical\.panel'\)/);
+  assert.match(pageCode, /localStorage\.setItem\('gfc\.clinical\.panel'/);
+  assert.match(pageCode, /try \{ return window\.localStorage\.getItem/, 'the read must be defensive — a private window throws');
+});
+
+test('a document on the timeline shows its real title and category, never "Document" and the internal source flag', () => {
+  const t = repo.buildTimeline({
+    documents: [
+      { id: 'careplan:2', title: 'Plan of care — version 2 (signed)', category: 'Plan of care', date: '2026-09-17', source: 'app' },
+      { id: 'upload:1', title: 'insurance_card_front.jpg', category: 'From the client', date: '2026-09-17', source: 'app' }
+    ]
+  });
+  assert.strictEqual(t.rows.length, 2);
+  for (const row of t.rows) {
+    assert.notStrictEqual(row.title, 'Document', `a real title must not fall back to the placeholder: ${JSON.stringify(row)}`);
+    assert.notStrictEqual(row.detail, 'app', 'the detail line must never show the internal source flag');
+  }
+  assert.match(t.rows.find(r => r.id === 'careplan:2').title, /Plan of care — version 2/);
+  assert.strictEqual(t.rows.find(r => r.id === 'careplan:2').detail, 'Plan of care');
+  assert.strictEqual(t.rows.find(r => r.id === 'upload:1').title, 'insurance_card_front.jpg');
+  assert.strictEqual(t.rows.find(r => r.id === 'upload:1').detail, 'From the client');
+  // A document with genuinely no title still falls back, so the row is never
+  // literally blank.
+  assert.strictEqual(repo.buildTimeline({ documents: [{ date: '2026-09-17' }] }).rows[0].title, 'Document');
+});
+
 test('a referral is its own kind on the thread, not a generic order', () => {
   const t = repo.buildTimeline({
     orders: [
@@ -905,9 +981,11 @@ test('a referral is its own kind on the thread, not a generic order', () => {
 
 test('an undated row is COUNTED, never dropped and never sorted to the top', () => {
   // "Nothing here" and "four things could not be placed" are different facts,
-  // and only one of them is a data gap worth chasing.
+  // and only one of them is a data gap worth chasing. Fixture uses `title`,
+  // the field the row actually carries — see the next test for why that
+  // distinction is load-bearing.
   const t = repo.buildTimeline({
-    documents: [{ date: null, description: 'no date' }, { date: '2026-09-01', description: 'dated' }]
+    documents: [{ date: null, title: 'no date' }, { date: '2026-09-01', title: 'dated' }]
   });
   assert.strictEqual(t.undated, 1);
   assert.strictEqual(t.rows.length, 1);
@@ -989,8 +1067,13 @@ test('all six analytics metrics have a home', () => {
 
 test('both new destinations are reachable and neither is hidden when empty', () => {
   // I3: a missing menu item is indistinguishable from a broken one.
-  assert.match(pageCode, /setView\('queues'\)/);
-  assert.match(pageCode, /setView\('analytics'\)/);
+  // REPOINTED 2026-09-23: the nine views used to be nine hand-written
+  // `setView('queues')`-style calls; the nav-bar rebuild declared them once in
+  // NAV_VIEWS, so "is this reachable" is now a question about that list and
+  // the click handler that reads it, not about a literal call site per view.
+  assert.match(pageCode, /key: 'queues', tab: 'Tasks'/);
+  assert.match(pageCode, /key: 'analytics', tab: 'Analytics'/);
+  assert.match(pageCode, /onClick=\{\(\) => \{ setView\(v\.key\)/, 'the nav strip must actually call setView with the clicked entry');
   assert.match(pageCode, /<WorkQueuesView/);
   assert.match(pageCode, /<AnalyticsView/);
   const i = pageCode.indexOf('const VIEW_TITLES');
