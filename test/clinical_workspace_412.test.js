@@ -454,9 +454,9 @@ test('no coordinates yields no distance, never zero miles', () => {
   assert.strictEqual(myDay.haversineMiles({ lat: 33.9, lng: -84.3 }, null), null);
   // 0,0 is an unset field, not a location in the Gulf of Guinea.
   assert.strictEqual(myDay.haversineMiles({ lat: 0, lng: 0 }, { lat: 33.9, lng: -84.3 }), null);
-  assert.strictEqual(myDay.coordsOf({ intake: { address: { lat: 0, lng: 0 } } }), null);
-  assert.strictEqual(myDay.coordsOf({ intake: { address: { lat: '', lng: '' } } }), null);
-  assert.deepStrictEqual(myDay.coordsOf({ intake: { address: { lat: 33.9, lng: -84.3 } } }), { lat: 33.9, lng: -84.3 });
+  assert.strictEqual(myDay.coordsOf({ address: { lat: 0, lng: 0 } }), null);
+  assert.strictEqual(myDay.coordsOf({ address: { lat: '', lng: '' } }), null);
+  assert.deepStrictEqual(myDay.coordsOf({ address: { lat: 33.9, lng: -84.3 } }), { lat: 33.9, lng: -84.3 });
 });
 
 test('a distance is LABELLED straight-line and never presented as drive time', () => {
@@ -465,7 +465,7 @@ test('a distance is LABELLED straight-line and never presented as drive time', (
   // flight will be late, so the label and the missing provider are both stated.
   const row = myDay.buildDayRow({
     appointment: { eid: '2', startTime: '10:15' },
-    client: { id: 'c2', name: 'Robert Williams', intake: { address: { lat: 33.94, lng: -84.35 } } },
+    client: { id: 'c2', name: 'Robert Williams', address: { lat: 33.94, lng: -84.35 } },
     previousCoords: { lat: 33.88, lng: -84.47 }
   });
   assert.strictEqual(row.distance.kind, 'straight_line');
@@ -476,7 +476,7 @@ test('a distance is LABELLED straight-line and never presented as drive time', (
 
 test('the first stop and an unplaceable stop are different facts', () => {
   const first = myDay.buildDayRow({
-    appointment: { eid: '1' }, client: { id: 'c1', intake: { address: { lat: 33.8, lng: -84.4 } } },
+    appointment: { eid: '1' }, client: { id: 'c1', address: { lat: 33.8, lng: -84.4 } },
     previousCoords: null
   });
   assert.strictEqual(first.distance.reason, 'first_stop');
@@ -498,14 +498,14 @@ test('a cancelled visit is not a leg, and the mileage total says when it is part
       { eid: '4', clientId: 'c4', startTime: '15:00', date: '2026-09-23' }
     ],
     clientsById: new Map([
-      ['c1', { id: 'c1', name: 'A', intake: { address: { lat: 33.80, lng: -84.40 } } }],
+      ['c1', { id: 'c1', name: 'A', address: { lat: 33.80, lng: -84.40 } }],
       // c2 is cancelled and 200 miles away — measuring it as a leg would
       // inflate every mile after it.
-      ['c2', { id: 'c2', name: 'B', intake: { address: { lat: 31.00, lng: -84.40 } } }],
+      ['c2', { id: 'c2', name: 'B', address: { lat: 31.00, lng: -84.40 } }],
       // c3 MUST have coordinates, or the leg from the cancelled stop is never
       // measured and this fixture cannot tell the two states apart — which is
       // exactly what the first version of it did.
-      ['c3', { id: 'c3', name: 'C', intake: { address: { lat: 33.82, lng: -84.41 } } }],
+      ['c3', { id: 'c3', name: 'C', address: { lat: 33.82, lng: -84.41 } }],
       ['c4', { id: 'c4', name: 'D', intake: {} }]
     ]),
     timingsByEid: new Map(), signedEids: new Set(),
@@ -978,4 +978,68 @@ test('the per-patient results read is a READ, so a case manager keeps it', () =>
   const body = routeBody(serverCode, "app.get('/api/clinical/patients/:clientId/results'");
   assert.match(body, /requireClinicalRead/);
   assert.ok(!/requireClinicalWrite/.test(body));
+});
+
+// ===========================================================================
+// 13. WHERE A CLIENT LIVES HAS ONE READER
+// ===========================================================================
+// Owner question, 2026-09-23: "why can't we use whatever we use for the
+// caregiver side?" The answer is that we already can and should — and asking
+// it surfaced a real bug.
+//
+// There is NO geocoding service anywhere in this app. An admin pastes
+// coordinates from Google Maps into /scheduling → Locations, which writes them
+// to `client.address.lat/lng`. The geofence has read them since Session 7.
+
+const sched = require('../schedulingRepository');
+
+test('My Day and the geofence read the SAME coordinates', () => {
+  // The bug this is written against: My Day wrote its own reader and looked in
+  // `client.intake.address` first. That object exists on every enrolled client
+  // and carries no coordinates, so it won every time and My Day reported "no
+  // coordinates" for the whole practice while the real ones sat one field away.
+  const client = {
+    id: 'c1',
+    address: { lat: 33.88, lng: -84.47 },
+    // Present on every enrolled client, and carrying no coordinates.
+    intake: { address: { line1: '123 Main St', city: 'Atlanta', state: 'GA' } }
+  };
+  assert.deepStrictEqual(myDay.coordsOf(client), sched.clientCoords(client));
+  assert.deepStrictEqual(myDay.coordsOf(client), { lat: 33.88, lng: -84.47 });
+});
+
+test('the two readers agree on every case, not just the happy one', () => {
+  [
+    { address: { lat: 33.88, lng: -84.47 } },
+    { address: { lat: 0, lng: 0 } },                       // unset, not the Gulf of Guinea
+    { address: { lat: '', lng: '' } },
+    { address: {} },
+    { intake: { address: { line1: 'no coordinates here' } } },
+    {},
+    null
+  ].forEach((c, i) => {
+    assert.deepStrictEqual(myDay.coordsOf(c), sched.clientCoords(c),
+      `the readers disagree on fixture ${i}: ${JSON.stringify(c)}`);
+  });
+});
+
+test('My Day delegates rather than keeping a second copy of the rule', () => {
+  const src = strippedSafely(fs.readFileSync(path.join(root, 'myDay.js'), 'utf8'), 'myDay.js');
+  assert.match(src, /const coordsOf = \(client\) => sched\.clientCoords\(client\);/,
+    'one answer to "where does this client live", owned by the module that owns the write');
+  assert.ok(!/client\.intake\.address/.test(src),
+    'the intake address carries no coordinates and must not be consulted for them');
+});
+
+test('the dependency runs clinical → scheduling, never the reverse', () => {
+  // test/scheduling.test.js forbids the scheduling module requiring the EMR
+  // client or reaching into /api/clinical/. This direction is the safe one, and
+  // asserting it here keeps that asymmetry deliberate rather than accidental.
+  const myDaySrc = fs.readFileSync(path.join(root, 'myDay.js'), 'utf8');
+  const schedSrc = fs.readFileSync(path.join(root, 'schedulingRepository.js'), 'utf8');
+  assert.match(myDaySrc, /require\('\.\/schedulingRepository'\)/);
+  assert.ok(!/require\(\s*['"]\.\/myDay['"]\s*\)/.test(schedSrc),
+    'scheduling must not depend back on the clinical day');
+  assert.ok(!/require\(\s*['"][./]*openemr['"]\s*\)/i.test(schedSrc),
+    'and pulling myDay in must not have dragged the EMR client into the scheduling lane');
 });

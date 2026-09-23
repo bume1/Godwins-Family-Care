@@ -14,6 +14,7 @@
 - Email the caregiver when a past shift is corrected, and fix the aliased before/after
 
 #### Changes
+- Make the chart a set of places, and give the cross-patient work a queue
 - Open the workspace on the day, not on a patient list
 - Put a patient banner above every chart tab, and collapse every form grid
 - Move the clinical enrollment sequence off the clinician's chart, onto admin enrollment
@@ -44,7 +45,6 @@
 - Send the login with the consent downloads
 - Let a client be added without a rate, and lock enrollment writes to admin
 - Pin the caregiver Feed's scoping
-- Point every email link at the app, and at a page that exists
 
 
 ### Version 3.1.0 - September 22, 2026

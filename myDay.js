@@ -10,6 +10,10 @@
 // BEFORE I KNOCK." Everything here is built for reading on a phone, in a car,
 // before getting out of it.
 //
+const sched = require('./schedulingRepository'); // clientCoords — the ONE reader
+                                                 // for a client's location (see
+                                                 // coordsOf below).
+
 // PURE. No I/O, no db, no clock of its own — `now` and `today` are passed in,
 // which is what makes the Eastern rule testable rather than hoped for. server.js
 // wires it to the store, to OpenEMR's calendar and to the practice clock.
@@ -132,16 +136,25 @@ const haversineMiles = (a, b) => {
   return Math.round(EARTH_RADIUS_MILES * 2 * Math.asin(Math.sqrt(h)) * 10) / 10;
 };
 
-const coordsOf = (client) => {
-  const addr = (client && client.intake && client.intake.address) || (client && client.address) || null;
-  if (!addr) return null;
-  const lat = Number(addr.lat), lng = Number(addr.lng);
-  if (!isFinite(lat) || !isFinite(lng)) return null;
-  // 0,0 is an unset field, not a location in the Gulf of Guinea. The scheduling
-  // geofence settled this on 2026-09-10; same rule, reused.
-  if (lat === 0 && lng === 0) return null;
-  return { lat, lng };
-};
+// WHERE A CLIENT LIVES HAS EXACTLY ONE READER AND IT IS NOT THIS MODULE.
+//
+// The caregiver side already solved this: there is no geocoding service
+// anywhere in this app. An admin right-clicks the front door in Google Maps and
+// pastes the coordinates into /scheduling → Locations, and that route writes
+// them to `client.address.lat/lng`. The geofence has read them since Session 7.
+//
+// The first version of this function wrote its OWN reader and looked in
+// `client.intake.address` first. That object exists on every enrolled client —
+// the enrollment wizard fills in line1/city/state/zip — and carries no
+// coordinates, so it won every time and this module reported "no coordinates"
+// for every patient in the practice while the real ones sat one field away.
+// Reproduced before the fix: the scheduling reader returned the coordinates and
+// this one returned null on the same client.
+//
+// So it delegates. One answer to "where does this client live", owned by the
+// module that owns the write. The dependency runs clinical → scheduling, which
+// is the safe direction: test/scheduling.test.js forbids the reverse.
+const coordsOf = (client) => sched.clientCoords(client);
 
 const addressLineOf = (client) => {
   const intake = (client && client.intake) || {};
