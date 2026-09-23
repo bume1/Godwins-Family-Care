@@ -200,3 +200,35 @@ test('every signed-in page carries the session guard and every login surface car
   const step = read('public/mfa-step.js');
   assert.match(step, /\/api\/auth\/mfa\/verify/); assert.match(step, /recoveryCodes/);
 });
+
+// ---- 6. the activity heartbeat (2026-09-23) ----
+// The server's idle clock (lastSeenAt) and the browser's activity clock
+// used to disagree: someone typing into a long form reset the BROWSER clock
+// on every keystroke while the SERVER's sat untouched, so they saw no
+// warning and were handed AUTH_IDLE — and an emptied form — on Save. The
+// heartbeat is what keeps the two in agreement.
+test('the heartbeat route does nothing but pass through authenticateToken — hitting it IS the session touch', () => {
+  assert.match(serverSrc, /app\.get\('\/api\/auth\/heartbeat',\s*authenticateToken,\s*\(req, res\) => \{\s*res\.json\(\{ ok: true \}\);\s*\}\);/);
+});
+test('the guard pings the heartbeat while active, throttled to once a TOUCH_THROTTLE_MS window, and never once it has warned', () => {
+  const guard = read('public/session-guard.js');
+  // sendHeartbeat requires a stored token before it will fetch at all.
+  const sendFn = guard.slice(guard.indexOf('const sendHeartbeat'), guard.indexOf('};', guard.indexOf('const sendHeartbeat')));
+  assert.match(sendFn, /if \(!token\) return;/);
+  assert.match(sendFn, /fetch\('\/api\/auth\/heartbeat'/);
+  // The interval: the idle-signout branch returns, the warning branch
+  // RETURNS (so nothing below it runs while warned), and only after both
+  // does the heartbeat call sit — structurally unreachable once warned.
+  const loopStart = guard.indexOf('setInterval(() => {');
+  const loop = guard.slice(loopStart, guard.indexOf('}, 5000);', loopStart));
+  const warnIdx = loop.indexOf('showWarning(');
+  const heartbeatIdx = loop.indexOf('sendHeartbeat()');
+  assert.ok(warnIdx > -1 && heartbeatIdx > -1 && heartbeatIdx > warnIdx, 'the heartbeat call must sit AFTER the warning branch, so a return above it makes it unreachable while warned');
+  assert.match(loop.slice(warnIdx, heartbeatIdx), /return;/, 'the warning branch must return before falling through to the heartbeat');
+  assert.match(loop, /Date\.now\(\) - lastHeartbeat >= HEARTBEAT_MS/);
+  assert.match(guard, /const HEARTBEAT_MS = 60 \* 1000/, 'must match the server\'s own touch throttle, not an invented interval');
+});
+test('clicking "Stay signed in" also sends a heartbeat immediately, not just on the next 5-second tick', () => {
+  const guard = read('public/session-guard.js');
+  assert.match(guard, /btn\.addEventListener\('click', \(\) => \{ touch\(\); sendHeartbeat\(\); \}\);/);
+});
