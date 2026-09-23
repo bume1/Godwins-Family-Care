@@ -1434,7 +1434,43 @@ const resolveEncounterFacility = ({ patientFacilityId, telehealthFacilityId, app
 //
 // billing_facility is deliberately absent: addBilling() has no such parameter
 // and the billing table no such column. It lives on form_encounter (Scope D).
-const buildChargePayloads = (record, { providerId } = {}) => {
+//
+// TWO KEYS WERE WRONG HERE AND BOTH FAILED SILENTLY (found 2026-09-23, fixed
+// with the encounter type). This function read `svc.modifier` and
+// `svc.linkedDiagnoses`; `buildEncounterServices` stores `modifiers` (an
+// array) and `dxLinks`. So EVERY modifier a clinician entered was dropped from
+// the charge — the field is on the form, validated, stored, and never reached
+// a claim — and the per-service diagnosis pointers NEVER fired, so every
+// service was billed against every encounter diagnosis. The second is the
+// worse one: a visit coded for diabetes and a separate service coded for
+// hypertension both went out pointing at both, which is a medical-necessity
+// misstatement. Same key-mismatch class that cost Phase 6B three acceptance
+// runs, and it returned 201 and looked right in Billing Manager either way.
+//
+// THE TELEHEALTH MODIFIER IS DERIVED, NOT TYPED. A telehealth encounter type
+// bills at POS 10 and carries modifier 95 (synchronous audio-video). It is
+// added from the encounter type for the same reason the POS is: a clinician
+// who forgets it produces a claim that reads as an in-person visit. GQ and 93
+// are deliberately NOT derived — the app cannot observe whether a visit was
+// store-and-forward or audio-only, and asserting audio-only about a video
+// visit is a false claim, so those stay a clinician's own entry.
+const TELEHEALTH_MODIFIER = '95';
+const modifiersForCharge = (svc, encounterType) => {
+  const own = Array.isArray(svc && svc.modifiers) ? svc.modifiers : [];
+  const t = encounterTypeByKey(encounterType);
+  const derived = t && t.telehealth ? [TELEHEALTH_MODIFIER] : [];
+  // The clinician's own entry first: modifier ORDER is meaningful on a claim
+  // line, and a pricing modifier they put first must stay first.
+  const all = [];
+  for (const m of [...own, ...derived]) {
+    const v = String(m || '').trim().toUpperCase();
+    if (/^[A-Z0-9]{2}$/.test(v) && !all.includes(v)) all.push(v);
+  }
+  // X12 carries at most four modifiers on a line; OpenEMR stores them as one
+  // colon-joined string, the same shape its own Fee Sheet writes.
+  return all.slice(0, 4).join(':');
+};
+const buildChargePayloads = (record, { providerId, encounterType } = {}) => {
   const diagnoses = (record && record.diagnoses) || [];
   const services = (record && record.services) || [];
   const dxPointers = diagnoses.map(d => ({ code_type: 'ICD10', code: d.code }));
@@ -1443,12 +1479,14 @@ const buildChargePayloads = (record, { providerId } = {}) => {
     code: svc.code,                       // NEVER a diagnosis code
     code_text: String(svc.description || svc.label || '').slice(0, 255),
     units: svc.units && svc.units > 0 ? svc.units : 1,
-    modifier: svc.modifier || '',
+    modifier: modifiersForCharge(svc, encounterType),
     provider_id: providerId != null ? Number(providerId) : undefined,
-    // Link only the diagnoses this service was coded against, when the
-    // clinician linked them; otherwise every encounter diagnosis.
-    diagnoses: (Array.isArray(svc.linkedDiagnoses) && svc.linkedDiagnoses.length
-      ? svc.linkedDiagnoses.map(c => ({ code_type: 'ICD10', code: c }))
+    // Link only the diagnoses this service was coded against. `dxLinks` is
+    // what buildEncounterServices stores and it is never empty — it refuses a
+    // service with no link — so the fallback is for a record written before
+    // that rule, not a routine path.
+    diagnoses: (Array.isArray(svc.dxLinks) && svc.dxLinks.length
+      ? svc.dxLinks.map(c => ({ code_type: 'ICD10', code: c }))
       : dxPointers),
     authorized: 1
   }));
@@ -2242,6 +2280,7 @@ module.exports = {
   applyCoding,
   SIGN_BLOCKER_CODES,
   checkSignReadiness,
+  TELEHEALTH_MODIFIER, modifiersForCharge,
   ATTESTATION_TEXT,
   buildAttestation,
   isEncounterClosed,

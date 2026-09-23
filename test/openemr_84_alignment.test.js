@@ -143,11 +143,74 @@ test('buildChargePayloads bills the service code, never a diagnosis', () => {
   }
 });
 
+// RESTATED 2026-09-23, not loosened. This test used to build its service with
+// `linkedDiagnoses` — a key NOTHING in the app has ever produced, because
+// buildEncounterServices stores `dxLinks`. So it passed against a branch
+// production never reached, while in production every service was silently
+// billed against EVERY encounter diagnosis. The fixture now comes out of
+// applyCoding, which is what the routes call, so it cannot drift from the
+// shape the app actually stores: write the assertion the way the caller calls
+// it, or you are testing a different function.
 test('a service linked to specific diagnoses bills only those', () => {
-  const rec = { ...CHARGE_REC, services: [{ code: '99348', codeType: 'CPT4', linkedDiagnoses: ['I10'] }] };
+  const rec = R.applyCoding(
+    { clientId: 'c', encounterUuid: 'e', diagnoses: [], services: [] },
+    { diagnoses: [{ code: 'E11.9', description: 'T2DM', primary: true }, { code: 'I10', description: 'HTN' }],
+      services: [{ code: '99348', units: 1, dxLinks: ['I10'] }] },
+    { id: 'u', name: 'FNP' }, '1234567893'
+  ).record;
+  assert.deepEqual(rec.services[0].dxLinks, ['I10'], 'precondition: the record stores the link the app actually writes');
   const [line] = R.buildChargePayloads(rec, { providerId: 5 });
-  assert.deepEqual(line.diagnoses.map(d => d.code), ['I10']);
+  assert.deepEqual(line.diagnoses.map(d => d.code), ['I10'],
+    'a claim that points a service at a diagnosis it was not coded against is a medical-necessity misstatement');
   assert.equal(line.code, '99348');
+});
+
+// The other half of the same defect: `svc.modifier` was read where `modifiers`
+// is stored, so every modifier a clinician entered was dropped from the claim.
+test('the modifiers a clinician entered reach the charge, and telehealth adds 95 by itself', () => {
+  const coded = (mods) => R.applyCoding(
+    { clientId: 'c', encounterUuid: 'e', diagnoses: [], services: [] },
+    { diagnoses: [{ code: 'E11.9', description: 'T2DM', primary: true }],
+      services: [{ code: '99348', units: 1, dxLinks: ['E11.9'], modifiers: mods }] },
+    { id: 'u', name: 'FNP' }, '1234567893'
+  ).record;
+  const rec = coded(['25']);
+  assert.deepEqual(rec.services[0].modifiers, ['25'], 'precondition: the record stores it');
+  assert.equal(R.buildChargePayloads(rec, { providerId: 5 })[0].modifier, '25');
+
+  // Derived from the encounter type, for the same reason the POS is: a
+  // clinician who forgets it produces a claim reading as an in-person visit.
+  assert.equal(R.buildChargePayloads(rec, { providerId: 5, encounterType: 'telehealth' })[0].modifier, '25:95');
+  assert.equal(R.buildChargePayloads(rec, { providerId: 5, encounterType: 'home_primary_care' })[0].modifier, '25');
+  assert.equal(R.buildChargePayloads(rec, { providerId: 5, encounterType: null })[0].modifier, '25');
+  // Already entered by hand: added once, not twice.
+  assert.equal(R.buildChargePayloads(coded(['95']), { providerId: 5, encounterType: 'telehealth' })[0].modifier, '95');
+  // The clinician's own entry keeps its place — modifier ORDER is meaningful
+  // on a claim line, and a pricing modifier they put first must stay first.
+  assert.equal(R.buildChargePayloads(coded(['25', '59']), { providerId: 5, encounterType: 'telehealth' })[0].modifier, '25:59:95');
+  // X12 carries at most four on a line.
+  assert.equal(R.buildChargePayloads(coded(['25', '59', 'GT', 'KX']), { providerId: 5, encounterType: 'telehealth' })[0].modifier.split(':').length, 4);
+});
+
+test('every charge call site passes the encounter type, so the telehealth modifier reaches the claim', () => {
+  // Deriving the modifier is worth nothing if a call site does not hand over
+  // the type — the charge would post, look right, and read as an in-person
+  // visit. Both sites: the shared post at sign/co-sign, and the re-post.
+  const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+  const calls = server.match(/buildChargePayloads\([^)]*\)/g) || [];
+  assert.ok(calls.length >= 2, 'expected the sign/co-sign post and the re-post');
+  for (const call of calls) {
+    assert.match(call, /encounterType:/, `charge call site must pass the encounter type: ${call}`);
+  }
+});
+
+test('the charge builder reads the keys the record actually carries', () => {
+  // Both defects above were one wrong key each, and both returned 201 and
+  // looked right in Billing Manager. Neither key may come back.
+  const src = fs.readFileSync(path.join(root, 'clinicalRepository.js'), 'utf8');
+  const fn = src.slice(src.indexOf('const buildChargePayloads'), src.indexOf('const ORDER_STATUS_TO_EMR'));
+  assert.doesNotMatch(fn, /svc\.modifier\b(?!s)/, 'the charge builder must read `modifiers`, the key the record stores');
+  assert.doesNotMatch(fn, /svc\.linkedDiagnoses/, 'the charge builder must read `dxLinks`, the key the record stores');
 });
 
 test('billing_facility is never on a charge payload', () => {

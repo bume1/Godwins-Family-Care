@@ -9665,7 +9665,10 @@ const postEncounterCharges = async ({ emr, client, encounterUuid, record, warnin
     record.chargeError = 'NO_OPENEMR_PROVIDER_ID';
     return record;
   }
-  const payloads = clinicalRepo.buildChargePayloads(record, { providerId });
+  // The encounter type rides onto the charge: a telehealth visit carries
+  // modifier 95, derived, never typed. Read off the stamp on the record, the
+  // same value the signature checked against the POS.
+  const payloads = clinicalRepo.buildChargePayloads(record, { providerId, encounterType: record.encounterType });
   const posted = [];
   try {
     for (const payload of payloads) {
@@ -12252,7 +12255,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/charges/repost', au
     const providerId = (ctx.record.renderingProvider && ctx.record.renderingProvider.openEmrProviderId) || ctx.actor.openEmrProviderId || null;
     if (!providerId) return res.status(409).json({ error: 'No OpenEMR provider id on file for the signing clinician. An admin sets it on the user record, then re-post.', code: 'NO_OPENEMR_PROVIDER_ID' });
     const alreadyPosted = new Set((ctx.record.postedCharges || []).map(c => `${c.codeType}:${c.code}`));
-    const payloads = clinicalRepo.buildChargePayloads(ctx.record, { providerId })
+    const payloads = clinicalRepo.buildChargePayloads(ctx.record, { providerId, encounterType: ctx.record.encounterType })
       .filter(p => !alreadyPosted.has(`${p.code_type}:${p.code}`));
     if (!payloads.length) return res.json({ message: 'Every charge line for this encounter is already posted', posted: [], record: ctx.record });
     const posted = [...(ctx.record.postedCharges || [])];
