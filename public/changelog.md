@@ -14,6 +14,7 @@
 - Email the caregiver when a past shift is corrected, and fix the aliased before/after
 
 #### Changes
+- Open the workspace on the day, not on a patient list
 - Put a patient banner above every chart tab, and collapse every form grid
 - Move the clinical enrollment sequence off the clinician's chart, onto admin enrollment
 - Say when a sign-out was a browser with no token, not a bad session

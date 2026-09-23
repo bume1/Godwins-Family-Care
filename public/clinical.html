@@ -152,6 +152,11 @@
       stampVisit: (eid, body) => authedFetch(`/api/clinical/visits/${eid}/timing`, {
         method: 'POST', body: JSON.stringify(body)
       }),
+      workQueues: () => authedFetch('/api/clinical/work-queues'),
+      analytics: () => authedFetch('/api/clinical/analytics'),
+      patientOrders: (id) => authedFetch(`/api/clinical/patients/${id}/orders`),
+      patientResults: (id) => authedFetch(`/api/clinical/patients/${id}/results`),
+      timeline: (id, kinds) => authedFetch(`/api/clinical/patients/${id}/timeline${kinds && kinds.length ? `?kinds=${encodeURIComponent(kinds.join(','))}` : ''}`),
       preVisit: (id, eid) => authedFetch(`/api/clinical/patients/${id}/pre-visit${eid ? `?eid=${encodeURIComponent(eid)}` : ''}`),
       // PROPOSES an order. It never applies one — accepting rebooks through the
       // existing appointment routes so the patient is told.
@@ -230,7 +235,7 @@
     // chain is what collided when 4.9 and 4.10 both added a view, and a fifth
     // would collide again.
     const VIEW_TITLES = {
-      myday: 'My Day', charts: 'Patient Chart', schedule: 'Schedule', queue: 'Coding Queue',
+      myday: 'My Day', queues: 'Work Queues', analytics: 'Analytics', charts: 'Patient Chart', schedule: 'Schedule', queue: 'Coding Queue',
       inbox: 'Inbox', results: 'Results Inbox', overdue: 'Overdue Orders'
     };
 
@@ -873,6 +878,424 @@
       );
     };
 
+    // ── Session 4.12 Scope D — CHART NAVIGATION: PLACES, NOT ACTIONS ───────
+    // Every tab is somewhere in the record. No workflow is a tab: the H&P opens
+    // as a visit from the banner, and med reconciliation is a step inside the
+    // encounter and a section under MEDICATIONS rather than a sibling of it.
+    //
+    // ChartSection and chartRow live at MODULE scope so every place can render
+    // the same way. A component declared inside another is a new function
+    // identity on every render, which remounts it and loses the caret — the
+    // trap test/react_input_focus.test.js exists to catch.
+    const ChartSection = ({ title, data, render, icon, linked, children }) => (
+      <div className="card mb-4">
+        <div className="card-h"><h2><i className={`ti ${icon} mr-1 text-accent`} />{title}</h2>
+          {/* A pending org-level read grant is a setup step, not a fault —
+              badge it differently so a real failure still stands out. */}
+          {data && !data.ok && data.permissionPending && <span className="chip bg-amber-50 text-amber-800">Not enabled yet</span>}
+          {data && !data.ok && !data.permissionPending && <span className="chip bg-red-50 text-red-700">EMR read failed</span>}
+        </div>
+        <div className="p-4 text-sm">
+          {children}
+          {!linked && <p className="text-stone-400 text-xs">Link this patient to OpenEMR to read live data.</p>}
+          {linked && data && data.ok && data.rows.length === 0 && <p className="text-stone-400 text-xs">Nothing on file in OpenEMR.</p>}
+          {linked && data && data.ok && data.rows.map((r, i) => render(r, i))}
+          {linked && data && !data.ok && data.permissionPending && (
+            <p className="text-amber-800 text-xs">
+              OpenEMR has not granted this app org-level read access to {title.toLowerCase()} yet.
+              An administrator enables it under Administration → Access → the <code className="font-mono">gfc-app-api</code> group.
+              Nothing is wrong with this patient's record.
+            </p>
+          )}
+          {linked && data && !data.ok && !data.permissionPending && <p className="text-red-600 text-xs">{data.error}</p>}
+        </div>
+      </div>
+    );
+
+    const chartRow = (main, sub, right, key) => (
+      <div key={key} className="flex items-start justify-between py-1.5 border-b border-stone-100 last:border-0 gap-2">
+        <div className="min-w-0"><div className="font-semibold text-[13px]">{main}</div>{sub && <div className="text-xs text-stone-500">{sub}</div>}</div>
+        {right && <span className="chip bg-primary-50 text-primary shrink-0">{right}</span>}
+      </div>
+    );
+
+    // An empty place says so in a sentence. A blank panel and a place with
+    // nothing in it are indistinguishable, and only one of them is correct —
+    // the rule the clinical inbox set and Scope I3 restates for navigation.
+    const EmptyPlace = ({ children }) => (
+      <div className="card p-6 text-center text-sm text-stone-500">{children}</div>
+    );
+
+    const ProblemsTab = ({ chart }) => {
+      const emr = (chart && chart.emr) || {};
+      return <ChartSection title="Problem list" icon="ti-list-details" data={emr.problems} linked={chart && chart.linked}
+        render={(r, i) => chartRow(r.title, [r.code, r.onset && `since ${fmtDate(r.onset)}`].filter(Boolean).join(' · '), r.status, i)} />;
+    };
+
+    const AllergiesTab = ({ chart }) => {
+      const emr = (chart && chart.emr) || {};
+      return (
+        <div>
+          {/* The same strip the banner carries, and deliberately the same
+              component: two renderings of "what is this patient allergic to"
+              is how the two start disagreeing. */}
+          <div className="mb-4"><AllergyStrip allergies={chart && chart.banner && chart.banner.allergies} /></div>
+          <ChartSection title="Allergies" icon="ti-alert-triangle" data={emr.allergies} linked={chart && chart.linked}
+            render={(r, i) => chartRow(r.title, r.criticality && `criticality: ${r.criticality}`, r.status, i)} />
+        </div>
+      );
+    };
+
+    // D4: med reconciliation is a SECTION under MEDICATIONS, not a tab beside
+    // it. Reconciling is something you do to the medication list; it is not a
+    // different place in the record.
+    const MedicationsTab = ({ chart, patient }) => {
+      const emr = (chart && chart.emr) || {};
+      return (
+        <div>
+          <ChartSection title="Medications" icon="ti-pill" data={emr.medications} linked={chart && chart.linked}
+            render={(r, i) => chartRow(r.title, r.instructions || (r.authoredOn && fmtDate(r.authoredOn)), r.status, i)} />
+          <MedRecTab patient={patient} />
+        </div>
+      );
+    };
+
+    const DocumentsTab = ({ chart, patient, onChartChanged }) => (
+      <ChartDocuments docs={(chart && chart.chartDocuments) || []} clientId={patient && patient.id} onRefresh={onChartChanged} />
+    );
+
+    // ---- Orders, Referrals, Imaging and Results, wired to what 4.10 built ---
+    // Not placeholders. 4.10 shipped the orders, the requisitions, the referral
+    // lifecycle and the results path with per-patient reads and no per-patient
+    // PLACE to read them in.
+    const useChartOrders = (clientId) => {
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState('');
+      const load = useCallback(() => {
+        if (!clientId) return;
+        api.patientOrders(clientId).then(r => { setData(r); setErr(''); }).catch(e => setErr(e.message));
+      }, [clientId]);
+      useEffect(() => { load(); }, [load]);
+      return { data, err, reload: load };
+    };
+
+    const OrderList = ({ rows, empty, err }) => {
+      if (err) return <div className="card p-4 text-sm text-red-600">{err}</div>;
+      if (!rows) return <div className="card p-4 text-sm text-stone-500">Loading…</div>;
+      if (!rows.length) return <EmptyPlace>{empty}</EmptyPlace>;
+      return (
+        <div className="card">
+          <div className="p-4">
+            {rows.map(o => (
+              <div key={o.id} className="py-2 border-b border-stone-100 last:border-0">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className="font-semibold text-[13px]">
+                    {o.orderType === 'referral' ? (o.specialty || 'Referral')
+                      : o.orderType === 'dme' ? (o.itemDescription || 'DME')
+                        : ((o.tests && o.tests.join(', ')) || o.orderType)}
+                  </span>
+                  <span className="chip bg-primary-50 text-primary">{String(o.status || '').toUpperCase()}</span>
+                </div>
+                <div className="text-[11.5px] text-stone-500">
+                  {[o.orderReference, o.priority, o.createdAt && fmtDate(o.createdAt)].filter(Boolean).join(' · ')}
+                </div>
+                {Array.isArray(o.sends) && o.sends.length > 0 && (
+                  <div className="text-[11.5px] text-stone-500">
+                    Last sent {fmtTs(o.sends[o.sends.length - 1].at)} to {o.sends[o.sends.length - 1].recipient || 'recipient not recorded'}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    };
+
+    const OrdersTab = ({ patient }) => {
+      const { data, err } = useChartOrders(patient && patient.id);
+      // Referrals and DME have their own places. This is the diagnostic half.
+      const rows = data ? (data.orders || []).filter(o => !['referral'].includes(o.orderType)) : null;
+      return <OrderList rows={rows} err={err}
+        empty="No orders on this chart yet. Orders are placed from inside an encounter." />;
+    };
+
+    const ReferralsTab = ({ patient }) => {
+      const { data, err } = useChartOrders(patient && patient.id);
+      const rows = data ? (data.orders || []).filter(o => o.orderType === 'referral') : null;
+      return <OrderList rows={rows} err={err}
+        empty="No referrals on this chart yet. A referral is placed from inside an encounter." />;
+    };
+
+    // D3: IMAGING lists imaging orders AND the result documents attached to
+    // them, so a study and its report are read in one place rather than two.
+    const ImagingTab = ({ patient }) => {
+      const { data, err } = useChartOrders(patient && patient.id);
+      const [results, setResults] = useState(null);
+      useEffect(() => {
+        if (!patient || !patient.id) return;
+        let live = true;
+        api.patientResults(patient.id).then(r => { if (live) setResults(r.results || []); }).catch(() => { if (live) setResults([]); });
+        return () => { live = false; };
+      }, [patient && patient.id]);
+      const rows = data ? (data.orders || []).filter(o => o.orderType === 'imaging') : null;
+      if (err) return <div className="card p-4 text-sm text-red-600">{err}</div>;
+      if (!rows) return <div className="card p-4 text-sm text-stone-500">Loading…</div>;
+      if (!rows.length) return <EmptyPlace>No imaging on this chart yet.</EmptyPlace>;
+      return (
+        <div className="card"><div className="p-4">
+          {rows.map(o => {
+            const attached = (results || []).filter(r => String(r.orderId) === String(o.id));
+            return (
+              <div key={o.id} className="py-2 border-b border-stone-100 last:border-0">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className="font-semibold text-[13px]">{(o.tests && o.tests.join(', ')) || 'Imaging'}</span>
+                  <span className="chip bg-primary-50 text-primary">{String(o.status || '').toUpperCase()}</span>
+                </div>
+                <div className="text-[11.5px] text-stone-500">{[o.orderReference, o.createdAt && fmtDate(o.createdAt)].filter(Boolean).join(' · ')}</div>
+                {attached.length === 0
+                  ? <div className="text-[11.5px] text-stone-400 mt-0.5">No report attached yet.</div>
+                  : attached.map(r => (
+                    <div key={r.id} className="text-[11.5px] text-stone-700 mt-0.5">
+                      <i className="ti ti-report-medical mr-1" />{r.label || r.documentName || 'Report'}
+                      {r.interpretation ? ` — ${r.interpretation}` : ''}
+                    </div>
+                  ))}
+              </div>
+            );
+          })}
+        </div></div>
+      );
+    };
+
+    const ResultsTab = ({ patient }) => {
+      const [rows, setRows] = useState(null);
+      const [err, setErr] = useState('');
+      useEffect(() => {
+        if (!patient || !patient.id) return;
+        let live = true;
+        api.patientResults(patient.id).then(r => { if (live) setRows(r.results || []); })
+          .catch(e => { if (live) setErr(e.message); });
+        return () => { live = false; };
+      }, [patient && patient.id]);
+      if (err) return <div className="card p-4 text-sm text-red-600">{err}</div>;
+      if (!rows) return <div className="card p-4 text-sm text-stone-500">Loading…</div>;
+      if (!rows.length) return <EmptyPlace>No results on this chart yet.</EmptyPlace>;
+      return (
+        <div className="card"><div className="p-4">
+          {rows.map(r => (
+            <div key={r.id} className="py-2 border-b border-stone-100 last:border-0">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span className="font-semibold text-[13px]">{r.label || r.documentName || 'Result'}</span>
+                <span className={`chip ${r.interpretation === 'critical' ? 'bg-red-100 text-red-800'
+                  : r.interpretation === 'abnormal' ? 'bg-amber-100 text-amber-800' : 'bg-stone-100 text-stone-600'}`}>
+                  {String(r.interpretation || 'unread').toUpperCase()}
+                </span>
+              </div>
+              <div className="text-[11.5px] text-stone-500">
+                {[r.receivedAt && fmtDate(r.receivedAt),
+                  r.order && r.order.reference,
+                  r.acknowledgedAt ? `acknowledged ${fmtDate(r.acknowledgedAt)}` : 'not yet acknowledged'
+                ].filter(Boolean).join(' · ')}
+              </div>
+            </div>
+          ))}
+        </div></div>
+      );
+    };
+
+    // ---- D5 TIMELINE -------------------------------------------------------
+    const TIMELINE_LABELS = {
+      visit: 'Visits', message: 'Messages', medication: 'Medications', order: 'Orders',
+      result: 'Results', referral: 'Referrals', document: 'Documents', hospitalization: 'Hospitalizations'
+    };
+
+    const TimelineTab = ({ patient }) => {
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState('');
+      const [filter, setFilter] = useState([]);
+      useEffect(() => {
+        if (!patient || !patient.id) return;
+        let live = true;
+        api.timeline(patient.id, filter).then(r => { if (live) { setData(r); setErr(''); } })
+          .catch(e => { if (live) setErr(e.message); });
+        return () => { live = false; };
+      }, [patient && patient.id, filter.join(',')]);
+      const toggle = (k) => setFilter(f => f.includes(k) ? f.filter(x => x !== k) : [...f, k]);
+      if (err) return <div className="card p-4 text-sm text-red-600">{err}</div>;
+      return (
+        <div className="card">
+          <div className="card-h"><h2><i className="ti ti-timeline mr-1 text-accent" />Timeline</h2></div>
+          <div className="px-4 pt-3 flex gap-1.5 flex-wrap">
+            {(data ? data.kinds : Object.keys(TIMELINE_LABELS)).map(k => (
+              <button key={k}
+                className={`chip border ${filter.includes(k) ? 'bg-primary text-white border-primary' : 'bg-white text-stone-600 border-stone-200'}`}
+                onClick={() => toggle(k)}>{TIMELINE_LABELS[k] || k}</button>
+            ))}
+            {filter.length > 0 && (
+              <button className="chip bg-stone-100 text-stone-600" onClick={() => setFilter([])}>Clear</button>
+            )}
+          </div>
+          <div className="p-4">
+            {!data && <p className="text-sm text-stone-500">Loading…</p>}
+            {data && data.rows.length === 0 && (
+              <p className="text-sm text-stone-500">
+                {filter.length ? 'Nothing of that kind on this chart.' : 'Nothing on this chart yet.'}
+              </p>
+            )}
+            {data && data.rows.map((r, i) => (
+              <div key={`${r.kind}-${r.id || i}`} className="flex gap-3 py-2 border-b border-stone-100 last:border-0">
+                <div className="w-[84px] shrink-0 text-[12px] text-stone-500 pt-0.5">{r.date}</div>
+                <div className="w-5 shrink-0 text-accent pt-0.5"><i className={`ti ti-${r.icon}`} /></div>
+                <div className="min-w-0">
+                  <div className="text-[13px] font-semibold text-stone-800">{r.title}</div>
+                  {r.detail && <div className="text-[11.5px] text-stone-500">{r.detail}</div>}
+                </div>
+              </div>
+            ))}
+            {/* "Nothing here" and "four things could not be placed" are
+                different facts, and only one of them is a data gap. */}
+            {data && data.undated > 0 && (
+              <p className="text-[11.5px] text-amber-700 mt-2">
+                {data.undated} {data.undated === 1 ? 'item has' : 'items have'} no usable date and could not be placed on the thread.
+              </p>
+            )}
+            {data && data.emrNotice && <p className="text-[11.5px] text-amber-700 mt-2">{data.emrNotice}</p>}
+          </div>
+        </div>
+      );
+    };
+
+    // ── Session 4.12 Scope I — WORK QUEUES and ANALYTICS ──────────────────
+    // I2: the cross-patient destinations are work queues, not chart tabs.
+    // I3: a destination with nothing in it renders an empty state SAYING SO —
+    // it is never hidden, because a missing menu item is indistinguishable
+    // from a broken one.
+    const QueueCard = ({ title, icon, rows, empty, render }) => (
+      <div className="card mb-4">
+        <div className="card-h">
+          <h2><i className={`ti ${icon} mr-1 text-accent`} />{title}</h2>
+          {rows && <span className="chip bg-primary-50 text-primary">{rows.length}</span>}
+        </div>
+        <div className="p-4 text-sm">
+          {!rows && <p className="text-stone-500 text-xs">Loading…</p>}
+          {rows && rows.length === 0 && <p className="text-stone-500 text-[12.5px]">{empty}</p>}
+          {rows && rows.map(render)}
+        </div>
+      </div>
+    );
+
+    const WorkQueuesView = ({ onOpenChart, onOpenEncounter }) => {
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState('');
+      useEffect(() => {
+        let live = true;
+        api.workQueues().then(r => { if (live) { setData(r); setErr(''); } })
+          .catch(e => { if (live) setErr(e.message); });
+        return () => { live = false; };
+      }, []);
+      if (err) return <div className="p-4 lg:p-7"><div className="card p-4 text-sm text-red-600">{err}</div></div>;
+      const q = (data && data.queues) || {};
+      const line = (main, sub, onClick, key) => (
+        <div key={key} className="flex items-center justify-between gap-2 py-1.5 border-b border-stone-100 last:border-0">
+          <div className="min-w-0">
+            <div className="text-[13px] font-semibold truncate">{main}</div>
+            {sub && <div className="text-[11.5px] text-stone-500">{sub}</div>}
+          </div>
+          {onClick && <button className="btn ghost !py-0.5 !px-2 text-[11px] shrink-0" onClick={onClick}>Open</button>}
+        </div>
+      );
+      return (
+        <div className="p-4 lg:p-7 max-w-3xl">
+          <QueueCard title="Unsigned encounters" icon="ti-signature" rows={data ? q.unsignedEncounters : null}
+            empty="Every documented encounter is signed. Nothing is waiting here."
+            render={(r) => line(r.patientName || 'Unnamed patient',
+              [r.date, r.codingStatus].filter(Boolean).join(' · '),
+              () => onOpenEncounter(r.clientId, r.encounterUuid), r.encounterUuid)} />
+          <QueueCard title="Results to acknowledge" icon="ti-flask" rows={data ? q.unacknowledgedResults : null}
+            empty="No results are waiting to be acknowledged."
+            render={(r) => line(`${r.patientName || 'Unnamed patient'} — ${r.label}`,
+              [r.interpretation, r.receivedAt && fmtDate(r.receivedAt)].filter(Boolean).join(' · '),
+              () => onOpenChart(r.clientId), r.id)} />
+          <QueueCard title="Open referrals" icon="ti-share" rows={data ? q.openReferrals : null}
+            empty="No referrals are outstanding."
+            render={(r) => line(`${r.patientName || 'Unnamed patient'} — ${r.specialty || 'Referral'}`,
+              [r.status, r.orderReference, r.createdAt && fmtDate(r.createdAt)].filter(Boolean).join(' · '),
+              () => onOpenChart(r.clientId), r.id)} />
+          <QueueCard title="Overdue orders" icon="ti-clock-exclamation" rows={data ? q.overdueOrders : null}
+            empty="Nothing is overdue."
+            render={(r) => line(`${r.patientName || 'Unnamed patient'} — ${r.orderType || 'Order'}`,
+              [r.daysOverdue != null ? `${r.daysOverdue} days overdue` : null,
+                r.recipient, r.faxNumber].filter(Boolean).join(' · '),
+              () => onOpenChart(r.clientId), r.id)} />
+          {data && data.overdueThresholds && (
+            <p className="text-[11.5px] text-stone-400">
+              Overdue after {Object.entries(data.overdueThresholds).map(([k, v]) => `${k} ${v}d`).join(' · ')}.
+            </p>
+          )}
+        </div>
+      );
+    };
+
+    const Metric = ({ label, value, sub, unavailable, reason }) => (
+      <div className="card p-4">
+        <div className="lblu">{label}</div>
+        {unavailable
+          ? <div className="text-[12.5px] text-amber-700 mt-1">Not available — {String(reason || '').replace(/_/g, ' ')}</div>
+          : <div className="serif text-2xl text-primary font-semibold mt-0.5">{value == null ? '—' : value}</div>}
+        {!unavailable && sub && <div className="text-[11.5px] text-stone-500">{sub}</div>}
+      </div>
+    );
+
+    const AnalyticsView = () => {
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState('');
+      useEffect(() => {
+        let live = true;
+        api.analytics().then(r => { if (live) { setData(r); setErr(''); } })
+          .catch(e => { if (live) setErr(e.message); });
+        return () => { live = false; };
+      }, []);
+      if (err) return <div className="p-4 lg:p-7"><div className="card p-4 text-sm text-red-600">{err}</div></div>;
+      if (!data) return <div className="p-4 lg:p-7 text-sm text-stone-500">Loading…</div>;
+      const m = data.metrics;
+      const weeks = m.visitsPerWeek || [];
+      const peak = Math.max(1, ...weeks.map(w => w.total));
+      return (
+        <div className="p-4 lg:p-7 max-w-3xl">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-4">
+            <Metric label="Average visit length"
+              value={m.averageVisitMinutes.value == null ? null : `${m.averageVisitMinutes.value} min`}
+              sub={`from ${m.averageVisitMinutes.sampleSize} finished ${m.averageVisitMinutes.sampleSize === 1 ? 'visit' : 'visits'}`} />
+            <Metric label="Unsigned notes" value={m.unsignedNotesAgeing.count}
+              sub={m.unsignedNotesAgeing.oldestDays != null ? `oldest ${m.unsignedNotesAgeing.oldestDays} days` : null} />
+            <Metric label="Open orders" value={m.openOrdersAgeing.count}
+              sub={m.openOrdersAgeing.oldestDays != null ? `oldest ${m.openOrdersAgeing.oldestDays} days` : null} />
+            {/* Two metrics this app cannot observe yet. Reported as unavailable
+                with the reason rather than as a zero somebody would read as
+                "nobody drove anywhere" or "no screenings are done". */}
+            <Metric label="Miles driven" unavailable={m.milesDriven.unavailable} reason={m.milesDriven.reason} />
+            <Metric label="Screening completion"
+              unavailable={m.screeningCompletionRate.unavailable} reason={m.screeningCompletionRate.reason} />
+          </div>
+          <div className="card">
+            <div className="card-h"><h2><i className="ti ti-chart-bar mr-1 text-accent" />Visits per week</h2></div>
+            <div className="p-4">
+              {weeks.length === 0 && <p className="text-[12.5px] text-stone-500">No documented visits in the last eight weeks.</p>}
+              {weeks.map(w => (
+                <div key={w.week} className="flex items-center gap-2 py-1">
+                  <span className="text-[11.5px] text-stone-500 w-[84px] shrink-0">{w.week}</span>
+                  <div className="flex-1 bg-stone-100 rounded h-3 overflow-hidden">
+                    <div className="bg-accent h-3" style={{ width: `${Math.round((w.total / peak) * 100)}%` }} />
+                  </div>
+                  <span className="text-[11.5px] text-stone-700 w-6 text-right">{w.total}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      );
+    };
+
     // ── Session 4.12 — MY DAY (Scope A) ────────────────────────────────────
     // The default landing screen. A house-call clinician does not start the day
     // by looking up a patient; they start it by looking at the day. Every row
@@ -1196,36 +1619,7 @@
       const [existingId, setExistingId] = useState('');
       const d = chart && chart.demographics;
       if (!chart) return <p className="text-sm text-stone-500 p-4">Loading chart…</p>;
-      const Sec = ({ title, data, render, icon }) => (
-        <div className="card mb-4">
-          <div className="card-h"><h2><i className={`ti ${icon} mr-1 text-accent`} />{title}</h2>
-            {/* A pending org-level read grant is a setup step, not a fault —
-                badge it differently so a real failure still stands out. */}
-            {data && !data.ok && data.permissionPending && <span className="chip bg-amber-50 text-amber-800">Not enabled yet</span>}
-            {data && !data.ok && !data.permissionPending && <span className="chip bg-red-50 text-red-700">EMR read failed</span>}
-          </div>
-          <div className="p-4 text-sm">
-            {!chart.linked && <p className="text-stone-400 text-xs">Link this patient to OpenEMR to read live data.</p>}
-            {chart.linked && data && data.ok && data.rows.length === 0 && <p className="text-stone-400 text-xs">Nothing on file in OpenEMR.</p>}
-            {chart.linked && data && data.ok && data.rows.map((r, i) => render(r, i))}
-            {chart.linked && data && !data.ok && data.permissionPending && (
-              <p className="text-amber-800 text-xs">
-                OpenEMR has not granted this app org-level read access to {title.toLowerCase()} yet.
-                An administrator enables it under Administration → Access → the <code className="font-mono">gfc-app-api</code> group.
-                Nothing is wrong with this patient's record.
-              </p>
-            )}
-            {chart.linked && data && !data.ok && !data.permissionPending && <p className="text-red-600 text-xs">{data.error}</p>}
-          </div>
-        </div>
-      );
       const emr = chart.emr || {};
-      const row = (main, sub, right) => (
-        <div className="flex items-start justify-between py-1.5 border-b border-stone-100 last:border-0">
-          <div><div className="font-semibold text-[13px]">{main}</div>{sub && <div className="text-xs text-stone-500">{sub}</div>}</div>
-          {right && <span className="chip bg-primary-50 text-primary">{right}</span>}
-        </div>
-      );
       return (
         <div>
           {!chart.linked && !canWrite && (
@@ -1306,28 +1700,22 @@
             </div>
           )}
           {chart.linked && <FacilityCard patient={patient} isAdmin={isAdmin} onChanged={onChartChanged} />}
+          {/* Session 4.12 Scope D — OVERVIEW is the at-a-glance. The problem
+              list, medications, allergies, documents and the timeline each have
+              their OWN place on the tab bar now, so nothing here is the
+              authoritative copy and nothing is rendered twice. */}
           <div className="grid md:grid-cols-2 gap-0 md:gap-4">
             <div>
-              <Sec title="Problem list" icon="ti-list-details" data={emr.problems}
-                render={(r, i) => <div key={i}>{row(r.title, [r.code, r.onset && `since ${fmtDate(r.onset)}`].filter(Boolean).join(' · '), r.status)}</div>} />
-              <Sec title="Medications" icon="ti-pill" data={emr.medications}
-                render={(r, i) => <div key={i}>{row(r.title, r.instructions || (r.authoredOn && fmtDate(r.authoredOn)), r.status)}</div>} />
-              <Sec title="Allergies" icon="ti-alert-triangle" data={emr.allergies}
-                render={(r, i) => <div key={i}>{row(r.title, r.criticality && `criticality: ${r.criticality}`, r.status)}</div>} />
+              <ChartSection title="Problem list" icon="ti-list-details" data={emr.problems} linked={chart.linked}
+                render={(r, i) => chartRow(r.title, [r.code, r.onset && `since ${fmtDate(r.onset)}`].filter(Boolean).join(' · '), r.status, i)} />
+              <ChartSection title="Medications" icon="ti-pill" data={emr.medications} linked={chart.linked}
+                render={(r, i) => chartRow(r.title, r.instructions || (r.authoredOn && fmtDate(r.authoredOn)), r.status, i)} />
             </div>
             <div>
-              <Sec title="Encounters" icon="ti-stethoscope" data={emr.encounters}
-                render={(r, i) => <div key={i}>{row(r.type, [r.provider, r.start && fmtTs(r.start)].filter(Boolean).join(' · '), r.status)}</div>} />
-              <Sec title="Vitals (recent)" icon="ti-heart-rate-monitor" data={emr.vitals}
-                render={(r, i) => <div key={i}>{row(r.name, r.at && fmtTs(r.at), r.value)}</div>} />
-              {/* Documents is NOT a `Sec` fed by emr.documents any more. On this
-                  instance OpenEMR returns nothing for a chart's documents (FHIR
-                  total 0, no list route, read-by-id 500s), so a section wired to
-                  that read shows an empty chart for a patient whose record is
-                  full. This list is assembled server-side from what the app
-                  holds, merged with whatever the EMR does return, and each row
-                  says where it can be read from. */}
-              <ChartDocuments docs={chart.chartDocuments || []} clientId={patient && patient.id} onRefresh={onChartChanged} />
+              <ChartSection title="Encounters" icon="ti-stethoscope" data={emr.encounters} linked={chart.linked}
+                render={(r, i) => chartRow(r.type, [r.provider, r.start && fmtTs(r.start)].filter(Boolean).join(' · '), r.status, i)} />
+              <ChartSection title="Vitals (recent)" icon="ti-heart-rate-monitor" data={emr.vitals} linked={chart.linked}
+                render={(r, i) => chartRow(r.name, r.at && fmtTs(r.at), r.value, i)} />
             </div>
           </div>
         </div>
@@ -3422,10 +3810,28 @@
         clinicalRole: (emrStatus && emrStatus.access && emrStatus.access.clinicalRole) || null,
         clinicalRoleLabel: (emrStatus && emrStatus.access && emrStatus.access.clinicalRoleLabel) || null
       };
+      // Session 4.12 Scope D — every one of these is a PLACE in the record.
+      // No workflow is a tab: the H&P opens as a visit from the banner's Start
+      // visit action, and med reconciliation is a section under MEDICATIONS
+      // rather than a sibling of it. Enrollment left for Admin in PR #116.
+      //
+      // Appointments is kept as a place alongside the brief's twelve because it
+      // is the per-patient calendar — removing a working surface is not what a
+      // reorganisation is for.
       const tabs = [
-        ['summary', 'Chart'], ['appts', 'Appointments'], ['encounters', 'Encounters'],
-        ...(canWrite ? [['visit', 'Initial Visit (H&P)']] : []),
-        ['medrec', 'Med Rec'], ['careplan', 'Care Plan'],
+        ['summary', 'Overview'],
+        ['timeline', 'Timeline'],
+        ['encounters', 'Encounters'],
+        ['appts', 'Appointments'],
+        ['problems', 'Problems'],
+        ['medications', 'Medications'],
+        ['allergies', 'Allergies'],
+        ['orders', 'Orders'],
+        ['results', 'Results'],
+        ['imaging', 'Imaging'],
+        ['referrals', 'Referrals'],
+        ['documents', 'Documents'],
+        ['careplan', 'Care Plan'],
         ['messages', 'Messages']
       ];
       return (
@@ -3494,6 +3900,10 @@
                     onClick={() => { setView('results'); setListOpen(false); }}><i className="ti ti-flask mr-1" />Results</button>
                   <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'overdue' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
                     onClick={() => { setView('overdue'); setListOpen(false); }}><i className="ti ti-clock-exclamation mr-1" />Overdue</button>
+                  <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'queues' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
+                    onClick={() => { setView('queues'); setListOpen(false); }}><i className="ti ti-checkbox mr-1" />Tasks</button>
+                  <button className={`px-3 py-1.5 text-xs font-semibold ${view === 'analytics' ? 'bg-primary text-white' : 'bg-white text-primary'}`}
+                    onClick={() => { setView('analytics'); setListOpen(false); }}><i className="ti ti-chart-bar mr-1" />Analytics</button>
                 </div>
               </div>
               <div className="flex items-center gap-2">
@@ -3600,6 +4010,12 @@
             {view === 'myday' && (
               <MyDayView user={user} onOpenChart={(clientId) => openChartById(clientId)} />
             )}
+            {view === 'queues' && (
+              <WorkQueuesView
+                onOpenChart={(clientId) => openChartById(clientId)}
+                onOpenEncounter={(clientId, euuid) => openChartById(clientId, { tab: 'encounters', encounterUuid: euuid })} />
+            )}
+            {view === 'analytics' && <AnalyticsView />}
             {view === 'queue' && (
               <CodingQueueView onOpenEncounter={(clientId, euuid) => openChartById(clientId, { tab: 'encounters', encounterUuid: euuid })} />
             )}
@@ -3629,6 +4045,20 @@
                   visitDraft={chart ? chart.visitDraft : null}
                   onStartVisit={canWrite ? () => setTab('visit') : null}
                   onHomeVisitSaved={refreshChart} />
+                {/* The H&P is NOT a tab (Scope D1) — it opens as a visit from
+                    the banner. So when one is open nothing on the tab bar is
+                    highlighted, and a clinician needs to be told where they are
+                    and how to get back. */}
+                {tab === 'visit' && (
+                  <div className="bg-accent/20 border-b border-accent px-4 lg:px-7 py-2 flex items-center justify-between gap-2 flex-wrap">
+                    <span className="text-[12.5px] text-primary font-semibold">
+                      <i className="ti ti-writing mr-1" />Documenting a visit
+                    </span>
+                    <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" onClick={() => setTab('summary')}>
+                      <i className="ti ti-arrow-left" />Back to the chart
+                    </button>
+                  </div>
+                )}
                 <div className="bg-white border-b border-stone-200 px-4 lg:px-7">
                   <div className="flex overflow-x-auto -mb-px">
                     {tabs.map(([k, label]) => (
@@ -3644,7 +4074,15 @@
                     onEncounterCreated={(euuid) => { setEncTarget(euuid); setTab('encounters'); }} />}
                   {tab === 'encounters' && <EncountersTab patient={sel} chart={chart} initialEuuid={encTarget} onOpened={() => setEncTarget(null)} />}
                   {tab === 'visit' && (chart ? <HpTab patient={sel} chart={chart} appointmentEid={hpApptEid} onDone={() => { setHpApptEid(null); refreshChart(); loadPatients(); }} onGoToEncounter={(euuid) => { setEncTarget(euuid); setTab('encounters'); }} /> : <p className="text-sm text-stone-500">Loading…</p>)}
-                  {tab === 'medrec' && <MedRecTab patient={sel} />}
+                  {tab === 'timeline' && <TimelineTab patient={sel} />}
+                  {tab === 'problems' && <ProblemsTab chart={chart} />}
+                  {tab === 'medications' && <MedicationsTab chart={chart} patient={sel} />}
+                  {tab === 'allergies' && <AllergiesTab chart={chart} />}
+                  {tab === 'orders' && <OrdersTab patient={sel} />}
+                  {tab === 'results' && <ResultsTab patient={sel} />}
+                  {tab === 'imaging' && <ImagingTab patient={sel} />}
+                  {tab === 'referrals' && <ReferralsTab patient={sel} />}
+                  {tab === 'documents' && <DocumentsTab chart={chart} patient={sel} onChartChanged={() => { loadPatients(); refreshChart(); }} />}
                   {tab === 'careplan' && <CarePlanTab patient={sel} onSaved={loadPatients} />}
                   {tab === 'messages' && <MessagesTab patient={sel} />}
                 </div>

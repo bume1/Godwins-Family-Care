@@ -86,6 +86,9 @@ const caregiverRepo = require('./caregiverRepository');
 const caregiverRoutes = require('./routes/caregiver'); // caregiver app: visit log + escalation (Session 6)
 const schedulingRoutes = require('./routes/scheduling');
 const welcomePacketRoutes = require('./routes/welcomePacket'); // caregiver onboarding packet + gate (2026-09)
+const messagingRepo = require('./messagingRepository'); // the ONE answer to "may this person read
+                                                       // this conversation" (PR #88). The chart
+                                                       // timeline asks it rather than restating it.
 const messagingRoutes = require('./routes/messaging'); // channel matrix + role-scoped threads (Session 9) // PHCP shifts, availability, time tracking (Session 7)
 
 const upload = multer({
@@ -11529,6 +11532,290 @@ app.get('/api/clinical/patients/:clientId/pre-visit', authenticateToken, require
     });
   } catch (error) {
     console.error('Pre-visit packet error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// Session 4.12 Scope I — WORK QUEUES and ANALYTICS
+// ══════════════════════════════════════════════════════════════════════════
+// I2: the cross-patient destinations are WORK QUEUES, not chart tabs — every
+// unsigned encounter, every unacknowledged result, every open referral and
+// every overdue order, across the whole panel.
+//
+// I3: a destination with nothing in it renders an empty state SAYING SO. It is
+// never hidden, because a missing menu item is indistinguishable from a broken
+// one — the rule the disabled messaging channel and the clinical inbox set.
+app.get('/api/clinical/work-queues', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const today = practiceToday();
+    const [orderRows, resultRows, attestations, billing, linkRows, users] = await Promise.all([
+      loadRows('clinical_orders'), loadRows('clinical_results'), loadRows('encounter_attestations'),
+      loadRows('encounter_billing'), getAppointmentLinkage(), getUsers()
+    ]);
+    const nameOf = (clientId) => {
+      const u = users.find(x => x && x.id === clientId);
+      return (u && u.name) || null;
+    };
+    const signed = new Set((attestations || [])
+      .filter(a => a && a.encounterUuid && a.signedAt).map(a => String(a.encounterUuid)));
+
+    // An encounter with a billing record and no attestation is documented and
+    // unsigned. That is the practice's biggest silent risk and it is what this
+    // queue exists for.
+    const unsignedEncounters = (billing || [])
+      .filter(r => r && r.encounterUuid && !signed.has(String(r.encounterUuid)))
+      .map(r => ({
+        encounterUuid: r.encounterUuid, clientId: r.clientId,
+        patientName: nameOf(r.clientId),
+        date: String(r.createdAt || '').slice(0, 10) || null,
+        codingStatus: r.codingStatus || null
+      }))
+      .sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+
+    const unacknowledgedResults = (resultRows || [])
+      .filter(r => r && !r.acknowledgedAt)
+      .map(r => ({
+        id: r.id, clientId: r.clientId, patientName: nameOf(r.clientId),
+        label: r.label || r.documentName || 'Result',
+        interpretation: r.interpretation || null,
+        receivedAt: r.receivedAt || null
+      }))
+      // Critical first, then abnormal, then the rest, OLDEST FIRST within each.
+      // The same ordering 4.10's inbox uses, for the same reason: the oldest
+      // unanswered result is the one most likely to have been forgotten.
+      .sort((a, b) => {
+        const rank = (x) => ({ critical: 0, abnormal: 1 }[String(x.interpretation)] ?? 2);
+        return rank(a) - rank(b) || String(a.receivedAt || '').localeCompare(String(b.receivedAt || ''));
+      });
+
+    const openReferrals = (orderRows || [])
+      .filter(o => o && o.orderType === 'referral' && !['completed', 'cancelled'].includes(String(o.status)))
+      .map(o => ({
+        id: o.id, clientId: o.clientId, patientName: nameOf(o.clientId),
+        specialty: o.specialty || null, status: o.status || null,
+        orderReference: o.orderReference || null, createdAt: o.createdAt || null
+      }))
+      .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+
+    // Overdue reuses 4.10's OWN builder and thresholds rather than restating
+    // them — a second copy of "how long is too long" is a second copy that
+    // drifts. Called directly and NOT behind a `typeof` guard: the first
+    // version of this line guarded a function name that does not exist, so the
+    // overdue queue would have been permanently empty and nothing would have
+    // said so. A defensive check that hides a missing function is worse than
+    // the crash it prevents.
+    const overdue = orderReq.buildOverdueList(orderRows || []);
+
+    res.json({
+      today,
+      overdueThresholds: orderReq.OVERDUE_DAYS,
+      queues: {
+        unsignedEncounters, unacknowledgedResults, openReferrals,
+        overdueOrders: overdue.map(o => ({ ...o, patientName: nameOf(o.clientId) }))
+      }
+    });
+  } catch (error) {
+    console.error('Work queues error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/clinical/analytics — Scope I4. Six metrics, and the frame they sit
+// in. Every one is COUNTED from what the app actually holds: a metric derived
+// from nothing is a number nobody can act on, and one this app cannot observe
+// is reported as unavailable rather than guessed.
+app.get('/api/clinical/analytics', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const today = practiceToday();
+    const since = new Date(`${today}T00:00:00Z`);
+    since.setUTCDate(since.getUTCDate() - 56); // eight weeks
+    const sinceYmd = since.toISOString().slice(0, 10);
+
+    const [timingRows, attestations, billing, orderRows] = await Promise.all([
+      loadVisitTimings(), loadRows('encounter_attestations'), loadRows('encounter_billing'),
+      loadRows('clinical_orders')
+    ]);
+
+    const finished = (timingRows || []).filter(t => t && t.startedAt && t.endedAt);
+    const lengths = finished.map(t => myDay.totalVisitMinutes(t)).filter(m => typeof m === 'number');
+    const avgVisitMinutes = lengths.length
+      ? Math.round(lengths.reduce((a, b) => a + b, 0) / lengths.length) : null;
+
+    // Visits per week by type, from the encounters the app has coded.
+    const weekOf = (ymd) => {
+      const d = new Date(`${ymd}T00:00:00Z`);
+      d.setUTCDate(d.getUTCDate() - d.getUTCDay());
+      return d.toISOString().slice(0, 10);
+    };
+    const perWeek = {};
+    (billing || []).forEach(r => {
+      const ymd = String(r && r.createdAt || '').slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd) || ymd < sinceYmd) return;
+      const w = weekOf(ymd);
+      perWeek[w] = perWeek[w] || { week: w, total: 0 };
+      perWeek[w].total += 1;
+    });
+
+    const signed = new Set((attestations || [])
+      .filter(a => a && a.encounterUuid && a.signedAt).map(a => String(a.encounterUuid)));
+    const unsignedAges = (billing || [])
+      .filter(r => r && r.encounterUuid && !signed.has(String(r.encounterUuid)))
+      .map(r => {
+        const ymd = String(r.createdAt || '').slice(0, 10);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return null;
+        return Math.max(0, Math.round((new Date(`${today}T00:00:00Z`) - new Date(`${ymd}T00:00:00Z`)) / 86400000));
+      })
+      .filter(n => n != null);
+
+    const openOrderAges = (orderRows || [])
+      .filter(o => o && ['ordered', 'sent', 'scheduled'].includes(String(o.status)))
+      .map(o => {
+        const ymd = String(o.createdAt || '').slice(0, 10);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return null;
+        return Math.max(0, Math.round((new Date(`${today}T00:00:00Z`) - new Date(`${ymd}T00:00:00Z`)) / 86400000));
+      })
+      .filter(n => n != null);
+
+    const bucket = (ages) => ({
+      count: ages.length,
+      oldestDays: ages.length ? Math.max(...ages) : null,
+      medianDays: ages.length ? ages.slice().sort((a, b) => a - b)[Math.floor(ages.length / 2)] : null
+    });
+
+    res.json({
+      today, since: sinceYmd,
+      metrics: {
+        visitsPerWeek: Object.values(perWeek).sort((a, b) => a.week.localeCompare(b.week)),
+        // MILES DRIVEN needs a routing provider, which is an open owner
+        // decision. Reported as unavailable with its reason rather than as a
+        // zero somebody would read as "nobody drove anywhere".
+        milesDriven: { value: null, unavailable: true, reason: myDay.DISTANCE_UNAVAILABLE },
+        averageVisitMinutes: { value: avgVisitMinutes, sampleSize: lengths.length },
+        unsignedNotesAgeing: bucket(unsignedAges),
+        openOrdersAgeing: bucket(openOrderAges),
+        // SCREENING COMPLETION needs the Questionnaire surfacing of Scope J,
+        // which is not built. Saying so beats a rate computed from nothing.
+        screeningCompletionRate: { value: null, unavailable: true, reason: 'no_screening_source' }
+      }
+    });
+  } catch (error) {
+    console.error('Clinical analytics error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/clinical/patients/:clientId/results — the RESULTS place on the
+// chart (Scope D). Session 4.10 built the results path and the cross-patient
+// inbox; what it had no read for was "show me this patient's results", which is
+// the question a clinician asks with the chart already open.
+//
+// A READ, so a case manager sees their client's results without being able to
+// acknowledge one — the 4.3 split, unchanged.
+app.get('/api/clinical/patients/:clientId/results', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    const [rows, orders] = await Promise.all([loadRows('clinical_results'), loadRows('clinical_orders')]);
+    const byId = new Map((orders || []).map(o => [String(o.id), o]));
+    const results = (rows || [])
+      .filter(r => r && String(r.clientId) === String(client.id))
+      .map(r => ({
+        ...r,
+        // The order it answers, so a result is readable as the reply to
+        // something rather than as a loose document.
+        order: r.orderId && byId.has(String(r.orderId))
+          ? { id: r.orderId, orderType: byId.get(String(r.orderId)).orderType,
+            reference: byId.get(String(r.orderId)).orderReference || null }
+          : null
+      }))
+      // Critical first, then abnormal, then the rest — and OLDEST FIRST within
+      // each, because the oldest unanswered result is the one most likely to
+      // have been forgotten. The same ordering 4.10's inbox uses.
+      .sort((a, b) => {
+        const rank = (x) => ({ critical: 0, abnormal: 1 }[String(x.interpretation)] ?? 2);
+        return rank(a) - rank(b) || String(a.receivedAt || '').localeCompare(String(b.receivedAt || ''));
+      });
+    res.json({ results, interpretations: clinicalResults.INTERPRETATIONS });
+  } catch (error) {
+    console.error('Patient results list error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/clinical/patients/:clientId/timeline?kinds=visit,result — Scope D5.
+// One chronological thread of everything. For somebody seen repeatedly at home
+// this is how a clinician reconstructs the interval since the last visit, which
+// is otherwise reassembled by opening five tabs and holding the dates in mind.
+app.get('/api/clinical/patients/:clientId/timeline', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    const kinds = String(req.query.kinds || '').split(',').map(k => k.trim()).filter(Boolean);
+
+    const [orderRows, resultRows, rxRows, threadRows, linkRows] = await Promise.all([
+      loadRows('clinical_orders'), loadRows('clinical_results'), loadRows('prescriptions'),
+      loadRows('message_threads'), getAppointmentLinkage()
+    ]);
+    const mine = (r) => r && String(r.clientId) === String(client.id);
+
+    // MESSAGES GO THROUGH messagingRepository.threadVisibility, NEVER A COPY OF
+    // ITS RULE. That function is where the cross-client leak lived (PR #88) and
+    // a second implementation of "may this person read this conversation" is
+    // exactly how the next one gets written. Only the thread's EXISTENCE
+    // reaches the timeline — a date, a channel and a title. Never a body: a
+    // chart timeline is not a second inbox.
+    const visibleThreads = (threadRows || [])
+      .filter(t => t && String(t.client_id) === String(client.id))
+      .filter(t => {
+        const v = messagingRepo.threadVisibility(req.user, t, { client });
+        return !!(v && v.visible);
+      })
+      .map(t => ({
+        id: t.id, channel: t.channel,
+        subject: messagingRepo.threadTitle(t),
+        date: t.last_message_at || t.updated_at || t.created_at
+      }));
+
+    let encounters = [], appointments = [], documents = [];
+    let emrNotice = null;
+    if (client.openEmrPatientId && openemr.isConfigured()) {
+      const emr = openemr.forActor(req.user);
+      const [encRes, apptRes] = await Promise.allSettled([
+        emr.getEncounters(client.openEmrPatientId),
+        emr.getPatientAppointmentRows(client.openEmrPatientId)
+      ]);
+      if (encRes.status === 'fulfilled') encounters = encRes.value.map(clinicalRepo.summarizeEncounter);
+      else emrNotice = `Visits could not be read from OpenEMR: ${encRes.reason && encRes.reason.message}`;
+      if (apptRes.status === 'fulfilled') {
+        appointments = await summarizeCalendarRows(apptRes.value);
+      }
+      try {
+        const planVersions = await db.get('care_plan_versions');
+        documents = clinicalRepo.buildChartDocumentIndex({
+          client, emrReadSupported: false, emrRows: [],
+          carePlanVersions: planVersions || [], roiAuthorizations: [],
+          clientUploads: (await db.get('client_document_uploads')) || [],
+          consentDefs: consentDefsForServiceLine(client.serviceLine),
+          consentSatisfied: isConsentSatisfied
+        });
+      } catch (e) { console.error('Timeline document index failed (non-fatal):', e.message); }
+    } else {
+      emrNotice = client.openEmrPatientId
+        ? 'OpenEMR is not configured, so visits are not on this thread.'
+        : 'This patient is not linked to an OpenEMR chart, so visits are not on this thread.';
+    }
+
+    const timeline = clinicalRepo.buildTimeline({
+      encounters, appointments, messages: visibleThreads,
+      prescriptions: (rxRows || []).filter(mine),
+      orders: (orderRows || []).filter(mine),
+      results: (resultRows || []).filter(mine),
+      documents, kinds
+    });
+    res.json({ ...timeline, emrNotice });
+  } catch (error) {
+    console.error('Chart timeline error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });

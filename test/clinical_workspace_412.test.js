@@ -757,3 +757,225 @@ test('the chart reports the draft state whether or not the patient is EMR-linked
   // offered here as something to resume.
   assert.strictEqual((body.match(/noteDraftId\(client\.id, req\.user\.id\)/g) || []).length, 2);
 });
+
+// ===========================================================================
+// 11. SCOPE D — chart navigation is PLACES, not actions
+// ===========================================================================
+
+test('every chart tab is a place in the record, and no workflow is one', () => {
+  const i = pageCode.indexOf('const tabs = [');
+  const decl = pageCode.slice(i, pageCode.indexOf('];', i));
+  const keys = [...decl.matchAll(/\['([a-z]+)',/g)].map(m => m[1]);
+  // The brief's twelve places, plus Appointments (the per-patient calendar,
+  // kept because removing a working surface is not what a reorganisation is
+  // for). Enrollment left for Admin in PR #116.
+  ['summary', 'timeline', 'encounters', 'problems', 'medications', 'allergies',
+    'orders', 'results', 'imaging', 'referrals', 'documents', 'careplan']
+    .forEach(k => assert.ok(keys.includes(k), `missing place: ${k}`));
+  // The H&P is NOT a tab — it opens as a visit from the banner.
+  assert.ok(!keys.includes('visit'), 'the H&P must not be a sibling tab');
+  // Med rec is a section under MEDICATIONS, not a place beside it (D4).
+  assert.ok(!keys.includes('medrec'), 'med reconciliation is not its own place');
+  assert.ok(!keys.includes('enrollment'), 'enrollment lives in Admin');
+});
+
+test('the H&P is still reachable, and says where you are while it is open', () => {
+  // Removing it from the tab bar must not strand it. It opens from the
+  // banner's Start visit action and from an appointment.
+  assert.match(pageCode, /onStartVisit=\{canWrite \? \(\) => setTab\('visit'\) : null\}/);
+  assert.match(pageCode, /tab === 'visit' && \(chart \?/, 'the H&P body still renders');
+  // With no tab highlighted, a clinician has to be told where they are.
+  assert.match(pageCode, /Documenting a visit/);
+  assert.match(pageCode, /Back to the chart/);
+});
+
+test('med reconciliation renders INSIDE medications', () => {
+  const i = pageCode.indexOf('const MedicationsTab');
+  const body = pageCode.slice(i, pageCode.indexOf('\n    const DocumentsTab'));
+  assert.match(body, /<MedRecTab patient=/);
+});
+
+test('the allergies place and the banner strip are the SAME component', () => {
+  // Two renderings of "what is this patient allergic to" is how the two start
+  // disagreeing, which is the whole reason the strip has three states.
+  const i = pageCode.indexOf('const AllergiesTab');
+  const body = pageCode.slice(i, pageCode.indexOf('\n    const MedicationsTab'));
+  assert.match(body, /<AllergyStrip allergies=\{chart && chart\.banner && chart\.banner\.allergies\}/);
+});
+
+test('there is exactly ONE chart section renderer, at module scope', () => {
+  // It was declared inside SummaryTab, which is a new function identity on
+  // every render. Hoisting it is what lets every place render the same way.
+  assert.strictEqual((pageCode.match(/const ChartSection = /g) || []).length, 1);
+  const at = pageCode.indexOf('const ChartSection = ');
+  assert.match(pageCode.slice(at - 60, at), /\n {4}$/,
+    'ChartSection must sit at module scope, not nested inside a component');
+  assert.ok(!/const Sec = \(/.test(pageCode), 'the old nested renderer is gone');
+});
+
+test('ORDERS, RESULTS, IMAGING and REFERRALS are wired, not placeholders', () => {
+  // D2. Session 4.10 shipped all of this with no per-patient place to read it.
+  ['OrdersTab', 'ResultsTab', 'ImagingTab', 'ReferralsTab']
+    .forEach(c => assert.ok(pageCode.includes(`const ${c} = `), `${c} is not defined`));
+  assert.match(pageCode, /patientOrders: \(id\) => authedFetch/);
+  assert.match(pageCode, /patientResults: \(id\) => authedFetch/);
+  assert.ok(!/TODO|placeholder|coming soon/i.test(
+    pageCode.slice(pageCode.indexOf('const OrdersTab'), pageCode.indexOf('const TIMELINE_LABELS'))),
+  'none of these may be a placeholder');
+});
+
+test('imaging shows a study together with its report', () => {
+  // D3. A study and its report read in one place rather than two.
+  const i = pageCode.indexOf('const ImagingTab');
+  const body = pageCode.slice(i, pageCode.indexOf('\n    const ResultsTab'));
+  assert.match(body, /api\.patientResults/);
+  assert.match(body, /No report attached yet/);
+});
+
+test('an empty place says so in a sentence', () => {
+  // I3, applied to the chart: a blank panel and a place with nothing in it are
+  // indistinguishable, and only one of them is correct.
+  assert.match(pageCode, /const EmptyPlace = /);
+  ['No orders on this chart yet', 'No referrals on this chart yet',
+    'No results on this chart yet', 'No imaging on this chart yet']
+    .forEach(t => assert.ok(pageCode.includes(t), `missing empty state: ${t}`));
+});
+
+// ---- D5 TIMELINE ---------------------------------------------------------
+
+test('the timeline is one thread, newest first', () => {
+  const t = repo.buildTimeline({
+    encounters: [{ date: '2026-09-22', type: 'Home Visit', id: 'e1' }],
+    orders: [{ createdAt: '2026-09-12T00:00:00Z', orderType: 'lab', tests: ['BMP'], id: 'o1' }],
+    results: [{ receivedAt: '2026-09-18', label: 'BMP', id: 'r1' }]
+  });
+  assert.deepStrictEqual(t.rows.map(r => r.date), ['2026-09-22', '2026-09-18', '2026-09-12']);
+  assert.deepStrictEqual(t.rows.map(r => r.kind), ['visit', 'result', 'order']);
+});
+
+test('a documented appointment is not on the thread twice', () => {
+  // It is already there as a visit. Showing every documented visit twice is
+  // the trap the portal's upcoming/recent merge already paid for.
+  const t = repo.buildTimeline({
+    encounters: [{ date: '2026-09-22', type: 'Home Visit', id: 'e1' }],
+    appointments: [
+      { date: '2026-09-22', title: 'the same visit', eid: 'a2', encounterUuid: 'e1' },
+      { date: '2026-09-25', title: 'not yet documented', eid: 'a1' }
+    ]
+  });
+  assert.strictEqual(t.rows.filter(r => r.date === '2026-09-22').length, 1);
+  assert.strictEqual(t.rows.length, 2);
+});
+
+test('a referral is its own kind on the thread, not a generic order', () => {
+  const t = repo.buildTimeline({
+    orders: [
+      { createdAt: '2026-09-15', orderType: 'referral', specialty: 'Cardiology', id: 'o2' },
+      { createdAt: '2026-09-12', orderType: 'lab', tests: ['BMP'], id: 'o1' }
+    ]
+  });
+  assert.deepStrictEqual(t.rows.map(r => r.kind), ['referral', 'order']);
+  assert.match(t.rows[0].title, /Cardiology/);
+});
+
+test('an undated row is COUNTED, never dropped and never sorted to the top', () => {
+  // "Nothing here" and "four things could not be placed" are different facts,
+  // and only one of them is a data gap worth chasing.
+  const t = repo.buildTimeline({
+    documents: [{ date: null, description: 'no date' }, { date: '2026-09-01', description: 'dated' }]
+  });
+  assert.strictEqual(t.undated, 1);
+  assert.strictEqual(t.rows.length, 1);
+  assert.ok(!t.rows.some(r => !r.date));
+});
+
+test('the timeline filters by kind, and an unknown kind narrows to nothing rather than everything', () => {
+  const src = {
+    results: [{ receivedAt: '2026-09-18', label: 'BMP' }],
+    orders: [{ createdAt: '2026-09-12', orderType: 'lab', tests: ['X'] }]
+  };
+  assert.strictEqual(repo.buildTimeline({ ...src, kinds: ['result'] }).rows.length, 1);
+  assert.strictEqual(repo.buildTimeline({ ...src, kinds: [] }).rows.length, 2, 'no filter means everything');
+  // A kind nobody declares must not silently widen the filter back to all.
+  assert.strictEqual(repo.buildTimeline({ ...src, kinds: ['nonsense'] }).rows.length, 0);
+});
+
+test('the timeline asks the messaging module who may read a conversation', () => {
+  // That function is where the cross-client leak lived (PR #88). A second
+  // implementation of "may this person read this" is how the next one is
+  // written. The timeline carries a thread's EXISTENCE and never a body.
+  const body = routeBody(serverCode, "app.get('/api/clinical/patients/:clientId/timeline'");
+  assert.match(body, /messagingRepo\.threadVisibility\(req\.user, t, \{ client \}\)/);
+  assert.ok(!/\bbody\b\s*:\s*(t|thread)\./.test(body), 'a message body must not reach the timeline');
+  assert.match(serverCode, /const messagingRepo = require\('\.\/messagingRepository'\)/);
+});
+
+// ===========================================================================
+// 12. SCOPE I — work queues and analytics
+// ===========================================================================
+
+test('the work queues are cross-patient, and each says so when empty', () => {
+  const body = routeBody(serverCode, "app.get('/api/clinical/work-queues'");
+  ['unsignedEncounters', 'unacknowledgedResults', 'openReferrals', 'overdueOrders']
+    .forEach(q => assert.ok(body.includes(q), `missing queue: ${q}`));
+  ['Every documented encounter is signed', 'No results are waiting to be acknowledged',
+    'No referrals are outstanding', 'Nothing is overdue']
+    .forEach(t => assert.ok(pageCode.includes(t), `missing empty state: ${t}`));
+});
+
+test('overdue reuses 4.10\'s own builder rather than a second copy of the rule', () => {
+  // The first version of this line guarded a function name that does not
+  // exist, so the queue would have been permanently empty and nothing would
+  // have said so. A defensive check that hides a missing function is worse
+  // than the crash it prevents.
+  const body = routeBody(serverCode, "app.get('/api/clinical/work-queues'");
+  assert.match(body, /orderReq\.buildOverdueList\(orderRows \|\| \[\]\)/);
+  assert.ok(!/orderReq\.overdueOrders/.test(body), 'that function does not exist');
+  assert.ok(!/OVERDUE_DAYS\s*=/.test(body), 'the thresholds are 4.10\'s, never restated here');
+  assert.match(body, /overdueThresholds: orderReq\.OVERDUE_DAYS/);
+  const orderReqMod = require('../orderRequisitions');
+  assert.strictEqual(typeof orderReqMod.buildOverdueList, 'function');
+});
+
+test('results waiting are ordered critical first, then oldest', () => {
+  // The same ordering 4.10's inbox uses: the oldest unanswered result is the
+  // one most likely to have been forgotten.
+  const body = routeBody(serverCode, "app.get('/api/clinical/work-queues'");
+  assert.match(body, /critical: 0, abnormal: 1/);
+  assert.match(body, /rank\(a\) - rank\(b\) \|\| String\(a\.receivedAt/);
+});
+
+test('a metric this app cannot observe is reported as unavailable, never as zero', () => {
+  // Miles driven needs a routing provider and screening completion needs the
+  // Questionnaire surfacing of Scope J. A zero would read as "nobody drove
+  // anywhere" and "no screenings are done", which are different claims.
+  const body = routeBody(serverCode, "app.get('/api/clinical/analytics'");
+  assert.match(body, /milesDriven: \{ value: null, unavailable: true, reason: myDay\.DISTANCE_UNAVAILABLE \}/);
+  assert.match(body, /screeningCompletionRate: \{ value: null, unavailable: true/);
+  assert.match(pageCode, /Not available — /);
+});
+
+test('all six analytics metrics have a home', () => {
+  const body = routeBody(serverCode, "app.get('/api/clinical/analytics'");
+  ['visitsPerWeek', 'milesDriven', 'averageVisitMinutes',
+    'unsignedNotesAgeing', 'openOrdersAgeing', 'screeningCompletionRate']
+    .forEach(m => assert.ok(body.includes(m), `missing metric: ${m}`));
+});
+
+test('both new destinations are reachable and neither is hidden when empty', () => {
+  // I3: a missing menu item is indistinguishable from a broken one.
+  assert.match(pageCode, /setView\('queues'\)/);
+  assert.match(pageCode, /setView\('analytics'\)/);
+  assert.match(pageCode, /<WorkQueuesView/);
+  assert.match(pageCode, /<AnalyticsView/);
+  const i = pageCode.indexOf('const VIEW_TITLES');
+  const titles = pageCode.slice(i, pageCode.indexOf('};', i));
+  assert.match(titles, /queues:/);
+  assert.match(titles, /analytics:/);
+});
+
+test('the per-patient results read is a READ, so a case manager keeps it', () => {
+  const body = routeBody(serverCode, "app.get('/api/clinical/patients/:clientId/results'");
+  assert.match(body, /requireClinicalRead/);
+  assert.ok(!/requireClinicalWrite/.test(body));
+});

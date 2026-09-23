@@ -1842,6 +1842,79 @@ const lastVisitDateOf = (encounters) => {
   return dates.length ? dates[dates.length - 1] : null;
 };
 
+
+// ============================================================
+// Session 4.12 Scope D5 — the chart TIMELINE
+// ============================================================
+// One chronological thread of everything that happened to this patient. For
+// somebody seen repeatedly at home this is how a clinician reconstructs the
+// interval since the last visit — which is otherwise reassembled by opening
+// five tabs and holding the dates in your head.
+//
+// PURE. Every source is passed in already read; this decides only what a row
+// looks like and what order the rows go in.
+
+const TIMELINE_KINDS = Object.freeze([
+  'visit', 'message', 'medication', 'order', 'result', 'referral', 'document', 'hospitalization'
+]);
+
+const TIMELINE_ICONS = Object.freeze({
+  visit: 'home', message: 'message', medication: 'pill', order: 'flask',
+  result: 'report-medical', referral: 'share', document: 'file', hospitalization: 'building-hospital'
+});
+
+// A row with no usable date cannot be placed on a timeline. It is COUNTED and
+// reported rather than dropped silently or sorted to the top as an empty
+// string — "there is nothing here" and "we could not place four things" are
+// different facts, and only one of them is a data gap worth chasing.
+const timelineDate = (v) => {
+  const d = String(v == null ? '' : v).slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : null;
+};
+
+const buildTimeline = ({
+  encounters, appointments, messages, prescriptions, orders, results, documents, kinds
+}) => {
+  const rows = [];
+  let undated = 0;
+  const push = (kind, date, title, detail, id) => {
+    const d = timelineDate(date);
+    if (!d) { undated += 1; return; }
+    rows.push({ kind, date: d, title, detail: detail || null, id: id || null, icon: TIMELINE_ICONS[kind] });
+  };
+
+  (encounters || []).forEach(e => push('visit', e.date || e.start,
+    e.type || 'Visit', [e.provider, e.status].filter(Boolean).join(' · '), e.id));
+  // An appointment that produced an encounter is already on the thread as a
+  // visit. Adding it again would show every documented visit twice — the trap
+  // the portal's "upcoming and recent" merge already paid for.
+  (appointments || []).filter(a => a && !a.encounterUuid).forEach(a => push('visit', a.date,
+    a.title || 'Appointment', [a.state, a.location].filter(Boolean).join(' · '), a.eid));
+  (messages || []).forEach(m => push('message', m.date || m.createdAt,
+    m.subject || 'Message', m.channel || null, m.id));
+  (prescriptions || []).forEach(rx => push('medication', rx.date || rx.createdAt,
+    rx.drug || rx.name || 'Medication', [rx.dose, rx.kind].filter(Boolean).join(' · '), rx.id));
+  (orders || []).forEach(o => {
+    const kind = o.orderType === 'referral' ? 'referral' : 'order';
+    push(kind, o.createdAt || o.orderedAt,
+      kind === 'referral' ? `${o.specialty || 'Referral'} referral` : ((o.tests && o.tests[0]) || o.orderType || 'Order'),
+      o.status || null, o.id);
+  });
+  (results || []).forEach(r => push('result', r.receivedAt || r.createdAt,
+    r.label || r.documentName || 'Result', r.interpretation || null, r.id));
+  (documents || []).forEach(d => push('document', d.date,
+    d.description || 'Document', d.source || null, d.id));
+
+  const wanted = Array.isArray(kinds) && kinds.length
+    ? new Set(kinds.filter(k => TIMELINE_KINDS.includes(k)))
+    : null;
+  const filtered = wanted ? rows.filter(r => wanted.has(r.kind)) : rows;
+  // Newest first: on a timeline the question is almost always "what has
+  // happened since I last saw them", and that is read from the top.
+  filtered.sort((a, b) => b.date.localeCompare(a.date));
+  return { rows: filtered, undated, kinds: TIMELINE_KINDS };
+};
+
 // ---- Home-visit standing facts (Scope F4) --------------------------------
 // "Use the side entrance." "Daughter Angela will be present." These are facts
 // about the PATIENT, not about one visit, and they live on the patient record
@@ -1975,6 +2048,9 @@ module.exports = {
   hasHomeVisitNotes,
   summarizePayerForBanner,
   buildPatientBanner,
+  TIMELINE_KINDS,
+  buildTimeline,
+  timelineDate,
   lastVisitDateOf,
   CARE_PLAN_FIELDS,
   buildCarePlanVersion,

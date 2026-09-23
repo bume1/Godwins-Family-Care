@@ -236,6 +236,46 @@ const makeUser = async (token, name, role, clinicalRole, extra) => {
   ok('  and so are the visit stamps',
     timingAfter.body.timing && timingAfter.body.timing.totalMinutes === 55, timingAfter.body.timing);
 
+  // ---- 8. The chart's new places (Scope D) and the work queues (Scope I) --
+  console.log('\n--- 8. the chart places, the timeline and the work queues ---');
+  const tl = await call('GET', `/api/clinical/patients/${patient.id}/timeline`, cTok);
+  ok('the timeline answers', tl.status === 200, tl.body);
+  ok('  it declares the kinds it can show, so the page names none of its own',
+    Array.isArray(tl.body.kinds) && tl.body.kinds.includes('result'), tl.body.kinds);
+  ok('  undated items are COUNTED rather than dropped', typeof tl.body.undated === 'number', tl.body.undated);
+  ok('  an unlinked chart says why visits are missing',
+    typeof tl.body.emrNotice === 'string' && tl.body.emrNotice.length > 0, tl.body.emrNotice);
+  const tlFiltered = await call('GET', `/api/clinical/patients/${patient.id}/timeline?kinds=result`, cTok);
+  ok('  filtering by kind is accepted', tlFiltered.status === 200 && Array.isArray(tlFiltered.body.rows), tlFiltered.body);
+  ok('  a case manager may READ the timeline',
+    (await call('GET', `/api/clinical/patients/${patient.id}/timeline`, rTok)).status === 200);
+
+  const pr = await call('GET', `/api/clinical/patients/${patient.id}/results`, cTok);
+  ok('the per-patient results place answers', pr.status === 200 && Array.isArray(pr.body.results), pr.body);
+  ok('  and it is a READ, so a case manager keeps it',
+    (await call('GET', `/api/clinical/patients/${patient.id}/results`, rTok)).status === 200);
+
+  const po = await call('GET', `/api/clinical/patients/${patient.id}/orders`, cTok);
+  ok('the per-patient orders place answers', po.status === 200 && Array.isArray(po.body.orders), po.body);
+
+  const wq = await call('GET', '/api/clinical/work-queues', cTok);
+  ok('the work queues answer', wq.status === 200, wq.body);
+  ['unsignedEncounters', 'unacknowledgedResults', 'openReferrals', 'overdueOrders']
+    .forEach(q => ok(`  ${q} is a list, even when empty`,
+      Array.isArray(wq.body.queues && wq.body.queues[q]), wq.body.queues && wq.body.queues[q]));
+  ok('  the overdue thresholds come from 4.10, not a second copy',
+    wq.body.overdueThresholds && wq.body.overdueThresholds.referral === 30, wq.body.overdueThresholds);
+
+  const an = await call('GET', '/api/clinical/analytics', cTok);
+  ok('analytics answers', an.status === 200, an.body);
+  ok('  miles driven is UNAVAILABLE, not zero',
+    an.body.metrics.milesDriven.unavailable === true && an.body.metrics.milesDriven.value === null,
+    an.body.metrics.milesDriven);
+  ok('  screening completion is UNAVAILABLE, not invented',
+    an.body.metrics.screeningCompletionRate.unavailable === true, an.body.metrics.screeningCompletionRate);
+  ok('  average visit length counts the visit this probe stamped',
+    an.body.metrics.averageVisitMinutes.sampleSize >= 1, an.body.metrics.averageVisitMinutes);
+
   console.log(`\n${pass}/${pass + fail} assertions passed${fail ? ` — ${fail} FAILED` : ''}`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error('Probe crashed:', e); process.exit(1); });
