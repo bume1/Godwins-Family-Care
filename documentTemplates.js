@@ -350,7 +350,9 @@ const readDocument = async ({ bytes, kind, mimeType, createWorker, allowOcr = tr
       return nothing(read.notice || 'This document has no text and nothing could be recognised in it.',
         { undecodable: read.undecodable || [] });
     }
-    lines = packet.groupIntoLines(read.runs);
+    // The OCR-aware grouper: same clustering, then re-sorted by x so the
+    // words come out in reading order. See documentOcr.groupWordLines.
+    lines = ocr.groupWordLines(read.runs);
     source = SOURCE.OCR;
     ocrConfidence = read.confidence;
     notice = read.notice;

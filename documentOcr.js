@@ -28,6 +28,7 @@
 
 const path = require('path');
 const { PDFDocument, PDFName, PDFRawStream } = require('pdf-lib');
+const { groupIntoLines: packetLines } = require('./welcomePacketImport');
 
 // THE LANGUAGE DATA SHIPS WITH THE APP AND IS NEVER FETCHED AT RUNTIME.
 // tesseract.js downloads `eng.traineddata` from a CDN on first use unless it is
@@ -97,11 +98,36 @@ const runsFromWords = (words, page) => words
   .map(w => ({
     text: String(w.text).trim(),
     x: w.bbox.x0,
-    y: w.bbox.y0,
+    // THE VERTICAL CENTRE, NOT THE TOP. A word's bounding box starts where its
+    // tallest letter starts, so "Model" and "page" on the same printed line
+    // report different tops — by the height of a capital against a descender.
+    // Grouping on the top scattered same-line words into different lines.
+    y: (w.bbox.y0 + w.bbox.y1) / 2,
     size: Math.max(4, (w.bbox.y1 - w.bbox.y0) || 9),
     page: page || 0
   }))
   .filter(r => r.text.length > 0);
+
+// LINES OF OCR'd WORDS, IN READING ORDER.
+//
+// The shared grouper sorts runs by y and then x, which is exactly right for a
+// PDF: every word on a printed line shares one baseline, so the y comparison
+// ties and x decides. OCR has no baseline — each word carries its own measured
+// box — so the y values differ slightly across a line, y never ties, and x
+// never gets consulted. The words land in the right LINE and the wrong ORDER.
+//
+// Found by running a real screenshot through it: "Model access page has been
+// retired" came back as "Model has been retired access page". Every word was
+// read correctly and the sentence was still useless — and a label matcher that
+// needs "Member ID:" to precede its value would have missed every field.
+//
+// So the grouper's clustering is reused, and each line is then re-sorted by x
+// and its text rebuilt. The shared function is left alone: the PDF path does
+// not have this problem and does not need the extra pass.
+const groupWordLines = (runs) => packetLines(runs).map(line => {
+  const ordered = line.runs.slice().sort((a, b) => a.x - b.x);
+  return { ...line, runs: ordered, text: ordered.map(r => r.text).join(' ').replace(/\s+/g, ' ').trim() };
+});
 
 // The worker is created per call and terminated in a finally. A long-lived
 // worker would be faster, and it would also hold a page of somebody's chart in
@@ -213,6 +239,7 @@ const ocrDocumentRuns = async ({ bytes, mimeType, createWorker }) => {
 
 module.exports = {
   LANG_PATH,
+  groupWordLines,
   MIN_WORD_CONFIDENCE, OCR_TIMEOUT_MS, MAX_OCR_PAGES, SUPPORTED_IMAGE_FILTERS,
   isImageMime, wordsFrom, runsFromWords, ocrImageRuns, embeddedImages, ocrDocumentRuns
 };

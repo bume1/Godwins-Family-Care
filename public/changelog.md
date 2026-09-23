@@ -14,6 +14,8 @@
 - Email the caregiver when a past shift is corrected, and fix the aliased before/after
 
 #### Changes
+- Record why the small OCR language set is the right one
+- Read scanned documents without a model, and without a vendor
 - Plot the day and fill the trip, with no vendor and no tiles
 - Read a client's coordinates from where the app actually stores them
 - Make the chart a set of places, and give the cross-patient work a queue
@@ -44,8 +46,6 @@
 - Backfill PR #103, and flag the half of an earlier entry it supersedes
 - Regenerate the changelog for this session's commit
 - Let an admin or a clinician edit an enrollment submission
-- Send the login with the consent downloads
-- Let a client be added without a rate, and lock enrollment writes to admin
 
 
 ### Version 3.1.0 - September 22, 2026

@@ -386,7 +386,14 @@ test('OCR runs come out in the SAME shape the PDF extractor produces', () => {
     [{ text: 'Member', confidence: 90, bbox: { x0: 40, y0: 100, x1: 90, y1: 112 } }], 2);
   assert.deepStrictEqual(Object.keys(runs[0]).sort(), ['page', 'size', 'text', 'x', 'y']);
   assert.strictEqual(runs[0].page, 2);
-  assert.strictEqual(runs[0].y, 100, 'y is top-down on both sides, so "the line below" means the same thing');
+  // REPOINTED, not relaxed: y is the box's vertical CENTRE now (see the
+  // reading-order test below), but the rule this guards is unchanged — y still
+  // increases DOWNWARD on both sides, so "the line below" means the same thing
+  // to the shared grouper and to the "next line down" rule.
+  assert.strictEqual(runs[0].y, 106, 'the centre of a 100..112 box');
+  const lower = ocr.runsFromWords(
+    [{ text: 'below', confidence: 90, bbox: { x0: 40, y0: 130, x1: 90, y1: 142 } }], 2);
+  assert.ok(lower[0].y > runs[0].y, 'a word further down the page has a LARGER y');
   // And they group with the PDF extractor's own grouper.
   const lines = packet.groupIntoLines(runs);
   assert.strictEqual(lines.length, 1);
@@ -444,4 +451,46 @@ test('the OCR language data ships with the app and is never fetched at runtime',
   const src = fs.readFileSync(path.join(root, 'documentOcr.js'), 'utf8');
   assert.match(src, /langPath: LANG_PATH, cachePath: LANG_PATH/,
     'the worker must be pointed at the local copy');
+});
+
+test('OCR words come out in READING ORDER, not bounding-box order', () => {
+  // THE BUG A REAL SCREENSHOT FOUND. The shared grouper sorts by y then x,
+  // which is exactly right for a PDF — every word on a printed line shares one
+  // baseline, so the y comparison ties and x decides. OCR has no baseline:
+  // each word carries its own measured box, so "Model" (a capital) and "page"
+  // (a descender) on the same line report different tops, y never ties, and x
+  // is never consulted.
+  //
+  // "Model access page has been retired" came back as "Model has been retired
+  // access page". Every word was read correctly and the sentence was useless —
+  // and a matcher that needs "Member ID:" to precede its value would have
+  // missed every field on every document.
+  const words = [
+    // One printed line. Tops deliberately differ, the way real glyphs do.
+    { text: 'Member', confidence: 95, bbox: { x0: 40, y0: 100, x1: 95, y1: 114 } },
+    { text: 'ID:', confidence: 95, bbox: { x0: 100, y0: 103, x1: 120, y1: 114 } },
+    { text: 'W123456789', confidence: 92, bbox: { x0: 125, y0: 101, x1: 230, y1: 113 } }
+  ];
+  const lines = ocr.groupWordLines(ocr.runsFromWords(words, 0));
+  assert.strictEqual(lines.length, 1, 'the three words are one line');
+  assert.strictEqual(lines[0].text, 'Member ID: W123456789');
+});
+
+test('a scrambled line would break the matcher, so the fix is load-bearing', () => {
+  // Proving the consequence rather than just the ordering: the label has to
+  // come first or `startsWith` never fires.
+  const words = [
+    { text: 'Member', confidence: 95, bbox: { x0: 40, y0: 100, x1: 95, y1: 114 } },
+    { text: 'ID:', confidence: 95, bbox: { x0: 100, y0: 103, x1: 120, y1: 114 } },
+    { text: 'W123456789', confidence: 92, bbox: { x0: 125, y0: 101, x1: 230, y1: 113 } }
+  ];
+  const lines = ocr.groupWordLines(ocr.runsFromWords(words, 0));
+  const out = tpl.extractFromLines({ kind: 'insuranceCard', lines });
+  assert.strictEqual(out.extracted['commercial.memberId'], 'W123456789');
+});
+
+test('a word is clustered by its vertical CENTRE, not its top', () => {
+  const runs = ocr.runsFromWords(
+    [{ text: 'Model', confidence: 95, bbox: { x0: 0, y0: 100, x1: 50, y1: 120 } }], 0);
+  assert.strictEqual(runs[0].y, 110, 'the centre of the box, so glyph height stops splitting lines');
 });
