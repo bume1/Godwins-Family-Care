@@ -20,7 +20,8 @@ const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
 
-const repo = require('../clinicalRepository');
+const repo = require("../clinicalRepository");
+const R = repo;
 
 const root = path.join(__dirname, '..');
 const serverSrc = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
@@ -1222,4 +1223,222 @@ test('the narrative fields stay plain textareas the device keyboard can dictate 
   const i = pageCode.indexOf('const TextArea = ');
   const body = pageCode.slice(i, i + 400);
   assert.match(body, /<textarea className="inp"/);
+});
+
+// ── Session 4.12 Scope F1 — the encounter type, and the POS it decides ──
+// Owner, 2026-09-23: this is an ADMIN setting on the enrollment record, not a
+// clinician's pick at the start of a visit. It is the other half of the 4.5
+// place-of-service rule, so every guard below is about what reaches a CLAIM.
+
+test('F1: the encounter type vocabulary is declared once, and each type either names a place of service or does not', () => {
+  const keys = R.ENCOUNTER_TYPES.map(t => t.key);
+  assert.equal(new Set(keys).size, keys.length, 'a duplicate key would make encounterTypeByKey silently pick one');
+  for (const t of R.ENCOUNTER_TYPES) {
+    assert.ok(t.label && t.label.trim(), `${t.key} must have a label a person can read`);
+    // pos is either a real two-character POS code or explicitly null. An empty
+    // string would read as "asserts a place" to nothing and as falsy to
+    // encounterTypeAssertsPos, which is two different answers to one question.
+    assert.ok(t.pos === null || /^\d{2}$/.test(t.pos), `${t.key} pos must be a 2-digit code or null, got ${JSON.stringify(t.pos)}`);
+    assert.equal(typeof t.telehealth, 'boolean');
+  }
+  // The four that name a place are the only ones that can conflict.
+  assert.deepEqual(
+    R.ENCOUNTER_TYPES.filter(t => R.encounterTypeAssertsPos(t.key)).map(t => t.key).sort(),
+    ['home_primary_care', 'office', 'psychiatric_home', 'psychiatric_telehealth', 'telehealth'].sort()
+  );
+  // Every telehealth type bills at a telehealth place of service. A telehealth
+  // type stamped at 11 or 12 is the exact false claim this scope exists to stop.
+  for (const t of R.ENCOUNTER_TYPES.filter(t => t.telehealth)) {
+    assert.equal(t.pos, '10', `${t.key} is telehealth so it must assert POS 10`);
+  }
+  assert.equal(R.encounterTypeByKey('not_a_type'), null);
+  assert.equal(R.encounterTypeByKey(''), null);
+  assert.equal(R.encounterTypeByKey(null), null);
+});
+
+test('F1: a type that names a place refuses a facility whose POS disagrees, naming BOTH values', () => {
+  const ok = R.checkEncounterTypeAgainstPos({ encounterType: 'home_primary_care', posCode: '12', facilityName: 'Private Residence' });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.code, null);
+
+  const bad = R.checkEncounterTypeAgainstPos({ encounterType: 'telehealth', posCode: '12', facilityName: 'Private Residence' });
+  assert.equal(bad.ok, false);
+  assert.equal(bad.code, R.POS_DISAGREES);
+  // BOTH values, or the reader cannot tell which of the two is wrong — and
+  // neither is fixed from the screen they are reading.
+  assert.match(bad.error, /\b10\b/, 'the error must name the POS the type asserts');
+  assert.match(bad.error, /\b12\b/, 'the error must name the POS the facility resolved to');
+  assert.match(bad.error, /Telehealth/, 'the error must name the encounter type');
+  assert.match(bad.error, /Private Residence/, 'the error must name the facility');
+
+  // The mirror case, so the check is not accidentally one-directional.
+  const bad2 = R.checkEncounterTypeAgainstPos({ encounterType: 'home_primary_care', posCode: '10', facilityName: 'Telehealth' });
+  assert.equal(bad2.code, R.POS_DISAGREES);
+  assert.match(bad2.error, /\b12\b/);
+  assert.match(bad2.error, /\b10\b/);
+});
+
+test('F1: a type that names no place never conflicts, and an unset type never conflicts', () => {
+  // An annual wellness visit or a follow-up happens wherever the patient is
+  // seen. Refusing those on a POS would be noise, and noise is how a real
+  // refusal gets clicked past.
+  for (const key of ['annual_wellness', 'acute_visit', 'transitional_care', 'follow_up']) {
+    for (const pos of ['10', '11', '12', '13']) {
+      assert.equal(R.checkEncounterTypeAgainstPos({ encounterType: key, posCode: pos }).ok, true, `${key} at ${pos} must not conflict`);
+    }
+  }
+  assert.equal(R.checkEncounterTypeAgainstPos({ encounterType: null, posCode: '12' }).ok, true);
+  assert.equal(R.checkEncounterTypeAgainstPos({ encounterType: 'not_a_type', posCode: '12' }).ok, true);
+});
+
+test('F1: a type that names a place with NO POS resolved is its own refusal, pointing at the facility', () => {
+  const none = R.checkEncounterTypeAgainstPos({ encounterType: 'home_primary_care', posCode: '', facilityName: 'Hickory Log' });
+  assert.equal(none.ok, false);
+  // A different code from the disagreement, because it is a different problem
+  // with a different fix — the facility record in OpenEMR, not the type.
+  assert.equal(none.code, 'ENCOUNTER_TYPE_NO_POS');
+  assert.notEqual(none.code, R.POS_DISAGREES);
+  assert.match(none.error, /Hickory Log/);
+  assert.match(none.error, /facility/i);
+  assert.equal(R.checkEncounterTypeAgainstPos({ encounterType: 'home_primary_care', posCode: null }).code, 'ENCOUNTER_TYPE_NO_POS');
+});
+
+test('F1: the booking overrides the patient default, and a psychiatric patient booked by video stays psychiatric', () => {
+  assert.deepEqual(
+    R.resolveEncounterType({ patientDefault: 'home_primary_care', appointmentLocation: null }),
+    { key: 'home_primary_care', source: 'patient_default', label: 'Home Primary Care' }
+  );
+  // "Home visit Tuesday, telehealth Thursday" is the normal case. The booking
+  // is where that was decided, so it wins.
+  const booked = R.resolveEncounterType({ patientDefault: 'home_primary_care', appointmentLocation: 'telehealth' });
+  assert.equal(booked.key, 'telehealth');
+  assert.equal(booked.source, 'appointment');
+  // Collapsing a psychiatric patient's video visit to plain telehealth would
+  // drop the exam variant and the risk assessment the signature depends on.
+  const psych = R.resolveEncounterType({ patientDefault: 'psychiatric_home', appointmentLocation: 'telehealth' });
+  assert.equal(psych.key, 'psychiatric_telehealth');
+  assert.equal(R.isPsychiatricEncounterType(psych.key), true);
+  assert.equal(R.isPsychiatricEncounterType(booked.key), false);
+  // Nothing set is stated as nothing set, never guessed at.
+  assert.deepEqual(R.resolveEncounterType({ patientDefault: null, appointmentLocation: null }), { key: null, source: 'unset', label: null });
+  assert.equal(R.resolveEncounterType({ patientDefault: 'not_a_type', appointmentLocation: null }).source, 'unset');
+});
+
+test('F1: signing REFUSES an encounter whose type and resolved POS disagree, and says so in its own sentence', () => {
+  const coded = R.applyCoding(
+    { clientId: 'c1', encounterUuid: 'e1', diagnoses: [], services: [] },
+    { diagnoses: [{ code: 'E11.9', description: 'T2DM', primary: true }],
+      services: [{ code: '99348', units: 1, dxLinks: ['E11.9'] }] },
+    { id: 'u1', name: 'FNP', npi: '1234567893' }, '1234567893'
+  ).record;
+  const base = { hasNote: true, record: coded, billingNpi: '1234567893' };
+
+  const agreeing = R.checkSignReadiness({ ...base, posCode: '12', encounterType: 'home_primary_care' });
+  assert.equal(agreeing.ok, true);
+
+  const clash = R.checkSignReadiness({ ...base, posCode: '12', encounterType: 'telehealth', facilityName: 'Private Residence' });
+  assert.equal(clash.ok, false);
+  assert.ok(clash.codes.includes(R.POS_DISAGREES));
+  assert.match(clash.message, /\b10\b/);
+  assert.match(clash.message, /\b12\b/);
+
+  // A missing POS blocks on facility_pos ALONE. Saying it twice, in two
+  // different sentences, sends the reader at two layers for one problem.
+  const noPos = R.checkSignReadiness({ ...base, posCode: '', encounterType: 'telehealth' });
+  assert.deepEqual(noPos.codes, ['SIGN_NO_FACILITY_POS']);
+  assert.ok(!noPos.codes.includes(R.POS_DISAGREES));
+
+  // An unset type never blocks a signature: the facility decides alone, which
+  // is exactly what happened before this scope existed.
+  assert.equal(R.checkSignReadiness({ ...base, posCode: '12', encounterType: null }).ok, true);
+
+  // The mismatch travels beside the other blockers rather than replacing them.
+  const both = R.checkSignReadiness({ hasNote: false, record: { diagnoses: [], services: [] }, billingNpi: null, posCode: '10', encounterType: 'home_primary_care' });
+  assert.ok(both.codes.includes('SIGN_NO_NOTE'));
+  assert.ok(both.codes.includes(R.POS_DISAGREES));
+  assert.match(both.message, /a documented note/);
+  assert.match(both.message, /place of service 12/);
+});
+
+test('F1: the encounter type is STAMPED on the billing record at creation, and an unknown one is refused rather than stored', () => {
+  const made = R.buildEncounterBillingRecord({
+    id: 'r1', clientId: 'c1', puuid: 'p1', encounterUuid: 'e1', encounterEid: '7',
+    reason: 'visit', date: '2026-09-23', actor: { id: 'u1', name: 'FNP' }, billingNpi: '1234567893',
+    encounterType: 'psychiatric_home', at: '2026-09-23T12:00:00.000Z'
+  });
+  assert.equal(made.encounterType, 'psychiatric_home');
+  // An invented type stored on a record would be read back as a real one by
+  // every consumer and would never match a POS, so it is dropped at the door.
+  const bogus = R.buildEncounterBillingRecord({
+    id: 'r2', clientId: 'c1', puuid: 'p1', encounterUuid: 'e2', encounterEid: '8',
+    reason: 'visit', date: '2026-09-23', actor: { id: 'u1', name: 'FNP' }, billingNpi: '1234567893',
+    encounterType: 'made_up'
+  });
+  assert.equal(bogus.encounterType, null);
+  const none = R.buildEncounterBillingRecord({
+    id: 'r3', clientId: 'c1', puuid: 'p1', encounterUuid: 'e3', encounterEid: '9',
+    reason: 'visit', date: '2026-09-23', actor: { id: 'u1', name: 'FNP' }, billingNpi: '1234567893'
+  });
+  assert.equal(none.encounterType, null);
+});
+
+test('F1 build-enforced: the encounter type is an ADMIN write on the enrollment surface, and the clinical chart only READS it', () => {
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // The write is admin-only. requireClinicalWrite would hand it to any
+  // licensed clinician, which is the gate the owner moved it off.
+  assert.match(
+    server,
+    /app\.put\('\/api\/clinical\/patients\/:clientId\/encounter-type',\s*authenticateToken,\s*requireAdmin,/,
+    'the encounter-type write must be admin-only'
+  );
+  // The facility write keeps the same gate it always had.
+  assert.match(
+    server,
+    /app\.put\('\/api\/clinical\/patients\/:clientId\/facility',\s*authenticateToken,\s*requireAdmin,/,
+    'the facility assignment must stay admin-only'
+  );
+  // The combined read is a READ, so a case manager can see what a patient's
+  // visits will bill as without being able to change it.
+  assert.match(
+    server,
+    /app\.get\('\/api\/clinical\/patients\/:clientId\/place-of-service',\s*authenticateToken,\s*requireClinicalRead,/,
+    'the place-of-service read must be on the clinical READ gate'
+  );
+
+  const chart = fs.readFileSync(path.join(__dirname, '..', 'public', 'clinical.html'), 'utf8');
+  // The clinician's chart must not carry a door onto either write. A button
+  // that is going to answer 403 is worse than no button.
+  assert.ok(!/\/encounter-type`/.test(chart), 'the clinical chart must not write the encounter type');
+  assert.ok(!/\/facility`,\s*\{\s*method:\s*'PUT'/.test(chart), 'the clinical chart must not write the facility assignment');
+  assert.ok(/placeOfService:\s*\(id\)/.test(chart), 'the chart reads the shared place-of-service route');
+  // And it names where the fix lives, rather than showing a dead field.
+  assert.match(chart, /An admin sets both of these on the enrollment record/);
+
+  const enroll = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-enrollment.html'), 'utf8');
+  assert.ok(/setEncounterType:\s*\(id,\s*encounterType\)/.test(enroll), 'the enrollment screen owns the encounter-type write');
+  assert.ok(/assignFacility:\s*\(id,\s*facilityId\)/.test(enroll), 'the enrollment screen owns the facility write');
+  // The page names no encounter type of its own — the list is served, so a
+  // type retired in the module cannot linger in a dropdown.
+  for (const t of R.ENCOUNTER_TYPES) {
+    assert.ok(!enroll.includes(`'${t.key}'`) && !enroll.includes(`"${t.key}"`),
+      `admin-enrollment.html must not restate the encounter type ${t.key}; the list is served`);
+  }
+  assert.ok(/data\.encounterTypes\.map/.test(enroll), 'the dropdown renders the served list');
+});
+
+test('F1 build-enforced: creating a visit stamps the RESOLVED type, and signing checks it against the POS OpenEMR holds', () => {
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  // One resolver answers WHERE and WHAT together. Two places answering the
+  // same question is how a telehealth visit gets stamped at a home POS.
+  assert.match(server, /resolveEncounterType\(\{\s*\n?\s*patientDefault: client\.encounterType/,
+    'resolveFacilityForVisit must resolve the encounter type from the patient default');
+  // Both visit-creation paths stamp it.
+  const stamps = server.match(/encounterType: place\.encounterType/g) || [];
+  assert.equal(stamps.length, 2, 'both the H&P and the follow-up creation paths must stamp the resolved type');
+  // The signature compares the STAMP against the POS read off OpenEMR. Reading
+  // the type back off the same encounter row would make it agree with itself.
+  assert.match(server, /encounterType: ctx\.record\.encounterType/,
+    'the sign gate must read the type off the stored stamp');
+  assert.ok(!/encounterType:\s*clinicalRepo\.resolveEncounterType\([^)]*encRow/.test(server),
+    'the sign gate must not re-derive the type from the encounter row it is checking');
 });

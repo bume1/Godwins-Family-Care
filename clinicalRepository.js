@@ -935,8 +935,14 @@ const buildEncounterServices = (list, diagnoses) => {
 // encounter; created when the app documents the visit (or lazily when coding
 // opens on an older encounter). Billing provider NPI comes from CONFIG — the
 // caller passes it; it is never a literal here.
-const buildEncounterBillingRecord = ({ id, clientId, puuid, encounterUuid, encounterEid, reason, date, actor, billingNpi, narrativeNoteSid, at }) => ({
+// `encounterType` is stamped HERE, at creation, from the patient's admin-set
+// default resolved against the booking — not re-derived at signing. At signing
+// the stamp is checked against the POS OpenEMR actually holds, and two
+// independent facts are what make that check mean anything: re-deriving the
+// type from the encounter's own POS would make it agree with itself.
+const buildEncounterBillingRecord = ({ id, clientId, puuid, encounterUuid, encounterEid, reason, date, actor, billingNpi, narrativeNoteSid, encounterType, at }) => ({
   id,
+  encounterType: encounterTypeByKey(encounterType) ? String(encounterType) : null,
   clientId,
   puuid,
   encounterUuid: String(encounterUuid),
@@ -990,6 +996,99 @@ const applyCoding = (record, { diagnoses, services }, actor, billingNpi, at) => 
   return { record: next };
 };
 
+// ============================================================
+// Session 4.12 Scope F1 — the ENCOUNTER TYPE, and the POS it decides
+// ============================================================
+// Owner, 2026-09-23: this belongs in the ENROLLMENT area, set by an admin,
+// rather than being chosen by a clinician at the start of every visit.
+//
+// That is the 4.5 rule applied consistently, not a new one: "POS is a property
+// of the facility record, and the patient's assignment is what selects it — a
+// clinician never sees or chooses a POS." The encounter type is the other half
+// of that same decision, so it lives beside the facility assignment, on the
+// same screen, under the same admin gate. A clinician SEES the resolved type
+// and POS on the encounter, because they are what will be billed; they do not
+// pick them.
+//
+// THE PER-PATIENT DEFAULT IS NOT THE WHOLE STORY, AND THAT IS DELIBERATE. One
+// patient genuinely has a home visit one week and a telehealth visit the next,
+// so the appointment's own `[GFC location=telehealth]` marker — which has
+// existed since 4.2 and is set when the visit is booked — still overrides the
+// patient's default. What the admin sets is what a visit is UNLESS the booking
+// said otherwise, which is the only shape that both bills correctly by default
+// and stays true on the exception.
+const ENCOUNTER_TYPES = Object.freeze([
+  { key: 'home_primary_care', label: 'Home Primary Care', pos: '12', telehealth: false },
+  { key: 'office', label: 'Office', pos: '11', telehealth: false },
+  { key: 'telehealth', label: 'Telehealth', pos: '10', telehealth: true },
+  { key: 'annual_wellness', label: 'Annual Wellness', pos: null, telehealth: false },
+  { key: 'acute_visit', label: 'Acute Visit', pos: null, telehealth: false },
+  { key: 'psychiatric_home', label: 'Psychiatric Home Visit', pos: '12', telehealth: false, psychiatric: true },
+  { key: 'psychiatric_telehealth', label: 'Psychiatric Telehealth', pos: '10', telehealth: true, psychiatric: true },
+  { key: 'transitional_care', label: 'Transitional Care', pos: null, telehealth: false },
+  { key: 'follow_up', label: 'Follow-up', pos: null, telehealth: false }
+]);
+
+const encounterTypeByKey = (key) =>
+  ENCOUNTER_TYPES.find(t => t.key === String(key || '')) || null;
+
+const isPsychiatricEncounterType = (key) => {
+  const t = encounterTypeByKey(key);
+  return !!(t && t.psychiatric);
+};
+
+// A type whose `pos` is null does not ASSERT a place of service — an annual
+// wellness visit or a follow-up happens wherever the patient is seen, so the
+// facility decides and there is nothing to disagree with. Only the four types
+// that name a place can conflict, which is what makes the refusal below
+// meaningful rather than noise.
+const encounterTypeAssertsPos = (key) => {
+  const t = encounterTypeByKey(key);
+  return !!(t && t.pos);
+};
+
+const POS_DISAGREES = 'ENCOUNTER_TYPE_POS_MISMATCH';
+
+// THE REFUSAL THE BRIEF ASKS FOR, AND IT NAMES BOTH VALUES. A signed encounter
+// becomes a claim: a telehealth visit billed at POS 12, or a home visit billed
+// at POS 10, is a false statement about where care happened. The check runs
+// only where the type names a place, and it says what each side said rather
+// than "they disagree", because the person reading it has to know which one is
+// wrong.
+const checkEncounterTypeAgainstPos = ({ encounterType, posCode, facilityName }) => {
+  const t = encounterTypeByKey(encounterType);
+  if (!t || !t.pos) return { ok: true, error: null, code: null };
+  const actual = String(posCode || '').trim();
+  if (!actual) {
+    return {
+      ok: false, code: 'ENCOUNTER_TYPE_NO_POS',
+      error: `This visit is recorded as ${t.label}, which bills at place of service ${t.pos}, but ${facilityName ? `the facility "${facilityName}"` : 'the assigned facility'} has no place-of-service code on its record in OpenEMR. An admin sets it on the facility.`
+    };
+  }
+  if (actual === t.pos) return { ok: true, error: null, code: null };
+  return {
+    ok: false, code: POS_DISAGREES,
+    error: `This visit is recorded as ${t.label}, which bills at place of service ${t.pos}, but ${facilityName ? `the facility "${facilityName}"` : 'the assigned facility'} resolves to place of service ${actual}. One of the two is wrong, and a signed encounter becomes a claim — an admin corrects the encounter type on the enrollment record, or the facility in OpenEMR.`
+  };
+};
+
+// What a visit IS, resolved. The booking wins over the patient's default, for
+// the reason above: a patient seen at home most weeks and by video this one is
+// the normal case, and the appointment is where that was decided.
+const resolveEncounterType = ({ patientDefault, appointmentLocation }) => {
+  const booked = String(appointmentLocation || '').toLowerCase() === 'telehealth';
+  const fallback = encounterTypeByKey(patientDefault);
+  if (booked) {
+    // A psychiatric patient booked as telehealth is a PSYCHIATRIC telehealth
+    // visit, not a general one — collapsing the two would drop the exam variant
+    // and the risk assessment the signature depends on.
+    const key = fallback && fallback.psychiatric ? 'psychiatric_telehealth' : 'telehealth';
+    return { key, source: 'appointment', label: encounterTypeByKey(key).label };
+  }
+  if (fallback) return { key: fallback.key, source: 'patient_default', label: fallback.label };
+  return { key: null, source: 'unset', label: null };
+};
+
 // ---- Sign & close (spec §3) ----
 const SIGN_BLOCKER_CODES = {
   note: 'SIGN_NO_NOTE',
@@ -999,7 +1098,11 @@ const SIGN_BLOCKER_CODES = {
   billing_npi: 'SIGN_NO_BILLING_NPI',
   // A signed encounter becomes a claim, and a claim needs a real place of
   // service. Documenting the visit is never blocked; billing it is.
-  facility_pos: 'SIGN_NO_FACILITY_POS'
+  facility_pos: 'SIGN_NO_FACILITY_POS',
+  // A POS that EXISTS but contradicts what kind of visit this was is a worse
+  // failure than a missing one, because nothing about it looks wrong: the
+  // claim goes out asserting care happened somewhere it did not.
+  encounter_type_pos: POS_DISAGREES
 };
 const SIGN_BLOCKER_LABELS = {
   note: 'a documented note',
@@ -1014,17 +1117,36 @@ const SIGN_BLOCKER_LABELS = {
 // care happens whether or not an admin has finished the facility setup — but
 // SIGNING is, because a signed encounter becomes a claim and a claim with an
 // unverified POS is the silent error this whole change exists to prevent.
-const checkSignReadiness = ({ hasNote, record, billingNpi, posCode }) => {
+//
+// `encounterType` is what the admin recorded this patient's visits as, resolved
+// against the booking. Where the type names a place of service, it is checked
+// against the one the facility resolved to, and a disagreement REFUSES the
+// signature naming both values — see checkEncounterTypeAgainstPos. That refusal
+// carries its own sentence rather than a label in the joined list, because the
+// reader has to know which of the two is wrong and neither is fixed from here.
+const checkSignReadiness = ({ hasNote, record, billingNpi, posCode, encounterType, facilityName }) => {
   const missing = [];
   if (!hasNote) missing.push('note');
   missing.push(...deriveCodingStatus(record).missing);
   if (!normalizeNpiValue(billingNpi)) missing.push('billing_npi');
-  if (!String(posCode || '').trim()) missing.push('facility_pos');
+  const pos = String(posCode || '').trim();
+  if (!pos) missing.push('facility_pos');
+  // Only asked where a POS actually resolved: with none, `facility_pos` above
+  // already blocks and saying it twice in two different sentences would send
+  // the reader at two layers for one problem.
+  const agreement = pos
+    ? checkEncounterTypeAgainstPos({ encounterType, posCode: pos, facilityName })
+    : { ok: true, error: null, code: null };
+  if (!agreement.ok) missing.push('encounter_type_pos');
+  const labelled = missing.filter(m => m !== 'encounter_type_pos');
+  const sentences = [];
+  if (labelled.length) sentences.push(`Cannot sign: the encounter needs ${labelled.map(m => SIGN_BLOCKER_LABELS[m]).join(', ')}.`);
+  if (!agreement.ok) sentences.push(`Cannot sign: ${agreement.error}`);
   return {
     ok: missing.length === 0,
     missing,
     codes: missing.map(m => SIGN_BLOCKER_CODES[m]),
-    message: missing.length ? `Cannot sign: the encounter needs ${missing.map(m => SIGN_BLOCKER_LABELS[m]).join(', ')}.` : null
+    message: sentences.length ? sentences.join(' ') : null
   };
 };
 const ATTESTATION_TEXT = 'I attest that this encounter documentation is accurate and complete, that I personally performed or directly supervised the services recorded, and that the diagnoses and service codes are supported by the note.';
@@ -1258,6 +1380,7 @@ const resolveBillingFacility = ({ facilities, configuredId }) => {
       || 'The billing facility could not be determined: OpenEMR names no single business entity and no billing facility is configured. An admin marks the GFC LLC record as the primary business entity in OpenEMR.'
   };
 };
+
 
 const FACILITY_UNASSIGNED = 'FACILITY_NOT_ASSIGNED';
 const resolveEncounterFacility = ({ patientFacilityId, telehealthFacilityId, appointmentLocation, facilities }) => {
@@ -2129,6 +2252,9 @@ module.exports = {
   buildPrescription,
   prescriptionToEmrRow,
   resolveEncounterFacility,
+  ENCOUNTER_TYPES, encounterTypeByKey, isPsychiatricEncounterType,
+  encounterTypeAssertsPos, checkEncounterTypeAgainstPos, resolveEncounterType,
+  POS_DISAGREES,
   FACILITY_UNASSIGNED,
   resolveBillingFacility,
   BILLING_FACILITY_UNRESOLVED,
