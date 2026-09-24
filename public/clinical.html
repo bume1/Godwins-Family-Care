@@ -1480,7 +1480,7 @@
         </div>
       );
       return (
-        <div className="p-4 lg:p-7 max-w-3xl">
+        <div className="p-4 lg:p-7 max-w-3xl mx-auto">
           <QueueCard title="Unsigned encounters" icon="ti-signature" rows={data ? q.unsignedEncounters : null}
             empty="Every documented encounter is signed. Nothing is waiting here."
             render={(r) => line(r.patientName || 'Unnamed patient',
@@ -1536,7 +1536,7 @@
       const weeks = m.visitsPerWeek || [];
       const peak = Math.max(1, ...weeks.map(w => w.total));
       return (
-        <div className="p-4 lg:p-7 max-w-3xl">
+        <div className="p-4 lg:p-7 max-w-3xl mx-auto">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-4">
             <Metric label="Average visit length"
               value={m.averageVisitMinutes.value == null ? null : `${m.averageVisitMinutes.value} min`}
@@ -1894,14 +1894,14 @@
 
       if (packet) {
         return (
-          <div className="p-4 lg:p-7 max-w-2xl">
+          <div className="p-4 lg:p-7 max-w-2xl mx-auto">
             <PreVisitPacket clientId={packet.clientId} eid={packet.eid}
               onClose={() => setPacket(null)} onOpenChart={onOpenChart} />
           </div>
         );
       }
       return (
-        <div className="p-4 lg:p-7 max-w-3xl">
+        <div className="p-4 lg:p-7 max-w-3xl mx-auto">
           <div className="card mb-4">
             <div className="bg-primary text-white px-4 py-3 rounded-t-[11px]">
               <div className="serif text-xl font-semibold">{greeting}, {String(user && user.name || '').split(' ')[0] || 'there'}</div>
@@ -2278,7 +2278,7 @@
       const painFields = ['breathing', 'negativeVocalization', 'facialExpression', 'bodyLanguage', 'consolability'];
       const hazardFields = [['smokeDetectors', 'Smoke detectors'], ['coDetectors', 'CO detectors'], ['grabBars', 'Grab bars'], ['nonSkidSurfaces', 'Non-skid surfaces'], ['runningWater', 'Running water'], ['secondaryExit', 'Secondary exit']];
       return (
-        <div className="max-w-3xl">
+        <div className="max-w-3xl mx-auto">
           {appointmentEid && (
             <div className="card p-3 mb-4 flex items-center gap-2 text-sm text-primary">
               <i className="ti ti-calendar-check text-accent" />
@@ -2519,7 +2519,7 @@
           .finally(() => setBusy(false));
       };
       return (
-        <div className="max-w-3xl">
+        <div className="max-w-3xl mx-auto">
           <div className="card">
             <div className="card-h"><h2>Medication reconciliation</h2>
               {!data.emrOk && <span className="chip bg-amber-50 text-amber-800">EMR list unavailable</span>}
@@ -2586,7 +2586,7 @@
         }).catch(e => setMsg({ ok: false, text: e.message })).finally(() => setBusy(false));
       };
       return (
-        <div className="max-w-3xl">
+        <div className="max-w-3xl mx-auto">
           {cp && (
             <div className="card mb-4">
               <div className="card-h"><h2>Current plan — v{cp.version}</h2>
@@ -2897,7 +2897,7 @@
 
       if (err && err.code === 'PROVIDER_NOT_MAPPED') {
         return (
-          <div className="p-6 lg:p-10 max-w-xl">
+          <div className="p-6 lg:p-10 max-w-xl mx-auto">
             <div className="card p-6 text-center">
               <i className="ti ti-calendar-question text-4xl text-accent" />
               <h2 className="serif text-xl text-primary font-semibold mt-2">Calendar not connected yet</h2>
@@ -3021,7 +3021,7 @@
         </div>
       );
       return (
-        <div className="max-w-3xl">
+        <div className="max-w-3xl mx-auto">
           {!data.linked && (
             <div className="card p-5 text-center">
               <i className="ti ti-calendar-off text-3xl text-accent" />
@@ -4369,7 +4369,7 @@
       if (err) return <p className="text-red-600 text-sm p-4">{err}</p>;
       if (!data) return <p className="text-sm text-stone-500 p-4">Loading encounters from OpenEMR…</p>;
       return (
-        <div className="max-w-3xl">
+        <div className="max-w-3xl mx-auto">
           {!data.linked && <div className="card p-5 text-center"><i className="ti ti-stethoscope-off text-3xl text-accent" /><p className="text-sm text-stone-500 mt-1">Link this patient to OpenEMR to document visits.</p></div>}
           {data.linked && (
             <div className="card">
