@@ -198,6 +198,12 @@
       reviewDocument: (id, uploadId, decision, reason) => authedFetch(`/api/gfc/admin/enrollment/${id}/documents/${uploadId}/review`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision, reason })
       }),
+      // Copy a misfiled document into a caregiver's own file (2026-09-24) —
+      // admin only, since whose record it truly belongs to is an office call.
+      moveDocumentToCaregiver: (id, docId, caregiverId) => authedFetch(`/api/gfc/admin/enrollment/${id}/documents/${docId}/move-to-caregiver`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ caregiverId })
+      }),
+      listMoveCaregivers: () => authedFetch('/api/gfc/admin/enrollment/meta/caregivers'),
       // The branded, no-login upload link (2026-09-23) — admin only, matching
       // every other workflow decision on this surface. get-or-create by
       // default; `{ regenerate: true }` turns off the old one and mints a new.
@@ -709,6 +715,14 @@
       // kinds itself drifts from the module that refuses one.
       const [extraction, setExtraction] = useState(null);
       const [reviewing, setReviewing] = useState(null);
+      // Filing to OpenEMR, and moving a misfiled document to a caregiver's own
+      // file (2026-09-24). `moving` names which file's caregiver-picker is
+      // open, so only one is ever expanded at a time.
+      const [routing, setRouting] = useState('');
+      const [routeErr, setRouteErr] = useState('');
+      const [moving, setMoving] = useState('');
+      const [caregivers, setCaregivers] = useState(null);
+      const [pickedCaregiver, setPickedCaregiver] = useState('');
 
       const load = useCallback(() => {
         api.documents(clientId).then(setState).catch(e => setErr(e.message));
@@ -760,6 +774,20 @@
         setBusy(true); setErr('');
         api.reviewDocument(clientId, uploadId, decision, reason).then(load)
           .catch(e => setErr(e.message)).finally(() => setBusy(false));
+      };
+
+      const startMove = (uploadId) => {
+        setMoving(uploadId); setRouteErr(''); setPickedCaregiver('');
+        if (caregivers) return;
+        api.listMoveCaregivers().then(r => setCaregivers(r.caregivers || []))
+          .catch(e => setRouteErr(e.message));
+      };
+      const confirmMove = (uploadId) => {
+        if (!pickedCaregiver) return;
+        setRouting(uploadId); setRouteErr('');
+        api.moveDocumentToCaregiver(clientId, uploadId, pickedCaregiver)
+          .then(() => { setMoving(''); load(); })
+          .catch(e => setRouteErr(e.message)).finally(() => setRouting(''));
       };
 
       if (!state) return <Section title="Documents from the client"><span className="text-sm text-gray-400">{err || 'Loading…'}</span></Section>;
@@ -891,7 +919,46 @@
                         <ReadDocumentButton clientId={clientId} doc={{ ...f, kind: r.kind }} extraction={extraction}
                           onRead={(ex) => setReviewing({ ...ex, fileName: f.fileName })} />
                       )}
+                      {/* Filing into the patient's actual OpenEMR chart is now
+                          AUTOMATIC (2026-09-24, owner rule) — every upload tries
+                          it the moment it is stored, and again as a catch-up pass
+                          the moment a patient is linked. No button: this chip is
+                          only ever a report of what already happened, never an
+                          action to take. A not-yet-filed document says nothing
+                          extra — absence already reads as "not yet", the same
+                          convention the clinical chart's own "In EMR" chip uses. */}
+                      {f.emrFiled && (
+                        <span className="chip bg-emerald-50 text-emerald-700" title={`Filed ${new Date(f.emrFiled.at).toLocaleString()}`}>In OpenEMR chart</span>
+                      )}
+                      {/* Whose record this truly belongs to is an office call —
+                          admin only, per the owner's explicit ask. */}
+                      {isAdmin && f.status !== 'rejected' && (
+                        f.movedTo
+                          ? <span className="chip bg-stone-100 text-stone-600" title={`Moved ${new Date(f.movedTo.at).toLocaleString()}`}>Also under {f.movedTo.caregiverName || 'a caregiver'}</span>
+                          : <button className="chip border border-gray-300 text-gray-600 bg-white" disabled={routing === f.id}
+                              onClick={() => startMove(f.id)}>Move to caregiver…</button>
+                      )}
                     </div>
+                    {routeErr && (routing === f.id || moving === f.id) && (
+                      <div className="text-danger-500 text-xs mt-1">{routeErr}</div>
+                    )}
+                    {moving === f.id && (
+                      <div className="flex items-center gap-2 mt-2 text-xs border border-gray-200 rounded-lg p-2">
+                        {!caregivers ? (
+                          <span className="text-gray-400">Loading caregivers…</span>
+                        ) : (
+                          <React.Fragment>
+                            <select className="input !py-1" value={pickedCaregiver} onChange={e => setPickedCaregiver(e.target.value)}>
+                              <option value="">Choose a caregiver…</option>
+                              {caregivers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                            </select>
+                            <button className="btn btn-primary !py-1 !px-2" disabled={!pickedCaregiver || routing === f.id}
+                              onClick={() => confirmMove(f.id)}>{routing === f.id ? 'Moving…' : 'Confirm'}</button>
+                            <button className="btn btn-ghost !py-1 !px-2" onClick={() => setMoving('')}>Cancel</button>
+                          </React.Fragment>
+                        )}
+                      </div>
+                    )}
                     {reviewing && reviewing.docId === f.id && (
                       <ExtractionReview clientId={clientId} extraction={reviewing}
                         onCancel={() => setReviewing(null)}

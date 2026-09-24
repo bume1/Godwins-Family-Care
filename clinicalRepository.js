@@ -333,7 +333,11 @@ const buildChartDocumentIndex = (input) => {
       contentType: u.mimeType || null,
       source: CHART_DOC_SOURCE.APP,
       openable: true,
-      inChart: false,
+      // Whether this UPLOAD has ALSO been filed into OpenEMR's own Documents
+      // (server.js, POST …/documents/:docId/file-to-emr, 2026-09-24). This was
+      // hardcoded false because there was no such route — a client upload had
+      // no path into the real EMR at all, unlike a care plan or a consent.
+      inChart: !!u.emrFiled,
       // Only an UPLOAD row can be read into proposals: it is the one kind that
       // corresponds to a stored file the extractor can fetch. A consent, a care
       // plan and a record release are documents this app GENERATED from the
