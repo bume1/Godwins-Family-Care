@@ -3,6 +3,23 @@
 One-shot / manually-invoked scripts. None of these run automatically — they
 are run by hand when needed.
 
+## export_billing_codes.js
+
+Reports the CPT4/HCPCS codes and modifiers GFC actually bills, for hand-entry
+(or confirming existing entry) into OpenEMR's fee schedule — OpenEMR ships no
+CPT table at all (AMA copyright) and this app keeps none of its own, so "our
+codes" has never lived in one printable place. Pulls from the same three
+sources `scripts/load_ncci_tables.js` already derives "GFC's code universe"
+from — the admin-curated favorites, every clinician's prior code selections,
+and every service line ever actually billed — but reports labels and the
+modifiers actually seen, which that script has no reason to keep. Read-only;
+never writes to the store.
+
+```bash
+node scripts/export_billing_codes.js
+node scripts/export_billing_codes.js --csv=billing_codes.csv
+```
+
 ## import_offline_patients.js (Session 3.3, Scope B3)
 
 Bulk-creates client records for the legacy paper-packet patients (the ~7
@@ -90,3 +107,36 @@ See the file header for usage.
 | `verify_session5.js` | Boots the real server on the memory adapter (or `BASE_URL=` for a deployed host) and runs the 38-check acceptance: production boot refusals, MFA enrol/verify/recovery, session revocation and idle expiry, the per-user OpenEMR handshake, durable audit rows, scrubbed log. |
 | `verify_emr_authcode.js` | **Owner-run** live acceptance for per-user OpenEMR auth: authorize URL → pasted redirect → PKCE exchange → userinfo → TEST-DATA note written and read back with the OpenEMR `user` on the row. Reports whether the password grant is still on. |
 | `emr_login.js` | Obtains a per-user OpenEMR token from a terminal for the other live probes (`verify_84_transport.js`, `verify_6b_charges.js`, …), which now read `OPENEMR_PROBE_ACCESS_TOKEN` instead of the retired API user. |
+
+## load_ncci_tables.js (NCCI/MUE sign-time bundling gate)
+
+Quarterly loader for the two CMS reference tables the sign-time bundling
+check (`clinicalRepository.js` `checkNcciBundling`) reads: NCCI
+Procedure-to-Procedure edits and Medically Unlikely Edit unit caps. Without
+having run at least once, every sign attempt is refused with
+`NCCI_DATA_STALE` — deliberately; see the check's own header comment.
+
+```bash
+node scripts/load_ncci_tables.js
+node scripts/load_ncci_tables.js --quarter=2026Q4   # if the auto-guessed quarter is wrong
+node scripts/load_ncci_tables.js --ptp-dir=/path/to/zips
+```
+
+**The two source files are not symmetric.** The MUE table is a plain URL,
+fetched automatically every run. The PTP edits sit behind an AMA license
+click-through on cms.gov, so a human downloads the four "Practitioner" PTP
+ZIPs by hand each quarter and drops them in `scripts/ncci_source/ptp/` (see
+that directory's own README) — the script cannot and does not try to get
+past that gate; if it finds nothing there, it says so and names the CMS page.
+
+Filtered on load to the codes GFC actually bills (its practice favorites,
+every clinician's prior code selections, and everything ever actually
+billed) rather than importing CMS's full ~2.7M-row file. Idempotent — each
+run replaces the stored table outright — and prints a diff against whatever
+was loaded before (codes added/removed, indicator or MUE-value changes).
+
+Stored as KV collections (`gfc_ncci_ptp_edits`, `gfc_ncci_mue`,
+`gfc_ncci_source_version`), the same shape as `gfc_payer_credentialing` —
+this app has no generic mechanism for a standalone SQL table, so CMS's
+reference data lives the same way every other collection in this app does.
+Not PHI: it carries nothing about any patient.

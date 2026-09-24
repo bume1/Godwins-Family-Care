@@ -52,6 +52,69 @@ test('every templated path is a DECLARED extraction target', () => {
   }
 });
 
+test('every EXTRACTABLE kind has something declared to look for', () => {
+  // The gap this closes, found chasing an owner report that reading
+  // "didn't work": `physicianOrder` and `priorRecords` were declared in
+  // documentExtraction.TARGETS from the start, with real fill/verify paths,
+  // and had NO entry in TEMPLATES at all. `extractFromLines` reads
+  // `TEMPLATES[kind]`, finds it undefined, and refuses with "No template is
+  // declared" — for every document of that kind, forever, regardless of
+  // image quality. A kind that answers `isExtractable(kind) === true` but
+  // has nothing here to search for is exactly that trap.
+  for (const kind of Object.keys(extraction.TARGETS)) {
+    assert.ok(tpl.TEMPLATES[kind], `${kind} is extractable but has no templates — every read of it hard-fails`);
+  }
+});
+
+test('the cross-check is a PURE function, run directly against a broken fixture', () => {
+  // `assertTemplatesAreDeclared()` closes over the shipped data, so a test
+  // that can only call it against the shipped (already-correct) data proves
+  // the guard exists, never that it actually catches anything. `checkTemplates`
+  // takes both sides as arguments so a deliberately broken fixture can drive it.
+  assert.deepStrictEqual(tpl.checkTemplates({}, {}), []);
+  assert.deepStrictEqual(
+    tpl.checkTemplates({}, { photoId: { verify: ['dob'] } }),
+    ['photoId is a declared extraction target but has no templates — every read of it will refuse with NO_TEMPLATE']
+  );
+  assert.deepStrictEqual(
+    tpl.checkTemplates({ photoId: { dob: { rule: 'date', labels: ['dob'] } } }, {}),
+    ['photoId has templates but no declared targets']
+  );
+  assert.deepStrictEqual(
+    tpl.checkTemplates({ photoId: { dob: { rule: 'not_a_real_rule', labels: ['dob'] } } }, { photoId: { verify: ['dob'] } }),
+    ['photoId.dob names an unknown value rule "not_a_real_rule"']
+  );
+  assert.deepStrictEqual(
+    tpl.checkTemplates({ photoId: { dob: { rule: 'date', labels: [] } } }, { photoId: { verify: ['dob'] } }),
+    ['photoId.dob declares no labels']
+  );
+  // And the shipped data must be clean by both checks at once.
+  assert.deepStrictEqual(tpl.checkTemplates(tpl.TEMPLATES, extraction.TARGETS), []);
+});
+
+test('a real load with the gap reintroduced REFUSES TO BOOT', () => {
+  // Same technique documentExtraction.js's own load guard is proven with: a
+  // mutation that could delete the throw and pass every test that only calls
+  // the exported function against already-clean data. This drives a REAL
+  // `require()` of a mutated copy, so the assertion that matters is that the
+  // module never finishes loading.
+  // Written INSIDE the project, not os.tmpdir(): `pdf-lib` is a real npm
+  // dependency this module requires directly, and Node's module resolution
+  // only finds it by walking UP from the file's own location to node_modules
+  // — a copy in /tmp has no such ancestor.
+  const copy = path.join(root, `.dt_probe_${process.pid}.js`);
+  const src = fs.readFileSync(path.join(root, 'documentTemplates.js'), 'utf8')
+    // Drop the whole photoId entry, which leaves it declared in TARGETS
+    // with nothing here — exactly the shape the real bug had.
+    .replace(/\n  photoId: \{\n    dob: \{ rule: 'date',[^}]*\}\n  \},/, '\n  /* photoId templates removed by the probe */');
+  assert.ok(!/photoId: \{\n    dob:/.test(src), 'the probe must actually have removed the photoId template');
+  fs.writeFileSync(copy, src);
+  try {
+    assert.throws(() => require(copy), /photoId is a declared extraction target but has no templates/,
+      'a target with nothing declared to search for must stop the module loading');
+  } finally { fs.unlinkSync(copy); }
+});
+
 test('an identity field is read to be COMPARED, never to be filled', () => {
   // A referral or a face sheet arrives from somebody else's system and may
   // simply be about a different patient. 4.9b settled this; the templates must
@@ -270,6 +333,65 @@ test('a realistic insurance card reads correctly', async () => {
   assert.strictEqual(read.extracted['medicare.id'], '1EG4-TE5-MK73');
   assert.strictEqual(read.extracted.dob, '1948-03-18');
   assert.strictEqual(read.extracted['medicare.advantagePlan'], undefined);
+});
+
+test('a physician order reads end to end — this kind used to hard-fail every time', async () => {
+  // Before this fix, `physicianOrder` was declared in documentExtraction with
+  // real fill/verify paths and had ZERO entries in TEMPLATES, so this exact
+  // call answered `{ source: SOURCE.NONE, code: 'NO_TEMPLATE' }` regardless of
+  // what the PDF said — a code gap, not an OCR quality problem, and it looked
+  // to a person clicking the button exactly like "reading doesn't work".
+  const PDFKit = require('pdfkit');
+  const bytes = await new Promise((resolve, reject) => {
+    const doc = new PDFKit({ size: [612, 792], margin: 40 });
+    const chunks = [];
+    doc.on('data', c => chunks.push(c));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+    doc.fontSize(10);
+    doc.text('Home Health Order', 40, 50);
+    doc.text('Primary Care Physician: Dr. Amara Osei', 40, 90);
+    doc.text('Practice: Buckhead Internal Medicine', 40, 110);
+    doc.text('Practice Phone: 404-555-0199', 40, 130);
+    doc.text('Date of Birth: 03/18/1948', 40, 150);
+    doc.end();
+  });
+  const read = await tpl.readDocument({ bytes, kind: 'physicianOrder', mimeType: 'application/pdf' });
+  assert.notStrictEqual(read.source, tpl.SOURCE.NONE, 'the NO_TEMPLATE failure must be gone');
+  assert.strictEqual(read.extracted['medicalTeam.pcpName'], 'Dr. Amara Osei');
+  assert.strictEqual(read.extracted['medicalTeam.pcpPractice'], 'Buckhead Internal Medicine');
+  assert.strictEqual(read.extracted['medicalTeam.pcpPhone'], '404-555-0199');
+  assert.strictEqual(read.extracted.dob, '1948-03-18');
+});
+
+test('a photo ID reads its date of birth — a kind with no fill target at all', async () => {
+  // photoId did not exist in documentExtraction.TARGETS before this fix, so
+  // the button never appeared for it. It gets a verify-only target now: a
+  // photo ID never WRITES anything (name and DOB are already known), but it
+  // is exactly the right document to check the record against.
+  const PDFKit = require('pdfkit');
+  const bytes = await new Promise((resolve, reject) => {
+    const doc = new PDFKit({ size: [340, 216], margin: 20 });
+    const chunks = [];
+    doc.on('data', c => chunks.push(c));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+    doc.fontSize(10);
+    doc.text('GEORGIA DRIVER LICENSE', 20, 20);
+    doc.text('Date of Birth: 03/18/1948', 20, 60);
+    doc.end();
+  });
+  const read = await tpl.readDocument({ bytes, kind: 'photoId', mimeType: 'application/pdf' });
+  assert.notStrictEqual(read.source, tpl.SOURCE.NONE);
+  assert.strictEqual(read.extracted.dob, '1948-03-18');
+  const built = extraction.buildProposals({
+    kind: 'photoId', docId: 'doc_license', extracted: read.extracted,
+    readValue: () => '1950-01-01', confidence: read.confidence
+  });
+  assert.ok(!built.error, built.error);
+  assert.strictEqual(built.rows.length, 1);
+  assert.strictEqual(built.rows[0].verifyOnly, true, 'a photo ID never proposes a value to WRITE, only to check');
+  assert.strictEqual(built.identityConflicts.length, 1, 'a mismatched DOB on the license must surface as an identity conflict');
 });
 
 test('what it reads feeds buildProposals unchanged', async () => {

@@ -321,9 +321,13 @@ test('a repeating or multi-select answer is refused by name, never half-read', (
 // -- an undeclared kind cannot be extracted at all -------------------------
 
 test('a kind with no declared targets has no schema and cannot be read', () => {
-  assert.strictEqual(X.schemaFor('photoId'), null);
-  assert.strictEqual(X.isExtractable('photoId'), false);
-  const r = X.buildProposals({ kind: 'photoId', docId: 'd1', extracted: { anything: 'x' } });
+  // `photoId` used to be this example — it now has a verify-only target of
+  // its own (2026-09-23, "it needs to be able to read any document
+  // uploaded"), so a kind genuinely outside the catalog is the one to use
+  // here, or this test stops proving anything the day a kind gets declared.
+  assert.strictEqual(X.schemaFor('somethingNobodyDeclared'), null);
+  assert.strictEqual(X.isExtractable('somethingNobodyDeclared'), false);
+  const r = X.buildProposals({ kind: 'somethingNobodyDeclared', docId: 'd1', extracted: { anything: 'x' } });
   assert.strictEqual(r.code, 'EXTRACTION_KIND_UNSUPPORTED');
 });
 

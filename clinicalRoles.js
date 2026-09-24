@@ -242,9 +242,12 @@ const serviceCodeRefusal = (user, badCodes) => {
 // GATE ON WHAT IS BEING ATTESTED, not only on who is asking.
 //   • carries any CPT/service code → provider (LCSW for the BH set only)
 //   • no service codes (nursing documentation) → rn or provider may sign
-//   • LMSW carrying a service code → signs, but the encounter is pendingCoSign
-//     and is not billable until an LCSW or provider co-signs (A10 bills
-//     nothing independently)
+//   • an LMSW NEVER completes a signature, billed or not (owner rule,
+//     2026-09-24: "only FNP, RN, MD is able to sign" — LMSW co-signs).
+//     Supervision is the whole reason the credential exists, so the carve-out
+//     this used to have for a plain, codeless note is gone: an LMSW's note is
+//     ALWAYS held for a provider's or an LCSW's signature, and it is the
+//     co-signer who attests — never the LMSW, whether or not anything bills.
 const SIGN_OUTCOME = Object.freeze({ ALLOWED: 'allowed', PENDING_CO_SIGN: 'pending_co_sign', REFUSED: 'refused' });
 const evaluateEncounterSignature = (user, serviceCodes) => {
   const role = resolveClinicalRole(user);
@@ -252,8 +255,15 @@ const evaluateEncounterSignature = (user, serviceCodes) => {
   if (!role || role === CLINICAL_ROLES.READ_ONLY) {
     return { outcome: SIGN_OUTCOME.REFUSED, code: 'SIGN_NO_CREDENTIAL', reason: 'Signing an encounter requires a clinical licence.' };
   }
+  if (role === CLINICAL_ROLES.LMSW) {
+    return {
+      outcome: SIGN_OUTCOME.PENDING_CO_SIGN, billable: false, clinicalRole: role,
+      code: 'SIGN_PENDING_CO_SIGN', signatureRole: 'authoring',
+      reason: 'An LMSW documents but does not sign. This note is held for signature by an LCSW or a provider — they become the attesting clinician of record.'
+    };
+  }
   if (!codes.length) {
-    // Nursing documentation. Everyone licensed may attest their own note.
+    // Nursing documentation. Every other licensed role attests its own note.
     return { outcome: SIGN_OUTCOME.ALLOWED, billable: false, clinicalRole: role };
   }
   if (role === CLINICAL_ROLES.PROVIDER) return { outcome: SIGN_OUTCOME.ALLOWED, billable: true, clinicalRole: role };
@@ -270,12 +280,7 @@ const evaluateEncounterSignature = (user, serviceCodes) => {
     }
     return { outcome: SIGN_OUTCOME.ALLOWED, billable: true, clinicalRole: role };
   }
-  // LMSW — signs, but nothing bills until a supervising credential co-signs.
-  return {
-    outcome: SIGN_OUTCOME.PENDING_CO_SIGN, billable: false, clinicalRole: role,
-    code: 'SIGN_PENDING_CO_SIGN',
-    reason: 'An LMSW bills nothing independently. The encounter is signed and held for co-signature by an LCSW or a provider before any charge posts.'
-  };
+  return { outcome: SIGN_OUTCOME.REFUSED, code: 'SIGN_NO_CREDENTIAL', reason: 'Signing an encounter requires a clinical licence.' };
 };
 // Who may clear a pendingCoSign encounter.
 const CO_SIGN_ROLES = Object.freeze([CLINICAL_ROLES.LCSW, CLINICAL_ROLES.PROVIDER]);
