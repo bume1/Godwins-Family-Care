@@ -286,3 +286,88 @@ test('a PTP edit is found whichever service line lists it first', () => {
   assert.equal(R.checkSignReadiness(readyArgs(forward, { ncciPtpEdits: edit })).ok, false);
   assert.equal(R.checkSignReadiness(readyArgs(backward, { ncciPtpEdits: edit })).ok, false);
 });
+
+// ============================================================
+// ncciRefreshReminder — the admin/manager dashboard nudge (2026-09-24).
+//
+// Distinct from ncciStaleness (the hard sign-time block at 100 days): this is
+// the proactive reminder that fires well before that, on the same stored
+// data, with no separate "dismissed" state — until there is a real billing
+// backend, this banner IS the process for keeping the quarterly CMS tables
+// current.
+// ============================================================
+test('never-loaded reference data is due starting from day one — "starting from today"', () => {
+  const r = R.ncciRefreshReminder({ ptp: { quarter: 'UNLOADED', loadedAt: null }, mue: { quarter: 'UNLOADED', loadedAt: null } });
+  assert.equal(r.due, true);
+  assert.equal(r.items.length, 2, 'both halves are unloaded, both must be named');
+  assert.ok(r.items.every(i => i.neverLoaded === true));
+  assert.match(r.message, /PTP edits.*never been loaded/);
+  assert.match(r.message, /MUE table.*never been loaded/);
+  assert.match(r.message, /load_ncci_tables\.js/);
+});
+
+test('freshly loaded reference data is not due', () => {
+  const now = new Date();
+  const r = R.ncciRefreshReminder({
+    ptp: { quarter: '2026Q3', loadedAt: now.toISOString() },
+    mue: { quarter: '2026Q3', loadedAt: now.toISOString() }
+  }, now);
+  assert.deepEqual(r, { due: false, items: [], message: null });
+});
+
+test('data loaded just under the reminder threshold is not yet due; just at it, is', () => {
+  const now = new Date('2026-09-24T12:00:00Z');
+  const justUnder = new Date(now.getTime() - (R.NCCI_REFRESH_REMINDER_DAYS - 1) * 86400000).toISOString();
+  const notDue = R.ncciRefreshReminder({ ptp: { quarter: '2026Q2', loadedAt: justUnder }, mue: { quarter: '2026Q2', loadedAt: justUnder } }, now);
+  assert.equal(notDue.due, false);
+
+  const atThreshold = new Date(now.getTime() - R.NCCI_REFRESH_REMINDER_DAYS * 86400000).toISOString();
+  const due = R.ncciRefreshReminder({ ptp: { quarter: '2026Q2', loadedAt: atThreshold }, mue: { quarter: '2026Q2', loadedAt: atThreshold } }, now);
+  assert.equal(due.due, true);
+  assert.equal(due.items.length, 2);
+  assert.match(due.message, /2026Q2.*was loaded 80 day\(s\) ago/);
+});
+
+test('the reminder is well ahead of the hard sign-time block, not the same threshold', () => {
+  assert.ok(R.NCCI_REFRESH_REMINDER_DAYS < R.NCCI_STALE_DAYS,
+    'the nudge must fire before the hard block, giving admin/manager time to act before a clinician is refused at sign time');
+});
+
+test('one stale half and one fresh half reports only the stale one, by name', () => {
+  const now = new Date();
+  const old = new Date(now.getTime() - 90 * 86400000).toISOString();
+  const r = R.ncciRefreshReminder({
+    ptp: { quarter: '2026Q2', loadedAt: old },
+    mue: { quarter: '2026Q3', loadedAt: now.toISOString() }
+  }, now);
+  assert.equal(r.due, true);
+  assert.equal(r.items.length, 1);
+  assert.equal(r.items[0].label, 'PTP edits');
+  assert.match(r.message, /PTP edits/);
+  assert.doesNotMatch(r.message, /MUE table/);
+});
+
+test('build-enforced: the admin-hub dashboard route computes the reminder from the same stored source version the sign gate reads, and never a second, drifting copy', () => {
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const from = server.indexOf("app.get('/api/admin-hub/dashboard'");
+  const to = server.indexOf('\n});', from);
+  assert.ok(from > 0 && to > from, 'the dashboard route must still exist');
+  const route = server.slice(from, to);
+  assert.match(route, /getNcciTables\(\)/, 'must reuse the one function that reads gfc_ncci_source_version, never re-fetch it directly');
+  assert.match(route, /clinicalRepo\.ncciRefreshReminder\(/, 'must call the pure reminder function, not restate its logic inline');
+  assert.doesNotMatch(route, /db\.get\('gfc_ncci_source_version'\)/, 'the route itself must not read the collection a second, independent way');
+  // Not just "the string appears somewhere in the route" — it must actually
+  // sit inside the `stats` object literal that gets sent back, or computing
+  // it is dead work nobody ever sees.
+  const statsFrom = route.indexOf('const stats = {');
+  const statsTo = route.indexOf('};', statsFrom);
+  assert.ok(statsFrom > 0 && statsTo > statsFrom, 'the stats object literal must still exist');
+  assert.match(route.slice(statsFrom, statsTo), /billingDataRefresh/, 'the computed reminder must actually be a key on the response payload, not just computed and discarded');
+});
+
+test('build-enforced: the dashboard route is reachable by both admin and manager, matching "admin and manager inbox"', () => {
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const line = server.split('\n').find(l => l.includes("app.get('/api/admin-hub/dashboard'"));
+  assert.ok(line, 'the dashboard route declaration must exist on one line');
+  assert.match(line, /requireAdminHubAccess/, 'must use the gate that already admits admin, manager and hasAdminHubAccess — never a narrower admin-only gate');
+});

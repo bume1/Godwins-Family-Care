@@ -1674,6 +1674,50 @@ const ncciStaleness = (sourceVersion) => {
   return null;
 };
 
+// A PROACTIVE nudge, distinct from ncciStaleness above. Staleness is the hard
+// sign-time block at NCCI_STALE_DAYS (100) — by the time it fires, a
+// clinician is standing in a patient's home unable to sign. This is the
+// admin/manager-facing reminder that fires well before that, on the SAME
+// stored data, so there is nothing here to fall out of sync with reality:
+// there is no separate "have we reminded them yet" record, no snooze, no
+// dismiss. The reminder clears itself the moment scripts/load_ncci_tables.js
+// actually runs and writes a fresh loadedAt — a reminder someone can click
+// away without doing the work is the exact trap this repo has a house rule
+// about (the competency ceiling, the caregiver feed, the two missing admin
+// screens — a control that can be satisfied without the underlying fact
+// being true is worse than no control).
+//
+// Until there is a real billing backend, this — plus the two lines it
+// prints — IS the operational process for keeping CMS's quarterly tables
+// current. Owner-directed 2026-09-24.
+const NCCI_REFRESH_REMINDER_DAYS = 80; // ~1 CMS quarter, leaving a margin before the 100-day sign-time block bites
+
+const ncciRefreshReminder = (sourceVersion, now) => {
+  const v = normalizeNcciSourceVersion(sourceVersion);
+  const nowMs = now ? new Date(now).getTime() : Date.now();
+  const items = [];
+  for (const [label, half] of [['PTP edits', v.ptp], ['MUE', v.mue]]) {
+    if (half.quarter === 'UNLOADED') {
+      items.push({ label, quarter: null, ageDays: null, neverLoaded: true });
+      continue;
+    }
+    const t = Date.parse(half.loadedAt);
+    const ageDays = Number.isNaN(t) ? null : Math.floor((nowMs - t) / 86400000);
+    if (ageDays === null || ageDays >= NCCI_REFRESH_REMINDER_DAYS) {
+      items.push({ label, quarter: half.quarter, ageDays, neverLoaded: false });
+    }
+  }
+  if (!items.length) return { due: false, items: [], message: null };
+  const sentences = items.map(it => it.neverLoaded
+    ? `The ${it.label} table has never been loaded.`
+    : `The ${it.label} table (${it.quarter}) was loaded ${it.ageDays} day(s) ago.`);
+  return {
+    due: true,
+    items,
+    message: `${sentences.join(' ')} Run scripts/load_ncci_tables.js to refresh CMS's quarterly billing reference data.`
+  };
+};
+
 // CMS's file is directional (a pair appears once, as column1/column2) but a
 // service line does not know which of the two it is, so both orders are
 // tried.
@@ -2570,6 +2614,8 @@ module.exports = {
   NCCI_STALE_DAYS, NCCI_UNBUNDLING_MODIFIERS,
   normalizeNcciSourceVersion,
   checkNcciBundling,
+  NCCI_REFRESH_REMINDER_DAYS,
+  ncciRefreshReminder,
   buildOrderPayload,
   orderStatusToEmr,
   TEST_ORDER_TYPES,

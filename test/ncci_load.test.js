@@ -112,12 +112,12 @@ test('extractTextLines reads a .txt member out of a real zip via unzip', async (
     ]);
   } finally { fs.unlinkSync(tmp); }
 });
-test('extractTextLines refuses a zip with no .txt member, naming what it did find', async () => {
+test('extractTextLines refuses a zip with no .txt or .csv member, naming what it did find', async () => {
   const buf = createZip([{ name: 'sample.xlsx', data: 'not really an xlsx, just bytes' }]);
   const tmp = path.join(os.tmpdir(), `gfc-ncci-test-noxt-${Date.now()}.zip`);
   fs.writeFileSync(tmp, buf);
   try {
-    await assert.rejects(L.extractTextLines(tmp), /no \.txt file/);
+    await assert.rejects(L.extractTextLines(tmp), /no \.txt or \.csv file/);
   } finally { fs.unlinkSync(tmp); }
 });
 
@@ -208,4 +208,59 @@ test('build-enforced: gfc_ncci_ptp_edits, gfc_ncci_mue and gfc_ncci_source_versi
     assert.ok(h, `${key} has no COLLECTION_REGISTRY handler`);
     assert.equal(h.phi, false, `${key} carries only CMS reference data, never PHI`);
   }
+});
+
+// Production runs node:22-alpine, whose BusyBox unzip has no -Z1 — the loader
+// failed there on first real use. Both listing formats must parse.
+test('parseZipListing reads both BusyBox and Info-ZIP `unzip -l` output, and nothing else', () => {
+  const L = require('../scripts/load_ncci_tables');
+  const busybox = [
+    'Archive:  /app/scripts/ncci_source/ptp/ccipra-v323r0-f1.zip',
+    '  Length      Date    Time    Name',
+    '---------  ---------- -----   ----',
+    ' 81234567  09-02-2026 10:15   ccipra-v323r0-f1.txt',
+    '  1234567  09-02-2026 10:15   ccipra v323r0 f1.xlsx',
+    '---------                     -------',
+    ' 82469134                     2 files',
+    ''
+  ].join('\n');
+  assert.deepEqual(L.parseZipListing(busybox), ['ccipra-v323r0-f1.txt', 'ccipra v323r0 f1.xlsx']);
+  const infozip = [
+    'Archive:  x.zip',
+    '  Length      Date    Time    Name',
+    '---------  ---------- -----   ----',
+    '      120  2026-09-02 10:15   MUE_table.txt',
+    '---------                     -------',
+    '      120                     1 file'
+  ].join('\r\n');
+  assert.deepEqual(L.parseZipListing(infozip), ['MUE_table.txt']);
+});
+
+test('build-enforced: the loader never uses unzip -Z (absent from the production Alpine image)', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'load_ncci_tables.js'), 'utf8')
+    .replace(/\/\/.*$/gm, '');
+  assert.doesNotMatch(src, /['"]-Z1?['"]/);
+});
+
+// 2026Q4's MUE zip ships .csv + .xlsx and no .txt — the loader refused it on
+// first real use. The CSV also carries the MAI as text, not a bare digit.
+test('the MUE CSV rendition parses, including a text MAI', () => {
+  const L = require('../scripts/load_ncci_tables');
+  assert.deepEqual(L.parseMueLine('99213,3,"3 Date of Service Edit: Clinical","Clinical: Data"'),
+    { code: '99213', mueValue: 3, mai: '3' });
+  assert.equal(L.parseMueLine('HCPCS/CPT Code,Practitioner Services MUE Values,MUE Adjudication Indicator,MUE Rationale'), null);
+});
+test('a zip carrying .csv and .xlsx but no .txt is read from the .csv, never the .xlsx', async () => {
+  const L = require('../scripts/load_ncci_tables');
+  const { createZip } = require('../zipWriter');
+  const os = require('node:os');
+  const zp = path.join(os.tmpdir(), `mue-csv-${process.pid}.zip`);
+  fs.writeFileSync(zp, createZip([
+    { name: 'MCR_MUE_PractitionerServices_Eff_10-01-2026.xlsx', data: Buffer.from('PK-not-really') },
+    { name: 'MCR_MUE_PractitionerServices_Eff_10-01-2026.csv', data: Buffer.from('99213,3,"3 Date of Service Edit: Clinical",x\n') }
+  ]));
+  try {
+    const lines = await L.extractTextLines(zp);
+    assert.ok(lines.some(l => l.startsWith('99213,3')));
+  } finally { fs.unlinkSync(zp); }
 });

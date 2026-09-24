@@ -21370,6 +21370,15 @@ app.get('/api/admin-hub/dashboard', authenticateToken, requireAdminHubAccess, as
     const users = await getUsers();
     const projects = await getProjects();
     const serviceReports = (await db.get('service_reports')) || [];
+    // Until there is a real billing backend, the CMS NCCI/MUE reference
+    // tables have no operator behind them at all — so this is the reminder,
+    // surfaced to whoever lands on this dashboard (admin AND manager both
+    // reach it through requireAdminHubAccess). It reads the same stored
+    // source-version data the sign-time gate reads and clears itself the
+    // moment scripts/load_ncci_tables.js actually runs — there is no
+    // separate "dismissed" flag to fall out of sync with reality.
+    const { ncciSourceVersion } = await getNcciTables();
+    const billingDataRefresh = clinicalRepo.ncciRefreshReminder(ncciSourceVersion);
 
     // Get all open tickets across the app (feedback requests + password reset requests)
     const feedbackRequests = (await db.get('feedback_requests')) || [];
@@ -21395,7 +21404,8 @@ app.get('/api/admin-hub/dashboard', authenticateToken, requireAdminHubAccess, as
       activeProjects: projects.filter(p => p.status !== 'completed').length,
       totalServiceReports: serviceReports.length,
       recentServiceReports: serviceReports.slice(0, 5),
-      openTickets: totalOpenTickets
+      openTickets: totalOpenTickets,
+      billingDataRefresh
     };
 
     res.json(stats);
