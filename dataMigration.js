@@ -90,6 +90,14 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'requisition_settings', phi: false, owner: '4.10', note: 'the return fax number and label printed on every requisition — org config, not PHI' },
   { key: 'visit_reminders', phi: true, owner: '4.11', note: 'day-before reminders, captured at booking time — carries the visit date and clinician' },
   { key: 'gfc_payer_credentialing', phi: false, owner: '4.4' },
+  // NCCI/MUE sign-time bundling check. CMS reference data only — never a
+  // patient's own information — so it is deliberately NOT PHI, the same
+  // classification as gfc_payer_credentialing. Filtered to the codes GFC
+  // actually bills at load time (scripts/load_ncci_tables.js), not the full
+  // ~2.7M-row CMS file.
+  { key: 'gfc_ncci_ptp_edits', phi: false, owner: 'ncci-mue', note: 'NCCI procedure-to-procedure bundling pairs, filtered to codes GFC bills' },
+  { key: 'gfc_ncci_mue', phi: false, owner: 'ncci-mue', note: 'Medically Unlikely Edit unit caps, keyed by code' },
+  { key: 'gfc_ncci_source_version', phi: false, owner: 'ncci-mue', note: 'which CMS quarter is loaded, and when — the sign-time staleness guard reads this' },
   // An H&P still being typed. PHI, and deliberately short-lived: filing the
   // note to the chart deletes the draft, so this collection holds only work in
   // progress and never a second copy of a note that already exists in OpenEMR.
