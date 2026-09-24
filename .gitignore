@@ -21,3 +21,8 @@ Thumbs.db
 
 # One-shot migration output (Session 4.6) — a run record, not source
 scripts/consent_lane_split_migration.log
+
+# CMS's own PTP Edits zips (AMA license-gated, human-downloaded quarterly) —
+# large binary files that do not belong in source control. See
+# scripts/ncci_source/README.md.
+scripts/ncci_source/*.zip

@@ -9579,6 +9579,27 @@ const getClinicalSettings = async () => {
   return { serviceCodeFavorites: favorites, favoritesSource: Array.isArray(stored.serviceCodeFavorites) ? 'record' : 'default' };
 };
 
+// The NCCI/MUE sign-time gate's reference data. Read fresh on every sign
+// attempt and every readiness preview — never cached — so a reload
+// (scripts/load_ncci_tables.js) takes effect on the very next request rather
+// than waiting for a restart. `sourceVersion` is ALWAYS a concrete object
+// (never null/undefined), even before the loader has ever run: that is what
+// makes checkSignReadiness's staleness gate fire for real in a fresh
+// deployment rather than silently no-op the way an absent param does for an
+// old test that has never heard of NCCI.
+const getNcciTables = async () => {
+  const [ptpEdits, mue, sourceVersion] = await Promise.all([
+    loadRows('gfc_ncci_ptp_edits'),
+    db.get('gfc_ncci_mue'),
+    db.get('gfc_ncci_source_version')
+  ]);
+  return {
+    ncciPtpEdits: ptpEdits,
+    ncciMue: (mue && typeof mue === 'object') ? mue : {},
+    ncciSourceVersion: clinicalRepo.normalizeNcciSourceVersion(sourceVersion)
+  };
+};
+
 // Shown when the acting clinician has no OpenEMR provider id, so the encounter
 // falls back to the configured default provider instead of naming them.
 const NO_PROVIDER_ID_WARNING = 'This visit was filed under the practice default provider, not you: your user record has no OpenEMR provider id. An admin sets it in Admin hub \u2192 Users. Charges will not post at sign-and-close until it is set.';
@@ -10157,11 +10178,11 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
     const ctx = await loadEncounterContext(req, res);
     if (!ctx) return;
     const { client, emr, record, encounterUuid } = ctx;
-    const [emrRowR, notesR, cands, settings, payer, usage] = await Promise.all([
+    const [emrRowR, notesR, cands, settings, payer, usage, ncci] = await Promise.all([
       emr.getEncounterRow(client.openEmrPatientId, encounterUuid).then(v => ({ ok: true, v })).catch(e => ({ ok: false, e })),
       emr.getSoapNotes(client.openEmrPatientId, encounterUuid).then(v => ({ ok: true, v })).catch(e => ({ ok: false, e })),
       loadDxCandidates(emr, client, encounterUuid),
-      getClinicalSettings(), getPayerCredentialing(), loadRows('clinical_code_usage')
+      getClinicalSettings(), getPayerCredentialing(), loadRows('clinical_code_usage'), getNcciTables()
     ]);
     const emrRow = emrRowR.ok ? emrRowR.v : null;
     // The narrative note is read by the sid the app recorded at write time.
@@ -10201,7 +10222,8 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
         hasNote, record, billingNpi: payer.billing_npi_used,
         posCode: emrRow && emrRow.pos_code,
         visit: record.visit, facilityName: emrRow && emrRow.facility_name,
-        riskAssessment: ctx.riskAssessment, completedSections: record.completedSections
+        riskAssessment: ctx.riskAssessment, completedSections: record.completedSections,
+        ncciPtpEdits: ncci.ncciPtpEdits, ncciMue: ncci.ncciMue, ncciSourceVersion: ncci.ncciSourceVersion
       }),
       riskAssessment: ctx.riskAssessment, riskHistory: ctx.riskHistory,
       riskRequired: clinicalRepo.riskAssessmentRequired(record.visit),
@@ -11102,7 +11124,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
     if (!ctx) return;
     if (ctx.closed) return res.status(409).json({ error: `Already signed and closed ${ctx.attestation.signedAt} by ${ctx.attestation.signedBy.name}`, code: 'ENCOUNTER_CLOSED' });
     if (!(req.body || {}).attest) return res.status(400).json({ error: 'You must confirm the attestation statement to sign', code: 'SIGN_NO_ATTEST' });
-    const payer = await getPayerCredentialing();
+    const [payer, ncci] = await Promise.all([getPayerCredentialing(), getNcciTables()]);
     let hasNote = false;
     try {
       if (ctx.record.narrativeNoteSid) hasNote = !!(await ctx.emr.getSoapNote(ctx.client.openEmrPatientId, ctx.encounterUuid, ctx.record.narrativeNoteSid));
@@ -11127,7 +11149,8 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
     const ready = clinicalRepo.checkSignReadiness({
       hasNote, record: ctx.record, billingNpi: payer.billing_npi_used, posCode: encPos,
       visit: ctx.record.visit, facilityName: encFacilityName,
-      riskAssessment: ctx.riskAssessment, completedSections: ctx.record.completedSections
+      riskAssessment: ctx.riskAssessment, completedSections: ctx.record.completedSections,
+      ncciPtpEdits: ncci.ncciPtpEdits, ncciMue: ncci.ncciMue, ncciSourceVersion: ncci.ncciSourceVersion
     });
     if (!ready.ok) return res.status(409).json({ error: ready.message, code: ready.codes[0], codes: ready.codes, missing: ready.missing });
 
@@ -11156,7 +11179,11 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
     await db.set('encounter_attestations', atts);
     // Rendering provider on the charge = signing clinician (spec §2.5)
     const record = { ...ctx.record, renderingProvider: attestation.signedBy, renderingProviderClinicalRole: signature.clinicalRole, billingProviderNpi: payer.billing_npi_used, closedAt: attestation.signedAt, updatedAt: attestation.signedAt };
-    const warnings = [...attestation.warnings];
+    // NCCI: an allowed-but-flagged PTP pair (a modifier was required and one
+    // was present) does not block signing, but it must reach the signer HERE
+    // rather than pass silently — this is exactly the case a biller cannot
+    // review later if nothing ever said it happened.
+    const warnings = [...attestation.warnings, ...(ready.warnings || [])];
 
     // ── Session 4.5 / Phase 6B: the charge write ──────────────────────────
     // THIS is what makes sign-and-close land in Billing Manager. Rendering

@@ -1204,7 +1204,7 @@ const SIGN_BLOCKER_LABELS = {
 // signature naming both values — see checkEncounterTypeAgainstPos. That refusal
 // carries its own sentence rather than a label in the joined list, because the
 // reader has to know which of the two is wrong and neither is fixed from here.
-const checkSignReadiness = ({ hasNote, record, billingNpi, posCode, visit, facilityName, riskAssessment, completedSections }) => {
+const checkSignReadiness = ({ hasNote, record, billingNpi, posCode, visit, facilityName, riskAssessment, completedSections, ncciPtpEdits, ncciMue, ncciSourceVersion }) => {
   const missing = [];
   if (!hasNote) missing.push('note');
   missing.push(...deriveCodingStatus(record).missing);
@@ -1235,7 +1235,15 @@ const checkSignReadiness = ({ hasNote, record, billingNpi, posCode, visit, facil
   const openSections = required.filter(k => !done.has(k));
   if (openSections.length) missing.push('note_sections');
 
-  const labelled = missing.filter(m => m !== 'encounter_type_pos' && m !== 'note_sections');
+  // NCCI/MUE: a bundling conflict or a unit-cap overage between the codes on
+  // THIS encounter. Asked of the record's own services, alongside the POS
+  // check above — a caller that never mentions ncci (every pre-existing
+  // caller of this function) gets ok:true from it and nothing changes; see
+  // checkNcciBundling's own comment.
+  const ncci = checkNcciBundling(record && record.services, visit, { ptpEdits: ncciPtpEdits, mueByCode: ncciMue, sourceVersion: ncciSourceVersion });
+  if (!ncci.ok) missing.push('ncci_bundling');
+
+  const labelled = missing.filter(m => m !== 'encounter_type_pos' && m !== 'note_sections' && m !== 'ncci_bundling');
   const sentences = [];
   if (labelled.length) sentences.push(`Cannot sign: the encounter needs ${labelled.map(m => SIGN_BLOCKER_LABELS[m]).join(', ')}.`);
   if (openSections.length) {
@@ -1245,12 +1253,20 @@ const checkSignReadiness = ({ hasNote, record, billingNpi, posCode, visit, facil
     sentences.push(`Cannot sign: this ${type ? type.label : 'visit'} note still needs ${openSections.map(k => apptTypes.SECTIONS[k]).join(', ')}.`);
   }
   if (!agreement.ok) sentences.push(`Cannot sign: ${agreement.error}`);
+  if (!ncci.ok) sentences.push(ncci.message);
   return {
     ok: missing.length === 0,
     missing,
     openSections,
-    codes: missing.map(m => SIGN_BLOCKER_CODES[m]),
-    message: sentences.length ? sentences.join(' ') : null
+    // 'ncci_bundling' is one missing-key that can carry SEVERAL specific
+    // codes (a PTP block and an MUE overage can both be true at once), so it
+    // expands rather than mapping 1:1 like every other blocker.
+    codes: missing.flatMap(m => (m === 'ncci_bundling' ? ncci.codes : [SIGN_BLOCKER_CODES[m]])),
+    message: sentences.length ? sentences.join(' ') : null,
+    // Present even when ok:true: an allowed-but-flagged PTP pair (a modifier
+    // was required AND present) is exactly the case that needs a human to
+    // see it rather than pass silently.
+    warnings: ncci.warnings
   };
 };
 const ATTESTATION_TEXT = 'I attest that this encounter documentation is accurate and complete, that I personally performed or directly supervised the services recorded, and that the diagnoses and service codes are supported by the note.';
@@ -1595,6 +1611,145 @@ const buildChargePayloads = (record, { providerId, visit } = {}) => {
       : dxPointers),
     authorized: 1
   }));
+};
+
+// ---- NCCI/MUE bundling check (sign-time gate) ----
+//
+// Two CMS reference tables decide whether two codes on one encounter may be
+// billed together at all (Procedure-to-Procedure edits) and whether a code's
+// daily unit count exceeds Medicare's cap (Medically Unlikely Edits). Neither
+// is this app's own judgment — both are CMS's published rules, loaded
+// quarterly by scripts/load_ncci_tables.js into gfc_ncci_ptp_edits /
+// gfc_ncci_mue / gfc_ncci_source_version (KV collections — see that script's
+// header for why these are not literal SQL tables).
+//
+// PURE, like everything else in this file: it takes the loaded reference data
+// as an argument and does no I/O. The caller decides whether that data is
+// fresh enough to trust; this function only judges what it is handed.
+//
+// A CALLER THAT NEVER MENTIONS ncci AT ALL gets no check — ok:true,
+// unconditionally (see the guard at the top). This is the same graceful
+// degradation `visit` already has in checkSignReadiness (an absent visit
+// means requiredSectionsForVisit asks for nothing either), and it is what
+// keeps every existing checkSignReadiness call in this repo's test suite
+// working unchanged. server.js's REAL call sites always resolve and pass a
+// concrete sourceVersion — even an "unloaded" one, via
+// normalizeNcciSourceVersion, which never returns undefined — so production
+// never silently skips this; only a caller that predates NCCI does.
+const NCCI_STALE_DAYS = 100;
+// The six CMS-recognized PTP bypass modifiers, PLUS 95. 95 (synchronous
+// telehealth) is not a documented NCCI bypass modifier — it is included here
+// as a pragmatic allowance because it is the ONLY modifier
+// `modifiersForCharge` ever DERIVES rather than accepts from the clinician,
+// and a bundling check that reads modifiers before that derivation runs
+// would false-block a valid telehealth encounter whose only "extra" modifier
+// is the one this app itself added. Worth a billing-consultant review before
+// this is treated as permanent rather than a stopgap.
+const NCCI_UNBUNDLING_MODIFIERS = ['25', '59', 'XE', 'XS', 'XP', 'XU', '95'];
+
+const normalizeNcciSourceVersion = (stored) => {
+  const s = stored || {};
+  const half = (h) => ({ quarter: (h && h.quarter) || 'UNLOADED', loadedAt: (h && h.loadedAt) || null });
+  return { ptp: half(s.ptp), mue: half(s.mue) };
+};
+
+const daysSince = (iso) => {
+  const t = iso ? Date.parse(iso) : NaN;
+  return Number.isNaN(t) ? Infinity : (Date.now() - t) / 86400000;
+};
+
+// One blocking reason, or none. Run BEFORE the pair/unit checks — a stale
+// table that passes everything is worse than an honest refusal to sign.
+const ncciStaleness = (sourceVersion) => {
+  const v = normalizeNcciSourceVersion(sourceVersion);
+  for (const [label, half] of [['PTP edits', v.ptp], ['MUE table', v.mue]]) {
+    if (half.quarter === 'UNLOADED') {
+      return { code: 'NCCI_DATA_STALE', error: `the ${label} reference table has never been loaded. Run scripts/load_ncci_tables.js before this encounter can be signed.` };
+    }
+    const age = Math.floor(daysSince(half.loadedAt));
+    if (age > NCCI_STALE_DAYS) {
+      return { code: 'NCCI_DATA_STALE', error: `the ${label} reference table (${half.quarter}) was loaded ${age} days ago, over the ${NCCI_STALE_DAYS}-day limit. Run scripts/load_ncci_tables.js before this encounter can be signed.` };
+    }
+  }
+  return null;
+};
+
+// CMS's file is directional (a pair appears once, as column1/column2) but a
+// service line does not know which of the two it is, so both orders are
+// tried.
+const findPtpEdit = (edits, codeA, codeB) => {
+  for (const e of edits) {
+    if (e.column1Code === codeA && e.column2Code === codeB) return e;
+    if (e.column1Code === codeB && e.column2Code === codeA) return e;
+  }
+  return null;
+};
+const resolvedModifierSet = (svc, visit) => new Set(modifiersForCharge(svc, visit).split(':').filter(Boolean));
+const hasUnbundlingModifier = (mods) => NCCI_UNBUNDLING_MODIFIERS.some(m => mods.has(m));
+
+const NCCI_NO_CHECK = Object.freeze({ ok: true, message: null, codes: [], missing: [], warnings: [] });
+
+// checkNcciBundling(services, visit, ncci) — ncci is { ptpEdits, mueByCode,
+// sourceVersion }, all pre-resolved by the caller (see the module comment
+// above for why an absent `ncci`/`sourceVersion` is a deliberate no-op).
+const checkNcciBundling = (services, visit, ncci) => {
+  if (!ncci || ncci.sourceVersion === undefined) return NCCI_NO_CHECK;
+  const list = Array.isArray(services) ? services : [];
+  if (!list.length) return NCCI_NO_CHECK; // nursing documentation, no charge — nothing to bundle-check
+
+  const stale = ncciStaleness(ncci.sourceVersion);
+  if (stale) return { ok: false, message: `Cannot sign: the NCCI/MUE reference data is stale — ${stale.error}`, codes: [stale.code], missing: ['ncci_bundling'], warnings: [] };
+
+  const ptpEdits = Array.isArray(ncci.ptpEdits) ? ncci.ptpEdits : [];
+  const mueByCode = (ncci.mueByCode && typeof ncci.mueByCode === 'object') ? ncci.mueByCode : {};
+
+  const blocked = [];        // indicator 0 — no modifier fixes this
+  const modifierNeeded = []; // indicator 1 — fixable, but nothing did
+  const warnings = [];
+  for (let i = 0; i < list.length; i++) {
+    for (let j = i + 1; j < list.length; j++) {
+      const a = list[i]; const b = list[j];
+      if (!a || !b || a.code === b.code) continue; // same code twice is a units question, not a pairing one
+      const edit = findPtpEdit(ptpEdits, a.code, b.code);
+      if (!edit) continue;
+      const indicator = Number(edit.modifierIndicator);
+      if (indicator === 9) continue; // not applicable — treat as no match
+      if (indicator === 0) { blocked.push([a.code, b.code]); continue; }
+      if (indicator === 1) {
+        const unlocked = hasUnbundlingModifier(resolvedModifierSet(a, visit)) || hasUnbundlingModifier(resolvedModifierSet(b, visit));
+        if (unlocked) {
+          warnings.push(`${a.code} and ${b.code} required a modifier to bill together, and one was present — confirm this pair is genuinely separately identifiable before this claim goes out.`);
+        } else {
+          modifierNeeded.push([a.code, b.code]);
+        }
+      }
+    }
+  }
+
+  const unitsByCode = new Map();
+  for (const s of list) { if (s && s.code) unitsByCode.set(s.code, (unitsByCode.get(s.code) || 0) + (Number(s.units) > 0 ? Number(s.units) : 1)); }
+  const mueExceeded = [];
+  for (const [code, units] of unitsByCode) {
+    const mue = mueByCode[code];
+    if (!mue || mue.mueValue == null) continue;
+    if (units > Number(mue.mueValue)) mueExceeded.push({ code, units, cap: Number(mue.mueValue), mai: mue.mai || null });
+  }
+
+  const codes = []; const sentences = [];
+  if (blocked.length) {
+    codes.push('NCCI_PTP_BLOCKED');
+    sentences.push(`Cannot sign: ${blocked.map(([x, y]) => `${x} and ${y}`).join('; ')} cannot be billed together on this encounter — no modifier resolves this pair.`);
+  }
+  if (modifierNeeded.length) {
+    codes.push('NCCI_PTP_MODIFIER_REQUIRED');
+    sentences.push(`Cannot sign: ${modifierNeeded.map(([x, y]) => `${x} and ${y}`).join('; ')} may only be billed together with an unbundling modifier (25, 59, XE, XS, XP or XU) on one of the two lines.`);
+  }
+  if (mueExceeded.length) {
+    codes.push('MUE_EXCEEDED');
+    sentences.push(`Cannot sign: ${mueExceeded.map(m => `${m.code} is billed at ${m.units} unit${m.units === 1 ? '' : 's'}, over its ${m.cap}-unit Medicare cap${m.mai ? ` (MAI ${m.mai})` : ''}`).join('; ')}.`);
+  }
+  if (!codes.length) return { ok: true, message: null, codes: [], missing: [], warnings };
+  return { ok: false, message: sentences.join(' '), codes, missing: ['ncci_bundling'], warnings };
 };
 
 // The app's order lifecycle is ordered → sent → resulted (or cancelled); the
@@ -2411,6 +2566,10 @@ module.exports = {
   resolveBillingFacility,
   BILLING_FACILITY_UNRESOLVED,
   buildChargePayloads,
+  // NCCI/MUE sign-time bundling check
+  NCCI_STALE_DAYS, NCCI_UNBUNDLING_MODIFIERS,
+  normalizeNcciSourceVersion,
+  checkNcciBundling,
   buildOrderPayload,
   orderStatusToEmr,
   TEST_ORDER_TYPES,
