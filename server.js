@@ -6767,6 +6767,20 @@ const VISIT_DOCUMENT_KINDS = Object.freeze(
 );
 const isVisitDocumentKind = (kind) => VISIT_DOCUMENT_KINDS.includes(String(kind || ''));
 
+// Where a CLIENT-uploaded document files in OpenEMR's own chart, by what kind
+// it is (2026-09-24). Deliberately conservative: only category paths already
+// proven live against this instance are used — `/Medical Record` via care-plan
+// filing, `/Consult` and `/Orders` via the results-inbox routing
+// (clinicalResults.js CATEGORY_BY_ORDER_TYPE). A kind with no obvious fit
+// defaults to `/Medical Record` rather than inventing a folder name nothing in
+// OpenEMR is configured to expect — the same UNMATCHED_CATEGORY rule that file
+// already follows.
+const CATEGORY_BY_DOCUMENT_KIND = Object.freeze({
+  referral: '/Consult',
+  physicianOrder: '/Orders'
+});
+const categoryForDocumentKind = (kind) => CATEGORY_BY_DOCUMENT_KIND[kind] || '/Medical Record';
+
 // A document belongs to a visit or to the client's standing file, and it must
 // say which. Extracted as a pure function so a test can RUN it rather than
 // read it: a guard asserted by grepping for its error code still passes when
@@ -6836,7 +6850,12 @@ const buildDocumentChecklist = (client, uploads, requests) => {
       files: files.concat(rejected).map(u => ({
         id: u.id, fileName: u.fileName, uploadedAt: u.uploadedAt,
         status: u.status, rejectionReason: u.rejectionReason || null,
-        url: `/api/gfc/documents/uploads/${u.id}/file`
+        url: `/api/gfc/documents/uploads/${u.id}/file`,
+        // Where else this document has been filed (2026-09-24). Additive facts
+        // recorded ALONGSIDE the row — neither one changes what `status` means
+        // or removes the file from this list.
+        emrFiled: u.emrFiled || null,
+        movedTo: u.movedTo || null
       }))
     };
   };
@@ -14491,6 +14510,215 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authe
     res.json({ message: decision === 'accepted' ? 'Document accepted.' : 'Document rejected and re-requested.', status: decision });
   } catch (error) {
     console.error('GFC document review error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST …/documents/:docId/file-to-emr — push a client-uploaded document into
+// the patient's OWN OpenEMR chart (2026-09-24, owner-directed).
+//
+// This closed a real gap: a care plan and a signed consent each have their own
+// path into OpenEMR (fileCarePlanToChart, the consent renderers), but a
+// document the CLIENT sent us — an ID, an insurance card, records mailed or
+// emailed in and typed through the staff door — never did. It sat in the app's
+// own store and the app's own chart view (buildChartDocumentIndex already
+// showed it, labeled "From the client") and never reached the real EMR unless
+// someone re-uploaded it there by hand, under their own OpenEMR login.
+//
+// ADDITIVE, never destructive. Nothing about the row's status, its place on
+// the checklist or its place in the app's own chart view changes — `emrFiled`
+// is a fact recorded ALONGSIDE everything else the row already says, the same
+// shape care-plan filing already uses on `carePlanDocs[...].chartFiled`.
+const fileDocumentToEmrHandler = async (req, res) => {
+  try {
+    const users = await getUsers();
+    const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+
+    const uploads = (await db.get('client_document_uploads')) || [];
+    const row = uploads.find(u => u.id === req.params.docId && u.clientId === client.id);
+    if (!row) return res.status(404).json({ error: 'Document not found', code: 'DOCUMENT_NOT_FOUND' });
+    // A rejected document is not evidence of anything — filing it into the
+    // real chart would put a photo we already sent back to the client into
+    // her permanent record.
+    if (row.status === 'rejected') {
+      return res.status(409).json({ error: 'A rejected document cannot be filed — it was sent back to the client.', code: 'DOCUMENT_REJECTED' });
+    }
+    if (!client.openEmrPatientId) {
+      return res.status(409).json({ error: 'This client is not linked to an OpenEMR chart yet, so there is nowhere to file it.', code: 'NOT_LINKED' });
+    }
+    if (!openemr.isConfigured()) {
+      return res.status(409).json({ error: 'OpenEMR is not configured.', code: 'EMR_NOT_CONFIGURED' });
+    }
+    if (row.emrFiled) {
+      return res.status(409).json({ error: 'Already filed to the OpenEMR chart.', code: 'ALREADY_FILED', filedAt: row.emrFiled.at });
+    }
+
+    let bytes;
+    try {
+      bytes = await googledrive.downloadFileBuffer(row.driveFileId);
+    } catch (e) {
+      const d = googledrive.describeDriveError ? googledrive.describeDriveError(e) : { reason: e.message, hint: null };
+      return res.status(502).json({ error: `That document could not be read back from storage: ${d.reason}`, code: 'DOCUMENT_UNREADABLE' });
+    }
+
+    const category = categoryForDocumentKind(row.kind);
+    try {
+      await openemr.forActor(req.user).uploadPatientDocument(
+        client.openEmrPatientId, row.fileName, bytes, row.mimeType, category);
+    } catch (e) {
+      console.error('[DOCUMENT FILE-TO-EMR] failed:', e.message);
+      return res.status(502).json({ error: `OpenEMR refused that document: ${e.message}`, code: 'EMR_UPLOAD_FAILED' });
+    }
+
+    const fresh = (await db.get('client_document_uploads')) || [];
+    const j = fresh.findIndex(u => u.id === row.id);
+    const at = new Date().toISOString();
+    if (j !== -1) {
+      fresh[j] = {
+        ...fresh[j],
+        emrFiled: { at, byId: req.user.id, byName: req.user.name || req.user.email, category }
+      };
+      await db.set('client_document_uploads', fresh);
+    }
+    await logActivity(req.user.id, req.user.name || req.user.email, 'client_document_filed_to_emr', 'document', client.id,
+      { uploadId: row.id, kind: row.kind, category });
+    res.json({ message: 'Filed to the OpenEMR chart.', filedAt: at, category });
+  } catch (error) {
+    console.error('Document file-to-EMR error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+// POST …/documents/:docId/move-to-caregiver — a document that turns out to be
+// about a CAREGIVER, not the client: a timesheet, a certification, onboarding
+// paperwork mailed to the wrong inbox (2026-09-24, owner-directed).
+//
+// `client_document_uploads` and `caregiver_documents` are two entirely
+// separate stores keyed to two entirely different kinds of person, and
+// nothing bridges them — a document filed under a client's name stays under
+// a client's name forever. Admin-only (owner's explicit ask): deciding whose
+// record a document truly belongs to is an office triage call, the same
+// weight as approving enrollment or changing a service line.
+//
+// COPIES the bytes into the caregiver's own Drive folder and files a normal
+// office-filed `caregiver_documents` row (lands accepted — the office is
+// the reviewer, and it was looking at the document when it filed it, the
+// same rule every office-filed document already follows). The ORIGINAL row
+// is left alone: the client genuinely sent this file through their own
+// channel, and that provenance does not stop being true because it also now
+// belongs in someone else's record. A `movedTo` pointer is added so the
+// client's own document list can say where it also lives, rather than the
+// file just quietly appearing twice with no link between the two copies.
+const moveDocumentToCaregiverHandler = async (req, res) => {
+  try {
+    const caregiverId = String((req.body || {}).caregiverId || '').trim();
+    if (!caregiverId) return res.status(400).json({ error: 'Say which caregiver this belongs to.', code: 'CAREGIVER_ID_REQUIRED' });
+
+    const users = await getUsers();
+    const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+    const caregiver = users.find(u => u.id === caregiverId && caregiverRepo.isCaregiver(u));
+    if (!caregiver) return res.status(404).json({ error: 'Caregiver record not found.', code: 'CAREGIVER_NOT_FOUND' });
+
+    const uploads = (await db.get('client_document_uploads')) || [];
+    const row = uploads.find(u => u.id === req.params.docId && u.clientId === client.id);
+    if (!row) return res.status(404).json({ error: 'Document not found', code: 'DOCUMENT_NOT_FOUND' });
+    if (row.status === 'rejected') {
+      return res.status(409).json({ error: 'A rejected document cannot be moved — it was sent back to the client.', code: 'DOCUMENT_REJECTED' });
+    }
+    if (row.movedTo) {
+      return res.status(409).json({ error: `Already filed under ${row.movedTo.caregiverName || 'a caregiver'}'s documents.`, code: 'ALREADY_MOVED' });
+    }
+
+    let bytes;
+    try {
+      bytes = await googledrive.downloadFileBuffer(row.driveFileId);
+    } catch (e) {
+      const d = googledrive.describeDriveError ? googledrive.describeDriveError(e) : { reason: e.message, hint: null };
+      return res.status(502).json({ error: `That document could not be read back from storage: ${d.reason}`, code: 'DOCUMENT_UNREADABLE' });
+    }
+
+    let stored;
+    try {
+      stored = await googledrive.uploadCaregiverDocumentFile(caregiver.name || 'Caregiver', row.storedName || row.fileName, bytes, row.mimeType);
+    } catch (e) {
+      const d = googledrive.describeDriveError ? googledrive.describeDriveError(e) : { reason: e.message, hint: null };
+      return res.status(502).json({ error: `Google refused that file: ${d.reason}`, code: 'DOCUMENT_STORAGE_UNAVAILABLE' });
+    }
+
+    const at = new Date().toISOString();
+    const cgRows = (await db.get('caregiver_documents')) || [];
+    const cgRow = {
+      id: `cgdoc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      caregiver_id: caregiver.id, caregiver_name: caregiver.name || null,
+      kind: 'other',
+      file_name: row.fileName, stored_name: row.storedName || row.fileName,
+      mime_type: row.mimeType, size_bytes: bytes.length,
+      drive_file_id: stored.fileId, drive_url: stored.webViewLink || null,
+      note: `Moved from ${client.name || 'a client'}'s file by ${req.user.name || req.user.email}.`.slice(0, 1000),
+      period_start: null, period_end: null, shift_id: null,
+      status: 'accepted', uploaded_at: at,
+      uploaded_by_id: req.user.id, uploaded_by_name: req.user.name || req.user.email || null,
+      uploaded_by_office: true,
+      reviewed_at: null, reviewed_by_name: null, review_note: null,
+      // Provenance of the move, not asked of by any existing caregiver-side
+      // reader — additive, the same rule the client-side pointer follows.
+      movedFromClientId: client.id, movedFromUploadId: row.id
+    };
+    cgRows.push(cgRow);
+    await db.set('caregiver_documents', cgRows);
+
+    const fresh = (await db.get('client_document_uploads')) || [];
+    const j = fresh.findIndex(u => u.id === row.id);
+    if (j !== -1) {
+      fresh[j] = {
+        ...fresh[j],
+        movedTo: {
+          caregiverId: caregiver.id, caregiverName: caregiver.name || null, caregiverDocId: cgRow.id,
+          at, byId: req.user.id, byName: req.user.name || req.user.email
+        }
+      };
+      await db.set('client_document_uploads', fresh);
+    }
+    await logActivity(req.user.id, req.user.name || req.user.email, 'client_document_moved_to_caregiver', 'document', client.id,
+      { uploadId: row.id, caregiverId: caregiver.id });
+    res.json({ message: `Also filed under ${caregiver.name || 'the caregiver'}'s documents.`, caregiverDocId: cgRow.id, at });
+  } catch (error) {
+    console.error('Document move-to-caregiver error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+// Two doors onto the SAME handler, matching the extraction routes' exact
+// shape (server.js, extractDocumentHandler): the enrollment screen a clinician
+// often works from, and the clinical chart itself. One function means the
+// idempotency check, the category mapping and the audit row cannot drift
+// between the two places a clinician might click this button from.
+app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/file-to-emr', authenticateToken, requireEnrollmentEditor, fileDocumentToEmrHandler);
+app.post('/api/clinical/patients/:clientId/documents/:docId/file-to-emr', authenticateToken, requireClinicalWrite, requireClinicalOnLine, fileDocumentToEmrHandler);
+// Whose record this truly belongs to is an office triage decision, so this
+// one stays admin-only, on the enrollment screen only (owner's explicit ask).
+app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/move-to-caregiver', authenticateToken, requireAdmin, moveDocumentToCaregiverHandler);
+
+// GET …/enrollment/meta/caregivers — who can receive a moved document. Under
+// `meta/`, not a bare `/enrollment/caregivers`: a single path segment there
+// collides with `GET /api/gfc/admin/enrollment/:clientId` (Express matches in
+// registration order, and that route is registered first) and "caregivers"
+// would be read as a client id. `meta/consent-registry` already set this
+// convention for exactly this reason. Served, not restated in the page: the
+// same rule the competency catalog and the document catalog already follow,
+// so the picker cannot drift from `caregiverRepo`'s own notion of who counts
+// as a caregiver.
+app.get('/api/gfc/admin/enrollment/meta/caregivers', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const caregivers = users.filter(u => caregiverRepo.isCaregiver(u) && u.accountStatus !== 'inactive')
+      .map(u => ({ id: u.id, name: u.name || u.email }))
+      .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    res.json({ caregivers });
+  } catch (error) {
+    console.error('GFC move-document caregiver list error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });

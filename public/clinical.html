@@ -160,6 +160,10 @@
       // routes the enrollment screen uses, gated on requireClinicalWrite.
       extractionStatus: (id) => authedFetch(`/api/clinical/patients/${id}/extraction`),
       extractDocument: (id, docId) => authedFetch(`/api/clinical/patients/${id}/documents/${encodeURIComponent(docId)}/extract`, { method: 'POST' }),
+      // Push a client-uploaded document into the patient's own OpenEMR chart
+      // (2026-09-24). The SAME route the enrollment screen uses, gated here on
+      // requireClinicalWrite — one handler, two doors.
+      fileDocumentToEmr: (id, docId) => authedFetch(`/api/clinical/patients/${id}/documents/${encodeURIComponent(docId)}/file-to-emr`, { method: 'POST' }),
       reviewExtraction: (id, exId, decisions) => authedFetch(`/api/clinical/patients/${id}/extraction/${encodeURIComponent(exId)}/review`, {
         method: 'POST', body: JSON.stringify({ decisions })
       }),
@@ -630,6 +634,35 @@
       );
     };
 
+    // Push a client-uploaded document into the patient's OWN OpenEMR chart
+    // (2026-09-24). Only an UPLOAD row carries `uploadId` — a care plan, a
+    // consent or a record release already has its own path into OpenEMR and
+    // this button has nothing to do for one of those. Once filed, `d.inChart`
+    // reflects it on the next load (buildChartDocumentIndex) and the "In EMR"
+    // chip already rendered by ChartDocuments takes over — no separate status
+    // display lives here.
+    const FileToEmrButton = ({ clientId, doc, onFiled }) => {
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      const access = useContext(AccessContext);
+      if (!access.canWrite || !doc.uploadId || doc.inChart) return null;
+      const run = () => {
+        setBusy(true); setErr('');
+        api.fileDocumentToEmr(clientId, doc.uploadId)
+          .then(onFiled)
+          .catch(e => setErr(e.message))
+          .finally(() => setBusy(false));
+      };
+      return (
+        <span className="flex items-center gap-1.5">
+          <button className="chip border border-accent text-primary bg-white" disabled={busy} onClick={run}>
+            {busy ? 'Filing…' : 'File to OpenEMR'}
+          </button>
+          {err && <span className="text-[11px] text-red-600">{err}</span>}
+        </span>
+      );
+    };
+
     const ChartDocuments = ({ docs, clientId, onRefresh }) => {
       const [busy, setBusy] = useState('');
       const [err, setErr] = useState('');
@@ -710,6 +743,7 @@
                       {!d.openable && <span className="chip bg-amber-50 text-amber-800">Open in OpenEMR</span>}
                       <ChartReadButton clientId={clientId} doc={d} status={readStatus}
                         onRead={(ex) => setReviewing(ex)} />
+                      <FileToEmrButton clientId={clientId} doc={d} onFiled={() => onRefresh && onRefresh()} />
                     </div>
                   </div>
                 ))}
