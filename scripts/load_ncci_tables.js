@@ -138,7 +138,9 @@ const parseMueLine = (line) => {
   const numeric = fields.filter(f => f !== code && NUMERIC_RE.test(f));
   if (!numeric.length) return null;
   const mueValue = Number(numeric[0]);
-  const mai = (numeric[1] && MAI_RE.test(numeric[1])) ? numeric[1] : null;
+  // The .csv carries the MAI as text ("3 Date of Service Edit: Clinical").
+  const maiText = fields.find(f => /^[123]\s+\D/.test(f));
+  const mai = (numeric[1] && MAI_RE.test(numeric[1])) ? numeric[1] : (maiText ? maiText[0] : null);
   return { code: code.toUpperCase(), mueValue, mai };
 };
 
@@ -189,8 +191,10 @@ const readZipEntryText = async (zipPath, entryName) => {
 };
 const extractTextLines = async (zipPath) => {
   const entries = await listZipEntries(zipPath);
-  const textEntries = entries.filter(e => /\.txt$/i.test(e));
-  if (!textEntries.length) throw new Error(`no .txt file inside ${path.basename(zipPath)} (found: ${entries.join(', ') || 'nothing'})`);
+  // PTP ships .txt; the MUE table ships .csv (2026Q4). Prefer .txt, else .csv.
+  let textEntries = entries.filter(e => /\.txt$/i.test(e));
+  if (!textEntries.length) textEntries = entries.filter(e => /\.csv$/i.test(e));
+  if (!textEntries.length) throw new Error(`no .txt or .csv file inside ${path.basename(zipPath)} (found: ${entries.join(', ') || 'nothing'})`);
   let lines = [];
   for (const entry of textEntries) lines = lines.concat((await readZipEntryText(zipPath, entry)).split(/\r?\n/));
   return lines;

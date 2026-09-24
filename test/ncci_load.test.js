@@ -112,12 +112,12 @@ test('extractTextLines reads a .txt member out of a real zip via unzip', async (
     ]);
   } finally { fs.unlinkSync(tmp); }
 });
-test('extractTextLines refuses a zip with no .txt member, naming what it did find', async () => {
+test('extractTextLines refuses a zip with no .txt or .csv member, naming what it did find', async () => {
   const buf = createZip([{ name: 'sample.xlsx', data: 'not really an xlsx, just bytes' }]);
   const tmp = path.join(os.tmpdir(), `gfc-ncci-test-noxt-${Date.now()}.zip`);
   fs.writeFileSync(tmp, buf);
   try {
-    await assert.rejects(L.extractTextLines(tmp), /no \.txt file/);
+    await assert.rejects(L.extractTextLines(tmp), /no \.txt or \.csv file/);
   } finally { fs.unlinkSync(tmp); }
 });
 
@@ -240,4 +240,27 @@ test('build-enforced: the loader never uses unzip -Z (absent from the production
   const src = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'load_ncci_tables.js'), 'utf8')
     .replace(/\/\/.*$/gm, '');
   assert.doesNotMatch(src, /['"]-Z1?['"]/);
+});
+
+// 2026Q4's MUE zip ships .csv + .xlsx and no .txt — the loader refused it on
+// first real use. The CSV also carries the MAI as text, not a bare digit.
+test('the MUE CSV rendition parses, including a text MAI', () => {
+  const L = require('../scripts/load_ncci_tables');
+  assert.deepEqual(L.parseMueLine('99213,3,"3 Date of Service Edit: Clinical","Clinical: Data"'),
+    { code: '99213', mueValue: 3, mai: '3' });
+  assert.equal(L.parseMueLine('HCPCS/CPT Code,Practitioner Services MUE Values,MUE Adjudication Indicator,MUE Rationale'), null);
+});
+test('a zip carrying .csv and .xlsx but no .txt is read from the .csv, never the .xlsx', async () => {
+  const L = require('../scripts/load_ncci_tables');
+  const { createZip } = require('../zipWriter');
+  const os = require('node:os');
+  const zp = path.join(os.tmpdir(), `mue-csv-${process.pid}.zip`);
+  fs.writeFileSync(zp, createZip([
+    { name: 'MCR_MUE_PractitionerServices_Eff_10-01-2026.xlsx', data: Buffer.from('PK-not-really') },
+    { name: 'MCR_MUE_PractitionerServices_Eff_10-01-2026.csv', data: Buffer.from('99213,3,"3 Date of Service Edit: Clinical",x\n') }
+  ]));
+  try {
+    const lines = await L.extractTextLines(zp);
+    assert.ok(lines.some(l => l.startsWith('99213,3')));
+  } finally { fs.unlinkSync(zp); }
 });
