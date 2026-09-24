@@ -172,9 +172,16 @@ const diffMue = (oldByCode, newByCode) => {
 };
 
 // ---- reading a zip's .txt member(s) without ever writing extracted files ---
+// `unzip -l`, not `-Z1`: the production image is node:22-alpine, whose BusyBox
+// unzip has no -Z. Both BusyBox and Info-ZIP print "length date time name"
+// rows under -l; the header and footer rows do not have that shape.
+const parseZipListing = (stdout) => stdout.split(/\r?\n/)
+  .map(line => /^\s*\d+\s+\S+\s+\S+\s+(.+?)\s*$/.exec(line))
+  .filter(Boolean)
+  .map(m => m[1]);
 const listZipEntries = async (zipPath) => {
-  const { stdout } = await execFileP('unzip', ['-Z1', zipPath]);
-  return stdout.split('\n').map(s => s.trim()).filter(Boolean);
+  const { stdout } = await execFileP('unzip', ['-l', zipPath]);
+  return parseZipListing(stdout);
 };
 const readZipEntryText = async (zipPath, entryName) => {
   const { stdout } = await execFileP('unzip', ['-p', zipPath, entryName], { maxBuffer: 1024 * 1024 * 256, encoding: 'utf8' });
@@ -286,7 +293,7 @@ async function main(opts = {}) {
 module.exports = {
   main, computeTargetQuarter, quarterLabel, parseQuarterArg, mueUrl,
   parsePtpLine, parseMueLine, splitFields, isCodeShaped,
-  deriveGfcCodeUniverse, diffPtp, diffMue, extractTextLines,
+  deriveGfcCodeUniverse, diffPtp, diffMue, extractTextLines, parseZipListing,
   PTP_SOURCE_PAGE, DEFAULT_PTP_DIR
 };
 

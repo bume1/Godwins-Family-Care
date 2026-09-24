@@ -209,3 +209,35 @@ test('build-enforced: gfc_ncci_ptp_edits, gfc_ncci_mue and gfc_ncci_source_versi
     assert.equal(h.phi, false, `${key} carries only CMS reference data, never PHI`);
   }
 });
+
+// Production runs node:22-alpine, whose BusyBox unzip has no -Z1 — the loader
+// failed there on first real use. Both listing formats must parse.
+test('parseZipListing reads both BusyBox and Info-ZIP `unzip -l` output, and nothing else', () => {
+  const L = require('../scripts/load_ncci_tables');
+  const busybox = [
+    'Archive:  /app/scripts/ncci_source/ptp/ccipra-v323r0-f1.zip',
+    '  Length      Date    Time    Name',
+    '---------  ---------- -----   ----',
+    ' 81234567  09-02-2026 10:15   ccipra-v323r0-f1.txt',
+    '  1234567  09-02-2026 10:15   ccipra v323r0 f1.xlsx',
+    '---------                     -------',
+    ' 82469134                     2 files',
+    ''
+  ].join('\n');
+  assert.deepEqual(L.parseZipListing(busybox), ['ccipra-v323r0-f1.txt', 'ccipra v323r0 f1.xlsx']);
+  const infozip = [
+    'Archive:  x.zip',
+    '  Length      Date    Time    Name',
+    '---------  ---------- -----   ----',
+    '      120  2026-09-02 10:15   MUE_table.txt',
+    '---------                     -------',
+    '      120                     1 file'
+  ].join('\r\n');
+  assert.deepEqual(L.parseZipListing(infozip), ['MUE_table.txt']);
+});
+
+test('build-enforced: the loader never uses unzip -Z (absent from the production Alpine image)', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'load_ncci_tables.js'), 'utf8')
+    .replace(/\/\/.*$/gm, '');
+  assert.doesNotMatch(src, /['"]-Z1?['"]/);
+});
