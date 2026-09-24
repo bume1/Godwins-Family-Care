@@ -87,7 +87,28 @@ const TARGETS = Object.freeze({
   dnrPolst: {
     fill: ['advanceDirective.status'],
     verify: ['dob']
-  }
+  },
+  // VERIFY-ONLY KINDS (owner, 2026-09-23: "it needs to be able to read any
+  // document uploaded"). Every one of these arrives from somewhere else —
+  // a wallet, a hospital, a contracting entity — and none of them has a
+  // FILL target: a photo ID and a medication list carry no field this app
+  // does not already hold, and `medications` is a LIST, which is refused as
+  // a fill target by `validateTargets` for the reason recorded there — a
+  // half-read medication list is worse than none. What every one of them
+  // DOES carry, reliably, is the patient's own date of birth, so `verify`
+  // is what they get: the one thing worth checking is whether this document
+  // is about the right person at all.
+  photoId: { verify: ['dob'] },
+  poaGuardianship: { verify: ['dob'] },
+  medicationList: { verify: ['dob'] },
+  // Per-visit documents (Session 4.12's VISIT-scoped kinds) get the same
+  // treatment — a discharge summary or an IME file is about a specific
+  // patient and identity-checking it is exactly as valuable as it is for a
+  // referral, even though nothing on it is a fill target.
+  dischargeSummary: { verify: ['dob'] },
+  dischargeMedList: { verify: ['dob'] },
+  imeRecords: { verify: ['dob'] },
+  imeExamRequest: { verify: ['dob'] }
 });
 
 // A consent packet is not a field read. It answers "which of these documents

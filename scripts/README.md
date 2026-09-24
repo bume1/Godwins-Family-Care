@@ -3,6 +3,23 @@
 One-shot / manually-invoked scripts. None of these run automatically — they
 are run by hand when needed.
 
+## export_billing_codes.js
+
+Reports the CPT4/HCPCS codes and modifiers GFC actually bills, for hand-entry
+(or confirming existing entry) into OpenEMR's fee schedule — OpenEMR ships no
+CPT table at all (AMA copyright) and this app keeps none of its own, so "our
+codes" has never lived in one printable place. Pulls from the same three
+sources `scripts/load_ncci_tables.js` already derives "GFC's code universe"
+from — the admin-curated favorites, every clinician's prior code selections,
+and every service line ever actually billed — but reports labels and the
+modifiers actually seen, which that script has no reason to keep. Read-only;
+never writes to the store.
+
+```bash
+node scripts/export_billing_codes.js
+node scripts/export_billing_codes.js --csv=billing_codes.csv
+```
+
 ## import_offline_patients.js (Session 3.3, Scope B3)
 
 Bulk-creates client records for the legacy paper-packet patients (the ~7

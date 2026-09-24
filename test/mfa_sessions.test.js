@@ -188,7 +188,7 @@ test('every signed-in page carries the session guard and every login surface car
   for (const p of ['index', 'admin-hub', 'portal', 'clinical', 'caregiver', 'scheduling', 'admin-enrollment', 'service-portal']) {
     assert.match(read(`public/${p}.html`), /<script src="\/session-guard\.js"><\/script>/, `${p}.html lacks the session guard`);
   }
-  for (const p of ['login', 'portal', 'admin-hub', 'admin-enrollment', 'service-portal']) {
+  for (const p of ['login', 'portal', 'admin-hub', 'admin-enrollment', 'service-portal', 'clinical']) {
     const html = read(`public/${p}.html`);
     assert.match(html, /<script src="\/mfa-step\.js"><\/script>/, `${p}.html lacks the MFA step`);
     assert.match(html, /GFC_MFA\.complete\(/, `${p}.html login does not pass through the MFA step`);

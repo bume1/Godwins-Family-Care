@@ -164,6 +164,66 @@ const TEMPLATES = Object.freeze({
     'medicalTeam.pharmacyPhone': { rule: 'phone', labels: ['pharmacy phone'] },
     dob: { rule: 'date', labels: ['date of birth', 'dob', 'birth date', 'birthdate'] },
     phone: { rule: 'phone', labels: ['patient phone', 'home phone', 'patient contact'] }
+  },
+  // physicianOrder and priorRecords declared these FILL targets in
+  // documentExtraction.TARGETS from the start and had NO entries here at
+  // all — so `extractFromLines` found `TEMPLATES[kind]` undefined and
+  // refused with "No template is declared", every time, for every document
+  // of either kind, regardless of image quality. Not a read failure: a gap.
+  // Found chasing an owner report that reading "didn't work" for documents
+  // this module was already supposed to cover. Same paths as `referral`
+  // because a physician's letterhead prints the same three things whichever
+  // form it is stapled to.
+  physicianOrder: {
+    'medicalTeam.pcpName': { rule: 'name', labels: ['primary care physician', 'primary care provider', 'pcp', 'ordering physician', 'ordering provider', 'physician', 'provider'] },
+    'medicalTeam.pcpPractice': { rule: 'text', labels: ['practice', 'clinic', 'group name', 'facility'] },
+    'medicalTeam.pcpPhone': { rule: 'phone', labels: ['practice phone', 'office phone', 'phone', 'tel', 'telephone'] },
+    dob: { rule: 'date', labels: ['date of birth', 'dob', 'birth date', 'birthdate'] }
+  },
+  priorRecords: {
+    'medicalTeam.pcpName': { rule: 'name', labels: ['primary care physician', 'primary care provider', 'pcp', 'attending physician', 'attending provider'] },
+    'medicalTeam.pcpPractice': { rule: 'text', labels: ['practice', 'clinic', 'group name', 'facility'] },
+    'medicalTeam.pcpPhone': { rule: 'phone', labels: ['practice phone', 'office phone', 'phone', 'tel', 'telephone'] },
+    'medicalTeam.preferredHospital': { rule: 'text', labels: ['hospital', 'facility name', 'discharged from'] },
+    'medicalTeam.preferredPharmacy': { rule: 'text', labels: ['pharmacy'] },
+    dob: { rule: 'date', labels: ['date of birth', 'dob', 'birth date', 'birthdate'] }
+  },
+  // advanceDirective and dnrPolst declared `advanceDirective.status` as a
+  // FILL target, but that path names OUR internal field ("DNR / advance
+  // directive on file?") and a real directive prints legal language, never
+  // that label — so no template row is declared for it. Guessing a value
+  // for it here would mean matching nothing real and proposing noise; the
+  // field stays reachable only through a person's own read of the document.
+  // DOB is still worth checking: is this directive about our client at all.
+  advanceDirective: {
+    dob: { rule: 'date', labels: ['date of birth', 'dob', 'birth date', 'birthdate'] }
+  },
+  dnrPolst: {
+    dob: { rule: 'date', labels: ['date of birth', 'dob', 'birth date', 'birthdate'] }
+  },
+  // Verify-only kinds (see documentExtraction.TARGETS for why none of these
+  // has a fill target). Every one just needs to be checked against the DOB
+  // already on file.
+  photoId: {
+    dob: { rule: 'date', labels: ['date of birth', 'dob', 'dob/exp', 'birth date', 'birthdate'] }
+  },
+  poaGuardianship: {
+    dob: { rule: 'date', labels: ['date of birth', 'dob', 'birth date', 'birthdate'] }
+  },
+  medicationList: {
+    dob: { rule: 'date', labels: ['date of birth', 'dob', 'birth date', 'birthdate'] }
+  },
+  dischargeSummary: {
+    dob: { rule: 'date', labels: ['date of birth', 'dob', 'birth date', 'birthdate'] }
+  },
+  dischargeMedList: {
+    dob: { rule: 'date', labels: ['date of birth', 'dob', 'birth date', 'birthdate'] }
+  },
+  imeRecords: {
+    dob: { rule: 'date', labels: ['date of birth', 'dob', 'birth date', 'birthdate'] }
+  },
+  imeExamRequest: {
+    dob: { rule: 'date', labels: ['date of birth', 'dob', 'birth date', 'birthdate'] }
   }
 });
 
@@ -171,10 +231,15 @@ const TEMPLATES = Object.freeze({
 // declared for its kind in documentExtraction.TARGETS, which is the allow-list
 // the review and the commit both run against. Checked AT LOAD so a typo fails
 // the boot rather than silently proposing nothing.
-const assertTemplatesAreDeclared = () => {
+// A pure function of its two arguments so it can be exercised directly
+// against a deliberately broken fixture, the same way `documentExtraction`'s
+// own `validateTargets(targets)` is — a check that can only ever be run
+// against the shipped, already-correct data proves nothing about whether it
+// would have caught the bug it exists for.
+const checkTemplates = (templates, targets) => {
   const problems = [];
-  for (const [kind, paths] of Object.entries(TEMPLATES)) {
-    const target = extraction.TARGETS[kind];
+  for (const [kind, paths] of Object.entries(templates || {})) {
+    const target = (targets || {})[kind];
     if (!target) { problems.push(`${kind} has templates but no declared targets`); continue; }
     const declared = new Set([...(target.fill || []), ...(target.verify || [])]);
     for (const [path, def] of Object.entries(paths)) {
@@ -183,6 +248,23 @@ const assertTemplatesAreDeclared = () => {
       if (!Array.isArray(def.labels) || !def.labels.length) problems.push(`${kind}.${path} declares no labels`);
     }
   }
+  // THE OTHER DIRECTION, closing the gap that shipped `physicianOrder` and
+  // `priorRecords` with declared fill/verify targets and NO templates at
+  // all: `extractFromLines` reads `TEMPLATES[kind]`, finds it undefined, and
+  // refuses with "No template is declared" for EVERY document of that kind,
+  // forever, regardless of image quality — which looks exactly like "reading
+  // doesn't work" to whoever clicks the button. A kind that is extractable
+  // per `extractableKinds()` but has nothing here to look for is that trap
+  // waiting to be added again the next time a kind gets declared without its
+  // templates in the same commit.
+  for (const kind of Object.keys(targets || {})) {
+    if (!(templates || {})[kind]) problems.push(`${kind} is a declared extraction target but has no templates — every read of it will refuse with NO_TEMPLATE`);
+  }
+  return problems;
+};
+
+const assertTemplatesAreDeclared = () => {
+  const problems = checkTemplates(TEMPLATES, extraction.TARGETS);
   if (problems.length) throw new Error(`documentTemplates is out of step with documentExtraction:\n  ${problems.join('\n  ')}`);
 };
 assertTemplatesAreDeclared();
@@ -382,5 +464,5 @@ const readDocument = async ({ bytes, kind, mimeType, createWorker, allowOcr = tr
 
 module.exports = {
   TEMPLATES, RULES, CONFIDENCE, SOURCE, MAX_LINE_GAP,
-  extractFromLines, readDocument, assertTemplatesAreDeclared, valueBeside
+  extractFromLines, readDocument, assertTemplatesAreDeclared, checkTemplates, valueBeside
 };

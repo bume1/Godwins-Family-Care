@@ -196,11 +196,32 @@ test('there is ONE engine — §10.3 applies to every AI feature', () => {
   // Both the dictation feature and document extraction route through here.
   assert.match(src, /DICTATION_TO_NOTE/);
   assert.match(src, /DOCUMENT_EXTRACTION/);
-  // And nothing else in the tree may call a model provider directly.
+  // `bedrockTransport.js` is the one exception, and it is the exception
+  // modelEngine.js itself names: "the Bedrock client is built in exactly one
+  // place when it is wired" (2026-09-24). It is allowed to touch the AWS SDK
+  // for exactly that reason — building the client — and nothing else. Any
+  // OTHER file touching a model provider is still exactly what this guards
+  // against: a second call site where the boundary rules drift.
   const root = path.join(__dirname, '..');
   const offenders = fs.readdirSync(root)
-    .filter(f => f.endsWith('.js') && f !== 'modelEngine.js')
+    .filter(f => f.endsWith('.js') && f !== 'modelEngine.js' && f !== 'bedrockTransport.js')
     .filter(f => /BedrockRuntime|invokeModel|anthropic\.claude/.test(fs.readFileSync(path.join(root, f), 'utf8')));
   assert.deepStrictEqual(offenders, [],
     'a second call site is a second place the boundary rules get implemented slightly differently');
+
+  // The one exception earns its keep only if it stays a bare transport —
+  // the moment it re-implements a boundary check of its own (region/model
+  // presence, ZDR, static-key detection) it IS the second place the original
+  // guard existed to prevent, just inside the exempted file instead of a new
+  // one. `modelEngine.js` alone decides whether a call is allowed to happen;
+  // `bedrockTransport.js` only places the call once permitted. Comments are
+  // stripped first — a source scan that cannot tell live code from PROSE
+  // ABOUT that code proves nothing, and this file's own header explains the
+  // boundary it does not re-check by naming the env vars it does not read.
+  const stripComments = (s) => s
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  const transportCode = stripComments(fs.readFileSync(path.join(root, 'bedrockTransport.js'), 'utf8'));
+  assert.doesNotMatch(transportCode, /BEDROCK_ZERO_DATA_RETENTION|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|process\.env/,
+    'bedrockTransport.js must not re-implement the boundary check — modelEngine.js is the only place that decides whether a call is allowed');
 });

@@ -10,6 +10,7 @@
     "changelog:version": "node changelog-generator.js"
   },
   "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.1139.0",
     "@hubspot/api-client": "^13.4.0",
     "@replit/database": "^2.0.5",
     "axios": "^1.13.2",
