@@ -721,6 +721,34 @@
             </div>
           </div>
 
+          {/* Billing reference-data reminder (owner-directed, 2026-09-24). There
+              is no real billing backend yet, so CMS's quarterly NCCI/MUE tables
+              (the sign-time bundling check) have no operator behind them at all
+              except this. It reads the same stored data the sign gate reads and
+              clears itself the moment scripts/load_ncci_tables.js actually runs
+              — there is no dismiss button, on purpose: a reminder someone can
+              click away without doing the work is worse than no reminder. Every
+              admin and manager lands here, so both see it. */}
+          {stats?.billingDataRefresh?.due && (
+            <div className="bg-amber-50 border border-amber-300 p-4 rounded-xl">
+              <p className="font-semibold text-amber-900">
+                Quarterly billing reference data needs refreshing
+              </p>
+              <p className="text-sm text-amber-800 mt-1">
+                {stats.billingDataRefresh.message}
+              </p>
+              <p className="text-xs text-amber-700 mt-2">
+                This runs on the server, not in this app — someone with access to the deployment runs
+                <code className="mx-1 px-1.5 py-0.5 bg-white rounded border border-amber-200">node scripts/load_ncci_tables.js</code>
+                each quarter (the MUE half fetches on its own; the PTP half needs that quarter's CMS zip files placed
+                in <code className="mx-1 px-1.5 py-0.5 bg-white rounded border border-amber-200">scripts/ncci_source/ptp/</code> first
+                — see <code className="mx-1 px-1.5 py-0.5 bg-white rounded border border-amber-200">scripts/ncci_source/README.md</code>).
+                Until a real billing backend exists, this banner is the only reminder there is — it stays until the
+                loader is actually re-run.
+              </p>
+            </div>
+          )}
+
           {/* Stats Grid */}
           <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-5">
             {statCards.map((stat, i) => (
