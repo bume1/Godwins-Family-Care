@@ -62,6 +62,7 @@
     ::-webkit-scrollbar { width:8px; height:8px; } ::-webkit-scrollbar-thumb { background:#d8d0bd; border-radius:8px; }
   </style>
   <script src="/session-guard.js"></script>
+  <script src="/mfa-step.js"></script>
 </head>
 <body>
   <div id="root"></div>
@@ -380,9 +381,19 @@
     const Login = ({ onLogin }) => {
       const [email, setEmail] = useState(''); const [password, setPassword] = useState('');
       const [err, setErr] = useState(''); const [busy, setBusy] = useState(false);
+      // This form had never gone through the MFA step (unlike login.html and
+      // admin-hub.html), so a clinical/admin/case-manager account — every one
+      // of which MFA has been required for since Session 5.3 — stored the
+      // literal token "undefined" and a partial {email, name} user object,
+      // then bounced back to this same screen the moment the first
+      // authenticated call answered 401. That bounce is what read as a
+      // second, duplicate login prompt. window.GFC_MFA.complete() is the one
+      // place that already knows how to run the challenge; a response
+      // carrying a real token passes straight through it unchanged.
       const submit = (e) => {
         e.preventDefault(); setBusy(true); setErr('');
-        api.login(email, password).then(r => {
+        api.login(email, password).then(r => window.GFC_MFA.complete(r)).then(r => {
+          if (!r || r.error || !r.token) throw new Error((r && r.error) || 'Sign-in failed');
           localStorage.setItem('admin_token', r.token);
           localStorage.setItem('admin_user', JSON.stringify(r.user));
           onLogin(r.user);
