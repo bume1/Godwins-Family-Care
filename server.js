@@ -11168,11 +11168,14 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
     // A charge failure must never void a completed signature: the attestation
     // is already persisted. It is surfaced as a warning and the encounter is
     // marked so the coding queue can show the charge did not post.
-    // ── Session 4.8: an LMSW signature holds the charge ───────────────────
-    // A10 bills nothing independently, so the encounter is SIGNED (the note is
-    // documented and attested) and the charge waits for an LCSW or provider
-    // co-signature. Posting it now and reversing it later would put a claim in
-    // Billing Manager that nobody was certified to render.
+    // ── Session 4.8, switched 2026-09-24: an LMSW never completes a sign ──
+    // Only a provider, an RN or an LCSW attests an encounter (owner rule:
+    // "only FNP, RN, MD is able to sign" — an LMSW documents and co-signs,
+    // never the reverse). So this branch is not "signed, charge held" — the
+    // note is documented and waits for an LCSW's or a provider's SIGNATURE,
+    // which is the actual attestation. Posting a charge now and reversing it
+    // later would put a claim in Billing Manager that nobody was certified to
+    // render.
     if (signature.outcome === clinicalRoles.SIGN_OUTCOME.PENDING_CO_SIGN) {
       record.coSignStatus = 'pending';
       record.coSignReason = signature.reason;
@@ -11193,7 +11196,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
     });
     res.json({
       message: record.coSignStatus === 'pending'
-        ? 'Encounter signed and held for co-signature — no charge posts until an LCSW or provider co-signs'
+        ? 'Note documented — it is not yet signed. It is held for signature by an LCSW or a provider; no charge posts until then.'
         : (record.chargesPosted ? 'Encounter signed and closed; charges posted' : 'Encounter signed and closed'),
       attestation, record, state: 'signed',
       coSignStatus: record.coSignStatus || 'not_required',
