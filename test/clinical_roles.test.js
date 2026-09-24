@@ -184,11 +184,18 @@ test('an lmsw encounter carrying a service code is pendingCoSign and not billabl
   const r = roles.evaluateEncounterSignature(LMSW, [{ code: '90834' }]);
   assert.equal(r.outcome, roles.SIGN_OUTCOME.PENDING_CO_SIGN);
   assert.equal(r.billable, false);
-  assert.match(r.reason, /bills nothing independently/i);
-  // With no service code it is documentation, and there is nothing to hold.
-  const nothingBilled = roles.evaluateEncounterSignature(LMSW, []);
-  assert.equal(nothingBilled.outcome, roles.SIGN_OUTCOME.ALLOWED);
-  assert.equal(nothingBilled.billable, false);
+  assert.match(r.reason, /does not sign/i);
+});
+
+test('an lmsw NEVER completes a signature, even on a plain codeless note (owner switch, 2026-09-24)', () => {
+  // "Only FNP, RN, MD is able to sign" — an LMSW's documentation always waits
+  // on a co-signer, whether or not anything would ever bill. The old carve-out
+  // for a codeless note (ALLOWED, "nothing to hold") is gone.
+  const r = roles.evaluateEncounterSignature(LMSW, []);
+  assert.equal(r.outcome, roles.SIGN_OUTCOME.PENDING_CO_SIGN);
+  assert.equal(r.billable, false);
+  assert.equal(r.signatureRole, 'authoring');
+  assert.match(r.reason, /does not sign/i);
 });
 
 test('an lcsw or provider clears the hold; an lmsw cannot clear their own', () => {
