@@ -14009,12 +14009,16 @@ const modelEngine = require('./modelEngine');
 const documentExtraction = require('./documentExtraction');
 const documentTemplates = require('./documentTemplates');   // reading a document WITHOUT a model,
                                                             // out of the text it already carries.
+const bedrockTransport = require('./bedrockTransport');     // the one Bedrock client (2026-09-24)
 
 const gfcModelEngine = modelEngine.createEngine({
   env: process.env,
-  // No transport yet. `invoke` refuses and says Bedrock is not connected, which
-  // is exactly what is true.
-  transport: null,
+  // The transport is always wired — modelEngine.js refuses to call it at all
+  // unless BEDROCK_REGION / BEDROCK_MODEL_ID / BEDROCK_ZERO_DATA_RETENTION are
+  // set and no static AWS keys are present, so a server with none of that
+  // configured behaves exactly as it did with transport: null. Requiring
+  // bedrockTransport.js only needs the SDK to resolve, never AWS credentials.
+  transport: bedrockTransport.transport,
   logActivity
 });
 
