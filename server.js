@@ -7093,7 +7093,14 @@ app.post('/api/gfc/documents/upload', authenticateToken, requireClientForIntake,
     await notify.documentUploaded({
       client, kind, label: row.label || kind, uploadId: row.id, actorId: req.user.id
     });
-    res.json({ message: 'Document received', document: { id: row.id, kind, fileName: row.fileName, uploadedAt: row.uploadedAt, status: row.status } });
+    // Automatic, every time — no button (owner rule). Best-effort: a client
+    // not yet linked to OpenEMR, or OpenEMR being unreachable, must never
+    // fail the upload itself.
+    const emrFiling = await attemptEmrFiling({ client, row, actor: req.user });
+    res.json({
+      message: 'Document received', emrFiling,
+      document: { id: row.id, kind, fileName: row.fileName, uploadedAt: row.uploadedAt, status: row.status }
+    });
   } catch (error) {
     console.error('GFC document upload error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -8053,8 +8060,11 @@ app.post('/api/clinical/patients/:clientId/link', authenticateToken, requireClin
     // point at which that plan CAN reach the chart, and nothing downstream
     // would ever try again.
     const carePlanFiling = await fileCarePlanToChart(client.id, req.user, 'patient_linked');
+    // Same reasoning, for every document uploaded before this client had a
+    // chart to file into — the catch-up pass, run exactly once at link time.
+    const documentsFiling = await backfillEmrFilingForClient(client.id, req.user);
 
-    res.json({ message: 'Linked to OpenEMR', openEmrPatientId: puuid, carePlanFiling });
+    res.json({ message: 'Linked to OpenEMR', openEmrPatientId: puuid, carePlanFiling, documentsFiling });
   } catch (error) {
     console.error('Clinical link error:', error);
     const status = error.status === 404 ? 400 : 502;
@@ -13996,12 +14006,17 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/upload', authenticateTok
 
     await logActivity(req.user.id, row.uploadedByName, 'client_document_filed_by_staff', 'document', client.id,
       { kind, ...(row.encounterUuid ? { encounterUuid: row.encounterUuid } : {}) });
+    // Automatic, every time — no button (owner rule). Best-effort, and run
+    // BEFORE the read-back below so the returned checklist already carries
+    // the fresh `emrFiled` stamp rather than the screen having to refetch.
+    const emrFiling = await attemptEmrFiling({ client, row, actor: req.user });
     const [allUploads, allRequests] = await Promise.all([
       db.get('client_document_uploads'), db.get('client_document_requests')
     ]);
     res.json({
       message: `Filed to ${client.name || 'the client'}'s documents`,
       document: { id: row.id, kind, fileName: row.fileName, uploadedAt: row.uploadedAt, status: row.status, source: row.source },
+      emrFiling,
       // The checklist is DERIVED, so it is returned here rather than left for
       // the screen to guess at — the item this filing ticked is ticked now.
       checklist: buildDocumentChecklist(client, allUploads || [], allRequests || [])
@@ -14514,8 +14529,10 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authe
   }
 });
 
-// POST …/documents/:docId/file-to-emr — push a client-uploaded document into
-// the patient's OWN OpenEMR chart (2026-09-24, owner-directed).
+// attemptEmrFiling — push a client-uploaded document into the patient's OWN
+// OpenEMR chart, AUTOMATICALLY, at the moment it is stored (2026-09-24,
+// owner-directed: "no file to open emr button. documents should
+// automatically file to open emr every time").
 //
 // This closed a real gap: a care plan and a signed consent each have their own
 // path into OpenEMR (fileCarePlanToChart, the consent renderers), but a
@@ -14525,69 +14542,85 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authe
 // showed it, labeled "From the client") and never reached the real EMR unless
 // someone re-uploaded it there by hand, under their own OpenEMR login.
 //
+// A BUTTON WAS THE FIRST VERSION OF THIS AND IT WAS WRONG — it made "does
+// this reach the chart" a thing somebody had to remember to click, on every
+// one of dozens of uploads. This is the SAME write, called from every place
+// a document is stored rather than offered as an action: the client's own
+// upload, the staff-filed upload, the no-login link, and — because a
+// document can arrive before a patient is ever linked to OpenEMR — a
+// catch-up pass run once at LINK time, the same "whichever moment lands
+// second carries the backfill" rule fileCarePlanToChart already follows.
+//
+// NEVER THROWS, and never holds up the upload it rides on. Care that was
+// given (or a document that was sent) is not lost because OpenEMR happened
+// to be down at that second — the same reasoning `emitSignedCarePlanPdf`'s
+// best-effort EMR filing already follows. A failure is logged and the
+// document simply reads as not-yet-filed; nothing else about the upload is
+// affected.
+//
 // ADDITIVE, never destructive. Nothing about the row's status, its place on
 // the checklist or its place in the app's own chart view changes — `emrFiled`
 // is a fact recorded ALONGSIDE everything else the row already says, the same
 // shape care-plan filing already uses on `carePlanDocs[...].chartFiled`.
-const fileDocumentToEmrHandler = async (req, res) => {
+const attemptEmrFiling = async ({ client, row, actor }) => {
+  if (!client || !row) return { filed: false, reason: 'MISSING_INPUT' };
+  if (row.status === 'rejected') return { filed: false, reason: 'DOCUMENT_REJECTED' };
+  if (row.emrFiled) return { filed: false, reason: 'ALREADY_FILED' };
+  if (!client.openEmrPatientId) return { filed: false, reason: 'NOT_LINKED' };
+  if (!openemr.isConfigured()) return { filed: false, reason: 'EMR_NOT_CONFIGURED' };
+
+  let bytes;
   try {
-    const users = await getUsers();
-    const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
-    if (!client) return res.status(404).json({ error: 'Client not found' });
-
-    const uploads = (await db.get('client_document_uploads')) || [];
-    const row = uploads.find(u => u.id === req.params.docId && u.clientId === client.id);
-    if (!row) return res.status(404).json({ error: 'Document not found', code: 'DOCUMENT_NOT_FOUND' });
-    // A rejected document is not evidence of anything — filing it into the
-    // real chart would put a photo we already sent back to the client into
-    // her permanent record.
-    if (row.status === 'rejected') {
-      return res.status(409).json({ error: 'A rejected document cannot be filed — it was sent back to the client.', code: 'DOCUMENT_REJECTED' });
-    }
-    if (!client.openEmrPatientId) {
-      return res.status(409).json({ error: 'This client is not linked to an OpenEMR chart yet, so there is nowhere to file it.', code: 'NOT_LINKED' });
-    }
-    if (!openemr.isConfigured()) {
-      return res.status(409).json({ error: 'OpenEMR is not configured.', code: 'EMR_NOT_CONFIGURED' });
-    }
-    if (row.emrFiled) {
-      return res.status(409).json({ error: 'Already filed to the OpenEMR chart.', code: 'ALREADY_FILED', filedAt: row.emrFiled.at });
-    }
-
-    let bytes;
-    try {
-      bytes = await googledrive.downloadFileBuffer(row.driveFileId);
-    } catch (e) {
-      const d = googledrive.describeDriveError ? googledrive.describeDriveError(e) : { reason: e.message, hint: null };
-      return res.status(502).json({ error: `That document could not be read back from storage: ${d.reason}`, code: 'DOCUMENT_UNREADABLE' });
-    }
-
-    const category = categoryForDocumentKind(row.kind);
-    try {
-      await openemr.forActor(req.user).uploadPatientDocument(
-        client.openEmrPatientId, row.fileName, bytes, row.mimeType, category);
-    } catch (e) {
-      console.error('[DOCUMENT FILE-TO-EMR] failed:', e.message);
-      return res.status(502).json({ error: `OpenEMR refused that document: ${e.message}`, code: 'EMR_UPLOAD_FAILED' });
-    }
-
-    const fresh = (await db.get('client_document_uploads')) || [];
-    const j = fresh.findIndex(u => u.id === row.id);
-    const at = new Date().toISOString();
-    if (j !== -1) {
-      fresh[j] = {
-        ...fresh[j],
-        emrFiled: { at, byId: req.user.id, byName: req.user.name || req.user.email, category }
-      };
-      await db.set('client_document_uploads', fresh);
-    }
-    await logActivity(req.user.id, req.user.name || req.user.email, 'client_document_filed_to_emr', 'document', client.id,
-      { uploadId: row.id, kind: row.kind, category });
-    res.json({ message: 'Filed to the OpenEMR chart.', filedAt: at, category });
-  } catch (error) {
-    console.error('Document file-to-EMR error:', error);
-    res.status(500).json({ error: 'Server error' });
+    bytes = await googledrive.downloadFileBuffer(row.driveFileId);
+  } catch (e) {
+    console.error('[AUTO FILE-TO-EMR] could not read the document back from storage:', e.message);
+    return { filed: false, reason: 'DOCUMENT_UNREADABLE' };
   }
+
+  const category = categoryForDocumentKind(row.kind);
+  try {
+    await openemr.forActor(actor).uploadPatientDocument(
+      client.openEmrPatientId, row.fileName, bytes, row.mimeType, category);
+  } catch (e) {
+    console.error('[AUTO FILE-TO-EMR] OpenEMR refused the document:', e.message);
+    return { filed: false, reason: 'EMR_UPLOAD_FAILED' };
+  }
+
+  const fresh = (await db.get('client_document_uploads')) || [];
+  const j = fresh.findIndex(u => u.id === row.id);
+  const at = new Date().toISOString();
+  if (j !== -1) {
+    fresh[j] = {
+      ...fresh[j],
+      emrFiled: { at, byId: actor.id, byName: actor.name || actor.email, category }
+    };
+    await db.set('client_document_uploads', fresh);
+  }
+  await logActivity(actor.id, actor.name || actor.email, 'client_document_filed_to_emr', 'document', client.id,
+    { uploadId: row.id, kind: row.kind, category });
+  return { filed: true, reason: null, at, category };
+};
+
+// The catch-up pass. A document can arrive before a client is ever linked to
+// OpenEMR — every upload site above already tried, and every one got
+// `NOT_LINKED` back and moved on. The moment a chart is linked is the first
+// point any of those CAN reach it, and nothing else would ever try again —
+// the same "whichever moment lands second carries the backfill" rule
+// fileCarePlanToChart already follows for the care plan. Sequential, not
+// Promise.all: several calls racing to read-modify-write client_document_uploads
+// would drop each other's writes.
+const backfillEmrFilingForClient = async (clientId, actor) => {
+  const users = await getUsers();
+  const client = users.find(u => u.id === clientId);
+  if (!client || !client.openEmrPatientId) return { filed: 0, skipped: 0 };
+  const uploads = (await db.get('client_document_uploads')) || [];
+  const candidates = uploads.filter(u => u && u.clientId === clientId && u.status !== 'rejected' && !u.emrFiled);
+  let filed = 0;
+  for (const row of candidates) {
+    const result = await attemptEmrFiling({ client, row, actor });
+    if (result.filed) filed++;
+  }
+  return { filed, skipped: candidates.length - filed };
 };
 
 // POST …/documents/:docId/move-to-caregiver — a document that turns out to be
@@ -14690,15 +14723,14 @@ const moveDocumentToCaregiverHandler = async (req, res) => {
   }
 };
 
-// Two doors onto the SAME handler, matching the extraction routes' exact
-// shape (server.js, extractDocumentHandler): the enrollment screen a clinician
-// often works from, and the clinical chart itself. One function means the
-// idempotency check, the category mapping and the audit row cannot drift
-// between the two places a clinician might click this button from.
-app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/file-to-emr', authenticateToken, requireEnrollmentEditor, fileDocumentToEmrHandler);
-app.post('/api/clinical/patients/:clientId/documents/:docId/file-to-emr', authenticateToken, requireClinicalWrite, requireClinicalOnLine, fileDocumentToEmrHandler);
-// Whose record this truly belongs to is an office triage decision, so this
-// one stays admin-only, on the enrollment screen only (owner's explicit ask).
+// file-to-emr has NO ROUTE, deliberately — it is not an action anyone
+// triggers, it is `attemptEmrFiling` called automatically from every upload
+// site plus the link-time backfill below. A route here would be a second,
+// manual door onto a write that is supposed to always already have happened.
+//
+// Whose record a document truly belongs to IS still an office triage
+// decision, so move-to-caregiver stays admin-only, on the enrollment screen
+// only (owner's explicit ask) — automatic filing never applies to it.
 app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/move-to-caregiver', authenticateToken, requireAdmin, moveDocumentToCaregiverHandler);
 
 // GET …/enrollment/meta/caregivers — who can receive a moved document. Under
@@ -14970,7 +15002,12 @@ app.post('/api/gfc/upload/:token', async (req, res) => {
     await logActivity(null, 'Upload link (no sign-in)', 'client_document_uploaded_via_link', 'document', client.id, { kind });
     await notify.documentUploaded({ client, kind, label: row.label || kind, uploadId: row.id, actorId: null });
 
-    res.json({ message: 'Document received', document: { id: row.id, kind, fileName: row.fileName, uploadedAt: row.uploadedAt, status: row.status } });
+    // Automatic, every time — no button (owner rule), no sign-in required for
+    // it to happen either. Best-effort: this link exists so nobody has to be
+    // signed in to send a document, and it must not start refusing uploads
+    // because OpenEMR happens to be unreachable.
+    const emrFiling = await attemptEmrFiling({ client, row, actor: { id: client.id, name: client.name || client.email } });
+    res.json({ message: 'Document received', emrFiling, document: { id: row.id, kind, fileName: row.fileName, uploadedAt: row.uploadedAt, status: row.status } });
   } catch (error) {
     console.error('GFC public upload-link submit error:', error);
     res.status(500).json({ error: 'Server error' });

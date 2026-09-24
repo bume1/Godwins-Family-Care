@@ -198,9 +198,6 @@
       reviewDocument: (id, uploadId, decision, reason) => authedFetch(`/api/gfc/admin/enrollment/${id}/documents/${uploadId}/review`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision, reason })
       }),
-      // Push a client-uploaded document into the patient's own OpenEMR chart
-      // (2026-09-24) — admin or a licensed clinician, matching the filing door.
-      fileDocumentToEmr: (id, docId) => authedFetch(`/api/gfc/admin/enrollment/${id}/documents/${docId}/file-to-emr`, { method: 'POST' }),
       // Copy a misfiled document into a caregiver's own file (2026-09-24) —
       // admin only, since whose record it truly belongs to is an office call.
       moveDocumentToCaregiver: (id, docId, caregiverId) => authedFetch(`/api/gfc/admin/enrollment/${id}/documents/${docId}/move-to-caregiver`, {
@@ -779,12 +776,6 @@
           .catch(e => setErr(e.message)).finally(() => setBusy(false));
       };
 
-      const fileToEmr = (uploadId) => {
-        setRouting(uploadId); setRouteErr('');
-        api.fileDocumentToEmr(clientId, uploadId).then(load)
-          .catch(e => setRouteErr(e.message)).finally(() => setRouting(''));
-      };
-
       const startMove = (uploadId) => {
         setMoving(uploadId); setRouteErr(''); setPickedCaregiver('');
         if (caregivers) return;
@@ -928,16 +919,16 @@
                         <ReadDocumentButton clientId={clientId} doc={{ ...f, kind: r.kind }} extraction={extraction}
                           onRead={(ex) => setReviewing({ ...ex, fileName: f.fileName })} />
                       )}
-                      {/* File into the patient's actual OpenEMR chart (2026-09-24)
-                          — admin or a licensed clinician, matching the upload door.
-                          A rejected file is excluded for the same reason it is
-                          excluded from reading: it is going back to the client,
-                          not into a permanent record. */}
-                      {canEdit && f.status !== 'rejected' && (
-                        f.emrFiled
-                          ? <span className="chip bg-emerald-50 text-emerald-700" title={`Filed ${new Date(f.emrFiled.at).toLocaleString()}`}>In OpenEMR chart</span>
-                          : <button className="chip border border-accent text-primary bg-white" disabled={routing === f.id}
-                              onClick={() => fileToEmr(f.id)}>{routing === f.id ? 'Filing…' : 'File to OpenEMR'}</button>
+                      {/* Filing into the patient's actual OpenEMR chart is now
+                          AUTOMATIC (2026-09-24, owner rule) — every upload tries
+                          it the moment it is stored, and again as a catch-up pass
+                          the moment a patient is linked. No button: this chip is
+                          only ever a report of what already happened, never an
+                          action to take. A not-yet-filed document says nothing
+                          extra — absence already reads as "not yet", the same
+                          convention the clinical chart's own "In EMR" chip uses. */}
+                      {f.emrFiled && (
+                        <span className="chip bg-emerald-50 text-emerald-700" title={`Filed ${new Date(f.emrFiled.at).toLocaleString()}`}>In OpenEMR chart</span>
                       )}
                       {/* Whose record this truly belongs to is an office call —
                           admin only, per the owner's explicit ask. */}

@@ -12,6 +12,15 @@
  *      inbox) had no way to reach the caregiver's own document store — the
  *      two stores are entirely separate and nothing bridged them.
  *
+ * CORRECTED same day (owner-directed: "no file to open emr button. documents
+ * should automatically file to open emr every time"). The first version of
+ * gap 1 was a button next to each document; there is no button now. Filing
+ * happens automatically, at the moment a document is stored, from every door
+ * a document can arrive through — the client's own upload, the staff-filed
+ * upload, and the no-login link — plus a catch-up pass run once at the
+ * moment a client is LINKED to OpenEMR, for whatever arrived before there was
+ * a chart to file into.
+ *
  * Runs the REAL server and the REAL routes. Stubbed: the KV store
  * (@replit/database), HIPAA Drive, and the OpenEMR transport — the three
  * pieces of infrastructure not reachable from a build sandbox. Everything
@@ -83,8 +92,6 @@ openemr.isConfigured = () => emrConfigured;
 // has no reason to fake. Those stay real — with no EMR reachable they reject
 // as network errors, which the chart route already tolerates gracefully
 // (Promise.allSettled + a permission-pending/error state, never a crash).
-// Only uploadPatientDocument, the one call this feature actually makes, is
-// overridden.
 const realForActor = openemr.forActor;
 openemr.forActor = (actor) => {
   const real = realForActor(actor);
@@ -94,7 +101,11 @@ openemr.forActor = (actor) => {
       if (emrShouldFail) throw new Error('simulated EMR outage');
       EMR_DOCS.push({ puuid, fileName, mimeType, categoryPath, byId: actor && actor.id });
       return true;
-    }
+    },
+    // The /link route verifies an existing OpenEMR patient id with this
+    // before linking — stubbed so the live backfill test can link a client
+    // mid-run without a real EMR to ask.
+    async getPatient(puuid) { return { id: puuid }; }
   };
 };
 
@@ -133,7 +144,7 @@ const call = async (method, url, token, body) => {
   const res = await fetch(`${BASE}${url}`, {
     method,
     headers: Object.assign(
-      { 'Authorization': `Bearer ${token}` },
+      { 'Authorization': `Bearer ${token || ''}` },
       body ? { 'Content-Type': 'application/json' } : {}
     ),
     body: body ? JSON.stringify(body) : undefined
@@ -149,12 +160,15 @@ const PNG = Buffer.concat([
 ]);
 const b64 = (buf) => `data:image/png;base64,${buf.toString('base64')}`;
 
+// CLIENT starts UNLINKED (proves NOT_LINKED, and later drives the link-time
+// catch-up pass). Must be on a clinical service line — the /link route
+// refuses PHC-only clients (wrongLine) regardless of document state.
 const CLIENT = {
   id: 'client_route_1', role: config.ROLES.CLIENT, email: 'routepatient@example.test',
-  name: 'Route PatientOne', slug: 'route-patientone', serviceLine: 'PHC',
+  name: 'Route PatientOne', slug: 'route-patientone', serviceLine: 'BOTH',
   enrollmentStatus: 'enrolled', consents: { consentToTreat: 'signed' }, consentMeta: {},
   intake: { firstName: 'Route', lastName: 'PatientOne' },
-  openEmrPatientId: null // not linked yet — proves the NOT_LINKED refusal
+  openEmrPatientId: null
 };
 const LINKED_CLIENT = {
   id: 'client_route_2', role: config.ROLES.CLIENT, email: 'linkedpatient@example.test',
@@ -174,57 +188,88 @@ const CAREGIVER = {
   await new Promise(r => setTimeout(r, 2500));
 
   const st = tok(STAFF), ct = tok(CLIENT), lct = tok(LINKED_CLIENT);
+  const checklistOf = (clientId, r) => (r.body.checklist || []).flatMap(c => c.files || []);
+  const getDocs = async (token) => call('GET', '/api/gfc/documents', token);
+  const getAdminDocs = async (clientId) => call('GET', `/api/gfc/admin/enrollment/${clientId}/documents`, st);
 
-  console.log('\n── File to OpenEMR: refused before a chart exists ──');
+  console.log('\n── Automatic filing: an unlinked client is skipped, inline in the upload response ──');
   let r = await call('POST', '/api/gfc/documents/upload', ct, { kind: 'photoId', fileName: 'licence.png', fileDataB64: b64(PNG) });
   check('upload accepted', r.status === 200, JSON.stringify(r.body).slice(0, 200));
-  const unlinkedUploadId = r.body.document.id;
-
-  r = await call('POST', `/api/gfc/admin/enrollment/${CLIENT.id}/documents/${unlinkedUploadId}/file-to-emr`, st);
-  check('an unlinked client refuses with NOT_LINKED, nothing written',
-    r.status === 409 && r.body.code === 'NOT_LINKED', JSON.stringify(r.body));
+  check('the upload response itself says filing was skipped, and why — no separate call needed',
+    r.body.emrFiling && r.body.emrFiling.filed === false && r.body.emrFiling.reason === 'NOT_LINKED', JSON.stringify(r.body.emrFiling));
   check('nothing was sent to the (stubbed) EMR', EMR_DOCS.length === 0, String(EMR_DOCS.length));
+  const unlinkedPendingId = r.body.document.id;
 
-  console.log('\n── File to OpenEMR: the real path ──');
+  console.log('\n── Automatic filing: a rejected document is never filed, even after linking ──');
+  r = await call('POST', '/api/gfc/documents/upload', ct, { kind: 'insuranceCard', fileName: 'blurry.png', fileDataB64: b64(PNG) });
+  const unlinkedRejectId = r.body.document.id;
+  r = await call('POST', `/api/gfc/admin/enrollment/${CLIENT.id}/documents/${unlinkedRejectId}/review`, st, { decision: 'rejected', reason: 'too blurry' });
+  check('rejected while still unlinked', r.status === 200, JSON.stringify(r.body));
+
+  console.log('\n── Automatic filing: linking a client runs the catch-up pass ──');
+  r = await call('POST', `/api/clinical/patients/${CLIENT.id}/link`, st, { openEmrPatientId: 'emr-uuid-backfill' });
+  check('the link succeeded', r.status === 200, JSON.stringify(r.body).slice(0, 200));
+  check('the link response reports exactly the one candidate filed, none skipped (the rejected row is never a candidate)',
+    !!r.body.documentsFiling && r.body.documentsFiling.filed === 1 && r.body.documentsFiling.skipped === 0,
+    JSON.stringify(r.body.documentsFiling));
+  check('exactly one document reached the (stubbed) chart — the pending one, not the rejected one',
+    EMR_DOCS.length === 1 && EMR_DOCS[0].fileName === 'licence.png', JSON.stringify(EMR_DOCS));
+  check('a "photoId" kind falls to the /Medical Record default', EMR_DOCS[0].categoryPath === '/Medical Record', EMR_DOCS[0].categoryPath);
+
+  r = await getAdminDocs(CLIENT.id);
+  let filedRow = checklistOf(CLIENT.id, r).find(f => f.id === unlinkedPendingId);
+  check('the checklist reflects the backfilled filing, stored on the row', !!(filedRow && filedRow.emrFiled), JSON.stringify(filedRow));
+  let stillRejected = checklistOf(CLIENT.id, r).find(f => f.id === unlinkedRejectId);
+  check('the rejected document was never filed', !!stillRejected && !stillRejected.emrFiled, JSON.stringify(stillRejected));
+
+  console.log('\n── Automatic filing: re-linking is idempotent — no duplicate filing ──');
+  r = await call('POST', `/api/clinical/patients/${CLIENT.id}/link`, st, { openEmrPatientId: 'emr-uuid-backfill', relink: true });
+  check('relink accepted', r.status === 200, JSON.stringify(r.body).slice(0, 200));
+  check('nothing new to file the second time', !!r.body.documentsFiling && r.body.documentsFiling.filed === 0 && r.body.documentsFiling.skipped === 0,
+    JSON.stringify(r.body.documentsFiling));
+  check('still exactly one document in the (stubbed) chart', EMR_DOCS.length === 1, String(EMR_DOCS.length));
+
+  console.log('\n── Automatic filing: an already-linked client files immediately, inline in the upload response ──');
   r = await call('POST', '/api/gfc/documents/upload', lct, { kind: 'referral', fileName: 'referral.png', fileDataB64: b64(PNG) });
   check('upload accepted on the linked client', r.status === 200, JSON.stringify(r.body).slice(0, 200));
   const uploadId = r.body.document.id;
-
-  r = await call('POST', `/api/gfc/admin/enrollment/${LINKED_CLIENT.id}/documents/${uploadId}/file-to-emr`, st);
-  check('filed to the chart', r.status === 200, JSON.stringify(r.body).slice(0, 200));
-  check('the stubbed EMR actually received the bytes', EMR_DOCS.length === 1 && EMR_DOCS[0].puuid === 'emr-uuid-123', JSON.stringify(EMR_DOCS));
+  check('the upload response says it filed, with no button or second call needed',
+    r.body.emrFiling && r.body.emrFiling.filed === true, JSON.stringify(r.body.emrFiling));
+  check('the stubbed EMR actually received the bytes', EMR_DOCS.length === 2 && EMR_DOCS[1].puuid === 'emr-uuid-123', JSON.stringify(EMR_DOCS));
   check('a "referral" kind uses the /Consult category — not the /Medical Record default',
-    EMR_DOCS[0].categoryPath === '/Consult', EMR_DOCS[0].categoryPath);
+    EMR_DOCS[1].categoryPath === '/Consult', EMR_DOCS[1].categoryPath);
 
-  r = await call('GET', `/api/gfc/admin/enrollment/${LINKED_CLIENT.id}/documents`, st);
-  const filedRow = (r.body.checklist || []).flatMap(c => c.files || []).find(f => f.id === uploadId);
+  r = await getAdminDocs(LINKED_CLIENT.id);
+  filedRow = checklistOf(LINKED_CLIENT.id, r).find(f => f.id === uploadId);
   check('the checklist reflects the filing, stored on the row', !!(filedRow && filedRow.emrFiled), JSON.stringify(filedRow));
 
+  console.log('\n── Automatic filing: the staff upload route files BEFORE its own checklist re-read ──');
+  r = await call('POST', `/api/gfc/admin/enrollment/${LINKED_CLIENT.id}/documents/upload`, st, { kind: 'physicianOrder', fileName: 'order.png', fileDataB64: b64(PNG) });
+  check('staff upload accepted', r.status === 200, JSON.stringify(r.body).slice(0, 200));
+  const staffUploadId = r.body.document.id;
+  check('the response itself says it filed', r.body.emrFiling && r.body.emrFiling.filed === true, JSON.stringify(r.body.emrFiling));
+  const staffFiledRow = checklistOf(LINKED_CLIENT.id, r).find(f => f.id === staffUploadId);
+  check('and the checklist RETURNED IN THIS SAME RESPONSE already shows it filed — ordering matters',
+    !!(staffFiledRow && staffFiledRow.emrFiled), JSON.stringify(staffFiledRow));
+  check('a "physicianOrder" kind uses the /Orders category', EMR_DOCS.length === 3 && EMR_DOCS[2].categoryPath === '/Orders', JSON.stringify(EMR_DOCS[2]));
+
+  console.log('\n── Automatic filing: the no-login link is the third door, and it files too ──');
+  r = await call('POST', `/api/gfc/admin/enrollment/${LINKED_CLIENT.id}/documents/upload-link`, st, {});
+  check('a link was generated', r.status === 200 && r.body.link && r.body.link.url, JSON.stringify(r.body));
+  const linkToken = (r.body.link.url.match(/\/upload\/([^/?#]+)/) || [])[1];
+  check('a token was carried in the url', !!linkToken, r.body.link.url);
+  r = await call('POST', `/api/gfc/upload/${linkToken}`, null, { kind: 'otherDocument', fileName: 'fromlink.png', fileDataB64: b64(PNG) });
+  check('the link upload is accepted with no login at all', r.status === 200, JSON.stringify(r.body).slice(0, 200));
+  check('and it files automatically too, with no admin ever seeing this document',
+    r.body.emrFiling && r.body.emrFiling.filed === true, JSON.stringify(r.body.emrFiling));
+  check('an "otherDocument" kind falls to the /Medical Record default',
+    EMR_DOCS.length === 4 && EMR_DOCS[3].categoryPath === '/Medical Record', JSON.stringify(EMR_DOCS[3]));
+
+  console.log('\n── No button exists to trigger filing manually — the old routes are gone ──');
   r = await call('POST', `/api/gfc/admin/enrollment/${LINKED_CLIENT.id}/documents/${uploadId}/file-to-emr`, st);
-  check('filing a second time is refused rather than double-filing',
-    r.status === 409 && r.body.code === 'ALREADY_FILED', JSON.stringify(r.body));
-  check('and the stub still shows exactly one document', EMR_DOCS.length === 1, String(EMR_DOCS.length));
-
-  console.log('\n── File to OpenEMR: a rejected document is never filed ──');
-  r = await call('POST', '/api/gfc/documents/upload', lct, { kind: 'insuranceCard', fileName: 'blurry.png', fileDataB64: b64(PNG) });
-  const rejectId = r.body.document.id;
-  await call('POST', `/api/gfc/admin/enrollment/${LINKED_CLIENT.id}/documents/${rejectId}/review`, st, { decision: 'rejected', reason: 'too blurry' });
-  r = await call('POST', `/api/gfc/admin/enrollment/${LINKED_CLIENT.id}/documents/${rejectId}/file-to-emr`, st);
-  check('a rejected document is refused', r.status === 409 && r.body.code === 'DOCUMENT_REJECTED', JSON.stringify(r.body));
-  check('still only one document reached the (stubbed) chart', EMR_DOCS.length === 1, String(EMR_DOCS.length));
-
-  console.log('\n── File to OpenEMR: also reachable from the clinical chart door ──');
-  r = await call('POST', '/api/gfc/documents/upload', lct, { kind: 'otherDocument', fileName: 'other.png', fileDataB64: b64(PNG) });
-  const secondUploadId = r.body.document.id;
-  r = await call('POST', `/api/clinical/patients/${LINKED_CLIENT.id}/documents/${secondUploadId}/file-to-emr`, st);
-  check('the clinical-chart door files it too — one handler, two routes',
-    r.status === 200 && EMR_DOCS.length === 2, JSON.stringify(r.body));
-  check('an unmapped kind defaults to /Medical Record', EMR_DOCS[1].categoryPath === '/Medical Record', EMR_DOCS[1].categoryPath);
-
-  console.log('\n── File to OpenEMR: a client cannot file their own document ──');
-  r = await call('POST', '/api/gfc/documents/upload', lct, { kind: 'otherDocument', fileName: 'x.png', fileDataB64: b64(PNG) });
-  r = await call('POST', `/api/gfc/admin/enrollment/${LINKED_CLIENT.id}/documents/${r.body.document.id}/file-to-emr`, lct);
-  check('a client is refused this route entirely', r.status === 403, String(r.status));
+  check('the old manual route is gone', r.status === 404, String(r.status));
+  r = await call('POST', `/api/clinical/patients/${LINKED_CLIENT.id}/documents/${uploadId}/file-to-emr`, st);
+  check('gone from the clinical-chart door too', r.status === 404, String(r.status));
 
   console.log('\n── Move to caregiver: who this belongs to ──');
   r = await call('GET', '/api/gfc/admin/enrollment/meta/caregivers', st);
@@ -256,13 +301,13 @@ const CAREGIVER = {
   check('the bytes moved with it', r.status === 200 && Buffer.isBuffer(r.body) && r.body.equals(PNG));
 
   console.log('\n── Move to caregiver: the ORIGINAL is never destroyed ──');
-  r = await call('GET', `/api/gfc/admin/enrollment/${CLIENT.id}/documents`, st);
-  const original = (r.body.checklist || []).flatMap(c => c.files || []).find(f => f.id === misfiledId);
+  r = await getAdminDocs(CLIENT.id);
+  const original = checklistOf(CLIENT.id, r).find(f => f.id === misfiledId);
   check('the client\'s own copy is still listed', !!original, JSON.stringify(original));
   check('and it says where it also lives', !!(original && original.movedTo && original.movedTo.caregiverId === CAREGIVER.id), JSON.stringify(original));
 
-  r = await call('GET', '/api/gfc/documents', ct);
-  const clientSide = (r.body.checklist || []).flatMap(c => c.files || []).find(f => f.id === misfiledId);
+  r = await getDocs(ct);
+  const clientSide = checklistOf(CLIENT.id, r).find(f => f.id === misfiledId);
   check('and the client still sees their own upload — nothing vanished from their portal', !!clientSide, JSON.stringify(clientSide));
 
   r = await call('POST', `/api/gfc/admin/enrollment/${CLIENT.id}/documents/${misfiledId}/move-to-caregiver`, st, { caregiverId: CAREGIVER.id });
@@ -287,18 +332,20 @@ const CAREGIVER = {
   r = await call('POST', `/api/gfc/admin/enrollment/${CLIENT.id}/documents/${clinicianTestId}/move-to-caregiver`, st, { caregiverId: CAREGIVER.id });
   check('a Drive failure on the caregiver upload refuses the move', r.status === 502, String(r.status));
   driveShouldFail = false;
-  r = await call('GET', `/api/gfc/admin/enrollment/${CLIENT.id}/documents`, st);
-  const stillUnmoved = (r.body.checklist || []).flatMap(c => c.files || []).find(f => f.id === clinicianTestId);
+  r = await getAdminDocs(CLIENT.id);
+  const stillUnmoved = checklistOf(CLIENT.id, r).find(f => f.id === clinicianTestId);
   check('and nothing was recorded as moved', stillUnmoved && !stillUnmoved.movedTo, JSON.stringify(stillUnmoved));
 
+  console.log('\n── An EMR failure never fails the upload it rides on — it rides along as a skip ──');
   emrShouldFail = true;
   r = await call('POST', '/api/gfc/documents/upload', lct, { kind: 'otherDocument', fileName: 'fail.png', fileDataB64: b64(PNG) });
+  check('the upload itself still succeeds even though filing will fail', r.status === 200, JSON.stringify(r.body).slice(0, 200));
   const failId = r.body.document.id;
-  r = await call('POST', `/api/gfc/admin/enrollment/${LINKED_CLIENT.id}/documents/${failId}/file-to-emr`, st);
-  check('an EMR failure refuses the filing', r.status === 502 && r.body.code === 'EMR_UPLOAD_FAILED', JSON.stringify(r.body));
+  check('the upload response says why filing failed, inline — no separate call needed',
+    r.body.emrFiling && r.body.emrFiling.filed === false && r.body.emrFiling.reason === 'EMR_UPLOAD_FAILED', JSON.stringify(r.body.emrFiling));
   emrShouldFail = false;
-  r = await call('GET', `/api/gfc/admin/enrollment/${LINKED_CLIENT.id}/documents`, st);
-  const stillUnfiled = (r.body.checklist || []).flatMap(c => c.files || []).find(f => f.id === failId);
+  r = await getAdminDocs(LINKED_CLIENT.id);
+  let stillUnfiled = checklistOf(LINKED_CLIENT.id, r).find(f => f.id === failId);
   check('and nothing was recorded as filed', stillUnfiled && !stillUnfiled.emrFiled, JSON.stringify(stillUnfiled));
 
   console.log('\n── The chart\'s own "In EMR" chip follows the same fact ──');
@@ -307,7 +354,16 @@ const CAREGIVER = {
   const chartRow = chartRows.find(d => d.uploadId === uploadId);
   check('the chart index now says this upload is in the EMR', !!(chartRow && chartRow.inChart), JSON.stringify(chartRow));
   const trulyUnfiled = chartRows.find(d => d.uploadId === failId);
-  check('a never-filed upload still says so', !!trulyUnfiled && !trulyUnfiled.inChart, JSON.stringify(trulyUnfiled));
+  check('a not-yet-filed upload still says so', !!trulyUnfiled && !trulyUnfiled.inChart, JSON.stringify(trulyUnfiled));
+
+  console.log('\n── A transient failure is not the end of the story — the next link-time pass can still pick it up ──');
+  r = await call('POST', `/api/clinical/patients/${LINKED_CLIENT.id}/link`, st, { openEmrPatientId: LINKED_CLIENT.openEmrPatientId, relink: true });
+  check('relink accepted', r.status === 200, JSON.stringify(r.body).slice(0, 200));
+  check('the previously-failed upload was the one candidate, and it was picked up this time',
+    !!r.body.documentsFiling && r.body.documentsFiling.filed === 1 && r.body.documentsFiling.skipped === 0, JSON.stringify(r.body.documentsFiling));
+  r = await getAdminDocs(LINKED_CLIENT.id);
+  const nowFiled = checklistOf(LINKED_CLIENT.id, r).find(f => f.id === failId);
+  check('and now the checklist shows it filed', !!(nowFiled && nowFiled.emrFiled), JSON.stringify(nowFiled));
 
   console.log('\n── The activity trail ──');
   const log = (await new MemDb().get('activity_log')) || [];
