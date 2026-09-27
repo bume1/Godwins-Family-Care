@@ -216,3 +216,31 @@ test('the note header no longer claims a service-account write, and the constant
   assert.doesNotMatch(read('server.js'), /OPENEMR_SERVICE_ACCOUNT/);
   assert.doesNotMatch(read('clinicalRepository.js'), /attributed to service account/);
 });
+
+// ---- 7. admin-triggered disconnect — the other half of self-service connect/disconnect ----
+// A clinician connects/disconnects their OWN OpenEMR link (routes above,
+// requireClinicalRead, keyed off req.user.id). Until now there was no way
+// for an ADMIN to act on someone ELSE's stale connection — e.g. alongside
+// an MFA reset when a clinician's device is lost. These two tests pin the
+// admin half: admin-gated, targets the URL user rather than the caller, and
+// never goes anywhere near a password.
+test('an admin can read and disconnect ANOTHER user\'s OpenEMR connection; both routes target the URL user, not the caller', () => {
+  const s = read('server.js');
+  assert.match(s, /app\.get\('\/api\/users\/:userId\/emr\/status', authenticateToken, requireAdmin/);
+  assert.match(s, /app\.post\('\/api\/users\/:userId\/emr\/disconnect', authenticateToken, requireAdmin/);
+  const statusRoute = s.slice(s.indexOf("app.get('/api/users/:userId/emr/status'"), s.indexOf("app.post('/api/users/:userId/emr/disconnect'"));
+  assert.match(statusRoute, /const target = users\.find\(u => u\.id === req\.params\.userId\)/);
+  assert.match(statusRoute, /emrAuth\.statusFor\(target\.id\)/, 'reads the TARGET user\'s status, never req.user\'s');
+  assert.doesNotMatch(statusRoute, /emrAuth\.statusFor\(req\.user/, 'must not silently read the ADMIN\'S OWN connection instead');
+  const disconnectRoute = s.slice(s.indexOf("app.post('/api/users/:userId/emr/disconnect'"), s.indexOf("app.get('/api/clinical/status'"));
+  assert.match(disconnectRoute, /const target = users\.find\(u => u\.id === req\.params\.userId\)/);
+  assert.match(disconnectRoute, /emrAuth\.disconnect\(target\.id\)/, 'disconnects the TARGET user, never req.user');
+  assert.doesNotMatch(disconnectRoute, /emrAuth\.disconnect\(req\.user/, 'must not silently disconnect the ADMIN\'S OWN connection instead');
+  assert.match(disconnectRoute, /'emr_disconnected_by_admin'/, 'a distinct activity type from the self-service emr_disconnected, so the audit trail says who actually acted');
+  assert.match(disconnectRoute, /logActivity\(req\.user\.id, req\.user\.name \|\| req\.user\.email, 'emr_disconnected_by_admin', 'openemr:oauth', target\.id/, 'logged as the admin\'s action, against the target');
+});
+test('the admin EMR routes never touch a password — they only clear this app\'s stored pointer to the OpenEMR token', () => {
+  const s = read('server.js');
+  const block = s.slice(s.indexOf("app.get('/api/users/:userId/emr/status'"), s.indexOf("app.get('/api/clinical/status'"));
+  assert.doesNotMatch(block, /\.password\b/, 'this is a token disconnect, never a credential change — OpenEMR passwords are never held by this app');
+});
