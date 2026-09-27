@@ -4,6 +4,49 @@
 
 ---
 
+### Version 3.1.0 - September 27, 2026
+
+#### New Features
+- Add a script to export GFC's billed CPT/HCPCS codes and modifiers
+- Add a quarterly admin/manager reminder to refresh the NCCI/MUE tables
+- Add an NCCI/MUE bundling check to the encounter sign gate
+- Add a general "something else" document kind
+- Add a branded, no-login document upload link
+
+#### Bug Fixes
+- Fix duplicate login prompt on the clinical workspace
+- Fix the idle timeout losing in-progress form data with no warning
+- Fix the office number on the upload form
+- Fix the top bar and make the patient panel collapse
+
+#### Changes
+- Wire the Bedrock transport modelEngine.js has been waiting for
+- Center the clinical workspace's capped-width content areas on desktop
+- Note the billing NPI correction (owner action, no code change)
+- Read the NCCI MUE table from its .csv rendition
+- Make the NCCI loader work with Alpine's BusyBox unzip
+- Track scripts/ncci_source/ptp/ so it exists in every deployed image
+- Close LMSW independent-signature loophole (owner rule)
+- Make document reading cover every uploaded document kind
+- Record PR #120 in the running status
+- Stop the patient banner claiming "Not assigned" when a facility is assigned but unconfirmed
+- Surface a degraded place-of-service read on the chart, not just the enrollment screen
+- Regenerate today's changelog section
+- Make a failed OpenEMR visit read loud on the Timeline, not quiet
+- Let a clinician use the clinical enrollment checklist, not just view it
+- Record Session 4.12 in the session tables
+- Let a document belong to one visit
+- An instrument OpenEMR already holds is surfaced, never rebuilt
+- Point the appointment config at the intake this app already has
+- Keep 4.12 out of the patient and family portal, on purpose
+- Let the visit decide the note, and the clock beat the diary
+- Split what kind of visit from where it happened
+- Say in one place what this app has proven about OpenEMR, and what it hasn't
+- Let a psychiatric visit be the same visit, with the exam it needs
+- Walk the encounter one step at a time, and bring the chart to it
+- Send the modifier that says a visit was by video
+
+
 ### Version 3.0.1 - September 23, 2026
 
 #### Bug Fixes
