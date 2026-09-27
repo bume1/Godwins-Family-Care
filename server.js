@@ -61,6 +61,8 @@ const patientRead = require('./patientReadRepository');
 const clinicalRoles = require('./clinicalRoles');
 const standingOrders = require('./standingOrders');   // signed, versioned, expiring protocols (4.8 Scope C)
 const clinicalInbox = require('./clinicalInbox');     // what is waiting on a clinician (4.9)
+const clinicalNotes = require('./clinicalNotes');     // the shared, versioned clinical note (2026-09-27)
+const noteFormat = require('./public/note-format');   // the six formatting shapes — app, OpenEMR and PDF read one rule set
 const myDay = require('./myDay');                     // the day, the visit stamps and the pre-visit
                                                       // packet (4.12). Pure — the clock is passed in.
 // Session 4.10 — orders that leave the building. The app GENERATES, a person
@@ -2527,6 +2529,18 @@ const requireClinicalWrite = (req, res, next) => {
 const requireCapability = (capability) => (req, res, next) => {
   if (clinicalRoles.can(req.user, capability)) return next();
   return res.status(403).json(clinicalRoles.refusalFor(req.user, capability));
+};
+// A clinical note is written by whoever documents a visit: a nursing note
+// (RN, provider) or a behavioral one (LCSW, LMSW, provider). Gating the shared
+// note on the nursing capability alone would lock an LMSW out of the note the
+// owner's rule says they author (2026-09-27).
+const requireNoteWriter = (req, res, next) => {
+  if (clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.NURSING_NOTE) ||
+      clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.BEHAVIORAL_NOTE)) return next();
+  return res.status(403).json({
+    ...clinicalRoles.refusalFor(req.user, clinicalRoles.CAPABILITIES.NURSING_NOTE),
+    error: 'Writing a clinical note requires a clinical licence (RN, LCSW, LMSW or provider).'
+  });
 };
 
 // Require Admin Hub access (super admins, managers, or users with hasAdminHubAccess)
@@ -8348,7 +8362,7 @@ const clearNoteDraft = async (clientId, clinicianId) => {
 // What keeps it to people who actually document is the NURSING_NOTE
 // capability, not the middleware: a case manager holds no such capability and
 // is refused there, and the row is keyed to the caller either way.
-app.get('/api/clinical/patients/:clientId/visit/draft', authenticateToken, requireClinicalRead, requireCapability(clinicalRoles.CAPABILITIES.NURSING_NOTE), async (req, res) => {
+app.get('/api/clinical/patients/:clientId/visit/draft', authenticateToken, requireClinicalRead, requireNoteWriter, async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -8361,13 +8375,23 @@ app.get('/api/clinical/patients/:clientId/visit/draft', authenticateToken, requi
   }
 });
 
-app.put('/api/clinical/patients/:clientId/visit/draft', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.NURSING_NOTE), async (req, res) => {
+app.put('/api/clinical/patients/:clientId/visit/draft', authenticateToken, requireClinicalWrite, requireNoteWriter, async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
     // Deliberately NOT buildHpWrites: a draft is incomplete by definition, so
     // the both-arms BP rule does not apply until the note is filed.
-    const clean = clinicalRepo.sanitizeNoteDraft(req.body && req.body.draft);
+    // A scratch copy of a SHARED note (2026-09-27) is held in the note's own
+    // shape, until its first save moves it onto an encounter.
+    const incoming = req.body && req.body.draft;
+    const clean = incoming && incoming.note
+      ? (() => {
+        const n = clinicalNotes.sanitizeNote(incoming.note);
+        if (n.error) return n;
+        return { draft: { note: n.note, ...(incoming.appointmentEid ? { appointmentEid: String(incoming.appointmentEid).slice(0, 40) } : {}),
+          ...(incoming.carryForwardFrom ? { carryForwardFrom: String(incoming.carryForwardFrom).slice(0, 80) } : {}) } };
+      })()
+      : clinicalRepo.sanitizeNoteDraft(incoming);
     if (clean.error) return res.status(400).json({ error: clean.error, code: clean.code });
     const rows = await loadNoteDrafts();
     const id = clinicalRepo.noteDraftId(client.id, req.user.id);
@@ -8387,7 +8411,7 @@ app.put('/api/clinical/patients/:clientId/visit/draft', authenticateToken, requi
   }
 });
 
-app.delete('/api/clinical/patients/:clientId/visit/draft', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.NURSING_NOTE), async (req, res) => {
+app.delete('/api/clinical/patients/:clientId/visit/draft', authenticateToken, requireClinicalWrite, requireNoteWriter, async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -9693,7 +9717,7 @@ const syncStructuredNote = async (emr, client, record) => {
   // 4.5: only the attestation and addenda go in the note now. Coding, orders
   // and prescriptions are native OpenEMR records — passing them here would
   // recreate the duplicate this session removed.
-  const note = clinicalRepo.buildStructuredNote({ attestation: side.attestation, addenda: side.addenda });
+  const note = clinicalRepo.buildStructuredNote({ attestation: side.attestation, addenda: side.addenda, record });
   try {
     if (record.structuredNoteSid) {
       await emr.updateSoapNote(client.openEmrPatientId, record.encounterUuid, record.structuredNoteSid, note);
@@ -10137,13 +10161,556 @@ app.post('/api/clinical/patients/:clientId/encounters', authenticateToken, requi
   }
 });
 
+// ============================================================
+// THE SHARED CLINICAL NOTE (owner-directed, 2026-09-27)
+// ============================================================
+// A note used to be filed ONCE: the narrative went to OpenEMR, the private
+// draft was deleted, and nobody — the author included — could change a word
+// afterwards. Now the note lives on its encounter as a shared, versioned draft
+// until it is signed:
+//
+//   • Save draft writes the app AND the OpenEMR narrative in one action, and
+//     every save is a revision row naming its editor and time.
+//   • Anyone licensed to write on this chart may edit a draft. Two people on
+//     one note is the point; the last save silently winning is not — every save
+//     names the version it was made against, and a stale one is refused.
+//   • Sign & submit locks it (the sign route, below). Co-signatures and
+//     addenda are the only changes after that.
+//
+// Drafts are keyed per ENCOUNTER, which keeps the protection the per-clinician
+// draft existed for: an on-site and a virtual visit on one day are two
+// encounters, so they still never overwrite each other.
+const loadNoteRevisions = () => loadRows('clinical_note_revisions');
+const appendNoteRevision = async (row) => {
+  const rows = await loadNoteRevisions();
+  rows.push(row);
+  await db.set('clinical_note_revisions', rows);
+  return clinicalNotes.revisionsFor(rows, row.encounterUuid);
+};
+// Facts the note text is not the only evidence for: an order placed on this
+// encounter IS its orders section, a structured risk assessment IS its risk
+// section.
+const noteSatisfiers = (ctx) => ({
+  ordersRx: (ctx.orders || []).length > 0 || (ctx.prescriptions || []).length > 0,
+  ordersRxReferrals: (ctx.orders || []).length > 0,
+  medicationsRx: (ctx.prescriptions || []).length > 0,
+  riskAssessment: !!ctx.riskAssessment
+});
+const noteReason = (note, visitLabel) => {
+  const first = noteFormat.toPlainText((note && note.chiefConcern) || '').trim().split('\n')[0];
+  return (first || visitLabel || 'Clinical visit').slice(0, 180);
+};
+const noteStatusOf = (record, attestation) => {
+  if (record && record.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED) return clinicalNotes.NOTE_STATUS.VOIDED;
+  if (clinicalRepo.isEncounterClosed(attestation)) return clinicalNotes.NOTE_STATUS.SIGNED;
+  return clinicalNotes.NOTE_STATUS.DRAFT;
+};
+
+// The narrative in OpenEMR, rewritten from the shared note. A note written
+// before the shared note existed is never RECOMPOSED — that would drop what the
+// author wrote the old way — its signature is appended instead. Best-effort:
+// the app copy is saved either way and a failure is stored for a retry.
+const writeNarrativeNote = async (emr, client, record, { signature, revisions } = {}) => {
+  try {
+    let soap;
+    if (record.note) {
+      soap = clinicalNotes.composeNarrative({
+        note: record.note, revisions, signature,
+        voided: record.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED ? record.voided : null
+      });
+    } else if (signature && record.narrativeNoteSid) {
+      const cur = await emr.getSoapNote(client.openEmrPatientId, record.encounterUuid, record.narrativeNoteSid);
+      if (!cur) throw new Error('the narrative note could not be read back to add the signature to it');
+      soap = { subjective: cur.subjective, objective: cur.objective, assessment: cur.assessment,
+        plan: clinicalNotes.appendSignatureToLegacyPlan(cur.plan, signature) };
+    } else {
+      return null;
+    }
+    if (record.narrativeNoteSid) {
+      await emr.updateSoapNote(client.openEmrPatientId, record.encounterUuid, record.narrativeNoteSid, soap);
+    } else {
+      const r = await emr.addSoapNote(client.openEmrPatientId, record.encounterUuid, soap);
+      record.narrativeNoteSid = r && r.sid != null ? String(r.sid) : null;
+    }
+    record.narrativeSyncedAt = new Date().toISOString();
+    record.narrativeSyncError = null;
+    return null;
+  } catch (e) {
+    console.error('Narrative note write failed:', e.message);
+    record.narrativeSyncError = e.message.slice(0, 300);
+    return `The note is saved in the app, but OpenEMR did not accept the update (${e.message.slice(0, 140)}). Save again to retry — nothing you wrote is lost.`;
+  }
+};
+
+// The signed note as a formatted PDF in the patient's OpenEMR Documents — the
+// copy that looks exactly like what was signed, bold signature included.
+// Re-filed on each clinician addendum or co-signature. Never fails a signature.
+const fileSignedNotePdf = async (emr, client, record, attestation, addenda) => {
+  try {
+    const revisions = clinicalNotes.revisionsFor(await loadNoteRevisions(), record.encounterUuid);
+    let items;
+    if (record.note) {
+      items = clinicalNotes.noteReadingOrder(record.note);
+    } else {
+      const cur = record.narrativeNoteSid
+        ? await emr.getSoapNote(client.openEmrPatientId, record.encounterUuid, record.narrativeNoteSid) : null;
+      items = clinicalNotes.SLOTS
+        .map(slot => ({ slot, label: null, plain: clinicalNotes.stripLegacyText(cur && cur[slot]) }))
+        .filter(i => i.plain.trim());
+    }
+    const buffer = await pdfGenerator.generateSignedNotePDF({
+      patientName: client.name, dob: (client.intake && client.intake.dob) || client.dob || null,
+      visitDate: record.date, visitLabel: clinicalRepo.visitLabel(record.visit),
+      encounterId: record.encounterEid || record.encounterUuid,
+      items, signature: clinicalNotes.buildSignatureSummary({ attestation, record }),
+      person: clinicalNotes.personLine,
+      history: clinicalNotes.noteHistoryLines(revisions).slice(1),
+      addenda: addenda || []
+    });
+    const fileName = `Clinical_Note_${String(record.date || '').replace(/-/g, '')}_${String(record.encounterEid || record.encounterUuid).slice(0, 12)}_${Date.now()}.pdf`;
+    await emr.uploadPatientDocument(client.openEmrPatientId, fileName, buffer, 'application/pdf', '/Medical Record');
+    record.signedNotePdfFiledAt = new Date().toISOString();
+    record.signedNotePdfError = null;
+    return null;
+  } catch (e) {
+    console.error('Signed-note PDF filing failed:', e.message);
+    record.signedNotePdfError = e.message.slice(0, 300);
+    return `The signed note is complete, but its formatted PDF could not be filed to OpenEMR Documents (${e.message.slice(0, 120)}).`;
+  }
+};
+
+// Where a note's content comes from when it is carried forward or opened for
+// editing: the shared note if it has one, otherwise the OpenEMR narrative of a
+// note written the old way.
+const noteContentOf = async (emr, client, record) => {
+  if (record.note) return { note: record.note, legacy: false };
+  if (!record.narrativeNoteSid) return { note: null, legacy: true };
+  const cur = await emr.getSoapNote(client.openEmrPatientId, record.encounterUuid, record.narrativeNoteSid);
+  return { note: cur ? clinicalNotes.noteFromLegacyNarrative(cur) : null, legacy: true };
+};
+const loadCarrySource = async (emr, client, sourceUuid) => {
+  const src = findBillingRecord(await loadRows('encounter_billing'), sourceUuid);
+  if (!src || src.clientId !== client.id) return { error: 'That earlier note is not on this patient\'s chart', code: 'CARRY_SOURCE_NOT_FOUND', status: 404 };
+  if (src.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED) return { error: 'That note was discarded and cannot be carried forward', code: 'CARRY_SOURCE_VOIDED', status: 409 };
+  const { note } = await noteContentOf(emr, client, src);
+  if (!note) return { error: 'That earlier encounter has no note to carry forward', code: 'CARRY_SOURCE_EMPTY', status: 409 };
+  return { source: src, content: clinicalNotes.carryForwardContent(note) };
+};
+const applyCarryRequest = async (emr, client, note, body, existingCarried) => {
+  let carried = existingCarried || null;
+  if (body.carryForwardFrom) {
+    const src = await loadCarrySource(emr, client, String(body.carryForwardFrom));
+    if (src.error) return src;
+    carried = clinicalNotes.buildCarriedForward({ fromEncounterUuid: src.source.encounterUuid, fromDate: src.source.date, content: src.content });
+  }
+  if (carried && Array.isArray(body.confirmCarried)) {
+    const keys = body.confirmCarried.filter(k => typeof k === 'string' && carried.fields[k]);
+    carried = { ...carried, confirmed: Array.from(new Set([...(carried.confirmed || []), ...keys])) };
+  }
+  if (carried) note.carriedForward = carried;
+  return { note, carriedFrom: body.carryForwardFrom ? String(body.carryForwardFrom) : null };
+};
+// A note's visit (type, modality, location) decides its place of service, so a
+// change to it moves the encounter's facility and POS with it — before signing
+// only, because a signed encounter is a claim.
+const applyVisitToEncounter = async (emr, client, record, descriptor, appointmentLocation) => {
+  const place = await resolveFacilityForVisit(emr, client, appointmentLocation || null, descriptor || null);
+  const fields = {};
+  if (place.facilityId) fields.facility_id = place.facilityId;
+  if (place.posCode) fields.pos_code = place.posCode;
+  record.visit = place.visit;
+  const warnings = place.warning ? [place.warning] : [];
+  if (Object.keys(fields).length) {
+    try { await emr.updateEncounter(client.openEmrPatientId, record.encounterUuid, fields); }
+    catch (e) { warnings.push(`The visit changed, but OpenEMR did not accept the new place of service (${e.message.slice(0, 120)}).`); }
+  }
+  return warnings;
+};
+const sameVisit = (a, b) => ['appointmentType', 'modality', 'location'].every(k => String((a || {})[k] || '') === String((b || {})[k] || ''));
+const noteView = async (ctx, extra = {}) => {
+  const revisions = clinicalNotes.revisionsFor(await loadNoteRevisions(), ctx.encounterUuid);
+  const record = ctx.record;
+  return {
+    note: record.note || null,
+    version: Number(record.noteVersion || 0),
+    status: noteStatusOf(record, ctx.attestation),
+    revisions,
+    contributors: clinicalNotes.contributorsFrom(revisions),
+    carriedPending: record.note ? clinicalNotes.carriedPending(record.note) : [],
+    carriedFrom: record.note && record.note.carriedForward
+      ? { encounterUuid: record.note.carriedForward.fromEncounterUuid, date: record.note.carriedForward.fromDate } : null,
+    signature: clinicalNotes.buildSignatureSummary({ attestation: ctx.attestation, record }),
+    completedSections: record.note ? clinicalNotes.deriveCompletedSections(record.note, noteSatisfiers(ctx)) : (record.completedSections || []),
+    narrativeSyncError: record.narrativeSyncError || null,
+    signedNotePdfFiledAt: record.signedNotePdfFiledAt || null,
+    signedNotePdfError: record.signedNotePdfError || null,
+    ...extra
+  };
+};
+
+// ── First save: the encounter, the narrative and revision 1, in one action ──
+app.post('/api/clinical/patients/:clientId/notes', authenticateToken, requireClinicalWrite, requireNoteWriter, async (req, res) => {
+  try {
+    const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    if (!client.openEmrPatientId) return res.status(409).json({ error: 'Link this client to an OpenEMR patient before documenting a visit', code: 'EMR_NOT_LINKED' });
+    const body = req.body || {};
+    const clean = clinicalNotes.sanitizeNote(body.note);
+    if (clean.error) return res.status(400).json({ error: clean.error, code: clean.code });
+    const note = clean.note;
+    const actor = actorFromReq(req);
+    const emr = openemr.forActor(req.user);
+    const puuid = client.openEmrPatientId;
+
+    // Keep a scratch copy FIRST, so an OpenEMR failure below never loses the
+    // note: it is still there the next time this clinician opens the patient.
+    {
+      const rows = await loadNoteDrafts();
+      const id = clinicalRepo.noteDraftId(client.id, req.user.id);
+      const existing = rows.find(r => r.id === id) || null;
+      const row = clinicalRepo.buildNoteDraft({ clientId: client.id, actor, draft: { note, appointmentEid: body.appointmentEid || undefined }, existing });
+      await db.set('clinical_note_drafts', existing ? rows.map(r => (r.id === id ? row : r)) : rows.concat([row]));
+    }
+
+    let appointment = null;
+    if (body.appointmentEid) {
+      appointment = (await emr.getPatientAppointmentRows(puuid)).find(r => String(r.pc_eid) === String(body.appointmentEid));
+      if (!appointment) return res.status(400).json({ error: 'That appointment does not belong to this patient', code: 'APPT_PATIENT_MISMATCH' });
+      if (await appointmentLinkedElsewhere(appointment.pc_eid, null)) {
+        return res.status(409).json({ error: 'That appointment already has a note. Open it from the chart instead of starting another.', code: 'APPT_ALREADY_DOCUMENTED' });
+      }
+    }
+    const carry = await applyCarryRequest(emr, client, note, body, null);
+    if (carry.error) return res.status(carry.status).json({ error: carry.error, code: carry.code });
+
+    const place = await resolveFacilityForVisit(emr, client,
+      appointment ? clinicalRepo.decodeAppointmentNotes(appointment.pc_hometext).location : null, note.visit || null);
+    const reason = noteReason(note, place.visitLabel);
+    const date = note.visitDate || (appointment && appointment.pc_eventDate) || practiceToday();
+    const encounter = {
+      date, reason: `${reason} — ${clinicalRepo.actorStamp(actor)}`.slice(0, 250), class_code: 'HH',
+      billing_note: `Rendering clinician is set at signing. Coding is recorded by the GFC Care Platform (see the GFC structured note on this encounter).`.slice(0, 500)
+    };
+    if (place.facilityId) encounter.facility_id = place.facilityId;
+    if (place.posCode) encounter.pos_code = place.posCode;
+    const bill = await resolveBillingForVisit(emr);
+    if (bill.facilityId) encounter.billing_facility = bill.facilityId;
+    const enc = await emr.createEncounter(puuid, encounter);
+    const encounterUuid = enc && (enc.euuid || enc.uuid || enc.encounter_uuid || enc.id);
+    if (!encounterUuid) return res.status(502).json({ error: 'OpenEMR did not return an encounter id. Your note is kept as a draft on this device.' });
+
+    const warnings = [];
+    if (place.warning) warnings.push(place.warning);
+    if (bill.warning) warnings.push(bill.warning);
+    if (!req.user.openEmrProviderId) warnings.push(NO_PROVIDER_ID_WARNING);
+    const payer = await getPayerCredentialing();
+    const rows = await loadRows('encounter_billing');
+    const record = clinicalRepo.buildEncounterBillingRecord({
+      id: uuidv4(), clientId: client.id, puuid, encounterUuid, encounterEid: enc.eid,
+      reason, date, actor, billingNpi: payer.billing_npi_used, narrativeNoteSid: null, visit: place.visit
+    });
+    record.note = { ...note, visitDate: date };
+    record.noteKind = note.kind;
+    record.noteVersion = 1;
+    record.noteStatus = clinicalNotes.NOTE_STATUS.DRAFT;
+    rows.push(record);
+    await db.set('encounter_billing', rows);
+    if (appointment) await linkAppointmentEncounter(appointment.pc_eid, client.id, encounterUuid, req.user);
+    const revisions = await appendNoteRevision(clinicalNotes.buildNoteRevision({
+      id: uuidv4(), record, version: 1, actor, clinicalRole: actor.clinicalRole,
+      changed: Object.keys(clinicalNotes.flattenNote(record.note)).sort(),
+      action: carry.carriedFrom ? 'carry_forward' : 'create', carriedFrom: carry.carriedFrom
+    }));
+    const narrativeWarning = await writeNarrativeNote(emr, client, record, { revisions });
+    if (narrativeWarning) warnings.push(narrativeWarning);
+    const syncWarning = await syncStructuredNote(emr, client, record);
+    if (syncWarning) warnings.push(syncWarning);
+    await saveBillingRecord(rows, record);
+
+    // An initial visit (H&P) is what the clinical enrollment checklist reads as
+    // "initial visit documented" — stamped on the first save, as filing did.
+    if (note.kind === 'hp' && !users[idx].clinicalInitialVisit) {
+      users[idx].clinicalInitialVisit = { at: new Date().toISOString(), byId: req.user.id, byName: req.user.name, encounterUuid, confirmedFields: note.confirmedFields || [] };
+      await db.set('users', users);
+      invalidateUsersCache();
+    }
+    await clearNoteDraft(client.id, req.user.id);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_note_saved', 'client', client.id, {
+      encounterUuid, version: 1, kind: note.kind, appointmentEid: appointment ? String(appointment.pc_eid) : null,
+      carriedFrom: carry.carriedFrom, warnings: warnings.length
+    });
+    res.json({
+      message: narrativeWarning ? 'Draft saved in the app' : 'Draft saved to the app and OpenEMR',
+      encounterUuid, encounterEid: enc.eid != null ? String(enc.eid) : null,
+      linkedAppointmentEid: appointment ? String(appointment.pc_eid) : null,
+      ...(await noteView({ encounterUuid, record, attestation: null, orders: [], prescriptions: [], riskAssessment: null }, { signsAsAuthor: clinicalRoles.isAuthorSigner(req.user) })),
+      warnings
+    });
+  } catch (error) {
+    console.error('Clinical note create error:', error);
+    res.status(502).json({ error: `OpenEMR write failed: ${error.message}. Your note is kept as a draft.` });
+  }
+});
+
+// ── Read the note: content, version, status, who has saved it, signatures ──
+app.get('/api/clinical/patients/:clientId/encounters/:euuid/note', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res);
+    if (!ctx) return;
+    // A note written before the shared note existed has no app copy. While it
+    // is unsigned it is OFFERED for editing, seeded from its OpenEMR text; the
+    // first save makes it a shared note at version 1.
+    let seeded = false;
+    if (!ctx.record.note && !ctx.closed) {
+      try {
+        const content = await noteContentOf(ctx.emr, ctx.client, ctx.record);
+        if (content.note) { ctx.record = { ...ctx.record, note: content.note, noteVersion: 0 }; seeded = true; }
+      } catch (e) { /* no seed — the page offers an empty note */ }
+    }
+    res.json(await noteView(ctx, { signsAsAuthor: clinicalRoles.isAuthorSigner(req.user), seededFromOpenEmr: seeded, canEdit: clinicalRoles.canClinicalWrite(req.user) && !ctx.closed && ctx.record.noteStatus !== clinicalNotes.NOTE_STATUS.VOIDED }));
+  } catch (error) {
+    console.error('Clinical note read error:', error);
+    res.status(500).json({ error: 'Could not read this note' });
+  }
+});
+
+// ── Every later save: version-checked, app + OpenEMR, a revision row ───────
+app.put('/api/clinical/patients/:clientId/encounters/:euuid/note', authenticateToken, requireClinicalWrite, requireNoteWriter, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res);
+    if (!ctx || refuseIfClosed(ctx, res)) return;
+    if (ctx.record.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED) {
+      return res.status(409).json({ error: 'This draft was discarded and can no longer be edited.', code: 'NOTE_VOIDED' });
+    }
+    const body = req.body || {};
+    const revisionsBefore = clinicalNotes.revisionsFor(await loadNoteRevisions(), ctx.encounterUuid);
+    const version = clinicalNotes.checkNoteVersion(ctx.record, body.baseVersion, revisionsBefore[revisionsBefore.length - 1]);
+    if (!version.ok) {
+      const current = await noteContentOf(ctx.emr, ctx.client, ctx.record).catch(() => ({ note: null }));
+      return res.status(409).json({ error: version.error, code: version.code, version: version.version,
+        lastSavedBy: version.lastSavedBy, lastSavedAt: version.lastSavedAt, note: current.note });
+    }
+    const clean = clinicalNotes.sanitizeNote(body.note);
+    if (clean.error) return res.status(400).json({ error: clean.error, code: clean.code });
+    const before = ctx.record.note || null;
+    const carry = await applyCarryRequest(ctx.emr, ctx.client, clean.note,
+      body, before ? before.carriedForward : null);
+    if (carry.error) return res.status(carry.status).json({ error: carry.error, code: carry.code });
+    const next = carry.note;
+    if (!next.visitDate && before && before.visitDate) next.visitDate = before.visitDate;
+    const changed = clinicalNotes.changedKeys(before, next);
+    const confirmChanged = JSON.stringify((before && before.carriedForward && before.carriedForward.confirmed) || [])
+      !== JSON.stringify((next.carriedForward && next.carriedForward.confirmed) || []);
+    if (!changed.length && !carry.carriedFrom && !confirmChanged && ctx.record.note && sameVisit(next.visit, before && before.visit)) {
+      return res.json({ message: 'Nothing changed since the last save', unchanged: true, ...(await noteView(ctx, { signsAsAuthor: clinicalRoles.isAuthorSigner(req.user) })), warnings: [] });
+    }
+    const warnings = [];
+    const record = { ...ctx.record, note: next, noteKind: next.kind, noteStatus: clinicalNotes.NOTE_STATUS.DRAFT, updatedAt: new Date().toISOString() };
+    if (next.visit && !sameVisit(next.visit, before && before.visit)) {
+      warnings.push(...(await applyVisitToEncounter(ctx.emr, ctx.client, record, next.visit, null)));
+    }
+    record.noteVersion = version.version + 1;
+    const revisions = await appendNoteRevision(clinicalNotes.buildNoteRevision({
+      id: uuidv4(), record, version: record.noteVersion, actor: ctx.actor, clinicalRole: ctx.actor.clinicalRole,
+      changed: changed.length ? changed : ['carriedForward'], action: carry.carriedFrom ? 'carry_forward' : 'save', carriedFrom: carry.carriedFrom
+    }));
+    const narrativeWarning = await writeNarrativeNote(ctx.emr, ctx.client, record, { revisions });
+    if (narrativeWarning) warnings.push(narrativeWarning);
+    await saveBillingRecord(ctx.rows, record);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_note_saved', 'client', ctx.client.id, {
+      encounterUuid: ctx.encounterUuid, version: record.noteVersion, sectionsChanged: changed.length, carriedFrom: carry.carriedFrom
+    });
+    res.json({ message: narrativeWarning ? 'Draft saved in the app' : 'Draft saved to the app and OpenEMR', ...(await noteView({ ...ctx, record }, { signsAsAuthor: clinicalRoles.isAuthorSigner(req.user) })), warnings });
+  } catch (error) {
+    console.error('Clinical note save error:', error);
+    res.status(502).json({ error: `Save failed: ${error.message}` });
+  }
+});
+
+// ── Discard a saved draft ────────────────────────────────────────────────
+// OpenEMR's API cannot delete an encounter, so a draft abandoned after its
+// first save is VOIDED, with a reason, and the chart says so in words. A blank
+// encounter with no explanation is the worse outcome. It never bills.
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/note/void', authenticateToken, requireClinicalWrite, requireNoteWriter, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res);
+    if (!ctx || refuseIfClosed(ctx, res)) return;
+    const reason = String((req.body || {}).reason || '').trim().slice(0, 500);
+    if (reason.length < 3) return res.status(400).json({ error: 'Say why this draft is being discarded — it stays on the chart as a discarded draft.', code: 'NOTE_VOID_REASON_REQUIRED' });
+    const at = new Date().toISOString();
+    const record = { ...ctx.record, noteStatus: clinicalNotes.NOTE_STATUS.VOIDED,
+      voided: { by: clinicalRepo.actorRecord(ctx.actor), at, reason }, updatedAt: at };
+    if (!record.note) record.note = { kind: record.noteKind || 'followup', chiefConcern: '', subjective: '', objective: '', assessment: '', plan: '', sections: {}, vitals: {}, hp: {} };
+    const revisions = await appendNoteRevision(clinicalNotes.buildNoteRevision({
+      id: uuidv4(), record, version: Number(record.noteVersion || 0) + 1, actor: ctx.actor, clinicalRole: ctx.actor.clinicalRole, changed: [], action: 'void'
+    }));
+    record.noteVersion = Number(record.noteVersion || 0) + 1;
+    const warnings = [];
+    const w = await writeNarrativeNote(ctx.emr, ctx.client, record, { revisions });
+    if (w) warnings.push(w);
+    await saveBillingRecord(ctx.rows, record);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_note_voided', 'client', ctx.client.id, { encounterUuid: ctx.encounterUuid });
+    res.json({ message: 'Draft discarded. The encounter stays on the chart marked as a discarded draft, and it will never bill.', ...(await noteView({ ...ctx, record }, { signsAsAuthor: clinicalRoles.isAuthorSigner(req.user) })), warnings });
+  } catch (error) {
+    console.error('Clinical note void error:', error);
+    res.status(502).json({ error: `Discard failed: ${error.message}` });
+  }
+});
+
+// ── Carry forward: which earlier notes, and one note's content ─────────────
+app.get('/api/clinical/patients/:clientId/notes/carry-forward-sources', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    const [records, atts] = await Promise.all([loadRows('encounter_billing'), loadRows('encounter_attestations')]);
+    const sources = records
+      .filter(r => r && r.clientId === client.id && r.noteStatus !== clinicalNotes.NOTE_STATUS.VOIDED && (r.note || r.narrativeNoteSid))
+      .map(r => {
+        const att = atts.find(a => a.encounterUuid === r.encounterUuid) || null;
+        return {
+          encounterUuid: r.encounterUuid, date: r.date || null, visitLabel: clinicalRepo.visitLabel(r.visit),
+          reason: r.reason || null, signedBy: att ? att.signedBy.name : null, signedAt: att ? att.signedAt : null,
+          status: noteStatusOf(r, att)
+        };
+      })
+      .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+    res.json({ sources });
+  } catch (error) {
+    console.error('Carry-forward sources error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+app.get('/api/clinical/patients/:clientId/encounters/:euuid/note/carry-forward', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    if (!client.openEmrPatientId) return res.status(409).json({ error: 'Link this client to an OpenEMR patient first', code: 'EMR_NOT_LINKED' });
+    const src = await loadCarrySource(openemr.forActor(req.user), client, String(req.params.euuid));
+    if (src.error) return res.status(src.status).json({ error: src.error, code: src.code });
+    res.json({
+      content: src.content, fromEncounterUuid: src.source.encounterUuid, fromDate: src.source.date,
+      // What will be held for review, so the page can mark each carried field.
+      fields: Object.keys(clinicalNotes.flattenNote(src.content, { includeVitals: false })).sort()
+    });
+  } catch (error) {
+    console.error('Carry-forward read error:', error);
+    res.status(502).json({ error: `Could not read the earlier note: ${error.message}` });
+  }
+});
+
+// ── Co-signatures on a signed note ─────────────────────────────────────────
+// Open to every licensed clinician (owner: "all clinicians"). A co-signature
+// attests participation and review and NEVER changes who bills — the billable
+// signature is the licensed clinician who signed, or who added the clinician
+// addendum to an author's note.
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/co-signatures', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res, { createRecord: false });
+    if (!ctx) return;
+    if (!ctx.record) return res.status(404).json({ error: 'No encounter record', code: 'ENCOUNTER_NOT_FOUND' });
+    if (!ctx.closed) return res.status(409).json({ error: 'A note is co-signed after it has been signed. Sign it first, or ask the author to.', code: 'ENCOUNTER_NOT_CLOSED' });
+    if (!clinicalRoles.canCoSignNote(req.user)) {
+      return res.status(403).json({ error: 'A co-signature comes from a licensed clinician.', code: 'CO_SIGN_CREDENTIAL', clinicalRole: clinicalRoles.resolveClinicalRole(req.user) });
+    }
+    const signerId = ctx.attestation && ctx.attestation.signedBy && ctx.attestation.signedBy.id;
+    const billingId = ctx.record.coSignedBy && ctx.record.coSignedBy.id;
+    if (String(signerId) === String(req.user.id) || String(billingId) === String(req.user.id)) {
+      return res.status(409).json({ error: 'You have already signed this note — a co-signature comes from someone else.', code: 'CO_SIGN_SELF' });
+    }
+    const existing = Array.isArray(ctx.record.coSignatures) ? ctx.record.coSignatures : [];
+    if (existing.some(c => String(c.id) === String(req.user.id))) {
+      return res.status(409).json({ error: 'You have already co-signed this note.', code: 'CO_SIGN_DUPLICATE' });
+    }
+    if (!(req.body || {}).attest) return res.status(400).json({ error: 'Confirm that you reviewed this note to co-sign it', code: 'SIGN_NO_ATTEST' });
+    const at = new Date().toISOString();
+    const coSignature = { ...clinicalRepo.actorRecord(ctx.actor), clinicalRole: ctx.actor.clinicalRole, at };
+    const record = { ...ctx.record, coSignatures: [...existing, coSignature], updatedAt: at };
+    const warnings = [];
+    const signature = clinicalNotes.buildSignatureSummary({ attestation: ctx.attestation, record });
+    const revisions = clinicalNotes.revisionsFor(await loadNoteRevisions(), ctx.encounterUuid);
+    const w1 = await writeNarrativeNote(ctx.emr, ctx.client, record, { signature, revisions });
+    if (w1) warnings.push(w1);
+    const w2 = await syncStructuredNote(ctx.emr, ctx.client, record);
+    if (w2) warnings.push(w2);
+    const w3 = await fileSignedNotePdf(ctx.emr, ctx.client, record, ctx.attestation, ctx.addenda);
+    if (w3) warnings.push(w3);
+    await saveBillingRecord(ctx.rows, record);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'encounter_co_signature_added', 'client', ctx.client.id, {
+      encounterUuid: ctx.encounterUuid, clinicalRole: ctx.actor.clinicalRole
+    });
+    res.json({ message: 'Co-signature added', ...(await noteView({ ...ctx, record }, { signsAsAuthor: clinicalRoles.isAuthorSigner(req.user) })), warnings });
+  } catch (error) {
+    console.error('Co-signature error:', error);
+    res.status(502).json({ error: `Co-signature failed: ${error.message}` });
+  }
+});
+
+// ── Attach a note to an appointment added after the fact ──────────────────
+// An unscheduled visit gets documented, and the appointment is booked later.
+// Until now nothing could join the two: the appointment read "not yet
+// documented" forever and its Document button made a SECOND encounter.
+// Unsigned notes only (owner decision): place of service follows the
+// appointment, and a signed encounter is a claim that must not move.
+const appointmentLinkedElsewhere = async (eid, encounterUuid) => (await getAppointmentLinkage())
+  .some(r => String(r.eid) === String(eid) && String(r.encounterUuid) !== String(encounterUuid || ''));
+app.put('/api/clinical/patients/:clientId/encounters/:euuid/appointment', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res);
+    if (!ctx) return;
+    if (ctx.closed) {
+      return res.status(409).json({ error: 'This note is already signed, so it can no longer be attached to an appointment — its place of service is part of a claim. Attach notes before signing.', code: 'ENCOUNTER_CLOSED' });
+    }
+    if (ctx.record.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED) {
+      return res.status(409).json({ error: 'A discarded draft cannot be attached to an appointment.', code: 'NOTE_VOIDED' });
+    }
+    const eid = String((req.body || {}).appointmentEid || '').trim();
+    if (!/^\d+$/.test(eid)) return res.status(400).json({ error: 'Choose the appointment to attach this note to', code: 'APPT_REQUIRED' });
+    const appointment = (await ctx.emr.getPatientAppointmentRows(ctx.client.openEmrPatientId)).find(r => String(r.pc_eid) === eid);
+    if (!appointment) return res.status(400).json({ error: 'That appointment does not belong to this patient', code: 'APPT_PATIENT_MISMATCH' });
+    if (['x', '?'].includes(String(appointment.pc_apptstatus || ''))) {
+      return res.status(409).json({ error: 'That appointment was cancelled or marked a no-show, so a note cannot be attached to it.', code: 'APPT_NOT_ATTACHABLE' });
+    }
+    const links = await getAppointmentLinkage();
+    if (links.some(r => String(r.eid) === eid && String(r.encounterUuid) !== ctx.encounterUuid)) {
+      return res.status(409).json({ error: 'That appointment already has a note attached.', code: 'APPT_ALREADY_DOCUMENTED' });
+    }
+    const mine = links.find(r => String(r.encounterUuid) === ctx.encounterUuid);
+    if (mine && String(mine.eid) === eid) return res.json({ message: 'This note is already attached to that appointment', appointmentEid: eid, unchanged: true });
+    if (mine) return res.status(409).json({ error: 'This note is already attached to a different appointment.', code: 'ENCOUNTER_ALREADY_LINKED', appointmentEid: String(mine.eid) });
+
+    const record = { ...ctx.record, updatedAt: new Date().toISOString() };
+    const decoded = clinicalRepo.decodeAppointmentNotes(appointment.pc_hometext);
+    const warnings = await applyVisitToEncounter(ctx.emr, ctx.client, record,
+      (record.note && record.note.visit) || null, decoded.location);
+    if (appointment.pc_eventDate && appointment.pc_eventDate !== record.date) {
+      try {
+        await ctx.emr.updateEncounter(ctx.client.openEmrPatientId, ctx.encounterUuid, { date: appointment.pc_eventDate });
+        record.date = appointment.pc_eventDate;
+        if (record.note) record.note = { ...record.note, visitDate: appointment.pc_eventDate };
+      } catch (e) {
+        warnings.push(`Attached, but OpenEMR did not accept the appointment's date on the encounter (${e.message.slice(0, 120)}).`);
+      }
+    }
+    await linkAppointmentEncounter(eid, ctx.client.id, ctx.encounterUuid, req.user);
+    await saveBillingRecord(ctx.rows, record);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_note_attached_to_appointment', 'client', ctx.client.id, {
+      encounterUuid: ctx.encounterUuid, appointmentEid: eid
+    });
+    res.json({ message: 'Note attached to the appointment. Its place of service now follows that appointment.', appointmentEid: eid, visit: record.visit, visitLabel: clinicalRepo.visitLabel(record.visit), date: record.date, warnings });
+  } catch (error) {
+    console.error('Attach note to appointment error:', error);
+    res.status(502).json({ error: `Attach failed: ${error.message}` });
+  }
+});
+
 // ── Encounter list for a chart: OpenEMR encounters + coding/sign state ────
 app.get('/api/clinical/patients/:clientId/encounters', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
     if (!client.openEmrPatientId) return res.json({ linked: false, encounters: [] });
-    const [records, attestations, rx, orders] = await Promise.all([loadRows('encounter_billing'), loadRows('encounter_attestations'), loadRows('prescriptions'), loadRows('clinical_orders')]);
+    const [records, attestations, rx, orders, links] = await Promise.all([loadRows('encounter_billing'), loadRows('encounter_attestations'), loadRows('prescriptions'), loadRows('clinical_orders'), getAppointmentLinkage()]);
+    const eidByEncounter = new Map(links.map(l => [String(l.encounterUuid), String(l.eid)]));
     let emrRows = null; let emrError = null;
     try { emrRows = (await openemr.forActor(req.user).getEncounters(client.openEmrPatientId)).map(clinicalRepo.summarizeEncounter); }
     catch (e) { emrError = e.message; }
@@ -10162,7 +10729,13 @@ app.get('/api/clinical/patients/:clientId/encounters', authenticateToken, requir
         prescriptionCount: rx.filter(p => p.encounterUuid === String(e.id)).length,
         orderCount: orders.filter(o => o.encounterUuid === String(e.id)).length,
         renderingProvider: record ? record.renderingProvider : null,
-        structuredNoteError: record ? record.structuredNoteError || null : null
+        structuredNoteError: record ? record.structuredNoteError || null : null,
+        // Which appointment the note belongs to, whether it is still a draft or
+        // was discarded, and whether it waits on a clinician addendum.
+        appointmentEid: eidByEncounter.get(String(e.id)) || null,
+        noteStatus: noteStatusOf(record, att),
+        awaitingAddendum: !!(record && record.coSignStatus === 'pending'),
+        visitLabel: record ? clinicalRepo.visitLabel(record.visit) : null
       };
     }).sort((a, b) => String(b.start || '').localeCompare(String(a.start || '')));
     res.json({ linked: true, encounters: list, emrError });
@@ -10201,6 +10774,11 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
       narrative = notesR.v.filter(n => String(n.id) !== String(record.structuredNoteSid || '') && !/^\[GFC STRUCTURED RECORD/.test(String(n.subjective || '')));
     }
     const hasNote = narrative.length > 0;
+    const derivedSections = record.note
+      ? clinicalNotes.deriveCompletedSections(record.note, noteSatisfiers(ctx))
+      : (record.completedSections || []);
+    const linkRow = (await getAppointmentLinkage()).find(r => String(r.encounterUuid) === String(encounterUuid));
+    const linkedEid = linkRow ? String(linkRow.eid) : null;
     // T1 candidates (proposals only) — see loadDxCandidates
     const candidates = cands.candidates;
     const attestationWarnings = ctx.attestation ? ctx.attestation.warnings || [] : [];
@@ -10218,13 +10796,40 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
       notesError,
       record, state: encounterStateOf(record, ctx.attestation), closed: ctx.closed,
       prescriptions: ctx.prescriptions, orders: ctx.orders, attestation: ctx.attestation, addenda: ctx.addenda,
+      // Readiness as it applies to THIS viewer: an RN's or LMSW's signature is
+      // an author signature and is held to the note-only gate; everyone else,
+      // and the clinician addendum, to the full one.
       signReadiness: clinicalRepo.checkSignReadiness({
         hasNote, record, billingNpi: payer.billing_npi_used,
         posCode: emrRow && emrRow.pos_code,
         visit: record.visit, facilityName: emrRow && emrRow.facility_name,
-        riskAssessment: ctx.riskAssessment, completedSections: record.completedSections,
-        ncciPtpEdits: ncci.ncciPtpEdits, ncciMue: ncci.ncciMue, ncciSourceVersion: ncci.ncciSourceVersion
+        riskAssessment: ctx.riskAssessment, completedSections: derivedSections,
+        ncciPtpEdits: ncci.ncciPtpEdits, ncciMue: ncci.ncciMue, ncciSourceVersion: ncci.ncciSourceVersion,
+        billingChecks: !clinicalRoles.isAuthorSigner(req.user)
       }),
+      addendumReadiness: record.coSignStatus === 'pending' ? clinicalRepo.checkSignReadiness({
+        hasNote, record, billingNpi: payer.billing_npi_used,
+        posCode: emrRow && emrRow.pos_code,
+        visit: record.visit, facilityName: emrRow && emrRow.facility_name,
+        riskAssessment: ctx.riskAssessment, completedSections: derivedSections,
+        ncciPtpEdits: ncci.ncciPtpEdits, ncciMue: ncci.ncciMue, ncciSourceVersion: ncci.ncciSourceVersion
+      }) : null,
+      // The shared note, its versions and its signatures.
+      noteState: await noteView(ctx, { signsAsAuthor: clinicalRoles.isAuthorSigner(req.user) }),
+      linkedAppointmentEid: linkedEid,
+      // What THIS viewer may do with the note, answered by the server so the
+      // page never decides a credential question itself.
+      noteActions: {
+        canEdit: clinicalRoles.canClinicalWrite(req.user) && !ctx.closed && record.noteStatus !== clinicalNotes.NOTE_STATUS.VOIDED &&
+          (clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.NURSING_NOTE) || clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.BEHAVIORAL_NOTE)),
+        signsAsAuthor: clinicalRoles.isAuthorSigner(req.user),
+        canAddClinicianAddendum: record.coSignStatus === 'pending' && clinicalRoles.canCoSignEncounter(req.user) &&
+          !(ctx.attestation && ctx.attestation.signedBy && String(ctx.attestation.signedBy.id) === String(req.user.id)),
+        canCoSign: ctx.closed && clinicalRoles.canCoSignNote(req.user) &&
+          ![ctx.attestation && ctx.attestation.signedBy && ctx.attestation.signedBy.id, record.coSignedBy && record.coSignedBy.id, ...((record.coSignatures || []).map(c => c.id))]
+            .some(id => id != null && String(id) === String(req.user.id)),
+        canAttachAppointment: clinicalRoles.canClinicalWrite(req.user) && !ctx.closed && !linkedEid && record.noteStatus !== clinicalNotes.NOTE_STATUS.VOIDED
+      },
       riskAssessment: ctx.riskAssessment, riskHistory: ctx.riskHistory,
       riskRequired: clinicalRepo.riskAssessmentRequired(record.visit),
       riskLevels: clinicalRepo.RISK_LEVELS, riskDomains: clinicalRepo.RISK_DOMAINS,
@@ -10237,8 +10842,8 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
         modality: (record.visit || {}).modality,
         riskPositive: !!(ctx.riskAssessment && ctx.riskAssessment.levels &&
           clinicalRepo.RISK_DOMAINS.some(d => clinicalRepo.RISK_NEEDS_PLAN.includes(ctx.riskAssessment.levels[d])))
-      }),
-      completedSections: record.completedSections || [],
+      }).map(sec => ({ ...sec, ownField: clinicalNotes.sectionHasOwnField(sec.key) })),
+      completedSections: derivedSections,
       candidates, candidatesError: cands.error,
       favorites: {
         icd10: clinicalRepo.rankFavorites(usage, req.user.id, 'ICD10', 15),
@@ -10288,7 +10893,12 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
 app.put('/api/clinical/patients/:clientId/encounters/:euuid/coding', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res);
-    if (!ctx || refuseIfClosed(ctx, res)) return;
+    if (!ctx) return;
+    // A note an RN or LMSW signed as its author is locked, but its CODING is
+    // still open to the clinician who will add the billing addendum — choosing
+    // the codes is theirs, and they are confirmed when the addendum is signed.
+    const awaitingAddendum = ctx.record.coSignStatus === 'pending' && clinicalRoles.canCoSignEncounter(req.user);
+    if (!awaitingAddendum && refuseIfClosed(ctx, res)) return;
     const body = req.body || {};
     const payer = await getPayerCredentialing();
     const before = ctx.record;
@@ -11118,48 +11728,59 @@ app.get('/api/clinical/orders/overdue', authenticateToken, requireClinicalRead, 
 // Refused with a specific code until the encounter has a note, ≥1 diagnosis,
 // ≥1 service (each linked) and a configured billing NPI. The signer becomes
 // the rendering provider on the charge. Closed = read-only; addenda only.
+// Whether this encounter may be signed, asked the same way by the sign route,
+// the clinician-addendum route and the encounter detail preview. The note's
+// sections are DERIVED from the shared note (they used to be read from a field
+// nothing ever wrote, which blocked every templated visit from signing).
+// `billingChecks: false` is the author signature's gate — see checkSignReadiness.
+const readinessFor = async (ctx, { billingChecks = true, payer, ncci } = {}) => {
+  const [p, n] = await Promise.all([payer || getPayerCredentialing(), ncci || getNcciTables()]);
+  let hasNote = false;
+  try {
+    if (ctx.record.narrativeNoteSid) hasNote = !!(await ctx.emr.getSoapNote(ctx.client.openEmrPatientId, ctx.encounterUuid, ctx.record.narrativeNoteSid));
+    if (!hasNote) {
+      hasNote = (await ctx.emr.getSoapNotes(ctx.client.openEmrPatientId, ctx.encounterUuid))
+        .some(x => String(x.id) !== String(ctx.record.structuredNoteSid || '') && !/^\[GFC STRUCTURED RECORD/.test(String(x.subjective || '')));
+    }
+  } catch { hasNote = false; }
+  // The POS is read from the encounter OpenEMR actually holds, not from what we
+  // believe we sent — this is the value that reaches the claim. The TYPE is the
+  // stamp written when the visit was created: two independent facts, which is
+  // the only reason comparing them proves anything.
+  let encPos = null; let encFacilityName = null;
+  try {
+    const encRow = await ctx.emr.getEncounterRow(ctx.client.openEmrPatientId, ctx.encounterUuid);
+    encPos = encRow && encRow.pos_code;
+    encFacilityName = encRow && encRow.facility_name;
+  } catch { encPos = null; encFacilityName = null; }
+  const completedSections = ctx.record.note
+    ? clinicalNotes.deriveCompletedSections(ctx.record.note, noteSatisfiers(ctx))
+    : ctx.record.completedSections;
+  const ready = clinicalRepo.checkSignReadiness({
+    hasNote, record: ctx.record, billingNpi: p.billing_npi_used, posCode: encPos,
+    visit: ctx.record.visit, facilityName: encFacilityName,
+    riskAssessment: ctx.riskAssessment, completedSections: completedSections,
+    ncciPtpEdits: n.ncciPtpEdits, ncciMue: n.ncciMue, ncciSourceVersion: n.ncciSourceVersion,
+    billingChecks: billingChecks
+  });
+  return { ready, payer: p, completedSections };
+};
+
 app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res);
     if (!ctx) return;
     if (ctx.closed) return res.status(409).json({ error: `Already signed and closed ${ctx.attestation.signedAt} by ${ctx.attestation.signedBy.name}`, code: 'ENCOUNTER_CLOSED' });
+    if (ctx.record.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED) {
+      return res.status(409).json({ error: 'This draft was discarded and cannot be signed.', code: 'NOTE_VOIDED' });
+    }
     if (!(req.body || {}).attest) return res.status(400).json({ error: 'You must confirm the attestation statement to sign', code: 'SIGN_NO_ATTEST' });
-    const [payer, ncci] = await Promise.all([getPayerCredentialing(), getNcciTables()]);
-    let hasNote = false;
-    try {
-      if (ctx.record.narrativeNoteSid) hasNote = !!(await ctx.emr.getSoapNote(ctx.client.openEmrPatientId, ctx.encounterUuid, ctx.record.narrativeNoteSid));
-      if (!hasNote) {
-        hasNote = (await ctx.emr.getSoapNotes(ctx.client.openEmrPatientId, ctx.encounterUuid))
-          .some(n => String(n.id) !== String(ctx.record.structuredNoteSid || '') && !/^\[GFC STRUCTURED RECORD/.test(String(n.subjective || '')));
-      }
-    } catch { hasNote = false; }
-    // Read the POS from the encounter OpenEMR actually holds, not from what we
-    // believe we sent. This is the value that reaches the claim.
-    //
-    // The TYPE is read off the stamp written when the visit was created. Two
-    // independent facts — which is the only reason comparing them proves
-    // anything; re-deriving the type here from the row's own POS would make it
-    // agree with itself and the check would catch nothing.
-    let encPos = null; let encFacilityName = null;
-    try {
-      const encRow = await ctx.emr.getEncounterRow(ctx.client.openEmrPatientId, ctx.encounterUuid);
-      encPos = encRow && encRow.pos_code;
-      encFacilityName = encRow && encRow.facility_name;
-    } catch { encPos = null; encFacilityName = null; }
-    const ready = clinicalRepo.checkSignReadiness({
-      hasNote, record: ctx.record, billingNpi: payer.billing_npi_used, posCode: encPos,
-      visit: ctx.record.visit, facilityName: encFacilityName,
-      riskAssessment: ctx.riskAssessment, completedSections: ctx.record.completedSections,
-      ncciPtpEdits: ncci.ncciPtpEdits, ncciMue: ncci.ncciMue, ncciSourceVersion: ncci.ncciSourceVersion
-    });
-    if (!ready.ok) return res.status(409).json({ error: ready.message, code: ready.codes[0], codes: ready.codes, missing: ready.missing });
 
-    // ── Session 4.8: gate on WHAT IS BEING ATTESTED, not only on who asks ──
-    // An encounter carrying any CPT/service code is a claim, and a claim
-    // asserts that the signer was certified to render it. An encounter with no
-    // service codes is nursing documentation, and an RN attesting her own note
-    // is exactly right. The distinction is the encounter's content, so it is
-    // read off the record rather than assumed from the route.
+    // ── Session 4.8, widened 2026-09-27: gate on WHAT IS BEING ATTESTED ──
+    // A billable clinician's signature is a claim and is held to the full gate.
+    // An RN's or LMSW's is an AUTHOR signature: the note must be complete, but
+    // the codes and the place of service are the billing clinician's to settle
+    // at the addendum. The services are read off the record, not assumed.
     const signature = clinicalRoles.evaluateEncounterSignature(req.user, ctx.record.services || []);
     if (signature.outcome === clinicalRoles.SIGN_OUTCOME.REFUSED) {
       return res.status(403).json({
@@ -11167,6 +11788,16 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
         serviceCodes: (ctx.record.services || []).map(x => x.code)
       });
     }
+    const authorSignature = signature.outcome === clinicalRoles.SIGN_OUTCOME.PENDING_CO_SIGN;
+    // The note itself: nothing carried forward left unreviewed, and an H&P's
+    // blood pressure in both arms (moved from save to sign — refusing to SAVE
+    // an incomplete note is how home-visit documentation is lost).
+    if (ctx.record.note) {
+      const noteCheck = clinicalNotes.checkNoteForSigning(ctx.record.note);
+      if (!noteCheck.ok) return res.status(409).json({ error: noteCheck.error, code: noteCheck.code, pending: noteCheck.pending || [] });
+    }
+    const { ready, payer, completedSections } = await readinessFor(ctx, { billingChecks: !authorSignature });
+    if (!ready.ok) return res.status(409).json({ error: ready.message, code: ready.codes[0], codes: ready.codes, missing: ready.missing });
     const attestation = clinicalRepo.buildAttestation({ id: uuidv4(), record: ctx.record, actor: ctx.actor, billingNpi: payer.billing_npi_used, narrativeNoteSid: ctx.record.narrativeNoteSid });
     // The credential the signature was made under, stored on the attestation:
     // a role reassigned next year must not change what last year's signature
@@ -11195,15 +11826,13 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
     // A charge failure must never void a completed signature: the attestation
     // is already persisted. It is surfaced as a warning and the encounter is
     // marked so the coding queue can show the charge did not post.
-    // ── Session 4.8, switched 2026-09-24: an LMSW never completes a sign ──
-    // Only a provider, an RN or an LCSW attests an encounter (owner rule:
-    // "only FNP, RN, MD is able to sign" — an LMSW documents and co-signs,
-    // never the reverse). So this branch is not "signed, charge held" — the
-    // note is documented and waits for an LCSW's or a provider's SIGNATURE,
-    // which is the actual attestation. Posting a charge now and reversing it
-    // later would put a claim in Billing Manager that nobody was certified to
-    // render.
-    if (signature.outcome === clinicalRoles.SIGN_OUTCOME.PENDING_CO_SIGN) {
+    // ── An author's signature holds the charge (owner rule, 2026-09-27) ──
+    // An RN or LMSW signs as the note's author: the narrative locks, nothing
+    // bills, and the note waits for a clinician addendum from a provider (or an
+    // LCSW, for behavioral health). THAT addendum is the billable signature.
+    // Posting a charge now and reversing it later would put a claim in Billing
+    // Manager that nobody was certified to render.
+    if (authorSignature) {
       record.coSignStatus = 'pending';
       record.coSignReason = signature.reason;
       record.chargesPosted = false;
@@ -11213,17 +11842,51 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
       await postEncounterCharges({ emr: ctx.emr, client: ctx.client, encounterUuid: ctx.encounterUuid, record, warnings, signedBy: attestation.signedBy });
       record.coSignStatus = 'not_required';
     }
+    record.noteStatus = clinicalNotes.NOTE_STATUS.SIGNED;
+    record.completedSections = completedSections || [];
+    // The OpenEMR vitals ROW, written once, here: there is no vitals-update
+    // route, so writing it on every draft save would stack a row per save.
+    if (record.note && !record.vitalsWrittenAt) {
+      const vitalsRow = clinicalNotes.buildVitalsRow(record.note);
+      if (vitalsRow) {
+        try {
+          await ctx.emr.addVitals(ctx.client.openEmrPatientId, ctx.encounterUuid, vitalsRow);
+          record.vitalsWrittenAt = attestation.signedAt;
+        } catch (e) {
+          console.error('Vitals row write FAILED at sign (readings preserved in the note):', e.message);
+          warnings.push(`Vitals did not save to the chart's vitals form (${e.message.slice(0, 120)}). The readings are in the signed note.`);
+        }
+      }
+    }
+    // An initial visit's RN triage sets the client's care track — at signing,
+    // now that a note can be edited after it is first saved.
+    const track = record.note && record.note.hp && record.note.hp.triage && record.note.hp.triage.track;
+    if (track && clinicalRepo.VALID_TRACKS.includes(track) && ctx.users[ctx.idx] && ctx.users[ctx.idx].careTier !== track) {
+      ctx.users[ctx.idx].careTier = track;
+      await db.set('users', ctx.users);
+      invalidateUsersCache();
+    }
     const syncWarning = await syncStructuredNote(ctx.emr, ctx.client, record);
     if (syncWarning) warnings.push(syncWarning);
+    // The signature goes INTO the note — at the bottom, in OpenEMR's text and
+    // in the formatted PDF filed beside it.
+    const signatureSummary = clinicalNotes.buildSignatureSummary({ attestation, record });
+    const revisions = await appendNoteRevision(clinicalNotes.buildNoteRevision({
+      id: uuidv4(), record, version: Number(record.noteVersion || 0), actor: ctx.actor, clinicalRole: signature.clinicalRole, changed: [], action: 'sign'
+    }));
+    const narrativeWarning = await writeNarrativeNote(ctx.emr, ctx.client, record, { signature: signatureSummary, revisions });
+    if (narrativeWarning) warnings.push(narrativeWarning);
+    const pdfWarning = await fileSignedNotePdf(ctx.emr, ctx.client, record, attestation, ctx.addenda);
+    if (pdfWarning) warnings.push(pdfWarning);
     await saveBillingRecord(ctx.rows, record);
     await logActivity(req.user.id, req.user.name || req.user.email, 'encounter_signed', 'client', ctx.client.id, {
       encounterUuid: ctx.encounterUuid, attestationId: attestation.id, signedByNpi: attestation.signedBy.npi, billingProviderNpi: payer.billing_npi_used,
-      diagnoses: attestation.diagnosisCodes, services: attestation.serviceCodes,
+      diagnoses: attestation.diagnosisCodes, services: attestation.serviceCodes, signedAs: authorSignature ? 'author' : 'billing',
       chargesPosted: !!record.chargesPosted, postedChargeIds: (record.postedCharges || []).map(c => c.id), chargeError: record.chargeError || null
     });
     res.json({
       message: record.coSignStatus === 'pending'
-        ? 'Note documented — it is not yet signed. It is held for signature by an LCSW or a provider; no charge posts until then.'
+        ? 'Signed as the note\'s author — it is locked. It is not billable until a provider (or an LCSW, for behavioral health) adds the clinician addendum.'
         : (record.chargesPosted ? 'Encounter signed and closed; charges posted' : 'Encounter signed and closed'),
       attestation, record, state: 'signed',
       coSignStatus: record.coSignStatus || 'not_required',
@@ -11236,64 +11899,90 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
   }
 });
 
-// ── Encounter co-signature (Session 4.8) ─────────────────────────────────
-// An LMSW documents and attests; nothing bills until a supervising credential
-// co-signs. The CO-SIGNER becomes the rendering provider on the charge, which
-// is the point of the co-signature — the claim names the person certified to
-// render the service (spec §2.5, billing spec §4 item 4).
+// ── The clinician addendum: the billable signature on an author's note ─────
+// (Session 4.8's co-sign, widened 2026-09-27.) An RN or LMSW signs a note as
+// its AUTHOR; nothing bills until a provider — or an LCSW, for behavioral
+// health — adds the clinician addendum (owner: "licensed clinician must add
+// addendums to notes saved and signed by the non-billable team member"). The
+// addendum's author becomes the rendering clinician on the charge, because the
+// claim names the person certified to render the service (spec §2.5, billing
+// spec §4 item 4). The route keeps its path so an encounter held under the old
+// LMSW rule is cleared the same way.
 app.post('/api/clinical/patients/:clientId/encounters/:euuid/co-sign', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res, { createRecord: false });
     if (!ctx) return;
     if (!ctx.record) return res.status(404).json({ error: 'No encounter record', code: 'ENCOUNTER_NOT_FOUND' });
     if (ctx.record.coSignStatus !== 'pending') {
-      return res.status(409).json({ error: 'This encounter is not waiting on a co-signature', code: 'ENCOUNTER_NOT_PENDING_CO_SIGN' });
+      return res.status(409).json({ error: 'This note is not waiting on a clinician addendum', code: 'ENCOUNTER_NOT_PENDING_CO_SIGN' });
     }
     if (!clinicalRoles.canCoSignEncounter(req.user)) {
-      return res.status(403).json({ error: 'A co-signature is provided by an LCSW or a provider', code: 'CO_SIGN_CREDENTIAL', clinicalRole: clinicalRoles.resolveClinicalRole(req.user) });
+      return res.status(403).json({ error: 'The clinician addendum is added by a provider, or by an LCSW for a behavioral-health note', code: 'CO_SIGN_CREDENTIAL', clinicalRole: clinicalRoles.resolveClinicalRole(req.user) });
     }
-    // The signer cannot clear their own hold. An LMSW cannot reach this route
-    // at all, so this guards the case a future role change creates rather than
-    // one that exists today — a co-signature that can be self-issued is not a
-    // co-signature.
+    // An author cannot make their own note billable — an addendum that can be
+    // self-issued is not a clinician's review.
     if (ctx.attestation && ctx.attestation.signedBy && ctx.attestation.signedBy.id === req.user.id) {
-      return res.status(409).json({ error: 'A co-signature comes from someone other than the clinician who signed', code: 'CO_SIGN_SELF' });
+      return res.status(409).json({ error: 'The clinician addendum comes from someone other than the note\'s author', code: 'CO_SIGN_SELF' });
     }
-    if (!(req.body || {}).attest) return res.status(400).json({ error: 'You must confirm the attestation statement to co-sign', code: 'SIGN_NO_ATTEST' });
-    // The co-signer's own certification must match what is being billed.
+    if (!(req.body || {}).attest) return res.status(400).json({ error: 'You must confirm the attestation statement to add the clinician addendum', code: 'SIGN_NO_ATTEST' });
+    // The addendum is required text: it is the clinician's own statement about
+    // the author's note, not a bare click.
+    const now = new Date().toISOString();
+    const built = clinicalRepo.buildAddendum({
+      id: uuidv4(), encounterUuid: ctx.encounterUuid, clientId: ctx.client.id,
+      text: (req.body || {}).text, actor: ctx.actor, at: now
+    });
+    if (built.error) return res.status(400).json({ error: 'Write the clinician addendum — it is what makes this note billable.', code: built.code });
+    // The addendum author's own certification must match what is being billed:
+    // an LCSW makes only the behavioral-health set billable.
     const badCodes = clinicalRoles.disallowedServiceCodesFor(req.user, ctx.record.services || []);
     if (badCodes.length) {
       return res.status(403).json({ error: clinicalRoles.serviceCodeRefusal(req.user, badCodes), code: 'CLINICAL_CODE_SET', codes: badCodes });
     }
-    const now = new Date().toISOString();
+    // The full gate — codes, billing NPI, place of service, bundling — because
+    // THIS signature is the claim.
+    const { ready } = await readinessFor(ctx, { billingChecks: true });
+    if (!ready.ok) return res.status(409).json({ error: ready.message, code: ready.codes[0], codes: ready.codes, missing: ready.missing });
+
     const coSigner = clinicalRepo.actorRecord(actorFromReq(req));
-    const warnings = [];
+    const warnings = [...(ready.warnings || [])];
     const record = {
       ...ctx.record,
       coSignStatus: 'cleared',
       coSignedAt: now,
       coSignedBy: { ...coSigner, clinicalRole: clinicalRoles.resolveClinicalRole(req.user) },
-      // The co-signer is the rendering provider: they carry the certification
-      // the claim asserts. The documenting clinician stays on the attestation.
+      clinicalAddendumId: built.addendum.id,
+      // The addendum's author is the rendering provider: they carry the
+      // certification the claim asserts. The author stays on the attestation.
       renderingProvider: coSigner,
       renderingProviderClinicalRole: clinicalRoles.resolveClinicalRole(req.user),
       updatedAt: now
     };
+    const addendum = { ...built.addendum, kind: 'clinician_addendum' };
+    const addRows = await loadRows('encounter_addenda');
+    addRows.push(addendum);
+    await db.set('encounter_addenda', addRows);
     await postEncounterCharges({ emr: ctx.emr, client: ctx.client, encounterUuid: ctx.encounterUuid, record, warnings, signedBy: coSigner });
     const syncWarning = await syncStructuredNote(ctx.emr, ctx.client, record);
     if (syncWarning) warnings.push(syncWarning);
+    const signatureSummary = clinicalNotes.buildSignatureSummary({ attestation: ctx.attestation, record });
+    const revisions = clinicalNotes.revisionsFor(await loadNoteRevisions(), ctx.encounterUuid);
+    const nw = await writeNarrativeNote(ctx.emr, ctx.client, record, { signature: signatureSummary, revisions });
+    if (nw) warnings.push(nw);
+    const pw = await fileSignedNotePdf(ctx.emr, ctx.client, record, ctx.attestation, [...ctx.addenda, addendum]);
+    if (pw) warnings.push(pw);
     await saveBillingRecord(ctx.rows, record);
     await logActivity(req.user.id, req.user.name || req.user.email, 'encounter_co_signed', 'client', ctx.client.id, {
-      encounterUuid: ctx.encounterUuid,
+      encounterUuid: ctx.encounterUuid, addendumId: addendum.id,
       signedByUserId: ctx.attestation && ctx.attestation.signedBy ? ctx.attestation.signedBy.id : null,
       coSignedByClinicalRole: record.renderingProviderClinicalRole,
       services: (record.services || []).map(x => x.code),
       chargesPosted: !!record.chargesPosted, chargeError: record.chargeError || null
     });
-    res.json({ message: record.chargesPosted ? 'Encounter co-signed; charges posted' : 'Encounter co-signed', record, coSignStatus: 'cleared', billable: true, chargesPosted: !!record.chargesPosted, warnings });
+    res.json({ message: record.chargesPosted ? 'Clinician addendum added; the note is billable and charges posted' : 'Clinician addendum added; the note is billable', record, addendum, coSignStatus: 'cleared', billable: true, chargesPosted: !!record.chargesPosted, warnings });
   } catch (error) {
-    console.error('Encounter co-sign error:', error);
-    res.status(502).json({ error: `Co-sign failed: ${error.message}` });
+    console.error('Clinician addendum error:', error);
+    res.status(502).json({ error: `Clinician addendum failed: ${error.message}` });
   }
 });
 
@@ -11789,7 +12478,8 @@ app.get('/api/clinical/work-queues', authenticateToken, requireClinicalRead, asy
     // unsigned. That is the practice's biggest silent risk and it is what this
     // queue exists for.
     const unsignedEncounters = (billing || [])
-      .filter(r => r && r.encounterUuid && !signed.has(String(r.encounterUuid)))
+      // A discarded draft is not waiting on anyone.
+      .filter(r => r && r.encounterUuid && !signed.has(String(r.encounterUuid)) && r.noteStatus !== 'voided')
       .map(r => ({
         encounterUuid: r.encounterUuid, clientId: r.clientId,
         patientName: nameOf(r.clientId),
@@ -12416,7 +13106,11 @@ app.get('/api/clinical/patients/:clientId/place-of-service', authenticateToken, 
       const rows = [];
       for (const m of apptTypes.MODALITIES) {
         for (const sec of apptTypes.sectionsFor(t.key, { modality: m.key })) {
-          rows.push({ ...sec, modality: m.key });
+          // `ownField`: whether the note gives this section its own box, or
+          // one of the note's fixed fields answers it (chief concern, HPI,
+          // exam, assessment, plan, vitals). Served, so the page never keeps a
+          // second copy of that mapping.
+          rows.push({ ...sec, modality: m.key, ownField: clinicalNotes.sectionHasOwnField(sec.key) });
         }
       }
       noteTemplates[t.key] = rows;
@@ -12689,6 +13383,9 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/addenda', authentic
     const warnings = [];
     const syncWarning = await syncStructuredNote(ctx.emr, ctx.client, ctx.record);
     if (syncWarning) warnings.push(syncWarning);
+    // The formatted chart copy carries its addenda, so it is re-filed.
+    const pdfWarning = await fileSignedNotePdf(ctx.emr, ctx.client, ctx.record, ctx.attestation, [...ctx.addenda, built.addendum]);
+    if (pdfWarning) warnings.push(pdfWarning);
     await saveBillingRecord(ctx.rows, ctx.record);
     await logActivity(req.user.id, req.user.name || req.user.email, 'encounter_addendum', 'client', ctx.client.id, { encounterUuid: ctx.encounterUuid, addendumId: built.addendum.id, byNpi: ctx.actor.npi || null });
     res.json({ message: 'Addendum recorded', addendum: built.addendum, warnings });

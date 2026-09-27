@@ -106,7 +106,8 @@ const COLLECTION_REGISTRY = Object.freeze([
   // APPOINTMENT, because Arrive is pressed at a front door minutes before any
   // encounter exists.
   { key: 'visit_timings', phi: true, owner: '4.12', note: 'one per appointment; arrival/start/end and the time statement' },
-  { key: 'clinical_note_drafts', phi: true, owner: '4.9', note: 'one per clinician per patient; cleared when the note is filed' },
+  { key: 'clinical_note_drafts', phi: true, owner: '4.9', note: 'one per clinician per patient; a scratch copy until a note\'s first save moves it onto its encounter' },
+  { key: 'clinical_note_revisions', phi: true, owner: '2026-09-27', note: 'one row per save of a shared note: editor, time, WHICH sections changed — never the text' },
   // ---- caregiver app (Session 6) ----
   { key: 'caregiver_visit_logs', phi: true, owner: '6' },
   { key: 'caregiver_visit_log_reviews', phi: true, owner: '6' },

@@ -1514,9 +1514,13 @@ test('F build-enforced: creating a visit stamps the descriptor, and signing chec
   // default — resolving the other way would bill the visit at the place the
   // patient usually is rather than the place they were.
   assert.match(server, /patientDefaultLocation: client\.usualLocation \|\| null/);
-  // Both visit-creation paths stamp it.
+  // Every visit-creation path stamps it: the H&P, the follow-up, and the
+  // shared note's first save (2026-09-27), which is the one the page now uses.
   const stamps = server.match(/visit: place\.visit/g) || [];
-  assert.equal(stamps.length, 2, 'both the H&P and the follow-up creation paths must stamp the descriptor');
+  assert.equal(stamps.length, 3, 'the H&P, the follow-up and the shared-note creation paths must all stamp the descriptor');
+  const notesCreate = server.slice(server.indexOf("app.post('/api/clinical/patients/:clientId/notes'"));
+  assert.match(notesCreate.slice(0, notesCreate.indexOf('app.get(')), /visit: place\.visit/,
+    'the shared note\'s first save must stamp the descriptor it was handed');
   // The signature compares the STAMP against the POS read off OpenEMR.
   assert.match(server, /visit: ctx\.record\.visit/, 'the sign gate must read the descriptor off the stored stamp');
   assert.ok(!/visit:\s*apptTypes\.resolveVisit\([^)]*encRow/.test(server),

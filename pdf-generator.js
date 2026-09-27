@@ -1888,7 +1888,178 @@ async function generateRequisitionPDF(d) {
   return stampRequisitionPages(merged, { patientName, dob, mbi, reference });
 }
 
+// ============================================================
+// The signed clinical note (owner, 2026-09-27)
+// ============================================================
+// OpenEMR's note field is plain text, so bold, italic and underline cannot
+// live there. This is the copy that looks exactly like what was signed, filed
+// to the patient's OpenEMR Documents at signing and again on each clinician
+// addendum or co-signature. The signature block is BOLD and set apart, which
+// is the one thing the owner asked the final signature to be.
+//
+// The caller hands over the note already laid out (clinicalNotes
+// .noteReadingOrder) and the signature summary, so the PDF and the OpenEMR
+// text are built from ONE ordering and cannot disagree about the note.
+const noteFormat = require('./public/note-format');
+const NOTE_SLOT_LABELS = { subjective: 'Subjective', objective: 'Objective', assessment: 'Assessment', plan: 'Plan' };
+
+async function generateSignedNotePDF(d) {
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ size: 'LETTER', margin: 48, bufferPages: true });
+      const chunks = [];
+      doc.on('data', c => chunks.push(c));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+      const L = 48, R = 612 - 48, W = R - L, BOTTOM = 730;
+      const C = ROI_COLORS;
+      const et = (iso) => (iso ? `${gfcTime.fmtDateTime(iso)} ET` : '—');
+      let y = 44;
+      const room = (h) => { if (y + h > BOTTOM) { doc.addPage(); y = 48; } };
+
+      // Header — who and which visit, on the first page.
+      doc.rect(L, y, W, 30).fill(C.navy);
+      doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(13).text('Clinical note', L + 12, y + 9);
+      doc.fillColor(C.gold).font('Helvetica').fontSize(8.5)
+        .text('Godwins Family Care LLC', L, y + 11, { width: W - 12, align: 'right' });
+      y += 40;
+      const meta = [
+        ['Patient', d.patientName], ['Date of birth', d.dob], ['Visit date', d.visitDate],
+        ['Visit', d.visitLabel], ['Encounter', d.encounterId]
+      ].filter(([, v]) => v);
+      doc.fontSize(9).fillColor(C.ink);
+      for (const [label, value] of meta) {
+        doc.font('Helvetica-Bold').text(`${label}: `, L, y, { continued: true }).font('Helvetica').text(String(value));
+        y = doc.y + 2;
+      }
+      y += 6;
+
+      const fontFor = (r) => (r.b && r.i ? 'Helvetica-BoldOblique' : r.b ? 'Helvetica-Bold' : r.i ? 'Helvetica-Oblique' : 'Helvetica');
+      // One block of formatted markup: headings, bullets, numbers, and runs of
+      // bold / italic / underline — the same six shapes the editor produces.
+      const drawMarkup = (markup, indent = 0) => {
+        for (const bl of noteFormat.toBlocks(markup)) {
+          if (bl.type === 'blank') { y += 5; continue; }
+          const size = bl.type === 'h' ? 10.5 : 9.5;
+          const prefix = bl.type === 'ul' ? '•  ' : bl.type === 'ol' ? `${bl.n}.  ` : '';
+          const x = L + indent + (prefix ? 10 : 0);
+          const runs = bl.runs.length ? bl.runs : [{ text: ' ' }];
+          const text = runs.map(r => r.text).join('');
+          room(doc.font('Helvetica').fontSize(size).heightOfString(prefix + text, { width: W - indent - 10 }) + 4);
+          doc.fillColor(C.ink).fontSize(size);
+          if (prefix) doc.font('Helvetica').text(prefix, L + indent, y, { continued: false, lineBreak: false });
+          runs.forEach((r, i) => {
+            const last = i === runs.length - 1;
+            const opts = { continued: !last, underline: !!r.u, width: W - indent - (prefix ? 10 : 0) };
+            doc.font(bl.type === 'h' ? 'Helvetica-Bold' : fontFor(r));
+            if (i === 0) doc.text(r.text, x, y, opts); else doc.text(r.text, opts);
+          });
+          y = doc.y + 3;
+        }
+      };
+      const drawPlain = (text, indent = 0) => {
+        const t = String(text || '');
+        room(doc.font('Helvetica').fontSize(9.5).heightOfString(t, { width: W - indent }) + 4);
+        doc.fillColor(C.ink).font('Helvetica').fontSize(9.5).text(t, L + indent, y, { width: W - indent });
+        y = doc.y + 3;
+      };
+
+      if (d.voided) {
+        drawPlain(`This draft was discarded by ${d.voided.by && d.voided.by.name ? d.voided.by.name : 'a clinician'} on ${et(d.voided.at)}: ${d.voided.reason}`);
+      }
+      let slot = null;
+      for (const item of (d.items || [])) {
+        if (item.slot !== slot) {
+          slot = item.slot;
+          room(28);
+          y += 4;
+          doc.rect(L, y, W, 16).fill(C.cream);
+          doc.fillColor(C.navy).font('Helvetica-Bold').fontSize(9)
+            .text(NOTE_SLOT_LABELS[slot].toUpperCase(), L + 8, y + 4, { characterSpacing: 0.6 });
+          y += 22;
+        }
+        if (item.label) {
+          room(14);
+          doc.fillColor(C.navy).font('Helvetica-Bold').fontSize(9).text(item.label, L, y);
+          y = doc.y + 2;
+        }
+        if (item.markup !== undefined) drawMarkup(item.markup, item.label ? 6 : 0);
+        else drawPlain(item.plain, item.label ? 6 : 0);
+        y += 4;
+      }
+
+      // Addenda — each with its own signer and time.
+      const addenda = Array.isArray(d.addenda) ? d.addenda : [];
+      if (addenda.length) {
+        room(28); y += 6;
+        doc.fillColor(C.navy).font('Helvetica-Bold').fontSize(10).text('Addenda', L, y); y = doc.y + 4;
+        for (const a of addenda) {
+          room(30);
+          const who = a.by ? `${a.by.name || 'Unknown'}${a.by.licenseLevel ? `, ${a.by.licenseLevel}` : ''}` : 'Unknown';
+          doc.fillColor(C.ink).font('Helvetica-Bold').fontSize(9)
+            .text(`${a.kind === 'clinician_addendum' ? 'Clinician addendum' : 'Addendum'} — ${who} — ${et(a.at)}`, L, y);
+          y = doc.y + 2;
+          drawMarkup(a.text, 6);
+          y += 4;
+        }
+      }
+
+      // Note history — every saved draft, its editor and its time.
+      const history = Array.isArray(d.history) ? d.history : [];
+      if (history.length) {
+        room(24); y += 6;
+        doc.fillColor(C.muted).font('Helvetica-Bold').fontSize(8).text('NOTE HISTORY — every saved draft', L, y, { characterSpacing: 0.5 });
+        y = doc.y + 2;
+        for (const line of history) { room(11); doc.fillColor(C.muted).font('Helvetica').fontSize(8).text(line, L, y); y = doc.y + 1; }
+      }
+
+      // The signature block — bold, ruled, set apart. The final signature is
+      // the one thing on this page that has to be unmistakable.
+      const sig = d.signature;
+      if (sig) {
+        const lines = [];
+        lines.push(sig.signer.capacity === 'author'
+          ? `Signed by ${d.person(sig.signer)} — author (not a billing signature) — ${et(sig.signer.at)}`
+          : `Signed by ${d.person(sig.signer)} — ${et(sig.signer.at)}`);
+        if (sig.billing) lines.push(`Clinician addendum and billing signature: ${d.person(sig.billing)} — ${et(sig.billing.at)}`);
+        if (sig.awaitingAddendum) lines.push('Awaiting clinician addendum — not billable until a provider (or an LCSW, for behavioral health) adds it.');
+        for (const c of sig.coSignatures || []) lines.push(`Co-signed by ${d.person(c)} — ${et(c.at)}`);
+        const h = 26 + lines.reduce((s, l) => s + doc.font('Helvetica-Bold').fontSize(10).heightOfString(l, { width: W - 20 }) + 4, 0);
+        room(h + 10);
+        y += 10;
+        doc.rect(L, y, W, h).lineWidth(1.4).strokeColor(C.navy).stroke();
+        doc.fillColor(C.navy).font('Helvetica-Bold').fontSize(11).text('ELECTRONICALLY SIGNED', L + 10, y + 8);
+        let ly = y + 26;
+        for (const l of lines) {
+          doc.fillColor(C.ink).font('Helvetica-Bold').fontSize(10).text(l, L + 10, ly, { width: W - 20 });
+          ly = doc.y + 4;
+        }
+        y += h + 6;
+      }
+
+      // Footer on every page: who, which note, page n of m.
+      // Written below the bottom margin, so the margin is lifted for the
+      // footer alone — otherwise pdfkit treats it as overflow and adds a blank
+      // page to hold it.
+      const range = doc.bufferedPageRange();
+      for (let i = 0; i < range.count; i++) {
+        doc.switchToPage(range.start + i);
+        const bottom = doc.page.margins.bottom;
+        doc.page.margins.bottom = 0;
+        doc.fillColor(C.muted).font('Helvetica').fontSize(7.5)
+          .text(`${d.patientName || ''}${d.dob ? ` · DOB ${d.dob}` : ''} · Encounter ${d.encounterId || ''} · page ${i + 1} of ${range.count}`,
+            L, 758, { width: W, align: 'center', lineBreak: false });
+        doc.page.margins.bottom = bottom;
+      }
+      doc.end();
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
 module.exports = {
+  generateSignedNotePDF,
   generateServiceReportPDF,
   generateServiceReportWithAttachments,
   generateEnrollmentPacketPDF,

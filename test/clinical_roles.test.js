@@ -180,30 +180,45 @@ test('the ceiling is per credential and is checked independently of any protocol
 
 // ---- 4. Acceptance: the LMSW billing rule -------------------------------
 
-test('an lmsw encounter carrying a service code is pendingCoSign and not billable', () => {
-  const r = roles.evaluateEncounterSignature(LMSW, [{ code: '90834' }]);
-  assert.equal(r.outcome, roles.SIGN_OUTCOME.PENDING_CO_SIGN);
-  assert.equal(r.billable, false);
-  assert.match(r.reason, /does not sign/i);
+test('an RN or LMSW signs as AUTHOR — the note locks, bills nothing, and waits for a clinician addendum', () => {
+  // Owner, 2026-09-27: "licensed clinician must add addendums to notes saved
+  // and signed by the non-billable team member". It holds with or without
+  // codes on the draft — codes are confirmed at the addendum, never billed on
+  // the author's signature.
+  for (const author of [RN, LMSW]) {
+    for (const codes of [[], [{ code: '99348' }], [{ code: '90834' }]]) {
+      const r = roles.evaluateEncounterSignature(author, codes);
+      assert.equal(r.outcome, roles.SIGN_OUTCOME.PENDING_CO_SIGN, `${author.clinicalRole} with ${JSON.stringify(codes)}`);
+      assert.equal(r.billable, false, 'a non-billable signature never makes a note billable');
+      assert.equal(r.signatureRole, 'authoring');
+      assert.match(r.reason, /clinician addendum/i, 'the reason says what happens next');
+    }
+  }
+  assert.equal(roles.isAuthorSigner(RN), true);
+  assert.equal(roles.isAuthorSigner(LMSW), true);
+  assert.equal(roles.isAuthorSigner(PROVIDER), false);
+  assert.equal(roles.isAuthorSigner(LCSW), false);
 });
 
-test('an lmsw NEVER completes a signature, even on a plain codeless note (owner switch, 2026-09-24)', () => {
-  // "Only FNP, RN, MD is able to sign" — an LMSW's documentation always waits
-  // on a co-signer, whether or not anything would ever bill. The old carve-out
-  // for a codeless note (ALLOWED, "nothing to hold") is gone.
-  const r = roles.evaluateEncounterSignature(LMSW, []);
-  assert.equal(r.outcome, roles.SIGN_OUTCOME.PENDING_CO_SIGN);
-  assert.equal(r.billable, false);
-  assert.equal(r.signatureRole, 'authoring');
-  assert.match(r.reason, /does not sign/i);
+test('the author hold names an LCSW only when an LCSW could actually bill it', () => {
+  assert.match(roles.evaluateEncounterSignature(LMSW, [{ code: '90834' }]).reason, /or an LCSW/);
+  assert.ok(!/LCSW/.test(roles.evaluateEncounterSignature(RN, [{ code: '99348' }]).reason),
+    'an E/M note cannot be billed by an LCSW, so the reason must not offer one');
 });
 
-test('an lcsw or provider clears the hold; an lmsw cannot clear their own', () => {
+test('only an lcsw or provider adds the billable addendum; an author cannot', () => {
   assert.equal(roles.canCoSignEncounter(LCSW), true);
   assert.equal(roles.canCoSignEncounter(PROVIDER), true);
-  assert.equal(roles.canCoSignEncounter(LMSW), false, 'A10 bills nothing independently — including by co-signing itself');
+  assert.equal(roles.canCoSignEncounter(LMSW), false, 'an author signer never produces the billable signature');
   assert.equal(roles.canCoSignEncounter(RN), false);
   assert.equal(roles.canCoSignEncounter(READ_ONLY), false);
+});
+
+test('a co-signature on a signed note is open to every licensed clinician, never to read-only staff', () => {
+  for (const u of [PROVIDER, RN, LCSW, LMSW]) assert.equal(roles.canCoSignNote(u), true, `${u.clinicalRole} may co-sign`);
+  assert.equal(roles.canCoSignNote(READ_ONLY), false);
+  assert.equal(roles.canCoSignNote(ADMIN), true, 'admin resolves to provider');
+  assert.equal(roles.canCoSignNote(CLIENT), false);
 });
 
 test('the charge is HELD at sign and RELEASED at co-sign, in one shared code path', () => {
@@ -244,14 +259,11 @@ test('the code set FAILS CLOSED — an unknown code is refused for a narrowed cr
 });
 
 test('signing branches on WHAT THE ENCOUNTER CARRIES, not only on who is asking', () => {
-  // An rn signing an encounter with a CPT code gets 403; the same rn signing a
-  // nursing note with no service code succeeds.
-  const billable = roles.evaluateEncounterSignature(RN, [{ code: '99348' }]);
-  assert.equal(billable.outcome, roles.SIGN_OUTCOME.REFUSED);
-  assert.equal(billable.code, 'SIGN_CREDENTIAL_BILLABLE');
-  assert.match(billable.reason, /99348/, 'the refusal names the code that makes it billable');
-  const nursing = roles.evaluateEncounterSignature(RN, []);
-  assert.equal(nursing.outcome, roles.SIGN_OUTCOME.ALLOWED);
+  // A provider's signature on a coded note is billable; on a codeless one it
+  // attests with nothing to bill.
+  assert.deepEqual(
+    [roles.evaluateEncounterSignature(PROVIDER, [{ code: '99348' }]).billable, roles.evaluateEncounterSignature(PROVIDER, []).billable],
+    [true, false]);
   // An LCSW signs the BH set and is refused an E/M encounter.
   assert.equal(roles.evaluateEncounterSignature(LCSW, [{ code: '90834' }]).outcome, roles.SIGN_OUTCOME.ALLOWED);
   assert.equal(roles.evaluateEncounterSignature(LCSW, [{ code: '99348' }]).code, 'SIGN_CREDENTIAL_CODE_SET');
