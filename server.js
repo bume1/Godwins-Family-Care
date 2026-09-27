@@ -7918,6 +7918,43 @@ app.post('/api/emr/disconnect', authenticateToken, requireClinicalRead, async (r
   }
 });
 
+// ---- Admin-triggered EHR recovery, the other half of the pair above ----
+// The two routes just above are self-service: a clinician connects and
+// disconnects their OWN OpenEMR sign-in. Neither lets an admin act for
+// someone else — so when a clinician's device is lost, an admin could reset
+// the app's MFA (below) but had no way to also clear the stale OpenEMR
+// connection sitting on that same device. This is that missing half.
+//
+// It still never touches an OpenEMR PASSWORD: this app has not held one
+// since Session 5.2 (per-user authorization_code + PKCE), and it never will
+// — that boundary is deliberate and stays intact. What this clears is only
+// OUR stored pointer to their OpenEMR token, which forces them to sign in
+// to OpenEMR again the next time they open a chart, the same as if they had
+// disconnected it themselves.
+app.get('/api/users/:userId/emr/status', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const target = users.find(u => u.id === req.params.userId);
+    if (!target) return res.status(404).json({ error: 'User not found' });
+    res.json(await emrAuth.statusFor(target.id));
+  } catch (error) { res.status(500).json({ error: 'Server error' }); }
+});
+app.post('/api/users/:userId/emr/disconnect', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const target = users.find(u => u.id === req.params.userId);
+    if (!target) return res.status(404).json({ error: 'User not found' });
+    const had = await emrAuth.disconnect(target.id);
+    // A distinct activity type from the self-service 'emr_disconnected' above,
+    // so the audit trail says an ADMIN did this to someone else rather than
+    // the clinician doing it to themselves.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'emr_disconnected_by_admin', 'openemr:oauth', target.id, { targetEmail: target.email, had });
+    res.json({ ok: true, disconnected: had });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not disconnect', code: 'EMR_DISCONNECT_FAILED' });
+  }
+});
+
 app.get('/api/clinical/status', authenticateToken, requireClinicalRead, async (req, res) => {
   const payer = await getPayerCredentialing();
   res.json({

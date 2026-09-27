@@ -185,6 +185,27 @@
           body: JSON.stringify({ skilledCompetencies })
         }).then(handleResponse).catch(err => ({ error: err.message })),
 
+      // Account recovery (Session 5.3 / 5.2 routes; this is their first UI).
+      // Resetting MFA and disconnecting OpenEMR are two independent things —
+      // see the cards in the Edit User form — and neither touches the
+      // password field above.
+      resetUserMfa: (token, userId) =>
+        fetch(`${API_URL}/api/users/${userId}/mfa/reset`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(err => ({ error: err.message })),
+
+      getEmrStatus: (token, userId) =>
+        fetch(`${API_URL}/api/users/${userId}/emr/status`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(err => ({ error: err.message })),
+
+      disconnectUserEmr: (token, userId) =>
+        fetch(`${API_URL}/api/users/${userId}/emr/disconnect`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(err => ({ error: err.message })),
+
       // Caregiver documents. The admin files onboarding paperwork on a
       // caregiver's behalf and must name them; the API refuses an unnamed one.
       listCaregiverDocs: (token, caregiverId) =>
@@ -1510,6 +1531,13 @@
       const [competencies, setCompetencies] = useState([]);
       // Session 4.8 — served, not hardcoded (see api.getClinicalRoles).
       const [clinicalRoleCatalog, setClinicalRoleCatalog] = useState([]);
+      // Account recovery: OpenEMR connection status for whoever is being
+      // edited. Fetched on demand when the form opens — like competencies,
+      // it lives outside formData because it is not a field the save
+      // round-trips, it is a live status read fresh each time.
+      const [emrStatus, setEmrStatus] = useState(null);
+      const [emrStatusLoading, setEmrStatusLoading] = useState(false);
+      const [accessActionBusy, setAccessActionBusy] = useState(false);
 
       const selectedClinicalRole = clinicalRoleCatalog.find(r => r.value === formData.clinicalRole) || null;
       const pendingRoleReview = users.filter(u => u.clinicalRoleAutoAssigned && u.clinicalRole);
@@ -1679,7 +1707,45 @@
         setCompetencies((user.skilledCompetencies || [])
           .filter(c => c && c.verified)
           .map(c => ({ task: c.task, verified: true, expiry: c.expiry || null })));
+        setEmrStatus(null);
+        if (user.hasClinicalAccess) refreshEmrStatus(user.id);
         setShowForm(true);
+      };
+
+      // Account recovery — the admin-hub half of the two routes above. Both
+      // actions are independent of each other and of the password field:
+      // resetting MFA does not touch OpenEMR, disconnecting OpenEMR does not
+      // touch MFA, and neither touches the password.
+      const refreshEmrStatus = async (userId) => {
+        setEmrStatusLoading(true);
+        const result = await api.getEmrStatus(token, userId);
+        setEmrStatusLoading(false);
+        if (!result.error) setEmrStatus(result);
+      };
+
+      const resetUserMfa = async (user) => {
+        if (!window.confirm(`Reset ${user.name}'s authenticator?\n\nThis deletes their current enrollment and signs them out of every active session immediately. They will set up a new authenticator (scan a fresh QR code) the next time they log in.`)) return;
+        setAccessActionBusy(true);
+        const result = await api.resetUserMfa(token, user.id);
+        setAccessActionBusy(false);
+        if (result.error) { setMessage(`Error: ${result.error}`); return; }
+        setMessage(result.hadEnrollment
+          ? `Authenticator reset for ${user.name}. ${result.sessionsRevoked} active session(s) ended — they'll get a new QR code next login.`
+          : `${user.name} had no authenticator enrolled yet.`);
+        setEditingUser(prev => (prev && prev.id === user.id) ? { ...prev, mfaEnrolled: false } : prev);
+        loadData();
+      };
+
+      const disconnectUserEmr = async (user) => {
+        if (!window.confirm(`Disconnect ${user.name}'s OpenEMR connection?\n\nThey will need to sign in to OpenEMR again the next time they open a chart. This does not change their OpenEMR password — that is set in OpenEMR itself, not here.`)) return;
+        setAccessActionBusy(true);
+        const result = await api.disconnectUserEmr(token, user.id);
+        setAccessActionBusy(false);
+        if (result.error) { setMessage(`Error: ${result.error}`); return; }
+        setMessage(result.disconnected
+          ? `${user.name}'s OpenEMR connection was cleared. They'll be asked to sign in again next time.`
+          : `${user.name} had no active OpenEMR connection.`);
+        refreshEmrStatus(user.id);
       };
 
       const handleDelete = async (userId) => {
@@ -1943,7 +2009,7 @@
                   className="px-4 py-2 rounded-lg font-medium flex items-center gap-2 shadow-sm hover:shadow-md transition-all border border-orange-300 bg-orange-50 text-orange-700 hover:bg-orange-100">
                   {Icons.key} Bulk Reset
                 </button>
-                <button onClick={() => { setShowForm(true); setEditingUser(null); setFormData(defaultFormData); setCompetencies([]); }}
+                <button onClick={() => { setShowForm(true); setEditingUser(null); setFormData(defaultFormData); setCompetencies([]); setEmrStatus(null); }}
                   className="px-4 py-2 rounded-lg font-medium flex items-center gap-2 shadow-sm hover:shadow-md transition-all"
                   style={{backgroundColor: '#033D50', color: 'white'}}>
                   {Icons.plus} Add User
@@ -2033,7 +2099,7 @@
               <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
                 <div className="sticky top-0 bg-white border-b px-6 py-4 flex items-center justify-between">
                   <h2 className="text-lg font-bold text-accent">{editingUser ? 'Edit User' : 'Create New User'}</h2>
-                  <button onClick={() => { setShowForm(false); setEditingUser(null); setCompetencies([]); }} className="text-gray-400 hover:text-gray-600">
+                  <button onClick={() => { setShowForm(false); setEditingUser(null); setCompetencies([]); setEmrStatus(null); }} className="text-gray-400 hover:text-gray-600">
                     {Icons.close}
                   </button>
                 </div>
@@ -2335,6 +2401,58 @@
                               Last verified {new Date(formData.medicareEnrollmentVerified).toLocaleDateString()} by {formData.medicareEnrollmentVerifiedBy || 'an admin'}.
                             </p>
                           )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* ── Account recovery ────────────────────────────────
+                      Both routes existed on the server (Session 5.3 MFA
+                      reset, Session 5.2 OpenEMR disconnect) with no button
+                      anywhere in the app. This is that button. Only shown
+                      when editing an existing user — there is nothing to
+                      recover for one that does not exist yet. */}
+                  {editingUser && (
+                    <div className="border-t pt-4">
+                      <h3 className="font-medium text-gray-800 mb-1">Account recovery</h3>
+                      <p className="text-sm text-gray-500 mb-3">
+                        For a lost or replaced device. Neither of these is the password field above — reset that separately if it also needs to change.
+                      </p>
+                      <div className="p-3 bg-gray-50 rounded-lg">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-medium text-gray-700">Authenticator (MFA)</p>
+                            <p className="text-xs text-gray-500 mt-0.5">
+                              {editingUser.mfaEnrolled
+                                ? 'Enrolled. Resetting deletes it and signs them out of every active session immediately — they scan a new QR code next login.'
+                                : 'Not enrolled yet. They are asked to enrol at their next login.'}
+                            </p>
+                          </div>
+                          <button type="button" disabled={!editingUser.mfaEnrolled || accessActionBusy}
+                            onClick={() => resetUserMfa(editingUser)}
+                            className="px-3 py-1.5 bg-amber-100 text-amber-800 text-sm rounded-lg hover:bg-amber-200 disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap">
+                            Reset authenticator
+                          </button>
+                        </div>
+                      </div>
+
+                      {formData.hasClinicalAccess && (
+                        <div className="mt-3 p-3 bg-gray-50 rounded-lg">
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <p className="text-sm font-medium text-gray-700">OpenEMR connection</p>
+                              <p className="text-xs text-gray-500 mt-0.5">
+                                {emrStatusLoading ? 'Checking…' : (emrStatus && emrStatus.connected)
+                                  ? `Connected${emrStatus.emrUser && emrStatus.emrUser.username ? ` as ${emrStatus.emrUser.username}` : ''}${emrStatus.connectedAt ? ` since ${new Date(emrStatus.connectedAt).toLocaleDateString()}` : ''}. This is their own OpenEMR sign-in, separate from this app's password — disconnecting does not change it.`
+                                  : 'Not connected. They sign in to OpenEMR the next time they open a chart.'}
+                              </p>
+                            </div>
+                            <button type="button" disabled={!(emrStatus && emrStatus.connected) || accessActionBusy}
+                              onClick={() => disconnectUserEmr(editingUser)}
+                              className="px-3 py-1.5 bg-amber-100 text-amber-800 text-sm rounded-lg hover:bg-amber-200 disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap">
+                              Disconnect OpenEMR
+                            </button>
+                          </div>
                         </div>
                       )}
                     </div>
@@ -2729,7 +2847,7 @@
                   )}
 
                   <div className="flex justify-end gap-3 pt-4 border-t sticky bottom-0 bg-white pb-2">
-                    <button type="button" onClick={() => { setShowForm(false); setEditingUser(null); setMessage(''); setCompetencies([]); }} className="px-6 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 font-medium" disabled={saving}>
+                    <button type="button" onClick={() => { setShowForm(false); setEditingUser(null); setMessage(''); setCompetencies([]); setEmrStatus(null); }} className="px-6 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 font-medium" disabled={saving}>
                       Cancel
                     </button>
                     <button type="submit" disabled={saving} className="px-6 py-2.5 rounded-lg font-medium flex items-center gap-2" style={{backgroundColor: '#033D50', color: 'white'}}>
