@@ -7,6 +7,7 @@
 ### Version 3.1.0 - September 27, 2026
 
 #### New Features
+- Add admin buttons for MFA reset and OpenEMR disconnect
 - Add a script to export GFC's billed CPT/HCPCS codes and modifiers
 - Add a quarterly admin/manager reminder to refresh the NCCI/MUE tables
 - Add an NCCI/MUE bundling check to the encounter sign gate
@@ -44,7 +45,6 @@
 - Say in one place what this app has proven about OpenEMR, and what it hasn't
 - Let a psychiatric visit be the same visit, with the exam it needs
 - Walk the encounter one step at a time, and bring the chart to it
-- Send the modifier that says a visit was by video
 
 
 ### Version 3.0.1 - September 23, 2026
