@@ -1138,6 +1138,14 @@
       </div>
     );
 
+    // Readings on a saved note that has not been signed. OpenEMR's vitals form
+    // gets them once, at signing — the server flags them; this only labels them.
+    const DraftVitalsChip = () => (
+      <span className="chip bg-amber-50 text-amber-800 ml-1" title="From a saved note that is not signed yet. OpenEMR's vitals form gets these when the note is signed.">
+        Draft — not yet in OpenEMR
+      </span>
+    );
+
     const chartRow = (main, sub, right, key) => (
       <div key={key} className="flex items-start justify-between py-1.5 border-b border-stone-100 last:border-0 gap-2">
         <div className="min-w-0"><div className="font-semibold text-[13px]">{main}</div>{sub && <div className="text-xs text-stone-500">{sub}</div>}</div>
@@ -1844,7 +1852,8 @@
               <Row label="Reason">{k.reason || '—'}</Row>
               <Row label="Last visit">{k.lastVisitAt || '—'}</Row>
               <Row label="Last vitals">
-                {k.lastVitals ? [k.lastVitals.label, k.lastVitals.value].filter(Boolean).join(' ') : '—'}
+                {k.lastVitals ? [k.lastVitals.label || k.lastVitals.name, k.lastVitals.value].filter(Boolean).join(' ') : '—'}
+                {k.lastVitals && k.lastVitals.draft && <DraftVitalsChip />}
               </Row>
               <Row label="Active problems">
                 {k.activeProblems && k.activeProblems.length
@@ -2148,7 +2157,14 @@
               <ChartSection title="Encounters" icon="ti-stethoscope" data={emr.encounters} linked={chart.linked}
                 render={(r, i) => chartRow(r.type, [r.provider, r.start && fmtTs(r.start)].filter(Boolean).join(' · '), r.status, i)} />
               <ChartSection title="Vitals (recent)" icon="ti-heart-rate-monitor" data={emr.vitals} linked={chart.linked}
-                render={(r, i) => chartRow(r.name, r.at && fmtTs(r.at), r.value, i)} />
+                render={(r, i) => chartRow(r.name, r.at && fmtTs(r.at), r.value, i)}>
+                {(chart.draftVitals || []).length > 0 && (
+                  <div className="mb-2 pb-2 border-b border-stone-100">
+                    <div className="mb-1"><DraftVitalsChip /></div>
+                    {chart.draftVitals.map((r, i) => chartRow(r.name, r.at && fmtDayLabel(String(r.at).slice(0, 10)), r.value, `draft-${i}`))}
+                  </div>
+                )}
+              </ChartSection>
             </div>
           </div>
         </div>
