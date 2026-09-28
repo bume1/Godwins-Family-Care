@@ -7543,7 +7543,9 @@ app.get('/api/gfc/clinical/summary', authenticateToken, requireEnrolledClient, a
         const emrRows = degrade(encountersR, 'visits');
         const byUuid = new Map(mineRecords.map(r => [String(r.encounterUuid), r]));
         const emrById = new Map((emrRows || []).map(clinicalRepo.summarizeEncounter).map(e => [String(e.id), e]));
-        const ids = [...new Set([...emrById.keys(), ...byUuid.keys()])];
+        // A deleted (voided) encounter never reaches the patient.
+        const ids = [...new Set([...emrById.keys(), ...byUuid.keys()])]
+          .filter(id => !(byUuid.get(id) && byUuid.get(id).noteStatus === clinicalNotes.NOTE_STATUS.VOIDED));
         const hp = client.clinicalInitialVisit || null;
         const visits = ids.map(id => patientRead.buildVisitSummary({
           encounterUuid: id, encounter: emrById.get(id) || null, record: byUuid.get(id) || null,
@@ -8366,8 +8368,9 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
     // Session 4.12 — the banner. Built from the SAME allergy read the chart's
     // own Allergies section uses, so the strip and the section can never
     // disagree about what this patient is allergic to.
+    const deletedEnc = await deletedEncounterIds(client.id);
     const encounterRows = encounters.status === 'fulfilled'
-      ? encounters.value.map(clinicalRepo.summarizeEncounter) : [];
+      ? withoutDeleted(encounters.value.map(clinicalRepo.summarizeEncounter), deletedEnc) : [];
     const banner = clinicalRepo.buildPatientBanner({
       client, linked: true, emrAllergies,
       facility: await facilityPromise,
@@ -8388,7 +8391,7 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
         problems: take(problems, clinicalRepo.summarizeCondition),
         allergies: emrAllergies,
         medications: take(meds, clinicalRepo.summarizeMedicationRequest),
-        encounters: take(encounters, clinicalRepo.summarizeEncounter),
+        encounters: (() => { const t = take(encounters, clinicalRepo.summarizeEncounter); return t.ok ? { ...t, rows: withoutDeleted(t.rows, deletedEnc) } : t; })(),
         carePlans: take(carePlans, r => ({ id: r.id, status: r.status, description: r.description || null })),
         // The EMR half, and then the whole list — see chartDocuments below.
         documents: take(documents, clinicalRepo.summarizeDocument),
@@ -10261,7 +10264,9 @@ const appendNoteRevision = async (row) => {
 // section.
 const noteSatisfiers = (ctx) => ({
   ordersRx: (ctx.orders || []).length > 0 || (ctx.prescriptions || []).length > 0,
-  ordersRxReferrals: (ctx.orders || []).length > 0,
+  // "Orders / Rx / Referrals": a prescription on the encounter counts as well
+  // as an order — the note no longer offers a free-text copy of either.
+  ordersRxReferrals: (ctx.orders || []).length > 0 || (ctx.prescriptions || []).length > 0,
   medicationsRx: (ctx.prescriptions || []).length > 0,
   riskAssessment: !!ctx.riskAssessment
 });
@@ -10621,19 +10626,29 @@ app.put('/api/clinical/patients/:clientId/encounters/:euuid/note', authenticateT
   }
 });
 
-// ── Discard a saved draft ────────────────────────────────────────────────
-// OpenEMR's API cannot delete an encounter, so a draft abandoned after its
-// first save is VOIDED, with a reason, and the chart says so in words. A blank
-// encounter with no explanation is the worse outcome. It never bills.
+// ── Delete a mistaken encounter (owner, 2026-09-28) ──────────────────────
+// UNSIGNED only — a signed note is corrected by addendum. OpenEMR's API cannot
+// erase an encounter, so it is VOIDED there (its note says who deleted it,
+// when and why), hidden from every list in the app, and kept on record. A
+// reason is required. Refused while an order or prescription hangs off it
+// (clinicalNotes.checkEncounterDeletable), so nothing downstream is orphaned.
+// Anything that pointed at it is released: an appointment it documented goes
+// back to "not yet documented", and it stops counting as the initial visit.
 app.post('/api/clinical/patients/:clientId/encounters/:euuid/note/void', authenticateToken, requireClinicalWrite, requireNoteWriter, async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res);
-    if (!ctx || refuseIfClosed(ctx, res)) return;
+    if (!ctx) return;
+    const deletable = clinicalNotes.checkEncounterDeletable({ record: ctx.record, closed: ctx.closed, orders: ctx.orders, prescriptions: ctx.prescriptions });
+    if (!deletable.ok) return res.status(deletable.status).json({ error: deletable.error, code: deletable.code, blockers: deletable.blockers });
     const reason = String((req.body || {}).reason || '').trim().slice(0, 500);
-    if (reason.length < 3) return res.status(400).json({ error: 'Say why this draft is being discarded — it stays on the chart as a discarded draft.', code: 'NOTE_VOID_REASON_REQUIRED' });
+    if (reason.length < 3) return res.status(400).json({ error: 'Say why this encounter is being deleted. The reason is kept on record.', code: 'NOTE_VOID_REASON_REQUIRED' });
     const at = new Date().toISOString();
+    // Release the appointment it documented, keeping the pointer on record.
+    const links = await getAppointmentLinkage();
+    const released = links.filter(l => String(l.encounterUuid) === String(ctx.encounterUuid));
+    if (released.length) await db.set('appointment_encounters', links.filter(l => String(l.encounterUuid) !== String(ctx.encounterUuid)));
     const record = { ...ctx.record, noteStatus: clinicalNotes.NOTE_STATUS.VOIDED,
-      voided: { by: clinicalRepo.actorRecord(ctx.actor), at, reason }, updatedAt: at };
+      voided: { by: clinicalRepo.actorRecord(ctx.actor), at, reason, releasedAppointments: released.map(l => ({ ...l })) }, updatedAt: at };
     if (!record.note) record.note = { kind: record.noteKind || 'followup', chiefConcern: '', subjective: '', objective: '', assessment: '', plan: '', sections: {}, vitals: {}, hp: {} };
     const revisions = await appendNoteRevision(clinicalNotes.buildNoteRevision({
       id: uuidv4(), record, version: Number(record.noteVersion || 0) + 1, actor: ctx.actor, clinicalRole: ctx.actor.clinicalRole, changed: [], action: 'void'
@@ -10643,13 +10658,35 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/note/void', authent
     const w = await writeNarrativeNote(ctx.emr, ctx.client, record, { revisions });
     if (w) warnings.push(w);
     await saveBillingRecord(ctx.rows, record);
-    await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_note_voided', 'client', ctx.client.id, { encounterUuid: ctx.encounterUuid });
-    res.json({ message: 'Draft discarded. The encounter stays on the chart marked as a discarded draft, and it will never bill.', ...(await noteView({ ...ctx, record }, { signsAsAuthor: clinicalRoles.isAuthorSigner(req.user) })), warnings });
+    // A deleted note is not the client's initial visit. The stamp is moved to
+    // the voided record so the audit trail keeps it, and the checklist step
+    // re-opens.
+    const civ = ctx.users[ctx.idx].clinicalInitialVisit;
+    if (civ && String(civ.encounterUuid) === String(ctx.encounterUuid)) {
+      delete ctx.users[ctx.idx].clinicalInitialVisit;
+      await db.set('users', ctx.users);
+      invalidateUsersCache();
+      record.voided.clearedInitialVisit = civ;
+      await saveBillingRecord(ctx.rows, record);
+    }
+    await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_encounter_deleted', 'client', ctx.client.id, {
+      encounterUuid: ctx.encounterUuid, releasedAppointmentEids: released.map(l => String(l.eid)), clearedInitialVisit: !!record.voided.clearedInitialVisit
+    });
+    res.json({ message: `Encounter deleted. It is removed from the chart's lists and voided in OpenEMR; who deleted it, when and why is kept on record.${released.length ? ' Its appointment is back to "not yet documented".' : ''}`,
+      ...(await noteView({ ...ctx, record }, { signsAsAuthor: clinicalRoles.isAuthorSigner(req.user) })), warnings });
   } catch (error) {
-    console.error('Clinical note void error:', error);
-    res.status(502).json({ error: `Discard failed: ${error.message}` });
+    console.error('Clinical encounter delete error:', error);
+    res.status(502).json({ error: `Delete failed: ${error.message}` });
   }
 });
+
+// The encounters a person deleted, as a set of ids — every list that shows
+// encounters (the chart, "last visit", the pre-visit packet, the timeline and
+// the patient's own portal) leaves these out.
+const deletedEncounterIds = async (clientId) => new Set((await loadRows('encounter_billing'))
+  .filter(r => r && r.clientId === clientId && r.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED)
+  .map(r => String(r.encounterUuid)));
+const withoutDeleted = (rows, deleted) => (rows || []).filter(e => !deleted.has(String(e && e.id)));
 
 // ── Carry forward: which earlier notes, and one note's content ─────────────
 app.get('/api/clinical/patients/:clientId/notes/carry-forward-sources', authenticateToken, requireClinicalRead, async (req, res) => {
@@ -10829,10 +10866,15 @@ app.get('/api/clinical/patients/:clientId/encounters', authenticateToken, requir
         appointmentEid: eidByEncounter.get(String(e.id)) || null,
         noteStatus: noteStatusOf(record, att),
         awaitingAddendum: !!(record && record.coSignStatus === 'pending'),
-        visitLabel: record ? clinicalRepo.visitLabel(record.visit) : null
+        visitLabel: record ? clinicalRepo.visitLabel(record.visit) : null,
+        deleted: record && record.voided ? { byName: record.voided.by && record.voided.by.name, at: record.voided.at, reason: record.voided.reason } : null
       };
     }).sort((a, b) => String(b.start || '').localeCompare(String(a.start || '')));
-    res.json({ linked: true, encounters: list, emrError });
+    // Deleted encounters are left out unless asked for — they stay on record,
+    // and "Show deleted" is where who deleted them, when and why is read.
+    const includeDeleted = String(req.query.includeDeleted || '') === '1';
+    const deletedCount = list.filter(e => e.noteStatus === 'voided').length;
+    res.json({ linked: true, encounters: includeDeleted ? list : list.filter(e => e.noteStatus !== 'voided'), deletedCount, emrError });
   } catch (error) {
     console.error('Clinical encounter list error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -12497,7 +12539,7 @@ app.get('/api/clinical/patients/:clientId/pre-visit', authenticateToken, require
       const take = (r, fn) => r.status === 'fulfilled'
         ? { ok: true, rows: r.value.map(fn) }
         : { ok: false, error: r.reason && r.reason.message, permissionPending: (r.reason && r.reason.status) === 403 };
-      const encRows = encounters.status === 'fulfilled' ? encounters.value.map(clinicalRepo.summarizeEncounter) : [];
+      const encRows = encounters.status === 'fulfilled' ? withoutDeleted(encounters.value.map(clinicalRepo.summarizeEncounter), await deletedEncounterIds(client.id)) : [];
       lastVisitAt = clinicalRepo.lastVisitDateOf(encRows);
       const problemsTake = take(problems, clinicalRepo.summarizeCondition);
       activeProblems = problemsTake.ok ? problemsTake.rows.slice(0, 12) : [];
@@ -12867,7 +12909,7 @@ app.get('/api/clinical/patients/:clientId/timeline', authenticateToken, requireC
         emr.getEncounters(client.openEmrPatientId),
         emr.getPatientAppointmentRows(client.openEmrPatientId)
       ]);
-      if (encRes.status === 'fulfilled') encounters = encRes.value.map(clinicalRepo.summarizeEncounter);
+      if (encRes.status === 'fulfilled') encounters = withoutDeleted(encRes.value.map(clinicalRepo.summarizeEncounter), await deletedEncounterIds(client.id));
       else emrNotice = `Visits could not be read from OpenEMR: ${encRes.reason && encRes.reason.message}`;
       if (apptRes.status === 'fulfilled') {
         appointments = await summarizeCalendarRows(apptRes.value);

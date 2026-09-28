@@ -355,7 +355,7 @@ test('the OpenEMR narrative keeps structure, drops formatting markers, and ends 
 
 test('a discarded draft says so in words and carries no clinical content', () => {
   const out = notes.composeNarrative({ note: { assessment: 'something clinical' }, voided: { by: RN, at: '2026-09-27T13:00:00Z', reason: 'Wrong patient' } });
-  assert.match(out.subjective, /Draft discarded by Ruth Nolan, RN — .* — Wrong patient/);
+  assert.match(out.subjective, /ENTERED IN ERROR — encounter deleted by Ruth Nolan, RN — .* — Wrong patient/);
   assert.doesNotMatch(Object.values(out).join('\n'), /something clinical/);
 });
 
@@ -401,4 +401,161 @@ test('the PDF signature block is drawn in bold', () => {
   const block = body.slice(body.indexOf("'ELECTRONICALLY SIGNED'") - 200);
   assert.match(block, /font\('Helvetica-Bold'\)[^\n]*\.text\('ELECTRONICALLY SIGNED'/);
   assert.match(block, /for \(const l of lines\)[\s\S]{0,200}font\('Helvetica-Bold'\)/, 'every signature line is bold');
+});
+
+// ---- One note, in the visit type's order (owner report, 2026-09-28) ------
+// The template sections used to sit in a separate "Visit sections" card in the
+// middle of the note, so the page read as two notes. The layout helper is
+// lifted out of the page and RUN.
+const PAGE = fs.readFileSync(path.join(__dirname, '..', 'public', 'clinical.html'), 'utf8');
+const layoutSrc = (() => {
+  const a = PAGE.indexOf('const FIXED_BLOCK_FOR_SECTION = ');
+  const b = PAGE.indexOf('// One section\'s own box');
+  assert.ok(a > 0 && b > a, 'the layout helper moved — re-anchor this slice');
+  return PAGE.slice(a, b);
+})();
+const layout = new Function('NF', `${layoutSrc}; return { FIXED_BLOCK_FOR_SECTION, SECTIONS_COVERED_BY_CARDS, noteLayout };`)(require('../public/note-format.js'));
+const apptTypes = require('../appointmentTypes');
+const newPatientSections = apptTypes.sectionsFor('pc_new_patient', 'in_person')
+  .map(s => ({ key: s.key, label: s.label || apptTypes.SECTIONS[s.key], required: s.required === true, ownField: notes.sectionHasOwnField(s.key) }));
+const HP_FIXED = ['chiefConcern', 'subjective', 'vitals', 'exam', 'assessment', 'plan'];
+
+test('the page maps exactly the sections the server says a fixed field answers', () => {
+  assert.deepStrictEqual(Object.keys(layout.FIXED_BLOCK_FOR_SECTION).sort(), Object.keys(notes.FIELD_FOR_SECTION).sort());
+});
+
+test('a New Patient note lays out every section once, in the template\'s order', () => {
+  const items = layout.noteLayout({ sections: newPatientSections, fixedBlocks: HP_FIXED, extraBlocks: ['skinWound', 'pain', 'hazards', 'triage'], extraLabel: 'Home visit assessment', stored: {} });
+  const order = items.filter(i => i.kind !== 'heading').map(i => (i.kind === 'fixed' ? `fixed:${i.block}` : `${i.kind}:${i.section.key}`));
+  assert.deepStrictEqual(order.slice(0, 16), [
+    'fixed:chiefConcern', 'fixed:subjective', 'section:pmhSurgical', 'section:familyHistory', 'section:socialHistory',
+    'section:medReconciliation', 'section:allergies', 'section:ros', 'fixed:vitals', 'fixed:exam', 'fixed:assessment',
+    'fixed:plan', 'pointer:ordersRxReferrals', 'section:careManagementEligibility', 'section:followUp', 'section:mdmOrTime'
+  ]);
+  assert.deepStrictEqual(order.slice(16), ['fixed:skinWound', 'fixed:pain', 'fixed:hazards', 'fixed:triage']);
+  assert.strictEqual(new Set(order).size, order.length, 'nothing appears twice');
+  // A section a fixed field answers never also gets its own box.
+  assert.ok(!items.some(i => i.kind === 'section' && notes.FIELD_FOR_SECTION[i.section.key]));
+});
+
+test('orders and prescriptions are the interactive cards, not a second free-text box', () => {
+  const items = layout.noteLayout({ sections: newPatientSections, fixedBlocks: HP_FIXED, stored: {} });
+  const orders = items.find(i => i.section && i.section.key === 'ordersRxReferrals');
+  assert.strictEqual(orders.kind, 'pointer');
+  assert.match(orders.card, /Orders and Prescriptions cards/);
+  // An orders section is never REQUIRED, so a pointer can never block signing.
+  for (const t of apptTypes.APPOINTMENT_TYPES) for (const m of ['in_person', 'telehealth']) {
+    for (const s of apptTypes.sectionsFor(t.key, m)) {
+      if (layout.SECTIONS_COVERED_BY_CARDS[s.key]) assert.notStrictEqual(s.required, true, `${t.key} requires ${s.key}`);
+    }
+  }
+});
+
+test('nothing already typed is hidden: an old orders note and a section from another visit type still show', () => {
+  const stored = { ordersRxReferrals: 'Ordered CMP by phone', treatmentPlan: 'From when this was a BH visit' };
+  const items = layout.noteLayout({ sections: newPatientSections, fixedBlocks: HP_FIXED, stored, labelFor: k => k });
+  assert.strictEqual(items.find(i => i.section && i.section.key === 'ordersRxReferrals').kind, 'section', 'typed text keeps its box');
+  const orphan = items.find(i => i.section && i.section.key === 'treatmentPlan');
+  assert.ok(orphan && orphan.kind === 'section', 'a section this visit type no longer lists still shows');
+  assert.ok(items.some(i => i.kind === 'heading' && /earlier visit type/.test(i.label)));
+});
+
+test('with no visit type chosen, the note still shows every field in the usual order', () => {
+  const items = layout.noteLayout({ sections: [], fixedBlocks: HP_FIXED, extraBlocks: ['triage'], extraLabel: 'Home visit assessment', stored: {} });
+  assert.deepStrictEqual(items.filter(i => i.kind === 'fixed').map(i => i.block), [...HP_FIXED, 'triage']);
+});
+
+test('the separate "Visit sections" card is gone from both note editors', () => {
+  assert.ok(!/<h2>Visit sections<\/h2>/.test(PAGE));
+  assert.ok(!PAGE.includes('<TemplateSections'));
+  assert.strictEqual((PAGE.match(/\{noteLayout\(\{/g) || []).length, 2, 'the H&P and the follow-up note both use the one layout');
+});
+
+test('a prescription counts toward "Orders / Rx / Referrals" on the server', () => {
+  assert.match(SERVER, /ordersRxReferrals: \(ctx\.orders \|\| \[\]\)\.length > 0 \|\| \(ctx\.prescriptions \|\| \[\]\)\.length > 0/);
+});
+
+// ---- An arm that can't be used for a BP (owner, 2026-09-28) --------------
+
+const hpWith = (vitals) => notes.sanitizeNote({ kind: 'hp', chiefConcern: 'Visit', vitals }).note;
+
+test('an H&P signs with one arm marked unable to take, with its reason', () => {
+  const n = hpWith({ bpRightSys: '135', bpRightDia: '76', bpLeftUnable: 'yes', bpLeftUnableReason: 'Pacemaker side' });
+  assert.deepStrictEqual(notes.checkNoteForSigning(n), { ok: true });
+  assert.match(notes.vitalsLine(n), /BP right arm 135\/76; BP left arm unable to obtain \(Pacemaker side\)/);
+  const row = notes.buildVitalsRow(n);
+  assert.strictEqual(row.bps, '135'); assert.strictEqual(row.bpd, '76');
+  assert.match(row.note, /left arm unable to obtain \(Pacemaker side\)/);
+  assert.match(notes.draftVitalsRows({ encounterUuid: 'e', noteStatus: 'draft', note: n })[0].value, /left unable to obtain/);
+});
+
+test('"unable to take" without a reason, or a blank arm, still refuses signing', () => {
+  const noReason = notes.checkNoteForSigning(hpWith({ bpRightSys: '135', bpLeftUnable: 'yes' }));
+  assert.strictEqual(noReason.code, 'HP_BP_BOTH_ARMS'); assert.match(noReason.error, /without a reason/);
+  const blank = notes.checkNoteForSigning(hpWith({ bpRightSys: '135' }));
+  assert.strictEqual(blank.code, 'HP_BP_BOTH_ARMS'); assert.match(blank.error, /Unable to take/);
+});
+
+test('the reason is kept at full length, the readings stay short', () => {
+  const long = 'Right-sided AV fistula for dialysis — do not cuff this arm per nephrology';
+  const n = hpWith({ bpLeftSys: '130', bpRightUnable: 'yes', bpRightUnableReason: long, hr: '12345678901234567890' });
+  assert.strictEqual(n.vitals.bpRightUnableReason, long);
+  assert.strictEqual(n.vitals.hr.length, 16);
+});
+
+test('two section names for one field show that field once', () => {
+  const secs = [
+    { key: 'hpi', label: 'HPI', ownField: false },
+    { key: 'intervalHistory', label: 'Interval History', ownField: false },
+    { key: 'vitals', label: 'Vitals', ownField: false },
+    { key: 'awvVitals', label: 'Vitals (AWV)', ownField: false }
+  ];
+  const items = layout.noteLayout({ sections: secs, fixedBlocks: HP_FIXED, stored: {} });
+  assert.strictEqual(items.filter(i => i.kind === 'fixed' && i.block === 'subjective').length, 1);
+  assert.strictEqual(items.filter(i => i.kind === 'fixed' && i.block === 'vitals').length, 1);
+});
+
+// ---- Deleting a mistaken encounter (owner, 2026-09-28) --------------------
+
+test('an unsigned encounter with nothing hanging off it can be deleted', () => {
+  assert.deepStrictEqual(notes.checkEncounterDeletable({ record: { noteStatus: 'draft' }, closed: false, orders: [], prescriptions: [] }), { ok: true });
+});
+
+test('a signed note cannot be deleted — it is corrected by addendum', () => {
+  const r = notes.checkEncounterDeletable({ record: { noteStatus: 'signed' }, closed: true, orders: [], prescriptions: [] });
+  assert.strictEqual(r.ok, false); assert.strictEqual(r.code, 'ENCOUNTER_CLOSED'); assert.match(r.error, /addendum/);
+});
+
+test('an encounter with a live order or any prescription is not deleted, and each is named', () => {
+  const r = notes.checkEncounterDeletable({ record: { noteStatus: 'draft' }, closed: false,
+    orders: [{ tests: ['CMP'], status: 'sent' }, { tests: ['CBC'], status: 'cancelled' }],
+    prescriptions: [{ drug: 'Lisinopril 10 mg' }] });
+  assert.strictEqual(r.code, 'ENCOUNTER_HAS_ORDERS');
+  assert.deepStrictEqual(r.blockers, ['order "CMP" (sent)', 'prescription "Lisinopril 10 mg"']);
+  assert.match(r.error, /Cancel the order/); assert.match(r.error, /prescription cannot be deleted/);
+  // A cancelled order alone does not block.
+  assert.strictEqual(notes.checkEncounterDeletable({ record: { noteStatus: 'draft' }, closed: false, orders: [{ tests: ['CBC'], status: 'cancelled' }], prescriptions: [] }).ok, true);
+});
+
+test('a deleted encounter cannot be deleted twice', () => {
+  assert.strictEqual(notes.checkEncounterDeletable({ record: { noteStatus: 'voided' }, closed: false }).code, 'ENCOUNTER_ALREADY_DELETED');
+});
+
+test('the delete route checks first, needs a reason, releases the appointment and the initial-visit stamp', () => {
+  const src = stripComments(SERVER);
+  const route = src.slice(src.indexOf("app.post('/api/clinical/patients/:clientId/encounters/:euuid/note/void'"));
+  const body = route.slice(0, route.indexOf('\napp.'));
+  assert.ok(body.indexOf('checkEncounterDeletable(') < body.indexOf('saveBillingRecord('), 'the check runs before anything is written');
+  assert.match(body, /NOTE_VOID_REASON_REQUIRED/);
+  assert.match(body, /db\.set\('appointment_encounters'/);
+  assert.match(body, /delete ctx\.users\[ctx\.idx\]\.clinicalInitialVisit/);
+});
+
+test('every list of encounters leaves the deleted ones out', () => {
+  assert.match(SERVER, /\? withoutDeleted\(encounters\.value\.map\(clinicalRepo\.summarizeEncounter\), deletedEnc\)/, 'chart banner: last visit');
+  assert.match(SERVER, /rows: withoutDeleted\(t\.rows, deletedEnc\)/, 'chart encounters section');
+  assert.match(SERVER, /const encRows = encounters\.status === 'fulfilled' \? withoutDeleted\(/, 'pre-visit packet: last visit');
+  assert.match(SERVER, /encounters = withoutDeleted\(encRes\.value\.map\(clinicalRepo\.summarizeEncounter\), await deletedEncounterIds\(client\.id\)\)/, 'timeline');
+  assert.match(SERVER, /filter\(id => !\(byUuid\.get\(id\) && byUuid\.get\(id\)\.noteStatus === clinicalNotes\.NOTE_STATUS\.VOIDED\)\)/, 'the patient portal never shows a deleted visit');
+  assert.match(SERVER, /encounters: includeDeleted \? list : list\.filter\(e => e\.noteStatus !== 'voided'\)/);
 });
