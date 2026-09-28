@@ -238,41 +238,44 @@ const serviceCodeRefusal = (user, badCodes) => {
   return `Your clinical credential does not permit selecting service code${(badCodes || []).length === 1 ? '' : 's'} ${list}.`;
 };
 
-// ---- Signing a billable encounter (§3) ----------------------------------
-// GATE ON WHAT IS BEING ATTESTED, not only on who is asking.
-//   • carries any CPT/service code → provider (LCSW for the BH set only)
-//   • no service codes (nursing documentation) → rn or provider may sign
-//   • an LMSW NEVER completes a signature, billed or not (owner rule,
-//     2026-09-24: "only FNP, RN, MD is able to sign" — LMSW co-signs).
-//     Supervision is the whole reason the credential exists, so the carve-out
-//     this used to have for a plain, codeless note is gone: an LMSW's note is
-//     ALWAYS held for a provider's or an LCSW's signature, and it is the
-//     co-signer who attests — never the LMSW, whether or not anything bills.
+// ---- Signing an encounter (§3) ------------------------------------------
+// THE BILLABLE SIGNATURE IS THE LICENSED CLINICIAN WHO SIGNS, within their
+// scope (owner, 2026-09-27). Two tiers:
+//
+//   BILLABLE SIGNERS — provider (NP/MD) signs anything; an LCSW signs the
+//   behavioural-health set. Their signature is the claim's rendering signature.
+//
+//   AUTHOR SIGNERS — an RN or an LMSW signs their own note as its AUTHOR. That
+//   locks the narrative and bills NOTHING: the note waits, "awaiting clinician
+//   addendum", until a billable signer adds the required addendum, and THAT
+//   addendum is the billable signature (owner, 2026-09-27: "licensed clinician
+//   must add addendums to notes saved and signed by the non-billable team
+//   member"). This holds whether or not the draft carries codes — any codes on
+//   it are confirmed by the clinician at the addendum, never billed on the
+//   author's signature.
+//
+// This reverses the 2026-09-24 rule that an LMSW could not sign at all. The
+// invariant that rule protected is kept: a non-billable signature never makes
+// a note billable.
 const SIGN_OUTCOME = Object.freeze({ ALLOWED: 'allowed', PENDING_CO_SIGN: 'pending_co_sign', REFUSED: 'refused' });
+const AUTHOR_SIGNER_ROLES = Object.freeze([CLINICAL_ROLES.RN, CLINICAL_ROLES.LMSW]);
+const isAuthorSigner = (user) => AUTHOR_SIGNER_ROLES.includes(resolveClinicalRole(user));
 const evaluateEncounterSignature = (user, serviceCodes) => {
   const role = resolveClinicalRole(user);
   const codes = (Array.isArray(serviceCodes) ? serviceCodes : []).map(codeOf).filter(Boolean);
   if (!role || role === CLINICAL_ROLES.READ_ONLY) {
     return { outcome: SIGN_OUTCOME.REFUSED, code: 'SIGN_NO_CREDENTIAL', reason: 'Signing an encounter requires a clinical licence.' };
   }
-  if (role === CLINICAL_ROLES.LMSW) {
+  if (AUTHOR_SIGNER_ROLES.includes(role)) {
+    const label = role === CLINICAL_ROLES.RN ? 'An RN' : 'An LMSW';
     return {
       outcome: SIGN_OUTCOME.PENDING_CO_SIGN, billable: false, clinicalRole: role,
       code: 'SIGN_PENDING_CO_SIGN', signatureRole: 'authoring',
-      reason: 'An LMSW documents but does not sign. This note is held for signature by an LCSW or a provider — they become the attesting clinician of record.'
+      reason: `${label} signs as the note's author, which locks it but bills nothing. It now waits for a clinician addendum from a provider${codes.length && codes.every(isBehavioralHealthCode) ? ' or an LCSW' : ''} — that addendum is the billable signature.`
     };
   }
-  if (!codes.length) {
-    // Nursing documentation. Every other licensed role attests its own note.
-    return { outcome: SIGN_OUTCOME.ALLOWED, billable: false, clinicalRole: role };
-  }
+  if (!codes.length) return { outcome: SIGN_OUTCOME.ALLOWED, billable: false, clinicalRole: role };
   if (role === CLINICAL_ROLES.PROVIDER) return { outcome: SIGN_OUTCOME.ALLOWED, billable: true, clinicalRole: role };
-  if (role === CLINICAL_ROLES.RN) {
-    return {
-      outcome: SIGN_OUTCOME.REFUSED, code: 'SIGN_CREDENTIAL_BILLABLE', clinicalRole: role,
-      reason: `This encounter carries a billable service code (${codes.join(', ')}), so it must be signed by a provider. An RN may sign a nursing note that carries no service code.`
-    };
-  }
   if (role === CLINICAL_ROLES.LCSW) {
     const bad = codes.filter(c => !isBehavioralHealthCode(c));
     if (bad.length) {
@@ -282,9 +285,15 @@ const evaluateEncounterSignature = (user, serviceCodes) => {
   }
   return { outcome: SIGN_OUTCOME.REFUSED, code: 'SIGN_NO_CREDENTIAL', reason: 'Signing an encounter requires a clinical licence.' };
 };
-// Who may clear a pendingCoSign encounter.
+// Who may add the BILLABLE clinician addendum that clears an author's hold.
+// The addendum author's scope is then checked against the codes with
+// evaluateEncounterSignature, so an LCSW can only bill the behavioural-health set.
 const CO_SIGN_ROLES = Object.freeze([CLINICAL_ROLES.LCSW, CLINICAL_ROLES.PROVIDER]);
 const canCoSignEncounter = (user) => CO_SIGN_ROLES.includes(resolveClinicalRole(user));
+// A CO-SIGNATURE on a signed note (owner: "all clinicians") attests
+// participation and review. It never changes who bills, so it is open to every
+// licensed clinical role; unlicensed read-only staff cannot attest a note.
+const canCoSignNote = (user) => LICENSED_CLINICAL_ROLES.includes(resolveClinicalRole(user));
 
 // ---- Care-plan signature branches on the SERVICE LINE (§3) --------------
 //   Track A / PHC  → an RN signature satisfies the care plan
@@ -458,9 +467,12 @@ module.exports = {
   disallowedServiceCodesFor,
   serviceCodeRefusal,
   SIGN_OUTCOME,
+  AUTHOR_SIGNER_ROLES,
+  isAuthorSigner,
   evaluateEncounterSignature,
   CO_SIGN_ROLES,
   canCoSignEncounter,
+  canCoSignNote,
   CARE_PLAN_OUTCOME,
   evaluateCarePlanSignature,
   canCoSignCarePlan,

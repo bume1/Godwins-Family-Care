@@ -32,7 +32,7 @@ const KINDS = Object.freeze({
 });
 
 const KIND_LABELS = Object.freeze({
-  [KINDS.ENCOUNTER_CO_SIGN]: 'Encounter awaiting co-signature',
+  [KINDS.ENCOUNTER_CO_SIGN]: 'Note awaiting clinician addendum',
   [KINDS.ORDER_CO_SIGN]: 'Order awaiting co-signature',
   [KINDS.CARE_PLAN_CO_SIGN]: 'Care plan awaiting provider signature',
   [KINDS.VISIT_LOG_REVIEW]: 'Caregiver note awaiting review',
@@ -93,9 +93,9 @@ const buildInbox = ({
   const attByUuid = new Map((attestations || []).map(a => [String(a.encounterUuid), a]));
   const items = [];
 
-  // 1. An encounter an LMSW signed: documented and attested, charge HELD until
-  //    an LCSW or provider co-signs. The hold is the point — 4.8 chose holding
-  //    over posting and reversing.
+  // 1. A note an RN or LMSW signed as its AUTHOR (owner rule, 2026-09-27):
+  //    locked, charge HELD, until a provider — or an LCSW for behavioral
+  //    health — adds the clinician addendum that is its billable signature.
   for (const r of (encounterRecords || [])) {
     if (!r || r.coSignStatus !== 'pending') continue;
     const att = attByUuid.get(String(r.encounterUuid)) || null;
@@ -107,8 +107,10 @@ const buildInbox = ({
       encounterUuid: r.encounterUuid,
       at: (att && att.signedAt) || r.updatedAt || r.date,
       actionable: v.canCoSignEncounter && notSelf(v, signerId),
-      waitingOn: v.canCoSignEncounter && notSelf(v, signerId) ? 'you' : 'an LCSW or a provider',
-      detail: signerName ? `Signed by ${signerName}; the charge is held until it is co-signed.` : 'The charge is held until it is co-signed.'
+      waitingOn: v.canCoSignEncounter && notSelf(v, signerId) ? 'you' : 'a provider or an LCSW',
+      detail: signerName
+        ? `Signed by ${signerName} as the note's author; not billable until a clinician adds the addendum.`
+        : 'Not billable until a clinician adds the addendum.'
     }));
   }
 
@@ -173,6 +175,7 @@ const buildInbox = ({
     if (!r) continue;
     if (r.coSignStatus === 'pending') continue;          // already listed above
     if (attByUuid.has(String(r.encounterUuid))) continue; // signed
+    if (r.noteStatus === 'voided') continue;              // a discarded draft waits on nobody
     const renderedById = r.renderingProvider && r.renderingProvider.id;
     const isMine = !!v.id && !!renderedById && String(v.id) === String(renderedById);
     items.push(item({
