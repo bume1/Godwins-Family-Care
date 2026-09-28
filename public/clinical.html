@@ -228,7 +228,7 @@
       settings: () => authedFetch('/api/clinical/settings'),
       saveSettings: (body) => authedFetch('/api/clinical/settings', { method: 'PUT', body: JSON.stringify(body) }),
       codeSearch: (params) => authedFetch(`/api/clinical/codes/search?${new URLSearchParams(params).toString()}`),
-      encounters: (id) => authedFetch(`/api/clinical/patients/${id}/encounters`),
+      encounters: (id, includeDeleted) => authedFetch(`/api/clinical/patients/${id}/encounters${includeDeleted ? '?includeDeleted=1' : ''}`),
       encounterDetail: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}`),
       saveCoding: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/coding`, { method: 'PUT', body: JSON.stringify(body) }),
       addRx: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/prescriptions`, { method: 'POST', body: JSON.stringify(body) }),
@@ -2681,10 +2681,11 @@
 
       // Before the first save there is only your scratch copy to throw away.
       // After it, the encounter exists in OpenEMR and cannot be deleted, so the
-      // draft is DISCARDED with a reason and stays on the chart saying so.
+      // encounter is DELETED with a reason: voided in OpenEMR, hidden from the
+      // chart's lists, and kept on record.
       const discardDraft = () => {
         if (sn.euuid) {
-          const reason = window.prompt('Why is this draft being discarded? It stays on the chart as a discarded draft and never bills.');
+          const reason = window.prompt('Why is this encounter being deleted? The reason is kept on record. It will be removed from the chart and voided in OpenEMR, and it will never bill.');
           if (!reason || reason.trim().length < 3) return;
           setBusy('discard'); setMsg(null);
           api.voidNote(patient.id, sn.euuid, reason.trim())
@@ -3012,7 +3013,7 @@
               </button>
               {(draftAt || sn.euuid) && (
                 <button className="btn ghost text-red-600" disabled={!!busy} onClick={discardDraft}>
-                  {busy === 'discard' ? 'Discarding…' : 'Discard draft'}
+                  {busy === 'discard' ? (sn.euuid ? 'Deleting…' : 'Discarding…') : (sn.euuid ? 'Delete encounter' : 'Discard draft')}
                 </button>
               )}
             </div>
@@ -4643,7 +4644,7 @@
           .finally(() => setBusy(false));
       };
       const discard = () => {
-        const reason = window.prompt('Why is this draft being discarded? It stays on the chart as a discarded draft and never bills.');
+        const reason = window.prompt('Why is this encounter being deleted? The reason is kept on record. It will be removed from the chart and voided in OpenEMR, and it will never bill.');
         if (!reason || reason.trim().length < 3) return;
         setBusy('discard');
         api.voidNote(patient.id, euuid, reason.trim()).then(r => { setMsg({ ok: true, text: r.message }); onChanged && onChanged(); })
@@ -4723,7 +4724,7 @@
             <div className="flex flex-wrap items-center gap-2">
               <button className="btn" disabled={!!busy} onClick={() => save().catch(() => {})}><i className="ti ti-device-floppy" />{busy === 'draft' ? 'Saving…' : 'Save draft'}</button>
               <button className="btn gold" disabled={!!busy || showSign} onClick={() => setShowSign(true)}><i className="ti ti-writing-sign" />Sign &amp; submit note</button>
-              <button className="btn ghost text-red-600" disabled={!!busy} onClick={discard}>{busy === 'discard' ? 'Discarding…' : 'Discard draft'}</button>
+              <button className="btn ghost text-red-600" disabled={!!busy} onClick={discard}>{busy === 'discard' ? 'Deleting…' : 'Delete encounter'}</button>
             </div>
             <p className="text-[11px] text-stone-500 mt-2"><b>Save draft</b> saves to the app and OpenEMR together, stamped with your name and the time — it does <b>not</b> sign. <b>Sign &amp; submit note</b> saves, then signs and locks it.</p>
             <NoteHistory revisions={sn.meta.revisions} />
@@ -4933,7 +4934,7 @@
               )}
               {ns.status === 'voided' && (
                 <div className="bg-stone-100 border border-stone-200 rounded-lg p-2.5 text-xs text-stone-700 mt-1">
-                  <b>This draft was discarded.</b> It stays on the chart so the encounter is explained, and it will never bill.
+                  <b>This encounter was deleted{d.record.voided ? ` by ${(d.record.voided.by || {}).name || 'someone'} on ${fmtTs(d.record.voided.at)}` : ''}.</b>{d.record.voided && d.record.voided.reason ? <> Reason: {d.record.voided.reason}.</> : null} It is hidden from the chart's lists, voided in OpenEMR, kept on record, and it will never bill.
                 </div>
               )}
               {(d.warnings || []).map((w, i) => <p key={i} className="text-xs text-amber-700"><i className="ti ti-alert-triangle mr-1" />{w}</p>)}
@@ -4954,7 +4955,7 @@
                   onGoToCoding={() => setStep('coding')} onChanged={() => { load(); onChanged && onChanged(); }} />
           )}
           {on('visit') && !(ns.status === 'draft' && na.canEdit) && <div className="card mb-4">
-            <div className="card-h"><h2>Note</h2><span className="text-[10.5px] text-stone-500">{closed ? 'signed — read-only; corrections are addenda' : ns.status === 'voided' ? 'discarded draft' : 'draft — read-only for your role'}</span></div>
+            <div className="card-h"><h2>Note</h2><span className="text-[10.5px] text-stone-500">{closed ? 'signed — read-only; corrections are addenda' : ns.status === 'voided' ? 'deleted encounter' : 'draft — read-only for your role'}</span></div>
             <div className="p-4 text-sm grid gap-3">
               {ns.note
                 ? <SignedNoteView note={ns.note} noteSections={d.noteSections} signature={ns.signature} revisions={ns.revisions} />
@@ -5217,7 +5218,10 @@
       const [err, setErr] = useState('');
       const [open, setOpen] = useState(initialEuuid || null);
       const [followUp, setFollowUp] = useState(false);
-      const load = useCallback(() => { api.encounters(patient.id).then(r => { setData(r); setErr(''); }).catch(e => setErr(e.message)); }, [patient.id]);
+      // Deleted encounters are hidden unless asked for; this is where who
+      // deleted one, when and why is read back.
+      const [showDeleted, setShowDeleted] = useState(false);
+      const load = useCallback(() => { api.encounters(patient.id, showDeleted).then(r => { setData(r); setErr(''); }).catch(e => setErr(e.message)); }, [patient.id, showDeleted]);
       useEffect(load, [load]);
       useEffect(() => { if (initialEuuid) { setOpen(initialEuuid); onOpened && onOpened(); } }, [initialEuuid]);
       if (open) return <EncounterPanel patient={patient} euuid={open} chart={chart} onChartChanged={onChartChanged} onBack={() => { setOpen(null); load(); }} onChanged={load} />;
@@ -5233,19 +5237,26 @@
               </div>
               <div className="p-4">
                 {data.emrError && <p className="text-xs text-amber-700 mb-2">OpenEMR encounter list unavailable ({data.emrError}) — showing what the app has recorded.</p>}
+                {data.deletedCount > 0 && (
+                  <label className="flex items-center gap-2 text-xs text-stone-500 mb-2">
+                    <input type="checkbox" checked={showDeleted} onChange={e => setShowDeleted(e.target.checked)} />
+                    Show deleted encounters ({data.deletedCount})
+                  </label>
+                )}
                 {data.encounters.length === 0 && <p className="text-sm text-stone-400">No encounters yet. The initial H&amp;P lives on its own tab; follow-ups start here.</p>}
                 {data.encounters.map(e => (
                   <div key={e.id} className="flex flex-wrap items-center justify-between gap-2 py-2.5 border-b border-stone-100 last:border-0 cursor-pointer" onClick={() => setOpen(e.id)}>
                     <div>
                       <div className="font-semibold text-[13px]">{e.start ? fmtDate(e.start) : '—'} — {e.reason || e.type}</div>
                       <div className="text-xs text-stone-500">
+                        {e.deleted && <div className="text-stone-500">Deleted by {e.deleted.byName} on {fmtTs(e.deleted.at)} — {e.deleted.reason}</div>}
                         {[e.renderingProvider ? npiLabel(e.renderingProvider) : e.provider, `${e.diagnosisCount} dx · ${e.serviceCount} svc · ${e.prescriptionCount} Rx · ${e.orderCount} orders`, e.signedAt && `signed ${fmtTs(e.signedAt)} by ${e.signedBy}`].filter(Boolean).join(' · ')}
                       </div>
                     </div>
                     <div className="flex flex-wrap items-center gap-1.5">
                       {e.structuredNoteError && <span className="chip bg-red-50 text-red-700" title={e.structuredNoteError}>EMR sync failed</span>}
                       {e.noteStatus === 'draft' && <span className="chip bg-amber-50 text-amber-800">DRAFT — editable</span>}
-                      {e.noteStatus === 'voided' && <span className="chip bg-stone-100 text-stone-500">DISCARDED</span>}
+                      {e.noteStatus === 'voided' && <span className="chip bg-stone-100 text-stone-500" title={e.deleted ? `Deleted by ${e.deleted.byName} — ${e.deleted.reason}` : ''}>DELETED</span>}
                       {e.awaitingAddendum && <span className="chip bg-amber-50 text-amber-800">AWAITING CLINICIAN ADDENDUM</span>}
                       {e.appointmentEid
                         ? <span className="chip bg-primary-50 text-primary" title="Attached to an appointment"><i className="ti ti-calendar-check" /></span>

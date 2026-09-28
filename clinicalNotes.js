@@ -254,7 +254,7 @@ const carryForwardContent = (source) => {
 // A note written before the shared note existed lives only as OpenEMR plain
 // text, with an attribution header, a "Documented by" line, a VITALS line and
 // possibly a signature block — none of which a NEW note may inherit.
-const LEGACY_DROP_LINE = /^(\[GFC CLINICIAN\]|Documented by |VITALS —|Draft discarded by )/;
+const LEGACY_DROP_LINE = /^(\[GFC CLINICIAN\]|Documented by |VITALS —|Draft discarded by |ENTERED IN ERROR)/;
 const LEGACY_STOP_LINE = /^(=+|ELECTRONICALLY SIGNED|NOTE HISTORY|AWAITING CLINICIAN ADDENDUM)/;
 const stripLegacyText = (text) => {
   const out = [];
@@ -496,6 +496,38 @@ const checkNoteForSigning = (note) => {
   return { ok: true };
 };
 
+// ---- Deleting a mistaken encounter (owner, 2026-09-28) -------------------
+// UNSIGNED only (owner decision): a signed note is part of the legal record
+// and possibly a claim, and is corrected by addendum. OpenEMR's API cannot
+// erase an encounter, so "delete" voids it there, hides it from every list in
+// the app and keeps who/when/why on record.
+//
+// Refused while something real hangs off it: an order that has not been
+// cancelled (it may already have gone to a lab, imaging centre or specialist)
+// or any prescription (it is on the patient's medication list in OpenEMR and
+// may be at a pharmacy). Deleting the encounter would orphan them. The refusal
+// names each one, so the clinician knows exactly what to deal with first.
+const checkEncounterDeletable = ({ record, closed, orders, prescriptions }) => {
+  if (closed) {
+    return { ok: false, code: 'ENCOUNTER_CLOSED', status: 409,
+      error: 'A signed note cannot be deleted — it is part of the legal record. Add an addendum to correct it.' };
+  }
+  if (record && record.noteStatus === NOTE_STATUS.VOIDED) {
+    return { ok: false, code: 'ENCOUNTER_ALREADY_DELETED', status: 409, error: 'This encounter was already deleted.' };
+  }
+  const liveOrders = (orders || []).filter(o => o && String(o.status || '') !== 'cancelled');
+  const rx = (prescriptions || []).filter(Boolean);
+  if (liveOrders.length || rx.length) {
+    const named = [
+      ...liveOrders.map(o => `order "${(o.tests && o.tests[0]) || o.orderType || 'order'}" (${o.status || 'ordered'})`),
+      ...rx.map(p => `prescription "${p.drug || p.medication || p.title || 'prescription'}"`)
+    ];
+    return { ok: false, code: 'ENCOUNTER_HAS_ORDERS', status: 409, blockers: named,
+      error: `This encounter has ${named.join(', ')} recorded on it. ${liveOrders.length ? 'Cancel the order(s) first. ' : ''}${rx.length ? 'A prescription cannot be deleted from here — sign the note and correct it by addendum instead. ' : ''}Then the encounter can be deleted.`.trim() };
+  }
+  return { ok: true };
+};
+
 // ---- Signatures ---------------------------------------------------------
 // Who signed, in what capacity, and who co-signed — read from the attestation
 // and the encounter record. The same summary drives the plain-text block in
@@ -581,8 +613,8 @@ const itemPlainText = (item) => {
 
 const composeNarrative = ({ note, revisions, signature, voided }) => {
   if (voided) {
-    const line = `Draft discarded by ${personLine(voided.by)} — ${fmtEt(voided.at)} — ${voided.reason}`;
-    return { subjective: line, objective: 'Discarded draft — no clinical content.', assessment: 'Discarded draft.', plan: 'Discarded draft — this encounter does not bill.' };
+    const line = `ENTERED IN ERROR — encounter deleted by ${personLine(voided.by)} — ${fmtEt(voided.at)} — ${voided.reason}`;
+    return { subjective: line, objective: 'Deleted encounter — no clinical content.', assessment: 'Deleted encounter.', plan: 'Deleted encounter — this encounter does not bill.' };
   }
   const slots = { subjective: [], objective: [], assessment: [], plan: [] };
   for (const item of noteReadingOrder(note)) slots[item.slot].push(itemPlainText(item));
@@ -627,6 +659,7 @@ module.exports = {
   carryForwardContent,
   stripLegacyText,
   noteFromLegacyNarrative,
+  checkEncounterDeletable,
   parseLegacyVitals,
   splitLegacyHpBlocks,
   draftVitalsRows,

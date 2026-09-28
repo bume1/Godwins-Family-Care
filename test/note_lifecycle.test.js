@@ -355,7 +355,7 @@ test('the OpenEMR narrative keeps structure, drops formatting markers, and ends 
 
 test('a discarded draft says so in words and carries no clinical content', () => {
   const out = notes.composeNarrative({ note: { assessment: 'something clinical' }, voided: { by: RN, at: '2026-09-27T13:00:00Z', reason: 'Wrong patient' } });
-  assert.match(out.subjective, /Draft discarded by Ruth Nolan, RN — .* — Wrong patient/);
+  assert.match(out.subjective, /ENTERED IN ERROR — encounter deleted by Ruth Nolan, RN — .* — Wrong patient/);
   assert.doesNotMatch(Object.values(out).join('\n'), /something clinical/);
 });
 
@@ -513,4 +513,49 @@ test('two section names for one field show that field once', () => {
   const items = layout.noteLayout({ sections: secs, fixedBlocks: HP_FIXED, stored: {} });
   assert.strictEqual(items.filter(i => i.kind === 'fixed' && i.block === 'subjective').length, 1);
   assert.strictEqual(items.filter(i => i.kind === 'fixed' && i.block === 'vitals').length, 1);
+});
+
+// ---- Deleting a mistaken encounter (owner, 2026-09-28) --------------------
+
+test('an unsigned encounter with nothing hanging off it can be deleted', () => {
+  assert.deepStrictEqual(notes.checkEncounterDeletable({ record: { noteStatus: 'draft' }, closed: false, orders: [], prescriptions: [] }), { ok: true });
+});
+
+test('a signed note cannot be deleted — it is corrected by addendum', () => {
+  const r = notes.checkEncounterDeletable({ record: { noteStatus: 'signed' }, closed: true, orders: [], prescriptions: [] });
+  assert.strictEqual(r.ok, false); assert.strictEqual(r.code, 'ENCOUNTER_CLOSED'); assert.match(r.error, /addendum/);
+});
+
+test('an encounter with a live order or any prescription is not deleted, and each is named', () => {
+  const r = notes.checkEncounterDeletable({ record: { noteStatus: 'draft' }, closed: false,
+    orders: [{ tests: ['CMP'], status: 'sent' }, { tests: ['CBC'], status: 'cancelled' }],
+    prescriptions: [{ drug: 'Lisinopril 10 mg' }] });
+  assert.strictEqual(r.code, 'ENCOUNTER_HAS_ORDERS');
+  assert.deepStrictEqual(r.blockers, ['order "CMP" (sent)', 'prescription "Lisinopril 10 mg"']);
+  assert.match(r.error, /Cancel the order/); assert.match(r.error, /prescription cannot be deleted/);
+  // A cancelled order alone does not block.
+  assert.strictEqual(notes.checkEncounterDeletable({ record: { noteStatus: 'draft' }, closed: false, orders: [{ tests: ['CBC'], status: 'cancelled' }], prescriptions: [] }).ok, true);
+});
+
+test('a deleted encounter cannot be deleted twice', () => {
+  assert.strictEqual(notes.checkEncounterDeletable({ record: { noteStatus: 'voided' }, closed: false }).code, 'ENCOUNTER_ALREADY_DELETED');
+});
+
+test('the delete route checks first, needs a reason, releases the appointment and the initial-visit stamp', () => {
+  const src = stripComments(SERVER);
+  const route = src.slice(src.indexOf("app.post('/api/clinical/patients/:clientId/encounters/:euuid/note/void'"));
+  const body = route.slice(0, route.indexOf('\napp.'));
+  assert.ok(body.indexOf('checkEncounterDeletable(') < body.indexOf('saveBillingRecord('), 'the check runs before anything is written');
+  assert.match(body, /NOTE_VOID_REASON_REQUIRED/);
+  assert.match(body, /db\.set\('appointment_encounters'/);
+  assert.match(body, /delete ctx\.users\[ctx\.idx\]\.clinicalInitialVisit/);
+});
+
+test('every list of encounters leaves the deleted ones out', () => {
+  assert.match(SERVER, /\? withoutDeleted\(encounters\.value\.map\(clinicalRepo\.summarizeEncounter\), deletedEnc\)/, 'chart banner: last visit');
+  assert.match(SERVER, /rows: withoutDeleted\(t\.rows, deletedEnc\)/, 'chart encounters section');
+  assert.match(SERVER, /const encRows = encounters\.status === 'fulfilled' \? withoutDeleted\(/, 'pre-visit packet: last visit');
+  assert.match(SERVER, /encounters = withoutDeleted\(encRes\.value\.map\(clinicalRepo\.summarizeEncounter\), await deletedEncounterIds\(client\.id\)\)/, 'timeline');
+  assert.match(SERVER, /filter\(id => !\(byUuid\.get\(id\) && byUuid\.get\(id\)\.noteStatus === clinicalNotes\.NOTE_STATUS\.VOIDED\)\)/, 'the patient portal never shows a deleted visit');
+  assert.match(SERVER, /encounters: includeDeleted \? list : list\.filter\(e => e\.noteStatus !== 'voided'\)/);
 });

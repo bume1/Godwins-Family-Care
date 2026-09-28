@@ -302,7 +302,7 @@ const HP_NOTE = {
   check('a discard needs a reason', r.status === 400, r.body);
   r = await call('POST', `${P}/encounters/${second}/note/void`, tok.rn, { reason: 'Started on the wrong patient visit' });
   check('the draft is discarded', r.status === 200 && record(second).noteStatus === 'voided', r.body);
-  check('OpenEMR says so in words', /Draft discarded by Ruth Nolan/.test(narrativeText(second)));
+  check('OpenEMR says so in words', /ENTERED IN ERROR — encounter deleted by Ruth Nolan/.test(narrativeText(second)));
   r = await call('POST', `${P}/encounters/${second}/sign`, tok.fnp, { attest: true });
   check('a discarded draft cannot be signed', r.status === 409 && r.body.code === 'NOTE_VOIDED', r.body);
   r = await call('GET', '/api/clinical/work-queues', tok.fnp);
@@ -358,6 +358,41 @@ const HP_NOTE = {
   check('its unchanged vitals are NOT sent to OpenEMR a second time', EMR.vitals.filter(v => v.euuid === legacyEuuid).length === vitalsBefore && !!record(legacyEuuid).vitalsWrittenAt);
   r = await call('GET', `${P}/chart`, tok.rn);
   check('once signed, it leaves the draft list', !((r.body && r.body.draftVitals) || []).some(d => d.encounterUuid === legacyEuuid));
+
+  console.log('\n── 12. Deleting a mistaken encounter (unsigned only) ──');
+  r = await call('POST', `${P}/encounters/${hp}/note/void`, tok.fnp, { reason: 'Mistake' });
+  check('a signed note cannot be deleted', r.status === 409 && r.body.code === 'ENCOUNTER_CLOSED', r.body);
+  // An order on the encounter blocks the delete until it is cancelled.
+  r = await call('POST', `${P}/notes`, tok.rn, { note: { kind: 'followup', chiefConcern: 'Opened on the wrong patient' } });
+  const mistaken = r.body.encounterUuid;
+  STORE.set('clinical_orders', rows('clinical_orders').concat([{ id: 'ord-probe', clientId: PATIENT.id, encounterUuid: mistaken, orderType: 'lab', tests: ['CMP'], status: 'sent', createdAt: new Date().toISOString() }]));
+  r = await call('POST', `${P}/encounters/${mistaken}/note/void`, tok.rn, { reason: 'Wrong patient' });
+  check('a live order blocks the delete, and is named', r.status === 409 && r.body.code === 'ENCOUNTER_HAS_ORDERS' && /CMP/.test(r.body.error), r.body);
+  check('nothing was changed by the refusal', record(mistaken).noteStatus === 'draft');
+  STORE.set('clinical_orders', rows('clinical_orders').map(o => (o.id === 'ord-probe' ? { ...o, status: 'cancelled' } : o)));
+  r = await call('POST', `${P}/encounters/${mistaken}/note/void`, tok.rn, { reason: 'Wrong patient' });
+  check('once the order is cancelled it deletes', r.status === 200 && record(mistaken).noteStatus === 'voided', r.body);
+  check('who, when and why are kept on record', record(mistaken).voided && record(mistaken).voided.reason === 'Wrong patient' && record(mistaken).voided.by.id === RN.id);
+  // A first H&P saved in error counted as the patient's initial visit; deleting it re-opens that step.
+  const OP = `/api/clinical/patients/${OTHER.id}`;
+  r = await call('POST', `${OP}/notes`, tok.rn, { note: { kind: 'hp', chiefConcern: 'Started on the wrong patient' } });
+  const wrongHp = r.body && r.body.encounterUuid;
+  check('the first H&P is stamped as that patient\'s initial visit', !!wrongHp && (rows('users').find(u => u.id === OTHER.id).clinicalInitialVisit || {}).encounterUuid === wrongHp, r.body);
+  r = await call('POST', `${OP}/encounters/${wrongHp}/note/void`, tok.rn, { reason: 'Wrong patient' });
+  check('deleting it re-opens the initial-visit step, and the old stamp is kept on record', r.status === 200 && !rows('users').find(u => u.id === OTHER.id).clinicalInitialVisit && record(wrongHp).voided.clearedInitialVisit.encounterUuid === wrongHp, r.body);
+  // A deleted note that documented an appointment releases it.
+  r = await call('POST', `${P}/encounters/${un}/note/void`, tok.rn, { reason: 'Documented the wrong visit' });
+  check('a note attached to an appointment deletes', r.status === 200, r.body);
+  check('the appointment is released', !rows('appointment_encounters').some(l => l.encounterUuid === un) && record(un).voided.releasedAppointments.some(l => String(l.eid) === '900'));
+  r = await call('GET', `${P}/appointments`, tok.rn);
+  check('the appointment reads "not yet documented" again', r.status === 200 && (r.body.appointments || []).some(a => String(a.eid) === '900' && !a.encounterUuid && a.state !== 'documented'), (r.body.appointments || []).map(a => [a.eid, a.state, a.encounterUuid]));
+  r = await call('GET', `${P}/encounters`, tok.rn);
+  check('deleted encounters are gone from the list', r.status === 200 && !r.body.encounters.some(e => [un, mistaken, second].includes(e.id)) && r.body.deletedCount >= 3, { n: r.body.deletedCount, ids: (r.body.encounters || []).map(e => e.id) });
+  r = await call('GET', `${P}/encounters?includeDeleted=1`, tok.rn);
+  const shown = r.body && (r.body.encounters || []).find(e => e.id === mistaken);
+  check('"Show deleted" brings them back with who and why', shown && shown.noteStatus === 'voided' && shown.deleted && shown.deleted.reason === 'Wrong patient', shown);
+  r = await call('GET', `${P}/chart`, tok.rn);
+  check('a deleted note\'s vitals are not shown as a draft', !((r.body && r.body.draftVitals) || []).some(d => [un, mistaken].includes(d.encounterUuid)));
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
