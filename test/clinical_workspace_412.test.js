@@ -1824,7 +1824,7 @@ test('G build-enforced: the screen restates no risk vocabulary and no clinical r
   // pointed out: a patient who normally has a primary-care visit can have a
   // psych evaluation. The note follows the VISIT's appointment type now, and
   // which sections that type carries is the server's answer, not the page's.
-  assert.match(page, /noteHasSection\('mentalStatusExam'\) && \(/,
+  assert.match(page, /noteHasSection\('mentalStatusExam'\) \? \['mse'\] : \[\]/,
     'the MSE must be shown when THIS VISIT carries it, not when the patient is flagged');
   assert.ok(!page.includes('isPsychiatric'), 'the superseded patient flag must be gone, not left beside it');
   // And the page derives the section list from what the server served.

@@ -33,8 +33,21 @@ const NOTE_TEXT_LABELS = Object.freeze({
 // The union of the H&P's two-arm vitals and the follow-up's single BP.
 const NOTE_VITAL_KEYS = Object.freeze([
   'bpRightSys', 'bpRightDia', 'bpLeftSys', 'bpLeftDia', 'bpSys', 'bpDia',
-  'hr', 'temp', 'rr', 'spo2', 'weight', 'height', 'pain'
+  'hr', 'temp', 'rr', 'spo2', 'weight', 'height', 'pain',
+  // An H&P arm that cannot be used for a BP (owner, 2026-09-28): a flag and
+  // the reason, in place of a reading.
+  'bpRightUnable', 'bpLeftUnable', 'bpRightUnableReason', 'bpLeftUnableReason'
 ]);
+const NOTE_VITAL_MAX = Object.freeze({ bpRightUnableReason: 200, bpLeftUnableReason: 200 });
+// An arm counts as documented with a reading, or marked unable WITH a reason.
+const armUnable = (v, s) => !!(v && v[`${s}Unable`]);
+const armDocumented = (v, s) => !!(v && (String(v[`${s}Sys`] || '').trim()
+  || (armUnable(v, s) && String(v[`${s}UnableReason`] || '').trim())));
+const twoArm = (v) => !!(v && ['bpRightSys', 'bpRightDia', 'bpLeftSys', 'bpLeftDia', 'bpRightUnable', 'bpLeftUnable'].some(k => v[k]));
+// One arm, in words: a reading, or "unable to obtain (reason)".
+const armText = (v, s) => (armUnable(v, s)
+  ? `unable to obtain${String(v[`${s}UnableReason`] || '').trim() ? ` (${String(v[`${s}UnableReason`]).trim()})` : ''}`
+  : `${v[`${s}Sys`] || '—'}/${v[`${s}Dia`] || '—'}`);
 const HP_SECTION_KEYS = Object.freeze(Object.keys(clinicalRepo.HP_SECTION_LABELS));
 const NOTE_MAX_FIELD = 20000;       // markup, per field — formatting markers count
 const NOTE_MAX_HP_VALUE = 2000;
@@ -67,7 +80,7 @@ const sanitizeNote = (input) => {
   note.vitals = {};
   if (plainObject(input.vitals)) {
     for (const k of NOTE_VITAL_KEYS) {
-      const v = cleanText(input.vitals[k], 16).trim();
+      const v = cleanText(input.vitals[k], NOTE_VITAL_MAX[k] || 16).trim();
       if (v) note.vitals[k] = v;
     }
   }
@@ -355,10 +368,10 @@ const draftVitalsRows = (record) => {
   const id = (k) => `draft:${r.encounterUuid}:${k}`;
   const rows = [];
   const push = (key, name, value) => { if (value) rows.push({ id: id(key), name, value, at, draft: true, encounterUuid: r.encounterUuid || null }); };
-  if (v.bpRightSys || v.bpLeftSys || v.bpRightDia || v.bpLeftDia) {
-    const side = (s, d) => ((s || d) ? `${s || '—'}/${d || '—'}` : null);
-    push('bp', 'Blood pressure', [side(v.bpRightSys, v.bpRightDia) && `right ${side(v.bpRightSys, v.bpRightDia)}`,
-      side(v.bpLeftSys, v.bpLeftDia) && `left ${side(v.bpLeftSys, v.bpLeftDia)}`].filter(Boolean).join(' · '));
+  if (twoArm(v)) {
+    const side = (s) => ((v[`${s}Sys`] || v[`${s}Dia`] || armUnable(v, s)) ? armText(v, s) : null);
+    push('bp', 'Blood pressure', [side('bpRight') && `right ${side('bpRight')}`,
+      side('bpLeft') && `left ${side('bpLeft')}`].filter(Boolean).join(' · '));
   } else if (v.bpSys || v.bpDia) {
     push('bp', 'Blood pressure', `${v.bpSys || '—'}/${v.bpDia || '—'} mmHg`);
   }
@@ -429,8 +442,8 @@ const vitalsLine = (note) => {
   const v = (note && note.vitals) || {};
   if (!Object.keys(v).length) return '';
   const d = (k) => v[k] || '—';
-  const bp = (v.bpRightSys || v.bpLeftSys)
-    ? `BP right arm ${d('bpRightSys')}/${d('bpRightDia')}; BP left arm ${d('bpLeftSys')}/${d('bpLeftDia')}`
+  const bp = twoArm(v)
+    ? `BP right arm ${armText(v, 'bpRight')}; BP left arm ${armText(v, 'bpLeft')}`
     : `BP ${d('bpSys')}/${d('bpDia')}`;
   const telehealth = note.visit && note.visit.modality === 'telehealth';
   return `VITALS${telehealth ? ' (patient-reported, telehealth)' : ''} — ${bp}; HR ${d('hr')}; Temp ${d('temp')}; RR ${d('rr')}; SpO2 ${d('spo2')}; Wt ${d('weight')}; Ht ${d('height')}${v.pain ? `; Pain ${v.pain}/10` : ''}`;
@@ -441,14 +454,14 @@ const vitalsLine = (note) => {
 const buildVitalsRow = (note) => {
   const v = (note && note.vitals) || {};
   if (!Object.keys(v).length) return null;
-  if (v.bpRightSys || v.bpLeftSys) {
+  if (twoArm(v)) {
     const useRight = (parseInt(v.bpRightSys, 10) || 0) >= (parseInt(v.bpLeftSys, 10) || 0);
     return {
       bps: useRight ? (v.bpRightSys || '') : (v.bpLeftSys || ''),
       bpd: useRight ? (v.bpRightDia || '') : (v.bpLeftDia || ''),
       pulse: v.hr || '', temperature: v.temp || '', respiration: v.rr || '', oxygen_saturation: v.spo2 || '',
       weight: v.weight || '', height: v.height || '',
-      note: `BP right arm ${v.bpRightSys || '—'}/${v.bpRightDia || '—'}; BP left arm ${v.bpLeftSys || '—'}/${v.bpLeftDia || '—'}`
+      note: `BP right arm ${armText(v, 'bpRight')}; BP left arm ${armText(v, 'bpLeft')}`.slice(0, 250)
     };
   }
   return {
@@ -471,8 +484,13 @@ const checkNoteForSigning = (note) => {
   }
   if (note.kind === 'hp') {
     const v = note.vitals || {};
-    if (!v.bpRightSys || !v.bpLeftSys) {
-      return { ok: false, code: 'HP_BP_BOTH_ARMS', error: 'Blood pressure in BOTH arms is required before an initial visit (H&P) can be signed (intake spec §2C).' };
+    // Each arm needs a reading — or, when it cannot be used (pacemaker side,
+    // fistula), "Unable to take" with the reason (owner, 2026-09-28).
+    if (!armDocumented(v, 'bpRight') || !armDocumented(v, 'bpLeft')) {
+      const missingReason = ['bpRight', 'bpLeft'].some(s => armUnable(v, s) && !String(v[`${s}UnableReason`] || '').trim());
+      return { ok: false, code: 'HP_BP_BOTH_ARMS', error: missingReason
+        ? 'An arm is marked "Unable to take" without a reason. Say why that arm could not be used, then sign.'
+        : 'Blood pressure in BOTH arms is required before an initial visit (H&P) can be signed (intake spec §2C). If an arm cannot be used, tick "Unable to take" for it and give the reason.' };
     }
   }
   return { ok: true };

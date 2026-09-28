@@ -10261,7 +10261,9 @@ const appendNoteRevision = async (row) => {
 // section.
 const noteSatisfiers = (ctx) => ({
   ordersRx: (ctx.orders || []).length > 0 || (ctx.prescriptions || []).length > 0,
-  ordersRxReferrals: (ctx.orders || []).length > 0,
+  // "Orders / Rx / Referrals": a prescription on the encounter counts as well
+  // as an order — the note no longer offers a free-text copy of either.
+  ordersRxReferrals: (ctx.orders || []).length > 0 || (ctx.prescriptions || []).length > 0,
   medicationsRx: (ctx.prescriptions || []).length > 0,
   riskAssessment: !!ctx.riskAssessment
 });

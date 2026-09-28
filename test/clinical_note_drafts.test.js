@@ -205,7 +205,7 @@ test('Save draft saves through the shared note, and Sign & submit really signs',
   // The one component that renders the Sign & submit button used by the note
   // editors must call the sign route — a "Sign" button that only saves is the
   // defect this whole file exists to prevent.
-  const panel = clinicalPage.slice(clinicalPage.indexOf('const SignNotePanel = ('), clinicalPage.indexOf('const TemplateSections = ('));
+  const panel = clinicalPage.slice(clinicalPage.indexOf('const SignNotePanel = ('), clinicalPage.indexOf('const FIXED_BLOCK_FOR_SECTION = '));
   assert.ok(panel.includes('api.sign(patientId, euuid)'), 'Sign & submit must call the sign route');
   assert.ok(actions.includes('<SignNotePanel'), 'the H&P must offer the real sign panel');
   const shared = clinicalPage.slice(clinicalPage.indexOf('const useSharedNote = ('), clinicalPage.indexOf('const SignNotePanel = ('));

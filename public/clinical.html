@@ -2464,23 +2464,89 @@
       );
     };
 
-    // Template sections this visit type asks for that no fixed field answers.
-    const TemplateSections = ({ sections, values, onChange, pending, onConfirm, readOnly }) => {
-      const own = (sections || []).filter(s => s.ownField);
-      if (!own.length) return null;
-      return (
-        <div className="card mb-4">
-          <div className="card-h"><h2>Visit sections</h2><span className="text-[10.5px] text-stone-500">asked for by this visit type</span></div>
-          <div className="p-4 grid gap-3">
-            {own.map(s => (
-              <FormattedField key={s.key} label={s.label} required={s.required} readOnly={readOnly}
-                value={(values || {})[s.key] || ''} onChange={v => onChange(s.key, v)}
-                carried={(pending || []).includes(`sections.${s.key}`)} onConfirmCarried={() => onConfirm(`sections.${s.key}`)} />
-            ))}
-          </div>
-        </div>
-      );
+    // ── ONE NOTE, IN THE VISIT TYPE'S OWN ORDER (owner report, 2026-09-28) ──
+    // The template sections used to be dumped into a separate "Visit sections"
+    // card in the middle of the note, with the note's fixed fields (chief
+    // concern, vitals, exam, assessment, plan) in cards around it — so the page
+    // read as two notes. Now every section appears ONCE, in the order the visit
+    // type lists it. A section the note already has a fixed field for shows
+    // that field in its place; the rest get their own box.
+    //
+    // DISPLAY ONLY. Nothing about how a note is stored changes: the fixed fields
+    // and `sections.<key>` are saved exactly as before.
+    //
+    // Mirrors clinicalNotes.FIELD_FOR_SECTION (build-enforced key for key), so a
+    // section the server counts as answered by a fixed field never gets a
+    // second box here.
+    const FIXED_BLOCK_FOR_SECTION = Object.freeze({
+      chiefComplaint: 'chiefConcern', reasonForVisit: 'chiefConcern',
+      hpi: 'subjective', intervalHistory: 'subjective',
+      vitals: 'vitals', awvVitals: 'vitals',
+      physicalExam: 'exam', focusedExam: 'exam',
+      mentalStatusExam: 'mse',
+      assessment: 'assessment', plan: 'plan'
+    });
+    // Sections the encounter's own interactive cards already ARE — the Orders
+    // and Prescriptions cards (owner, 2026-09-28: keep those, drop the free-text
+    // copy). An order or prescription placed on the encounter satisfies these
+    // on the server (noteSatisfiers), so no text box is offered for them — only
+    // a pointer to the card. A box that ALREADY holds text still shows, so
+    // nothing typed before this change is hidden.
+    const SECTIONS_COVERED_BY_CARDS = Object.freeze({
+      ordersRx: 'the Orders and Prescriptions cards',
+      ordersRxReferrals: 'the Orders and Prescriptions cards',
+      medicationsRx: 'the Prescriptions card'
+    });
+    // → an ordered list of { kind: 'fixed', block, label } | { kind: 'section',
+    //   section } | { kind: 'pointer', section, card } | { kind: 'heading',
+    //   label }. Nothing already typed is ever
+    //   left out: fixed blocks the template does not name, and any stored
+    //   section this visit type no longer lists (the type was changed after
+    //   typing), follow the template under their own headings.
+    const noteLayout = ({ sections, fixedBlocks, extraBlocks, extraLabel, stored, labelFor }) => {
+      const out = [];
+      const used = new Set();
+      const listed = new Set();
+      for (const sec of (sections || [])) {
+        listed.add(sec.key);
+        const block = FIXED_BLOCK_FOR_SECTION[sec.key];
+        if (!sec.ownField && block && fixedBlocks.includes(block)) {
+          if (used.has(block)) continue;          // two names for one field — shown once
+          used.add(block);
+          out.push({ kind: 'fixed', block, label: sec.label });
+        } else if (SECTIONS_COVERED_BY_CARDS[sec.key] && NF.isBlank((stored || {})[sec.key])) {
+          out.push({ kind: 'pointer', section: sec, card: SECTIONS_COVERED_BY_CARDS[sec.key] });
+        } else {
+          out.push({ kind: 'section', section: sec });
+        }
+      }
+      const rest = fixedBlocks.filter(b => !used.has(b)).concat(extraBlocks || []);
+      if (rest.length) {
+        if (out.length) out.push({ kind: 'heading', label: extraLabel });
+        for (const b of rest) out.push({ kind: 'fixed', block: b, label: null });
+      }
+      const orphans = Object.keys(stored || {}).filter(k => !listed.has(k) && !NF.isBlank(stored[k]));
+      if (orphans.length) {
+        out.push({ kind: 'heading', label: 'From an earlier visit type — kept, still saved with the note' });
+        for (const k of orphans) out.push({ kind: 'section', section: { key: k, label: labelFor ? labelFor(k) : k, ownField: true, required: false } });
+      }
+      return out;
     };
+    // One section's own box — the same field, value and badges the old card had.
+    const renderOwnSection = (sec, values, onChange, pending, onConfirm) => (
+      <FormattedField key={`sec-${sec.key}`} label={sec.label} required={sec.required}
+        value={(values || {})[sec.key] || ''} onChange={v => onChange(sec.key, v)}
+        carried={(pending || []).includes(`sections.${sec.key}`)} onConfirmCarried={() => onConfirm(`sections.${sec.key}`)} />
+    );
+    const CardPointer = ({ section, card }) => (
+      <div className="text-xs text-stone-600 border border-dashed border-stone-300 rounded-lg px-3 py-2">
+        <b className="text-primary">{section.label}</b> — recorded in {card} on this encounter's Coding step, not typed here.
+      </div>
+    );
+    const NoteHeading = ({ label }) => (
+      <div className="border-t border-stone-200 pt-3 mt-1"><span className="text-[11px] font-bold text-primary uppercase tracking-wide">{label}</span></div>
+    );
+    const sectionLabelFor = (k) => String(k).replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase());
 
     const HpTab = ({ patient, chart, appointmentEid, onDone, onGoToEncounter, encounterUuid, embedded, onChanged }) => {
       const pf = (chart && chart.intakePrefill) || {};
@@ -2489,7 +2555,7 @@
       const [f, setF] = useState({
         chiefConcern: pf.chiefConcern ? NF.fromPlainText(pf.chiefConcern) : '',
         subjective: '', objective: '', assessment: '', plan: '', sections: {},
-        vitals: { bpRightSys: '', bpRightDia: '', bpLeftSys: '', bpLeftDia: '', hr: '', temp: '', rr: '', spo2: '', weight: '', height: '' },
+        vitals: { bpRightSys: '', bpRightDia: '', bpLeftSys: '', bpLeftDia: '', bpRightUnable: '', bpRightUnableReason: '', bpLeftUnable: '', bpLeftUnableReason: '', hr: '', temp: '', rr: '', spo2: '', weight: '', height: '' },
         systemsExam: { general: '', cardiovascular: '', respiratory: '', lungSounds: '', neuro: '', gi: '', gu: '', musculoskeletal: '' },
         // Scope G — the exam variant, not a different note. Held in state on
         // every visit and RENDERED only on a psychiatric one, so a patient
@@ -2658,6 +2724,182 @@
         : null);
       const painFields = ['breathing', 'negativeVocalization', 'facialExpression', 'bodyLanguage', 'consolability'];
       const hazardFields = [['smokeDetectors', 'Smoke detectors'], ['coDetectors', 'CO detectors'], ['grabBars', 'Grab bars'], ['nonSkidSurfaces', 'Non-skid surfaces'], ['runningWater', 'Running water'], ['secondaryExit', 'Secondary exit']];
+      const setSection = (k, v) => setF(prev => ({ ...prev, sections: { ...prev.sections, [k]: v } }));
+      // An arm that cannot be used for a BP (pacemaker side, fistula, injury)
+      // is marked, with the reason, instead of a reading (owner, 2026-09-28).
+      // Ticking it clears that arm's numbers; unticking clears the reason.
+      const setUnable = (s, on) => setF(prev => ({ ...prev, vitals: { ...prev.vitals,
+        [`${s}Unable`]: on ? 'yes' : '',
+        ...(on ? { [`${s}Sys`]: '', [`${s}Dia`]: '' } : { [`${s}UnableReason`]: '' }) } }));
+      const bpArm = (s, side) => {
+        const unable = !!f.vitals[`${s}Unable`];
+        return (
+          <div key={s} className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end mb-2">
+            {!unable && <VitalInput f={f} set={set} k={`${s}Sys`} label={`BP ${side} — sys`} />}
+            {!unable && <VitalInput f={f} set={set} k={`${s}Dia`} label={`BP ${side} — dia`} />}
+            {unable && <VitalInput f={f} set={set} k={`${s}UnableReason`} w="sm:col-span-2" label={`Why the ${side} arm can't be used`} />}
+            <label className="flex items-center gap-2 text-xs sm:col-span-2 pb-2.5">
+              <input type="checkbox" checked={unable} onChange={e => setUnable(s, e.target.checked)} />
+              Unable to take BP in the {side} arm
+            </label>
+          </div>
+        );
+      };
+      const blockTitle = (text, note) => (
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-[13px] font-semibold text-primary">{text}</span>
+          {note && <span className="text-[10.5px] text-stone-500">{note}</span>}
+        </div>
+      );
+      // One block of the note. A plain function, NOT a component, for the
+      // react_input_focus reason above.
+      const hpBlock = (block, label) => {
+        switch (block) {
+          case 'chiefConcern': return (
+            <div className="grid gap-3">
+              <Prefilled fieldKey="chiefConcern" confirmed={confirmed} onConfirm={confirm}>
+                <FormattedField label={label || 'Chief concern'} value={f.chiefConcern} onChange={v => set('chiefConcern', v)}
+                  carried={isCarried('chiefConcern')} onConfirmCarried={() => sn.confirm('chiefConcern')} />
+              </Prefilled>
+              {(pf.conditions || []).length > 0 && (
+                <Prefilled fieldKey="conditions" confirmed={confirmed} onConfirm={confirm}>
+                  <span className="lblu block mb-1">Family-reported conditions (intake)</span>
+                  <div className="flex flex-wrap gap-1.5">{pf.conditions.map((c, i) => <span key={i} className="chip bg-primary-50 text-primary">{c}</span>)}</div>
+                </Prefilled>
+              )}
+            </div>
+          );
+          case 'subjective': return (
+            <FormattedField label={label || 'Subjective / history'} minRows={3} value={f.subjective} onChange={v => set('subjective', v)}
+              carried={isCarried('subjective')} onConfirmCarried={() => sn.confirm('subjective')} />
+          );
+          case 'vitals': return (
+            <div>
+              {blockTitle(label || 'Vitals', 'BP in both arms (§2C) — or mark an arm unable to take')}
+              {bpArm('bpRight', 'right')}
+              {bpArm('bpLeft', 'left')}
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 mt-2">
+                <VitalInput f={f} set={set} k="hr" label="Heart rate" /><VitalInput f={f} set={set} k="temp" label="Temp (°F)" /><VitalInput f={f} set={set} k="rr" label="Resp rate" /><VitalInput f={f} set={set} k="spo2" label="SpO₂ (%)" />
+                <VitalInput f={f} set={set} k="weight" label="Weight (lb)" /><VitalInput f={f} set={set} k="height" label="Height (in)" />
+              </div>
+            </div>
+          );
+          case 'exam': return (
+            <div>
+              {blockTitle(label || 'Systems exam')}
+              <div className={`grid md:grid-cols-2 gap-3 ${isCarried('hp.systemsExam') ? 'carried rounded-lg p-2' : ''}`}>
+                {Object.keys(f.systemsExam).map(k => (
+                  <TextArea f={f} set={set} key={k} path={`systemsExam.${k}`} label={k === 'lungSounds' ? 'Lung sounds' : k.charAt(0).toUpperCase() + k.slice(1)} />
+                ))}
+                <div className="md:col-span-2">{carriedMark('hp.systemsExam')}</div>
+              </div>
+              <div className="mt-3">
+                <FormattedField label="Other exam findings" value={f.objective} onChange={v => set('objective', v)}
+                  carried={isCarried('objective')} onConfirmCarried={() => sn.confirm('objective')} />
+              </div>
+            </div>
+          );
+          // Offered where THIS VISIT's type is psychiatric, and nowhere else —
+          // the caller only passes it then. The systems exam still applies.
+          case 'mse': return (
+            <div>
+              {blockTitle(label || 'Mental status exam', 'the systems exam still applies')}
+              <div className={`grid md:grid-cols-2 gap-3 ${isCarried('hp.mentalStatusExam') ? 'carried rounded-lg p-2' : ''}`}>
+                {Object.keys(f.mentalStatusExam).map(k => (
+                  <TextArea f={f} set={set} key={k} path={`mentalStatusExam.${k}`} label={k.replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase())} />
+                ))}
+                <div className="md:col-span-2">{carriedMark('hp.mentalStatusExam')}</div>
+              </div>
+            </div>
+          );
+          case 'assessment': return (
+            <FormattedField label={label || 'Assessment'} minRows={3} value={f.assessment} onChange={v => set('assessment', v)}
+              carried={isCarried('assessment')} onConfirmCarried={() => sn.confirm('assessment')} />
+          );
+          case 'plan': return (
+            <FormattedField label={label || 'Plan'} minRows={3} value={f.plan} onChange={v => set('plan', v)}
+              carried={isCarried('plan')} onConfirmCarried={() => sn.confirm('plan')} />
+          );
+          case 'skinWound': return (
+            <div className="grid gap-3">
+              {blockTitle('Skin & wound')}
+              <TextArea f={f} set={set} path="skinWound.findings" label="Skin findings" />
+              <Field label="Wound present?">
+                <select className="inp" value={f.skinWound.woundPresent} onChange={e => set('skinWound.woundPresent', e.target.value)}>
+                  <option value="no">No</option><option value="yes">Yes</option>
+                </select>
+              </Field>
+              {f.skinWound.woundPresent === 'yes' && (
+                <div className="grid md:grid-cols-2 gap-3">
+                  <TextArea f={f} set={set} path="skinWound.woundLocation" label="Location" />
+                  <TextArea f={f} set={set} path="skinWound.woundMeasurements" label="Measurements (L × W × D cm)" />
+                </div>
+              )}
+              {carriedMark('hp.skinWound')}
+            </div>
+          );
+          case 'pain': return (
+            <div>
+              {blockTitle('Pain assessment (PAINAD-style)', '0–2 each')}
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+                {painFields.map(k => (
+                  <Field key={k} label={k.replace(/([A-Z])/g, ' $1')}>
+                    <select className="inp" value={f.painAssessment[k]} onChange={e => set(`painAssessment.${k}`, e.target.value)}>
+                      <option value="">—</option><option>0</option><option>1</option><option>2</option>
+                    </select>
+                  </Field>
+                ))}
+                <Field label="Total score">
+                  <input className="inp" readOnly value={painFields.reduce((s, k) => s + (parseInt(f.painAssessment[k], 10) || 0), 0)} />
+                </Field>
+                <div className="sm:col-span-2 md:col-span-3">{carriedMark('hp.painAssessment')}</div>
+              </div>
+            </div>
+          );
+          case 'hazards': return (
+            <div>
+              {blockTitle('Home-hazard inventory')}
+              {(pf.homeSafetyFlags || []).length > 0 && (
+                <Prefilled fieldKey="homeSafetyFlags" confirmed={confirmed} onConfirm={confirm}>
+                  <span className="lblu block mb-1">Intake staff-safety flags</span>
+                  <div className="flex flex-wrap gap-1.5">{pf.homeSafetyFlags.map((c, i) => <span key={i} className="chip bg-amber-50 text-amber-800">{c}</span>)}</div>
+                </Prefilled>
+              )}
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 mt-3">
+                {hazardFields.map(([k, hl]) => (
+                  <Field key={k} label={hl}>
+                    <select className="inp" value={f.homeHazards[k]} onChange={e => set(`homeHazards.${k}`, e.target.value)}>
+                      <option value="">—</option><option value="present_working">Present / working</option>
+                      <option value="present_not_working">Present, not working</option><option value="absent">Absent</option>
+                      <option value="na">N/A</option>
+                    </select>
+                  </Field>
+                ))}
+              </div>
+              <div className="mt-3"><TextArea f={f} set={set} path="homeHazards.notes" label="Hazard notes" /></div>
+              {carriedMark('hp.homeHazards')}
+            </div>
+          );
+          case 'triage': return (
+            <div>
+              {blockTitle('RN triage')}
+              {carriedMark('hp.triage')}
+              <div className="grid md:grid-cols-2 gap-3">
+                <Field label="Track assignment (RN triage)">
+                  <select className="inp" value={f.triage.track} onChange={e => set('triage.track', e.target.value)}>
+                    <option value="">— keep current ({patient.careTier || 'unset'})</option>
+                    <option value="A1">A1 — Essential ADL</option><option value="A2">A2 — Comprehensive ADL &amp; IADL</option>
+                    <option value="A3">A3 — IADL-Forward Support</option><option value="A4">A4 — Behavioral &amp; Cognitive</option>
+                    <option value="B">B — Skilled Nursing</option>
+                  </select>
+                </Field>
+                <TextArea f={f} set={set} path="triage.rationale" label="Triage rationale" />
+              </div>
+            </div>
+          );
+          default: return null;
+        }
+      };
       return (
         <div className={embedded ? '' : 'max-w-3xl mx-auto'}>
           {appointmentEid && !sn.euuid && (
@@ -2729,155 +2971,27 @@
             </div>
           </div>
 
+          {/* THE NOTE — one continuous note, in the order this visit type lists
+              its sections (owner report, 2026-09-28). See noteLayout. */}
           <div className="card mb-4">
-            <div className="card-h"><h2>{visitType ? visitType.label : 'Visit'} · Note</h2></div>
+            <div className="card-h"><h2>{visitType ? visitType.label : 'Visit'} · Note</h2>
+              {!visit.appointmentType && <span className="text-[10.5px] text-stone-500">choose the visit type above to lay the note out for it</span>}
+            </div>
             <div className="p-4 grid gap-4">
-              <Prefilled fieldKey="chiefConcern" confirmed={confirmed} onConfirm={confirm}>
-                <FormattedField label="Chief concern" value={f.chiefConcern} onChange={v => set('chiefConcern', v)}
-                  carried={isCarried('chiefConcern')} onConfirmCarried={() => sn.confirm('chiefConcern')} />
-              </Prefilled>
-              {(pf.conditions || []).length > 0 && (
-                <Prefilled fieldKey="conditions" confirmed={confirmed} onConfirm={confirm}>
-                  <span className="lblu block mb-1">Family-reported conditions (intake)</span>
-                  <div className="flex flex-wrap gap-1.5">{pf.conditions.map((c, i) => <span key={i} className="chip bg-primary-50 text-primary">{c}</span>)}</div>
-                </Prefilled>
-              )}
               <DictationHint />
-              <FormattedField label="Subjective / history" minRows={3} value={f.subjective} onChange={v => set('subjective', v)}
-                carried={isCarried('subjective')} onConfirmCarried={() => sn.confirm('subjective')} />
-            </div>
-          </div>
-
-          <TemplateSections sections={noteSections} values={f.sections}
-            onChange={(k, v) => setF(prev => ({ ...prev, sections: { ...prev.sections, [k]: v } }))}
-            pending={sn.pending} onConfirm={sn.confirm} />
-
-          <div className="card mb-4">
-            <div className="card-h"><h2>Vitals</h2><span className="text-[10.5px] text-stone-500">BP required in both arms (§2C)</span></div>
-            <div className="p-4 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
-              <VitalInput f={f} set={set} k="bpRightSys" label="BP right — sys" /><VitalInput f={f} set={set} k="bpRightDia" label="BP right — dia" />
-              <VitalInput f={f} set={set} k="bpLeftSys" label="BP left — sys" /><VitalInput f={f} set={set} k="bpLeftDia" label="BP left — dia" />
-              <VitalInput f={f} set={set} k="hr" label="Heart rate" /><VitalInput f={f} set={set} k="temp" label="Temp (°F)" /><VitalInput f={f} set={set} k="rr" label="Resp rate" /><VitalInput f={f} set={set} k="spo2" label="SpO₂ (%)" />
-              <VitalInput f={f} set={set} k="weight" label="Weight (lb)" /><VitalInput f={f} set={set} k="height" label="Height (in)" />
-            </div>
-          </div>
-
-          <div className="card mb-4">
-            <div className="card-h"><h2>Systems exam</h2></div>
-            <div className={`p-4 grid md:grid-cols-2 gap-3 ${isCarried('hp.systemsExam') ? 'carried rounded-b-lg' : ''}`}>
-              {Object.keys(f.systemsExam).map(k => (
-                <TextArea f={f} set={set} key={k} path={`systemsExam.${k}`} label={k === 'lungSounds' ? 'Lung sounds' : k.charAt(0).toUpperCase() + k.slice(1)} />
-              ))}
-              <div className="md:col-span-2">{carriedMark('hp.systemsExam')}</div>
-            </div>
-            <div className="px-4 pb-4">
-              <FormattedField label="Other exam findings" value={f.objective} onChange={v => set('objective', v)}
-                carried={isCarried('objective')} onConfirmCarried={() => sn.confirm('objective')} />
-            </div>
-          </div>
-
-          {/* Offered where the encounter type says the visit is psychiatric,
-              and nowhere else. An empty MSE on every note trains people to
-              scroll past the section that matters. The SERVER answers whether
-              this patient is psychiatric — the page never reads a label and
-              decides for itself. */}
-          {/* The MSE follows THIS VISIT's appointment type, not the patient's
-              usual one. A patient who normally has a primary-care visit can
-              have a psych evaluation, and the note has to follow the visit. */}
-          {noteHasSection('mentalStatusExam') && (
-            <div className="card mb-4">
-              <div className="card-h"><h2>Mental status exam</h2>
-                <span className="text-[10.5px] text-stone-500">the exam for this visit — the systems exam above still applies</span>
-              </div>
-              <div className={`p-4 grid md:grid-cols-2 gap-3 ${isCarried('hp.mentalStatusExam') ? 'carried rounded-b-lg' : ''}`}>
-                {Object.keys(f.mentalStatusExam).map(k => (
-                  <TextArea f={f} set={set} key={k} path={`mentalStatusExam.${k}`} label={k.replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase())} />
-                ))}
-                <div className="md:col-span-2">{carriedMark('hp.mentalStatusExam')}</div>
-              </div>
-            </div>
-          )}
-
-          <div className="card mb-4">
-            <div className="card-h"><h2>Skin &amp; wound</h2></div>
-            <div className="p-4 grid gap-3">
-              <TextArea f={f} set={set} path="skinWound.findings" label="Skin findings" />
-              <Field label="Wound present?">
-                <select className="inp" value={f.skinWound.woundPresent} onChange={e => set('skinWound.woundPresent', e.target.value)}>
-                  <option value="no">No</option><option value="yes">Yes</option>
-                </select>
-              </Field>
-              {f.skinWound.woundPresent === 'yes' && (
-                <div className="grid md:grid-cols-2 gap-3">
-                  <TextArea f={f} set={set} path="skinWound.woundLocation" label="Location" />
-                  <TextArea f={f} set={set} path="skinWound.woundMeasurements" label="Measurements (L × W × D cm)" />
-                </div>
-              )}
-              {carriedMark('hp.skinWound')}
-            </div>
-          </div>
-
-          <div className="card mb-4">
-            <div className="card-h"><h2>Pain assessment (PAINAD-style)</h2><span className="text-[10.5px] text-stone-500">0–2 each</span></div>
-            <div className="p-4 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
-              {painFields.map(k => (
-                <Field key={k} label={k.replace(/([A-Z])/g, ' $1')}>
-                  <select className="inp" value={f.painAssessment[k]} onChange={e => set(`painAssessment.${k}`, e.target.value)}>
-                    <option value="">—</option><option>0</option><option>1</option><option>2</option>
-                  </select>
-                </Field>
-              ))}
-              <Field label="Total score">
-                <input className="inp" readOnly value={painFields.reduce((s, k) => s + (parseInt(f.painAssessment[k], 10) || 0), 0)} />
-              </Field>
-              <div className="sm:col-span-2 md:col-span-3">{carriedMark('hp.painAssessment')}</div>
-            </div>
-          </div>
-
-          <div className="card mb-4">
-            <div className="card-h"><h2>Home-hazard inventory</h2></div>
-            <div className="p-4">
-              {(pf.homeSafetyFlags || []).length > 0 && (
-                <Prefilled fieldKey="homeSafetyFlags" confirmed={confirmed} onConfirm={confirm}>
-                  <span className="lblu block mb-1">Intake staff-safety flags</span>
-                  <div className="flex flex-wrap gap-1.5">{pf.homeSafetyFlags.map((c, i) => <span key={i} className="chip bg-amber-50 text-amber-800">{c}</span>)}</div>
-                </Prefilled>
-              )}
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 mt-3">
-                {hazardFields.map(([k, label]) => (
-                  <Field key={k} label={label}>
-                    <select className="inp" value={f.homeHazards[k]} onChange={e => set(`homeHazards.${k}`, e.target.value)}>
-                      <option value="">—</option><option value="present_working">Present / working</option>
-                      <option value="present_not_working">Present, not working</option><option value="absent">Absent</option>
-                      <option value="na">N/A</option>
-                    </select>
-                  </Field>
-                ))}
-              </div>
-              <div className="mt-3"><TextArea f={f} set={set} path="homeHazards.notes" label="Hazard notes" /></div>
-              {carriedMark('hp.homeHazards')}
-            </div>
-          </div>
-
-          <div className="card mb-4">
-            <div className="card-h"><h2>Assessment, plan &amp; RN triage</h2></div>
-            <div className="p-4 grid gap-3">
-              <FormattedField label="Assessment" minRows={3} value={f.assessment} onChange={v => set('assessment', v)}
-                carried={isCarried('assessment')} onConfirmCarried={() => sn.confirm('assessment')} />
-              <FormattedField label="Plan" minRows={3} value={f.plan} onChange={v => set('plan', v)}
-                carried={isCarried('plan')} onConfirmCarried={() => sn.confirm('plan')} />
-              {carriedMark('hp.triage')}
-              <div className="grid md:grid-cols-2 gap-3">
-                <Field label="Track assignment (RN triage)">
-                  <select className="inp" value={f.triage.track} onChange={e => set('triage.track', e.target.value)}>
-                    <option value="">— keep current ({patient.careTier || 'unset'})</option>
-                    <option value="A1">A1 — Essential ADL</option><option value="A2">A2 — Comprehensive ADL &amp; IADL</option>
-                    <option value="A3">A3 — IADL-Forward Support</option><option value="A4">A4 — Behavioral &amp; Cognitive</option>
-                    <option value="B">B — Skilled Nursing</option>
-                  </select>
-                </Field>
-                <TextArea f={f} set={set} path="triage.rationale" label="Triage rationale" />
-              </div>
+              {noteLayout({
+                sections: noteSections,
+                fixedBlocks: ['chiefConcern', 'subjective', 'vitals', 'exam', ...(noteHasSection('mentalStatusExam') ? ['mse'] : []), 'assessment', 'plan'],
+                extraBlocks: ['skinWound', 'pain', 'hazards', 'triage'],
+                extraLabel: 'Home visit assessment',
+                stored: f.sections, labelFor: sectionLabelFor
+              }).map((item, i) => (item.kind === 'heading'
+                ? <NoteHeading key={`h-${i}`} label={item.label} />
+                : item.kind === 'pointer'
+                  ? <CardPointer key={`p-${item.section.key}`} section={item.section} card={item.card} />
+                : item.kind === 'section'
+                  ? renderOwnSection(item.section, f.sections, setSection, sn.pending, sn.confirm)
+                  : <div key={`b-${item.block}`}>{hpBlock(item.block, item.label)}</div>))}
             </div>
           </div>
 
@@ -4547,6 +4661,26 @@
         <FormattedField label={label} minRows={rows || 2} value={f[k]} onChange={v => setF(p => ({ ...p, [k]: v }))}
           carried={carried(k)} onConfirmCarried={() => sn.confirm(k)} />
       );
+      // One block of the note (a plain function, not a component).
+      const fuBlock = (block, label) => {
+        switch (block) {
+          case 'chiefConcern': return field('chiefConcern', label || 'Visit reason / chief concern');
+          case 'subjective': return field('subjective', label || 'Subjective', 3);
+          case 'vitals': return (
+            <div>
+              <span className="lblu block mb-1">{label || 'Vitals'}</span>
+              <div className="grid grid-cols-1 sm:grid-cols-3 md:grid-cols-5 gap-2">
+                <FollowUpVital f={f} setV={setV} k="bpSys" label="BP sys" /><FollowUpVital f={f} setV={setV} k="bpDia" label="BP dia" /><FollowUpVital f={f} setV={setV} k="hr" label="HR" /><FollowUpVital f={f} setV={setV} k="temp" label="Temp °F" /><FollowUpVital f={f} setV={setV} k="rr" label="RR" />
+                <FollowUpVital f={f} setV={setV} k="spo2" label="SpO₂ %" /><FollowUpVital f={f} setV={setV} k="weight" label="Wt lb" /><FollowUpVital f={f} setV={setV} k="height" label="Ht in" /><FollowUpVital f={f} setV={setV} k="pain" label="Pain /10" />
+              </div>
+            </div>
+          );
+          case 'exam': return field('objective', label || 'Objective', 3);
+          case 'assessment': return field('assessment', label || 'Assessment', 3);
+          case 'plan': return field('plan', label || 'Plan', 3);
+          default: return null;
+        }
+      };
       return (
         <div>
           <div className="card p-3 mb-3 text-xs text-stone-600 flex flex-wrap items-center gap-2">
@@ -4560,27 +4694,25 @@
           )}
           {!showCarry && <button className="btn ghost !py-1.5 text-xs mb-3" onClick={() => setShowCarry(true)}><i className="ti ti-copy" />Start from a previous note</button>}
           {showCarry && <CarryForwardPicker patientId={patient.id} excludeEuuid={euuid} onPick={pickCarry} onClose={() => setShowCarry(false)} />}
+          {/* One continuous note in the visit type's order — see noteLayout. */}
           <div className="card mb-4">
             <div className="card-h"><h2>Note</h2></div>
             <div className="p-4 grid gap-3">
-              {field('chiefConcern', 'Visit reason / chief concern')}
               <DictationHint />
-              {field('subjective', 'Subjective', 3)}
-              <div>
-                <span className="lblu block mb-1">Vitals</span>
-                <div className="grid grid-cols-1 sm:grid-cols-3 md:grid-cols-5 gap-2">
-                  <FollowUpVital f={f} setV={setV} k="bpSys" label="BP sys" /><FollowUpVital f={f} setV={setV} k="bpDia" label="BP dia" /><FollowUpVital f={f} setV={setV} k="hr" label="HR" /><FollowUpVital f={f} setV={setV} k="temp" label="Temp °F" /><FollowUpVital f={f} setV={setV} k="rr" label="RR" />
-                  <FollowUpVital f={f} setV={setV} k="spo2" label="SpO₂ %" /><FollowUpVital f={f} setV={setV} k="weight" label="Wt lb" /><FollowUpVital f={f} setV={setV} k="height" label="Ht in" /><FollowUpVital f={f} setV={setV} k="pain" label="Pain /10" />
-                </div>
-              </div>
-              {field('objective', 'Objective', 3)}
-              {field('assessment', 'Assessment', 3)}
-              {field('plan', 'Plan', 3)}
+              {noteLayout({
+                sections: noteSections,
+                fixedBlocks: ['chiefConcern', 'subjective', 'vitals', 'exam', 'assessment', 'plan'],
+                extraBlocks: [], extraLabel: 'More of this note',
+                stored: f.sections, labelFor: sectionLabelFor
+              }).map((item, i) => (item.kind === 'heading'
+                ? <NoteHeading key={`h-${i}`} label={item.label} />
+                : item.kind === 'pointer'
+                  ? <CardPointer key={`p-${item.section.key}`} section={item.section} card={item.card} />
+                : item.kind === 'section'
+                  ? renderOwnSection(item.section, f.sections, (k, v) => setF(prev => ({ ...prev, sections: { ...prev.sections, [k]: v } })), sn.pending, sn.confirm)
+                  : <div key={`b-${item.block}`}>{fuBlock(item.block, item.label)}</div>))}
             </div>
           </div>
-          <TemplateSections sections={noteSections} values={f.sections}
-            onChange={(k, v) => setF(prev => ({ ...prev, sections: { ...prev.sections, [k]: v } }))}
-            pending={sn.pending} onConfirm={sn.confirm} />
           {msg && <p className={`text-sm mb-3 ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
           {showSign && (
             <SignNotePanel patientId={patient.id} euuid={euuid} saveFirst={() => save()} signsAsAuthor={sn.meta.signsAsAuthor}
@@ -4607,8 +4739,11 @@
       const n = note || {};
       const v = n.vitals || {};
       const vitalsText = Object.keys(v).length
-        ? ((v.bpRightSys || v.bpLeftSys)
-          ? `BP right ${v.bpRightSys || '—'}/${v.bpRightDia || '—'} · left ${v.bpLeftSys || '—'}/${v.bpLeftDia || '—'}`
+        ? ((v.bpRightSys || v.bpLeftSys || v.bpRightUnable || v.bpLeftUnable)
+          ? ['Right', 'Left'].map(side => {
+              const s = `bp${side}`;
+              return `${side === 'Right' ? 'BP right' : 'left'} ${v[`${s}Unable`] ? `unable to obtain${v[`${s}UnableReason`] ? ` (${v[`${s}UnableReason`]})` : ''}` : `${v[`${s}Sys`] || '—'}/${v[`${s}Dia`] || '—'}`}`;
+            }).join(' · ')
           : `BP ${v.bpSys || '—'}/${v.bpDia || '—'}`) + ` · HR ${v.hr || '—'} · Temp ${v.temp || '—'} · RR ${v.rr || '—'} · SpO₂ ${v.spo2 || '—'}`
         : null;
       const labelOf = (k) => ((noteSections || []).find(s => s.key === k) || {}).label || humanize(k);
