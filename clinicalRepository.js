@@ -333,7 +333,11 @@ const buildChartDocumentIndex = (input) => {
       contentType: u.mimeType || null,
       source: CHART_DOC_SOURCE.APP,
       openable: true,
-      inChart: false,
+      // Whether this UPLOAD has ALSO been filed into OpenEMR's own Documents
+      // (server.js, POST …/documents/:docId/file-to-emr, 2026-09-24). This was
+      // hardcoded false because there was no such route — a client upload had
+      // no path into the real EMR at all, unlike a care plan or a consent.
+      inChart: !!u.emrFiled,
       // Only an UPLOAD row can be read into proposals: it is the one kind that
       // corresponds to a stored file the extractor can fetch. A consent, a care
       // plan and a record release are documents this app GENERATED from the
@@ -1204,17 +1208,24 @@ const SIGN_BLOCKER_LABELS = {
 // signature naming both values — see checkEncounterTypeAgainstPos. That refusal
 // carries its own sentence rather than a label in the joined list, because the
 // reader has to know which of the two is wrong and neither is fixed from here.
-const checkSignReadiness = ({ hasNote, record, billingNpi, posCode, visit, facilityName, riskAssessment, completedSections, ncciPtpEdits, ncciMue, ncciSourceVersion }) => {
+// `billingChecks: false` is the AUTHOR signature's gate (an RN's or LMSW's,
+// owner 2026-09-27): the note must be complete, but the codes, the billing NPI
+// and the place of service are the billing clinician's to settle at the
+// addendum — that addendum is what becomes a claim, so that is where they are
+// checked. Every caller that does not say otherwise gets the full gate.
+const checkSignReadiness = ({ hasNote, record, billingNpi, posCode, visit, facilityName, riskAssessment, completedSections, ncciPtpEdits, ncciMue, ncciSourceVersion, billingChecks = true }) => {
   const missing = [];
   if (!hasNote) missing.push('note');
-  missing.push(...deriveCodingStatus(record).missing);
-  if (!normalizeNpiValue(billingNpi)) missing.push('billing_npi');
   const pos = String(posCode || '').trim();
-  if (!pos) missing.push('facility_pos');
+  if (billingChecks) {
+    missing.push(...deriveCodingStatus(record).missing);
+    if (!normalizeNpiValue(billingNpi)) missing.push('billing_npi');
+    if (!pos) missing.push('facility_pos');
+  }
   // Only asked where a POS actually resolved: with none, `facility_pos` above
   // already blocks and saying it twice in two different sentences would send
   // the reader at two layers for one problem.
-  const agreement = pos
+  const agreement = pos && billingChecks
     ? checkVisitAgainstPos({ visit, posCode: pos, facilityName })
     : { ok: true, error: null, code: null };
   if (!agreement.ok) missing.push('encounter_type_pos');
@@ -1240,7 +1251,9 @@ const checkSignReadiness = ({ hasNote, record, billingNpi, posCode, visit, facil
   // check above — a caller that never mentions ncci (every pre-existing
   // caller of this function) gets ok:true from it and nothing changes; see
   // checkNcciBundling's own comment.
-  const ncci = checkNcciBundling(record && record.services, visit, { ptpEdits: ncciPtpEdits, mueByCode: ncciMue, sourceVersion: ncciSourceVersion });
+  const ncci = billingChecks
+    ? checkNcciBundling(record && record.services, visit, { ptpEdits: ncciPtpEdits, mueByCode: ncciMue, sourceVersion: ncciSourceVersion })
+    : { ok: true, codes: [], warnings: [], message: null };
   if (!ncci.ok) missing.push('ncci_bundling');
 
   const labelled = missing.filter(m => m !== 'encounter_type_pos' && m !== 'note_sections' && m !== 'ncci_bundling');
@@ -2035,14 +2048,24 @@ const renderBlock = (name, lines) => [`[GFC ${name} v${GFC_BLOCK_VERSION}]`, ...
 const cell = (v) => String(v == null ? '' : v).replace(/\s*\|\s*/g, '/').replace(/\r?\n/g, ' ').trim();
 const providerCell = (p) => `${cell(p && p.name) || 'unknown'} | NPI ${(p && p.npi) || 'none'}`;
 
-const renderAttestationBlock = (att) => renderBlock('ATTESTATION', [
-  `signed_at: ${att.signedAt}`,
-  `signed_by: ${providerCell(att.signedBy)}`,
-  `attestation: ${cell(att.attestationText)}`,
-  `dx: ${(att.diagnosisCodes || []).join(',')}`,
-  `svc: ${(att.serviceCodes || []).join(',')}`,
-  'encounter_closed: true | corrections are addenda only'
-]);
+// The record's clinician addendum and co-signatures ride here too (2026-09-27):
+// before, a co-signature lived only on the app's record, so the chart named the
+// author and never the clinician who made the note billable.
+const renderAttestationBlock = (att, record) => {
+  const r = record || {};
+  return renderBlock('ATTESTATION', [
+    `signed_at: ${att.signedAt}`,
+    `signed_by: ${providerCell(att.signedBy)}`,
+    `signed_as: ${r.coSignStatus === 'pending' || r.coSignStatus === 'cleared' ? 'author (not a billing signature)' : 'billing signature'}`,
+    `attestation: ${cell(att.attestationText)}`,
+    `dx: ${(att.diagnosisCodes || []).join(',')}`,
+    `svc: ${(att.serviceCodes || []).join(',')}`,
+    ...(r.coSignStatus === 'pending' ? ['billing: AWAITING CLINICIAN ADDENDUM'] : []),
+    ...(r.coSignStatus === 'cleared' && r.coSignedBy ? [`billing_signature: ${r.coSignedAt} | ${providerCell(r.coSignedBy)}`] : []),
+    ...(Array.isArray(r.coSignatures) ? r.coSignatures.map(c => `co_signature: ${c.at} | ${providerCell(c)}`) : []),
+    'encounter_closed: true | corrections are addenda only'
+  ]);
+};
 const renderAddendaBlock = (addenda) => renderBlock('ADDENDA', (addenda || []).flatMap(a => [
   `addendum: ${a.id} | ${a.at} | ${providerCell(a.by)}`,
   `  ${String(a.text || '').replace(/\r?\n/g, '\n  ')}`
@@ -2067,12 +2090,12 @@ const renderAddendaBlock = (addenda) => renderBlock('ADDENDA', (addenda || []).f
 // CODING and ORDERS. Prescriptions became native in Scope A of the same
 // session, so leaving RX would have left exactly the duplicate the brief is
 // removing elsewhere. Flagged rather than done quietly.
-const buildStructuredNote = ({ attestation, addenda }) => ({
+const buildStructuredNote = ({ attestation, addenda, record }) => ({
   subjective: '[GFC STRUCTURED RECORD v2] The sign-and-close record for this encounter, written by the GFC Care Platform. OpenEMR has no encounter sign/close concept, so the attestation and any addenda live here. Coding, orders and prescriptions are NOT here — they are native OpenEMR records (billing, procedure_order, prescriptions). The clinician\'s narrative is the separate SOAP note on this encounter. Do not edit this note by hand — it is regenerated on every change.',
   objective: 'Coding, orders and prescriptions are recorded natively in OpenEMR — see the Fee Sheet, Procedure Orders and the medication list. This note carries the attestation only.',
   assessment: 'See the encounter diagnoses and services on the Fee Sheet.',
   plan: [
-    attestation ? renderAttestationBlock(attestation) : 'Encounter OPEN — not yet signed and closed.',
+    attestation ? renderAttestationBlock(attestation, record) : 'Encounter OPEN — not yet signed and closed.',
     (addenda || []).length ? renderAddendaBlock(addenda) : null
   ].filter(Boolean).join('\n\n')
 });
@@ -2525,6 +2548,10 @@ const buildPatientBanner = ({ client, linked, emrAllergies, facility, lastVisitA
 };
 
 module.exports = {
+  // Read by clinicalNotes.js so the shared note keeps the H&P's own section
+  // vocabulary rather than a second copy of it.
+  HP_SECTION_LABELS,
+  kvLines,
   // Session 4.12 — the persistent patient banner and the home-visit facts
   ALLERGY_STATE,
   buildAllergyStrip,

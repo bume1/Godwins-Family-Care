@@ -140,13 +140,20 @@ test('filing the note clears the draft that produced it', () => {
 });
 
 test('all three draft routes require the capability that documents a note', () => {
+  // Repointed 2026-09-27: a note is written by a nursing OR a behavioral
+  // documenter (an LMSW authors notes too), so the gate is requireNoteWriter —
+  // still a capability check, never the middleware alone.
   for (const verb of ['get', 'put', 'delete']) {
     const re = new RegExp(`app\\.${verb}\\('/api/clinical/patients/:clientId/visit/draft'[^\\n]*`);
     const line = (server.match(re) || [])[0];
     assert.ok(line, `the ${verb.toUpperCase()} draft route is missing`);
-    assert.ok(line.includes('CAPABILITIES.NURSING_NOTE'),
-      `${verb.toUpperCase()} draft must gate on NURSING_NOTE, not the middleware alone`);
+    assert.ok(line.includes('requireNoteWriter'),
+      `${verb.toUpperCase()} draft must gate on a note-writing capability, not the middleware alone`);
   }
+  const gate = server.slice(server.indexOf('const requireNoteWriter'), server.indexOf('const requireNoteWriter') + 600);
+  assert.match(gate, /CAPABILITIES\.NURSING_NOTE/);
+  assert.match(gate, /CAPABILITIES\.BEHAVIORAL_NOTE/);
+  assert.match(gate, /status\(403\)/, 'anyone holding neither is refused');
 });
 
 test('a draft is read back only by its own author', () => {
@@ -169,29 +176,41 @@ test('the activity trail records that a draft was saved, never its content', () 
 
 // The defect this replaces: one button reading "Sign & write to chart" that
 // performed no attestation at all.
-test('no H&P action claims to sign, because none of them signs', () => {
+// Repointed 2026-09-27: the owner replaced the three actions with two — Save
+// draft (app AND OpenEMR, one action) and Sign & submit note. The rule these
+// guards protect is unchanged: an action that does not sign must say so, and
+// the action that says "Sign" must actually sign.
+test('no H&P action claims to sign unless it signs', () => {
   const hp = clinicalPage.slice(clinicalPage.indexOf('const HpTab = ('));
   const actions = hp.slice(0, hp.indexOf('const MedRecTab'));
   assert.ok(!/Sign & write to chart/.test(actions),
-    'the H&P button must not say "Sign" — filing a note is not attesting to it');
-  assert.ok(actions.includes('Save draft'), 'the simple save is missing');
-  assert.ok(actions.includes('Save & file note to chart'), 'the file-to-chart action is missing');
-  // Scoped to the message filing actually produces, NOT to the whole tab: the
-  // explainer paragraph also contains "not signed", so a looser assertion here
-  // passed even with the success message stripped. Caught by mutation.
-  const fileFn = actions.slice(actions.indexOf('const file = (thenGo)'));
-  const fileBody = fileFn.slice(0, fileFn.indexOf('const painFields'));
-  assert.ok(/NOT signed yet/.test(fileBody),
-    'the message shown after filing must say the note is not yet signed');
+    'no button may say "Sign" for an action that does not attest');
+  assert.ok(!/Save &amp; file note to chart|File note &amp; go to coding/.test(actions),
+    'the two separate filing buttons are gone — Save draft writes the app and OpenEMR together');
+  assert.ok(actions.includes('Save draft'), 'the save is missing');
+  assert.ok(actions.includes('Sign &amp; submit note'), 'the sign action is missing');
+  // Scoped to the message SAVING actually produces, not the whole tab: the
+  // explainer paragraph also says "not sign", so a looser assertion would pass
+  // with the success message stripped (caught by mutation on 2026-09-22).
+  const saveFn = actions.slice(actions.indexOf('const saveDraft = () =>'));
+  const saveBody = saveFn.slice(0, saveFn.indexOf('const discardDraft'));
+  assert.ok(/NOT signed yet/.test(saveBody),
+    'the message shown after saving must say the note is not yet signed');
 });
 
-test('the three note actions all exist and do three different things', () => {
+test('Save draft saves through the shared note, and Sign & submit really signs', () => {
   const hp = clinicalPage.slice(clinicalPage.indexOf('const HpTab = ('));
   const actions = hp.slice(0, hp.indexOf('const MedRecTab'));
-  assert.ok(actions.includes('api.saveDraft('), 'Save draft must call the draft route');
-  assert.ok(actions.includes('api.visit('), 'filing must call the visit route');
-  assert.ok(actions.includes('onGoToEncounter('),
-    'the third action must lead to where signing actually happens');
+  assert.ok(actions.includes('sn.save(toNote()'), 'Save draft must save the shared note');
+  // The one component that renders the Sign & submit button used by the note
+  // editors must call the sign route — a "Sign" button that only saves is the
+  // defect this whole file exists to prevent.
+  const panel = clinicalPage.slice(clinicalPage.indexOf('const SignNotePanel = ('), clinicalPage.indexOf('const TemplateSections = ('));
+  assert.ok(panel.includes('api.sign(patientId, euuid)'), 'Sign & submit must call the sign route');
+  assert.ok(actions.includes('<SignNotePanel'), 'the H&P must offer the real sign panel');
+  const shared = clinicalPage.slice(clinicalPage.indexOf('const useSharedNote = ('), clinicalPage.indexOf('const SignNotePanel = ('));
+  assert.ok(shared.includes('api.createNote(') && shared.includes('api.saveNote('),
+    'the first save creates the note on its encounter; later saves update it');
 });
 
 // The reason THAT session started: a route with no screen. The rule did not
