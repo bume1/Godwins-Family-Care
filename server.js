@@ -8393,7 +8393,10 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
         // The EMR half, and then the whole list — see chartDocuments below.
         documents: take(documents, clinicalRepo.summarizeDocument),
         vitals: take(vitals, clinicalRepo.summarizeVitalObservation)
-      }
+      },
+      // Readings on a saved note that is not signed yet — not in OpenEMR's
+      // vitals form until signing, so shown from the note, marked as a draft.
+      draftVitals: await draftVitalsFor(client.id)
     });
   } catch (error) {
     console.error('Clinical chart error:', error);
@@ -10348,11 +10351,28 @@ const fileSignedNotePdf = async (emr, client, record, attestation, addenda) => {
 // Where a note's content comes from when it is carried forward or opened for
 // editing: the shared note if it has one, otherwise the OpenEMR narrative of a
 // note written the old way.
+// Every unsigned draft on this client's chart that carries vitals, newest
+// visit first, as vitals rows marked `draft`.
+const draftVitalsFor = async (clientId) => {
+  try {
+    const rows = (await loadRows('encounter_billing')).filter(r => r && r.clientId === clientId);
+    return rows
+      .map(r => clinicalNotes.draftVitalsRows(r))
+      .filter(list => list.length)
+      .sort((a, b) => String(b[0].at || '').localeCompare(String(a[0].at || '')))
+      .flat();
+  } catch (e) {
+    console.error('Draft vitals read failed (non-fatal):', e.message);
+    return [];
+  }
+};
 const noteContentOf = async (emr, client, record) => {
   if (record.note) return { note: record.note, legacy: false };
   if (!record.narrativeNoteSid) return { note: null, legacy: true };
   const cur = await emr.getSoapNote(client.openEmrPatientId, record.encounterUuid, record.narrativeNoteSid);
-  return { note: cur ? clinicalNotes.noteFromLegacyNarrative(cur) : null, legacy: true };
+  const isInitialVisit = !!(client.clinicalInitialVisit && client.clinicalInitialVisit.encounterUuid
+    && String(client.clinicalInitialVisit.encounterUuid) === String(record.encounterUuid));
+  return { note: cur ? clinicalNotes.noteFromLegacyNarrative(cur, record.noteKind, { isInitialVisit }) : null, legacy: true };
 };
 const loadCarrySource = async (emr, client, sourceUuid) => {
   const src = findBillingRecord(await loadRows('encounter_billing'), sourceUuid);
@@ -10572,6 +10592,14 @@ app.put('/api/clinical/patients/:clientId/encounters/:euuid/note', authenticateT
     }
     const warnings = [];
     const record = { ...ctx.record, note: next, noteKind: next.kind, noteStatus: clinicalNotes.NOTE_STATUS.DRAFT, updatedAt: new Date().toISOString() };
+    // The first shared save of a note filed the old way: its vitals row was
+    // written to OpenEMR at filing, so remember those readings — signing then
+    // writes another row only if somebody changed them.
+    if (!before && ctx.record.narrativeNoteSid && !ctx.record.legacyVitals) {
+      const legacy = await noteContentOf(ctx.emr, ctx.client, ctx.record).catch(() => ({ note: null }));
+      const lv = legacy.note && legacy.note.vitals;
+      if (lv && Object.keys(lv).length) record.legacyVitals = lv;
+    }
     if (next.visit && !sameVisit(next.visit, before && before.visit)) {
       warnings.push(...(await applyVisitToEncounter(ctx.emr, ctx.client, record, next.visit, null)));
     }
@@ -11912,6 +11940,10 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
     record.completedSections = completedSections || [];
     // The OpenEMR vitals ROW, written once, here: there is no vitals-update
     // route, so writing it on every draft save would stack a row per save.
+    if (record.note && !record.vitalsWrittenAt && record.legacyVitals && !clinicalNotes.vitalsNeedRow(record)) {
+      // Filed the old way and unchanged since: OpenEMR already has this row.
+      record.vitalsWrittenAt = record.createdAt || attestation.signedAt;
+    }
     if (record.note && !record.vitalsWrittenAt) {
       const vitalsRow = clinicalNotes.buildVitalsRow(record.note);
       if (vitalsRow) {
@@ -12489,6 +12521,15 @@ app.get('/api/clinical/patients/:clientId/pre-visit', authenticateToken, require
         today: practiceToday(), careTierLabel: careTierLabelFor(client.careTier)
       });
       emrNotice = client.openEmrPatientId ? 'OpenEMR is not configured.' : 'This patient is not linked to an OpenEMR chart.';
+    }
+    // A saved but unsigned note's readings are newer than anything in
+    // OpenEMR's vitals form (written only at signing), so they win here.
+    {
+      const drafts = await draftVitalsFor(client.id);
+      if (drafts.length) {
+        const newest = drafts.filter(r => r.encounterUuid === drafts[0].encounterUuid);
+        lastVitals = { label: null, value: newest.map(r => `${r.name} ${r.value}`).join(' · '), at: drafts[0].at, draft: true };
+      }
     }
 
     const plan = client.carePlan || null;

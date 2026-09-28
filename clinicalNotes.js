@@ -252,16 +252,135 @@ const stripLegacyText = (text) => {
   }
   return out.join('\n').replace(/^\n+|\n+$/g, '');
 };
-const noteFromLegacyNarrative = (soap, kind) => {
+// The readings an old note carries on its "VITALS —" line, back in the form's
+// own keys. Two shapes were ever written (clinicalRepository buildHpWrites and
+// buildFollowUpWrites); "—" was written for an empty box. Dropping this line
+// was a real bug: whoever opened an older note to edit it saw blank vitals,
+// and their first save rewrote the OpenEMR note without them (2026-09-28).
+const parseLegacyVitals = (text) => {
+  const line = (String(text || '').match(/VITALS[^—\n]*—\s*([^\n]*)/) || [])[1];
+  if (!line) return {};
+  const out = {};
+  const put = (k, v) => { const t = String(v == null ? '' : v).trim(); if (t && t !== '—') out[k] = t.slice(0, 16); };
+  const arm = (side) => line.match(new RegExp(`BP ${side} arm ([^/;]*)/([^;]*)`, 'i'));
+  const right = arm('right'); const left = arm('left');
+  if (right || left) {
+    if (right) { put('bpRightSys', right[1]); put('bpRightDia', right[2]); }
+    if (left) { put('bpLeftSys', left[1]); put('bpLeftDia', left[2]); }
+  } else {
+    const bp = line.match(/(?:^|;)\s*BP\s+([^/;]*)\/([^;]*)/i);
+    if (bp) { put('bpSys', bp[1]); put('bpDia', bp[2]); }
+  }
+  const val = (label) => (line.match(new RegExp(`(?:^|;)\\s*${label}\\s+([^;]+)`, 'i')) || [])[1];
+  put('hr', val('HR')); put('temp', val('Temp')); put('rr', val('RR')); put('spo2', val('SpO2'));
+  put('weight', val('Wt')); put('height', val('Ht'));
+  const pain = line.match(/(?:^|;)\s*Pain\s+([^;/]+)\/10/i);
+  if (pain) put('pain', pain[1]);
+  return out;
+};
+
+// An old H&P's objective carries each exam as a block: the section label in
+// capitals, then "Label: value" lines (clinicalRepository.kvLines). Read back
+// into note.hp so the H&P form's boxes are filled rather than the text sitting
+// in Objective.
+const camelFromLabel = (label) => {
+  const words = String(label).trim().split(/\s+/).filter(Boolean);
+  return words.map((w, i) => (i ? w.charAt(0).toUpperCase() + w.slice(1) : w.charAt(0).toLowerCase() + w.slice(1))).join('');
+};
+const HP_BLOCK_BY_HEADING = Object.freeze(Object.entries(clinicalRepo.HP_SECTION_LABELS)
+  .reduce((acc, [k, label]) => { acc[`${label.toUpperCase()}:`] = k; return acc; }, {}));
+const splitLegacyHpBlocks = (objectiveText) => {
+  const hp = {};
+  const kept = [];
+  let current = null;
+  for (const raw of String(objectiveText || '').replace(/\r\n?/g, '\n').split('\n')) {
+    const line = raw.trim();
+    if (HP_BLOCK_BY_HEADING[line]) { current = HP_BLOCK_BY_HEADING[line]; hp[current] = hp[current] || {}; continue; }
+    if (current) {
+      if (!line) { current = null; continue; }
+      const m = line.match(/^([^:]+):\s*(.*)$/);
+      if (m) { if (m[2].trim()) hp[current][camelFromLabel(m[1])] = m[2].trim().slice(0, NOTE_MAX_HP_VALUE); continue; }
+      current = null;
+    }
+    kept.push(raw);
+  }
+  for (const k of Object.keys(hp)) if (!Object.keys(hp[k]).length) delete hp[k];
+  return { hp, objective: kept.join('\n').replace(/^\n+|\n+$/g, '') };
+};
+const TRACK_LINE = /^RN Track assignment:\s*([^—\n]+?)(?:\s+—\s+(.*))?$/;
+
+// `hint.isInitialVisit` — the server knows which encounter was the client's
+// initial visit, which settles the kind even when the BP line was left blank.
+const noteFromLegacyNarrative = (soap, kind, hint = {}) => {
   const s = soap || {};
   const placeholder = /^(No objective findings recorded\.|See encounter diagnoses \(GFC structured note\)\.|Not documented\.)$/;
-  const field = (v) => { const t = stripLegacyText(v); return placeholder.test(t.trim()) ? '' : nf.fromPlainText(t); };
+  const vitals = parseLegacyVitals(s.objective);
+  const isHp = kind === 'hp' || !!hint.isInitialVisit || !!(vitals.bpRightSys || vitals.bpLeftSys || vitals.bpRightDia || vitals.bpLeftDia);
+  const clean = (v) => { const t = stripLegacyText(v); return placeholder.test(t.trim()) ? '' : t; };
+  let objective = clean(s.objective);
+  let plan = clean(s.plan);
+  let hp = {};
+  if (isHp) {
+    const split = splitLegacyHpBlocks(objective);
+    hp = split.hp; objective = split.objective;
+    const planLines = plan.split('\n');
+    const at = planLines.findIndex(l => TRACK_LINE.test(l.trim()));
+    if (at !== -1) {
+      const m = planLines[at].trim().match(TRACK_LINE);
+      hp.triage = { track: m[1].trim(), ...(m[2] ? { rationale: m[2].trim() } : {}) };
+      planLines.splice(at, 1);
+      plan = planLines.join('\n').replace(/^\n+|\n+$/g, '');
+    }
+  }
+  const field = (t) => (t ? nf.fromPlainText(t) : '');
   return {
-    kind: NOTE_KINDS.includes(kind) ? kind : 'followup',
-    chiefConcern: '', subjective: field(s.subjective), objective: field(s.objective),
-    assessment: field(s.assessment), plan: field(s.plan),
-    sections: {}, vitals: {}, hp: {}, confirmedFields: []
+    kind: isHp ? 'hp' : (NOTE_KINDS.includes(kind) ? kind : 'followup'),
+    chiefConcern: '', subjective: field(clean(s.subjective)), objective: field(objective),
+    assessment: field(clean(s.assessment)), plan: field(plan),
+    sections: {}, vitals, hp, confirmedFields: []
   };
+};
+
+// ---- Draft vitals, shown before the note is signed (owner, 2026-09-28) ----
+// The OpenEMR vitals row is written once, at signing, because OpenEMR cannot
+// update or delete one. Until then the readings live only in the note — so the
+// chart's vitals list and My Day's "Last vitals" show them from here, marked as
+// a draft that is not in OpenEMR yet. Once the row is written they drop out.
+const draftVitalsRows = (record) => {
+  const r = record || {};
+  if (!r.note || r.noteStatus !== NOTE_STATUS.DRAFT || r.vitalsWrittenAt) return [];
+  const v = r.note.vitals || {};
+  if (!Object.keys(v).length) return [];
+  const at = r.note.visitDate || r.date || null;
+  const id = (k) => `draft:${r.encounterUuid}:${k}`;
+  const rows = [];
+  const push = (key, name, value) => { if (value) rows.push({ id: id(key), name, value, at, draft: true, encounterUuid: r.encounterUuid || null }); };
+  if (v.bpRightSys || v.bpLeftSys || v.bpRightDia || v.bpLeftDia) {
+    const side = (s, d) => ((s || d) ? `${s || '—'}/${d || '—'}` : null);
+    push('bp', 'Blood pressure', [side(v.bpRightSys, v.bpRightDia) && `right ${side(v.bpRightSys, v.bpRightDia)}`,
+      side(v.bpLeftSys, v.bpLeftDia) && `left ${side(v.bpLeftSys, v.bpLeftDia)}`].filter(Boolean).join(' · '));
+  } else if (v.bpSys || v.bpDia) {
+    push('bp', 'Blood pressure', `${v.bpSys || '—'}/${v.bpDia || '—'} mmHg`);
+  }
+  push('hr', 'Heart rate', v.hr && `${v.hr} /min`);
+  push('temp', 'Body temperature', v.temp && `${v.temp} °F`);
+  push('rr', 'Respiratory rate', v.rr && `${v.rr} /min`);
+  push('spo2', 'Oxygen saturation', v.spo2 && `${v.spo2} %`);
+  push('weight', 'Body weight', v.weight && `${v.weight} lb`);
+  push('height', 'Body height', v.height && `${v.height} in`);
+  push('pain', 'Pain score', v.pain && `${v.pain}/10`);
+  return rows;
+};
+
+// A note filed the old way already had its vitals row written at filing. Its
+// first shared save records those readings as `legacyVitals`; signing then
+// writes a new row only if somebody changed them, so OpenEMR does not get the
+// same readings twice.
+const vitalsNeedRow = (record) => {
+  const v = (record && record.note && record.note.vitals) || {};
+  if (!Object.keys(v).length) return false;
+  if (!record.legacyVitals) return true;
+  return stableJson(v) !== stableJson(record.legacyVitals);
 };
 const buildCarriedForward = ({ fromEncounterUuid, fromDate, content }) => {
   const flat = flattenNote(content, { includeVitals: false });
@@ -490,6 +609,10 @@ module.exports = {
   carryForwardContent,
   stripLegacyText,
   noteFromLegacyNarrative,
+  parseLegacyVitals,
+  splitLegacyHpBlocks,
+  draftVitalsRows,
+  vitalsNeedRow,
   buildCarriedForward,
   carriedPending,
   slotForSection,
