@@ -4,43 +4,6 @@
 
 ---
 
-### Version 3.1.0 - September 28, 2026
-
-#### New Features
-- Add admin buttons for MFA reset and OpenEMR disconnect
-- Add a script to export GFC's billed CPT/HCPCS codes and modifiers
-- Add a quarterly admin/manager reminder to refresh the NCCI/MUE tables
-- Add an NCCI/MUE bundling check to the encounter sign gate
-- Add a general "something else" document kind
-- Add a branded, no-login document upload link
-
-#### Bug Fixes
-- Fix duplicate login prompt on the clinical workspace
-- Fix the idle timeout losing in-progress form data with no warning
-- Fix the office number on the upload form
-
-#### Changes
-- Delete a mistaken unsigned encounter, with a reason
-- Show the clinical note as one note in clinical order, and allow 'unable to take' for a BP arm
-- Show a draft note's vitals in the chart, and keep an older note's vitals when someone else edits it
-- Record Session 4.13 as merged in PR #133
-- Shared clinical notes: one draft, Sign & submit, clinician addendum, carry-forward
-- Auto-file client documents to OpenEMR; remove the manual button
-- File a client document into OpenEMR, or move it to a caregiver's file
-- Wire the Bedrock transport modelEngine.js has been waiting for
-- Center the clinical workspace's capped-width content areas on desktop
-- Note the billing NPI correction (owner action, no code change)
-- Read the NCCI MUE table from its .csv rendition
-- Make the NCCI loader work with Alpine's BusyBox unzip
-- Track scripts/ncci_source/ptp/ so it exists in every deployed image
-- Close LMSW independent-signature loophole (owner rule)
-- Make document reading cover every uploaded document kind
-- Record PR #120 in the running status
-- Stop the patient banner claiming "Not assigned" when a facility is assigned but unconfirmed
-- Surface a degraded place-of-service read on the chart, not just the enrollment screen
-- Regenerate today's changelog section
-
-
 ### Version 3.1.0 - September 27, 2026
 
 #### New Features
