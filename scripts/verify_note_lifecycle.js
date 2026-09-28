@@ -321,6 +321,44 @@ const HP_NOTE = {
   r = await call('POST', `${P}/notes`, tok.rn, { note: { kind: 'followup', chiefConcern: '<script>alert(1)</script>' } });
   check('typed HTML is stored as text and reaches OpenEMR as text', r.status === 200 && narrativeText(r.body.encounterUuid).includes('<script>alert(1)</script>'));
 
+  console.log('\n── 11. Vitals: an older note opened by another user, and a draft\'s vitals in the chart ──');
+  // A note filed with the old buttons: an encounter, an OpenEMR narrative and
+  // a billing record with no app copy of the note. Its vitals row was written
+  // at filing, the old way.
+  const legacyEuuid = 'enc-legacy-1';
+  EMR.encounters.set(legacyEuuid, { puuid: PATIENT.openEmrPatientId, eid: '777', date: '2026-09-26', reason: 'Initial visit' });
+  EMR.soap.set('7771', { id: '7771', euuid: legacyEuuid,
+    subjective: '[GFC CLINICIAN] Ruth Nolan, RN\n\nNew to the practice',
+    objective: 'VITALS — BP right arm 132/82; BP left arm 128/80; HR 76; Temp 98.4; RR 16; SpO2 97; Wt 160; Ht 66\n\nSYSTEMS EXAM:\nGeneral: Alert\nLung Sounds: Clear',
+    assessment: 'Stable', plan: 'Return in two weeks\nDocumented by Ruth Nolan' });
+  STORE.set('encounter_billing', rows('encounter_billing').concat([{
+    id: 'bill-legacy', clientId: PATIENT.id, puuid: PATIENT.openEmrPatientId, encounterUuid: legacyEuuid, encounterEid: '777',
+    date: '2026-09-26', narrativeNoteSid: '7771', diagnoses: [], services: [], createdAt: '2026-09-26T14:00:00.000Z'
+  }]));
+  r = await call('GET', `${P}/encounters/${legacyEuuid}/note`, tok.fnp);
+  check('another clinician opens the older note and sees its vitals', r.status === 200 && r.body.note && r.body.note.vitals.bpRightSys === '132' && r.body.note.vitals.bpLeftSys === '128' && r.body.note.vitals.hr === '76', r.body && r.body.note);
+  check('it opens as an H&P, exam in its box', r.body.note.kind === 'hp' && r.body.note.hp.systemsExam && r.body.note.hp.systemsExam.lungSounds === 'Clear', r.body.note);
+  const seededNote = r.body.note;
+  r = await call('PUT', `${P}/encounters/${legacyEuuid}/note`, tok.fnp, { note: { ...seededNote, assessment: 'Stable — reviewed' }, baseVersion: 0 });
+  check('their save is accepted', r.status === 200, r.body);
+  check('the OpenEMR note still carries the vitals after the save', /VITALS — BP right arm 132\/82; BP left arm 128\/80; HR 76/.test(narrativeText(legacyEuuid)), narrativeText(legacyEuuid).slice(0, 300));
+  check('the readings filed the old way are remembered', record(legacyEuuid).legacyVitals && record(legacyEuuid).legacyVitals.bpRightSys === '132');
+
+  r = await call('GET', `${P}/chart`, tok.rn);
+  const drafts = (r.body && r.body.draftVitals) || [];
+  check('the chart shows the unsigned note\'s vitals, marked draft', r.status === 200 && drafts.some(d => d.encounterUuid === legacyEuuid && d.draft === true && /132\/82/.test(d.value)), { status: r.status, drafts });
+  check('a signed note\'s vitals are not shown as a draft', !drafts.some(d => d.encounterUuid === hp || d.encounterUuid === cf));
+  r = await call('GET', `${P}/pre-visit`, tok.rn);
+  const lv = r.body && r.body.packet && r.body.packet.lastVitals;
+  check('"Last vitals" shows the draft readings too', r.status === 200 && lv && lv.draft === true && /Blood pressure right 132\/82/.test(lv.value), { status: r.status, lv });
+
+  const vitalsBefore = EMR.vitals.filter(v => v.euuid === legacyEuuid).length;
+  r = await call('POST', `${P}/encounters/${legacyEuuid}/sign`, tok.rn, { attest: true });
+  check('the older note is signed', r.status === 200, r.body);
+  check('its unchanged vitals are NOT sent to OpenEMR a second time', EMR.vitals.filter(v => v.euuid === legacyEuuid).length === vitalsBefore && !!record(legacyEuuid).vitalsWrittenAt);
+  r = await call('GET', `${P}/chart`, tok.rn);
+  check('once signed, it leaves the draft list', !((r.body && r.body.draftVitals) || []).some(d => d.encounterUuid === legacyEuuid));
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

@@ -177,6 +177,117 @@ test('a legacy OpenEMR note loses its header, vitals line, history and signature
   assert.strictEqual(out, 'Hold diuretic');
 });
 
+// ---- Vitals on an older note opened for editing (owner report, 2026-09-28) ----
+// A note filed with the old buttons has no app copy; opening it seeds it from
+// its OpenEMR text. Its vitals were dropped there, so whoever opened it saw
+// blank vitals and their save rewrote the OpenEMR note without them.
+
+const LEGACY_HP = {
+  subjective: '[GFC CLINICIAN] Ruth Nolan, RN\n\nFeels steadier this week',
+  objective: 'VITALS — BP right arm 130/80; BP left arm 128/—; HR 72; Temp 98.1; RR 16; SpO2 97; Wt —; Ht 66\n\n'
+    + 'SYSTEMS EXAM:\nGeneral: Well appearing\nLung Sounds: Clear\n\nHOME-HAZARD INVENTORY:\nGrab Bars: no\nNotes: Loose rug',
+  assessment: 'Stable',
+  plan: 'Continue current medications\nRN Track assignment: A2 — needs ADL help\nDocumented by Ruth Nolan'
+};
+const LEGACY_FU = {
+  subjective: '[GFC CLINICIAN] Bethel Godwins, FNP\n\nKnee pain',
+  objective: 'VITALS — BP 118/70; HR —; Temp —; RR —; SpO2 96; Wt —; Ht —; Pain 3/10\n\nLungs clear',
+  assessment: 'OA', plan: 'Ice\nDocumented by Bethel Godwins'
+};
+
+test('an older H&P opened for editing keeps its vitals, both arms, and opens as an H&P', () => {
+  const n = notes.noteFromLegacyNarrative(LEGACY_HP);
+  assert.strictEqual(n.kind, 'hp');
+  assert.deepStrictEqual(n.vitals, { bpRightSys: '130', bpRightDia: '80', bpLeftSys: '128', hr: '72', temp: '98.1', rr: '16', spo2: '97', height: '66' });
+  assert.deepStrictEqual(n.hp.systemsExam, { general: 'Well appearing', lungSounds: 'Clear' });
+  assert.deepStrictEqual(n.hp.homeHazards, { grabBars: 'no', notes: 'Loose rug' });
+  assert.deepStrictEqual(n.hp.triage, { track: 'A2', rationale: 'needs ADL help' });
+  assert.doesNotMatch(n.objective, /SYSTEMS EXAM|VITALS|Lung Sounds/, 'the exam blocks moved into their boxes, not duplicated in Objective');
+  assert.doesNotMatch(n.plan, /RN Track|Documented by/);
+  assert.match(n.plan, /Continue current medications/);
+});
+
+test('an older follow-up keeps its vitals and stays a follow-up', () => {
+  const n = notes.noteFromLegacyNarrative(LEGACY_FU);
+  assert.strictEqual(n.kind, 'followup');
+  assert.deepStrictEqual(n.vitals, { bpSys: '118', bpDia: '70', spo2: '96', pain: '3' });
+  assert.strictEqual(n.objective, 'Lungs clear');
+  assert.deepStrictEqual(n.hp, {});
+});
+
+test('the initial visit opens as an H&P even when its BP line was left blank', () => {
+  const soap = { objective: 'VITALS — BP —/—; HR 70; Temp —; RR —; SpO2 —; Wt —; Ht —', plan: 'x' };
+  assert.strictEqual(notes.noteFromLegacyNarrative(soap).kind, 'followup');
+  assert.strictEqual(notes.noteFromLegacyNarrative(soap, undefined, { isInitialVisit: true }).kind, 'hp');
+});
+
+test('a note with no vitals line reads back as no vitals, not as an error', () => {
+  assert.deepStrictEqual(notes.parseLegacyVitals('Lungs clear'), {});
+  assert.deepStrictEqual(notes.parseLegacyVitals(''), {});
+});
+
+test('a telehealth vitals line from a shared note parses too', () => {
+  const line = notes.vitalsLine({ vitals: { bpSys: '120', bpDia: '80', hr: '64' }, visit: { modality: 'telehealth' } });
+  assert.deepStrictEqual(notes.parseLegacyVitals(line), { bpSys: '120', bpDia: '80', hr: '64' });
+});
+
+test('the server tells the parser which encounter was the initial visit', () => {
+  const src = stripComments(SERVER);
+  assert.match(src, /noteFromLegacyNarrative\(cur, record\.noteKind, \{ isInitialVisit \}\)/);
+});
+
+// ---- Draft vitals in the chart before signing (owner decision, 2026-09-28) ----
+
+const draftRecord = (extra = {}) => ({
+  encounterUuid: 'enc_1', date: '2026-09-27', noteStatus: 'draft',
+  note: { kind: 'followup', visitDate: '2026-09-27', vitals: { bpSys: '118', bpDia: '70', hr: '72', pain: '3' } }, ...extra
+});
+
+test('an unsigned draft\'s vitals become chart rows, each marked draft', () => {
+  const rows = notes.draftVitalsRows(draftRecord());
+  assert.deepStrictEqual(rows.map(r => r.name), ['Blood pressure', 'Heart rate', 'Pain score']);
+  assert.ok(rows.every(r => r.draft === true && r.at === '2026-09-27' && r.encounterUuid === 'enc_1'));
+  assert.strictEqual(rows[0].value, '118/70 mmHg');
+});
+
+test('an H&P draft shows both arms on one row', () => {
+  const rows = notes.draftVitalsRows(draftRecord({ note: { kind: 'hp', vitals: { bpRightSys: '130', bpRightDia: '80', bpLeftSys: '128', bpLeftDia: '78' } } }));
+  assert.strictEqual(rows[0].value, 'right 130/80 · left 128/78');
+});
+
+test('draft vitals drop out once signed, once written to OpenEMR, or when discarded', () => {
+  assert.strictEqual(notes.draftVitalsRows(draftRecord({ noteStatus: 'signed' })).length, 0);
+  assert.strictEqual(notes.draftVitalsRows(draftRecord({ noteStatus: 'voided' })).length, 0);
+  assert.strictEqual(notes.draftVitalsRows(draftRecord({ vitalsWrittenAt: '2026-09-27T15:00:00Z' })).length, 0);
+  assert.strictEqual(notes.draftVitalsRows(draftRecord({ note: { kind: 'followup', vitals: {} } })).length, 0);
+  assert.strictEqual(notes.draftVitalsRows({ encounterUuid: 'x', noteStatus: 'draft' }).length, 0);
+});
+
+test('an older note\'s unchanged vitals are not sent to OpenEMR a second time at signing', () => {
+  const v = { bpSys: '118', bpDia: '70' };
+  assert.strictEqual(notes.vitalsNeedRow({ note: { vitals: v }, legacyVitals: { ...v } }), false);
+  assert.strictEqual(notes.vitalsNeedRow({ note: { vitals: { ...v, hr: '80' } }, legacyVitals: v }), true, 'changed readings get a new row');
+  assert.strictEqual(notes.vitalsNeedRow({ note: { vitals: v } }), true, 'a new-style note writes its row');
+  assert.strictEqual(notes.vitalsNeedRow({ note: { vitals: {} } }), false);
+});
+
+test('the chart and My Day both read draft vitals, and signing checks the older note\'s readings', () => {
+  const src = stripComments(SERVER);
+  // (Read raw: the crude comment stripper swallows this stretch of server.js
+  // through a "/*" inside a string earlier on.)
+  assert.match(SERVER, /\n\s+draftVitals: await draftVitalsFor\(client\.id\)/);
+  assert.match(src, /const drafts = await draftVitalsFor\(client\.id\);/);
+  assert.match(src, /record\.legacyVitals && !clinicalNotes\.vitalsNeedRow\(record\)/);
+  assert.match(src, /if \(lv && Object\.keys\(lv\)\.length\) record\.legacyVitals = lv;/);
+});
+
+test('the page labels draft vitals and never decides for itself which ones are drafts', () => {
+  const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'clinical.html'), 'utf8');
+  assert.match(page, /chart\.draftVitals/);
+  assert.match(page, /k\.lastVitals\.draft && <DraftVitalsChip \/>/);
+  assert.match(page, /Draft — not yet in OpenEMR/);
+});
+
 // ---- Signing rules that moved from save to sign --------------------------
 
 test('an H&P can be SAVED without both arms but not SIGNED without them', () => {
