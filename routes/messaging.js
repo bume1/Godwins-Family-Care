@@ -170,7 +170,29 @@ module.exports = function createMessagingRoutes(deps) {
   });
 
   // ---- Attachments ---------------------------------------------------------
-  const cleanName = (n) => String(n || 'attachment').replace(/[\\/\u0000-\u001f]/g, '_').trim().slice(0, 120) || 'attachment';
+  // multer/busboy hands back the filename decoded as latin1 while browsers send
+  // UTF-8, so "José" arrives as "JosÃ©". Re-read the bytes; if that is not valid
+  // UTF-8 the name really was latin1 and is left as it came.
+  const utf8Name = (n) => {
+    const raw = String(n || '');
+    if (!/[\u0080-\u00ff]/.test(raw)) return raw;
+    const fixed = Buffer.from(raw, 'latin1').toString('utf8');
+    return fixed.includes('\ufffd') ? raw : fixed;
+  };
+  // Control characters and bidi/zero-width marks are removed: a right-to-left
+  // override makes "fdp.exe" read as "exe.pdf" on a chip.
+  const cleanName = (n) => utf8Name(n).replace(/[\\/\u0000-\u001f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '_').trim().slice(0, 120) || 'attachment';
+  // The extension always says what the BYTES are, whatever the sender called it.
+  const EXT_FOR_MIME = { 'application/pdf': '.pdf', 'image/jpeg': '.jpg', 'image/png': '.png' };
+  const nameForMime = (name, mime) => {
+    const base = name.replace(/\.[A-Za-z0-9]{1,8}$/, '').slice(0, 110) || 'attachment';
+    return base + (EXT_FOR_MIME[mime] || '');
+  };
+  // Files stored in Drive for a send that then fails AFTER storage (a write, the
+  // audit row) would be orphaned: nothing points at them. Removed best-effort.
+  const discardStored = async (attachments) => {
+    for (const a of attachments || []) { try { await googledrive.deleteFile(a.drive_file_id); } catch (_) { /* best effort */ } }
+  };
   const attachmentsEnabled = !!(upload && googledrive && detectFileType);
 
   // multipart/form-data carries files; a plain JSON post carries none. Multer
@@ -183,9 +205,12 @@ module.exports = function createMessagingRoutes(deps) {
     const run = () => upload.array('files', msg.MAX_ATTACHMENTS + 1)(req, res, (err) => {
       if (!err) return next();
       const tooBig = err.code === 'LIMIT_FILE_SIZE';
+      const tooMany = err.code === 'LIMIT_UNEXPECTED_FILE' || err.code === 'LIMIT_FILE_COUNT';
       return res.status(400).json({
-        error: tooBig ? `Each attachment is up to ${Math.round(config.MAX_FILE_SIZE / 1048576)} MB.` : 'That attachment could not be read.',
-        code: tooBig ? 'ATTACHMENT_TOO_LARGE' : 'ATTACHMENT_UNREADABLE'
+        error: tooBig ? `Each attachment is up to ${Math.round(config.MAX_FILE_SIZE / 1048576)} MB.`
+          : tooMany ? `A message carries up to ${msg.MAX_ATTACHMENTS} attachments.`
+          : 'That attachment could not be read.',
+        code: tooBig ? 'ATTACHMENT_TOO_LARGE' : tooMany ? 'TOO_MANY_ATTACHMENTS' : 'ATTACHMENT_UNREADABLE'
       });
     });
     return uploadLimiter ? uploadLimiter(req, res, run) : run();
@@ -207,7 +232,7 @@ module.exports = function createMessagingRoutes(deps) {
     const stored = [];
     try {
       for (const f of list) {
-        const name = cleanName(f.originalname);
+        const name = nameForMime(cleanName(f.originalname), f.__mime);
         const up = await googledrive.uploadMessageAttachmentFile(client.name || 'Client', `msg_${Date.now()}_${uuidv4().slice(0, 8)}_${name}`, f.buffer, f.__mime);
         stored.push({ id: uuidv4(), name, mime: f.__mime, size: f.buffer.length, drive_file_id: up.fileId });
       }
@@ -341,6 +366,7 @@ module.exports = function createMessagingRoutes(deps) {
   // Start a thread
   // ==========================================================================
   router.post('/api/messaging/threads', authenticateToken, requireMessagingRole, parseMessageBody, async (req, res) => {
+    let filed = []; let written = false;
     try {
       const body = req.body || {};
       const channelId = String(body.channel || '');
@@ -374,6 +400,7 @@ module.exports = function createMessagingRoutes(deps) {
       const stored = await storeAttachments(client, files);
       if (stored.error) return res.status(stored.error.status).json(stored.error.body);
       const attachments = stored.attachments;
+      filed = attachments;
 
       const sender = msg.senderIdentity(req.user, { client, isPoa });
       const at = nowIso();
@@ -437,6 +464,7 @@ module.exports = function createMessagingRoutes(deps) {
       const all = await readRows('messages');
       all.push(message);
       await db.set('messages', all);
+      written = true;
 
       await logActivity(req.user.id, req.user.name || req.user.email, 'message_thread_started', 'message_thread', threadId,
         { channel: channelId, clientId: client.id, role: sender.fromRole, actingFor: sender.actingFor });
@@ -452,6 +480,7 @@ module.exports = function createMessagingRoutes(deps) {
       });
     } catch (error) {
       console.error('Messaging thread create error:', error);
+      if (!written) await discardStored(filed);
       res.status(500).json({ error: 'Server error' });
     }
   });
@@ -460,6 +489,7 @@ module.exports = function createMessagingRoutes(deps) {
   // Reply
   // ==========================================================================
   router.post('/api/messaging/threads/:id/messages', authenticateToken, requireMessagingRole, parseMessageBody, async (req, res) => {
+    let filed = []; let written = false;
     try {
       const opened = await openThread(req, req.params.id);
       if (opened.error) return res.status(opened.error.status).json(opened.error.body);
@@ -474,6 +504,7 @@ module.exports = function createMessagingRoutes(deps) {
       const stored = await storeAttachments(client, files);
       if (stored.error) return res.status(stored.error.status).json(stored.error.body);
       const attachments = stored.attachments;
+      filed = attachments;
 
       const sender = msg.senderIdentity(req.user, { client, isPoa });
       const at = nowIso();
@@ -497,6 +528,7 @@ module.exports = function createMessagingRoutes(deps) {
       const all = await readRows('messages');
       all.push(message);
       await db.set('messages', all);
+      written = true;
 
       const threads = await readRows('message_threads');
       const idx = threads.findIndex(t => t && t.id === thread.id);
@@ -524,6 +556,7 @@ module.exports = function createMessagingRoutes(deps) {
       res.json({ message: { ...publicMessage(message), mine: true }, thread: publicThread(threads[idx], 0) });
     } catch (error) {
       console.error('Messaging reply error:', error);
+      if (!written) await discardStored(filed);
       res.status(500).json({ error: 'Server error' });
     }
   });
@@ -674,15 +707,24 @@ module.exports = function createMessagingRoutes(deps) {
       if (id === senderId) continue;
       const u = users.find(x => x && x.id === id);
       if (!u || !u.email) continue;
+      // A family member who is no longer the client's designated POA was on the
+      // row when it began; the gate that hides the thread from them must also
+      // stop the email.
+      if (thread.channel === 'care_team' && u.role === ROLES.FAMILY) {
+        const owner = users.find(x => x && x.id === thread.client_id && x.role === ROLES.CLIENT);
+        if (!owner || !poaIdsFor(users, owner).includes(u.id)) continue;
+      }
       // The patient side of a Care Team conversation is told in a PHI-free
       // sentence that points at the Messages tab of their portal: no client
       // name, no clinician name, no words from the message.
+      const fromCareTeam = ![msg.ROLE.CLIENT, msg.ROLE.FAMILY, 'POA'].includes(message.from_role);
       const clientSide = thread.channel === 'care_team' && (u.role === ROLES.CLIENT || u.role === ROLES.FAMILY);
       if (clientSide) {
         await queueNotification('message_received', u.id, u.email, u.name,
           {
-            subject: 'You have a new message from your care team',
-            body: 'You have a new message from your care team. Sign in to your portal to read it. For privacy we do not put messages in email.',
+            subject: fromCareTeam ? 'You have a new message from your care team' : 'There is a new message in your care team conversation',
+            body: (fromCareTeam ? 'You have a new message from your care team.' : 'There is a new message in your care team conversation.')
+              + ' Sign in to your portal to read it. For privacy we do not put messages in email.',
             ctaUrl: links.PATHS.PORTAL_MESSAGES, ctaLabel: 'Open your messages'
           },
           { relatedEntityId: message.id, relatedEntityType: 'message', createdBy: senderId });

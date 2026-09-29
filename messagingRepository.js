@@ -248,6 +248,14 @@ const effectiveRole = (user, isPoa) => {
   const role = actorRole(user);
   return (role === ROLE.FAMILY && isPoa) ? ROLE.CLIENT : role;
 };
+// Every role a person acts as, for checking a channel's lists. A POA is
+// client-equivalent AND still a family member, so they keep the family
+// channels they already had and gain the client ones.
+const rolesFor = (user, isPoa) => {
+  const role = actorRole(user);
+  return (role === ROLE.FAMILY && isPoa) ? [ROLE.CLIENT, ROLE.FAMILY] : [role];
+};
+const anyRole = (list, roles) => roles.some(r => list.includes(r));
 
 // ---- Who is attached to this client ---------------------------------------
 // Reused from Session 6 rather than restated where the rule already exists:
@@ -319,7 +327,7 @@ function channelAvailability(channelId, { user, client, users, isPoa = false }) 
 
   // Admin starts anything (owner rule 2026-09-13: "admin / manager should be
   // able to message anyone"). Every other role is held to the matrix.
-  if (!isUnrestricted(user) && !channel.initiators.includes(role)) {
+  if (!isUnrestricted(user) && !anyRole(channel.initiators, rolesFor(user, isPoa))) {
     return {
       available: false, code: 'CHANNEL_NOT_YOURS',
       reason: `${ROLE_LABELS[role]}s do not start ${channel.label} messages.`
@@ -366,7 +374,7 @@ function channelAvailability(channelId, { user, client, users, isPoa = false }) 
 function channelsFor({ user, client, users, isPoa = false }) {
   const role = effectiveRole(user, isPoa);
   return CHANNEL_IDS
-    .filter(id => isUnrestricted(user) || CHANNELS[id].initiators.includes(role))
+    .filter(id => isUnrestricted(user) || anyRole(CHANNELS[id].initiators, rolesFor(user, isPoa)))
     .map(id => {
       const a = channelAvailability(id, { user, client, users, isPoa });
       return {
@@ -509,7 +517,7 @@ function canPostToThread(user, thread, { client, isPoa = false } = {}) {
   const channel = channelById(thread.channel);
   if (!channel) return { allowed: false, code: 'UNKNOWN_CHANNEL', reason: 'That conversation has no channel.' };
 
-  if (channel.oneWay && !channel.initiators.includes(role) && !isUnrestricted(user)) {
+  if (channel.oneWay && !anyRole(channel.initiators, rolesFor(user, isPoa)) && !isUnrestricted(user)) {
     return {
       allowed: false, code: 'CHANNEL_READ_ONLY',
       reason: `A ${channel.label} is an update, not a conversation. Reply through Support and the office will route it.`
@@ -524,7 +532,7 @@ function canPostToThread(user, thread, { client, isPoa = false } = {}) {
   // "Admins do not post in Direct" — a conversation they were accountable for
   // and locked out of. The participant list still governs everyone else, which
   // is what keeps family out of a clinical thread.
-  if (!isStaffRole(role) && !channel.participants.includes(role)) {
+  if (!isStaffRole(role) && !anyRole(channel.participants, rolesFor(user, isPoa))) {
     return { allowed: false, code: 'NOT_A_PARTICIPANT', reason: `${ROLE_LABELS[role]}s do not post in ${channel.label}.` };
   }
   if (thread.status === 'closed') {

@@ -57,7 +57,7 @@ const EXE = () => Buffer.from('MZ\x90\x00 not a document');
 
 const boot = async (opts = {}) => {
   const store = new Map([['users', USERS()]]);
-  const db = { get: async (k) => (store.has(k) ? JSON.parse(JSON.stringify(store.get(k))) : null), set: async (k, v) => { store.set(k, JSON.parse(JSON.stringify(v))); } };
+  const db = { get: async (k) => (store.has(k) ? JSON.parse(JSON.stringify(store.get(k))) : null), set: async (k, v) => { if (opts.failWrite && k === opts.failWrite) throw new Error('write failed'); store.set(k, JSON.parse(JSON.stringify(v))); } };
   const notices = []; const activity = [];
   const drive = { uploads: [], deleted: [], failOn: opts.failOn || 0, files: new Map() };
   const googledrive = {
@@ -462,4 +462,69 @@ test('the routes: attachments are typed BEFORE storage, stored privately, and th
   for (const dep of ['upload', 'uploadLimiter', 'googledrive', 'detectFileType', 'contentDisposition']) assert.match(mount, new RegExp(`\\b${dep}\\b`), `server.js passes ${dep}`);
   assert.match(mount, /detectFileType: \(buf\) => detectFileType\(buf\)/, 'a closure: the const is defined later in the file');
   assert.match(fs.readFileSync(path.join(root, 'googledrive.js'), 'utf8'), /'GFC Message Attachments'/);
+});
+
+// ============================================================
+// Review findings, fixed and pinned
+// ============================================================
+test('a POA keeps the Family Portal channel AND gains the client ones', () => {
+  const poa = { id: 'p', role: 'family', familyIsPoa: true, familyOfClientId: 'client-1' };
+  const ids = msg.channelsFor({ user: poa, client: { id: 'client-1', careTeam: {} }, users: [], isPoa: true }).map(c => c.id);
+  assert.ok(ids.includes('family_portal'), 'still a family channel');
+  assert.ok(ids.includes('care_team'), 'and now the client one');
+  const thread = { id: 't', channel: 'family_portal', client_id: 'client-1', participant_ids: ['p'], status: 'open' };
+  const r = msg.canPostToThread(poa, thread, { client: { id: 'client-1' }, isPoa: true });
+  assert.equal(r.allowed, true, JSON.stringify(r));
+});
+
+test('attachment names: UTF-8 restored, bidi stripped, extension follows the bytes; too many files says so', async () => {
+  const h = await boot();
+  try {
+    const tricky = 'Jos\u00e9 labs\u202Efdp.bat';   // the real name a browser sends: accent, RLO, .bat
+    const r = await h.call('fnp-1', 'POST', '/api/messaging/threads', { form: h.form(
+      { channel: 'care_team', clientId: 'client-1', body: 'Files', format: 'plain' },
+      [{ name: tricky, type: 'application/pdf', buf: PDF() }]) });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+    const a = rows(h, 'messages')[0].attachments[0];
+    assert.ok(a.name.endsWith('.pdf'), `extension follows the sniffed type: ${a.name}`);
+    assert.ok(!/[‮]/.test(a.name) && !/\.bat/.test(a.name), a.name);
+    assert.ok(a.name.startsWith('José'), `UTF-8 restored: ${a.name}`);
+    const many = await h.call('fnp-1', 'POST', '/api/messaging/threads', { form: h.form(
+      { channel: 'care_team', clientId: 'client-1', body: 'x', format: 'plain' },
+      Array.from({ length: 8 }, (_, i) => ({ name: `f${i}.png`, type: 'image/png', buf: PNG() }))) });
+    assert.equal(many.status, 400);
+    assert.equal(many.data.code, 'TOO_MANY_ATTACHMENTS');
+  } finally { h.close(); }
+});
+
+test('a revoked POA is not emailed; the notice does not claim the care team wrote when the patient did', async () => {
+  const h = await boot();
+  try {
+    await h.call('fnp-1', 'POST', '/api/messaging/threads', { json: { channel: 'care_team', clientId: 'client-1', body: 'Hello', format: 'plain' } });
+    const tid = rows(h, 'message_threads')[0].id;
+    const users = h.store.get('users'); users.find(u => u.id === 'poa-1').familyIsPoa = false; h.store.set('users', users);
+    h.notices.length = 0;
+    await h.call('fnp-1', 'POST', `/api/messaging/threads/${tid}/messages`, { json: { body: 'Again', format: 'plain' } });
+    assert.ok(!h.notices.some(n => n.email === 'poa@test.local'), 'the revoked POA gets nothing');
+    assert.ok(h.notices.some(n => n.email === 'c1@test.local' && /from your care team/.test(n.data.subject)));
+    h.notices.length = 0;
+    const restored = h.store.get('users'); restored.find(u => u.id === 'poa-1').familyIsPoa = true; h.store.set('users', restored);
+    await h.call('client-1', 'POST', `/api/messaging/threads/${tid}/messages`, { json: { body: 'Thanks', format: 'plain' } });
+    const back = h.notices.filter(n => n.type === 'message_received' && n.email !== 'fnp@test.local');
+    assert.ok(back.some(n => n.email === 'poa@test.local'), 'the POA is told about the patient reply');
+    assert.ok(back.every(n => !/from your care team/.test(n.data.subject)), 'a patient reply is not "from your care team"');
+  } finally { h.close(); }
+});
+
+test('a send that fails AFTER its files were stored removes them and writes nothing', async () => {
+  const h = await boot({ failWrite: 'messages' });
+  try {
+    const r = await h.call('fnp-1', 'POST', '/api/messaging/threads', { form: h.form(
+      { channel: 'care_team', clientId: 'client-1', body: 'x', format: 'plain' },
+      [{ name: 'a.pdf', type: 'application/pdf', buf: PDF() }, { name: 'b.png', type: 'image/png', buf: PNG() }]) });
+    assert.equal(r.status, 500);
+    assert.equal(h.drive.uploads.length, 2, 'both were stored first');
+    assert.equal(h.drive.deleted.length, 2, 'and both removed when the message could not be written');
+    assert.equal(rows(h, 'messages').length, 0);
+  } finally { h.close(); }
 });
