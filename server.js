@@ -54,6 +54,7 @@ const clinicalRepo = require('./clinicalRepository');
 const apptTypes = require('./appointmentTypes');  // clinical workspace pure helpers (Session 4.1)
 // Session 4.3 — patient/family/POA clinical read rules + the case-manager read/write split
 const patientRead = require('./patientReadRepository');
+const patientPublish = require('./patientPublish');   // Portal P1: the published copies the portal reads (patients never read OpenEMR)
 // Session 4.8 — the clinical role enum, capability matrix and credential
 // ceiling. THE one place that answers "may this person do this"; the clinical
 // vocabulary lives there rather than in config.js for the same reason the
@@ -7503,110 +7504,57 @@ const providerNameMap = async () => {
   return map;
 };
 
-// GET /api/gfc/clinical/summary — the curated read, one round trip: visit
-// summaries, medications, allergies, problem list, live upcoming appointments,
-// and vitals (from the encounter note; OMITTED when nothing presentable).
+// GET /api/gfc/clinical/summary — the curated read, one round trip.
+//
+// Portal P1 (owner, 2026-09-29): served ENTIRELY from the published copies
+// (patientPublish.js). This route never touches OpenEMR — a patient, POA or
+// family user has no OpenEMR identity, and the old version failed every
+// section for them and then told them to try again in a few minutes, forever.
+// The audience and sharing rules are unchanged: sectionsFor + FILTER_MAP run
+// on every read, so a sharing change takes effect with no republish.
+//
+// Appointments are not published in P1 (P2 publishes them at booking), so the
+// section is absent rather than wrong.
 app.get('/api/gfc/clinical/summary', authenticateToken, requireEnrolledClient, async (req, res) => {
   try {
     const ctx = await resolvePatientClinicalContext(req, res);
     if (!ctx) return;
     const { client, audience, sections, acting } = ctx;
     const want = (k) => sections[k] && sections[k] !== 'none';
+    const [chart, visitRows, results] = await Promise.all([
+      loadPublishedChart(client.id), loadPublishedVisits(), loadRows('clinical_results')
+    ]);
     const out = {
       audience, sections, isPoa: acting.isPoa, actingAs: acting.isPoa ? acting.signerName : null,
       clientName: client.preferredName || client.name,
-      emrConfigured: openemr.isConfigured(), degraded: []
+      publishedAt: (chart && chart.publishedAt) || null,
+      publishedFromVisitDate: (chart && chart.publishedFromVisitDate) || null,
+      // Which sections have EVER been published. A section never published
+      // says "not shared yet", never "none recorded" — the second is a claim
+      // about the patient's record the portal cannot make.
+      published: {
+        problems: !!(chart && chart.problems), allergies: !!(chart && chart.allergies),
+        medications: !!(chart && chart.medications), vitals: !!(chart && chart.vitals)
+      }
     };
-    if (!openemr.isConfigured()) {
-      await logPatientClinicalRead(req, ctx, 'clinical_summary', { emrConfigured: false });
-      return res.json(out);
+    if (want('problems') && chart && chart.problems) out.problems = patientRead.filterRows('problem', sections.problems, chart.problems);
+    if (want('allergies') && chart && chart.allergies) out.allergies = patientRead.filterRows('allergy', sections.allergies, chart.allergies);
+    if (want('medications') && chart && chart.medications) out.medications = patientRead.filterRows('medication', sections.medications, chart.medications);
+    if (want('vitals') && chart && chart.vitals) out.vitals = patientRead.filterRow('vital', sections.vitals, chart.vitals);
+    if (want('visits')) {
+      out.visits = visitRows.filter(r => r && r.clientId === client.id)
+        .map(r => patientPublish.visitForAudience(r, sections.visits))
+        .filter(v => v && v.date)
+        .sort((a, b) => String(b.date).localeCompare(String(a.date)));
     }
-    const emr = openemr.forActor(req.user);
-    const puuid = client.openEmrPatientId;
-    const settle = (p) => p.then(v => ({ ok: true, v })).catch(e => ({ ok: false, error: e.message }));
-    const [problemsR, allergiesR, medsR, encountersR, apptsR, providers] = await Promise.all([
-      want('problems') ? settle(emr.getProblems(puuid)) : null,
-      want('allergies') ? settle(emr.getAllergies(puuid)) : null,
-      want('medications') ? settle(emr.getMedicationRequests(puuid)) : null,
-      (want('visits') || want('vitals')) ? settle(emr.getEncounters(puuid)) : null,
-      want('appointments') ? settle(emr.getPatientAppointmentRows(puuid)) : null,
-      providerNameMap()
-    ]);
-    const degrade = (r, name) => { if (r && !r.ok) out.degraded.push(name); return r && r.ok ? r.v : null; };
-
-    if (want('problems')) {
-      const rows = degrade(problemsR, 'problems');
-      out.problems = patientRead.filterRows('problem', sections.problems, (rows || []).map(clinicalRepo.summarizeCondition).map(patientRead.summarizeProblemForPatient));
+    if (want('results')) {
+      out.results = patientRead.filterRows('result', sections.results,
+        results.filter(r => r && r.clientId === client.id).map(patientPublish.resultForPatient).filter(Boolean)
+          .sort((a, b) => String(b.resultDate || '').localeCompare(String(a.resultDate || ''))));
     }
-    if (want('allergies')) {
-      const rows = degrade(allergiesR, 'allergies');
-      out.allergies = patientRead.filterRows('allergy', sections.allergies, (rows || []).map(clinicalRepo.summarizeAllergy).map(patientRead.summarizeAllergyForPatient));
-    }
-    if (want('medications')) {
-      const rows = degrade(medsR, 'medications');
-      out.medications = patientRead.filterRows('medication', sections.medications,
-        (rows || []).map(clinicalRepo.summarizeMedicationRequest).filter(m => !['stopped', 'cancelled', 'entered-in-error'].includes(String(m.status || '')))
-          .map(patientRead.summarizeMedicationForPatient));
-    }
-
-    // Visits: OpenEMR's encounter list joined to the app-side 4.4 records
-    // (coded diagnoses, Rx, orders, attestation, clinician stamp). The
-    // narrative note is never read here.
-    let mineRecords = [];
-    if (want('visits') || want('vitals')) {
-      const [records, atts, rx, orders] = await Promise.all([loadRows('encounter_billing'), loadRows('encounter_attestations'), loadRows('prescriptions'), loadRows('clinical_orders')]);
-      mineRecords = records.filter(r => r && r.clientId === client.id);
-      if (want('visits')) {
-        const emrRows = degrade(encountersR, 'visits');
-        const byUuid = new Map(mineRecords.map(r => [String(r.encounterUuid), r]));
-        const emrById = new Map((emrRows || []).map(clinicalRepo.summarizeEncounter).map(e => [String(e.id), e]));
-        // A deleted (voided) encounter never reaches the patient.
-        const ids = [...new Set([...emrById.keys(), ...byUuid.keys()])]
-          .filter(id => !(byUuid.get(id) && byUuid.get(id).noteStatus === clinicalNotes.NOTE_STATUS.VOIDED));
-        const hp = client.clinicalInitialVisit || null;
-        const visits = ids.map(id => patientRead.buildVisitSummary({
-          encounterUuid: id, encounter: emrById.get(id) || null, record: byUuid.get(id) || null,
-          attestation: atts.find(a => a && a.encounterUuid === id) || null,
-          prescriptions: rx.filter(p => p && p.encounterUuid === id),
-          orders: orders.filter(o => o && o.encounterUuid === id),
-          providerFallbackName: hp && hp.encounterUuid === id ? hp.byName : null
-        })).filter(v => v.date).sort((a, b) => String(b.date).localeCompare(String(a.date)));
-        out.visits = patientRead.filterRows('visit', sections.visits, visits);
-      }
-    }
-
-    // Vitals: the vitals REST endpoint 500s on this instance, so readings live
-    // verbatim in the encounter note. Read the latest narrative note BY SID
-    // (server-side only), parse the numbers, and omit the section entirely
-    // when there is nothing presentable — never an empty panel.
-    if (want('vitals')) {
-      const withNote = mineRecords.filter(r => r.narrativeNoteSid).sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
-      for (const r of withNote.slice(0, 3)) {
-        try {
-          const note = await emr.getSoapNote(puuid, r.encounterUuid, r.narrativeNoteSid);
-          const parsed = note ? patientRead.parseVitalsFromNote(note.objective, r.date) : null;
-          if (parsed) { out.vitals = patientRead.filterRow('vital', sections.vitals, parsed); break; }
-        } catch (e) { out.degraded.push('vitals'); break; }
-      }
-    }
-
-    // Upcoming appointments: LIVE rows only. Reschedules/cancels leave
-    // tombstones ('x') and no-shows ('?') on the calendar — the patient never
-    // sees those. The list endpoint omits pc_hometext (location marker), so
-    // the few upcoming rows are hydrated individually.
-    if (want('appointments')) {
-      const rows = degrade(apptsR, 'appointments');
-      const summaries = rows ? await summarizeCalendarRows(rows) : [];
-      const upcoming = patientRead.selectUpcomingAppointments(summaries);
-      const hydrated = await Promise.all(upcoming.map(a => emr.getAppointmentRow(puuid, a.eid).catch(() => null)));
-      const merged = upcoming.map((a, i) => hydrated[i] ? { ...a, ...clinicalRepo.summarizeAppointmentRow({ ...hydrated[i] }, a.encounterUuid) } : a);
-      out.appointments = patientRead.filterRows('appointment', sections.appointments,
-        merged.map(a => patientRead.summarizeAppointmentForPatient(a, providers.get(String(a.providerId)) || null)));
-    }
-
     await logPatientClinicalRead(req, ctx, 'clinical_summary', {
-      sections: Object.keys(sections).filter(want), degraded: out.degraded,
-      counts: { visits: (out.visits || []).length, medications: (out.medications || []).length, appointments: (out.appointments || []).length }
+      sections: Object.keys(sections).filter(want), source: 'published',
+      counts: { visits: (out.visits || []).length, medications: (out.medications || []).length, results: (out.results || []).length }
     });
     res.json(out);
   } catch (error) {
@@ -7617,8 +7565,9 @@ app.get('/api/gfc/clinical/summary', authenticateToken, requireEnrolledClient, a
 
 // GET /api/gfc/clinical/documents — the patient's own chart document index:
 // every plan-of-care version, executed consent, record release, their own
-// uploads, and anything OpenEMR itself holds (a fax, an outside record — the
-// one thing the app can never know about on its own). Built from the SAME
+// uploads, and (Portal P1) the patient copy of each filed test result.
+// OpenEMR-only documents (a fax filed straight into OpenEMR) are NOT listed
+// for patients: patients never read OpenEMR (owner, 2026-09-29). Built from the SAME
 // buildChartDocumentIndex() the clinician's chart uses, so a patient and
 // their clinician are reading off one definition of "the chart's documents",
 // never two that can drift apart.
@@ -7637,16 +7586,6 @@ app.get('/api/gfc/clinical/documents', authenticateToken, requireEnrolledClient,
       db.get('care_plan_versions'), db.get('consent_events'), db.get('client_document_uploads')
     ]);
 
-    // Same feature-detected EMR read the clinician's chart uses: supported:
-    // false until the Phase 6B document routes are deployed, never assumed.
-    let emrDocs = { supported: false, rows: [] };
-    if (client.openEmrPatientId && openemr.isConfigured()) {
-      try {
-        emrDocs = await openemr.forActor(req.user).listPatientDocuments(client.openEmrPatientId);
-      } catch (e) {
-        console.error('Patient chart document list unavailable:', e.message);
-      }
-    }
     let roiAuths = [];
     try {
       const events = (roiEvents || []).filter(e => e && e.client_id === client.id);
@@ -7656,15 +7595,10 @@ app.get('/api/gfc/clinical/documents', authenticateToken, requireEnrolledClient,
 
     const documents = clinicalRepo.buildChartDocumentIndex({
       client,
-      emrReadSupported: !!emrDocs.supported,
-      emrRows: emrDocs.supported
-        ? emrDocs.rows.map(r => ({
-          id: r.id,
-          description: r.name || r.category || 'Document',
-          date: r.docdate || r.filed_at || null,
-          contentType: r.mimetype || null
-        }))
-        : [],
+      // Patients never read OpenEMR (Portal P1): the EMR half is empty here, so
+      // the index lists only what the app holds.
+      emrReadSupported: false,
+      emrRows: [],
       carePlanVersions: planVersions || [],
       roiAuthorizations: roiAuths,
       clientUploads: docUploads || [],
@@ -7672,6 +7606,17 @@ app.get('/api/gfc/clinical/documents', authenticateToken, requireEnrolledClient,
       consentSatisfied: isConsentSatisfied
     });
 
+    // Portal P1: the patient copy of each released test result.
+    const resultDocs = (await loadRows('clinical_results'))
+      .filter(r => r && r.clientId === client.id)
+      .map(r => ({ r, p: patientPublish.resultForPatient(r) }))
+      .filter(x => x.p && x.p.hasFile)
+      .map(({ r, p }) => ({
+        id: `result:${r.id}`, title: p.label, category: 'Test result', date: p.resultDate,
+        note: p.reviewStatus === 'reviewed' ? `Reviewed by ${p.reviewedBy}` : 'Not yet reviewed by your care team',
+        openable: true
+      }));
+    documents.push(...resultDocs);
     await logPatientClinicalRead(req, ctx, 'chart_documents', { count: documents.length });
     res.json({ documents });
   } catch (error) {
@@ -7689,14 +7634,31 @@ app.get('/api/gfc/clinical/documents/:docId/file', authenticateToken, requireEnr
   try {
     const ctx = await resolvePatientClinicalContext(req, res);
     if (!ctx) return;
-    const { client, audience } = ctx;
-    if (audience === 'family') return res.status(403).json({ error: 'Not shared with family', code: 'DOCUMENT_NOT_SHARED' });
-
+    const { client, audience, sections } = ctx;
     const raw = String(req.params.docId || '');
     const sep = raw.indexOf(':');
     const kind = sep === -1 ? raw : raw.slice(0, sep);
     const ref = sep === -1 ? '' : raw.slice(sep + 1);
     const audit = (resource) => logPatientClinicalRead(req, ctx, `chart_document_${resource}`, { docId: raw });
+
+    // Portal P1: a filed test result's patient copy. Family reach it only when
+    // the client shares results (sharing.results), the same rule the summary
+    // applies — so this branch sits before the family refusal below.
+    if (kind === 'result') {
+      if (!sections.results || sections.results === 'none') return res.status(403).json({ error: 'Not shared with family', code: 'DOCUMENT_NOT_SHARED' });
+      const r = (await loadRows('clinical_results')).find(x => x && x.id === ref && x.clientId === client.id);
+      if (!r || !r.releasedToPatientAt) return res.status(404).json({ error: 'Result not found', code: 'RESULT_NOT_FOUND' });
+      if (!r.patientCopy || !r.patientCopy.storageRef) return res.status(404).json({ error: 'The copy of this result is not available yet — ask your care team', code: 'RESULT_COPY_MISSING' });
+      let buf;
+      try { buf = await googledrive.downloadFileBuffer(r.patientCopy.storageRef); }
+      catch (e) { console.error('Result copy read failed:', e.message); return res.status(502).json({ error: 'The result could not be opened right now', code: 'DOCUMENT_READ_FAILED' }); }
+      await audit(`result_${ref}`);
+      res.setHeader('Content-Type', r.patientCopy.mimeType || 'application/pdf');
+      res.setHeader('Content-Disposition', contentDisposition('inline', r.patientCopy.fileName || 'result.pdf'));
+      return res.send(buf);
+    }
+
+    if (audience === 'family') return res.status(403).json({ error: 'Not shared with family', code: 'DOCUMENT_NOT_SHARED' });
 
     if (kind === 'careplan') {
       const version = ref;
@@ -7748,22 +7710,10 @@ app.get('/api/gfc/clinical/documents/:docId/file', authenticateToken, requireEnr
       return res.json({ url: auth.generated_pdf_drive_url, fileName: auth.generated_pdf_file_name || null });
     }
 
+    // Patients never read OpenEMR (Portal P1). An OpenEMR-only document is
+    // not listed for them, so a request for one is refused by name.
     if (kind === 'emr') {
-      if (!client.openEmrPatientId) return res.status(409).json({ error: 'Client is not linked to OpenEMR', code: 'CLINICAL_NOT_LINKED' });
-      const read = await openemr.forActor(req.user).getPatientDocument(client.openEmrPatientId, ref);
-      if (!read.supported) {
-        return res.status(501).json({
-          error: 'This document is not ready to open yet — ask your care team for a copy',
-          code: 'EMR_DOCUMENT_READ_UNAVAILABLE'
-        });
-      }
-      if (!read.doc) {
-        return res.status(404).json({ error: 'No such document on this chart', code: 'EMR_DOCUMENT_NOT_FOUND' });
-      }
-      await audit(`emr_${ref}`);
-      res.setHeader('Content-Type', read.doc.mimetype);
-      res.setHeader('Content-Disposition', contentDisposition('inline', read.doc.name));
-      return res.send(read.doc.buffer);
+      return res.status(404).json({ error: 'This document is not available in the portal — ask your care team for a copy', code: 'EMR_DOCUMENT_NOT_IN_PORTAL' });
     }
 
     return res.status(400).json({ error: 'Unknown document reference', code: 'DOCUMENT_REF_UNKNOWN' });
@@ -10085,6 +10035,111 @@ const postEncounterCharges = async ({ emr, client, encounterUuid, record, warnin
   return record;
 };
 
+// ── Portal P1: publish on sign (owner, 2026-09-29) ─────────────────────────
+// Patients never read OpenEMR. A clinician's signature is the moment the
+// server reads the chart with THAT CLINICIAN'S live session (ctx.emr) and
+// stores the patient-facing copy the portal reads. Same soft-fail rule as the
+// charge write: a publish failure NEVER voids a signature. It is recorded on
+// the encounter (portalPublished false + the reason) and surfaced as a
+// warning, and the Publish button on the encounter is the retry.
+const loadPublishedVisits = async () => loadRows('patient_published_visits');
+const upsertPublishedVisit = async (row) => {
+  const rows = await loadPublishedVisits();
+  const i = rows.findIndex(r => r && r.encounterUuid === row.encounterUuid);
+  const prior = i === -1 ? null : rows[i];
+  if (i === -1) rows.push(row); else rows[i] = row;
+  await db.set('patient_published_visits', rows);
+  return prior;
+};
+const loadPublishedChart = async (clientId) => (await loadRows('patient_published_chart')).find(r => r && r.clientId === clientId) || null;
+const upsertPublishedChart = async (next) => {
+  const rows = await loadRows('patient_published_chart');
+  const i = rows.findIndex(r => r && r.clientId === next.clientId);
+  const merged = patientPublish.mergeChart(i === -1 ? null : rows[i], next);
+  if (i === -1) rows.push(merged); else rows[i] = merged;
+  await db.set('patient_published_chart', rows);
+  return merged;
+};
+// Problems, allergies and medications, read as the acting clinician. A section
+// whose read fails is left OUT (undefined), so the previous copy stands —
+// never an empty list that tells a patient their allergies vanished.
+const publishChartFromEmr = async (emr, client, actor, { vitals, sourceEncounterUuid, sourceVisitDate } = {}) => {
+  const settle = (p) => p.then(v => ({ ok: true, v })).catch(e => ({ ok: false, error: e.message }));
+  const puuid = client.openEmrPatientId;
+  const [pr, al, me] = await Promise.all([settle(emr.getProblems(puuid)), settle(emr.getAllergies(puuid)), settle(emr.getMedicationRequests(puuid))]);
+  const failed = [['problems', pr], ['allergies', al], ['medications', me]].filter(([, r]) => !r.ok).map(([k]) => k);
+  const chart = patientPublish.buildPublishedChart({
+    clientId: client.id,
+    problems: pr.ok ? (pr.v || []) : undefined,
+    allergies: al.ok ? (al.v || []) : undefined,
+    medications: me.ok ? (me.v || []) : undefined,
+    vitals: vitals || undefined,
+    at: new Date().toISOString(), by: actor, sourceEncounterUuid, sourceVisitDate
+  });
+  await upsertPublishedChart(chart);
+  return { failed };
+};
+// Publish one signed encounter: the visit row (summary + the signed note +
+// addenda) and the chart. Never throws. Returns { published, warning, skipped }.
+const publishEncounterToPortal = async (ctx, { record, attestation, addenda, notifyPatient = true } = {}) => {
+  const rec = record || ctx.record;
+  const att = attestation || ctx.attestation;
+  try {
+    if (!att || !att.signedAt) return { published: false, skipped: 'NOT_SIGNED' };
+    if (rec.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED) return { published: false, skipped: 'VOIDED' };
+    // An author's note (RN/LMSW) waits for the clinician addendum; it publishes
+    // from the route that clears the pending state.
+    if (rec.coSignStatus === 'pending') return { published: false, skipped: 'PENDING_CO_SIGN' };
+    // A note written before the shared note (4.13) exists only in OpenEMR.
+    let legacyNote = null;
+    if (!rec.note && rec.narrativeNoteSid) {
+      const soap = await ctx.emr.getSoapNote(ctx.client.openEmrPatientId, ctx.encounterUuid, rec.narrativeNoteSid);
+      legacyNote = soap && !patientPublish.isStructuredRecordNote(soap, rec.structuredNoteSid) ? soap : null;
+    }
+    const at = new Date().toISOString();
+    const hp = ctx.client.clinicalInitialVisit || null;
+    const row = patientPublish.buildPublishedVisit({
+      clientId: ctx.client.id, encounterUuid: ctx.encounterUuid, encounter: null, record: rec, attestation: att,
+      prescriptions: ctx.prescriptions, orders: ctx.orders, addenda: addenda || ctx.addenda, legacyNote,
+      hold: att.portalHold || null, at, by: ctx.actor,
+      providerFallbackName: hp && hp.encounterUuid === ctx.encounterUuid ? hp.byName : null
+    });
+    const prior = await upsertPublishedVisit(row);
+    const chart = await publishChartFromEmr(ctx.emr, ctx.client, ctx.actor, {
+      vitals: row.vitals, sourceEncounterUuid: ctx.encounterUuid, sourceVisitDate: row.visit.date
+    });
+    const changed = !prior || prior.contentHash !== row.contentHash;
+    if (changed && notifyPatient) {
+      await notify.visitSummaryReady({
+        clientId: ctx.client.id, encounterUuid: ctx.encounterUuid, contentHash: row.contentHash,
+        visitDate: row.visit.date ? practiceTime.fmtDate(`${row.visit.date}T12:00:00Z`) : null, actorId: ctx.actor.id
+      });
+    }
+    await logActivity(ctx.actor.id, ctx.actor.name || ctx.actor.email || 'clinician', 'portal_published', 'client', ctx.client.id, {
+      encounterUuid: ctx.encounterUuid, noteHeld: !!row.noteHeld, notePublished: !!row.note, changed,
+      chartSectionsNotRefreshed: chart.failed
+    });
+    return {
+      published: true, changed, publishedAt: at,
+      warning: chart.failed.length
+        ? `The visit is on the patient's portal, but their ${chart.failed.join(', ')} could not be read from OpenEMR just now, so the portal still shows the previous copy. Use Refresh portal chart to retry.`
+        : null
+    };
+  } catch (e) {
+    console.error('Portal publish FAILED (the signature stands):', e.message);
+    return { published: false, warning: `The note is signed, but it did not publish to the patient's portal (${String(e.message).slice(0, 140)}). Use Publish to portal on this visit to retry.`, error: String(e.message).slice(0, 300) };
+  }
+};
+// Stamp the outcome on the encounter record (saved by the caller).
+const applyPublishOutcome = (record, out, warnings) => {
+  if (out.skipped) return record;
+  record.portalPublished = !!out.published;
+  record.portalPublishError = out.published ? null : (out.error || 'unknown');
+  if (out.published) record.portalPublishedAt = out.publishedAt;
+  if (out.warning) warnings.push(out.warning);
+  return record;
+};
+
 const refuseIfClosed = (ctx, res) => {
   if (ctx.closed) {
     res.status(409).json({ error: `This encounter was signed and closed ${ctx.attestation.signedAt} by ${ctx.attestation.signedBy.name}. It is read-only — record a correction as an addendum.`, code: 'ENCOUNTER_CLOSED' });
@@ -10925,6 +10980,9 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/co-signatures', aut
     if (w2) warnings.push(w2);
     const w3 = await fileSignedNotePdf(ctx.emr, ctx.client, record, ctx.attestation, ctx.addenda);
     if (w3) warnings.push(w3);
+    // Portal P1: the co-signer appears in the note's signature lines. No new
+    // notice — a co-signature is not new text to read (the content hash says so).
+    if (record.portalPublished) applyPublishOutcome(record, await publishEncounterToPortal({ ...ctx, record }, { record }), warnings);
     await saveBillingRecord(ctx.rows, record);
     await logActivity(req.user.id, req.user.name || req.user.email, 'encounter_co_signature_added', 'client', ctx.client.id, {
       encounterUuid: ctx.encounterUuid, clinicalRole: ctx.actor.clinicalRole
@@ -11936,6 +11994,24 @@ const receiveClinicalResult = async (req, res, { order, rows, idx, client }) => 
     warnings.push('OpenEMR is not reachable, so the result is recorded in the app and not yet filed in the chart.');
   }
 
+  // ── Portal P1: VISIBLE TO THE PATIENT ON FILING (owner, 2026-09-29) ──
+  // The patient reads a copy the app holds, stored the way a client's own
+  // upload is (private, never an anyone-link) — patients never read OpenEMR.
+  // Nobody is NOTIFIED here; the notice goes out when a clinician reviews it,
+  // and until then the portal says "Not yet reviewed by your care team".
+  result.releasedToPatientAt = result.receivedAt;
+  result.patientNotifiedAt = null;
+  result.patientNote = null;
+  result.patientCopy = null;
+  try {
+    const safeName = `result_${(client.slug || client.id)}_${Date.now()}_${String(result.document.fileName).replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+    const stored = await googledrive.uploadClientDocumentFile(client.name || 'Client', safeName, req.file.buffer, mime);
+    result.patientCopy = { storageRef: stored.fileId, fileName: result.document.fileName, mimeType: mime };
+  } catch (e) {
+    console.error('Result patient copy not stored:', e.message);
+    warnings.push(`The result is filed, but the patient's portal copy could not be stored (${String(e.message).slice(0, 120)}). The patient will see the result listed without a document to open.`);
+  }
+
   const results = await loadRows('clinical_results');
   results.push(result);
   await db.set('clinical_results', results);
@@ -12094,6 +12170,15 @@ app.post('/api/clinical/results/:resultId/acknowledge', authenticateToken, requi
     if (applied.error) {
       return res.status(applied.status || 400).json({ error: applied.error, code: applied.code, ...(applied.capability ? { capability: applied.capability, clinicalRole: applied.clinicalRole } : {}) });
     }
+    // Portal P1: ONE notice to the patient, at review, never at filing.
+    // Re-acknowledging is already refused above, and patientNotifiedAt makes
+    // it exactly once even so. A result filed before the portal released
+    // results (no releasedToPatientAt) is not on the portal and sends nothing.
+    if (applied.result.releasedToPatientAt && !applied.result.patientNotifiedAt) {
+      const sent = await notify.resultReviewed({ clientId: applied.result.clientId, resultId: applied.result.id, actorId: req.user.id });
+      applied.result.patientNotifiedAt = new Date().toISOString();
+      applied.result.patientNotified = (sent && sent.notified) || 0;
+    }
     results[idx] = applied.result;
     await db.set('clinical_results', results);
     await logActivity(req.user.id, req.user.name || req.user.email, 'result_acknowledged', 'client', applied.result.clientId, {
@@ -12101,6 +12186,7 @@ app.post('/api/clinical/results/:resultId/acknowledge', authenticateToken, requi
       // THAT a follow-up plan was recorded, never the plan itself: an audit trail
       // is not a second copy of the clinical record.
       followUpRecorded: !!applied.result.followUpNote,
+      patientNoteRecorded: !!applied.result.patientNote,
       wasRoutedTo: (applied.result.routeTo && applied.result.routeTo.userId) || null
     });
     res.json({ message: 'Result acknowledged', result: applied.result });
@@ -12198,6 +12284,10 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
       return res.status(409).json({ error: 'This draft was discarded and cannot be signed.', code: 'NOTE_VOIDED' });
     }
     if (!(req.body || {}).attest) return res.status(400).json({ error: 'You must confirm the attestation statement to sign', code: 'SIGN_NO_ATTEST' });
+    // Portal P1: "Hold this note from the portal" needs a reason from the fixed
+    // list, and is refused BEFORE anything is written.
+    const holdCheck = patientPublish.validateHold((req.body || {}).portalHold);
+    if (holdCheck.error) return res.status(400).json({ error: holdCheck.error, code: holdCheck.code, reasons: patientPublish.HOLD_REASONS });
 
     // ── Session 4.8, widened 2026-09-27: gate on WHAT IS BEING ATTESTED ──
     // A billable clinician's signature is a claim and is held to the full gate.
@@ -12233,6 +12323,8 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
     // at all is decided by billing at submission.
     attestation.billable = signature.outcome === clinicalRoles.SIGN_OUTCOME.ALLOWED;
     attestation.coSignStatus = signature.outcome === clinicalRoles.SIGN_OUTCOME.PENDING_CO_SIGN ? 'pending' : 'not_required';
+    // Stored on the attestation: who held the note from the portal, when, why.
+    attestation.portalHold = holdCheck.hold ? { reason: holdCheck.hold.reason, by: clinicalRepo.actorRecord(ctx.actor), at: attestation.signedAt } : null;
     const atts = await loadRows('encounter_attestations');
     atts.push(attestation);
     await db.set('encounter_attestations', atts);
@@ -12316,6 +12408,10 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
     if (narrativeWarning) warnings.push(narrativeWarning);
     const pdfWarning = await fileSignedNotePdf(ctx.emr, ctx.client, record, attestation, ctx.addenda);
     if (pdfWarning) warnings.push(pdfWarning);
+    // Portal P1: publish, now that the attestation is persisted. An author's
+    // note waits for the clinician addendum (publishEncounterToPortal skips it).
+    // Soft-fail: a publish failure never voids the signature.
+    applyPublishOutcome(record, await publishEncounterToPortal(ctx, { record, attestation }), warnings);
     await saveBillingRecord(ctx.rows, record);
     await logActivity(req.user.id, req.user.name || req.user.email, 'encounter_signed', 'client', ctx.client.id, {
       encounterUuid: ctx.encounterUuid, attestationId: attestation.id, signedByNpi: attestation.signedBy.npi, billingProviderNpi: payer.billing_npi_used,
@@ -12415,6 +12511,9 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/co-sign', authentic
     if (nw) warnings.push(nw);
     const pw = await fileSignedNotePdf(ctx.emr, ctx.client, record, ctx.attestation, [...ctx.addenda, addendum]);
     if (pw) warnings.push(pw);
+    // Portal P1: the clinician addendum clears the pending state, so THIS is
+    // where an author's note first publishes.
+    applyPublishOutcome(record, await publishEncounterToPortal(ctx, { record, addenda: [...ctx.addenda, addendum] }), warnings);
     await saveBillingRecord(ctx.rows, record);
     await logActivity(req.user.id, req.user.name || req.user.email, 'encounter_co_signed', 'client', ctx.client.id, {
       encounterUuid: ctx.encounterUuid, addendumId: addendum.id,
@@ -14018,12 +14117,93 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/addenda', authentic
     // The formatted chart copy carries its addenda, so it is re-filed.
     const pdfWarning = await fileSignedNotePdf(ctx.emr, ctx.client, ctx.record, ctx.attestation, [...ctx.addenda, built.addendum]);
     if (pdfWarning) warnings.push(pdfWarning);
+    // Portal P1: addenda are part of the signed record, so a published visit
+    // is republished with the addendum on it.
+    if (ctx.record.portalPublished) {
+      applyPublishOutcome(ctx.record, await publishEncounterToPortal(ctx, { addenda: [...ctx.addenda, built.addendum] }), warnings);
+    }
     await saveBillingRecord(ctx.rows, ctx.record);
     await logActivity(req.user.id, req.user.name || req.user.email, 'encounter_addendum', 'client', ctx.client.id, { encounterUuid: ctx.encounterUuid, addendumId: built.addendum.id, byNpi: ctx.actor.npi || null });
     res.json({ message: 'Addendum recorded', addendum: built.addendum, warnings });
   } catch (error) {
     console.error('Encounter addendum error:', error);
     res.status(502).json({ error: `Addendum failed: ${error.message}` });
+  }
+});
+
+// ── Portal P1: Publish to portal (the retry button) ───────────────────────
+// Republishes one signed visit. Idempotent: an unchanged visit sends no
+// notice. Also where a hold is placed or released after signing:
+//   { hold: { reason } }   hold the note (reason from the fixed list)
+//   { hold: 'release' }    release it — the note publishes now
+// A visit signed before publishing existed publishes for the first time here.
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/publish', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res, { createRecord: false });
+    if (!ctx) return;
+    if (!ctx.record) return res.status(404).json({ error: 'No encounter record', code: 'ENCOUNTER_NOT_FOUND' });
+    if (!ctx.closed) return res.status(409).json({ error: 'Only a signed note is published to the patient\'s portal. Drafts never are.', code: 'ENCOUNTER_NOT_CLOSED' });
+    if (ctx.record.coSignStatus === 'pending') {
+      return res.status(409).json({ error: 'This note is waiting on the clinician addendum; it publishes when that is added.', code: 'ENCOUNTER_PENDING_CO_SIGN' });
+    }
+    let attestation = ctx.attestation;
+    const holdInput = (req.body || {}).hold;
+    if (holdInput !== undefined) {
+      let nextHold = null;
+      if (holdInput !== 'release') {
+        const check = patientPublish.validateHold(holdInput);
+        if (check.error) return res.status(400).json({ error: check.error, code: check.code, reasons: patientPublish.HOLD_REASONS });
+        nextHold = check.hold ? { reason: check.hold.reason, by: clinicalRepo.actorRecord(ctx.actor), at: new Date().toISOString() } : null;
+      }
+      const atts = await loadRows('encounter_attestations');
+      const i = atts.findIndex(a => a && a.id === attestation.id);
+      if (i !== -1) {
+        const prevHold = atts[i].portalHold || null;
+        atts[i] = { ...atts[i], portalHold: nextHold, portalHoldHistory: [...(atts[i].portalHoldHistory || []), { from: prevHold, to: nextHold, by: clinicalRepo.actorRecord(ctx.actor), at: new Date().toISOString() }] };
+        await db.set('encounter_attestations', atts);
+        attestation = atts[i];
+      }
+      await logActivity(req.user.id, req.user.name || req.user.email, nextHold ? 'portal_note_held' : 'portal_note_released', 'client', ctx.client.id, {
+        encounterUuid: ctx.encounterUuid, reason: nextHold ? nextHold.reason : null
+      });
+    }
+    const warnings = [];
+    const out = await publishEncounterToPortal({ ...ctx, attestation }, { attestation });
+    applyPublishOutcome(ctx.record, out, warnings);
+    await saveBillingRecord(ctx.rows, ctx.record);
+    if (!out.published) return res.status(502).json({ error: out.warning || 'Publish failed', code: 'PORTAL_PUBLISH_FAILED' });
+    res.json({
+      message: out.changed ? 'Published to the patient\'s portal' : 'Already up to date on the patient\'s portal',
+      portalPublished: true, portalPublishedAt: ctx.record.portalPublishedAt, noteHeld: !!(attestation && attestation.portalHold), warnings
+    });
+  } catch (error) {
+    console.error('Portal publish error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Portal P1: Refresh portal chart ───────────────────────────────────────
+// Republishes problems, allergies and medications outside a visit (a list
+// changed between visits). Read with the pressing clinician's own session.
+app.post('/api/clinical/patients/:clientId/portal/refresh-chart', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    if (!client.openEmrPatientId) return res.status(409).json({ error: 'Link this client to an OpenEMR patient first', code: 'EMR_NOT_LINKED' });
+    const actor = actorFromReq(req);
+    const out = await publishChartFromEmr(openemr.forActor(req.user), client, actor);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'portal_chart_refreshed', 'client', client.id, { failed: out.failed });
+    if (out.failed.length === 3) {
+      return res.status(502).json({ error: 'OpenEMR could not be read just now, so nothing changed on the patient\'s portal. Check your OpenEMR sign-in and try again.', code: 'PORTAL_CHART_UNREADABLE' });
+    }
+    const chart = await loadPublishedChart(client.id);
+    res.json({
+      message: out.failed.length ? `Portal chart refreshed, except ${out.failed.join(', ')} (could not be read; the previous copy stands)` : 'Portal chart refreshed',
+      publishedAt: chart && chart.publishedAt, failed: out.failed
+    });
+  } catch (error) {
+    console.error('Portal chart refresh error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 

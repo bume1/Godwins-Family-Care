@@ -2,12 +2,21 @@
 // Patient clinical read — pure helpers (Session 4.3)
 //
 // ARCHITECTURE RULE: read-only, filtered, scoped. A patient (or the family /
-// POA the client authorized) sees a CURATED read of their own OpenEMR record.
-// Never raw clinician notes, never another patient's data, never OpenEMR's
-// native portal. server.js resolves the patient from the authenticated
-// session's client record (openEmrPatientId) — NEVER from a request
-// parameter — and passes the raw rows through the builders here. Everything
-// in this module is I/O-free so the sharing rules are unit-testable.
+// POA the client authorized) sees a CURATED read of their own record. Never
+// another patient's data, never OpenEMR's native portal. server.js resolves
+// the patient from the authenticated session's client record — NEVER from a
+// request parameter. Everything in this module is I/O-free so the sharing
+// rules are unit-testable.
+//
+// Portal P1 (owner, 2026-09-29): the rows now come from the PUBLISHED copies
+// (patientPublish.js), written when a clinician signs — patients never read
+// OpenEMR. The audience and sharing rules below did not change.
+//
+// NOTES ACCESS (owner decision 2026-09-29, reversing the 4.3 rule that a
+// narrative note is never shown to a patient): the SIGNED note reaches the
+// patient and a POA, and non-POA family only when the client shares full
+// visit summaries. It travels in ONE section, `note`, and nowhere else — the
+// build-fail test asserts the note-content fields appear in no other section.
 //
 // The three audiences:
 //   patient — the client themselves (full curated read)
@@ -37,9 +46,10 @@ const SHARING_DEFAULTS = Object.freeze({
   allergies: false,
   problems: false,
   appointments: true,
-  vitals: false
+  vitals: false,
+  results: false              // test results (Portal P1): closed to non-POA family by default
 });
-const SHARING_BOOL_KEYS = Object.freeze(['carePlan', 'medications', 'allergies', 'problems', 'appointments', 'vitals']);
+const SHARING_BOOL_KEYS = Object.freeze(['carePlan', 'medications', 'allergies', 'problems', 'appointments', 'vitals', 'results']);
 const normalizeSharing = (input) => {
   const src = input && typeof input === 'object' ? input : {};
   const out = {};
@@ -63,6 +73,11 @@ const FILTER_MAP = Object.freeze({
   problem: { full: ['id', 'name', 'status', 'since'] },
   appointment: { full: ['id', 'date', 'startTime', 'endTime', 'durationMinutes', 'title', 'location', 'provider', 'state'] },
   vital: { full: ['date', 'bloodPressure', 'bloodPressureNote', 'heartRate', 'temperature', 'respiration', 'oxygen', 'weight', 'height', 'pain'] },
+  // The signed note (Portal P1). The ONLY section that may carry note content.
+  note: { full: ['subjective', 'objective', 'assessment', 'plan', 'addenda', 'signatures', 'signedAt'] },
+  // A filed test result: what the lab sent and whether the care team has
+  // reviewed it. Never the app's own interpretation flag or inbox summary.
+  result: { full: ['id', 'label', 'resultDate', 'performedBy', 'reviewStatus', 'reviewedBy', 'reviewedAt', 'patientNote', 'hasFile'] },
   carePlan: {
     full: ['version', 'problems', 'goals', 'eachVisit', 'visitFrequency', 'visitDays', 'visitTimes', 'duration', 'chargePlanNote', 'effectiveDate', 'targetDate',
       'authoredBy', 'authoredAt', 'visitSchedule', 'careTier', 'careTierLabel', 'coSignedAt', 'coSignedBy', 'rnSignedAt', 'rnName', 'updatedAt', 'updatedBy', 'primaryCaregiver', 'careTeam', 'authorizedServices', 'signedPdf'],
@@ -70,8 +85,11 @@ const FILTER_MAP = Object.freeze({
   }
 });
 
-// Fields that must NEVER reach a patient, family, or POA payload, in any
-// section. The build-fail test asserts none of these appear in FILTER_MAP.
+// Fields that must NEVER reach a patient, family, or POA payload. The
+// build-fail test asserts none of these appear in FILTER_MAP — EXCEPT the
+// note-content fields (NOTE_CONTENT_FIELDS), which may appear in the `note`
+// section and nowhere else (owner decision 2026-09-29).
+const NOTE_CONTENT_FIELDS = Object.freeze(['subjective', 'objective', 'assessment', 'plan']);
 const CLINICIAN_ONLY_FIELDS = Object.freeze([
   // narrative note content
   'subjective', 'objective', 'assessment', 'plan', 'narrativeNotes', 'narrativeNoteSid',
@@ -83,8 +101,15 @@ const CLINICIAN_ONLY_FIELDS = Object.freeze([
   // EMR keys and raw rows
   'encounterEid', 'eid', 'puuid', 'openEmrPatientId', 'pid', 'patientPid', 'patientPuuid', 'uuid', 'providerId', 'pc_aid', 'pc_hometext', 'hometext', 'notes',
   // operational noise
-  'warnings', 'emrWriteError', 'emrMedicationId'
+  'warnings', 'emrWriteError', 'emrMedicationId',
+  // results (Portal P1): the app's interpretation flag and the inbox's routing
+  // and follow-up are the care team's. The lab's own report is the record.
+  'interpretation', 'followUpNote', 'routeTo', 'patientCopy', 'storageRef'
 ]);
+// A result's `summary` is inbox shorthand written for clinicians. `summary` is
+// a legitimate VISIT field, so this is its own list, asserted absent from the
+// result section.
+const RESULT_CLINICIAN_ONLY_FIELDS = Object.freeze(['summary', 'interpretation', 'followUpNote', 'routeTo', 'escalatedAt', 'document']);
 
 const pickFields = (obj, allow) => {
   if (!obj || typeof obj !== 'object') return null;
@@ -135,7 +160,7 @@ const evaluateClinicalReadAccess = ({ reqUser, client, isConsentSatisfied, isCli
 const sectionsFor = (audience, sharingInput) => {
   const s = normalizeSharing(sharingInput);
   if (audience === 'patient' || audience === 'poa') {
-    return { carePlan: 'full', visits: 'full', medications: 'full', allergies: 'full', problems: 'full', appointments: 'full', vitals: 'full' };
+    return { carePlan: 'full', visits: 'full', medications: 'full', allergies: 'full', problems: 'full', appointments: 'full', vitals: 'full', results: 'full' };
   }
   return {
     carePlan: s.carePlan ? 'summary' : 'none',
@@ -144,7 +169,8 @@ const sectionsFor = (audience, sharingInput) => {
     allergies: s.allergies ? 'full' : 'none',
     problems: s.problems ? 'full' : 'none',
     appointments: s.appointments ? 'full' : 'none',
-    vitals: s.vitals ? 'full' : 'none'
+    vitals: s.vitals ? 'full' : 'none',
+    results: s.results ? 'full' : 'none'
   };
 };
 
@@ -315,7 +341,7 @@ const summarizeProblemForPatient = (p) => ({
 
 module.exports = {
   AUDIENCES, VISIT_LEVELS, SHARING_DEFAULTS, normalizeSharing,
-  FILTER_MAP, CLINICIAN_ONLY_FIELDS, pickFields, filterFor, filterRow, filterRows,
+  FILTER_MAP, CLINICIAN_ONLY_FIELDS, NOTE_CONTENT_FIELDS, RESULT_CLINICIAN_ONLY_FIELDS, pickFields, filterFor, filterRow, filterRows,
   evaluateClinicalReadAccess, sectionsFor,
   poaSignerName, buildActingIdentity,
   canClinicalWrite, canClinicalRead,

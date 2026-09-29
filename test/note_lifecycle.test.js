@@ -609,6 +609,8 @@ test('every list of encounters leaves the deleted ones out', () => {
   assert.match(SERVER, /rows: withoutDeleted\(t\.rows, deletedEnc\)/, 'chart encounters section');
   assert.match(SERVER, /const encRows = encounters\.status === 'fulfilled' \? withoutDeleted\(/, 'pre-visit packet: last visit');
   assert.match(SERVER, /encounters = withoutDeleted\(encRes\.value\.map\(clinicalRepo\.summarizeEncounter\), await deletedEncounterIds\(client\.id\)\)/, 'timeline');
-  assert.match(SERVER, /filter\(id => !\(byUuid\.get\(id\) && byUuid\.get\(id\)\.noteStatus === clinicalNotes\.NOTE_STATUS\.VOIDED\)\)/, 'the patient portal never shows a deleted visit');
+  // Portal P1: the patient portal reads PUBLISHED visits only, and a deleted
+  // (voided) encounter never publishes.
+  assert.match(SERVER, /if \(rec\.noteStatus === clinicalNotes\.NOTE_STATUS\.VOIDED\) return \{ published: false, skipped: 'VOIDED' \}/, 'the patient portal never shows a deleted visit');
   assert.match(SERVER, /encounters: includeDeleted \? list : list\.filter\(e => e\.noteStatus !== 'voided'\)/);
 });

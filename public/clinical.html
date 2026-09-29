@@ -258,7 +258,7 @@
       attachResult: (orderId, formData) => authedUpload(`/api/clinical/orders/${orderId}/result`, formData),
       attachUnmatchedResult: (clientId, formData) => authedUpload(`/api/clinical/patients/${clientId}/results`, formData),
       resultsInbox: () => authedFetch('/api/clinical/results/inbox'),
-      acknowledgeResult: (resultId, followUpNote) => authedFetch(`/api/clinical/results/${resultId}/acknowledge`, { method: 'POST', body: JSON.stringify({ followUpNote }) }),
+      acknowledgeResult: (resultId, followUpNote, patientNote) => authedFetch(`/api/clinical/results/${resultId}/acknowledge`, { method: 'POST', body: JSON.stringify({ followUpNote, patientNote }) }),
       overdueOrders: () => authedFetch('/api/clinical/orders/overdue'),
       // THE REQUISITION IS OPENED, NOT FETCHED. On a phone it must land in the
       // browser's PDF viewer so the SHARE SHEET is one tap away — that is the
@@ -267,7 +267,11 @@
       // header (the enrollment-downloads lesson, PR #103) and `authenticateToken`
       // accepts `?token=` for exactly this case.
       requisitionUrl: (orderId) => `/api/clinical/orders/${orderId}/requisition.pdf?token=${encodeURIComponent(getToken() || '')}`,
-      sign: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/sign`, { method: 'POST', body: JSON.stringify({ attest: true }) }),
+      // portalHold: false, or { reason } to hold the note from the patient portal.
+      sign: (id, euuid, portalHold) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/sign`, { method: 'POST', body: JSON.stringify({ attest: true, portalHold: portalHold || false }) }),
+      // Portal P1: republish a signed visit (hold: { reason } | 'release' | undefined).
+      publishToPortal: (id, euuid, hold) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/publish`, { method: 'POST', body: JSON.stringify(hold === undefined ? {} : { hold }) }),
+      refreshPortalChart: (id) => authedFetch(`/api/clinical/patients/${id}/portal/refresh-chart`, { method: 'POST', body: '{}' }),
       // ── The shared note (2026-09-27) ──
       createNote: (id, body) => authedFetch(`/api/clinical/patients/${id}/notes`, { method: 'POST', body: JSON.stringify(body) }),
       getNote: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/note`),
@@ -1039,6 +1043,27 @@
       );
     };
 
+    // Portal P1: republish problems, allergies and medications to the patient's
+    // portal outside a visit. The portal never reads OpenEMR; this is how a
+    // list changed between visits reaches it. Module scope (input-focus rule).
+    const RefreshPortalChart = ({ clientId }) => {
+      const [state, setState] = useState({ busy: false, msg: null, ok: true });
+      const go = () => {
+        setState({ busy: true, msg: null, ok: true });
+        api.refreshPortalChart(clientId)
+          .then(r => setState({ busy: false, msg: r.message, ok: true }))
+          .catch(e => setState({ busy: false, msg: e.message, ok: false }));
+      };
+      return (
+        <div className="mt-1.5 flex flex-wrap items-center gap-2">
+          <button className="text-[11.5px] text-primary font-semibold flex items-center gap-1" disabled={state.busy} onClick={go}>
+            <i className="ti ti-world-upload" />{state.busy ? 'Refreshing…' : 'Refresh portal chart'}
+          </button>
+          {state.msg && <span className={`text-[11px] ${state.ok ? 'text-emerald-700' : 'text-red-600'}`}>{state.msg}</span>}
+        </div>
+      );
+    };
+
     const PatientBanner = ({ banner, patient, homeVisitFields, visitDraft, onStartVisit, onHomeVisitSaved }) => {
       const [open, setOpen] = useState(false);
       const access = useContext(AccessContext);
@@ -1075,6 +1100,7 @@
               </button>
             )}
           </div>
+          {patient && patient.id && access.canWrite && <RefreshPortalChart clientId={patient.id} />}
           <div className="mt-2"><AllergyStrip allergies={b.allergies} /></div>
           <button className="text-[11.5px] text-primary font-semibold mt-2 flex items-center gap-1" onClick={() => setOpen(!open)}>
             <i className={`ti ti-chevron-${open ? 'up' : 'down'}`} />{open ? 'Hide details' : 'Address, contacts, insurance'}
@@ -2466,17 +2492,79 @@
       return { euuid, meta, pending, conflict, setConflict, load, save, applyCarry, confirm, carryFrom };
     };
 
+    // Portal P1 (owner, 2026-09-29): a signed note is shown to the patient.
+    // A clinician may hold one from the portal, with a reason from a fixed
+    // list. Module scope, per the input-focus rule.
+    const PORTAL_HOLD_REASONS = [
+      ['risk_of_harm', 'Substantial risk of harm to the patient or another person'],
+      ['patient_request', 'The patient asked for it not to be shown']
+    ];
+    const portalHoldPayload = (hold) => (hold && hold.on ? { reason: hold.reason || '' } : false);
+    const PortalHoldControl = ({ hold, setHold }) => (
+      <div className="text-xs">
+        <label className="flex items-start gap-2">
+          <input type="checkbox" className="mt-0.5" checked={!!hold.on} onChange={e => setHold({ ...hold, on: e.target.checked })} />
+          <span>Hold this note from the patient portal. The visit summary still publishes; the portal says the note is available on request.</span>
+        </label>
+        {hold.on && (
+          <select className="inp mt-1.5" value={hold.reason || ''} onChange={e => setHold({ ...hold, reason: e.target.value })}>
+            <option value="">Choose a reason (required)</option>
+            {PORTAL_HOLD_REASONS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+          </select>
+        )}
+      </div>
+    );
+
+    // Where this signed visit stands on the patient's portal, the retry
+    // button, and placing or releasing a hold after signing.
+    const PortalPublishCard = ({ record, attestation, canWrite, busy, onPublish }) => {
+      const [hold, setHold] = useState({ on: false, reason: '' });
+      const r = record || {};
+      const held = !!(attestation && attestation.portalHold);
+      const heldLabel = held ? (PORTAL_HOLD_REASONS.find(([k]) => k === attestation.portalHold.reason) || [null, attestation.portalHold.reason])[1] : null;
+      return (
+        <div className="card mb-4">
+          <div className="card-h"><h2>Patient portal</h2>
+            <span className={`chip ${r.portalPublished ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-800'}`}>
+              {r.portalPublished ? 'Published' : (r.portalPublishError ? 'Did not publish' : 'Not published')}
+            </span>
+          </div>
+          <div className="p-4 grid gap-2 text-sm">
+            {r.portalPublished && <p className="text-xs text-stone-600">The visit summary{held ? '' : ' and the signed note'} are on the patient's portal{r.portalPublishedAt ? ` (published ${fmtTs(r.portalPublishedAt)})` : ''}.</p>}
+            {!r.portalPublished && r.portalPublishError && <p className="text-xs text-amber-700">It did not publish: {r.portalPublishError}. Publishing again is safe.</p>}
+            {!r.portalPublished && !r.portalPublishError && <p className="text-xs text-stone-600">This visit was signed before portal publishing existed, or has not been published yet.</p>}
+            {held && <p className="text-xs text-stone-600"><b>Note held from the portal:</b> {heldLabel}. The patient sees the summary and "available on request".</p>}
+            {canWrite && (
+              <div className="flex flex-wrap items-start gap-2">
+                <button className="btn w-fit" disabled={busy === 'portal'} onClick={() => onPublish(undefined)}>
+                  <i className="ti ti-world-upload" />{busy === 'portal' ? 'Publishing…' : 'Publish to portal'}
+                </button>
+                {held && <button className="btn ghost w-fit" disabled={busy === 'portal'} onClick={() => onPublish('release')}>Release the note to the portal</button>}
+              </div>
+            )}
+            {canWrite && !held && (
+              <div className="grid gap-1.5">
+                <PortalHoldControl hold={hold} setHold={setHold} />
+                {hold.on && <button className="btn ghost w-fit" disabled={!hold.reason || busy === 'portal'} onClick={() => onPublish({ reason: hold.reason })}>Hold the note and republish</button>}
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    };
+
     // Sign & submit: saves first, then signs. The server decides whether this
     // is a billable signature or an author's; a refusal says what is missing.
     const SignNotePanel = ({ patientId, euuid, saveFirst, signsAsAuthor, onSigned, onGoToCoding, onCancel }) => {
       const [attest, setAttest] = useState(false);
+      const [hold, setHold] = useState({ on: false, reason: '' });
       const [busy, setBusy] = useState(false);
       const [err, setErr] = useState(null);
       const CODING_BLOCKERS = ['SIGN_NO_DIAGNOSIS', 'SIGN_NO_SERVICE', 'SIGN_UNLINKED_SERVICE'];
       const go = () => {
         setBusy(true); setErr(null);
         Promise.resolve(saveFirst ? saveFirst() : null)
-          .then(() => api.sign(patientId, euuid))
+          .then(() => api.sign(patientId, euuid, portalHoldPayload(hold)))
           .then(r => onSigned && onSigned(r))
           .catch(e => setErr({ text: e.message, coding: !!(e.data && (e.data.codes || [e.data.code]).some(c => CODING_BLOCKERS.includes(c))) }))
           .finally(() => setBusy(false));
@@ -2491,9 +2579,10 @@
             <input type="checkbox" className="mt-0.5" checked={attest} onChange={e => setAttest(e.target.checked)} />
             <span>I attest that this documentation is accurate and complete, and that I personally performed or directly supervised the services recorded. Signing locks the note — later changes are addenda.</span>
           </label>
+          <div className="mt-2"><PortalHoldControl hold={hold} setHold={setHold} /></div>
           {err && <p className="text-xs text-red-600 mt-2">{err.text}</p>}
           <div className="flex flex-wrap gap-2 mt-2">
-            <button className="btn gold" disabled={!attest || busy} onClick={go}><i className="ti ti-writing-sign" />{busy ? 'Signing…' : 'Sign & submit note'}</button>
+            <button className="btn gold" disabled={!attest || busy || (hold.on && !hold.reason)} onClick={go}><i className="ti ti-writing-sign" />{busy ? 'Signing…' : 'Sign & submit note'}</button>
             {err && err.coding && onGoToCoding && <button className="btn ghost" onClick={onGoToCoding}>Go to coding</button>}
             <button className="btn ghost" onClick={onCancel}>Not yet</button>
           </div>
@@ -4554,7 +4643,7 @@
       const rows = d.results || [];
       const ack = (r) => {
         setBusy(r.id);
-        return api.acknowledgeResult(r.id, notes[r.id] || '')
+        return api.acknowledgeResult(r.id, notes[r.id] || '', notes[`p:${r.id}`] || '')
           .then(() => { setBusy(''); load(); })
           .catch(e => { setBusy(''); setErr(e.message); });
       };
@@ -4594,6 +4683,10 @@
                         <input className="inp" placeholder="What are you doing about it? (required)"
                           value={notes[r.id] || ''} onChange={e => setNotes({ ...notes, [r.id]: e.target.value })} />
                       )}
+                      {/* Portal P1: the patient already sees this result; acknowledging it
+                          sends them ONE notice. This line is shown to them beside it. */}
+                      <input className="inp" maxLength={500} placeholder="Optional note for the patient, in plain words (shown on their portal)"
+                        value={notes[`p:${r.id}`] || ''} onChange={e => setNotes({ ...notes, [`p:${r.id}`]: e.target.value })} />
                       <div className="flex justify-end">
                         <button className="btn !py-1.5" disabled={busy === r.id || (r.followUpRequired && !(notes[r.id] || '').trim())}
                           onClick={() => ack(r)}>{busy === r.id ? 'Recording…' : 'Acknowledge'}</button>
@@ -5022,6 +5115,7 @@
       const [services, setServices] = useState([]);
       const [addToProblemList, setAddToProblemList] = useState([]);
       const [attest, setAttest] = useState(false);
+      const [portalHold, setPortalHold] = useState({ on: false, reason: '' });
       const [addendum, setAddendum] = useState('');
       // The clinician addendum that makes an author's note billable, and
       // attaching this note to an appointment booked after the visit.
@@ -5262,7 +5356,7 @@
                   <Field label="What we did today, in plain words"><textarea className="inp" rows={6} maxLength={4000} disabled={codingLocked || billerEditing} value={facing.patientSummary} onChange={e => setFacing({ ...facing, patientSummary: e.target.value })} placeholder="e.g. We checked your blood pressure and adjusted your water pill." /></Field>
                   <Field label="Follow-up instructions for the patient"><textarea className="inp" rows={6} maxLength={4000} disabled={codingLocked || billerEditing} value={facing.followUpInstructions} onChange={e => setFacing({ ...facing, followUpInstructions: e.target.value })} placeholder="e.g. Take the new dose each morning; we will see you again in 4 weeks." /></Field>
                 </div>
-                <p className="text-[11px] text-stone-400 mt-1">Without this, the portal shows only the diagnoses addressed, prescriptions recorded and tests ordered. The narrative note is never shown to patients.</p>
+                <p className="text-[11px] text-stone-400 mt-1">Without this, the portal summary shows only the diagnoses addressed, prescriptions recorded and tests ordered. Since 2026-09-29 (owner decision) the signed note itself is also shown to the patient and their POA, unless you hold it from the portal when signing.</p>
               </div>
               {!codingLocked && (
                 <div className="flex items-center gap-3">
@@ -5393,10 +5487,11 @@
                   <span>I attest that this documentation is accurate and complete, that I personally performed or directly supervised the services recorded{na.signsAsAuthor ? '' : ', and that the diagnoses are supported by the note'}. Signing as <b>{npiLabel(d.me)}</b>.</span>
                 </label>
                 {!d.me.npi && <p className="text-[11px] text-amber-700"><i className="ti ti-alert-triangle mr-1" />Your NPI is not on file — an admin can add it in your user profile. Signing is allowed for test use and will be flagged.</p>}
-                <button className="btn gold w-fit" disabled={!attest || !d.signReadiness.ok || dirty || busy === 'sign'} onClick={() => run('sign', () => api.sign(patient.id, euuid))}>
+                <PortalHoldControl hold={portalHold} setHold={setPortalHold} />
+                <button className="btn gold w-fit" disabled={!attest || !d.signReadiness.ok || dirty || busy === 'sign' || (portalHold.on && !portalHold.reason)} onClick={() => run('sign', () => api.sign(patient.id, euuid, portalHoldPayload(portalHold)))}>
                   <i className="ti ti-writing-sign" />{busy === 'sign' ? 'Signing…' : 'Sign & submit note'}
                 </button>
-                <p className="text-[10.5px] text-stone-400">Locks the note with your name, NPI and the time, bold at the bottom of the note — in OpenEMR and in the formatted copy filed to the patient's Documents.</p>
+                <p className="text-[10.5px] text-stone-400">Locks the note with your name, NPI and the time, bold at the bottom of the note — in OpenEMR and in the formatted copy filed to the patient's Documents. The signed note and visit summary then publish to the patient's portal.</p>
               </div>
             </div>
           )}
@@ -5499,6 +5594,11 @@
                 </button>
               </div>
             </div>
+          )}
+
+          {on('sign') && closed && !awaitingAddendum && (
+            <PortalPublishCard record={d.record} attestation={d.attestation} canWrite={canWrite} busy={busy}
+              onPublish={(hold) => run('portal', () => api.publishToPortal(patient.id, euuid, hold))} />
           )}
 
           {on('sign') && closed && (

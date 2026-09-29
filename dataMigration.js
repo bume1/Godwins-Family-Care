@@ -87,6 +87,10 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'standing_orders', phi: true, owner: '4.8', note: 'versions are immutable — a revision is a new row' },
   { key: 'standing_order_executions', phi: true, owner: '4.8', note: 'the audit trail: who acted under whose authority, under which version' },
   { key: 'clinical_results', phi: true, owner: '4.10', note: 'received results: the interpretation, the chart pointer, and who acknowledged it' },
+  // Portal P1: the patient-facing copies the portal reads. Patients never read
+  // OpenEMR; these are written when a clinician signs, read by the portal.
+  { key: 'patient_published_chart', phi: true, owner: 'portal-p1', note: 'one row per client: problems, allergies, meds, vitals, capped history' },
+  { key: 'patient_published_visits', phi: true, owner: 'portal-p1', note: 'one row per signed encounter: visit summary and the signed note' },
   { key: 'requisition_settings', phi: false, owner: '4.10', note: 'the return fax number and label printed on every requisition — org config, not PHI' },
   { key: 'visit_reminders', phi: true, owner: '4.11', note: 'day-before reminders, captured at booking time — carries the visit date and clinician' },
   { key: 'gfc_payer_credentialing', phi: false, owner: '4.4' },
