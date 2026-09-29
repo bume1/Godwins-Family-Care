@@ -78,6 +78,7 @@ const clinicalResults = require('./clinicalResults'); // the RESULTS path — re
 // Session 4.11 — the day-before visit reminder, CAPTURED AT WRITE TIME because
 // per-clinician OpenEMR auth means no background job can read the calendar.
 const visitReminders = require('./visitReminders');
+const avs = require('./afterVisitSummary');         // after-visit summary: one assembler for staff, patient and paper
 const consentText = require('./public/consent-text'); // approved consent bodies, versioned (Session 4.6)
 const appLinks = require('./appLinks');               // the ONE place that answers "where does this person go?"
 const consentRegistry = require('./consentRegistry'); // THE consent registry: lanes, statuses, provenance (4.6)
@@ -7723,6 +7724,42 @@ app.get('/api/gfc/clinical/documents/:docId/file', authenticateToken, requireEnr
   }
 });
 
+// GET /api/gfc/clinical/visits/:visitId/summary.pdf — the patient's own copy of
+// one signed visit's after-visit summary. :visitId names an encounter WITHIN the
+// session-resolved patient's chart (refused if it is anyone else's), the same
+// shape as :docId. Built from the stored record and the snapshot taken at
+// signing, never an OpenEMR read (patients have no OpenEMR identity). A family
+// member needs visit summaries shared at full; medications, allergies and the
+// next visit follow the client's own sharing settings for that section.
+app.get('/api/gfc/clinical/visits/:visitId/summary.pdf', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const ctx = await resolvePatientClinicalContext(req, res);
+    if (!ctx) return;
+    const { client, sections } = ctx;
+    if (sections.visits !== 'full') return res.status(403).json({ error: 'Visit summaries are not shared with you in full.', code: 'VISIT_NOT_SHARED' });
+    const euuid = String(req.params.visitId || '');
+    const [records, atts] = await Promise.all([loadRows('encounter_billing'), loadRows('encounter_attestations')]);
+    const record = records.find(r => r && r.clientId === client.id && String(r.encounterUuid) === euuid);
+    const attestation = atts.find(a => a && String(a.encounterUuid) === euuid && a.signedAt);
+    if (!record || record.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED) return res.status(404).json({ error: 'Visit not found', code: 'VISIT_NOT_FOUND' });
+    if (!attestation) return res.status(409).json({ error: 'This visit summary will be ready once your clinician signs the note.', code: 'NOTE_NOT_SIGNED' });
+    // Same rule as the portal's visit list (Portal P1): a patient sees a visit
+    // only once it is published. An author's note waiting on the clinician
+    // addendum is signed but not published, so its summary is not ready either.
+    const published = (await loadPublishedVisits()).some(r => r && r.clientId === client.id && String(r.encounterUuid) === euuid);
+    if (!published) return res.status(409).json({ error: 'This visit summary will be ready once your clinician finishes the note.', code: 'VISIT_NOT_PUBLISHED' });
+    const d = await assembleAfterVisitSummary({ client, record, attestation, sections });
+    const buffer = await pdfGenerator.generateAfterVisitSummaryPDF(d);
+    await logPatientClinicalRead(req, ctx, 'after_visit_summary', { encounterUuid: euuid });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', contentDisposition('inline', avsFileName(client, record)));
+    res.send(buffer);
+  } catch (error) {
+    console.error('Patient after-visit summary error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // GET /api/gfc/clinical/care-plan.pdf — the SIGNED care plan (both
 // signatures). Served from the Drive reference on client.carePlanDocs — never
 // from OpenEMR Documents (server defect). When the Drive copy is not
@@ -8664,11 +8701,25 @@ app.post('/api/clinical/patients/:clientId/medrec', authenticateToken, requireCl
         }
       }
     }
-    users[idx].medications = resolved.rows.map(r => ({ ...r, reconciledAt: new Date().toISOString() }));
-    users[idx].medRecLast = { at: new Date().toISOString(), byId: req.user.id, byName: req.user.name };
+    // What changed, append-only, so the after-visit summary can say what was
+    // started, changed or stopped at the visit. Computed against the list as it
+    // stood BEFORE this save. A visit is named when the reconciliation was done
+    // from inside an encounter; otherwise the visit's own date ties them.
+    const changeAt = new Date().toISOString();
+    const changeRows = clinicalRepo.buildMedicationChangeRows({
+      decisions: (req.body || {}).decisions, previous: client.medications || [], clientId: client.id,
+      encounterUuid: (req.body || {}).encounterUuid || null, day: practiceToday(), at: changeAt,
+      actor: req.user, newId: () => uuidv4()
+    });
+    if (changeRows.length) {
+      const log = await loadRows('medication_changes');
+      await db.set('medication_changes', [...log, ...changeRows]);
+    }
+    users[idx].medications = resolved.rows.map(r => ({ ...r, reconciledAt: changeAt }));
+    users[idx].medRecLast = { at: changeAt, byId: req.user.id, byName: req.user.name };
     await db.set('users', users);
     invalidateUsersCache();
-    await logActivity(req.user.id, req.user.name || req.user.email, 'med_reconciliation', 'client', client.id, { rows: resolved.rows.length, emrWrites: emrResults.length });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'med_reconciliation', 'client', client.id, { rows: resolved.rows.length, emrWrites: emrResults.length, changes: changeRows.map(c => c.action) });
     res.json({ message: 'Medications reconciled', medications: users[idx].medications, emrResults });
   } catch (error) {
     console.error('Clinical medrec save error:', error);
@@ -10524,6 +10575,84 @@ const writeNarrativeNote = async (emr, client, record, { signature, revisions } 
   }
 };
 
+// ── After-visit summary: the chart-derived parts, snapshotted ──────────────
+// Patients have no OpenEMR identity, so their download cannot read the chart.
+// The current medication list, the allergies and the next visit are read HERE
+// with a clinician's (or billing's) own login — at signing and on every staff
+// download — and stored on the encounter record. Each part records where it
+// came from; a part that could not be read is marked unavailable, never empty.
+const buildAvsSnapshot = async (emr, client, encounterUuid, visitDate) => {
+  const puuid = client.openEmrPatientId;
+  const takenAt = new Date().toISOString();
+  const snap = {
+    takenAt,
+    medications: { source: 'unavailable', rows: [] },
+    allergies: { source: 'unavailable', rows: [], intakeText: String(client.allergies || (client.intake && client.intake.allergies) || '').trim() || null },
+    nextVisit: { state: 'unavailable', asOfLabel: `${practiceTime.fmtDateTime(takenAt)} ET` }
+  };
+  if (!puuid || !emr) return snap;
+  try {
+    const meds = (await emr.getMedicationRequests(puuid)).map(clinicalRepo.summarizeMedicationRequest)
+      .filter(m => m.title && !['stopped', 'cancelled', 'entered-in-error', 'completed'].includes(String(m.status || '')));
+    snap.medications = { source: 'chart', rows: meds.map(m => ({ name: m.title, detail: m.instructions || null })) };
+  } catch (e) { snap.medications.error = String(e.message || e).slice(0, 200); }
+  try {
+    const rows = (await emr.getAllergies(puuid)).map(clinicalRepo.summarizeAllergy)
+      .filter(clinicalRepo.isActiveAllergy).filter(a => a.title);
+    snap.allergies = { ...snap.allergies, source: 'chart', rows: rows.map(a => ({ text: a.title, detail: a.criticality ? `${a.criticality} risk` : null })) };
+  } catch (e) { snap.allergies.error = String(e.message || e).slice(0, 200); }
+  try {
+    const rows = await emr.getPatientAppointmentRows(puuid);
+    const upcoming = patientRead.selectUpcomingAppointments(await summarizeCalendarRows(rows))
+      .filter(a => String(a.encounterUuid || '') !== String(encounterUuid) && (!visitDate || String(a.date) > String(visitDate)));
+    const next = upcoming[0];
+    if (!next) snap.nextVisit = { ...snap.nextVisit, state: 'none' };
+    else {
+      // The list row omits the location marker; hydrate so a video visit is
+      // never printed as "your home".
+      const full = await emr.getAppointmentRow(puuid, next.eid).catch(() => null);
+      const a = full ? { ...next, ...clinicalRepo.summarizeAppointmentRow({ ...full }, next.encounterUuid) } : next;
+      snap.nextVisit = {
+        ...snap.nextVisit, state: 'found', date: a.date, startTime: a.startTime,
+        when: formatVisitWhen(a.date, a.startTime),
+        who: await clinicianNameForProviderId(a.providerId),
+        where: full ? (VISIT_PLACE_LABEL[a.location] || null) : null
+      };
+    }
+  } catch (e) { snap.nextVisit.error = String(e.message || e).slice(0, 200); }
+  return snap;
+};
+
+// Everything a summary is built from, for one signed encounter. `sections` is
+// the viewer's sharing verdict (null = staff, everything).
+const assembleAfterVisitSummary = async ({ client, record, attestation, sections }) => {
+  const euuid = String(record.encounterUuid);
+  const [rx, orders, changes] = await Promise.all([loadRows('prescriptions'), loadRows('clinical_orders'), loadRows('medication_changes')]);
+  const encRx = rx.filter(p => p && String(p.encounterUuid) === euuid);
+  const hp = client.clinicalInitialVisit || null;
+  const visit = patientRead.buildVisitSummary({
+    encounterUuid: euuid, encounter: null, record, attestation,
+    prescriptions: encRx, orders: orders.filter(o => o && String(o.encounterUuid) === euuid),
+    providerFallbackName: hp && hp.encounterUuid === euuid ? hp.byName : null
+  });
+  const visitDate = record.date || visit.date;
+  const now = new Date().toISOString();
+  return avs.assemble({
+    client, record, visit, sections,
+    prescriptions: encRx,
+    medChanges: avs.changesForVisit(changes, { clientId: client.id, encounterUuid: euuid, visitDate }),
+    snapshot: record.avsSnapshot || null,
+    fallbackMeds: client.medications || [],
+    intakeAllergies: client.allergies || (client.intake && client.intake.allergies) || null,
+    org: consentText.ORG,
+    dob: (client.intake && client.intake.dob) || client.dob || null,
+    visitDateLabel: visitDate ? practiceTime.fmtDate(`${visitDate}T12:00:00Z`) : null,
+    preparedLabel: `${practiceTime.fmtDateTime(now)} ET`
+  });
+};
+const avsFileName = (client, record) =>
+  `Visit_Summary_${String(record.date || '').replace(/-/g, '')}_${String(client.name || 'patient').replace(/[^A-Za-z0-9]+/g, '_').slice(0, 40)}.pdf`;
+
 // The signed note as a formatted PDF in the patient's OpenEMR Documents — the
 // copy that looks exactly like what was signed, bold signature included.
 // Re-filed on each clinician addendum or co-signature. Never fails a signature.
@@ -10808,6 +10937,78 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid/note.pdf', authentic
     res.send(buffer);
   } catch (error) {
     console.error('Signed note PDF error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── After-visit summary: staff download and "given to" log ────────────────
+// Signed notes only (owner): a patient never sees half-finished text. The
+// chart-derived parts are re-read live here, with the viewer's own login, and
+// saved back so the patient's copy picks up the latest read.
+app.get('/api/clinical/patients/:clientId/encounters/:euuid/visit-summary.pdf', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res, { createRecord: false });
+    if (!ctx) return;
+    if (!ctx.record || ctx.record.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED) {
+      return res.status(404).json({ error: 'No note found for this encounter', code: 'ENCOUNTER_NOT_FOUND' });
+    }
+    if (!ctx.closed || !ctx.attestation) {
+      return res.status(409).json({ error: 'The visit summary is available once the note is signed.', code: 'NOTE_NOT_SIGNED' });
+    }
+    try {
+      ctx.record.avsSnapshot = await buildAvsSnapshot(ctx.emr, ctx.client, ctx.encounterUuid, ctx.record.date);
+      await saveBillingRecord(ctx.rows, ctx.record);
+    } catch (e) { console.error('After-visit summary refresh failed:', e.message); }
+    const d = await assembleAfterVisitSummary({ client: ctx.client, record: ctx.record, attestation: ctx.attestation, sections: null });
+    const buffer = await pdfGenerator.generateAfterVisitSummaryPDF(d);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'after_visit_summary_downloaded', 'client', ctx.client.id, { encounterUuid: ctx.encounterUuid });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', contentDisposition('inline', avsFileName(ctx.client, ctx.record)));
+    res.send(buffer);
+  } catch (error) {
+    console.error('After-visit summary error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Who a summary was given to, how and when — the app records it, a person
+// hands it over (the same rule as the requisitions: the app never faxes).
+const AVS_RECIPIENT_TYPES = Object.freeze(['patient', 'family', 'facility', 'other']);
+const AVS_RECIPIENT_LABELS = Object.freeze({ patient: 'The patient', family: 'Family or POA', facility: 'Facility staff', other: 'Someone else' });
+// The same people who may record where an order went (admin, manager, case
+// manager, licensed clinician) record who a summary went to.
+const requireAvsRecorder = (req, res, next) => {
+  if (clinicalRoles.canEditOrderDestination(req.user)) return next();
+  return res.status(403).json({ error: 'Recording who a visit summary went to is done by an admin, a manager, a case manager or a licensed clinician.', code: 'AVS_RECORD_ONLY' });
+};
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/visit-summary/given', authenticateToken, requireAvsRecorder, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res, { createRecord: false });
+    if (!ctx) return;
+    if (!ctx.record || !ctx.closed) return res.status(409).json({ error: 'The visit summary is available once the note is signed.', code: 'NOTE_NOT_SIGNED' });
+    const b = req.body || {};
+    const recipientType = String(b.recipientType || '');
+    if (!AVS_RECIPIENT_TYPES.includes(recipientType)) return res.status(400).json({ error: `Who it went to must be one of: ${AVS_RECIPIENT_TYPES.join(', ')}`, code: 'AVS_BAD_RECIPIENT' });
+    const channel = String(b.channel || '');
+    if (!orderReq.SEND_CHANNELS.includes(channel)) return res.status(400).json({ error: `How it was given must be one of: ${orderReq.SEND_CHANNELS.join(', ')}`, code: 'AVS_BAD_CHANNEL' });
+    const recipientName = String(b.recipientName || '').trim().slice(0, 160);
+    if (recipientType !== 'patient' && !recipientName) return res.status(400).json({ error: 'Name who received it (a person or the facility).', code: 'AVS_RECIPIENT_NAME_REQUIRED' });
+    const row = {
+      id: uuidv4(), clientId: ctx.client.id, encounterUuid: ctx.encounterUuid,
+      recipientType, recipientName: recipientName || null, channel,
+      recipientFax: orderReq.FAX_SEND_CHANNELS.includes(channel) ? (orderReq.normalizeFax(b.recipientFax) || null) : null,
+      at: new Date().toISOString(), by: { id: req.user.id, name: req.user.name || req.user.email }
+    };
+    if (orderReq.FAX_SEND_CHANNELS.includes(channel) && !row.recipientFax) return res.status(400).json({ error: 'A fax needs the number it went to.', code: 'AVS_FAX_REQUIRED' });
+    const rows = await loadRows('after_visit_summary_disclosures');
+    await db.set('after_visit_summary_disclosures', [...rows, row]);
+    // A disclosure: who and how. The summary's content is not in the log.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'after_visit_summary_given', 'client', ctx.client.id, {
+      encounterUuid: ctx.encounterUuid, recipientType, recipientName: row.recipientName, channel, recipientFax: row.recipientFax
+    });
+    res.json({ message: 'Recorded.', given: row });
+  } catch (error) {
+    console.error('After-visit summary given error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -11263,6 +11464,10 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
       warnings: [...attestationWarnings, ...(record.structuredNoteError ? [`GFC structured note not synced to OpenEMR: ${record.structuredNoteError}`] : [])],
       orderTypes: clinicalRepo.ORDER_TYPES, orderPriorities: clinicalRepo.ORDER_PRIORITIES, orderStatuses: clinicalRepo.ORDER_STATUSES, orderTransitions: clinicalRepo.ORDER_TRANSITIONS,
       rxRoutes: clinicalRepo.RX_ROUTES,
+      rxKinds: clinicalRepo.RX_KINDS,
+      avsGiven: (await loadRows('after_visit_summary_disclosures')).filter(g => g && String(g.encounterUuid) === String(encounterUuid)),
+      avsRecipientTypes: AVS_RECIPIENT_TYPES, avsRecipientLabels: AVS_RECIPIENT_LABELS,
+      rxKindLabels: clinicalRepo.RX_KIND_LABELS,
       // ── Session 4.10 ── every vocabulary is SERVED, never restated in the
       // page. A form that names its own options drifts from the validator that
       // refuses one it did not offer, silently — the rule the competency catalog
@@ -12559,6 +12764,15 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
     if (narrativeWarning) warnings.push(narrativeWarning);
     const pdfWarning = await fileSignedNotePdf(ctx.emr, ctx.client, record, attestation, ctx.addenda);
     if (pdfWarning) warnings.push(pdfWarning);
+    // The after-visit summary's chart-derived parts, read now while a
+    // clinician's login can read them (the patient's download cannot).
+    try { record.avsSnapshot = await buildAvsSnapshot(ctx.emr, ctx.client, ctx.encounterUuid, record.date); }
+    catch (e) { console.error('After-visit summary snapshot failed:', e.message); }
+    // Not a block: a note can be signed without it. But the patient's summary
+    // then has no plain-language account of the visit, so the clinician is told.
+    if (!String(record.patientSummary || '').trim()) {
+      warnings.push('"What we did today" is empty, so the patient\'s visit summary has no plain-language account of this visit. Add it from the coding panel before billing submits, or in an addendum.');
+    }
     // Portal P1: publish, now that the attestation is persisted. An author's
     // note waits for the clinician addendum (publishEncounterToPortal skips it).
     // Soft-fail: a publish failure never voids the signature.
@@ -14623,7 +14837,12 @@ const mirrorIntakeToClientProfile = (client, intake, meds, priorProviders) => {
   const nonEmptyArr = (v) => Array.isArray(v) ? v : undefined;
 
   if (intake.dob) set('dob', intake.dob);
-  if (Array.isArray(meds)) set('medications', meds);
+  // Once a clinician has reconciled the list, it is the clinical list and an
+  // intake or enrollment edit no longer overwrites it. Before this, saving an
+  // unrelated field (a phone number) replaced the reconciled list with the
+  // intake copy — putting stopped medicines back and dropping ones added at a
+  // visit. The intake copy itself is untouched and still shows as "reported".
+  if (Array.isArray(meds) && !client.medRecLast) set('medications', meds);
   set('priorProviders', priorProviders);
 
   // Identity / demographics

@@ -176,7 +176,10 @@ test('patient-facing clinical routes take NO id parameter — the patient comes 
   for (const l of patientRoutes) {
     const routePath = l.match(/'([^']+)'/)[1];
     const params = routePath.match(/:[A-Za-z]+/g) || [];
-    assert.ok(params.every(p => p === ':docId'), `${routePath} must not take a patient-identifying parameter`);
+    // :visitId (2026-09-29) is the same kind of exception: it names an encounter
+    // WITHIN the session patient's chart, and the route refuses one that is not
+    // theirs.
+    assert.ok(params.every(p => p === ':docId' || p === ':visitId'), `${routePath} must not take a patient-identifying parameter`);
     assert.match(l, /requireEnrolledClient/, `${routePath} must sit behind the enrollment gate`);
   }
 });
@@ -260,7 +263,7 @@ test('every /api/clinical route is registered with the matching guard (GET → r
     } else {
       // 2026-09-29: the order-destination edit carries requireOrderDestinationEditor,
       // the one order door a case manager holds (destination fields only).
-      assert.match(l, /requireClinicalWrite|requireAdmin|requireBilling|requireOrderDestinationEditor|requireOrderAnnotator/, `${method.toUpperCase()} route must use requireClinicalWrite (or requireAdmin / requireBilling / requireOrderDestinationEditor): ${l.slice(0, 90)}`);
+      assert.match(l, /requireClinicalWrite|requireAdmin|requireBilling|requireOrderDestinationEditor|requireOrderAnnotator|requireAvsRecorder/, `${method.toUpperCase()} route must use requireClinicalWrite (or requireAdmin / requireBilling / requireOrderDestinationEditor): ${l.slice(0, 90)}`);
       assert.doesNotMatch(l, /requireClinicalRead/, l.slice(0, 90));
     }
   }

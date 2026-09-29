@@ -207,8 +207,30 @@ const canClinicalRead = (u) => clinicalRoles.canClinicalRead(u);
 // Practitioner 403s), coded diagnoses with descriptions, and — when the
 // clinician wrote one — a patient-facing summary + follow-up instructions.
 // Nothing here reads the narrative SOAP note.
-const ORDER_TYPE_LABELS = { lab: 'Lab work', imaging: 'Imaging', procedure: 'Procedure' };
+const ORDER_TYPE_LABELS = { lab: 'Lab work', imaging: 'Imaging', procedure: 'Procedure', referral: 'Referral', dme: 'Equipment' };
 const ORDER_STATUS_LABELS = { ordered: 'ordered', sent: 'sent to the lab', resulted: 'results received', cancelled: 'cancelled' };
+// A referral and a piece of equipment are not a lab: they are arranged, sent
+// to a provider or supplier, and (for a referral) scheduled. Saying "sent to
+// the lab" about a home health referral would be wrong on the patient's copy.
+const ORDER_STATUS_LABELS_BY_TYPE = {
+  referral: { ordered: 'being arranged', sent: 'sent to the provider', scheduled: 'appointment scheduled', completed: 'completed', cancelled: 'cancelled' },
+  dme: { ordered: 'being arranged', sent: 'sent to the supplier', completed: 'completed', cancelled: 'cancelled' }
+};
+// What the patient is told an order IS. Only the plain name of the thing and,
+// for a referral or equipment, who it is with — never a fax number, NPI,
+// order reference or a diagnosis code.
+const orderWhat = (o) => {
+  if (!o) return { tests: [], where: null };
+  if (o.orderType === 'referral') {
+    const r = o.referral || {};
+    return { tests: [r.specialty || o.specialty].filter(Boolean), where: r.receivingPractice || null };
+  }
+  if (o.orderType === 'dme') {
+    const d = o.dme || {};
+    return { tests: [d.itemDescription || o.itemDescription].filter(Boolean), where: d.supplierName || null };
+  }
+  return { tests: Array.isArray(o.tests) ? o.tests : [], where: null };
+};
 // EMR encounter reasons carry the 4.4 attribution suffix (" — Name, cred (NPI …)"); strip it.
 const stripAttribution = (reason) => String(reason || '').split(' — ')[0].trim();
 const firstWords = (s, n) => String(s || '').split(/\s+/).slice(0, n).join(' ');
@@ -224,11 +246,18 @@ const buildVisitSummary = ({ encounterUuid, encounter, record, attestation, pres
     name: [r.drug, r.dose].filter(Boolean).join(' ') || 'Prescription',
     instructions: [r.route, r.frequency, r.instructions].filter(Boolean).join(' · ') || null
   }));
-  const tests = (orders || []).filter(o => o && o.status !== 'cancelled').map(o => ({
-    type: ORDER_TYPE_LABELS[o.orderType] || o.orderType || 'Order',
-    tests: Array.isArray(o.tests) ? o.tests : [],
-    status: ORDER_STATUS_LABELS[o.status] || o.status || 'ordered'
-  }));
+  const tests = (orders || []).filter(o => o && o.status !== 'cancelled').map(o => {
+    const what = orderWhat(o);
+    const labels = ORDER_STATUS_LABELS_BY_TYPE[o.orderType] || ORDER_STATUS_LABELS;
+    return {
+      type: ORDER_TYPE_LABELS[o.orderType] || o.orderType || 'Order',
+      tests: what.tests,
+      // A referral still waiting on its agency is "being arranged", never "sent".
+      status: (o.orderType === 'referral' && o.referral && o.referral.agencyPending && !o.referral.receivingFax)
+        ? 'being arranged' : (labels[o.status] || o.status || 'ordered'),
+      ...(what.where ? { where: what.where } : {})
+    };
+  });
   const signed = !!(attestation && attestation.signedAt);
   const sentences = [];
   if (rec.patientSummary) sentences.push(String(rec.patientSummary).trim());
@@ -244,7 +273,7 @@ const buildVisitSummary = ({ encounterUuid, encounter, record, attestation, pres
     id: String(encounterUuid || rec.encounterUuid || (encounter && encounter.id) || ''),
     date, provider, reason,
     overview,
-    summary: sentences.join(' '),
+    summary: sentences.join('\n\n'),
     followUp: rec.followUpInstructions ? String(rec.followUpInstructions).trim() : null,
     status: signed ? 'complete' : 'in_progress',
     newPrescriptions: rx,
@@ -259,10 +288,23 @@ const buildVisitSummary = ({ encounterUuid, encounter, record, attestation, pres
 // same constants, so the box and the save cannot disagree about the cap.
 const PATIENT_SUMMARY_MAX = 4000;
 const FOLLOW_UP_MAX = 4000;
+// LINE BREAKS ARE KEPT. This used to collapse every run of whitespace to one
+// space, so "1. Take the new dose… 2. Call if…" typed as a list reached the
+// patient as one run-on paragraph. Lines are trimmed, runs of spaces squeezed,
+// CR/LF normalised, control characters dropped and more than one blank line in a
+// row collapsed. Everything that shows these strings must render newlines
+// (the portal, the after-visit PDF).
+const cleanMultiline = (v, max) => {
+  const s = String(v == null ? '' : v)
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .split('\n').map(l => l.replace(/[ \t]+/g, ' ').trim()).join('\n')
+    .replace(/\n{3,}/g, '\n\n').trim();
+  return s ? s.slice(0, max).trim() : null;
+};
 const buildPatientFacingFields = (body) => {
   const src = body && typeof body === 'object' ? body : {};
-  const clean = (v, max) => { const s = String(v == null ? '' : v).replace(/\s+/g, ' ').trim(); return s ? s.slice(0, max) : null; };
-  return { patientSummary: clean(src.patientSummary, PATIENT_SUMMARY_MAX), followUpInstructions: clean(src.followUpInstructions, FOLLOW_UP_MAX) };
+  return { patientSummary: cleanMultiline(src.patientSummary, PATIENT_SUMMARY_MAX), followUpInstructions: cleanMultiline(src.followUpInstructions, FOLLOW_UP_MAX) };
 };
 
 // ---- Vitals from the encounter note (server-side vitals defect) ----
@@ -350,7 +392,7 @@ module.exports = {
   evaluateClinicalReadAccess, sectionsFor,
   poaSignerName, buildActingIdentity,
   canClinicalWrite, canClinicalRead,
-  buildVisitSummary, buildPatientFacingFields, PATIENT_SUMMARY_MAX, FOLLOW_UP_MAX, stripAttribution,
+  buildVisitSummary, buildPatientFacingFields, cleanMultiline, PATIENT_SUMMARY_MAX, FOLLOW_UP_MAX, stripAttribution,
   parseVitalsFromNote,
   selectUpcomingAppointments, summarizeAppointmentForPatient, LOCATION_LABELS,
   summarizeMedicationForPatient, summarizeAllergyForPatient, summarizeProblemForPatient
