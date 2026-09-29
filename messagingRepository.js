@@ -24,6 +24,8 @@
 // control. Both exist, and they are independent.
 // ============================================================================
 
+const nf = require('./public/note-format.js');   // the six-shape message formatting, one source for editor, server and screen
+
 const ROLE = Object.freeze({
   CLIENT: 'client',
   FAMILY: 'family',
@@ -121,6 +123,25 @@ const CHANNELS = Object.freeze({
     oneWay: true,
     blurb: 'An update a clinician has chosen to share with family.'
   },
+  // Owner, 2026-09-29: a clinician can message a patient from the clinician
+  // portal, with attachments and formatted text, and the patient (or their POA)
+  // can start one to their clinician. NOT Clinical Escalation: that is a
+  // CONCERN, it tracks whether anyone has responded, and it stays the channel a
+  // patient uses to raise one. `includesPoa` adds the client's designated POA
+  // users as recipients, because a POA is client-equivalent and would otherwise
+  // never be told there was a message.
+  care_team: {
+    id: 'care_team', label: 'Care Team',
+    participants: [ROLE.CLIENT, ROLE.CLINICAL],
+    initiators: [ROLE.CLIENT, ROLE.CLINICAL],
+    includesPoa: true,
+    requiresAssignedClinician: true,
+    blurb: 'You and the clinician caring for you. Send questions and documents here. To raise a concern, use Clinical Escalation. Not for emergencies: call 911.',
+    blurbByRole: {
+      [ROLE.CLINICAL]: 'The patient, and their designated power of attorney if they have one. Secure messages with attachments.',
+      [ROLE.ADMIN]: 'The patient and their clinician.'
+    }
+  },
   admin_direct: {
     id: 'admin_direct', label: 'Admin Broadcast or Direct',
     participants: [ROLE.ADMIN, ROLE.CLIENT, ROLE.FAMILY, ROLE.CAREGIVER, ROLE.CLINICAL, ROLE.CASE_MANAGER],
@@ -196,7 +217,13 @@ const MATRIX_ROWS = Object.freeze([
   { from: ROLE.CLIENT, to: ROLE.CASE_MANAGER, label: 'Care Coordination', channel: 'care_coordination' },
   { from: ROLE.CASE_MANAGER, to: ROLE.CLIENT, label: 'Care Coordination', channel: 'care_coordination' },
   { from: ROLE.CLINICAL, to: ROLE.CLIENT, label: 'Clinical Escalation', channel: 'clinical_escalation' },
-  { from: ROLE.CASE_MANAGER, to: ROLE.CAREGIVER, label: 'Behavioral Escalation', channel: 'behavioral_escalation' }
+  { from: ROLE.CASE_MANAGER, to: ROLE.CAREGIVER, label: 'Behavioral Escalation', channel: 'behavioral_escalation' },
+  // ---- Owner amendment, 2026-09-29 -----------------------------------------
+  // A general clinician <-> patient conversation. Clinical Escalation stays the
+  // patient's way to raise a CONCERN (it tracks a response); this is for
+  // everything else, with attachments and formatted text, in both directions.
+  { from: ROLE.CLINICAL, to: ROLE.CLIENT, label: 'Care Team', channel: 'care_team' },
+  { from: ROLE.CLIENT, to: ROLE.CLINICAL, label: 'Care Team', channel: 'care_team' }
 ]);
 
 // The roles that work for the agency. Everything that distinguishes "staff" from
@@ -209,6 +236,18 @@ const isStaffRole = (role) => STAFF_ROLES.includes(role);
 const isUnrestricted = (user) => actorRole(user) === ROLE.ADMIN || !!(user && user.isManager);
 
 const channelById = (id) => CHANNELS[String(id || '')] || null;
+
+// A designated POA is CLIENT-EQUIVALENT (owner decision 08/2026, spec §4.3). The
+// participant and initiator checks used to read the raw role, so a POA — role
+// `family` — could READ a client's Clinical Escalation, Direct or Care
+// Coordination thread and could neither reply to it nor start one: the matrix
+// lists `client`, not `family`. Found 2026-09-29 by running it; the Care Team
+// channel would have inherited it. Sender attribution is unchanged: a POA still
+// posts as "<POA> as POA for <client>".
+const effectiveRole = (user, isPoa) => {
+  const role = actorRole(user);
+  return (role === ROLE.FAMILY && isPoa) ? ROLE.CLIENT : role;
+};
 
 // ---- Who is attached to this client ---------------------------------------
 // Reused from Session 6 rather than restated where the rule already exists:
@@ -271,11 +310,11 @@ function clientInScope(user, client, { caregiverAssigned = false } = {}) {
 // Never a bare false. "Not available" and "not available BECAUSE no caregiver is
 // assigned yet" are different answers, and only the second one tells a person
 // what to do next.
-function channelAvailability(channelId, { user, client, users }) {
+function channelAvailability(channelId, { user, client, users, isPoa = false }) {
   const channel = channelById(channelId);
   if (!channel) return { available: false, code: 'UNKNOWN_CHANNEL', reason: `"${channelId}" is not a channel.` };
 
-  const role = actorRole(user);
+  const role = effectiveRole(user, isPoa);
   if (!role) return { available: false, code: 'UNKNOWN_ROLE', reason: 'This account has no messaging role.' };
 
   // Admin starts anything (owner rule 2026-09-13: "admin / manager should be
@@ -293,6 +332,15 @@ function channelAvailability(channelId, { user, client, users }) {
     return {
       available: false, code: 'NO_CAREGIVER_ASSIGNED',
       reason: 'No caregiver is assigned yet, so there is nobody on the other end. The office assigns one, and this opens on its own.'
+    };
+  }
+  // Care Team is a conversation with a clinician, so a patient or POA starting
+  // one needs somebody on the other end. Shown DISABLED with the reason, never
+  // hidden. A clinician or admin starting one is the somebody.
+  if (channel.requiresAssignedClinician && (role === ROLE.CLIENT || role === ROLE.FAMILY) && !assignedClinicianIds(client).length) {
+    return {
+      available: false, code: 'NO_CLINICIAN_ASSIGNED_YET',
+      reason: 'No clinician is assigned to you yet, so there is nobody on the other end. The office assigns one, and this opens on its own. For anything urgent, call the office.'
     };
   }
   if (channelId === 'clinical_escalation' && !assignedClinicianIds(client).length) {
@@ -315,12 +363,12 @@ function channelAvailability(channelId, { user, client, users }) {
 // Every channel this user could open for this client, each carrying its own
 // availability. The UI renders the unavailable ones disabled with their reason
 // rather than omitting them.
-function channelsFor({ user, client, users }) {
-  const role = actorRole(user);
+function channelsFor({ user, client, users, isPoa = false }) {
+  const role = effectiveRole(user, isPoa);
   return CHANNEL_IDS
     .filter(id => isUnrestricted(user) || CHANNELS[id].initiators.includes(role))
     .map(id => {
-      const a = channelAvailability(id, { user, client, users });
+      const a = channelAvailability(id, { user, client, users, isPoa });
       return {
         id, label: CHANNELS[id].label, blurb: blurbFor(id, role),
         available: a.available, code: a.code, reason: a.reason,
@@ -422,7 +470,7 @@ function threadVisibility(user, thread, { client, isPoa = false } = {}) {
     if (!mine || thread.client_id !== mine) {
       return deny('THREAD_NOT_YOURS', 'That conversation belongs to another client.');
     }
-    const clientChannels = ['direct_care', 'support', 'clinical_escalation', 'care_coordination', 'admin_direct', 'care_update', 'family_portal'];
+    const clientChannels = ['direct_care', 'support', 'clinical_escalation', 'care_team', 'care_coordination', 'admin_direct', 'care_update', 'family_portal'];
     if (!clientChannels.includes(thread.channel)) {
       return deny('THREAD_NOT_YOURS', 'That conversation is between staff.');
     }
@@ -457,7 +505,7 @@ function canPostToThread(user, thread, { client, isPoa = false } = {}) {
   const seen = threadVisibility(user, thread, { client, isPoa });
   if (!seen.visible) return { allowed: false, code: seen.code, reason: seen.reason };
 
-  const role = actorRole(user);
+  const role = effectiveRole(user, isPoa);
   const channel = channelById(thread.channel);
   if (!channel) return { allowed: false, code: 'UNKNOWN_CHANNEL', reason: 'That conversation has no channel.' };
 
@@ -513,15 +561,40 @@ function senderIdentity(user, { client, isPoa = false } = {}) {
 
 // ---- Message validation ----------------------------------------------------
 const MAX_BODY = 4000;
+// Attachments (owner, 2026-09-29). PDF, JPEG and PNG only — typed by their BYTES
+// by the route, the same sniff every other upload uses — a few per message.
+const MAX_ATTACHMENTS = 5;
+const ATTACHMENT_MIMES = Object.freeze(['application/pdf', 'image/jpeg', 'image/png']);
 
-function validateMessage(input) {
-  const body = input && typeof input.body === 'string' ? input.body.trim() : '';
+// `format: 'markup'` is the six-shape formatting (public/note-format.js); a
+// message without it is PLAIN TEXT and is never run through the formatter — an
+// older message that happens to contain `_` or `- ` must not turn into
+// underlines and bullets. A message may be attachments alone.
+function validateMessage(input, { attachmentCount = 0 } = {}) {
+  const src = input && typeof input === 'object' ? input : {};
+  const format = src.format === 'markup' ? 'markup' : 'plain';
+  // A multipart form (how a message with files travels) carries line breaks as CRLF.
+  const body = typeof src.body === 'string' ? src.body.replace(/\r\n?/g, '\n').trim() : '';
+  const blank = format === 'markup' ? nf.isBlank(typeof src.body === 'string' ? src.body : '') : !body;
   const errors = [];
-  if (!body) errors.push({ field: 'body', code: 'BODY_REQUIRED', message: 'Write a message first.' });
+  if (blank && !attachmentCount) errors.push({ field: 'body', code: 'BODY_REQUIRED', message: 'Write a message first.' });
   if (body.length > MAX_BODY) {
     errors.push({ field: 'body', code: 'BODY_TOO_LONG', message: `Messages are up to ${MAX_BODY} characters. That one is ${body.length}.` });
   }
-  return { valid: errors.length === 0, errors, clean: { body: body.slice(0, MAX_BODY) } };
+  if (attachmentCount > MAX_ATTACHMENTS) {
+    errors.push({ field: 'attachments', code: 'TOO_MANY_ATTACHMENTS', message: `A message carries up to ${MAX_ATTACHMENTS} attachments.` });
+  }
+  return { valid: errors.length === 0, errors, clean: { body: body.slice(0, MAX_BODY), format } };
+}
+
+// The one-line preview a thread list and a notice may show: plain text, never
+// markup, and a note that a file came with it.
+function previewOf(body, format, attachments) {
+  const text = format === 'markup' ? nf.toPlainText(body || '') : String(body || '');
+  const flat = text.replace(/\s+/g, ' ').trim();
+  const n = (attachments || []).length;
+  if (flat) return (flat + (n ? ` · ${n} attachment${n > 1 ? 's' : ''}` : '')).slice(0, 120);
+  return n ? `${n} attachment${n > 1 ? 's' : ''}: ${attachments[0].name}`.slice(0, 120) : '';
 }
 
 // ---- Clinical escalation response status -----------------------------------
@@ -563,7 +636,7 @@ module.exports = {
   careTeamOf, assignedCaregiverIds, assignedClinicianIds, assignedCaseManagerId, hasActiveCaregiver,
   clientInScope, channelAvailability, channelsFor,
   isParty, ownClientId, threadVisibility, canPostToThread,
-  senderIdentity, validateMessage, MAX_BODY,
+  senderIdentity, validateMessage, previewOf, effectiveRole, MAX_BODY, MAX_ATTACHMENTS, ATTACHMENT_MIMES,
   RESPONSE_STATUSES, RESPONSE_TRANSITIONS, canTransitionResponse, responseRefusal,
   threadTitle, unreadCount
 };

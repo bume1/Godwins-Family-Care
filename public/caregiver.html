@@ -23,7 +23,9 @@
        build step. Loaded here so window.GFCCaregiverSchedule exists before the
        app renders; ScheduleTab below mounts it. -->
   <script src="/components/caregiver-schedule.js"></script>
-  <!-- Session 9's messaging component, wired in the same session it was built. -->
+  <!-- Session 9's messaging component, wired in the same session it was built.
+       note-format.js is the message formatting (bold, lists…) it composes and renders with. -->
+  <script src="/note-format.js"></script>
   <script src="/components/gfc-messaging.js"></script>
   <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
   <style>

@@ -2715,7 +2715,15 @@ app.use(welcomePacketRoutes({ db, config, logActivity, queueNotification, getUse
   hashIp: (req) => roiRepo.hashIp(clientIpFrom(req), JWT_SECRET) }));
 
 app.use(schedulingRoutes({ db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4 }));
-app.use(messagingRoutes({ db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4 }));
+// Message attachments (2026-09-29): multipart parsing, private Drive storage, and
+// the byte-sniff. `detectFileType` is defined further down this file, so it is
+// passed as a closure; `contentDisposition` is imported at the top.
+app.use(messagingRoutes({
+  db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4,
+  upload, uploadLimiter, googledrive,
+  detectFileType: (buf) => detectFileType(buf),
+  contentDisposition
+}));
 
 // Uploads require authentication - registered here after authenticateToken is defined
 app.use('/uploads', authenticateToken, express.static('uploads', staticOptions));
