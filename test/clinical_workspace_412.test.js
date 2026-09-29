@@ -807,7 +807,13 @@ test('every chart tab is a place in the record, and no workflow is one', () => {
 test('the H&P is still reachable, and says where you are while it is open', () => {
   // Removing it from the tab bar must not strand it. It opens from the
   // banner's Start visit action and from an appointment.
-  assert.match(pageCode, /onStartVisit=\{canWrite \? \(\) => setTab\('visit'\) : null\}/);
+  assert.match(pageCode, /onStartVisit=\{canWrite \? startVisit : null\}/);
+  // Start visit opens the H&P, unless a shared draft is already saved on an
+  // encounter: then it resumes THAT (a blank H&P would become a second
+  // encounter, which can only be voided).
+  const sv = pageCode.slice(pageCode.indexOf('const startVisit = () =>'), pageCode.indexOf('const documentFromSchedule'));
+  assert.match(sv, /if \(vd && vd\.encounterUuid\) \{ setEncTarget\(vd\.encounterUuid\); setTab\('encounters'\); return; \}/);
+  assert.match(sv, /setTab\('visit'\);/);
   assert.match(pageCode, /tab === 'visit' && \(chart \?/, 'the H&P body still renders');
   // With no tab highlighted, a clinician has to be told where they are.
   assert.match(pageCode, /Documenting a visit/);
@@ -871,11 +877,20 @@ test('an empty place says so in a sentence', () => {
 test('the timeline is one thread, newest first', () => {
   const t = repo.buildTimeline({
     encounters: [{ date: '2026-09-22', type: 'Home Visit', id: 'e1' }],
-    orders: [{ createdAt: '2026-09-12T00:00:00Z', orderType: 'lab', tests: ['BMP'], id: 'o1' }],
+    orders: [{ createdAt: '2026-09-12T15:00:00Z', orderType: 'lab', tests: ['BMP'], id: 'o1' }],
     results: [{ receivedAt: '2026-09-18', label: 'BMP', id: 'r1' }]
   });
   assert.deepStrictEqual(t.rows.map(r => r.date), ['2026-09-22', '2026-09-18', '2026-09-12']);
   assert.deepStrictEqual(t.rows.map(r => r.kind), ['visit', 'result', 'order']);
+});
+
+test('a timestamp lands on the day it was in Georgia, not the UTC day', () => {
+  // 00:30Z on the 12th is 8:30 PM on the 11th in Georgia. Slicing the UTC
+  // string put every evening order, result and message on the next day.
+  const t = repo.buildTimeline({ orders: [{ createdAt: '2026-09-12T00:30:00Z', orderType: 'lab', tests: ['BMP'], id: 'o1' }] });
+  assert.deepStrictEqual(t.rows.map(r => r.date), ['2026-09-11']);
+  const b = repo.buildTimeline({ encounters: [{ date: '2026-09-12', type: 'Home Visit', id: 'e1' }] });
+  assert.deepStrictEqual(b.rows.map(r => r.date), ['2026-09-12'], 'a bare calendar date is kept as it is');
 });
 
 test('a documented appointment is not on the thread twice', () => {
