@@ -11681,6 +11681,14 @@ app.get('/api/clinical/orders/:orderId/requisition.pdf', authenticateToken, requ
     const found = await loadOrderForActor(req.params.orderId, res);
     if (!found) return;
     const { rows, idx, order, client } = found;
+    // No agency, no fax number: a requisition with a blank "send to" is a
+    // document nobody can send. Refused by name, pointing at the fix.
+    if (orderReq.isAgencyPending(order)) {
+      return res.status(409).json({
+        error: 'The receiving agency is not confirmed yet, so there is no requisition to send. Add the agency and fax with Update destination first.',
+        code: 'ORDER_AGENCY_PENDING'
+      });
+    }
     const [settings, users, billing] = await Promise.all([
       getRequisitionSettings(), getUsers(), loadRows('encounter_billing')
     ]);
@@ -12112,8 +12120,19 @@ app.get('/api/clinical/orders/overdue', authenticateToken, requireClinicalRead, 
     const [orders, users] = await Promise.all([loadRows('clinical_orders'), getUsers()]);
     const rows = orderReq.buildOverdueList(orders);
     const nameOf = (id) => { const u = users.find(x => x && x.id === id); return (u && u.name) || null; };
+    // The other half of "nobody noticed": an order placed with the agency still
+    // to be confirmed is not overdue (nothing was sent), so it would sit
+    // forever. It is listed here, oldest first, with who placed it.
+    const waiting = orders.filter(o => o && o.status === 'ordered' && orderReq.isAgencyPending(o))
+      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
+      .map(o => ({
+        id: o.id, clientId: o.clientId, clientName: nameOf(o.clientId), orderReference: o.orderReference,
+        specialty: (o.referral || {}).specialty || null, priority: o.priority,
+        createdAt: o.createdAt, orderingClinician: o.orderingClinician || null, encounterUuid: o.encounterUuid || null
+      }));
     res.json({
       orders: rows.map(o => ({ ...o, clientName: nameOf(o.clientId) })),
+      agencyPending: waiting,
       thresholds: orderReq.OVERDUE_DAYS
     });
   } catch (error) {
