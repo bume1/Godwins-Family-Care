@@ -49,6 +49,12 @@ const validateHold = (input) => {
   return { hold: { reason } };
 };
 
+// What is stored on the attestation for a hold: who, why, when. ONE function
+// for both doors (signing and the Publish route), so the two cannot store it
+// differently — and so a test can pin that the sign route calls it, rather than
+// only reading the route's text.
+const holdStamp = (check, by, at) => (check && check.hold ? { reason: check.hold.reason, by, at } : null);
+
 // ---- The billing plumbing note is never a patient's note ----
 // The same test the sign route's hasNote check applies.
 const isStructuredRecordNote = (soap, structuredNoteSid) => !!soap && (
@@ -265,7 +271,7 @@ const resultForPatient = (r) => {
 };
 
 module.exports = {
-  HOLD_REASONS, HOLD_REASON_LABELS, validateHold,
+  HOLD_REASONS, HOLD_REASON_LABELS, validateHold, holdStamp,
   isStructuredRecordNote,
   buildPublishedChart, mergeChart, CHART_SECTIONS, CHART_HISTORY_MAX,
   vitalsFromNote, noteFromShared, noteFromLegacy,

@@ -12573,7 +12573,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
     attestation.billable = signature.outcome === clinicalRoles.SIGN_OUTCOME.ALLOWED;
     attestation.coSignStatus = signature.outcome === clinicalRoles.SIGN_OUTCOME.PENDING_CO_SIGN ? 'pending' : 'not_required';
     // Stored on the attestation: who held the note from the portal, when, why.
-    attestation.portalHold = holdCheck.hold ? { reason: holdCheck.hold.reason, by: clinicalRepo.actorRecord(ctx.actor), at: attestation.signedAt } : null;
+    attestation.portalHold = patientPublish.holdStamp(holdCheck, clinicalRepo.actorRecord(ctx.actor), attestation.signedAt);
     const atts = await loadRows('encounter_attestations');
     atts.push(attestation);
     await db.set('encounter_attestations', atts);
@@ -14419,7 +14419,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/publish', authentic
       if (holdInput !== 'release') {
         const check = patientPublish.validateHold(holdInput);
         if (check.error) return res.status(400).json({ error: check.error, code: check.code, reasons: patientPublish.HOLD_REASONS });
-        nextHold = { reason: check.hold.reason, by: clinicalRepo.actorRecord(ctx.actor), at: new Date().toISOString() };
+        nextHold = patientPublish.holdStamp(check, clinicalRepo.actorRecord(ctx.actor), new Date().toISOString());
       }
       const atts = await loadRows('encounter_attestations');
       const i = atts.findIndex(a => a && a.id === attestation.id);
