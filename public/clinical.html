@@ -3818,7 +3818,11 @@
       const remove = (code) => setDiagnoses(diagnoses.filter(d => d.code !== code).map((d, i, a) => ({ ...d, primary: a.some(x => x.primary) ? d.primary : i === 0 })));
       const setPrimary = (code) => setDiagnoses(diagnoses.map(d => ({ ...d, primary: d.code === code })));
       const pending = (candidates || []).filter(c => c.code && !has(c.code));
-      const uncoded = (candidates || []).filter(c => !c.code);
+      // A problem already coded on THIS note is coded, whatever the problem-list
+      // read says; only a problem nobody has coded anywhere is worth flagging.
+      const onNote = new Set(diagnoses.map(d => d.problemUuid).filter(Boolean));
+      const uncoded = (candidates || []).filter(c => !c.code && !(c.problemUuid && onNote.has(c.problemUuid)));
+      const uncodedNames = uncoded.slice(0, 4).map(u => u.description).join(', ') + (uncoded.length > 4 ? ` and ${uncoded.length - 4} more` : '');
       return (
         <div className="grid gap-2">
           {diagnoses.length === 0 && <p className="text-xs text-stone-400">No diagnoses on this encounter yet.</p>}
@@ -3857,7 +3861,7 @@
           )}
           {!readOnly && uncoded.length > 0 && (
             <p className="text-[11px] text-amber-700"><i className="ti ti-alert-triangle mr-1" />
-              {uncoded.length} problem{uncoded.length > 1 ? 's' : ''} on the OpenEMR list ha{uncoded.length > 1 ? 've' : 's'} no ICD-10 code ({uncoded.map(u => u.description).join(', ')}) — code {uncoded.length > 1 ? 'them' : 'it'} below to bill against {uncoded.length > 1 ? 'them' : 'it'}.
+              {uncoded.length} problem{uncoded.length > 1 ? 's' : ''} on the OpenEMR list ha{uncoded.length > 1 ? 've' : 's'} no ICD-10 code ({uncodedNames}) — code {uncoded.length > 1 ? 'them' : 'it'} below to bill against {uncoded.length > 1 ? 'them' : 'it'}.
             </p>
           )}
           {!readOnly && <CodePicker set="ICD10" clientId={clientId} exclude={diagnoses.map(d => d.code)} onPick={add} />}

@@ -9927,8 +9927,20 @@ const loadDxCandidates = async (emr, client, excludeEncounterUuid) => {
   let problems = []; let error = null;
   try { problems = (await emr.getProblems(client.openEmrPatientId)).map(clinicalRepo.summarizeCondition); }
   catch (e) { error = e.message; }
-  const prior = (await loadRows('encounter_billing')).filter(r => r && r.clientId === client.id && r.encounterUuid !== String(excludeEncounterUuid || ''));
-  return { candidates: clinicalRepo.mergeCandidateSources(clinicalRepo.buildCandidateDiagnoses(problems), prior), error };
+  // The FHIR read drops each problem's ICD-10 code; OpenEMR's own problem rows
+  // carry it. A failed read leaves the codes as FHIR gave them, never an error.
+  let problemRows = [];
+  if (problems.length) {
+    try { problemRows = await emr.getProblemRows(client.openEmrPatientId); }
+    catch (e) { console.error('Problem-row code read failed:', e.message); }
+  }
+  const all = (await loadRows('encounter_billing')).filter(r => r && r.clientId === client.id);
+  const current = excludeEncounterUuid ? all.find(r => r.encounterUuid === String(excludeEncounterUuid)) : null;
+  const prior = all.filter(r => r.encounterUuid !== String(excludeEncounterUuid || ''));
+  const base = clinicalRepo.fillCandidateCodes(clinicalRepo.buildCandidateDiagnoses(problems), {
+    problemRows, currentDiagnoses: current ? current.diagnoses : []
+  });
+  return { candidates: clinicalRepo.mergeCandidateSources(base, prior), error };
 };
 
 // Common loader: clinical client + linked check + billing record + closed state.
