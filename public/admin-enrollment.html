@@ -1552,7 +1552,7 @@
             </p>
             {assigned && !posMissing && !notService && agree.ok
               ? <span className="badge bg-success-50 text-success-600 shrink-0">POS {data.posCode}</span>
-              : <span className="badge bg-warning-50 text-warning-600 shrink-0">Blocks signing</span>}
+              : <span className="badge bg-warning-50 text-warning-600 shrink-0">Blocks billing</span>}
           </div>
 
           {data.degraded && (
@@ -1565,7 +1565,7 @@
           <div className="text-xs text-gray-500 mb-2">
             {assigned
               ? <>Assigned to <b>{data.facilityName || `facility ${data.facilityId}`}</b>{data.posCode ? <> &middot; place of service <b>{data.posCode}</b></> : null}.</>
-              : <b className="text-warning-600">Not assigned to an OpenEMR facility, so this patient&rsquo;s visits cannot be signed.</b>}
+              : <b className="text-warning-600">Not assigned to an OpenEMR facility, so this patient&rsquo;s visits cannot be submitted to billing.</b>}
           </div>
           {posMissing && (
             <p className="text-xs text-warning-600 mb-2">

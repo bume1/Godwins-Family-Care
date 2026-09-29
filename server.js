@@ -2496,7 +2496,9 @@ const requireSuperAdmin = requireAdmin;
 // audited here (user, role, patientId, resource) — the scoped read mirrors
 // their OpenEMR permissions and must leave the same trail.
 const requireClinicalRead = (req, res, next) => {
-  if (!patientRead.canClinicalRead(req.user)) {
+  // Billing (an admin or a manager) reads the note it is coding — the minimum
+  // a claim needs (owner, 2026-09-29). It gains no clinical WRITE by this.
+  if (!patientRead.canClinicalRead(req.user) && !clinicalRoles.canSubmitBilling(req.user)) {
     return res.status(403).json({ error: 'Clinical access required.', code: 'CLINICAL_ONLY' });
   }
   if (req.user.role === config.ROLES.CASE_MANAGER) {
@@ -2526,6 +2528,13 @@ const requireClinicalWrite = (req, res, next) => {
 // permits. The 403 NAMES THE CREDENTIAL REASON — a refusal that says only
 // "forbidden" sends a nurse to an admin, when what she needs to know is that
 // the work requires a different person.
+// Billing (owner, 2026-09-29): an admin or a manager — see
+// clinicalRoles.canSubmitBilling. Codes after signing, the place of service,
+// and the claim itself are billing's; a clinician never reaches these routes.
+const requireBilling = (req, res, next) => {
+  if (clinicalRoles.canSubmitBilling(req.user)) return next();
+  return res.status(403).json({ error: 'Billing is done by an admin or a manager.', code: 'BILLING_ONLY' });
+};
 const requireCapability = (capability) => (req, res, next) => {
   if (clinicalRoles.can(req.user, capability)) return next();
   return res.status(403).json(clinicalRoles.refusalFor(req.user, capability));
@@ -7970,7 +7979,11 @@ app.get('/api/clinical/status', authenticateToken, requireClinicalRead, async (r
       clinicalRole: clinicalRoles.resolveClinicalRole(req.user),
       clinicalRoleLabel: clinicalRoles.CLINICAL_ROLE_LABELS[clinicalRoles.resolveClinicalRole(req.user)] || null,
       capabilities: clinicalRoles.capabilitiesFor(req.user),
-      credentialCeiling: clinicalRoles.ceilingFor(req.user)
+      credentialCeiling: clinicalRoles.ceilingFor(req.user),
+      // Billing (an admin or a manager): the codes after signing, the place of
+      // service and Submit to billing. The page draws billing controls from
+      // this answer and never decides it itself.
+      canSubmitBilling: clinicalRoles.canSubmitBilling(req.user)
     },
     ...(await openemr.getStatus(req.user)), serverStartedAt: SERVER_STARTED_AT,
     // Session 4.4 deploy diagnostics: billing NPI (spec §2.5) + the caller's
@@ -8299,7 +8312,11 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
     // the facility's place-of-service code, and a sequential round trip to
     // OpenEMR on every chart open is a second of a clinician's day for a value
     // the reads below are already waiting on anyway.
-    const facilityPromise = resolveFacilityForVisit(emr, client, null).catch(() => null);
+    // Billing only (owner, 2026-09-29): a clinician's banner carries no
+    // facility or place of service at all, so it is not even looked up.
+    const facilityPromise = clinicalRoles.canSubmitBilling(req.user)
+      ? resolveFacilityForVisit(emr, client, null).catch(() => null)
+      : Promise.resolve(null);
     const [problems, allergies, meds, encounters, carePlans, documents, vitals] = await Promise.allSettled([
       emr.getProblems(puuid), emr.getAllergies(puuid), emr.getMedicationRequests(puuid),
       emr.getEncounters(puuid), emr.getCarePlans(puuid), emr.getDocumentReferences(puuid),
@@ -8371,9 +8388,10 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
     const deletedEnc = await deletedEncounterIds(client.id);
     const encounterRows = encounters.status === 'fulfilled'
       ? withoutDeleted(encounters.value.map(clinicalRepo.summarizeEncounter), deletedEnc) : [];
+    const bannerFacility = await facilityPromise;
     const banner = clinicalRepo.buildPatientBanner({
       client, linked: true, emrAllergies,
-      facility: await facilityPromise,
+      facility: bannerFacility,
       lastVisitAt: clinicalRepo.lastVisitDateOf(encounterRows),
       today: practiceToday(),
       careTierLabel: careTierLabelFor(client.careTier)
@@ -8382,6 +8400,8 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
     // to know whether THIS clinician has a draft open on THIS patient. Keyed to
     // the caller, the same way the draft routes are — a colleague's half-written
     // note is never offered here as something to resume.
+    // A clinician's banner carries no facility or place of service at all.
+    if (!clinicalRoles.canSubmitBilling(req.user)) delete banner.facility;
     const ownDraft = (await loadNoteDrafts()).find(r => r && r.id === clinicalRepo.noteDraftId(client.id, req.user.id)) || null;
     const visitDraft = { open: !!ownDraft, savedAt: (ownDraft && ownDraft.updatedAt) || null };
     res.json({
@@ -9034,6 +9054,50 @@ const APPT_DEFAULTS = () => ({
 // business entity) rather than config, so the two cannot drift apart silently.
 // Cached briefly: it changes about once a year, and every booking and swap
 // needs it.
+// ── The facility list, and the copy of it clinicians rely on ─────────────
+// A clinician's own OpenEMR login cannot read facilities (owner, 2026-09-29:
+// "clinicians don't make POS decisions, just visit type"), and they are not
+// being given that permission. So the place of service is settled by an admin
+// or manager — when a patient's facility is assigned, or when the facility is
+// set up in OpenEMR — and every successful read of the list is kept here. A
+// visit a clinician creates takes its POS from this copy instead of failing
+// into "this patient has no facility" (the owner report that started this).
+const FACILITY_SNAPSHOT_KEY = 'openemr_facility_snapshot';
+const FACILITY_SNAPSHOT_FIELDS = ['id', 'name', 'pos_code', 'service_location', 'billing_location', 'primary_business_entity', 'city', 'state'];
+const saveFacilitySnapshot = async (rows, user) => {
+  const facilities = (rows || []).map(f => {
+    const out = {};
+    for (const k of FACILITY_SNAPSHOT_FIELDS) if (f && f[k] !== undefined) out[k] = f[k];
+    return out;
+  });
+  // An empty read (OpenEMR answers 404 as "none") never replaces a real copy,
+  // and an unchanged list is not rewritten on every visit.
+  if (!facilities.length) return false;
+  const prev = await db.get(FACILITY_SNAPSHOT_KEY);
+  if (prev && JSON.stringify(prev.facilities) === JSON.stringify(facilities)) return false;
+  await db.set(FACILITY_SNAPSHOT_KEY, {
+    facilities, syncedAt: new Date().toISOString(),
+    syncedById: user ? user.id : null, syncedByName: user ? (user.name || user.email || null) : null
+  });
+  return true;
+};
+const getFacilitySnapshot = async () => (await db.get(FACILITY_SNAPSHOT_KEY)) || null;
+// Live when this login can read it (and the copy is refreshed); otherwise the
+// copy. Only a login that can read NEITHER fails, with the live error.
+const readFacilities = async (emr, user) => {
+  try {
+    const rows = await emr.getFacilities();
+    try { await saveFacilitySnapshot(rows, user); } catch (e) { console.error('Facility snapshot save failed:', e.message); }
+    return { rows, source: 'live' };
+  } catch (e) {
+    const snap = await getFacilitySnapshot();
+    if (snap && Array.isArray(snap.facilities) && snap.facilities.length) {
+      return { rows: snap.facilities, source: 'snapshot', syncedAt: snap.syncedAt };
+    }
+    throw e;
+  }
+};
+
 let billingFacilityCache = { at: 0, value: null };
 const BILLING_FACILITY_TTL_MS = 5 * 60 * 1000;
 const resolveBillingForVisit = async (emr) => {
@@ -9042,17 +9106,19 @@ const resolveBillingForVisit = async (emr) => {
     return billingFacilityCache.value;
   }
   let facilities = [];
-  try { facilities = await emr.getFacilities(); }
+  try { facilities = (await readFacilities(emr)).rows; }
   catch (e) {
     return { facilityId: null, facilityName: null, source: 'unavailable',
-      error: 'FACILITY_LOOKUP_FAILED',
-      warning: `OpenEMR's facility list could not be read (${e.message.slice(0, 120)}), so the billing entity could not be determined.` };
+      error: 'FACILITY_LOOKUP_FAILED', warning: null,
+      billingWarning: `OpenEMR's facility list could not be read (${e.message.slice(0, 120)}), so the billing entity could not be determined.` };
   }
   const resolved = clinicalRepo.resolveBillingFacility({
     facilities, configuredId: config.OPENEMR.BILLING_FACILITY_ID || null
   });
-  billingFacilityCache = { at: now, value: resolved };
-  return resolved;
+  // The billing entity is billing's to see, like the place of service.
+  const out = { ...resolved, warning: null, billingWarning: resolved.warning || null };
+  billingFacilityCache = { at: now, value: out };
+  return out;
 };
 
 // Linkage pointers ONLY (per the 4.2 no-duplication rule):
@@ -9723,7 +9789,8 @@ const actorFromReq = (req) => ({
   id: req.user.id, name: req.user.name, licenseLevel: req.user.licenseLevel || null,
   npi: req.user.npi || null, openEmrProviderId: req.user.openEmrProviderId || null, role: req.user.role, email: req.user.email,
   clinicalRole: clinicalRoles.resolveClinicalRole(req.user),
-  hasClinicalAccess: clinicalRoles.derivedHasClinicalAccess(req.user)
+  hasClinicalAccess: clinicalRoles.derivedHasClinicalAccess(req.user),
+  isManager: !!req.user.isManager
 });
 
 const forEncounter = (rows, encounterUuid) => rows.filter(r => r && r.encounterUuid === String(encounterUuid));
@@ -9851,12 +9918,12 @@ const resolveFacilityForVisit = async (emr, client, appointmentLocation, descrip
     patientDefaultLocation: client.usualLocation || null
   });
   let facilities = [];
-  try { facilities = await emr.getFacilities(); }
+  try { facilities = (await readFacilities(emr)).rows; }
   catch (e) {
     return { facilityId: null, posCode: null, facilityName: null, source: 'unavailable',
       visit, visitLabel: visit.label,
-      error: 'FACILITY_LOOKUP_FAILED',
-      warning: `OpenEMR's facility list could not be read (${e.message.slice(0, 120)}), so the place of service could not be derived.` };
+      error: 'FACILITY_LOOKUP_FAILED', warning: null,
+      billingWarning: `OpenEMR's facility list could not be read (${e.message.slice(0, 120)}) and no admin or manager has synced it yet, so the place of service could not be derived. Billing sets it before submitting.` };
   }
   const place = clinicalRepo.resolveEncounterFacility({
     patientFacilityId: client.openEmrFacilityId || null,
@@ -9869,10 +9936,14 @@ const resolveFacilityForVisit = async (emr, client, appointmentLocation, descrip
   const agree = clinicalRepo.checkVisitAgainstPos({
     visit, posCode: place.posCode, facilityName: place.facilityName
   });
+  // BILLING'S, never a clinician's (owner, 2026-09-29): every one of these is
+  // about the place of service. `warning` stays null so no caller can hand one
+  // to the clinician creating the visit; it is recorded for billing instead.
   return {
     ...place,
     visit, visitLabel: visit.label,
-    warning: place.warning || (agree.ok ? null : agree.error)
+    warning: null,
+    billingWarning: place.warning || (agree.ok ? null : agree.error)
   };
 };
 
@@ -10410,12 +10481,14 @@ const applyVisitToEncounter = async (emr, client, record, descriptor, appointmen
   if (place.facilityId) fields.facility_id = place.facilityId;
   if (place.posCode) fields.pos_code = place.posCode;
   record.visit = place.visit;
-  const warnings = place.warning ? [place.warning] : [];
+  // Place-of-service problems are recorded for billing, never returned to the
+  // clinician who changed the visit (owner, 2026-09-29).
+  record.posMissingReason = place.posCode ? null : (place.billingWarning || place.error || 'No place of service could be derived.');
   if (Object.keys(fields).length) {
     try { await emr.updateEncounter(client.openEmrPatientId, record.encounterUuid, fields); }
-    catch (e) { warnings.push(`The visit changed, but OpenEMR did not accept the new place of service (${e.message.slice(0, 120)}).`); }
+    catch (e) { record.posMissingReason = `OpenEMR did not accept the place of service (${e.message.slice(0, 120)}).`; }
   }
-  return warnings;
+  return [];
 };
 const sameVisit = (a, b) => ['appointmentType', 'modality', 'location'].every(k => String((a || {})[k] || '') === String((b || {})[k] || ''));
 const noteView = async (ctx, extra = {}) => {
@@ -10501,6 +10574,9 @@ app.post('/api/clinical/patients/:clientId/notes', authenticateToken, requireCli
       reason, date, actor, billingNpi: payer.billing_npi_used, narrativeNoteSid: null, visit: place.visit
     });
     record.note = { ...note, visitDate: date };
+    // Why this encounter has no place of service, for billing (never shown to
+    // the clinician). Billing stamps it at submission.
+    record.posMissingReason = place.posCode ? null : (place.billingWarning || place.error || 'No place of service could be derived.');
     record.noteKind = note.kind;
     record.noteVersion = 1;
     record.noteStatus = clinicalNotes.NOTE_STATUS.DRAFT;
@@ -10887,6 +10963,8 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
     const ctx = await loadEncounterContext(req, res);
     if (!ctx) return;
     const { client, emr, record, encounterUuid } = ctx;
+    const canBill = clinicalRoles.canSubmitBilling(req.user);
+    const billingStatus = clinicalRepo.deriveBillingStatus(record, ctx.attestation);
     const [emrRowR, notesR, cands, settings, payer, usage, ncci] = await Promise.all([
       emr.getEncounterRow(client.openEmrPatientId, encounterUuid).then(v => ({ ok: true, v })).catch(e => ({ ok: false, e })),
       emr.getSoapNotes(client.openEmrPatientId, encounterUuid).then(v => ({ ok: true, v })).catch(e => ({ ok: false, e })),
@@ -10922,11 +11000,14 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
       encounter: emrRow ? {
         uuid: encounterUuid, eid: emrRow.eid != null ? String(emrRow.eid) : record.encounterEid, date: String(emrRow.date || '').slice(0, 10),
         reason: emrRow.reason, billingNote: emrRow.billing_note || null, providerId: emrRow.provider_id != null ? String(emrRow.provider_id) : null,
-        facility: emrRow.facility_name || null, classCode: emrRow.class_code || null,
-        // Where care happened and the POS it carries. Derived from the
-        // patient's facility assignment — shown, never edited here.
-        facilityId: emrRow.facility_id != null ? String(emrRow.facility_id) : null,
-        posCode: emrRow.pos_code != null ? String(emrRow.pos_code) : null
+        classCode: emrRow.class_code || null,
+        // Where care happened and the POS it carries — BILLING'S ONLY (owner,
+        // 2026-09-29): a clinician never sees a place of service.
+        ...(canBill ? {
+          facility: emrRow.facility_name || null,
+          facilityId: emrRow.facility_id != null ? String(emrRow.facility_id) : null,
+          posCode: emrRow.pos_code != null ? String(emrRow.pos_code) : null
+        } : {})
       } : { uuid: encounterUuid, eid: record.encounterEid, date: record.date, reason: record.reason, emrError: emrRowR.e && emrRowR.e.message },
       narrativeNotes: narrative.map(n => ({ id: String(n.id), date: n.date, subjective: n.subjective, objective: n.objective, assessment: n.assessment, plan: n.plan })),
       notesError,
@@ -10935,21 +11016,37 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
       // Readiness as it applies to THIS viewer: an RN's or LMSW's signature is
       // an author signature and is held to the note-only gate; everyone else,
       // and the clinician addendum, to the full one.
+      // The CLINICIAN's gate: the note and at least one ICD-10 (an RN's or
+      // LMSW's author signature: the note alone). Nothing about codes, the
+      // billing NPI or a place of service — those are billing's.
       signReadiness: clinicalRepo.checkSignReadiness({
-        hasNote, record, billingNpi: payer.billing_npi_used,
-        posCode: emrRow && emrRow.pos_code,
-        visit: record.visit, facilityName: emrRow && emrRow.facility_name,
+        hasNote, record, visit: record.visit,
         riskAssessment: ctx.riskAssessment, completedSections: derivedSections,
-        ncciPtpEdits: ncci.ncciPtpEdits, ncciMue: ncci.ncciMue, ncciSourceVersion: ncci.ncciSourceVersion,
-        billingChecks: !clinicalRoles.isAuthorSigner(req.user)
+        gate: clinicalRoles.isAuthorSigner(req.user) ? 'author' : 'clinical'
       }),
       addendumReadiness: record.coSignStatus === 'pending' ? clinicalRepo.checkSignReadiness({
-        hasNote, record, billingNpi: payer.billing_npi_used,
-        posCode: emrRow && emrRow.pos_code,
-        visit: record.visit, facilityName: emrRow && emrRow.facility_name,
+        hasNote, record, visit: record.visit,
         riskAssessment: ctx.riskAssessment, completedSections: derivedSections,
-        ncciPtpEdits: ncci.ncciPtpEdits, ncciMue: ncci.ncciMue, ncciSourceVersion: ncci.ncciSourceVersion
+        gate: 'clinical'
       }) : null,
+      // Where this signed encounter stands with billing, for everyone; what is
+      // still missing before it can be submitted, for billing only.
+      billingStatus,
+      billingReadiness: canBill && ctx.closed ? clinicalRepo.checkSignReadiness({
+        record, billingNpi: payer.billing_npi_used,
+        posCode: (emrRow && emrRow.pos_code) || null,
+        posError: !emrRowR.ok ? (emrRowR.e && emrRowR.e.message) || 'unreadable' : null,
+        visit: record.visit, facilityName: emrRow && emrRow.facility_name,
+        ncciPtpEdits: ncci.ncciPtpEdits, ncciMue: ncci.ncciMue, ncciSourceVersion: ncci.ncciSourceVersion,
+        gate: 'billing'
+      }) : null,
+      billingActions: {
+        canBill,
+        canEditCoding: canBill && ctx.closed && billingStatus === clinicalRepo.BILLING_STATUS.AWAITING_BILLING,
+        canSubmit: canBill && billingStatus === clinicalRepo.BILLING_STATUS.AWAITING_BILLING,
+        canRefreshPos: canBill && billingStatus === clinicalRepo.BILLING_STATUS.AWAITING_BILLING
+      },
+      posMissingReason: canBill ? record.posMissingReason || null : undefined,
       // The shared note, its versions and its signatures.
       noteState: await noteView(ctx, { signsAsAuthor: clinicalRoles.isAuthorSigner(req.user) }),
       linkedAppointmentEid: linkedEid,
@@ -11026,21 +11123,54 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
 // 409 ENCOUNTER_CLOSED after sign. New manual diagnoses can also be added to
 // the OpenEMR problem list (addToProblemList: [codes]) — an explicit choice,
 // never automatic.
-app.put('/api/clinical/patients/:clientId/encounters/:euuid/coding', authenticateToken, requireClinicalWrite, async (req, res) => {
+const requireClinicalWriteOrBilling = (req, res, next) => {
+  if (clinicalRoles.canSubmitBilling(req.user)) return next();
+  return requireClinicalWrite(req, res, next);
+};
+app.put('/api/clinical/patients/:clientId/encounters/:euuid/coding', authenticateToken, requireClinicalWriteOrBilling, async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res);
     if (!ctx) return;
     // A note an RN or LMSW signed as its author is locked, but its CODING is
     // still open to the clinician who will add the billing addendum — choosing
-    // the codes is theirs, and they are confirmed when the addendum is signed.
+    // the diagnoses is theirs, and they are confirmed when the addendum is signed.
     const awaitingAddendum = ctx.record.coSignStatus === 'pending' && clinicalRoles.canCoSignEncounter(req.user);
-    if (!awaitingAddendum && refuseIfClosed(ctx, res)) return;
+    // After the clinician signs, the CODES are billing's (owner, 2026-09-29):
+    // service codes, modifiers, units and dx links, until billing submits.
+    // A clinician is refused; billing is refused once the claim is submitted.
+    const billingStatus = clinicalRepo.deriveBillingStatus(ctx.record, ctx.attestation);
+    const billingEdit = ctx.closed && billingStatus === clinicalRepo.BILLING_STATUS.AWAITING_BILLING && clinicalRoles.canSubmitBilling(req.user);
+    if (!ctx.closed && !patientRead.canClinicalWrite(req.user)) {
+      return res.status(409).json({ error: 'Billing codes a visit once the clinician has signed it.', code: 'BILLING_AWAITS_SIGNATURE' });
+    }
+    if (ctx.closed && !awaitingAddendum && !billingEdit) {
+      if (billingStatus === clinicalRepo.BILLING_STATUS.AWAITING_BILLING) {
+        return res.status(409).json({ error: 'This note is signed and with billing. Billing adds the service codes; a correction to the note goes in as an addendum.', code: 'ENCOUNTER_WITH_BILLING' });
+      }
+      if (clinicalRepo.isBillingSubmitted(ctx.record, ctx.attestation) && clinicalRoles.canSubmitBilling(req.user)) {
+        return res.status(409).json({ error: 'This visit was already submitted to billing, so its codes are locked. Correct the claim in OpenEMR\'s Billing Manager.', code: 'BILLING_SUBMITTED' });
+      }
+      if (refuseIfClosed(ctx, res)) return;
+    }
     const body = req.body || {};
     const payer = await getPayerCredentialing();
     const before = ctx.record;
     const coded = clinicalRepo.applyCoding(before, { diagnoses: body.diagnoses || [], services: body.services || [] }, ctx.actor, payer.billing_npi_used);
     if (coded.error) return res.status(400).json({ error: coded.error, code: coded.code });
     const record = coded.record;
+    if (billingEdit && !awaitingAddendum) {
+      // The DIAGNOSES are the signing clinician's: they attested to them.
+      // Billing links services to them; it never adds, removes or changes one.
+      const dxKey = (r) => (r.diagnoses || []).map(d => d.code).sort().join(',');
+      if (dxKey(before) !== dxKey(record)) {
+        return res.status(409).json({ error: 'The diagnoses are the signing clinician\'s. Billing links services to them but cannot change them — ask the clinician to add an addendum.', code: 'DX_LOCKED_AFTER_SIGN' });
+      }
+      // The claim still names the clinician who signed, never the biller.
+      record.renderingProvider = before.renderingProvider || null;
+      record.renderingProviderClinicalRole = before.renderingProviderClinicalRole || null;
+      record.billingCodedBy = clinicalRepo.actorRecord(ctx.actor);
+      record.billingCodedAt = record.updatedAt;
+    }
     // ── Session 4.8: certification gates the CODE, not just the encounter ──
     // The billing spec's rule (§4 item 4) is that the rendering provider's
     // certification must match the code billed. The gate is on CHANGING the
@@ -11050,7 +11180,9 @@ app.put('/api/clinical/patients/:clientId/encounters/:euuid/coding', authenticat
     // cannot add a CPT code must not be able to silently wipe one either.
     const beforeCodes = (before.services || []).map(x => x.code).sort().join(',');
     const afterCodes = (record.services || []).map(x => x.code).sort().join(',');
-    if (beforeCodes !== afterCodes) {
+    // Billing's own credential is not what a claim asserts: the RENDERING
+    // clinician's code set is re-checked at Submit to billing instead.
+    if (beforeCodes !== afterCodes && !(billingEdit && !awaitingAddendum)) {
       if (!clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.SELECT_SERVICE_CODES)) {
         return res.status(403).json(clinicalRoles.refusalFor(req.user, clinicalRoles.CAPABILITIES.SELECT_SERVICE_CODES));
       }
@@ -11077,7 +11209,7 @@ app.put('/api/clinical/patients/:clientId/encounters/:euuid/coding', authenticat
     await recordUsageFor(ctx.actor, 'HCPCS', record.services.filter(s => s.codeType === 'HCPCS' && !prevSvc.has(s.code)));
     const warnings = [];
     const problemAdds = [];
-    for (const code of Array.isArray(body.addToProblemList) ? body.addToProblemList : []) {
+    for (const code of (billingEdit && !awaitingAddendum) ? [] : (Array.isArray(body.addToProblemList) ? body.addToProblemList : [])) {
       const d = record.diagnoses.find(x => x.code === clinicalRepo.normalizeIcd10(code));
       if (!d) continue;
       try {
@@ -11869,7 +12001,7 @@ app.get('/api/clinical/orders/overdue', authenticateToken, requireClinicalRead, 
 // sections are DERIVED from the shared note (they used to be read from a field
 // nothing ever wrote, which blocked every templated visit from signing).
 // `billingChecks: false` is the author signature's gate — see checkSignReadiness.
-const readinessFor = async (ctx, { billingChecks = true, payer, ncci } = {}) => {
+const readinessFor = async (ctx, { billingChecks = true, gate, payer, ncci } = {}) => {
   const [p, n] = await Promise.all([payer || getPayerCredentialing(), ncci || getNcciTables()]);
   let hasNote = false;
   try {
@@ -11883,21 +12015,27 @@ const readinessFor = async (ctx, { billingChecks = true, payer, ncci } = {}) => 
   // believe we sent — this is the value that reaches the claim. The TYPE is the
   // stamp written when the visit was created: two independent facts, which is
   // the only reason comparing them proves anything.
-  let encPos = null; let encFacilityName = null;
-  try {
-    const encRow = await ctx.emr.getEncounterRow(ctx.client.openEmrPatientId, ctx.encounterUuid);
-    encPos = encRow && encRow.pos_code;
-    encFacilityName = encRow && encRow.facility_name;
-  } catch { encPos = null; encFacilityName = null; }
+  // A failed READ is kept as its own fact (owner report 2026-09-29): swallowed
+  // into null it read as "this patient has no facility", which sent people to
+  // fix the wrong thing. Only the billing gate asks about a POS at all.
+  let encPos = null; let encFacilityName = null; let posError = null;
+  const g = gate || (billingChecks === false ? 'author' : 'full');
+  if (g === 'billing' || g === 'full') {
+    try {
+      const encRow = await ctx.emr.getEncounterRow(ctx.client.openEmrPatientId, ctx.encounterUuid);
+      encPos = encRow && encRow.pos_code;
+      encFacilityName = encRow && encRow.facility_name;
+    } catch (e) { encPos = null; encFacilityName = null; posError = e.message || 'unreadable'; }
+  }
   const completedSections = ctx.record.note
     ? clinicalNotes.deriveCompletedSections(ctx.record.note, noteSatisfiers(ctx))
     : ctx.record.completedSections;
   const ready = clinicalRepo.checkSignReadiness({
-    hasNote, record: ctx.record, billingNpi: p.billing_npi_used, posCode: encPos,
+    hasNote, record: ctx.record, billingNpi: p.billing_npi_used, posCode: encPos, posError,
     visit: ctx.record.visit, facilityName: encFacilityName,
     riskAssessment: ctx.riskAssessment, completedSections: completedSections,
     ncciPtpEdits: n.ncciPtpEdits, ncciMue: n.ncciMue, ncciSourceVersion: n.ncciSourceVersion,
-    billingChecks: billingChecks
+    gate: g
   });
   return { ready, payer: p, completedSections };
 };
@@ -11932,14 +12070,19 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
       const noteCheck = clinicalNotes.checkNoteForSigning(ctx.record.note);
       if (!noteCheck.ok) return res.status(409).json({ error: noteCheck.error, code: noteCheck.code, pending: noteCheck.pending || [] });
     }
-    const { ready, payer, completedSections } = await readinessFor(ctx, { billingChecks: !authorSignature });
+    // The CLINICIAN's gate (owner, 2026-09-29): a complete note and at least
+    // one ICD-10. CPT, the billing NPI and the place of service are billing's,
+    // settled after this signature and checked at Submit to billing.
+    const { ready, payer, completedSections } = await readinessFor(ctx, { gate: authorSignature ? 'author' : 'clinical' });
     if (!ready.ok) return res.status(409).json({ error: ready.message, code: ready.codes[0], codes: ready.codes, missing: ready.missing });
     const attestation = clinicalRepo.buildAttestation({ id: uuidv4(), record: ctx.record, actor: ctx.actor, billingNpi: payer.billing_npi_used, narrativeNoteSid: ctx.record.narrativeNoteSid });
     // The credential the signature was made under, stored on the attestation:
     // a role reassigned next year must not change what last year's signature
     // says it was. The name alone does not answer that.
     attestation.signedByClinicalRole = signature.clinicalRole;
-    attestation.billable = signature.outcome === clinicalRoles.SIGN_OUTCOME.ALLOWED && !!(ctx.record.services || []).length;
+    // Whether this SIGNER is one a claim can name. Whether the visit is billed
+    // at all is decided by billing at submission.
+    attestation.billable = signature.outcome === clinicalRoles.SIGN_OUTCOME.ALLOWED;
     attestation.coSignStatus = signature.outcome === clinicalRoles.SIGN_OUTCOME.PENDING_CO_SIGN ? 'pending' : 'not_required';
     const atts = await loadRows('encounter_attestations');
     atts.push(attestation);
@@ -11975,8 +12118,14 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
       record.chargeError = 'PENDING_CO_SIGN';
       warnings.push(signature.reason);
     } else {
-      await postEncounterCharges({ emr: ctx.emr, client: ctx.client, encounterUuid: ctx.encounterUuid, record, warnings, signedBy: attestation.signedBy });
+      // Signed and SENT TO BILLING (owner, 2026-09-29). Nothing posts here:
+      // billing adds the codes and modifiers and submits, and that submission
+      // is what writes the charges — with this clinician as rendering provider.
       record.coSignStatus = 'not_required';
+      record.billingStatus = clinicalRepo.BILLING_STATUS.AWAITING_BILLING;
+      record.sentToBillingAt = attestation.signedAt;
+      record.chargesPosted = false;
+      record.chargeError = null;
     }
     record.noteStatus = clinicalNotes.NOTE_STATUS.SIGNED;
     record.completedSections = completedSections || [];
@@ -12027,11 +12176,12 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
     res.json({
       message: record.coSignStatus === 'pending'
         ? 'Signed as the note\'s author — it is locked. It is not billable until a provider (or an LCSW, for behavioral health) adds the clinician addendum.'
-        : (record.chargesPosted ? 'Encounter signed and closed; charges posted' : 'Encounter signed and closed'),
+        : 'Signed and sent to billing. The note is locked for clinicians; billing adds the service codes and submits.',
       attestation, record, state: 'signed',
       coSignStatus: record.coSignStatus || 'not_required',
+      billingStatus: clinicalRepo.deriveBillingStatus(record, attestation),
       billable: record.coSignStatus !== 'pending',
-      chargesPosted: !!record.chargesPosted, postedCharges: record.postedCharges || [], warnings
+      chargesPosted: false, postedCharges: [], warnings
     });
   } catch (error) {
     console.error('Encounter sign error:', error);
@@ -12079,9 +12229,10 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/co-sign', authentic
     if (badCodes.length) {
       return res.status(403).json({ error: clinicalRoles.serviceCodeRefusal(req.user, badCodes), code: 'CLINICAL_CODE_SET', codes: badCodes });
     }
-    // The full gate — codes, billing NPI, place of service, bundling — because
-    // THIS signature is the claim.
-    const { ready } = await readinessFor(ctx, { billingChecks: true });
+    // The clinician's gate: the note and at least one ICD-10. The codes, the
+    // billing NPI, the place of service and bundling are checked when billing
+    // submits (owner, 2026-09-29).
+    const { ready } = await readinessFor(ctx, { gate: 'clinical' });
     if (!ready.ok) return res.status(409).json({ error: ready.message, code: ready.codes[0], codes: ready.codes, missing: ready.missing });
 
     const coSigner = clinicalRepo.actorRecord(actorFromReq(req));
@@ -12102,7 +12253,11 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/co-sign', authentic
     const addRows = await loadRows('encounter_addenda');
     addRows.push(addendum);
     await db.set('encounter_addenda', addRows);
-    await postEncounterCharges({ emr: ctx.emr, client: ctx.client, encounterUuid: ctx.encounterUuid, record, warnings, signedBy: coSigner });
+    // Sent to billing; the charges post when billing submits.
+    record.billingStatus = clinicalRepo.BILLING_STATUS.AWAITING_BILLING;
+    record.sentToBillingAt = now;
+    record.chargesPosted = false;
+    record.chargeError = null;
     const syncWarning = await syncStructuredNote(ctx.emr, ctx.client, record);
     if (syncWarning) warnings.push(syncWarning);
     const signatureSummary = clinicalNotes.buildSignatureSummary({ attestation: ctx.attestation, record });
@@ -12119,10 +12274,162 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/co-sign', authentic
       services: (record.services || []).map(x => x.code),
       chargesPosted: !!record.chargesPosted, chargeError: record.chargeError || null
     });
-    res.json({ message: record.chargesPosted ? 'Clinician addendum added; the note is billable and charges posted' : 'Clinician addendum added; the note is billable', record, addendum, coSignStatus: 'cleared', billable: true, chargesPosted: !!record.chargesPosted, warnings });
+    res.json({ message: 'Clinician addendum added; the note is signed and sent to billing', record, addendum, coSignStatus: 'cleared', billable: true, billingStatus: clinicalRepo.BILLING_STATUS.AWAITING_BILLING, chargesPosted: false, warnings });
   } catch (error) {
     console.error('Clinician addendum error:', error);
     res.status(502).json({ error: `Clinician addendum failed: ${error.message}` });
+  }
+});
+
+// ── Billing: the second half of a signed visit (owner, 2026-09-29) ─────────
+// "The clinician should sign and submit which locks the note to clinicians and
+// allows it to remain editable for billing and admin. Then billing submits
+// fully." The clinician's signature needs the note and an ICD-10 code; the
+// service codes, modifiers, dx links and the place of service are billing's,
+// and THIS submission is what writes the charges.
+//
+// The place of service is stamped here when the encounter carries none — for
+// a visit created before the facility list was synced, or by a login that
+// could not read it. Billing's own login does the reading.
+const stampEncounterPos = async (ctx, { force = false } = {}) => {
+  let row = null; let readError = null;
+  try { row = await ctx.emr.getEncounterRow(ctx.client.openEmrPatientId, ctx.encounterUuid); }
+  catch (e) { readError = e.message || 'unreadable'; }
+  const current = row && row.pos_code ? String(row.pos_code) : null;
+  if (current && !force) return { posCode: current, facilityName: row.facility_name || null, stamped: false };
+  const telehealth = ctx.record.visit && ctx.record.visit.modality === 'telehealth';
+  const place = await resolveFacilityForVisit(ctx.emr, ctx.client, telehealth ? 'telehealth' : null, ctx.record.visit || null);
+  if (!place.posCode) {
+    return { posCode: current, stamped: false, error: place.billingWarning || place.error || 'No place of service could be derived for this patient.', readError };
+  }
+  const fields = { pos_code: place.posCode };
+  if (place.facilityId) fields.facility_id = place.facilityId;
+  await ctx.emr.updateEncounter(ctx.client.openEmrPatientId, ctx.encounterUuid, fields);
+  return { posCode: place.posCode, facilityName: place.facilityName || null, stamped: true };
+};
+
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/pos/refresh', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res, { createRecord: false });
+    if (!ctx) return;
+    if (!ctx.record) return res.status(404).json({ error: 'No encounter record', code: 'ENCOUNTER_NOT_FOUND' });
+    if (clinicalRepo.isBillingSubmitted(ctx.record, ctx.attestation)) {
+      return res.status(409).json({ error: 'This visit was already submitted to billing; its place of service is part of the claim.', code: 'BILLING_SUBMITTED' });
+    }
+    const out = await stampEncounterPos(ctx, { force: true });
+    const record = { ...ctx.record, posMissingReason: out.posCode ? null : (out.error || null), updatedAt: new Date().toISOString() };
+    await saveBillingRecord(ctx.rows, record);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'encounter_pos_refreshed', 'client', ctx.client.id, {
+      encounterUuid: ctx.encounterUuid, posCode: out.posCode || null, stamped: !!out.stamped
+    });
+    if (!out.posCode) return res.status(409).json({ error: out.error, code: 'BILLING_POS_UNRESOLVED' });
+    res.json({ message: `Place of service set to ${out.posCode}${out.facilityName ? ` (${out.facilityName})` : ''}`, posCode: out.posCode, facilityName: out.facilityName || null });
+  } catch (error) {
+    console.error('POS refresh error:', error);
+    res.status(502).json({ error: `Place of service could not be set: ${error.message}` });
+  }
+});
+
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/billing-submit', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res, { createRecord: false });
+    if (!ctx) return;
+    if (!ctx.record) return res.status(404).json({ error: 'No encounter record', code: 'ENCOUNTER_NOT_FOUND' });
+    if (!ctx.closed) return res.status(409).json({ error: 'The clinician signs the note first; billing submits after.', code: 'ENCOUNTER_NOT_SIGNED' });
+    const status = clinicalRepo.deriveBillingStatus(ctx.record, ctx.attestation);
+    if (status === clinicalRepo.BILLING_STATUS.AWAITING_ADDENDUM) {
+      return res.status(409).json({ error: 'This note is waiting on a clinician addendum from a provider (or an LCSW, for behavioral health) before it can be billed.', code: 'BILLING_AWAITS_ADDENDUM' });
+    }
+    if (status !== clinicalRepo.BILLING_STATUS.AWAITING_BILLING) {
+      return res.status(409).json({ error: 'This visit was already submitted to billing.', code: 'BILLING_SUBMITTED' });
+    }
+    const body = req.body || {};
+    const now = new Date().toISOString();
+    const biller = clinicalRepo.actorRecord(ctx.actor);
+
+    // No charge: a signed note that bills nothing (a phone call, a visit the
+    // practice is not billing). Said, with a reason, rather than left waiting.
+    if (body.noCharge) {
+      const reason = String(body.reason || '').trim();
+      if (reason.length < 3) return res.status(400).json({ error: 'Say why this visit is not being billed.', code: 'NO_CHARGE_REASON' });
+      const record = { ...ctx.record, billingStatus: clinicalRepo.BILLING_STATUS.NO_CHARGE, billingSubmittedAt: now, billingSubmittedBy: biller, noChargeReason: reason.slice(0, 500), updatedAt: now };
+      await saveBillingRecord(ctx.rows, record);
+      await logActivity(req.user.id, req.user.name || req.user.email, 'encounter_billing_no_charge', 'client', ctx.client.id, { encounterUuid: ctx.encounterUuid });
+      return res.json({ message: 'Closed with no charge', record, billingStatus: record.billingStatus, chargesPosted: false, warnings: [] });
+    }
+    if (!body.attest) return res.status(400).json({ error: 'Confirm the codes are supported by the signed note to submit.', code: 'BILLING_NO_ATTEST' });
+
+    // The claim names the RENDERING clinician, so it is THEIR credential the
+    // codes must fit (an LCSW's note never bills E/M), never the biller's.
+    const renderingRole = ctx.record.renderingProviderClinicalRole ||
+      (ctx.attestation && ctx.attestation.signedByClinicalRole) || null;
+    if (renderingRole) {
+      const renderer = { clinicalRole: renderingRole, hasClinicalAccess: true };
+      const bad = clinicalRoles.disallowedServiceCodesFor(renderer, ctx.record.services || []);
+      if (bad.length) {
+        return res.status(403).json({ error: clinicalRoles.serviceCodeRefusal(renderer, bad).replace(/^Your clinical credential/, 'The signing clinician\'s credential'), code: 'BILLING_CODE_SET', codes: bad });
+      }
+    }
+
+    const warnings = [];
+    // The place of service, stamped with billing's own login if missing.
+    try {
+      const pos = await stampEncounterPos(ctx);
+      if (pos.stamped) warnings.push(`Place of service set to ${pos.posCode}${pos.facilityName ? ` (${pos.facilityName})` : ''} from the patient's facility.`);
+    } catch (e) {
+      warnings.push(`The place of service could not be written to the encounter (${e.message.slice(0, 120)}).`);
+    }
+    const { ready, payer } = await readinessFor(ctx, { gate: 'billing' });
+    if (!ready.ok) return res.status(409).json({ error: ready.message, code: ready.codes[0], codes: ready.codes, missing: ready.missing });
+    warnings.push(...(ready.warnings || []));
+
+    const record = {
+      ...ctx.record,
+      billingStatus: clinicalRepo.BILLING_STATUS.BILLED,
+      billingSubmittedAt: now, billingSubmittedBy: biller,
+      billingProviderNpi: payer.billing_npi_used,
+      posMissingReason: null,
+      updatedAt: now
+    };
+    // Rendering provider = the signing clinician (or the addendum author) —
+    // never the person clicking submit.
+    await postEncounterCharges({ emr: ctx.emr, client: ctx.client, encounterUuid: ctx.encounterUuid, record, warnings, signedBy: record.renderingProvider });
+    const syncWarning = await syncStructuredNote(ctx.emr, ctx.client, record);
+    if (syncWarning) warnings.push(syncWarning);
+    await saveBillingRecord(ctx.rows, record);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'encounter_billing_submitted', 'client', ctx.client.id, {
+      encounterUuid: ctx.encounterUuid, services: (record.services || []).map(x => x.code),
+      renderingProviderId: record.renderingProvider ? record.renderingProvider.id : null,
+      chargesPosted: !!record.chargesPosted, postedChargeIds: (record.postedCharges || []).map(c => c.id), chargeError: record.chargeError || null
+    });
+    res.json({
+      message: record.chargesPosted ? 'Submitted to billing; charges posted to Billing Manager' : 'Submitted to billing',
+      record, billingStatus: record.billingStatus,
+      chargesPosted: !!record.chargesPosted, postedCharges: record.postedCharges || [], warnings
+    });
+  } catch (error) {
+    console.error('Billing submit error:', error);
+    res.status(502).json({ error: `Submit to billing failed: ${error.message}` });
+  }
+});
+
+// Re-read OpenEMR's facility list with an admin's or manager's login and keep
+// the copy clinicians' visits take their place of service from. For when a
+// facility's POS is changed in OpenEMR directly.
+app.post('/api/clinical/facilities/sync', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    if (!openemr.isConfigured()) return res.status(409).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
+    const rows = await openemr.forActor(req.user).getFacilities();
+    if (!rows.length) return res.status(409).json({ error: 'OpenEMR returned no facilities, so the saved copy was left as it was.', code: 'FACILITY_LIST_EMPTY' });
+    await saveFacilitySnapshot(rows, req.user);
+    billingFacilityCache = { at: 0, value: null };
+    await logActivity(req.user.id, req.user.name || req.user.email, 'facilities_synced', 'system', null, { count: rows.length });
+    const snap = await getFacilitySnapshot();
+    res.json({ message: `Synced ${rows.length} facilit${rows.length === 1 ? 'y' : 'ies'} from OpenEMR`, syncedAt: snap ? snap.syncedAt : null,
+      facilities: rows.map(f => ({ id: String(f.id), name: f.name || null, posCode: f.pos_code ? String(f.pos_code) : null })) });
+  } catch (error) {
+    console.error('Facility sync error:', error);
+    res.status(502).json({ error: `Facility sync failed: ${error.message}` });
   }
 });
 
@@ -13001,10 +13308,10 @@ app.put('/api/clinical/patients/:clientId/facility', authenticateToken, requireA
       users[idx].openEmrFacilityId = null;
       await db.set('users', users);
       await logActivity(req.user.id, req.user.name || req.user.email, 'patient_facility_cleared', 'client', client.id, {});
-      return res.json({ message: 'Facility assignment cleared. Visits for this patient cannot be signed until one is set.', facility: null });
+      return res.json({ message: 'Facility assignment cleared. Visits for this patient cannot be submitted to billing until one is set.', facility: null });
     }
     if (!/^\d+$/.test(raw)) return res.status(400).json({ error: 'A numeric OpenEMR facility id is required', code: 'BAD_FACILITY' });
-    const facilities = await openemr.forActor(req.user).getFacilities();
+    const facilities = (await readFacilities(openemr.forActor(req.user), req.user)).rows;
     const chosen = facilities.find(f => String(f.id) === raw);
     if (!chosen) return res.status(400).json({ error: 'That facility does not exist in OpenEMR', code: 'UNKNOWN_FACILITY' });
     users[idx].openEmrFacilityId = raw;
@@ -13012,7 +13319,7 @@ app.put('/api/clinical/patients/:clientId/facility', authenticateToken, requireA
     // Surfaced, not settable here: if the facility has no POS on its record,
     // the fix belongs on the facility in OpenEMR.
     const posWarning = chosen.pos_code ? null
-      : `"${chosen.name || raw}" has no place-of-service code on its record in OpenEMR. Set it on the facility (Administration → Facilities) or visits for this patient cannot be signed.`;
+      : `"${chosen.name || raw}" has no place-of-service code on its record in OpenEMR. Set it on the facility (Administration → Facilities) or visits for this patient cannot be submitted to billing.`;
     await logActivity(req.user.id, req.user.name || req.user.email, 'patient_facility_assigned', 'client', client.id, {
       facilityId: raw, facilityName: chosen.name || null, posCode: chosen.pos_code || null
     });
@@ -13215,7 +13522,7 @@ app.put('/api/clinical/patients/:clientId/usual-location', authenticateToken, re
     // rather than at the moment somebody tries to sign.
     const warnings = [];
     if (chosen.fromFacilityRecord) {
-      warnings.push('The place of service for a facility visit comes from that facility\'s record in OpenEMR. Check the facility assigned to this patient has one set, or their visits cannot be signed.');
+      warnings.push('The place of service for a facility visit comes from that facility\'s record in OpenEMR. Check the facility assigned to this patient has one set, or their visits cannot be submitted to billing.');
     }
     res.json({
       message: `${client.name || 'Patient'} is usually seen at ${chosen.label.toLowerCase()}. Each booking confirms it and can change it for that visit.`,
@@ -13272,13 +13579,20 @@ app.get('/api/clinical/patients/:clientId/place-of-service', authenticateToken, 
       usualLocationLabel: (apptTypes.locationByKey(client.usualLocation) || {}).label || null,
       facilityId: client.openEmrFacilityId ? String(client.openEmrFacilityId) : null
     };
+    // A clinician gets the visit-type catalog and nothing about a facility or a
+    // place of service (owner, 2026-09-29): they choose what KIND of visit it
+    // is; where it bills is billing's.
+    if (!clinicalRoles.canSubmitBilling(req.user)) {
+      const { facilityId, ...clinicianView } = base;
+      return res.json(clinicianView);
+    }
     if (!openemr.isConfigured()) {
       return res.json({ ...base, facilities: [], degraded: true, reason: 'OpenEMR is not configured', agreement: null,
         locations, appointmentTypes, services, modalities, noteTemplates });
     }
     const emr = openemr.forActor(req.user);
     let rows = [];
-    try { rows = await emr.getFacilities(); }
+    try { rows = (await readFacilities(emr, req.user)).rows; }
     catch (e) {
       // An unreadable facility list is not evidence that nothing is assigned.
       return res.json({ ...base, facilities: [], degraded: true, reason: `OpenEMR's facility list could not be read: ${e.message}`, agreement: null,
@@ -13308,7 +13622,7 @@ app.get('/api/clinical/patients/:clientId/place-of-service', authenticateToken, 
         facilityPos: current ? current.posCode : null
       }),
       billingFacilityName: billTo.facilityName || null,
-      billingFacilityWarning: billTo.warning || null
+      billingFacilityWarning: billTo.billingWarning || null
     });
   } catch (error) {
     console.error('Place of service read error:', error);
@@ -13321,11 +13635,12 @@ app.get('/api/clinical/patients/:clientId/place-of-service', authenticateToken, 
 // NOT a charge field: addBilling() has no such parameter and the billing table
 // no such column, so it never goes near a charge payload (build-enforced in
 // test/openemr_84_alignment.test.js).
-app.get('/api/clinical/facilities', authenticateToken, requireClinicalRead, async (req, res) => {
+app.get('/api/clinical/facilities', authenticateToken, requireBilling, async (req, res) => {
   try {
     if (!openemr.isConfigured()) return res.json({ facilities: [], degraded: true, reason: 'OpenEMR is not configured' });
     const emr = openemr.forActor(req.user);
-    const rows = await emr.getFacilities();
+    const read = await readFacilities(emr, req.user);
+    const rows = read.rows;
     const billTo = await resolveBillingForVisit(emr);
     res.json({
       facilities: rows.map(f => ({
@@ -13347,7 +13662,7 @@ app.get('/api/clinical/facilities', authenticateToken, requireClinicalRead, asyn
       billingFacilityId: billTo.facilityId ? String(billTo.facilityId) : null,
       billingFacilityName: billTo.facilityName || null,
       billingFacilitySource: billTo.source,
-      billingFacilityWarning: billTo.warning || null
+      billingFacilityWarning: billTo.billingWarning || null
     });
   } catch (error) {
     console.error('Facility list error:', error);
@@ -13358,13 +13673,13 @@ app.get('/api/clinical/facilities', authenticateToken, requireClinicalRead, asyn
 // facility could only be set at create time, because 7.0.4's encounter PUT
 // 500'd; on 8.4 it works once `user` and `group` are in the body (the
 // transport adds them). A closed encounter is read-only.
-app.put('/api/clinical/patients/:clientId/encounters/:euuid/billing-facility', authenticateToken, requireClinicalWrite, async (req, res) => {
+app.put('/api/clinical/patients/:clientId/encounters/:euuid/billing-facility', authenticateToken, requireBilling, async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res);
     if (!ctx || refuseIfClosed(ctx, res)) return;
     const facilityId = String((req.body || {}).facilityId || '').trim();
     if (!/^\d+$/.test(facilityId)) return res.status(400).json({ error: 'A numeric OpenEMR facility id is required', code: 'BAD_FACILITY' });
-    const facilities = await ctx.emr.getFacilities();
+    const facilities = (await readFacilities(ctx.emr, req.user)).rows;
     const chosen = facilities.find(f => String(f.id) === facilityId);
     if (!chosen) return res.status(400).json({ error: 'That facility does not exist in OpenEMR', code: 'UNKNOWN_FACILITY' });
     // Written to form_encounter, never to a charge.
@@ -13406,7 +13721,7 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid/charges', authentica
 // Void a charge line. Never a hard delete: the 6B controller sets activity = 0
 // so the audit trail survives, which is why the voided row simply leaves the
 // active list rather than reporting as removed.
-app.delete('/api/clinical/patients/:clientId/encounters/:euuid/charges/:chargeId', authenticateToken, requireClinicalWrite, async (req, res) => {
+app.delete('/api/clinical/patients/:clientId/encounters/:euuid/charges/:chargeId', authenticateToken, requireBilling, async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res);
     if (!ctx) return;
@@ -13436,11 +13751,14 @@ app.delete('/api/clinical/patients/:clientId/encounters/:euuid/charges/:chargeId
 });
 // Re-post charges for an encounter whose sign-time post failed (no provider
 // id, EMR down). Skips lines already posted so it cannot double-bill.
-app.post('/api/clinical/patients/:clientId/encounters/:euuid/charges/repost', authenticateToken, requireClinicalWrite, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/charges/repost', authenticateToken, requireBilling, async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res);
     if (!ctx) return;
-    if (!ctx.closed) return res.status(409).json({ error: 'Charges post at sign-and-close. Sign this encounter first.', code: 'ENCOUNTER_NOT_SIGNED' });
+    if (!ctx.closed) return res.status(409).json({ error: 'The clinician signs the note first; billing submits after.', code: 'ENCOUNTER_NOT_SIGNED' });
+    if (clinicalRepo.deriveBillingStatus(ctx.record, ctx.attestation) !== clinicalRepo.BILLING_STATUS.BILLED) {
+      return res.status(409).json({ error: 'Charges post when billing submits the visit. Use Submit to billing.', code: 'BILLING_NOT_SUBMITTED' });
+    }
     const providerId = (ctx.record.renderingProvider && ctx.record.renderingProvider.openEmrProviderId) || ctx.actor.openEmrProviderId || null;
     if (!providerId) return res.status(409).json({ error: 'No OpenEMR provider id on file for the signing clinician. An admin sets it on the user record, then re-post.', code: 'NO_OPENEMR_PROVIDER_ID' });
     const alreadyPosted = new Set((ctx.record.postedCharges || []).map(c => `${c.codeType}:${c.code}`));
@@ -13601,7 +13919,7 @@ app.get('/api/clinical/inbox', authenticateToken, requireClinicalRead, async (re
 
 app.get('/api/clinical/encounters/queue', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
-    const filter = ['not_coded', 'coded', 'signed', 'open', 'all'].includes(String(req.query.state)) ? String(req.query.state) : 'open';
+    const filter = ['not_coded', 'coded', 'signed', 'awaiting_billing', 'open', 'all'].includes(String(req.query.state)) ? String(req.query.state) : 'open';
     const [records, attestations, clientMap] = await Promise.all([loadRows('encounter_billing'), loadRows('encounter_attestations'), clinicalClientsByPuuid()]);
     let emrRows = null; let emrError = null;
     if (openemr.isConfigured()) {
@@ -13620,19 +13938,30 @@ app.get('/api/clinical/encounters/queue', authenticateToken, requireClinicalRead
         const att = attByUuid.get(String(r.id)) || null;
         rows.push({ encounterUuid: String(r.id), clientId: app.clientId, patientName: app.name, date: s.start, reason: record ? record.reason : s.type, provider: s.provider,
           state: encounterStateOf(record, att), diagnosisCount: record ? record.diagnoses.length : 0, serviceCount: record ? record.services.length : 0,
-          renderingProvider: record ? record.renderingProvider : null, signedAt: att ? att.signedAt : null });
+          renderingProvider: record ? record.renderingProvider : null, signedAt: att ? att.signedAt : null,
+          billingStatus: clinicalRepo.deriveBillingStatus(record, att) });
       }
     } else {
       // EMR feed unavailable — degrade to what the app already knows
       for (const record of records) {
         const att = attByUuid.get(record.encounterUuid) || null;
         rows.push({ encounterUuid: record.encounterUuid, clientId: record.clientId, patientName: null, date: record.date, reason: record.reason, provider: null,
-          state: encounterStateOf(record, att), diagnosisCount: record.diagnoses.length, serviceCount: record.services.length, renderingProvider: record.renderingProvider, signedAt: att ? att.signedAt : null });
+          state: encounterStateOf(record, att), diagnosisCount: record.diagnoses.length, serviceCount: record.services.length, renderingProvider: record.renderingProvider, signedAt: att ? att.signedAt : null,
+          billingStatus: clinicalRepo.deriveBillingStatus(record, att) });
       }
     }
-    const filtered = rows.filter(r => filter === 'all' ? true : filter === 'open' ? r.state !== 'signed' : r.state === filter)
-      .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
-    res.json({ filter, encounters: filtered, counts: { not_coded: rows.filter(r => r.state === 'not_coded').length, coded: rows.filter(r => r.state === 'coded').length, signed: rows.filter(r => r.state === 'signed').length }, emrError, degraded: !emrRows });
+    // "Awaiting billing" is signed by the clinician and not yet submitted
+    // (owner, 2026-09-29) — billing's worklist, OLDEST first, because the visit
+    // waiting longest is the one most likely to be forgotten.
+    const awaiting = (r) => r.billingStatus === clinicalRepo.BILLING_STATUS.AWAITING_BILLING;
+    const filtered = rows.filter(r => filter === 'all' ? true
+      : filter === 'open' ? (r.state !== 'signed' || awaiting(r))
+      : filter === 'awaiting_billing' ? awaiting(r)
+      : r.state === filter)
+      .sort((a, b) => filter === 'awaiting_billing'
+        ? String(a.signedAt || a.date || '').localeCompare(String(b.signedAt || b.date || ''))
+        : String(b.date || '').localeCompare(String(a.date || '')));
+    res.json({ filter, encounters: filtered, counts: { not_coded: rows.filter(r => r.state === 'not_coded').length, coded: rows.filter(r => r.state === 'coded').length, awaiting_billing: rows.filter(awaiting).length, signed: rows.filter(r => r.state === 'signed').length }, emrError, degraded: !emrRows });
   } catch (error) {
     console.error('Coding queue error:', error);
     res.status(500).json({ error: 'Server error' });

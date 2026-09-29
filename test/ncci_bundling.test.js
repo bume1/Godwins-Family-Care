@@ -226,7 +226,18 @@ test('build-enforced: both checkSignReadiness call sites in server.js hand over 
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const calls = server.match(/checkSignReadiness\(\{[\s\S]{0,500}?\}\)/g) || [];
   assert.ok(calls.length >= 2, 'expected the sign route and the readiness preview');
-  for (const c of calls) {
+  // REPOINTED 2026-09-29 (clinician sign / billing submit split): NCCI is a
+  // BILLING question. The clinician's gate ('clinical' / 'author') is handed
+  // no billing inputs at all; every other call — the billing gate and the
+  // shared readinessFor — must carry the tables.
+  const clinicianCalls = calls.filter(c => /gate: (clinicalRoles\.isAuthorSigner\(req\.user\) \? 'author' : 'clinical'|'clinical'|'author')/.test(c));
+  assert.ok(clinicianCalls.length >= 2, 'the clinician sign preview and the addendum preview use the clinical gate');
+  for (const c of clinicianCalls) {
+    assert.doesNotMatch(c, /ncciPtpEdits|billingNpi|posCode/, 'a clinician gate is never handed a billing input');
+  }
+  const billingCalls = calls.filter(c => !clinicianCalls.includes(c));
+  assert.ok(billingCalls.length >= 2, 'the billing preview and readinessFor');
+  for (const c of billingCalls) {
     assert.match(c, /ncciPtpEdits:/, `every sign-readiness call must pass the PTP table: ${c.slice(0, 90)}…`);
     assert.match(c, /ncciMue:/, 'and the MUE table');
     assert.match(c, /ncciSourceVersion:/, 'and the source version the staleness guard reads');
