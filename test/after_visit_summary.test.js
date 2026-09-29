@@ -48,8 +48,8 @@ test('follow-up instructions keep their line breaks (a numbered list stays a lis
 });
 
 test('the portal renders the summary and follow-up with their line breaks', () => {
-  assert.match(PORTAL, /<div style=\{\{ whiteSpace: 'pre-wrap' \}\}>\{v\.summary\}<\/div>/);
-  assert.match(PORTAL, /whiteSpace: 'pre-wrap' \}\}><b style=\{\{ color: 'var\(--navy\)' \}\}>Follow-up:<\/b> \{v\.followUp\}/);
+  assert.match(PORTAL, /<div style=\{\{ whiteSpace: 'pre-wrap' \}\}>\{v\.overview \|\| v\.summary\}<\/div>/);
+  assert.match(PORTAL, /whiteSpace: 'pre-wrap' \}\}><b style=\{\{ color: 'var\(--navy\)' \}\}>What happens next:<\/b> \{v\.followUp\}/);
 });
 
 // ── 2. medication changes ───────────────────────────────────────────────────

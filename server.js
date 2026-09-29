@@ -7743,6 +7743,11 @@ app.get('/api/gfc/clinical/visits/:visitId/summary.pdf', authenticateToken, requ
     const attestation = atts.find(a => a && String(a.encounterUuid) === euuid && a.signedAt);
     if (!record || record.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED) return res.status(404).json({ error: 'Visit not found', code: 'VISIT_NOT_FOUND' });
     if (!attestation) return res.status(409).json({ error: 'This visit summary will be ready once your clinician signs the note.', code: 'NOTE_NOT_SIGNED' });
+    // Same rule as the portal's visit list (Portal P1): a patient sees a visit
+    // only once it is published. An author's note waiting on the clinician
+    // addendum is signed but not published, so its summary is not ready either.
+    const published = (await loadPublishedVisits()).some(r => r && r.clientId === client.id && String(r.encounterUuid) === euuid);
+    if (!published) return res.status(409).json({ error: 'This visit summary will be ready once your clinician finishes the note.', code: 'VISIT_NOT_PUBLISHED' });
     const d = await assembleAfterVisitSummary({ client, record, attestation, sections });
     const buffer = await pdfGenerator.generateAfterVisitSummaryPDF(d);
     await logPatientClinicalRead(req, ctx, 'after_visit_summary', { encounterUuid: euuid });

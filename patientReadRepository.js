@@ -273,9 +273,7 @@ const buildVisitSummary = ({ encounterUuid, encounter, record, attestation, pres
     id: String(encounterUuid || rec.encounterUuid || (encounter && encounter.id) || ''),
     date, provider, reason,
     overview,
-    summary: sentences.join('
-
-'),
+    summary: sentences.join('\n\n'),
     followUp: rec.followUpInstructions ? String(rec.followUpInstructions).trim() : null,
     status: signed ? 'complete' : 'in_progress',
     newPrescriptions: rx,
