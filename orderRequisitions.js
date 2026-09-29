@@ -192,9 +192,19 @@ const buildReferral = ({ id, clientId, puuid, encounterUuid, input, actor, encou
   if (!clinicalSummary) {
     return { error: 'A clinical summary is required — it is the question you want the specialist to answer', code: 'REFERRAL_NO_SUMMARY' };
   }
-  const receivingFax = normalizeFax(i.receivingFax);
-  if (!receivingFax) {
-    return { error: 'A valid 10-digit receiving fax number is required — this is the number the requisition is faxed to', code: 'REFERRAL_BAD_FAX' };
+  // THE AGENCY IS OFTEN NOT KNOWN WHEN THE ORDER IS PLACED (home health above
+  // all: the patient's plan picks one, or the office calls around). An explicit
+  // `agencyPending` lets the referral be recorded with NO fax yet. It is a flag
+  // the clinician sets on purpose, never a blank that slips through: a fax typed
+  // wrongly is still refused, and a referral with neither a fax nor the flag is
+  // refused exactly as before. Nothing can be faxed while it is pending
+  // (applySend, the requisition) and the office fills it in with
+  // applyDestinationEdit, which clears the flag when a valid fax arrives.
+  const rawFax = String(i.receivingFax == null ? '' : i.receivingFax).trim();
+  const receivingFax = normalizeFax(rawFax);
+  const agencyPending = !!i.agencyPending && !rawFax;
+  if (!receivingFax && !agencyPending) {
+    return { error: 'A valid 10-digit receiving fax number is required — this is the number the requisition is faxed to. If the agency is not confirmed yet, tick "Agency not confirmed yet" instead.', code: 'REFERRAL_BAD_FAX' };
   }
   // PRIOR AUTHORIZATION. Medicare Advantage plans frequently require one and
   // it is the single most commonly forgotten step in a referral, so it is a
@@ -215,7 +225,8 @@ const buildReferral = ({ id, clientId, puuid, encounterUuid, input, actor, encou
         specialty,
         receivingPractice: clean(i.receivingPractice, 160) || null,
         receivingProvider: clean(i.receivingProvider, 160) || null,
-        receivingFax,
+        receivingFax: receivingFax || null,
+        agencyPending,
         receivingPhone: clean(i.receivingPhone, 40) || null,
         reason,
         urgency: URGENCIES.includes(i.urgency) ? i.urgency : env.envelope.priority,
@@ -537,11 +548,20 @@ const defaultRecipientFax = (order) => {
 // A cancelled or completed order is refused — "sent" after the fact is not a
 // correction, it is a different event, and a resend of a live order is the
 // thing this supports.
+// An order recorded before the agency was known. Only a referral can be.
+const isAgencyPending = (order) => !!order && order.orderType === REFERRAL &&
+  !!(order.referral || {}).agencyPending && !(order.referral || {}).receivingFax;
 const SENDABLE_STATUSES = Object.freeze(['ordered', 'sent', 'scheduled']);
 const applySend = ({ order, input, actor, at }) => {
   if (!order) return { error: 'Order not found', code: 'ORDER_NOT_FOUND', status: 404 };
   if (!SENDABLE_STATUSES.includes(String(order.status))) {
     return { error: `An order that is "${order.status}" cannot be recorded as faxed.`, code: 'ORDER_NOT_SENDABLE', status: 409 };
+  }
+  if (isAgencyPending(order) && FAX_SEND_CHANNELS.includes(String((input || {}).channel || DEFAULT_SEND_CHANNEL))) {
+    return {
+      error: 'The receiving agency is not confirmed yet, so there is no fax number to send to. Use Update destination to add the agency and fax first.',
+      code: 'ORDER_AGENCY_PENDING', status: 409
+    };
   }
   const built = buildSendRecord({ input, actor, order, at });
   if (built.error) return { ...built, status: 400 };
@@ -661,12 +681,17 @@ const applyDestinationEdit = ({ order, input, actor, at }) => {
   }
   const current = order[spec.bucket] || {};
   const next = { ...current };
+  const pending = isAgencyPending(order);
   const changes = [];
   for (const f of spec.fields) {
     // An ABSENT key means leave it alone; a present one is a decision, including
     // a blank one (which clears an optional field and is refused on a required one).
     if (!Object.prototype.hasOwnProperty.call(i, f.key)) continue;
     let value;
+    // A pending agency may stay without a fax: a blank fax on a pending order is
+    // "still not confirmed", not an error, so the office can save the practice
+    // name first and add the number when they have it.
+    if (f.fax && pending && !String(i[f.key] == null ? '' : i[f.key]).trim()) continue;
     if (f.fax) {
       value = normalizeFax(i[f.key]);
       if (!value) {
@@ -700,6 +725,8 @@ const applyDestinationEdit = ({ order, input, actor, at }) => {
       code: 'ORDER_DESTINATION_REASON_REQUIRED', status: 400
     };
   }
+  // A valid fax on a pending order IS the agency being confirmed.
+  if (pending && next.receivingFax) next.agencyPending = false;
   const now = at || new Date().toISOString();
   const by = {
     id: (actor && actor.id) || null, name: (actor && actor.name) || null,
@@ -835,7 +862,7 @@ module.exports = {
   ENROLLMENT_STATUSES, ENROLLMENT_LABELS, ENROLLMENT_OK, ENROLLMENT_GATED_TYPES,
   normalizeMedicareEnrollment, isMedicarePatient, checkOrderingEnrollment,
   buildSendRecord, applySend, applyReferralScheduled,
-  DESTINATION_FIELDS, DESTINATION_EDITABLE_STATUSES, destinationFieldsFor, destinationFormFields, applyDestinationEdit,
+  isAgencyPending, DESTINATION_FIELDS, DESTINATION_EDITABLE_STATUSES, destinationFieldsFor, destinationFormFields, applyDestinationEdit,
   defaultRecipientName, defaultRecipientFax,
   OVERDUE_DAYS, overdueThresholdFor, isAwaitingResult, overdueAgeDays, isOverdue, buildOverdueList,
   DEFAULT_RETURN_FAX_LABEL, normalizeRequisitionSettings, seedReturnFax,

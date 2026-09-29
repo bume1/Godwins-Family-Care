@@ -365,3 +365,119 @@ test('no other order write is opened to a case manager', () => {
     assert.match(SERVER.slice(i, i + 220), /requireClinicalWrite/, `${p} must stay behind requireClinicalWrite`);
   }
 });
+
+// ── Placing an order before the agency is known (owner, 2026-09-29) ─────────
+// Home health is the case: the agency is confirmed after the order is placed,
+// by the office. A referral can be recorded with NO fax when the clinician says
+// so on purpose; nothing can be sent until the agency and fax are added.
+
+const pendingRef = (extra = {}) => orderReq.buildReferral({
+  id: 'op', clientId: 'c1', encounterUuid: 'e1', actor: ACTOR, encounterDiagnoses: DX,
+  input: {
+    specialty: 'Home health', reason: 'Skilled nursing and PT', clinicalSummary: 'Homebound, repeated falls.',
+    diagnosisCodes: ['E11.9'], agencyPending: true, ...extra
+  }
+});
+
+test('AGENCY PENDING: a referral can be placed with no fax when the flag is ticked', () => {
+  const r = pendingRef();
+  assert.ok(r.order, JSON.stringify(r));
+  assert.equal(r.order.referral.receivingFax, null);
+  assert.equal(r.order.referral.agencyPending, true);
+  assert.equal(orderReq.isAgencyPending(r.order), true);
+});
+
+test('AGENCY PENDING: no flag and no fax is still refused exactly as before', () => {
+  const r = pendingRef({ agencyPending: false });
+  assert.equal(r.code, 'REFERRAL_BAD_FAX');
+  assert.match(r.error, /Agency not confirmed yet/);
+});
+
+test('AGENCY PENDING: the flag never lets a mistyped fax through', () => {
+  const r = pendingRef({ receivingFax: '404555012' });
+  assert.equal(r.code, 'REFERRAL_BAD_FAX', 'a typed fax is validated whether or not the flag is set');
+});
+
+test('AGENCY PENDING: a valid fax typed alongside the flag means it is not pending', () => {
+  const r = pendingRef({ receivingFax: '4045550123' });
+  assert.equal(r.order.referral.agencyPending, false);
+  assert.equal(r.order.referral.receivingFax, '4045550123');
+  assert.equal(orderReq.isAgencyPending(r.order), false);
+});
+
+test('AGENCY PENDING: only a referral can be pending, and a DME order still needs its supplier fax', () => {
+  assert.equal(orderReq.isAgencyPending({ orderType: 'dme', dme: { agencyPending: true } }), false);
+  const built = orderReq.buildDmeOrder({
+    id: 'o9', clientId: 'c1', encounterUuid: 'e1', actor: ACTOR, encounterDiagnoses: DX,
+    client: { name: 'Juanita Guess' },
+    input: { itemDescription: 'Walker', quantity: 1, supplierName: 'Acme', lengthOfNeed: '99 months', diagnosisCodes: ['E11.9'], agencyPending: true }
+  });
+  assert.equal(built.code, 'DME_BAD_SUPPLIER_FAX');
+});
+
+test('AGENCY PENDING: nothing can be faxed until the agency is added', () => {
+  const o = pendingRef().order;
+  const r = orderReq.applySend({ order: o, actor: ACTOR, input: { channel: 'doximity' } });
+  assert.equal(r.code, 'ORDER_AGENCY_PENDING');
+  assert.equal(r.status, 409);
+  assert.equal(r.order, undefined);
+  const noChannel = orderReq.applySend({ order: o, actor: ACTOR, input: {} });
+  assert.equal(noChannel.code, 'ORDER_AGENCY_PENDING', 'the default channel is a fax');
+});
+
+test('AGENCY PENDING: the office can save the practice first, and it stays pending', () => {
+  const o = pendingRef().order;
+  const r = orderReq.applyDestinationEdit({ order: o, actor: CM, input: { receivingPractice: 'Kindred at Home', receivingFax: '' } });
+  assert.ok(r.order, JSON.stringify(r));
+  assert.equal(r.order.referral.receivingPractice, 'Kindred at Home');
+  assert.equal(r.order.referral.agencyPending, true);
+  assert.deepEqual(r.changes.map(c => c.field), ['receivingPractice']);
+});
+
+test('AGENCY PENDING: adding a valid fax confirms the agency, needs no reason, and unlocks sending to that number', () => {
+  const o = pendingRef().order;
+  const r = orderReq.applyDestinationEdit({ order: o, actor: CM, input: { receivingPractice: 'Kindred at Home', receivingFax: '(770) 555-0111' } });
+  assert.ok(r.order, JSON.stringify(r));
+  assert.equal(r.order.referral.receivingFax, '7705550111');
+  assert.equal(r.order.referral.agencyPending, false);
+  assert.equal(r.order.resendNeeded, false, 'nothing was sent, so there is nothing to re-send');
+  const sent = orderReq.applySend({ order: r.order, actor: ACTOR, input: { channel: 'doximity' } });
+  assert.ok(sent.order, JSON.stringify(sent));
+  assert.equal(sent.order.sends[0].recipientFax, '7705550111');
+  assert.equal(sent.order.sends[0].recipientName, 'Kindred at Home');
+});
+
+test('AGENCY PENDING: a wrong fax on a pending order is still refused, and a blank-only save is no change', () => {
+  const o = pendingRef().order;
+  assert.equal(orderReq.applyDestinationEdit({ order: o, actor: CM, input: { receivingFax: '12345' } }).code, 'REFERRAL_BAD_FAX');
+  assert.equal(orderReq.applyDestinationEdit({ order: o, actor: CM, input: { receivingFax: '' } }).code, 'ORDER_DESTINATION_NO_CHANGE');
+});
+
+test('AGENCY PENDING: a NON-pending order still cannot have its fax blanked', () => {
+  const r = orderReq.applyDestinationEdit({ order: referral(), actor: CM, input: { receivingFax: '' } });
+  assert.equal(r.code, 'REFERRAL_BAD_FAX');
+});
+
+test('AGENCY PENDING (route): the case manager fills in a pending order and the stored row follows', async () => {
+  const h = liftRoute();
+  h.state.rows.push(pendingRef().order);
+  const [, , handler] = h.routes[PATH];
+  const res = mkRes();
+  await handler({ params: { orderId: 'op' }, body: { receivingPractice: 'Kindred', receivingFax: '7705550111' }, user: { ...CM } }, res);
+  assert.equal(res.code, 200, JSON.stringify(res.body));
+  assert.equal(h.state.saved.v[0].referral.agencyPending, false);
+  assert.equal(h.state.saved.v[0].referral.receivingFax, '7705550111');
+});
+
+test('AGENCY PENDING (wiring): requisition refused while pending, waiting list served, page shows it', () => {
+  const start = SERVER.indexOf("app.get('/api/clinical/orders/:orderId/requisition.pdf'");
+  const reqRoute = SERVER.slice(start, start + 1500);
+  assert.match(reqRoute, /orderReq\.isAgencyPending\(order\)/);
+  assert.match(reqRoute, /ORDER_AGENCY_PENDING/);
+  const od = SERVER.indexOf("app.get('/api/clinical/orders/overdue'");
+  assert.match(SERVER.slice(od, od + 2500), /agencyPending: waiting/);
+  assert.match(PAGE, /Agency not confirmed yet/);
+  assert.match(PAGE, /Needs agency/);
+  assert.match(PAGE, /Waiting on an agency/);
+  assert.match(PAGE, /\{!agencyPending && <a className="chip[^>]*href=\{api\.requisitionUrl/, 'the requisition link is hidden while pending');
+});

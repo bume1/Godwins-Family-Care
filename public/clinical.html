@@ -4174,9 +4174,14 @@
           <Field label="Receiving fax (this is what gets faxed)">
             <input className="inp" inputMode="tel" value={f.receivingFax || ''} onChange={e => setF({ ...f, receivingFax: e.target.value })} />
             {f.receivingFax && !faxOk(f.receivingFax) && <p className="text-[11px] text-amber-700 mt-1">Ten digits. A mistyped fax number sends this patient's record to a stranger.</p>}
+            {!f.receivingFax && f.agencyPending && <p className="text-[11px] text-stone-500 mt-1">Left blank on purpose. Nothing can be faxed until the office adds it.</p>}
           </Field>
           <Field label="Receiving phone"><input className="inp" value={f.receivingPhone || ''} onChange={e => setF({ ...f, receivingPhone: e.target.value })} /></Field>
         </div>
+        <label className="flex items-start gap-2 text-xs mt-1">
+          <input type="checkbox" className="mt-0.5" checked={!!f.agencyPending} onChange={e => setF({ ...f, agencyPending: e.target.checked })} />
+          <span><b>Agency not confirmed yet.</b> Place the order now and leave the fax blank. It shows as "Needs agency" until the office or social work adds the agency and fax with Update destination. Nothing can be faxed before then.</span>
+        </label>
         <Field label="Reason for referral"><input className="inp" value={f.reason || ''} onChange={e => setF({ ...f, reason: e.target.value })} /></Field>
         <Field label="Clinical summary — the question you want answered">
           <textarea className="inp" rows={3} value={f.clinicalSummary || ''} onChange={e => setF({ ...f, clinicalSummary: e.target.value })} />
@@ -4323,7 +4328,7 @@
                 (enrollmentWarning && (!ack.acknowledged || !ack.reason.trim())) ||
                 (isDoc
                   ? (f.orderType === 'referral'
-                    ? (!f.specialty || !f.reason || !f.clinicalSummary || !faxOk(f.receivingFax))
+                    ? (!f.specialty || !f.reason || !f.clinicalSummary || (f.agencyPending && !String(f.receivingFax || '').trim() ? false : !faxOk(f.receivingFax)))
                     : (!f.itemDescription || !f.quantity || !f.supplierName || !f.lengthOfNeed || !faxOk(f.supplierFax) || (f.requiresF2F && !f.faceToFaceDate)))
                   : !f.tests.trim())}
               onClick={() => {
@@ -4357,7 +4362,10 @@
       const alreadySent = (order.sends || []).length > 0;
       const faxField = (destFields || []).find(f => f.fax);
       const faxChanging = !!faxField && faxOk(dest[faxField.key]) && String(dest[faxField.key]).replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '') !== String(destBucket[faxField.key] || '');
-      const destValid = !!destFields && destFields.every(f => f.fax ? faxOk(dest[f.key]) : (!f.required || String(dest[f.key] || '').trim()));
+      // A referral placed before the agency was known may be saved without the fax
+      // yet; every other order still needs a valid one.
+      const agencyPending = !!(order.referral && order.referral.agencyPending && !order.referral.receivingFax);
+      const destValid = !!destFields && destFields.every(f => f.fax ? (faxOk(dest[f.key]) || (agencyPending && !String(dest[f.key] || '').trim())) : (!f.required || String(dest[f.key] || '').trim()));
       const lastDest = (order.destinationHistory || []).slice(-1)[0] || null;
       const [send, setSend] = useState({
         // SERVED, not named here. The default channel and which channels carry a
@@ -4375,10 +4383,11 @@
       return (
         <div className="mt-1.5">
           <div className="flex flex-wrap gap-1.5">
-            <a className="chip border bg-white text-primary border-stone-200" href={api.requisitionUrl(order.id)} target="_blank" rel="noopener noreferrer">
+            {agencyPending && <span className="chip bg-amber-50 text-amber-800 border border-amber-200">Needs agency</span>}
+            {!agencyPending && <a className="chip border bg-white text-primary border-stone-200" href={api.requisitionUrl(order.id)} target="_blank" rel="noopener noreferrer">
               <i className="ti ti-file-text" /> {order.requisitionGeneratedAt ? 'Open requisition again' : 'Open requisition'}
-            </a>
-            {['ordered', 'sent', 'scheduled'].includes(order.status) &&
+            </a>}
+            {!agencyPending && ['ordered', 'sent', 'scheduled'].includes(order.status) &&
               <button className="chip border bg-white text-primary border-stone-200" onClick={() => {
                 // Re-read the destination each time it opens: it can have been
                 // updated since this row first rendered, and a re-send must go
@@ -4394,8 +4403,10 @@
               </button>}
             {canEditDestination && destFields && (editableStatuses || []).includes(order.status) &&
               <button className="chip border bg-white text-primary border-stone-200" onClick={() => { if (mode !== 'dest') { setDest(destStart()); setDestReason(''); } setMode(mode === 'dest' ? '' : 'dest'); }}>
-                Update destination
+                {agencyPending ? 'Add agency and fax' : 'Update destination'}
               </button>}
+            {agencyPending && !canEditDestination &&
+              <span className="text-[11px] text-stone-500">Waiting for the office to confirm the agency.</span>}
             {order.orderType === 'referral' && ['sent'].includes(order.status) &&
               <button className="chip border bg-white text-primary border-stone-200" onClick={() => setMode(mode === 'appt' ? '' : 'appt')}>Mark as scheduled</button>}
             {!['cancelled', 'resulted', 'completed'].includes(order.status) &&
@@ -4634,8 +4645,26 @@
       if (err) return <div className="p-7"><p className="text-red-600 text-sm">{err}</p></div>;
       if (!d) return <div className="p-10 text-stone-400 text-sm">Loading…</div>;
       const rows = d.orders || [];
+      const waitingAgency = d.agencyPending || [];
       return (
         <div className="p-4 lg:p-7">
+          {waitingAgency.length > 0 && (
+            <div className="card mb-4">
+              <div className="card-h"><h2>Waiting on an agency</h2><span className="chip bg-amber-50 text-amber-800">{waitingAgency.length}</span></div>
+              <div className="p-4 text-sm">
+                {waitingAgency.map(o => (
+                  <div key={o.id} className="py-2 border-b border-stone-100 last:border-0">
+                    <div className="font-semibold text-[13px]">
+                      Referral{o.specialty ? ` · ${o.specialty}` : ''} · {o.clientName || o.clientId} {o.orderReference ? <span className="text-stone-500">· {o.orderReference}</span> : null}
+                    </div>
+                    <div className="text-xs text-stone-600 mt-0.5">
+                      Placed {fmtTs(o.createdAt)}{o.orderingClinician && o.orderingClinician.name ? ` by ${o.orderingClinician.name}` : ''}. No agency or fax yet, so nothing can be sent. Open the patient's encounter and use Add agency and fax.
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="card">
             <div className="card-h"><h2>Sent and never answered</h2><span className="chip bg-amber-50 text-amber-800">{rows.length}</span></div>
             <div className="p-4 text-sm">
