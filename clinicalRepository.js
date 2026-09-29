@@ -2367,7 +2367,9 @@ const buildAllergyStrip = ({ linked, emrAllergies, reportedAllergies }) => {
     };
   }
   const rows = (emrAllergies.rows || []).filter(isActiveAllergy)
-    .map(r => String((r && (r.allergen || r.name || r.description)) || '').trim())
+    // `title` is what summarizeAllergy emits, which is what the chart passes in.
+    // Not reading it made a chart WITH allergies say "No known allergies".
+    .map(r => String((r && (r.allergen || r.name || r.title || r.description)) || '').trim())
     .filter(Boolean);
   if (rows.length) return { state: ALLERGY_STATE.LISTED, source: 'chart', rows, reason: null };
   return { state: ALLERGY_STATE.NONE_KNOWN, source: 'chart', rows: [], reason: null };

@@ -193,6 +193,18 @@ test('a resolved or entered-in-error allergy is not on the strip', () => {
   assert.deepStrictEqual(strip.rows, ['Penicillin', 'Codeine']);
 });
 
+test('a chart WITH allergies never reads as "no known allergies" (the rows the chart really passes)', () => {
+  // The fixtures above use {allergen}; production passes summarizeAllergy's
+  // rows, which carry `title`. A strip that could not read them said "none
+  // known" over a real allergy list.
+  const fhir = { resourceType: 'AllergyIntolerance', id: 'a1', text: { div: '<div>Penicillin</div>' }, clinicalStatus: { coding: [{ code: 'active' }] } };
+  const row = repo.summarizeAllergy(fhir);
+  assert.ok(row.title, 'the production row shape carries a title');
+  const strip = repo.buildAllergyStrip({ linked: true, emrAllergies: { ok: true, rows: [row] } });
+  assert.strictEqual(strip.state, repo.ALLERGY_STATE.LISTED);
+  assert.strictEqual(strip.rows.length, 1);
+});
+
 test('an allergy with no status recorded stays on the strip', () => {
   // No status is not evidence of resolution, and dropping it would hide a real
   // allergy on exactly the rows a sparse chart produces.
