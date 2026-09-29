@@ -119,7 +119,9 @@ const clean = (v, max) => String(v == null ? '' : v).trim().slice(0, max);
 const isYmd = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) && !Number.isNaN(new Date(`${v}T12:00:00Z`).getTime());
 
 const normalizeIcd10 = (raw) => {
-  let s = String(raw || '').trim().toUpperCase().replace(/\s+/g, '');
+  // A trailing period ("I10.") is how OpenEMR's code search returns a
+  // three-character code; drop it, as clinicalRepository.normalizeIcd10 does.
+  let s = String(raw || '').trim().toUpperCase().replace(/\s+/g, '').replace(/\.+$/, '');
   if (!s) return null;
   if (/^[A-Z][0-9][0-9A-Z][0-9A-Z]{1,4}$/.test(s)) s = `${s.slice(0, 3)}.${s.slice(3)}`;
   return /^[A-Z][0-9][0-9A-Z](\.[0-9A-Z]{1,4})?$/.test(s) ? s : null;
