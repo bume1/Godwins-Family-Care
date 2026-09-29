@@ -155,7 +155,7 @@ const build = (over = {}) => {
 test('the rendered PDF carries every standard part of an after-visit summary', async () => {
   const text = await pdfText(await pdf.generateAfterVisitSummaryPDF(build()));
   for (const want of ['Visit Summary', 'What we did today', 'We adjusted your water pill', 'High blood pressure',
-    'Your medications', 'Changes at this visit', 'CHANGED', 'Furosemide', 'STOPPED', 'Ibuprofen', 'Your current medications', 'Aspirin 81 mg',
+    'Your medications', 'Changes at this visit', 'CHANGED', 'Furosemide', 'STOPPED', 'Ibuprofen', 'Your current medications', 'Aspirin', '81 mg',
     'Allergies', 'Penicillin', 'Home health', 'being arranged',
     'Follow-up instructions', '2. Call if you feel dizzy', 'Your next visit', 'Thursday, October 15', 'call us to confirm',
     consentText.ORG.phone, 'After hours', 'on-call', 'When to call 911', 'trouble breathing']) {
@@ -236,4 +236,54 @@ test('"given to" is recorded with who, how and when, and the log carries no summ
 test('the portal offers the download only on a complete, fully shared visit', () => {
   assert.match(PORTAL, /\{v\.status === 'complete' && \(/);
   assert.match(PORTAL, /\/api\/gfc\/clinical\/visits\/\$\{encodeURIComponent\(v\.id\)\}\/summary\.pdf/);
+});
+
+// ── Juanita, 2026-09-29: family-reported meds, reconciled at the visit, no new
+// orders. A KEPT medicine is never written to OpenEMR, so the chart read is
+// empty and the list must come from the app's reconciled rows.
+test('reconciled medications show even when the chart has none and nothing was ordered', () => {
+  const d = build({
+    snapshot: { ...SNAP, medications: { source: 'chart', rows: [] } },
+    fallbackMeds: [{ name: 'Amlodipine', dose: '5 mg', frequency: 'daily' }, { name: 'Carbamazepine', dose: '200 mg', frequency: 'twice daily' }],
+    reconciled: true, prescriptions: [], medChanges: []
+  });
+  assert.deepEqual(d.medications.current.map(m => m.text), ['Amlodipine', 'Carbamazepine']);
+  assert.equal(d.medications.current[0].detail, '5 mg · daily', 'a reconciled list carries no "as reported" label');
+  assert.ok(!d.medications.noneOnFile);
+});
+
+test('before any reconciliation, the family-reported list shows, labelled', () => {
+  const d = build({ snapshot: null, fallbackMeds: [], reconciled: false, intakeMeds: [{ name: 'Lisinopril', dose: '10 mg' }], prescriptions: [], medChanges: [] });
+  assert.deepEqual(d.medications.current, [{ text: 'Lisinopril', detail: '10 mg — as reported when you enrolled' }]);
+});
+
+test('the chart and the app list merge without doubles, and a stopped medicine is left off', () => {
+  const d = build({
+    fallbackMeds: [{ name: 'Aspirin', dose: '81 mg' }, { name: 'Ibuprofen', dose: '200 mg' }], reconciled: true,
+    snapshot: { ...SNAP, medications: { source: 'chart', rows: [{ name: 'Aspirin 81 mg' }, { name: 'Furosemide 40 mg', detail: 'once daily' }, { name: 'Ibuprofen 200 mg' }] } },
+    medChanges: [{ action: 'stopped', name: 'Ibuprofen' }]
+  });
+  assert.deepEqual(d.medications.current.map(m => m.text), ['Aspirin', 'Furosemide 40 mg']);
+});
+
+test('an empty reconciled list reads as "none on your list", not "not available"', async () => {
+  const d = build({ snapshot: { ...SNAP, medications: { source: 'chart', rows: [] } }, fallbackMeds: [], reconciled: true, prescriptions: [], medChanges: [] });
+  assert.equal(d.medications.noneOnFile, true);
+  const text = await pdfText(await pdf.generateAfterVisitSummaryPDF(d));
+  assert.match(text, /No current medications are on your list/);
+  assert.doesNotMatch(text, /not available/);
+});
+
+test('an empty chart allergy list does not hide what the family reported', () => {
+  const d = build({ snapshot: { ...SNAP, allergies: { source: 'chart', rows: [] } }, intakeAllergies: 'Sulfa - hives' });
+  assert.deepEqual(d.allergies, [{ text: 'Sulfa - hives', detail: 'as reported when you enrolled' }]);
+  const none = build({ snapshot: { ...SNAP, allergies: { source: 'chart', rows: [] } }, intakeAllergies: 'None' });
+  assert.deepEqual(none.allergies, []);
+});
+
+test('a wrapped bullet never runs into the next heading', () => {
+  const PDF = fs.readFileSync(path.join(__dirname, '..', 'pdf-generator.js'), 'utf8');
+  const fn = PDF.slice(PDF.indexOf('async function generateAfterVisitSummaryPDF'));
+  assert.match(fn, /y = Math\.max\(y \+ h, doc\.y\) \+ 4;/, 'bullets advance to where pdfkit actually stopped');
+  assert.match(fn, /font\('Helvetica-Bold'\)\.fontSize\(BODY\)\.heightOfString\(full/, 'bullets are measured in the bold face');
 });

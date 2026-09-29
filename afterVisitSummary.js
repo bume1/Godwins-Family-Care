@@ -69,16 +69,32 @@ const changesForVisit = (rows, { clientId, encounterUuid, visitDate }) => (rows 
   (!c.encounterUuid && visitDate && c.day === visitDate)
 ));
 
-// A current-medication row for the page: bold name, then how to take it.
-const currentMedRows = (snapshot, fallbackMeds) => {
+// The current medication list. The app's list is the one the clinician
+// reconciled (family-reported at enrollment, then kept, added or stopped at the
+// visit); a medicine that was KEPT is never written to OpenEMR, so the chart
+// alone misses it. So: the app's list first, then any chart medicine it does
+// not already name, minus anything stopped at this visit. Before any
+// reconciliation, the app's list is what the family reported, labelled so.
+const medKey = (v) => String(v == null ? '' : v).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+const sameMed = (a, b) => { const x = medKey(a), y = medKey(b); return !!x && !!y && (x === y || x.startsWith(`${y} `) || y.startsWith(`${x} `)); };
+const currentMedRows = (snapshot, fallbackMeds, { reconciled = false, stopped = [], intakeMeds = [] } = {}) => {
   const snap = snapshot && snapshot.medications;
-  if (snap && snap.source !== 'unavailable' && Array.isArray(snap.rows)) {
-    return { available: true, source: snap.source, current: snap.rows.map(r => ({ text: r.name, detail: r.detail || null })) };
+  const chartOk = !!(snap && snap.source !== 'unavailable' && Array.isArray(snap.rows));
+  const isStopped = (name) => stopped.some(s => sameMed(s, name));
+  const detailOf = (m) => [clean(m.dose), clean(m.route), clean(m.frequency)].filter(Boolean).join(' · ') || null;
+  let app = (fallbackMeds || []).filter(m => m && clean(m.name));
+  let label = reconciled ? null : 'as reported when you enrolled';
+  if (!app.length && !reconciled) app = (intakeMeds || []).filter(m => m && clean(m.name));
+  const current = app.filter(m => !isStopped(m.name)).map(m => ({ text: clean(m.name), detail: [detailOf(m), label].filter(Boolean).join(' — ') || null }));
+  if (chartOk) {
+    for (const r of snap.rows) {
+      if (!r || !clean(r.name) || isStopped(r.name) || current.some(c => sameMed(c.text, r.name))) continue;
+      current.push({ text: clean(r.name), detail: r.detail || null });
+    }
   }
-  const app = (fallbackMeds || []).filter(m => m && clean(m.name));
-  if (app.length) {
-    return { available: true, source: 'app', current: app.map(m => ({ text: clean(m.name), detail: [clean(m.dose), clean(m.route), clean(m.frequency)].filter(Boolean).join(' · ') || null })) };
-  }
+  if (current.length) return { available: true, source: chartOk ? 'chart+app' : 'app', current };
+  // Nothing on any list: an honest "none" only when something was actually read.
+  if (chartOk || reconciled) return { available: true, source: chartOk ? 'chart' : 'app', current: [], noneOnFile: true };
   return { available: false, source: 'unavailable', current: [] };
 };
 
@@ -86,9 +102,14 @@ const currentMedRows = (snapshot, fallbackMeds) => {
 // such), else "could not be read". Never "no known allergies" out of a failure.
 const allergyRows = (snapshot, intakeText) => {
   const snap = snapshot && snapshot.allergies;
-  if (snap && snap.source === 'chart' && Array.isArray(snap.rows)) return snap.rows.map(r => (typeof r === 'string' ? { text: r } : r));
   const intake = clean(intakeText || (snap && snap.intakeText));
-  if (intake) return [{ text: intake, detail: 'as reported when you enrolled' }];
+  const intakeSaysNone = !intake || /^(none|no|nka|nkda|n\/a|no known( drug)? allergies)\.?$/i.test(intake);
+  if (snap && snap.source === 'chart' && Array.isArray(snap.rows)) {
+    const rows = snap.rows.map(r => (typeof r === 'string' ? { text: r } : r));
+    if (rows.length || intakeSaysNone) return rows;
+  }
+  if (intake && !intakeSaysNone) return [{ text: intake, detail: 'as reported when you enrolled' }];
+  if (intake) return [];
   return null;
 };
 
@@ -109,10 +130,11 @@ const nextVisitBlock = (snapshot) => {
 // `sections` is the viewer's sharing verdict (patient / POA = full; family per
 // the client's settings). A section a family member may not see is left out,
 // never printed as empty.
-const assemble = ({ client, record, visit, prescriptions, medChanges, snapshot, org, sections, dob, preparedLabel, visitDateLabel, fallbackMeds, intakeAllergies }) => {
+const assemble = ({ client, record, visit, prescriptions, medChanges, snapshot, org, sections, dob, preparedLabel, visitDateLabel, fallbackMeds, intakeMeds, reconciled, intakeAllergies }) => {
   const see = (k) => !sections || (sections[k] && sections[k] !== 'none');
   const rec = record || {};
-  const medsSnapshot = currentMedRows(snapshot, fallbackMeds);
+  const stopped = (medChanges || []).filter(c => c && c.action === 'stopped').map(c => c.name);
+  const medsSnapshot = currentMedRows(snapshot, fallbackMeds, { reconciled: !!reconciled, stopped, intakeMeds });
   const changes = buildMedicationChanges({ prescriptions, medChanges });
   return {
     patientName: (client && (client.name || client.preferredName)) || '',
@@ -124,7 +146,7 @@ const assemble = ({ client, record, visit, prescriptions, medChanges, snapshot, 
       ? `This visit addressed: ${visit.diagnosesAddressed.join(', ')}.` : null),
     diagnoses: (visit && visit.diagnosesAddressed) || [],
     medications: see('medications')
-      ? { available: medsSnapshot.available || changes.length > 0, changes, current: medsSnapshot.current, source: medsSnapshot.source }
+      ? { available: medsSnapshot.available || changes.length > 0, changes, current: medsSnapshot.current, source: medsSnapshot.source, noneOnFile: !!medsSnapshot.noneOnFile }
       : { available: true, changes, current: [], hiddenCurrent: true },
     allergies: see('allergies') ? allergyRows(snapshot, intakeAllergies) : undefined,
     orders: ((visit && visit.testsOrdered) || []).map(t => ({

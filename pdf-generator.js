@@ -2106,6 +2106,7 @@ async function generateAfterVisitSummaryPDF(d) {
       y += 6;
 
       const heading = (t) => {
+        y += 8;
         room(40);
         doc.fillColor(C.navy).font('Helvetica-Bold').fontSize(HEAD).text(t, L, y, { width: W });
         y += 17;
@@ -2118,10 +2119,10 @@ async function generateAfterVisitSummaryPDF(d) {
         for (const line of String(t).split('\n')) {
           const h = doc.heightOfString(line || ' ', { width: W });
           room(h + 3);
-          doc.fillColor(C.ink).font('Helvetica').fontSize(BODY).text(line || ' ', L, y, { width: W });
-          y += h + 3;
+          doc.fillColor(C.ink).font('Helvetica').fontSize(BODY).text(line || ' ', L, y, { width: W, lineGap: 1.5 });
+          y = Math.max(y + h, doc.y) + 3;
         }
-        y += 4;
+        y += 6;
       };
       // A row is a string or { tag?, text, detail? }: an optional bold tag
       // ("NEW"), the bold item, then plain detail after a dash.
@@ -2129,7 +2130,8 @@ async function generateAfterVisitSummaryPDF(d) {
         for (const r of rows) {
           const it = typeof r === 'string' ? { text: r } : r;
           const full = `${it.tag ? `${it.tag}  ` : ''}${it.text}${it.detail ? ` — ${it.detail}` : ''}`;
-          const h = doc.heightOfString(full, { width: W - 16 });
+          // Measured in bold (the wider face) so a wrapped row reserves enough room.
+          const h = doc.font('Helvetica-Bold').fontSize(BODY).heightOfString(full, { width: W - 16 });
           room(h + 4);
           doc.fillColor(C.ink).font('Helvetica').fontSize(BODY).text('•', L + 2, y, { width: 10, lineBreak: false });
           let cont = true;
@@ -2137,12 +2139,23 @@ async function generateAfterVisitSummaryPDF(d) {
           if (it.tag) parts.push([`${it.tag}  `, 'Helvetica-Bold', C.navy]);
           parts.push([it.text, 'Helvetica-Bold', C.ink]);
           if (it.detail) parts.push([` — ${it.detail}`, 'Helvetica', C.ink]);
-          parts.forEach(([t, f, col], i) => {
-            doc.fillColor(col).font(f).text(t, i === 0 ? L + 14 : undefined, i === 0 ? y : undefined, { width: W - 16, continued: i < parts.length - 1 });
-          });
-          y += h + 3;
+          // A row that fits on one line is set part by part at measured x
+          // positions; pdfkit's `continued` runs can break a short row early.
+          const widths = parts.map(([t, f]) => doc.font(f).fontSize(BODY).widthOfString(t));
+          if (widths.reduce((a, b) => a + b, 0) <= W - 16) {
+            let x = L + 14;
+            parts.forEach(([t, f, col], i) => { doc.fillColor(col).font(f).text(t, x, y, { lineBreak: false }); x += widths[i]; });
+            doc.y = y + h;
+          } else {
+            parts.forEach(([t, f, col], i) => {
+              doc.fillColor(col).font(f).text(t, i === 0 ? L + 14 : undefined, i === 0 ? y : undefined, { width: W - 16, continued: i < parts.length - 1 });
+            });
+          }
+          // Where pdfkit actually finished, never less than the measured height:
+          // mixed bold/regular runs can wrap onto a line the estimate missed.
+          y = Math.max(y + h, doc.y) + 4;
         }
-        y += 4;
+        y += 6;
       };
 
       heading('What we did today');
@@ -2169,6 +2182,8 @@ async function generateAfterVisitSummaryPDF(d) {
           doc.fillColor(C.muted).font('Helvetica-Bold').fontSize(BODY).text('Your current medications:', L, y, { width: W });
           y += 15;
           bullets(meds.current);
+        } else if (meds.noneOnFile) {
+          paragraph('No current medications are on your list. If you take any medicine, vitamin or supplement, please tell your care team.');
         } else if (!meds.hiddenCurrent) {
           paragraph('Your full medication list was not available for this summary. Please ask your care team for your current list.');
         }

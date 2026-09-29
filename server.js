@@ -10666,6 +10666,8 @@ const assembleAfterVisitSummary = async ({ client, record, attestation, sections
     medChanges: avs.changesForVisit(changes, { clientId: client.id, encounterUuid: euuid, visitDate }),
     snapshot: record.avsSnapshot || null,
     fallbackMeds: client.medications || [],
+    intakeMeds: (client.intake && client.intake.medications) || [],
+    reconciled: !!client.medRecLast,
     intakeAllergies: client.allergies || (client.intake && client.intake.allergies) || null,
     org: consentText.ORG,
     dob: (client.intake && client.intake.dob) || client.dob || null,
