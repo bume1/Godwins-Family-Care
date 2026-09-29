@@ -2444,8 +2444,19 @@ const TIMELINE_ICONS = Object.freeze({
 // reported rather than dropped silently or sorted to the top as an empty
 // string — "there is nothing here" and "we could not place four things" are
 // different facts, and only one of them is a data gap worth chasing.
+// A full timestamp is placed on the day it was IN GEORGIA: slicing the UTC
+// string put everything after 8pm Eastern on the next day. A bare date is
+// already a calendar day and is kept as it is.
 const timelineDate = (v) => {
-  const d = String(v == null ? '' : v).slice(0, 10);
+  const raw = String(v == null ? '' : v);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  if (/^\d{4}-\d{2}-\d{2}T/.test(raw)) {
+    try {
+      const p = require('./public/gfc-time').zonedParts(new Date(raw));
+      if (p && p.isoDate) return p.isoDate;
+    } catch (e) { /* fall through to the literal date */ }
+  }
+  const d = raw.slice(0, 10);
   return /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : null;
 };
 
@@ -2474,11 +2485,13 @@ const buildTimeline = ({
   (orders || []).forEach(o => {
     const kind = o.orderType === 'referral' ? 'referral' : 'order';
     push(kind, o.createdAt || o.orderedAt,
-      kind === 'referral' ? `${o.specialty || 'Referral'} referral` : ((o.tests && o.tests[0]) || o.orderType || 'Order'),
+      kind === 'referral' ? `${(o.referral && o.referral.specialty) || o.specialty || 'Specialist'} referral`
+        : o.orderType === 'dme' ? ((o.dme && o.dme.itemDescription) || 'DME order')
+        : ((o.tests && o.tests[0]) || o.orderType || 'Order'),
       o.status || null, o.id);
   });
   (results || []).forEach(r => push('result', r.receivedAt || r.createdAt,
-    r.label || r.documentName || 'Result', r.interpretation || null, r.id));
+    r.summary || (r.document && r.document.fileName) || r.performedBy || 'Result', r.interpretation || null, r.id));
   // BUG (found 2026-09-23, live screenshot): every document on the timeline
   // read "Document / app". `buildChartDocumentIndex` rows carry `title` and
   // `category`, not `description` and `source` — `source` exists too, but it

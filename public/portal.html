@@ -306,24 +306,32 @@
         const response = await fetch(url, {
           headers: { 'Authorization': `Bearer ${token}` }
         });
-        if (!response.ok) throw new Error(`HTTP error ${response.status}`);
+        if (!response.ok) {
+          // Say which failure it was: an expired session is the one thing the
+          // person can fix, and "try again" never helps a 403 or a 404.
+          let msg = response.status === 401 ? 'Your session has ended. Please sign in again.' : `HTTP error ${response.status}`;
+          try { const j = await response.json(); if (j && j.error && response.status !== 401) msg = j.error; } catch (e) {}
+          throw new Error(msg);
+        }
         const blob = await response.blob();
         const blobUrl = URL.createObjectURL(blob);
-        if (kind === 'zip') {
+        // window.open after an await is outside the tap on iPhone Safari, which
+        // blocks it as a pop-up. When it is blocked, hand over a download
+        // instead so the document still arrives.
+        const opened = kind === 'zip' ? null : window.open(blobUrl, '_blank');
+        if (!opened) {
           const a = document.createElement('a');
           a.href = blobUrl;
-          a.download = (url.split('/').pop() || 'download.zip').split('?')[0];
+          a.download = (url.split('/').pop() || (kind === 'zip' ? 'download.zip' : 'document.pdf')).split('?')[0];
           document.body.appendChild(a);
           a.click();
           a.remove();
-        } else {
-          window.open(blobUrl, '_blank');
         }
         // Revoke after a delay to allow the browser to load it
         setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
       } catch (err) {
         console.error('Download failed:', err);
-        alert('Failed to download. Please try again.');
+        alert(`That document didn't open: ${err.message}`);
       }
     };
 
@@ -4844,7 +4852,11 @@
     // Friendly date like "Jul 21" (prototype uses month-abbrev, no year for recency).
     function prettyDate(iso) {
       if (!iso) return '';
-      const d = new Date(iso); if (isNaN(d)) return '';
+      // A bare calendar date ("2026-10-01") parses as UTC midnight, which is the
+      // evening BEFORE in Georgia, so every visit and plan date read a day early.
+      // Read it at midday UTC instead: the same calendar day in any US zone.
+      const s = String(iso);
+      const d = new Date(/^\d{4}-\d{2}-\d{2}$/.test(s) ? `${s}T12:00:00Z` : s); if (isNaN(d)) return '';
       return window.GFC_TIME ? window.GFC_TIME.fmtDate(d).replace(/\/\d{4}$/, '') : '';
     }
 
@@ -5735,7 +5747,11 @@
             return;
           }
           const url = URL.createObjectURL(await res.blob());
-          window.open(url, '_blank');
+          // Blocked as a pop-up on iPhone after an await: fall back to a download.
+          if (!window.open(url, '_blank')) {
+            const a = document.createElement('a'); a.href = url; a.download = `${d.title || 'document'}.pdf`;
+            document.body.appendChild(a); a.click(); a.remove();
+          }
           setTimeout(() => URL.revokeObjectURL(url), 60000);
         } catch (e) { setChartErr('That document could not be opened.'); }
         finally { setChartBusy(''); }
@@ -5821,7 +5837,7 @@
             return (
               <div className="doc" key={s.key} style={{ alignItems: 'flex-start' }}>
                 <i className="ti ti-file-certificate" style={{ marginTop: 2 }} />
-                <div style={{ minWidth: 0, flex: 1, cursor: 'pointer' }} onClick={openConsentPdf}>
+                <div style={{ minWidth: 0, flex: 1, cursor: s.copyUrl ? 'pointer' : 'default' }} onClick={s.copyUrl ? openConsentPdf : undefined}>
                   <b>{s.label}</b><span>{sub}</span>
                   {/* The copy above is regenerated from stored text and metadata —
                       for a paper signature it never carried the actual scan.
@@ -5833,7 +5849,7 @@
                     </div>
                   )}
                 </div>
-                <span style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 700, letterSpacing: '.06em', color: 'var(--goldd)' }}>PDF</span>
+                {s.copyUrl && <span style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 700, letterSpacing: '.06em', color: 'var(--goldd)' }}>PDF</span>}
               </div>
             );
           })}
@@ -5876,13 +5892,20 @@
 
           <p className="lbl">From your care team</p>
           {files.length === 0 && <p className="sub">Shared documents from your care team will appear here.</p>}
-          {files.map(f => (
-            <a className="doc" key={f.id} href={f.url || '#'} target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'none' }}>
-              <i className="ti ti-file-text" />
-              <div><b>{f.title || f.name || 'Document'}</b><span>{f.description || 'Shared by your care team'}</span></div>
-              <i className="ti ti-download" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
-            </a>
-          ))}
+          {files.map(f => {
+            // A file stored on this app (/uploads/…) needs the login token, and a
+            // plain link sends none, so it answered AUTH_MISSING. Fetch it with
+            // the header; an outside link (Drive) stays a link.
+            const local = typeof f.url === 'string' && f.url.startsWith('/');
+            return (
+              <a className="doc" key={f.id} href={local ? '#' : (f.url || '#')} target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'none' }}
+                onClick={local ? (e) => { e.preventDefault(); openPdfSecurely(`${API_URL}${f.url}`, token); } : undefined}>
+                <i className="ti ti-file-text" />
+                <div><b>{f.title || f.name || 'Document'}</b><span>{f.description || 'Shared by your care team'}</span></div>
+                <i className="ti ti-download" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
+              </a>
+            );
+          })}
           <p className="micro"><i className="ti ti-cloud-lock" />Documents stored in HIPAA Google Drive</p>
         </div>
       );
@@ -5976,6 +5999,11 @@
       const problems = clinical.problems || [];
       const vitals = clinical.vitals || null;
       const degraded = clinical.degraded || [];
+      // A section that failed to load is NOT an empty section. "No allergies
+      // recorded" over a failed read tells a patient something untrue about
+      // their own record, so a failed section says it could not be loaded.
+      const failed = (k) => degraded.includes(k);
+      const Unloaded = () => <HealthEmpty title="Couldn't load this right now" sub="This part of your record is on file with your care team. Please check back later or ask them." />;
       const vitalRows = vitals ? [
         ['Blood pressure', vitals.bloodPressure, vitals.bloodPressureNote], ['Heart rate', vitals.heartRate && `${vitals.heartRate} bpm`],
         ['Temperature', vitals.temperature && `${vitals.temperature} °F`], ['Breathing rate', vitals.respiration && `${vitals.respiration} /min`],
@@ -5995,7 +6023,8 @@
           {has('appointments') && (
             <React.Fragment>
               <p className="lbl" style={{ marginTop: 0 }}>Upcoming visits</p>
-              {appts.length === 0 && <HealthEmpty title="No upcoming visits scheduled" sub="Your care team will reach out to book the next one." />}
+              {appts.length === 0 && failed('appointments') && <Unloaded />}
+              {appts.length === 0 && !failed('appointments') && <HealthEmpty title="No upcoming visits scheduled" sub="Your care team will reach out to book the next one." />}
               {appts.map(a => (
                 <div className="visit hl" key={a.id}>
                   <span className="vt">{prettyDate(a.date)}<br />{fmtClock(a.startTime)}</span>
@@ -6008,7 +6037,8 @@
           {has('visits') && (
             <React.Fragment>
               <p className="lbl">Visit summaries</p>
-              {visits.length === 0 && <HealthEmpty title="No visit summaries yet" sub="After each visit, a plain-language summary appears here once your clinician finishes the note." />}
+              {visits.length === 0 && failed('visits') && <Unloaded />}
+              {visits.length === 0 && !failed('visits') && <HealthEmpty title="No visit summaries yet" sub="After each visit, a plain-language summary appears here once your clinician finishes the note." />}
               {visits.map(v => {
                 const expandable = 'summary' in v;
                 const open = openVisit === v.id;
@@ -6049,7 +6079,8 @@
           {has('medications') && (
             <React.Fragment>
               <p className="lbl">Current medications</p>
-              {meds.length === 0 && <HealthEmpty title="No medications on your clinical record yet" sub="Your clinician reviews your medications at each visit." />}
+              {meds.length === 0 && failed('medications') && <Unloaded />}
+              {meds.length === 0 && !failed('medications') && <HealthEmpty title="No medications on your clinical record yet" sub="Your clinician reviews your medications at each visit." />}
               {meds.length > 0 && (
                 <div className="card" style={{ margin: 0 }}>
                   {meds.map(m => (
@@ -6067,7 +6098,8 @@
           {has('allergies') && (
             <React.Fragment>
               <p className="lbl">Allergies</p>
-              {allergies.length === 0 && <HealthEmpty title="No allergies recorded" sub="Tell your clinician about any reactions you've had." />}
+              {allergies.length === 0 && failed('allergies') && <Unloaded />}
+              {allergies.length === 0 && !failed('allergies') && <HealthEmpty title="No allergies recorded" sub="Tell your clinician about any reactions you've had." />}
               {allergies.length > 0 && (
                 <div className="card" style={{ margin: 0 }}>
                   {allergies.map(a => <div className="goal" key={a.id}><i className="ti ti-alert-triangle" style={{ color: '#B5462E' }} />{a.name}{a.severity ? ` · ${a.severity}` : ''}</div>)}
@@ -6079,7 +6111,8 @@
           {has('problems') && (
             <React.Fragment>
               <p className="lbl">Conditions we're managing</p>
-              {problems.length === 0 && <HealthEmpty title="No conditions listed yet" sub="Your clinician builds this list with you at your visits." />}
+              {problems.length === 0 && failed('problems') && <Unloaded />}
+              {problems.length === 0 && !failed('problems') && <HealthEmpty title="No conditions listed yet" sub="Your clinician builds this list with you at your visits." />}
               {problems.length > 0 && (
                 <div className="card" style={{ margin: 0 }}>
                   {problems.map(p => <div className="goal" key={p.id}><i className="ti ti-list-details" />{p.name}{p.since ? <span style={{ fontSize: 12, color: 'var(--mut)', marginLeft: 'auto' }}>since {prettyDate(p.since)}</span> : null}</div>)}
@@ -6122,6 +6155,7 @@
       const [showTransferRoi, setShowTransferRoi] = useState(false); // Transfer-of-Care ROI overlay (Session 3.4)
       const [justEnrolled, setJustEnrolled] = useState(false); // one-time nudge right after intake completes (Session 3.4)
       const [data, setData] = useState(null);          // care-plan + visits
+      const [dataErr, setDataErr] = useState('');      // a failed load is not "still loading"
       const [docs, setDocs] = useState(null);
       const [clinical, setClinical] = useState(null);  // 4.3 curated clinical read (clinical-line clients only)
       const [shifts, setShifts] = useState([]);        // this client's own confirmed caregiver schedule (Session 7)
@@ -6175,7 +6209,7 @@
             api.getMyUpcomingShifts(token)
           ]);
           if (cancelled) return;
-          if (!cp.error) setData(cp);
+          if (!cp.error) { setData(cp); setDataErr(''); } else setDataErr(cp.error);
           if (!dc.error) setDocs(dc);
           if (!sh.error) setShifts(sh.shifts || []);
           if (clinicalAvailable) {
@@ -6283,8 +6317,14 @@
           {view === 'health' && clinicalAvailable && <GfcHealth clinical={clinical} me={me} token={token} readOnly={readOnly}
             onSharingSaved={(sharing) => setMe(m => m ? { ...m, sharing } : m)} />}
           {view === 'messages' && <GfcMessages token={token} me={me} actingAs={me && me.actingAs} />}
-          {view === 'documents' && <GfcDocuments docs={docs} readOnly={readOnly} token={token} onOpenTransferRoi={() => setShowTransferRoi(true)} onRefresh={refreshDocs} clinicalDocs={clinicalAvailable ? clinicalDocs : null} />}
-          {!data && view !== 'messages' && view !== 'documents' && view !== 'health' && (
+          {/* Uploads, the share link and the record release are client-only on the
+              server (requireClientForIntake), so a POA got a button that always
+              answered 403. On this tab every family login, POA included, reads. */}
+          {view === 'documents' && <GfcDocuments docs={docs} readOnly={!!isFamily} token={token} onOpenTransferRoi={() => setShowTransferRoi(true)} onRefresh={refreshDocs} clinicalDocs={clinicalAvailable ? clinicalDocs : null} />}
+          {!data && dataErr && view !== 'messages' && view !== 'documents' && view !== 'health' && (
+            <div className="gfc-body"><div className="lockcard"><i className="ti ti-alert-triangle" /><div><b>Your care information didn't load</b><span>{dataErr} Please refresh the page to try again.</span></div></div></div>
+          )}
+          {!data && !dataErr && view !== 'messages' && view !== 'documents' && view !== 'health' && (
             <div className="gfc-body" style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}><div className="gfc-spin" /></div>
           )}
           <nav className="gfc-tabs">

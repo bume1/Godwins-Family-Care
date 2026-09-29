@@ -216,6 +216,9 @@
       addProblem: (id, body) => authedFetch(`/api/clinical/patients/${id}/problems`, { method: 'POST', body: JSON.stringify(body) }),
       carePlan: (id) => authedFetch(`/api/clinical/patients/${id}/care-plan`),
       saveCarePlan: (id, body) => authedFetch(`/api/clinical/patients/${id}/care-plan`, { method: 'POST', body: JSON.stringify(body) }),
+      // Two co-sign routes that had no button anywhere in the app.
+      providerCoSignCarePlan: (id, signatureImageB64) => authedFetch(`/api/clinical/patients/${id}/care-plan/provider-cosign`, { method: 'POST', body: JSON.stringify({ signatureImageB64 }) }),
+      coSignOrder: (orderId) => authedFetch(`/api/clinical/orders/${encodeURIComponent(orderId)}/co-sign`, { method: 'POST', body: JSON.stringify({}) }),
       // The clinical enrollment sequence (checklist/mark/activate) moved to
       // /admin/enrollment — it duplicated that screen's own approval gate and
       // both wrote the same client.enrollmentStatus independently. See
@@ -320,7 +323,12 @@
       { key: 'analytics', tab: 'Analytics', icon: 'ti-chart-bar' }
     ]);
 
-    const fmtDate = (iso) => iso ? new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
+    // A bare calendar date ("2026-10-01") parses as UTC midnight: the evening
+    // BEFORE in Georgia, so every date-only value read a day early. Read it at
+    // midday UTC, which is the same calendar day in every US zone.
+    const fmtDate = (iso) => iso
+      ? new Date(/^\d{4}-\d{2}-\d{2}$/.test(String(iso)) ? `${iso}T12:00:00Z` : iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+      : '—';
     const fmtTs = (iso) => iso ? new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
     const initials = (n) => String(n || '').split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join('') || 'GF';
 
@@ -855,12 +863,17 @@
       const [data, setData] = useState(null);
       const [err, setErr] = useState('');
       const [mineOnly, setMineOnly] = useState(true);
+      const [rowErr, setRowErr] = useState({});
       const load = () => api.inbox().then(r => { setData(r); setErr(''); }).catch(e => setErr(e.message));
       useEffect(() => { load(); }, []);
       if (err) return <div className="p-6"><p className="text-sm text-red-600">{err}</p></div>;
       if (!data) return <div className="p-10 text-stone-400 text-sm">Loading your inbox…</div>;
       const shown = mineOnly ? data.items.filter(i => i.actionable) : data.items;
       const c = data.counts;
+      const coSignOrder = (i) => {
+        if (!window.confirm('Co-sign this order executed under your standing order?')) return;
+        api.coSignOrder(i.id).then(load).catch(e => setRowErr({ [i.id]: e.message }));
+      };
       return (
         <div className="p-4 lg:p-7">
           <div className="flex flex-wrap items-center gap-2 mb-4">
@@ -902,9 +915,13 @@
                 <span className={`chip ${i.actionable ? 'bg-amber-50 text-amber-800' : 'bg-stone-100 text-stone-500'}`}>
                   {i.actionable ? 'Waiting on you' : `Waiting on ${i.waitingOn}`}
                 </span>
+                {i.kind === 'order_co_sign' && i.actionable && (
+                  <button className="btn !py-1.5" onClick={() => coSignOrder(i)}><i className="ti ti-writing-sign" />Co-sign</button>
+                )}
                 {i.encounterUuid
                   ? <button className="btn ghost !py-1.5" onClick={() => onOpenEncounter(i.clientId, i.encounterUuid)}>Open encounter</button>
-                  : <button className="btn ghost !py-1.5" onClick={() => onOpenChart(i.clientId)}>Open chart</button>}
+                  : <button className="btn ghost !py-1.5" onClick={() => onOpenChart(i.clientId)}>{i.kind === 'care_plan_co_sign' ? 'Open care plan' : 'Open chart'}</button>}
+                {rowErr[i.id] && <div className="w-full text-[11px] text-red-600">{rowErr[i.id]}</div>}
               </div>
             ))}
           </div>
@@ -1303,6 +1320,9 @@
       return { data, err, reload: load };
     };
 
+    // Result records carry `summary`, `performedBy` and `document.fileName`;
+    // `label`/`documentName` never existed, so every result read "Result".
+    const resultTitle = (r, fallback) => (r && (r.summary || (r.document && r.document.fileName) || r.performedBy)) || fallback;
     const OrderList = ({ rows, empty, err }) => {
       if (err) return <div className="card p-4 text-sm text-red-600">{err}</div>;
       if (!rows) return <div className="card p-4 text-sm text-stone-500">Loading…</div>;
@@ -1314,8 +1334,8 @@
               <div key={o.id} className="py-2 border-b border-stone-100 last:border-0">
                 <div className="flex items-center justify-between gap-2 flex-wrap">
                   <span className="font-semibold text-[13px]">
-                    {o.orderType === 'referral' ? (o.specialty || 'Referral')
-                      : o.orderType === 'dme' ? (o.itemDescription || 'DME')
+                    {o.orderType === 'referral' ? ((o.referral && o.referral.specialty) || o.specialty || 'Referral')
+                      : o.orderType === 'dme' ? ((o.dme && o.dme.itemDescription) || o.itemDescription || 'DME')
                         : ((o.tests && o.tests.join(', ')) || o.orderType)}
                   </span>
                   <span className="chip bg-primary-50 text-primary">{String(o.status || '').toUpperCase()}</span>
@@ -1380,7 +1400,7 @@
                   ? <div className="text-[11.5px] text-stone-400 mt-0.5">No report attached yet.</div>
                   : attached.map(r => (
                     <div key={r.id} className="text-[11.5px] text-stone-700 mt-0.5">
-                      <i className="ti ti-report-medical mr-1" />{r.label || r.documentName || 'Report'}
+                      <i className="ti ti-report-medical mr-1" />{resultTitle(r, 'Report')}
                       {r.interpretation ? ` — ${r.interpretation}` : ''}
                     </div>
                   ))}
@@ -1409,7 +1429,7 @@
           {rows.map(r => (
             <div key={r.id} className="py-2 border-b border-stone-100 last:border-0">
               <div className="flex items-center justify-between gap-2 flex-wrap">
-                <span className="font-semibold text-[13px]">{r.label || r.documentName || 'Result'}</span>
+                <span className="font-semibold text-[13px]">{resultTitle(r, 'Result')}</span>
                 <span className={`chip ${r.interpretation === 'critical' ? 'bg-red-100 text-red-800'
                   : r.interpretation === 'abnormal' ? 'bg-amber-100 text-amber-800' : 'bg-stone-100 text-stone-600'}`}>
                   {String(r.interpretation || 'unread').toUpperCase()}
@@ -1558,8 +1578,8 @@
           <QueueCard title="Overdue orders" icon="ti-clock-exclamation" rows={data ? q.overdueOrders : null}
             empty="Nothing is overdue."
             render={(r) => line(`${r.patientName || 'Unnamed patient'} — ${r.orderType || 'Order'}`,
-              [r.daysOverdue != null ? `${r.daysOverdue} days overdue` : null,
-                r.recipient, r.faxNumber].filter(Boolean).join(' · '),
+              [r.ageDays != null ? `${r.ageDays} days since sent` : null,
+                r.recipientName, r.recipientFax].filter(Boolean).join(' · '),
               () => onOpenChart(r.clientId), r.id)} />
           {data && data.overdueThresholds && (
             <p className="text-[11.5px] text-stone-400">
@@ -2416,6 +2436,7 @@
       const adopt = (r) => {
         setMeta(m => ({ ...m, version: r.version, status: r.status, revisions: r.revisions || [], signature: r.signature || null,
           carriedPending: r.carriedPending || [], carriedFrom: r.carriedFrom || null,
+          narrativeSyncError: r.narrativeSyncError || null,
           signsAsAuthor: r.signsAsAuthor !== undefined ? !!r.signsAsAuthor : m.signsAsAuthor }));
         setCarryFrom(null); setLocalPending([]); setConfirmCarried([]); setConflict(null);
       };
@@ -2564,7 +2585,7 @@
     );
     const sectionLabelFor = (k) => String(k).replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase());
 
-    const HpTab = ({ patient, chart, appointmentEid, onDone, onGoToEncounter, encounterUuid, embedded, onChanged }) => {
+    const HpTab = ({ patient, chart, appointmentEid, onDone, onGoToEncounter, encounterUuid, embedded, onChanged, codingDirty }) => {
       const pf = (chart && chart.intakePrefill) || {};
       const [confirmed, setConfirmed] = useState([]);
       const confirm = (k) => setConfirmed(c => c.includes(k) ? c : [...c, k]);
@@ -2720,6 +2741,9 @@
       // Sign & submit: the note has to exist before it can be signed, so a
       // first save happens first.
       const startSign = () => {
+        // Signing reads the SAVED diagnoses and locks them: unsaved coding on the
+        // encounter screen would be signed away.
+        if (codingDirty) { setMsg({ ok: false, text: 'Save your diagnoses and coding on this encounter before signing.' }); return; }
         if (sn.euuid) { setShowSign(true); return; }
         saveDraft().then(() => setShowSign(true)).catch(() => {});
       };
@@ -2928,7 +2952,9 @@
           {sn.euuid && (
             <div className="card p-3 mb-4 text-xs text-stone-600 flex flex-wrap items-center gap-2">
               <span className="chip bg-amber-50 text-amber-800">DRAFT · v{sn.meta.version}</span>
-              Saved to the app and OpenEMR. Anyone writing on this chart can keep editing it until it is signed.
+              {sn.meta.narrativeSyncError
+                ? <span className="text-red-700">Saved in the app, but OpenEMR did not take the latest version ({sn.meta.narrativeSyncError}). Save draft again to retry.</span>
+                : 'Saved to the app and OpenEMR. Anyone writing on this chart can keep editing it until it is signed.'}
             </div>
           )}
           {sn.conflict && (
@@ -3052,7 +3078,8 @@
       const [busy, setBusy] = useState(false); const [msg, setMsg] = useState(null);
       const load = useCallback(() => { api.medrec(patient.id).then(setData).catch(e => setMsg({ ok: false, text: e.message })); }, [patient.id]);
       useEffect(load, [load]);
-      if (!data) return <p className="text-sm text-stone-500 p-4">Loading…</p>;
+      // A failed load used to leave "Loading…" up forever with the error unseen.
+      if (!data) return msg && !msg.ok ? <p className="text-sm text-red-600 p-4">{msg.text}</p> : <p className="text-sm text-stone-500 p-4">Loading…</p>;
       const { matched, familyOnly, emrOnly } = data.view;
       const decide = (key, action, med, emrUuid) => setDecisions(d => ({ ...d, [key]: { action, med, emrUuid } }));
       const rows = [
@@ -3064,7 +3091,10 @@
         const list = rows.map(r => decisions[r.key] ? { ...decisions[r.key] } : { action: 'keep', med: r.med, emrUuid: r.emrUuid });
         setBusy(true); setMsg(null);
         api.medrecSave(patient.id, list)
-          .then(r => { setMsg({ ok: true, text: `${r.message}. EMR writes: ${r.emrResults.filter(x => x.ok).length}/${r.emrResults.length}` }); load(); })
+          // Decisions are keyed by row POSITION, and the rows change once saved.
+          // Keeping them re-sent an earlier "add" on the next Resolve (a second
+          // copy in OpenEMR) and applied it to whatever row moved into that slot.
+          .then(r => { setDecisions({}); setMsg({ ok: true, text: `${r.message}. EMR writes: ${r.emrResults.filter(x => x.ok).length}/${r.emrResults.length}` }); load(); })
           .catch(e => setMsg({ ok: false, text: e.message }))
           .finally(() => setBusy(false));
       };
@@ -3118,6 +3148,19 @@
       useEffect(() => { api.carePlan(patient.id).then(setExisting).catch(() => {}); }, [patient.id]);
       const cp = existing && existing.carePlan;
       const coSigned = cp && existing.coSign && existing.coSign[`v${cp.version}`];
+      // An IHPC plan (or one an LMSW authored) waits on a PROVIDER signature, and
+      // the chip used to say "awaiting client co-signature" for it too.
+      const providerPending = !!(cp && cp.providerCoSignStatus === 'pending');
+      const providerPadRef = useRef(null);
+      const [pBusy, setPBusy] = useState(false); const [pMsg, setPMsg] = useState(null);
+      const providerSign = () => {
+        if (!providerPadRef.current || providerPadRef.current.isEmpty()) { setPMsg({ ok: false, text: 'Draw your signature first.' }); return; }
+        setPBusy(true); setPMsg(null);
+        api.providerCoSignCarePlan(patient.id, providerPadRef.current.toDataURL())
+          .then(r => { setPMsg({ ok: true, text: r.message || 'Signed.' }); return api.carePlan(patient.id).then(setExisting); })
+          .catch(e => setPMsg({ ok: false, text: e.message }))
+          .finally(() => setPBusy(false));
+      };
       const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
       const lines = (s) => s.split('\n').map(x => x.trim()).filter(Boolean);
       const save = () => {
@@ -3140,8 +3183,8 @@
           {cp && (
             <div className="card mb-4">
               <div className="card-h"><h2>Current plan — v{cp.version}</h2>
-                <span className={`chip ${coSigned ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-800'}`}>
-                  {coSigned ? `Co-signed ${fmtTs(coSigned.at)}` : 'Awaiting client co-signature'}
+                <span className={`chip ${coSigned && !providerPending ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-800'}`}>
+                  {providerPending ? 'Awaiting provider signature' : coSigned ? `Co-signed ${fmtTs(coSigned.at)}` : 'Awaiting client co-signature'}
                 </span>
               </div>
               <div className="p-4 text-sm grid gap-1">
@@ -3154,6 +3197,14 @@
                       ? <a className="text-primary underline" href={existing.docs[`v${cp.version}`].signed.driveUrl} target="_blank" rel="noreferrer">on Drive</a>
                       : 'stored'}
                     {existing.docs[`v${cp.version}`].signed.emrDocumented && ' · filed to OpenEMR'}
+                  </div>
+                )}
+                {providerPending && canWrite && (
+                  <div className="mt-2 grid gap-2 rounded border border-amber-200 bg-amber-50 p-3">
+                    <div className="text-[12px] text-amber-900">This plan needs a provider's signature beside the author's. The author's signature is kept.</div>
+                    <SignaturePad padRef={providerPadRef} />
+                    {pMsg && <p className={`text-sm ${pMsg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{pMsg.text}</p>}
+                    <button className="btn w-fit" disabled={pBusy} onClick={providerSign}><i className="ti ti-writing-sign" />{pBusy ? 'Signing…' : 'Sign as provider'}</button>
                   </div>
                 )}
                 {(existing.history || []).length > 1 && (
@@ -3245,7 +3296,9 @@
         const body = { providerId: f.providerId, date: f.date, startTime: f.startTime,
           durationMinutes: Number(f.durationMinutes), title: f.title, location: f.location, notes: f.notes };
         (isRes ? api.rescheduleAppointment(appt.eid, body) : api.createAppointment(f.clientId, body))
-          .then(r => onSaved(r))
+          // The server's warnings (a superseded row it could not remove, for one)
+          // were dropped, leaving an unexplained duplicate on the calendar.
+          .then(r => { if (r && r.warnings && r.warnings.length) window.alert(r.warnings.join('\n\n')); onSaved(r); })
           .catch(e => { setErr(e.message); setBusy(false); });
       };
       return (
@@ -3324,7 +3377,7 @@
       const provider = (providers || []).filter(p => p.id === appt.providerId).map(p => p.name)[0] || `Provider ${appt.providerId}`;
       const active = appt.state !== 'cancelled';
       const run = (label, fn) => { setBusy(label); setErr('');
-        fn().then(r => onChanged(r)).catch(e => { setErr(e.message); setBusy(''); }); };
+        fn().then(r => { if (r && r.warnings && r.warnings.length) window.alert(r.warnings.join('\n\n')); onChanged(r); }).catch(e => { setErr(e.message); setBusy(''); }); };
       return (
         <div className="fixed inset-0 bg-black/40 z-40 flex items-start justify-center p-4 overflow-y-auto" onClick={onClose}>
           <div className="card w-full max-w-md mt-10" onClick={e => e.stopPropagation()}>
@@ -3839,7 +3892,9 @@
               {!readOnly && (
                 <div className="flex items-center gap-2 text-xs">
                   {!d.primary && <button type="button" className="text-primary underline" onClick={() => setPrimary(d.code)}>Make primary</button>}
-                  {d.source === 'manual' && setAddToProblemList && (
+                  {/* A code picked from OpenEMR's own search arrives as 'openemr', and it
+                      is just as absent from the problem list as one typed in. */}
+                  {(d.source === 'manual' || d.source === 'openemr') && setAddToProblemList && (
                     <label className="flex items-center gap-1 text-stone-500">
                       <input type="checkbox" checked={(addToProblemList || []).includes(d.code)}
                         onChange={e => setAddToProblemList(e.target.checked ? [...(addToProblemList || []), d.code] : (addToProblemList || []).filter(c => c !== d.code))} />
@@ -3973,7 +4028,10 @@
           .then(r => (diagnoses.length || services.length
             ? api.saveCoding(patient.id, r.encounterUuid, { diagnoses, services }).then(() => r).catch(e => ({ ...r, codingError: e.message }))
             : r))
-          .then(r => onSaved(r)).catch(e => { setErr(e.message); setBusy(false); });
+          // The note is saved even when the codes were refused; say so rather
+          // than closing as if the codes had gone in too.
+          .then(r => { if (r && r.codingError) window.alert(`The note was saved, but the codes were not: ${r.codingError}\n\nAdd them on the encounter.`); onSaved(r); })
+          .catch(e => { setErr(e.message); setBusy(false); });
       };
       const pickCarry = (r) => {
         const c = r.content || {};
@@ -4011,7 +4069,7 @@
                 <DxEditor diagnoses={diagnoses} setDiagnoses={setDiagnoses} candidates={cands} clientId={patient.id} />
               </div>
               <div className="border-t border-stone-100 pt-3">
-                <span className="lblu block mb-1">Service code (CPT/HCPCS) — optional now, required before signing</span>
+                <span className="lblu block mb-1">Service code (CPT/HCPCS) — optional; billing adds or confirms codes after you sign</span>
                 <SvcEditor services={services} setServices={setServices} diagnoses={diagnoses}
                   practiceFavorites={settings && settings.serviceCodeFavorites} favorites={[]} />
               </div>
@@ -4179,8 +4237,13 @@
     // for a credential that has no direct authority — the protocol picker then
     // has no blank option, and the TESTS come from the protocol's list rather
     // than a free-text box, because a test typed in is refused server-side.
-    const OrderForm = ({ diagnoses, types, priorities, onSave, busy, standingOrders, requireStandingOrder, docTypes }) => {
+    const OrderForm = ({ diagnoses, types, priorities, onSave, busy, standingOrders, requireStandingOrder, docTypes, enrollmentWarning }) => {
       const [f, setF] = useState({ orderType: 'lab', tests: '', priority: 'routine', diagnosisCodes: diagnoses.map(d => d.code), notes: '', standingOrderId: '' });
+      // 42 CFR 424.507: the server refuses a Medicare lab/imaging/DME order from
+      // an ordering clinician not enrolled in approved status UNTIL it is
+      // acknowledged with a reason. This form had no way to send one, so every
+      // such order was simply refused. Shown once the server has said so.
+      const [ack, setAck] = useState({ acknowledged: false, reason: '' });
       // 4.10: which types carry a payload rather than a list of tests. SERVED,
       // never listed here — a form that names its own options drifts from the
       // validator that refuses one it did not offer.
@@ -4202,7 +4265,13 @@
           {(requireStandingOrder || protocols.length > 0) && (
             <Field label={requireStandingOrder ? 'Standing order (required)' : 'Standing order (optional)'}>
               <select className="inp" value={f.standingOrderId}
-                onChange={e => setF({ ...f, standingOrderId: e.target.value, tests: '', orderType: 'lab' })}>
+                onChange={e => {
+                  // A protocol that does not permit 'lab' left the form sending
+                  // 'lab' under an option list that did not contain it.
+                  const next = protocols.find(o => o.id === e.target.value);
+                  const first = next && (next.executableOrderTypes || [])[0];
+                  setF({ ...f, standingOrderId: e.target.value, tests: '', orderType: first || 'lab' });
+                }}>
                 {!requireStandingOrder && <option value="">No protocol — my own authority</option>}
                 {requireStandingOrder && <option value="">Select a protocol…</option>}
                 {protocols.map(o => <option key={o.id} value={o.id}>{o.title} (v{o.version})</option>)}
@@ -4238,15 +4307,29 @@
             ))}
           </div>
           <Field label="Notes"><input className="inp" value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} /></Field>
+          {enrollmentWarning && (
+            <div className="rounded border border-amber-300 bg-amber-50 p-2.5 grid gap-2">
+              <p className="text-[12px] text-amber-900">{enrollmentWarning.error}</p>
+              <label className="flex items-center gap-2 text-[12px]">
+                <input type="checkbox" checked={ack.acknowledged} onChange={e => setAck({ ...ack, acknowledged: e.target.checked })} />
+                I understand and want to place this order anyway
+              </label>
+              <Field label="Reason (recorded on the order)"><input className="inp" value={ack.reason} onChange={e => setAck({ ...ack, reason: e.target.value })} /></Field>
+            </div>
+          )}
           <div className="flex justify-end">
             <button className="btn !py-1.5"
               disabled={busy || !f.diagnosisCodes.length || (requireStandingOrder && !f.standingOrderId) ||
+                (enrollmentWarning && (!ack.acknowledged || !ack.reason.trim())) ||
                 (isDoc
                   ? (f.orderType === 'referral'
                     ? (!f.specialty || !f.reason || !f.clinicalSummary || !faxOk(f.receivingFax))
                     : (!f.itemDescription || !f.quantity || !f.supplierName || !f.lengthOfNeed || !faxOk(f.supplierFax) || (f.requiresF2F && !f.faceToFaceDate)))
                   : !f.tests.trim())}
-              onClick={() => onSave(isDoc ? f : { ...f, tests: f.tests.split('\n').map(s => s.trim()).filter(Boolean) })}>
+              onClick={() => {
+                const body = isDoc ? f : { ...f, tests: f.tests.split('\n').map(s => s.trim()).filter(Boolean) };
+                onSave(enrollmentWarning ? { ...body, enrollmentAcknowledgment: { acknowledged: ack.acknowledged, reason: ack.reason.trim() } } : body);
+              }}>
               {busy ? 'Recording…' : f.orderType === 'referral' ? 'Record referral' : f.orderType === 'dme' ? 'Record written order' : 'Record order'}
             </button>
           </div>
@@ -4391,7 +4474,7 @@
               <Field label="Note (optional)"><input className="inp" value={send.note} onChange={e => setSend({ ...send, note: e.target.value })} /></Field>
               <div className="flex justify-end">
                 <button className="btn !py-1.5" disabled={busy || !send.recipientName || (isFax && !faxOk(send.recipientFax))}
-                  onClick={() => onSent(send).then(() => setMode(''))}>{busy ? 'Recording…' : 'Record the send'}</button>
+                  onClick={() => onSent(send).then(r => { if (r) setMode(''); })}>{busy ? 'Recording…' : 'Record the send'}</button>
               </div>
             </div>
           )}
@@ -4399,7 +4482,7 @@
           {mode === 'appt' && (
             <div className="grid gap-2 mt-2 p-2.5 rounded border border-stone-200 bg-stone-50">
               <Field label="Appointment date the specialist's office gave"><input className="inp" type="date" value={appt} onChange={e => setAppt(e.target.value)} /></Field>
-              <div className="flex justify-end"><button className="btn !py-1.5" disabled={busy || !appt} onClick={() => onScheduled(appt).then(() => setMode(''))}>Record it</button></div>
+              <div className="flex justify-end"><button className="btn !py-1.5" disabled={busy || !appt} onClick={() => onScheduled(appt).then(r => { if (r) setMode(''); })}>Record it</button></div>
             </div>
           )}
 
@@ -4425,7 +4508,7 @@
               {res.interpretation === 'critical' && <p className="text-[11px] text-amber-800">A critical result notifies the ordering clinician immediately. The notice carries no patient or clinical detail.</p>}
               <div className="flex justify-end">
                 <button className="btn !py-1.5" disabled={busy || !res.file || !res.performedBy || !res.summary}
-                  onClick={() => onResult(res).then(() => setMode(''))}>{busy ? 'Filing…' : 'File the result'}</button>
+                  onClick={() => onResult(res).then(r => { if (r) setMode(''); })}>{busy ? 'Filing…' : 'File the result'}</button>
               </div>
             </div>
           )}
@@ -4453,7 +4536,9 @@
         api.resultsInbox().then(r => { setD(r); setErr(''); }).catch(e => setErr(e.message));
       }, []);
       useEffect(load, [load]);
-      if (err) return <div className="p-7"><p className="text-red-600 text-sm">{err}</p></div>;
+      // Only a failed LOAD replaces the page. A refused acknowledgement used to
+      // replace the whole inbox with its error text; now it shows above the list.
+      if (err && !d) return <div className="p-7"><p className="text-red-600 text-sm">{err}</p></div>;
       if (!d) return <div className="p-10 text-stone-400 text-sm">Loading the inbox…</div>;
       const rows = d.results || [];
       const ack = (r) => {
@@ -4465,6 +4550,7 @@
       const tone = { critical: 'bg-red-50 text-red-700 border-red-200', abnormal: 'bg-amber-50 text-amber-800 border-amber-200', normal: 'bg-stone-50 text-stone-600 border-stone-200' };
       return (
         <div className="p-4 lg:p-7">
+          {err && <p className="text-red-600 text-sm mb-3">{err}</p>}
           <div className="card mb-4">
             <div className="card-h">
               <h2>Results waiting for review</h2>
@@ -4703,7 +4789,7 @@
 
     // A follow-up (or older) note being edited on its encounter. The H&P has its
     // own, larger form (HpTab) and is embedded the same way.
-    const FollowUpNoteEditor = ({ patient, euuid, noteSections, onGoToCoding, onChanged }) => {
+    const FollowUpNoteEditor = ({ patient, euuid, noteSections, onGoToCoding, onChanged, codingDirty }) => {
       const sn = useSharedNote({ patientId: patient.id, encounterUuid: euuid });
       const blank = { chiefConcern: '', subjective: '', objective: '', assessment: '', plan: '', sections: {},
         vitals: { bpSys: '', bpDia: '', hr: '', temp: '', rr: '', spo2: '', weight: '', height: '', pain: '' } };
@@ -4775,7 +4861,10 @@
         <div>
           <div className="card p-3 mb-3 text-xs text-stone-600 flex flex-wrap items-center gap-2">
             <span className="chip bg-amber-50 text-amber-800">DRAFT · v{sn.meta.version}</span>
-            {seeded ? 'This note was written before notes could be edited. It is loaded from OpenEMR — saving makes it a shared draft.' : 'Saved to the app and OpenEMR. Anyone writing on this chart can keep editing it until it is signed.'}
+            {seeded ? 'This note was written before notes could be edited. It is loaded from OpenEMR — saving makes it a shared draft.'
+              : sn.meta.narrativeSyncError
+                ? <span className="text-red-700">Saved in the app, but OpenEMR did not take the latest version ({sn.meta.narrativeSyncError}). Save draft again to retry.</span>
+                : 'Saved to the app and OpenEMR. Anyone writing on this chart can keep editing it until it is signed.'}
           </div>
           {sn.conflict && (
             <NoteConflict conflict={sn.conflict}
@@ -4812,7 +4901,10 @@
           <div className="card p-3 mb-3">
             <div className="flex flex-wrap items-center gap-2">
               <button className="btn" disabled={!!busy} onClick={() => save().catch(() => {})}><i className="ti ti-device-floppy" />{busy === 'draft' ? 'Saving…' : 'Save draft'}</button>
-              <button className="btn gold" disabled={!!busy || showSign} onClick={() => setShowSign(true)}><i className="ti ti-writing-sign" />Sign &amp; submit note</button>
+              {/* Signing reads the SAVED diagnoses and then locks them, so unsaved
+                  coding on this screen would be signed away without a word. */}
+              <button className="btn gold" disabled={!!busy || showSign || codingDirty} title={codingDirty ? 'Save your diagnoses and coding first' : undefined} onClick={() => setShowSign(true)}><i className="ti ti-writing-sign" />Sign &amp; submit note</button>
+              {codingDirty && <span className="text-[11px] text-amber-700">Save your diagnoses and coding below before signing.</span>}
               <button className="btn ghost text-red-600" disabled={!!busy} onClick={discard}>{busy === 'discard' ? 'Deleting…' : 'Delete encounter'}</button>
             </div>
             <p className="text-[11px] text-stone-500 mt-2"><b>Save draft</b> saves to the app and OpenEMR together, stamped with your name and the time — it does <b>not</b> sign. <b>Sign &amp; submit note</b> saves, then signs and locks it.</p>
@@ -4934,15 +5026,32 @@
       const canAdvanceOrders = useCan('orderStatusAdvance');
       const myClinicalRole = useClinicalRole();
       const [standingOrders, setStandingOrders] = useState([]);
+      const [orderEnrollmentWarning, setOrderEnrollmentWarning] = useState(null);
       useEffect(() => {
         if (!canOrderStanding) return;
         api.myStandingOrders().then(r => setStandingOrders((r && r.standingOrders) || [])).catch(() => setStandingOrders([]));
       }, [canOrderStanding]);
+      // Every save elsewhere on the encounter (a draft, an Rx, an order) reloads
+      // it. The reload used to reset the coding boxes, so diagnoses added or a
+      // long patient summary typed and not yet saved vanished. Unsaved coding
+      // is kept; only a clean screen takes the server's copy.
+      const codingRef = useRef({});
+      codingRef.current = { diagnoses, services, facing, addToProblemList, record: d && d.record, key: `${patient.id}|${euuid}` };
       const load = useCallback(() => {
         api.encounterDetail(patient.id, euuid).then(r => {
+          const cur = codingRef.current;
+          const prev = cur.key === `${patient.id}|${euuid}` ? cur.record : null;
+          const unsaved = !!prev && (
+            JSON.stringify(cur.diagnoses) !== JSON.stringify(prev.diagnoses || []) ||
+            JSON.stringify(cur.services) !== JSON.stringify(prev.services || []) ||
+            (cur.facing.patientSummary || '') !== (prev.patientSummary || '') ||
+            (cur.facing.followUpInstructions || '') !== (prev.followUpInstructions || '') ||
+            (cur.addToProblemList || []).length > 0);
           setD(r); setErr('');
-          setDiagnoses(r.record.diagnoses || []); setServices(r.record.services || []); setAddToProblemList([]);
-          setFacing({ patientSummary: r.record.patientSummary || '', followUpInstructions: r.record.followUpInstructions || '' });
+          if (!unsaved) {
+            setDiagnoses(r.record.diagnoses || []); setServices(r.record.services || []); setAddToProblemList([]);
+            setFacing({ patientSummary: r.record.patientSummary || '', followUpInstructions: r.record.followUpInstructions || '' });
+          }
         }).catch(e => setErr(e.message));
       }, [patient.id, euuid]);
       useEffect(load, [load]);
@@ -4951,8 +5060,12 @@
         return fn().then(r => {
           setMsg({ ok: true, text: `${okText || r.message}${r.warnings && r.warnings.length ? ` — ${r.warnings.join(' · ')}` : ''}` });
           load(); onChanged && onChanged(); return r;
-        }).catch(e => setMsg({ ok: false, text: e.data && e.data.missing ? `${e.message}` : e.message })).finally(() => setBusy(''));
+        }).catch(e => { setMsg({ ok: false, text: e.data && e.data.missing ? `${e.message}` : e.message }); return null; }).finally(() => setBusy(''));
       };
+      // run() resolves to null when the action was refused. A form only closes,
+      // or its text only clears, on a real success: a refused prescription,
+      // order or addendum keeps what the clinician typed (owner-reported class).
+      const onOk = (fn) => (r) => { if (r) fn(r); return r; };
       if (err) return <div className="card p-4"><p className="text-red-600 text-sm">{err}</p><button className="btn ghost mt-2" onClick={onBack}>Back</button></div>;
       if (!d) return <p className="text-sm text-stone-500 p-4">Loading encounter from OpenEMR…</p>;
       const closed = d.closed;
@@ -4984,7 +5097,8 @@
           .catch(e => setMsg({ ok: false, text: e.message }));
       };
       const facingDirty = (facing.patientSummary || '') !== (d.record.patientSummary || '') || (facing.followUpInstructions || '') !== (d.record.followUpInstructions || '');
-      const dirty = JSON.stringify(diagnoses) !== JSON.stringify(d.record.diagnoses || []) || JSON.stringify(services) !== JSON.stringify(d.record.services || []) || facingDirty;
+      // Ticking "add to problem list" is a change too: without it, Save stayed disabled.
+      const dirty = JSON.stringify(diagnoses) !== JSON.stringify(d.record.diagnoses || []) || JSON.stringify(services) !== JSON.stringify(d.record.services || []) || facingDirty || (addToProblemList || []).length > 0;
       const ORDER_LABEL = { ordered: 'Ordered', sent: 'Sent', resulted: 'Resulted', cancelled: 'Cancelled' };
       // On a phone one step shows at a time; at a desk the whole encounter is
       // one scroll, because a reviewer wants to see all of it at once. Two
@@ -5024,7 +5138,7 @@
                   <div className="grid gap-1">
                     {(attachAppts || []).map(a => (
                       <button key={a.eid} className="text-left border border-stone-200 rounded-lg px-2.5 py-1.5 hover:bg-cream" disabled={busy === 'attach'}
-                        onClick={() => run('attach', () => api.attachNote(patient.id, euuid, a.eid)).then(() => setAttachOpen(false))}>
+                        onClick={() => run('attach', () => api.attachNote(patient.id, euuid, a.eid)).then(onOk(() => setAttachOpen(false)))}>
                         <b>{fmtDayLabel(a.date)}</b> {fmt12h(a.startTime)} — {a.title || 'Appointment'}
                       </button>
                     ))}
@@ -5055,9 +5169,9 @@
               signed it is read-only, formatted, with the signature at the foot. */}
           {on('visit') && ns.status === 'draft' && na.canEdit && (
             ((ns.note && ns.note.kind) || d.record.noteKind) === 'hp'
-              ? <HpTab patient={patient} chart={chart} encounterUuid={euuid} embedded
+              ? <HpTab patient={patient} chart={chart} encounterUuid={euuid} embedded codingDirty={!locked && dirty}
                   onChanged={() => { load(); onChanged && onChanged(); }} onGoToEncounter={() => setStep('coding')} />
-              : <FollowUpNoteEditor patient={patient} euuid={euuid} noteSections={d.noteSections}
+              : <FollowUpNoteEditor patient={patient} euuid={euuid} noteSections={d.noteSections} codingDirty={!locked && dirty}
                   onGoToCoding={() => setStep('coding')} onChanged={() => { load(); onChanged && onChanged(); }} />
           )}
           {on('visit') && !(ns.status === 'draft' && na.canEdit) && <div className="card mb-4">
@@ -5147,7 +5261,7 @@
                   </div>
                 ))}
                 {!locked && !canPrescribe && <p className="text-[11px] text-stone-400 mt-2">Prescribing is a provider's — your credential can read what was prescribed but not add to it.</p>}
-                {showRx && !locked && canPrescribe && <RxForm routes={d.rxRoutes} schedules={d.rxSchedules} scheduleLabels={d.rxScheduleLabels} prescriber={d.prescriber} busy={busy === 'rx'} onSave={(f) => run('rx', () => api.addRx(patient.id, euuid, f)).then(() => setShowRx(false))} />}
+                {showRx && !locked && canPrescribe && <RxForm routes={d.rxRoutes} schedules={d.rxSchedules} scheduleLabels={d.rxScheduleLabels} prescriber={d.prescriber} busy={busy === 'rx'} onSave={(f) => run('rx', () => api.addRx(patient.id, euuid, f)).then(onOk(() => setShowRx(false)))} />}
                 <p className="text-[10.5px] text-stone-400 mt-2">Record only — e-prescribing is out of scope; transmission continues as today.</p>
               </div>
             </div>
@@ -5213,8 +5327,12 @@
                 {showOrder && !locked && (canOrderDirect || canOrderStanding) &&
                   <OrderForm diagnoses={diagnoses} types={d.orderTypes} priorities={d.orderPriorities} busy={busy === 'order'}
                     docTypes={d.documentOrderTypes}
-                    standingOrders={standingOrders} requireStandingOrder={!canOrderDirect}
-                    onSave={(f) => run('order', () => api.addOrder(patient.id, euuid, f)).then(() => setShowOrder(false))} />}
+                    standingOrders={standingOrders} requireStandingOrder={!canOrderDirect} enrollmentWarning={orderEnrollmentWarning}
+                    onSave={(f) => run('order', () => api.addOrder(patient.id, euuid, f).catch(e => {
+                      // Keep the 424.507 refusal so the form can ask for the acknowledgment.
+                      if (e && e.data && e.data.needsReason) setOrderEnrollmentWarning(e.data);
+                      throw e;
+                    })).then(onOk(() => { setShowOrder(false); setOrderEnrollmentWarning(null); }))} />}
                 {!locked && !canOrderDirect && canOrderStanding && <p className="text-[11px] text-stone-400 mt-2">You place orders under a signed standing order. Pick the protocol, then the test it permits.</p>}
                 <p className="text-[10.5px] text-stone-400 mt-2">The app generates; a person transmits. Open the requisition, fax it from Doximity, then record the send here — that is what moves an order to sent. Attaching the result is what moves it to resulted. Both still work after the encounter is signed.</p>
               </div>
@@ -5272,7 +5390,7 @@
                     <span>I attest that I reviewed this note, that the services recorded were performed as documented under my supervision or by me, and that the diagnoses are supported. Signing as <b>{npiLabel(d.me)}</b>.</span>
                   </label>
                   <button className="btn gold w-fit" disabled={!clinAttest || NF.isBlank(clinAddendum) || dirty || (d.addendumReadiness && !d.addendumReadiness.ok) || busy === 'clinAddendum'}
-                    onClick={() => run('clinAddendum', () => api.clinicianAddendum(patient.id, euuid, clinAddendum)).then(() => { setClinAddendum(''); setClinAttest(false); })}>
+                    onClick={() => run('clinAddendum', () => api.clinicianAddendum(patient.id, euuid, clinAddendum)).then(onOk(() => { setClinAddendum(''); setClinAttest(false); }))}>
                     <i className="ti ti-writing-sign" />{busy === 'clinAddendum' ? 'Signing…' : 'Add clinician addendum & sign'}
                   </button>
                 </>}
@@ -5310,7 +5428,7 @@
                   </label>
                   <div className="flex flex-wrap gap-2">
                     <button className="btn gold w-fit" disabled={!billAttest || dirty || busy === 'bill' || (d.billingReadiness && !d.billingReadiness.ok && !(d.billingReadiness.missing || []).every(m => m === 'facility_pos' || m === 'pos_unreadable'))}
-                      onClick={() => run('bill', () => api.billingSubmit(patient.id, euuid, { attest: true })).then(() => setBillAttest(false))}>
+                      onClick={() => run('bill', () => api.billingSubmit(patient.id, euuid, { attest: true })).then(onOk(() => setBillAttest(false)))}>
                       <i className="ti ti-send" />{busy === 'bill' ? 'Submitting…' : 'Submit to billing'}
                     </button>
                     {!noChargeOpen && <button className="btn ghost w-fit" onClick={() => setNoChargeOpen(true)}>No charge…</button>}
@@ -5321,7 +5439,7 @@
                       <input className="inp" value={noChargeReason} maxLength={500} onChange={e => setNoChargeReason(e.target.value)} placeholder="e.g. Courtesy phone follow-up" />
                       <div className="flex gap-2">
                         <button className="btn w-fit" disabled={noChargeReason.trim().length < 3 || busy === 'nocharge'}
-                          onClick={() => run('nocharge', () => api.billingSubmit(patient.id, euuid, { noCharge: true, reason: noChargeReason })).then(() => { setNoChargeOpen(false); setNoChargeReason(''); })}>
+                          onClick={() => run('nocharge', () => api.billingSubmit(patient.id, euuid, { noCharge: true, reason: noChargeReason })).then(onOk(() => { setNoChargeOpen(false); setNoChargeReason(''); }))}>
                           Close with no charge
                         </button>
                         <button className="btn ghost w-fit" onClick={() => setNoChargeOpen(false)}>Cancel</button>
@@ -5347,7 +5465,7 @@
                   <input type="checkbox" className="mt-0.5" checked={coSignAttest} onChange={e => setCoSignAttest(e.target.checked)} />
                   <span>I reviewed this note and took part in the care it documents. My co-signature does not change who billed it. Signing as <b>{npiLabel(d.me)}</b>.</span>
                 </label>
-                <button className="btn w-fit" disabled={!coSignAttest || busy === 'coSign'} onClick={() => run('coSign', () => api.coSignNote(patient.id, euuid)).then(() => setCoSignAttest(false))}>
+                <button className="btn w-fit" disabled={!coSignAttest || busy === 'coSign'} onClick={() => run('coSign', () => api.coSignNote(patient.id, euuid)).then(onOk(() => setCoSignAttest(false)))}>
                   <i className="ti ti-signature" />{busy === 'coSign' ? 'Signing…' : 'Add my co-signature'}
                 </button>
               </div>
@@ -5368,7 +5486,7 @@
                   </div>
                 ))}
                 {canWrite && <FormattedField label="Add an addendum (signed as you, timestamped now)" value={addendum} onChange={setAddendum} />}
-                {canWrite && <button className="btn w-fit" disabled={NF.isBlank(addendum) || busy === 'addendum'} onClick={() => run('addendum', () => api.addAddendum(patient.id, euuid, addendum)).then(() => setAddendum(''))}>
+                {canWrite && <button className="btn w-fit" disabled={NF.isBlank(addendum) || busy === 'addendum'} onClick={() => run('addendum', () => api.addAddendum(patient.id, euuid, addendum)).then(onOk(() => setAddendum('')))}>
                   {busy === 'addendum' ? 'Recording…' : 'Sign addendum'}
                 </button>}
               </div>
@@ -5460,7 +5578,7 @@
           <div className="card-h"><h2>Billing settings</h2><span className="text-[10.5px] text-stone-500">gfc_payer_credentialing.billing_npi_used · admin only</span></div>
           <div className="p-4 grid gap-3 text-sm">
             <div className="grid md:grid-cols-2 gap-3">
-              <Field label={`Billing provider NPI (${s.billingNpiSource === 'record' ? 'set here' : s.billingNpiSource === 'env_seed' ? 'seeded from env' : 'NOT SET — signing is blocked'})`}>
+              <Field label={`Billing provider NPI (${s.billingNpiSource === 'record' ? 'set here' : s.billingNpiSource === 'env_seed' ? 'seeded from env' : 'NOT SET — submitting to billing is blocked'})`}>
                 <input className="inp font-mono" maxLength={10} disabled={!s.isAdmin} value={f.billingNpiUsed} onChange={e => setF({ ...f, billingNpiUsed: e.target.value.replace(/\D/g, '') })} />
               </Field>
               <Field label="Billing provider name"><input className="inp" disabled={!s.isAdmin} value={f.billingProviderName} onChange={e => setF({ ...f, billingProviderName: e.target.value })} /></Field>
@@ -5607,25 +5725,46 @@
         window.location.href = '/login';
       };
 
+      // The chart answer for the patient actually selected: switching patients
+      // quickly could otherwise land the previous patient's chart (banner,
+      // allergies) under the new name.
+      const selIdRef = useRef(null);
       const openPatient = (p, opts) => {
+        selIdRef.current = p.id;
         setSel(p); setChart(null); setTab((opts && opts.tab) || 'summary'); setListOpen(false);
         setLinkCandidates([]);  // candidates belong to the patient that produced them
         setView('charts'); setHpApptEid((opts && opts.appointmentEid) || null);
         setEncTarget((opts && opts.encounterUuid) || null);
-        api.chart(p.id).then(setChart).catch(e => setErr(e.message));
+        api.chart(p.id).then(c => { if (selIdRef.current === p.id) setChart(c); }).catch(e => { if (selIdRef.current === p.id) setErr(e.message); });
       };
       // Calendar → chart navigation (4.2): open the chart, or jump straight
       // into documentation (H&P for a first visit, Appointments tab otherwise).
+      // The sidebar list is filtered by its search box, so with a search typed in,
+      // every "Open chart" / "Open encounter" button elsewhere did nothing for a
+      // patient outside the filter. Fall back to the unfiltered list, then to
+      // the id alone (the chart read supplies the rest).
       const openChartById = (clientId, opts) => {
         const p = (patients || []).find(x => x.id === clientId);
-        if (p) openPatient(p, opts);
+        if (p) { openPatient(p, opts); return; }
+        api.patients('').then(r => {
+          const q = ((r && r.patients) || []).find(x => x.id === clientId);
+          openPatient(q || { id: clientId }, opts);
+        }).catch(() => openPatient({ id: clientId }, opts));
+      };
+      // The banner's Start visit / Resume draft. A saved draft lives on its
+      // encounter: resume THAT, rather than starting a blank H&P whose save
+      // becomes a second OpenEMR encounter.
+      const startVisit = () => {
+        const vd = chart && chart.visitDraft;
+        if (vd && vd.encounterUuid) { setEncTarget(vd.encounterUuid); setTab('encounters'); return; }
+        setTab('visit');
       };
       const documentFromSchedule = (appt) => {
         const p = (patients || []).find(x => x.id === appt.clientId);
         if (!p) return;
         openPatient(p, p.initialVisitAt ? { tab: 'appts' } : { tab: 'visit', appointmentEid: appt.eid });
       };
-      const refreshChart = () => sel && api.chart(sel.id).then(setChart).catch(() => {});
+      const refreshChart = () => sel && api.chart(sel.id).then(c => { if (selIdRef.current === sel.id) setChart(c); }).catch(() => {});
       const link = (body) => {
         setLinking(true); setErr('');
         api.link(sel.id, body || {})
@@ -5907,7 +6046,7 @@
                   patient={sel}
                   homeVisitFields={(emrStatus && emrStatus.homeVisitFields) || []}
                   visitDraft={chart ? chart.visitDraft : null}
-                  onStartVisit={canWrite ? () => setTab('visit') : null}
+                  onStartVisit={canWrite ? startVisit : null}
                   onHomeVisitSaved={refreshChart} />
                 {/* The H&P is NOT a tab (Scope D1) — it opens as a visit from
                     the banner. So when one is open nothing on the tab bar is

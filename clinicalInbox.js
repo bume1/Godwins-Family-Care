@@ -120,7 +120,11 @@ const buildInbox = ({
   // 2. A standing-order execution. The ONLY item here with a deadline of its
   //    own, so an overdue one sorts to the top.
   for (const o of (orders || [])) {
-    const cs = o && o.coSign;
+    // The execution route spreads the co-sign fields onto the order itself
+    // (Object.assign(order, auth.coSign)), so they live at the top level.
+    // Reading a nested `coSign` object meant no standing-order co-sign ever
+    // reached the inbox. The nested shape is still read in case one exists.
+    const cs = o ? (o.coSignStatus ? o : o.coSign) : null;
     if (!cs || cs.coSignStatus !== 'pending') continue;
     const executedById = o.executedBy && o.executedBy.id;
     const canAct = v.canCoSignEncounter && notSelf(v, executedById);
