@@ -92,6 +92,8 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'patient_published_chart', phi: true, owner: 'portal-p1', note: 'one row per client: problems, allergies, meds, vitals, capped history' },
   { key: 'patient_published_visits', phi: true, owner: 'portal-p1', note: 'one row per signed encounter: visit summary and the signed note' },
   { key: 'requisition_settings', phi: false, owner: '4.10', note: 'the return fax number and label printed on every requisition — org config, not PHI' },
+  { key: 'medication_changes', phi: true, owner: 'avs', note: 'append-only: what was started, changed or stopped at reconciliation, with who, when and (when known) the visit' },
+  { key: 'after_visit_summary_disclosures', phi: true, owner: 'avs', note: 'append-only: who an after-visit summary was given to, how and when' },
   { key: 'visit_reminders', phi: true, owner: '4.11', note: 'day-before reminders, captured at booking time — carries the visit date and clinician' },
   { key: 'gfc_payer_credentialing', phi: false, owner: '4.4' },
   // A copy of OpenEMR's facility list (id, name, POS, flags), refreshed every

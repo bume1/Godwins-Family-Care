@@ -6166,7 +6166,15 @@
                         {(v.testsOrdered || []).length > 0 && (
                           <div style={{ marginTop: 8 }}>
                             <b style={{ color: 'var(--navy)' }}>Tests ordered</b>
-                            {v.testsOrdered.map((t, i) => <div className="goal" key={i} style={{ padding: '6px 0' }}><i className="ti ti-test-pipe" />{t.type}{t.tests.length ? ` (${t.tests.join(', ')})` : ''} · {t.status}</div>)}
+                            {v.testsOrdered.map((t, i) => <div className="goal" key={i} style={{ padding: '6px 0' }}><i className="ti ti-test-pipe" />{t.type}{t.tests.length ? ` (${t.tests.join(', ')})` : ''}{t.where ? ` with ${t.where}` : ''} · {t.status}</div>)}
+                          </div>
+                        )}
+                        {v.status === 'complete' && (
+                          <div style={{ marginTop: 10 }}>
+                            <button className="btn" style={{ padding: '8px 12px', fontSize: 13 }} onClick={(e) => { e.stopPropagation(); openPdfSecurely(`${API_URL}/api/gfc/clinical/visits/${encodeURIComponent(v.id)}/summary.pdf`, token); }}>
+                              <i className="ti ti-file-download" /> Download visit summary (PDF)
+                            </button>
+                            <div style={{ fontSize: 11.5, color: 'var(--mut)', marginTop: 4 }}>Includes your medications, allergies, next visit and who to call. Print it or share it with your family or care home.</div>
                           </div>
                         )}
                         {v.note && (

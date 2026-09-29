@@ -65,6 +65,10 @@
     phone: '404-913-6705',
     fax: '678-692-7445',
     email: 'admin@godwinsfamilycarellc.com',
+    // A separate after-hours line, when GFC has one. Until then the main line
+    // reaches on-call after hours (the wording the consent packet already uses),
+    // and the after-visit summary says exactly that.
+    afterHoursPhone: null,
     // Open decision 2 for the owner: whether this renders in-app. It is carried
     // here so the answer is a one-line change, not a text rewrite.
     phcpLicense: 'PHCP013073'

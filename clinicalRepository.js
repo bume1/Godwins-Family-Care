@@ -168,6 +168,35 @@ const applyMedRecResolution = (decisions) => {
   return { rows };
 };
 
+// What a reconciliation CHANGED, as rows for the append-only medication_changes
+// log: an add is a start, a discontinue is a stop, and a kept medicine whose
+// dose or frequency differs from the list it replaces is a change. Matched by
+// normalised name only to find the PREVIOUS row of a kept medicine; nothing is
+// inferred about a medicine the clinician did not decide on.
+const medNameKey = (v) => String(v == null ? '' : v).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+const buildMedicationChangeRows = ({ decisions, previous, clientId, encounterUuid, day, at, actor, newId }) => {
+  const prev = new Map((previous || []).filter(m => m && m.name).map(m => [medNameKey(m.name), m]));
+  const rows = [];
+  for (const d of decisions || []) {
+    if (!d || !d.med || !d.med.name) continue;
+    const m = d.med;
+    const base = {
+      clientId, encounterUuid: encounterUuid ? String(encounterUuid) : null, day, at,
+      name: String(m.name).slice(0, 200), dose: String(m.dose || '').slice(0, 100),
+      route: String(m.route || '').slice(0, 60), frequency: String(m.frequency || '').slice(0, 100),
+      by: { id: actor && actor.id, name: actor && (actor.name || actor.email) }
+    };
+    if (d.action === 'add') rows.push({ id: newId(), action: 'started', ...base });
+    else if (d.action === 'discontinue') rows.push({ id: newId(), action: 'stopped', ...base });
+    else if (d.action === 'keep') {
+      const p = prev.get(medNameKey(m.name));
+      const differs = p && ((String(p.dose || '') !== base.dose && base.dose) || (String(p.frequency || '') !== base.frequency && base.frequency));
+      if (differs) rows.push({ id: newId(), action: 'changed', ...base, previous: { dose: p.dose || '', frequency: p.frequency || '' } });
+    }
+  }
+  return rows;
+};
+
 // ---- FHIR display summarizers (for the chart UI) ----
 const codeableText = (cc) => {
   if (!cc) return '';
@@ -1360,7 +1389,9 @@ const deriveEncounterState = (record, attestation) => {
 
 // ---- Prescription recording (Scope C — record only, no transmission) ----
 const RX_ROUTES = ['oral', 'sublingual', 'buccal', 'topical', 'transdermal', 'inhaled', 'intranasal', 'ophthalmic', 'otic', 'rectal', 'vaginal', 'subcutaneous', 'intramuscular', 'intravenous', 'other'];
-const RX_KINDS = ['new', 'refill'];
+const RX_KINDS = ['new', 'refill', 'change'];
+// What each kind is called on screen and on the patient's visit summary.
+const RX_KIND_LABELS = { new: 'New prescription', refill: 'Refill', change: 'Dose or instructions changed' };
 const buildPrescription = ({ id, clientId, puuid, encounterUuid, input, actor, at }) => {
   const i = input || {};
   const drug = String(i.drug || '').trim();
@@ -1443,7 +1474,7 @@ const prescriptionToEmrRow = (rx) => {
   const sched = rx.schedule && rx.schedule !== 'non_controlled' ? ` | ${rx.schedule}` : '';
   const cred = rx.prescriberCredential ? ` ${rx.prescriberCredential}` : '';
   const pdmp = rx.pdmpAttestation && rx.pdmpAttestation.checked ? ` | PDMP checked ${rx.pdmpAttestation.checkedOn}` : '';
-  const tail = ` | ${rx.kind === 'refill' ? 'Refill' : 'New Rx'}${sched} | Prescriber: ${(rx.prescriber && rx.prescriber.name) || 'unknown'}${cred} (NPI ${(rx.prescriber && rx.prescriber.npi) || 'none'})${pdmp}`;
+  const tail = ` | ${rx.kind === 'refill' ? 'Refill' : rx.kind === 'change' ? 'Changed Rx' : 'New Rx'}${sched} | Prescriber: ${(rx.prescriber && rx.prescriber.name) || 'unknown'}${cred} (NPI ${(rx.prescriber && rx.prescriber.npi) || 'none'})${pdmp}`;
   const sig = [rx.dose, rx.route, rx.frequency].filter(Boolean).join(' ');
   const head = [sig ? `Sig: ${sig}` : null, rx.instructions].filter(Boolean).join('. ');
   return {
@@ -2661,6 +2692,7 @@ module.exports = {
   MANUAL_CHECKLIST_STEPS,
   deriveClinicalChecklist,
   buildMedRecView,
+  buildMedicationChangeRows,
   applyMedRecResolution,
   summarizeCondition,
   summarizeAllergy,
@@ -2721,6 +2753,7 @@ module.exports = {
   deriveEncounterState,
   RX_ROUTES,
   RX_KINDS,
+  RX_KIND_LABELS,
   buildPrescription,
   prescriptionToEmrRow,
   resolveEncounterFacility,

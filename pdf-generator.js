@@ -2169,13 +2169,20 @@ async function generateAfterVisitSummaryPDF(d) {
           doc.fillColor(C.muted).font('Helvetica-Bold').fontSize(BODY).text('Your current medications:', L, y, { width: W });
           y += 15;
           bullets(meds.current);
+        } else if (!meds.hiddenCurrent) {
+          paragraph('Your full medication list was not available for this summary. Please ask your care team for your current list.');
         }
       }
 
-      heading('Allergies');
-      if (d.allergies == null) paragraph('Your allergy list was not available for this summary. Please ask your care team.');
-      else if (!d.allergies.length) paragraph('No allergies are on file.');
-      else bullets(d.allergies);
+      // `undefined` = this reader may not see allergies (family sharing), so the
+      // section is left out; `null` = the list could not be read, which is
+      // never printed as "no allergies".
+      if (d.allergies !== undefined) {
+        heading('Allergies');
+        if (d.allergies == null) paragraph('Your allergy list was not available for this summary. Please ask your care team.');
+        else if (!d.allergies.length) paragraph('No allergies are recorded in your chart.');
+        else bullets(d.allergies);
+      }
 
       heading('Tests, referrals and equipment ordered');
       if ((d.orders || []).length) bullets(d.orders);
@@ -2186,7 +2193,8 @@ async function generateAfterVisitSummaryPDF(d) {
 
       heading('Your next visit');
       if (d.nextVisit && d.nextVisit.when) {
-        paragraph([d.nextVisit.when, d.nextVisit.who, d.nextVisit.where].filter(Boolean).join('\n'));
+        paragraph([d.nextVisit.when, d.nextVisit.who, d.nextVisit.where,
+          `As of ${d.nextVisitAsOf || 'when this summary was prepared'}. Call us to confirm or change it.`].filter(Boolean).join('\n'));
       } else {
         paragraph('Your next visit has not been scheduled yet. We will contact you, or call us to set it up.');
       }
