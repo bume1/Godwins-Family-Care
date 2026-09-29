@@ -720,7 +720,7 @@ test('the visit overview is the clinician\'s own words, without the prescription
   assert.equal(patientRead.filterRow('visit', 'full', row.visit).overview, 'We checked your blood pressure.');
   assert.equal('overview' in patientRead.filterRow('visit', 'summary', row.visit), false);
   assert.match(portal, /\{visit\.overview \|\| visit\.summary\}/);
-  assert.match(portal, /<div>\{v\.overview \|\| v\.summary\}<\/div>/);
+  assert.match(portal, /<div style=\{\{ whiteSpace: 'pre-wrap' \}\}>\{v\.overview \|\| v\.summary\}<\/div>/);
 });
 test('the published note carries no raw VITALS shorthand, and the vitals are published on their own', () => {
   const row = patientPublish.buildPublishedVisit({ clientId: 'c', encounterUuid: 'e1', record: RECORD, attestation: ATTESTATION, addenda: [] });

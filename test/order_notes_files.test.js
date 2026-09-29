@@ -207,7 +207,7 @@ test('the page refreshes the chart when an encounter changes or closes', () => {
 
 const liftNotePdf = () => {
   const i = SERVER.indexOf("app.get('/api/clinical/patients/:clientId/encounters/:euuid/note.pdf'");
-  const j = SERVER.indexOf("app.put('/api/clinical/patients/:clientId/encounters/:euuid/note'", i);
+  const j = SERVER.indexOf("// ── After-visit summary: staff download", i);
   assert.ok(i > 0 && j > i);
   const src = SERVER.slice(i, j);
   const routes = {};

@@ -269,6 +269,8 @@
       // query parameter here because a navigation carries no Authorization
       // header (the enrollment-downloads lesson, PR #103) and `authenticateToken`
       // accepts `?token=` for exactly this case.
+      visitSummaryUrl: (clientId, euuid) => `/api/clinical/patients/${clientId}/encounters/${euuid}/visit-summary.pdf?token=${encodeURIComponent(getToken() || '')}`,
+      avsGiven: (clientId, euuid, body) => authedFetch(`/api/clinical/patients/${clientId}/encounters/${euuid}/visit-summary/given`, { method: 'POST', body: JSON.stringify(body) }),
       signedNoteUrl: (clientId, euuid) => `/api/clinical/patients/${clientId}/encounters/${euuid}/note.pdf?token=${encodeURIComponent(getToken() || '')}`,
       requisitionUrl: (orderId) => `/api/clinical/orders/${orderId}/requisition.pdf?token=${encodeURIComponent(getToken() || '')}`,
       // portalHold: false, or { reason } to hold the note from the patient portal.
@@ -4320,7 +4322,7 @@
       );
     };
 
-    const RxForm = ({ routes, onSave, busy, schedules, scheduleLabels, prescriber }) => {
+    const RxForm = ({ routes, onSave, busy, schedules, scheduleLabels, prescriber, kinds, kindLabels }) => {
       // ── Session 4.10 ── THE SCHEDULE HAS NO DEFAULT. The clinician chooses,
       // because the whole control is that a person declared it — a pre-selected
       // "not a controlled substance" is a declaration nobody made.
@@ -4342,7 +4344,7 @@
             </p>
           )}
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2">
-            <Field label="Type"><select className="inp" value={f.kind} onChange={e => setF({ ...f, kind: e.target.value })}><option value="new">New Rx</option><option value="refill">Refill</option></select></Field>
+            <Field label="Type"><select className="inp" value={f.kind} onChange={e => setF({ ...f, kind: e.target.value })}>{(kinds || ['new', 'refill']).map(k => <option key={k} value={k}>{(kindLabels && kindLabels[k]) || k}</option>)}</select></Field>
             <Field label="Drug" className="sm:col-span-2"><input className="inp" value={f.drug} onChange={e => setF({ ...f, drug: e.target.value })} /></Field>
             <Field label="Dose"><input className="inp" placeholder="500 mg" value={f.dose} onChange={e => setF({ ...f, dose: e.target.value })} /></Field>
             <Field label="Route"><select className="inp" value={f.route} onChange={e => setF({ ...f, route: e.target.value })}>{(routes || ['oral']).map(r => <option key={r} value={r}>{r}</option>)}</select></Field>
@@ -5253,6 +5255,48 @@
       );
     };
 
+    // Who a signed visit's after-visit summary was given to. The app records it;
+    // a person hands it over (or faxes it from Doximity). Served vocabularies.
+    const AvsGivenLog = ({ d, busy, onRecord }) => {
+      const canRecord = useCanEditOrderDestination();
+      const [open, setOpen] = useState(false);
+      const channels = d.sendChannels || [];
+      const [f, setF] = useState({ recipientType: 'patient', recipientName: '', channel: 'hand', recipientFax: '' });
+      const isFax = (d.faxSendChannels || []).includes(f.channel);
+      const types = d.avsRecipientTypes || [];
+      const labels = d.avsRecipientLabels || {};
+      const given = d.avsGiven || [];
+      const ok = f.recipientType && f.channel && (f.recipientType === 'patient' || f.recipientName.trim()) && (!isFax || f.recipientFax.trim());
+      return (
+        <div className="mt-2 text-stone-700">
+          {given.length > 0 && (
+            <div className="mb-1">
+              <b>Visit summary given to:</b>
+              {given.map(g => <div key={g.id}>{labels[g.recipientType] || g.recipientType}{g.recipientName ? ` — ${g.recipientName}` : ''} · {(d.sendChannelLabels || {})[g.channel] || g.channel}{g.recipientFax ? ` · ${g.recipientFax}` : ''} · {fmtTs(g.at)}{g.by && g.by.name ? ` · ${g.by.name}` : ''}</div>)}
+            </div>
+          )}
+          {canRecord && !open && <button className="chip border bg-white text-primary border-stone-200" onClick={() => setOpen(true)}><i className="ti ti-send" /> Record who the summary was given to</button>}
+          {canRecord && open && (
+            <div className="grid gap-1.5 mt-1 max-w-md">
+              <select className="inp" value={f.recipientType} onChange={e => setF({ ...f, recipientType: e.target.value })}>
+                {types.map(t => <option key={t} value={t}>{labels[t] || t}</option>)}
+              </select>
+              {f.recipientType !== 'patient' && <input className="inp" placeholder={f.recipientType === 'facility' ? 'Facility and staff name' : 'Name'} value={f.recipientName} onChange={e => setF({ ...f, recipientName: e.target.value })} />}
+              <select className="inp" value={f.channel} onChange={e => setF({ ...f, channel: e.target.value })}>
+                {channels.map(c => <option key={c} value={c}>{(d.sendChannelLabels || {})[c] || c}</option>)}
+              </select>
+              {isFax && <input className="inp" placeholder="Fax number it went to" value={f.recipientFax} onChange={e => setF({ ...f, recipientFax: e.target.value })} />}
+              <div className="flex gap-1.5">
+                <button className="btn gold !py-1 !px-2.5 text-xs" disabled={!ok || busy} onClick={() => Promise.resolve(onRecord(f)).then(r => { if (r) { setOpen(false); setF({ recipientType: 'patient', recipientName: '', channel: 'hand', recipientFax: '' }); } })}>{busy ? 'Saving…' : 'Record'}</button>
+                <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={() => setOpen(false)}>Cancel</button>
+              </div>
+              <p className="text-[10.5px] text-stone-500">This records that you gave it. It does not send anything. Before sending to a facility, check the patient has authorized sharing with that facility.</p>
+            </div>
+          )}
+        </div>
+      );
+    };
+
     const EncounterPanel = ({ patient, euuid, chart, onChartChanged, onBack, onChanged }) => {
       const [d, setD] = useState(null);
       const [err, setErr] = useState('');
@@ -5418,7 +5462,11 @@
               {closed && (
                 <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-2.5 text-xs text-emerald-900 mt-1">
                   <b>Signed {fmtTs(d.attestation.signedAt)} by {npiLabel(d.attestation.signedBy)}{awaitingAddendum ? ' as the note\'s author' : ''}.</b> The note is locked for clinicians. Corrections go in as addenda below, each with its own signer and timestamp.
-                  <div className="mt-1.5"><a className="chip border bg-white text-primary border-stone-200" href={api.signedNoteUrl(patient.id, euuid)} target="_blank" rel="noopener noreferrer"><i className="ti ti-file-download" /> Download note PDF</a></div>
+                  <div className="mt-1.5 flex flex-wrap gap-1.5">
+                    <a className="chip border bg-white text-primary border-stone-200" href={api.signedNoteUrl(patient.id, euuid)} target="_blank" rel="noopener noreferrer"><i className="ti ti-file-download" /> Download note PDF</a>
+                    <a className="chip border bg-white text-primary border-stone-200" href={api.visitSummaryUrl(patient.id, euuid)} target="_blank" rel="noopener noreferrer"><i className="ti ti-file-heart" /> Visit summary for the patient (PDF)</a>
+                  </div>
+                  <AvsGivenLog d={d} busy={busy === 'avs'} onRecord={(body) => run('avs', () => api.avsGiven(patient.id, euuid, body))} />
                   {awaitingAddendum && <div className="mt-1 text-amber-800 font-semibold">Not billable yet — waiting for a clinician addendum from a provider (or an LCSW, for behavioral health).</div>}
                   {!awaitingAddendum && BILLING_STATUS_TEXT[d.billingStatus] && <div className="mt-1 font-semibold">{BILLING_STATUS_TEXT[d.billingStatus]}</div>}
                 </div>
@@ -5532,7 +5580,7 @@
                   </div>
                 ))}
                 {!locked && !canPrescribe && <p className="text-[11px] text-stone-400 mt-2">Prescribing is a provider's — your credential can read what was prescribed but not add to it.</p>}
-                {showRx && !locked && canPrescribe && <RxForm routes={d.rxRoutes} schedules={d.rxSchedules} scheduleLabels={d.rxScheduleLabels} prescriber={d.prescriber} busy={busy === 'rx'} onSave={(f) => run('rx', () => api.addRx(patient.id, euuid, f)).then(onOk(() => setShowRx(false)))} />}
+                {showRx && !locked && canPrescribe && <RxForm routes={d.rxRoutes} kinds={d.rxKinds} kindLabels={d.rxKindLabels} schedules={d.rxSchedules} scheduleLabels={d.rxScheduleLabels} prescriber={d.prescriber} busy={busy === 'rx'} onSave={(f) => run('rx', () => api.addRx(patient.id, euuid, f)).then(onOk(() => setShowRx(false)))} />}
                 <p className="text-[10.5px] text-stone-400 mt-2">Record only — e-prescribing is out of scope; transmission continues as today.</p>
               </div>
             </div>
@@ -5630,6 +5678,8 @@
                 {na.signsAsAuthor && <p className="text-xs text-stone-600">You sign as the note's <b>author</b>. It locks, and it is not billable until a provider — or an LCSW, for a behavioral-health note — adds the clinician addendum. Diagnoses are theirs to confirm.</p>}
                 {!na.signsAsAuthor && <p className="text-xs text-stone-600">Signing locks the note for clinicians and sends it to <b>billing</b>, who add the service codes and submit. You need the note and at least one ICD-10 diagnosis.</p>}
                 {!d.signReadiness.ok && <p className="text-xs text-amber-700">{d.signReadiness.message}{dirty ? ' Save your coding changes first.' : ''}</p>}
+                {!String((d.record && d.record.patientSummary) || '').trim() && !String(facing.patientSummary || '').trim() &&
+                  <p className="text-xs text-amber-700"><i className="ti ti-alert-triangle mr-1" />"What we did today, in plain words" is empty. You can still sign, but the patient's visit summary will have no plain-language account of this visit.</p>}
                 <label className="flex items-start gap-2 text-xs">
                   <input type="checkbox" className="mt-0.5" checked={attest} onChange={e => setAttest(e.target.checked)} />
                   <span>I attest that this documentation is accurate and complete, that I personally performed or directly supervised the services recorded{na.signsAsAuthor ? '' : ', and that the diagnoses are supported by the note'}. Signing as <b>{npiLabel(d.me)}</b>.</span>

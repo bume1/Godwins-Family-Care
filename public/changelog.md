@@ -7,8 +7,7 @@
 ### Version 3.1.0 - September 29, 2026
 
 #### New Features
-- Add admin buttons for MFA reset and OpenEMR disconnect
-- Add a script to export GFC's billed CPT/HCPCS codes and modifiers
+- Open an order to see it, add notes and files; Orders tab shows every type; fix stale Resume draft banner
 
 #### Bug Fixes
 - Fix bugs found in a sweep of the patient portal and clinician workspace
@@ -17,8 +16,14 @@
 - Let the office and case managers update where an order goes
 
 #### Changes
+- After-visit summary: patient download waits for the visit to be published; tests follow the merged portal markup
+- After-visit summary: downloadable PDF for staff and patient, med changes, allergies, next visit, contacts, 911
+- After-visit summary, part 2: allergy strip bug, referral and equipment order labels
+- After-visit summary, part 1: keep line breaks in patient-facing text, PDF renderer
 - Portal P1: visit overview without repeats, no VITALS shorthand in the note, family label
 - Portal P1: patients read published copies, not OpenEMR
+- Signed note PDF: practice logo in the header bar, title reads Clinical Note
+- Download the signed note as a PDF; show the requisition greyed while the agency is pending
 - Let a referral be placed before the agency is known
 - Stop flagging coded problems as having no ICD-10 code
 - Let a clinician book a visit without reading OpenEMR's facility list
@@ -31,10 +36,6 @@
 - Show a draft note's vitals in the chart, and keep an older note's vitals when someone else edits it
 - Record Session 4.13 as merged in PR #133
 - Shared clinical notes: one draft, Sign & submit, clinician addendum, carry-forward
-- Auto-file client documents to OpenEMR; remove the manual button
-- File a client document into OpenEMR, or move it to a caregiver's file
-- Wire the Bedrock transport modelEngine.js has been waiting for
-- Center the clinical workspace's capped-width content areas on desktop
 
 
 ### Version 3.1.0 - September 27, 2026
