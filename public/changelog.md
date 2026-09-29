@@ -16,6 +16,7 @@
 - Let the office and case managers update where an order goes
 
 #### Changes
+- Medication reconciliation writes kept and added home medications to OpenEMR prescriptions
 - After-visit summary: patient download waits for the visit to be published; tests follow the merged portal markup
 - After-visit summary: downloadable PDF for staff and patient, med changes, allergies, next visit, contacts, 911
 - After-visit summary, part 2: allergy strip bug, referral and equipment order labels
@@ -35,7 +36,6 @@
 - Show the clinical note as one note in clinical order, and allow 'unable to take' for a BP arm
 - Show a draft note's vitals in the chart, and keep an older note's vitals when someone else edits it
 - Record Session 4.13 as merged in PR #133
-- Shared clinical notes: one draft, Sign & submit, clinician addendum, carry-forward
 
 
 ### Version 3.1.0 - September 27, 2026
