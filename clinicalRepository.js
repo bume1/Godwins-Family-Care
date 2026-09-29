@@ -864,6 +864,10 @@ const summarizeAppointmentRow = (row, linkedEncounterUuid, now) => {
 const ICD10_RE = /^[A-Z][0-9][0-9A-Z](\.[0-9A-Z]{1,4})?$/;
 const normalizeIcd10 = (raw) => {
   let s = String(raw || '').trim().toUpperCase().replace(/^ICD10:/, '').replace(/\s+/g, '');
+  // OpenEMR's code search returns a three-character code as "R55. " / "I10. "
+  // — a dangling period with nothing after it. Drop it rather than refuse a
+  // code the clinician picked straight off OpenEMR's own list.
+  s = s.replace(/\.+$/, '');
   // Accept the undotted form clinicians often type ("E119" → "E11.9")
   if (/^[A-Z][0-9][0-9A-Z][0-9A-Z]{1,4}$/.test(s)) s = `${s.slice(0, 3)}.${s.slice(3)}`;
   return ICD10_RE.test(s) ? s : null;

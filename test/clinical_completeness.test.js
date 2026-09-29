@@ -35,6 +35,15 @@ test('ICD-10 normalization accepts real formats, dots the undotted form, rejects
   assert.equal(R.normalizeIcd10('e119'), 'E11.9');
   assert.equal(R.normalizeIcd10(' ICD10:Z79.899 '), 'Z79.899');
   assert.equal(R.normalizeIcd10('I10'), 'I10');
+  // OpenEMR's code search returns three-character codes with a dangling
+  // period and padding ("R55. "); picking one off that list must not refuse.
+  assert.equal(R.normalizeIcd10('R55. '), 'R55');
+  assert.equal(R.normalizeIcd10('I10.'), 'I10');
+  assert.equal(R.normalizeIcd10('E11.9.'), 'E11.9');
+  assert.equal(R.normalizeIcd10('.'), null);
+  assert.ok(!R.buildEncounterDiagnoses([{ code: 'R55. ' }, { code: 'I10.' }]).error);
+  assert.equal(require('../orderRequisitions').normalizeIcd10('I10. '), 'I10');
+  assert.equal(require('../standingOrders').normalizeIcd10('R55.'), 'R55');
   assert.equal(R.normalizeIcd10('12345'), null);
   assert.equal(R.normalizeIcd10('E'), null);
   assert.equal(R.normalizeIcd10(''), null);
