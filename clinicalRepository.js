@@ -394,6 +394,19 @@ const summarizeVitalObservation = (r) => {
     : (r.component || []).map(c => `${codeableText(c.code)} ${(c.valueQuantity || {}).value ?? ''}`).join(' / ');
   return { id: r.id, name: codeableText(r.code), value: val, at: r.effectiveDateTime || null };
 };
+// OpenEMR's FHIR vitals include rows that carry no reading at all: the panel
+// row that groups a visit's vitals, "Temperature Location", and an oxygen row
+// whose flow-rate components are empty. Listed, they read as clutter beside
+// the real numbers (owner report, 2026-09-28). A row is kept only when it
+// carries a value — decided from the resource, not from the text, since a
+// label like "SpO2" has a digit in it.
+const hasVitalReading = (r) => {
+  const present = (q) => !!q && q.value !== undefined && q.value !== null && String(q.value).trim() !== '';
+  if (!r) return false;
+  if (present(r.valueQuantity)) return true;
+  return (r.component || []).some(c => present(c.valueQuantity));
+};
+const summarizeVitalObservations = (rows) => (rows || []).filter(hasVitalReading).map(summarizeVitalObservation);
 
 // OpenEMR's SOAP validator accepts an empty section but rejects a 1-character
 // one (lengthBetween 2..65535, answered as HTTP 200 + a validation map). Treat
@@ -2583,6 +2596,8 @@ module.exports = {
   buildChartDocumentIndex,
   CHART_DOC_SOURCE,
   summarizeVitalObservation,
+  summarizeVitalObservations,
+  hasVitalReading,
   buildHpWrites,
   sanitizeNoteDraft,
   buildNoteDraft,

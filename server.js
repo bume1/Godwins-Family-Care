@@ -8395,7 +8395,7 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
         carePlans: take(carePlans, r => ({ id: r.id, status: r.status, description: r.description || null })),
         // The EMR half, and then the whole list — see chartDocuments below.
         documents: take(documents, clinicalRepo.summarizeDocument),
-        vitals: take(vitals, clinicalRepo.summarizeVitalObservation)
+        vitals: (() => { const t = take(vitals, clinicalRepo.summarizeVitalObservation); return t.ok ? { ...t, rows: clinicalRepo.summarizeVitalObservations(vitals.value) } : t; })()
       },
       // Readings on a saved note that is not signed yet — not in OpenEMR's
       // vitals form until signing, so shown from the note, marked as a draft.
@@ -12544,7 +12544,9 @@ app.get('/api/clinical/patients/:clientId/pre-visit', authenticateToken, require
       const problemsTake = take(problems, clinicalRepo.summarizeCondition);
       activeProblems = problemsTake.ok ? problemsTake.rows.slice(0, 12) : [];
       if (!problemsTake.ok) emrNotice = 'Some chart sections could not be read.';
-      const vitalsTake = take(vitals, clinicalRepo.summarizeVitalObservation);
+      const vitalsTake = vitals.status === 'fulfilled'
+        ? { ok: true, rows: clinicalRepo.summarizeVitalObservations(vitals.value) }
+        : take(vitals, clinicalRepo.summarizeVitalObservation);
       lastVitals = vitalsTake.ok && vitalsTake.rows.length ? vitalsTake.rows[vitalsTake.rows.length - 1] : null;
       banner = clinicalRepo.buildPatientBanner({
         client, linked: true, emrAllergies: take(allergies, clinicalRepo.summarizeAllergy),

@@ -244,6 +244,13 @@ This file is auto-loaded at the start of every Claude Code session. Read it firs
 
 ## Recent decisions
 
+**09/2026 — Vitals no longer show twice, and "n/a/n/a" reads back as a reason (owner report with screenshot, 2026-09-28).** The chart's Vitals panel listed an older note's readings once as "Draft — not yet in OpenEMR" and again from OpenEMR, plus empty OpenEMR rows.
+- **An older note's readings are already in OpenEMR.** `draftVitalsRows` now returns nothing when `legacyVitals` is set and nothing OpenEMR stores has changed. Change a reading and it shows as a draft until signing, as before.
+- **`vitalsNeedRow` compares what the OpenEMR row would hold** (`buildVitalsRow`'s numbers), not the form. Ticking "Unable to take" on an arm that never had a number, or editing a reason, writes no second row.
+- **`parseLegacyVitals` split on the first slash**, so "BP left arm n/a/n/a" became a systolic of "n" and a diastolic of "a/n/a". An arm now reads as a plain reading, as "unable to obtain (reason)", or, for anything else, as unable with the reason `Recorded as "<text>" on the original note` so the words survive. A draft already saved with "n" / "a/n/a" is fixed by ticking Unable to take; it writes no duplicate row.
+- **OpenEMR vitals rows with no reading are dropped** (`clinicalRepository.summarizeVitalObservations` / `hasVitalReading`): the panel row, Temperature Location, and an oxygen row with empty flow-rate parts. Decided from the resource, not the text, and a reading of 0 is kept. Chart and pre-visit both use it.
+- **Verified:** 4 new tests, 10 of 10 mutations caught; two probe checks that expected the double listing were repointed (unchanged → not a draft; changed → a draft; back → signs with no second row). Full suite 1680 (0 failing); notes probe 104/104, orders 82/82, roles 57/57.
+
 **09/2026 — A mistaken encounter can be deleted, with a reason — unsigned only (owner, 2026-09-28).** "Discard draft" became **Delete encounter**. Owner decision: signed notes are NOT deletable — they are part of the legal record and possibly a claim, and are corrected by addendum.
 - **OpenEMR's API cannot erase an encounter**, so delete VOIDS it there (the narrative reads "ENTERED IN ERROR — encounter deleted by <name> — <time> — <reason>"), hides it from every list in the app, and keeps who/when/why on the record. A reason is required.
 - **Refused while something real hangs off it** (`clinicalNotes.checkEncounterDeletable`): an order not yet cancelled, or any prescription — the refusal names each one. Cancel the order first; a prescription cannot be removed here, so that note is signed and corrected by addendum.
