@@ -3,6 +3,7 @@
  * Uses pdfkit to generate professional PDF documents
  */
 
+const path = require('path');
 const PDFDocument = require('pdfkit');
 const { PDFDocument: PDFLib, StandardFonts, rgb } = require('pdf-lib');
 const consentText = require('./public/consent-text');   // approved consent bodies, versioned (Session 4.6)
@@ -1918,11 +1919,14 @@ async function generateSignedNotePDF(d) {
       const room = (h) => { if (y + h > BOTTOM) { doc.addPage(); y = 48; } };
 
       // Header — who and which visit, on the first page.
-      doc.rect(L, y, W, 30).fill(C.navy);
-      doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(13).text('Clinical note', L + 12, y + 9);
-      doc.fillColor(C.gold).font('Helvetica').fontSize(8.5)
-        .text('Godwins Family Care LLC', L, y + 11, { width: W - 12, align: 'right' });
-      y += 40;
+      // The practice's own logo (white lockup, trimmed to its artwork) sits at
+      // the right of the bar; the title stays at the left.
+      const HEADER_H = 40, LOGO_H = 26, LOGO_W = Math.round(LOGO_H * 1021 / 334);
+      doc.rect(L, y, W, HEADER_H).fill(C.navy);
+      doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(14).text('Clinical Note', L + 12, y + 13);
+      doc.image(path.join(__dirname, 'public', 'brand', 'logo-full-white-trimmed.png'),
+        R - 12 - LOGO_W, y + (HEADER_H - LOGO_H) / 2, { width: LOGO_W, height: LOGO_H });
+      y += HEADER_H + 10;
       const meta = [
         ['Patient', d.patientName], ['Date of birth', d.dob], ['Visit date', d.visitDate],
         ['Visit', d.visitLabel], ['Encounter', d.encounterId]

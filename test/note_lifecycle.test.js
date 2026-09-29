@@ -445,6 +445,11 @@ test('the signed-note PDF carries the note, the signer and every co-signer', asy
   assert.match(text, /Bethel Godwins, FNP/);
   assert.match(text, /Mara Shaw, LMSW/);
   assert.doesNotMatch(text, /\*\*Fall/, 'formatting markers never print');
+  // The header: the title reads "Clinical Note" and the practice's logo, not a
+  // typed company name, sits in the bar.
+  assert.match(text, /Clinical Note/);
+  assert.doesNotMatch(text, /Godwins Family Care LLC/);
+  assert.ok(buf.toString('latin1').includes('/Subtype /Image'), 'the logo image is embedded');
 });
 
 test('the PDF signature block is drawn in bold', () => {
