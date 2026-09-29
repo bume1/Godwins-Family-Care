@@ -2053,6 +2053,39 @@ const mergeCandidateSources = (candidates, priorRecords) => {
   return out;
 };
 
+// The FHIR Condition read on this instance drops the ICD-10 coding, so a
+// problem that plainly carries a code in OpenEMR reads back uncoded and the
+// chart told the clinician to code something already coded (owner report,
+// 2026-09-29: "19 problems have no ICD-10 code" under 19 coded diagnoses).
+// The standard API's medical_problem row carries it ("ICD10:E87.1", sometimes
+// several joined by ";"), keyed by the same uuid the FHIR Condition id is.
+// This encounter's own diagnoses are the second source: a problem coded on
+// the note being written is coded, even before the next read-back.
+const icd10FromProblemRow = (row) => {
+  for (const part of String((row && row.diagnosis) || '').split(/[;,]/)) {
+    if (!/^\s*ICD10:/i.test(part)) continue;
+    const code = normalizeIcd10(part);
+    if (code) return code;
+  }
+  return null;
+};
+const fillCandidateCodes = (candidates, { problemRows, currentDiagnoses } = {}) => {
+  const byRow = new Map();
+  for (const r of problemRows || []) {
+    const code = icd10FromProblemRow(r);
+    if (code && r && r.uuid) byRow.set(String(r.uuid), code);
+  }
+  const byCurrent = new Map((currentDiagnoses || [])
+    .filter(d => d && d.code && d.problemUuid).map(d => [String(d.problemUuid), d.code]));
+  return (candidates || []).map(c => {
+    if (!c || c.code || !c.problemUuid) return c;
+    const uuid = String(c.problemUuid);
+    const code = byRow.get(uuid) || byCurrent.get(uuid) || null;
+    if (!code) return c;
+    return { ...c, code, preselected: true, needsCode: false, codeVia: byRow.has(uuid) ? 'openemr_problem_row' : 'this_encounter' };
+  });
+};
+
 // ---- Coding assist T2: per-clinician usage-ranked favorites (spec §8) ----
 // Usage rows: { userId, set: 'ICD10'|'CPT4'|'HCPCS', code, description, count, lastUsedAt }
 const CODE_SETS = ['ICD10', 'CPT4', 'HCPCS'];
@@ -2701,6 +2734,8 @@ module.exports = {
   advanceOrderStatus,
   buildCandidateDiagnoses,
   mergeCandidateSources,
+  icd10FromProblemRow,
+  fillCandidateCodes,
   CODE_SETS,
   recordCodeUsage,
   rankFavorites,

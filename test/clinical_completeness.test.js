@@ -492,3 +492,43 @@ test('G4: the allergy write sends a plain date and refuses a silent no-op', () =
   assert.match(fn, /slice\(0,\s*10\)/, 'begdate must be trimmed to a plain date');
   assert.match(fn, /validationErrors/, 'the allergy write must check the body, not the status code');
 });
+
+// ---- Owner report 2026-09-29: "19 problems have no ICD-10 code" under 19 coded diagnoses ----
+test('T1 fill: a problem the FHIR read left uncoded takes its code from OpenEMR\'s own problem row, then from this note', () => {
+  const candidates = R.buildCandidateDiagnoses([
+    { id: 'u-hyp', title: 'Hypo-osmolality and hyponatremia', code: null, status: 'active' },
+    { id: 'u-r55', title: 'Syncope and collapse', code: null, status: 'active' },
+    { id: 'u-none', title: 'Never coded anywhere', code: null, status: 'active' }
+  ]);
+  const filled = R.fillCandidateCodes(candidates, {
+    problemRows: [
+      { uuid: 'u-hyp', diagnosis: 'ICD10:E87.1' },
+      { uuid: 'u-none', diagnosis: '' },
+      { uuid: 'u-other', diagnosis: 'SNOMED:123;ICD10:I10' }
+    ],
+    currentDiagnoses: [{ code: 'R55', problemUuid: 'u-r55' }, { code: 'I10', problemUuid: null }]
+  });
+  assert.deepEqual(filled.map(c => [c.problemUuid, c.code, c.preselected, c.needsCode, c.codeVia || null]), [
+    ['u-hyp', 'E87.1', true, false, 'openemr_problem_row'],
+    ['u-r55', 'R55', true, false, 'this_encounter'],
+    ['u-none', null, false, true, null]
+  ]);
+  assert.equal(R.icd10FromProblemRow({ diagnosis: 'SNOMED:123;ICD10:I10' }), 'I10', 'the ICD-10 part of a multi-code row');
+  assert.equal(R.icd10FromProblemRow({ diagnosis: 'ICD10:R55. ' }), 'R55', 'OpenEMR\'s dangling period is dropped');
+  assert.equal(R.icd10FromProblemRow({}), null);
+  assert.equal(R.icd10FromProblemRow({ diagnosis: 'E11.9' }), null, 'a code naming no code system is not assumed to be ICD-10');
+  // A code FHIR did return is never overwritten.
+  const kept = R.fillCandidateCodes([{ code: 'E11.9', problemUuid: 'u-hyp' }], { problemRows: [{ uuid: 'u-hyp', diagnosis: 'ICD10:E87.1' }] });
+  assert.equal(kept[0].code, 'E11.9');
+});
+
+test('T1 fill is wired: the candidate loader reads OpenEMR\'s problem rows and this note, and the chart never flags a problem already on the note', () => {
+  const fs = require('fs'); const path = require('path');
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const loader = server.slice(server.indexOf('const loadDxCandidates ='), server.indexOf('// Common loader: clinical client'));
+  assert.match(loader, /problemRows = await emr\.getProblemRows\(client\.openEmrPatientId\)/);
+  assert.match(loader, /clinicalRepo\.fillCandidateCodes\(clinicalRepo\.buildCandidateDiagnoses\(problems\), \{\s*problemRows, currentDiagnoses: current \? current\.diagnoses : \[\]/);
+  assert.match(loader, /mergeCandidateSources\(base, prior\)/);
+  const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'clinical.html'), 'utf8');
+  assert.match(page, /const uncoded = \(candidates \|\| \[\]\)\.filter\(c => !c\.code && !\(c\.problemUuid && onNote\.has\(c\.problemUuid\)\)\);/);
+});
