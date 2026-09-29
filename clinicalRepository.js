@@ -277,6 +277,7 @@ const summarizeDocument = (r) => ({
 // clinician needs to see. `openable: false` on an EMR row is not a bug in this
 // list; it is the EMR read gap, named on the row rather than hidden by omitting
 // it. Omitting it would tell the clinician the document does not exist.
+const clientDocs = require('./clientDocuments');
 const CHART_DOC_SOURCE = { APP: 'app', EMR: 'emr' };
 
 const buildChartDocumentIndex = (input) => {
@@ -284,6 +285,11 @@ const buildChartDocumentIndex = (input) => {
     client = {}, emrRows = [], carePlanVersions = [], roiAuthorizations = [],
     clientUploads = [], consentDefs = [], consentSatisfied = () => false
   } = input || {};
+  // WHO IS READING (owner, 2026-09-29). The patient's own list is not the
+  // chart: it carries what they sent, what staff deliberately shared, and the
+  // documents they signed. Never what lives only in OpenEMR — results before
+  // review, signed clinical notes and faxes are released by a person.
+  const forPatient = input && input.audience === 'patient';
 
   const rows = [];
   const consents = client.consents || {};
@@ -350,6 +356,11 @@ const buildChartDocumentIndex = (input) => {
   //    of anything and showing it in a chart would mislead.
   for (const u of clientUploads) {
     if (!u || u.clientId !== client.id || u.status === 'rejected') continue;
+    // A removed upload is gone from every list; the row stays in the store as
+    // the record of who removed it and why.
+    if (clientDocs.isRemoved(u)) continue;
+    if (forPatient && !clientDocs.patientCanSee(u)) continue;
+    const staffFiled = clientDocs.isStaffFiled(u);
     // This is also what makes a `readable` flag unnecessary on the row below: a
     // rejected document never reaches the chart at all, so nothing downstream
     // can offer to read one. A field that is always true reads like a guard and
@@ -357,7 +368,12 @@ const buildChartDocumentIndex = (input) => {
     rows.push({
       id: `upload:${u.id}`,
       title: u.fileName || 'Client document',
-      category: 'From the client',
+      // It said "From the client" on every row, including the ones the office
+      // filed — which is how a staff-scanned medical summary read as if the
+      // patient had sent it.
+      category: forPatient
+        ? (staffFiled ? 'From your care team' : 'You sent this')
+        : (staffFiled ? 'Filed by staff' : 'From the client'),
       date: u.uploadedAt || null,
       contentType: u.mimeType || null,
       source: CHART_DOC_SOURCE.APP,
@@ -379,8 +395,10 @@ const buildChartDocumentIndex = (input) => {
       kind: u.kind || null,
       // WHO FILED IT. A reviewer weighs a document the client sent differently
       // from one the office scanned in, and the read should say which it is.
-      filedBy: u.source === 'staff' ? 'staff' : 'client',
-      note: u.status === 'accepted' ? null : 'Not yet reviewed'
+      filedBy: staffFiled ? 'staff' : 'client',
+      // Whether the patient can see it. Always true for their own upload.
+      sharedWithPatient: clientDocs.patientCanSee(u),
+      note: forPatient ? null : (u.status === 'accepted' ? null : 'Not yet reviewed')
     });
   }
 
@@ -394,10 +412,20 @@ const buildChartDocumentIndex = (input) => {
   //    a different fact from one that cannot be opened at all, and a clinician
   //    who is told the wrong one goes looking for the wrong problem.
   const emrReadSupported = !!input.emrReadSupported;
-  for (const r of emrRows) {
+  // Every upload is now filed into OpenEMR automatically, so the same file came
+  // back a second time as an OpenEMR row. The app's row already says "In EMR";
+  // its OpenEMR copy is dropped here, matched on the file name it was filed
+  // under. A REMOVED upload's copy is kept: the API cannot delete it from
+  // OpenEMR, so the chart must still show that it is there.
+  const filedCopies = new Set(clientUploads
+    .filter(u => u && u.clientId === client.id && u.emrFiled && !clientDocs.isRemoved(u) && u.fileName)
+    .map(u => String(u.fileName)));
+  for (const r of (forPatient ? [] : emrRows)) {
+    const title = r.description || r.name || 'Document';
+    if (filedCopies.has(String(title))) continue;
     rows.push({
       id: `emr:${r.id}`,
-      title: r.description || r.name || 'Document',
+      title,
       category: 'In the EMR',
       date: r.date || null,
       contentType: r.contentType || r.mimetype || null,

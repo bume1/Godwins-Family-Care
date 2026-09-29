@@ -241,9 +241,18 @@ test('the staff filing door is admin OR clinician, never the wider staff gate', 
 test('the checklist is derived, never stored', () => {
   // A stored copy goes stale the moment the service line changes. Both the
   // client view and the staff view call the same builder.
-  assert.match(SERVER, /const buildDocumentChecklist = \(client, uploads, requests\)/);
-  assert.equal((SERVER.match(/buildDocumentChecklist\(client, uploads, requests\)/g) || []).length, 2,
-    'the client and staff views must read the same derivation');
+  assert.match(SERVER, /const buildDocumentChecklist = \(client, uploads, requests, opts = \{\}\)/);
+  // The client's view and the staff view call the SAME builder. Since
+  // 2026-09-29 the client's view passes its audience, so it lists only the
+  // files the patient may see; the staff view passes none and sees them all.
+  const clientRoute = SERVER.slice(SERVER.indexOf("app.get('/api/gfc/documents', authenticateToken"),
+    SERVER.indexOf("app.post('/api/gfc/documents/upload', authenticateToken"));
+  assert.match(clientRoute, /buildDocumentChecklist\(client, uploads, requests, \{ audience: 'patient' \}\)/,
+    'the client view must ask for the patient audience');
+  const staffRoute = SERVER.slice(SERVER.indexOf("app.get('/api/gfc/admin/enrollment/:clientId/documents', authenticateToken"),
+    SERVER.indexOf("app.post('/api/gfc/admin/enrollment/:clientId/documents/upload'"));
+  assert.match(staffRoute, /buildDocumentChecklist\(client, uploads, requests\)/,
+    'the staff view reads the same derivation, unfiltered');
   assert.ok(!/client_document_checklist/.test(SERVER), 'nothing may persist a checklist');
 });
 
