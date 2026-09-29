@@ -357,13 +357,31 @@ const HP_NOTE = {
   check('the OpenEMR note still carries the vitals after the save', /VITALS — BP right arm 132\/82; BP left arm 128\/80; HR 76/.test(narrativeText(legacyEuuid)), narrativeText(legacyEuuid).slice(0, 300));
   check('the readings filed the old way are remembered', record(legacyEuuid).legacyVitals && record(legacyEuuid).legacyVitals.bpRightSys === '132');
 
+  // Unchanged, those readings are already in OpenEMR's vitals — listing them
+  // again as a draft showed every vital twice (owner report, 2026-09-28).
   r = await call('GET', `${P}/chart`, tok.rn);
-  const drafts = (r.body && r.body.draftVitals) || [];
-  check('the chart shows the unsigned note\'s vitals, marked draft', r.status === 200 && drafts.some(d => d.encounterUuid === legacyEuuid && d.draft === true && /132\/82/.test(d.value)), { status: r.status, drafts });
+  let drafts = (r.body && r.body.draftVitals) || [];
+  check('the older note\'s unchanged vitals are not listed a second time as a draft', r.status === 200 && !drafts.some(d => d.encounterUuid === legacyEuuid), { status: r.status, drafts });
   check('a signed note\'s vitals are not shown as a draft', !drafts.some(d => d.encounterUuid === hp || d.encounterUuid === cf));
   r = await call('GET', `${P}/pre-visit`, tok.rn);
-  const lv = r.body && r.body.packet && r.body.packet.lastVitals;
+  let lv = r.body && r.body.packet && r.body.packet.lastVitals;
+  check('"Last vitals" does not offer them as a draft either', r.status === 200 && !(lv && lv.draft), { status: r.status, lv });
+  // Change one reading: now it IS news, and shows as a draft until signed.
+  r = await call('GET', `${P}/encounters/${legacyEuuid}/note`, tok.fnp);
+  let cur = r.body;
+  r = await call('PUT', `${P}/encounters/${legacyEuuid}/note`, tok.fnp, { note: { ...cur.note, vitals: { ...cur.note.vitals, hr: '88' } }, baseVersion: record(legacyEuuid).noteVersion });
+  check('a changed reading saves', r.status === 200, r.body);
+  r = await call('GET', `${P}/chart`, tok.rn);
+  drafts = (r.body && r.body.draftVitals) || [];
+  check('the chart shows the changed readings, marked draft', drafts.some(d => d.encounterUuid === legacyEuuid && d.draft === true && /132\/82/.test(d.value)) && drafts.some(d => d.encounterUuid === legacyEuuid && /88/.test(d.value)), drafts);
+  r = await call('GET', `${P}/pre-visit`, tok.rn);
+  lv = r.body && r.body.packet && r.body.packet.lastVitals;
   check('"Last vitals" shows the draft readings too', r.status === 200 && lv && lv.draft === true && /Blood pressure right 132\/82/.test(lv.value), { status: r.status, lv });
+  // Put it back, so signing below proves the unchanged case writes no row.
+  r = await call('GET', `${P}/encounters/${legacyEuuid}/note`, tok.fnp);
+  cur = r.body;
+  r = await call('PUT', `${P}/encounters/${legacyEuuid}/note`, tok.fnp, { note: { ...cur.note, vitals: { ...cur.note.vitals, hr: '76' } }, baseVersion: record(legacyEuuid).noteVersion });
+  check('and back to the original reading', r.status === 200, r.body);
 
   const vitalsBefore = EMR.vitals.filter(v => v.euuid === legacyEuuid).length;
   r = await call('POST', `${P}/encounters/${legacyEuuid}/sign`, tok.rn, { attest: true });
