@@ -5871,6 +5871,9 @@
                       {e.noteStatus === 'draft' && <span className="chip bg-amber-50 text-amber-800">DRAFT — editable</span>}
                       {e.noteStatus === 'voided' && <span className="chip bg-stone-100 text-stone-500" title={e.deleted ? `Deleted by ${e.deleted.byName} — ${e.deleted.reason}` : ''}>DELETED</span>}
                       {e.awaitingAddendum && <span className="chip bg-amber-50 text-amber-800">AWAITING CLINICIAN ADDENDUM</span>}
+                      {e.signedAt && !e.awaitingAddendum && e.noteStatus !== 'voided' && !e.portalPublished && (
+                        <span className="chip bg-amber-50 text-amber-800" title={e.portalPublishError ? `Last publish failed: ${e.portalPublishError}` : 'Open the visit and press Publish to portal on its Sign step'}>NOT ON PORTAL</span>
+                      )}
                       {e.appointmentEid
                         ? <span className="chip bg-primary-50 text-primary" title="Attached to an appointment"><i className="ti ti-calendar-check" /></span>
                         : <span className="chip bg-stone-100 text-stone-500" title="Not attached to an appointment">unscheduled</span>}

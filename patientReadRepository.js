@@ -79,7 +79,7 @@ const FILTER_MAP = Object.freeze({
   // reviewed it. Never the app's own interpretation flag or inbox summary.
   result: { full: ['id', 'label', 'resultDate', 'performedBy', 'reviewStatus', 'reviewedBy', 'reviewedAt', 'patientNote', 'hasFile'] },
   carePlan: {
-    full: ['version', 'problems', 'goals', 'eachVisit', 'visitFrequency', 'visitDays', 'visitTimes', 'duration', 'chargePlanNote', 'effectiveDate', 'targetDate',
+    full: ['version', 'problems', 'goals', 'eachVisit', 'visitFrequency', 'visitDays', 'visitTimes', 'duration', 'effectiveDate', 'targetDate',
       'authoredBy', 'authoredAt', 'visitSchedule', 'careTier', 'careTierLabel', 'coSignedAt', 'coSignedBy', 'rnSignedAt', 'rnName', 'updatedAt', 'updatedBy', 'primaryCaregiver', 'careTeam', 'authorizedServices', 'signedPdf'],
     summary: ['version', 'goals', 'eachVisit', 'visitSchedule', 'effectiveDate', 'careTierLabel', 'coSignedAt', 'authoredBy', 'signedPdf']
   }

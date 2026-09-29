@@ -66,8 +66,30 @@ const isStructuredRecordNote = (soap, structuredNoteSid) => !!soap && (
 // Each section is undefined when it was NOT READ this time (a failed read), so
 // mergeChart keeps what was published before rather than telling a patient
 // their allergy list is now empty.
-const INACTIVE_MED = new Set(['stopped', 'cancelled', 'entered-in-error']);
-const buildPublishedChart = ({ clientId, problems, allergies, medications, vitals, at, by, sourceEncounterUuid, sourceVisitDate, sourcePuuid, partial }) => {
+// 'completed' is how FHIR reports a list medicine given an end date, which is
+// what medication reconciliation's "discontinue" writes. A stopped medicine on
+// a patient's current list is a wrong fact, not a missing one.
+const INACTIVE_MED = new Set(['stopped', 'cancelled', 'entered-in-error', 'completed']);
+const INACTIVE_PROBLEM = new Set(['resolved', 'inactive', 'remission', 'entered-in-error']);
+const INACTIVE_ALLERGY = new Set(['resolved', 'inactive', 'refuted', 'entered-in-error']);
+const statusOf = (s) => String(s || '').trim().toLowerCase();
+const cleanText = (v) => String(v == null ? '' : v).replace(/\s+/g, ' ').trim();
+const medKey = (v) => cleanText(v).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+const sameMed = (a, b) => { const x = medKey(a), y = medKey(b); return !!x && !!y && (x === y || x.startsWith(`${y} `) || y.startsWith(`${x} `)); };
+const appMedRow = (m, i) => ({
+  id: `app:${i}`, name: [cleanText(m.name), cleanText(m.dose)].filter(Boolean).join(' '),
+  instructions: [cleanText(m.route), cleanText(m.frequency)].filter(Boolean).join(' · ') || null,
+  status: 'active', since: null
+});
+// A medicine a clinician KEPT at reconciliation lives only in the app's list
+// (reconciliation writes OpenEMR only for adds and stops), so a chart read from
+// OpenEMR alone would leave it off the patient's list. Only once reconciled:
+// before that, the app's list is what the family reported and is not the chart.
+const reconciledAppMeds = (client) => {
+  if (!client || !client.medRecLast) return [];
+  return (Array.isArray(client.medications) ? client.medications : []).filter(m => m && cleanText(m.name));
+};
+const buildPublishedChart = ({ clientId, problems, allergies, medications, appMedications, vitals, at, by, sourceEncounterUuid, sourceVisitDate, sourcePuuid, partial }) => {
   const out = { clientId, publishedAt: at || new Date().toISOString(), publishedBy: personName(by) };
   // WHICH OpenEMR patient this was read from. A client relinked to the right
   // chart must never keep showing sections read from the wrong one.
@@ -78,17 +100,53 @@ const buildPublishedChart = ({ clientId, problems, allergies, medications, vital
   if (sourceEncounterUuid !== undefined) out.sourceEncounterUuid = sourceEncounterUuid || null;
   if (sourceVisitDate !== undefined) out.publishedFromVisitDate = sourceVisitDate || null;
   if (Array.isArray(problems)) {
-    out.problems = problems.map(clinicalRepo.summarizeCondition).map(patientRead.summarizeProblemForPatient);
+    out.problems = problems.map(clinicalRepo.summarizeCondition)
+      .filter(p => !INACTIVE_PROBLEM.has(statusOf(p.status)))
+      .map(patientRead.summarizeProblemForPatient);
   }
   if (Array.isArray(allergies)) {
-    out.allergies = allergies.map(clinicalRepo.summarizeAllergy).map(patientRead.summarizeAllergyForPatient);
+    out.allergies = allergies.map(clinicalRepo.summarizeAllergy)
+      .filter(a => !INACTIVE_ALLERGY.has(statusOf(a.status)))
+      .map(patientRead.summarizeAllergyForPatient);
   }
   if (Array.isArray(medications)) {
-    out.medications = medications.map(clinicalRepo.summarizeMedicationRequest)
-      .filter(m => !INACTIVE_MED.has(String(m.status || '')))
+    const fromChart = medications.map(clinicalRepo.summarizeMedicationRequest)
+      .filter(m => !INACTIVE_MED.has(statusOf(m.status)))
       .map(patientRead.summarizeMedicationForPatient);
+    const extra = (appMedications || []).filter(m => !fromChart.some(c => sameMed(c.name, m.name))).map(appMedRow);
+    out.medications = fromChart.concat(extra);
   }
   if (vitals) out.vitals = vitals;
+  return out;
+};
+// What the app already holds, for a section no chart has been published into
+// yet. Shown LABELLED with where it came from, never as the clinical record:
+// a medicine list a clinician reconciled, or what the family reported at
+// enrollment. It is the client's own information, and "your care team will add
+// this after a visit" over a list they gave us reads as the portal losing it.
+// Each value is null when the app holds nothing for that section.
+const NONE_WORDS = /^(none|no|nka|nkda|n\/a|na|no known( drug)? allergies)\.?$/i;
+const appHeldHealth = (client) => {
+  const c = client || {};
+  const intake = c.intake || {};
+  const out = { medications: null, allergies: null, problems: null };
+  const recon = c.medRecLast || null;
+  const meds = (recon ? c.medications : (Array.isArray(c.medications) && c.medications.length ? c.medications : intake.medications)) || [];
+  const medRows = (Array.isArray(meds) ? meds : []).filter(m => m && cleanText(m.name)).map(appMedRow);
+  if (recon) out.medications = { source: 'reconciled', at: recon.at || null, by: recon.byName || null, rows: medRows };
+  else if (medRows.length) out.medications = { source: 'reported', at: null, by: null, rows: medRows };
+  const allergyText = cleanText(c.allergies || intake.allergies);
+  if (allergyText) {
+    out.allergies = NONE_WORDS.test(allergyText)
+      ? { source: 'reported', rows: [] }
+      : { source: 'reported', rows: [{ id: 'app:0', name: allergyText, severity: null, status: null }] };
+  }
+  const planProblems = (c.carePlan && Array.isArray(c.carePlan.problems) ? c.carePlan.problems : []).map(cleanText).filter(Boolean);
+  const reported = (Array.isArray(intake.conditions) ? intake.conditions : []).map(cleanText).filter(Boolean);
+  const probs = planProblems.length ? planProblems : reported;
+  if (probs.length) {
+    out.problems = { source: planProblems.length ? 'care_plan' : 'reported', rows: probs.map((name, i) => ({ id: `app:${i}`, name, status: null, since: null })) };
+  }
   return out;
 };
 const CHART_SECTIONS = Object.freeze(['problems', 'allergies', 'medications', 'vitals']);
@@ -270,10 +328,60 @@ const resultForPatient = (r) => {
   };
 };
 
+
+// ---- Portal P2: published appointments ----------------------------------
+// The patient's calendar. Patients cannot read OpenEMR, so a copy is written
+// whenever someone with an OpenEMR session touches this patient's appointments
+// (booking, rescheduling, cancelling, marking a no-show, or opening the
+// patient's appointment list). Upcoming live rows, plus the last
+// APPOINTMENT_PAST_DAYS days of visits that happened. Cancelled tombstones and
+// no-shows are never a patient's appointment. Clinician notes never leave.
+const APPOINTMENT_PAST_DAYS = 90;
+const APPOINTMENT_LOCATION_LABELS = { home: 'Your home', telehealth: 'Video / phone visit', office: 'Office visit' };
+const isoMinusDays = (isoDate, days) => {
+  const t = Date.parse(`${isoDate}T12:00:00Z`);
+  return Number.isFinite(t) ? new Date(t - days * 86400000).toISOString().slice(0, 10) : isoDate;
+};
+// `summaries` are clinicalRepository.summarizeAppointmentRow rows; `today` is
+// the practice's calendar date (Georgia); `providerName(id)` names a clinician
+// from the app's user records (never guessed, never an id).
+const buildPublishedAppointments = ({ summaries, today, providerName }) => {
+  const from = isoMinusDays(today, APPOINTMENT_PAST_DAYS);
+  const seen = new Set();
+  return (summaries || [])
+    .filter(a => a && a.date && a.status !== 'x' && a.status !== '?')
+    .filter(a => a.state !== 'cancelled' && a.state !== 'no_show')
+    .filter(a => String(a.date) >= from)
+    .filter(a => { const k = String(a.eid); if (seen.has(k)) return false; seen.add(k); return true; })
+    .map(a => ({
+      id: String(a.eid),
+      date: a.date,
+      startTime: a.startTime || null,
+      endTime: a.endTime || null,
+      durationMinutes: a.durationMinutes || null,
+      title: a.title || 'Clinical visit',
+      // Unknown location is left unknown rather than claimed to be "your home".
+      location: a.location ? (APPOINTMENT_LOCATION_LABELS[a.location] || null) : null,
+      provider: (providerName && providerName(a.providerId)) || 'Your care team',
+      state: String(a.date) >= today ? 'upcoming' : 'completed'
+    }))
+    .sort((a, b) => `${a.date} ${a.startTime || ''}`.localeCompare(`${b.date} ${b.startTime || ''}`));
+};
+// A later read that could not see a row's location (the calendar list omits
+// it on this OpenEMR) must not erase the location an earlier, fuller read found.
+const mergeAppointments = (prior, next) => {
+  const before = new Map((prior || []).map(a => [String(a.id), a]));
+  return (next || []).map(a => {
+    const p = before.get(String(a.id));
+    return (!a.location && p && p.location) ? { ...a, location: p.location } : a;
+  });
+};
+
 module.exports = {
+  buildPublishedAppointments, mergeAppointments, APPOINTMENT_PAST_DAYS,
   HOLD_REASONS, HOLD_REASON_LABELS, validateHold, holdStamp,
   isStructuredRecordNote,
-  buildPublishedChart, mergeChart, CHART_SECTIONS, CHART_HISTORY_MAX,
+  buildPublishedChart, mergeChart, CHART_SECTIONS, appHeldHealth, reconciledAppMeds, CHART_HISTORY_MAX,
   vitalsFromNote, noteFromShared, noteFromLegacy,
   buildPublishedVisit, visitContentHash, visitForAudience,
   resultForPatient, ORDER_LABELS, sentPrescriptions, PRESCRIPTION_NOT_SENT
