@@ -3359,7 +3359,7 @@
           // Decisions are keyed by row POSITION, and the rows change once saved.
           // Keeping them re-sent an earlier "add" on the next Resolve (a second
           // copy in OpenEMR) and applied it to whatever row moved into that slot.
-          .then(r => { setDecisions({}); setMsg({ ok: true, text: `${r.message}. EMR writes: ${r.emrResults.filter(x => x.ok).length}/${r.emrResults.length}` }); load(); })
+          .then(r => { setDecisions({}); setMsg({ ok: !r.emrResults.some(x => !x.ok), text: `${r.message}. Sent to OpenEMR: ${r.emrResults.filter(x => x.ok).length} of ${r.emrResults.length}.${r.emrResults.filter(x => !x.ok).map(x => ` ${x.med}: ${x.error}`).join('')}` }); load(); })
           .catch(e => setMsg({ ok: false, text: e.message }))
           .finally(() => setBusy(false));
       };
@@ -3395,7 +3395,7 @@
               {canWrite && <button className="btn mt-4" disabled={busy || rows.length === 0} onClick={save}>
                 {busy ? 'Saving…' : 'Resolve — write to OpenEMR & update app rows'}
               </button>}
-              {canWrite && <p className="text-[11px] text-stone-400 mt-2">Unmarked rows default to "keep". "Add" writes to OpenEMR; "discontinue" end-dates the OpenEMR row and removes it from the app's structured list.</p>}
+              {canWrite && <p className="text-[11px] text-stone-400 mt-2">Unmarked rows default to "keep". Every kept or added medication not already in OpenEMR is written to OpenEMR's prescriptions, marked as a home medication (not a new GFC prescription). "Discontinue" end-dates the OpenEMR row and removes it from the app's list.</p>}
               {!canWrite && <p className="text-[11px] text-stone-400 mt-2">Read-only view — reconciliation is resolved by a clinician.</p>}
             </div>
           </div>
