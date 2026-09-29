@@ -87,9 +87,13 @@ test('provider name falls back to the app-side visit stamp, never a blank or an 
   assert.match(w.summary, /still finishing/);
 });
 test('clinician-authored patient text is bounded and never carries a code', () => {
-  const f = R.buildPatientFacingFields({ patientSummary: '  We checked   your BP.  ', followUpInstructions: 'x'.repeat(700) });
+  const f = R.buildPatientFacingFields({ patientSummary: '  We checked   your BP.  ', followUpInstructions: 'x'.repeat(R.FOLLOW_UP_MAX + 100) });
   assert.equal(f.patientSummary, 'We checked your BP.');
-  assert.equal(f.followUpInstructions.length, 600);
+  assert.equal(f.followUpInstructions.length, R.FOLLOW_UP_MAX);
+  // Owner, 2026-09-29: a real summary ran past the old 1000/600 caps.
+  assert.ok(R.PATIENT_SUMMARY_MAX >= 4000 && R.FOLLOW_UP_MAX >= 4000);
+  const long = 'a'.repeat(3500);
+  assert.equal(R.buildPatientFacingFields({ patientSummary: long }).patientSummary, long);
   assert.deepEqual(R.buildPatientFacingFields({ patientSummary: '' }), { patientSummary: null, followUpInstructions: null });
 });
 

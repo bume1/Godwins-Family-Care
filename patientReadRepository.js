@@ -223,11 +223,15 @@ const buildVisitSummary = ({ encounterUuid, encounter, record, attestation, pres
 };
 
 // Clinician-authored patient-facing text (set from the encounter panel).
-// Bounded, plain strings; empty clears the field.
+// Bounded, plain strings; empty clears the field. Raised from 1000/600 (owner,
+// 2026-09-29): a real home-visit summary ran past both. The screen reads the
+// same constants, so the box and the save cannot disagree about the cap.
+const PATIENT_SUMMARY_MAX = 4000;
+const FOLLOW_UP_MAX = 4000;
 const buildPatientFacingFields = (body) => {
   const src = body && typeof body === 'object' ? body : {};
   const clean = (v, max) => { const s = String(v == null ? '' : v).replace(/\s+/g, ' ').trim(); return s ? s.slice(0, max) : null; };
-  return { patientSummary: clean(src.patientSummary, 1000), followUpInstructions: clean(src.followUpInstructions, 600) };
+  return { patientSummary: clean(src.patientSummary, PATIENT_SUMMARY_MAX), followUpInstructions: clean(src.followUpInstructions, FOLLOW_UP_MAX) };
 };
 
 // ---- Vitals from the encounter note (server-side vitals defect) ----
@@ -306,7 +310,7 @@ module.exports = {
   evaluateClinicalReadAccess, sectionsFor,
   poaSignerName, buildActingIdentity,
   canClinicalWrite, canClinicalRead,
-  buildVisitSummary, buildPatientFacingFields, stripAttribution,
+  buildVisitSummary, buildPatientFacingFields, PATIENT_SUMMARY_MAX, FOLLOW_UP_MAX, stripAttribution,
   parseVitalsFromNote,
   selectUpcomingAppointments, summarizeAppointmentForPatient, LOCATION_LABELS,
   summarizeMedicationForPatient, summarizeAllergyForPatient, summarizeProblemForPatient

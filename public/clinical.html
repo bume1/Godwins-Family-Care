@@ -5039,8 +5039,8 @@
               <div className="border-t border-stone-100 pt-3">
                 <span className="lblu block mb-1">Patient-facing summary (shown in the patient portal — plain language, optional)</span>
                 <div className="grid md:grid-cols-2 gap-3">
-                  <Field label="What we did today, in plain words"><textarea className="inp" rows={3} maxLength={1000} disabled={codingLocked || billerEditing} value={facing.patientSummary} onChange={e => setFacing({ ...facing, patientSummary: e.target.value })} placeholder="e.g. We checked your blood pressure and adjusted your water pill." /></Field>
-                  <Field label="Follow-up instructions for the patient"><textarea className="inp" rows={3} maxLength={600} disabled={codingLocked || billerEditing} value={facing.followUpInstructions} onChange={e => setFacing({ ...facing, followUpInstructions: e.target.value })} placeholder="e.g. Take the new dose each morning; we will see you again in 4 weeks." /></Field>
+                  <Field label="What we did today, in plain words"><textarea className="inp" rows={6} maxLength={4000} disabled={codingLocked || billerEditing} value={facing.patientSummary} onChange={e => setFacing({ ...facing, patientSummary: e.target.value })} placeholder="e.g. We checked your blood pressure and adjusted your water pill." /></Field>
+                  <Field label="Follow-up instructions for the patient"><textarea className="inp" rows={6} maxLength={4000} disabled={codingLocked || billerEditing} value={facing.followUpInstructions} onChange={e => setFacing({ ...facing, followUpInstructions: e.target.value })} placeholder="e.g. Take the new dose each morning; we will see you again in 4 weeks." /></Field>
                 </div>
                 <p className="text-[11px] text-stone-400 mt-1">Without this, the portal shows only the diagnoses addressed, prescriptions recorded and tests ordered. The narrative note is never shown to patients.</p>
               </div>
