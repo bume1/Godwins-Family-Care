@@ -202,3 +202,50 @@ test('the page refreshes the chart when an encounter changes or closes', () => {
   const code = stripComments(PAGE);
   assert.match(code, /onBack=\{\(\) => \{ setOpen\(null\); load\(\); onChartChanged && onChartChanged\(\); \}\} onChanged=\{\(\) => \{ load\(\); onChartChanged && onChartChanged\(\); \}\}/);
 });
+
+// ── the signed-note download ───────────────────────────────────────────────
+
+const liftNotePdf = () => {
+  const i = SERVER.indexOf("app.get('/api/clinical/patients/:clientId/encounters/:euuid/note.pdf'");
+  const j = SERVER.indexOf("app.put('/api/clinical/patients/:clientId/encounters/:euuid/note'", i);
+  assert.ok(i > 0 && j > i);
+  const src = SERVER.slice(i, j);
+  const routes = {};
+  const st = { ctx: null, audit: [], built: 0 };
+  const fn = new Function('app', 'authenticateToken', 'requireClinicalRead', 'loadEncounterContext', 'clinicalNotes', 'buildSignedNotePdf', 'logActivity', 'contentDisposition', src);
+  fn({ get: (p, ...h) => { routes[p] = h; } }, 'A', 'R', async (req, res) => st.ctx,
+    { NOTE_STATUS: { VOIDED: 'voided' } }, async () => { st.built++; return Buffer.from('%PDF-x'); },
+    async (...a) => { st.audit.push(a); }, (d, n) => `${d}; ${n}`);
+  const h = Object.values(routes)[0];
+  return { st, run: async (ctx) => { st.ctx = ctx; const res = mkRes(); await h[h.length - 1]({ user: { id: 'u', name: 'N' }, params: {} }, res); return res; } };
+};
+const NOTE_CTX = { client: { id: 'c1' }, encounterUuid: 'e1', record: { date: '2026-09-28', encounterEid: '9', noteStatus: 'signed' }, attestation: { signedAt: 'x' }, addenda: [], emr: {} };
+
+test('a signed note downloads as an inline PDF and the read is audited', async () => {
+  const t = liftNotePdf();
+  const res = await t.run({ ...NOTE_CTX, closed: true });
+  assert.equal(res.headers['Content-Type'], 'application/pdf');
+  assert.match(res.headers['Content-Disposition'], /Clinical_Note_20260928_9\.pdf/);
+  assert.ok(t.st.audit.some(a => a[2] === 'signed_note_pdf_downloaded'));
+});
+
+test('an unsigned or deleted note is refused, and no PDF is built', async () => {
+  const t = liftNotePdf();
+  const un = await t.run({ ...NOTE_CTX, closed: false, attestation: null });
+  assert.equal(un.code, 409);
+  assert.equal(un.body.code, 'NOTE_NOT_SIGNED');
+  const gone = await t.run({ ...NOTE_CTX, closed: true, record: { ...NOTE_CTX.record, noteStatus: 'voided' } });
+  assert.equal(gone.code, 404);
+  assert.equal(t.st.built, 0);
+});
+
+test('the signed-note download reuses the filing builder and the page offers it', () => {
+  const code = stripComments(SERVER);
+  assert.match(code, /const buffer = await buildSignedNotePdf\(emr, client, record, attestation, addenda\);/, 'filing and download share one builder');
+  assert.match(code, /app\.get\('\/api\/clinical\/patients\/:clientId\/encounters\/:euuid\/note\.pdf', authenticateToken, requireClinicalRead,/);
+  assert.match(stripComments(PAGE), /api\.signedNoteUrl\(patient\.id, euuid\)/);
+});
+
+test('a requisition greyed out while the agency is pending has a visible disabled chip', () => {
+  assert.match(stripComments(PAGE), /\{agencyPending && <span className="chip[^"]*cursor-not-allowed"[^>]*> ?<i className="ti ti-file-text" \/> Open requisition<\/span>\}/);
+});

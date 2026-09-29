@@ -269,6 +269,7 @@
       // query parameter here because a navigation carries no Authorization
       // header (the enrollment-downloads lesson, PR #103) and `authenticateToken`
       // accepts `?token=` for exactly this case.
+      signedNoteUrl: (clientId, euuid) => `/api/clinical/patients/${clientId}/encounters/${euuid}/note.pdf?token=${encodeURIComponent(getToken() || '')}`,
       requisitionUrl: (orderId) => `/api/clinical/orders/${orderId}/requisition.pdf?token=${encodeURIComponent(getToken() || '')}`,
       sign: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/sign`, { method: 'POST', body: JSON.stringify({ attest: true }) }),
       // ── The shared note (2026-09-27) ──
@@ -4529,6 +4530,7 @@
         <div className="mt-1.5">
           <div className="flex flex-wrap gap-1.5">
             {agencyPending && <span className="chip bg-amber-50 text-amber-800 border border-amber-200">Needs agency</span>}
+            {agencyPending && <span className="chip border bg-stone-100 text-stone-400 border-stone-200 cursor-not-allowed" title="Add the receiving agency and fax first, then the requisition can be opened."><i className="ti ti-file-text" /> Open requisition</span>}
             {!agencyPending && <a className="chip border bg-white text-primary border-stone-200" href={api.requisitionUrl(order.id)} target="_blank" rel="noopener noreferrer">
               <i className="ti ti-file-text" /> {order.requisitionGeneratedAt ? 'Open requisition again' : 'Open requisition'}
             </a>}
@@ -5322,6 +5324,7 @@
               {closed && (
                 <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-2.5 text-xs text-emerald-900 mt-1">
                   <b>Signed {fmtTs(d.attestation.signedAt)} by {npiLabel(d.attestation.signedBy)}{awaitingAddendum ? ' as the note\'s author' : ''}.</b> The note is locked for clinicians. Corrections go in as addenda below, each with its own signer and timestamp.
+                  <div className="mt-1.5"><a className="chip border bg-white text-primary border-stone-200" href={api.signedNoteUrl(patient.id, euuid)} target="_blank" rel="noopener noreferrer"><i className="ti ti-file-download" /> Download note PDF</a></div>
                   {awaitingAddendum && <div className="mt-1 text-amber-800 font-semibold">Not billable yet — waiting for a clinician addendum from a provider (or an LCSW, for behavioral health).</div>}
                   {!awaitingAddendum && BILLING_STATUS_TEXT[d.billingStatus] && <div className="mt-1 font-semibold">{BILLING_STATUS_TEXT[d.billingStatus]}</div>}
                 </div>

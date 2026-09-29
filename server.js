@@ -10472,28 +10472,34 @@ const writeNarrativeNote = async (emr, client, record, { signature, revisions } 
 // The signed note as a formatted PDF in the patient's OpenEMR Documents — the
 // copy that looks exactly like what was signed, bold signature included.
 // Re-filed on each clinician addendum or co-signature. Never fails a signature.
+// The formatted signed-note PDF as bytes: one builder for the copy filed to
+// OpenEMR and the copy a clinician downloads, so the two can never differ.
+const buildSignedNotePdf = async (emr, client, record, attestation, addenda) => {
+  const revisions = clinicalNotes.revisionsFor(await loadNoteRevisions(), record.encounterUuid);
+  let items;
+  if (record.note) {
+    items = clinicalNotes.noteReadingOrder(record.note);
+  } else {
+    const cur = record.narrativeNoteSid
+      ? await emr.getSoapNote(client.openEmrPatientId, record.encounterUuid, record.narrativeNoteSid) : null;
+    items = clinicalNotes.SLOTS
+      .map(slot => ({ slot, label: null, plain: clinicalNotes.stripLegacyText(cur && cur[slot]) }))
+      .filter(i => i.plain.trim());
+  }
+  const buffer = await pdfGenerator.generateSignedNotePDF({
+    patientName: client.name, dob: (client.intake && client.intake.dob) || client.dob || null,
+    visitDate: record.date, visitLabel: clinicalRepo.visitLabel(record.visit),
+    encounterId: record.encounterEid || record.encounterUuid,
+    items, signature: clinicalNotes.buildSignatureSummary({ attestation, record }),
+    person: clinicalNotes.personLine,
+    history: clinicalNotes.noteHistoryLines(revisions).slice(1),
+    addenda: addenda || []
+  });
+  return buffer;
+};
 const fileSignedNotePdf = async (emr, client, record, attestation, addenda) => {
   try {
-    const revisions = clinicalNotes.revisionsFor(await loadNoteRevisions(), record.encounterUuid);
-    let items;
-    if (record.note) {
-      items = clinicalNotes.noteReadingOrder(record.note);
-    } else {
-      const cur = record.narrativeNoteSid
-        ? await emr.getSoapNote(client.openEmrPatientId, record.encounterUuid, record.narrativeNoteSid) : null;
-      items = clinicalNotes.SLOTS
-        .map(slot => ({ slot, label: null, plain: clinicalNotes.stripLegacyText(cur && cur[slot]) }))
-        .filter(i => i.plain.trim());
-    }
-    const buffer = await pdfGenerator.generateSignedNotePDF({
-      patientName: client.name, dob: (client.intake && client.intake.dob) || client.dob || null,
-      visitDate: record.date, visitLabel: clinicalRepo.visitLabel(record.visit),
-      encounterId: record.encounterEid || record.encounterUuid,
-      items, signature: clinicalNotes.buildSignatureSummary({ attestation, record }),
-      person: clinicalNotes.personLine,
-      history: clinicalNotes.noteHistoryLines(revisions).slice(1),
-      addenda: addenda || []
-    });
+    const buffer = await buildSignedNotePdf(emr, client, record, attestation, addenda);
     const fileName = `Clinical_Note_${String(record.date || '').replace(/-/g, '')}_${String(record.encounterEid || record.encounterUuid).slice(0, 12)}_${Date.now()}.pdf`;
     await emr.uploadPatientDocument(client.openEmrPatientId, fileName, buffer, 'application/pdf', '/Medical Record');
     record.signedNotePdfFiledAt = new Date().toISOString();
@@ -10724,6 +10730,33 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid/note', authenticateT
 });
 
 // ── Every later save: version-checked, app + OpenEMR, a revision row ───────
+// ── GET …/encounters/:euuid/note.pdf — download the signed note ────────────
+// The same formatted PDF that is filed to OpenEMR Documents at signing, built
+// on demand with the addenda and co-signatures as they stand now. A note that
+// is not signed has no signature block to print, so it is refused by name
+// rather than handed over as something that looks final.
+app.get('/api/clinical/patients/:clientId/encounters/:euuid/note.pdf', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res, { createRecord: false });
+    if (!ctx) return;
+    if (!ctx.record || ctx.record.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED) {
+      return res.status(404).json({ error: 'No note found for this encounter', code: 'ENCOUNTER_NOT_FOUND' });
+    }
+    if (!ctx.closed || !ctx.attestation) {
+      return res.status(409).json({ error: 'This note is not signed yet, so there is no signed copy to download. Sign it first.', code: 'NOTE_NOT_SIGNED' });
+    }
+    const buffer = await buildSignedNotePdf(ctx.emr, ctx.client, ctx.record, ctx.attestation, ctx.addenda);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'signed_note_pdf_downloaded', 'client', ctx.client.id, { encounterUuid: ctx.encounterUuid });
+    const fileName = `Clinical_Note_${String(ctx.record.date || '').replace(/-/g, '')}_${String(ctx.record.encounterEid || ctx.encounterUuid).slice(0, 12)}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', contentDisposition('inline', fileName));
+    res.send(buffer);
+  } catch (error) {
+    console.error('Signed note PDF error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.put('/api/clinical/patients/:clientId/encounters/:euuid/note', authenticateToken, requireClinicalWrite, requireNoteWriter, async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res);
