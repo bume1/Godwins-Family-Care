@@ -49,6 +49,12 @@ const validateHold = (input) => {
   return { hold: { reason } };
 };
 
+// What is stored on the attestation for a hold: who, why, when. ONE function
+// for both doors (signing and the Publish route), so the two cannot store it
+// differently — and so a test can pin that the sign route calls it, rather than
+// only reading the route's text.
+const holdStamp = (check, by, at) => (check && check.hold ? { reason: check.hold.reason, by, at } : null);
+
 // ---- The billing plumbing note is never a patient's note ----
 // The same test the sign route's hasNote check applies.
 const isStructuredRecordNote = (soap, structuredNoteSid) => !!soap && (
@@ -61,8 +67,14 @@ const isStructuredRecordNote = (soap, structuredNoteSid) => !!soap && (
 // mergeChart keeps what was published before rather than telling a patient
 // their allergy list is now empty.
 const INACTIVE_MED = new Set(['stopped', 'cancelled', 'entered-in-error']);
-const buildPublishedChart = ({ clientId, problems, allergies, medications, vitals, at, by, sourceEncounterUuid, sourceVisitDate }) => {
+const buildPublishedChart = ({ clientId, problems, allergies, medications, vitals, at, by, sourceEncounterUuid, sourceVisitDate, sourcePuuid, partial }) => {
   const out = { clientId, publishedAt: at || new Date().toISOString(), publishedBy: personName(by) };
+  // WHICH OpenEMR patient this was read from. A client relinked to the right
+  // chart must never keep showing sections read from the wrong one.
+  if (sourcePuuid !== undefined) out.sourcePuuid = sourcePuuid || null;
+  // Some sections could not be read this time: the stamps must not claim the
+  // whole chart is as fresh as the visit that triggered the read.
+  if (partial) out.partial = true;
   if (sourceEncounterUuid !== undefined) out.sourceEncounterUuid = sourceEncounterUuid || null;
   if (sourceVisitDate !== undefined) out.publishedFromVisitDate = sourceVisitDate || null;
   if (Array.isArray(problems)) {
@@ -80,9 +92,32 @@ const buildPublishedChart = ({ clientId, problems, allergies, medications, vital
   return out;
 };
 const CHART_SECTIONS = Object.freeze(['problems', 'allergies', 'medications', 'vitals']);
-const mergeChart = (prior, next) => {
+const mergeChart = (priorIn, nextIn) => {
+  const { partial, ...next } = nextIn || {};
+  let prior = priorIn || null;
+  // Read from a DIFFERENT OpenEMR patient than the copy on file (a relink):
+  // nothing carries forward, not a section and not the history.
+  if (prior && next.sourcePuuid !== undefined && prior.sourcePuuid !== undefined && prior.sourcePuuid !== next.sourcePuuid) prior = null;
   const merged = { ...(prior || {}), ...next };
   for (const k of CHART_SECTIONS) if (next[k] === undefined && prior && prior[k] !== undefined) merged[k] = prior[k];
+  if (prior) {
+    // Publishing an OLDER visit (a clinician addendum days later, an addendum,
+    // a Publish click) refreshes the current-state lists but must not roll the
+    // latest vitals or "updated after your visit on" back behind a newer visit.
+    const older = next.publishedFromVisitDate && prior.publishedFromVisitDate && next.publishedFromVisitDate < prior.publishedFromVisitDate;
+    if (older) {
+      for (const k of ['vitals', 'sourceEncounterUuid', 'publishedFromVisitDate']) {
+        if (prior[k] === undefined) delete merged[k]; else merged[k] = prior[k];
+      }
+    }
+    // A partial read keeps the stamps it had: a section still months old must
+    // not be relabelled as updated today.
+    if (partial) {
+      for (const k of ['publishedAt', 'publishedBy', 'publishedFromVisitDate', 'sourceEncounterUuid']) {
+        if (prior[k] === undefined) delete merged[k]; else merged[k] = prior[k];
+      }
+    }
+  }
   // History: what the patient was shown before, capped. Never recursive.
   const snapshot = prior ? (({ history, ...rest }) => rest)(prior) : null;
   merged.history = [...(snapshot ? [snapshot] : []), ...((prior && prior.history) || [])].slice(0, CHART_HISTORY_MAX);
@@ -122,17 +157,14 @@ const noteFromShared = (note) => {
   }
   return out;
 };
-// A note written before the shared note existed lives only in OpenEMR. Its
-// attribution header (which carries an NPI), its "Documented by" line and its
-// signature/history block are stripped — the signature is shown separately.
-const noteFromLegacy = (soap) => {
-  const out = {};
-  for (const s of SLOTS) {
-    const text = clinicalNotes.stripLegacyText(soap && soap[s]);
-    out[s] = text && text !== 'Not documented.' ? [{ label: null, plain: text }] : [];
-  }
-  return out;
-};
+// A note written before the shared note existed lives only in OpenEMR. It is
+// converted with clinicalNotes.noteFromLegacyNarrative — the ONE converter, which
+// already drops the attribution header (it carries an NPI), the "Documented by"
+// line, the VITALS line, the signature block, the writers' placeholder text and
+// the RN triage block — and then rendered exactly as a new note is, so an old
+// note cannot show a patient what a new one would not. A second, lighter
+// cleaner here leaked the triage rationale (portal review, 2026-09-29).
+const noteFromLegacy = (soap, hint) => noteFromShared(clinicalNotes.noteFromLegacyNarrative(soap, undefined, hint || {}));
 const noteIsEmpty = (n) => !n || SLOTS.every(s => !(n[s] || []).length);
 
 const personName = (p) => {
@@ -163,37 +195,47 @@ const sentPrescriptions = (rows) => (rows || []).filter(p => p && !PRESCRIPTION_
 
 // ---- A visit, as published ----
 // `hold` (from the attestation) publishes the summary WITHOUT the note.
-const buildPublishedVisit = ({ clientId, encounterUuid, encounter, record, attestation, prescriptions, orders, addenda, legacyNote, hold, at, by, providerFallbackName }) => {
+const buildPublishedVisit = ({ clientId, encounterUuid, encounter, record, attestation, prescriptions, orders, addenda, legacyNote, isInitialVisit, hold, at, by, providerFallbackName }) => {
   const rec = record || {};
   const visit = patientRead.buildVisitSummary({
     encounterUuid, encounter, record: rec, attestation,
     prescriptions: sentPrescriptions(prescriptions), orders: orders || [], providerFallbackName
   });
-  let note = null;
-  if (!hold) {
-    const body = rec.note ? noteFromShared(rec.note) : noteFromLegacy(legacyNote);
-    if (!noteIsEmpty(body)) {
-      note = { ...body, addenda: patientAddenda(addenda), signatures: patientSignatures(attestation, rec), signedAt: (attestation && attestation.signedAt) || null };
-    }
-  }
+  // The note as the patient would read it, whether or not it is being held.
+  const sharedNote = rec.note || (legacyNote ? clinicalNotes.noteFromLegacyNarrative(legacyNote, undefined, { isInitialVisit: !!isInitialVisit }) : null);
+  const body = sharedNote ? noteFromShared(sharedNote) : null;
+  const hasBody = !!body && !noteIsEmpty(body);
+  const cleanAddenda = patientAddenda(addenda);
+  const note = (!hold && hasBody)
+    ? { ...body, addenda: cleanAddenda, signatures: patientSignatures(attestation, rec), signedAt: (attestation && attestation.signedAt) || null }
+    : null;
   const row = {
     clientId, encounterUuid: String(encounterUuid),
     visit,
     note,
     noteHeld: hold ? { reason: hold.reason } : null,
-    vitals: rec.note ? vitalsFromNote(rec.note, visit.date) : (legacyNote ? patientRead.parseVitalsFromNote(legacyNote.objective, visit.date) : null),
+    vitals: sharedNote ? vitalsFromNote(sharedNote, visit.date) : null,
     publishedAt: at || new Date().toISOString(),
     publishedBy: personName(by)
   };
-  row.contentHash = visitContentHash(row);
+  // Two hashes, so the server can tell "the summary changed" from "the note
+  // changed" — a note being held changes only the second.
+  const hashes = visitContentHashes({ visit, body: hasBody ? body : null, addenda: cleanAddenda });
+  row.summaryHash = hashes.summary; row.noteHash = hashes.note; row.contentHash = hashes.all;
   return row;
 };
-// What decides whether a republish tells the patient anything new: the summary
-// text and the note text. A co-signature or a hold reason is not "new to read".
-const visitContentHash = (row) => crypto.createHash('sha256').update(JSON.stringify({
-  summary: row.visit && row.visit.summary, followUp: row.visit && row.visit.followUp,
-  note: row.note ? SLOTS.map(s => row.note[s]).concat([row.note.addenda]) : null
-})).digest('hex').slice(0, 16);
+// What decides whether a republish tells the patient anything new: the
+// clinician-authored text — the patient-facing overview, the follow-up, the note
+// and the addenda. NOT the derived summary (it embeds order statuses, which move
+// on their own), and NOT whether the note is held (placing a hold must not
+// email "your clinician's note is ready").
+const h16 = (o) => crypto.createHash('sha256').update(JSON.stringify(o)).digest('hex').slice(0, 16);
+const visitContentHashes = ({ visit, body, addenda }) => {
+  const summary = { overview: visit && visit.overview, followUp: visit && visit.followUp };
+  const note = { note: body ? SLOTS.map(s => body[s]) : null, addenda: addenda || [] };
+  return { summary: h16(summary), note: h16(note), all: h16({ summary, note }) };
+};
+const visitContentHash = (parts) => visitContentHashes(parts).all;
 
 // ---- Reading: a published visit for one audience ----
 // The visit goes through FILTER_MAP exactly as before; the note is attached
@@ -229,7 +271,7 @@ const resultForPatient = (r) => {
 };
 
 module.exports = {
-  HOLD_REASONS, HOLD_REASON_LABELS, validateHold,
+  HOLD_REASONS, HOLD_REASON_LABELS, validateHold, holdStamp,
   isStructuredRecordNote,
   buildPublishedChart, mergeChart, CHART_SECTIONS, CHART_HISTORY_MAX,
   vitalsFromNote, noteFromShared, noteFromLegacy,
