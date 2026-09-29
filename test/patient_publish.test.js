@@ -127,7 +127,7 @@ const build = (opts = {}) => {
     ${patientSrc}
     ${resultsSrc}
     ${ackSrc}
-    return { loadPublishedVisits, upsertPublishedVisit, loadPublishedChart, upsertPublishedChart, publishChartFromEmr, publishEncounterToPortal, applyPublishOutcome, receiveClinicalResult };`);
+    return { loadPublishedVisits, upsertPublishedVisit, holdPublishedVisit, dropPublishedForClient, patchPortalOutcome, loadPublishedChart, upsertPublishedChart, publishChartFromEmr, publishEncounterToPortal, applyPublishOutcome, receiveClinicalResult };`);
   const fns = mk(db, loadRows, notify, logActivity, openemr, app, patientPublish, patientRead, clinicalNotes, clinicalRepo,
     clinicalResults, practiceTime, (q, s, n) => n(), (q, s, n) => n(), (q, s, n) => n(),
     async (u) => (u.role === 'client' ? CLIENT_LIVE(opts, u) : (u.familyOfClientId ? CLIENT_LIVE(opts, { id: u.familyOfClientId }) : null)),
@@ -301,9 +301,11 @@ test('5. an addendum republishes the visit with the addendum on it', async () =>
 });
 test('5b. the addendum and co-signature routes republish an already-published visit', () => {
   const addenda = routeBody("app.post('/api/clinical/patients/:clientId/encounters/:euuid/addenda'");
-  assert.match(addenda, /if \(ctx\.record\.portalPublished\) \{\s*applyPublishOutcome\(ctx\.record, await publishEncounterToPortal\(ctx, \{ addenda:/);
+  assert.match(addenda, /if \(ctx\.record\.portalPublished\) \{\s*portalOut = await publishEncounterToPortal\(ctx, \{ addenda:/);
+  assert.match(addenda, /await patchPortalOutcome\(ctx\.encounterUuid, portalOut\)/, 'the portal fields are written fresh, not from the stale copy');
   const cosigs = routeBody("app.post('/api/clinical/patients/:clientId/encounters/:euuid/co-signatures'");
-  assert.match(cosigs, /if \(record\.portalPublished\) applyPublishOutcome\(record, await publishEncounterToPortal\(/);
+  assert.match(cosigs, /if \(record\.portalPublished\) \{\s*portalOut = await publishEncounterToPortal\(/);
+  assert.match(cosigs, /await patchPortalOutcome\(ctx\.encounterUuid, portalOut\)/);
 });
 
 // ============================================================
@@ -427,10 +429,13 @@ test('8b. signatures shown to a patient carry names and dates, never an NPI or b
 // ============================================================
 // 9. Results: visible on filing, ONE notice on review
 // ============================================================
-const fileResult = async (h, over = {}) => {
+const ORDER = () => ({ id: 'o1', clientId: 'c-1', orderType: 'lab', orderReference: 'GFC-ORD-ABCDEF', encounterUuid: 'e1', status: 'sent',
+  orderingClinician: { id: 'u-1', name: 'Bethel Godwins' }, sends: [] });
+// `order: null` files an UNMATCHED document (no order, no reference).
+const fileResult = async (h, over = {}, { order = ORDER() } = {}) => {
   const req = { user: PROVIDER, params: {}, body: { interpretation: 'abnormal', resultDate: '2026-09-27', performedBy: 'Quest Diagnostics', summary: 'A1c 8.1 — INTERNAL SHORTHAND', ...over }, file: { buffer: Buffer.from('%PDF-1.4 x'), originalname: 'a1c.pdf' } };
   const res = mkRes();
-  await h.receiveClinicalResult(req, res, { order: null, rows: null, idx: -1, client: CLIENT });
+  await h.receiveClinicalResult(req, res, { order, rows: order ? [order] : null, idx: order ? 0 : -1, client: CLIENT });
   return res;
 };
 const ackReq = (id, body = {}, user = PROVIDER) => ({ user, params: { resultId: id }, body });
@@ -512,6 +517,48 @@ test('9f. a result filed while Drive is down is still filed, listed, and warned 
   h.store.set('users', []);
   const r = (await readSummary(h, CLIENT_USER)).results[0];
   assert.equal(r.hasFile, false, 'listed without a document to open, never a broken link');
+});
+test('9j. an UNMATCHED outside record is not on the portal until a clinician reviews it, then it is released with one notice', async () => {
+  const h = build();
+  const res = await fileResult(h, { interpretation: 'normal' }, { order: null });
+  assert.equal(res.statusCode, 200);
+  const filed = (await h.loadRows('clinical_results'))[0];
+  assert.equal(filed.unmatched, true);
+  assert.equal(filed.releasedToPatientAt, null, 'nothing confirms whose it is, so it is not released on filing');
+  h.store.set('users', []);
+  assert.deepEqual((await readSummary(h, CLIENT_USER)).results, [], 'not listed');
+  assert.equal((await call(h, 'GET /api/gfc/clinical/documents/:docId/file', CLIENT_USER, { params: { docId: `result:${filed.id}` } })).statusCode, 404, 'and not openable');
+  await h.handlers['POST /api/clinical/results/:resultId/acknowledge'](ackReq(filed.id, {}), mkRes());
+  const after = (await h.loadRows('clinical_results'))[0];
+  assert.ok(after.releasedToPatientAt, 'released by the review');
+  assert.equal(h.notices.length, 1, 'and the patient is told once');
+  assert.equal((await readSummary(h, CLIENT_USER)).results.length, 1);
+});
+test('9k. a result for a CANCELLED order is refused before anything is uploaded or stored', async () => {
+  const h = build();
+  const res = await fileResult(h, {}, { order: { ...ORDER(), status: 'cancelled' } });
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.body.code, 'ORDER_CANCELLED');
+  assert.deepEqual(h.drive.uploads, [], 'no Drive copy');
+  assert.deepEqual(await h.loadRows('clinical_results'), [], 'no row, so nothing for the patient to see');
+});
+test('9l. the acknowledgement is saved BEFORE the patient is told, and a result filed meanwhile is not lost', async () => {
+  const body = routeBody("app.post('/api/clinical/results/:resultId/acknowledge'");
+  const saved = body.indexOf("await db.set('clinical_results', fresh)");
+  const told = body.indexOf('notify.resultReviewed(');
+  assert.ok(saved > 0 && told > saved, 'persist first, then notify');
+  assert.match(body, /const fresh = await loadRows\('clinical_results'\)/, 'the write is onto a copy read just now');
+  // Behaviour: a second result filed while the notice is in flight survives.
+  const h = build();
+  await fileResult(h);
+  const id = (await h.loadRows('clinical_results'))[0].id;
+  const realNotify = h.notices.push.bind(h.notices);
+  h.notices.push = (n) => { const rows = h.store.get('clinical_results'); rows.push({ id: 'filed-meanwhile', clientId: 'c-1', releasedToPatientAt: 'x' }); h.store.set('clinical_results', rows); return realNotify(n); };
+  await h.handlers['POST /api/clinical/results/:resultId/acknowledge'](ackReq(id, { followUpNote: 'plan' }), mkRes());
+  const ids = (await h.loadRows('clinical_results')).map(r => r.id);
+  assert.ok(ids.includes('filed-meanwhile'), 'the result filed during the notice is still there');
+  const row = (await h.loadRows('clinical_results')).find(r => r.id === id);
+  assert.ok(row.acknowledgedAt && row.patientNotifiedAt);
 });
 test('9g. a result released BEFORE this feature existed sends no notice at review (it is not on the portal)', () => {
   const ack = routeBody("app.post('/api/clinical/results/:resultId/acknowledge'");
@@ -685,6 +732,191 @@ test('medication changes on the visit are prescriptions that actually went out; 
   const rx = [{ drug: 'Lisinopril', dose: '10 mg', transmission: 'none' }, { drug: 'Pending drug', dose: '5 mg', transmission: 'pending' }, { drug: 'Unsent drug', transmission: 'not_sent' }];
   const row = patientPublish.buildPublishedVisit({ clientId: 'c', encounterUuid: 'e1', record: RECORD, attestation: ATTESTATION, prescriptions: rx, addenda: [] });
   assert.deepEqual(row.visit.newPrescriptions.map(r => r.name), ['Lisinopril 10 mg'], 'legacy "none" is recorded and shown; pending and not_sent are not');
+});
+
+// ============================================================
+// Adversarial review, 2026-09-29: every confirmed finding has a test
+// ============================================================
+const HP_SOAP = () => ({
+  id: '9',
+  subjective: '[GFC CLINICIAN] Bethel Godwins, FNP (NPI 1234567893)\nDocumented by Bethel Godwins\nSeen at home, feeling better.',
+  objective: `VITALS — BP right arm 130/80; BP left arm 128/78; HR 72; Temp —; RR —; SpO2 97; Wt —; Ht —\n\n${clinicalRepo.HP_SECTION_LABELS.triage.toUpperCase()}:\nTrack: B\nRationale: Complex, high utilisation, likely to exceed the home care budget\n\nLungs clear.`,
+  assessment: 'See encounter diagnoses (GFC structured note).',
+  plan: 'Continue current medicines.\nRN Track assignment: B — Complex, high utilisation, likely to exceed the home care budget'
+});
+const legacyCtx = (h, over = {}) => signedCtx(h, { record: { ...RECORD, note: undefined }, emr: { getProblems: async () => [], getAllergies: async () => [], getMedicationRequests: async () => [], getSoapNote: async () => HP_SOAP() }, ...over });
+
+test('R1. an old OpenEMR-only note never shows a patient the RN triage track, its rationale or the writers\' placeholder text', async () => {
+  const h = build();
+  await h.publishEncounterToPortal(legacyCtx(h));
+  h.store.set('users', []);
+  const s = JSON.stringify(await readSummary(h, CLIENT_USER));
+  assert.match(s, /feeling better/, 'the real note is there');
+  assert.ok(!/Track|Rationale|utilisation|home care budget|TRIAGE/i.test(s), 'no staffing decision');
+  assert.ok(!/See encounter diagnoses|No objective findings|GFC structured note/.test(s), 'no placeholder text');
+  assert.ok(!/1234567893|GFC CLINICIAN|Documented by|VITALS/.test(s));
+});
+
+test('R2. A HOLD FAILS CLOSED: it reaches the copy the patient can already read, and needs no OpenEMR read', async () => {
+  const h = build();
+  await publish(h);
+  h.store.set('users', []);
+  assert.ok((await readSummary(h, CLIENT_USER)).visits[0].note, 'the note is readable before the hold');
+  assert.equal(await h.holdPublishedVisit('c-1', 'e1', { reason: 'risk_of_harm' }), true);
+  const v = (await readSummary(h, CLIENT_USER)).visits[0];
+  assert.equal('note' in v, false, 'stopped being readable at once');
+  assert.equal(v.noteHeld, true);
+  // And a held LEGACY note is republished without reading OpenEMR at all, so a
+  // lapsed sign-in cannot leave the old text live.
+  const legacy = build();
+  const held = { ...ATTESTATION, portalHold: { reason: 'patient_request' } };
+  let read = false;
+  const ctx = legacyCtx(legacy, { attestation: held });
+  ctx.emr.getSoapNote = async () => { read = true; throw new Error('EMR_NOT_CONNECTED'); };
+  const out = await legacy.publishEncounterToPortal(ctx, { attestation: held });
+  assert.equal(out.published, true);
+  assert.equal(read, false, 'a held note is never read from OpenEMR');
+  assert.equal((await legacy.loadPublishedVisits())[0].note, null);
+  // The route applies the hold BEFORE the republish that can fail.
+  const body = routeBody("app.post('/api/clinical/patients/:clientId/encounters/:euuid/publish'");
+  assert.ok(body.indexOf('holdPublishedVisit(') > 0 && body.indexOf('holdPublishedVisit(') < body.indexOf('await publishEncounterToPortal('));
+  assert.match(body, /The hold is in force/);
+  const holdHelper = slice('const holdPublishedVisit', 'const dropPublishedForClient');
+  assert.match(holdHelper, /note: null, noteHeld/);
+});
+
+test('R3. only the word "release" releases a hold — null and false are refused', () => {
+  const body = routeBody("app.post('/api/clinical/patients/:clientId/encounters/:euuid/publish'");
+  assert.match(body, /holdInput === null \|\| holdInput === false\) \{\s*return res\.status\(400\)[\s\S]{0,220}PORTAL_HOLD_INVALID/);
+  assert.ok(body.indexOf('PORTAL_HOLD_INVALID') < body.indexOf("db.set('encounter_attestations'"), 'refused before anything is written');
+});
+
+test('R4. a mismatched client and encounter publish nothing, and a row is only replaced by the same client', async () => {
+  const h = build();
+  const out = await h.publishEncounterToPortal(signedCtx(h, { record: { ...RECORD, clientId: 'c-OTHER' } }));
+  assert.equal(out.published, false);
+  assert.equal(out.skipped, 'CLIENT_MISMATCH');
+  assert.deepEqual(await h.loadPublishedVisits(), []);
+  assert.deepEqual(h.notices, []);
+  // Keyed on client AND encounter: the same encounter id under another client is a different row.
+  await h.upsertPublishedVisit({ clientId: 'c-1', encounterUuid: 'eX', visit: { date: '2026-01-01' } });
+  await h.upsertPublishedVisit({ clientId: 'c-2', encounterUuid: 'eX', visit: { date: '2026-02-02' } });
+  const rows = await h.loadPublishedVisits();
+  assert.equal(rows.length, 2);
+  assert.equal(rows.find(r => r.clientId === 'c-1').visit.date, '2026-01-01', 'c-1\'s row was not replaced by c-2\'s publish');
+  const pub = routeBody("app.post('/api/clinical/patients/:clientId/encounters/:euuid/publish'");
+  assert.match(pub, /ctx\.record\.clientId && ctx\.record\.clientId !== ctx\.client\.id\) \{\s*return res\.status\(404\)/);
+});
+
+test('R5. relinking to a different OpenEMR patient removes what was published from the old one', async () => {
+  const h = build();
+  await publish(h);
+  await h.upsertPublishedVisit({ clientId: 'c-2', encounterUuid: 'eY', visit: { date: '2026-01-01' } });
+  await h.dropPublishedForClient('c-1');
+  assert.equal(await h.loadPublishedChart('c-1'), null);
+  assert.deepEqual((await h.loadPublishedVisits()).map(r => r.clientId), ['c-2'], 'only that client\'s rows go');
+  const link = routeBody("app.post('/api/clinical/patients/:clientId/link'");
+  assert.match(link, /relinkedAway = !!\(client\.openEmrPatientId && String\(client\.openEmrPatientId\) !== String\(puuid\)\)/);
+  assert.match(link, /if \(relinkedAway\) await dropPublishedForClient\(client\.id\)/);
+  // And nothing carries forward from a chart read from a different patient.
+  const prior = patientPublish.buildPublishedChart({ clientId: 'c', allergies: [{ id: 'a1', code: { text: 'Penicillin' } }], sourcePuuid: 'X', at: '2026-01-01T00:00:00Z' });
+  const next = patientPublish.buildPublishedChart({ clientId: 'c', medications: [], sourcePuuid: 'Y', at: '2026-02-01T00:00:00Z' });
+  const merged = patientPublish.mergeChart(prior, next);
+  assert.equal(merged.allergies, undefined, 'the wrong patient\'s allergies are not carried into the right patient\'s chart');
+  assert.deepEqual(merged.history, []);
+});
+
+test('R6. publishing an OLDER visit never rolls the latest vitals or "updated after your visit" back', () => {
+  const mk = (date, bp, uuid) => patientPublish.buildPublishedChart({ clientId: 'c', problems: [], vitals: { date, bloodPressure: bp }, sourceEncounterUuid: uuid, sourceVisitDate: date, sourcePuuid: 'P', at: `${date}T12:00:00Z` });
+  const b = patientPublish.mergeChart(null, mk('2026-09-20', '120/80', 'B'));
+  const a = patientPublish.mergeChart(b, mk('2026-09-01', '150/90', 'A'));   // visit A's addendum, days later
+  assert.equal(a.vitals.bloodPressure, '120/80');
+  assert.equal(a.publishedFromVisitDate, '2026-09-20');
+  assert.equal(a.sourceEncounterUuid, 'B');
+  const c = patientPublish.mergeChart(b, mk('2026-09-25', '118/76', 'C'));   // a newer visit still moves it forward
+  assert.equal(c.vitals.bloodPressure, '118/76');
+  assert.equal(c.publishedFromVisitDate, '2026-09-25');
+});
+
+test('R7. a chart read that fails changes nothing; a partial read keeps its stamps', async () => {
+  const h = build();
+  const allFail = { getProblems: async () => { throw new Error('x'); }, getAllergies: async () => { throw new Error('x'); }, getMedicationRequests: async () => { throw new Error('x'); } };
+  const none = await h.publishChartFromEmr(allFail, CLIENT, { id: 'u-1', name: 'B' }, {});
+  assert.equal(none.wrote, false);
+  assert.equal(await h.loadPublishedChart('c-1'), null, 'no row, so the "summary is coming" state stays');
+  await h.publishEncounterToPortal(signedCtx(h));
+  const before = await h.loadPublishedChart('c-1');
+  const partial = await h.publishChartFromEmr({ getProblems: async () => [], getAllergies: async () => { throw new Error('x'); }, getMedicationRequests: async () => [] }, CLIENT, { id: 'u-1', name: 'B' },
+    { sourceEncounterUuid: 'e-later', sourceVisitDate: '2026-12-31' });
+  assert.deepEqual(partial.failed, ['allergies']);
+  const after = await h.loadPublishedChart('c-1');
+  assert.equal(after.publishedFromVisitDate, before.publishedFromVisitDate, 'a partial read does not claim the chart is as fresh as the new visit');
+  assert.equal(after.publishedAt, before.publishedAt);
+});
+
+test('R8. the publish date is only shown to an audience that has a published section open', async () => {
+  const h = build({ client: { sharing: { visitSummaries: 'none', carePlan: true, appointments: true } } });
+  await publish(h);
+  const s = await readSummary(h, FAMILY_USER);
+  assert.equal(s.publishedAt, null);
+  assert.equal(s.publishedFromVisitDate, null, 'family with everything closed learns nothing about the last visit');
+  const open = await readSummary(build({ client: { sharing: { visitSummaries: 'summary' } }, seed: Object.fromEntries(h.store) }), FAMILY_USER);
+  assert.ok(open.publishedFromVisitDate, 'with visits open it is shown');
+});
+
+test('R9. the patient is told only when there is something new to read', async () => {
+  const h = build();
+  await publish(h);                                                    // first publish: 1 notice
+  assert.equal(h.notices.length, 1);
+  assert.equal(h.notices[0].hasNote, true);
+  // An order moving on (status embedded in the derived summary) is not news.
+  await h.publishEncounterToPortal(signedCtx(h, { orders: [{ orderType: 'lab', status: 'sent', tests: ['A1c'] }] }));
+  assert.equal(h.notices.length, 1, 'no second email because an order advanced');
+  // Placing a hold is not news either.
+  const held = { ...ATTESTATION, portalHold: { reason: 'risk_of_harm' } };
+  await h.publishEncounterToPortal(signedCtx(h, { attestation: held }), { attestation: held });
+  assert.equal(h.notices.length, 1, 'a hold sends no "your note is ready" email');
+  // Text changing WHILE the note is held is not news either: the patient cannot read it.
+  const heldEdit = signedCtx(h, { attestation: held, record: { ...RECORD, note: { ...SHARED_NOTE, plan: 'Changed while held.' } } });
+  await h.publishEncounterToPortal(heldEdit, { attestation: held });
+  assert.equal(h.notices.length, 1, 'no email for an edit to a note the patient cannot see');
+  // Releasing it IS news, and its notice cannot be swallowed as a duplicate of the first.
+  await h.publishEncounterToPortal(signedCtx(h), {});
+  assert.equal(h.notices.length, 2);
+  assert.match(h.notices[1].contentHash, /:released$/);
+  assert.equal(h.notices[1].hasNote, true);
+  // A first publish made WITH a hold never mentions a note.
+  const first = build();
+  await first.publishEncounterToPortal(signedCtx(first, { attestation: held }), { attestation: held });
+  assert.equal(first.notices[0].hasNote, false);
+  const src = fs.readFileSync(path.join(root, 'notifications.js'), 'utf8');
+  assert.match(src, /\$\{hasNote \? ", along with your clinician's note" : ''\}/);
+});
+
+test('R10. the portal fields are written onto a record read fresh, never the copy loaded before the OpenEMR reads', async () => {
+  const h = build({ seed: { encounter_billing: [{ id: 'r1', encounterUuid: 'e1', billingStatus: 'awaiting_billing', postedCharges: [] }] } });
+  // Billing submits while the publish is waiting on OpenEMR.
+  const rows = h.store.get('encounter_billing'); rows[0].billingStatus = 'billed'; rows[0].postedCharges = [{ id: 'c1' }]; h.store.set('encounter_billing', rows);
+  await h.patchPortalOutcome('e1', { published: true, publishedAt: '2026-09-29T00:00:00Z' });
+  const row = h.store.get('encounter_billing')[0];
+  assert.equal(row.billingStatus, 'billed', 'billing\'s change is not reverted');
+  assert.deepEqual(row.postedCharges, [{ id: 'c1' }]);
+  assert.equal(row.portalPublished, true);
+  await h.patchPortalOutcome('e1', { published: false, error: 'boom' });
+  assert.equal(h.store.get('encounter_billing')[0].portalPublishError, 'boom');
+  const body = stripComments(routeBody("app.post('/api/clinical/patients/:clientId/encounters/:euuid/publish'"));
+  assert.ok(!/saveBillingRecord/.test(body), 'the publish route no longer saves the whole collection');
+});
+
+test('R11. screens: evening timestamps keep their Eastern date, state does not follow a clinician to the next patient, and no button promises what family cannot read', () => {
+  assert.ok(!/prettyDate\(String\([^)]*\)\.slice\(0, 10\)\)/.test(portal), 'a timestamp is never sliced to its UTC day before prettyDate');
+  for (const expr of ['prettyDate(a.at)', 'prettyDate(sg.at)', 'prettyDate(r.reviewedAt)', 'prettyDate(clinical.publishedAt)']) assert.ok(portal.includes(expr), expr);
+  assert.match(clinicalPage, /<RefreshPortalChart key=\{patient\.id\} clientId=\{patient\.id\} \/>/);
+  assert.match(clinicalPage, /<PortalPublishCard key=\{`hold:\$\{!!\(d\.attestation && d\.attestation\.portalHold\)\}`\}/);
+  assert.match(portal, /\{\('summary' in visit\) && <button className="btn" onClick=\{\(\) => onNavigate\('health'\)\}>/);
+  assert.match(portal, /const openPdfSecurely = async \(url, token, kind, filename\)/);
+  assert.match(portal, /a\.download = filename \|\| /);
+  assert.match(portal, /token, undefined, `\$\{r\.label\}\$\{r\.resultDate \? ` \$\{r\.resultDate\}` : ''\}\.pdf`\)/, 'a result opens under a real file name on iPhone');
 });
 
 // ============================================================

@@ -17,6 +17,7 @@
 - Let the office and case managers update where an order goes
 
 #### Changes
+- Portal P1: visit overview without repeats, no VITALS shorthand in the note, family label
 - Portal P1: patients read published copies, not OpenEMR
 - Let a referral be placed before the agency is known
 - Stop flagging coded problems as having no ICD-10 code
@@ -34,7 +35,6 @@
 - File a client document into OpenEMR, or move it to a caregiver's file
 - Wire the Bedrock transport modelEngine.js has been waiting for
 - Center the clinical workspace's capped-width content areas on desktop
-- Note the billing NPI correction (owner action, no code change)
 
 
 ### Version 3.1.0 - September 27, 2026

@@ -1104,7 +1104,7 @@
               </button>
             )}
           </div>
-          {patient && patient.id && access.canWrite && <RefreshPortalChart clientId={patient.id} />}
+          {patient && patient.id && access.canWrite && <RefreshPortalChart key={patient.id} clientId={patient.id} />}
           <div className="mt-2"><AllergyStrip allergies={b.allergies} /></div>
           <button className="text-[11.5px] text-primary font-semibold mt-2 flex items-center gap-1" onClick={() => setOpen(!open)}>
             <i className={`ti ti-chevron-${open ? 'up' : 'down'}`} />{open ? 'Hide details' : 'Address, contacts, insurance'}
@@ -5745,7 +5745,7 @@
           )}
 
           {on('sign') && closed && !awaitingAddendum && (
-            <PortalPublishCard record={d.record} attestation={d.attestation} canWrite={canWrite} busy={busy}
+            <PortalPublishCard key={`hold:${!!(d.attestation && d.attestation.portalHold)}`} record={d.record} attestation={d.attestation} canWrite={canWrite} busy={busy}
               onPublish={(hold) => run('portal', () => api.publishToPortal(patient.id, euuid, hold))} />
           )}
 
