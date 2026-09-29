@@ -2062,8 +2062,191 @@ async function generateSignedNotePDF(d) {
   });
 }
 
+// ── After-visit summary (owner, 2026-09-29) ─────────────────────────────────
+// The paper copy of what the patient portal shows: something to leave with the
+// patient, hand to a family member or send to a facility for the resident's
+// chart. It is rendered from ONE assembled document (afterVisitSummary.js), so
+// the portal, the staff download and the patient download cannot disagree.
+// Larger type than the clinical note (older readers) and no clinical codes.
+async function generateAfterVisitSummaryPDF(d) {
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ size: 'LETTER', margin: 48, bufferPages: true });
+      const chunks = [];
+      doc.on('data', c => chunks.push(c));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+      const L = 48, R = 612 - 48, W = R - L, BOTTOM = 728;
+      const C = ROI_COLORS;
+      let y = 44;
+      const room = (h) => { if (y + h > BOTTOM) { doc.addPage(); y = 48; } };
+      const BODY = 11, HEAD = 12.5;
+
+      // Header bar: title left, the practice's logo right (same as the note PDF).
+      const HEADER_H = 44, LOGO_H = 28, LOGO_W = Math.round(LOGO_H * 1021 / 334);
+      doc.rect(L, y, W, HEADER_H).fill(C.navy);
+      doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(16).text('Visit Summary', L + 12, y + 14);
+      doc.image(path.join(__dirname, 'public', 'brand', 'logo-full-white-trimmed.png'),
+        R - 12 - LOGO_W, y + (HEADER_H - LOGO_H) / 2, { width: LOGO_W, height: LOGO_H });
+      y += HEADER_H + 12;
+
+      // Who and which visit.
+      const meta = [
+        ['Patient', d.patientName], ['Date of birth', d.dob], ['Visit date', d.visitDateLabel],
+        ['Seen by', d.providerLabel], ['Visit', d.visitReason]
+      ].filter(([, v]) => v);
+      doc.fontSize(BODY);
+      for (const [k, v] of meta) {
+        const h = doc.heightOfString(String(v), { width: W - 110 });
+        room(h + 4);
+        doc.fillColor(C.muted).font('Helvetica').text(k, L, y, { width: 100 });
+        doc.fillColor(C.ink).font('Helvetica-Bold').text(String(v), L + 110, y, { width: W - 110 });
+        y += h + 4;
+      }
+      y += 6;
+
+      const heading = (t) => {
+        y += 8;
+        room(40);
+        doc.fillColor(C.navy).font('Helvetica-Bold').fontSize(HEAD).text(t, L, y, { width: W });
+        y += 17;
+        doc.moveTo(L, y).lineTo(R, y).lineWidth(1).strokeColor(C.goldRule).stroke();
+        y += 6;
+        doc.fontSize(BODY).fillColor(C.ink).font('Helvetica');
+      };
+      // Free text keeps its line breaks ("1. … 2. …" stays a list).
+      const paragraph = (t) => {
+        for (const line of String(t).split('\n')) {
+          const h = doc.heightOfString(line || ' ', { width: W });
+          room(h + 3);
+          doc.fillColor(C.ink).font('Helvetica').fontSize(BODY).text(line || ' ', L, y, { width: W, lineGap: 1.5 });
+          y = Math.max(y + h, doc.y) + 3;
+        }
+        y += 6;
+      };
+      // A row is a string or { tag?, text, detail? }: an optional bold tag
+      // ("NEW"), the bold item, then plain detail after a dash.
+      const bullets = (rows) => {
+        for (const r of rows) {
+          const it = typeof r === 'string' ? { text: r } : r;
+          const full = `${it.tag ? `${it.tag}  ` : ''}${it.text}${it.detail ? ` — ${it.detail}` : ''}`;
+          // Measured in bold (the wider face) so a wrapped row reserves enough room.
+          const h = doc.font('Helvetica-Bold').fontSize(BODY).heightOfString(full, { width: W - 16 });
+          room(h + 4);
+          doc.fillColor(C.ink).font('Helvetica').fontSize(BODY).text('•', L + 2, y, { width: 10, lineBreak: false });
+          let cont = true;
+          const parts = [];
+          if (it.tag) parts.push([`${it.tag}  `, 'Helvetica-Bold', C.navy]);
+          parts.push([it.text, 'Helvetica-Bold', C.ink]);
+          if (it.detail) parts.push([` — ${it.detail}`, 'Helvetica', C.ink]);
+          // A row that fits on one line is set part by part at measured x
+          // positions; pdfkit's `continued` runs can break a short row early.
+          const widths = parts.map(([t, f]) => doc.font(f).fontSize(BODY).widthOfString(t));
+          if (widths.reduce((a, b) => a + b, 0) <= W - 16) {
+            let x = L + 14;
+            parts.forEach(([t, f, col], i) => { doc.fillColor(col).font(f).text(t, x, y, { lineBreak: false }); x += widths[i]; });
+            doc.y = y + h;
+          } else {
+            parts.forEach(([t, f, col], i) => {
+              doc.fillColor(col).font(f).text(t, i === 0 ? L + 14 : undefined, i === 0 ? y : undefined, { width: W - 16, continued: i < parts.length - 1 });
+            });
+          }
+          // Where pdfkit actually finished, never less than the measured height:
+          // mixed bold/regular runs can wrap onto a line the estimate missed.
+          y = Math.max(y + h, doc.y) + 4;
+        }
+        y += 6;
+      };
+
+      heading('What we did today');
+      paragraph(d.whatWeDid || 'Your clinician will go over this visit with you.');
+      if ((d.diagnoses || []).length) {
+        doc.fillColor(C.muted).font('Helvetica-Bold').fontSize(BODY).text('This visit covered:', L, y, { width: W });
+        y += 15;
+        bullets(d.diagnoses);
+      }
+
+      heading('Your medications');
+      const meds = d.medications || {};
+      if (meds.available === false) {
+        paragraph('Your medication list was not available for this summary. Please ask your care team for your current list.');
+      } else {
+        if ((meds.changes || []).length) {
+          doc.fillColor(C.muted).font('Helvetica-Bold').fontSize(BODY).text('Changes at this visit:', L, y, { width: W });
+          y += 15;
+          bullets(meds.changes);
+        } else {
+          paragraph('No medication changes were recorded at this visit.');
+        }
+        if ((meds.current || []).length) {
+          doc.fillColor(C.muted).font('Helvetica-Bold').fontSize(BODY).text('Your current medications:', L, y, { width: W });
+          y += 15;
+          bullets(meds.current);
+        } else if (meds.noneOnFile) {
+          paragraph('No current medications are on your list. If you take any medicine, vitamin or supplement, please tell your care team.');
+        } else if (!meds.hiddenCurrent) {
+          paragraph('Your full medication list was not available for this summary. Please ask your care team for your current list.');
+        }
+      }
+
+      // `undefined` = this reader may not see allergies (family sharing), so the
+      // section is left out; `null` = the list could not be read, which is
+      // never printed as "no allergies".
+      if (d.allergies !== undefined) {
+        heading('Allergies');
+        if (d.allergies == null) paragraph('Your allergy list was not available for this summary. Please ask your care team.');
+        else if (!d.allergies.length) paragraph('No allergies are recorded in your chart.');
+        else bullets(d.allergies);
+      }
+
+      heading('Tests, referrals and equipment ordered');
+      if ((d.orders || []).length) bullets(d.orders);
+      else paragraph('Nothing was ordered at this visit.');
+
+      heading('Follow-up instructions');
+      paragraph(d.followUp || 'No special instructions were written for this visit. Call us if you have any questions.');
+
+      heading('Your next visit');
+      if (d.nextVisit && d.nextVisit.when) {
+        paragraph([d.nextVisit.when, d.nextVisit.who, d.nextVisit.where,
+          `As of ${d.nextVisitAsOf || 'when this summary was prepared'}. Call us to confirm or change it.`].filter(Boolean).join('\n'));
+      } else {
+        paragraph('Your next visit has not been scheduled yet. We will contact you, or call us to set it up.');
+      }
+
+      // Contact and the 911 box are kept together on one page.
+      room(150);
+      heading('Questions or a new problem');
+      paragraph(d.contactLines.join('\n'));
+      const boxH = 10 + 16 + doc.heightOfString(d.emergencyText, { width: W - 24 }) + 10;
+      room(boxH + 6);
+      doc.lineWidth(1.5).strokeColor(C.ink).rect(L, y, W, boxH).stroke();
+      doc.fillColor(C.ink).font('Helvetica-Bold').fontSize(HEAD).text('When to call 911', L + 12, y + 8, { width: W - 24 });
+      doc.font('Helvetica').fontSize(BODY).text(d.emergencyText, L + 12, y + 8 + 17, { width: W - 24 });
+      y += boxH + 6;
+
+      // Footer on every page. Written below the bottom margin, so the margin is
+      // lifted for the footer alone — otherwise pdfkit adds a blank page for it.
+      const range = doc.bufferedPageRange();
+      for (let i = 0; i < range.count; i++) {
+        doc.switchToPage(range.start + i);
+        const bottom = doc.page.margins.bottom;
+        doc.page.margins.bottom = 0;
+        doc.fillColor(C.muted).font('Helvetica').fontSize(8)
+          .text(`${d.patientName || ''}${d.dob ? ` · DOB ${d.dob}` : ''} · Visit ${d.visitDateLabel || ''} · Prepared ${d.preparedLabel || ''} · page ${i + 1} of ${range.count}`,
+            L, 752, { width: W, align: 'center', lineBreak: false });
+        doc.page.margins.bottom = bottom;
+      }
+      doc.end();
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
 module.exports = {
   generateSignedNotePDF,
+  generateAfterVisitSummaryPDF,
   generateServiceReportPDF,
   generateServiceReportWithAttachments,
   generateEnrollmentPacketPDF,
