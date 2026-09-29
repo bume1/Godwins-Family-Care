@@ -35,7 +35,8 @@ const world = (over = {}) => ({
   orders: [{
     id: 'o1', clientId: 'c1', executedBy: { id: 'rn1', name: 'Ruth Nolan' },
     createdAt: '2026-09-15T09:00:00Z',
-    coSign: { coSignStatus: 'pending', coSignDueAt: '2026-09-18T09:00:00Z' }
+    // The shape the execution route actually stores: flat on the order.
+    coSignStatus: 'pending', coSignDueAt: '2026-09-18T09:00:00Z'
   }],
   carePlanClients: [{
     id: 'c3', name: 'Ada Boyd',
@@ -151,7 +152,7 @@ test('an overdue co-sign sorts above everything else', () => {
 test('a co-sign still inside its window is not overdue', () => {
   const r = inbox.buildInbox({
     viewer: provider,
-    ...world({ orders: [{ id: 'o2', clientId: 'c1', createdAt: '2026-09-21T09:00:00Z', coSign: { coSignStatus: 'pending', coSignDueAt: '2026-09-30T09:00:00Z' } }] })
+    ...world({ orders: [{ id: 'o2', clientId: 'c1', createdAt: '2026-09-21T09:00:00Z', coSignStatus: 'pending', coSignDueAt: '2026-09-30T09:00:00Z' }] })
   });
   assert.strictEqual(byKind(r, 'order_co_sign').overdue, false);
   assert.strictEqual(r.counts.overdue, 0);

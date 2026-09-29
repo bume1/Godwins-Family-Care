@@ -6912,8 +6912,15 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
     // so it keeps an explicit label here.
     const consentLabels = GFC_CONSENT_DEFS.reduce((m, d) => { m[d.type] = d.title; return m; },
       { roiTransfer: 'Transfer-of-Care Authorization (record release)' });
+    // Only what was actually executed is a "signed" row. `pending` is written by
+    // a service-line change and is not a document, and it rendered as "Signed"
+    // with no date. The copy route is client-only and knows only registry
+    // consents, so a family login or a non-registry key gets no copy link
+    // rather than a link that always fails.
+    const registryTypes = new Set(GFC_CONSENT_DEFS.map(d => d.type));
+    const canOpenCopy = req.user.role === config.ROLES.CLIENT;
     const signedConsents = Object.keys(consents)
-      .filter(k => consents[k] && consents[k] !== 'na')
+      .filter(k => ['signed', 'signed_offline', 'optin_recorded'].includes(consents[k]))
       .map(k => ({
         key: k,
         label: consentLabels[k] || k,
@@ -6922,7 +6929,7 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
         signerName: (client.consentMeta && client.consentMeta[k] && client.consentMeta[k].typedName) || null,
         bodyVersion: (client.consentMeta && client.consentMeta[k] && client.consentMeta[k].version) || null,
         // Scope C — the client can now download the document they signed.
-        copyUrl: `/api/gfc/consents/${k}.pdf`,
+        copyUrl: canOpenCopy && registryTypes.has(k) ? `/api/gfc/consents/${k}.pdf` : null,
         // For a paper signature, the copy above is a RE-RENDERED PDF from the
         // stored text and metadata — it never carried the actual scan. This is
         // the original file staff uploaded, when Drive filing succeeded.
@@ -6936,7 +6943,8 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
 
     // Documents shared with this client via the existing client-documents store (Drive-backed).
     const allDocs = (await db.get('client_documents')) || [];
-    const clientDocs = allDocs.filter(d => !d.slug || d.slug === client.slug);
+    // A document staff turned off (active: false) is no longer shared.
+    const clientDocs = allDocs.filter(d => (!d.slug || d.slug === client.slug) && d.active !== false);
 
     // The signed Enrollment Packet — served on demand (and persisted to Drive when configured).
     const hasSignedConsents = signedConsents.length > 0;
@@ -8403,7 +8411,24 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
     // A clinician's banner carries no facility or place of service at all.
     if (!clinicalRoles.canSubmitBilling(req.user)) delete banner.facility;
     const ownDraft = (await loadNoteDrafts()).find(r => r && r.id === clinicalRepo.noteDraftId(client.id, req.user.id)) || null;
-    const visitDraft = { open: !!ownDraft, savedAt: (ownDraft && ownDraft.updatedAt) || null };
+    // The scratch draft is cleared by the FIRST save, after which the note is a
+    // shared draft on its encounter. Reading only the scratch row made the
+    // banner offer "Start visit" again, and that opened a blank H&P whose save
+    // created a second OpenEMR encounter (which can only be voided). An
+    // unsigned, undeleted shared draft for this patient is resumed instead.
+    let sharedDraft = null;
+    if (!ownDraft) {
+      const signedUuids = new Set(((await loadRows('encounter_attestations')) || [])
+        .filter(a => a && a.signedAt).map(a => String(a.encounterUuid)));
+      sharedDraft = ((await loadRows('encounter_billing')) || [])
+        .filter(r => r && r.clientId === client.id && r.note && r.noteStatus === clinicalNotes.NOTE_STATUS.DRAFT && !signedUuids.has(String(r.encounterUuid)))
+        .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))[0] || null;
+    }
+    const visitDraft = {
+      open: !!(ownDraft || sharedDraft),
+      savedAt: (ownDraft && ownDraft.updatedAt) || (sharedDraft && sharedDraft.updatedAt) || null,
+      encounterUuid: sharedDraft ? String(sharedDraft.encounterUuid) : null
+    };
     res.json({
       demographics, intakePrefill, linked: true, banner, visitDraft,
       chartDocuments,
@@ -8668,7 +8693,7 @@ app.post('/api/clinical/patients/:clientId/medrec', authenticateToken, requireCl
     const emrResults = [];
     if (client.openEmrPatientId && openemr.isConfigured()) {
       const emr = openemr.forActor(req.user);
-      const today = new Date().toISOString().slice(0, 10);
+      const today = practiceToday() // Georgia's date: UTC is tomorrow after 8pm;
       for (const d of (req.body.decisions || [])) {
         try {
           if (d.action === 'add' && !d.emrUuid) {
@@ -10723,7 +10748,9 @@ app.put('/api/clinical/patients/:clientId/encounters/:euuid/note', authenticateT
     const changed = clinicalNotes.changedKeys(before, next);
     const confirmChanged = JSON.stringify((before && before.carriedForward && before.carriedForward.confirmed) || [])
       !== JSON.stringify((next.carriedForward && next.carriedForward.confirmed) || []);
-    if (!changed.length && !carry.carriedFrom && !confirmChanged && ctx.record.note && sameVisit(next.visit, before && before.visit)) {
+    // An unchanged save is a no-op EXCEPT when OpenEMR refused the last one:
+    // then "save again to retry" has to actually write it again.
+    if (!changed.length && !carry.carriedFrom && !confirmChanged && ctx.record.note && sameVisit(next.visit, before && before.visit) && !ctx.record.narrativeSyncError) {
       return res.json({ message: 'Nothing changed since the last save', unchanged: true, ...(await noteView(ctx, { signsAsAuthor: clinicalRoles.isAuthorSigner(req.user) })), warnings: [] });
     }
     const warnings = [];
@@ -12733,12 +12760,25 @@ app.get('/api/clinical/my-day', authenticateToken, requireClinicalRead, async (r
     // Open tasks, counted from what is actually waiting: orders still out and
     // results nobody has acknowledged. A count that comes from nowhere is a
     // number nobody can act on.
-    const mine = (r) => !scope.providerId ||
-      String((r && (r.orderingClinicianProviderId || r.providerId)) || '') === String(scope.providerId);
+    // Orders carry the ordering clinician as an object, and results carry who
+    // they route to; `orderingClinicianProviderId`/`providerId` never existed,
+    // so a clinician's My Day always read "0 open tasks". Matched on the app
+    // user behind the provider id (and the provider id itself when stamped).
+    const scopeUserIds = new Set();
+    if (scope.providerId) {
+      for (const u of (users || [])) {
+        if (u && String(u.openEmrProviderId || '') === String(scope.providerId)) scopeUserIds.add(String(u.id));
+      }
+    }
+    const isScopeUser = (id, pid) => (id != null && scopeUserIds.has(String(id))) ||
+      (pid != null && String(pid) === String(scope.providerId));
+    const mineOrder = (o) => !scope.providerId ||
+      isScopeUser(o.orderingClinician && o.orderingClinician.id, o.orderingClinician && o.orderingClinician.openEmrProviderId);
+    const mineResult = (r) => !scope.providerId || isScopeUser(r.routeTo && r.routeTo.userId, null);
     const openOrders = (orderRows || []).filter(o => o &&
       ['ordered', 'sent', 'scheduled'].includes(String(o.status)));
     const unacked = (resultRows || []).filter(r => r && !r.acknowledgedAt);
-    const openTasks = openOrders.filter(mine).length + unacked.filter(mine).length;
+    const openTasks = openOrders.filter(mineOrder).length + unacked.filter(mineResult).length;
 
     const day = myDay.buildMyDay({
       date,
@@ -12888,7 +12928,7 @@ app.get('/api/clinical/patients/:clientId/pre-visit', authenticateToken, require
     const openReferrals = openOrders.filter(o => o.orderType === 'referral')
       .map(o => ({ id: o.id, specialty: o.label, status: 'pending' }));
     const unacknowledged = (resultRows || []).filter(mine).filter(r => !r.acknowledgedAt)
-      .map(r => ({ id: r.id, label: r.label || r.documentName || 'Result', interpretation: r.interpretation || null }));
+      .map(r => ({ id: r.id, label: (r.summary || (r.document && r.document.fileName) || r.performedBy || 'Result'), interpretation: r.interpretation || null }));
 
     let banner = null, lastVitals = null, activeProblems = [], medicationChanges = [], lastVisitAt = null, appointment = null;
     let emrNotice = null;
@@ -12945,7 +12985,7 @@ app.get('/api/clinical/patients/:clientId/pre-visit', authenticateToken, require
       packet: myDay.buildPreVisitPacket({
         client, appointment, banner, lastVisitAt, lastVitals, activeProblems,
         recentResults: (resultRows || []).filter(mine).slice(-3).map(r => ({
-          id: r.id, label: r.label || r.documentName || 'Result',
+          id: r.id, label: (r.summary || (r.document && r.document.fileName) || r.performedBy || 'Result'),
           interpretation: r.interpretation || null, receivedAt: r.receivedAt || null
         })),
         medicationChanges,
@@ -13005,7 +13045,7 @@ app.get('/api/clinical/work-queues', authenticateToken, requireClinicalRead, asy
       .filter(r => r && !r.acknowledgedAt)
       .map(r => ({
         id: r.id, clientId: r.clientId, patientName: nameOf(r.clientId),
-        label: r.label || r.documentName || 'Result',
+        label: (r.summary || (r.document && r.document.fileName) || r.performedBy || 'Result'),
         interpretation: r.interpretation || null,
         receivedAt: r.receivedAt || null
       }))
@@ -13021,7 +13061,7 @@ app.get('/api/clinical/work-queues', authenticateToken, requireClinicalRead, asy
       .filter(o => o && o.orderType === 'referral' && !['completed', 'cancelled'].includes(String(o.status)))
       .map(o => ({
         id: o.id, clientId: o.clientId, patientName: nameOf(o.clientId),
-        specialty: o.specialty || null, status: o.status || null,
+        specialty: (o.referral && o.referral.specialty) || o.specialty || null, status: o.status || null,
         orderReference: o.orderReference || null, createdAt: o.createdAt || null
       }))
       .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
@@ -13078,6 +13118,7 @@ app.get('/api/clinical/analytics', authenticateToken, requireClinicalRead, async
     };
     const perWeek = {};
     (billing || []).forEach(r => {
+      if (r && r.noteStatus === 'voided') return; // a deleted encounter was never a visit
       const ymd = String(r && r.createdAt || '').slice(0, 10);
       if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd) || ymd < sinceYmd) return;
       const w = weekOf(ymd);
@@ -13088,7 +13129,7 @@ app.get('/api/clinical/analytics', authenticateToken, requireClinicalRead, async
     const signed = new Set((attestations || [])
       .filter(a => a && a.encounterUuid && a.signedAt).map(a => String(a.encounterUuid)));
     const unsignedAges = (billing || [])
-      .filter(r => r && r.encounterUuid && !signed.has(String(r.encounterUuid)))
+      .filter(r => r && r.encounterUuid && !signed.has(String(r.encounterUuid)) && r.noteStatus !== 'voided')
       .map(r => {
         const ymd = String(r.createdAt || '').slice(0, 10);
         if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return null;
@@ -14009,7 +14050,9 @@ app.get('/api/clinical/encounters/queue', authenticateToken, requireClinicalRead
     // (owner, 2026-09-29) — billing's worklist, OLDEST first, because the visit
     // waiting longest is the one most likely to be forgotten.
     const awaiting = (r) => r.billingStatus === clinicalRepo.BILLING_STATUS.AWAITING_BILLING;
-    const filtered = rows.filter(r => filter === 'all' ? true
+    // A deleted (voided) encounter was never a visit: it listed as "Not coded".
+    const voided = new Set(records.filter(r => r && r.noteStatus === 'voided').map(r => String(r.encounterUuid)));
+    const filtered = rows.filter(r => !voided.has(String(r.encounterUuid))).filter(r => filter === 'all' ? true
       : filter === 'open' ? (r.state !== 'signed' || awaiting(r))
       : filter === 'awaiting_billing' ? awaiting(r)
       : r.state === filter)
@@ -14587,7 +14630,7 @@ async function sendEnrollmentConfirmation(client, portalUrl, extraRecipient) {
 // GET /api/gfc/enrollment-packet.pdf.
 async function persistEnrollmentPacketToDrive(client) {
   try {
-    const ok = await googledrive.testConnection().then(r => r && r.success).catch(() => false);
+    const ok = await googledrive.testConnection().then(r => r && r.connected).catch(() => false); // testConnection answers `connected`, never `success`
     if (!ok) return null;
     const pdf = await pdfGenerator.generateEnrollmentPacketPDF(client);
     const fileName = `Enrollment-Packet-${(client.slug || client.id)}-${Date.now()}.pdf`;
@@ -17187,7 +17230,9 @@ app.get('/api/gfc/transfer-roi', authenticateToken, requireClientForIntake, asyn
     const patient = {
       patientName: client.preferredName || client.name || `${intake.firstName || ''} ${intake.lastName || ''}`.trim(),
       patientDOB: intake.dob || '',
-      patientAddress: intake.address || client.address || '',
+      // The intake address is a structured object once staff edit it, and it
+      // printed as "[object Object]" on the form and on the faxed PDF.
+      patientAddress: (v => (v && typeof v === 'object') ? consentRender.addressLine(v) : String(v || ''))(intake.address || client.address),
       patientPhone: intake.phone || pc.phone || ''
     };
     const events = (await roiStore.listConsentEventsByClient(client.id)).map(e => ({
