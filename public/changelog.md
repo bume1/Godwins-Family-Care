@@ -12,12 +12,12 @@
 
 #### Bug Fixes
 - Fix bugs found in a sweep of the patient portal and clinician workspace
-- Fix duplicate login prompt on the clinical workspace
 
 #### Improvements
 - Let the office and case managers update where an order goes
 
 #### Changes
+- Portal P1: patients read published copies, not OpenEMR
 - Let a referral be placed before the agency is known
 - Stop flagging coded problems as having no ICD-10 code
 - Let a clinician book a visit without reading OpenEMR's facility list

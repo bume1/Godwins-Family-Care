@@ -114,6 +114,10 @@ const noteFromShared = (note) => {
     // The RN's Track assignment is an internal staffing decision, not part of
     // what a patient reads about their visit.
     if (item.plain && /^RN Track assignment:/.test(item.plain)) continue;
+    // The clinician's "VITALS — BP …; Temp —; RR —" shorthand, with its blank
+    // dashes, is not something to hand a patient: the readings are published on
+    // their own (the Latest vitals panel), so the line is left out of the note.
+    if (item.plain && /^VITALS\b/.test(item.plain)) continue;
     out[item.slot].push({ label: item.label || null, ...(item.markup !== undefined ? { markup: item.markup } : { plain: item.plain }) });
   }
   return out;

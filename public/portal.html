@@ -4954,7 +4954,7 @@
           <div className="lbl" style={{ margin: '0 0 8px' }}>Your latest visit</div>
           <h3>{prettyDate(visit.date)} — {visit.reason}</h3>
           <div className="lwho">{visit.provider}</div>
-          {visit.summary && <div className="lsec"><b>What we worked on</b>{visit.summary}</div>}
+          {(visit.overview || visit.summary) && <div className="lsec"><b>What we worked on</b>{visit.overview || visit.summary}</div>}
           {rx.length > 0 && <div className="lsec"><b>Medicine changes</b>{rx.map((r, i) => <div key={i}>{r.name}{r.instructions ? ` · ${r.instructions}` : ''}</div>)}</div>}
           {tests.length > 0 && <div className="lsec"><b>Tests ordered</b>{tests.map((t, i) => <div key={i}>{t.type}{(t.tests || []).length ? ` (${t.tests.join(', ')})` : ''} · {t.status}</div>)}</div>}
           {visit.followUp && <div className="lsec"><b>What happens next</b>{visit.followUp}</div>}
@@ -6074,7 +6074,7 @@
             <select value={s.visitSummaries || 'summary'} onChange={e => setS({ ...s, visitSummaries: e.target.value })} style={{ width: 'auto', margin: 0 }}>
               <option value="none">Nothing</option>
               <option value="summary">Date, provider, reason</option>
-              <option value="full">Full summary</option>
+              <option value="full">Full summary and your clinician's note</option>
             </select>
           </label>
           <SharingRow s={s} setS={setS} k="appointments" label="Upcoming visits" sub="Date, time, who is coming" />
@@ -6155,7 +6155,7 @@
                     </div>
                     {expandable && open && (
                       <div style={{ marginTop: 10, fontSize: 14, color: 'var(--ink)', lineHeight: 1.55 }} onClick={e => e.stopPropagation()}>
-                        <div>{v.summary}</div>
+                        <div>{v.overview || v.summary}</div>
                         {v.followUp && <div style={{ marginTop: 8 }}><b style={{ color: 'var(--navy)' }}>What happens next:</b> {v.followUp}</div>}
                         {(v.newPrescriptions || []).length > 0 && (
                           <div style={{ marginTop: 8 }}>

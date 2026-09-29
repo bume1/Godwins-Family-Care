@@ -65,7 +65,7 @@ const normalizeSharing = (input) => {
 // only where the client's sharing settings open a section fully).
 const FILTER_MAP = Object.freeze({
   visit: {
-    full: ['id', 'date', 'provider', 'reason', 'summary', 'followUp', 'status', 'newPrescriptions', 'testsOrdered', 'diagnosesAddressed'],
+    full: ['id', 'date', 'provider', 'reason', 'overview', 'summary', 'followUp', 'status', 'newPrescriptions', 'testsOrdered', 'diagnosesAddressed'],
     summary: ['id', 'date', 'provider', 'reason', 'status']
   },
   medication: { full: ['id', 'name', 'instructions', 'status', 'since'] },
@@ -233,12 +233,17 @@ const buildVisitSummary = ({ encounterUuid, encounter, record, attestation, pres
   const sentences = [];
   if (rec.patientSummary) sentences.push(String(rec.patientSummary).trim());
   else if (dx.length) sentences.push(`This visit addressed: ${dx.join(', ')}.`);
+  // What the visit was about, on its own. `summary` below appends the
+  // prescription and test sentences, which the portal also lists under
+  // "Medicine changes" and "Tests ordered" — showing both said everything twice.
+  const overview = sentences[0] || (signed ? 'Your clinician completed and signed the note for this visit.' : 'Your clinician is still finishing the note for this visit.');
   if (rx.length) sentences.push(`${rx.length === 1 ? 'A prescription was' : 'Prescriptions were'} recorded: ${rx.map(r => r.name).join(', ')}.`);
   if (tests.length) sentences.push(`${tests.map(t => `${t.type}${t.tests.length ? ` (${t.tests.join(', ')})` : ''} — ${t.status}`).join('; ')}.`);
   if (!sentences.length) sentences.push(signed ? 'Your clinician completed and signed the note for this visit.' : 'Your clinician is still finishing the note for this visit.');
   return {
     id: String(encounterUuid || rec.encounterUuid || (encounter && encounter.id) || ''),
     date, provider, reason,
+    overview,
     summary: sentences.join(' '),
     followUp: rec.followUpInstructions ? String(rec.followUpInstructions).trim() : null,
     status: signed ? 'complete' : 'in_progress',

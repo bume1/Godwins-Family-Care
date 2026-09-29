@@ -653,6 +653,34 @@ test('a draft, a voided note and an unsigned encounter never publish', async () 
 // ============================================================
 // Latest visit card content rules
 // ============================================================
+test('the visit overview is the clinician\'s own words, without the prescription and test sentences the page lists separately', () => {
+  const rx = [{ drug: 'Lisinopril', dose: '10 mg', transmission: 'none' }];
+  const orders = [{ orderType: 'lab', status: 'ordered', tests: ['A1c'] }];
+  const row = patientPublish.buildPublishedVisit({ clientId: 'c', encounterUuid: 'e1', record: RECORD, attestation: ATTESTATION, prescriptions: rx, orders, addenda: [] });
+  assert.equal(row.visit.overview, 'We checked your blood pressure.');
+  assert.match(row.visit.summary, /prescription was recorded/i, 'the long summary still carries them (older readers)');
+  assert.ok(!/prescription|Lab work/i.test(row.visit.overview));
+  // With no patient summary the overview falls back to the diagnoses, then to a plain sentence.
+  const dx = patientPublish.buildPublishedVisit({ clientId: 'c', encounterUuid: 'e1', record: { ...RECORD, patientSummary: null }, attestation: ATTESTATION, prescriptions: rx, orders, addenda: [] });
+  assert.equal(dx.visit.overview, 'This visit addressed: Essential hypertension.');
+  const bare = patientPublish.buildPublishedVisit({ clientId: 'c', encounterUuid: 'e1', record: { ...RECORD, patientSummary: null, diagnoses: [] }, attestation: ATTESTATION, prescriptions: rx, orders, addenda: [] });
+  assert.match(bare.visit.overview, /completed and signed the note/);
+  // Full level carries it; the family summary level still carries no visit text.
+  assert.equal(patientRead.filterRow('visit', 'full', row.visit).overview, 'We checked your blood pressure.');
+  assert.equal('overview' in patientRead.filterRow('visit', 'summary', row.visit), false);
+  assert.match(portal, /\{visit\.overview \|\| visit\.summary\}/);
+  assert.match(portal, /<div>\{v\.overview \|\| v\.summary\}<\/div>/);
+});
+test('the published note carries no raw VITALS shorthand, and the vitals are published on their own', () => {
+  const row = patientPublish.buildPublishedVisit({ clientId: 'c', encounterUuid: 'e1', record: RECORD, attestation: ATTESTATION, addenda: [] });
+  const text = JSON.stringify(row.note);
+  assert.ok(!/VITALS|Temp —|RR —/.test(text), 'no clinician shorthand in the note a patient reads');
+  assert.match(text, /Alert and comfortable/, 'the rest of the objective section is still there');
+  assert.equal(row.vitals.bloodPressure, '128/78');
+});
+test('the sharing screen says that "full" for family includes the clinician\'s note', () => {
+  assert.match(portal, /<option value="full">Full summary and your clinician's note<\/option>/);
+});
 test('medication changes on the visit are prescriptions that actually went out; today every recorded one shows', () => {
   const rx = [{ drug: 'Lisinopril', dose: '10 mg', transmission: 'none' }, { drug: 'Pending drug', dose: '5 mg', transmission: 'pending' }, { drug: 'Unsent drug', transmission: 'not_sent' }];
   const row = patientPublish.buildPublishedVisit({ clientId: 'c', encounterUuid: 'e1', record: RECORD, attestation: ATTESTATION, prescriptions: rx, addenda: [] });
