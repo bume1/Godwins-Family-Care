@@ -55,15 +55,22 @@ test('medication reconciliation stamps OpenEMR with Georgia\'s date', () => {
 });
 
 // ---- Patient portal ----
-test('portal Health tab: a section that failed to load says so, never "none recorded"', () => {
-  for (const [key, empty] of [['allergies', 'No allergies recorded'], ['medications', 'No medications on your clinical record yet'],
-    ['problems', 'No conditions listed yet'], ['visits', 'No visit summaries yet'], ['appointments', 'No upcoming visits scheduled']]) {
+// Portal P1 (2026-09-29) replaced the old rule's mechanism, not its point. The
+// portal used to read OpenEMR live and could say a section "failed to load";
+// it now reads published copies, so the equivalent lie is "No allergies
+// recorded" over a section that was simply never published. An empty statement
+// is a claim about the patient's record and may only show once that section
+// HAS been published; before that it says the care team will add it.
+test('portal Health tab: "none recorded" only over a section that was actually published', () => {
+  for (const [key, empty, list] of [['allergies', 'No allergies recorded', 'allergies'], ['medications', 'No medications on your record', 'meds'],
+    ['problems', 'No conditions listed yet', 'problems']]) {
     const i = portal.indexOf(`<HealthEmpty title="${empty}"`);
     assert.ok(i > 0, empty);
     const line = portal.slice(portal.lastIndexOf('\n', i), i);
-    assert.match(line, new RegExp(`!failed\\('${key}'\\) &&`), `"${empty}" must not show over a failed ${key} read`);
+    assert.match(line, new RegExp(`pub\\.${key} && ${list}\\.length === 0 &&`), `"${empty}" must not show over an unpublished ${key} section`);
+    assert.match(portal, new RegExp(`\\{!pub\\.${key} && <NotYet />\\}`), `an unpublished ${key} section says the care team will add it`);
   }
-  assert.match(portal, /const failed = \(k\) => degraded\.includes\(k\);/);
+  assert.doesNotMatch(portal, /degraded\.includes|Please try again in a few minutes/, 'the old "try again in a few minutes" copy is gone with the live read');
 });
 
 test('portal signed-consents list: only executed consents, and a copy link only where one opens', () => {

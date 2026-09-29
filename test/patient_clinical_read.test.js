@@ -37,13 +37,27 @@ const CLINICIAN = { id: 'u-1', role: 'user', name: 'Bethel Godwins', hasClinical
 const ADMIN = { id: 'a-1', role: 'admin', name: 'Admin' };
 
 // ---- 1. Filter map ----
-test('no clinician-only field is allowed by any section of the filter map', () => {
+// Portal P1 (owner decision 2026-09-29) changed this rule ON PURPOSE rather
+// than deleting it: the signed note now reaches the patient, but ONLY through
+// the `note` section. Note content is still forbidden in every other section,
+// and every other clinician-only field is still forbidden everywhere.
+test('no clinician-only field is allowed by any section of the filter map — note content only in `note`', () => {
   for (const [section, levels] of Object.entries(R.FILTER_MAP)) {
     for (const [level, allow] of Object.entries(levels)) {
-      const leak = allow.filter(f => R.CLINICIAN_ONLY_FIELDS.includes(f));
+      const leak = allow.filter(f => R.CLINICIAN_ONLY_FIELDS.includes(f)
+        && !(section === 'note' && R.NOTE_CONTENT_FIELDS.includes(f)));
       assert.deepEqual(leak, [], `${section}.${level} allows clinician-only field(s): ${leak.join(', ')}`);
     }
   }
+  // The exception is exactly the four SOAP slots, and they ARE clinician-only
+  // everywhere else.
+  for (const f of R.NOTE_CONTENT_FIELDS) assert.ok(R.CLINICIAN_ONLY_FIELDS.includes(f), `${f} must stay clinician-only outside the note section`);
+  assert.ok(R.FILTER_MAP.note, 'the note section exists');
+  for (const f of ['narrativeNotes', 'narrativeNoteSid', 'structuredNoteSid', 'npi', 'attestationText']) {
+    assert.ok(!R.FILTER_MAP.note.full.includes(f), `${f} never rides in the note section`);
+  }
+  // A result never carries the app's own interpretation or the inbox summary.
+  for (const f of R.RESULT_CLINICIAN_ONLY_FIELDS) assert.ok(!R.FILTER_MAP.result.full.includes(f), `result section allows ${f}`);
 });
 test('a hostile row carrying every clinician-only field is stripped for patient, POA and family', () => {
   const hostile = Object.fromEntries(R.CLINICIAN_ONLY_FIELDS.map(f => [f, `LEAK-${f}`]));

@@ -16,6 +16,7 @@
        GFC_TIME's helpers explicitly, because code that says what it means
        outlives a shim. See public/gfc-time.js. -->
   <script src="/gfc-time.js"></script>
+  <script src="/note-format.js"></script>
   <script>window.GFC_TIME && window.GFC_TIME.installDefaultTimeZone();</script>
   <script src="https://cdn.tailwindcss.com"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -105,6 +106,17 @@
     .gfc .visit .vm span{font-size:12.5px;color:var(--mut);}
     .gfc .visit.hl{background:#fcf3da;border-color:rgba(245,205,133,.7);}
     .gfc .visit .chk{margin-left:auto;color:var(--teal);font-size:18px;}
+    /* the signed note, rendered from the six fixed shapes in note-format.js */
+    .gfc .fmt{font-size:14px;line-height:1.55;color:var(--ink);}
+    .gfc .fmt ul{list-style:disc;padding-left:1.25rem;margin:2px 0;}
+    .gfc .fmt ol{list-style:decimal;padding-left:1.4rem;margin:2px 0;}
+    .gfc .fmt h3{font-size:14.5px;font-weight:700;color:var(--navy);margin:6px 0 2px;}
+    .gfc .fmt strong{font-weight:700;} .gfc .fmt em{font-style:italic;} .gfc .fmt u{text-decoration:underline;}
+    .gfc .latest{background:#fff;border:1px solid rgba(245,205,133,.7);border-radius:16px;padding:18px;margin-bottom:12px;box-shadow:0 2px 8px rgba(3,61,80,.05);}
+    .gfc .latest h3{font-family:'Cormorant Garamond',serif;font-size:21px;font-weight:600;color:var(--navy);margin:0;line-height:1.2;}
+    .gfc .latest .lwho{font-size:14px;color:var(--mut);margin-top:3px;}
+    .gfc .latest .lsec{margin-top:14px;font-size:15px;line-height:1.55;color:var(--ink);}
+    .gfc .latest .lsec b{display:block;font-size:11px;letter-spacing:1.2px;text-transform:uppercase;color:var(--goldd);margin-bottom:3px;}
     /* tiles */
     .gfc .tiles{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:6px;}
     .gfc .tile{background:#fff;border:1px solid var(--line);border-radius:14px;padding:15px;position:relative;box-shadow:0 1px 3px rgba(3,61,80,.04);cursor:pointer;text-align:left;}
@@ -4888,6 +4900,103 @@
       );
     };
 
+    // ── Portal P1 (owner, 2026-09-29): what the patient reads is a PUBLISHED
+    // copy written when a clinician signs — patients never read OpenEMR. These
+    // components render it. Module scope (input-focus rule). Nothing here
+    // decides what a viewer may see; the server already filtered every row.
+    const NF = window.GFC_NOTE_FORMAT;
+    const NOTE_SLOT_HEADINGS = { subjective: 'What you told us', objective: 'What we found', assessment: 'Our assessment', plan: 'The plan going forward' };
+    const PublishedNote = ({ note }) => {
+      const slots = ['subjective', 'objective', 'assessment', 'plan'].filter(k => (note[k] || []).length);
+      return (
+        <div>
+          {slots.map(k => (
+            <div key={k} style={{ marginTop: 12 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--goldd)' }}>{NOTE_SLOT_HEADINGS[k]}</div>
+              {note[k].map((item, i) => (
+                <div key={i} style={{ marginTop: 4 }}>
+                  {item.label && <b style={{ color: 'var(--navy)' }}>{item.label}: </b>}
+                  {item.markup !== undefined
+                    ? <div className="fmt" dangerouslySetInnerHTML={{ __html: NF.renderHtml(item.markup) }} />
+                    : <div className="fmt" style={{ whiteSpace: 'pre-wrap' }}>{item.plain}</div>}
+                </div>
+              ))}
+            </div>
+          ))}
+          {(note.addenda || []).length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--goldd)' }}>Added after the visit</div>
+              {note.addenda.map((a, i) => (
+                <div key={i} style={{ marginTop: 6, paddingLeft: 10, borderLeft: '3px solid var(--gold)' }}>
+                  <div className="fmt" dangerouslySetInnerHTML={{ __html: NF.renderHtml(a.text) }} />
+                  <div style={{ fontSize: 12, color: 'var(--mut)' }}>{[a.by, a.at ? prettyDate(String(a.at).slice(0, 10)) : null].filter(Boolean).join(' · ')}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          {(note.signatures || []).length > 0 && (
+            <div style={{ marginTop: 12, paddingTop: 8, borderTop: '1px solid var(--line)', fontSize: 12.5, color: 'var(--mut)' }}>
+              {note.signatures.map((sg, i) => <div key={i}>{sg.role} <b style={{ color: 'var(--navy)' }}>{sg.name}</b>{sg.at ? ` · ${prettyDate(String(sg.at).slice(0, 10))}` : ''}</div>)}
+            </div>
+          )}
+        </div>
+      );
+    };
+    const HELD_NOTE_TEXT = "Your clinician's note for this visit is available on request. Ask your care team and they will go over it with you.";
+
+    // The most recent visit, in large type — the card families open first.
+    const LatestVisitCard = ({ visit, onNavigate }) => {
+      if (!visit) return null;
+      const rx = visit.newPrescriptions || [];
+      const tests = visit.testsOrdered || [];
+      return (
+        <div className="latest">
+          <div className="lbl" style={{ margin: '0 0 8px' }}>Your latest visit</div>
+          <h3>{prettyDate(visit.date)} — {visit.reason}</h3>
+          <div className="lwho">{visit.provider}</div>
+          {(visit.overview || visit.summary) && <div className="lsec"><b>What we worked on</b>{visit.overview || visit.summary}</div>}
+          {rx.length > 0 && <div className="lsec"><b>Medicine changes</b>{rx.map((r, i) => <div key={i}>{r.name}{r.instructions ? ` · ${r.instructions}` : ''}</div>)}</div>}
+          {tests.length > 0 && <div className="lsec"><b>Tests ordered</b>{tests.map((t, i) => <div key={i}>{t.type}{(t.tests || []).length ? ` (${t.tests.join(', ')})` : ''} · {t.status}</div>)}</div>}
+          {visit.followUp && <div className="lsec"><b>What happens next</b>{visit.followUp}</div>}
+          {visit.noteHeld && <div className="lsec" style={{ fontSize: 13.5, color: 'var(--mut)' }}>{HELD_NOTE_TEXT}</div>}
+          <button className="btn" onClick={() => onNavigate('health')}>{visit.note ? 'Read the full summary and note' : 'Read the full summary'}</button>
+          <button className="btn ghost" style={{ marginTop: 10 }} onClick={() => onNavigate('messages')}>Message the care team</button>
+        </div>
+      );
+    };
+
+    // "Not yet reviewed" is what makes it honest that a result is visible
+    // before a clinician has looked at it (owner decision 2026-09-29).
+    const ResultRow = ({ r, token }) => {
+      const [busy, setBusy] = useState(false);
+      const reviewed = r.reviewStatus === 'reviewed';
+      return (
+        <div className="card" style={{ margin: '0 0 10px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'flex-start' }}>
+            <div>
+              <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--navy)' }}>{r.label}</div>
+              <div style={{ fontSize: 12.5, color: 'var(--mut)', marginTop: 2 }}>{[r.resultDate ? prettyDate(r.resultDate) : null, r.performedBy].filter(Boolean).join(' · ')}</div>
+            </div>
+            <span className="pill" style={{ marginTop: 0, whiteSpace: 'nowrap', background: reviewed ? 'rgba(3,61,80,.08)' : 'rgba(245,205,133,.25)', color: 'var(--navy)', borderColor: 'var(--line2)' }}>
+              {reviewed ? 'Reviewed' : 'Not yet reviewed'}
+            </span>
+          </div>
+          <div style={{ fontSize: 13, color: 'var(--ink)', marginTop: 8, lineHeight: 1.5 }}>
+            {reviewed
+              ? `Reviewed by ${r.reviewedBy}${r.reviewedAt ? ` on ${prettyDate(String(r.reviewedAt).slice(0, 10))}` : ''}.`
+              : 'Not yet reviewed by your care team. You may see it before they have had a chance to go over it with you.'}
+          </div>
+          {r.patientNote && <div style={{ fontSize: 14, color: 'var(--navy)', marginTop: 8, lineHeight: 1.5 }}><b>From your care team:</b> {r.patientNote}</div>}
+          {r.hasFile && (
+            <button className="btn ghost" style={{ marginTop: 12 }} disabled={busy}
+              onClick={async () => { setBusy(true); await openPdfSecurely(`${API_URL}/api/gfc/clinical/documents/${encodeURIComponent(`result:${r.id}`)}/file`, token); setBusy(false); }}>
+              {busy ? 'Opening…' : 'Open the report'}
+            </button>
+          )}
+        </div>
+      );
+    };
+
     const GfcDashboard = ({ data, onNavigate, me, clinical, shifts }) => {
       const cp = data.carePlan;                       // null until an RN authors the real plan (Session 4)
       const nextClinical = clinical && !clinical.error && (clinical.appointments || [])[0]; // 4.3: live OpenEMR row, never a tombstone
@@ -4945,6 +5054,7 @@
               </React.Fragment>
             )}
           </div>
+          {clinical && !clinical.error && (clinical.visits || [])[0] && <LatestVisitCard visit={clinical.visits[0]} onNavigate={onNavigate} />}
           {nextClinical && (
             <React.Fragment>
               <p className="lbl">Your next clinical visit</p>
@@ -5964,7 +6074,7 @@
             <select value={s.visitSummaries || 'summary'} onChange={e => setS({ ...s, visitSummaries: e.target.value })} style={{ width: 'auto', margin: 0 }}>
               <option value="none">Nothing</option>
               <option value="summary">Date, provider, reason</option>
-              <option value="full">Full summary</option>
+              <option value="full">Full summary and your clinician's note</option>
             </select>
           </label>
           <SharingRow s={s} setS={setS} k="appointments" label="Upcoming visits" sub="Date, time, who is coming" />
@@ -5972,6 +6082,7 @@
           <SharingRow s={s} setS={setS} k="allergies" label="Allergies" />
           <SharingRow s={s} setS={setS} k="problems" label="Conditions" sub="Problem list" />
           <SharingRow s={s} setS={setS} k="vitals" label="Vitals" sub="Latest readings from a visit" />
+          <SharingRow s={s} setS={setS} k="results" label="Test results" sub="Reports from labs and imaging" />
           <button className="btn" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save sharing settings'}</button>
           {msg && (msg === 'Saved.' ? <p className="micro"><i className="ti ti-check" />Saved</p> : <div className="err">{msg}</div>)}
         </div>
@@ -5992,18 +6103,18 @@
       }
       const sec = clinical.sections || {};
       const has = (k) => sec[k] && sec[k] !== 'none';
-      const appts = clinical.appointments || [];
       const visits = clinical.visits || [];
+      const results = clinical.results || [];
       const meds = clinical.medications || [];
       const allergies = clinical.allergies || [];
       const problems = clinical.problems || [];
       const vitals = clinical.vitals || null;
-      const degraded = clinical.degraded || [];
-      // A section that failed to load is NOT an empty section. "No allergies
-      // recorded" over a failed read tells a patient something untrue about
-      // their own record, so a failed section says it could not be loaded.
-      const failed = (k) => degraded.includes(k);
-      const Unloaded = () => <HealthEmpty title="Couldn't load this right now" sub="This part of your record is on file with your care team. Please check back later or ask them." />;
+      // Everything here is a copy your care team published after a visit. A part
+      // they have not published yet is "not shared yet" — never "none recorded",
+      // which would be a claim about your record this page cannot make.
+      const pub = clinical.published || {};
+      const NotYet = () => <HealthEmpty title="Your care team will add this after a visit" sub="It appears here once your clinician has reviewed it with you." />;
+      const nothingYet = !clinical.publishedAt && visits.length === 0 && results.length === 0;
       const vitalRows = vitals ? [
         ['Blood pressure', vitals.bloodPressure, vitals.bloodPressureNote], ['Heart rate', vitals.heartRate && `${vitals.heartRate} bpm`],
         ['Temperature', vitals.temperature && `${vitals.temperature} °F`], ['Breathing rate', vitals.respiration && `${vitals.respiration} /min`],
@@ -6014,31 +6125,23 @@
         <div className="gfc-body">
           {readOnly && <span className="ro"><i className="ti ti-eye" />Family view · read-only</span>}
           {clinical.isPoa && <span className="ro"><i className="ti ti-user-shield" />Acting as {clinical.actingAs}</span>}
-          {degraded.length > 0 && (
-            <div className="card" style={{ marginTop: 0, background: 'var(--cream)', boxShadow: 'none' }}>
-              <div style={{ fontSize: 12.5, color: 'var(--ink)', lineHeight: 1.5 }}><b style={{ color: 'var(--navy)' }}>Some sections couldn't load from your clinical record right now</b> ({degraded.join(', ')}). Please try again in a few minutes.</div>
-            </div>
+          {clinical.publishedAt && (
+            <p className="sub" style={{ marginTop: 0 }}>
+              {clinical.publishedFromVisitDate ? `Updated after your visit on ${prettyDate(clinical.publishedFromVisitDate)}.` : `Last updated ${prettyDate(String(clinical.publishedAt).slice(0, 10))}.`}
+            </p>
           )}
+          {nothingYet && <HealthEmpty title="Your health summary is coming" sub="Your care team will share your health summary after your first visit." />}
 
-          {has('appointments') && (
+          {has('results') && results.length > 0 && (
             <React.Fragment>
-              <p className="lbl" style={{ marginTop: 0 }}>Upcoming visits</p>
-              {appts.length === 0 && failed('appointments') && <Unloaded />}
-              {appts.length === 0 && !failed('appointments') && <HealthEmpty title="No upcoming visits scheduled" sub="Your care team will reach out to book the next one." />}
-              {appts.map(a => (
-                <div className="visit hl" key={a.id}>
-                  <span className="vt">{prettyDate(a.date)}<br />{fmtClock(a.startTime)}</span>
-                  <div className="vm"><b>{a.title}</b><span>{a.provider} · {a.location}{a.durationMinutes ? ` · ${a.durationMinutes} min` : ''}</span></div>
-                </div>
-              ))}
+              <p className="lbl" style={{ marginTop: 0 }}>Test results</p>
+              {results.map(r => <ResultRow key={r.id} r={r} token={token} />)}
             </React.Fragment>
           )}
 
-          {has('visits') && (
+          {has('visits') && visits.length > 0 && (
             <React.Fragment>
               <p className="lbl">Visit summaries</p>
-              {visits.length === 0 && failed('visits') && <Unloaded />}
-              {visits.length === 0 && !failed('visits') && <HealthEmpty title="No visit summaries yet" sub="After each visit, a plain-language summary appears here once your clinician finishes the note." />}
               {visits.map(v => {
                 const expandable = 'summary' in v;
                 const open = openVisit === v.id;
@@ -6046,18 +6149,17 @@
                   <div className="card" key={v.id} style={{ margin: '0 0 10px', cursor: expandable ? 'pointer' : 'default' }} onClick={() => expandable && setOpenVisit(open ? null : v.id)}>
                     <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
                       <div>
-                        <div style={{ fontSize: 14.5, fontWeight: 600, color: 'var(--navy)' }}>{prettyDate(v.date)} — {v.reason}</div>
-                        <div style={{ fontSize: 12.5, color: 'var(--mut)', marginTop: 2 }}>{v.provider}</div>
+                        <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--navy)' }}>{prettyDate(v.date)} — {v.reason}</div>
+                        <div style={{ fontSize: 13, color: 'var(--mut)', marginTop: 2 }}>{v.provider}</div>
                       </div>
-                      <span className="pill" style={{ marginTop: 0, whiteSpace: 'nowrap' }}>{v.status === 'complete' ? 'Note complete' : 'In progress'}</span>
                     </div>
                     {expandable && open && (
-                      <div style={{ marginTop: 10, fontSize: 13.5, color: 'var(--ink)', lineHeight: 1.55 }}>
-                        <div>{v.summary}</div>
-                        {v.followUp && <div style={{ marginTop: 8 }}><b style={{ color: 'var(--navy)' }}>Follow-up:</b> {v.followUp}</div>}
+                      <div style={{ marginTop: 10, fontSize: 14, color: 'var(--ink)', lineHeight: 1.55 }} onClick={e => e.stopPropagation()}>
+                        <div>{v.overview || v.summary}</div>
+                        {v.followUp && <div style={{ marginTop: 8 }}><b style={{ color: 'var(--navy)' }}>What happens next:</b> {v.followUp}</div>}
                         {(v.newPrescriptions || []).length > 0 && (
                           <div style={{ marginTop: 8 }}>
-                            <b style={{ color: 'var(--navy)' }}>Prescriptions recorded</b>
+                            <b style={{ color: 'var(--navy)' }}>Medicine changes</b>
                             {v.newPrescriptions.map((r, i) => <div className="goal" key={i} style={{ padding: '6px 0' }}><i className="ti ti-pill" />{r.name}{r.instructions ? ` · ${r.instructions}` : ''}</div>)}
                           </div>
                         )}
@@ -6067,9 +6169,16 @@
                             {v.testsOrdered.map((t, i) => <div className="goal" key={i} style={{ padding: '6px 0' }}><i className="ti ti-test-pipe" />{t.type}{t.tests.length ? ` (${t.tests.join(', ')})` : ''} · {t.status}</div>)}
                           </div>
                         )}
+                        {v.note && (
+                          <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--line)' }}>
+                            <b style={{ color: 'var(--navy)' }}>Your clinician's note</b>
+                            <PublishedNote note={v.note} />
+                          </div>
+                        )}
+                        {v.noteHeld && !v.note && <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--line)', color: 'var(--mut)' }}>{HELD_NOTE_TEXT}</div>}
                       </div>
                     )}
-                    {expandable && <div style={{ fontSize: 11.5, color: 'var(--goldd)', marginTop: 6, fontWeight: 600 }}>{open ? 'Hide details' : 'Read summary'}</div>}
+                    {expandable && <div style={{ fontSize: 12.5, color: 'var(--goldd)', marginTop: 6, fontWeight: 600 }}>{open ? 'Hide details' : (v.note ? 'Read summary and note' : 'Read summary')}</div>}
                   </div>
                 );
               })}
@@ -6079,8 +6188,8 @@
           {has('medications') && (
             <React.Fragment>
               <p className="lbl">Current medications</p>
-              {meds.length === 0 && failed('medications') && <Unloaded />}
-              {meds.length === 0 && !failed('medications') && <HealthEmpty title="No medications on your clinical record yet" sub="Your clinician reviews your medications at each visit." />}
+              {!pub.medications && <NotYet />}
+              {pub.medications && meds.length === 0 && <HealthEmpty title="No medications on your record" sub="Your clinician reviews your medications at each visit." />}
               {meds.length > 0 && (
                 <div className="card" style={{ margin: 0 }}>
                   {meds.map(m => (
@@ -6098,8 +6207,8 @@
           {has('allergies') && (
             <React.Fragment>
               <p className="lbl">Allergies</p>
-              {allergies.length === 0 && failed('allergies') && <Unloaded />}
-              {allergies.length === 0 && !failed('allergies') && <HealthEmpty title="No allergies recorded" sub="Tell your clinician about any reactions you've had." />}
+              {!pub.allergies && <NotYet />}
+              {pub.allergies && allergies.length === 0 && <HealthEmpty title="No allergies recorded" sub="Tell your clinician about any reactions you've had." />}
               {allergies.length > 0 && (
                 <div className="card" style={{ margin: 0 }}>
                   {allergies.map(a => <div className="goal" key={a.id}><i className="ti ti-alert-triangle" style={{ color: '#B5462E' }} />{a.name}{a.severity ? ` · ${a.severity}` : ''}</div>)}
@@ -6111,8 +6220,8 @@
           {has('problems') && (
             <React.Fragment>
               <p className="lbl">Conditions we're managing</p>
-              {problems.length === 0 && failed('problems') && <Unloaded />}
-              {problems.length === 0 && !failed('problems') && <HealthEmpty title="No conditions listed yet" sub="Your clinician builds this list with you at your visits." />}
+              {!pub.problems && <NotYet />}
+              {pub.problems && problems.length === 0 && <HealthEmpty title="No conditions listed yet" sub="Your clinician builds this list with you at your visits." />}
               {problems.length > 0 && (
                 <div className="card" style={{ margin: 0 }}>
                   {problems.map(p => <div className="goal" key={p.id}><i className="ti ti-list-details" />{p.name}{p.since ? <span style={{ fontSize: 12, color: 'var(--mut)', marginLeft: 'auto' }}>since {prettyDate(p.since)}</span> : null}</div>)}
@@ -6141,7 +6250,7 @@
               <GfcSharingCard me={me} token={token} onSaved={onSharingSaved} />
             </React.Fragment>
           )}
-          <p className="micro"><i className="ti ti-shield-lock" />Synced from your clinical record · read-only · all access is logged</p>
+          <p className="micro"><i className="ti ti-shield-lock" />Shared by your care team after each visit · read-only · all access is logged</p>
         </div>
       );
     };

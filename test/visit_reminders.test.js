@@ -205,7 +205,10 @@ test('A3: booking creates one, cancel voids, and a no-show still sends nothing',
   // conversation, not an automated email, and the patient may have been in
   // hospital. The existing rule, and a reminder must not reintroduce it.
   const noShow = SERVER_CODE.slice(SERVER_CODE.indexOf("appointments/:eid/no-show"));
-  const noShowBody = noShow.slice(0, noShow.indexOf('app.get(') > 0 ? noShow.indexOf('app.get(') : 3000);
+  // Bounded to the ROUTE (up to its closing `});`), not to "the next app.get(":
+  // a scan that runs to the next GET reads whatever helper happens to sit
+  // between two routes, which is a guard about the layout rather than the route.
+  const noShowBody = noShow.slice(0, noShow.indexOf('\n});\n') > 0 ? noShow.indexOf('\n});\n') : 3000);
   assert.ok(!/notify\.|scheduleVisitReminder/.test(noShowBody), 'a no-show notifies nobody and schedules nothing');
 });
 

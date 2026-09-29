@@ -4,6 +4,39 @@
 
 ---
 
+### Version 3.1.0 - September 29, 2026
+
+#### New Features
+- Add admin buttons for MFA reset and OpenEMR disconnect
+- Add a script to export GFC's billed CPT/HCPCS codes and modifiers
+
+#### Bug Fixes
+- Fix bugs found in a sweep of the patient portal and clinician workspace
+
+#### Improvements
+- Let the office and case managers update where an order goes
+
+#### Changes
+- Portal P1: patients read published copies, not OpenEMR
+- Let a referral be placed before the agency is known
+- Stop flagging coded problems as having no ICD-10 code
+- Let a clinician book a visit without reading OpenEMR's facility list
+- Clinician signs with an ICD-10; billing adds codes and submits
+- Accept ICD-10 codes with a trailing period from OpenEMR's code search
+- Restore public/changelog.md (boot-time rewrite, not part of this change)
+- Stop vitals showing twice; read an older note's "n/a/n/a" arm as a reason
+- Delete a mistaken unsigned encounter, with a reason
+- Show the clinical note as one note in clinical order, and allow 'unable to take' for a BP arm
+- Show a draft note's vitals in the chart, and keep an older note's vitals when someone else edits it
+- Record Session 4.13 as merged in PR #133
+- Shared clinical notes: one draft, Sign & submit, clinician addendum, carry-forward
+- Auto-file client documents to OpenEMR; remove the manual button
+- File a client document into OpenEMR, or move it to a caregiver's file
+- Wire the Bedrock transport modelEngine.js has been waiting for
+- Center the clinical workspace's capped-width content areas on desktop
+- Note the billing NPI correction (owner action, no code change)
+
+
 ### Version 3.1.0 - September 27, 2026
 
 #### New Features
