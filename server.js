@@ -8680,19 +8680,35 @@ app.post('/api/clinical/patients/:clientId/medrec', authenticateToken, requireCl
     // Write additions/discontinuations through to OpenEMR (best-effort per
     // row — a partial EMR failure is reported, never silently swallowed).
     const emrResults = [];
+    const sentRx = new Map();
     if (client.openEmrPatientId && openemr.isConfigured()) {
       const emr = openemr.forActor(req.user);
       const today = practiceToday() // Georgia's date: UTC is tomorrow after 8pm;
+      // Every kept or added medication not already in OpenEMR becomes an
+      // OpenEMR PRESCRIPTION row (owner, 2026-09-29), marked as a home
+      // medication rather than a GFC order. OpenEMR's own list is read first
+      // and a name already on it is skipped; if that read fails nothing is
+      // sent, because sending blind is how a re-save doubles every row.
+      let existingRx = null;
+      try { existingRx = (await emr.getPrescriptions(client.openEmrPatientId)).filter(r => String(r.active) !== '0').map(r => r.drug || r.title || ''); }
+      catch (e) { emrResults.push({ med: 'OpenEMR prescription list', action: 'read', ok: false, error: `could not be read, so no medications were sent (${e.message.slice(0, 120)}). Save again to retry.` }); }
+      if (existingRx) {
+        const actorFull = users.find(u => u && u.id === req.user.id) || null;
+        for (const med of clinicalRepo.homeMedsToSend(req.body.decisions, existingRx)) {
+          try {
+            const row = await emr.createPrescription(client.openEmrPatientId,
+              clinicalRepo.homeMedicationToEmrRow(med, { byName: req.user.name, credential: actorFull && (actorFull.prescriberCredential || actorFull.licenseLevel), day: today }),
+              (req.body || {}).encounterUuid || null);
+            sentRx.set(clinicalRepo.normMedName(med.name), row && (row.uuid || row.id) != null ? String(row.uuid || row.id) : 'sent');
+            emrResults.push({ med: med.name, action: 'prescription', ok: true });
+          } catch (e) {
+            emrResults.push({ med: med.name, action: 'prescription', ok: false, error: e.message });
+          }
+        }
+      }
       for (const d of (req.body.decisions || [])) {
         try {
-          if (d.action === 'add' && !d.emrUuid) {
-            await emr.addMedication(client.openEmrPatientId, {
-              title: [d.med.name, d.med.dose].filter(Boolean).join(' '),
-              begdate: today,
-              comments: [d.med.frequency, d.med.route, d.med.prescriber && `Prescriber: ${d.med.prescriber}`].filter(Boolean).join(' · ')
-            });
-            emrResults.push({ med: d.med.name, action: 'add', ok: true });
-          } else if (d.action === 'discontinue' && d.emrUuid) {
+          if (d.action === 'discontinue' && d.emrUuid) {
             await emr.updateMedication(client.openEmrPatientId, d.emrUuid, { title: [d.med.name, d.med.dose].filter(Boolean).join(' '), enddate: today });
             emrResults.push({ med: d.med.name, action: 'discontinue', ok: true });
           }
@@ -8715,7 +8731,14 @@ app.post('/api/clinical/patients/:clientId/medrec', authenticateToken, requireCl
       const log = await loadRows('medication_changes');
       await db.set('medication_changes', [...log, ...changeRows]);
     }
-    users[idx].medications = resolved.rows.map(r => ({ ...r, reconciledAt: changeAt }));
+    // Keep each row's OpenEMR prescription link across saves: from this save's
+    // writes, else from the row as it stood before.
+    const priorLink = new Map((client.medications || []).filter(m => m && m.emrPrescriptionId).map(m => [clinicalRepo.normMedName(m.name), m.emrPrescriptionId]));
+    users[idx].medications = resolved.rows.map(r => {
+      const key = clinicalRepo.normMedName(r.name);
+      const link = sentRx.get(key) || priorLink.get(key) || null;
+      return { ...r, reconciledAt: changeAt, ...(link ? { emrPrescriptionId: link } : {}) };
+    });
     users[idx].medRecLast = { at: changeAt, byId: req.user.id, byName: req.user.name };
     await db.set('users', users);
     invalidateUsersCache();
