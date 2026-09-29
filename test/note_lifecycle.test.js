@@ -271,6 +271,59 @@ test('an older note\'s unchanged vitals are not sent to OpenEMR a second time at
   assert.strictEqual(notes.vitalsNeedRow({ note: { vitals: {} } }), false);
 });
 
+// ---- Vitals showing twice (owner report, 2026-09-28) ----
+
+test('an older note\'s arm typed as "n/a/n/a" reads back as unable to take, not as "n" and "a/n/a"', () => {
+  const v = notes.parseLegacyVitals('VITALS — BP right arm 135/76; BP left arm n/a/n/a; HR 60');
+  assert.deepStrictEqual(v, { bpRightSys: '135', bpRightDia: '76', bpLeftUnable: 'yes',
+    bpLeftUnableReason: 'Recorded as "n/a/n/a" on the original note', hr: '60' });
+  const u = notes.parseLegacyVitals('VITALS — BP right arm 120/80; BP left arm unable to obtain (fistula)');
+  assert.strictEqual(u.bpLeftUnable, 'yes');
+  assert.strictEqual(u.bpLeftUnableReason, 'fistula');
+  assert.deepStrictEqual(notes.parseLegacyVitals('VITALS — BP right arm —/—; BP left arm 118/70'), { bpLeftSys: '118', bpLeftDia: '70' });
+  // Round trip: what signing writes reads back the same.
+  const hp = { bpRightSys: '130', bpRightDia: '80', bpLeftUnable: 'yes', bpLeftUnableReason: 'pacemaker side' };
+  const back = notes.parseLegacyVitals(`VITALS — ${notes.buildVitalsRow({ vitals: hp }).note}`);
+  assert.deepStrictEqual(back, hp);
+});
+
+test('an older note\'s vitals already in OpenEMR are not listed again as a draft', () => {
+  const v = { bpRightSys: '135', bpRightDia: '76', bpLeftSys: 'n', bpLeftDia: 'a/n/a', hr: '60' };
+  const rec = draftRecord({ note: { kind: 'hp', visitDate: '2026-09-24', vitals: v }, legacyVitals: { ...v } });
+  assert.strictEqual(notes.draftVitalsRows(rec).length, 0);
+  const changed = draftRecord({ note: { kind: 'hp', visitDate: '2026-09-24', vitals: { ...v, hr: '88' } }, legacyVitals: { ...v } });
+  assert.ok(notes.draftVitalsRows(changed).length > 0, 'a changed reading shows as a draft until signed');
+});
+
+test('ticking "Unable to take" on an arm OpenEMR never had a number for is not a new reading', () => {
+  const legacy = { bpRightSys: '135', bpRightDia: '76', bpLeftSys: 'n', bpLeftDia: 'a/n/a', hr: '60' };
+  const now = { bpRightSys: '135', bpRightDia: '76', bpLeftUnable: 'yes', bpLeftUnableReason: 'fistula', hr: '60' };
+  assert.strictEqual(notes.vitalsNeedRow({ note: { vitals: now }, legacyVitals: legacy }), false);
+  assert.strictEqual(notes.draftVitalsRows(draftRecord({ note: { kind: 'hp', vitals: now }, legacyVitals: legacy })).length, 0);
+  assert.strictEqual(notes.vitalsNeedRow({ note: { vitals: { ...now, bpRightSys: '140' } }, legacyVitals: legacy }), true);
+  for (const k of ['pulse', 'temperature', 'respiration', 'oxygen_saturation', 'weight', 'height']) {
+    const key = { pulse: 'hr', temperature: 'temp', respiration: 'rr', oxygen_saturation: 'spo2', weight: 'weight', height: 'height' }[k];
+    assert.strictEqual(notes.vitalsNeedRow({ note: { vitals: { ...now, [key]: '99' } }, legacyVitals: legacy }), true, `${k} change needs a row`);
+  }
+});
+
+test('OpenEMR vitals rows with no reading are dropped; real readings, including two-part BP, are kept', () => {
+  const repo = require('../clinicalRepository');
+  const code = (t) => ({ text: t });
+  const rows = [
+    { id: 'panel', code: code('Vital signs panel') },
+    { id: 'loc', code: code('Temperature Location') },
+    { id: 'o2x', code: code('oxygen_saturation'), component: [{ code: code('Inhaled oxygen flow rate'), valueQuantity: {} }, { code: code('SpO2 concentration'), valueQuantity: { value: null } }] },
+    { id: 'hr', code: code('Heart rate'), valueQuantity: { value: 60, unit: '/min' } },
+    { id: 'zero', code: code('Pain'), valueQuantity: { value: 0 } },
+    { id: 'bp', code: code('Blood pressure'), component: [{ code: code('Systolic'), valueQuantity: { value: 135 } }, { code: code('Diastolic'), valueQuantity: { value: 76 } }] }
+  ];
+  assert.deepStrictEqual(repo.summarizeVitalObservations(rows).map(r => r.id), ['hr', 'zero', 'bp']);
+  const src = stripComments(SERVER);
+  assert.match(src, /rows: clinicalRepo\.summarizeVitalObservations\(vitals\.value\) \}/);
+  assert.match(src, /\{ ok: true, rows: clinicalRepo\.summarizeVitalObservations\(vitals\.value\) \}/);
+});
+
 test('the chart and My Day both read draft vitals, and signing checks the older note\'s readings', () => {
   const src = stripComments(SERVER);
   // (Read raw: the crude comment stripper swallows this stretch of server.js
