@@ -276,8 +276,17 @@ const parseVitalsFromNote = (objectiveText, date) => {
 // Works on the 4.2 summarized rows (state derived from pc_apptstatus + the
 // encounter linkage). A reschedule leaves a cancelled ('x') tombstone and a
 // no-show a '?' row; neither is a patient's appointment any more.
+// "Today" is Georgia's date: for four hours every evening UTC is already
+// tomorrow, and the rest of today's visits dropped off the list.
+const practiceDate = (now) => {
+  try {
+    const p = require('./public/gfc-time').zonedParts(now);
+    if (p && p.isoDate) return p.isoDate;
+  } catch (e) { /* fall through */ }
+  return now.toISOString().slice(0, 10);
+};
 const selectUpcomingAppointments = (summaries, now = new Date()) => {
-  const today = now.toISOString().slice(0, 10);
+  const today = practiceDate(now);
   return (summaries || [])
     .filter(a => a && a.state === 'scheduled' && a.status !== 'x' && a.status !== '?' && String(a.date || '') >= today)
     .sort((a, b) => `${a.date} ${a.startTime}`.localeCompare(`${b.date} ${b.startTime}`));
