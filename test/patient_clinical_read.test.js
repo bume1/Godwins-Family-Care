@@ -246,7 +246,7 @@ test('every /api/clinical route is registered with the matching guard (GET → r
     } else {
       // 2026-09-29: the order-destination edit carries requireOrderDestinationEditor,
       // the one order door a case manager holds (destination fields only).
-      assert.match(l, /requireClinicalWrite|requireAdmin|requireBilling|requireOrderDestinationEditor/, `${method.toUpperCase()} route must use requireClinicalWrite (or requireAdmin / requireBilling / requireOrderDestinationEditor): ${l.slice(0, 90)}`);
+      assert.match(l, /requireClinicalWrite|requireAdmin|requireBilling|requireOrderDestinationEditor|requireOrderAnnotator/, `${method.toUpperCase()} route must use requireClinicalWrite (or requireAdmin / requireBilling / requireOrderDestinationEditor): ${l.slice(0, 90)}`);
       assert.doesNotMatch(l, /requireClinicalRead/, l.slice(0, 90));
     }
   }

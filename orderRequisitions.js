@@ -851,7 +851,50 @@ const requisitionFileName = (order, client) => {
 // must hold EXACTLY what was sent.
 const REQUISITION_CATEGORY = '/Orders';
 
+// ── Notes and files on an order ───────────────────────────────────────────
+// A home health order is finalized over days: an agency is confirmed, a
+// face-to-face note arrives, somebody phones and gets a name. Notes and files
+// are APPEND-ONLY working records beside the order. They never touch the
+// clinical content of the order or its status, and neither one moves an order
+// to sent or resulted (those still need their own evidence routes).
+const ORDER_NOTE_MAX = 2000;
+const ORDER_FILE_LABEL_MAX = 120;
+
+const buildOrderNote = ({ order, text, actor, at, id }) => {
+  if (!order) return { error: 'Order not found', status: 404, code: 'ORDER_NOT_FOUND' };
+  const t = String(text == null ? '' : text).trim();
+  if (!t) return { error: 'Write the note first.', status: 400, code: 'ORDER_NOTE_EMPTY' };
+  if (t.length > ORDER_NOTE_MAX) {
+    return { error: `A note is at most ${ORDER_NOTE_MAX} characters.`, status: 400, code: 'ORDER_NOTE_TOO_LONG' };
+  }
+  const note = { id, text: t, by: { id: actor && actor.id, name: actor && (actor.name || actor.email) }, at };
+  return { note, order: { ...order, orderNotes: [...(order.orderNotes || []), note], updatedAt: at } };
+};
+
+const buildOrderFile = ({ order, label, fileName, mimeType, byteLength, stored, emrFiled, actor, at, id }) => {
+  if (!order) return { error: 'Order not found', status: 404, code: 'ORDER_NOT_FOUND' };
+  const lab = String(label == null ? '' : label).trim().slice(0, ORDER_FILE_LABEL_MAX);
+  const file = {
+    id, label: lab || null, fileName: String(fileName || 'document'), mimeType, byteLength,
+    driveFileId: (stored && (stored.fileId || stored.id)) || null,
+    emrFiled: !!emrFiled,
+    by: { id: actor && actor.id, name: actor && (actor.name || actor.email) }, at
+  };
+  return { file, order: { ...order, orderFiles: [...(order.orderFiles || []), file], updatedAt: at } };
+};
+
+// What a browser may see of an attached file: never the Drive id.
+const publicOrderFile = (f) => {
+  const { driveFileId, ...rest } = f || {};
+  return rest;
+};
+
+// An order as a browser sees it: attached files without their storage ids.
+const publicOrder = (o) => (o && Array.isArray(o.orderFiles)
+  ? { ...o, orderFiles: o.orderFiles.map(publicOrderFile) } : o);
+
 module.exports = {
+  publicOrder, ORDER_NOTE_MAX, ORDER_FILE_LABEL_MAX, buildOrderNote, buildOrderFile, publicOrderFile,
   REFERRAL, DME, DOCUMENT_ORDER_TYPES,
   REFERRAL_STATUSES, REFERRAL_TRANSITIONS, URGENCIES,
   SEND_CHANNELS, DEFAULT_SEND_CHANNEL, FAX_SEND_CHANNELS, SEND_CHANNEL_LABELS, SENDABLE_STATUSES,

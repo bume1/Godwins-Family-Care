@@ -255,6 +255,9 @@
       updateOrderDestination: (orderId, body) => authedFetch(`/api/clinical/orders/${orderId}/destination`, { method: 'PUT', body: JSON.stringify(body) }),
       markOrderSent: (orderId, body) => authedFetch(`/api/clinical/orders/${orderId}/sent`, { method: 'POST', body: JSON.stringify(body) }),
       markReferralScheduled: (orderId, appointmentDate) => authedFetch(`/api/clinical/orders/${orderId}/scheduled`, { method: 'POST', body: JSON.stringify({ appointmentDate }) }),
+      addOrderNote: (orderId, text) => authedFetch(`/api/clinical/orders/${orderId}/notes`, { method: 'POST', body: JSON.stringify({ text }) }),
+      addOrderFile: (orderId, formData) => authedUpload(`/api/clinical/orders/${orderId}/files`, formData),
+      orderFileUrl: (orderId, fileId) => `/api/clinical/orders/${orderId}/files/${fileId}?token=${encodeURIComponent(getToken() || '')}`,
       attachResult: (orderId, formData) => authedUpload(`/api/clinical/orders/${orderId}/result`, formData),
       attachUnmatchedResult: (clientId, formData) => authedUpload(`/api/clinical/patients/${clientId}/results`, formData),
       resultsInbox: () => authedFetch('/api/clinical/results/inbox'),
@@ -266,6 +269,7 @@
       // query parameter here because a navigation carries no Authorization
       // header (the enrollment-downloads lesson, PR #103) and `authenticateToken`
       // accepts `?token=` for exactly this case.
+      signedNoteUrl: (clientId, euuid) => `/api/clinical/patients/${clientId}/encounters/${euuid}/note.pdf?token=${encodeURIComponent(getToken() || '')}`,
       requisitionUrl: (orderId) => `/api/clinical/orders/${orderId}/requisition.pdf?token=${encodeURIComponent(getToken() || '')}`,
       sign: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/sign`, { method: 'POST', body: JSON.stringify({ attest: true }) }),
       // ── The shared note (2026-09-27) ──
@@ -1323,7 +1327,12 @@
     // Result records carry `summary`, `performedBy` and `document.fileName`;
     // `label`/`documentName` never existed, so every result read "Result".
     const resultTitle = (r, fallback) => (r && (r.summary || (r.document && r.document.fileName) || r.performedBy)) || fallback;
-    const OrderList = ({ rows, empty, err }) => {
+    const orderTitle = (o) => o.orderType === 'referral' ? ((o.referral && o.referral.specialty) || o.specialty || 'Referral')
+      : o.orderType === 'dme' ? ((o.dme && o.dme.itemDescription) || o.itemDescription || 'DME')
+        : ((o.tests && o.tests.join(', ')) || o.orderType);
+    const TYPE_LABEL = { lab: 'Lab', imaging: 'Imaging', procedure: 'Procedure', referral: 'Referral', dme: 'DME' };
+
+    const OrderList = ({ rows, empty, err, onOpen }) => {
       if (err) return <div className="card p-4 text-sm text-red-600">{err}</div>;
       if (!rows) return <div className="card p-4 text-sm text-stone-500">Loading…</div>;
       if (!rows.length) return <EmptyPlace>{empty}</EmptyPlace>;
@@ -1331,44 +1340,181 @@
         <div className="card">
           <div className="p-4">
             {rows.map(o => (
-              <div key={o.id} className="py-2 border-b border-stone-100 last:border-0">
+              <button key={o.id} type="button" onClick={() => onOpen && onOpen(o.id)}
+                className="block w-full text-left py-2 border-b border-stone-100 last:border-0 hover:bg-stone-50">
                 <div className="flex items-center justify-between gap-2 flex-wrap">
                   <span className="font-semibold text-[13px]">
-                    {o.orderType === 'referral' ? ((o.referral && o.referral.specialty) || o.specialty || 'Referral')
-                      : o.orderType === 'dme' ? ((o.dme && o.dme.itemDescription) || o.itemDescription || 'DME')
-                        : ((o.tests && o.tests.join(', ')) || o.orderType)}
+                    <span className="text-stone-400 font-normal">{TYPE_LABEL[o.orderType] || o.orderType} · </span>{orderTitle(o)}
                   </span>
-                  <span className="chip bg-primary-50 text-primary">{String(o.status || '').toUpperCase()}</span>
+                  <span className="flex items-center gap-1.5">
+                    {o.orderType === 'referral' && o.referral && o.referral.agencyPending && !o.referral.receivingFax && <span className="chip bg-amber-50 text-amber-800">NEEDS AGENCY</span>}
+                    <span className="chip bg-primary-50 text-primary">{String(o.status || '').toUpperCase()}</span>
+                  </span>
                 </div>
                 <div className="text-[11.5px] text-stone-500">
                   {[o.orderReference, o.priority, o.createdAt && fmtDate(o.createdAt)].filter(Boolean).join(' · ')}
+                  {((o.orderNotes || []).length > 0 || (o.orderFiles || []).length > 0) &&
+                    ` · ${(o.orderNotes || []).length} note${(o.orderNotes || []).length === 1 ? '' : 's'}, ${(o.orderFiles || []).length} file${(o.orderFiles || []).length === 1 ? '' : 's'}`}
                 </div>
                 {Array.isArray(o.sends) && o.sends.length > 0 && (
                   <div className="text-[11.5px] text-stone-500">
                     Last sent {fmtTs(o.sends[o.sends.length - 1].at)} to {o.sends[o.sends.length - 1].recipient || 'recipient not recorded'}
                   </div>
                 )}
-              </div>
+              </button>
             ))}
           </div>
         </div>
       );
     };
 
-    const OrdersTab = ({ patient }) => {
-      const { data, err } = useChartOrders(patient && patient.id);
-      // Referrals and DME have their own places. This is the diagnostic half.
-      const rows = data ? (data.orders || []).filter(o => !['referral'].includes(o.orderType)) : null;
-      return <OrderList rows={rows} err={err}
-        empty="No orders on this chart yet. Orders are placed from inside an encounter." />;
+    // One order, opened. The working record while an order is being finalized:
+    // the details, where it goes, who sent what, and notes and files that only
+    // ever get added to.
+    const OrderDetail = ({ order, data, onBack, onChanged }) => {
+      const canAnnotate = useCanEditOrderDestination();
+      const [busy, setBusy] = useState('');
+      const [msg, setMsg] = useState('');
+      const [err, setErr] = useState('');
+      const [note, setNote] = useState('');
+      const [fileLabel, setFileLabel] = useState('');
+      const fileRef = useRef(null);
+      const run = async (key, fn, ok) => {
+        setBusy(key); setErr(''); setMsg('');
+        try { const r = await fn(); if (r && r.message) setMsg(r.message); if (ok) ok(); onChanged(); return r; }
+        catch (e) { setErr(e.message || 'That did not go through.'); return null; }
+        finally { setBusy(''); }
+      };
+      const bucket = order.orderType === 'referral' ? (order.referral || {}) : order.orderType === 'dme' ? (order.dme || {}) : {};
+      const facts = Object.entries(bucket)
+        .filter(([, v]) => v !== null && v !== '' && v !== undefined && typeof v !== 'object')
+        .map(([k, v]) => [k.replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase()), typeof v === 'boolean' ? (v ? 'Yes' : 'No') : String(v)]);
+      const dx = (order.diagnosisCodes || []).map(d => (typeof d === 'string' ? d : (d && (d.code || d.icd10)) || '')).filter(Boolean);
+      return (
+        <div className="space-y-3">
+          <button type="button" className="text-[12.5px] text-primary font-semibold" onClick={onBack}><i className="ti ti-arrow-left" /> All orders</button>
+          <div className="card p-4">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div className="font-semibold text-[15px]">{TYPE_LABEL[order.orderType] || order.orderType} · {orderTitle(order)}</div>
+              <span className="chip bg-primary-50 text-primary">{String(order.status || '').toUpperCase()}</span>
+            </div>
+            <div className="text-[11.5px] text-stone-500 mt-0.5">
+              {[order.orderReference, order.priority, order.createdAt && `Placed ${fmtDate(order.createdAt)}`, order.orderingClinician && order.orderingClinician.name && `by ${order.orderingClinician.name}`].filter(Boolean).join(' · ')}
+            </div>
+            {dx.length > 0 && <div className="text-[12px] text-stone-600 mt-1">Diagnoses: {dx.join(', ')}</div>}
+            {facts.length > 0 && (
+              <dl className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-[12.5px]">
+                {facts.map(([k, v]) => <div key={k}><dt className="inline text-stone-500">{k}: </dt><dd className="inline">{v}</dd></div>)}
+              </dl>
+            )}
+            <div className="mt-2">
+              <OrderActions order={order} channels={data.sendChannels} channelLabels={data.sendChannelLabels}
+                defaultChannel={data.defaultSendChannel} faxChannels={data.faxSendChannels}
+                interpretations={data.resultInterpretations} busy={busy === 'act'}
+                destinationFields={data.destinationFields} editableStatuses={data.destinationEditableStatuses}
+                onDestination={(body) => run('act', () => api.updateOrderDestination(order.id, body))}
+                onSent={(body) => run('act', () => api.markOrderSent(order.id, body))}
+                onScheduled={(date) => run('act', () => api.markReferralScheduled(order.id, date))}
+                onResult={(r) => {
+                  const fd = new FormData();
+                  fd.append('file', r.file);
+                  ['interpretation', 'resultDate', 'performedBy', 'summary'].forEach(k => fd.append(k, r[k]));
+                  return run('act', () => api.attachResult(order.id, fd));
+                }} />
+            </div>
+          </div>
+
+          {(order.sends || []).length > 0 && (
+            <div className="card p-4">
+              <div className="font-semibold text-[13px] mb-1">Sent</div>
+              {order.sends.map((sd, i) => (
+                <div key={i} className="text-[12px] text-stone-600">{fmtTs(sd.at)} · {sd.channel} · {sd.recipient || 'recipient not recorded'}{sd.recipientFax ? ` · ${sd.recipientFax}` : ''}{sd.by && sd.by.name ? ` · ${sd.by.name}` : ''}</div>
+              ))}
+            </div>
+          )}
+          {(order.destinationHistory || []).length > 0 && (
+            <div className="card p-4">
+              <div className="font-semibold text-[13px] mb-1">Destination changes</div>
+              {order.destinationHistory.map((h, i) => (
+                <div key={i} className="text-[12px] text-stone-600">{fmtTs(h.at)} · {h.field}: {h.from || '(blank)'} → {h.to || '(blank)'}{h.by && h.by.name ? ` · ${h.by.name}` : ''}{h.reason ? ` · ${h.reason}` : ''}</div>
+              ))}
+            </div>
+          )}
+
+          <div className="card p-4">
+            <div className="font-semibold text-[13px] mb-1">Notes</div>
+            {(order.orderNotes || []).length === 0 && <div className="text-[12px] text-stone-500">No notes yet.</div>}
+            {(order.orderNotes || []).map(n => (
+              <div key={n.id} className="py-1.5 border-b border-stone-100 last:border-0">
+                <div className="text-[13px] whitespace-pre-wrap">{n.text}</div>
+                <div className="text-[11px] text-stone-500">{n.by && n.by.name} · {fmtTs(n.at)}</div>
+              </div>
+            ))}
+            {canAnnotate && (
+              <div className="mt-2">
+                <textarea className="w-full border border-stone-200 rounded p-2 text-[13px]" rows={2} maxLength={data.noteMax || 2000}
+                  placeholder="e.g. Spoke with the agency intake nurse, start of care Thursday" value={note} onChange={e => setNote(e.target.value)} />
+                <button type="button" className="btn btn-primary mt-1" disabled={!note.trim() || busy === 'note'}
+                  onClick={() => run('note', () => api.addOrderNote(order.id, note), () => setNote(''))}>Add note</button>
+              </div>
+            )}
+          </div>
+
+          <div className="card p-4">
+            <div className="font-semibold text-[13px] mb-1">Files</div>
+            {(order.orderFiles || []).length === 0 && <div className="text-[12px] text-stone-500">No files attached yet.</div>}
+            {(order.orderFiles || []).map(f => (
+              <div key={f.id} className="py-1.5 border-b border-stone-100 last:border-0 text-[13px]">
+                <a className="text-primary font-semibold" href={api.orderFileUrl(order.id, f.id)} target="_blank" rel="noopener noreferrer">{f.label || f.fileName}</a>
+                <div className="text-[11px] text-stone-500">{f.label ? `${f.fileName} · ` : ''}{f.by && f.by.name} · {fmtTs(f.at)}{f.emrFiled ? ' · in the chart' : ''}</div>
+              </div>
+            ))}
+            {canAnnotate && (
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <input className="border border-stone-200 rounded p-1.5 text-[13px]" placeholder="What is this file? (optional)" maxLength={120}
+                  value={fileLabel} onChange={e => setFileLabel(e.target.value)} />
+                <input ref={fileRef} type="file" accept="application/pdf,image/jpeg,image/png" className="text-[12px]" />
+                <button type="button" className="btn btn-primary" disabled={busy === 'file'}
+                  onClick={() => {
+                    const f = fileRef.current && fileRef.current.files && fileRef.current.files[0];
+                    if (!f) { setErr('Choose a file to attach.'); return; }
+                    const fd = new FormData();
+                    fd.append('file', f); fd.append('label', fileLabel);
+                    run('file', () => api.addOrderFile(order.id, fd), () => { setFileLabel(''); if (fileRef.current) fileRef.current.value = ''; });
+                  }}>Attach file</button>
+                <div className="w-full text-[11px] text-stone-400">PDF, JPG or PNG, up to 10 MB. It is filed to the patient's chart too.</div>
+              </div>
+            )}
+          </div>
+          {msg && <div className="text-[12.5px] text-green-700">{msg}</div>}
+          {err && <div className="text-[12.5px] text-red-600">{err}</div>}
+        </div>
+      );
     };
 
-    const ReferralsTab = ({ patient }) => {
-      const { data, err } = useChartOrders(patient && patient.id);
-      const rows = data ? (data.orders || []).filter(o => o.orderType === 'referral') : null;
-      return <OrderList rows={rows} err={err}
-        empty="No referrals on this chart yet. A referral is placed from inside an encounter." />;
+    // The list and the opened order for one tab. The opened order is read from
+    // the freshly loaded list, so a note or file added a moment ago shows at once.
+    const OrderBrowser = ({ patient, keep, empty }) => {
+      const { data, err, reload } = useChartOrders(patient && patient.id);
+      const [openId, setOpenId] = useState(null);
+      const rows = data ? (data.orders || []).filter(keep) : null;
+      const open = data && openId ? (data.orders || []).find(o => o.id === openId) : null;
+      if (open) return <OrderDetail order={open} data={data} onBack={() => setOpenId(null)} onChanged={reload} />;
+      return <OrderList rows={rows} err={err} empty={empty} onOpen={setOpenId} />;
     };
+
+    // Every order the patient has, whatever kind. Referrals and DME used to be
+    // filtered out of this tab, so a home health order placed here could only
+    // be found on another one.
+    const OrdersTab = ({ patient }) => (
+      <OrderBrowser patient={patient} keep={() => true}
+        empty="No orders on this chart yet. Orders are placed from inside an encounter." />
+    );
+
+    const ReferralsTab = ({ patient }) => (
+      <OrderBrowser patient={patient} keep={o => o.orderType === 'referral'}
+        empty="No referrals on this chart yet. A referral is placed from inside an encounter." />
+    );
 
     // D3: IMAGING lists imaging orders AND the result documents attached to
     // them, so a study and its report are read in one place rather than two.
@@ -4384,6 +4530,7 @@
         <div className="mt-1.5">
           <div className="flex flex-wrap gap-1.5">
             {agencyPending && <span className="chip bg-amber-50 text-amber-800 border border-amber-200">Needs agency</span>}
+            {agencyPending && <span className="chip border bg-stone-100 text-stone-400 border-stone-200 cursor-not-allowed" title="Add the receiving agency and fax first, then the requisition can be opened."><i className="ti ti-file-text" /> Open requisition</span>}
             {!agencyPending && <a className="chip border bg-white text-primary border-stone-200" href={api.requisitionUrl(order.id)} target="_blank" rel="noopener noreferrer">
               <i className="ti ti-file-text" /> {order.requisitionGeneratedAt ? 'Open requisition again' : 'Open requisition'}
             </a>}
@@ -5177,6 +5324,7 @@
               {closed && (
                 <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-2.5 text-xs text-emerald-900 mt-1">
                   <b>Signed {fmtTs(d.attestation.signedAt)} by {npiLabel(d.attestation.signedBy)}{awaitingAddendum ? ' as the note\'s author' : ''}.</b> The note is locked for clinicians. Corrections go in as addenda below, each with its own signer and timestamp.
+                  <div className="mt-1.5"><a className="chip border bg-white text-primary border-stone-200" href={api.signedNoteUrl(patient.id, euuid)} target="_blank" rel="noopener noreferrer"><i className="ti ti-file-download" /> Download note PDF</a></div>
                   {awaitingAddendum && <div className="mt-1 text-amber-800 font-semibold">Not billable yet — waiting for a clinician addendum from a provider (or an LCSW, for behavioral health).</div>}
                   {!awaitingAddendum && BILLING_STATUS_TEXT[d.billingStatus] && <div className="mt-1 font-semibold">{BILLING_STATUS_TEXT[d.billingStatus]}</div>}
                 </div>
@@ -5539,7 +5687,7 @@
       const load = useCallback(() => { api.encounters(patient.id, showDeleted).then(r => { setData(r); setErr(''); }).catch(e => setErr(e.message)); }, [patient.id, showDeleted]);
       useEffect(load, [load]);
       useEffect(() => { if (initialEuuid) { setOpen(initialEuuid); onOpened && onOpened(); } }, [initialEuuid]);
-      if (open) return <EncounterPanel patient={patient} euuid={open} chart={chart} onChartChanged={onChartChanged} onBack={() => { setOpen(null); load(); }} onChanged={load} />;
+      if (open) return <EncounterPanel patient={patient} euuid={open} chart={chart} onChartChanged={onChartChanged} onBack={() => { setOpen(null); load(); onChartChanged && onChartChanged(); }} onChanged={() => { load(); onChartChanged && onChartChanged(); }} />;
       if (err) return <p className="text-red-600 text-sm p-4">{err}</p>;
       if (!data) return <p className="text-sm text-stone-500 p-4">Loading encounters from OpenEMR…</p>;
       return (
