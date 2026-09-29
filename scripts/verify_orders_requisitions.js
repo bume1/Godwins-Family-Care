@@ -395,6 +395,35 @@ const usersById = async (token) => {
   // right answer, and it proves the route is reachable and line-gated.
   ok('the orders list is line-gated', ordersList.status === 409 || ordersList.status === 200, ordersList.status);
 
+  // ══════════════════════════════════════════════════════════════════════
+  console.log('\n--- K. updating where an order goes: who may, and only that ---');
+  // ══════════════════════════════════════════════════════════════════════
+  // A nonexistent order answers 404 AFTER the gate, so a 404 here means the
+  // caller got past it and a 403 means they did not. Placing a real order needs
+  // an OpenEMR encounter; the row-level behaviour is proven in
+  // test/order_destination.test.js by running the shipped route.
+  const cm = await makeUser(admin, 'Courtney Hale', 'caseManager');
+  const cmToken = await login(cm.email, PW);
+  const dest = { receivingPractice: 'Kindred at Home' };
+  const DEST = '/api/clinical/orders/no-such-order/destination';
+  const cmDest = await call('PUT', DEST, cmToken, dest);
+  ok('a case manager passes the destination gate (404 = past the gate, no such order)', cmDest.status === 404, { status: cmDest.status, body: cmDest.body });
+  ok('  an admin, a clinician and an lmsw do too', (await Promise.all([admin, npToken, lmswToken].map(t => call('PUT', DEST, t, dest)))).every(r => r.status === 404));
+  const clientDest = await call('PUT', DEST, clientToken, dest);
+  ok('a CLIENT is refused', clientDest.status === 403 && clientDest.body.code === 'ORDER_DESTINATION_ONLY', clientDest.body);
+  const anonDest = await call('PUT', DEST, null, dest);
+  ok('  and so is an unauthenticated request', anonDest.status === 401 || anonDest.status === 403, anonDest.status);
+  const cmSend = await call('POST', '/api/clinical/orders/no-such-order/sent', cmToken, { recipientName: 'X', recipientFax: '4045550123' });
+  ok('THE CASE MANAGER STAYS READ-ONLY: recording a send is still refused', cmSend.status === 403, cmSend.body);
+  const cmStatus = await call('POST', '/api/clinical/orders/no-such-order/status', cmToken, { status: 'cancelled' });
+  ok('  and so is cancelling an order', cmStatus.status === 403, cmStatus.body);
+  const cmServed = await call('GET', '/api/clinical/status', cmToken);
+  ok('the status the page draws from says the case manager may update a destination',
+    cmServed.status === 200 && cmServed.body.access && cmServed.body.access.canEditOrderDestination === true && cmServed.body.access.canWrite === false,
+    cmServed.body && cmServed.body.access);
+  const clientServed = await call('GET', '/api/clinical/status', clientToken);
+  ok('  and does not for a client', clientServed.status === 403, clientServed.status);
+
   console.log(`\n${pass} passed, ${fail} failed  (${pass + fail} assertions)`);
   console.log('\nNOT PROVEN FROM A SANDBOX, stated plainly: filing a requisition or a');
   console.log('result into the OpenEMR chart, and the procedure_order status follow.');

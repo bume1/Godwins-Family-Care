@@ -7983,7 +7983,9 @@ app.get('/api/clinical/status', authenticateToken, requireClinicalRead, async (r
       // Billing (an admin or a manager): the codes after signing, the place of
       // service and Submit to billing. The page draws billing controls from
       // this answer and never decides it itself.
-      canSubmitBilling: clinicalRoles.canSubmitBilling(req.user)
+      canSubmitBilling: clinicalRoles.canSubmitBilling(req.user),
+      // Where an order goes: the one order edit a case manager holds.
+      canEditOrderDestination: clinicalRoles.canEditOrderDestination(req.user)
     },
     ...(await openemr.getStatus(req.user)), serverStartedAt: SERVER_STARTED_AT,
     // Session 4.4 deploy diagnostics: billing NPI (spec §2.5) + the caller's
@@ -11153,6 +11155,8 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
       sendChannelLabels: orderReq.SEND_CHANNEL_LABELS,
       defaultSendChannel: orderReq.DEFAULT_SEND_CHANNEL,
       faxSendChannels: orderReq.FAX_SEND_CHANNELS,
+      destinationFields: orderReq.destinationFormFields(),
+      destinationEditableStatuses: orderReq.DESTINATION_EDITABLE_STATUSES,
       rxSchedules: controlled.SCHEDULES,
       rxScheduleLabels: controlled.SCHEDULE_LABELS,
       resultInterpretations: clinicalResults.INTERPRETATIONS,
@@ -11777,6 +11781,50 @@ app.post('/api/clinical/orders/:orderId/sent', authenticateToken, requireClinica
     });
   } catch (error) {
     console.error('Order send error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── PUT …/orders/:orderId/destination — where the order goes ──────────────
+// The agency, practice or supplier is usually confirmed AFTER the order is
+// placed, by the office or social work. This is the ONE order door open to a
+// case manager (who is read-only everywhere else), and it reaches destination
+// fields only — see orderRequisitions.DESTINATION_FIELDS. It is deliberately not
+// behind requireClinicalWrite, and it does not widen it.
+const requireOrderDestinationEditor = (req, res, next) => {
+  if (clinicalRoles.canEditOrderDestination(req.user)) return next();
+  return res.status(403).json({
+    error: 'Updating where an order goes is done by an admin, a manager, a case manager or a licensed clinician.',
+    code: 'ORDER_DESTINATION_ONLY'
+  });
+};
+app.put('/api/clinical/orders/:orderId/destination', authenticateToken, requireOrderDestinationEditor, async (req, res) => {
+  try {
+    const found = await loadOrderForActor(req.params.orderId, res);
+    if (!found) return;
+    const { rows, idx, order, client } = found;
+    const applied = orderReq.applyDestinationEdit({ order, input: req.body, actor: actorFromReq(req) });
+    if (applied.error) return res.status(applied.status || 400).json({ error: applied.error, code: applied.code });
+    rows[idx] = applied.order;
+    await db.set('clinical_orders', rows);
+    // The audit row names WHICH fields changed and, for the fax number, from and
+    // to: the number is the record of who the PHI goes to, the same reason a send
+    // logs it. Nothing about the patient rides in it.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'order_destination_updated', 'client', client.id, {
+      orderId: order.id, orderType: order.orderType, orderReference: order.orderReference,
+      fields: applied.changes.map(c => c.field),
+      faxFrom: (applied.changes.find(c => /fax$/i.test(c.field)) || {}).from || null,
+      faxTo: (applied.changes.find(c => /fax$/i.test(c.field)) || {}).to || null,
+      resendNeeded: applied.resendNeeded
+    });
+    res.json({
+      message: applied.resendNeeded
+        ? 'Destination updated. This order was already faxed — open the requisition again and record another send.'
+        : 'Destination updated.',
+      order: applied.order, changes: applied.changes, resendNeeded: applied.resendNeeded
+    });
+  } catch (error) {
+    console.error('Order destination error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
