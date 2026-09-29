@@ -313,7 +313,7 @@
     // Helper to download a PDF via Authorization header instead of token in URL
     // `kind` defaults to 'pdf' (open in a new tab). Pass 'zip' for an archive —
     // a browser cannot display one, so it is saved rather than opened.
-    const openPdfSecurely = async (url, token, kind) => {
+    const openPdfSecurely = async (url, token, kind, filename) => {
       try {
         const response = await fetch(url, {
           headers: { 'Authorization': `Bearer ${token}` }
@@ -334,7 +334,7 @@
         if (!opened) {
           const a = document.createElement('a');
           a.href = blobUrl;
-          a.download = (url.split('/').pop() || (kind === 'zip' ? 'download.zip' : 'document.pdf')).split('?')[0];
+          a.download = filename || (url.split('/').pop() || (kind === 'zip' ? 'download.zip' : 'document.pdf')).split('?')[0];
           document.body.appendChild(a);
           a.click();
           a.remove();
@@ -4929,14 +4929,14 @@
               {note.addenda.map((a, i) => (
                 <div key={i} style={{ marginTop: 6, paddingLeft: 10, borderLeft: '3px solid var(--gold)' }}>
                   <div className="fmt" dangerouslySetInnerHTML={{ __html: NF.renderHtml(a.text) }} />
-                  <div style={{ fontSize: 12, color: 'var(--mut)' }}>{[a.by, a.at ? prettyDate(String(a.at).slice(0, 10)) : null].filter(Boolean).join(' · ')}</div>
+                  <div style={{ fontSize: 12, color: 'var(--mut)' }}>{[a.by, a.at ? prettyDate(a.at) : null].filter(Boolean).join(' · ')}</div>
                 </div>
               ))}
             </div>
           )}
           {(note.signatures || []).length > 0 && (
             <div style={{ marginTop: 12, paddingTop: 8, borderTop: '1px solid var(--line)', fontSize: 12.5, color: 'var(--mut)' }}>
-              {note.signatures.map((sg, i) => <div key={i}>{sg.role} <b style={{ color: 'var(--navy)' }}>{sg.name}</b>{sg.at ? ` · ${prettyDate(String(sg.at).slice(0, 10))}` : ''}</div>)}
+              {note.signatures.map((sg, i) => <div key={i}>{sg.role} <b style={{ color: 'var(--navy)' }}>{sg.name}</b>{sg.at ? ` · ${prettyDate(sg.at)}` : ''}</div>)}
             </div>
           )}
         </div>
@@ -4959,7 +4959,7 @@
           {tests.length > 0 && <div className="lsec"><b>Tests ordered</b>{tests.map((t, i) => <div key={i}>{t.type}{(t.tests || []).length ? ` (${t.tests.join(', ')})` : ''} · {t.status}</div>)}</div>}
           {visit.followUp && <div className="lsec"><b>What happens next</b>{visit.followUp}</div>}
           {visit.noteHeld && <div className="lsec" style={{ fontSize: 13.5, color: 'var(--mut)' }}>{HELD_NOTE_TEXT}</div>}
-          <button className="btn" onClick={() => onNavigate('health')}>{visit.note ? 'Read the full summary and note' : 'Read the full summary'}</button>
+          {('summary' in visit) && <button className="btn" onClick={() => onNavigate('health')}>{visit.note ? 'Read the full summary and note' : 'Read the full summary'}</button>}
           <button className="btn ghost" style={{ marginTop: 10 }} onClick={() => onNavigate('messages')}>Message the care team</button>
         </div>
       );
@@ -4983,13 +4983,13 @@
           </div>
           <div style={{ fontSize: 13, color: 'var(--ink)', marginTop: 8, lineHeight: 1.5 }}>
             {reviewed
-              ? `Reviewed by ${r.reviewedBy}${r.reviewedAt ? ` on ${prettyDate(String(r.reviewedAt).slice(0, 10))}` : ''}.`
+              ? `Reviewed by ${r.reviewedBy}${r.reviewedAt ? ` on ${prettyDate(r.reviewedAt)}` : ''}.`
               : 'Not yet reviewed by your care team. You may see it before they have had a chance to go over it with you.'}
           </div>
           {r.patientNote && <div style={{ fontSize: 14, color: 'var(--navy)', marginTop: 8, lineHeight: 1.5 }}><b>From your care team:</b> {r.patientNote}</div>}
           {r.hasFile && (
             <button className="btn ghost" style={{ marginTop: 12 }} disabled={busy}
-              onClick={async () => { setBusy(true); await openPdfSecurely(`${API_URL}/api/gfc/clinical/documents/${encodeURIComponent(`result:${r.id}`)}/file`, token); setBusy(false); }}>
+              onClick={async () => { setBusy(true); await openPdfSecurely(`${API_URL}/api/gfc/clinical/documents/${encodeURIComponent(`result:${r.id}`)}/file`, token, undefined, `${r.label}${r.resultDate ? ` ${r.resultDate}` : ''}.pdf`); setBusy(false); }}>
               {busy ? 'Opening…' : 'Open the report'}
             </button>
           )}
@@ -6127,7 +6127,7 @@
           {clinical.isPoa && <span className="ro"><i className="ti ti-user-shield" />Acting as {clinical.actingAs}</span>}
           {clinical.publishedAt && (
             <p className="sub" style={{ marginTop: 0 }}>
-              {clinical.publishedFromVisitDate ? `Updated after your visit on ${prettyDate(clinical.publishedFromVisitDate)}.` : `Last updated ${prettyDate(String(clinical.publishedAt).slice(0, 10))}.`}
+              {clinical.publishedFromVisitDate ? `Updated after your visit on ${prettyDate(clinical.publishedFromVisitDate)}.` : `Last updated ${prettyDate(clinical.publishedAt)}.`}
             </p>
           )}
           {nothingYet && <HealthEmpty title="Your health summary is coming" sub="Your care team will share your health summary after your first visit." />}
