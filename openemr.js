@@ -224,7 +224,14 @@ const forActor = (actor) => {
     logEmrAccess(actor, 'write', 'appointment', puuid, { path: `patient/${pid}/appointment` });
     const row = unwrapApi(data);
     const eid = row && (row.id ?? row.pc_eid);
-    if (eid == null) throw new OpenEmrError('OpenEMR did not return an appointment id', 502, row);
+    // OpenEMR's appointment validator can also answer with its complaints as a
+    // bare map (e.g. a required pc_facility missing) rather than under
+    // validationErrors. Whatever came back is named, so the next failure says
+    // its own cause instead of only "no id".
+    if (eid == null) {
+      const said = body && Object.keys(body).length ? `: ${JSON.stringify(body).slice(0, 300)}` : ' (empty response)';
+      throw new OpenEmrError(`OpenEMR did not accept the appointment${said}`, 502, row);
+    }
     return String(eid);
   };
 

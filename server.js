@@ -9050,6 +9050,22 @@ const APPT_DEFAULTS = () => ({
   categoryId: config.OPENEMR.ENCOUNTER_CATEGORY
 });
 
+// OpenEMR refuses an appointment with either facility field missing. Checked
+// here first so the person booking reads what to fix. The wording is about
+// the patient's setup, never the place of service: that is billing's
+// (owner, 2026-09-29), and the person booking is usually a clinician.
+const appointmentSetupGap = (fields) => {
+  if (!fields.pc_facility) {
+    return { code: 'APPT_PATIENT_SETUP_INCOMPLETE',
+      error: "This patient's setup isn't finished, so the visit can't go on the calendar yet. An admin needs to assign their facility on the patient record." };
+  }
+  if (!fields.pc_billing_location) {
+    return { code: 'APPT_BILLING_ENTITY_UNSET',
+      error: "The practice's billing entity isn't set up, so the visit can't go on the calendar yet. An admin needs to set it (OPENEMR_BILLING_FACILITY_ID)." };
+  }
+  return null;
+};
+
 // The billing entity on a claim. Read from OpenEMR (which records the primary
 // business entity) rather than config, so the two cannot drift apart silently.
 // Cached briefly: it changes about once a year, and every booking and swap
@@ -9108,9 +9124,14 @@ const resolveBillingForVisit = async (emr) => {
   let facilities = [];
   try { facilities = (await readFacilities(emr)).rows; }
   catch (e) {
-    return { facilityId: null, facilityName: null, source: 'unavailable',
+    // The practice's configured billing entity wins over OpenEMR's flag anyway
+    // (owner, 2026-09-09), so it needs no read. Not cached, so the next login
+    // that CAN read the list still verifies it.
+    const configuredId = config.OPENEMR.BILLING_FACILITY_ID || null;
+    return { facilityId: configuredId ? String(configuredId) : null, facilityName: null,
+      source: configuredId ? 'configured_unverified' : 'unavailable',
       error: 'FACILITY_LOOKUP_FAILED', warning: null,
-      billingWarning: `OpenEMR's facility list could not be read (${e.message.slice(0, 120)}), so the billing entity could not be determined.` };
+      billingWarning: `OpenEMR's facility list could not be read (${e.message.slice(0, 120)}), so the billing entity was taken from configuration without checking it against OpenEMR.` };
   }
   const resolved = clinicalRepo.resolveBillingFacility({
     facilities, configuredId: config.OPENEMR.BILLING_FACILITY_ID || null
@@ -9447,6 +9468,11 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
     const billTo = await resolveBillingForVisit(emr);
     if (billTo.facilityId) built.fields.pc_billing_location = String(billTo.facilityId);
     if (billTo.warning) apptWarnings.push(billTo.warning);
+    // OpenEMR requires both and answers a missing one with a bare complaint
+    // map, which is how "did not return an appointment id" reached a
+    // clinician. Say what is actually wrong, in words that are not about POS.
+    const apptSetupGap = appointmentSetupGap(built.fields);
+    if (apptSetupGap) return res.status(409).json(apptSetupGap);
 
     const rows = await emr.listAppointmentRows();
     const conflict = clinicalRepo.findAppointmentConflict(rows, {
@@ -9532,6 +9558,15 @@ app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requir
     if (row.pc_facility) built.fields.pc_facility = String(row.pc_facility);
     const rsBill = await resolveBillingForVisit(emr);
     if (rsBill.facilityId) built.fields.pc_billing_location = String(rsBill.facilityId);
+    // A row booked before the facility fix may carry no facility; the patient's
+    // assignment fills it rather than sending OpenEMR a row it will refuse.
+    if (!built.fields.pc_facility) {
+      const rsUser = (await getUsers()).find(u => u.role === config.ROLES.CLIENT &&
+        String(u.openEmrPatientId || '') === String(row.puuid));
+      if (rsUser && rsUser.openEmrFacilityId) built.fields.pc_facility = String(rsUser.openEmrFacilityId);
+    }
+    const rsSetupGap = appointmentSetupGap(built.fields);
+    if (rsSetupGap) return res.status(409).json(rsSetupGap);
 
     const conflict = clinicalRepo.findAppointmentConflict(rows, {
       providerId, date: body.date, startTime: body.startTime,
@@ -9920,7 +9955,15 @@ const resolveFacilityForVisit = async (emr, client, appointmentLocation, descrip
   let facilities = [];
   try { facilities = (await readFacilities(emr)).rows; }
   catch (e) {
-    return { facilityId: null, posCode: null, facilityName: null, source: 'unavailable',
+    // The list could not be read (a clinician's login cannot, and no copy has
+    // been synced yet). The facility ID itself needs no read: it lives on our
+    // own patient record, or in config for telehealth. Without it OpenEMR
+    // refuses an appointment outright (Juanita Guess, 2026-09-29), so it is
+    // still returned. Only the POS, which does need the list, stays empty.
+    const telehealth = String(appointmentLocation || '').toLowerCase() === 'telehealth';
+    const fallbackId = (telehealth && config.OPENEMR.TELEHEALTH_FACILITY_ID) || client.openEmrFacilityId || null;
+    return { facilityId: fallbackId ? String(fallbackId) : null, posCode: null, facilityName: null,
+      source: fallbackId ? 'assigned_unverified' : 'unavailable',
       visit, visitLabel: visit.label,
       error: 'FACILITY_LOOKUP_FAILED', warning: null,
       billingWarning: `OpenEMR's facility list could not be read (${e.message.slice(0, 120)}) and no admin or manager has synced it yet, so the place of service could not be derived. Billing sets it before submitting.` };
