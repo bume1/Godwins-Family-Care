@@ -95,8 +95,12 @@
     // which reads the SAME module the routes enforce with. This page never
     // decides a capability itself: a control drawn here is one the server will
     // accept, and every one is re-checked at the route regardless.
-    const AccessContext = React.createContext({ canWrite: true, role: null, capabilities: {}, clinicalRole: null });
+    const AccessContext = React.createContext({ canWrite: true, role: null, capabilities: {}, clinicalRole: null, canSubmitBilling: false });
     const useCanWrite = () => useContext(AccessContext).canWrite;
+    // Billing (an admin or a manager, owner 2026-09-29): the only viewer who
+    // ever sees a place of service, edits codes after signing, or submits.
+    // Answered by the server; false until it has answered.
+    const useCanBill = () => !!useContext(AccessContext).canSubmitBilling;
     const useCan = (capability) => {
       const ctx = useContext(AccessContext);
       // Until the status call lands there is no matrix; fall back to the
@@ -265,6 +269,9 @@
       carrySources: (id) => authedFetch(`/api/clinical/patients/${id}/notes/carry-forward-sources`),
       carryContent: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/note/carry-forward`),
       clinicianAddendum: (id, euuid, text) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/co-sign`, { method: 'POST', body: JSON.stringify({ attest: true, text }) }),
+      billingSubmit: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/billing-submit`, { method: 'POST', body: JSON.stringify(body) }),
+      refreshPos: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/pos/refresh`, { method: 'POST', body: '{}' }),
+      syncFacilities: () => authedFetch('/api/clinical/facilities/sync', { method: 'POST', body: '{}' }),
       coSignNote: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/co-signatures`, { method: 'POST', body: JSON.stringify({ attest: true }) }),
       attachNote: (id, euuid, appointmentEid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/appointment`, { method: 'PUT', body: JSON.stringify({ appointmentEid }) }),
       addAddendum: (id, euuid, text) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/addenda`, { method: 'POST', body: JSON.stringify({ text }) }),
@@ -790,7 +797,7 @@
             <h2><i className="ti ti-building-hospital mr-1 text-accent" />Place of service</h2>
             {ok
               ? <span className="chip bg-emerald-50 text-emerald-700">POS {data.posCode}</span>
-              : <span className="chip bg-amber-50 text-amber-800">Blocks signing</span>}
+              : <span className="chip bg-amber-50 text-amber-800">Blocks billing</span>}
           </div>
           <div className="p-4 text-sm grid gap-2">
             {data.degraded && (
@@ -801,7 +808,7 @@
             <div className="text-xs text-stone-600">
               {assigned
                 ? <>Seen at <b>{data.facilityName || `facility ${data.facilityId}`}</b>{data.posCode ? <> · place of service <b>{data.posCode}</b></> : null}.</>
-                : <b className="text-amber-800">This patient is not assigned to an OpenEMR facility, so their visits cannot be signed.</b>}
+                : <b className="text-amber-800">This patient is not assigned to an OpenEMR facility, so their visits cannot be submitted to billing.</b>}
             </div>
             <div className="text-xs text-stone-600">
               {data.usualLocation
@@ -837,7 +844,8 @@
       order_co_sign: 'ti-flask',
       care_plan_co_sign: 'ti-clipboard-heart',
       visit_log_review: 'ti-notes',
-      encounter_unsigned: 'ti-file-pencil'
+      encounter_unsigned: 'ti-file-pencil',
+      encounter_awaiting_billing: 'ti-receipt'
     };
     const InboxView = ({ onOpenEncounter, onOpenChart }) => {
       const [data, setData] = useState(null);
@@ -1013,6 +1021,7 @@
     const PatientBanner = ({ banner, patient, homeVisitFields, visitDraft, onStartVisit, onHomeVisitSaved }) => {
       const [open, setOpen] = useState(false);
       const access = useContext(AccessContext);
+      const canBill = !!access.canSubmitBilling;
       const b = banner || {};
       const name = b.name || (patient && patient.name) || '—';
       // The identity line, and it never collapses — not on a phone, not on any
@@ -1076,7 +1085,7 @@
                     {b.insurance && b.insurance.qmb ? <><br /><span className="chip bg-amber-100 text-amber-800">QMB</span></> : null}
                   </span>
                 </BannerFact>
-                <BannerFact label="Facility &amp; POS">
+                {canBill && <BannerFact label="Facility &amp; POS">
                   {b.facility && b.facility.name ? (
                     <span>{b.facility.name}<br />POS {b.facility.posCode || <span className="text-amber-700">not set</span>}</span>
                   ) : b.facility && b.facility.id ? (
@@ -1088,9 +1097,9 @@
                     // false rather than something unconfirmed.
                     <span className="text-amber-700">Assigned (facility {b.facility.id}) — {b.facility.warning || 'could not be confirmed against OpenEMR right now'}</span>
                   ) : (
-                    <span className="text-amber-700">Not assigned — visits cannot be signed</span>
+                    <span className="text-amber-700">Not assigned — visits cannot be submitted to billing</span>
                   )}
-                </BannerFact>
+                </BannerFact>}
                 <BannerFact label="Last visit" value={b.lastVisitAt} />
                 <BannerFact label="Track" value={b.careTierLabel} />
               </div>
@@ -2057,6 +2066,7 @@
 
     const SummaryTab = ({ chart, patient, onLink, linking, linkCandidates, onDismissCandidates, isAdmin, onChartChanged }) => {
       const canWrite = useCanWrite();
+      const canBill = useCanBill();
       const [showLinkExisting, setShowLinkExisting] = useState(false);
       const [existingId, setExistingId] = useState('');
       const d = chart && chart.demographics;
@@ -2141,7 +2151,9 @@
               </div>
             </div>
           )}
-          {chart.linked && <PlaceOfServiceCard patient={patient} />}
+          {/* Billing's only (owner, 2026-09-29): a clinician chooses what KIND
+              of visit it is, never where it bills. */}
+          {chart.linked && canBill && <PlaceOfServiceCard patient={patient} />}
           {/* Session 4.12 Scope D — OVERVIEW is the at-a-glance. The problem
               list, medications, allergies, documents and the timeline each have
               their OWN place on the tab bar now, so nothing here is the
@@ -3626,7 +3638,7 @@
               <div className="card w-full max-w-lg mt-10" onClick={e => e.stopPropagation()}>
                 <div className="card-h"><h2>Attach an existing note</h2><button className="text-stone-400" onClick={() => setAttaching(null)}><i className="ti ti-x" /></button></div>
                 <div className="p-4 grid gap-2 text-sm">
-                  <p className="text-xs text-stone-500">To the appointment on <b>{fmtDayLabel(attaching.date)} {fmt12h(attaching.startTime)}</b>. Pick the note written for this visit. Its place of service will follow this appointment. Only unsigned notes not already attached are listed.</p>
+                  <p className="text-xs text-stone-500">To the appointment on <b>{fmtDayLabel(attaching.date)} {fmt12h(attaching.startTime)}</b>. Pick the note written for this visit. Only unsigned notes not already attached are listed.</p>
                   {attachErr && <p className="text-xs text-red-600">{attachErr}</p>}
                   {!attachable && !attachErr && <p className="text-xs text-stone-500">Loading this patient's notes…</p>}
                   {attachable && attachable.length === 0 && <p className="text-xs text-stone-500">No unsigned, unattached note on this chart. A signed note cannot be attached.</p>}
@@ -4818,6 +4830,11 @@
       const [clinAddendum, setClinAddendum] = useState('');
       const [clinAttest, setClinAttest] = useState(false);
       const [coSignAttest, setCoSignAttest] = useState(false);
+      // Billing's half (owner, 2026-09-29): submit the signed visit, or close
+      // it with no charge and a reason.
+      const [billAttest, setBillAttest] = useState(false);
+      const [noChargeOpen, setNoChargeOpen] = useState(false);
+      const [noChargeReason, setNoChargeReason] = useState('');
       const [attachOpen, setAttachOpen] = useState(false);
       const [attachAppts, setAttachAppts] = useState(null);
       const [showRx, setShowRx] = useState(false); const [showOrder, setShowOrder] = useState(false);
@@ -4868,10 +4885,21 @@
       // (noteActions) — the page decides no credential question itself.
       const na = d.noteActions || {};
       const ns = d.noteState || {};
+      // Billing's side of a signed visit, answered by the server.
+      const ba = d.billingActions || {};
       // Coding stays open, on a note an RN or LMSW signed as its author, to the
-      // clinician who will add the billing addendum: the codes are theirs.
-      const codingLocked = (closed && !na.canAddClinicianAddendum) || !canWrite;
+      // clinician who will add the billing addendum: the diagnoses are theirs.
+      // Once a clinician signs, the SERVICE codes, modifiers and dx links are
+      // billing's until billing submits (owner, 2026-09-29) — the diagnoses
+      // stay exactly as the clinician signed them.
+      const billerEditing = closed && !!ba.canEditCoding && !na.canAddClinicianAddendum;
+      const codingLocked = closed ? !(na.canAddClinicianAddendum || ba.canEditCoding) : !canWrite;
       const awaitingAddendum = d.record.coSignStatus === 'pending';
+      const BILLING_STATUS_TEXT = {
+        awaiting_billing: 'With billing — service codes are added and the visit submitted by billing.',
+        billed: 'Submitted to billing.',
+        no_charge: 'Closed by billing with no charge.'
+      };
       const openAttach = () => {
         setAttachOpen(true); setAttachAppts(null);
         api.patientAppointments(patient.id)
@@ -4899,7 +4927,7 @@
                 <span>Date <b>{d.encounter.date || '—'}</b></span>
                 <span>OpenEMR encounter <b>#{d.encounter.eid || '—'}</b></span>
                 <span>Rendering clinician <b>{npiLabel(d.record.renderingProvider)}</b></span>
-                <span>Billing provider NPI <b>{d.billingNpiUsed || <span className="text-red-600">not configured (Settings)</span>}</b></span>
+                {ba.canBill && <span>Billing provider NPI <b>{d.billingNpiUsed || <span className="text-red-600">not configured (Settings)</span>}</b></span>}
               </div>
               {d.encounter.billingNote && <div className="text-xs text-stone-500">OpenEMR billing note: {d.encounter.billingNote}</div>}
               <div className="flex flex-wrap items-center gap-2 text-xs mt-1">
@@ -4913,7 +4941,7 @@
               {attachOpen && (
                 <div className="border border-stone-200 rounded-lg p-2.5 mt-1 text-xs">
                   <div className="flex items-center justify-between mb-1"><b className="text-primary">Attach this note to an appointment</b><button className="text-stone-400" onClick={() => setAttachOpen(false)}><i className="ti ti-x" /></button></div>
-                  <p className="text-stone-500 mb-2">For a visit that was unscheduled when the note was written. Its place of service will follow the appointment. Only unsigned notes can be attached.</p>
+                  <p className="text-stone-500 mb-2">For a visit that was unscheduled when the note was written. Only unsigned notes can be attached.</p>
                   {!attachAppts && <p className="text-stone-500">Loading this patient's appointments…</p>}
                   {attachAppts && attachAppts.length === 0 && <p className="text-stone-500">No appointment without a note. Book the appointment first, then attach this note to it.</p>}
                   <div className="grid gap-1">
@@ -4928,8 +4956,9 @@
               )}
               {closed && (
                 <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-2.5 text-xs text-emerald-900 mt-1">
-                  <b>Signed {fmtTs(d.attestation.signedAt)} by {npiLabel(d.attestation.signedBy)}{awaitingAddendum ? ' as the note\'s author' : ''}.</b> The note is locked. Corrections go in as addenda below, each with its own signer and timestamp.
+                  <b>Signed {fmtTs(d.attestation.signedAt)} by {npiLabel(d.attestation.signedBy)}{awaitingAddendum ? ' as the note\'s author' : ''}.</b> The note is locked for clinicians. Corrections go in as addenda below, each with its own signer and timestamp.
                   {awaitingAddendum && <div className="mt-1 text-amber-800 font-semibold">Not billable yet — waiting for a clinician addendum from a provider (or an LCSW, for behavioral health).</div>}
+                  {!awaitingAddendum && BILLING_STATUS_TEXT[d.billingStatus] && <div className="mt-1 font-semibold">{BILLING_STATUS_TEXT[d.billingStatus]}</div>}
                 </div>
               )}
               {ns.status === 'voided' && (
@@ -4989,9 +5018,10 @@
             <div className="p-4 grid gap-4">
               <div>
                 <span className="lblu block mb-1">Diagnoses (ICD-10-CM)</span>
-                <DxEditor diagnoses={diagnoses} setDiagnoses={setDiagnoses} candidates={d.candidates} clientId={patient.id} readOnly={codingLocked}
+                <DxEditor diagnoses={diagnoses} setDiagnoses={setDiagnoses} candidates={d.candidates} clientId={patient.id} readOnly={codingLocked || billerEditing}
                   addToProblemList={addToProblemList} setAddToProblemList={setAddToProblemList} />
                 {d.candidatesError && <p className="text-[11px] text-amber-700 mt-1">Problem list unavailable: {d.candidatesError}</p>}
+                {billerEditing && <p className="text-[11px] text-stone-400 mt-1">The diagnoses are the signing clinician's. Link services to them below; a change to a diagnosis goes back to the clinician as an addendum.</p>}
               </div>
               <div>
                 <span className="lblu block mb-1">Services (CPT / HCPCS) — each linked to ≥1 diagnosis</span>
@@ -5001,15 +5031,16 @@
                     correcting a diagnosis is not coding a claim. The route
                     gates on the codes CHANGING, so a read-only editor and the
                     server agree without the page having to re-derive it. */}
-                <SvcEditor services={services} setServices={setServices} diagnoses={diagnoses} readOnly={codingLocked || !canSelectCodes}
+                <SvcEditor services={services} setServices={setServices} diagnoses={diagnoses} readOnly={codingLocked || (!canSelectCodes && !billerEditing)}
                   practiceFavorites={d.favorites.practiceServices} favorites={d.favorites.services} />
-                {!codingLocked && !canSelectCodes && <p className="text-[11px] text-stone-400 mt-1">Selecting a service code is a provider's (an LCSW selects the behavioural-health set). You can still correct the diagnoses.</p>}
+                {!codingLocked && !canSelectCodes && !billerEditing && <p className="text-[11px] text-stone-400 mt-1">Service codes are added by billing after the note is signed. You can still correct the diagnoses.</p>}
+                {!closed && canSelectCodes && <p className="text-[11px] text-stone-400 mt-1">Optional before signing — billing adds or confirms the service codes after you sign.</p>}
               </div>
               <div className="border-t border-stone-100 pt-3">
                 <span className="lblu block mb-1">Patient-facing summary (shown in the patient portal — plain language, optional)</span>
                 <div className="grid md:grid-cols-2 gap-3">
-                  <Field label="What we did today, in plain words"><textarea className="inp" rows={3} maxLength={1000} disabled={codingLocked} value={facing.patientSummary} onChange={e => setFacing({ ...facing, patientSummary: e.target.value })} placeholder="e.g. We checked your blood pressure and adjusted your water pill." /></Field>
-                  <Field label="Follow-up instructions for the patient"><textarea className="inp" rows={3} maxLength={600} disabled={codingLocked} value={facing.followUpInstructions} onChange={e => setFacing({ ...facing, followUpInstructions: e.target.value })} placeholder="e.g. Take the new dose each morning; we will see you again in 4 weeks." /></Field>
+                  <Field label="What we did today, in plain words"><textarea className="inp" rows={3} maxLength={1000} disabled={codingLocked || billerEditing} value={facing.patientSummary} onChange={e => setFacing({ ...facing, patientSummary: e.target.value })} placeholder="e.g. We checked your blood pressure and adjusted your water pill." /></Field>
+                  <Field label="Follow-up instructions for the patient"><textarea className="inp" rows={3} maxLength={600} disabled={codingLocked || billerEditing} value={facing.followUpInstructions} onChange={e => setFacing({ ...facing, followUpInstructions: e.target.value })} placeholder="e.g. Take the new dose each morning; we will see you again in 4 weeks." /></Field>
                 </div>
                 <p className="text-[11px] text-stone-400 mt-1">Without this, the portal shows only the diagnoses addressed, prescriptions recorded and tests ordered. The narrative note is never shown to patients.</p>
               </div>
@@ -5128,11 +5159,12 @@
                 <span className={`chip ${d.signReadiness.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-800'}`}>{d.signReadiness.ok ? 'Ready to sign' : `${d.signReadiness.missing.length} blocker${d.signReadiness.missing.length > 1 ? 's' : ''}`}</span>
               </div>
               <div className="p-4 grid gap-3 text-sm">
-                {na.signsAsAuthor && <p className="text-xs text-stone-600">You sign as the note's <b>author</b>. It locks, and it is not billable until a provider — or an LCSW, for a behavioral-health note — adds the clinician addendum. Codes are theirs to confirm.</p>}
+                {na.signsAsAuthor && <p className="text-xs text-stone-600">You sign as the note's <b>author</b>. It locks, and it is not billable until a provider — or an LCSW, for a behavioral-health note — adds the clinician addendum. Diagnoses are theirs to confirm.</p>}
+                {!na.signsAsAuthor && <p className="text-xs text-stone-600">Signing locks the note for clinicians and sends it to <b>billing</b>, who add the service codes and submit. You need the note and at least one ICD-10 diagnosis.</p>}
                 {!d.signReadiness.ok && <p className="text-xs text-amber-700">{d.signReadiness.message}{dirty ? ' Save your coding changes first.' : ''}</p>}
                 <label className="flex items-start gap-2 text-xs">
                   <input type="checkbox" className="mt-0.5" checked={attest} onChange={e => setAttest(e.target.checked)} />
-                  <span>I attest that this documentation is accurate and complete, that I personally performed or directly supervised the services recorded{na.signsAsAuthor ? '' : ', and that the diagnoses and service codes are supported by the note'}. Signing as <b>{npiLabel(d.me)}</b>.</span>
+                  <span>I attest that this documentation is accurate and complete, that I personally performed or directly supervised the services recorded{na.signsAsAuthor ? '' : ', and that the diagnoses are supported by the note'}. Signing as <b>{npiLabel(d.me)}</b>.</span>
                 </label>
                 {!d.me.npi && <p className="text-[11px] text-amber-700"><i className="ti ti-alert-triangle mr-1" />Your NPI is not on file — an admin can add it in your user profile. Signing is allowed for test use and will be flagged.</p>}
                 <button className="btn gold w-fit" disabled={!attest || !d.signReadiness.ok || dirty || busy === 'sign'} onClick={() => run('sign', () => api.sign(patient.id, euuid))}>
@@ -5152,19 +5184,76 @@
                   <p className="text-xs text-stone-600">Signed by {npiLabel(d.attestation && d.attestation.signedBy)} as the note's author. A provider — or an LCSW, for a behavioral-health note — adds the clinician addendum that makes it billable.</p>
                 )}
                 {na.canAddClinicianAddendum && <>
-                  <p className="text-xs text-stone-600">Review the author's note, confirm the codes on the Coding step, and add your addendum. <b>Your addendum is the billable signature</b> — you become the rendering clinician on the claim.</p>
+                  <p className="text-xs text-stone-600">Review the author's note, confirm the diagnoses on the Coding step, and add your addendum. <b>Your addendum is the billable signature</b> — you become the rendering clinician on the claim, and the note goes to billing.</p>
                   {d.addendumReadiness && !d.addendumReadiness.ok && <p className="text-xs text-amber-700">{d.addendumReadiness.message}{dirty ? ' Save your coding changes first.' : ''}</p>}
                   <FormattedField label="Your addendum" minRows={3} value={clinAddendum} onChange={setClinAddendum}
                     placeholder="e.g. Patient seen with the RN; I agree with the assessment and plan above, with these additions…" />
                   <label className="flex items-start gap-2 text-xs">
                     <input type="checkbox" className="mt-0.5" checked={clinAttest} onChange={e => setClinAttest(e.target.checked)} />
-                    <span>I attest that I reviewed this note, that the services recorded were performed as documented under my supervision or by me, and that the diagnoses and service codes are supported. Signing as <b>{npiLabel(d.me)}</b>.</span>
+                    <span>I attest that I reviewed this note, that the services recorded were performed as documented under my supervision or by me, and that the diagnoses are supported. Signing as <b>{npiLabel(d.me)}</b>.</span>
                   </label>
                   <button className="btn gold w-fit" disabled={!clinAttest || NF.isBlank(clinAddendum) || dirty || (d.addendumReadiness && !d.addendumReadiness.ok) || busy === 'clinAddendum'}
                     onClick={() => run('clinAddendum', () => api.clinicianAddendum(patient.id, euuid, clinAddendum)).then(() => { setClinAddendum(''); setClinAttest(false); })}>
                     <i className="ti ti-writing-sign" />{busy === 'clinAddendum' ? 'Signing…' : 'Add clinician addendum & sign'}
                   </button>
                 </>}
+              </div>
+            </div>
+          )}
+
+          {/* BILLING (owner, 2026-09-29): an admin or a manager finishes the
+              codes on a signed visit and submits it. The only place a place of
+              service is shown or changed; a clinician never sees this card. */}
+          {on('sign') && closed && ba.canBill && !awaitingAddendum && (
+            <div className="card mb-4 border-primary-100">
+              <div className="card-h"><h2><i className="ti ti-receipt mr-1 text-accent" />Billing</h2>
+                <span className={`chip ${d.billingStatus === 'awaiting_billing' ? 'bg-amber-50 text-amber-800' : 'bg-emerald-50 text-emerald-700'}`}>
+                  {d.billingStatus === 'awaiting_billing' ? 'AWAITING BILLING' : d.billingStatus === 'no_charge' ? 'NO CHARGE' : 'SUBMITTED'}
+                </span>
+              </div>
+              <div className="p-4 grid gap-3 text-sm">
+                <div className="flex flex-wrap items-center gap-3 text-xs text-stone-600">
+                  <span>Place of service <b>{d.encounter.posCode || <span className="text-amber-700">not set</span>}</b>{d.encounter.facility ? <> · {d.encounter.facility}</> : null}</span>
+                  {ba.canRefreshPos && (
+                    <button className="btn ghost !py-1 !px-2.5 text-xs" disabled={busy === 'pos'} onClick={() => run('pos', () => api.refreshPos(patient.id, euuid))}>
+                      <i className="ti ti-refresh" />{busy === 'pos' ? 'Setting…' : 'Refresh place of service'}
+                    </button>
+                  )}
+                </div>
+                {d.posMissingReason && !d.encounter.posCode && <p className="text-[11px] text-amber-700">{d.posMissingReason}</p>}
+                {d.billingStatus === 'awaiting_billing' && <>
+                  {d.billingReadiness && !d.billingReadiness.ok && <p className="text-xs text-amber-700">{d.billingReadiness.message}{dirty ? ' Save your coding changes first.' : ''}</p>}
+                  {d.billingReadiness && (d.billingReadiness.warnings || []).map((w, i) => <p key={i} className="text-[11px] text-amber-700">{w}</p>)}
+                  <p className="text-[11px] text-stone-500">A missing place of service is set from the patient's facility when you submit. Charges post to OpenEMR's Billing Manager with <b>{npiLabel(d.record.renderingProvider)}</b> as the rendering clinician.</p>
+                  <label className="flex items-start gap-2 text-xs">
+                    <input type="checkbox" className="mt-0.5" checked={billAttest} onChange={e => setBillAttest(e.target.checked)} />
+                    <span>The service codes and modifiers on this visit are supported by the signed note.</span>
+                  </label>
+                  <div className="flex flex-wrap gap-2">
+                    <button className="btn gold w-fit" disabled={!billAttest || dirty || busy === 'bill' || (d.billingReadiness && !d.billingReadiness.ok && !(d.billingReadiness.missing || []).every(m => m === 'facility_pos' || m === 'pos_unreadable'))}
+                      onClick={() => run('bill', () => api.billingSubmit(patient.id, euuid, { attest: true })).then(() => setBillAttest(false))}>
+                      <i className="ti ti-send" />{busy === 'bill' ? 'Submitting…' : 'Submit to billing'}
+                    </button>
+                    {!noChargeOpen && <button className="btn ghost w-fit" onClick={() => setNoChargeOpen(true)}>No charge…</button>}
+                  </div>
+                  {noChargeOpen && (
+                    <div className="grid gap-2 border border-stone-200 rounded-lg p-2.5">
+                      <label className="text-xs text-stone-600">Why is this visit not being billed?</label>
+                      <input className="inp" value={noChargeReason} maxLength={500} onChange={e => setNoChargeReason(e.target.value)} placeholder="e.g. Courtesy phone follow-up" />
+                      <div className="flex gap-2">
+                        <button className="btn w-fit" disabled={noChargeReason.trim().length < 3 || busy === 'nocharge'}
+                          onClick={() => run('nocharge', () => api.billingSubmit(patient.id, euuid, { noCharge: true, reason: noChargeReason })).then(() => { setNoChargeOpen(false); setNoChargeReason(''); })}>
+                          Close with no charge
+                        </button>
+                        <button className="btn ghost w-fit" onClick={() => setNoChargeOpen(false)}>Cancel</button>
+                      </div>
+                    </div>
+                  )}
+                </>}
+                {d.billingStatus === 'billed' && (
+                  <p className="text-xs text-stone-600">Submitted {d.record.billingSubmittedAt ? fmtTs(d.record.billingSubmittedAt) : ''}{d.record.billingSubmittedBy ? ` by ${d.record.billingSubmittedBy.name}` : ''}. {d.record.chargesPosted ? 'Charges posted to Billing Manager.' : (d.record.chargeError ? `Charges did not post (${d.record.chargeError}).` : '')}</p>
+                )}
+                {d.billingStatus === 'no_charge' && <p className="text-xs text-stone-600">Reason: {d.record.noChargeReason}</p>}
               </div>
             </div>
           )}
@@ -5320,7 +5409,7 @@
           <div className="card">
             <div className="card-h"><h2>Coding queue</h2>
               <div className="flex gap-1.5">
-                {[['open', 'Open'], ['not_coded', 'Not coded'], ['coded', 'Coded, unsigned'], ['signed', 'Signed'], ['all', 'All']].map(([k, l]) => (
+                {[['open', 'Open'], ['not_coded', 'Not coded'], ['coded', 'Coded, unsigned'], ['awaiting_billing', 'Awaiting billing'], ['signed', 'Signed'], ['all', 'All']].map(([k, l]) => (
                   <button key={k} className={`chip border ${filter === k ? 'bg-primary text-white border-primary' : 'bg-white text-primary border-stone-200'}`} onClick={() => setFilter(k)}>
                     {l}{data && data.counts && k in data.counts ? ` ${data.counts[k]}` : ''}
                   </button>
@@ -5481,7 +5570,8 @@
         canWrite, role: user.role,
         capabilities: (emrStatus && emrStatus.access && emrStatus.access.capabilities) || {},
         clinicalRole: (emrStatus && emrStatus.access && emrStatus.access.clinicalRole) || null,
-        clinicalRoleLabel: (emrStatus && emrStatus.access && emrStatus.access.clinicalRoleLabel) || null
+        clinicalRoleLabel: (emrStatus && emrStatus.access && emrStatus.access.clinicalRoleLabel) || null,
+        canSubmitBilling: !!(emrStatus && emrStatus.access && emrStatus.access.canSubmitBilling)
       };
       // Session 4.12 Scope D — every one of these is a PLACE in the record.
       // No workflow is a tab: the H&P opens as a visit from the banner's Start
@@ -5695,9 +5785,9 @@
                 )}
               </div>
             )}
-            {emrStatus && emrStatus.billingNpiConfigured === false && (
+            {emrStatus && emrStatus.billingNpiConfigured === false && access.canSubmitBilling && (
               <div className="bg-amber-50 border-b border-amber-200 px-4 lg:px-7 py-2 text-[12px] text-amber-900">
-                <b>Billing provider NPI not configured.</b> Encounters cannot be signed until an admin sets it under Coding queue → Billing settings (or seeds <code className="font-mono">GFC_BILLING_NPI_USED</code> in the env).
+                <b>Billing provider NPI not configured.</b> Signed visits cannot be submitted to billing until an admin sets it under Coding queue → Billing settings (or seeds <code className="font-mono">GFC_BILLING_NPI_USED</code> in the env).
               </div>
             )}
             {err && <p className="text-red-600 text-sm px-7 pt-3">{err}</p>}

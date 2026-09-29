@@ -267,17 +267,23 @@ test('charges post at sign-and-close with the signing clinician as rendering pro
   // A charge failure must never void a signature that already succeeded.
   assert.match(helper, /chargesPosted = false/);
 
+  // REPOINTED 2026-09-29: the clinician signs and SENDS TO BILLING; billing's
+  // submission is what posts the charge (owner: "the clinician should sign and
+  // submit which locks the note ... then billing submits fully"). The rendering
+  // provider is still the signing clinician, never the biller who submits.
   const sign = server.slice(server.indexOf("encounters/:euuid/sign'"), server.indexOf("encounters/:euuid/co-sign'"));
-  assert.match(sign, /postEncounterCharges\(/, 'the sign route still posts the charge');
-  assert.match(sign, /signedBy: attestation\.signedBy/, 'rendering provider is the signing clinician');
-  assert.match(sign, /billing_npi_used/, 'billing provider stays the config value');
-  // Session 4.8: an LMSW signs, and nothing bills until a supervising
-  // credential co-signs. Posting now and reversing later would put a claim in
-  // Billing Manager that nobody was certified to render.
-  assert.match(sign, /PENDING_CO_SIGN/, 'an LMSW signature holds the charge');
-  const coSign = server.slice(server.indexOf("encounters/:euuid/co-sign'"), server.indexOf("encounters/:euuid/co-sign'") + 4000);
-  assert.match(coSign, /postEncounterCharges\(/, 'and the co-signature is what releases it');
-  assert.match(coSign, /signedBy: coSigner/, 'the co-signer becomes the rendering provider — they carry the certification the claim asserts');
+  assert.doesNotMatch(sign, /postEncounterCharges\(/, 'signing no longer posts a charge');
+  assert.match(sign, /AWAITING_BILLING/, 'a billable signature sends the note to billing');
+  assert.match(sign, /PENDING_CO_SIGN/, 'an author signature holds for the clinician addendum');
+  const coSign = server.slice(server.indexOf("encounters/:euuid/co-sign'"), server.indexOf("encounters/:euuid/co-sign'") + 5000);
+  assert.doesNotMatch(coSign.slice(0, coSign.indexOf('res.json(')), /postEncounterCharges\(/, 'the addendum sends to billing too');
+  assert.match(coSign, /renderingProvider: coSigner/, 'the addendum author becomes the rendering provider');
+  const submit = server.slice(server.indexOf("encounters/:euuid/billing-submit'"));
+  const submitBody = submit.slice(0, submit.indexOf('\n});\n'));
+  assert.match(submitBody, /postEncounterCharges\(/, 'billing submission posts the charge');
+  assert.match(submitBody, /signedBy: record\.renderingProvider/, 'rendering provider is the signing clinician, not the biller');
+  assert.match(submitBody, /billing_npi_used/, 'billing provider stays the config value');
+  assert.match(submitBody, /gate: 'billing'/, 'the billing gate runs before anything posts');
 });
 
 // ---- Scope D: per-visit billing facility ----

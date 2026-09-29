@@ -256,10 +256,12 @@ test('the facility picker is admin-only on screen, matching the route', () => {
     'the chart card must not write anything');
 });
 
-test('an unassigned patient is told plainly that it blocks signing', () => {
+test('an unassigned patient is told plainly that it blocks billing', () => {
+  // 2026-09-29: the place of service blocks SUBMITTING TO BILLING, not the
+  // clinician's signature — the clinician signs with the note and an ICD-10.
   const card = enrollPage.slice(enrollPage.indexOf('const PlaceOfServiceCard = ('));
   const body = card.slice(0, card.indexOf('const DetailView = ('));
-  assert.ok(/cannot be signed/i.test(body),
+  assert.ok(/cannot be submitted to billing/i.test(body),
     'the card must name the consequence, not just show an empty field');
   // Assigned-but-no-POS is a different problem with a different fix, and the
   // fix is not on this screen. Telling someone to set it here would send them
