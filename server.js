@@ -8418,17 +8418,17 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
     // banner offer "Start visit" again, and that opened a blank H&P whose save
     // created a second OpenEMR encounter (which can only be voided). An
     // unsigned, undeleted shared draft for this patient is resumed instead.
-    let sharedDraft = null;
-    if (!ownDraft) {
-      const signedUuids = new Set(((await loadRows('encounter_attestations')) || [])
-        .filter(a => a && a.signedAt).map(a => String(a.encounterUuid)));
-      sharedDraft = ((await loadRows('encounter_billing')) || [])
-        .filter(r => r && r.clientId === client.id && r.note && r.noteStatus === clinicalNotes.NOTE_STATUS.DRAFT && !signedUuids.has(String(r.encounterUuid)))
-        .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))[0] || null;
-    }
+    // Always computed, even when a scratch row exists: a stale scratch row
+    // must not mask the real note, or the banner opens a blank form for a
+    // note that exists (and keeps saying "Resume draft" after it is signed).
+    const signedUuids = new Set(((await loadRows('encounter_attestations')) || [])
+      .filter(a => a && a.signedAt).map(a => String(a.encounterUuid)));
+    const sharedDraft = ((await loadRows('encounter_billing')) || [])
+      .filter(r => r && r.clientId === client.id && r.note && r.noteStatus === clinicalNotes.NOTE_STATUS.DRAFT && !signedUuids.has(String(r.encounterUuid)))
+      .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))[0] || null;
     const visitDraft = {
       open: !!(ownDraft || sharedDraft),
-      savedAt: (ownDraft && ownDraft.updatedAt) || (sharedDraft && sharedDraft.updatedAt) || null,
+      savedAt: (sharedDraft && sharedDraft.updatedAt) || (ownDraft && ownDraft.updatedAt) || null,
       encounterUuid: sharedDraft ? String(sharedDraft.encounterUuid) : null
     };
     res.json({
@@ -11096,7 +11096,7 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
       narrativeNotes: narrative.map(n => ({ id: String(n.id), date: n.date, subjective: n.subjective, objective: n.objective, assessment: n.assessment, plan: n.plan })),
       notesError,
       record, state: encounterStateOf(record, ctx.attestation), closed: ctx.closed,
-      prescriptions: ctx.prescriptions, orders: ctx.orders, attestation: ctx.attestation, addenda: ctx.addenda,
+      prescriptions: ctx.prescriptions, orders: (ctx.orders || []).map(orderReq.publicOrder), attestation: ctx.attestation, addenda: ctx.addenda,
       // Readiness as it applies to THIS viewer: an RN's or LMSW's signature is
       // an author signature and is held to the note-only gate; everyone else,
       // and the clinician addendum, to the full one.
@@ -11630,7 +11630,10 @@ app.get('/api/clinical/patients/:clientId/orders', authenticateToken, requireCli
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
     const [orders, rx] = await Promise.all([loadRows('clinical_orders'), loadRows('prescriptions')]);
     res.json({
-      orders: orders.filter(o => o && o.clientId === client.id).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
+      orders: orders.filter(o => o && o.clientId === client.id).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).map(orderReq.publicOrder),
+      destinationFields: orderReq.destinationFormFields(),
+      destinationEditableStatuses: orderReq.DESTINATION_EDITABLE_STATUSES,
+      noteMax: orderReq.ORDER_NOTE_MAX,
       prescriptions: rx.filter(p => p && p.clientId === client.id).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
       orderTransitions: clinicalRepo.ORDER_TRANSITIONS,
       referralTransitions: orderReq.REFERRAL_TRANSITIONS,
@@ -11999,6 +12002,121 @@ app.post('/api/clinical/orders/:orderId/result', authenticateToken, requireClini
     await receiveClinicalResult(req, res, found);
   } catch (error) {
     console.error('Result attach error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Notes and files on an order ───────────────────────────────────────────
+// A home health order is finalized over days. Same door as the destination
+// edit: the office and case managers hold it, and it reaches ONLY these two
+// append-only records — never the order's clinical content or its status.
+const requireOrderAnnotator = (req, res, next) => {
+  if (clinicalRoles.canEditOrderDestination(req.user)) return next();
+  return res.status(403).json({
+    error: 'Adding notes and files to an order is done by an admin, a manager, a case manager or a licensed clinician.',
+    code: 'ORDER_ANNOTATE_ONLY'
+  });
+};
+app.post('/api/clinical/orders/:orderId/notes', authenticateToken, requireOrderAnnotator, async (req, res) => {
+  try {
+    const found = await loadOrderForActor(req.params.orderId, res);
+    if (!found) return;
+    const { rows, idx, order, client } = found;
+    const built = orderReq.buildOrderNote({
+      order, text: (req.body || {}).text, actor: actorFromReq(req),
+      at: new Date().toISOString(), id: `onote_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    });
+    if (built.error) return res.status(built.status || 400).json({ error: built.error, code: built.code });
+    rows[idx] = built.order;
+    await db.set('clinical_orders', rows);
+    // The audit row says a note was added, never what it says.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'order_note_added', 'client', client.id, {
+      orderId: order.id, orderType: order.orderType, orderReference: order.orderReference, noteId: built.note.id
+    });
+    res.json({ message: 'Note added.', note: built.note, order: orderReq.publicOrder(built.order) });
+  } catch (error) {
+    console.error('Order note error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/clinical/orders/:orderId/files', authenticateToken, requireOrderAnnotator, uploadLimiter,
+  upload.single('file'), async (req, res) => {
+  try {
+    const found = await loadOrderForActor(req.params.orderId, res);
+    if (!found) return;
+    const { rows, idx, order, client } = found;
+    if (!req.file || !req.file.buffer || !req.file.buffer.length) {
+      return res.status(400).json({ error: 'Choose a file to attach.', code: 'ORDER_FILE_MISSING' });
+    }
+    // Typed by its BYTES, never by what the uploader claimed.
+    const mime = detectFileType(req.file.buffer);
+    if (!mime) return res.status(400).json({ error: 'Only PDF, JPG, and PNG files are accepted.', code: 'ORDER_FILE_BAD_TYPE' });
+    const fileName = String(req.file.originalname || 'document').replace(/[^a-zA-Z0-9._ -]/g, '_');
+    // A Drive failure REFUSES the attachment: a row pointing at a file that
+    // does not exist is worse than none.
+    let stored;
+    try {
+      stored = await googledrive.uploadClientDocumentFile(client.name || 'Client',
+        `order_${order.orderReference || order.id}_${Date.now()}_${fileName}`, req.file.buffer, mime);
+    } catch (e) {
+      console.error('[ORDER FILES] Drive upload failed:', e.message);
+      return res.status(502).json({ error: 'We could not store that file. Please try again.', code: 'ORDER_FILE_STORAGE_UNAVAILABLE' });
+    }
+    // Into the chart too, automatically and best-effort, like every other
+    // document; never fails the attachment.
+    let emrFiled = false;
+    if (client.openEmrPatientId && openemr.isConfigured()) {
+      try {
+        await openemr.forActor(req.user).uploadPatientDocument(
+          client.openEmrPatientId, fileName, req.file.buffer, mime, orderReq.REQUISITION_CATEGORY);
+        emrFiled = true;
+      } catch (e) { console.error('Order file chart filing failed:', e.message); }
+    }
+    const built = orderReq.buildOrderFile({
+      order, label: (req.body || {}).label, fileName, mimeType: mime, byteLength: req.file.buffer.length,
+      stored, emrFiled, actor: actorFromReq(req), at: new Date().toISOString(),
+      id: `ofile_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    });
+    if (built.error) return res.status(built.status || 400).json({ error: built.error, code: built.code });
+    rows[idx] = built.order;
+    await db.set('clinical_orders', rows);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'order_file_added', 'client', client.id, {
+      orderId: order.id, orderType: order.orderType, orderReference: order.orderReference,
+      fileId: built.file.id, emrFiled
+    });
+    res.json({
+      message: emrFiled ? 'File attached and filed to the chart.' : 'File attached.',
+      file: orderReq.publicOrderFile(built.file), order: orderReq.publicOrder(built.order)
+    });
+  } catch (error) {
+    console.error('Order file error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Open an attached file through the app, so every read is audited.
+app.get('/api/clinical/orders/:orderId/files/:fileId', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const found = await loadOrderForActor(req.params.orderId, res);
+    if (!found) return;
+    const { order, client } = found;
+    const file = (order.orderFiles || []).find(f => f && f.id === req.params.fileId);
+    if (!file || !file.driveFileId) return res.status(404).json({ error: 'File not found', code: 'ORDER_FILE_NOT_FOUND' });
+    let buf;
+    try { buf = await googledrive.downloadFileBuffer(file.driveFileId); }
+    catch (e) {
+      console.error('[ORDER FILES] Drive read failed:', e.message);
+      return res.status(502).json({ error: 'The stored copy could not be read', code: 'ORDER_FILE_READ_FAILED' });
+    }
+    await logActivity(req.user.id, req.user.name || req.user.email, 'order_file_read', 'client', client.id, {
+      orderId: order.id, fileId: file.id
+    });
+    res.setHeader('Content-Type', file.mimeType || 'application/octet-stream');
+    res.setHeader('Content-Disposition', contentDisposition('inline', file.fileName));
+    res.send(buf);
+  } catch (error) {
+    console.error('Order file open error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
