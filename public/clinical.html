@@ -101,6 +101,9 @@
     // ever sees a place of service, edits codes after signing, or submits.
     // Answered by the server; false until it has answered.
     const useCanBill = () => !!useContext(AccessContext).canSubmitBilling;
+    // Where an order goes (admin, manager, case manager, licensed clinician).
+    // Answered by the server, like every other control here.
+    const useCanEditOrderDestination = () => !!useContext(AccessContext).canEditOrderDestination;
     const useCan = (capability) => {
       const ctx = useContext(AccessContext);
       // Until the status call lands there is no matrix; fall back to the
@@ -249,6 +252,7 @@
       // 'sent' and 'resulted' are deliberately absent from orderStatus above:
       // each has its own route because each captures EVIDENCE. The page cannot
       // reach them any other way, and neither can a curl.
+      updateOrderDestination: (orderId, body) => authedFetch(`/api/clinical/orders/${orderId}/destination`, { method: 'PUT', body: JSON.stringify(body) }),
       markOrderSent: (orderId, body) => authedFetch(`/api/clinical/orders/${orderId}/sent`, { method: 'POST', body: JSON.stringify(body) }),
       markReferralScheduled: (orderId, appointmentDate) => authedFetch(`/api/clinical/orders/${orderId}/scheduled`, { method: 'POST', body: JSON.stringify({ appointmentDate }) }),
       attachResult: (orderId, formData) => authedUpload(`/api/clinical/orders/${orderId}/result`, formData),
@@ -4339,8 +4343,22 @@
     // open the requisition (it lands in the phone's PDF viewer, one tap from the
     // share sheet), fax it from Doximity, then come back and say it went — which
     // is what "Mark as faxed" records, with the number and the channel.
-    const OrderActions = ({ order, channels, channelLabels, defaultChannel, faxChannels, interpretations, onSent, onScheduled, onResult, busy }) => {
+    const OrderActions = ({ order, channels, channelLabels, defaultChannel, faxChannels, interpretations, onSent, onScheduled, onResult, busy,
+      destinationFields, editableStatuses, onDestination }) => {
       const [mode, setMode] = useState('');
+      const canEditDestination = useCanEditOrderDestination();
+      // The fields for this order's type are the SERVER's list; a type it does
+      // not list (a lab) has no destination to edit and gets no button.
+      const destFields = (destinationFields && destinationFields[order.orderType]) || null;
+      const destBucket = order.orderType === 'referral' ? (order.referral || {}) : (order.dme || {});
+      const destStart = () => Object.fromEntries((destFields || []).map(f => [f.key, destBucket[f.key] || '']));
+      const [dest, setDest] = useState(destStart);
+      const [destReason, setDestReason] = useState('');
+      const alreadySent = (order.sends || []).length > 0;
+      const faxField = (destFields || []).find(f => f.fax);
+      const faxChanging = !!faxField && faxOk(dest[faxField.key]) && String(dest[faxField.key]).replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '') !== String(destBucket[faxField.key] || '');
+      const destValid = !!destFields && destFields.every(f => f.fax ? faxOk(dest[f.key]) : (!f.required || String(dest[f.key] || '').trim()));
+      const lastDest = (order.destinationHistory || []).slice(-1)[0] || null;
       const [send, setSend] = useState({
         // SERVED, not named here. The default channel and which channels carry a
         // fax number are both the server's answer — this form restating either
@@ -4361,8 +4379,22 @@
               <i className="ti ti-file-text" /> {order.requisitionGeneratedAt ? 'Open requisition again' : 'Open requisition'}
             </a>
             {['ordered', 'sent', 'scheduled'].includes(order.status) &&
-              <button className="chip border bg-white text-primary border-stone-200" onClick={() => setMode(mode === 'send' ? '' : 'send')}>
+              <button className="chip border bg-white text-primary border-stone-200" onClick={() => {
+                // Re-read the destination each time it opens: it can have been
+                // updated since this row first rendered, and a re-send must go
+                // to the number the order carries NOW.
+                if (mode !== 'send') setSend(s => ({
+                  ...s,
+                  recipientName: (order.referral && (order.referral.receivingPractice || order.referral.receivingProvider || order.referral.specialty)) || (order.dme && order.dme.supplierName) || s.recipientName,
+                  recipientFax: (order.referral && order.referral.receivingFax) || (order.dme && order.dme.supplierFax) || s.recipientFax
+                }));
+                setMode(mode === 'send' ? '' : 'send');
+              }}>
                 {sends.length ? 'Record another send' : 'Mark as faxed'}
+              </button>}
+            {canEditDestination && destFields && (editableStatuses || []).includes(order.status) &&
+              <button className="chip border bg-white text-primary border-stone-200" onClick={() => { if (mode !== 'dest') { setDest(destStart()); setDestReason(''); } setMode(mode === 'dest' ? '' : 'dest'); }}>
+                Update destination
               </button>}
             {order.orderType === 'referral' && ['sent'].includes(order.status) &&
               <button className="chip border bg-white text-primary border-stone-200" onClick={() => setMode(mode === 'appt' ? '' : 'appt')}>Mark as scheduled</button>}
@@ -4371,6 +4403,47 @@
                 {order.orderType === 'referral' ? 'Attach consult note' : 'Attach result'}
               </button>}
           </div>
+
+          {order.resendNeeded && (
+            <div className="text-[11px] font-semibold text-amber-800 mt-1.5">
+              The destination changed after this order was faxed. Open the requisition again and record another send to the new number.
+            </div>
+          )}
+          {lastDest && (
+            <div className="text-[11px] text-stone-500 mt-1">
+              Destination updated {fmtTs(lastDest.at)} by {lastDest.by && lastDest.by.name}: {(lastDest.changes || []).map(c => c.label).join(', ')}
+              {lastDest.reason ? ` — ${lastDest.reason}` : ''}
+            </div>
+          )}
+
+          {mode === 'dest' && destFields && (
+            <div className="grid gap-2 mt-2 p-2.5 rounded border border-stone-200 bg-stone-50">
+              <p className="text-[11px] text-stone-600">
+                Where this order goes. The clinical content of the order stays as the clinician wrote it. Open the requisition again afterward
+                — it reads the new details.
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {destFields.map(f => (
+                  <Field key={f.key} label={f.label}>
+                    <input className="inp" inputMode={f.fax || /phone/i.test(f.key) ? 'tel' : undefined} value={dest[f.key] || ''}
+                      onChange={e => setDest({ ...dest, [f.key]: e.target.value })} />
+                    {f.fax && dest[f.key] && !faxOk(dest[f.key]) && <p className="text-[11px] text-amber-700 mt-1">Ten digits. A wrong fax number is a wrong disclosure.</p>}
+                  </Field>
+                ))}
+              </div>
+              {alreadySent && faxChanging && (
+                <Field label="Why is the fax number changing? (required — this order was already faxed)">
+                  <input className="inp" value={destReason} onChange={e => setDestReason(e.target.value)} />
+                </Field>
+              )}
+              <div className="flex justify-end">
+                <button className="btn !py-1.5" disabled={busy || !destValid || (alreadySent && faxChanging && !destReason.trim())}
+                  onClick={() => onDestination({ ...dest, ...(alreadySent && faxChanging ? { changeReason: destReason } : {}) }).then(() => setMode(''))}>
+                  {busy ? 'Saving…' : 'Save destination'}
+                </button>
+              </div>
+            </div>
+          )}
 
           {sends.map((sd, i) => (
             <div key={i} className="text-[11px] text-stone-500 mt-1">
@@ -5226,6 +5299,8 @@
                     <OrderActions order={o} channels={d.sendChannels} channelLabels={d.sendChannelLabels}
                       defaultChannel={d.defaultSendChannel} faxChannels={d.faxSendChannels}
                       interpretations={d.resultInterpretations} busy={busy === `o${o.id}`}
+                      destinationFields={d.destinationFields} editableStatuses={d.destinationEditableStatuses}
+                      onDestination={(body) => run(`o${o.id}`, () => api.updateOrderDestination(o.id, body))}
                       onSent={(body) => run(`o${o.id}`, () => api.markOrderSent(o.id, body))}
                       onScheduled={(date) => run(`o${o.id}`, () => api.markReferralScheduled(o.id, date))}
                       onResult={(r) => {
@@ -5714,7 +5789,8 @@
         capabilities: (emrStatus && emrStatus.access && emrStatus.access.capabilities) || {},
         clinicalRole: (emrStatus && emrStatus.access && emrStatus.access.clinicalRole) || null,
         clinicalRoleLabel: (emrStatus && emrStatus.access && emrStatus.access.clinicalRoleLabel) || null,
-        canSubmitBilling: !!(emrStatus && emrStatus.access && emrStatus.access.canSubmitBilling)
+        canSubmitBilling: !!(emrStatus && emrStatus.access && emrStatus.access.canSubmitBilling),
+        canEditOrderDestination: !!(emrStatus && emrStatus.access && emrStatus.access.canEditOrderDestination)
       };
       // Session 4.12 Scope D — every one of these is a PLACE in the record.
       // No workflow is a tab: the H&P opens as a visit from the banner's Start
