@@ -394,7 +394,7 @@ function createNotifier(deps) {
   // only when the summary or note text changed (the caller decides that from
   // the content hash, which is also in the dedupe key). The visit date is PHI,
   // so it rides only where the transport is covered.
-  async function visitSummaryReady({ clientId, encounterUuid, contentHash, visitDate, actorId }) {
+  async function visitSummaryReady({ clientId, encounterUuid, contentHash, visitDate, actorId, hasNote = true }) {
     try {
       const detail = transportAllowsDetail();
       return await sendToClientSide({
@@ -403,9 +403,9 @@ function createNotifier(deps) {
         subject: detail && visitDate ? `Your visit summary from ${visitDate} is ready` : 'A visit summary is ready in your portal',
         headline: 'Your visit summary is ready',
         paragraphs: detail && visitDate
-          ? [`Your visit summary from ${visitDate} is ready to read in your portal, along with your clinician's note.`,
+          ? [`Your visit summary from ${visitDate} is ready to read in your portal${hasNote ? ", along with your clinician's note" : ''}.`,
              'If anything in it is unclear, send the care team a message from the portal.']
-          : ['Your visit summary is ready to read in your secure portal.',
+          : [`Your visit summary is ready to read in your secure portal${hasNote ? ', along with your clinician\'s note' : ''}.`,
              'For privacy we do not put visit details in email.'],
         actorId,
         entityId: `${encounterUuid}:summary:${contentHash}`,
