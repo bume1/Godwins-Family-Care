@@ -6155,8 +6155,8 @@
                     </div>
                     {expandable && open && (
                       <div style={{ marginTop: 10, fontSize: 14, color: 'var(--ink)', lineHeight: 1.55 }} onClick={e => e.stopPropagation()}>
-                        <div>{v.overview || v.summary}</div>
-                        {v.followUp && <div style={{ marginTop: 8 }}><b style={{ color: 'var(--navy)' }}>What happens next:</b> {v.followUp}</div>}
+                        <div style={{ whiteSpace: 'pre-wrap' }}>{v.overview || v.summary}</div>
+                        {v.followUp && <div style={{ marginTop: 8, whiteSpace: 'pre-wrap' }}><b style={{ color: 'var(--navy)' }}>What happens next:</b> {v.followUp}</div>}
                         {(v.newPrescriptions || []).length > 0 && (
                           <div style={{ marginTop: 8 }}>
                             <b style={{ color: 'var(--navy)' }}>Medicine changes</b>

@@ -244,7 +244,9 @@ const buildVisitSummary = ({ encounterUuid, encounter, record, attestation, pres
     id: String(encounterUuid || rec.encounterUuid || (encounter && encounter.id) || ''),
     date, provider, reason,
     overview,
-    summary: sentences.join(' '),
+    summary: sentences.join('
+
+'),
     followUp: rec.followUpInstructions ? String(rec.followUpInstructions).trim() : null,
     status: signed ? 'complete' : 'in_progress',
     newPrescriptions: rx,
@@ -259,10 +261,23 @@ const buildVisitSummary = ({ encounterUuid, encounter, record, attestation, pres
 // same constants, so the box and the save cannot disagree about the cap.
 const PATIENT_SUMMARY_MAX = 4000;
 const FOLLOW_UP_MAX = 4000;
+// LINE BREAKS ARE KEPT. This used to collapse every run of whitespace to one
+// space, so "1. Take the new dose… 2. Call if…" typed as a list reached the
+// patient as one run-on paragraph. Lines are trimmed, runs of spaces squeezed,
+// CR/LF normalised, control characters dropped and more than one blank line in a
+// row collapsed. Everything that shows these strings must render newlines
+// (the portal, the after-visit PDF).
+const cleanMultiline = (v, max) => {
+  const s = String(v == null ? '' : v)
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .split('\n').map(l => l.replace(/[ \t]+/g, ' ').trim()).join('\n')
+    .replace(/\n{3,}/g, '\n\n').trim();
+  return s ? s.slice(0, max).trim() : null;
+};
 const buildPatientFacingFields = (body) => {
   const src = body && typeof body === 'object' ? body : {};
-  const clean = (v, max) => { const s = String(v == null ? '' : v).replace(/\s+/g, ' ').trim(); return s ? s.slice(0, max) : null; };
-  return { patientSummary: clean(src.patientSummary, PATIENT_SUMMARY_MAX), followUpInstructions: clean(src.followUpInstructions, FOLLOW_UP_MAX) };
+  return { patientSummary: cleanMultiline(src.patientSummary, PATIENT_SUMMARY_MAX), followUpInstructions: cleanMultiline(src.followUpInstructions, FOLLOW_UP_MAX) };
 };
 
 // ---- Vitals from the encounter note (server-side vitals defect) ----
@@ -350,7 +365,7 @@ module.exports = {
   evaluateClinicalReadAccess, sectionsFor,
   poaSignerName, buildActingIdentity,
   canClinicalWrite, canClinicalRead,
-  buildVisitSummary, buildPatientFacingFields, PATIENT_SUMMARY_MAX, FOLLOW_UP_MAX, stripAttribution,
+  buildVisitSummary, buildPatientFacingFields, cleanMultiline, PATIENT_SUMMARY_MAX, FOLLOW_UP_MAX, stripAttribution,
   parseVitalsFromNote,
   selectUpcomingAppointments, summarizeAppointmentForPatient, LOCATION_LABELS,
   summarizeMedicationForPatient, summarizeAllergyForPatient, summarizeProblemForPatient
