@@ -90,6 +90,11 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'requisition_settings', phi: false, owner: '4.10', note: 'the return fax number and label printed on every requisition — org config, not PHI' },
   { key: 'visit_reminders', phi: true, owner: '4.11', note: 'day-before reminders, captured at booking time — carries the visit date and clinician' },
   { key: 'gfc_payer_credentialing', phi: false, owner: '4.4' },
+  // A copy of OpenEMR's facility list (id, name, POS, flags), refreshed every
+  // time an admin or manager reads it. Clinicians' own OpenEMR logins cannot
+  // read facilities (owner, 2026-09-29), so a visit a clinician creates takes
+  // its place of service from this copy. Org config, not PHI.
+  { key: 'openemr_facility_snapshot', phi: false, owner: 'billing-split', note: 'facility id/name/POS as last read by admin or manager — the POS source for clinician-created visits' },
   // NCCI/MUE sign-time bundling check. CMS reference data only — never a
   // patient's own information — so it is deliberately NOT PHI, the same
   // classification as gfc_payer_credentialing. Filtered to the codes GFC

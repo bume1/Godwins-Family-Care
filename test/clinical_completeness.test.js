@@ -146,7 +146,7 @@ test('signing is refused with a specific code for each missing element', () => {
   const noPos = R.checkSignReadiness({ hasNote: true, record: coded, billingNpi: BILLING_NPI });
   assert.deepEqual(noPos.codes, ['SIGN_NO_FACILITY_POS']);
   assert.match(noPos.message, /place of service/i);
-  assert.match(noPos.message, /admin fixes it on the patient or the facility, not here/i);
+  assert.match(noPos.message, /admin or manager sets it on the patient's facility card/i);
 
   const ready = R.checkSignReadiness({ hasNote: true, record: coded, billingNpi: BILLING_NPI, posCode: POS });
   assert.equal(ready.ok, true);

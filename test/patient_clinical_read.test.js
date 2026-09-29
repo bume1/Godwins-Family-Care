@@ -233,11 +233,14 @@ test('every /api/clinical route is registered with the matching guard (GET → r
   assert.ok(clinical.length >= 36, `expected the full clinical route table, found ${clinical.length}`);
   for (const l of clinical) {
     const method = l.match(/^app\.(\w+)/)[1];
+    // 2026-09-29: BILLING routes (an admin or a manager — the facility list,
+    // the place of service, Submit to billing, charges) carry requireBilling,
+    // and coding carries requireClinicalWriteOrBilling. Neither is a READ gate.
     if (method === 'get') {
-      assert.match(l, /requireClinicalRead/, `GET route must use requireClinicalRead: ${l.slice(0, 90)}`);
+      assert.match(l, /requireClinicalRead|requireBilling/, `GET route must use requireClinicalRead (or requireBilling): ${l.slice(0, 90)}`);
       assert.doesNotMatch(l, /requireClinicalWrite/, l.slice(0, 90));
     } else {
-      assert.match(l, /requireClinicalWrite|requireAdmin/, `${method.toUpperCase()} route must use requireClinicalWrite (or requireAdmin): ${l.slice(0, 90)}`);
+      assert.match(l, /requireClinicalWrite|requireAdmin|requireBilling/, `${method.toUpperCase()} route must use requireClinicalWrite (or requireAdmin / requireBilling): ${l.slice(0, 90)}`);
       assert.doesNotMatch(l, /requireClinicalRead/, l.slice(0, 90));
     }
   }

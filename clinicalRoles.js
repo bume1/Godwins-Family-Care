@@ -294,6 +294,14 @@ const canCoSignEncounter = (user) => CO_SIGN_ROLES.includes(resolveClinicalRole(
 // participation and review. It never changes who bills, so it is open to every
 // licensed clinical role; unlicensed read-only staff cannot attest a note.
 const canCoSignNote = (user) => LICENSED_CLINICAL_ROLES.includes(resolveClinicalRole(user));
+// BILLING (owner, 2026-09-29): after a clinician signs, the codes, the modifiers
+// and the place of service belong to billing, and billing submits the claim.
+// Until a dedicated billing role exists (B-series `hasBillingAccess`), billing
+// is an admin or a manager. This is deliberately NOT a clinical role: it is the
+// only thing that may see or change a place of service, and a clinician never
+// can. One predicate, read by every billing route and served to the page.
+const canSubmitBilling = (user) => !!user && user.accountStatus !== 'inactive' &&
+  (user.role === 'admin' || user.isManager === true);
 
 // ---- Care-plan signature branches on the SERVICE LINE (§3) --------------
 //   Track A / PHC  → an RN signature satisfies the care plan
@@ -473,6 +481,7 @@ module.exports = {
   CO_SIGN_ROLES,
   canCoSignEncounter,
   canCoSignNote,
+  canSubmitBilling,
   CARE_PLAN_OUTCOME,
   evaluateCarePlanSignature,
   canCoSignCarePlan,

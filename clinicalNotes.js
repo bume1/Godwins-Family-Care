@@ -275,11 +275,25 @@ const parseLegacyVitals = (text) => {
   if (!line) return {};
   const out = {};
   const put = (k, v) => { const t = String(v == null ? '' : v).trim(); if (t && t !== '—') out[k] = t.slice(0, 16); };
-  const arm = (side) => line.match(new RegExp(`BP ${side} arm ([^/;]*)/([^;]*)`, 'i'));
+  // An arm reads "135/76", "—/—", "unable to obtain (reason)", or whatever was
+  // typed into the boxes. Splitting on the FIRST slash turned "n/a/n/a" into a
+  // systolic of "n" and a diastolic of "a/n/a" (2026-09-28). Anything that is
+  // not a plain reading is kept as the reason the arm was not measured, so the
+  // words survive and the arm counts as documented rather than as a number.
+  const arm = (side) => (line.match(new RegExp(`BP ${side} arm ([^;]*)`, 'i')) || [])[1];
+  const putArm = (s, text) => {
+    const t = String(text || '').trim();
+    if (!t) return;
+    const reading = t.match(/^(\d{2,3}|—)?\s*\/\s*(\d{2,3}|—)?$/);
+    if (reading) { put(`${s}Sys`, reading[1]); put(`${s}Dia`, reading[2]); return; }
+    const unable = t.match(/^unable to obtain(?:\s*\((.*)\))?$/i);
+    out[`${s}Unable`] = 'yes';
+    const reason = unable ? (unable[1] || '') : `Recorded as "${t}" on the original note`;
+    if (reason.trim()) out[`${s}UnableReason`] = reason.trim().slice(0, 200);
+  };
   const right = arm('right'); const left = arm('left');
-  if (right || left) {
-    if (right) { put('bpRightSys', right[1]); put('bpRightDia', right[2]); }
-    if (left) { put('bpLeftSys', left[1]); put('bpLeftDia', left[2]); }
+  if (right != null || left != null) {
+    putArm('bpRight', right); putArm('bpLeft', left);
   } else {
     const bp = line.match(/(?:^|;)\s*BP\s+([^/;]*)\/([^;]*)/i);
     if (bp) { put('bpSys', bp[1]); put('bpDia', bp[2]); }
@@ -364,6 +378,10 @@ const draftVitalsRows = (record) => {
   if (!r.note || r.noteStatus !== NOTE_STATUS.DRAFT || r.vitalsWrittenAt) return [];
   const v = r.note.vitals || {};
   if (!Object.keys(v).length) return [];
+  // A note filed the old way already put these readings in OpenEMR; showing
+  // them again as a draft listed every vital twice (owner, 2026-09-28). They
+  // come back only when somebody changes a reading OpenEMR would store.
+  if (r.legacyVitals && !vitalsNeedRow(r)) return [];
   const at = r.note.visitDate || r.date || null;
   const id = (k) => `draft:${r.encounterUuid}:${k}`;
   const rows = [];
@@ -393,8 +411,15 @@ const vitalsNeedRow = (record) => {
   const v = (record && record.note && record.note.vitals) || {};
   if (!Object.keys(v).length) return false;
   if (!record.legacyVitals) return true;
-  return stableJson(v) !== stableJson(record.legacyVitals);
+  // Compare what the OpenEMR row would hold, not the form. Ticking "Unable to
+  // take" on an arm that was never measured, or tidying a reason, changes no
+  // reading, and a second row with the same numbers is the duplicate this
+  // exists to prevent.
+  const row = (vitals) => buildVitalsRow({ vitals }) || {};
+  const a = row(v); const b = row(record.legacyVitals);
+  return VITALS_ROW_READINGS.some(k => String(a[k] || '').trim() !== String(b[k] || '').trim());
 };
+const VITALS_ROW_READINGS = ['bps', 'bpd', 'pulse', 'temperature', 'respiration', 'oxygen_saturation', 'weight', 'height'];
 const buildCarriedForward = ({ fromEncounterUuid, fromDate, content }) => {
   const flat = flattenNote(content, { includeVitals: false });
   const fields = {};

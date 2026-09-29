@@ -394,6 +394,19 @@ const summarizeVitalObservation = (r) => {
     : (r.component || []).map(c => `${codeableText(c.code)} ${(c.valueQuantity || {}).value ?? ''}`).join(' / ');
   return { id: r.id, name: codeableText(r.code), value: val, at: r.effectiveDateTime || null };
 };
+// OpenEMR's FHIR vitals include rows that carry no reading at all: the panel
+// row that groups a visit's vitals, "Temperature Location", and an oxygen row
+// whose flow-rate components are empty. Listed, they read as clutter beside
+// the real numbers (owner report, 2026-09-28). A row is kept only when it
+// carries a value — decided from the resource, not from the text, since a
+// label like "SpO2" has a digit in it.
+const hasVitalReading = (r) => {
+  const present = (q) => !!q && q.value !== undefined && q.value !== null && String(q.value).trim() !== '';
+  if (!r) return false;
+  if (present(r.valueQuantity)) return true;
+  return (r.component || []).some(c => present(c.valueQuantity));
+};
+const summarizeVitalObservations = (rows) => (rows || []).filter(hasVitalReading).map(summarizeVitalObservation);
 
 // OpenEMR's SOAP validator accepts an empty section but rejects a 1-character
 // one (lengthBetween 2..65535, answered as HTTP 200 + a validation map). Treat
@@ -1189,7 +1202,11 @@ const SIGN_BLOCKER_CODES = {
   // Scope F/G: the note template this appointment type declares.
   note_sections: 'SIGN_NOTE_SECTIONS_INCOMPLETE',
   // Scope G. A psychiatric note signed with no documented risk assessment.
-  risk_assessment: 'SIGN_NO_RISK_ASSESSMENT'
+  risk_assessment: 'SIGN_NO_RISK_ASSESSMENT',
+  // The encounter row could not be READ from OpenEMR, which is a different
+  // fact from a POS that is genuinely missing (owner report 2026-09-29: a
+  // swallowed 403 read as "this patient has no facility").
+  pos_unreadable: 'BILLING_POS_UNREADABLE'
 };
 const SIGN_BLOCKER_LABELS = {
   note: 'a documented note',
@@ -1197,96 +1214,98 @@ const SIGN_BLOCKER_LABELS = {
   service: 'at least one CPT/HCPCS service code',
   service_dx_link: 'every service linked to a diagnosis',
   billing_npi: 'the billing provider NPI configured in settings',
-  facility_pos: "a place of service — this patient has no OpenEMR facility assigned, or their facility has no POS code on its record. An admin fixes it on the patient or the facility, not here",
+  facility_pos: "a place of service — this patient has no facility assigned, or their facility has no POS code on its record. An admin or manager sets it on the patient's facility card",
+  pos_unreadable: 'a place of service — the encounter could not be read back from OpenEMR to check it',
   risk_assessment: 'a risk assessment — this is a psychiatric visit and it cannot be signed without one'
 };
-// `posCode` is the place of service the encounter actually carries, derived
-// from the patient's facility. Documenting a visit is never blocked on it —
-// care happens whether or not an admin has finished the facility setup — but
-// SIGNING is, because a signed encounter becomes a claim and a claim with an
-// unverified POS is the silent error this whole change exists to prevent.
+// TWO GATES, TWO PEOPLE (owner, 2026-09-29). The CLINICIAN signs the note;
+// BILLING (admin or manager) finishes the codes and submits the claim. So what
+// used to be one gate is three named ones:
+//   'author'   — an RN's or LMSW's signature: the note is complete. Nothing
+//                about codes; a licensed clinician's addendum follows.
+//   'clinical' — a provider's or LCSW's signature, and the clinician addendum:
+//                the note is complete AND carries at least one ICD-10 code.
+//                No CPT, no place of service, no billing NPI, no bundling —
+//                those are billing's, and a clinician is never refused over
+//                them (and never told about a place of service at all).
+//   'billing'  — Submit to billing: the services, their dx links, the billing
+//                NPI, the place of service, the visit-type-vs-POS agreement and
+//                NCCI/MUE. THIS is what becomes a claim.
+//   'full'     — both, for any caller that predates the split.
+// `billingChecks: false` is the pre-split name for 'author' and still works.
 //
-// `encounterType` is what the admin recorded this patient's visits as, resolved
-// against the booking. Where the type names a place of service, it is checked
-// against the one the facility resolved to, and a disagreement REFUSES the
-// signature naming both values — see checkEncounterTypeAgainstPos. That refusal
-// carries its own sentence rather than a label in the joined list, because the
-// reader has to know which of the two is wrong and neither is fixed from here.
-// `billingChecks: false` is the AUTHOR signature's gate (an RN's or LMSW's,
-// owner 2026-09-27): the note must be complete, but the codes, the billing NPI
-// and the place of service are the billing clinician's to settle at the
-// addendum — that addendum is what becomes a claim, so that is where they are
-// checked. Every caller that does not say otherwise gets the full gate.
-const checkSignReadiness = ({ hasNote, record, billingNpi, posCode, visit, facilityName, riskAssessment, completedSections, ncciPtpEdits, ncciMue, ncciSourceVersion, billingChecks = true }) => {
+// `posError` is set when the encounter row could not be READ: that is
+// reported as its own blocker rather than as a missing POS, because the fix is
+// a different one.
+const SIGN_GATES = Object.freeze(['author', 'clinical', 'billing', 'full']);
+const checkSignReadiness = ({ hasNote, record, billingNpi, posCode, posError, visit, facilityName, riskAssessment, completedSections, ncciPtpEdits, ncciMue, ncciSourceVersion, billingChecks, gate }) => {
+  const g = SIGN_GATES.includes(gate) ? gate : (billingChecks === false ? 'author' : 'full');
+  const noteChecks = g !== 'billing';
+  const billing = g === 'billing' || g === 'full';
   const missing = [];
-  if (!hasNote) missing.push('note');
+  if (noteChecks && !hasNote) missing.push('note');
+  const dxCount = ((record && record.diagnoses) || []).length;
+  if ((g === 'clinical' || g === 'billing' || g === 'full') && !dxCount) missing.push('diagnosis');
   const pos = String(posCode || '').trim();
-  if (billingChecks) {
-    missing.push(...deriveCodingStatus(record).missing);
+  if (billing) {
+    missing.push(...deriveCodingStatus(record).missing.filter(m => m !== 'diagnosis'));
     if (!normalizeNpiValue(billingNpi)) missing.push('billing_npi');
-    if (!pos) missing.push('facility_pos');
+    if (!pos) missing.push(posError ? 'pos_unreadable' : 'facility_pos');
   }
   // Only asked where a POS actually resolved: with none, `facility_pos` above
   // already blocks and saying it twice in two different sentences would send
   // the reader at two layers for one problem.
-  const agreement = pos && billingChecks
+  const agreement = pos && billing
     ? checkVisitAgainstPos({ visit, posCode: pos, facilityName })
     : { ok: true, error: null, code: null };
   if (!agreement.ok) missing.push('encounter_type_pos');
 
   // Scope G, asked of the VISIT: a behavioural-health appointment type cannot
   // be signed without a risk assessment.
-  if (riskAssessmentRequired(visit) && !riskAssessment) missing.push('risk_assessment');
+  if (noteChecks && riskAssessmentRequired(visit) && !riskAssessment) missing.push('risk_assessment');
 
   // Scope F: the appointment type's own note template, resolved for THIS
-  // visit — a physical exam is demanded in person and not over video. The
-  // SAFETY PLAN becomes required once the risk recorded on this encounter is
-  // not negative, which is why the risk row is read here rather than the
-  // template being fixed at the start of the visit.
+  // visit. The SAFETY PLAN becomes required once the risk recorded on this
+  // encounter is not negative.
   const riskPositive = !!(riskAssessment && riskAssessment.levels &&
     RISK_DOMAINS.some(d => RISK_NEEDS_PLAN.includes(riskAssessment.levels[d])));
-  const required = requiredSectionsForVisit(visit, { riskPositive });
+  const required = noteChecks ? requiredSectionsForVisit(visit, { riskPositive }) : [];
   const done = new Set((Array.isArray(completedSections) ? completedSections : []).map(String));
   const openSections = required.filter(k => !done.has(k));
   if (openSections.length) missing.push('note_sections');
 
   // NCCI/MUE: a bundling conflict or a unit-cap overage between the codes on
-  // THIS encounter. Asked of the record's own services, alongside the POS
-  // check above — a caller that never mentions ncci (every pre-existing
-  // caller of this function) gets ok:true from it and nothing changes; see
-  // checkNcciBundling's own comment.
-  const ncci = billingChecks
+  // THIS encounter — a billing question, asked only at the billing gate.
+  const ncci = billing
     ? checkNcciBundling(record && record.services, visit, { ptpEdits: ncciPtpEdits, mueByCode: ncciMue, sourceVersion: ncciSourceVersion })
     : { ok: true, codes: [], warnings: [], message: null };
   if (!ncci.ok) missing.push('ncci_bundling');
 
+  const verb = g === 'billing' ? 'Cannot submit to billing' : 'Cannot sign';
   const labelled = missing.filter(m => m !== 'encounter_type_pos' && m !== 'note_sections' && m !== 'ncci_bundling');
   const sentences = [];
-  if (labelled.length) sentences.push(`Cannot sign: the encounter needs ${labelled.map(m => SIGN_BLOCKER_LABELS[m]).join(', ')}.`);
+  if (labelled.length) sentences.push(`${verb}: the encounter needs ${labelled.map(m => SIGN_BLOCKER_LABELS[m]).join(', ')}.`);
   if (openSections.length) {
-    // NAMED, never counted. "3 sections outstanding" is a number a clinician
-    // has to go hunting through their own note for.
+    // NAMED, never counted.
     const type = apptTypes.typeByKey(normalizeVisit(visit).appointmentType);
     sentences.push(`Cannot sign: this ${type ? type.label : 'visit'} note still needs ${openSections.map(k => apptTypes.SECTIONS[k]).join(', ')}.`);
   }
-  if (!agreement.ok) sentences.push(`Cannot sign: ${agreement.error}`);
+  if (!agreement.ok) sentences.push(`${verb}: ${agreement.error}`);
   if (!ncci.ok) sentences.push(ncci.message);
   return {
     ok: missing.length === 0,
+    gate: g,
     missing,
     openSections,
-    // 'ncci_bundling' is one missing-key that can carry SEVERAL specific
-    // codes (a PTP block and an MUE overage can both be true at once), so it
-    // expands rather than mapping 1:1 like every other blocker.
     codes: missing.flatMap(m => (m === 'ncci_bundling' ? ncci.codes : [SIGN_BLOCKER_CODES[m]])),
     message: sentences.length ? sentences.join(' ') : null,
-    // Present even when ok:true: an allowed-but-flagged PTP pair (a modifier
-    // was required AND present) is exactly the case that needs a human to
-    // see it rather than pass silently.
     warnings: ncci.warnings
   };
 };
-const ATTESTATION_TEXT = 'I attest that this encounter documentation is accurate and complete, that I personally performed or directly supervised the services recorded, and that the diagnoses and service codes are supported by the note.';
+// The clinician attests to the NOTE and its diagnoses. Service codes are
+// chosen afterwards by billing (owner, 2026-09-29), so the clinician no longer
+// attests to them; billing's own submission is recorded separately.
+const ATTESTATION_TEXT = 'I attest that this encounter documentation is accurate and complete, that I personally performed or directly supervised the services recorded, and that the diagnoses are supported by the note.';
 const buildAttestation = ({ id, record, actor, at, billingNpi, narrativeNoteSid }) => {
   const npi = normalizeNpiValue(actor && actor.npi);
   return {
@@ -1317,6 +1336,22 @@ const buildAddendum = ({ id, encounterUuid, clientId, text, actor, at }) => {
     }
   };
 };
+// Where a SIGNED encounter stands with billing. A record signed before the
+// split carries no billingStatus; it went through the old one-step sign that
+// posted charges itself, so it reads as billed (nothing is migrated).
+const BILLING_STATUS = Object.freeze({
+  NOT_SIGNED: 'not_signed', AWAITING_ADDENDUM: 'awaiting_addendum',
+  AWAITING_BILLING: 'awaiting_billing', BILLED: 'billed', NO_CHARGE: 'no_charge'
+});
+const deriveBillingStatus = (record, attestation) => {
+  if (!isEncounterClosed(attestation)) return BILLING_STATUS.NOT_SIGNED;
+  if (record && record.coSignStatus === 'pending') return BILLING_STATUS.AWAITING_ADDENDUM;
+  const s = record && record.billingStatus;
+  if (s === BILLING_STATUS.AWAITING_BILLING || s === BILLING_STATUS.BILLED || s === BILLING_STATUS.NO_CHARGE) return s;
+  return BILLING_STATUS.BILLED;
+};
+const isBillingSubmitted = (record, attestation) =>
+  [BILLING_STATUS.BILLED, BILLING_STATUS.NO_CHARGE].includes(deriveBillingStatus(record, attestation));
 const deriveEncounterState = (record, attestation) => {
   if (isEncounterClosed(attestation)) return 'signed';
   if (record && deriveCodingStatus(record).coded) return 'coded';
@@ -2542,7 +2577,7 @@ const buildPatientBanner = ({ client, linked, emrAllergies, facility, lastVisitA
     insurance: summarizePayerForBanner(c),
     facility: facility
       ? { id: facility.facilityId || null, name: facility.facilityName || null,
-        posCode: facility.posCode || null, warning: facility.warning || null }
+        posCode: facility.posCode || null, warning: facility.billingWarning || facility.warning || null }
       : null,
     lastVisitAt: lastVisitAt || null,
     serviceLine: c.serviceLine || null,
@@ -2587,6 +2622,8 @@ module.exports = {
   buildChartDocumentIndex,
   CHART_DOC_SOURCE,
   summarizeVitalObservation,
+  summarizeVitalObservations,
+  hasVitalReading,
   buildHpWrites,
   sanitizeNoteDraft,
   buildNoteDraft,
@@ -2622,6 +2659,10 @@ module.exports = {
   applyCoding,
   SIGN_BLOCKER_CODES,
   checkSignReadiness,
+  SIGN_GATES,
+  BILLING_STATUS,
+  deriveBillingStatus,
+  isBillingSubmitted,
   TELEHEALTH_MODIFIER, modifiersForCharge,
   RISK_LEVELS, RISK_NEEDS_PLAN, RISK_DOMAINS, buildRiskAssessment,
   latestRiskAssessment, riskAssessmentRequired, highestRisk,
