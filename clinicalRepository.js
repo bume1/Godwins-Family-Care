@@ -1489,6 +1489,50 @@ const prescriptionToEmrRow = (rx) => {
   };
 };
 
+// A HOME MEDICATION (family-reported at enrollment, confirmed by a clinician at
+// reconciliation) as an OpenEMR prescription row (owner, 2026-09-29). It is a
+// record of what the patient takes, NOT a new GFC prescription, and the note
+// says so first: the chart must never read as though GFC wrote an order it did
+// not. Route rides in the note as well as the field, because drug_route and
+// drug_interval are empty option lists on this instance until they are seeded
+// (the dose and frequency are sent structured so they land the day they are).
+const homeMedicationToEmrRow = (med, { byName, credential, day } = {}) => {
+  const m = med || {};
+  const sig = [m.dose, m.route, m.frequency].map(v => String(v || '').trim()).filter(Boolean).join(' ');
+  const who = [byName, credential].filter(Boolean).join(', ') || 'a GFC clinician';
+  const parts = [
+    `Home medication, reported at enrollment and reconciled by ${who} on ${day}. Not a new GFC prescription.`,
+    sig ? `Sig: ${sig}.` : null,
+    m.prescriber ? `Prescriber: ${String(m.prescriber).trim()}.` : null,
+    m.pharmacy ? `Pharmacy: ${String(m.pharmacy).trim()}.` : null
+  ].filter(Boolean);
+  return {
+    drug: String(m.name || '').trim().slice(0, 150),
+    dosage: String(m.dose || '').trim().slice(0, 100),
+    route: String(m.route || '').trim() || null,
+    interval: String(m.frequency || '').trim().slice(0, 100),
+    date_added: day,
+    active: 1,
+    note: parts.join(' ').slice(0, 255)
+  };
+};
+// Which reconciled rows still need an OpenEMR prescription: kept or added, not
+// already tied to an OpenEMR row, and not already on OpenEMR's prescription
+// list by name (so a re-save, or a list read that failed, cannot double it).
+const homeMedsToSend = (decisions, existingDrugNames) => {
+  const have = new Set((existingDrugNames || []).map(normMedName).filter(Boolean));
+  const seen = new Set();
+  const out = [];
+  for (const d of decisions || []) {
+    if (!d || !d.med || !d.med.name || d.action === 'discontinue' || d.emrUuid) continue;
+    const key = normMedName(d.med.name);
+    if (!key || have.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    out.push(d.med);
+  }
+  return out;
+};
+
 // ---- Facility and POS resolution (Session 4.5, owner spec 2026-09-08) ----
 //
 // POS IS A PROPERTY OF THE FACILITY RECORD, SET ONCE. A clinician never sees or
@@ -2753,6 +2797,7 @@ module.exports = {
   deriveEncounterState,
   RX_ROUTES,
   RX_KINDS,
+  homeMedicationToEmrRow, homeMedsToSend, normMedName,
   RX_KIND_LABELS,
   buildPrescription,
   prescriptionToEmrRow,
