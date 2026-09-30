@@ -570,13 +570,11 @@ async function autoUpdateChangelog(db) {
     await db.set('changelog', changelog);
     await db.set('changelog_last_commit_hash', currentHash);
 
-    // Also update changelog.md (non-critical)
-    try {
-      await updateChangelogMd(`Version ${nextVersion}`, dateStr, sections);
-    } catch (e) {
-      // Non-critical, just log
-      console.log('Auto-changelog: Could not update changelog.md:', e.message);
-    }
+    // public/changelog.md is NOT rewritten at boot. Nothing serves it (the
+    // /changelog page reads the database entry written above), and a file the
+    // app rewrites on every start is a file every branch changes, so every
+    // parallel branch clashed on it. Regenerate it on purpose with the CLI
+    // (`node changelog-generator.js`), never as a side effect of booting.
 
     const totalItems = sections.reduce((sum, s) => sum + s.items.length, 0);
     console.log(`✅ Auto-changelog: Generated v${nextVersion} with ${totalItems} items from ${commits.length} commits`);

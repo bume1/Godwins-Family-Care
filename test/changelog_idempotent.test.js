@@ -148,12 +148,34 @@ test('running the writer twice leaves one section, not two', async () => {
   // Each write is asserted to have HAPPENED. updateChangelogMd returns false
   // when it cannot find the header, and a pair of silent no-ops would leave one
   // section by doing nothing at all.
-  assert.strictEqual(await local.updateChangelogMd('Version 3.1.0', 'September 20, 2026', sections), true);
-  assert.strictEqual(await local.updateChangelogMd('Version 3.1.0', 'September 20, 2026', sections), true);
+  // The writer logs a line with an emoji on success. Printed from inside a
+  // test file, that line intermittently corrupted Node's test-runner stream
+  // ("Unable to deserialize cloned data", about 1 run in 6), so it is held
+  // back while the writer runs.
+  const log = console.log;
+  console.log = () => {};
+  let first, second;
+  try {
+    first = await local.updateChangelogMd('Version 3.1.0', 'September 20, 2026', sections);
+    second = await local.updateChangelogMd('Version 3.1.0', 'September 20, 2026', sections);
+  } finally {
+    console.log = log;
+  }
+  assert.strictEqual(first, true);
+  assert.strictEqual(second, true);
 
   const after = fs.readFileSync(path.join(pub, 'changelog.md'), 'utf8');
   const copies = after.split('\n').filter(l => l.startsWith('### Version 3.1.0')).length;
   assert.strictEqual(copies, 1, `two writes must leave one section, found ${copies}`);
   assert.ok(after.includes('an older release'), 'and the older release is still there');
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('booting does not rewrite public/changelog.md', () => {
+  // Every branch used to carry a boot-time rewrite of this file, so parallel
+  // branches clashed on it. The database entry is what the page reads.
+  const body = SRC.slice(SRC.indexOf('async function autoUpdateChangelog'));
+  const code = body.replace(/\/\/.*$/gm, '');
+  assert.ok(!/updateChangelogMd\s*\(/.test(code),
+    'autoUpdateChangelog must not call updateChangelogMd');
 });
