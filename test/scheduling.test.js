@@ -989,8 +989,8 @@ test('the Care tab reads the real schedule, not the retrospective visit log', ()
   const portal = fs.readFileSync(path.join(__dirname, '..', 'public', 'portal.html'), 'utf8');
   const i = portal.indexOf('const GfcCarePlan');
   const body = portal.slice(i, i + 2000);
-  assert.match(body, /const upcoming = \(shifts \|\| \[\]\)/,
-    'upcoming comes from shifts — visit_logs is written after a visit and never held a future one');
+  assert.match(body, /buildScheduleItems\(shifts, clinical\)/,
+    'upcoming comes from the shift board plus the published clinical calendar — visit_logs is written after a visit and never held a future one');
   assert.match(body, /data\.recentVisits/, 'recent still reads visit_logs, which is what it is for');
 });
 

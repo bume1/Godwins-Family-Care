@@ -62,14 +62,19 @@ test('medication reconciliation stamps OpenEMR with Georgia\'s date', () => {
 // is a claim about the patient's record and may only show once that section
 // HAS been published; before that it says the care team will add it.
 test('portal Health tab: "none recorded" only over a section that was actually published', () => {
+  // A section with nothing published may show what the app holds (a reconciled
+  // list, or what the family reported), labelled; "none" is only ever said over
+  // a section that was published or that the app actually holds.
   for (const [key, empty, list] of [['allergies', 'No allergies recorded', 'allergies'], ['medications', 'No medications on your record', 'meds'],
     ['problems', 'No conditions listed yet', 'problems']]) {
-    const i = portal.indexOf(`<HealthEmpty title="${empty}"`);
-    assert.ok(i > 0, empty);
-    const line = portal.slice(portal.lastIndexOf('\n', i), i);
-    assert.match(line, new RegExp(`pub\\.${key} && ${list}\\.length === 0 &&`), `"${empty}" must not show over an unpublished ${key} section`);
-    assert.match(portal, new RegExp(`\\{!pub\\.${key} && <NotYet />\\}`), `an unpublished ${key} section says the care team will add it`);
+    const start = portal.indexOf(`{has('${key}') && (`);
+    const block = portal.slice(start, portal.indexOf('</React.Fragment>', start));
+    assert.ok(start > 0 && block.includes(`<HealthEmpty title="${empty}"`), empty);
+    assert.match(block, new RegExp(`\\{shown\\('${key}'\\) && ${list}\\.length === 0 &&`), `"${empty}" must not show over an unpublished, unheld ${key} section`);
+    assert.match(block, new RegExp(`\\{!shown\\('${key}'\\) && <NotYet />\\}`), `an unpublished ${key} section with nothing held says the care team will add it`);
+    assert.match(block, new RegExp(`<FromAppNote section="${key}" />`), `app-held ${key} are labelled with their source`);
   }
+  assert.match(portal, /const shown = \(k\) => pub\[k\] \|\| !!fromApp\[k\];/);
   assert.doesNotMatch(portal, /degraded\.includes|Please try again in a few minutes/, 'the old "try again in a few minutes" copy is gone with the live read');
 });
 
@@ -77,7 +82,11 @@ test('portal signed-consents list: only executed consents, and a copy link only 
   const route = between(server, "app.get('/api/gfc/documents',", 'const offlinePacketFiles');
   assert.match(route, /\.filter\(k => \['signed', 'signed_offline', 'optin_recorded'\]\.includes\(consents\[k\]\)\)/);
   assert.match(route, /copyUrl: canOpenCopy && registryTypes\.has\(k\) \?/);
-  assert.match(route, /const canOpenCopy = req\.user\.role === config\.ROLES\.CLIENT;/);
+  // The client or their POA (client-equivalent): plain family get no copy link.
+  assert.match(route, /const canOpenCopy = await isClientOrPoa\(req\.user\);/);
+  const gate = between(server, 'const isClientOrPoa = async', 'const requireClientForOwnConsents');
+  assert.match(gate, /user\.role === config\.ROLES\.CLIENT\) return true/);
+  assert.match(gate, /buildActingIdentity\(user, client\)\.isPoa/);
   assert.match(portal, /onClick=\{s\.copyUrl \? openConsentPdf : undefined\}/);
 });
 

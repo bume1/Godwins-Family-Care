@@ -104,6 +104,25 @@
     .gfc .visit .vt{font-family:'Cormorant Garamond',serif;font-size:15px;font-weight:600;color:var(--navy);min-width:64px;line-height:1.15;}
     .gfc .visit .vm b{display:block;font-size:14px;color:var(--navy);font-weight:600;}
     .gfc .visit .vm span{font-size:12.5px;color:var(--mut);}
+    .gfc .cal{background:#fff;border:1px solid var(--line);border-radius:15px;padding:12px;box-shadow:0 2px 8px rgba(3,61,80,.05);}
+    .gfc .cal-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;}
+    .gfc .cal-hd b{font-family:'Cormorant Garamond',serif;font-size:19px;color:var(--navy);}
+    .gfc .cal-hd button{border:1px solid var(--line);background:#fff;border-radius:9px;width:34px;height:34px;color:var(--navy);cursor:pointer;}
+    .gfc .cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;}
+    .gfc .cal-dow{font-size:10.5px;text-transform:uppercase;letter-spacing:.8px;color:var(--mut);text-align:center;padding:2px 0;}
+    .gfc .cal-day{min-height:46px;border-radius:9px;border:1px solid transparent;background:var(--cream);padding:4px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:3px;font-size:13px;color:var(--navy);}
+    .gfc .cal-day.out{background:transparent;color:#b9c3c7;}
+    .gfc .cal-day.today{border-color:var(--gold);font-weight:700;}
+    .gfc .cal-day.sel{background:var(--navy);color:#fff;}
+    .gfc .cal-dots{display:flex;gap:3px;}
+    .gfc .cal-dot{width:7px;height:7px;border-radius:50%;}
+    .gfc .cal-dot.clinical{background:#2b7a8c;}
+    .gfc .cal-dot.caregiver{background:var(--goldd);}
+    .gfc .cal-key{display:flex;gap:14px;font-size:12px;color:var(--mut);margin-top:8px;}
+    .gfc .cal-key span{display:flex;align-items:center;gap:5px;}
+    .gfc .visit .kind{font-size:10.5px;text-transform:uppercase;letter-spacing:.8px;font-weight:700;}
+    .gfc .visit .kind.clinical{color:#2b7a8c;}
+    .gfc .visit .kind.caregiver{color:var(--goldd);}
     .gfc .visit.hl{background:#fcf3da;border-color:rgba(245,205,133,.7);}
     .gfc .visit .chk{margin-left:auto;color:var(--teal);font-size:18px;}
     /* the signed note, rendered from the six fixed shapes in note-format.js */
@@ -4997,10 +5016,142 @@
       );
     };
 
-    const GfcDashboard = ({ data, onNavigate, me, clinical, shifts }) => {
+    // ── Portal P2: one schedule, both kinds of visit ──────────────────────
+    // A patient has two calendars behind the scenes: caregiver shifts (the
+    // shift board) and clinical visits (OpenEMR, copied to the portal whenever
+    // staff book, move or open them). The patient sees ONE list and ONE
+    // calendar, each visit labelled with what it is. Dates are Georgia's.
+    const scheduleClock = (t) => {
+      if (!t) return '';
+      const [h, m] = String(t).split(':').map(Number);
+      if (isNaN(h)) return t;
+      return `${((h + 11) % 12) + 1}:${String(m || 0).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+    };
+    const georgiaDate = (iso) => {
+      const p = window.GFC_TIME && window.GFC_TIME.zonedParts(iso);
+      return p ? p.isoDate : String(iso || '').slice(0, 10);
+    };
+    const buildScheduleItems = (shifts, clinical) => {
+      const items = [];
+      const T = window.GFC_TIME;
+      (shifts || []).forEach(s => {
+        items.push({
+          id: `shift:${s.id}`, kind: 'caregiver', date: georgiaDate(s.start),
+          sortKey: Date.parse(s.start) || 0,
+          time: T ? `${T.fmtTime(s.start)} – ${T.fmtTime(s.end)}` : '',
+          title: s.status === 'in_progress' ? 'Caregiver visit in progress' : 'Caregiver visit',
+          detail: s.caregiverName || 'Your caregiver',
+          live: s.status === 'in_progress', past: false
+        });
+      });
+      const appts = (clinical && !clinical.error && clinical.appointments) || [];
+      appts.forEach(a => {
+        const at = T && T.instantFromZoned ? T.instantFromZoned(a.date, a.startTime || '12:00') : null;
+        items.push({
+          id: `appt:${a.id}`, kind: 'clinical', date: a.date,
+          sortKey: at ? Date.parse(at) : Date.parse(`${a.date}T12:00:00Z`),
+          time: [scheduleClock(a.startTime), scheduleClock(a.endTime)].filter(Boolean).join(' – '),
+          title: a.title || 'Clinical visit',
+          detail: [a.provider, a.location].filter(Boolean).join(' · '),
+          live: false, past: a.state === 'completed'
+        });
+      });
+      return items.sort((x, y) => x.sortKey - y.sortKey);
+    };
+    const ScheduleRow = ({ v }) => (
+      <div className={`visit ${v.live ? 'hl' : ''}`}>
+        <span className="vt">{prettyDate(v.date)}<br />{v.time}</span>
+        <div className="vm">
+          <span className={`kind ${v.kind}`}>{v.kind === 'clinical' ? 'Clinical visit' : 'Caregiver'}</span>
+          <b>{v.title}</b><span>{v.detail}</span>
+        </div>
+        {v.past && <i className="ti ti-circle-check chk" />}
+      </div>
+    );
+
+    // The patient's calendar: the same month grid a clinician works from,
+    // showing only this patient's own visits.
+    // What an empty visit list says. A failed caregiver-schedule load is named
+    // as a failure, never read as "no visits"; a list empty only because the
+    // next clinical visit has its own card says "no OTHER visits".
+    const ScheduleEmpty = ({ empty, shiftsErr, other }) => (
+      <React.Fragment>
+        {shiftsErr && <p className="sub" style={{ marginTop: 0, color: '#B5462E' }}><i className="ti ti-alert-triangle" /> Your caregiver visit schedule could not be loaded ({shiftsErr}). Refresh to try again.</p>}
+        {!shiftsErr && empty && <p className="sub" style={{ marginTop: 0 }}>{other ? 'No other visits scheduled.' : 'No visits scheduled yet. Your care team will let you know when your next visit is set.'}</p>}
+      </React.Fragment>
+    );
+
+    const GfcSchedule = ({ shifts, shiftsErr, clinical }) => {
+      const items = buildScheduleItems(shifts, clinical);
+      const today = georgiaDate(new Date().toISOString());
+      const [month, setMonth] = useState(() => today.slice(0, 7));
+      const [sel, setSel] = useState(today);
+      const [y, m] = month.split('-').map(Number);
+      const first = new Date(Date.UTC(y, m - 1, 1));
+      const daysIn = new Date(Date.UTC(y, m, 0)).getUTCDate();
+      const lead = first.getUTCDay();
+      const cells = [];
+      for (let i = 0; i < lead; i++) cells.push(null);
+      for (let d = 1; d <= daysIn; d++) cells.push(`${month}-${String(d).padStart(2, '0')}`);
+      while (cells.length % 7) cells.push(null);
+      const byDay = {};
+      items.forEach(v => { (byDay[v.date] = byDay[v.date] || []).push(v); });
+      const shift = (n) => {
+        const d = new Date(Date.UTC(y, m - 1 + n, 1));
+        setMonth(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`);
+      };
+      const monthLabel = first.toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+      const upcoming = items.filter(v => !v.past && v.date >= today);
+      const dayItems = byDay[sel] || [];
+      const clinicalNotYet = clinical && !clinical.error && clinical.appointmentsPublished === false;
+      return (
+        <div className="gfc-body">
+          <h2 className="disp">Your schedule</h2>
+          <p className="sub">Every visit on your calendar: clinical visits with your provider and visits from your caregiver.</p>
+          <div className="cal">
+            <div className="cal-hd">
+              <button onClick={() => shift(-1)} aria-label="Previous month"><i className="ti ti-chevron-left" /></button>
+              <b>{monthLabel}</b>
+              <button onClick={() => shift(1)} aria-label="Next month"><i className="ti ti-chevron-right" /></button>
+            </div>
+            <div className="cal-grid">
+              {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => <div className="cal-dow" key={d}>{d}</div>)}
+              {cells.map((d, i) => d ? (
+                <div key={d} className={`cal-day ${d === today ? 'today' : ''} ${d === sel ? 'sel' : ''}`} onClick={() => setSel(d)}>
+                  <span>{Number(d.slice(8))}</span>
+                  <div className="cal-dots">
+                    {(byDay[d] || []).slice(0, 3).map(v => <span key={v.id} className={`cal-dot ${v.kind}`} />)}
+                  </div>
+                </div>
+              ) : <div key={`x${i}`} className="cal-day out" />)}
+            </div>
+            <div className="cal-key">
+              <span><i className="cal-dot clinical" style={{ display: 'inline-block' }} />Clinical visit</span>
+              <span><i className="cal-dot caregiver" style={{ display: 'inline-block' }} />Caregiver</span>
+            </div>
+          </div>
+          <p className="lbl">{prettyDate(sel)}</p>
+          {dayItems.length === 0 && <p className="sub" style={{ marginTop: 0 }}>Nothing scheduled this day.</p>}
+          {dayItems.map(v => <ScheduleRow key={v.id} v={v} />)}
+          <p className="lbl">Coming up</p>
+          <ScheduleEmpty empty={upcoming.length === 0} shiftsErr={shiftsErr} />
+          {upcoming.slice(0, 10).map(v => <ScheduleRow key={v.id} v={v} />)}
+          {clinicalNotYet && <p className="sub">Your clinical visits will appear here once your care team updates your calendar.</p>}
+        </div>
+      );
+    };
+
+    const GfcDashboard = ({ data, onNavigate, me, clinical, shifts, shiftsErr }) => {
       const cp = data.carePlan;                       // null until an RN authors the real plan (Session 4)
-      const nextClinical = clinical && !clinical.error && (clinical.appointments || [])[0]; // 4.3: live OpenEMR row, never a tombstone
-      const pc = (cp && cp.primaryCaregiver) || {};
+      const todayGa = georgiaDate(new Date().toISOString());
+      // Portal P2: the next clinical visit from the published calendar.
+      const nextClinical = clinical && !clinical.error && (clinical.appointments || []).find(a => a.state === 'upcoming' && a.date >= todayGa);
+      // The next clinical visit has its own card, so it is not listed twice.
+      const schedule = buildScheduleItems(shifts, clinical).filter(v => !v.past && v.date >= todayGa && !(nextClinical && v.id === `appt:${nextClinical.id}`));
+      // Who looks after them: from the plan, else the care team the office
+      // assigned (the plan does not have to be written yet to know that).
+      const team = (cp && cp.careTeam && cp.careTeam.length ? cp.careTeam : data.careTeam) || [];
+      const pc = (cp && cp.primaryCaregiver) || team.find(m => m.role === 'Primary caregiver') || {};
       // The client's own confirmed caregiver schedule (Session 7's shifts, not
       // visit_logs — visit_logs is written retrospectively when a caregiver
       // files a completed log, so it never actually carried a future visit).
@@ -5047,8 +5198,8 @@
             ) : (
               <React.Fragment>
                 <div className="prow">
-                  <Avatar initials="GF" />
-                  <div><div className="nm">Your care plan is being prepared</div><div className="rl">Your nurse will review it with you</div></div>
+                  <Avatar initials={pc.initials || 'GF'} />
+                  <div><div className="nm">Your care plan is being prepared</div><div className="rl">{pc.name ? `Your caregiver: ${pc.name}` : 'Your nurse will review it with you'}</div></div>
                 </div>
                 {tierLabel && <span className="pill"><i className="ti ti-heart-handshake" style={{ fontSize: 13 }} />{tierLabel}</span>}
               </React.Fragment>
@@ -5058,9 +5209,9 @@
           {nextClinical && (
             <React.Fragment>
               <p className="lbl">Your next clinical visit</p>
-              <div className="visit hl" onClick={() => onNavigate('health')} style={{ cursor: 'pointer' }}>
-                <span className="vt">{prettyDate(nextClinical.date)}<br />{fmtClock(nextClinical.startTime)}</span>
-                <div className="vm"><b>{nextClinical.title}</b><span>{nextClinical.provider} · {nextClinical.location}</span></div>
+              <div className="visit hl" onClick={() => onNavigate('schedule')} style={{ cursor: 'pointer' }}>
+                <span className="vt">{prettyDate(nextClinical.date)}<br />{scheduleClock(nextClinical.startTime)}</span>
+                <div className="vm"><b>{nextClinical.title}</b><span>{[nextClinical.provider, nextClinical.location].filter(Boolean).join(' · ')}</span></div>
               </div>
             </React.Fragment>
           )}
@@ -5068,13 +5219,9 @@
               cannot be answered differently on two screens. */}
           <GfcVisitInProgress shifts={shifts} />
           <p className="lbl">Upcoming visits</p>
-          {upcoming.length === 0 && <p className="sub" style={{ marginTop: 0 }}>No visits scheduled yet — your care coordinator will reach out to set up your schedule.</p>}
-          {upcoming.filter(v => !v.live).slice(0, 2).map(v => (
-            <div className={`visit ${v.highlight ? 'hl' : ''}`} key={v.id}>
-              <span className="vt">{v.day}<br />{v.time}</span>
-              <div className="vm"><b>{v.type}</b><span>{v.with}</span></div>
-            </div>
-          ))}
+          <ScheduleEmpty empty={schedule.filter(v => !v.live).length === 0} shiftsErr={shiftsErr} other={!!nextClinical} />
+          {schedule.filter(v => !v.live).slice(0, 3).map(v => <ScheduleRow key={v.id} v={v} />)}
+          <div className="plink" style={{ marginTop: 4, cursor: 'pointer', color: 'var(--navy)', fontWeight: 600, fontSize: 13 }} onClick={() => onNavigate('schedule')}>See your full calendar <i className="ti ti-arrow-right" /></div>
           <div className="tiles" style={{ marginTop: 14 }}>
             {/* No unread badge here. The Session 9 component owns the count and
                 reports it through onUnread when it is open; a badge wired to a
@@ -5124,27 +5271,13 @@
       );
     };
 
-    const GfcCarePlan = ({ data, readOnly, token, shifts }) => {
+    const GfcCarePlan = ({ data, readOnly, token, shifts, shiftsErr, clinical }) => {
+      const careSchedule = buildScheduleItems(shifts, clinical).filter(v => !v.live && !v.past && v.date >= georgiaDate(new Date().toISOString()));
       const cp = data.carePlan || {};
       const hasPlan = !!data.carePlan;               // null until the RN-authored plan exists (Session 4)
-      // Upcoming comes from the real caregiver schedule, not from visit_logs.
-      // visit_logs is written when a caregiver FILES a completed log, so it
-      // never carried a future visit — this tab said "no visits scheduled"
-      // while Home showed one in progress. Recent still reads visit_logs,
-      // which is exactly what that collection is for.
-      // Eastern, always — see public/gfc-time.js.
-      const fmtShiftTime = (iso) => window.GFC_TIME ? window.GFC_TIME.fmtTime(iso) : '';
-      const upcoming = (shifts || [])
-        .filter(s => s.status !== 'in_progress')      // the live one has its own card above
-        .map(s => ({
-          id: s.id,
-          day: prettyDate(s.start),
-          time: `${fmtShiftTime(s.start)} – ${fmtShiftTime(s.end)}`,
-          type: 'Scheduled visit',
-          with: s.caregiverName || 'Your caregiver',
-          highlight: false
-        }));
       const recent = data.recentVisits || [];
+      // The care team shows even before the plan is written.
+      const teamList = (hasPlan && (cp.careTeam || []).length ? cp.careTeam : data.careTeam) || [];
       const teamColors = ['var(--gold)', '#9FE1CB', '#CECBF6'];
       const teamTextColors = ['var(--navy)', '#0f6e56', '#3c3489'];
       const [coSigned, setCoSigned] = useState(!!cp.coSignedAt);
@@ -5234,12 +5367,18 @@
           )}
           {hasPlan && (cp.version != null) && (
             <p className="sub" style={{ marginTop: 0, marginBottom: 12 }}>
-              Version {cp.version}{cp.effectiveDate ? ` · effective ${prettyDate(cp.effectiveDate)}` : ''}{cp.authoredBy ? ` · written by ${cp.authoredBy}` : ''}, reviewed with you and your family.
+              Version {cp.version}{cp.effectiveDate ? ` · effective ${prettyDate(cp.effectiveDate)}` : ''}{cp.targetDate ? ` · review by ${prettyDate(cp.targetDate)}` : ''}{cp.authoredBy ? ` · written by ${cp.authoredBy}` : ''}, reviewed with you and your family.
             </p>
           )}
           {hasPlan && (
           <React.Fragment>
-          <p className="lbl" style={{ marginTop: 0 }}>Goals</p>
+          {(cp.problems || []).length > 0 && (
+            <React.Fragment>
+              <p className="lbl" style={{ marginTop: 0 }}>What we are working on</p>
+              {cp.problems.map((p, i) => <div className="goal" key={i}><i className="ti ti-list-details" style={{ color: 'var(--navy)' }} />{p}</div>)}
+            </React.Fragment>
+          )}
+          <p className="lbl" style={{ marginTop: (cp.problems || []).length ? undefined : 0 }}>Goals</p>
           {(cp.goals || []).map((g, i) => (
             <div className="goal" key={i}><i className="ti ti-circle-check" />{g}</div>
           ))}
@@ -5268,12 +5407,14 @@
               <div className="seg">{(cp.authorizedServices || []).map((s, i) => <span className="on" key={i}>{s}</span>)}</div>
             </React.Fragment>
           )}
-          {(cp.careTeam || []).length > 0 && (
+          </React.Fragment>
+          )}
+          {teamList.length > 0 && (
             <React.Fragment>
               <p className="lbl">Care team</p>
               <div className="card" style={{ margin: 0 }}>
-                {(cp.careTeam || []).map((m, i) => (
-                  <div className="prow" style={{ marginBottom: i < (cp.careTeam.length - 1) ? 10 : 0 }} key={i}>
+                {teamList.map((m, i) => (
+                  <div className="prow" style={{ marginBottom: i < (teamList.length - 1) ? 10 : 0 }} key={i}>
                     <Avatar initials={m.initials} size={34} bg={teamColors[i % 3]} color={teamTextColors[i % 3]} />
                     <div><div style={{ fontSize: 14, fontWeight: 600, color: 'var(--navy)' }}>{m.name}</div><div style={{ fontSize: 12, color: 'var(--mut)' }}>{m.role}</div></div>
                   </div>
@@ -5281,17 +5422,10 @@
               </div>
             </React.Fragment>
           )}
-          </React.Fragment>
-          )}
           <GfcVisitInProgress shifts={shifts} />
           <p className="lbl">Upcoming visits</p>
-          {upcoming.length === 0 && <p className="sub" style={{ marginTop: 0 }}>No visits scheduled yet.</p>}
-          {upcoming.map(v => (
-            <div className={`visit ${v.highlight ? 'hl' : ''}`} key={v.id}>
-              <span className="vt">{v.day}<br />{v.time}</span>
-              <div className="vm"><b>{v.type}</b><span>{v.with}{v.duration ? ` · ${v.duration}` : ''}</span></div>
-            </div>
-          ))}
+          <ScheduleEmpty empty={careSchedule.length === 0} shiftsErr={shiftsErr} />
+          {careSchedule.map(v => <ScheduleRow key={v.id} v={v} />)}
           <p className="lbl">Recent visits</p>
           {recent.length === 0 && <p className="sub" style={{ marginTop: 0 }}>No completed visits yet.</p>}
           {recent.map(v => (
@@ -5822,7 +5956,7 @@
       );
     };
 
-    const GfcDocuments = ({ docs, readOnly, token, onOpenTransferRoi, onRefresh, clinicalDocs }) => {
+    const GfcDocuments = ({ docs, readOnly, token, onOpenTransferRoi, onRefresh, clinicalDocs, docsErr, clinicalDocsErr }) => {
       const signed = docs?.signedConsents || [];
       const files = docs?.documents || [];
       const packet = docs?.enrollmentPacket || null;
@@ -5910,6 +6044,7 @@
           )}
 
           <p className="lbl">Your documents</p>
+          {docsErr && <div className="lockcard"><i className="ti ti-alert-triangle" /><div><b>Your documents didn't load</b><span>{docsErr} Refresh to try again.</span></div></div>}
           {packet && (
             <div className="doc" onClick={() => openDoc(packet.url)} style={{ cursor: 'pointer' }}>
               <i className="ti ti-file-certificate" />
@@ -5926,7 +6061,7 @@
           )}
 
           <p className="lbl" style={{ marginTop: packet ? undefined : 0 }}>Signed consents</p>
-          {signed.length === 0 && <p className="sub">No consents on file yet.</p>}
+          {signed.length === 0 && !docsErr && <p className="sub">No consents on file yet.</p>}
           {packetZip && (
             <div className="doc" onClick={() => openPdfSecurely(`${API_URL}${packetZip.url}`, token, 'zip')} style={{ cursor: 'pointer' }}>
               <i className="ti ti-file-zip" />
@@ -5981,7 +6116,8 @@
             <React.Fragment>
               <p className="lbl">Your clinical record</p>
               {chartErr && <div className="err">{chartErr}</div>}
-              {clinicalDocs.length === 0 && <p className="sub">Nothing on your clinical chart yet.</p>}
+              {clinicalDocsErr && <div className="err">Your clinical record didn't load: {clinicalDocsErr} Refresh to try again.</div>}
+              {clinicalDocs.length === 0 && !clinicalDocsErr && <p className="sub">Nothing on your clinical chart yet.</p>}
               {clinicalDocs.map(d => (
                 <div className="doc" key={d.id} onClick={() => openChartDoc(d)}
                   style={{ cursor: d.openable ? 'pointer' : 'default', opacity: d.openable ? 1 : 0.7 }}>
@@ -6114,6 +6250,20 @@
       // which would be a claim about your record this page cannot make.
       const pub = clinical.published || {};
       const NotYet = () => <HealthEmpty title="Your care team will add this after a visit" sub="It appears here once your clinician has reviewed it with you." />;
+      // A section no chart has been published into yet, filled from what we
+      // already hold, and labelled with where it came from so it is never read
+      // as the clinical record.
+      const fromApp = clinical.fromApp || {};
+      const FromAppNote = ({ section }) => {
+        const f = fromApp[section];
+        if (!f) return null;
+        const text = f.source === 'reconciled'
+          ? `Reviewed with ${f.by || 'your clinician'}${f.at ? ` on ${prettyDate(f.at)}` : ''}. Your full chart will appear here after your next visit.`
+          : f.source === 'care_plan' ? 'From your care plan. Your full chart will appear here after your next visit.'
+          : 'What you told us when you enrolled. Your clinician will confirm this with you.';
+        return <p className="sub" style={{ marginTop: 0, marginBottom: 8 }}><i className="ti ti-info-circle" /> {text}</p>;
+      };
+      const shown = (k) => pub[k] || !!fromApp[k];
       const nothingYet = !clinical.publishedAt && visits.length === 0 && results.length === 0;
       const vitalRows = vitals ? [
         ['Blood pressure', vitals.bloodPressure, vitals.bloodPressureNote], ['Heart rate', vitals.heartRate && `${vitals.heartRate} bpm`],
@@ -6130,7 +6280,7 @@
               {clinical.publishedFromVisitDate ? `Updated after your visit on ${prettyDate(clinical.publishedFromVisitDate)}.` : `Last updated ${prettyDate(clinical.publishedAt)}.`}
             </p>
           )}
-          {nothingYet && <HealthEmpty title="Your health summary is coming" sub="Your care team will share your health summary after your first visit." />}
+          {nothingYet && <HealthEmpty title="Your health summary is coming" sub="Your care team has not shared a visit summary here yet. It appears after your clinician reviews it." />}
 
           {has('results') && results.length > 0 && (
             <React.Fragment>
@@ -6196,8 +6346,9 @@
           {has('medications') && (
             <React.Fragment>
               <p className="lbl">Current medications</p>
-              {!pub.medications && <NotYet />}
-              {pub.medications && meds.length === 0 && <HealthEmpty title="No medications on your record" sub="Your clinician reviews your medications at each visit." />}
+              {!shown('medications') && <NotYet />}
+              <FromAppNote section="medications" />
+              {shown('medications') && meds.length === 0 && <HealthEmpty title="No medications on your record" sub="Your clinician reviews your medications at each visit." />}
               {meds.length > 0 && (
                 <div className="card" style={{ margin: 0 }}>
                   {meds.map(m => (
@@ -6215,8 +6366,11 @@
           {has('allergies') && (
             <React.Fragment>
               <p className="lbl">Allergies</p>
-              {!pub.allergies && <NotYet />}
-              {pub.allergies && allergies.length === 0 && <HealthEmpty title="No allergies recorded" sub="Tell your clinician about any reactions you've had." />}
+              {!shown('allergies') && <NotYet />}
+              <FromAppNote section="allergies" />
+              {shown('allergies') && allergies.length === 0 && (fromApp.allergies
+                ? <HealthEmpty title="You told us you have no known allergies" sub="Tell your clinician about any reactions you've had." />
+                : <HealthEmpty title="No allergies recorded" sub="Tell your clinician about any reactions you've had." />)}
               {allergies.length > 0 && (
                 <div className="card" style={{ margin: 0 }}>
                   {allergies.map(a => <div className="goal" key={a.id}><i className="ti ti-alert-triangle" style={{ color: '#B5462E' }} />{a.name}{a.severity ? ` · ${a.severity}` : ''}</div>)}
@@ -6228,8 +6382,9 @@
           {has('problems') && (
             <React.Fragment>
               <p className="lbl">Conditions we're managing</p>
-              {!pub.problems && <NotYet />}
-              {pub.problems && problems.length === 0 && <HealthEmpty title="No conditions listed yet" sub="Your clinician builds this list with you at your visits." />}
+              {!shown('problems') && <NotYet />}
+              <FromAppNote section="problems" />
+              {shown('problems') && problems.length === 0 && <HealthEmpty title="No conditions listed yet" sub="Your clinician builds this list with you at your visits." />}
               {problems.length > 0 && (
                 <div className="card" style={{ margin: 0 }}>
                   {problems.map(p => <div className="goal" key={p.id}><i className="ti ti-list-details" />{p.name}{p.since ? <span style={{ fontSize: 12, color: 'var(--mut)', marginLeft: 'auto' }}>since {prettyDate(p.since)}</span> : null}</div>)}
@@ -6238,6 +6393,12 @@
             </React.Fragment>
           )}
 
+          {has('vitals') && !vitals && (
+            <React.Fragment>
+              <p className="lbl">Latest vitals</p>
+              <NotYet />
+            </React.Fragment>
+          )}
           {vitals && vitalRows.length > 0 && (
             <React.Fragment>
               <p className="lbl">Latest vitals</p>
@@ -6279,6 +6440,11 @@
       const [clinical, setClinical] = useState(null);  // 4.3 curated clinical read (clinical-line clients only)
       const [shifts, setShifts] = useState([]);        // this client's own confirmed caregiver schedule (Session 7)
       const [clinicalDocs, setClinicalDocs] = useState([]); // the IHPC chart's own documents (clinical-line clients only)
+      // A failed load is not an empty list. Each says so instead of "nothing
+      // on file" / "no visits scheduled".
+      const [shiftsErr, setShiftsErr] = useState('');
+      const [docsErr, setDocsErr] = useState('');
+      const [clinicalDocsErr, setClinicalDocsErr] = useState('');
 
       const reloadMe = async () => {
         const result = await api.getGfcMe(token);
@@ -6305,14 +6471,23 @@
       const readOnly = !!isFamily && !isPoa;
       // Server decides: linked + clinical line + consent to treat (+ ROI/sharing for family)
       const clinicalAvailable = !!(me && me.clinicalRead && me.clinicalRead.available);
+      // A clinical-line client the server has not cleared yet (not linked to a
+      // chart, consent to treatment not on file) still gets the Health tab, with
+      // the reason. A tab that silently is not there reads as "no health data".
+      // PHC-only clients never see it (schema §6).
+      const clinicalBlocked = !!(me && me.clinicalRead && !me.clinicalRead.available && me.clinicalRead.code && me.clinicalRead.code !== 'CLINICAL_NOT_ON_LINE');
       const locked = me && (isFamily ? !me.roiFamilySigned : me.enrollmentStatus === 'intake_pending');
 
       // Re-read the documents payload after an upload, so the checklist reflects
       // what we now hold rather than what the page loaded with.
       const refreshDocs = useCallback(async () => {
-        const dc = await api.getGfcDocuments(token);
-        if (!dc.error) setDocs(dc);
-      }, [token]);
+        const [dc, cd] = await Promise.all([
+          api.getGfcDocuments(token),
+          clinicalAvailable ? api.getGfcClinicalDocuments(token) : Promise.resolve(null)
+        ]);
+        if (!dc.error) { setDocs(dc); setDocsErr(''); } else setDocsErr(dc.error);
+        if (cd) { if (!cd.error) { setClinicalDocs(cd.documents || []); setClinicalDocsErr(''); } else setClinicalDocsErr(cd.error); }
+      }, [token, clinicalAvailable]);
 
       // Step 2: once unlocked, load portal data (these endpoints are gated server-side).
       useEffect(() => {
@@ -6329,8 +6504,8 @@
           ]);
           if (cancelled) return;
           if (!cp.error) { setData(cp); setDataErr(''); } else setDataErr(cp.error);
-          if (!dc.error) setDocs(dc);
-          if (!sh.error) setShifts(sh.shifts || []);
+          if (!dc.error) { setDocs(dc); setDocsErr(''); } else setDocsErr(dc.error);
+          if (!sh.error) { setShifts(sh.shifts || []); setShiftsErr(''); } else setShiftsErr(sh.error);
           if (clinicalAvailable) {
             const [cl, cd] = await Promise.all([
               api.getGfcClinicalSummary(token),
@@ -6338,7 +6513,7 @@
             ]);
             if (cancelled) return;
             setClinical(cl);
-            if (!cd.error) setClinicalDocs(cd.documents || []);
+            if (!cd.error) { setClinicalDocs(cd.documents || []); setClinicalDocsErr(''); } else setClinicalDocsErr(cd.error);
           }
         })();
         return () => { cancelled = true; };
@@ -6415,13 +6590,14 @@
       }
 
       // UNLOCKED portal.
-      const titles = { home: 'My Care', care: 'Care Plan', health: 'My Health', messages: 'Messages', documents: 'Documents' };
+      const titles = { home: 'My Care', care: 'Care Plan', schedule: 'Schedule', health: 'My Health', messages: 'Messages', documents: 'Documents' };
       // The Health tab exists ONLY for clinical-line clients the server cleared
       // (PHC-only clients never see a clinical section — schema §6).
       const tabs = [
         { id: 'home', icon: 'ti-home', label: 'Home' },
         { id: 'care', icon: 'ti-clipboard-heart', label: 'Care' },
-        ...(clinicalAvailable ? [{ id: 'health', icon: 'ti-heart-rate-monitor', label: 'Health' }] : []),
+        { id: 'schedule', icon: 'ti-calendar', label: 'Schedule' },
+        ...(clinicalAvailable || clinicalBlocked ? [{ id: 'health', icon: 'ti-heart-rate-monitor', label: 'Health' }] : []),
         { id: 'messages', icon: 'ti-message', label: 'Messages' },
         { id: 'documents', icon: 'ti-file-text', label: 'Documents' }
       ];
@@ -6431,15 +6607,17 @@
             <span className="ttl">{titles[view]}</span>
             <button onClick={gfcLogout} title="Sign out"><i className="ti ti-logout" /></button>
           </div>
-          {view === 'home' && data && <GfcDashboard data={data} onNavigate={setView} me={me} clinical={clinicalAvailable ? clinical : null} shifts={shifts} />}
-          {view === 'care' && data && <GfcCarePlan data={data} readOnly={readOnly} token={token} shifts={shifts} />}
+          {view === 'home' && data && <GfcDashboard data={data} onNavigate={setView} me={me} clinical={clinicalAvailable ? clinical : null} shifts={shifts} shiftsErr={shiftsErr} />}
+          {view === 'care' && data && <GfcCarePlan data={data} readOnly={readOnly} token={token} shifts={shifts} shiftsErr={shiftsErr} clinical={clinicalAvailable ? clinical : null} />}
+          {view === 'schedule' && <GfcSchedule shifts={shifts} shiftsErr={shiftsErr} clinical={clinicalAvailable ? clinical : null} />}
+          {view === 'health' && clinicalBlocked && <GfcHealth clinical={{ error: me.clinicalRead.reason || 'Your care team is still setting up your health record.' }} me={me} token={token} readOnly={readOnly} />}
           {view === 'health' && clinicalAvailable && <GfcHealth clinical={clinical} me={me} token={token} readOnly={readOnly}
             onSharingSaved={(sharing) => setMe(m => m ? { ...m, sharing } : m)} />}
           {view === 'messages' && <GfcMessages token={token} me={me} actingAs={me && me.actingAs} />}
           {/* Uploads, the share link and the record release are client-only on the
               server (requireClientForIntake), so a POA got a button that always
               answered 403. On this tab every family login, POA included, reads. */}
-          {view === 'documents' && <GfcDocuments docs={docs} readOnly={!!isFamily} token={token} onOpenTransferRoi={() => setShowTransferRoi(true)} onRefresh={refreshDocs} clinicalDocs={clinicalAvailable ? clinicalDocs : null} />}
+          {view === 'documents' && <GfcDocuments docs={docs} readOnly={!!isFamily} token={token} onOpenTransferRoi={() => setShowTransferRoi(true)} onRefresh={refreshDocs} clinicalDocs={clinicalAvailable ? clinicalDocs : null} docsErr={docsErr} clinicalDocsErr={clinicalDocsErr} />}
           {!data && dataErr && view !== 'messages' && view !== 'documents' && view !== 'health' && (
             <div className="gfc-body"><div className="lockcard"><i className="ti ti-alert-triangle" /><div><b>Your care information didn't load</b><span>{dataErr} Please refresh the page to try again.</span></div></div></div>
           )}

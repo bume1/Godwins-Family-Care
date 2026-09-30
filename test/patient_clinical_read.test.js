@@ -159,7 +159,9 @@ test('family summary-level care plan drops the charge note and problems, keeps g
   const out = R.filterRow('carePlan', 'summary', plan);
   assert.deepEqual(out.goals, ['Walk daily']);
   assert.ok(!('problems' in out) && !('chargePlanNote' in out) && !('rnName' in out));
-  assert.equal(R.filterRow('carePlan', 'full', plan).chargePlanNote, '$$');
+  // The charge note is an internal nursing note: it never reaches a patient, even at full.
+  assert.equal(R.filterRow('carePlan', 'full', plan).chargePlanNote, undefined);
+  assert.deepEqual(R.filterRow('carePlan', 'full', plan).problems, ['Falls']);
 });
 
 // ---- 4. Session scoping ----

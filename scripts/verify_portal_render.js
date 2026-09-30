@@ -59,11 +59,35 @@ const RESULTS = [
   { id: 'r2', orderType: 'imaging', resultDate: '2026-09-20', performedBy: 'Peachtree Imaging', releasedToPatientAt: '2026-09-20T20:00:00Z', patientCopy: { storageRef: 'x' }, acknowledgedAt: '2026-09-21T14:00:00Z', acknowledgedBy: { name: 'Bethel Godwins' }, patientNote: 'Your X-ray looks fine. No changes needed.' }
 ].map(P.resultForPatient);
 
+// Portal P2: the calendar, dated relative to today in Georgia.
+const GT = require(root + '/public/gfc-time');
+const TODAY = GT.zonedParts(new Date()).isoDate;
+const plus = (n) => new Date(Date.parse(`${TODAY}T12:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+const APPTS = P.buildPublishedAppointments({ today: TODAY, providerName: () => 'Bethel Godwins, nurse practitioner', summaries: [
+  { eid: '101', date: plus(3), startTime: '10:00', endTime: '10:45', durationMinutes: 45, title: 'Follow-up visit', status: '-', state: 'scheduled', location: 'home', providerId: '7' },
+  { eid: '102', date: plus(10), startTime: '14:00', endTime: '14:30', durationMinutes: 30, title: 'Telehealth check-in', status: '-', state: 'scheduled', location: 'telehealth', providerId: '7' },
+  { eid: '100', date: plus(-5), startTime: '09:00', endTime: '09:45', durationMinutes: 45, title: 'New patient visit', status: '-', state: 'documented', location: 'home', providerId: '7' }
+] });
+const SHIFTS = [{ id: 's1', caregiverName: 'Maria Lopez', start: GT.instantFromZoned(plus(1), '09:00'), end: GT.instantFromZoned(plus(1), '13:00'), status: 'confirmed' }];
+
 const payload = (audience, sharing, opts = {}) => {
   const sections = R.sectionsFor(audience, sharing);
   const level = sections.visits;
   const out = { audience, sections, isPoa: audience === 'poa', actingAs: audience === 'poa' ? 'Luka Agent as POA for Juanita Guess' : null, clientName: 'Juanita' };
-  if (opts.empty) { out.published = { problems: false, allergies: false, medications: false, vitals: false }; out.publishedAt = null; out.visits = level !== 'none' ? [] : undefined; return out; }
+  if (opts.empty) {
+    out.published = { problems: false, allergies: false, medications: false, vitals: false }; out.publishedAt = null; out.visits = level !== 'none' ? [] : undefined;
+    // What the app holds, the way the summary route serves it.
+    out.fromApp = {};
+    if (opts.held) {
+      const held = P.appHeldHealth(opts.held);
+      for (const [k, kind] of [['medications', 'medication'], ['allergies', 'allergy'], ['problems', 'problem']]) {
+        if (!held[k]) continue;
+        out[k] = R.filterRows(kind, sections[k], held[k].rows);
+        out.fromApp[k] = { source: held[k].source, at: held[k].at || null, by: held[k].by || null };
+      }
+    }
+    return out;
+  }
   out.publishedAt = chart.publishedAt; out.publishedFromVisitDate = '2026-09-28';
   out.published = { problems: true, allergies: true, medications: true, vitals: true };
   const want = (k) => sections[k] && sections[k] !== 'none';
@@ -73,6 +97,8 @@ const payload = (audience, sharing, opts = {}) => {
   if (want('vitals')) out.vitals = R.filterRow('vital', sections.vitals, chart.vitals);
   if (want('visits')) out.visits = [P.visitForAudience(visit(opts.hold), level)];
   if (want('results')) out.results = R.filterRows('result', sections.results, RESULTS);
+  out.appointmentsPublished = true;
+  if (want('appointments')) out.appointments = R.filterRows('appointment', sections.appointments, APPTS);
   return out;
 };
 
@@ -82,6 +108,10 @@ const SCENARIOS = {
   poa:          { user: { id: 'f-2', role: 'family', name: 'Luka Agent', familyOfClientId: 'c-1', familyIsPoa: true }, audience: 'poa', sharing: {} },
   familySummary:{ user: { id: 'f-1', role: 'family', name: 'Sam Relative', familyOfClientId: 'c-1' }, audience: 'family', sharing: {} },
   unpublished:  { user: { id: 'c-1', role: 'client', name: 'Juanita Guess', slug: 'juanita-guess' }, audience: 'patient', sharing: {}, empty: true },
+  appHeld:      { user: { id: 'c-1', role: 'client', name: 'Juanita Guess', slug: 'juanita-guess' }, audience: 'patient', sharing: {}, empty: true,
+    held: { medRecLast: { at: '2026-09-20T15:00:00Z', byName: 'Bethel Godwins' }, medications: [{ name: 'Lisinopril', dose: '10 mg', frequency: 'daily' }], intake: { allergies: 'NKDA', conditions: ['Diabetes'] } } },
+  blocked:      { user: { id: 'c-1', role: 'client', name: 'Juanita Guess', slug: 'juanita-guess' }, audience: 'patient', sharing: {},
+    clinicalRead: { available: false, code: 'CLINICAL_CONSENT_REQUIRED', reason: 'Consent to medical treatment must be on file before clinical information can be shown.' } },
 };
 
 const OUT = {};
@@ -106,7 +136,7 @@ const srv = http.createServer((req, res) => {
     const errors = []; page.on('pageerror', e => errors.push('pageerror: ' + e.message)); page.on('console', m => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
     await page.addInitScript(([t, u]) => { localStorage.setItem('portal_token', t); localStorage.setItem('portal_user', JSON.stringify(u)); }, ['tok', sc.user]);
     const me = { role: sc.user.role, isFamily: sc.user.role === 'family', isPoa: !!sc.user.familyIsPoa, name: sc.user.name, clientName: 'Juanita', clientFullName: 'Juanita Guess', slug: 'juanita-guess',
-      clinicalRead: { available: true, audience: sc.audience, sections: R.sectionsFor(sc.audience, sc.sharing) }, sharing: sc.user.role === 'client' || sc.user.familyIsPoa ? R.normalizeSharing(sc.sharing) : undefined,
+      clinicalRead: sc.clinicalRead || { available: true, audience: sc.audience, sections: R.sectionsFor(sc.audience, sc.sharing) }, sharing: sc.user.role === 'client' || sc.user.familyIsPoa ? R.normalizeSharing(sc.sharing) : undefined,
       enrollmentStatus: 'enrolled', intakeComplete: true, roiFamilySigned: true };
     // Third-party assets are served from local copies fetched with curl (which
     // trusts the sandbox proxy CA); certificate checking is left ON.
@@ -124,7 +154,7 @@ const srv = http.createServer((req, res) => {
       if (u === '/api/gfc/clinical/summary') return j(payload(sc.audience, sc.sharing, sc));
       if (u === '/api/gfc/clinical/documents') return j({ documents: [] });
       if (u === '/api/gfc/documents') return j({ consents: [], files: [] });
-      if (u === '/api/scheduling/my-upcoming-shifts') return j({ shifts: [] });
+      if (u === '/api/scheduling/my-upcoming-shifts') return j({ shifts: SHIFTS });
       return j({});
     });
     await page.goto(`http://localhost:${port}/portal/juanita-guess`, { waitUntil: 'networkidle' }).catch(() => {});
@@ -144,6 +174,10 @@ const srv = http.createServer((req, res) => {
     out.pwned = await page.evaluate(() => window.__pwned === undefined ? 'not run (escaped)' : 'EXECUTED');
     out.errors = errors;
     if (S) await page.screenshot({ path: `${S}/${name}-health.png`, fullPage: true });
+    const sched = page.getByText('Schedule', { exact: true }).first();
+    if (await sched.count()) { await sched.click(); await page.waitForTimeout(600); }
+    out.scheduleText = (await page.locator('body').innerText()).slice(0, 3000);
+    if (S) await page.screenshot({ path: `${S}/${name}-schedule.png`, fullPage: true });
     OUT[name] = out;
     console.log(`\n=== ${name}: errors=${errors.length} pwned=${out.pwned}`); if (errors.length) { failures++; console.log(errors.slice(0, 5).join('\n')); }
     await ctx.close();
@@ -168,8 +202,14 @@ const srv = http.createServer((req, res) => {
     expect('POA: reads the note like the patient, and is told who they are acting for', has(O.healthText, /what you told us/i) && has(O.healthText, /acting as luka agent/i));
     expect('family at summary level: date, provider and reason only — no note, no results, no sections, no sharing card', !has(F.healthText, /what you told us/i) && !has(F.healthText, /not yet reviewed/i) && !has(F.healthText, /current medications/i) && !has(F.healthText, /what family members can see/i));
     expect('family at summary level: the Home card does not offer a summary they cannot read', has(F.homeText, /your latest visit/i) && !has(F.homeText, /read the full summary/i));
-    expect('nothing published: says the summary is coming, and each section says the care team will add it (never "none recorded")', has(U.healthText, /health summary is coming/i) && (U.healthText.match(/will add this after a visit/gi) || []).length === 3 && !has(U.healthText, /no allergies recorded|no conditions listed|no medications on your record/i));
+    expect('nothing published: says the summary is coming, and each section says the care team will add it (never "none recorded")', has(U.healthText, /health summary is coming/i) && (U.healthText.match(/will add this after a visit/gi) || []).length === 4 && !has(U.healthText, /no allergies recorded|no conditions listed|no medications on your record/i));
+    const A = OUT.appHeld, B = OUT.blocked;
+    expect('nothing published but the app holds lists: the reconciled medicines and reported conditions show, labelled; NKDA reads as none', has(A.healthText, /Lisinopril 10 mg/) && has(A.healthText, /Reviewed with Bethel Godwins/) && has(A.healthText, /Diabetes/) && has(A.healthText, /what you told us when you enrolled/i) && has(A.healthText, /no known allergies/i));
+    expect('clinical read refused: the Health tab is there and says why', has(B.healthText, /Consent to medical treatment must be on file/));
     expect('nothing published: no Latest visit card on Home', !has(U.homeText, /your latest visit/i));
+    expect('schedule: Home lists the clinical visit and the caregiver visit together, labelled', has(P.homeText, /your next clinical visit/i) && has(P.homeText, /Follow-up visit/) && has(P.homeText, /Maria Lopez/) && has(P.homeText, /see your full calendar/i));
+    expect('schedule: the Schedule tab shows the month grid, both kinds of visit and the recent visit', has(P.scheduleText, /your schedule/i) && has(P.scheduleText, /sun\s*mon/i) && has(P.scheduleText, /Telehealth check-in/) && has(P.scheduleText, /Maria Lopez/) && has(P.scheduleText, /Video \/ phone visit/));
+    expect('schedule: family without shared visits sees no clinical visits on the calendar', !has(F.scheduleText, /Telehealth check-in/) || R.sectionsFor('family', {}).appointments !== 'none');
     expect('no page errors on any audience', Object.values(OUT).every(r => r.errors.length === 0));
   }
   await browser.close(); srv.close(); process.exit(failures ? 1 : 0);

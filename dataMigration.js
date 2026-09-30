@@ -90,6 +90,7 @@ const COLLECTION_REGISTRY = Object.freeze([
   // Portal P1: the patient-facing copies the portal reads. Patients never read
   // OpenEMR; these are written when a clinician signs, read by the portal.
   { key: 'patient_published_chart', phi: true, owner: 'portal-p1', note: 'one row per client: problems, allergies, meds, vitals, capped history' },
+  { key: 'patient_published_appointments', phi: true, owner: 'portal-p2', note: 'one row per client: upcoming and recent clinical visits, copied when staff touch the calendar' },
   { key: 'patient_published_visits', phi: true, owner: 'portal-p1', note: 'one row per signed encounter: visit summary and the signed note' },
   { key: 'requisition_settings', phi: false, owner: '4.10', note: 'the return fax number and label printed on every requisition — org config, not PHI' },
   { key: 'medication_changes', phi: true, owner: 'avs', note: 'append-only: what was started, changed or stopped at reconciliation, with who, when and (when known) the visit' },
