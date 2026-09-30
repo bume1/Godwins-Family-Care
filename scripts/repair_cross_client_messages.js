@@ -86,7 +86,7 @@ function refreshPreviews(threads, remaining) {
     const last = own[own.length - 1];
     const prevAt = t.last_message_at;
     t.last_message_at = last ? last.sent_at : t.created_at;
-    t.last_message_preview = last ? String(last.body || '').slice(0, 120) : '';
+    t.last_message_preview = last ? require('../messagingRepository').previewOf(last.body, last.body_format, last.attachments) : '';
     if (t.last_message_at !== prevAt) touched++;
   }
   return touched;

@@ -533,7 +533,7 @@
             localStorage.setItem('portal_user', JSON.stringify(result.user));
             // If logged in from central /portal without slug, redirect to user's portal
             if (!slug && result.user.slug) {
-              window.location.href = `/portal/${result.user.slug}`;
+              window.location.href = `/portal/${result.user.slug}${window.location.hash || ''}`;
               return;
             }
             onLogin(result.token, result.user);
@@ -6267,7 +6267,9 @@
       const [me, setMe] = useState(null);
       const [loading, setLoading] = useState(true);
       const [error, setError] = useState(null);
-      const [view, setView] = useState('home');       // home | care | messages | documents
+      // The email a patient gets about a new message links to /portal#messages,
+      // so the fragment is read once, at mount. Anything else opens Home.
+      const [view, setView] = useState(() => (window.location.hash === '#messages' ? 'messages' : 'home'));       // home | care | messages | documents
       const [showIntake, setShowIntake] = useState(false);
       const [showTransferRoi, setShowTransferRoi] = useState(false); // Transfer-of-Care ROI overlay (Session 3.4)
       const [justEnrolled, setJustEnrolled] = useState(false); // one-time nudge right after intake completes (Session 3.4)
@@ -6682,7 +6684,7 @@
         }
         // Client users logged in from central portal - redirect to their portal
         if (user.slug) {
-          window.location.href = `/portal/${user.slug}`;
+          window.location.href = `/portal/${user.slug}${window.location.hash || ''}`;
           return null;
         }
         return (

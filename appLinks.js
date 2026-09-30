@@ -30,6 +30,7 @@
 // sites: a path that moves gets corrected once, here.
 const PATHS = Object.freeze({
   PORTAL: '/portal',                        // client + family
+  PORTAL_MESSAGES: '/portal#messages',       // client + family, straight to the Messages tab (the portal reads the fragment)
   CAREGIVER_APP: '/caregiver',              // caregiver home
   CAREGIVER_SCHEDULE: '/caregiver#schedule',// their shifts — where a shift notice belongs
   CAREGIVER_MORE: '/caregiver#more',        // messages + documents live here
