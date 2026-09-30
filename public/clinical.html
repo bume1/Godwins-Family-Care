@@ -689,6 +689,26 @@
     const ChartDocuments = ({ docs, clientId, onRefresh }) => {
       const [busy, setBusy] = useState('');
       const [err, setErr] = useState('');
+      const canWrite = useCanWrite();
+      // Whether the patient sees a document the office filed (owner,
+      // 2026-09-29). Off until someone shares it; the server decides who may.
+      const setShared = async (d, shared) => {
+        setBusy(d.id); setErr('');
+        try {
+          const res = await fetch(`${API_URL}/api/gfc/admin/enrollment/${clientId}/documents/${encodeURIComponent(d.uploadId)}/share`, {
+            method: 'PUT',
+            headers: { 'Authorization': `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ shared })
+          });
+          if (!res.ok) {
+            let msg = 'That could not be changed.';
+            try { const j = await res.json(); msg = j.error || msg; } catch (e) { /* non-JSON body */ }
+            setErr(msg); return;
+          }
+          onRefresh && onRefresh();
+        } catch (e) { setErr('That could not be changed.'); }
+        finally { setBusy(''); }
+      };
       // Which kinds can be read, and whether reading is on at all. ASKED OF THE
       // SERVER: a page that lists the readable kinds itself drifts from the
       // module that refuses one.
@@ -730,7 +750,9 @@
       };
 
       // Grouped by what the document IS, which is how a clinician looks for one.
-      const order = ['Plan of care', 'Consent', 'Record release', 'From the client', 'In the EMR'];
+      // Every category buildChartDocumentIndex can emit must be named here, or
+      // its rows silently drop out of the list.
+      const order = ['Plan of care', 'Consent', 'Record release', 'From the client', 'Filed by staff', 'In the EMR'];
       const groups = order
         .map(g => ({ name: g, rows: docs.filter(d => d.category === g) }))
         .filter(g => g.rows.length);
@@ -761,7 +783,13 @@
                       </div>
                     </div>
                     <div className="shrink-0 flex items-center gap-1.5">
-                      {d.filedBy && <span className="chip bg-stone-100 text-stone-600">{d.filedBy === 'staff' ? 'Filed by the office' : 'From the client'}</span>}
+                      {d.filedBy === 'staff' && (canWrite
+                        ? <button className={`chip border ${d.sharedWithPatient ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-stone-300 bg-white text-stone-600'}`}
+                            disabled={busy === d.id} onClick={() => setShared(d, !d.sharedWithPatient)}
+                            title={d.sharedWithPatient ? 'The patient can see this. Click to hide it.' : 'The patient cannot see this. Click to share it with them.'}>
+                            {d.sharedWithPatient ? 'Shared with patient' : 'Hidden from patient'}
+                          </button>
+                        : <span className="chip bg-stone-100 text-stone-600">{d.sharedWithPatient ? 'Shared with patient' : 'Hidden from patient'}</span>)}
                       {d.inChart && <span className="chip bg-emerald-50 text-emerald-700">In EMR</span>}
                       {!d.openable && <span className="chip bg-amber-50 text-amber-800">Open in OpenEMR</span>}
                       <ChartReadButton clientId={clientId} doc={d} status={readStatus}

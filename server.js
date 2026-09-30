@@ -34,6 +34,7 @@ const path = require('path');
 const multer = require('multer');
 const hubspot = require('./hubspot');
 const googledrive = require('./googledrive');
+const docRules = require('./clientDocuments');   // who may see and remove a client document (2026-09-29)
 const pdfGenerator = require('./pdf-generator');
 const changelogGenerator = require('./changelog-generator');
 const config = require('./config');
@@ -6855,9 +6856,15 @@ const expectedDocumentsForServiceLine = (serviceLine) => {
 // A conditional entry (the POA document) only counts as owed once the condition
 // is true, so a client with no representative is never chased for a document
 // that does not exist for them.
-const buildDocumentChecklist = (client, uploads, requests) => {
+const buildDocumentChecklist = (client, uploads, requests, opts = {}) => {
   const line = client.serviceLine || (client.intake && client.intake.serviceLine) || 'PHC';
-  const mine = (uploads || []).filter(u => u.clientId === client.id);
+  // A removed upload no longer counts toward anything: removing the only
+  // insurance card on file puts the item back on the list.
+  const mine = docRules.liveUploads(uploads).filter(u => u.clientId === client.id);
+  // The patient's copy of this list shows only the files they may see. The
+  // item's STATUS still counts every file on record, so a document the office
+  // filed and did not share still stops the client being chased for it.
+  const forPatient = opts.audience === 'patient';
   const asks = (requests || []).filter(r => r.clientId === client.id && r.status === 'open');
   const hasPoa = !!(client.familyIsPoa || client.hasPoa ||
     ((client.intake || {}).legalDocs || {}).powerOfAttorney ||
@@ -6880,9 +6887,14 @@ const buildDocumentChecklist = (client, uploads, requests) => {
         ? ask.reminders[ask.reminders.length - 1].at : null,
       // received = we have it; accepted = a person has looked at it.
       status: accepted ? 'accepted' : (files.length ? 'received' : 'missing'),
-      files: files.concat(rejected).map(u => ({
+      files: files.concat(rejected).filter(u => !forPatient || docRules.patientCanSee(u)).map(u => ({
         id: u.id, fileName: u.fileName, uploadedAt: u.uploadedAt,
         status: u.status, rejectionReason: u.rejectionReason || null,
+        // Who filed it, and whether the patient can see it — staff screens
+        // need both to offer "Share with patient".
+        source: u.source === 'staff' ? 'staff' : 'client',
+        uploadedByName: u.uploadedByName || null,
+        sharedWithPatient: docRules.patientCanSee(u),
         url: `/api/gfc/documents/uploads/${u.id}/file`,
         // Where else this document has been filed (2026-09-24). Additive facts
         // recorded ALONGSIDE the row — neither one changes what `status` means
@@ -6975,7 +6987,7 @@ app.get('/api/gfc/documents', authenticateToken, requireEnrolledClient, async (r
     // The other direction: what we still need FROM them, and what they sent.
     const uploads = (await db.get('client_document_uploads')) || [];
     const requests = (await db.get('client_document_requests')) || [];
-    const checklist = buildDocumentChecklist(client, uploads, requests);
+    const checklist = buildDocumentChecklist(client, uploads, requests, { audience: 'patient' });
     const links = (await db.get('client_upload_links')) || [];
     const liveUploadLink = uploadLinks.liveLinkFor(client.id, links);
 
@@ -7156,7 +7168,9 @@ app.get('/api/gfc/documents/uploads/:id/file', authenticateToken, requireClientF
     if (!client) return res.status(404).json({ error: 'No client record on file' });
     const uploads = (await db.get('client_document_uploads')) || [];
     const row = uploads.find(u => u.id === req.params.id && u.clientId === client.id);
-    if (!row) return res.status(404).json({ error: 'Document not found' });
+    // Removed, or filed by staff and not shared: to the patient it is not
+    // there. A 404, never a 403 that confirms the document exists.
+    if (!row || !docRules.patientCanSee(row)) return res.status(404).json({ error: 'Document not found' });
     await serveStoredDocument(res, row, req.user);
   } catch (error) {
     console.error('GFC document download error:', error);
@@ -7610,6 +7624,9 @@ app.get('/api/gfc/clinical/documents', authenticateToken, requireEnrolledClient,
     } catch (e) { console.error('Patient chart ROI lookup failed (non-fatal):', e.message); }
 
     const documents = clinicalRepo.buildChartDocumentIndex({
+      // The patient's own list: what they sent, what staff chose to share with
+      // them, and what they signed (owner, 2026-09-29).
+      audience: 'patient',
       client,
       // Patients never read OpenEMR (Portal P1): the EMR half is empty here, so
       // the index lists only what the app holds.
@@ -7704,7 +7721,9 @@ app.get('/api/gfc/clinical/documents/:docId/file', authenticateToken, requireEnr
     if (kind === 'upload') {
       const uploads = (await db.get('client_document_uploads')) || [];
       const row = uploads.find(u => u.id === ref && u.clientId === client.id);
-      if (!row) return res.status(404).json({ error: 'Document not found' });
+      // Removed, or filed by staff and not shared with them: to the patient it
+      // is not there. A 404, not a 403 that confirms it exists.
+      if (!row || !docRules.patientCanSee(row)) return res.status(404).json({ error: 'Document not found' });
       if (row.status === 'rejected') return res.status(409).json({ error: 'That document was rejected', code: 'DOCUMENT_REJECTED' });
       await audit(`upload_${ref}`);
       return serveStoredDocument(res, row, req.user);
@@ -8212,7 +8231,7 @@ app.get('/api/clinical/patients/:clientId/documents/:docId/file', authenticateTo
     if (kind === 'upload') {
       const uploads = (await db.get('client_document_uploads')) || [];
       const row = uploads.find(u => u.id === ref && u.clientId === client.id);
-      if (!row) return res.status(404).json({ error: 'Document not found' });
+      if (!row || docRules.isRemoved(row)) return res.status(404).json({ error: 'Document not found' });
       // A rejected upload is not part of the record and the index does not list
       // it; refuse it here too rather than relying on the list to hide it.
       if (row.status === 'rejected') return res.status(409).json({ error: 'That document was rejected', code: 'DOCUMENT_REJECTED' });
@@ -14113,7 +14132,7 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid/documents', authenti
     const encounterUuid = String(req.params.euuid || '');
     const rows = await loadRows('encounter_billing');
     const record = findBillingRecord(rows, encounterUuid);
-    const uploads = ((await db.get('client_document_uploads')) || [])
+    const uploads = docRules.liveUploads(await db.get('client_document_uploads'))
       .filter(u => u && u.clientId === client.id && u.encounterUuid === encounterUuid);
 
     const appointmentType = (record && record.visit && record.visit.appointmentType) || null;
@@ -15944,6 +15963,9 @@ app.get('/api/gfc/admin/enrollment/:clientId/documents', authenticateToken, requ
       catalog: expectedDocumentsForServiceLine(client.serviceLine)
         .map(d => ({ kind: d.kind, label: d.label })),
       clientEmail: client.email || null,
+      // What this viewer may do to a document. Answered here so the page never
+      // offers a button the route will refuse.
+      access: { canRemove: docRules.canRemoveDocuments(req.user), canShare: canShareDocuments(req.user) },
       uploadLink: liveUploadLink
         ? { url: uploadLinks.buildUrl(await getAppBaseUrl(), liveUploadLink.token), createdAt: liveUploadLink.createdAt }
         : null
@@ -16151,7 +16173,7 @@ const extractDocumentHandler = async (req, res) => {
 
     const uploads = (await db.get('client_document_uploads')) || [];
     const doc = uploads.find(u => u.id === req.params.docId && u.clientId === client.id);
-    if (!doc) return res.status(404).json({ error: 'Document not found', code: 'DOCUMENT_NOT_FOUND' });
+    if (!doc || docRules.isRemoved(doc)) return res.status(404).json({ error: 'Document not found', code: 'DOCUMENT_NOT_FOUND' });
     if (!documentExtraction.isExtractable(doc.kind)) {
       return res.status(400).json({
         error: `There is nothing declared to read out of a ${doc.kind}.`,
@@ -16516,7 +16538,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authe
     }
     const uploads = (await db.get('client_document_uploads')) || [];
     const i = uploads.findIndex(u => u.id === req.params.uploadId && u.clientId === req.params.clientId);
-    if (i === -1) return res.status(404).json({ error: 'Document not found' });
+    if (i === -1 || docRules.isRemoved(uploads[i])) return res.status(404).json({ error: 'Document not found' });
 
     const now = new Date().toISOString();
     uploads[i] = {
@@ -16633,7 +16655,8 @@ const backfillEmrFilingForClient = async (clientId, actor) => {
   const client = users.find(u => u.id === clientId);
   if (!client || !client.openEmrPatientId) return { filed: 0, skipped: 0 };
   const uploads = (await db.get('client_document_uploads')) || [];
-  const candidates = uploads.filter(u => u && u.clientId === clientId && u.status !== 'rejected' && !u.emrFiled);
+  // A removed upload is not filed anywhere new.
+  const candidates = uploads.filter(u => u && u.clientId === clientId && u.status !== 'rejected' && !u.emrFiled && !docRules.isRemoved(u));
   let filed = 0;
   for (const row of candidates) {
     const result = await attemptEmrFiling({ client, row, actor });
@@ -16675,7 +16698,7 @@ const moveDocumentToCaregiverHandler = async (req, res) => {
 
     const uploads = (await db.get('client_document_uploads')) || [];
     const row = uploads.find(u => u.id === req.params.docId && u.clientId === client.id);
-    if (!row) return res.status(404).json({ error: 'Document not found', code: 'DOCUMENT_NOT_FOUND' });
+    if (!row || docRules.isRemoved(row)) return res.status(404).json({ error: 'Document not found', code: 'DOCUMENT_NOT_FOUND' });
     if (row.status === 'rejected') {
       return res.status(409).json({ error: 'A rejected document cannot be moved — it was sent back to the client.', code: 'DOCUMENT_REJECTED' });
     }
@@ -16779,10 +16802,89 @@ app.get('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/file', authenti
   try {
     const uploads = (await db.get('client_document_uploads')) || [];
     const row = uploads.find(u => u.id === req.params.uploadId && u.clientId === req.params.clientId);
-    if (!row) return res.status(404).json({ error: 'Document not found' });
+    if (!row || docRules.isRemoved(row)) return res.status(404).json({ error: 'Document not found' });
     await serveStoredDocument(res, row, req.user);
   } catch (error) {
     console.error('GFC staff document read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Removing a document, and sharing one with the patient (owner, 2026-09-29) ──
+//
+// REMOVE: admin or manager, with a reason. The document leaves every screen in
+// the app — the patient's portal, the chart, the checklist, the visit list —
+// and the row stays in the store carrying who removed it, when and why. The
+// Drive file is kept. Only UPLOADS are removable: a consent, a care plan and a
+// signed note are generated legal documents and have no remove route at all.
+// OpenEMR's API cannot delete a document, so a copy already filed there stays
+// in OpenEMR and the response says so, for someone to remove it there by hand.
+const requireDocumentRemover = (req, res, next) => {
+  if (docRules.canRemoveDocuments(req.user)) return next();
+  return res.status(403).json({ error: 'An admin or a manager removes documents.', code: 'DOCUMENT_REMOVE_ADMIN_OR_MANAGER' });
+};
+// SHARE: whether the patient (and their POA) can see a document the OFFICE
+// filed. Off until someone turns it on. An admin, a manager or a licensed
+// clinician decides — releasing a record to a patient is often a clinical call.
+const canShareDocuments = (user) => docRules.canRemoveDocuments(user) || canEditEnrollment(user);
+const requireDocumentSharer = (req, res, next) => {
+  if (canShareDocuments(req.user)) return next();
+  return res.status(403).json({ error: 'An admin, a manager or a clinician decides what the patient sees.', code: 'DOCUMENT_SHARE_NOT_PERMITTED' });
+};
+
+app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/remove', authenticateToken, requireDocumentRemover, async (req, res) => {
+  try {
+    const uploads = (await db.get('client_document_uploads')) || [];
+    const i = uploads.findIndex(u => u && u.id === req.params.uploadId && u.clientId === req.params.clientId);
+    const check = docRules.checkRemoval(i === -1 ? null : uploads[i], (req.body || {}).reason);
+    if (!check.ok) return res.status(check.status).json({ error: check.error, code: check.code });
+
+    const row = uploads[i];
+    uploads[i] = { ...row, removed: docRules.buildRemoval({ actor: req.user, reason: check.reason }) };
+    await db.set('client_document_uploads', uploads);
+    // Who and what, never the reason text: that stays on the row itself.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'client_document_removed', 'document', req.params.clientId,
+      { uploadId: row.id, kind: row.kind || null, source: row.source || 'client', emrCopy: !!row.emrFiled });
+
+    const users = await getUsers();
+    const client = users.find(u => u.id === req.params.clientId);
+    const requests = (await db.get('client_document_requests')) || [];
+    res.json({
+      removed: { id: row.id, fileName: row.fileName, ...uploads[i].removed },
+      // The copy filed into OpenEMR is not touched: the API cannot delete it.
+      emrCopy: row.emrFiled
+        ? { stillInOpenEmr: true, fileName: row.fileName, message: 'A copy was filed to OpenEMR. Remove it there by hand if it should not be in the chart.' }
+        : null,
+      checklist: client ? buildDocumentChecklist(client, uploads, requests) : null
+    });
+  } catch (error) {
+    console.error('Remove client document error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.put('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/share', authenticateToken, requireDocumentSharer, async (req, res) => {
+  try {
+    const shared = (req.body || {}).shared;
+    if (typeof shared !== 'boolean') return res.status(400).json({ error: 'Say whether to share it: shared true or false.', code: 'SHARE_FLAG_REQUIRED' });
+    const uploads = (await db.get('client_document_uploads')) || [];
+    const i = uploads.findIndex(u => u && u.id === req.params.uploadId && u.clientId === req.params.clientId);
+    const check = docRules.checkShare(i === -1 ? null : uploads[i]);
+    if (!check.ok) return res.status(check.status).json({ error: check.error, code: check.code });
+
+    uploads[i] = {
+      ...uploads[i],
+      sharedWithPatient: shared,
+      sharedChangedAt: new Date().toISOString(),
+      sharedChangedById: req.user.id,
+      sharedChangedByName: req.user.name || req.user.email || null
+    };
+    await db.set('client_document_uploads', uploads);
+    await logActivity(req.user.id, req.user.name || req.user.email, shared ? 'client_document_shared' : 'client_document_unshared',
+      'document', req.params.clientId, { uploadId: uploads[i].id, kind: uploads[i].kind || null });
+    res.json({ id: uploads[i].id, sharedWithPatient: shared });
+  } catch (error) {
+    console.error('Share client document error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
