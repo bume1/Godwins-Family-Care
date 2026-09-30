@@ -29,9 +29,22 @@
  * Babel) without a second copy of React and without a build step, and into the
  * caregiver app the same way. Brand tokens scoped under `.gfcm`.
  *
- * DELIBERATELY NOT BUILT (brief): attachments, read receipts beyond a per-user
- * read mark, typing indicators, realtime push. In-app plus the existing
- * notification queue only.
+ * FORMATTED TEXT AND ATTACHMENTS (owner, 2026-09-29). A message is composed in a
+ * small rich-text editor (bold, italic, underline, bullets, numbers, heading —
+ * the six shapes in /note-format.js, which the host page must load; without it
+ * the composer falls back to plain text). What is SENT is that markup, never
+ * HTML, and it is rendered by the same escaping renderer, so nothing a person
+ * types can become live markup. Up to five PDF/JPEG/PNG files ride along; they
+ * are opened through the app with the caller's token, never a public link. The
+ * server types every file by its bytes and refuses what it does not recognise,
+ * so the checks here are a convenience, not the control.
+ *
+ * A message written before formatting existed is PLAIN TEXT and is shown as
+ * such — it is never run through the formatter.
+ *
+ * DELIBERATELY NOT BUILT (brief): read receipts beyond a per-user read mark,
+ * typing indicators, realtime push. In-app plus the existing notification queue
+ * only.
  * ==========================================================================*/
 
 (function (global) {
@@ -78,7 +91,25 @@
     '.gfcm .merr{background:#fdeaea;border:1px solid #f0c0c0;color:var(--red);border-radius:9px;padding:10px 12px;font-size:14px;margin-bottom:10px}',
     '.gfcm .mok{background:#e8f2ee;border:1px solid #bfdccf;color:var(--green);border-radius:9px;padding:10px 12px;font-size:14px;margin-bottom:10px}',
     '.gfcm .mempty{text-align:center;color:var(--mut);padding:22px 10px;font-size:15px}',
-    '.gfcm .mdis{opacity:.62}'
+    '.gfcm .mdis{opacity:.62}',
+    // formatted message text (mirrors the note formatting), the editor, attachments
+    '.gfcm .mfmt{font-size:15px;line-height:1.5;word-wrap:break-word}',
+    '.gfcm .mfmt ul{list-style:disc;padding-left:1.25rem;margin:2px 0}',
+    '.gfcm .mfmt ol{list-style:decimal;padding-left:1.4rem;margin:2px 0}',
+    '.gfcm .mfmt h3{font-family:inherit;font-size:15px;font-weight:700;margin:4px 0 2px;color:inherit}',
+    '.gfcm .mfmt strong{font-weight:700}.gfcm .mfmt em{font-style:italic}.gfcm .mfmt u{text-decoration:underline}',
+    '.gfcm .mfmtbar{display:flex;flex-wrap:wrap;gap:5px;margin:4px 0 6px}',
+    '.gfcm .mfmtb{border:1px solid var(--line);background:#fff;border-radius:7px;min-width:34px;height:32px;padding:0 9px;font-size:14px;color:var(--navy);cursor:pointer;font-family:inherit}',
+    '.gfcm .mfmtb:hover{background:var(--cream)}',
+    '.gfcm .meditor{min-height:96px;border:1px solid #d8cdb8;border-radius:9px;padding:10px 12px;background:#fff;color:var(--ink);outline:none;white-space:pre-wrap}',
+    '.gfcm .meditor:focus{border-color:var(--goldd)}',
+    '.gfcm .meditor:empty::before{content:attr(data-placeholder);color:#a8a29e}',
+    '.gfcm .matts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}',
+    '.gfcm .matt{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--cream);border-radius:20px;padding:4px 10px;font-size:13px;color:var(--navy);cursor:pointer;font-family:inherit;max-width:100%}',
+    '.gfcm .matt .mnm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:220px}',
+    '.gfcm .mbub.me .matt{background:rgba(250,247,242,.14);border-color:rgba(245,205,133,.5);color:var(--cream)}',
+    '.gfcm .mattx{border:none;background:none;font-size:16px;line-height:1;color:var(--mut);cursor:pointer;padding:0 2px}',
+    '.gfcm .mfile{display:inline-block;cursor:pointer}'
   ].join('\n');
 
   function injectCss() {
@@ -106,6 +137,123 @@
         d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
   }
 
+  var MAX_FILES = 5;
+  var MAX_BYTES = 10 * 1024 * 1024;
+  var FMT_TOOLS = [
+    ['bold', '<b>B</b>', 'Bold'], ['italic', '<i>I</i>', 'Italic'], ['underline', '<u>U</u>', 'Underline'],
+    ['insertUnorderedList', '&bull; List', 'Bulleted list'], ['insertOrderedList', '1. List', 'Numbered list'], ['heading', 'H', 'Heading']
+  ];
+  function NF() { return global.GFC_NOTE_FORMAT || null; }
+  function newDraft() { return { markup: '', plain: '', files: [] }; }
+  function fmtSize(n) {
+    if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
+    if (n >= 1024) return Math.round(n / 1024) + ' KB';
+    return n + ' B';
+  }
+
+  // The body of a message as it should be SHOWN. A message with no format is
+  // plain text (esc + line breaks) and never touches the formatter; a markup
+  // message goes through the escaping renderer.
+  function messageHtml(m) {
+    var nf = NF();
+    if (m.format === 'markup' && nf) return '<div class="mfmt">' + nf.renderHtml(m.body || '') + '</div>';
+    return '<div>' + esc(m.body).replace(/\n/g, '<br>') + '</div>';
+  }
+
+  function attachmentsHtml(m) {
+    if (!m.attachments || !m.attachments.length) return '';
+    return '<div class="matts">' + m.attachments.map(function (a) {
+      return '<button type="button" class="matt" data-att="' + esc(m.id) + '|' + esc(a.id) + '" data-att-name="' + esc(a.name) + '" title="Open ' + esc(a.name) + '">' +
+        '&#128206; <span class="mnm">' + esc(a.name) + '</span> <span class="mmu">' + esc(fmtSize(a.size || 0)) + '</span></button>';
+    }).join('') + '</div>';
+  }
+
+  // The composer. `state.draft` is the source of truth, so a re-render (an error,
+  // a refresh) never loses what somebody typed — the plain textarea it replaces
+  // did, on every failed send.
+  function renderEditor(state) {
+    var nf = NF();
+    var d = state.draft;
+    var html = '';
+    if (nf) {
+      html += '<div class="mfmtbar" role="toolbar" aria-label="Format your message">' + FMT_TOOLS.map(function (t) {
+        return '<button type="button" class="mfmtb" data-fmt="' + t[0] + '" title="' + t[2] + '" aria-label="' + t[2] + '">' + t[1] + '</button>';
+      }).join('') + '</div>' +
+        '<div class="meditor mfmt" data-editor="1" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Message" data-placeholder="Write your message"></div>';
+    } else {
+      html += '<textarea data-field="body" maxlength="4000">' + esc(d.plain || '') + '</textarea>';
+    }
+    html += '<div class="matts">' + d.files.map(function (f, i) {
+      return '<span class="matt">&#128206; <span class="mnm">' + esc(f.name) + '</span> <span class="mmu">' + esc(fmtSize(f.size)) + '</span>' +
+        '<button type="button" class="mattx" data-remove-file="' + i + '" aria-label="Remove ' + esc(f.name) + '">&times;</button></span>';
+    }).join('') + '</div>';
+    html += '<div class="mbtns" style="align-items:center"><label class="mbtn ghost mfile">Attach a file' +
+      '<input type="file" data-files="1" multiple accept="application/pdf,image/jpeg,image/png,.pdf,.jpg,.jpeg,.png" hidden></label>' +
+      '<span class="mmu">PDF, JPEG or PNG &middot; up to ' + MAX_FILES + ' files, 10 MB each</span></div>';
+    return html;
+  }
+
+  // Read the editor (or the fallback textarea) into the draft. Called before
+  // every re-render and before every send.
+  function captureDraft(state, root) {
+    if (!root) return;
+    var nf = NF();
+    var ed = root.querySelector('[data-editor]');
+    if (ed && nf) state.draft.markup = nf.domToMarkup(ed);
+    var ta = root.querySelector('[data-field="body"]');
+    if (ta) state.draft.plain = ta.value;
+  }
+
+  function draftPayload(state, root) {
+    captureDraft(state, root);
+    var nf = NF();
+    if (nf) return { body: state.draft.markup, format: 'markup', blank: nf.isBlank(state.draft.markup) };
+    var t = state.draft.plain || '';
+    return { body: t, format: 'plain', blank: !t.trim() };
+  }
+
+  function apiForm(state, path, form) {
+    return fetch(API + path, { method: 'POST', headers: { Authorization: 'Bearer ' + state.authToken }, body: form }).then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (data) {
+        if (!res.ok) {
+          var err = new Error((data && data.error) || 'Request failed (' + res.status + ')');
+          err.code = data && data.code; err.status = res.status; throw err;
+        }
+        return data;
+      });
+    });
+  }
+
+  // Post JSON when there is no file, multipart when there is.
+  function postMessage(state, path, fields, files) {
+    if (!files.length) return api(state, path, { method: 'POST', body: fields });
+    var form = new FormData();
+    Object.keys(fields).forEach(function (k) { if (fields[k] !== undefined && fields[k] !== null) form.append(k, fields[k]); });
+    files.forEach(function (f) { form.append('files', f.file, f.name); });
+    return apiForm(state, path, form);
+  }
+
+  // Attachments are read with the caller's token and handed to the browser as a
+  // blob — never a public link. A pop-up opened after an await is blocked on
+  // some phones, so a download is the fallback.
+  function openAttachment(state, ref, name) {
+    var parts = ref.split('|');
+    return fetch(API + '/api/messaging/messages/' + encodeURIComponent(parts[0]) + '/attachments/' + encodeURIComponent(parts[1]),
+      { headers: { Authorization: 'Bearer ' + state.authToken } }).then(function (res) {
+      if (!res.ok) {
+        return res.json().catch(function () { return {}; }).then(function (d) { throw new Error((d && d.error) || 'That attachment could not be opened.'); });
+      }
+      return res.blob();
+    }).then(function (blob) {
+      var url = URL.createObjectURL(blob);
+      if (!window.open(url, '_blank')) {
+        var a = document.createElement('a'); a.href = url; a.download = name || 'attachment';
+        document.body.appendChild(a); a.click(); a.remove();
+      }
+      setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+    });
+  }
+
   function api(state, path, opts) {
     opts = opts || {};
     return fetch(API + path, {
@@ -129,6 +277,10 @@
   function render(state) {
     var root = document.getElementById(state.elementId);
     if (!root) return;
+    // NOT captured here. Reading the editor at render time would read the OLD
+    // editor after a successful send and put the sent message straight back in
+    // the box. The draft is kept current by the editor's own input events (see
+    // bind) and read explicitly before a send or a file change.
     root.className = 'gfcm';
 
     var html = '';
@@ -145,6 +297,9 @@
       html += renderList(state);
     }
     root.innerHTML = html;
+    var nf = NF();
+    var ed = root.querySelector('[data-editor]');
+    if (ed && nf) ed.innerHTML = nf.renderHtml(state.draft.markup || '');
     bind(state, root);
   }
 
@@ -227,7 +382,7 @@
       '<h3>' + esc(c.label || 'New message') + '</h3>' +
       '<p class="mmu">' + esc(c.blurb || '') + '</p>' +
       (c.code ? '<div class="mnote"><b>Before you send</b>' + esc(c.reason || '') + '</div>' : '') +
-      '<label>Message</label><textarea data-field="body" maxlength="4000"></textarea>' +
+      '<label>Message</label>' + renderEditor(state) +
       '<div class="mbtns">' +
       '<button class="mbtn gold" data-send="1">Send</button>' +
       '<button class="mbtn ghost" data-back="1">Cancel</button>' +
@@ -247,13 +402,13 @@
     html += '<div style="margin-top:12px">' + state.messages.map(function (m) {
       return '<div class="mbub ' + (m.mine ? 'me' : 'them') + '">' +
         '<div class="mwho">' + esc(m.from) + (m.isPoa ? '' : ' · ' + esc(m.fromRoleLabel)) + '</div>' +
-        '<div>' + esc(m.body).replace(/\n/g, '<br>') + '</div>' +
+        messageHtml(m) + attachmentsHtml(m) +
         '<div class="mwhen">' + esc(fmtWhen(m.sentAt)) + '</div>' +
         '</div>';
     }).join('') + '</div>';
 
     if (state.canPost) {
-      html += '<label>Reply</label><textarea data-field="body" maxlength="4000"></textarea>' +
+      html += '<label>Reply</label>' + renderEditor(state) +
         '<div class="mbtns"><button class="mbtn gold" data-reply="1">Send reply</button></div>';
     } else {
       html += '<div class="mnote"><b>You cannot reply here</b>' + esc(state.cannotPostReason || '') + '</div>';
@@ -270,10 +425,6 @@
 
   // ---- Bind ----------------------------------------------------------------
   function bind(state, root) {
-    var val = function () {
-      var el = root.querySelector('[data-field="body"]');
-      return el ? el.value : '';
-    };
     var go = function (p) {
       state.error = '';
       state.notice = '';
@@ -290,39 +441,100 @@
     };
 
     root.querySelectorAll('[data-open]').forEach(function (b) {
-      b.onclick = function () { go(openThread(state, b.getAttribute('data-open'))); };
+      b.onclick = function () { state.draft = newDraft(); go(openThread(state, b.getAttribute('data-open'))); };
     });
     root.querySelectorAll('[data-compose]').forEach(function (b) {
       b.onclick = function () {
         state.composeChannel = b.getAttribute('data-compose');
+        state.draft = newDraft();
         state.view = 'compose';
         state.error = '';
         render(state);
       };
     });
     var back = root.querySelector('[data-back]');
-    if (back) back.onclick = function () { state.view = 'list'; state.error = ''; refresh(state); };
+    if (back) back.onclick = function () { state.draft = newDraft(); state.view = 'list'; state.error = ''; refresh(state); };
+
+    // ---- The composer ------------------------------------------------------
+    var editor = root.querySelector('[data-editor]');
+    var runFmt = function (cmd) {
+      if (!editor) return;
+      editor.focus();
+      if (cmd === 'heading') {
+        var inHeading = /^h\d$/i.test(String(document.queryCommandValue('formatBlock') || ''));
+        document.execCommand('formatBlock', false, inHeading ? 'div' : 'h3');
+      } else {
+        document.execCommand(cmd, false, null);
+      }
+    };
+    root.querySelectorAll('[data-fmt]').forEach(function (b) {
+      // mousedown, not click: a click would take focus (and the selection) off the editor
+      b.onmousedown = function (e) { e.preventDefault(); runFmt(b.getAttribute('data-fmt')); };
+    });
+    // A paste arrives as TEXT: formatting from Word or a web page is not carried
+    // over, and the person applies what they mean with the toolbar.
+    // Keep the draft current as people type, so a re-render (an error, a refresh)
+    // can restore it and a successful send can clear it for good.
+    var keepDraft = function () { captureDraft(state, root); };
+    if (editor) { editor.oninput = keepDraft; editor.onblur = keepDraft; }
+    var plainBox = root.querySelector('[data-field="body"]');
+    if (plainBox) plainBox.oninput = keepDraft;
+    if (editor) editor.onpaste = function (e) {
+      e.preventDefault();
+      var text = (e.clipboardData || window.clipboardData).getData('text/plain');
+      document.execCommand('insertText', false, text);
+    };
+    var picker = root.querySelector('[data-files]');
+    if (picker) picker.onchange = function () {
+      captureDraft(state, root);
+      var problems = [];
+      Array.prototype.forEach.call(picker.files, function (f) {
+        if (state.draft.files.length >= MAX_FILES) problems.push('A message carries up to ' + MAX_FILES + ' attachments.');
+        else if (f.size > MAX_BYTES) problems.push(f.name + ' is over 10 MB.');
+        else if (!/^(application\/pdf|image\/jpeg|image\/png)$/.test(f.type) && !/\.(pdf|jpe?g|png)$/i.test(f.name)) problems.push(f.name + ' is not a PDF, JPEG or PNG.');
+        else state.draft.files.push({ name: f.name, size: f.size, file: f });
+      });
+      state.error = problems.filter(function (x, i, a) { return a.indexOf(x) === i; }).join(' ');
+      render(state);
+    };
+    root.querySelectorAll('[data-remove-file]').forEach(function (b) {
+      b.onclick = function () {
+        captureDraft(state, root);
+        state.draft.files.splice(Number(b.getAttribute('data-remove-file')), 1);
+        render(state);
+      };
+    });
+    root.querySelectorAll('[data-att]').forEach(function (b) {
+      b.onclick = function () {
+        b.disabled = true;
+        openAttachment(state, b.getAttribute('data-att'), b.getAttribute('data-att-name'))
+          .catch(function (err) { state.error = err.message; render(state); })
+          .then(function () { b.disabled = false; });
+      };
+    });
 
     var send = root.querySelector('[data-send]');
     if (send) send.onclick = function () {
-      var body = val();
+      var d = draftPayload(state, root);
+      if (d.blank && !state.draft.files.length) { state.error = 'Write a message first.'; render(state); return; }
       send.disabled = true;
-      go(api(state, '/api/messaging/threads', {
-        method: 'POST',
-        body: { channel: state.composeChannel, clientId: state.scopeClientId || undefined, body: body }
-      }).then(function (res) {
-        state.view = 'list';
-        state.notice = res.notice || 'Message sent.';
-        return refresh(state);
-      })).then(function () { send.disabled = false; });
+      go(postMessage(state, '/api/messaging/threads',
+        { channel: state.composeChannel, clientId: state.scopeClientId || undefined, body: d.body, format: d.format }, state.draft.files)
+        .then(function (res) {
+          state.draft = newDraft();      // cleared ONLY on success: a failed send keeps every word and file
+          state.view = 'list';
+          state.notice = res.notice || 'Message sent.';
+          return refresh(state);
+        })).then(function () { send.disabled = false; });
     };
 
     var reply = root.querySelector('[data-reply]');
     if (reply) reply.onclick = function () {
-      var body = val();
+      var d = draftPayload(state, root);
+      if (d.blank && !state.draft.files.length) { state.error = 'Write a message first.'; render(state); return; }
       reply.disabled = true;
-      go(api(state, '/api/messaging/threads/' + state.thread.id + '/messages', { method: 'POST', body: { body: body } })
-        .then(function () { return openThread(state, state.thread.id); }))
+      go(postMessage(state, '/api/messaging/threads/' + state.thread.id + '/messages', { body: d.body, format: d.format }, state.draft.files)
+        .then(function () { state.draft = newDraft(); return openThread(state, state.thread.id); }))
         .then(function () { reply.disabled = false; });
     };
 
@@ -399,7 +611,8 @@
       error: '', notice: '',
       threads: [], channels: [], messages: [],
       thread: null, canPost: false, cannotPostReason: null,
-      composeChannel: null
+      composeChannel: null,
+      draft: newDraft()
     };
     instances[elementId] = state;
     render(state);

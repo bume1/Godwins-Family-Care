@@ -19,18 +19,27 @@
 // inboxes and one of them going unread. Session 6's shape is used exactly as
 // merged, with `source` added to say which door it came through.
 //
-// NOT A CHAT SERVER. No attachments, no read receipts beyond a per-user read
-// mark, no typing indicators, no realtime push — out of scope by the brief. It
-// rides the EXISTING notification queue; there is not a second one.
+// NOT A CHAT SERVER. No read receipts beyond a per-user read mark, no typing
+// indicators, no realtime push — out of scope by the brief. It rides the
+// EXISTING notification queue; there is not a second one.
+//
+// Owner, 2026-09-29: messages carry FORMATTED TEXT (the six shapes in
+// public/note-format.js, stored as `body_format: 'markup'`; an older message has
+// no format and is plain) and up to five ATTACHMENTS (PDF, JPEG, PNG, typed by
+// their bytes, stored privately in Drive, read back only through the route below
+// after the thread's visibility rule, and audited). A Drive failure REFUSES the
+// send: a message pointing at a file that does not exist is worse than none.
 // ============================================================================
 
 const express = require('express');
 const links = require('../appLinks');   // where each person actually goes
 const msg = require('../messagingRepository');
 const caregiverRepo = require('../caregiverRepository');
+const nf = require('../public/note-format.js');   // the message formatting: plain text for escalations and previews
 
 module.exports = function createMessagingRoutes(deps) {
-  const { db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4 } = deps;
+  const { db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4,
+    upload, uploadLimiter, googledrive, detectFileType, contentDisposition } = deps;
   const router = express.Router();
 
   const ROLES = config.ROLES;
@@ -113,8 +122,16 @@ module.exports = function createMessagingRoutes(deps) {
     if (wants.includes(msg.ROLE.ADMIN)) {
       users.filter(u => u.role === ROLES.ADMIN).forEach(u => add(u.id));
     }
+    // A POA is client-equivalent, so on a channel that names the client they are
+    // on it too — otherwise they could read it and never be told it existed.
+    if (channel && channel.includesPoa && client) poaIdsFor(users, client).forEach(add);
     return [...ids];
   };
+
+  // The client's designated POAs, from the FRESH user list.
+  const poaIdsFor = (users, client) => users
+    .filter(u => u && u.role === ROLES.FAMILY && u.familyIsPoa && u.familyOfClientId === client.id)
+    .map(u => u.id);
 
   const publicThread = (t, me) => ({
     id: t.id,
@@ -144,9 +161,88 @@ module.exports = function createMessagingRoutes(deps) {
     isPoa: m.from_role === 'POA',
     actingFor: m.acting_for || null,
     body: m.body,
+    // Absent on a message written before formatting existed: that one is PLAIN
+    // TEXT and must never be run through the formatter.
+    format: m.body_format === 'markup' ? 'markup' : 'plain',
+    attachments: (m.attachments || []).map(a => ({ id: a.id, name: a.name, mime: a.mime, size: a.size })),
     sentAt: m.sent_at,
     mine: false
   });
+
+  // ---- Attachments ---------------------------------------------------------
+  // multer/busboy hands back the filename decoded as latin1 while browsers send
+  // UTF-8, so "José" arrives as "JosÃ©". Re-read the bytes; if that is not valid
+  // UTF-8 the name really was latin1 and is left as it came.
+  const utf8Name = (n) => {
+    const raw = String(n || '');
+    if (!/[\u0080-\u00ff]/.test(raw)) return raw;
+    const fixed = Buffer.from(raw, 'latin1').toString('utf8');
+    return fixed.includes('\ufffd') ? raw : fixed;
+  };
+  // Control characters and bidi/zero-width marks are removed: a right-to-left
+  // override makes "fdp.exe" read as "exe.pdf" on a chip.
+  const cleanName = (n) => utf8Name(n).replace(/[\\/\u0000-\u001f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '_').trim().slice(0, 120) || 'attachment';
+  // The extension always says what the BYTES are, whatever the sender called it.
+  const EXT_FOR_MIME = { 'application/pdf': '.pdf', 'image/jpeg': '.jpg', 'image/png': '.png' };
+  const nameForMime = (name, mime) => {
+    const base = name.replace(/\.[A-Za-z0-9]{1,8}$/, '').slice(0, 110) || 'attachment';
+    return base + (EXT_FOR_MIME[mime] || '');
+  };
+  // Files stored in Drive for a send that then fails AFTER storage (a write, the
+  // audit row) would be orphaned: nothing points at them. Removed best-effort.
+  const discardStored = async (attachments) => {
+    for (const a of attachments || []) { try { await googledrive.deleteFile(a.drive_file_id); } catch (_) { /* best effort */ } }
+  };
+  const attachmentsEnabled = !!(upload && googledrive && detectFileType);
+
+  // multipart/form-data carries files; a plain JSON post carries none. Multer
+  // errors are turned into a sentence about the file, not a 500.
+  const parseMessageBody = (req, res, next) => {
+    if (!req.is('multipart/form-data')) return next();
+    if (!attachmentsEnabled) {
+      return res.status(415).json({ error: 'Attachments are not available right now.', code: 'ATTACHMENTS_UNAVAILABLE' });
+    }
+    const run = () => upload.array('files', msg.MAX_ATTACHMENTS + 1)(req, res, (err) => {
+      if (!err) return next();
+      const tooBig = err.code === 'LIMIT_FILE_SIZE';
+      const tooMany = err.code === 'LIMIT_UNEXPECTED_FILE' || err.code === 'LIMIT_FILE_COUNT';
+      return res.status(400).json({
+        error: tooBig ? `Each attachment is up to ${Math.round(config.MAX_FILE_SIZE / 1048576)} MB.`
+          : tooMany ? `A message carries up to ${msg.MAX_ATTACHMENTS} attachments.`
+          : 'That attachment could not be read.',
+        code: tooBig ? 'ATTACHMENT_TOO_LARGE' : tooMany ? 'TOO_MANY_ATTACHMENTS' : 'ATTACHMENT_UNREADABLE'
+      });
+    });
+    return uploadLimiter ? uploadLimiter(req, res, run) : run();
+  };
+
+  // Every file is typed by its BYTES and refused BEFORE any is stored; then each
+  // is stored privately. If storage fails part-way the ones already stored are
+  // removed and the send is refused — nothing is written pointing at a file that
+  // is not there.
+  const storeAttachments = async (client, files) => {
+    const list = files || [];
+    for (const f of list) {
+      const mime = detectFileType(f.buffer);
+      if (!mime || !msg.ATTACHMENT_MIMES.includes(mime)) {
+        return { error: { status: 400, body: { error: `"${cleanName(f.originalname)}" is not a PDF, JPEG or PNG.`, code: 'ATTACHMENT_BAD_TYPE' } } };
+      }
+      f.__mime = mime;
+    }
+    const stored = [];
+    try {
+      for (const f of list) {
+        const name = nameForMime(cleanName(f.originalname), f.__mime);
+        const up = await googledrive.uploadMessageAttachmentFile(client.name || 'Client', `msg_${Date.now()}_${uuidv4().slice(0, 8)}_${name}`, f.buffer, f.__mime);
+        stored.push({ id: uuidv4(), name, mime: f.__mime, size: f.buffer.length, drive_file_id: up.fileId });
+      }
+    } catch (e) {
+      console.error('[MESSAGING] attachment storage failed:', e.message);
+      for (const a of stored) { try { await googledrive.deleteFile(a.drive_file_id); } catch (_) { /* best effort */ } }
+      return { error: { status: 502, body: { error: 'We could not store that attachment, so the message was not sent. Please try again.', code: 'ATTACHMENT_STORAGE_UNAVAILABLE' } } };
+    }
+    return { attachments: stored };
+  };
 
   // ==========================================================================
   // Which clients this user may message about — the picker behind every staff
@@ -176,10 +272,11 @@ module.exports = function createMessagingRoutes(deps) {
     try {
       const client = await resolveClient(req.user, req.query.clientId);
       const users = await getUsers();
+      const isPoa = await isActingPoa(req.user, client);
       res.json({
         role: msg.actorRole(req.user),
         client: client ? { id: client.id, name: client.name } : null,
-        channels: msg.channelsFor({ user: req.user, client, users })
+        channels: msg.channelsFor({ user: req.user, client, users, isPoa })
       });
     } catch (error) {
       console.error('Messaging channels error:', error);
@@ -268,7 +365,8 @@ module.exports = function createMessagingRoutes(deps) {
   // ==========================================================================
   // Start a thread
   // ==========================================================================
-  router.post('/api/messaging/threads', authenticateToken, requireMessagingRole, async (req, res) => {
+  router.post('/api/messaging/threads', authenticateToken, requireMessagingRole, parseMessageBody, async (req, res) => {
+    let filed = []; let written = false;
     try {
       const body = req.body || {};
       const channelId = String(body.channel || '');
@@ -288,15 +386,22 @@ module.exports = function createMessagingRoutes(deps) {
         });
       }
       const users = await getUsers();
-      const availability = msg.channelAvailability(channelId, { user: req.user, client, users });
+      const isPoa = await isActingPoa(req.user, client);
+      const availability = msg.channelAvailability(channelId, { user: req.user, client, users, isPoa });
       if (!availability.available) {
         return res.status(403).json({ error: availability.reason, code: availability.code });
       }
 
-      const { valid, errors, clean } = msg.validateMessage(body);
+      const files = req.files || [];
+      const { valid, errors, clean } = msg.validateMessage(body, { attachmentCount: files.length });
       if (!valid) return res.status(400).json({ error: errors[0].message, code: errors[0].code, errors });
+      // Attachments are stored only once everything else about the send is
+      // known to be allowed, and a failure here writes nothing.
+      const stored = await storeAttachments(client, files);
+      if (stored.error) return res.status(stored.error.status).json(stored.error.body);
+      const attachments = stored.attachments;
+      filed = attachments;
 
-      const isPoa = await isActingPoa(req.user, client);
       const sender = msg.senderIdentity(req.user, { client, isPoa });
       const at = nowIso();
       const threadId = uuidv4();
@@ -325,7 +430,7 @@ module.exports = function createMessagingRoutes(deps) {
         escalation_event_id: null,
         created_at: at,
         last_message_at: at,
-        last_message_preview: clean.body.slice(0, 120)
+        last_message_preview: msg.previewOf(clean.body, clean.format, attachments)
       };
 
       const message = {
@@ -339,6 +444,8 @@ module.exports = function createMessagingRoutes(deps) {
         display_name: sender.displayName,
         acting_for: sender.actingFor,
         body: clean.body,
+        body_format: clean.format,
+        attachments,
         sent_at: at,
         read_by: [req.user.id]
       };
@@ -347,7 +454,7 @@ module.exports = function createMessagingRoutes(deps) {
       // Session 6's shape, so the case manager has one inbox rather than two.
       if (channel.raisesEscalation) {
         thread.escalation_event_id = await raiseBehavioralEscalation({
-          actor: req.user, sender, client, text: clean.body, threadId, at
+          actor: req.user, sender, client, text: clean.format === 'markup' ? nf.toPlainText(clean.body) : clean.body, threadId, at
         });
       }
 
@@ -357,6 +464,7 @@ module.exports = function createMessagingRoutes(deps) {
       const all = await readRows('messages');
       all.push(message);
       await db.set('messages', all);
+      written = true;
 
       await logActivity(req.user.id, req.user.name || req.user.email, 'message_thread_started', 'message_thread', threadId,
         { channel: channelId, clientId: client.id, role: sender.fromRole, actingFor: sender.actingFor });
@@ -372,6 +480,7 @@ module.exports = function createMessagingRoutes(deps) {
       });
     } catch (error) {
       console.error('Messaging thread create error:', error);
+      if (!written) await discardStored(filed);
       res.status(500).json({ error: 'Server error' });
     }
   });
@@ -379,7 +488,8 @@ module.exports = function createMessagingRoutes(deps) {
   // ==========================================================================
   // Reply
   // ==========================================================================
-  router.post('/api/messaging/threads/:id/messages', authenticateToken, requireMessagingRole, async (req, res) => {
+  router.post('/api/messaging/threads/:id/messages', authenticateToken, requireMessagingRole, parseMessageBody, async (req, res) => {
+    let filed = []; let written = false;
     try {
       const opened = await openThread(req, req.params.id);
       if (opened.error) return res.status(opened.error.status).json(opened.error.body);
@@ -388,8 +498,13 @@ module.exports = function createMessagingRoutes(deps) {
       const post = msg.canPostToThread(req.user, thread, { client, isPoa });
       if (!post.allowed) return res.status(403).json({ error: post.reason, code: post.code });
 
-      const { valid, errors, clean } = msg.validateMessage(req.body);
+      const files = req.files || [];
+      const { valid, errors, clean } = msg.validateMessage(req.body, { attachmentCount: files.length });
       if (!valid) return res.status(400).json({ error: errors[0].message, code: errors[0].code, errors });
+      const stored = await storeAttachments(client, files);
+      if (stored.error) return res.status(stored.error.status).json(stored.error.body);
+      const attachments = stored.attachments;
+      filed = attachments;
 
       const sender = msg.senderIdentity(req.user, { client, isPoa });
       const at = nowIso();
@@ -404,6 +519,8 @@ module.exports = function createMessagingRoutes(deps) {
         display_name: sender.displayName,
         acting_for: sender.actingFor,
         body: clean.body,
+        body_format: clean.format,
+        attachments,
         sent_at: at,
         read_by: [req.user.id]
       };
@@ -411,11 +528,12 @@ module.exports = function createMessagingRoutes(deps) {
       const all = await readRows('messages');
       all.push(message);
       await db.set('messages', all);
+      written = true;
 
       const threads = await readRows('message_threads');
       const idx = threads.findIndex(t => t && t.id === thread.id);
       threads[idx].last_message_at = at;
-      threads[idx].last_message_preview = clean.body.slice(0, 120);
+      threads[idx].last_message_preview = msg.previewOf(clean.body, clean.format, attachments);
       // A clinician replying to a clinical escalation IS the response. Nobody
       // has to remember to also press a button, because a status that depends
       // on someone remembering is a status that goes stale.
@@ -438,6 +556,7 @@ module.exports = function createMessagingRoutes(deps) {
       res.json({ message: { ...publicMessage(message), mine: true }, thread: publicThread(threads[idx], 0) });
     } catch (error) {
       console.error('Messaging reply error:', error);
+      if (!written) await discardStored(filed);
       res.status(500).json({ error: 'Server error' });
     }
   });
@@ -445,6 +564,39 @@ module.exports = function createMessagingRoutes(deps) {
   // ==========================================================================
   // Clinical escalation response status — clinician or admin, forward-only
   // ==========================================================================
+  // ==========================================================================
+  // Read one attachment. It goes through the SAME visibility rule as reading the
+  // thread (403 when the thread is not yours, 404 when nothing is there), the
+  // bytes are served with the type they were SNIFFED to, and every read is
+  // audited. Never a Drive link.
+  // ==========================================================================
+  router.get('/api/messaging/messages/:messageId/attachments/:attachmentId', authenticateToken, requireMessagingRole, async (req, res) => {
+    try {
+      const m = (await readRows('messages')).find(x => x && x.id === req.params.messageId);
+      if (!m) return res.status(404).json({ error: 'Attachment not found.', code: 'ATTACHMENT_NOT_FOUND' });
+      const opened = await openThread(req, m.thread_id);
+      if (opened.error) return res.status(opened.error.status).json(opened.error.body);
+      const a = (m.attachments || []).find(x => x && x.id === req.params.attachmentId);
+      if (!a || !a.drive_file_id) return res.status(404).json({ error: 'Attachment not found.', code: 'ATTACHMENT_NOT_FOUND' });
+      if (!attachmentsEnabled) return res.status(501).json({ error: 'Attachments are not available right now.', code: 'ATTACHMENTS_UNAVAILABLE' });
+      let bytes;
+      try { bytes = await googledrive.downloadFileBuffer(a.drive_file_id); }
+      catch (e) {
+        console.error('[MESSAGING] attachment read failed:', e.message);
+        return res.status(502).json({ error: 'That attachment could not be opened right now.', code: 'ATTACHMENT_READ_FAILED' });
+      }
+      await logActivity(req.user.id, req.user.name || req.user.email, 'message_attachment_read', 'message', m.id,
+        { threadId: m.thread_id, attachmentId: a.id, channel: opened.thread.channel, clientId: opened.thread.client_id });
+      res.setHeader('Content-Type', a.mime);
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Content-Disposition', contentDisposition ? contentDisposition('inline', a.name) : `inline; filename="attachment"`);
+      return res.send(bytes);
+    } catch (error) {
+      console.error('Messaging attachment error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   router.post('/api/messaging/threads/:id/response-status', authenticateToken, requireMessagingRole, async (req, res) => {
     try {
       const opened = await openThread(req, req.params.id);
@@ -543,10 +695,41 @@ module.exports = function createMessagingRoutes(deps) {
   async function notifyThread(thread, message, senderId) {
     const users = await getUsers();
     const label = msg.threadTitle(thread);
-    for (const id of thread.participant_ids || []) {
+    const channel = msg.channelById(thread.channel);
+    const recipients = new Set(thread.participant_ids || []);
+    // A POA designated AFTER the thread began, or a clinician's own POA
+    // recipients, are read fresh: the participant list on the row is a snapshot.
+    if (channel && channel.includesPoa) {
+      const client = users.find(x => x && x.id === thread.client_id && x.role === ROLES.CLIENT);
+      if (client) poaIdsFor(users, client).forEach(id => recipients.add(id));
+    }
+    for (const id of recipients) {
       if (id === senderId) continue;
       const u = users.find(x => x && x.id === id);
       if (!u || !u.email) continue;
+      // A family member who is no longer the client's designated POA was on the
+      // row when it began; the gate that hides the thread from them must also
+      // stop the email.
+      if (thread.channel === 'care_team' && u.role === ROLES.FAMILY) {
+        const owner = users.find(x => x && x.id === thread.client_id && x.role === ROLES.CLIENT);
+        if (!owner || !poaIdsFor(users, owner).includes(u.id)) continue;
+      }
+      // The patient side of a Care Team conversation is told in a PHI-free
+      // sentence that points at the Messages tab of their portal: no client
+      // name, no clinician name, no words from the message.
+      const fromCareTeam = ![msg.ROLE.CLIENT, msg.ROLE.FAMILY, 'POA'].includes(message.from_role);
+      const clientSide = thread.channel === 'care_team' && (u.role === ROLES.CLIENT || u.role === ROLES.FAMILY);
+      if (clientSide) {
+        await queueNotification('message_received', u.id, u.email, u.name,
+          {
+            subject: fromCareTeam ? 'You have a new message from your care team' : 'There is a new message in your care team conversation',
+            body: (fromCareTeam ? 'You have a new message from your care team.' : 'There is a new message in your care team conversation.')
+              + ' Sign in to your portal to read it. For privacy we do not put messages in email.',
+            ctaUrl: links.PATHS.PORTAL_MESSAGES, ctaLabel: 'Open your messages'
+          },
+          { relatedEntityId: message.id, relatedEntityType: 'message', createdBy: senderId });
+        continue;
+      }
       await queueNotification('message_received', u.id, u.email, u.name,
         {
           subject: `${label} — ${thread.client_name}`,
