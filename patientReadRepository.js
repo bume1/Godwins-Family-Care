@@ -2,12 +2,21 @@
 // Patient clinical read — pure helpers (Session 4.3)
 //
 // ARCHITECTURE RULE: read-only, filtered, scoped. A patient (or the family /
-// POA the client authorized) sees a CURATED read of their own OpenEMR record.
-// Never raw clinician notes, never another patient's data, never OpenEMR's
-// native portal. server.js resolves the patient from the authenticated
-// session's client record (openEmrPatientId) — NEVER from a request
-// parameter — and passes the raw rows through the builders here. Everything
-// in this module is I/O-free so the sharing rules are unit-testable.
+// POA the client authorized) sees a CURATED read of their own record. Never
+// another patient's data, never OpenEMR's native portal. server.js resolves
+// the patient from the authenticated session's client record — NEVER from a
+// request parameter. Everything in this module is I/O-free so the sharing
+// rules are unit-testable.
+//
+// Portal P1 (owner, 2026-09-29): the rows now come from the PUBLISHED copies
+// (patientPublish.js), written when a clinician signs — patients never read
+// OpenEMR. The audience and sharing rules below did not change.
+//
+// NOTES ACCESS (owner decision 2026-09-29, reversing the 4.3 rule that a
+// narrative note is never shown to a patient): the SIGNED note reaches the
+// patient and a POA, and non-POA family only when the client shares full
+// visit summaries. It travels in ONE section, `note`, and nowhere else — the
+// build-fail test asserts the note-content fields appear in no other section.
 //
 // The three audiences:
 //   patient — the client themselves (full curated read)
@@ -37,9 +46,10 @@ const SHARING_DEFAULTS = Object.freeze({
   allergies: false,
   problems: false,
   appointments: true,
-  vitals: false
+  vitals: false,
+  results: false              // test results (Portal P1): closed to non-POA family by default
 });
-const SHARING_BOOL_KEYS = Object.freeze(['carePlan', 'medications', 'allergies', 'problems', 'appointments', 'vitals']);
+const SHARING_BOOL_KEYS = Object.freeze(['carePlan', 'medications', 'allergies', 'problems', 'appointments', 'vitals', 'results']);
 const normalizeSharing = (input) => {
   const src = input && typeof input === 'object' ? input : {};
   const out = {};
@@ -55,7 +65,7 @@ const normalizeSharing = (input) => {
 // only where the client's sharing settings open a section fully).
 const FILTER_MAP = Object.freeze({
   visit: {
-    full: ['id', 'date', 'provider', 'reason', 'summary', 'followUp', 'status', 'newPrescriptions', 'testsOrdered', 'diagnosesAddressed'],
+    full: ['id', 'date', 'provider', 'reason', 'overview', 'summary', 'followUp', 'status', 'newPrescriptions', 'testsOrdered', 'diagnosesAddressed'],
     summary: ['id', 'date', 'provider', 'reason', 'status']
   },
   medication: { full: ['id', 'name', 'instructions', 'status', 'since'] },
@@ -63,15 +73,23 @@ const FILTER_MAP = Object.freeze({
   problem: { full: ['id', 'name', 'status', 'since'] },
   appointment: { full: ['id', 'date', 'startTime', 'endTime', 'durationMinutes', 'title', 'location', 'provider', 'state'] },
   vital: { full: ['date', 'bloodPressure', 'bloodPressureNote', 'heartRate', 'temperature', 'respiration', 'oxygen', 'weight', 'height', 'pain'] },
+  // The signed note (Portal P1). The ONLY section that may carry note content.
+  note: { full: ['subjective', 'objective', 'assessment', 'plan', 'addenda', 'signatures', 'signedAt'] },
+  // A filed test result: what the lab sent and whether the care team has
+  // reviewed it. Never the app's own interpretation flag or inbox summary.
+  result: { full: ['id', 'label', 'resultDate', 'performedBy', 'reviewStatus', 'reviewedBy', 'reviewedAt', 'patientNote', 'hasFile'] },
   carePlan: {
-    full: ['version', 'problems', 'goals', 'eachVisit', 'visitFrequency', 'visitDays', 'visitTimes', 'duration', 'chargePlanNote', 'effectiveDate', 'targetDate',
+    full: ['version', 'problems', 'goals', 'eachVisit', 'visitFrequency', 'visitDays', 'visitTimes', 'duration', 'effectiveDate', 'targetDate',
       'authoredBy', 'authoredAt', 'visitSchedule', 'careTier', 'careTierLabel', 'coSignedAt', 'coSignedBy', 'rnSignedAt', 'rnName', 'updatedAt', 'updatedBy', 'primaryCaregiver', 'careTeam', 'authorizedServices', 'signedPdf'],
     summary: ['version', 'goals', 'eachVisit', 'visitSchedule', 'effectiveDate', 'careTierLabel', 'coSignedAt', 'authoredBy', 'signedPdf']
   }
 });
 
-// Fields that must NEVER reach a patient, family, or POA payload, in any
-// section. The build-fail test asserts none of these appear in FILTER_MAP.
+// Fields that must NEVER reach a patient, family, or POA payload. The
+// build-fail test asserts none of these appear in FILTER_MAP — EXCEPT the
+// note-content fields (NOTE_CONTENT_FIELDS), which may appear in the `note`
+// section and nowhere else (owner decision 2026-09-29).
+const NOTE_CONTENT_FIELDS = Object.freeze(['subjective', 'objective', 'assessment', 'plan']);
 const CLINICIAN_ONLY_FIELDS = Object.freeze([
   // narrative note content
   'subjective', 'objective', 'assessment', 'plan', 'narrativeNotes', 'narrativeNoteSid',
@@ -83,8 +101,15 @@ const CLINICIAN_ONLY_FIELDS = Object.freeze([
   // EMR keys and raw rows
   'encounterEid', 'eid', 'puuid', 'openEmrPatientId', 'pid', 'patientPid', 'patientPuuid', 'uuid', 'providerId', 'pc_aid', 'pc_hometext', 'hometext', 'notes',
   // operational noise
-  'warnings', 'emrWriteError', 'emrMedicationId'
+  'warnings', 'emrWriteError', 'emrMedicationId',
+  // results (Portal P1): the app's interpretation flag and the inbox's routing
+  // and follow-up are the care team's. The lab's own report is the record.
+  'interpretation', 'followUpNote', 'routeTo', 'patientCopy', 'storageRef'
 ]);
+// A result's `summary` is inbox shorthand written for clinicians. `summary` is
+// a legitimate VISIT field, so this is its own list, asserted absent from the
+// result section.
+const RESULT_CLINICIAN_ONLY_FIELDS = Object.freeze(['summary', 'interpretation', 'followUpNote', 'routeTo', 'escalatedAt', 'document']);
 
 const pickFields = (obj, allow) => {
   if (!obj || typeof obj !== 'object') return null;
@@ -135,7 +160,7 @@ const evaluateClinicalReadAccess = ({ reqUser, client, isConsentSatisfied, isCli
 const sectionsFor = (audience, sharingInput) => {
   const s = normalizeSharing(sharingInput);
   if (audience === 'patient' || audience === 'poa') {
-    return { carePlan: 'full', visits: 'full', medications: 'full', allergies: 'full', problems: 'full', appointments: 'full', vitals: 'full' };
+    return { carePlan: 'full', visits: 'full', medications: 'full', allergies: 'full', problems: 'full', appointments: 'full', vitals: 'full', results: 'full' };
   }
   return {
     carePlan: s.carePlan ? 'summary' : 'none',
@@ -144,7 +169,8 @@ const sectionsFor = (audience, sharingInput) => {
     allergies: s.allergies ? 'full' : 'none',
     problems: s.problems ? 'full' : 'none',
     appointments: s.appointments ? 'full' : 'none',
-    vitals: s.vitals ? 'full' : 'none'
+    vitals: s.vitals ? 'full' : 'none',
+    results: s.results ? 'full' : 'none'
   };
 };
 
@@ -181,8 +207,30 @@ const canClinicalRead = (u) => clinicalRoles.canClinicalRead(u);
 // Practitioner 403s), coded diagnoses with descriptions, and — when the
 // clinician wrote one — a patient-facing summary + follow-up instructions.
 // Nothing here reads the narrative SOAP note.
-const ORDER_TYPE_LABELS = { lab: 'Lab work', imaging: 'Imaging', procedure: 'Procedure' };
+const ORDER_TYPE_LABELS = { lab: 'Lab work', imaging: 'Imaging', procedure: 'Procedure', referral: 'Referral', dme: 'Equipment' };
 const ORDER_STATUS_LABELS = { ordered: 'ordered', sent: 'sent to the lab', resulted: 'results received', cancelled: 'cancelled' };
+// A referral and a piece of equipment are not a lab: they are arranged, sent
+// to a provider or supplier, and (for a referral) scheduled. Saying "sent to
+// the lab" about a home health referral would be wrong on the patient's copy.
+const ORDER_STATUS_LABELS_BY_TYPE = {
+  referral: { ordered: 'being arranged', sent: 'sent to the provider', scheduled: 'appointment scheduled', completed: 'completed', cancelled: 'cancelled' },
+  dme: { ordered: 'being arranged', sent: 'sent to the supplier', completed: 'completed', cancelled: 'cancelled' }
+};
+// What the patient is told an order IS. Only the plain name of the thing and,
+// for a referral or equipment, who it is with — never a fax number, NPI,
+// order reference or a diagnosis code.
+const orderWhat = (o) => {
+  if (!o) return { tests: [], where: null };
+  if (o.orderType === 'referral') {
+    const r = o.referral || {};
+    return { tests: [r.specialty || o.specialty].filter(Boolean), where: r.receivingPractice || null };
+  }
+  if (o.orderType === 'dme') {
+    const d = o.dme || {};
+    return { tests: [d.itemDescription || o.itemDescription].filter(Boolean), where: d.supplierName || null };
+  }
+  return { tests: Array.isArray(o.tests) ? o.tests : [], where: null };
+};
 // EMR encounter reasons carry the 4.4 attribution suffix (" — Name, cred (NPI …)"); strip it.
 const stripAttribution = (reason) => String(reason || '').split(' — ')[0].trim();
 const firstWords = (s, n) => String(s || '').split(/\s+/).slice(0, n).join(' ');
@@ -198,22 +246,34 @@ const buildVisitSummary = ({ encounterUuid, encounter, record, attestation, pres
     name: [r.drug, r.dose].filter(Boolean).join(' ') || 'Prescription',
     instructions: [r.route, r.frequency, r.instructions].filter(Boolean).join(' · ') || null
   }));
-  const tests = (orders || []).filter(o => o && o.status !== 'cancelled').map(o => ({
-    type: ORDER_TYPE_LABELS[o.orderType] || o.orderType || 'Order',
-    tests: Array.isArray(o.tests) ? o.tests : [],
-    status: ORDER_STATUS_LABELS[o.status] || o.status || 'ordered'
-  }));
+  const tests = (orders || []).filter(o => o && o.status !== 'cancelled').map(o => {
+    const what = orderWhat(o);
+    const labels = ORDER_STATUS_LABELS_BY_TYPE[o.orderType] || ORDER_STATUS_LABELS;
+    return {
+      type: ORDER_TYPE_LABELS[o.orderType] || o.orderType || 'Order',
+      tests: what.tests,
+      // A referral still waiting on its agency is "being arranged", never "sent".
+      status: (o.orderType === 'referral' && o.referral && o.referral.agencyPending && !o.referral.receivingFax)
+        ? 'being arranged' : (labels[o.status] || o.status || 'ordered'),
+      ...(what.where ? { where: what.where } : {})
+    };
+  });
   const signed = !!(attestation && attestation.signedAt);
   const sentences = [];
   if (rec.patientSummary) sentences.push(String(rec.patientSummary).trim());
   else if (dx.length) sentences.push(`This visit addressed: ${dx.join(', ')}.`);
+  // What the visit was about, on its own. `summary` below appends the
+  // prescription and test sentences, which the portal also lists under
+  // "Medicine changes" and "Tests ordered" — showing both said everything twice.
+  const overview = sentences[0] || (signed ? 'Your clinician completed and signed the note for this visit.' : 'Your clinician is still finishing the note for this visit.');
   if (rx.length) sentences.push(`${rx.length === 1 ? 'A prescription was' : 'Prescriptions were'} recorded: ${rx.map(r => r.name).join(', ')}.`);
   if (tests.length) sentences.push(`${tests.map(t => `${t.type}${t.tests.length ? ` (${t.tests.join(', ')})` : ''} — ${t.status}`).join('; ')}.`);
   if (!sentences.length) sentences.push(signed ? 'Your clinician completed and signed the note for this visit.' : 'Your clinician is still finishing the note for this visit.');
   return {
     id: String(encounterUuid || rec.encounterUuid || (encounter && encounter.id) || ''),
     date, provider, reason,
-    summary: sentences.join(' '),
+    overview,
+    summary: sentences.join('\n\n'),
     followUp: rec.followUpInstructions ? String(rec.followUpInstructions).trim() : null,
     status: signed ? 'complete' : 'in_progress',
     newPrescriptions: rx,
@@ -223,11 +283,28 @@ const buildVisitSummary = ({ encounterUuid, encounter, record, attestation, pres
 };
 
 // Clinician-authored patient-facing text (set from the encounter panel).
-// Bounded, plain strings; empty clears the field.
+// Bounded, plain strings; empty clears the field. Raised from 1000/600 (owner,
+// 2026-09-29): a real home-visit summary ran past both. The screen reads the
+// same constants, so the box and the save cannot disagree about the cap.
+const PATIENT_SUMMARY_MAX = 4000;
+const FOLLOW_UP_MAX = 4000;
+// LINE BREAKS ARE KEPT. This used to collapse every run of whitespace to one
+// space, so "1. Take the new dose… 2. Call if…" typed as a list reached the
+// patient as one run-on paragraph. Lines are trimmed, runs of spaces squeezed,
+// CR/LF normalised, control characters dropped and more than one blank line in a
+// row collapsed. Everything that shows these strings must render newlines
+// (the portal, the after-visit PDF).
+const cleanMultiline = (v, max) => {
+  const s = String(v == null ? '' : v)
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .split('\n').map(l => l.replace(/[ \t]+/g, ' ').trim()).join('\n')
+    .replace(/\n{3,}/g, '\n\n').trim();
+  return s ? s.slice(0, max).trim() : null;
+};
 const buildPatientFacingFields = (body) => {
   const src = body && typeof body === 'object' ? body : {};
-  const clean = (v, max) => { const s = String(v == null ? '' : v).replace(/\s+/g, ' ').trim(); return s ? s.slice(0, max) : null; };
-  return { patientSummary: clean(src.patientSummary, 1000), followUpInstructions: clean(src.followUpInstructions, 600) };
+  return { patientSummary: cleanMultiline(src.patientSummary, PATIENT_SUMMARY_MAX), followUpInstructions: cleanMultiline(src.followUpInstructions, FOLLOW_UP_MAX) };
 };
 
 // ---- Vitals from the encounter note (server-side vitals defect) ----
@@ -272,8 +349,17 @@ const parseVitalsFromNote = (objectiveText, date) => {
 // Works on the 4.2 summarized rows (state derived from pc_apptstatus + the
 // encounter linkage). A reschedule leaves a cancelled ('x') tombstone and a
 // no-show a '?' row; neither is a patient's appointment any more.
+// "Today" is Georgia's date: for four hours every evening UTC is already
+// tomorrow, and the rest of today's visits dropped off the list.
+const practiceDate = (now) => {
+  try {
+    const p = require('./public/gfc-time').zonedParts(now);
+    if (p && p.isoDate) return p.isoDate;
+  } catch (e) { /* fall through */ }
+  return now.toISOString().slice(0, 10);
+};
 const selectUpcomingAppointments = (summaries, now = new Date()) => {
-  const today = now.toISOString().slice(0, 10);
+  const today = practiceDate(now);
   return (summaries || [])
     .filter(a => a && a.state === 'scheduled' && a.status !== 'x' && a.status !== '?' && String(a.date || '') >= today)
     .sort((a, b) => `${a.date} ${a.startTime}`.localeCompare(`${b.date} ${b.startTime}`));
@@ -302,11 +388,11 @@ const summarizeProblemForPatient = (p) => ({
 
 module.exports = {
   AUDIENCES, VISIT_LEVELS, SHARING_DEFAULTS, normalizeSharing,
-  FILTER_MAP, CLINICIAN_ONLY_FIELDS, pickFields, filterFor, filterRow, filterRows,
+  FILTER_MAP, CLINICIAN_ONLY_FIELDS, NOTE_CONTENT_FIELDS, RESULT_CLINICIAN_ONLY_FIELDS, pickFields, filterFor, filterRow, filterRows,
   evaluateClinicalReadAccess, sectionsFor,
   poaSignerName, buildActingIdentity,
   canClinicalWrite, canClinicalRead,
-  buildVisitSummary, buildPatientFacingFields, stripAttribution,
+  buildVisitSummary, buildPatientFacingFields, cleanMultiline, PATIENT_SUMMARY_MAX, FOLLOW_UP_MAX, stripAttribution,
   parseVitalsFromNote,
   selectUpcomingAppointments, summarizeAppointmentForPatient, LOCATION_LABELS,
   summarizeMedicationForPatient, summarizeAllergyForPatient, summarizeProblemForPatient

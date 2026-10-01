@@ -153,7 +153,7 @@ const past = new Date(Date.now() - 3 * 86400000).toISOString();
 
 test('a confirmed shift shows up as an upcoming visit', async () => {
   const get = loadGetClientVisits({
-    shifts: [{ id: 's1', clientId: 'c1', status: 'confirmed', start: future, caregiverId: 'cg1' }],
+    shifts: [{ id: 's1', client_id: 'c1', status: 'confirmed', start: future, caregiver_id: 'cg1' }],
     users: [{ id: 'cg1', name: 'Rosa Diaz' }]
   });
   const { upcoming } = await get({ id: 'c1' });
@@ -167,7 +167,7 @@ test('a shift nobody has agreed to yet is NOT shown', async () => {
   // that may never happen.
   for (const status of ['open', 'claimed', 'assigned']) {
     const get = loadGetClientVisits({
-      shifts: [{ id: 's1', clientId: 'c1', status, start: future, caregiverId: 'cg1' }],
+      shifts: [{ id: 's1', client_id: 'c1', status, start: future, caregiver_id: 'cg1' }],
       users: [{ id: 'cg1', name: 'Rosa Diaz' }]
     });
     const { upcoming } = await get({ id: 'c1' });
@@ -177,7 +177,7 @@ test('a shift nobody has agreed to yet is NOT shown', async () => {
 
 test('another client\'s shift never appears', async () => {
   const get = loadGetClientVisits({
-    shifts: [{ id: 's1', clientId: 'c2', status: 'confirmed', start: future, caregiverId: 'cg1' }],
+    shifts: [{ id: 's1', client_id: 'c2', status: 'confirmed', start: future, caregiver_id: 'cg1' }],
     users: [{ id: 'cg1', name: 'Rosa Diaz' }]
   });
   const { upcoming } = await get({ id: 'c1' });
@@ -186,7 +186,7 @@ test('another client\'s shift never appears', async () => {
 
 test('an unnamed caregiver reads as the care team, not as blank', async () => {
   const get = loadGetClientVisits({
-    shifts: [{ id: 's1', clientId: 'c1', status: 'confirmed', start: future, caregiverId: 'ghost' }],
+    shifts: [{ id: 's1', client_id: 'c1', status: 'confirmed', start: future, caregiver_id: 'ghost' }],
     users: []
   });
   const { upcoming } = await get({ id: 'c1' });
@@ -198,7 +198,7 @@ test('recent visits still come from the documented log, not the shift board', as
   // both would show every past visit twice.
   const get = loadGetClientVisits({
     visitLogs: [{ id: 'v1', client_id: 'c1', status: 'completed', scheduledAt: past, caregiverName: 'Rosa Diaz' }],
-    shifts: [{ id: 's1', clientId: 'c1', status: 'completed', start: past, caregiverId: 'cg1' }],
+    shifts: [{ id: 's1', client_id: 'c1', status: 'completed', start: past, caregiver_id: 'cg1' }],
     users: [{ id: 'cg1', name: 'Rosa Diaz' }]
   });
   const { recent } = await get({ id: 'c1' });
@@ -211,9 +211,21 @@ test('shifts and visit logs share one ordered list', async () => {
   const later = new Date(Date.now() + 5 * 86400000).toISOString();
   const get = loadGetClientVisits({
     visitLogs: [{ id: 'v1', client_id: 'c1', status: 'scheduled', scheduledAt: later }],
-    shifts: [{ id: 's1', clientId: 'c1', status: 'confirmed', start: soon, caregiverId: 'cg1' }],
+    shifts: [{ id: 's1', client_id: 'c1', status: 'confirmed', start: soon, caregiver_id: 'cg1' }],
     users: [{ id: 'cg1', name: 'Rosa Diaz' }]
   });
   const { upcoming } = await get({ id: 'c1' });
   assert.deepStrictEqual(upcoming.map(u => u.id), ['shift:s1', 'v1'], 'soonest first, whichever source it came from');
+});
+
+test('a visit happening right now stays on the upcoming list until it ends (stored snake_case shift rows)', async () => {
+  const started = new Date(Date.now() - 3600000).toISOString();
+  const ends = new Date(Date.now() + 3600000).toISOString();
+  const get = loadGetClientVisits({
+    shifts: [{ id: 's1', client_id: 'c1', status: 'in_progress', start: started, end: ends, caregiver_id: 'cg1', caregiver_name: 'Rosa Diaz' }],
+    users: []
+  });
+  const { upcoming } = await get({ id: 'c1' });
+  assert.strictEqual(upcoming.length, 1);
+  assert.strictEqual(upcoming[0].with, 'Rosa Diaz', 'the name stored on the shift is used when the user record is not found');
 });

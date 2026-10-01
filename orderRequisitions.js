@@ -119,7 +119,9 @@ const clean = (v, max) => String(v == null ? '' : v).trim().slice(0, max);
 const isYmd = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) && !Number.isNaN(new Date(`${v}T12:00:00Z`).getTime());
 
 const normalizeIcd10 = (raw) => {
-  let s = String(raw || '').trim().toUpperCase().replace(/\s+/g, '');
+  // A trailing period ("I10.") is how OpenEMR's code search returns a
+  // three-character code; drop it, as clinicalRepository.normalizeIcd10 does.
+  let s = String(raw || '').trim().toUpperCase().replace(/\s+/g, '').replace(/\.+$/, '');
   if (!s) return null;
   if (/^[A-Z][0-9][0-9A-Z][0-9A-Z]{1,4}$/.test(s)) s = `${s.slice(0, 3)}.${s.slice(3)}`;
   return /^[A-Z][0-9][0-9A-Z](\.[0-9A-Z]{1,4})?$/.test(s) ? s : null;
@@ -190,9 +192,19 @@ const buildReferral = ({ id, clientId, puuid, encounterUuid, input, actor, encou
   if (!clinicalSummary) {
     return { error: 'A clinical summary is required — it is the question you want the specialist to answer', code: 'REFERRAL_NO_SUMMARY' };
   }
-  const receivingFax = normalizeFax(i.receivingFax);
-  if (!receivingFax) {
-    return { error: 'A valid 10-digit receiving fax number is required — this is the number the requisition is faxed to', code: 'REFERRAL_BAD_FAX' };
+  // THE AGENCY IS OFTEN NOT KNOWN WHEN THE ORDER IS PLACED (home health above
+  // all: the patient's plan picks one, or the office calls around). An explicit
+  // `agencyPending` lets the referral be recorded with NO fax yet. It is a flag
+  // the clinician sets on purpose, never a blank that slips through: a fax typed
+  // wrongly is still refused, and a referral with neither a fax nor the flag is
+  // refused exactly as before. Nothing can be faxed while it is pending
+  // (applySend, the requisition) and the office fills it in with
+  // applyDestinationEdit, which clears the flag when a valid fax arrives.
+  const rawFax = String(i.receivingFax == null ? '' : i.receivingFax).trim();
+  const receivingFax = normalizeFax(rawFax);
+  const agencyPending = !!i.agencyPending && !rawFax;
+  if (!receivingFax && !agencyPending) {
+    return { error: 'A valid 10-digit receiving fax number is required — this is the number the requisition is faxed to. If the agency is not confirmed yet, tick "Agency not confirmed yet" instead.', code: 'REFERRAL_BAD_FAX' };
   }
   // PRIOR AUTHORIZATION. Medicare Advantage plans frequently require one and
   // it is the single most commonly forgotten step in a referral, so it is a
@@ -213,7 +225,8 @@ const buildReferral = ({ id, clientId, puuid, encounterUuid, input, actor, encou
         specialty,
         receivingPractice: clean(i.receivingPractice, 160) || null,
         receivingProvider: clean(i.receivingProvider, 160) || null,
-        receivingFax,
+        receivingFax: receivingFax || null,
+        agencyPending,
         receivingPhone: clean(i.receivingPhone, 40) || null,
         reason,
         urgency: URGENCIES.includes(i.urgency) ? i.urgency : env.envelope.priority,
@@ -535,11 +548,20 @@ const defaultRecipientFax = (order) => {
 // A cancelled or completed order is refused — "sent" after the fact is not a
 // correction, it is a different event, and a resend of a live order is the
 // thing this supports.
+// An order recorded before the agency was known. Only a referral can be.
+const isAgencyPending = (order) => !!order && order.orderType === REFERRAL &&
+  !!(order.referral || {}).agencyPending && !(order.referral || {}).receivingFax;
 const SENDABLE_STATUSES = Object.freeze(['ordered', 'sent', 'scheduled']);
 const applySend = ({ order, input, actor, at }) => {
   if (!order) return { error: 'Order not found', code: 'ORDER_NOT_FOUND', status: 404 };
   if (!SENDABLE_STATUSES.includes(String(order.status))) {
     return { error: `An order that is "${order.status}" cannot be recorded as faxed.`, code: 'ORDER_NOT_SENDABLE', status: 409 };
+  }
+  if (isAgencyPending(order) && FAX_SEND_CHANNELS.includes(String((input || {}).channel || DEFAULT_SEND_CHANNEL))) {
+    return {
+      error: 'The receiving agency is not confirmed yet, so there is no fax number to send to. Use Update destination to add the agency and fax first.',
+      code: 'ORDER_AGENCY_PENDING', status: 409
+    };
   }
   const built = buildSendRecord({ input, actor, order, at });
   if (built.error) return { ...built, status: 400 };
@@ -551,6 +573,9 @@ const applySend = ({ order, input, actor, at }) => {
       status: 'sent',
       sends: [...(order.sends || []), built.send],
       lastSentAt: built.send.sentAt,
+      // A send recorded after a destination change is the re-send that change
+      // was waiting for.
+      resendNeeded: false,
       statusHistory: [...(order.statusHistory || []), {
         status: 'sent', at: now, by: { id: (actor && actor.id) || null, name: (actor && actor.name) || null },
         note: `${resend ? 'Re-sent' : 'Sent'} by ${built.send.channelLabel} to ${built.send.recipientName}${built.send.recipientFax ? ` at ${formatFax(built.send.recipientFax)}` : ''}`
@@ -587,6 +612,136 @@ const applyReferralScheduled = ({ order, appointmentDate, actor, at }) => {
       }],
       updatedAt: now
     }
+  };
+};
+
+// ---- Updating where an order goes ---------------------------------------
+// THE AGENCY IS OFTEN CONFIRMED AFTER THE ORDER IS PLACED. A referral or a
+// written order is created by the clinician; who actually receives it is settled
+// by whoever calls around, which is the office or social work. Before this, the
+// destination was fixed at creation and the only correction was to cancel and
+// re-enter the whole order.
+//
+// THE EDIT REACHES DESTINATION FIELDS AND NOTHING ELSE, and that list is the
+// control: it is what lets a case manager, who is read-only everywhere else,
+// hold this one door. The clinical content — diagnoses, reason, clinical summary,
+// item, quantity, the ordering clinician — is not on it, and a body that names
+// one is REFUSED BY NAME rather than having the key dropped, because a silent
+// drop reads as "saved". A type absent from the table (labs, imaging) has no
+// destination to edit, so a new order type is not editable until somebody
+// declares its fields here.
+const DESTINATION_FIELDS = Object.freeze({
+  [REFERRAL]: Object.freeze({
+    bucket: 'referral',
+    fields: Object.freeze([
+      { key: 'receivingPractice', label: 'Receiving practice', max: 160 },
+      { key: 'receivingProvider', label: 'Receiving provider', max: 160 },
+      { key: 'receivingFax', label: 'Receiving fax', fax: true, required: true, badFaxCode: 'REFERRAL_BAD_FAX' },
+      { key: 'receivingPhone', label: 'Receiving phone', max: 40 }
+    ])
+  }),
+  [DME]: Object.freeze({
+    bucket: 'dme',
+    fields: Object.freeze([
+      { key: 'supplierName', label: 'Supplier name', max: 160, required: true, missingCode: 'DME_NO_SUPPLIER' },
+      { key: 'supplierFax', label: 'Supplier fax', fax: true, required: true, badFaxCode: 'DME_BAD_SUPPLIER_FAX' },
+      { key: 'supplierPhone', label: 'Supplier phone', max: 40 }
+    ])
+  })
+});
+// Only an order still in flight. Once it is completed or cancelled the
+// destination is history, and rewriting it would change who a finished
+// disclosure appears to have gone to.
+const DESTINATION_EDITABLE_STATUSES = Object.freeze(['ordered', 'sent', 'scheduled']);
+const destinationFieldsFor = (orderType) => (DESTINATION_FIELDS[String(orderType)] || {}).fields || null;
+// What the screen draws its form from. Served, never restated in the page.
+const destinationFormFields = () => Object.fromEntries(Object.entries(DESTINATION_FIELDS).map(([type, spec]) =>
+  [type, spec.fields.map(f => ({ key: f.key, label: f.label, required: !!f.required, fax: !!f.fax }))]));
+
+const applyDestinationEdit = ({ order, input, actor, at }) => {
+  if (!order) return { error: 'Order not found', code: 'ORDER_NOT_FOUND', status: 404 };
+  const spec = DESTINATION_FIELDS[String(order.orderType)];
+  if (!spec) {
+    return { error: `A ${order.orderType} order has no receiving practice to update here.`, code: 'ORDER_NO_DESTINATION', status: 400 };
+  }
+  if (!DESTINATION_EDITABLE_STATUSES.includes(String(order.status))) {
+    return { error: `An order that is "${order.status}" can no longer have its destination changed.`, code: 'ORDER_DESTINATION_LOCKED', status: 409 };
+  }
+  const i = (input && typeof input === 'object') ? input : {};
+  const known = new Set(spec.fields.map(f => f.key));
+  // `changeReason` is why the destination is changing. It is deliberately not
+  // called `reason`: a referral has its own clinical `reason`, and the two must
+  // never be mistakable for one another.
+  const stray = Object.keys(i).filter(k => k !== 'changeReason' && !known.has(k));
+  if (stray.length) {
+    return {
+      error: `${stray.join(', ')} ${stray.length === 1 ? 'is' : 'are'} not part of where the order goes and cannot be changed here. Only ${spec.fields.map(f => f.label.toLowerCase()).join(', ')} can.`,
+      code: 'ORDER_DESTINATION_FIELD_NOT_EDITABLE', status: 400
+    };
+  }
+  const current = order[spec.bucket] || {};
+  const next = { ...current };
+  const pending = isAgencyPending(order);
+  const changes = [];
+  for (const f of spec.fields) {
+    // An ABSENT key means leave it alone; a present one is a decision, including
+    // a blank one (which clears an optional field and is refused on a required one).
+    if (!Object.prototype.hasOwnProperty.call(i, f.key)) continue;
+    let value;
+    // A pending agency may stay without a fax: a blank fax on a pending order is
+    // "still not confirmed", not an error, so the office can save the practice
+    // name first and add the number when they have it.
+    if (f.fax && pending && !String(i[f.key] == null ? '' : i[f.key]).trim()) continue;
+    if (f.fax) {
+      value = normalizeFax(i[f.key]);
+      if (!value) {
+        return { error: `A valid 10-digit ${f.label.toLowerCase()} number is required — this is the number the requisition is faxed to`, code: f.badFaxCode, status: 400 };
+      }
+    } else {
+      value = clean(i[f.key], f.max) || null;
+      if (!value && f.required) {
+        return { error: `${f.label} is required`, code: f.missingCode || 'ORDER_DESTINATION_FIELD_REQUIRED', status: 400 };
+      }
+    }
+    const before = current[f.key] == null || current[f.key] === '' ? null : current[f.key];
+    if (before === value) continue;
+    next[f.key] = value;
+    changes.push({ field: f.key, label: f.label, from: before, to: value });
+  }
+  if (!changes.length) {
+    return { error: 'Nothing changed — those are already the destination on this order.', code: 'ORDER_DESTINATION_NO_CHANGE', status: 400 };
+  }
+  // A FAX NUMBER CHANGED AFTER THE ORDER WENT OUT IS AN ADMISSION THAT THE FIRST
+  // SEND MAY HAVE GONE TO THE WRONG PLACE, so it needs a reason and it raises a
+  // flag until somebody records the re-send. The earlier send row is left
+  // exactly as it was: it is a disclosure that happened.
+  const faxField = spec.fields.find(f => f.fax);
+  const faxChanged = changes.some(c => c.field === faxField.key);
+  const alreadySent = (order.sends || []).length > 0;
+  const reason = clean(i.changeReason, 500) || null;
+  if (faxChanged && alreadySent && !reason) {
+    return {
+      error: 'This order has already been faxed. Say why the fax number is changing (for example, "the agency confirmed a different intake fax") so the earlier send can be reviewed.',
+      code: 'ORDER_DESTINATION_REASON_REQUIRED', status: 400
+    };
+  }
+  // A valid fax on a pending order IS the agency being confirmed.
+  if (pending && next.receivingFax) next.agencyPending = false;
+  const now = at || new Date().toISOString();
+  const by = {
+    id: (actor && actor.id) || null, name: (actor && actor.name) || null,
+    clinicalRole: (actor && actor.clinicalRole) || null, role: (actor && actor.role) || null
+  };
+  const resendNeeded = faxChanged && alreadySent ? true : !!order.resendNeeded;
+  return {
+    order: {
+      ...order,
+      [spec.bucket]: next,
+      resendNeeded,
+      destinationHistory: [...(order.destinationHistory || []), { at: now, by, changes, reason }],
+      updatedAt: now
+    },
+    changes, faxChanged, resendNeeded
   };
 };
 
@@ -696,7 +851,50 @@ const requisitionFileName = (order, client) => {
 // must hold EXACTLY what was sent.
 const REQUISITION_CATEGORY = '/Orders';
 
+// ── Notes and files on an order ───────────────────────────────────────────
+// A home health order is finalized over days: an agency is confirmed, a
+// face-to-face note arrives, somebody phones and gets a name. Notes and files
+// are APPEND-ONLY working records beside the order. They never touch the
+// clinical content of the order or its status, and neither one moves an order
+// to sent or resulted (those still need their own evidence routes).
+const ORDER_NOTE_MAX = 2000;
+const ORDER_FILE_LABEL_MAX = 120;
+
+const buildOrderNote = ({ order, text, actor, at, id }) => {
+  if (!order) return { error: 'Order not found', status: 404, code: 'ORDER_NOT_FOUND' };
+  const t = String(text == null ? '' : text).trim();
+  if (!t) return { error: 'Write the note first.', status: 400, code: 'ORDER_NOTE_EMPTY' };
+  if (t.length > ORDER_NOTE_MAX) {
+    return { error: `A note is at most ${ORDER_NOTE_MAX} characters.`, status: 400, code: 'ORDER_NOTE_TOO_LONG' };
+  }
+  const note = { id, text: t, by: { id: actor && actor.id, name: actor && (actor.name || actor.email) }, at };
+  return { note, order: { ...order, orderNotes: [...(order.orderNotes || []), note], updatedAt: at } };
+};
+
+const buildOrderFile = ({ order, label, fileName, mimeType, byteLength, stored, emrFiled, actor, at, id }) => {
+  if (!order) return { error: 'Order not found', status: 404, code: 'ORDER_NOT_FOUND' };
+  const lab = String(label == null ? '' : label).trim().slice(0, ORDER_FILE_LABEL_MAX);
+  const file = {
+    id, label: lab || null, fileName: String(fileName || 'document'), mimeType, byteLength,
+    driveFileId: (stored && (stored.fileId || stored.id)) || null,
+    emrFiled: !!emrFiled,
+    by: { id: actor && actor.id, name: actor && (actor.name || actor.email) }, at
+  };
+  return { file, order: { ...order, orderFiles: [...(order.orderFiles || []), file], updatedAt: at } };
+};
+
+// What a browser may see of an attached file: never the Drive id.
+const publicOrderFile = (f) => {
+  const { driveFileId, ...rest } = f || {};
+  return rest;
+};
+
+// An order as a browser sees it: attached files without their storage ids.
+const publicOrder = (o) => (o && Array.isArray(o.orderFiles)
+  ? { ...o, orderFiles: o.orderFiles.map(publicOrderFile) } : o);
+
 module.exports = {
+  publicOrder, ORDER_NOTE_MAX, ORDER_FILE_LABEL_MAX, buildOrderNote, buildOrderFile, publicOrderFile,
   REFERRAL, DME, DOCUMENT_ORDER_TYPES,
   REFERRAL_STATUSES, REFERRAL_TRANSITIONS, URGENCIES,
   SEND_CHANNELS, DEFAULT_SEND_CHANNEL, FAX_SEND_CHANNELS, SEND_CHANNEL_LABELS, SENDABLE_STATUSES,
@@ -707,6 +905,7 @@ module.exports = {
   ENROLLMENT_STATUSES, ENROLLMENT_LABELS, ENROLLMENT_OK, ENROLLMENT_GATED_TYPES,
   normalizeMedicareEnrollment, isMedicarePatient, checkOrderingEnrollment,
   buildSendRecord, applySend, applyReferralScheduled,
+  isAgencyPending, DESTINATION_FIELDS, DESTINATION_EDITABLE_STATUSES, destinationFieldsFor, destinationFormFields, applyDestinationEdit,
   defaultRecipientName, defaultRecipientFax,
   OVERDUE_DAYS, overdueThresholdFor, isAwaitingResult, overdueAgeDays, isOverdue, buildOverdueList,
   DEFAULT_RETURN_FAX_LABEL, normalizeRequisitionSettings, seedReturnFax,

@@ -299,7 +299,7 @@ function createNotifier(deps) {
 
   const apptRecipients = (clientId) => clientSideRecipients(clientId);
 
-  const sendToClientSide = async ({ clientId, type, subject, headline, paragraphs, fields, callout, actorId, entityId }) => {
+  const sendToClientSide = async ({ clientId, type, subject, headline, paragraphs, fields, callout, actorId, entityId, entityType }) => {
     const { client, recipients } = await apptRecipients(clientId);
     if (!client) return { notified: 0, reason: 'no client record' };
     if (!recipients.length) return { notified: 0, reason: 'no email address on file' };
@@ -308,11 +308,13 @@ function createNotifier(deps) {
     for (const { user, actingFor } of recipients) {
       const ok = await send({
         type, user, subject, headline,
-        // A POA is told whose visit it is; the client is not told their own name.
-        paragraphs: actingFor ? paragraphs.map(p => p.replace(/^Your visit/, `${actingFor.name}'s visit`)) : paragraphs,
+        // A POA is told whose visit (or result) it is; the client is not told
+        // their own name. Every client-side paragraph opens with "Your visit"
+        // or "Your test result" for exactly this reason.
+        paragraphs: actingFor ? paragraphs.map(p => p.replace(/^Your (visit|test result)/, (m, what) => `${actingFor.name}'s ${what}`)) : paragraphs,
         fields, callout,
         ctaUrl: url, ctaLabel: 'Open your portal',
-        relatedEntityId: entityId, relatedEntityType: 'appointment',
+        relatedEntityId: entityId, relatedEntityType: entityType || 'appointment',
         actorId, phi: true
       });
       if (ok) n += 1;
@@ -383,6 +385,58 @@ function createNotifier(deps) {
       });
     } catch (e) {
       console.error('[APPT] reminder notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- Portal P1: a visit summary is ready (owner, 2026-09-29) --------------
+  // Sent when a signed visit is PUBLISHED to the portal, and on a republish
+  // only when the summary or note text changed (the caller decides that from
+  // the content hash, which is also in the dedupe key). The visit date is PHI,
+  // so it rides only where the transport is covered.
+  async function visitSummaryReady({ clientId, encounterUuid, contentHash, visitDate, actorId, hasNote = true }) {
+    try {
+      const detail = transportAllowsDetail();
+      return await sendToClientSide({
+        clientId,
+        type: 'visit_summary_ready',
+        subject: detail && visitDate ? `Your visit summary from ${visitDate} is ready` : 'A visit summary is ready in your portal',
+        headline: 'Your visit summary is ready',
+        paragraphs: detail && visitDate
+          ? [`Your visit summary from ${visitDate} is ready to read in your portal${hasNote ? ", along with your clinician's note" : ''}.`,
+             'If anything in it is unclear, send the care team a message from the portal.']
+          : [`Your visit summary is ready to read in your secure portal${hasNote ? ', along with your clinician\'s note' : ''}.`,
+             'For privacy we do not put visit details in email.'],
+        actorId,
+        entityId: `${encounterUuid}:summary:${contentHash}`,
+        entityType: 'visit'
+      });
+    } catch (e) {
+      console.error('[PORTAL] visit summary notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- Portal P1: a test result was reviewed (owner, 2026-09-29) -----------
+  // Results are VISIBLE to the patient the moment they are filed, but nobody is
+  // TOLD until a clinician has reviewed one — an email about a result nobody
+  // has looked at yet invites a phone call the office cannot answer. Never the
+  // value, the test name or the clinician's note: that is in the portal.
+  async function resultReviewed({ clientId, resultId, actorId }) {
+    try {
+      return await sendToClientSide({
+        clientId,
+        type: 'result_reviewed',
+        subject: 'A test result has been reviewed by your care team',
+        headline: 'A test result has been reviewed',
+        paragraphs: ['Your test result has been reviewed by your care team. You can read it, and any note they added, in your portal.',
+          'For privacy we do not put results in email.'],
+        actorId,
+        entityId: `${resultId}:reviewed`,
+        entityType: 'result'
+      });
+    } catch (e) {
+      console.error('[PORTAL] result reviewed notice failed (non-fatal):', e.message);
       return { notified: 0, reason: e.message };
     }
   }
@@ -589,7 +643,9 @@ function createNotifier(deps) {
     documentUploaded, documentReviewed, consentSigned, carePlanCoSigned,
     documentsRequested, enrollmentFollowUp, enrollmentApproved,
     // clinical visits
-    appointmentBooked, appointmentRescheduled, appointmentCancelled, visitReminder
+    appointmentBooked, appointmentRescheduled, appointmentCancelled, visitReminder,
+    // patient portal (P1)
+    visitSummaryReady, resultReviewed
   };
 }
 

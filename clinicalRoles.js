@@ -294,6 +294,26 @@ const canCoSignEncounter = (user) => CO_SIGN_ROLES.includes(resolveClinicalRole(
 // participation and review. It never changes who bills, so it is open to every
 // licensed clinical role; unlicensed read-only staff cannot attest a note.
 const canCoSignNote = (user) => LICENSED_CLINICAL_ROLES.includes(resolveClinicalRole(user));
+// BILLING (owner, 2026-09-29): after a clinician signs, the codes, the modifiers
+// and the place of service belong to billing, and billing submits the claim.
+// Until a dedicated billing role exists (B-series `hasBillingAccess`), billing
+// is an admin or a manager. This is deliberately NOT a clinical role: it is the
+// only thing that may see or change a place of service, and a clinician never
+// can. One predicate, read by every billing route and served to the page.
+const canSubmitBilling = (user) => !!user && user.accountStatus !== 'inactive' &&
+  (user.role === 'admin' || user.isManager === true);
+
+// WHERE AN ORDER GOES (owner, 2026-09-29): the receiving agency, practice or
+// supplier is usually confirmed AFTER the clinician places the order, by
+// whoever is on the phone with the agency. That is the office and social work,
+// not only the ordering clinician. This is deliberately NOT a clinical
+// capability and NOT the read/write split: a case manager stays read-only
+// everywhere else, and this one predicate is the only door that lets them
+// touch an order — and only its destination fields (orderRequisitions).
+// Admin, a manager, a case manager, or any licensed clinical role.
+const canEditOrderDestination = (user) => !!user && user.accountStatus !== 'inactive' &&
+  (user.role === 'admin' || user.role === 'caseManager' || user.isManager === true ||
+    LICENSED_CLINICAL_ROLES.includes(resolveClinicalRole(user)));
 
 // ---- Care-plan signature branches on the SERVICE LINE (§3) --------------
 //   Track A / PHC  → an RN signature satisfies the care plan
@@ -473,6 +493,8 @@ module.exports = {
   CO_SIGN_ROLES,
   canCoSignEncounter,
   canCoSignNote,
+  canSubmitBilling,
+  canEditOrderDestination,
   CARE_PLAN_OUTCOME,
   evaluateCarePlanSignature,
   canCoSignCarePlan,

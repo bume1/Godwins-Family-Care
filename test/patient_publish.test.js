@@ -1,0 +1,1445 @@
+// ============================================================
+// Portal P1 (owner-directed, 2026-09-29) — the patient portal reads PUBLISHED
+// copies, written when a clinician signs. Patients never read OpenEMR.
+//
+// Why: since Session 5.2 every OpenEMR read runs as the person asking, and a
+// patient, POA or family user has no OpenEMR identity. Every patient Health
+// read failed with EMR_NOT_CONNECTED and the portal said "try again in a few
+// minutes" forever. Giving the app a system login would undo the Session 5
+// decision that there is no shared credential.
+//
+// The helpers and routes are lifted out of server.js and RUN against fakes —
+// not read — with a fake OpenEMR that THROWS if a patient route touches it.
+// Run: npm test
+// ============================================================
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
+
+const root = path.join(__dirname, '..');
+const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+const portal = fs.readFileSync(path.join(root, 'public/portal.html'), 'utf8');
+const clinicalPage = fs.readFileSync(path.join(root, 'public/clinical.html'), 'utf8');
+const patientPublish = require('../patientPublish');
+const patientRead = require('../patientReadRepository');
+const clinicalNotes = require('../clinicalNotes');
+const clinicalRepo = require('../clinicalRepository');
+const clinicalResults = require('../clinicalResults');
+const clinicalRoles = require('../clinicalRoles');
+const practiceTime = require('../public/gfc-time');
+
+const slice = (from, to) => {
+  const a = server.indexOf(from); const b = server.indexOf(to, a + from.length);
+  assert.ok(a >= 0 && b > a, `anchors moved: ${from} … ${to}`);
+  return server.slice(a, b);
+};
+// The body of one route, bounded to the ROUTE (its closing `});`), not to
+// "whatever comes next" — a scan that runs on reads helpers between routes.
+const routeBody = (start) => {
+  const a = server.indexOf(start);
+  assert.ok(a >= 0, `route moved: ${start}`);
+  const b = server.indexOf('\n});\n', a);
+  return server.slice(a, b + 5);
+};
+const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+
+// ---- The harness: real server code, fake world -----------------------------
+const mkRes = () => {
+  const r = { statusCode: 200, body: undefined, headers: {},
+    status(c) { r.statusCode = c; return r; }, json(b) { r.body = b; return r; },
+    send(b) { r.body = b; return r; }, setHeader(k, v) { r.headers[k] = v; } };
+  return r;
+};
+
+const CLIENT = { id: 'c-1', role: 'client', name: 'Juanita Guess', preferredName: 'Juanita', slug: 'juanita-guess', serviceLine: 'IHPC',
+  openEmrPatientId: 'puuid-1', consents: { roiFamily: 'signed', consentToTreat: 'signed' }, sharing: {} };
+const CLIENT_USER = { id: 'c-1', role: 'client', name: 'Juanita Guess' };
+const FAMILY_USER = { id: 'f-1', role: 'family', name: 'Sam Relative', familyOfClientId: 'c-1', familyIsPoa: false };
+const POA_USER = { id: 'f-2', role: 'family', name: 'Luka Agent', familyOfClientId: 'c-1', familyIsPoa: true };
+const PROVIDER = { id: 'u-1', role: 'user', name: 'Bethel Godwins', licenseLevel: 'FNP', npi: '1234567893', hasClinicalAccess: true, clinicalRole: 'provider' };
+const NURSE = { id: 'u-2', role: 'user', name: 'Rita Nurse', hasClinicalAccess: true, clinicalRole: 'rn' };
+
+const SHARED_NOTE = {
+  kind: 'followup', visitDate: '2026-09-28', chiefConcern: 'Blood pressure follow-up',
+  subjective: 'Feels **better** this week.\n- less dizzy', objective: 'Alert and comfortable.', assessment: 'Blood pressure improving.',
+  plan: 'Continue the current medicine.', sections: {}, hp: {}, confirmedFields: [],
+  vitals: { bpSys: '128', bpDia: '78', hr: '72' }
+};
+const ATTESTATION = {
+  id: 'att-1', encounterUuid: 'e1', signedAt: '2026-09-28T15:00:00.000Z',
+  signedBy: { id: 'u-1', name: 'Bethel Godwins', licenseLevel: 'FNP', npi: '1234567893' },
+  signedByClinicalRole: 'provider', coSignStatus: 'not_required', portalHold: null
+};
+const RECORD = {
+  encounterUuid: 'e1', clientId: 'c-1', date: '2026-09-28', reason: 'Follow-up — Bethel Godwins, FNP (NPI 1234567893)',
+  diagnoses: [{ code: 'I10', description: 'Essential hypertension' }], patientSummary: 'We checked your blood pressure.',
+  followUpInstructions: 'See you in 4 weeks.', renderingProvider: { name: 'Bethel Godwins' },
+  note: SHARED_NOTE, noteStatus: 'signed', narrativeNoteSid: '9', structuredNoteSid: '10', coSignStatus: 'not_required'
+};
+
+// A summary-route call needs the publish helpers, the summary route and the
+// documents routes: they share loadPublished*/resolvePatientClinicalContext.
+const build = (opts = {}) => {
+  const store = new Map(Object.entries(opts.seed || {}));
+  const arm = { failKey: null };   // make ONE collection's write throw, to prove what happens when a republish fails
+  const db = { get: async (k) => (store.has(k) ? JSON.parse(JSON.stringify(store.get(k))) : null), set: async (k, v) => { if (arm.failKey === k) throw new Error(`write to ${k} failed`); store.set(k, JSON.parse(JSON.stringify(v))); } };
+  const loadRows = async (k) => (await db.get(k)) || [];
+  const notices = [];
+  const notify = {
+    visitSummaryReady: async (a) => { notices.push({ type: 'visit_summary_ready', ...a }); return { notified: 1 }; },
+    resultReviewed: async (a) => { notices.push({ type: 'result_reviewed', ...a }); return { notified: 1 }; }
+  };
+  const activity = [];
+  const logActivity = async (...a) => { activity.push(a); };
+  // A patient route must NEVER touch OpenEMR: any access throws.
+  // (The clinician's results-filing route legitimately asks whether OpenEMR is
+  // configured; the harness answers "no" only while THAT route runs.)
+  const openemrTouched = [];
+  const mode = { clinician: false };
+  const openemr = new Proxy({}, { get: (_, k) => {
+    if (mode.clinician && k === 'isConfigured') return () => false;
+    openemrTouched.push(String(k)); throw new Error(`patient route touched openemr.${String(k)}`);
+  } });
+  const handlers = {};
+  const app = { get: (p, ...h) => { handlers[`GET ${p}`] = h[h.length - 1]; }, post: (p, ...h) => { handlers[`POST ${p}`] = h[h.length - 1]; } };
+  const users = [CLIENT, FAMILY_USER, POA_USER, { ...PROVIDER, openEmrProviderId: '7' }];
+  const drive = { downloads: [], uploads: [] };
+  const googledrive = {
+    downloadFileBuffer: async (id) => { drive.downloads.push(id); return Buffer.from('%PDF-1.4 fake'); },
+    uploadClientDocumentFile: async (name, file) => { drive.uploads.push(file); if (opts.driveFails) throw new Error('drive down'); return { fileId: 'drv-1' }; }
+  };
+  const publishSrc = slice('const loadPublishedVisits', 'const refuseIfClosed');
+  const patientSrc = slice('const resolvePatientClinicalContext', '// GET /api/gfc/clinical/care-plan.pdf — the SIGNED');
+  const resultsSrc = slice('const receiveClinicalResult', '// Attach a result to an order.');
+  const ackSrc = slice("app.post('/api/clinical/results/:resultId/acknowledge'", '// ── GET /api/clinical/orders/overdue');
+  const pubRouteSrc = slice("app.post('/api/clinical/patients/:clientId/encounters/:euuid/publish'", '// ── Portal P1: Refresh portal chart');
+  // The REAL actorFromReq, lifted. A fake that dropped clinicalRole made every
+  // provider look unlicensed — the trap Session 4.8 recorded.
+  const actorSrc = slice('const actorFromReq =', 'const forEncounter =');
+  const names = ['db', 'loadRows', 'notify', 'logActivity', 'openemr', 'app', 'patientPublish', 'patientRead', 'clinicalNotes', 'clinicalRepo',
+    'clinicalResults', 'practiceTime', 'authenticateToken', 'requireEnrolledClient', 'requireClinicalWrite', 'resolveGfcClientRecord',
+    'isConsentSatisfied', 'isClinicalServiceLine', 'getUsers', 'googledrive', 'contentDisposition', 'detectFileType', 'uuidv4',
+    'queueNotification', 'appLinks', 'clinicalRoles', 'loadEncounterContext', 'roiStore', 'consentDefsForServiceLine', 'buildCarePlanPdfForVersion', 'renderConsentPdf', 'serveStoredDocument', 'console', 'visitReminders', 'summarizeCalendarRows', 'config'];
+  // eslint-disable-next-line no-new-func
+  const mk = new Function(...names, `
+    ${actorSrc}
+    ${publishSrc}
+    ${patientSrc}
+    ${resultsSrc}
+    ${ackSrc}
+    ${pubRouteSrc}
+    return { loadPublishedVisits, upsertPublishedVisit, holdPublishedVisit, dropPublishedForClient, patchPortalOutcome, loadPublishedChart, upsertPublishedChart, publishChartFromEmr, publishEncounterToPortal, applyPublishOutcome, receiveClinicalResult, publishAppointmentsForClient, loadPublishedAppointments };`);
+  const fns = mk(db, loadRows, notify, logActivity, openemr, app, patientPublish, patientRead, clinicalNotes, clinicalRepo,
+    clinicalResults, practiceTime, (q, s, n) => n(), (q, s, n) => n(), (q, s, n) => n(),
+    async (u) => (u.role === 'client' ? CLIENT_LIVE(opts, u) : (u.familyOfClientId ? CLIENT_LIVE(opts, { id: u.familyOfClientId }) : null)),
+    (v) => ['signed', 'signed_offline'].includes(v), (l) => ['IHPC', 'BOTH'].includes(String(l || '').toUpperCase()),
+    async () => users, googledrive, (d, n) => `${d}; filename="${n}"`, () => 'application/pdf', () => 'res-1',
+    async () => ({ queued: true }), { PATHS: { CLINICAL: '/clinical' } }, clinicalRoles,
+    async (req, res) => (opts.ctxFor ? opts.ctxFor(req, res) : null), { listProviderAuthorizations: async () => [] }, () => [],
+    async () => ({ buffer: Buffer.from('x'), source: 'x' }), async () => ({ error: 'n/a' }), async () => {},
+    { log() {}, error() {}, warn() {} },
+    require('../visitReminders'),
+    async (rows) => rows.map(r => clinicalRepo.summarizeAppointmentRow(r, r.__linked || null, opts.now || new Date())),
+    { ROLES: { CLIENT: 'client' } });
+  const clinician = (fn) => async (...args) => { mode.clinician = true; try { return await fn(...args); } finally { mode.clinician = false; } };
+  return { store, db, arm, loadRows, notices, activity, openemr, openemrTouched, handlers, drive, ...fns,
+    receiveClinicalResult: clinician(fns.receiveClinicalResult) };
+};
+const CLIENT_LIVE = (opts, u) => ({ ...CLIENT, ...(opts.client || {}), id: u.id === 'c-1' || u.familyOfClientId ? 'c-1' : u.id });
+
+const call = async (h, key, user, extra = {}) => {
+  const res = mkRes();
+  await h.handlers[key]({ user, params: {}, body: {}, query: {}, ...extra }, res);
+  return res;
+};
+const signedCtx = (h, over = {}) => ({
+  client: CLIENT, encounterUuid: 'e1', record: { ...RECORD }, attestation: { ...ATTESTATION }, prescriptions: [], orders: [], addenda: [],
+  actor: { id: 'u-1', name: 'Bethel Godwins', npi: '1234567893' },
+  emr: { getProblems: async () => [], getAllergies: async () => [], getMedicationRequests: async () => [],
+    getSoapNote: async () => null },
+  ...over
+});
+const readSummary = async (h, user) => (await call(h, 'GET /api/gfc/clinical/summary', user)).body;
+const publish = async (h, over) => h.publishEncounterToPortal(signedCtx(h, over), over && over.opts || {});
+
+// ============================================================
+// 1. THE RULE: patients never read OpenEMR (build-enforced)
+// ============================================================
+test('1. no patient-facing /api/gfc/ route calls openemr.forActor( — patients never read OpenEMR', () => {
+  const re = /\napp\.(get|post|put|delete|patch)\('(\/api\/gfc[^']*)'/g;
+  const starts = []; let m;
+  while ((m = re.exec(server))) starts.push({ at: m.index, path: m[2] });
+  const boundaries = [...server.matchAll(/\napp\.(get|post|put|delete|patch|use)\(/g)].map(x => x.index);
+  let checked = 0; const offenders = [];
+  for (const st of starts) {
+    // STAFF routes under /api/gfc/admin/ act as the staff member signed in and
+    // are not patient reads; every other /api/gfc/ route is a client/family one.
+    if (st.path.startsWith('/api/gfc/admin/')) continue;
+    const end = boundaries.find(x => x > st.at + 5) || server.length;
+    const body = stripComments(server.slice(st.at, end));
+    checked += 1;
+    if (/\bopenemr\.forActor\(|\bforActor\(/.test(body)) offenders.push(st.path);
+  }
+  assert.ok(checked > 15, `the sweep must actually cover the patient routes (${checked})`);
+  assert.deepEqual(offenders, []);
+});
+
+test('1b. the summary route is served from the published copies and constructs no OpenEMR actor', () => {
+  const body = stripComments(routeBody("app.get('/api/gfc/clinical/summary'"));
+  assert.ok(!/openemr/.test(body), 'the summary route never references openemr');
+  assert.match(body, /loadPublishedChart\(client\.id\)/);
+  assert.match(body, /loadPublishedVisits\(\)/);
+  assert.ok(!/degraded/.test(body), 'there is no degraded list: nothing is read live');
+});
+
+// ============================================================
+// 2. The summary is served with NO OpenEMR token, from published rows
+// ============================================================
+test('2. a client with no OpenEMR token gets their published chart, visits and no `degraded`', async () => {
+  const h = build();
+  const out = await publish(h);
+  assert.equal(out.published, true);
+  const s = await readSummary(h, CLIENT_USER);
+  assert.equal(h.openemrTouched.length, 0, 'OpenEMR was never touched');
+  assert.equal(s.degraded, undefined);
+  assert.equal(s.visits.length, 1);
+  assert.equal(s.visits[0].date, '2026-09-28');
+  assert.equal(s.visits[0].summary.startsWith('We checked your blood pressure.'), true);
+  assert.equal(s.publishedFromVisitDate, '2026-09-28');
+  assert.ok(s.publishedAt);
+});
+test('2b. a section never published says so; it is never reported as "empty"', async () => {
+  const h = build();
+  const s = await readSummary(h, CLIENT_USER);
+  assert.deepEqual(s.published, { problems: false, allergies: false, medications: false, vitals: false });
+  assert.equal(s.problems, undefined, 'an unpublished section is absent, not []');
+  assert.deepEqual(s.visits, []);
+});
+
+// ============================================================
+// 3. Soft-fail: a publish failure never voids a signature
+// ============================================================
+test('3. a publish failure returns a warning and portalPublished=false; the republish fixes it', async () => {
+  const h = build();
+  const boom = signedCtx(h, { emr: { getProblems: async () => { throw new Error('OpenEMR down'); }, getAllergies: async () => [], getMedicationRequests: async () => [], getSoapNote: async () => null } });
+  // Chart reads soft-fail per section: the visit still publishes.
+  const partial = await h.publishEncounterToPortal(boom);
+  assert.equal(partial.published, true);
+  assert.match(partial.warning, /problems could not be read/);
+  // A throw inside the publish itself is caught and reported, never thrown.
+  const broken = signedCtx(h, { record: { ...RECORD, note: undefined, narrativeNoteSid: '9' }, emr: { getSoapNote: async () => { throw new Error('EMR_NOT_CONNECTED'); } } });
+  const failed = await h.publishEncounterToPortal(broken);
+  assert.equal(failed.published, false);
+  assert.match(failed.warning, /signed, but it did not publish/);
+  const warnings = []; const rec = { ...RECORD };
+  h.applyPublishOutcome(rec, failed, warnings);
+  assert.equal(rec.portalPublished, false);
+  assert.match(rec.portalPublishError, /EMR_NOT_CONNECTED/);
+  assert.equal(warnings.length, 1);
+  // The retry (same helper the Publish button calls) succeeds and clears the error.
+  const ok = await h.publishEncounterToPortal(signedCtx(h));
+  h.applyPublishOutcome(rec, ok, warnings);
+  assert.equal(rec.portalPublished, true);
+  assert.equal(rec.portalPublishError, null);
+});
+test('3b. the sign route persists the attestation BEFORE it publishes, and publish cannot throw out of it', () => {
+  const body = routeBody("app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign'");
+  const persisted = body.indexOf("await db.set('encounter_attestations', atts)");
+  const published = body.indexOf('publishEncounterToPortal(');
+  assert.ok(persisted > 0 && published > persisted, 'publish comes after the attestation is saved');
+  assert.match(body, /applyPublishOutcome\(record, await publishEncounterToPortal\(ctx, \{ record, attestation \}\), warnings\)/);
+  // The hold is checked, and refused, before ANYTHING is written.
+  const hold = body.indexOf('patientPublish.validateHold(');
+  assert.ok(hold > 0 && hold < persisted, 'a hold without a reason is refused before the signature is written');
+  assert.match(body, /PORTAL_HOLD_REASON_REQUIRED|holdCheck\.code/);
+});
+test('3c. the Publish button and Refresh portal chart are real, write-gated routes', () => {
+  const pub = routeBody("app.post('/api/clinical/patients/:clientId/encounters/:euuid/publish'");
+  assert.match(pub, /requireClinicalWrite/);
+  assert.match(server, /app\.post\('\/api\/clinical\/patients\/:clientId\/portal\/refresh-chart', authenticateToken, requireClinicalWrite/);
+  assert.match(pub, /ENCOUNTER_NOT_CLOSED/, 'drafts never publish');
+  assert.match(pub, /ENCOUNTER_PENDING_CO_SIGN/, 'an author note publishes from the addendum route');
+});
+
+// ============================================================
+// 4. Pending co-sign: nothing at sign, published at the addendum
+// ============================================================
+test('4. an author-signed note (pending clinician addendum) is not published; the addendum publishes it', async () => {
+  const h = build();
+  const pending = await h.publishEncounterToPortal(signedCtx(h, { record: { ...RECORD, coSignStatus: 'pending' } }));
+  assert.equal(pending.published, false);
+  assert.equal(pending.skipped, 'PENDING_CO_SIGN');
+  assert.deepEqual(await h.loadPublishedVisits(), [], 'nothing was stored');
+  // The clinician addendum clears it, and THAT is where it first publishes.
+  const cleared = await h.publishEncounterToPortal(signedCtx(h, {
+    record: { ...RECORD, coSignStatus: 'cleared', coSignedAt: '2026-09-28T18:00:00.000Z', coSignedBy: { id: 'u-1', name: 'Bethel Godwins', licenseLevel: 'FNP' } },
+    attestation: { ...ATTESTATION, signedBy: { id: 'u-2', name: 'Rita Nurse', licenseLevel: 'RN' }, coSignStatus: 'pending' },
+    addenda: [{ text: 'I agree with the plan.', by: { name: 'Bethel Godwins', licenseLevel: 'FNP' }, at: '2026-09-28T18:00:00.000Z', kind: 'clinician_addendum' }]
+  }));
+  assert.equal(cleared.published, true);
+  const rows = await h.loadPublishedVisits();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].note.addenda[0].kind, 'clinician_addendum');
+});
+test('4b. the co-sign route publishes; the sign route skips a pending note through the same helper', () => {
+  const cosign = routeBody("app.post('/api/clinical/patients/:clientId/encounters/:euuid/co-sign'");
+  assert.match(cosign, /applyPublishOutcome\(record, await publishEncounterToPortal\(ctx, \{ record, addenda:/);
+  const publishFn = slice('const publishEncounterToPortal', 'const applyPublishOutcome');
+  assert.match(publishFn, /rec\.coSignStatus === 'pending'\) return \{ published: false, skipped: 'PENDING_CO_SIGN' \}/);
+});
+
+// ============================================================
+// 5. Addenda are part of the signed record
+// ============================================================
+test('5. an addendum republishes the visit with the addendum on it', async () => {
+  const h = build();
+  await publish(h);
+  const before = (await h.loadPublishedVisits())[0];
+  assert.deepEqual(before.note.addenda, []);
+  await h.publishEncounterToPortal(signedCtx(h), { addenda: [{ text: 'Blood pressure log reviewed.', by: { name: 'Bethel Godwins', licenseLevel: 'FNP' }, at: '2026-09-29T10:00:00.000Z' }] });
+  const after = (await h.loadPublishedVisits())[0];
+  assert.equal(after.note.addenda.length, 1);
+  assert.equal(after.note.addenda[0].text, 'Blood pressure log reviewed.');
+  assert.equal((await h.loadPublishedVisits()).length, 1, 'one row per encounter, updated in place');
+  const s = await readSummary(h, CLIENT_USER);
+  assert.equal(s.visits[0].note.addenda.length, 1);
+});
+test('5b. the addendum and co-signature routes republish an already-published visit', () => {
+  const addenda = routeBody("app.post('/api/clinical/patients/:clientId/encounters/:euuid/addenda'");
+  assert.match(addenda, /if \(ctx\.record\.portalPublished\) \{\s*portalOut = await publishEncounterToPortal\(ctx, \{ addenda:/);
+  assert.match(addenda, /await patchPortalOutcome\(ctx\.encounterUuid, portalOut\)/, 'the portal fields are written fresh, not from the stale copy');
+  const cosigs = routeBody("app.post('/api/clinical/patients/:clientId/encounters/:euuid/co-signatures'");
+  assert.match(cosigs, /if \(record\.portalPublished\) \{\s*portalOut = await publishEncounterToPortal\(/);
+  assert.match(cosigs, /await patchPortalOutcome\(ctx\.encounterUuid, portalOut\)/);
+});
+
+// ============================================================
+// 6. The billing-plumbing note is never a patient's note
+// ============================================================
+test('6. the structured-record note never appears in any payload', async () => {
+  const legacyRecord = { ...RECORD, note: undefined };
+  for (const soap of [
+    { id: '10', subjective: 'anything', objective: 'x', assessment: 'x', plan: 'x' },                        // by sid
+    { id: '77', subjective: '[GFC STRUCTURED RECORD v1]\nservices: 99349', objective: 'x', assessment: 'x', plan: 'x' } // by content
+  ]) {
+    const h = build();
+    const out = await h.publishEncounterToPortal(signedCtx(h, { record: legacyRecord, emr: { getProblems: async () => [], getAllergies: async () => [], getMedicationRequests: async () => [], getSoapNote: async () => soap } }));
+    assert.equal(out.published, true);
+    const row = (await h.loadPublishedVisits())[0];
+    assert.equal(row.note, null, 'no note is published from the structured record');
+    for (const user of [CLIENT_USER, POA_USER]) {
+      const s = JSON.stringify(await readSummary(h, user));
+      assert.ok(!/STRUCTURED RECORD|services: 99349/.test(s));
+    }
+  }
+});
+test('6b. a legacy OpenEMR-only note is published without its attribution header, NPI or signature block', async () => {
+  const h = build();
+  const soap = {
+    id: '9', subjective: '[GFC CLINICIAN] Bethel Godwins, FNP (NPI 1234567893)\nDocumented by Bethel Godwins\nPatient reports feeling better.',
+    objective: 'VITALS — BP 128/78; HR 72; Temp —; RR —; SpO2 97; Wt —; Ht —\nLungs clear.', assessment: 'Stable.',
+    plan: 'Continue medicine.\n========================================\nELECTRONICALLY SIGNED\nSigned by Bethel Godwins, FNP (NPI 1234567893)'
+  };
+  await h.publishEncounterToPortal(signedCtx(h, { record: { ...RECORD, note: undefined }, emr: { getProblems: async () => [], getAllergies: async () => [], getMedicationRequests: async () => [], getSoapNote: async () => soap } }));
+  const s = JSON.stringify(await readSummary(h, CLIENT_USER));
+  assert.match(s, /Patient reports feeling better/);
+  assert.ok(!/1234567893|GFC CLINICIAN|ELECTRONICALLY SIGNED|Documented by/.test(s), 'no NPI, header or signature block from the legacy text');
+});
+test('6c. no NPI, billing field or attestation text reaches any audience, in any section', async () => {
+  const h = build();
+  await publish(h);
+  for (const user of [CLIENT_USER, POA_USER, FAMILY_USER]) {
+    h.store.set('users', []);
+    const s = JSON.stringify(await readSummary(h, user));
+    assert.ok(!/1234567893|npi|billing|attestation|structuredNote|narrativeNote/i.test(s), `leak for ${user.id}`);
+  }
+});
+
+// ============================================================
+// 7. Holding a note from the portal
+// ============================================================
+test('7. a held note publishes the summary WITHOUT `note`, for every audience', async () => {
+  const h = build();
+  const att = { ...ATTESTATION, portalHold: { reason: 'risk_of_harm', by: { name: 'Bethel Godwins' }, at: ATTESTATION.signedAt } };
+  await h.publishEncounterToPortal(signedCtx(h, { attestation: att }), { attestation: att });
+  const row = (await h.loadPublishedVisits())[0];
+  assert.equal(row.note, null);
+  assert.deepEqual(row.noteHeld, { reason: 'risk_of_harm' });
+  h.store.set('users', []);
+  for (const user of [CLIENT_USER, POA_USER]) {
+    const s = await readSummary(h, user);
+    assert.equal(s.visits.length, 1, 'the summary still publishes');
+    assert.equal('note' in s.visits[0], false, `no note for ${user.id}`);
+    assert.equal(s.visits[0].noteHeld, true, 'the portal is told the note is available on request');
+  }
+  // Family whose client shares full visit summaries: still no note.
+  const hf = build({ client: { sharing: { visitSummaries: 'full' } } });
+  await hf.publishEncounterToPortal(signedCtx(hf, { attestation: att }), { attestation: att });
+  assert.equal('note' in (await readSummary(hf, FAMILY_USER)).visits[0], false);
+});
+test('7b. a hold needs a reason from the fixed list; releasing it is a republish', async () => {
+  assert.deepEqual(patientPublish.validateHold(undefined), { hold: null });
+  assert.deepEqual(patientPublish.validateHold(false), { hold: null });
+  assert.deepEqual(patientPublish.validateHold({ reason: 'patient_request' }), { hold: { reason: 'patient_request' } });
+  for (const bad of [{}, { reason: '' }, { reason: 'because' }, true, 'yes', { reason: null }]) {
+    const r = patientPublish.validateHold(bad);
+    assert.equal(r.code, 'PORTAL_HOLD_REASON_REQUIRED', JSON.stringify(bad));
+    assert.equal(r.hold, undefined, 'a bad hold is refused, not read as "no hold"');
+  }
+  const h = build();
+  const held = { ...ATTESTATION, portalHold: { reason: 'patient_request' } };
+  await h.publishEncounterToPortal(signedCtx(h, { attestation: held }), { attestation: held });
+  assert.equal((await h.loadPublishedVisits())[0].note, null);
+  await h.publishEncounterToPortal(signedCtx(h), {});
+  assert.ok((await h.loadPublishedVisits())[0].note, 'releasing the hold publishes the note');
+});
+test('7c. the publish route answers 400 for a hold with no reason and writes nothing', () => {
+  const pub = routeBody("app.post('/api/clinical/patients/:clientId/encounters/:euuid/publish'");
+  const check = pub.indexOf('patientPublish.validateHold(holdInput)');
+  const write = pub.indexOf("db.set('encounter_attestations'");
+  assert.ok(check > 0 && write > check, 'validated before it writes');
+  assert.match(pub, /status\(400\)\.json\(\{ error: check\.error, code: check\.code/);
+});
+
+// ============================================================
+// 8. Audiences: note and results follow the sharing rules
+// ============================================================
+test('8. patient and POA get the note; non-POA family only at visitSummaries "full"', async () => {
+  const h = build();
+  await publish(h);
+  h.store.set('users', []);
+  for (const user of [CLIENT_USER, POA_USER]) {
+    const v = (await readSummary(h, user)).visits[0];
+    assert.ok(v.note, `note for ${user.id}`);
+    assert.match(JSON.stringify(v.note), /Feels/);
+  }
+  const summaryOnly = (await readSummary(h, FAMILY_USER)).visits[0];   // default sharing: summary level
+  assert.equal('note' in summaryOnly, false);
+  assert.equal('summary' in summaryOnly, false, 'the family summary level carries no visit text either');
+  const full = build({ client: { sharing: { visitSummaries: 'full' } } });
+  await publish(full);
+  assert.ok((await readSummary(full, FAMILY_USER)).visits[0].note, 'family with full visit summaries gets the note');
+  const none = build({ client: { sharing: { visitSummaries: 'none' } } });
+  await publish(none);
+  assert.equal((await readSummary(none, FAMILY_USER)).visits, undefined, 'visit summaries off: the section is omitted entirely');
+});
+test('8b. signatures shown to a patient carry names and dates, never an NPI or billing capacity', async () => {
+  const h = build();
+  await publish(h);
+  const sig = (await readSummary(h, CLIENT_USER)).visits[0].note.signatures;
+  assert.equal(sig[0].name, 'Bethel Godwins, FNP');
+  assert.deepEqual(Object.keys(sig[0]).sort(), ['at', 'name', 'role']);
+});
+
+// ============================================================
+// 9. Results: visible on filing, ONE notice on review
+// ============================================================
+const ORDER = () => ({ id: 'o1', clientId: 'c-1', orderType: 'lab', orderReference: 'GFC-ORD-ABCDEF', encounterUuid: 'e1', status: 'sent',
+  orderingClinician: { id: 'u-1', name: 'Bethel Godwins' }, sends: [] });
+// `order: null` files an UNMATCHED document (no order, no reference).
+const fileResult = async (h, over = {}, { order = ORDER() } = {}) => {
+  const req = { user: PROVIDER, params: {}, body: { interpretation: 'abnormal', resultDate: '2026-09-27', performedBy: 'Quest Diagnostics', summary: 'A1c 8.1 — INTERNAL SHORTHAND', ...over }, file: { buffer: Buffer.from('%PDF-1.4 x'), originalname: 'a1c.pdf' } };
+  const res = mkRes();
+  await h.receiveClinicalResult(req, res, { order, rows: order ? [order] : null, idx: order ? 0 : -1, client: CLIENT });
+  return res;
+};
+const ackReq = (id, body = {}, user = PROVIDER) => ({ user, params: { resultId: id }, body });
+test('9. a filed result is on the portal at once, with ZERO notices, and says it is not yet reviewed', async () => {
+  const h = build();
+  const res = await fileResult(h);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(h.notices, [], 'nothing is sent at filing');
+  const row = (await h.loadRows('clinical_results'))[0];
+  assert.ok(row.releasedToPatientAt, 'released at filing');
+  assert.equal(row.patientNotifiedAt, null);
+  assert.equal(row.patientCopy.storageRef, 'drv-1', 'the patient copy is stored the way a client upload is');
+  h.store.set('users', []);
+  const s = await readSummary(h, CLIENT_USER);
+  assert.equal(s.results.length, 1);
+  assert.equal(s.results[0].reviewStatus, 'not_reviewed');
+  assert.equal(s.results[0].reviewedBy, null);
+  assert.equal(s.results[0].hasFile, true);
+});
+test('9b. acknowledging sends exactly ONE notice; re-acknowledging sends none', async () => {
+  const h = build();
+  await fileResult(h);
+  const id = (await h.loadRows('clinical_results'))[0].id;
+  const res = mkRes();
+  await h.handlers['POST /api/clinical/results/:resultId/acknowledge'](ackReq(id, { followUpNote: 'Repeat A1c in 3 months.', patientNote: 'Your sugar is a little high; we will adjust your plan.' }), res);
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+  assert.deepEqual(h.notices.map(n => n.type), ['result_reviewed']);
+  assert.equal(h.notices[0].clientId, 'c-1');
+  const again = mkRes();
+  await h.handlers['POST /api/clinical/results/:resultId/acknowledge'](ackReq(id, { followUpNote: 'again' }), again);
+  assert.equal(again.statusCode, 409);
+  assert.equal(h.notices.length, 1, 'still exactly one');
+  const row = (await h.loadRows('clinical_results'))[0];
+  assert.ok(row.patientNotifiedAt);
+  const s = await readSummary(h, CLIENT_USER);
+  assert.equal(s.results[0].reviewStatus, 'reviewed');
+  assert.equal(s.results[0].reviewedBy, 'Bethel Godwins');
+  assert.equal(s.results[0].patientNote, 'Your sugar is a little high; we will adjust your plan.');
+});
+test('9c. the app\'s interpretation, the inbox summary and the follow-up note NEVER reach a patient payload', async () => {
+  const h = build();
+  await fileResult(h);
+  const id = (await h.loadRows('clinical_results'))[0].id;
+  await h.handlers['POST /api/clinical/results/:resultId/acknowledge'](ackReq(id, { followUpNote: 'SECRET-FOLLOWUP-PLAN', patientNote: 'friendly' }), mkRes());
+  h.store.set('users', []);
+  for (const user of [CLIENT_USER, POA_USER]) {
+    const s = JSON.stringify(await readSummary(h, user));
+    assert.ok(!/INTERNAL SHORTHAND|SECRET-FOLLOWUP-PLAN|"interpretation"|abnormal|routeTo|patientCopy|storageRef|drv-1/.test(s), `leak for ${user.id}: ${s}`);
+  }
+  const docs = JSON.stringify((await call(h, 'GET /api/gfc/clinical/documents', CLIENT_USER)).body);
+  assert.ok(!/INTERNAL SHORTHAND|SECRET-FOLLOWUP|drv-1/.test(docs));
+  for (const f of ['interpretation', 'followUpNote', 'routeTo', 'patientCopy', 'storageRef']) assert.ok(patientRead.CLINICIAN_ONLY_FIELDS.includes(f), f);
+  for (const f of patientRead.RESULT_CLINICIAN_ONLY_FIELDS) assert.ok(!patientRead.FILTER_MAP.result.full.includes(f), f);
+});
+test('9d. a patientNote is optional and is not shown before review', async () => {
+  const h = build();
+  await fileResult(h, { interpretation: 'normal' });
+  const id = (await h.loadRows('clinical_results'))[0].id;
+  const rows = await h.loadRows('clinical_results');
+  rows[0].patientNote = 'stale text set before review';
+  await h.db.set('clinical_results', rows);
+  assert.equal((await readSummary(h, CLIENT_USER)).results[0].patientNote, null, 'not shown until reviewed');
+  await h.handlers['POST /api/clinical/results/:resultId/acknowledge'](ackReq(id, {}), mkRes());
+  assert.equal((await readSummary(h, CLIENT_USER)).results[0].patientNote, null, 'and empty when the clinician wrote none');
+});
+test('9e. the result notice reaches a POA by name and says nothing about the result', () => {
+  const src = fs.readFileSync(path.join(root, 'notifications.js'), 'utf8');
+  const fn = src.slice(src.indexOf('async function resultReviewed'), src.indexOf('// ---- 5. Staff asked the client for documents'));
+  assert.match(fn, /paragraphs: \['Your test result has been reviewed/, 'opens with "Your test result" so a POA is told whose it is');
+  assert.ok(!/resultDate|performedBy|label|interpretation|patientNote|summary/.test(fn.replace(/relatedEntityType|entityType/g, '')), 'no result detail in the notice');
+  assert.match(src, /replace\(\/\^Your \(visit\|test result\)\//);
+  assert.match(fn, /entityId: `\$\{resultId\}:reviewed`/);
+});
+test('9f. a result filed while Drive is down is still filed, listed, and warned about', async () => {
+  const h = build({ driveFails: true });
+  const res = await fileResult(h);
+  assert.equal(res.statusCode, 200);
+  assert.match(res.body.warnings.join(' '), /portal copy could not be stored/);
+  h.store.set('users', []);
+  const r = (await readSummary(h, CLIENT_USER)).results[0];
+  assert.equal(r.hasFile, false, 'listed without a document to open, never a broken link');
+});
+test('9j. an UNMATCHED outside record is not on the portal until a clinician reviews it, then it is released with one notice', async () => {
+  const h = build();
+  const res = await fileResult(h, { interpretation: 'normal' }, { order: null });
+  assert.equal(res.statusCode, 200);
+  const filed = (await h.loadRows('clinical_results'))[0];
+  assert.equal(filed.unmatched, true);
+  assert.equal(filed.releasedToPatientAt, null, 'nothing confirms whose it is, so it is not released on filing');
+  h.store.set('users', []);
+  assert.deepEqual((await readSummary(h, CLIENT_USER)).results, [], 'not listed');
+  assert.equal((await call(h, 'GET /api/gfc/clinical/documents/:docId/file', CLIENT_USER, { params: { docId: `result:${filed.id}` } })).statusCode, 404, 'and not openable');
+  await h.handlers['POST /api/clinical/results/:resultId/acknowledge'](ackReq(filed.id, {}), mkRes());
+  const after = (await h.loadRows('clinical_results'))[0];
+  assert.ok(after.releasedToPatientAt, 'released by the review');
+  assert.equal(h.notices.length, 1, 'and the patient is told once');
+  assert.equal((await readSummary(h, CLIENT_USER)).results.length, 1);
+});
+test('9k. a result for a CANCELLED order is refused before anything is uploaded or stored', async () => {
+  const h = build();
+  const res = await fileResult(h, {}, { order: { ...ORDER(), status: 'cancelled' } });
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.body.code, 'ORDER_CANCELLED');
+  assert.deepEqual(h.drive.uploads, [], 'no Drive copy');
+  assert.deepEqual(await h.loadRows('clinical_results'), [], 'no row, so nothing for the patient to see');
+});
+test('9l. the acknowledgement is saved BEFORE the patient is told, and a result filed meanwhile is not lost', async () => {
+  const body = routeBody("app.post('/api/clinical/results/:resultId/acknowledge'");
+  const saved = body.indexOf("await db.set('clinical_results', fresh)");
+  const told = body.indexOf('notify.resultReviewed(');
+  assert.ok(saved > 0 && told > saved, 'persist first, then notify');
+  assert.match(body, /const fresh = await loadRows\('clinical_results'\)/, 'the write is onto a copy read just now');
+  // Behaviour: a second result filed while the notice is in flight survives.
+  const h = build();
+  await fileResult(h);
+  const id = (await h.loadRows('clinical_results'))[0].id;
+  const realNotify = h.notices.push.bind(h.notices);
+  h.notices.push = (n) => { const rows = h.store.get('clinical_results'); rows.push({ id: 'filed-meanwhile', clientId: 'c-1', releasedToPatientAt: 'x' }); h.store.set('clinical_results', rows); return realNotify(n); };
+  await h.handlers['POST /api/clinical/results/:resultId/acknowledge'](ackReq(id, { followUpNote: 'plan' }), mkRes());
+  const ids = (await h.loadRows('clinical_results')).map(r => r.id);
+  assert.ok(ids.includes('filed-meanwhile'), 'the result filed during the notice is still there');
+  const row = (await h.loadRows('clinical_results')).find(r => r.id === id);
+  assert.ok(row.acknowledgedAt && row.patientNotifiedAt);
+});
+test('9g. a result released BEFORE this feature existed sends no notice at review (it is not on the portal)', () => {
+  const ack = routeBody("app.post('/api/clinical/results/:resultId/acknowledge'");
+  assert.match(ack, /applied\.result\.releasedToPatientAt && !applied\.result\.patientNotifiedAt/);
+});
+test('9h. results reach non-POA family only when sharing.results is on; the document follows the same rule', async () => {
+  const closed = build();
+  await fileResult(closed);
+  closed.store.set('users', []);
+  assert.equal((await readSummary(closed, FAMILY_USER)).results, undefined, 'default: closed to non-POA family');
+  assert.equal(patientRead.SHARING_DEFAULTS.results, false);
+  const id = (await closed.loadRows('clinical_results'))[0].id;
+  const denied = await call(closed, 'GET /api/gfc/clinical/documents/:docId/file', FAMILY_USER, { params: { docId: `result:${id}` } });
+  assert.equal(denied.statusCode, 403);
+  const open = build({ client: { sharing: { results: true } } });
+  await fileResult(open);
+  const oid = (await open.loadRows('clinical_results'))[0].id;
+  assert.equal((await readSummary(open, FAMILY_USER)).results.length, 1);
+  const got = await call(open, 'GET /api/gfc/clinical/documents/:docId/file', FAMILY_USER, { params: { docId: `result:${oid}` } });
+  assert.equal(got.statusCode, 200);
+  assert.deepEqual(open.drive.downloads, ['drv-1']);
+  // The patient can open their own; another client's result id is a 404.
+  const mine = await call(open, 'GET /api/gfc/clinical/documents/:docId/file', CLIENT_USER, { params: { docId: `result:${oid}` } });
+  assert.equal(mine.statusCode, 200);
+  const rows = await open.loadRows('clinical_results');
+  rows.push({ ...rows[0], id: 'other', clientId: 'c-OTHER' });
+  await open.db.set('clinical_results', rows);
+  const foreign = await call(open, 'GET /api/gfc/clinical/documents/:docId/file', CLIENT_USER, { params: { docId: 'result:other' } });
+  assert.equal(foreign.statusCode, 404, 'another client\'s result is never served');
+});
+test('9i. the patient document index lists result copies and never an OpenEMR-only document', async () => {
+  const h = build();
+  await fileResult(h);
+  const id = (await h.loadRows('clinical_results'))[0].id;
+  const docs = (await call(h, 'GET /api/gfc/clinical/documents', CLIENT_USER)).body.documents;
+  const row = docs.find(d => d.id === `result:${id}`);
+  assert.ok(row && row.openable);
+  assert.equal(row.note, 'Not yet reviewed by your care team');
+  assert.equal(h.openemrTouched.length, 0);
+  const emr = await call(h, 'GET /api/gfc/clinical/documents/:docId/file', CLIENT_USER, { params: { docId: 'emr:5' } });
+  assert.equal(emr.statusCode, 404);
+  assert.equal(emr.body.code, 'EMR_DOCUMENT_NOT_IN_PORTAL');
+});
+
+// ============================================================
+// 10. A sharing change takes effect on the next read, with no republish
+// ============================================================
+test('10. changing the client\'s sharing changes the very next read — nothing is republished', async () => {
+  const h = build();
+  const chartEmr = { getProblems: async () => [{ id: 'p1', code: { text: 'Hypertension' }, clinicalStatus: { text: 'active' } }],
+    getAllergies: async () => [{ id: 'a1', code: { text: 'Penicillin' }, criticality: 'high' }],
+    getMedicationRequests: async () => [{ id: 'm1', medicationCodeableConcept: { text: 'Lisinopril 10 mg' }, status: 'active', dosageInstruction: [{ text: 'daily' }] },
+      { id: 'm2', medicationCodeableConcept: { text: 'Old drug' }, status: 'stopped' }], getSoapNote: async () => null };
+  await h.publishEncounterToPortal(signedCtx(h, { emr: chartEmr }));
+  const publishedAt = (await h.loadPublishedChart('c-1')).publishedAt;
+  const before = await readSummary(h, FAMILY_USER);
+  assert.equal(before.medications, undefined, 'default sharing: medications closed to non-POA family');
+  assert.equal(before.allergies, undefined);
+  const clientRow = { ...CLIENT, sharing: { medications: true, allergies: true } };
+  const h2 = build({ client: { sharing: clientRow.sharing }, seed: Object.fromEntries(h.store) });
+  const after = await readSummary(h2, FAMILY_USER);
+  assert.deepEqual(after.medications.map(m => m.name), ['Lisinopril 10 mg'], 'stopped medications are not published');
+  assert.deepEqual(after.allergies.map(a => a.name), ['Penicillin']);
+  assert.equal((await h2.loadPublishedChart('c-1')).publishedAt, publishedAt, 'no republish happened');
+  // And the patient always sees the published chart.
+  assert.equal((await readSummary(h2, CLIENT_USER)).problems[0].name, 'Hypertension');
+});
+
+// ============================================================
+// Chart publishing: a failed section keeps the previous copy
+// ============================================================
+test('a section that fails to read is left as it was published — never overwritten with an empty list', async () => {
+  const h = build();
+  const good = { getProblems: async () => [{ id: 'p1', code: { text: 'Hypertension' }, clinicalStatus: { text: 'active' } }], getAllergies: async () => [{ id: 'a1', code: { text: 'Penicillin' } }], getMedicationRequests: async () => [], getSoapNote: async () => null };
+  await h.publishEncounterToPortal(signedCtx(h, { emr: good }));
+  const failing = { ...good, getAllergies: async () => { throw new Error('403'); } };
+  const out = await h.publishEncounterToPortal(signedCtx(h, { emr: failing }));
+  assert.equal(out.published, true);
+  assert.match(out.warning, /allergies could not be read/);
+  const chart = await h.loadPublishedChart('c-1');
+  assert.equal(chart.allergies.length, 1, 'the earlier allergy list stands');
+  assert.equal(chart.history.length >= 1 && chart.history.length <= patientPublish.CHART_HISTORY_MAX, true);
+});
+test('mergeChart keeps a prior section even when the caller passes an explicit undefined for it', () => {
+  // buildPublishedChart leaves a failed section's key OUT, which a spread
+  // already handles; this is the other way a failed read can arrive, and the
+  // only one the explicit loop in mergeChart exists for.
+  const prior = patientPublish.buildPublishedChart({ clientId: 'c', allergies: [{ id: 'a1', code: { text: 'Penicillin' } }], at: '2026-09-01T00:00:00Z' });
+  const merged = patientPublish.mergeChart(prior, { clientId: 'c', allergies: undefined, publishedAt: '2026-09-02T00:00:00Z' });
+  assert.equal(merged.allergies.length, 1);
+  assert.equal(merged.publishedAt, '2026-09-02T00:00:00Z');
+});
+test('a telehealth visit\'s patient-reported vitals still reach the portal', () => {
+  const tele = { ...SHARED_NOTE, visit: { modality: 'telehealth' } };
+  const v = patientPublish.vitalsFromNote(tele, '2026-09-28');
+  assert.equal(v.bloodPressure, '128/78');
+  assert.equal(v.heartRate, '72');
+  const two = patientPublish.vitalsFromNote({ ...SHARED_NOTE, vitals: { bpRightSys: '130', bpRightDia: '80', bpLeftSys: '126', bpLeftDia: '78' } }, '2026-09-28');
+  assert.equal(two.bloodPressure, '130/80', 'the higher arm, as everywhere else');
+  assert.match(two.bloodPressureNote, /left arm 126\/78/);
+  assert.equal(patientPublish.vitalsFromNote({ ...SHARED_NOTE, vitals: {} }, 'x'), null, 'nothing recorded: omitted, never an empty panel');
+});
+test('the chart history is capped and never nests', () => {
+  let prior = null;
+  for (let i = 0; i < 30; i += 1) prior = patientPublish.mergeChart(prior, patientPublish.buildPublishedChart({ clientId: 'c', problems: [], at: `2026-01-${String((i % 28) + 1).padStart(2, '0')}T00:00:00Z` }));
+  assert.equal(prior.history.length, patientPublish.CHART_HISTORY_MAX);
+  assert.ok(prior.history.every(h => !('history' in h)), 'a snapshot carries no history of its own');
+});
+
+// ============================================================
+// Republishing tells the patient only what is new
+// ============================================================
+test('the visit-summary notice goes out on publish, not again for an unchanged republish, and again when the note changes', async () => {
+  const h = build();
+  await publish(h);
+  assert.equal(h.notices.filter(n => n.type === 'visit_summary_ready').length, 1);
+  await publish(h);
+  assert.equal(h.notices.length, 1, 'unchanged: no second notice');
+  const changed = signedCtx(h, { record: { ...RECORD, note: { ...SHARED_NOTE, plan: 'Increase the dose.' } } });
+  await h.publishEncounterToPortal(changed);
+  assert.equal(h.notices.length, 2, 'the note text changed: the patient is told');
+  assert.match(h.notices[0].contentHash, /^[0-9a-f]{16}$/);
+  assert.notEqual(h.notices[0].contentHash, h.notices[1].contentHash);
+});
+test('a co-signature changes no text, so it notifies nobody', () => {
+  const a = patientPublish.buildPublishedVisit({ clientId: 'c', encounterUuid: 'e1', record: RECORD, attestation: ATTESTATION, addenda: [] });
+  const b = patientPublish.buildPublishedVisit({ clientId: 'c', encounterUuid: 'e1', record: { ...RECORD, coSignatures: [{ id: 'u-9', name: 'Dr. Co', at: '2026-09-29T00:00:00Z' }] }, attestation: ATTESTATION, addenda: [] });
+  assert.equal(a.contentHash, b.contentHash);
+  assert.notEqual(JSON.stringify(a.note.signatures), JSON.stringify(b.note.signatures));
+});
+test('a draft, a voided note and an unsigned encounter never publish', async () => {
+  const h = build();
+  assert.equal((await h.publishEncounterToPortal(signedCtx(h, { attestation: null }))).skipped, 'NOT_SIGNED');
+  assert.equal((await h.publishEncounterToPortal(signedCtx(h, { record: { ...RECORD, noteStatus: 'voided' } }))).skipped, 'VOIDED');
+  assert.deepEqual(await h.loadPublishedVisits(), []);
+  assert.deepEqual(h.notices, []);
+});
+
+// ============================================================
+// Latest visit card content rules
+// ============================================================
+test('the visit overview is the clinician\'s own words, without the prescription and test sentences the page lists separately', () => {
+  const rx = [{ drug: 'Lisinopril', dose: '10 mg', transmission: 'none' }];
+  const orders = [{ orderType: 'lab', status: 'ordered', tests: ['A1c'] }];
+  const row = patientPublish.buildPublishedVisit({ clientId: 'c', encounterUuid: 'e1', record: RECORD, attestation: ATTESTATION, prescriptions: rx, orders, addenda: [] });
+  assert.equal(row.visit.overview, 'We checked your blood pressure.');
+  assert.match(row.visit.summary, /prescription was recorded/i, 'the long summary still carries them (older readers)');
+  assert.ok(!/prescription|Lab work/i.test(row.visit.overview));
+  // With no patient summary the overview falls back to the diagnoses, then to a plain sentence.
+  const dx = patientPublish.buildPublishedVisit({ clientId: 'c', encounterUuid: 'e1', record: { ...RECORD, patientSummary: null }, attestation: ATTESTATION, prescriptions: rx, orders, addenda: [] });
+  assert.equal(dx.visit.overview, 'This visit addressed: Essential hypertension.');
+  const bare = patientPublish.buildPublishedVisit({ clientId: 'c', encounterUuid: 'e1', record: { ...RECORD, patientSummary: null, diagnoses: [] }, attestation: ATTESTATION, prescriptions: rx, orders, addenda: [] });
+  assert.match(bare.visit.overview, /completed and signed the note/);
+  // Full level carries it; the family summary level still carries no visit text.
+  assert.equal(patientRead.filterRow('visit', 'full', row.visit).overview, 'We checked your blood pressure.');
+  assert.equal('overview' in patientRead.filterRow('visit', 'summary', row.visit), false);
+  assert.match(portal, /\{visit\.overview \|\| visit\.summary\}/);
+  assert.match(portal, /<div style=\{\{ whiteSpace: 'pre-wrap' \}\}>\{v\.overview \|\| v\.summary\}<\/div>/);
+});
+test('the published note carries no raw VITALS shorthand, and the vitals are published on their own', () => {
+  const row = patientPublish.buildPublishedVisit({ clientId: 'c', encounterUuid: 'e1', record: RECORD, attestation: ATTESTATION, addenda: [] });
+  const text = JSON.stringify(row.note);
+  assert.ok(!/VITALS|Temp —|RR —/.test(text), 'no clinician shorthand in the note a patient reads');
+  assert.match(text, /Alert and comfortable/, 'the rest of the objective section is still there');
+  assert.equal(row.vitals.bloodPressure, '128/78');
+});
+test('the sharing screen says that "full" for family includes the clinician\'s note', () => {
+  assert.match(portal, /<option value="full">Full summary and your clinician's note<\/option>/);
+});
+test('medication changes on the visit are prescriptions that actually went out; today every recorded one shows', () => {
+  const rx = [{ drug: 'Lisinopril', dose: '10 mg', transmission: 'none' }, { drug: 'Pending drug', dose: '5 mg', transmission: 'pending' }, { drug: 'Unsent drug', transmission: 'not_sent' }];
+  const row = patientPublish.buildPublishedVisit({ clientId: 'c', encounterUuid: 'e1', record: RECORD, attestation: ATTESTATION, prescriptions: rx, addenda: [] });
+  assert.deepEqual(row.visit.newPrescriptions.map(r => r.name), ['Lisinopril 10 mg'], 'legacy "none" is recorded and shown; pending and not_sent are not');
+});
+
+// ============================================================
+// Adversarial review, 2026-09-29: every confirmed finding has a test
+// ============================================================
+const HP_SOAP = () => ({
+  id: '9',
+  subjective: '[GFC CLINICIAN] Bethel Godwins, FNP (NPI 1234567893)\nDocumented by Bethel Godwins\nSeen at home, feeling better.',
+  objective: `VITALS — BP right arm 130/80; BP left arm 128/78; HR 72; Temp —; RR —; SpO2 97; Wt —; Ht —\n\n${clinicalRepo.HP_SECTION_LABELS.triage.toUpperCase()}:\nTrack: B\nRationale: Complex, high utilisation, likely to exceed the home care budget\n\nLungs clear.`,
+  assessment: 'See encounter diagnoses (GFC structured note).',
+  plan: 'Continue current medicines.\nRN Track assignment: B — Complex, high utilisation, likely to exceed the home care budget'
+});
+const legacyCtx = (h, over = {}) => signedCtx(h, { record: { ...RECORD, note: undefined }, emr: { getProblems: async () => [], getAllergies: async () => [], getMedicationRequests: async () => [], getSoapNote: async () => HP_SOAP() }, ...over });
+
+test('R1. an old OpenEMR-only note never shows a patient the RN triage track, its rationale or the writers\' placeholder text', async () => {
+  const h = build();
+  await h.publishEncounterToPortal(legacyCtx(h));
+  h.store.set('users', []);
+  const s = JSON.stringify(await readSummary(h, CLIENT_USER));
+  assert.match(s, /feeling better/, 'the real note is there');
+  assert.ok(!/Track|Rationale|utilisation|home care budget|TRIAGE/i.test(s), 'no staffing decision');
+  assert.ok(!/See encounter diagnoses|No objective findings|GFC structured note/.test(s), 'no placeholder text');
+  assert.ok(!/1234567893|GFC CLINICIAN|Documented by|VITALS/.test(s));
+});
+
+test('R2. A HOLD FAILS CLOSED: it reaches the copy the patient can already read, and needs no OpenEMR read', async () => {
+  const h = build();
+  await publish(h);
+  h.store.set('users', []);
+  assert.ok((await readSummary(h, CLIENT_USER)).visits[0].note, 'the note is readable before the hold');
+  assert.equal(await h.holdPublishedVisit('c-1', 'e1', { reason: 'risk_of_harm' }), true);
+  const v = (await readSummary(h, CLIENT_USER)).visits[0];
+  assert.equal('note' in v, false, 'stopped being readable at once');
+  assert.equal(v.noteHeld, true);
+  // And a held LEGACY note is republished without reading OpenEMR at all, so a
+  // lapsed sign-in cannot leave the old text live.
+  const legacy = build();
+  const held = { ...ATTESTATION, portalHold: { reason: 'patient_request' } };
+  let read = false;
+  const ctx = legacyCtx(legacy, { attestation: held });
+  ctx.emr.getSoapNote = async () => { read = true; throw new Error('EMR_NOT_CONNECTED'); };
+  const out = await legacy.publishEncounterToPortal(ctx, { attestation: held });
+  assert.equal(out.published, true);
+  assert.equal(read, false, 'a held note is never read from OpenEMR');
+  assert.equal((await legacy.loadPublishedVisits())[0].note, null);
+  // The route applies the hold BEFORE the republish that can fail.
+  const body = routeBody("app.post('/api/clinical/patients/:clientId/encounters/:euuid/publish'");
+  assert.ok(body.indexOf('holdPublishedVisit(') > 0 && body.indexOf('holdPublishedVisit(') < body.indexOf('await publishEncounterToPortal('));
+  assert.match(body, /The hold is in force/);
+  const holdHelper = slice('const holdPublishedVisit', 'const dropPublishedForClient');
+  assert.match(holdHelper, /note: null, noteHeld/);
+});
+
+test('R3. only the word "release" releases a hold — null and false are refused', () => {
+  const body = routeBody("app.post('/api/clinical/patients/:clientId/encounters/:euuid/publish'");
+  assert.match(body, /holdInput === null \|\| holdInput === false\) \{\s*return res\.status\(400\)[\s\S]{0,220}PORTAL_HOLD_INVALID/);
+  assert.ok(body.indexOf('PORTAL_HOLD_INVALID') < body.indexOf("db.set('encounter_attestations'"), 'refused before anything is written');
+});
+
+test('R4. a mismatched client and encounter publish nothing, and a row is only replaced by the same client', async () => {
+  const h = build();
+  const out = await h.publishEncounterToPortal(signedCtx(h, { record: { ...RECORD, clientId: 'c-OTHER' } }));
+  assert.equal(out.published, false);
+  assert.equal(out.skipped, 'CLIENT_MISMATCH');
+  assert.deepEqual(await h.loadPublishedVisits(), []);
+  assert.deepEqual(h.notices, []);
+  // Keyed on client AND encounter: the same encounter id under another client is a different row.
+  await h.upsertPublishedVisit({ clientId: 'c-1', encounterUuid: 'eX', visit: { date: '2026-01-01' } });
+  await h.upsertPublishedVisit({ clientId: 'c-2', encounterUuid: 'eX', visit: { date: '2026-02-02' } });
+  const rows = await h.loadPublishedVisits();
+  assert.equal(rows.length, 2);
+  assert.equal(rows.find(r => r.clientId === 'c-1').visit.date, '2026-01-01', 'c-1\'s row was not replaced by c-2\'s publish');
+  const pub = routeBody("app.post('/api/clinical/patients/:clientId/encounters/:euuid/publish'");
+  assert.match(pub, /ctx\.record\.clientId && ctx\.record\.clientId !== ctx\.client\.id\) \{\s*return res\.status\(404\)/);
+});
+
+test('R5. relinking to a different OpenEMR patient removes what was published from the old one', async () => {
+  const h = build();
+  await publish(h);
+  await h.upsertPublishedVisit({ clientId: 'c-2', encounterUuid: 'eY', visit: { date: '2026-01-01' } });
+  await h.dropPublishedForClient('c-1');
+  assert.equal(await h.loadPublishedChart('c-1'), null);
+  assert.deepEqual((await h.loadPublishedVisits()).map(r => r.clientId), ['c-2'], 'only that client\'s rows go');
+  const link = routeBody("app.post('/api/clinical/patients/:clientId/link'");
+  assert.match(link, /relinkedAway = !!\(client\.openEmrPatientId && String\(client\.openEmrPatientId\) !== String\(puuid\)\)/);
+  assert.match(link, /if \(relinkedAway\) await dropPublishedForClient\(client\.id\)/);
+  // And nothing carries forward from a chart read from a different patient.
+  const prior = patientPublish.buildPublishedChart({ clientId: 'c', allergies: [{ id: 'a1', code: { text: 'Penicillin' } }], sourcePuuid: 'X', at: '2026-01-01T00:00:00Z' });
+  const next = patientPublish.buildPublishedChart({ clientId: 'c', medications: [], sourcePuuid: 'Y', at: '2026-02-01T00:00:00Z' });
+  const merged = patientPublish.mergeChart(prior, next);
+  assert.equal(merged.allergies, undefined, 'the wrong patient\'s allergies are not carried into the right patient\'s chart');
+  assert.deepEqual(merged.history, []);
+});
+
+test('R6. publishing an OLDER visit never rolls the latest vitals or "updated after your visit" back', () => {
+  const mk = (date, bp, uuid) => patientPublish.buildPublishedChart({ clientId: 'c', problems: [], vitals: { date, bloodPressure: bp }, sourceEncounterUuid: uuid, sourceVisitDate: date, sourcePuuid: 'P', at: `${date}T12:00:00Z` });
+  const b = patientPublish.mergeChart(null, mk('2026-09-20', '120/80', 'B'));
+  const a = patientPublish.mergeChart(b, mk('2026-09-01', '150/90', 'A'));   // visit A's addendum, days later
+  assert.equal(a.vitals.bloodPressure, '120/80');
+  assert.equal(a.publishedFromVisitDate, '2026-09-20');
+  assert.equal(a.sourceEncounterUuid, 'B');
+  const c = patientPublish.mergeChart(b, mk('2026-09-25', '118/76', 'C'));   // a newer visit still moves it forward
+  assert.equal(c.vitals.bloodPressure, '118/76');
+  assert.equal(c.publishedFromVisitDate, '2026-09-25');
+});
+
+test('R7. a chart read that fails changes nothing; a partial read keeps its stamps', async () => {
+  const h = build();
+  const allFail = { getProblems: async () => { throw new Error('x'); }, getAllergies: async () => { throw new Error('x'); }, getMedicationRequests: async () => { throw new Error('x'); } };
+  const none = await h.publishChartFromEmr(allFail, CLIENT, { id: 'u-1', name: 'B' }, {});
+  assert.equal(none.wrote, false);
+  assert.equal(await h.loadPublishedChart('c-1'), null, 'no row, so the "summary is coming" state stays');
+  await h.publishEncounterToPortal(signedCtx(h));
+  const before = await h.loadPublishedChart('c-1');
+  const partial = await h.publishChartFromEmr({ getProblems: async () => [], getAllergies: async () => { throw new Error('x'); }, getMedicationRequests: async () => [] }, CLIENT, { id: 'u-1', name: 'B' },
+    { sourceEncounterUuid: 'e-later', sourceVisitDate: '2026-12-31' });
+  assert.deepEqual(partial.failed, ['allergies']);
+  const after = await h.loadPublishedChart('c-1');
+  assert.equal(after.publishedFromVisitDate, before.publishedFromVisitDate, 'a partial read does not claim the chart is as fresh as the new visit');
+  assert.equal(after.publishedAt, before.publishedAt);
+});
+
+test('R8. the publish date is only shown to an audience that has a published section open', async () => {
+  const h = build({ client: { sharing: { visitSummaries: 'none', carePlan: true, appointments: true } } });
+  await publish(h);
+  const s = await readSummary(h, FAMILY_USER);
+  assert.equal(s.publishedAt, null);
+  assert.equal(s.publishedFromVisitDate, null, 'family with everything closed learns nothing about the last visit');
+  const open = await readSummary(build({ client: { sharing: { visitSummaries: 'summary' } }, seed: Object.fromEntries(h.store) }), FAMILY_USER);
+  assert.ok(open.publishedFromVisitDate, 'with visits open it is shown');
+});
+
+test('R9. the patient is told only when there is something new to read', async () => {
+  const h = build();
+  await publish(h);                                                    // first publish: 1 notice
+  assert.equal(h.notices.length, 1);
+  assert.equal(h.notices[0].hasNote, true);
+  // An order moving on (status embedded in the derived summary) is not news.
+  await h.publishEncounterToPortal(signedCtx(h, { orders: [{ orderType: 'lab', status: 'sent', tests: ['A1c'] }] }));
+  assert.equal(h.notices.length, 1, 'no second email because an order advanced');
+  // Placing a hold is not news either.
+  const held = { ...ATTESTATION, portalHold: { reason: 'risk_of_harm' } };
+  await h.publishEncounterToPortal(signedCtx(h, { attestation: held }), { attestation: held });
+  assert.equal(h.notices.length, 1, 'a hold sends no "your note is ready" email');
+  // Text changing WHILE the note is held is not news either: the patient cannot read it.
+  const heldEdit = signedCtx(h, { attestation: held, record: { ...RECORD, note: { ...SHARED_NOTE, plan: 'Changed while held.' } } });
+  await h.publishEncounterToPortal(heldEdit, { attestation: held });
+  assert.equal(h.notices.length, 1, 'no email for an edit to a note the patient cannot see');
+  // Releasing it IS news, and its notice cannot be swallowed as a duplicate of the first.
+  await h.publishEncounterToPortal(signedCtx(h), {});
+  assert.equal(h.notices.length, 2);
+  assert.match(h.notices[1].contentHash, /:released$/);
+  assert.equal(h.notices[1].hasNote, true);
+  // A first publish made WITH a hold never mentions a note.
+  const first = build();
+  await first.publishEncounterToPortal(signedCtx(first, { attestation: held }), { attestation: held });
+  assert.equal(first.notices[0].hasNote, false);
+  const src = fs.readFileSync(path.join(root, 'notifications.js'), 'utf8');
+  assert.match(src, /\$\{hasNote \? ", along with your clinician's note" : ''\}/);
+});
+
+test('R10. the portal fields are written onto a record read fresh, never the copy loaded before the OpenEMR reads', async () => {
+  const h = build({ seed: { encounter_billing: [{ id: 'r1', encounterUuid: 'e1', billingStatus: 'awaiting_billing', postedCharges: [] }] } });
+  // Billing submits while the publish is waiting on OpenEMR.
+  const rows = h.store.get('encounter_billing'); rows[0].billingStatus = 'billed'; rows[0].postedCharges = [{ id: 'c1' }]; h.store.set('encounter_billing', rows);
+  await h.patchPortalOutcome('e1', { published: true, publishedAt: '2026-09-29T00:00:00Z' });
+  const row = h.store.get('encounter_billing')[0];
+  assert.equal(row.billingStatus, 'billed', 'billing\'s change is not reverted');
+  assert.deepEqual(row.postedCharges, [{ id: 'c1' }]);
+  assert.equal(row.portalPublished, true);
+  await h.patchPortalOutcome('e1', { published: false, error: 'boom' });
+  assert.equal(h.store.get('encounter_billing')[0].portalPublishError, 'boom');
+  const body = stripComments(routeBody("app.post('/api/clinical/patients/:clientId/encounters/:euuid/publish'"));
+  assert.ok(!/saveBillingRecord/.test(body), 'the publish route no longer saves the whole collection');
+});
+
+test('R11. screens: evening timestamps keep their Eastern date, state does not follow a clinician to the next patient, and no button promises what family cannot read', () => {
+  assert.ok(!/prettyDate\(String\([^)]*\)\.slice\(0, 10\)\)/.test(portal), 'a timestamp is never sliced to its UTC day before prettyDate');
+  for (const expr of ['prettyDate(a.at)', 'prettyDate(sg.at)', 'prettyDate(r.reviewedAt)', 'prettyDate(clinical.publishedAt)']) assert.ok(portal.includes(expr), expr);
+  assert.match(clinicalPage, /<RefreshPortalChart key=\{patient\.id\} clientId=\{patient\.id\} \/>/);
+  assert.match(clinicalPage, /<PortalPublishCard key=\{`hold:\$\{!!\(d\.attestation && d\.attestation\.portalHold\)\}`\}/);
+  assert.match(portal, /\{\('summary' in visit\) && <button className="btn" onClick=\{\(\) => onNavigate\('health'\)\}>/);
+  assert.match(portal, /const openPdfSecurely = async \(url, token, kind, filename\)/);
+  assert.match(portal, /a\.download = filename \|\| /);
+  assert.match(portal, /token, undefined, `\$\{r\.label\}\$\{r\.resultDate \? ` \$\{r\.resultDate\}` : ''\}\.pdf`\)/, 'a result opens under a real file name on iPhone');
+});
+
+// ============================================================
+// The review's TEST-HONESTY findings, 2026-09-29. Each of these was a place the
+// shipped code could be broken with every test still green.
+// ============================================================
+
+// ---- T1: the sign route's hold and publish trigger --------------------------
+test('T1. signing with "hold this note" stores the hold, through the one function both doors use', () => {
+  // Behaviour of the function:
+  const by = { name: 'Bethel Godwins' };
+  assert.deepEqual(patientPublish.holdStamp(patientPublish.validateHold({ reason: 'risk_of_harm' }), by, '2026-09-29T15:00:00Z'), { reason: 'risk_of_harm', by, at: '2026-09-29T15:00:00Z' });
+  assert.equal(patientPublish.holdStamp(patientPublish.validateHold(false), by, 'x'), null, 'no hold: nothing stored');
+  // And the sign route CALLS it, as an unconditional statement — not behind a
+  // condition and not replaced by a literal. (A source scan cannot prove a line
+  // is reached; anchoring on a statement that starts its own line is what tells
+  // an unconditional call from `if (false) call()`.)
+  const sign = routeBody("app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign'");
+  assert.match(sign, /\n\s+attestation\.portalHold = patientPublish\.holdStamp\(holdCheck, clinicalRepo\.actorRecord\(ctx\.actor\), attestation\.signedAt\);/);
+  assert.match(sign, /\n\s+applyPublishOutcome\(record, await publishEncounterToPortal\(ctx, \{ record, attestation \}\), warnings\);/, 'publish runs on every signature, unconditionally');
+  const cosign = routeBody("app.post('/api/clinical/patients/:clientId/encounters/:euuid/co-sign'");
+  assert.match(cosign, /\n\s+applyPublishOutcome\(record, await publishEncounterToPortal\(ctx, \{ record, addenda:/);
+  const pub = routeBody("app.post('/api/clinical/patients/:clientId/encounters/:euuid/publish'");
+  assert.match(pub, /nextHold = patientPublish\.holdStamp\(check, /);
+});
+
+// ---- T2: the Publish route, actually run -------------------------------------
+const pubCtx = (h, over = {}) => ({
+  client: CLIENT, encounterUuid: 'e1', record: { ...RECORD }, attestation: { ...ATTESTATION }, closed: true, prescriptions: [], orders: [], addenda: [],
+  actor: { id: 'u-1', name: 'Bethel Godwins', npi: '1234567893' }, rows: [],
+  emr: { getProblems: async () => [], getAllergies: async () => [], getMedicationRequests: async () => [], getSoapNote: async () => null },
+  ...over
+});
+const publishRoute = async (h, body, ctxOver) => {
+  const res = mkRes();
+  await h.handlers['POST /api/clinical/patients/:clientId/encounters/:euuid/publish']({ user: PROVIDER, params: { clientId: 'c-1', euuid: 'e1' }, body }, res);
+  return res;
+};
+const withRoute = (ctxOver, seed) => build({ seed: { encounter_attestations: [{ ...ATTESTATION }], encounter_billing: [{ id: 'r1', encounterUuid: 'e1', clientId: 'c-1' }], ...(seed || {}) },
+  ctxFor: async () => pubCtx(null, ctxOver) });
+
+test('T2. the Publish route: a hold is stored AND applied, "release" really releases, a bad reason is refused before anything is written', async () => {
+  const h = withRoute();
+  await publish(h);                                                                  // a published visit with a readable note
+  // A hold with no valid reason: 400, and the attestation is untouched.
+  for (const bad of [{ reason: 'because' }, {}, 'yes', { reason: '' }]) {
+    const r = await publishRoute(h, { hold: bad });
+    assert.equal(r.statusCode, 400, JSON.stringify(bad));
+    assert.ok(!h.store.get('encounter_attestations')[0].portalHold, 'nothing written for a refused hold');
+    assert.equal((h.store.get('encounter_attestations')[0].portalHoldHistory || []).length, 0, 'and no history row');
+  }
+  // null / false are NOT a release.
+  for (const notRelease of [null, false]) {
+    const r = await publishRoute(h, { hold: notRelease });
+    assert.equal(r.statusCode, 400);
+    assert.equal(r.body.code, 'PORTAL_HOLD_INVALID');
+  }
+  // A real hold: stored on the attestation with history, and the LIVE copy stops carrying the note.
+  const held = await publishRoute(h, { hold: { reason: 'risk_of_harm' } });
+  assert.equal(held.statusCode, 200, JSON.stringify(held.body));
+  const att = h.store.get('encounter_attestations')[0];
+  assert.equal(att.portalHold.reason, 'risk_of_harm');
+  assert.equal(att.portalHoldHistory.length, 1);
+  assert.equal((await h.loadPublishedVisits())[0].note, null);
+  // "release" clears it and the note is back — a mutation that kept the old hold would fail here.
+  const ctxAfterHold = { attestation: att };
+  const h2 = build({ seed: Object.fromEntries(h.store), ctxFor: async () => pubCtx(null, ctxAfterHold) });
+  const released = await (async () => { const res = mkRes(); await h2.handlers['POST /api/clinical/patients/:clientId/encounters/:euuid/publish']({ user: PROVIDER, params: { clientId: 'c-1', euuid: 'e1' }, body: { hold: 'release' } }, res); return res; })();
+  assert.equal(released.statusCode, 200);
+  assert.equal(h2.store.get('encounter_attestations')[0].portalHold, null, 'the hold is gone');
+  assert.ok((await h2.loadPublishedVisits())[0].note, 'and the note is readable again');
+  assert.deepEqual(h2.activity.map(a => a[2]).filter(t => /portal_note/.test(t)), ['portal_note_released']);
+});
+
+test('T2b. a hold FAILS CLOSED through the route: the republish fails, the note is still no longer readable, and the answer says so', async () => {
+  const h = withRoute();
+  await publish(h);
+  h.store.set('users', []);
+  assert.ok((await readSummary(h, CLIENT_USER)).visits[0].note, 'readable before the hold');
+  h.arm.failKey = 'patient_published_chart';                                          // the republish's chart write throws
+  const r = await publishRoute(h, { hold: { reason: 'patient_request' } });
+  h.arm.failKey = null;
+  assert.equal(r.statusCode, 502, 'the republish failed');
+  assert.equal(r.body.holdApplied, true);
+  assert.match(r.body.error, /The hold is in force/);
+  const v = (await readSummary(h, CLIENT_USER)).visits[0];
+  assert.equal('note' in v, false, 'the note stopped being readable even though the republish failed');
+});
+
+test('T2c. the Publish route refuses an encounter that is not on the URL patient\'s chart', async () => {
+  const h = withRoute({ record: { ...RECORD, clientId: 'c-OTHER' } });
+  const r = await publishRoute(h, {});
+  assert.equal(r.statusCode, 404);
+  assert.deepEqual(await h.loadPublishedVisits(), []);
+});
+
+// ---- T3: published rows are scoped to the requesting client ------------------
+test('T3. one client never reads another client\'s published visits, results, chart or documents', async () => {
+  const h = build();
+  await publish(h);                                                                  // c-1's visit + chart
+  const rows = h.store.get('patient_published_visits');
+  rows.push({ ...rows[0], clientId: 'c-2', encounterUuid: 'eB', visit: { ...rows[0].visit, id: 'eB', summary: 'C2-PRIVATE-SUMMARY', overview: 'C2-PRIVATE-SUMMARY', date: '2026-09-27' }, note: { subjective: [{ label: null, plain: 'C2-PRIVATE-NOTE' }], objective: [], assessment: [], plan: [], addenda: [], signatures: [] } });
+  h.store.set('patient_published_visits', rows);
+  const charts = h.store.get('patient_published_chart');
+  charts.push({ clientId: 'c-2', publishedAt: 'x', allergies: [{ id: 'a9', name: 'C2-ALLERGY' }], problems: [], medications: [], sourcePuuid: 'P2' });
+  h.store.set('patient_published_chart', charts);
+  const results = [{ id: 'rB', clientId: 'c-2', orderType: 'lab', resultDate: '2026-09-27', performedBy: 'Quest', releasedToPatientAt: 'x', patientCopy: { storageRef: 'zz' }, acknowledgedAt: null }];
+  h.store.set('clinical_results', results);
+  h.store.set('users', []);
+  const s = JSON.stringify(await readSummary(h, CLIENT_USER));
+  assert.ok(!/C2-|eB|"rB"/.test(s), `c-1's summary must carry nothing of c-2's: ${s.slice(0, 300)}`);
+  assert.equal((await readSummary(h, CLIENT_USER)).visits.length, 1);
+  assert.equal(await h.loadPublishedChart('c-2').then(c => c.clientId), 'c-2');
+  assert.equal((await h.loadPublishedChart('c-1')).clientId, 'c-1', 'the chart lookup is by client');
+  const docs = JSON.stringify((await call(h, 'GET /api/gfc/clinical/documents', CLIENT_USER)).body);
+  assert.ok(!/rB/.test(docs), 'nor does c-1\'s document index list c-2\'s result');
+  // and the source still scopes each read (pinned so a filter cannot be quietly dropped)
+  const summary = stripComments(routeBody("app.get('/api/gfc/clinical/summary'"));
+  assert.match(summary, /visitRows\.filter\(r => r && r\.clientId === client\.id\)/);
+  assert.match(summary, /results\.filter\(r => r && r\.clientId === client\.id\)/);
+  assert.match(server, /\.find\(r => r && r\.clientId === clientId\) \|\| null;/);
+});
+
+// ---- T4: the note section's allow-list is pinned INDEPENDENTLY of the module --
+test('T4. the note section carries exactly these fields — pinned here, not derived from the constant it guards', () => {
+  assert.deepEqual([...patientRead.NOTE_CONTENT_FIELDS].sort(), ['assessment', 'objective', 'plan', 'subjective']);
+  assert.deepEqual([...patientRead.FILTER_MAP.note.full].sort(), ['addenda', 'assessment', 'objective', 'plan', 'signatures', 'signedAt', 'subjective']);
+  assert.deepEqual([...patientRead.FILTER_MAP.result.full].sort(), ['hasFile', 'id', 'label', 'patientNote', 'performedBy', 'resultDate', 'reviewStatus', 'reviewedAt', 'reviewedBy']);
+  for (const f of ['signatureImage', 'ipHash', 'billingProviderNpi', 'npi', 'attestationText', 'renderingProvider', 'uuid', 'openEmrPatientId']) {
+    for (const [section, levels] of Object.entries(patientRead.FILTER_MAP)) {
+      for (const [level, allow] of Object.entries(levels)) assert.ok(!allow.includes(f), `${section}.${level} must never allow ${f}`);
+    }
+  }
+});
+
+// ---- T5: the REAL notifier, run --------------------------------------------
+test('T5. the real notifier: client and POA only, a POA is told whose it is, the key carries the content, wording follows the transport', async () => {
+  const { createNotifier } = require('../notifications');
+  const users = [
+    { id: 'c-1', role: 'client', name: 'Juanita Guess', email: 'j@example.test' },
+    { id: 'f-2', role: 'family', name: 'Luka Agent', email: 'l@example.test', familyOfClientId: 'c-1', familyIsPoa: true },
+    { id: 'f-1', role: 'family', name: 'Sam Relative', email: 's@example.test', familyOfClientId: 'c-1', familyIsPoa: false }
+  ];
+  const make = (covered) => {
+    const queued = [];
+    const seen = new Set();
+    const n = createNotifier({
+      getUsers: async () => users, getAppBaseUrl: async () => 'https://app.test',
+      emailTransport: { transportStatus: () => ({ baaCovered: covered }) },
+      // dedupe exactly as queueNotification does: type + recipient + relatedEntityId
+      queueNotification: async (type, id, email, name, data, opts) => {
+        const key = `${type}|${email}|${opts.relatedEntityId}`;
+        if (seen.has(key)) return null;
+        seen.add(key); queued.push({ type, email, name, data, opts }); return { queued: true };
+      },
+      staffRoles: ['admin'], clientRole: 'client', familyRole: 'family'
+    });
+    return { n, queued };
+  };
+  const { n, queued } = make(true);
+  await n.visitSummaryReady({ clientId: 'c-1', encounterUuid: 'e1', contentHash: 'aaaa', visitDate: '9/28/2026', actorId: 'u', hasNote: true });
+  assert.deepEqual(queued.map(q => q.email).sort(), ['j@example.test', 'l@example.test'], 'the client and the POA, never non-POA family');
+  const poa = queued.find(q => q.email === 'l@example.test');
+  assert.match(poa.data.body, /Juanita Guess's visit summary/, 'a POA is told whose it is');
+  assert.match(queued[0].data.subject, /9\/28\/2026/, 'a covered transport carries the date');
+  assert.match(poa.data.body, /along with your clinician's note/);
+  assert.equal(queued[0].opts.relatedEntityId, 'e1:summary:aaaa');
+  // The same text again is a duplicate; changed text is not — so a note edit is not swallowed.
+  await n.visitSummaryReady({ clientId: 'c-1', encounterUuid: 'e1', contentHash: 'aaaa', visitDate: 'x', actorId: 'u' });
+  assert.equal(queued.length, 2, 'the identical notice is de-duplicated');
+  await n.visitSummaryReady({ clientId: 'c-1', encounterUuid: 'e1', contentHash: 'bbbb', visitDate: 'x', actorId: 'u' });
+  assert.equal(queued.length, 4, 'a changed note produces a new notice');
+  const held = make(true);
+  await held.n.visitSummaryReady({ clientId: 'c-1', encounterUuid: 'e1', contentHash: 'cccc', visitDate: '9/28/2026', actorId: 'u', hasNote: false });
+  assert.ok(!/clinician's note/.test(held.queued[0].data.body), 'no claim about a note that is held');
+  // Not covered: nothing specific.
+  const vague = make(false);
+  await vague.n.visitSummaryReady({ clientId: 'c-1', encounterUuid: 'e1', contentHash: 'dddd', visitDate: '9/28/2026', actorId: 'u' });
+  await vague.n.resultReviewed({ clientId: 'c-1', resultId: 'r1', actorId: 'u' });
+  const text = JSON.stringify(vague.queued);
+  assert.ok(!/9\/28\/2026/.test(text), 'an uncovered transport carries no visit date');
+  const rr = vague.queued.filter(q => q.type === 'result_reviewed');
+  assert.deepEqual(rr.map(q => q.email).sort(), ['j@example.test', 'l@example.test']);
+  assert.match(rr.find(q => q.email === 'l@example.test').data.body, /Juanita Guess's test result/, 'a POA is told whose result');
+  assert.ok(!/A1c|\blab\b|imaging|Quest/i.test(rr.map(q => `${q.data.subject} ${q.data.body}`).join(' ')), 'a result notice never names the result');
+  assert.equal(typeof n.visitSummaryReady, 'function');
+  assert.equal(typeof n.resultReviewed, 'function');
+});
+
+// ---- T6: the page's hold vocabulary is the server's --------------------------
+test('T6. the clinician page\'s hold reasons and payload are exactly the server\'s', () => {
+  const m = clinicalPage.match(/const PORTAL_HOLD_REASONS = \[([\s\S]*?)\n    \];/);
+  assert.ok(m, 'the page declares its hold reasons');
+  const pairs = [...m[1].matchAll(/\['([a-z_]+)', '([^']+)'\]/g)].map(x => [x[1], x[2]]);
+  assert.deepEqual(pairs.map(p => p[0]), [...patientPublish.HOLD_REASONS], 'same keys, same order');
+  for (const [k, label] of pairs) assert.equal(label, patientPublish.HOLD_REASON_LABELS[k], `${k}: the page wording matches the server's`);
+  assert.match(clinicalPage, /const portalHoldPayload = \(hold\) => \(hold && hold\.on \? \{ reason: hold\.reason \|\| '' \} : false\);/, 'the payload key is `reason`, which validateHold reads');
+  // What that payload does at the server:
+  assert.equal(patientPublish.validateHold({ reason: 'risk_of_harm' }).hold.reason, 'risk_of_harm');
+});
+
+// ---- T7: every chart section keeps its previous copy when its read fails ----
+test('T7. a failed problems read or medications read leaves the published list alone, just as allergies do', async () => {
+  const good = { getProblems: async () => [{ id: 'p1', code: { text: 'Hypertension' }, clinicalStatus: { text: 'active' } }], getAllergies: async () => [{ id: 'a1', code: { text: 'Penicillin' } }],
+    getMedicationRequests: async () => [{ id: 'm1', medicationCodeableConcept: { text: 'Lisinopril 10 mg' }, status: 'active' }], getSoapNote: async () => null };
+  for (const failing of ['getProblems', 'getMedicationRequests']) {
+    const h = build();
+    await h.publishEncounterToPortal(signedCtx(h, { emr: good }));
+    const out = await h.publishEncounterToPortal(signedCtx(h, { emr: { ...good, [failing]: async () => { throw new Error('403'); } } }));
+    assert.equal(out.published, true);
+    const chart = await h.loadPublishedChart('c-1');
+    const key = failing === 'getProblems' ? 'problems' : 'medications';
+    assert.equal(chart[key].length, 1, `the earlier ${key} list stands after a failed read`);
+    h.store.set('users', []);
+    const s = await readSummary(h, CLIENT_USER);
+    assert.equal(s[key].length, 1, `and the patient still sees it`);
+  }
+});
+
+// ---- T8: the portal's rendering sites (source pins) --------------------------
+test('T8. the portal renders addenda escaped, shows the held-note sentence, and only says "Reviewed" for a reviewed result', () => {
+  assert.match(portal, /__html: NF\.renderHtml\(a\.text\)/, 'addendum text goes through the escaping renderer');
+  assert.ok(!/__html: a\.text|__html: item\.plain|__html: m\.body|__html: r\.patientNote/.test(portal), 'no raw text injected as HTML');
+  assert.match(portal, /\{visit\.noteHeld && <div className="lsec"[^>]*>\{HELD_NOTE_TEXT\}<\/div>\}/, 'the Home card shows the held-note sentence');
+  assert.match(portal, /\{v\.noteHeld && !v\.note && <div[^>]*>\{HELD_NOTE_TEXT\}<\/div>\}/, 'the Health tab shows it too');
+  assert.match(portal, /const reviewed = r\.reviewStatus === 'reviewed';/);
+  assert.match(portal, /\{reviewed \? 'Reviewed' : 'Not yet reviewed'\}/);
+  assert.match(portal, /\? `Reviewed by \$\{r\.reviewedBy\}/);
+  assert.match(portal, /: 'Not yet reviewed by your care team\./);
+  assert.match(portal, /\{clinical && !clinical\.error && \(clinical\.visits \|\| \[\]\)\[0\] && <LatestVisitCard visit=\{clinical\.visits\[0\]\} onNavigate=\{onNavigate\} \/>\}/);
+});
+
+// ---- T9: the patient-actor OpenEMR calls that REMAIN, named ------------------
+test('T9. "patients never read OpenEMR" is about the READ routes; the patient-actor WRITE helpers that remain are listed, so a new one fails here', () => {
+  // These two helpers call openemr.forActor(actor) and are reached from patient
+  // routes with the PATIENT or POA as the actor. A patient has no OpenEMR
+  // identity, so both fail and skip — the same root cause as the Health tab
+  // (CLAUDE.md, open item). They are OPEN, not endorsed: this list exists so a
+  // third one cannot be added without somebody seeing it.
+  const HELPERS = ['attemptEmrFiling', 'emitSignedCarePlanPdf'];
+  const boundaries = [...server.matchAll(/\napp\.(get|post|put|delete|patch|use)\(/g)].map(x => x.index);
+  const found = new Set();
+  const re = /\napp\.(get|post|put|delete|patch)\('(\/api\/gfc[^']*)'/g; let m;
+  while ((m = re.exec(server))) {
+    if (m[2].startsWith('/api/gfc/admin/')) continue;
+    const end = boundaries.find(x => x > m.index + 5) || server.length;
+    const body = stripComments(server.slice(m.index, end));
+    for (const h of HELPERS) if (new RegExp(`\\b${h}\\(`).test(body)) found.add(`${m[1]} ${m[2]} -> ${h}`);
+  }
+  // A patient route calling a helper that itself calls forActor with the caller.
+  assert.ok(found.size >= 1, 'the sweep sees the known patient-actor helper call(s)');
+  assert.ok(found.size <= 6, `unexpected new patient-route callers of the patient-actor helpers: ${[...found].join('; ')}`);
+  for (const h of HELPERS) assert.match(server, new RegExp(`const ${h} = async`), `${h} still exists — if it was fixed, remove it from this list`);
+});
+
+// ============================================================
+// Portal + clinician screens
+// ============================================================
+test('portal: the live-read wording is gone, the note renders escaped, and a hold reads "available on request"', () => {
+  assert.ok(!/couldn't load from your clinical record|Please try again in a few minutes|degraded/.test(portal));
+  assert.match(portal, /Updated after your visit on/);
+  assert.match(portal, /Your care team has not shared a visit summary here yet/);
+  assert.match(portal, /is available on request/);
+  assert.match(portal, /NF\.renderHtml\(item\.markup\)/, 'the note goes through the shared renderer, which escapes before it formats');
+  assert.match(portal, /<script src="\/note-format\.js"><\/script>/);
+  assert.match(portal, /Not yet reviewed by your care team/);
+  assert.match(portal, /const LatestVisitCard =/);
+  assert.match(portal, /<LatestVisitCard visit=\{clinical\.visits\[0\]\}/);
+  assert.match(portal, /Message the care team/);
+  assert.match(portal, /k="results" label="Test results"/, 'the sharing screen offers results');
+  // Module scope (input-focus rule): none of these is declared inside another component.
+  for (const name of ['PublishedNote', 'LatestVisitCard', 'ResultRow']) {
+    assert.match(portal, new RegExp(`\\n    const ${name} = `));
+  }
+});
+test('clinician page: hold at signing, Publish card, Refresh portal chart, patient note at review', () => {
+  assert.match(clinicalPage, /const PortalHoldControl =/);
+  assert.match(clinicalPage, /portalHold: portalHold \|\| false/);
+  assert.match(clinicalPage, /const PortalPublishCard =/);
+  assert.match(clinicalPage, /publishToPortal: \(id, euuid, hold\)/);
+  assert.match(clinicalPage, /const RefreshPortalChart =/);
+  assert.match(clinicalPage, /refreshPortalChart: \(id\)/);
+  assert.match(clinicalPage, /acknowledgeResult: \(resultId, followUpNote, patientNote\)/);
+  assert.ok(!/The narrative note is never shown to patients/.test(clinicalPage), 'the old rule\'s copy is gone');
+  assert.match(clinicalPage, /Since 2026-09-29 \(owner decision\) the signed note itself is also shown/);
+  // A hold with no reason cannot be submitted from either sign surface.
+  assert.equal((clinicalPage.match(/\(hold\.on && !hold\.reason\)|\(portalHold\.on && !portalHold\.reason\)/g) || []).length, 2);
+});
+test('the two published collections are claimed for migration as PHI', () => {
+  const reg = require('../dataMigration');
+  const find = (k) => (reg.COLLECTION_REGISTRY || []).find(c => c.key === k);
+  for (const k of ['patient_published_chart', 'patient_published_visits']) {
+    assert.ok(find(k), `${k} is registered`);
+    assert.equal(find(k).phi, true);
+  }
+});
+
+
+// ============================================================
+// Portal P2: the patient's calendar (owner, 2026-09-29: "the patient needs to
+// see a version of the calendar clinicians see")
+// ============================================================
+const gaToday = () => practiceTime.zonedParts(new Date()).isoDate;
+const shiftDays = (iso, n) => new Date(Date.parse(`${iso}T12:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+const apptRow = (over) => ({ pc_eid: '1', pc_eventDate: shiftDays(gaToday(), 7), pc_startTime: '10:00:00', pc_endTime: '10:45:00',
+  pc_duration: 2700, pc_apptstatus: '-', pc_aid: '7', pc_title: 'Follow-up visit', pc_hometext: '[GFC location=telehealth]\nbring BP log',
+  puuid: 'puuid-1', ...over });
+const apptEmr = (rows) => ({
+  getPatientAppointmentRows: async () => rows.map(r => ({ ...r, pc_hometext: undefined })),   // the list omits hometext on this OpenEMR
+  getAppointmentRow: async (_p, eid) => rows.find(r => String(r.pc_eid) === String(eid)) || null
+});
+
+test('P2-1. the calendar copy: upcoming and recent visits, never tombstones, no-shows or clinician notes', async () => {
+  const h = build();
+  const today = gaToday();
+  const out = await h.publishAppointmentsForClient(apptEmr([
+    apptRow({ pc_eid: '1' }),
+    apptRow({ pc_eid: '2', pc_apptstatus: 'x' }),                                // a reschedule tombstone
+    apptRow({ pc_eid: '6', pc_apptstatus: 'x', pc_eventDate: shiftDays(today, -3), __linked: 'e8' }), // a tombstone still carrying a note link
+    apptRow({ pc_eid: '3', pc_apptstatus: '?' }),                                // a no-show
+    apptRow({ pc_eid: '4', pc_eventDate: shiftDays(today, -10), __linked: 'e9' }), // a visit that happened
+    apptRow({ pc_eid: '5', pc_eventDate: shiftDays(today, -200) })               // too old for the portal
+  ]), CLIENT, { id: 'u-1', name: 'Bethel Godwins' });
+  assert.equal(out.published, true);
+  const row = await h.loadPublishedAppointments('c-1');
+  assert.deepEqual(row.appointments.map(a => a.id), ['4', '1']);
+  const next = row.appointments.find(a => a.id === '1');
+  assert.equal(next.state, 'upcoming');
+  assert.equal(next.location, 'Video / phone visit', 'the location comes from the hydrated row');
+  assert.match(next.provider, /Bethel Godwins/, 'named from the app user mapped to the provider id');
+  assert.equal(row.appointments.find(a => a.id === '4').state, 'completed');
+  assert.ok(!JSON.stringify(row).includes('bring BP log'), 'clinician appointment notes never reach the patient copy');
+  assert.equal(row.sourcePuuid, 'puuid-1');
+});
+
+test('P2-2. the patient reads their calendar from the copy, filtered by sharing, and never from OpenEMR', async () => {
+  const h = build();
+  await h.publishAppointmentsForClient(apptEmr([apptRow({ pc_eid: '1' })]), CLIENT, { id: 'u-1' });
+  const mine = await readSummary(h, CLIENT);
+  assert.equal(mine.appointmentsPublished, true);
+  assert.deepEqual(mine.appointments.map(a => a.id), ['1']);
+  assert.deepEqual(Object.keys(mine.appointments[0]).sort(), ['date', 'durationMinutes', 'endTime', 'id', 'location', 'provider', 'startTime', 'state', 'title']);
+  assert.deepEqual(h.openemrTouched, [], 'the patient read touched OpenEMR');
+  // A stored row carrying anything beyond the allow-list (an older writer, a
+  // hand edit) still reaches the patient as the allow-list only.
+  const seeded = h.store.get('patient_published_appointments');
+  seeded[0].appointments[0].notes = 'clinician-only note';
+  h.store.set('patient_published_appointments', seeded);
+  assert.ok(!JSON.stringify(await readSummary(h, CLIENT)).includes('clinician-only note'));
+  // Family get it only when the client shares upcoming visits.
+  const fam = await readSummary(build({ seed: Object.fromEntries(h.store), client: { sharing: { appointments: false } } }), FAMILY_USER);
+  assert.equal(fam.appointments, undefined);
+});
+
+test('P2-3. a copy published against a different OpenEMR patient is not shown after a relink', async () => {
+  const h = build();
+  await h.publishAppointmentsForClient(apptEmr([apptRow({ pc_eid: '1' })]), CLIENT, { id: 'u-1' });
+  const relinked = build({ seed: Object.fromEntries(h.store), client: { openEmrPatientId: 'puuid-2' } });
+  const body = await readSummary(relinked, CLIENT);
+  assert.equal(body.appointmentsPublished, false);
+  assert.deepEqual(body.appointments, []);
+});
+
+test('P2-4. a later read without the location keeps the one an earlier read found; a failed read writes nothing', async () => {
+  const h = build();
+  await h.publishAppointmentsForClient(apptEmr([apptRow({ pc_eid: '1' })]), CLIENT, { id: 'u-1' });
+  const bare = { getPatientAppointmentRows: async () => [apptRow({ pc_eid: '1', pc_hometext: '' })], getAppointmentRow: async () => null };
+  await h.publishAppointmentsForClient(bare, CLIENT, { id: 'u-1' });
+  assert.equal((await h.loadPublishedAppointments('c-1')).appointments[0].location, 'Video / phone visit');
+  const before = JSON.stringify(h.store.get('patient_published_appointments'));
+  const down = await h.publishAppointmentsForClient({ getPatientAppointmentRows: async () => { throw new Error('EMR down'); } }, CLIENT, { id: 'u-1' });
+  assert.equal(down.published, false, 'never throws, reports the failure');
+  assert.equal(JSON.stringify(h.store.get('patient_published_appointments')), before);
+});
+
+test('P2-5. every calendar write path republishes the patient copy (an unconditional await, not behind a condition)', () => {
+  const route = (start) => stripComments(routeBody(start));
+  const cases = [
+    ["app.post('/api/clinical/patients/:clientId/appointments'", /\n\s*await publishAppointmentsForClient\(emr, client, actorFromReq\(req\)\);/],
+    ["app.post('/api/clinical/appointments/:eid/reschedule'", /\n\s*await republishAppointmentsByPuuid\(emr, row\.puuid, req\);/],
+    ["app.post('/api/clinical/appointments/:eid/cancel'", /\n\s*await republishAppointmentsByPuuid\(emr, row\.puuid, req\);/],
+    ["app.post('/api/clinical/appointments/:eid/no-show'", /\n\s*await republishAppointmentsByPuuid\(emr, row\.puuid, req\);/],
+    ["app.get('/api/clinical/patients/:clientId/appointments'", /\n\s*await publishAppointmentsForClient\(emr, client, actorFromReq\(req\), appointments\);/],
+    ["app.post('/api/clinical/patients/:clientId/portal/refresh-chart'", /\n\s*const appts = await publishAppointmentsForClient\(emrR, client, actor\);/]
+  ];
+  for (const [start, re] of cases) assert.match(route(start), re, start);
+  // Relinking drops the calendar copy with the rest of the published rows.
+  assert.match(slice('const dropPublishedForClient', 'const loadPublishedChart'), /'patient_published_appointments'/);
+});
+
+test('P2-6. the portal shows ONE schedule: clinical visits and caregiver visits together, and a Schedule tab', () => {
+  const portal = fs.readFileSync(path.join(__dirname, '..', 'public', 'portal.html'), 'utf8');
+  assert.match(portal, /\{ id: 'schedule', icon: 'ti-calendar', label: 'Schedule' \}/);
+  assert.match(portal, /\{view === 'schedule' && <GfcSchedule shifts=\{shifts\} shiftsErr=\{shiftsErr\} clinical=\{clinicalAvailable \? clinical : null\} \/>\}/);
+  // Home's next clinical visit reads the published state, not a raw OpenEMR row.
+  assert.match(portal, /\(clinical\.appointments \|\| \[\]\)\.find\(a => a\.state === 'upcoming' && a\.date >= todayGa\)/);
+  // Both lists are built from the shared builder, not from shifts alone.
+  assert.equal((portal.match(/buildScheduleItems\(shifts, clinical\)/g) || []).length >= 3, true);
+  assert.ok(!/const upcoming = \(shifts \|\| \[\]\)[\s\S]{0,400}\{upcoming\.map\(v =>/.test(portal), 'the Care tab no longer lists only caregiver shifts');
+});
+
+// ============================================================
+// AUDIT (owner report 2026-09-29: "the meds and other key areas don't show any data")
+// ============================================================
+test('A1. with no chart published, the portal shows what the app holds, labelled by source', () => {
+  const recon = patientPublish.appHeldHealth({ medRecLast: { at: '2026-09-20T15:00:00Z', byName: 'Bethel Godwins' },
+    medications: [{ name: 'Lisinopril', dose: '10 mg', frequency: 'daily' }], intake: { medications: [{ name: 'Old intake med' }], allergies: 'NKDA', conditions: ['Diabetes'] } });
+  assert.equal(recon.medications.source, 'reconciled');
+  assert.equal(recon.medications.by, 'Bethel Godwins');
+  assert.deepEqual(recon.medications.rows.map(r => r.name), ['Lisinopril 10 mg'], 'once reconciled, the reconciled list wins over intake');
+  assert.deepEqual(recon.allergies, { source: 'reported', rows: [] }, 'NKDA reads as "none reported", never as an allergen');
+  assert.equal(recon.problems.source, 'reported');
+  const intake = patientPublish.appHeldHealth({ intake: { medications: [{ name: 'Metformin', dose: '500 mg', route: 'by mouth', frequency: 'twice a day' }], allergies: 'Penicillin (rash)' } });
+  assert.equal(intake.medications.source, 'reported');
+  assert.equal(intake.medications.rows[0].instructions, 'by mouth · twice a day');
+  assert.equal(intake.allergies.rows[0].name, 'Penicillin (rash)');
+  const plan = patientPublish.appHeldHealth({ carePlan: { problems: ['Fall risk'] }, intake: { conditions: ['Diabetes'] } });
+  assert.equal(plan.problems.source, 'care_plan', 'a clinician-authored problem list beats what the family reported');
+  assert.deepEqual(plan.problems.rows.map(r => r.name), ['Fall risk']);
+  const stoppedAll = patientPublish.appHeldHealth({ medRecLast: { at: 'x' }, medications: [], intake: { medications: [{ name: 'Old intake med' }] } });
+  assert.deepEqual(stoppedAll.medications.rows, [], 'a list reconciled down to nothing stays empty; the old intake list does not come back');
+  assert.deepEqual(patientPublish.appHeldHealth({}), { medications: null, allergies: null, problems: null });
+});
+
+test('A2. the published chart leaves out stopped medicines and resolved problems/allergies, and keeps a reconciled KEPT medicine', () => {
+  const chart = patientPublish.buildPublishedChart({ clientId: 'c-1',
+    medications: [{ id: 'm1', medicationCodeableConcept: { text: 'Lisinopril 10 mg' }, status: 'active' }, { id: 'm2', medicationCodeableConcept: { text: 'Warfarin' }, status: 'completed' }],
+    problems: [{ id: 'p1', code: { text: 'Hypertension' }, clinicalStatus: { text: 'Active' } }, { id: 'p2', code: { text: 'Pneumonia' }, clinicalStatus: { text: 'Resolved' } }],
+    allergies: [{ id: 'a1', code: { text: 'Penicillin' } }, { id: 'a2', code: { text: 'Latex' }, clinicalStatus: { text: 'inactive' } }],
+    appMedications: [{ name: 'Lisinopril' }, { name: 'Vitamin D', dose: '1000 IU' }] });
+  assert.deepEqual(chart.medications.map(m => m.name), ['Lisinopril 10 mg', 'Vitamin D 1000 IU'], 'a kept medicine is added once; one OpenEMR already lists is not doubled; an end-dated one is gone');
+  assert.deepEqual(chart.problems.map(p => p.name), ['Hypertension']);
+  assert.deepEqual(chart.allergies.map(a => a.name), ['Penicillin']);
+  assert.deepEqual(patientPublish.reconciledAppMeds({ medications: [{ name: 'X' }] }), [], 'before reconciliation the app list is the family report, not the chart');
+});
+
+test('A3. the summary serves app-held sections only where nothing is published, under the same sharing gate', async () => {
+  const client = { medRecLast: { at: '2026-09-20T15:00:00Z', byName: 'Bethel Godwins' }, medications: [{ name: 'Lisinopril', dose: '10 mg' }],
+    intake: { allergies: 'Sulfa', conditions: ['Diabetes'] } };
+  const h = build({ client });
+  const s = await readSummary(h, CLIENT_USER);
+  assert.equal(s.published.medications, false);
+  assert.deepEqual(s.medications.map(m => m.name), ['Lisinopril 10 mg']);
+  assert.equal(s.fromApp.medications.source, 'reconciled');
+  assert.deepEqual(s.allergies.map(a => a.name), ['Sulfa']);
+  assert.equal(s.fromApp.problems.source, 'reported');
+  const fam = await readSummary(build({ client: { ...client, sharing: { medications: false, allergies: false, problems: false } } }), FAMILY_USER);
+  assert.equal(fam.medications, undefined, 'family sharing still governs app-held sections');
+  assert.deepEqual(fam.fromApp, {});
+  await publish(h);
+  const after = await readSummary(h, CLIENT_USER);
+  assert.equal(after.published.medications, true);
+  assert.equal(after.fromApp.medications, undefined, 'once published, the published copy is what shows');
+});
+
+test('A4. a first publish of an old visit goes out without the note when OpenEMR cannot be read; a published one is never stripped', async () => {
+  const legacy = { ...RECORD, note: undefined, narrativeNoteSid: '9' };
+  const noSession = { getProblems: async () => [], getAllergies: async () => [], getMedicationRequests: async () => [], getSoapNote: async () => { throw new Error('EMR_NOT_CONNECTED'); } };
+  const h = build();
+  const first = await h.publishEncounterToPortal(signedCtx(h, { record: legacy, emr: noSession }));
+  assert.equal(first.published, true);
+  assert.match(first.warning, /note could not be read from OpenEMR/);
+  assert.equal((await h.loadPublishedVisits())[0].note, null);
+  const soap = { id: '9', subjective: 'Seen today.', objective: 'x', assessment: 'x', plan: 'x' };
+  await h.publishEncounterToPortal(signedCtx(h, { record: legacy, emr: { ...noSession, getSoapNote: async () => soap } }));
+  assert.ok((await h.loadPublishedVisits())[0].note, 'the note is added once it can be read');
+  const again = await h.publishEncounterToPortal(signedCtx(h, { record: legacy, emr: noSession }));
+  assert.equal(again.published, false);
+  assert.ok((await h.loadPublishedVisits())[0].note, 'a lapsed sign-in never strips a note already on the portal');
+});
+
+test('A5. clinician list edits republish the portal chart, and refresh-chart brings vitals and files uploads', () => {
+  for (const route of ["app.post('/api/clinical/patients/:clientId/medrec'", "app.post('/api/clinical/patients/:clientId/problems'", "app.post('/api/clinical/patients/:clientId/allergies'"]) {
+    assert.match(stripComments(routeBody(route)), /\n\s*const portalChart = await refreshPortalChartAfterEdit\(req, /, route);
+  }
+  const refresh = stripComments(routeBody("app.post('/api/clinical/patients/:clientId/portal/refresh-chart'"));
+  assert.match(refresh, /patientPublish\.vitalsFromNote\(r\.note, r\.date\)/);
+  assert.match(refresh, /noteStatus !== clinicalNotes\.NOTE_STATUS\.VOIDED/);
+  assert.match(refresh, /publishChartFromEmr\(emrR, client, actor, latestSigned \? \{ vitals: latestSigned\.v \} : \{\}\)/);
+  assert.match(refresh, /backfillEmrFilingForClient\(client\.id, req\.user\)/, 'a patient upload files as the clinician, never as the patient');
+  const pub = server.slice(server.indexOf('const publishChartFromEmr'), server.indexOf('const loadPublishedAppointments'));
+  assert.match(pub, /appMedications: patientPublish\.reconciledAppMeds\(client\)/);
+});
+
+test('A6. documents: the intake summary and face sheet are the client\'s or POA\'s, and the packet link is the on-demand route', () => {
+  assert.match(server, /app\.get\('\/api\/gfc\/face-sheet\.pdf', authenticateToken, requireEnrolledClient, requireClientForOwnConsents,/);
+  assert.match(server, /app\.get\('\/api\/gfc\/enrollment-packet\.pdf', authenticateToken, requireEnrolledClient, requireClientForOwnConsents,/);
+  const route = stripComments(routeBody("app.get('/api/gfc/documents'"));
+  assert.match(route, /url: '\/api\/gfc\/enrollment-packet\.pdf'/);
+  assert.ok(!/client\.enrollmentPacket/.test(route), 'the private Drive copy is never handed to a patient');
+  assert.match(route, /consentPacketZip: hasSignedConsents && canOpenCopy \?/);
+  assert.ok(server.indexOf('const requireClientForOwnConsents') < server.indexOf("app.get('/api/gfc/face-sheet.pdf'"), 'defined before first use, or the app does not boot');
+});
+
+test('A7. the care team reaches the portal as names and roles only, never ids; family at summary level gets none', () => {
+  const from = server.indexOf('const careTeamForPortal');
+  const to = server.indexOf('// Build the client\'s REAL care plan for portal display');
+  const nameInitials = (n) => String(n || '').split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join('') || 'GF';
+  const fn = new Function('nameInitials', 'visitReminders', `${server.slice(from, to)}\nreturn careTeamForPortal;`)(nameInitials, require('../visitReminders'));
+  const users = [{ id: 'cg', name: 'Maria Lopez', email: 'm@x' }, { id: 'np', name: 'Bethel Godwins', prescriberCredential: 'NP' }, { id: 'old', name: 'Gone', accountStatus: 'inactive' }, { id: 'cm', name: 'Courtney Hale' }];
+  const out = fn({ careTeam: { primaryCaregiver: 'cg', backupCaregiver: 'old', assignedFNPs: ['np'], assignedCaseManager: 'cm' } }, users);
+  assert.deepEqual(out.primaryCaregiver, { name: 'Maria Lopez', initials: 'ML', role: 'Primary caregiver' });
+  assert.deepEqual(out.careTeam.map(m => m.role), ['Primary caregiver', 'Nurse practitioner', 'Case manager'], 'inactive accounts are left out');
+  assert.ok(!/"id"|m@x/.test(JSON.stringify(out)), 'no ids or emails');
+  const route = stripComments(routeBody("app.get('/api/gfc/care-plan'"));
+  assert.match(route, /careTeam: level === 'full' \? team\.careTeam : \[\]/);
+  assert.ok(!/'chargePlanNote'/.test(fs.readFileSync(path.join(__dirname, '..', 'patientReadRepository.js'), 'utf8').split('FILTER_MAP')[1].split('});')[0]), 'the charge note never reaches a patient');
+});
+
+test('A8. the portal says when a load failed, and why the Health tab is locked, instead of looking empty', () => {
+  const portal = fs.readFileSync(path.join(__dirname, '..', 'public', 'portal.html'), 'utf8');
+  assert.match(portal, /if \(!sh\.error\) \{ setShifts\(sh\.shifts \|\| \[\]\); setShiftsErr\(''\); \} else setShiftsErr\(sh\.error\);/);
+  assert.match(portal, /if \(!dc\.error\) \{ setDocs\(dc\); setDocsErr\(''\); \} else setDocsErr\(dc\.error\);/);
+  assert.match(portal, /Your caregiver visit schedule could not be loaded/);
+  assert.match(portal, /me\.clinicalRead\.code !== 'CLINICAL_NOT_ON_LINE'/, 'a PHC-only client still never sees a Health tab');
+  assert.match(portal, /view === 'health' && clinicalBlocked && <GfcHealth clinical=\{\{ error: me\.clinicalRead\.reason/);
+  assert.match(portal, /has\('vitals'\) && !vitals &&/);
+  assert.match(portal, /cp\.problems\.map\(/, 'the plan\'s problem list is shown before the patient co-signs it');
+});

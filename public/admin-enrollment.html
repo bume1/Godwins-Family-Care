@@ -204,6 +204,14 @@
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ caregiverId })
       }),
       listMoveCaregivers: () => authedFetch('/api/gfc/admin/enrollment/meta/caregivers'),
+      // Remove an uploaded file (admin or manager, reason required) and choose
+      // whether the patient sees one the office filed (2026-09-29).
+      removeDocument: (id, uploadId, reason) => authedFetch(`/api/gfc/admin/enrollment/${id}/documents/${uploadId}/remove`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason })
+      }),
+      shareDocument: (id, uploadId, shared) => authedFetch(`/api/gfc/admin/enrollment/${id}/documents/${uploadId}/share`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ shared })
+      }),
       // The branded, no-login upload link (2026-09-23) — admin only, matching
       // every other workflow decision on this surface. get-or-create by
       // default; `{ regenerate: true }` turns off the old one and mints a new.
@@ -776,6 +784,23 @@
           .catch(e => setErr(e.message)).finally(() => setBusy(false));
       };
 
+      // Remove: the reason is required and kept on record. A copy already filed
+      // to OpenEMR stays there (its API cannot delete one), and the reply says so.
+      const removeDoc = (f) => {
+        const reason = window.prompt(`Remove "${f.fileName}" from this client's file? Say why. The reason is kept on record.`) || '';
+        if (!reason.trim()) return;
+        setBusy(true); setErr('');
+        api.removeDocument(clientId, f.id, reason.trim())
+          .then(r => { if (r && r.emrCopy) alert(r.emrCopy.message); load(); })
+          .catch(e => setErr(e.message)).finally(() => setBusy(false));
+      };
+      const shareDoc = (f, shared) => {
+        setBusy(true); setErr('');
+        api.shareDocument(clientId, f.id, shared).then(load)
+          .catch(e => setErr(e.message)).finally(() => setBusy(false));
+      };
+      const access = (state && state.access) || {};
+
       const startMove = (uploadId) => {
         setMoving(uploadId); setRouteErr(''); setPickedCaregiver('');
         if (caregivers) return;
@@ -863,7 +888,7 @@
                 The client gets one email and the items appear on their portal checklist.
               </p>
               <p className="text-xs text-gray-500 mt-1">
-                A document you file yourself ticks its own item and stops the chasing — the client sees it on their portal too.
+                A document you file yourself ticks its own item and stops the chasing. The client does not see it until you share it with them.
               </p>
             </div>
           )}
@@ -902,6 +927,22 @@
                         {f.fileName}
                       </button>
                       <span className="text-gray-400">{new Date(f.uploadedAt).toLocaleDateString()}</span>
+                      {/* Who filed it, and whether the patient can see it. A file
+                          the client sent is theirs already; one the office filed
+                          stays hidden from the patient until someone shares it. */}
+                      <span className="text-gray-500">{f.source === 'staff' ? `Filed by ${f.uploadedByName || 'staff'}` : 'Sent by the client'}</span>
+                      {f.source === 'staff' && f.status !== 'rejected' && (
+                        access.canShare
+                          ? <button className={`chip border ${f.sharedWithPatient ? 'border-emerald-300 text-emerald-700 bg-emerald-50' : 'border-gray-300 text-gray-600 bg-white'}`}
+                              disabled={busy} onClick={() => shareDoc(f, !f.sharedWithPatient)}
+                              title={f.sharedWithPatient ? 'The patient can see this. Click to hide it from them.' : 'The patient cannot see this. Click to share it with them.'}>
+                              {f.sharedWithPatient ? 'Shared with patient' : 'Hidden from patient'}
+                            </button>
+                          : <span className="chip bg-stone-100 text-stone-600">{f.sharedWithPatient ? 'Shared with patient' : 'Hidden from patient'}</span>
+                      )}
+                      {access.canRemove && (
+                        <button className="chip border border-danger-200 text-danger-500 bg-white" disabled={busy} onClick={() => removeDoc(f)}>Remove…</button>
+                      )}
                       {f.status === 'rejected'
                         ? <span className="text-danger-500">Rejected — {f.rejectionReason}</span>
                         : f.status === 'accepted'
@@ -1552,7 +1593,7 @@
             </p>
             {assigned && !posMissing && !notService && agree.ok
               ? <span className="badge bg-success-50 text-success-600 shrink-0">POS {data.posCode}</span>
-              : <span className="badge bg-warning-50 text-warning-600 shrink-0">Blocks signing</span>}
+              : <span className="badge bg-warning-50 text-warning-600 shrink-0">Blocks billing</span>}
           </div>
 
           {data.degraded && (
@@ -1565,7 +1606,7 @@
           <div className="text-xs text-gray-500 mb-2">
             {assigned
               ? <>Assigned to <b>{data.facilityName || `facility ${data.facilityId}`}</b>{data.posCode ? <> &middot; place of service <b>{data.posCode}</b></> : null}.</>
-              : <b className="text-warning-600">Not assigned to an OpenEMR facility, so this patient&rsquo;s visits cannot be signed.</b>}
+              : <b className="text-warning-600">Not assigned to an OpenEMR facility, so this patient&rsquo;s visits cannot be submitted to billing.</b>}
           </div>
           {posMissing && (
             <p className="text-xs text-warning-600 mb-2">

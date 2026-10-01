@@ -4,6 +4,45 @@
 
 ---
 
+### Version 3.1.0 - September 29, 2026
+
+#### New Features
+- Portal P1: close the review's test-honesty gaps; add a browser probe
+- Open an order to see it, add notes and files; Orders tab shows every type; fix stale Resume draft banner
+
+#### Bug Fixes
+- Care Team messaging: fix review findings (POA family channels, revoked-POA email, attachment names and cleanup, notice wording)
+- Visit summary: list the clinician-reconciled medications, keep intake allergies, fix bullet spacing
+- Fix bugs found in a sweep of the patient portal and clinician workspace
+
+#### Improvements
+- Let the office and case managers update where an order goes
+
+#### Documentation
+- record Portal P1 in CLAUDE.md and the session plan
+
+#### Changes
+- Care Team messaging: clinician and patient/POA channel, formatted text, attachments, PHI-free email prompt
+- After-visit summary: patient download waits for the visit to be published; tests follow the merged portal markup
+- After-visit summary: downloadable PDF for staff and patient, med changes, allergies, next visit, contacts, 911
+- After-visit summary, part 2: allergy strip bug, referral and equipment order labels
+- After-visit summary, part 1: keep line breaks in patient-facing text, PDF renderer
+- Portal P1: fixes from the independent adversarial review
+- Portal P1: visit overview without repeats, no VITALS shorthand in the note, family label
+- Portal P1: patients read published copies, not OpenEMR
+- Signed note PDF: practice logo in the header bar, title reads Clinical Note
+- Download the signed note as a PDF; show the requisition greyed while the agency is pending
+- Let a referral be placed before the agency is known
+- Stop flagging coded problems as having no ICD-10 code
+- Let a clinician book a visit without reading OpenEMR's facility list
+- Clinician signs with an ICD-10; billing adds codes and submits
+- Accept ICD-10 codes with a trailing period from OpenEMR's code search
+- Restore public/changelog.md (boot-time rewrite, not part of this change)
+- Stop vitals showing twice; read an older note's "n/a/n/a" arm as a reason
+- Delete a mistaken unsigned encounter, with a reason
+- Show the clinical note as one note in clinical order, and allow 'unable to take' for a BP arm
+
+
 ### Version 3.1.0 - September 27, 2026
 
 #### New Features

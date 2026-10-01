@@ -65,7 +65,11 @@ const APPOINTMENTS = {
 };
 const openemr = require(path.join(__dirname, '..', 'openemr.js'));
 openemr.isConfigured = () => true;
-openemr.forActor = () => new Proxy({}, {
+// A clinician's own OpenEMR login cannot read the facility list (owner,
+// 2026-09-29 — the live situation behind "this patient has no facility"); an
+// admin's or a manager's can. Toggled so the earlier sections keep their world.
+let CLINICIANS_READ_FACILITIES = true;
+openemr.forActor = (actor) => new Proxy({}, {
   get(_t, prop) {
     switch (prop) {
       case 'createEncounter': return async (puuid, fields) => {
@@ -95,9 +99,14 @@ openemr.forActor = () => new Proxy({}, {
       case 'addVitals': return async (puuid, euuid, v) => { EMR.vitals.push({ euuid, ...v }); return {}; };
       case 'postCharge': return async (puuid, euuid, p) => { const id = String(++EMR.seq); EMR.charges.push({ id, euuid, ...p }); return { id }; };
       case 'uploadPatientDocument': return async (puuid, fileName, buffer) => { EMR.documents.push({ puuid, fileName, bytes: buffer.length, head: buffer.slice(0, 5).toString() }); return true; };
-      case 'getFacilities': return async () => FACILITIES;
+      case 'getFacilities': return async () => {
+        const billing = actor && (actor.role === 'admin' || actor.isManager === true);
+        if (!billing && !CLINICIANS_READ_FACILITIES) { const e = new Error('HTTP 403: Organization policy does not have permit access resource'); e.status = 403; throw e; }
+        return FACILITIES;
+      };
       case 'getPatientAppointmentRows': return async (puuid) => APPOINTMENTS[puuid] || [];
       case 'getEncounters': return async () => { throw new Error('FHIR encounter list not stubbed — the app degrades to its own records'); };
+      case 'getAllEncounters': return async () => { throw new Error('FHIR encounter feed not stubbed — the coding queue degrades to the app\'s own records'); };
       default:
         if (/^get/.test(String(prop))) return async () => [];
         return async () => { throw new Error(`openemr.${String(prop)} not stubbed`); };
@@ -137,6 +146,10 @@ const FNP = staff('fnp_1', 'Bethel Godwins', 'provider', 'FNP');
 const LCSW = staff('lcsw_1', 'Lena Cole', 'lcsw', 'LCSW');
 const LMSW = staff('lmsw_1', 'Mara Shaw', 'lmsw', 'LMSW');
 const CM = staff('cm_1', 'Casey Reed', 'readOnly', null, { role: 'caseManager', hasClinicalAccess: false });
+// Billing (owner, 2026-09-29): an admin or a manager. The manager holds no
+// clinical role at all.
+const MGR = { id: 'mgr_1', name: 'Morgan Price (TEST DATA)', email: 'mgr_1@example.test', role: 'user', isManager: true, hasClinicalAccess: false, accountStatus: 'active' };
+const BILLPATIENT = { ...PATIENT, id: 'c_bill', email: 'c_bill@example.test', name: 'Billing Probe Patient (TEST DATA)', slug: 'bill-probe', openEmrPatientId: 'uuid-bill-patient' };
 
 // Formatted markup, the way the editor stores it.
 const HP_NOTE = {
@@ -148,7 +161,7 @@ const HP_NOTE = {
 
 (async () => {
   const hash = await bcrypt.hash(PW, 4);
-  STORE.set('users', [PATIENT, OTHER, RN, FNP, LCSW, LMSW, CM].map(u => ({ ...u, password: hash })));
+  STORE.set('users', [PATIENT, OTHER, BILLPATIENT, RN, FNP, LCSW, LMSW, CM, MGR].map(u => ({ ...u, password: hash })));
   STORE.set('gfc_payer_credentialing', { billing_npi_used: '1234567893', billing_provider_name: 'GFC' });
   const fresh = new Date().toISOString();
   STORE.set('gfc_ncci_source_version', { ptp: { quarter: '2026Q4', loadedAt: fresh }, mue: { quarter: '2026Q4', loadedAt: fresh } });
@@ -156,7 +169,7 @@ const HP_NOTE = {
   require(path.join(__dirname, '..', 'server.js'));
   await new Promise(r => setTimeout(r, 3000));
   const tok = {};
-  for (const [k, u] of Object.entries({ rn: RN, fnp: FNP, lcsw: LCSW, lmsw: LMSW, cm: CM })) tok[k] = await login(u.email);
+  for (const [k, u] of Object.entries({ rn: RN, fnp: FNP, lcsw: LCSW, lmsw: LMSW, cm: CM, mgr: MGR })) tok[k] = await login(u.email);
   if (!tok.rn || !tok.fnp || !tok.lmsw) { console.log('LOGIN FAILED', tok); process.exit(1); }
   const P = `/api/clinical/patients/${PATIENT.id}`;
 
@@ -234,7 +247,7 @@ const HP_NOTE = {
   r = await call('POST', `${P}/encounters/${hp}/co-sign`, tok.fnp, { attest: true, text: 'Seen with the RN. I agree with the **assessment**; hold the diuretic.' });
   check('the FNP adds the clinician addendum', r.status === 200, r.body);
   check('the FNP is now the rendering clinician', record(hp).renderingProvider && record(hp).renderingProvider.id === FNP.id && record(hp).coSignStatus === 'cleared');
-  check('charges posted on the addendum, once', EMR.charges.filter(c => c.euuid === hp).length === 1);
+  check('nothing posts on the addendum — it goes to billing', EMR.charges.filter(c => c.euuid === hp).length === 0 && record(hp).billingStatus === 'awaiting_billing');
   check('the addendum is stored as the clinician addendum', rows('encounter_addenda').some(a => a.encounterUuid === hp && a.kind === 'clinician_addendum' && a.by.id === FNP.id));
   check('both signatures are in the note', /Clinician addendum and billing signature: Bethel Godwins \(TEST DATA\), FNP \(NPI 1234567893\)/.test(narrativeText(hp)));
   check('the PDF was re-filed with the addendum', EMR.documents.filter(d => /^Clinical_Note_/.test(d.fileName)).length >= 2);
@@ -243,7 +256,7 @@ const HP_NOTE = {
   r = await call('POST', `${P}/encounters/${hp}/co-signatures`, tok.lmsw, { attest: true });
   check('an LMSW co-signs', r.status === 200, r.body);
   check('the co-signature is in the note', /Co-signed by Mara Shaw \(TEST DATA\), LMSW/.test(narrativeText(hp)));
-  check('and it did not change who bills', record(hp).renderingProvider.id === FNP.id && EMR.charges.filter(c => c.euuid === hp).length === 1);
+  check('and it did not change who bills', record(hp).renderingProvider.id === FNP.id && EMR.charges.filter(c => c.euuid === hp).length === 0);
   r = await call('POST', `${P}/encounters/${hp}/co-signatures`, tok.lmsw, { attest: true });
   check('one co-signature per person', r.status === 409 && r.body.code === 'CO_SIGN_DUPLICATE', r.body);
   r = await call('POST', `${P}/encounters/${hp}/co-signatures`, tok.rn, { attest: true });
@@ -274,7 +287,7 @@ const HP_NOTE = {
   });
   check('editing one field and confirming the rest clears the hold', r.status === 200 && r.body.carriedPending.length === 0, r.body && r.body.carriedPending);
   r = await call('POST', `${P}/encounters/${cf}/sign`, tok.fnp, { attest: true });
-  check('the FNP signs it directly — billable at once', r.status === 200 && record(cf).coSignStatus === 'not_required' && EMR.charges.some(c => c.euuid === cf), r.body);
+  check('the FNP signs it directly — sent to billing, nothing posted yet', r.status === 200 && record(cf).coSignStatus === 'not_required' && record(cf).billingStatus === 'awaiting_billing' && !EMR.charges.some(c => c.euuid === cf), r.body);
 
   console.log('\n── 8. Attach a note to an appointment booked afterwards ──');
   r = await call('POST', `${P}/notes`, tok.rn, { note: { kind: 'followup', chiefConcern: 'Unscheduled wound check', subjective: 'Called in' } });
@@ -302,7 +315,7 @@ const HP_NOTE = {
   check('a discard needs a reason', r.status === 400, r.body);
   r = await call('POST', `${P}/encounters/${second}/note/void`, tok.rn, { reason: 'Started on the wrong patient visit' });
   check('the draft is discarded', r.status === 200 && record(second).noteStatus === 'voided', r.body);
-  check('OpenEMR says so in words', /Draft discarded by Ruth Nolan/.test(narrativeText(second)));
+  check('OpenEMR says so in words', /ENTERED IN ERROR — encounter deleted by Ruth Nolan/.test(narrativeText(second)));
   r = await call('POST', `${P}/encounters/${second}/sign`, tok.fnp, { attest: true });
   check('a discarded draft cannot be signed', r.status === 409 && r.body.code === 'NOTE_VOIDED', r.body);
   r = await call('GET', '/api/clinical/work-queues', tok.fnp);
@@ -344,13 +357,31 @@ const HP_NOTE = {
   check('the OpenEMR note still carries the vitals after the save', /VITALS — BP right arm 132\/82; BP left arm 128\/80; HR 76/.test(narrativeText(legacyEuuid)), narrativeText(legacyEuuid).slice(0, 300));
   check('the readings filed the old way are remembered', record(legacyEuuid).legacyVitals && record(legacyEuuid).legacyVitals.bpRightSys === '132');
 
+  // Unchanged, those readings are already in OpenEMR's vitals — listing them
+  // again as a draft showed every vital twice (owner report, 2026-09-28).
   r = await call('GET', `${P}/chart`, tok.rn);
-  const drafts = (r.body && r.body.draftVitals) || [];
-  check('the chart shows the unsigned note\'s vitals, marked draft', r.status === 200 && drafts.some(d => d.encounterUuid === legacyEuuid && d.draft === true && /132\/82/.test(d.value)), { status: r.status, drafts });
+  let drafts = (r.body && r.body.draftVitals) || [];
+  check('the older note\'s unchanged vitals are not listed a second time as a draft', r.status === 200 && !drafts.some(d => d.encounterUuid === legacyEuuid), { status: r.status, drafts });
   check('a signed note\'s vitals are not shown as a draft', !drafts.some(d => d.encounterUuid === hp || d.encounterUuid === cf));
   r = await call('GET', `${P}/pre-visit`, tok.rn);
-  const lv = r.body && r.body.packet && r.body.packet.lastVitals;
+  let lv = r.body && r.body.packet && r.body.packet.lastVitals;
+  check('"Last vitals" does not offer them as a draft either', r.status === 200 && !(lv && lv.draft), { status: r.status, lv });
+  // Change one reading: now it IS news, and shows as a draft until signed.
+  r = await call('GET', `${P}/encounters/${legacyEuuid}/note`, tok.fnp);
+  let cur = r.body;
+  r = await call('PUT', `${P}/encounters/${legacyEuuid}/note`, tok.fnp, { note: { ...cur.note, vitals: { ...cur.note.vitals, hr: '88' } }, baseVersion: record(legacyEuuid).noteVersion });
+  check('a changed reading saves', r.status === 200, r.body);
+  r = await call('GET', `${P}/chart`, tok.rn);
+  drafts = (r.body && r.body.draftVitals) || [];
+  check('the chart shows the changed readings, marked draft', drafts.some(d => d.encounterUuid === legacyEuuid && d.draft === true && /132\/82/.test(d.value)) && drafts.some(d => d.encounterUuid === legacyEuuid && /88/.test(d.value)), drafts);
+  r = await call('GET', `${P}/pre-visit`, tok.rn);
+  lv = r.body && r.body.packet && r.body.packet.lastVitals;
   check('"Last vitals" shows the draft readings too', r.status === 200 && lv && lv.draft === true && /Blood pressure right 132\/82/.test(lv.value), { status: r.status, lv });
+  // Put it back, so signing below proves the unchanged case writes no row.
+  r = await call('GET', `${P}/encounters/${legacyEuuid}/note`, tok.fnp);
+  cur = r.body;
+  r = await call('PUT', `${P}/encounters/${legacyEuuid}/note`, tok.fnp, { note: { ...cur.note, vitals: { ...cur.note.vitals, hr: '76' } }, baseVersion: record(legacyEuuid).noteVersion });
+  check('and back to the original reading', r.status === 200, r.body);
 
   const vitalsBefore = EMR.vitals.filter(v => v.euuid === legacyEuuid).length;
   r = await call('POST', `${P}/encounters/${legacyEuuid}/sign`, tok.rn, { attest: true });
@@ -358,6 +389,119 @@ const HP_NOTE = {
   check('its unchanged vitals are NOT sent to OpenEMR a second time', EMR.vitals.filter(v => v.euuid === legacyEuuid).length === vitalsBefore && !!record(legacyEuuid).vitalsWrittenAt);
   r = await call('GET', `${P}/chart`, tok.rn);
   check('once signed, it leaves the draft list', !((r.body && r.body.draftVitals) || []).some(d => d.encounterUuid === legacyEuuid));
+
+  console.log('\n── 12. Deleting a mistaken encounter (unsigned only) ──');
+  r = await call('POST', `${P}/encounters/${hp}/note/void`, tok.fnp, { reason: 'Mistake' });
+  check('a signed note cannot be deleted', r.status === 409 && r.body.code === 'ENCOUNTER_CLOSED', r.body);
+  // An order on the encounter blocks the delete until it is cancelled.
+  r = await call('POST', `${P}/notes`, tok.rn, { note: { kind: 'followup', chiefConcern: 'Opened on the wrong patient' } });
+  const mistaken = r.body.encounterUuid;
+  STORE.set('clinical_orders', rows('clinical_orders').concat([{ id: 'ord-probe', clientId: PATIENT.id, encounterUuid: mistaken, orderType: 'lab', tests: ['CMP'], status: 'sent', createdAt: new Date().toISOString() }]));
+  r = await call('POST', `${P}/encounters/${mistaken}/note/void`, tok.rn, { reason: 'Wrong patient' });
+  check('a live order blocks the delete, and is named', r.status === 409 && r.body.code === 'ENCOUNTER_HAS_ORDERS' && /CMP/.test(r.body.error), r.body);
+  check('nothing was changed by the refusal', record(mistaken).noteStatus === 'draft');
+  STORE.set('clinical_orders', rows('clinical_orders').map(o => (o.id === 'ord-probe' ? { ...o, status: 'cancelled' } : o)));
+  r = await call('POST', `${P}/encounters/${mistaken}/note/void`, tok.rn, { reason: 'Wrong patient' });
+  check('once the order is cancelled it deletes', r.status === 200 && record(mistaken).noteStatus === 'voided', r.body);
+  check('who, when and why are kept on record', record(mistaken).voided && record(mistaken).voided.reason === 'Wrong patient' && record(mistaken).voided.by.id === RN.id);
+  // A first H&P saved in error counted as the patient's initial visit; deleting it re-opens that step.
+  const OP = `/api/clinical/patients/${OTHER.id}`;
+  r = await call('POST', `${OP}/notes`, tok.rn, { note: { kind: 'hp', chiefConcern: 'Started on the wrong patient' } });
+  const wrongHp = r.body && r.body.encounterUuid;
+  check('the first H&P is stamped as that patient\'s initial visit', !!wrongHp && (rows('users').find(u => u.id === OTHER.id).clinicalInitialVisit || {}).encounterUuid === wrongHp, r.body);
+  r = await call('POST', `${OP}/encounters/${wrongHp}/note/void`, tok.rn, { reason: 'Wrong patient' });
+  check('deleting it re-opens the initial-visit step, and the old stamp is kept on record', r.status === 200 && !rows('users').find(u => u.id === OTHER.id).clinicalInitialVisit && record(wrongHp).voided.clearedInitialVisit.encounterUuid === wrongHp, r.body);
+  // A deleted note that documented an appointment releases it.
+  r = await call('POST', `${P}/encounters/${un}/note/void`, tok.rn, { reason: 'Documented the wrong visit' });
+  check('a note attached to an appointment deletes', r.status === 200, r.body);
+  check('the appointment is released', !rows('appointment_encounters').some(l => l.encounterUuid === un) && record(un).voided.releasedAppointments.some(l => String(l.eid) === '900'));
+  r = await call('GET', `${P}/appointments`, tok.rn);
+  check('the appointment reads "not yet documented" again', r.status === 200 && (r.body.appointments || []).some(a => String(a.eid) === '900' && !a.encounterUuid && a.state !== 'documented'), (r.body.appointments || []).map(a => [a.eid, a.state, a.encounterUuid]));
+  r = await call('GET', `${P}/encounters`, tok.rn);
+  check('deleted encounters are gone from the list', r.status === 200 && !r.body.encounters.some(e => [un, mistaken, second].includes(e.id)) && r.body.deletedCount >= 3, { n: r.body.deletedCount, ids: (r.body.encounters || []).map(e => e.id) });
+  r = await call('GET', `${P}/encounters?includeDeleted=1`, tok.rn);
+  const shown = r.body && (r.body.encounters || []).find(e => e.id === mistaken);
+  check('"Show deleted" brings them back with who and why', shown && shown.noteStatus === 'voided' && shown.deleted && shown.deleted.reason === 'Wrong patient', shown);
+  r = await call('GET', `${P}/chart`, tok.rn);
+  check('a deleted note\'s vitals are not shown as a draft', !((r.body && r.body.draftVitals) || []).some(d => [un, mistaken].includes(d.encounterUuid)));
+
+
+  console.log('\n── 13. Clinician signs with an ICD-10; billing finishes and submits ──');
+  // Bethel's report, reproduced: her login cannot read OpenEMR's facility list,
+  // and no admin or manager has read it yet, so there is no saved copy either.
+  CLINICIANS_READ_FACILITIES = false;
+  STORE.delete('openemr_facility_snapshot');
+  const B = `/api/clinical/patients/${BILLPATIENT.id}`;
+  r = await call('POST', `${B}/notes`, tok.fnp, { note: { kind: 'followup', chiefConcern: 'BP follow-up', subjective: 'Feels well', assessment: 'HTN, controlled', plan: 'Continue' } });
+  const bv = r.body && r.body.encounterUuid;
+  check('the FNP saves a note although her login cannot read facilities', r.status === 200 && !!bv, r.body);
+  check('no place-of-service warning reaches the clinician', !/place of service|facility|POS/i.test(JSON.stringify((r.body && r.body.warnings) || [])), r.body && r.body.warnings);
+  check('the reason is kept for billing instead', !!(record(bv) && record(bv).posMissingReason), record(bv) && record(bv).posMissingReason);
+  r = await call('POST', `${B}/encounters/${bv}/sign`, tok.fnp, { attest: true });
+  check('with no ICD-10 the sign is refused, naming ICD-10 only', r.status === 409 && r.body.code === 'SIGN_NO_DIAGNOSIS' && /ICD-10/.test(r.body.error) && !/CPT|place of service|POS/i.test(r.body.error), r.body);
+  r = await call('PUT', `${B}/encounters/${bv}/coding`, tok.fnp, { diagnoses: [{ code: 'I10', description: 'Essential hypertension' }], services: [] });
+  check('she adds the diagnosis', r.status === 200, r.body);
+  r = await call('GET', `${B}/encounters/${bv}`, tok.fnp);
+  check('her view carries no place of service at all', r.status === 200 && !('posCode' in (r.body.encounter || {})) && !('facilityId' in (r.body.encounter || {})) && r.body.billingReadiness === null, r.body && r.body.encounter);
+  check('and she is ready to sign with no CPT', r.body.signReadiness && r.body.signReadiness.ok === true, r.body.signReadiness);
+  r = await call('POST', `${B}/encounters/${bv}/sign`, tok.fnp, { attest: true });
+  check('the FNP signs with an ICD-10 and no CPT — THE OWNER REPORT, FIXED', r.status === 200 && record(bv).billingStatus === 'awaiting_billing', r.body);
+  check('nothing is billed yet', !EMR.charges.some(c => c.euuid === bv));
+  r = await call('PUT', `${B}/encounters/${bv}/coding`, tok.fnp, { diagnoses: [{ code: 'I10' }], services: [{ code: '99349', dxLinks: ['I10'] }] });
+  check('the note is locked to clinicians: she cannot add codes after signing', r.status === 409 && r.body.code === 'ENCOUNTER_WITH_BILLING', r.body);
+  r = await call('GET', `${B}/chart`, tok.fnp);
+  check('her chart banner carries no facility or POS', r.status === 200 && r.body.banner && !('facility' in r.body.banner), r.body && r.body.banner);
+  r = await call('GET', `${B}/place-of-service`, tok.fnp);
+  check('the visit-type catalog reaches her without any facility or POS', r.status === 200 && Array.isArray(r.body.appointmentTypes) && !('posCode' in r.body) && !('facilityId' in r.body) && !('facilities' in r.body), Object.keys(r.body || {}));
+  r = await call('GET', '/api/clinical/facilities', tok.fnp);
+  check('the facility list is billing\'s', r.status === 403 && r.body.code === 'BILLING_ONLY', r.body);
+  r = await call('POST', `${B}/encounters/${bv}/billing-submit`, tok.fnp, { attest: true });
+  check('a clinician cannot submit to billing', r.status === 403 && r.body.code === 'BILLING_ONLY', r.body);
+
+  r = await call('GET', '/api/clinical/inbox', tok.mgr);
+  const billItem = r.body && (r.body.items || []).find(i => i.encounterUuid === bv && i.kind === 'encounter_awaiting_billing');
+  check('it reaches the manager\'s inbox as actionable', r.status === 200 && billItem && billItem.actionable === true, r.body);
+  r = await call('GET', '/api/clinical/inbox', tok.fnp);
+  const fnpItem = r.body && (r.body.items || []).find(i => i.encounterUuid === bv && i.kind === 'encounter_awaiting_billing');
+  check('the FNP sees it waiting on billing, not on her', fnpItem && fnpItem.actionable === false && fnpItem.waitingOn === 'billing', fnpItem);
+  r = await call('GET', '/api/clinical/encounters/queue?state=awaiting_billing', tok.mgr);
+  check('the coding queue lists it under Awaiting billing', r.status === 200 && (r.body.encounters || []).some(e => e.encounterUuid === bv), r.body);
+  r = await call('GET', `${B}/encounters/${bv}`, tok.mgr);
+  check('billing sees what is missing before submitting', r.status === 200 && r.body.billingReadiness && r.body.billingReadiness.missing.includes('service') && r.body.billingActions.canSubmit === true, r.body && r.body.billingReadiness);
+  r = await call('PUT', `${B}/encounters/${bv}/coding`, tok.mgr, { diagnoses: [{ code: 'E11.9' }], services: [{ code: '99349', dxLinks: ['E11.9'] }] });
+  check('billing cannot change the diagnoses', r.status === 409 && r.body.code === 'DX_LOCKED_AFTER_SIGN', r.body);
+  r = await call('PUT', `${B}/encounters/${bv}/coding`, tok.mgr, { diagnoses: [{ code: 'I10', description: 'Essential hypertension' }], services: [{ code: '99349', dxLinks: ['I10'], modifiers: ['25'] }] });
+  check('billing adds the service code and modifier', r.status === 200 && record(bv).services.length === 1 && record(bv).services[0].modifiers.includes('25'), r.body);
+  check('the rendering clinician is still the FNP, not the manager', record(bv).renderingProvider && record(bv).renderingProvider.id === FNP.id, record(bv).renderingProvider);
+  r = await call('POST', `${B}/encounters/${bv}/billing-submit`, tok.mgr, {});
+  check('submitting needs billing\'s attestation', r.status === 400 && r.body.code === 'BILLING_NO_ATTEST', r.body);
+  r = await call('POST', `${B}/encounters/${bv}/billing-submit`, tok.mgr, { attest: true });
+  check('billing submits', r.status === 200 && record(bv).billingStatus === 'billed', r.body);
+  check('the place of service was stamped from the patient\'s facility with billing\'s login', EMR.encounters.get(bv).pos_code === '12' && String(EMR.encounters.get(bv).facility_id) === '5', EMR.encounters.get(bv));
+  const posted = EMR.charges.filter(c => c.euuid === bv);
+  check('the charge posted once, with the FNP as rendering provider', posted.length === 1 && posted[0].code === '99349' && posted[0].provider_id === 7, posted);
+  r = await call('POST', `${B}/encounters/${bv}/billing-submit`, tok.mgr, { attest: true });
+  check('it cannot be submitted twice', r.status === 409 && r.body.code === 'BILLING_SUBMITTED', r.body);
+  r = await call('PUT', `${B}/encounters/${bv}/coding`, tok.mgr, { diagnoses: [{ code: 'I10' }], services: [] });
+  check('codes lock for everyone once submitted', r.status === 409 && r.body.code === 'BILLING_SUBMITTED', r.body);
+
+  console.log('\n── 14. The saved facility list gives clinicians\' visits their POS ──');
+  check('billing\'s read saved a copy of the facility list', ((STORE.get('openemr_facility_snapshot') || {}).facilities || []).some(f => f.id === '5' && f.pos_code === '12'));
+  r = await call('POST', `${B}/notes`, tok.fnp, { note: { kind: 'followup', chiefConcern: 'Second visit' } });
+  const bv2 = r.body && r.body.encounterUuid;
+  check('a new visit the FNP creates now carries POS 12 without her reading facilities', r.status === 200 && EMR.encounters.get(bv2).pos_code === '12' && !record(bv2).posMissingReason, EMR.encounters.get(bv2));
+  r = await call('POST', '/api/clinical/facilities/sync', tok.fnp, {});
+  check('only billing can sync the facility list', r.status === 403, r.body);
+  r = await call('POST', '/api/clinical/facilities/sync', tok.mgr, {});
+  check('a manager syncs it', r.status === 200 && /Synced 2/.test(r.body.message), r.body);
+  r = await call('PUT', `${B}/encounters/${bv2}/coding`, tok.fnp, { diagnoses: [{ code: 'I10' }], services: [] });
+  r = await call('POST', `${B}/encounters/${bv2}/sign`, tok.fnp, { attest: true });
+  check('signed and sent to billing', r.status === 200 && record(bv2).billingStatus === 'awaiting_billing', r.body);
+  r = await call('POST', `${B}/encounters/${bv2}/billing-submit`, tok.mgr, { noCharge: true, reason: '' });
+  check('no charge needs a reason', r.status === 400 && r.body.code === 'NO_CHARGE_REASON', r.body);
+  r = await call('POST', `${B}/encounters/${bv2}/billing-submit`, tok.mgr, { noCharge: true, reason: 'Courtesy follow-up' });
+  check('billing closes it with no charge', r.status === 200 && record(bv2).billingStatus === 'no_charge' && !EMR.charges.some(c => c.euuid === bv2), r.body);
+  CLINICIANS_READ_FACILITIES = true;
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

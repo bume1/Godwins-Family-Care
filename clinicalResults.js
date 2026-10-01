@@ -197,6 +197,7 @@ const canAcknowledge = (user, interpretation) => {
   return roles.canClinicalWrite(user);
 };
 
+const PATIENT_NOTE_MAX = 500;
 const applyAcknowledgement = ({ result, actor, input, at }) => {
   if (!result) return { error: 'Result not found', code: 'RESULT_NOT_FOUND', status: 404 };
   if (result.acknowledgedAt) {
@@ -234,6 +235,10 @@ const applyAcknowledgement = ({ result, actor, input, at }) => {
         clinicalRole: roles.resolveClinicalRole(actor)
       },
       followUpNote: note || null,
+      // Portal P1: an optional plain-language line FOR THE PATIENT, shown on
+      // their portal beside the result. The follow-up note above is the care
+      // team's and never reaches the patient.
+      patientNote: clean((input || {}).patientNote, PATIENT_NOTE_MAX) || null,
       updatedAt: now
     }
   };
@@ -336,7 +341,7 @@ module.exports = {
   ABNORMAL_ESCALATION_BUSINESS_DAYS, CRITICAL_ESCALATION_HOURS,
   businessDaysBetween, isEscalated,
   routeToFor, buildResult,
-  canAcknowledge, applyAcknowledgement,
+  canAcknowledge, applyAcknowledgement, PATIENT_NOTE_MAX,
   SEVERITY_RANK, buildInbox, buildEscalations,
   buildCriticalNotice,
   resultedStatusFor, applyResultToOrder

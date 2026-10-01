@@ -563,6 +563,24 @@ async function uploadClientDocumentFile(clientName, fileName, fileBuffer, mimeTy
 // the client: it is employment paperwork, and a timesheet routinely covers
 // several clients, so putting it in one client's folder would file it wrong and
 // widen who can see it.
+// Message attachments (a clinician and a patient exchanging documents). One
+// folder per client under "GFC Message Attachments", kept apart from the
+// document checklist so a file sent in a message is not mistaken for a filed
+// document. PHI — no anyone-link, read back only through the messaging route.
+async function uploadMessageAttachmentFile(clientName, fileName, fileBuffer, mimeType) {
+  const drive = await getDriveClient();
+  const { Readable } = require('stream');
+  const rootFolderId = await findOrCreateFolder('GFC Message Attachments', null);
+  const clientFolderId = await findOrCreateFolder(clientName || 'Unnamed Client', rootFolderId);
+  const response = await drive.files.create({
+    resource: { name: fileName, parents: [clientFolderId] },
+    media: { mimeType: mimeType || 'application/octet-stream', body: Readable.from([fileBuffer]) },
+    fields: 'id, name',
+    ...ALL_DRIVES
+  });
+  return { fileId: response.data.id, fileName: response.data.name };
+}
+
 async function uploadCaregiverDocumentFile(caregiverName, fileName, fileBuffer, mimeType) {
   const drive = await getDriveClient();
   const { Readable } = require('stream');
@@ -663,6 +681,7 @@ module.exports = {
   uploadOfflinePacketFile,
   uploadCarePlanFile,
   uploadClientDocumentFile,
+  uploadMessageAttachmentFile,
   uploadCaregiverDocumentFile,
   getSheetsClient,
   getDriveClient,

@@ -44,7 +44,7 @@ test('every row of the brief\'s matrix resolves to a channel covering both ends'
   // The module stores ten channels, because several rows are one conversation
   // read from either end. This is the test that makes that collapse safe: lose
   // a row and it fails.
-  assert.strictEqual(msg.MATRIX_ROWS.length, 15, 'eleven from the brief, four from the owner');
+  assert.strictEqual(msg.MATRIX_ROWS.length, 17, 'eleven from the brief, four from the owner on 2026-09-13, two more on 2026-09-29 (Care Team, both ways)');
   const brief = msg.MATRIX_ROWS.slice(0, 11);
   assert.ok(brief.every(r => msg.channelById(r.channel)), 'the brief\'s own eleven still resolve');
   for (const row of msg.MATRIX_ROWS) {
@@ -66,10 +66,10 @@ test('SAFETY: no channel exists that the brief did not ask for', () => {
 
 test('a role is offered only the channels it may open', () => {
   const ids = (user) => msg.channelsFor({ user, client: CLIENT, users: USERS }).map(c => c.id).sort();
-  assert.deepStrictEqual(ids(u('client-1')), ['care_coordination', 'clinical_escalation', 'direct_care', 'support']);
+  assert.deepStrictEqual(ids(u('client-1')), ['care_coordination', 'care_team', 'clinical_escalation', 'direct_care', 'support']);
   assert.deepStrictEqual(ids(u('cg-1')), ['behavioral_escalation', 'direct_care', 'family_portal', 'operations']);
   assert.deepStrictEqual(ids(u('fam-1')), ['family_portal', 'support']);
-  assert.deepStrictEqual(ids(u('fnp-1')), ['care_update', 'clinical_escalation', 'clinical_oversight']);
+  assert.deepStrictEqual(ids(u('fnp-1')), ['care_team', 'care_update', 'clinical_escalation', 'clinical_oversight']);
   // A case manager had NO channel at all: they could receive a behavioral
   // escalation and start nothing, so they could not reach the client whose care
   // they coordinate. Owner rule 2026-09-13.

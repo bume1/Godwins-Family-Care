@@ -87,9 +87,21 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'standing_orders', phi: true, owner: '4.8', note: 'versions are immutable — a revision is a new row' },
   { key: 'standing_order_executions', phi: true, owner: '4.8', note: 'the audit trail: who acted under whose authority, under which version' },
   { key: 'clinical_results', phi: true, owner: '4.10', note: 'received results: the interpretation, the chart pointer, and who acknowledged it' },
+  // Portal P1: the patient-facing copies the portal reads. Patients never read
+  // OpenEMR; these are written when a clinician signs, read by the portal.
+  { key: 'patient_published_chart', phi: true, owner: 'portal-p1', note: 'one row per client: problems, allergies, meds, vitals, capped history' },
+  { key: 'patient_published_appointments', phi: true, owner: 'portal-p2', note: 'one row per client: upcoming and recent clinical visits, copied when staff touch the calendar' },
+  { key: 'patient_published_visits', phi: true, owner: 'portal-p1', note: 'one row per signed encounter: visit summary and the signed note' },
   { key: 'requisition_settings', phi: false, owner: '4.10', note: 'the return fax number and label printed on every requisition — org config, not PHI' },
+  { key: 'medication_changes', phi: true, owner: 'avs', note: 'append-only: what was started, changed or stopped at reconciliation, with who, when and (when known) the visit' },
+  { key: 'after_visit_summary_disclosures', phi: true, owner: 'avs', note: 'append-only: who an after-visit summary was given to, how and when' },
   { key: 'visit_reminders', phi: true, owner: '4.11', note: 'day-before reminders, captured at booking time — carries the visit date and clinician' },
   { key: 'gfc_payer_credentialing', phi: false, owner: '4.4' },
+  // A copy of OpenEMR's facility list (id, name, POS, flags), refreshed every
+  // time an admin or manager reads it. Clinicians' own OpenEMR logins cannot
+  // read facilities (owner, 2026-09-29), so a visit a clinician creates takes
+  // its place of service from this copy. Org config, not PHI.
+  { key: 'openemr_facility_snapshot', phi: false, owner: 'billing-split', note: 'facility id/name/POS as last read by admin or manager — the POS source for clinician-created visits' },
   // NCCI/MUE sign-time bundling check. CMS reference data only — never a
   // patient's own information — so it is deliberately NOT PHI, the same
   // classification as gfc_payer_credentialing. Filtered to the codes GFC

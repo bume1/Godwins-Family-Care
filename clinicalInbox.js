@@ -28,7 +28,8 @@ const KINDS = Object.freeze({
   ORDER_CO_SIGN: 'order_co_sign',
   CARE_PLAN_CO_SIGN: 'care_plan_co_sign',
   VISIT_LOG_REVIEW: 'visit_log_review',
-  ENCOUNTER_UNSIGNED: 'encounter_unsigned'
+  ENCOUNTER_UNSIGNED: 'encounter_unsigned',
+  ENCOUNTER_AWAITING_BILLING: 'encounter_awaiting_billing'
 });
 
 const KIND_LABELS = Object.freeze({
@@ -36,7 +37,8 @@ const KIND_LABELS = Object.freeze({
   [KINDS.ORDER_CO_SIGN]: 'Order awaiting co-signature',
   [KINDS.CARE_PLAN_CO_SIGN]: 'Care plan awaiting provider signature',
   [KINDS.VISIT_LOG_REVIEW]: 'Caregiver note awaiting review',
-  [KINDS.ENCOUNTER_UNSIGNED]: 'Encounter documented but not signed'
+  [KINDS.ENCOUNTER_UNSIGNED]: 'Encounter documented but not signed',
+  [KINDS.ENCOUNTER_AWAITING_BILLING]: 'Signed note awaiting billing'
 });
 
 const iso = (v) => {
@@ -59,7 +61,8 @@ const viewerAbilities = (viewer) => ({
   canCoSignEncounter: clinicalRoles.canCoSignEncounter(viewer),
   canCoSignCarePlan: clinicalRoles.canCoSignCarePlan(viewer),
   canReviewNotes: clinicalRoles.can(viewer, clinicalRoles.CAPABILITIES.NURSING_NOTE),
-  canSignBillable: clinicalRoles.can(viewer, clinicalRoles.CAPABILITIES.SIGN_BILLABLE_ENCOUNTER)
+  canSignBillable: clinicalRoles.can(viewer, clinicalRoles.CAPABILITIES.SIGN_BILLABLE_ENCOUNTER),
+  canSubmitBilling: clinicalRoles.canSubmitBilling(viewer)
 });
 
 // A co-signature cannot be self-issued — the route refuses it (CO_SIGN_SELF).
@@ -117,7 +120,11 @@ const buildInbox = ({
   // 2. A standing-order execution. The ONLY item here with a deadline of its
   //    own, so an overdue one sorts to the top.
   for (const o of (orders || [])) {
-    const cs = o && o.coSign;
+    // The execution route spreads the co-sign fields onto the order itself
+    // (Object.assign(order, auth.coSign)), so they live at the top level.
+    // Reading a nested `coSign` object meant no standing-order co-sign ever
+    // reached the inbox. The nested shape is still read in case one exists.
+    const cs = o ? (o.coSignStatus ? o : o.coSign) : null;
     if (!cs || cs.coSignStatus !== 'pending') continue;
     const executedById = o.executedBy && o.executedBy.id;
     const canAct = v.canCoSignEncounter && notSelf(v, executedById);
@@ -186,6 +193,24 @@ const buildInbox = ({
       actionable: isMine && v.canSignBillable,
       waitingOn: isMine ? 'you' : 'the documenting clinician',
       detail: `${(r.diagnoses || []).length} diagnosis code(s), ${(r.services || []).length} service code(s) recorded.`
+    }));
+  }
+
+  // 6. Signed by the clinician and sent to billing (owner, 2026-09-29):
+  //    billing adds the service codes and submits. Waiting on billing — an
+  //    admin or a manager — and on nobody clinical.
+  for (const r of (encounterRecords || [])) {
+    if (!r || r.billingStatus !== 'awaiting_billing' || r.coSignStatus === 'pending') continue;
+    const att = attByUuid.get(String(r.encounterUuid)) || null;
+    if (!att) continue;
+    items.push(item({
+      kind: KINDS.ENCOUNTER_AWAITING_BILLING,
+      id: r.encounterUuid, clientId: r.clientId, patientName: nameOf(r.clientId),
+      encounterUuid: r.encounterUuid,
+      at: r.sentToBillingAt || att.signedAt || r.updatedAt,
+      actionable: v.canSubmitBilling,
+      waitingOn: v.canSubmitBilling ? 'you' : 'billing',
+      detail: `Signed by ${(att.signedBy && att.signedBy.name) || 'the clinician'}. ${(r.services || []).length} service code(s) so far.`
     }));
   }
 

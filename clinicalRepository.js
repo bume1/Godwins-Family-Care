@@ -168,6 +168,35 @@ const applyMedRecResolution = (decisions) => {
   return { rows };
 };
 
+// What a reconciliation CHANGED, as rows for the append-only medication_changes
+// log: an add is a start, a discontinue is a stop, and a kept medicine whose
+// dose or frequency differs from the list it replaces is a change. Matched by
+// normalised name only to find the PREVIOUS row of a kept medicine; nothing is
+// inferred about a medicine the clinician did not decide on.
+const medNameKey = (v) => String(v == null ? '' : v).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+const buildMedicationChangeRows = ({ decisions, previous, clientId, encounterUuid, day, at, actor, newId }) => {
+  const prev = new Map((previous || []).filter(m => m && m.name).map(m => [medNameKey(m.name), m]));
+  const rows = [];
+  for (const d of decisions || []) {
+    if (!d || !d.med || !d.med.name) continue;
+    const m = d.med;
+    const base = {
+      clientId, encounterUuid: encounterUuid ? String(encounterUuid) : null, day, at,
+      name: String(m.name).slice(0, 200), dose: String(m.dose || '').slice(0, 100),
+      route: String(m.route || '').slice(0, 60), frequency: String(m.frequency || '').slice(0, 100),
+      by: { id: actor && actor.id, name: actor && (actor.name || actor.email) }
+    };
+    if (d.action === 'add') rows.push({ id: newId(), action: 'started', ...base });
+    else if (d.action === 'discontinue') rows.push({ id: newId(), action: 'stopped', ...base });
+    else if (d.action === 'keep') {
+      const p = prev.get(medNameKey(m.name));
+      const differs = p && ((String(p.dose || '') !== base.dose && base.dose) || (String(p.frequency || '') !== base.frequency && base.frequency));
+      if (differs) rows.push({ id: newId(), action: 'changed', ...base, previous: { dose: p.dose || '', frequency: p.frequency || '' } });
+    }
+  }
+  return rows;
+};
+
 // ---- FHIR display summarizers (for the chart UI) ----
 const codeableText = (cc) => {
   if (!cc) return '';
@@ -248,6 +277,7 @@ const summarizeDocument = (r) => ({
 // clinician needs to see. `openable: false` on an EMR row is not a bug in this
 // list; it is the EMR read gap, named on the row rather than hidden by omitting
 // it. Omitting it would tell the clinician the document does not exist.
+const clientDocs = require('./clientDocuments');
 const CHART_DOC_SOURCE = { APP: 'app', EMR: 'emr' };
 
 const buildChartDocumentIndex = (input) => {
@@ -255,6 +285,11 @@ const buildChartDocumentIndex = (input) => {
     client = {}, emrRows = [], carePlanVersions = [], roiAuthorizations = [],
     clientUploads = [], consentDefs = [], consentSatisfied = () => false
   } = input || {};
+  // WHO IS READING (owner, 2026-09-29). The patient's own list is not the
+  // chart: it carries what they sent, what staff deliberately shared, and the
+  // documents they signed. Never what lives only in OpenEMR — results before
+  // review, signed clinical notes and faxes are released by a person.
+  const forPatient = input && input.audience === 'patient';
 
   const rows = [];
   const consents = client.consents || {};
@@ -321,6 +356,11 @@ const buildChartDocumentIndex = (input) => {
   //    of anything and showing it in a chart would mislead.
   for (const u of clientUploads) {
     if (!u || u.clientId !== client.id || u.status === 'rejected') continue;
+    // A removed upload is gone from every list; the row stays in the store as
+    // the record of who removed it and why.
+    if (clientDocs.isRemoved(u)) continue;
+    if (forPatient && !clientDocs.patientCanSee(u)) continue;
+    const staffFiled = clientDocs.isStaffFiled(u);
     // This is also what makes a `readable` flag unnecessary on the row below: a
     // rejected document never reaches the chart at all, so nothing downstream
     // can offer to read one. A field that is always true reads like a guard and
@@ -328,7 +368,12 @@ const buildChartDocumentIndex = (input) => {
     rows.push({
       id: `upload:${u.id}`,
       title: u.fileName || 'Client document',
-      category: 'From the client',
+      // It said "From the client" on every row, including the ones the office
+      // filed — which is how a staff-scanned medical summary read as if the
+      // patient had sent it.
+      category: forPatient
+        ? (staffFiled ? 'From your care team' : 'You sent this')
+        : (staffFiled ? 'Filed by staff' : 'From the client'),
       date: u.uploadedAt || null,
       contentType: u.mimeType || null,
       source: CHART_DOC_SOURCE.APP,
@@ -350,8 +395,10 @@ const buildChartDocumentIndex = (input) => {
       kind: u.kind || null,
       // WHO FILED IT. A reviewer weighs a document the client sent differently
       // from one the office scanned in, and the read should say which it is.
-      filedBy: u.source === 'staff' ? 'staff' : 'client',
-      note: u.status === 'accepted' ? null : 'Not yet reviewed'
+      filedBy: staffFiled ? 'staff' : 'client',
+      // Whether the patient can see it. Always true for their own upload.
+      sharedWithPatient: clientDocs.patientCanSee(u),
+      note: forPatient ? null : (u.status === 'accepted' ? null : 'Not yet reviewed')
     });
   }
 
@@ -365,10 +412,20 @@ const buildChartDocumentIndex = (input) => {
   //    a different fact from one that cannot be opened at all, and a clinician
   //    who is told the wrong one goes looking for the wrong problem.
   const emrReadSupported = !!input.emrReadSupported;
-  for (const r of emrRows) {
+  // Every upload is now filed into OpenEMR automatically, so the same file came
+  // back a second time as an OpenEMR row. The app's row already says "In EMR";
+  // its OpenEMR copy is dropped here, matched on the file name it was filed
+  // under. A REMOVED upload's copy is kept: the API cannot delete it from
+  // OpenEMR, so the chart must still show that it is there.
+  const filedCopies = new Set(clientUploads
+    .filter(u => u && u.clientId === client.id && u.emrFiled && !clientDocs.isRemoved(u) && u.fileName)
+    .map(u => String(u.fileName)));
+  for (const r of (forPatient ? [] : emrRows)) {
+    const title = r.description || r.name || 'Document';
+    if (filedCopies.has(String(title))) continue;
     rows.push({
       id: `emr:${r.id}`,
-      title: r.description || r.name || 'Document',
+      title,
       category: 'In the EMR',
       date: r.date || null,
       contentType: r.contentType || r.mimetype || null,
@@ -394,6 +451,19 @@ const summarizeVitalObservation = (r) => {
     : (r.component || []).map(c => `${codeableText(c.code)} ${(c.valueQuantity || {}).value ?? ''}`).join(' / ');
   return { id: r.id, name: codeableText(r.code), value: val, at: r.effectiveDateTime || null };
 };
+// OpenEMR's FHIR vitals include rows that carry no reading at all: the panel
+// row that groups a visit's vitals, "Temperature Location", and an oxygen row
+// whose flow-rate components are empty. Listed, they read as clutter beside
+// the real numbers (owner report, 2026-09-28). A row is kept only when it
+// carries a value — decided from the resource, not from the text, since a
+// label like "SpO2" has a digit in it.
+const hasVitalReading = (r) => {
+  const present = (q) => !!q && q.value !== undefined && q.value !== null && String(q.value).trim() !== '';
+  if (!r) return false;
+  if (present(r.valueQuantity)) return true;
+  return (r.component || []).some(c => present(c.valueQuantity));
+};
+const summarizeVitalObservations = (rows) => (rows || []).filter(hasVitalReading).map(summarizeVitalObservation);
 
 // OpenEMR's SOAP validator accepts an empty section but rejects a 1-character
 // one (lengthBetween 2..65535, answered as HTTP 200 + a validation map). Treat
@@ -864,6 +934,10 @@ const summarizeAppointmentRow = (row, linkedEncounterUuid, now) => {
 const ICD10_RE = /^[A-Z][0-9][0-9A-Z](\.[0-9A-Z]{1,4})?$/;
 const normalizeIcd10 = (raw) => {
   let s = String(raw || '').trim().toUpperCase().replace(/^ICD10:/, '').replace(/\s+/g, '');
+  // OpenEMR's code search returns a three-character code as "R55. " / "I10. "
+  // — a dangling period with nothing after it. Drop it rather than refuse a
+  // code the clinician picked straight off OpenEMR's own list.
+  s = s.replace(/\.+$/, '');
   // Accept the undotted form clinicians often type ("E119" → "E11.9")
   if (/^[A-Z][0-9][0-9A-Z][0-9A-Z]{1,4}$/.test(s)) s = `${s.slice(0, 3)}.${s.slice(3)}`;
   return ICD10_RE.test(s) ? s : null;
@@ -1185,7 +1259,11 @@ const SIGN_BLOCKER_CODES = {
   // Scope F/G: the note template this appointment type declares.
   note_sections: 'SIGN_NOTE_SECTIONS_INCOMPLETE',
   // Scope G. A psychiatric note signed with no documented risk assessment.
-  risk_assessment: 'SIGN_NO_RISK_ASSESSMENT'
+  risk_assessment: 'SIGN_NO_RISK_ASSESSMENT',
+  // The encounter row could not be READ from OpenEMR, which is a different
+  // fact from a POS that is genuinely missing (owner report 2026-09-29: a
+  // swallowed 403 read as "this patient has no facility").
+  pos_unreadable: 'BILLING_POS_UNREADABLE'
 };
 const SIGN_BLOCKER_LABELS = {
   note: 'a documented note',
@@ -1193,96 +1271,98 @@ const SIGN_BLOCKER_LABELS = {
   service: 'at least one CPT/HCPCS service code',
   service_dx_link: 'every service linked to a diagnosis',
   billing_npi: 'the billing provider NPI configured in settings',
-  facility_pos: "a place of service — this patient has no OpenEMR facility assigned, or their facility has no POS code on its record. An admin fixes it on the patient or the facility, not here",
+  facility_pos: "a place of service — this patient has no facility assigned, or their facility has no POS code on its record. An admin or manager sets it on the patient's facility card",
+  pos_unreadable: 'a place of service — the encounter could not be read back from OpenEMR to check it',
   risk_assessment: 'a risk assessment — this is a psychiatric visit and it cannot be signed without one'
 };
-// `posCode` is the place of service the encounter actually carries, derived
-// from the patient's facility. Documenting a visit is never blocked on it —
-// care happens whether or not an admin has finished the facility setup — but
-// SIGNING is, because a signed encounter becomes a claim and a claim with an
-// unverified POS is the silent error this whole change exists to prevent.
+// TWO GATES, TWO PEOPLE (owner, 2026-09-29). The CLINICIAN signs the note;
+// BILLING (admin or manager) finishes the codes and submits the claim. So what
+// used to be one gate is three named ones:
+//   'author'   — an RN's or LMSW's signature: the note is complete. Nothing
+//                about codes; a licensed clinician's addendum follows.
+//   'clinical' — a provider's or LCSW's signature, and the clinician addendum:
+//                the note is complete AND carries at least one ICD-10 code.
+//                No CPT, no place of service, no billing NPI, no bundling —
+//                those are billing's, and a clinician is never refused over
+//                them (and never told about a place of service at all).
+//   'billing'  — Submit to billing: the services, their dx links, the billing
+//                NPI, the place of service, the visit-type-vs-POS agreement and
+//                NCCI/MUE. THIS is what becomes a claim.
+//   'full'     — both, for any caller that predates the split.
+// `billingChecks: false` is the pre-split name for 'author' and still works.
 //
-// `encounterType` is what the admin recorded this patient's visits as, resolved
-// against the booking. Where the type names a place of service, it is checked
-// against the one the facility resolved to, and a disagreement REFUSES the
-// signature naming both values — see checkEncounterTypeAgainstPos. That refusal
-// carries its own sentence rather than a label in the joined list, because the
-// reader has to know which of the two is wrong and neither is fixed from here.
-// `billingChecks: false` is the AUTHOR signature's gate (an RN's or LMSW's,
-// owner 2026-09-27): the note must be complete, but the codes, the billing NPI
-// and the place of service are the billing clinician's to settle at the
-// addendum — that addendum is what becomes a claim, so that is where they are
-// checked. Every caller that does not say otherwise gets the full gate.
-const checkSignReadiness = ({ hasNote, record, billingNpi, posCode, visit, facilityName, riskAssessment, completedSections, ncciPtpEdits, ncciMue, ncciSourceVersion, billingChecks = true }) => {
+// `posError` is set when the encounter row could not be READ: that is
+// reported as its own blocker rather than as a missing POS, because the fix is
+// a different one.
+const SIGN_GATES = Object.freeze(['author', 'clinical', 'billing', 'full']);
+const checkSignReadiness = ({ hasNote, record, billingNpi, posCode, posError, visit, facilityName, riskAssessment, completedSections, ncciPtpEdits, ncciMue, ncciSourceVersion, billingChecks, gate }) => {
+  const g = SIGN_GATES.includes(gate) ? gate : (billingChecks === false ? 'author' : 'full');
+  const noteChecks = g !== 'billing';
+  const billing = g === 'billing' || g === 'full';
   const missing = [];
-  if (!hasNote) missing.push('note');
+  if (noteChecks && !hasNote) missing.push('note');
+  const dxCount = ((record && record.diagnoses) || []).length;
+  if ((g === 'clinical' || g === 'billing' || g === 'full') && !dxCount) missing.push('diagnosis');
   const pos = String(posCode || '').trim();
-  if (billingChecks) {
-    missing.push(...deriveCodingStatus(record).missing);
+  if (billing) {
+    missing.push(...deriveCodingStatus(record).missing.filter(m => m !== 'diagnosis'));
     if (!normalizeNpiValue(billingNpi)) missing.push('billing_npi');
-    if (!pos) missing.push('facility_pos');
+    if (!pos) missing.push(posError ? 'pos_unreadable' : 'facility_pos');
   }
   // Only asked where a POS actually resolved: with none, `facility_pos` above
   // already blocks and saying it twice in two different sentences would send
   // the reader at two layers for one problem.
-  const agreement = pos && billingChecks
+  const agreement = pos && billing
     ? checkVisitAgainstPos({ visit, posCode: pos, facilityName })
     : { ok: true, error: null, code: null };
   if (!agreement.ok) missing.push('encounter_type_pos');
 
   // Scope G, asked of the VISIT: a behavioural-health appointment type cannot
   // be signed without a risk assessment.
-  if (riskAssessmentRequired(visit) && !riskAssessment) missing.push('risk_assessment');
+  if (noteChecks && riskAssessmentRequired(visit) && !riskAssessment) missing.push('risk_assessment');
 
   // Scope F: the appointment type's own note template, resolved for THIS
-  // visit — a physical exam is demanded in person and not over video. The
-  // SAFETY PLAN becomes required once the risk recorded on this encounter is
-  // not negative, which is why the risk row is read here rather than the
-  // template being fixed at the start of the visit.
+  // visit. The SAFETY PLAN becomes required once the risk recorded on this
+  // encounter is not negative.
   const riskPositive = !!(riskAssessment && riskAssessment.levels &&
     RISK_DOMAINS.some(d => RISK_NEEDS_PLAN.includes(riskAssessment.levels[d])));
-  const required = requiredSectionsForVisit(visit, { riskPositive });
+  const required = noteChecks ? requiredSectionsForVisit(visit, { riskPositive }) : [];
   const done = new Set((Array.isArray(completedSections) ? completedSections : []).map(String));
   const openSections = required.filter(k => !done.has(k));
   if (openSections.length) missing.push('note_sections');
 
   // NCCI/MUE: a bundling conflict or a unit-cap overage between the codes on
-  // THIS encounter. Asked of the record's own services, alongside the POS
-  // check above — a caller that never mentions ncci (every pre-existing
-  // caller of this function) gets ok:true from it and nothing changes; see
-  // checkNcciBundling's own comment.
-  const ncci = billingChecks
+  // THIS encounter — a billing question, asked only at the billing gate.
+  const ncci = billing
     ? checkNcciBundling(record && record.services, visit, { ptpEdits: ncciPtpEdits, mueByCode: ncciMue, sourceVersion: ncciSourceVersion })
     : { ok: true, codes: [], warnings: [], message: null };
   if (!ncci.ok) missing.push('ncci_bundling');
 
+  const verb = g === 'billing' ? 'Cannot submit to billing' : 'Cannot sign';
   const labelled = missing.filter(m => m !== 'encounter_type_pos' && m !== 'note_sections' && m !== 'ncci_bundling');
   const sentences = [];
-  if (labelled.length) sentences.push(`Cannot sign: the encounter needs ${labelled.map(m => SIGN_BLOCKER_LABELS[m]).join(', ')}.`);
+  if (labelled.length) sentences.push(`${verb}: the encounter needs ${labelled.map(m => SIGN_BLOCKER_LABELS[m]).join(', ')}.`);
   if (openSections.length) {
-    // NAMED, never counted. "3 sections outstanding" is a number a clinician
-    // has to go hunting through their own note for.
+    // NAMED, never counted.
     const type = apptTypes.typeByKey(normalizeVisit(visit).appointmentType);
     sentences.push(`Cannot sign: this ${type ? type.label : 'visit'} note still needs ${openSections.map(k => apptTypes.SECTIONS[k]).join(', ')}.`);
   }
-  if (!agreement.ok) sentences.push(`Cannot sign: ${agreement.error}`);
+  if (!agreement.ok) sentences.push(`${verb}: ${agreement.error}`);
   if (!ncci.ok) sentences.push(ncci.message);
   return {
     ok: missing.length === 0,
+    gate: g,
     missing,
     openSections,
-    // 'ncci_bundling' is one missing-key that can carry SEVERAL specific
-    // codes (a PTP block and an MUE overage can both be true at once), so it
-    // expands rather than mapping 1:1 like every other blocker.
     codes: missing.flatMap(m => (m === 'ncci_bundling' ? ncci.codes : [SIGN_BLOCKER_CODES[m]])),
     message: sentences.length ? sentences.join(' ') : null,
-    // Present even when ok:true: an allowed-but-flagged PTP pair (a modifier
-    // was required AND present) is exactly the case that needs a human to
-    // see it rather than pass silently.
     warnings: ncci.warnings
   };
 };
-const ATTESTATION_TEXT = 'I attest that this encounter documentation is accurate and complete, that I personally performed or directly supervised the services recorded, and that the diagnoses and service codes are supported by the note.';
+// The clinician attests to the NOTE and its diagnoses. Service codes are
+// chosen afterwards by billing (owner, 2026-09-29), so the clinician no longer
+// attests to them; billing's own submission is recorded separately.
+const ATTESTATION_TEXT = 'I attest that this encounter documentation is accurate and complete, that I personally performed or directly supervised the services recorded, and that the diagnoses are supported by the note.';
 const buildAttestation = ({ id, record, actor, at, billingNpi, narrativeNoteSid }) => {
   const npi = normalizeNpiValue(actor && actor.npi);
   return {
@@ -1313,6 +1393,22 @@ const buildAddendum = ({ id, encounterUuid, clientId, text, actor, at }) => {
     }
   };
 };
+// Where a SIGNED encounter stands with billing. A record signed before the
+// split carries no billingStatus; it went through the old one-step sign that
+// posted charges itself, so it reads as billed (nothing is migrated).
+const BILLING_STATUS = Object.freeze({
+  NOT_SIGNED: 'not_signed', AWAITING_ADDENDUM: 'awaiting_addendum',
+  AWAITING_BILLING: 'awaiting_billing', BILLED: 'billed', NO_CHARGE: 'no_charge'
+});
+const deriveBillingStatus = (record, attestation) => {
+  if (!isEncounterClosed(attestation)) return BILLING_STATUS.NOT_SIGNED;
+  if (record && record.coSignStatus === 'pending') return BILLING_STATUS.AWAITING_ADDENDUM;
+  const s = record && record.billingStatus;
+  if (s === BILLING_STATUS.AWAITING_BILLING || s === BILLING_STATUS.BILLED || s === BILLING_STATUS.NO_CHARGE) return s;
+  return BILLING_STATUS.BILLED;
+};
+const isBillingSubmitted = (record, attestation) =>
+  [BILLING_STATUS.BILLED, BILLING_STATUS.NO_CHARGE].includes(deriveBillingStatus(record, attestation));
 const deriveEncounterState = (record, attestation) => {
   if (isEncounterClosed(attestation)) return 'signed';
   if (record && deriveCodingStatus(record).coded) return 'coded';
@@ -1321,7 +1417,9 @@ const deriveEncounterState = (record, attestation) => {
 
 // ---- Prescription recording (Scope C — record only, no transmission) ----
 const RX_ROUTES = ['oral', 'sublingual', 'buccal', 'topical', 'transdermal', 'inhaled', 'intranasal', 'ophthalmic', 'otic', 'rectal', 'vaginal', 'subcutaneous', 'intramuscular', 'intravenous', 'other'];
-const RX_KINDS = ['new', 'refill'];
+const RX_KINDS = ['new', 'refill', 'change'];
+// What each kind is called on screen and on the patient's visit summary.
+const RX_KIND_LABELS = { new: 'New prescription', refill: 'Refill', change: 'Dose or instructions changed' };
 const buildPrescription = ({ id, clientId, puuid, encounterUuid, input, actor, at }) => {
   const i = input || {};
   const drug = String(i.drug || '').trim();
@@ -1404,7 +1502,7 @@ const prescriptionToEmrRow = (rx) => {
   const sched = rx.schedule && rx.schedule !== 'non_controlled' ? ` | ${rx.schedule}` : '';
   const cred = rx.prescriberCredential ? ` ${rx.prescriberCredential}` : '';
   const pdmp = rx.pdmpAttestation && rx.pdmpAttestation.checked ? ` | PDMP checked ${rx.pdmpAttestation.checkedOn}` : '';
-  const tail = ` | ${rx.kind === 'refill' ? 'Refill' : 'New Rx'}${sched} | Prescriber: ${(rx.prescriber && rx.prescriber.name) || 'unknown'}${cred} (NPI ${(rx.prescriber && rx.prescriber.npi) || 'none'})${pdmp}`;
+  const tail = ` | ${rx.kind === 'refill' ? 'Refill' : rx.kind === 'change' ? 'Changed Rx' : 'New Rx'}${sched} | Prescriber: ${(rx.prescriber && rx.prescriber.name) || 'unknown'}${cred} (NPI ${(rx.prescriber && rx.prescriber.npi) || 'none'})${pdmp}`;
   const sig = [rx.dose, rx.route, rx.frequency].filter(Boolean).join(' ');
   const head = [sig ? `Sig: ${sig}` : null, rx.instructions].filter(Boolean).join('. ');
   return {
@@ -1417,6 +1515,50 @@ const prescriptionToEmrRow = (rx) => {
     date_added: rx.date,
     note: (head.slice(0, Math.max(0, 255 - tail.length)) + tail).slice(0, 255)
   };
+};
+
+// A HOME MEDICATION (family-reported at enrollment, confirmed by a clinician at
+// reconciliation) as an OpenEMR prescription row (owner, 2026-09-29). It is a
+// record of what the patient takes, NOT a new GFC prescription, and the note
+// says so first: the chart must never read as though GFC wrote an order it did
+// not. Route rides in the note as well as the field, because drug_route and
+// drug_interval are empty option lists on this instance until they are seeded
+// (the dose and frequency are sent structured so they land the day they are).
+const homeMedicationToEmrRow = (med, { byName, credential, day } = {}) => {
+  const m = med || {};
+  const sig = [m.dose, m.route, m.frequency].map(v => String(v || '').trim()).filter(Boolean).join(' ');
+  const who = [byName, credential].filter(Boolean).join(', ') || 'a GFC clinician';
+  const parts = [
+    `Home medication, reported at enrollment and reconciled by ${who} on ${day}. Not a new GFC prescription.`,
+    sig ? `Sig: ${sig}.` : null,
+    m.prescriber ? `Prescriber: ${String(m.prescriber).trim()}.` : null,
+    m.pharmacy ? `Pharmacy: ${String(m.pharmacy).trim()}.` : null
+  ].filter(Boolean);
+  return {
+    drug: String(m.name || '').trim().slice(0, 150),
+    dosage: String(m.dose || '').trim().slice(0, 100),
+    route: String(m.route || '').trim() || null,
+    interval: String(m.frequency || '').trim().slice(0, 100),
+    date_added: day,
+    active: 1,
+    note: parts.join(' ').slice(0, 255)
+  };
+};
+// Which reconciled rows still need an OpenEMR prescription: kept or added, not
+// already tied to an OpenEMR row, and not already on OpenEMR's prescription
+// list by name (so a re-save, or a list read that failed, cannot double it).
+const homeMedsToSend = (decisions, existingDrugNames) => {
+  const have = new Set((existingDrugNames || []).map(normMedName).filter(Boolean));
+  const seen = new Set();
+  const out = [];
+  for (const d of decisions || []) {
+    if (!d || !d.med || !d.med.name || d.action === 'discontinue' || d.emrUuid) continue;
+    const key = normMedName(d.med.name);
+    if (!key || have.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    out.push(d.med);
+  }
+  return out;
 };
 
 // ---- Facility and POS resolution (Session 4.5, owner spec 2026-09-08) ----
@@ -2014,6 +2156,39 @@ const mergeCandidateSources = (candidates, priorRecords) => {
   return out;
 };
 
+// The FHIR Condition read on this instance drops the ICD-10 coding, so a
+// problem that plainly carries a code in OpenEMR reads back uncoded and the
+// chart told the clinician to code something already coded (owner report,
+// 2026-09-29: "19 problems have no ICD-10 code" under 19 coded diagnoses).
+// The standard API's medical_problem row carries it ("ICD10:E87.1", sometimes
+// several joined by ";"), keyed by the same uuid the FHIR Condition id is.
+// This encounter's own diagnoses are the second source: a problem coded on
+// the note being written is coded, even before the next read-back.
+const icd10FromProblemRow = (row) => {
+  for (const part of String((row && row.diagnosis) || '').split(/[;,]/)) {
+    if (!/^\s*ICD10:/i.test(part)) continue;
+    const code = normalizeIcd10(part);
+    if (code) return code;
+  }
+  return null;
+};
+const fillCandidateCodes = (candidates, { problemRows, currentDiagnoses } = {}) => {
+  const byRow = new Map();
+  for (const r of problemRows || []) {
+    const code = icd10FromProblemRow(r);
+    if (code && r && r.uuid) byRow.set(String(r.uuid), code);
+  }
+  const byCurrent = new Map((currentDiagnoses || [])
+    .filter(d => d && d.code && d.problemUuid).map(d => [String(d.problemUuid), d.code]));
+  return (candidates || []).map(c => {
+    if (!c || c.code || !c.problemUuid) return c;
+    const uuid = String(c.problemUuid);
+    const code = byRow.get(uuid) || byCurrent.get(uuid) || null;
+    if (!code) return c;
+    return { ...c, code, preselected: true, needsCode: false, codeVia: byRow.has(uuid) ? 'openemr_problem_row' : 'this_encounter' };
+  });
+};
+
 // ---- Coding assist T2: per-clinician usage-ranked favorites (spec §8) ----
 // Usage rows: { userId, set: 'ICD10'|'CPT4'|'HCPCS', code, description, count, lastUsedAt }
 const CODE_SETS = ['ICD10', 'CPT4', 'HCPCS'];
@@ -2295,7 +2470,9 @@ const buildAllergyStrip = ({ linked, emrAllergies, reportedAllergies }) => {
     };
   }
   const rows = (emrAllergies.rows || []).filter(isActiveAllergy)
-    .map(r => String((r && (r.allergen || r.name || r.description)) || '').trim())
+    // `title` is what summarizeAllergy emits, which is what the chart passes in.
+    // Not reading it made a chart WITH allergies say "No known allergies".
+    .map(r => String((r && (r.allergen || r.name || r.title || r.description)) || '').trim())
     .filter(Boolean);
   if (rows.length) return { state: ALLERGY_STATE.LISTED, source: 'chart', rows, reason: null };
   return { state: ALLERGY_STATE.NONE_KNOWN, source: 'chart', rows: [], reason: null };
@@ -2372,8 +2549,19 @@ const TIMELINE_ICONS = Object.freeze({
 // reported rather than dropped silently or sorted to the top as an empty
 // string — "there is nothing here" and "we could not place four things" are
 // different facts, and only one of them is a data gap worth chasing.
+// A full timestamp is placed on the day it was IN GEORGIA: slicing the UTC
+// string put everything after 8pm Eastern on the next day. A bare date is
+// already a calendar day and is kept as it is.
 const timelineDate = (v) => {
-  const d = String(v == null ? '' : v).slice(0, 10);
+  const raw = String(v == null ? '' : v);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  if (/^\d{4}-\d{2}-\d{2}T/.test(raw)) {
+    try {
+      const p = require('./public/gfc-time').zonedParts(new Date(raw));
+      if (p && p.isoDate) return p.isoDate;
+    } catch (e) { /* fall through to the literal date */ }
+  }
+  const d = raw.slice(0, 10);
   return /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : null;
 };
 
@@ -2402,11 +2590,13 @@ const buildTimeline = ({
   (orders || []).forEach(o => {
     const kind = o.orderType === 'referral' ? 'referral' : 'order';
     push(kind, o.createdAt || o.orderedAt,
-      kind === 'referral' ? `${o.specialty || 'Referral'} referral` : ((o.tests && o.tests[0]) || o.orderType || 'Order'),
+      kind === 'referral' ? `${(o.referral && o.referral.specialty) || o.specialty || 'Specialist'} referral`
+        : o.orderType === 'dme' ? ((o.dme && o.dme.itemDescription) || 'DME order')
+        : ((o.tests && o.tests[0]) || o.orderType || 'Order'),
       o.status || null, o.id);
   });
   (results || []).forEach(r => push('result', r.receivedAt || r.createdAt,
-    r.label || r.documentName || 'Result', r.interpretation || null, r.id));
+    r.summary || (r.document && r.document.fileName) || r.performedBy || 'Result', r.interpretation || null, r.id));
   // BUG (found 2026-09-23, live screenshot): every document on the timeline
   // read "Document / app". `buildChartDocumentIndex` rows carry `title` and
   // `category`, not `description` and `source` — `source` exists too, but it
@@ -2538,7 +2728,7 @@ const buildPatientBanner = ({ client, linked, emrAllergies, facility, lastVisitA
     insurance: summarizePayerForBanner(c),
     facility: facility
       ? { id: facility.facilityId || null, name: facility.facilityName || null,
-        posCode: facility.posCode || null, warning: facility.warning || null }
+        posCode: facility.posCode || null, warning: facility.billingWarning || facility.warning || null }
       : null,
     lastVisitAt: lastVisitAt || null,
     serviceLine: c.serviceLine || null,
@@ -2574,6 +2764,7 @@ module.exports = {
   MANUAL_CHECKLIST_STEPS,
   deriveClinicalChecklist,
   buildMedRecView,
+  buildMedicationChangeRows,
   applyMedRecResolution,
   summarizeCondition,
   summarizeAllergy,
@@ -2583,6 +2774,8 @@ module.exports = {
   buildChartDocumentIndex,
   CHART_DOC_SOURCE,
   summarizeVitalObservation,
+  summarizeVitalObservations,
+  hasVitalReading,
   buildHpWrites,
   sanitizeNoteDraft,
   buildNoteDraft,
@@ -2618,6 +2811,10 @@ module.exports = {
   applyCoding,
   SIGN_BLOCKER_CODES,
   checkSignReadiness,
+  SIGN_GATES,
+  BILLING_STATUS,
+  deriveBillingStatus,
+  isBillingSubmitted,
   TELEHEALTH_MODIFIER, modifiersForCharge,
   RISK_LEVELS, RISK_NEEDS_PLAN, RISK_DOMAINS, buildRiskAssessment,
   latestRiskAssessment, riskAssessmentRequired, highestRisk,
@@ -2628,6 +2825,8 @@ module.exports = {
   deriveEncounterState,
   RX_ROUTES,
   RX_KINDS,
+  homeMedicationToEmrRow, homeMedsToSend, normMedName,
+  RX_KIND_LABELS,
   buildPrescription,
   prescriptionToEmrRow,
   resolveEncounterFacility,
@@ -2656,6 +2855,8 @@ module.exports = {
   advanceOrderStatus,
   buildCandidateDiagnoses,
   mergeCandidateSources,
+  icd10FromProblemRow,
+  fillCandidateCodes,
   CODE_SETS,
   recordCodeUsage,
   rankFavorites,

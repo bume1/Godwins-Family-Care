@@ -193,6 +193,18 @@ test('a resolved or entered-in-error allergy is not on the strip', () => {
   assert.deepStrictEqual(strip.rows, ['Penicillin', 'Codeine']);
 });
 
+test('a chart WITH allergies never reads as "no known allergies" (the rows the chart really passes)', () => {
+  // The fixtures above use {allergen}; production passes summarizeAllergy's
+  // rows, which carry `title`. A strip that could not read them said "none
+  // known" over a real allergy list.
+  const fhir = { resourceType: 'AllergyIntolerance', id: 'a1', text: { div: '<div>Penicillin</div>' }, clinicalStatus: { coding: [{ code: 'active' }] } };
+  const row = repo.summarizeAllergy(fhir);
+  assert.ok(row.title, 'the production row shape carries a title');
+  const strip = repo.buildAllergyStrip({ linked: true, emrAllergies: { ok: true, rows: [row] } });
+  assert.strictEqual(strip.state, repo.ALLERGY_STATE.LISTED);
+  assert.strictEqual(strip.rows.length, 1);
+});
+
 test('an allergy with no status recorded stays on the strip', () => {
   // No status is not evidence of resolution, and dropping it would hide a real
   // allergy on exactly the rows a sparse chart produces.
@@ -807,7 +819,13 @@ test('every chart tab is a place in the record, and no workflow is one', () => {
 test('the H&P is still reachable, and says where you are while it is open', () => {
   // Removing it from the tab bar must not strand it. It opens from the
   // banner's Start visit action and from an appointment.
-  assert.match(pageCode, /onStartVisit=\{canWrite \? \(\) => setTab\('visit'\) : null\}/);
+  assert.match(pageCode, /onStartVisit=\{canWrite \? startVisit : null\}/);
+  // Start visit opens the H&P, unless a shared draft is already saved on an
+  // encounter: then it resumes THAT (a blank H&P would become a second
+  // encounter, which can only be voided).
+  const sv = pageCode.slice(pageCode.indexOf('const startVisit = () =>'), pageCode.indexOf('const documentFromSchedule'));
+  assert.match(sv, /if \(vd && vd\.encounterUuid\) \{ setEncTarget\(vd\.encounterUuid\); setTab\('encounters'\); return; \}/);
+  assert.match(sv, /setTab\('visit'\);/);
   assert.match(pageCode, /tab === 'visit' && \(chart \?/, 'the H&P body still renders');
   // With no tab highlighted, a clinician has to be told where they are.
   assert.match(pageCode, /Documenting a visit/);
@@ -871,11 +889,20 @@ test('an empty place says so in a sentence', () => {
 test('the timeline is one thread, newest first', () => {
   const t = repo.buildTimeline({
     encounters: [{ date: '2026-09-22', type: 'Home Visit', id: 'e1' }],
-    orders: [{ createdAt: '2026-09-12T00:00:00Z', orderType: 'lab', tests: ['BMP'], id: 'o1' }],
+    orders: [{ createdAt: '2026-09-12T15:00:00Z', orderType: 'lab', tests: ['BMP'], id: 'o1' }],
     results: [{ receivedAt: '2026-09-18', label: 'BMP', id: 'r1' }]
   });
   assert.deepStrictEqual(t.rows.map(r => r.date), ['2026-09-22', '2026-09-18', '2026-09-12']);
   assert.deepStrictEqual(t.rows.map(r => r.kind), ['visit', 'result', 'order']);
+});
+
+test('a timestamp lands on the day it was in Georgia, not the UTC day', () => {
+  // 00:30Z on the 12th is 8:30 PM on the 11th in Georgia. Slicing the UTC
+  // string put every evening order, result and message on the next day.
+  const t = repo.buildTimeline({ orders: [{ createdAt: '2026-09-12T00:30:00Z', orderType: 'lab', tests: ['BMP'], id: 'o1' }] });
+  assert.deepStrictEqual(t.rows.map(r => r.date), ['2026-09-11']);
+  const b = repo.buildTimeline({ encounters: [{ date: '2026-09-12', type: 'Home Visit', id: 'e1' }] });
+  assert.deepStrictEqual(b.rows.map(r => r.date), ['2026-09-12'], 'a bare calendar date is kept as it is');
 });
 
 test('a documented appointment is not on the thread twice', () => {
@@ -1824,7 +1851,7 @@ test('G build-enforced: the screen restates no risk vocabulary and no clinical r
   // pointed out: a patient who normally has a primary-care visit can have a
   // psych evaluation. The note follows the VISIT's appointment type now, and
   // which sections that type carries is the server's answer, not the page's.
-  assert.match(page, /noteHasSection\('mentalStatusExam'\) && \(/,
+  assert.match(page, /noteHasSection\('mentalStatusExam'\) \? \['mse'\] : \[\]/,
     'the MSE must be shown when THIS VISIT carries it, not when the patient is flagged');
   assert.ok(!page.includes('isPsychiatric'), 'the superseded patient flag must be gone, not left beside it');
   // And the page derives the section list from what the server served.

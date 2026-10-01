@@ -37,13 +37,27 @@ const CLINICIAN = { id: 'u-1', role: 'user', name: 'Bethel Godwins', hasClinical
 const ADMIN = { id: 'a-1', role: 'admin', name: 'Admin' };
 
 // ---- 1. Filter map ----
-test('no clinician-only field is allowed by any section of the filter map', () => {
+// Portal P1 (owner decision 2026-09-29) changed this rule ON PURPOSE rather
+// than deleting it: the signed note now reaches the patient, but ONLY through
+// the `note` section. Note content is still forbidden in every other section,
+// and every other clinician-only field is still forbidden everywhere.
+test('no clinician-only field is allowed by any section of the filter map — note content only in `note`', () => {
   for (const [section, levels] of Object.entries(R.FILTER_MAP)) {
     for (const [level, allow] of Object.entries(levels)) {
-      const leak = allow.filter(f => R.CLINICIAN_ONLY_FIELDS.includes(f));
+      const leak = allow.filter(f => R.CLINICIAN_ONLY_FIELDS.includes(f)
+        && !(section === 'note' && R.NOTE_CONTENT_FIELDS.includes(f)));
       assert.deepEqual(leak, [], `${section}.${level} allows clinician-only field(s): ${leak.join(', ')}`);
     }
   }
+  // The exception is exactly the four SOAP slots, and they ARE clinician-only
+  // everywhere else.
+  for (const f of R.NOTE_CONTENT_FIELDS) assert.ok(R.CLINICIAN_ONLY_FIELDS.includes(f), `${f} must stay clinician-only outside the note section`);
+  assert.ok(R.FILTER_MAP.note, 'the note section exists');
+  for (const f of ['narrativeNotes', 'narrativeNoteSid', 'structuredNoteSid', 'npi', 'attestationText']) {
+    assert.ok(!R.FILTER_MAP.note.full.includes(f), `${f} never rides in the note section`);
+  }
+  // A result never carries the app's own interpretation or the inbox summary.
+  for (const f of R.RESULT_CLINICIAN_ONLY_FIELDS) assert.ok(!R.FILTER_MAP.result.full.includes(f), `result section allows ${f}`);
 });
 test('a hostile row carrying every clinician-only field is stripped for patient, POA and family', () => {
   const hostile = Object.fromEntries(R.CLINICIAN_ONLY_FIELDS.map(f => [f, `LEAK-${f}`]));
@@ -87,9 +101,13 @@ test('provider name falls back to the app-side visit stamp, never a blank or an 
   assert.match(w.summary, /still finishing/);
 });
 test('clinician-authored patient text is bounded and never carries a code', () => {
-  const f = R.buildPatientFacingFields({ patientSummary: '  We checked   your BP.  ', followUpInstructions: 'x'.repeat(700) });
+  const f = R.buildPatientFacingFields({ patientSummary: '  We checked   your BP.  ', followUpInstructions: 'x'.repeat(R.FOLLOW_UP_MAX + 100) });
   assert.equal(f.patientSummary, 'We checked your BP.');
-  assert.equal(f.followUpInstructions.length, 600);
+  assert.equal(f.followUpInstructions.length, R.FOLLOW_UP_MAX);
+  // Owner, 2026-09-29: a real summary ran past the old 1000/600 caps.
+  assert.ok(R.PATIENT_SUMMARY_MAX >= 4000 && R.FOLLOW_UP_MAX >= 4000);
+  const long = 'a'.repeat(3500);
+  assert.equal(R.buildPatientFacingFields({ patientSummary: long }).patientSummary, long);
   assert.deepEqual(R.buildPatientFacingFields({ patientSummary: '' }), { patientSummary: null, followUpInstructions: null });
 });
 
@@ -141,7 +159,9 @@ test('family summary-level care plan drops the charge note and problems, keeps g
   const out = R.filterRow('carePlan', 'summary', plan);
   assert.deepEqual(out.goals, ['Walk daily']);
   assert.ok(!('problems' in out) && !('chargePlanNote' in out) && !('rnName' in out));
-  assert.equal(R.filterRow('carePlan', 'full', plan).chargePlanNote, '$$');
+  // The charge note is an internal nursing note: it never reaches a patient, even at full.
+  assert.equal(R.filterRow('carePlan', 'full', plan).chargePlanNote, undefined);
+  assert.deepEqual(R.filterRow('carePlan', 'full', plan).problems, ['Falls']);
 });
 
 // ---- 4. Session scoping ----
@@ -158,7 +178,10 @@ test('patient-facing clinical routes take NO id parameter — the patient comes 
   for (const l of patientRoutes) {
     const routePath = l.match(/'([^']+)'/)[1];
     const params = routePath.match(/:[A-Za-z]+/g) || [];
-    assert.ok(params.every(p => p === ':docId'), `${routePath} must not take a patient-identifying parameter`);
+    // :visitId (2026-09-29) is the same kind of exception: it names an encounter
+    // WITHIN the session patient's chart, and the route refuses one that is not
+    // theirs.
+    assert.ok(params.every(p => p === ':docId' || p === ':visitId'), `${routePath} must not take a patient-identifying parameter`);
     assert.match(l, /requireEnrolledClient/, `${routePath} must sit behind the enrollment gate`);
   }
 });
@@ -233,11 +256,16 @@ test('every /api/clinical route is registered with the matching guard (GET → r
   assert.ok(clinical.length >= 36, `expected the full clinical route table, found ${clinical.length}`);
   for (const l of clinical) {
     const method = l.match(/^app\.(\w+)/)[1];
+    // 2026-09-29: BILLING routes (an admin or a manager — the facility list,
+    // the place of service, Submit to billing, charges) carry requireBilling,
+    // and coding carries requireClinicalWriteOrBilling. Neither is a READ gate.
     if (method === 'get') {
-      assert.match(l, /requireClinicalRead/, `GET route must use requireClinicalRead: ${l.slice(0, 90)}`);
+      assert.match(l, /requireClinicalRead|requireBilling/, `GET route must use requireClinicalRead (or requireBilling): ${l.slice(0, 90)}`);
       assert.doesNotMatch(l, /requireClinicalWrite/, l.slice(0, 90));
     } else {
-      assert.match(l, /requireClinicalWrite|requireAdmin/, `${method.toUpperCase()} route must use requireClinicalWrite (or requireAdmin): ${l.slice(0, 90)}`);
+      // 2026-09-29: the order-destination edit carries requireOrderDestinationEditor,
+      // the one order door a case manager holds (destination fields only).
+      assert.match(l, /requireClinicalWrite|requireAdmin|requireBilling|requireOrderDestinationEditor|requireOrderAnnotator|requireAvsRecorder/, `${method.toUpperCase()} route must use requireClinicalWrite (or requireAdmin / requireBilling / requireOrderDestinationEditor): ${l.slice(0, 90)}`);
       assert.doesNotMatch(l, /requireClinicalRead/, l.slice(0, 90));
     }
   }

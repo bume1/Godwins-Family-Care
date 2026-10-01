@@ -205,8 +205,8 @@ test('Save draft saves through the shared note, and Sign & submit really signs',
   // The one component that renders the Sign & submit button used by the note
   // editors must call the sign route — a "Sign" button that only saves is the
   // defect this whole file exists to prevent.
-  const panel = clinicalPage.slice(clinicalPage.indexOf('const SignNotePanel = ('), clinicalPage.indexOf('const TemplateSections = ('));
-  assert.ok(panel.includes('api.sign(patientId, euuid)'), 'Sign & submit must call the sign route');
+  const panel = clinicalPage.slice(clinicalPage.indexOf('const SignNotePanel = ('), clinicalPage.indexOf('const FIXED_BLOCK_FOR_SECTION = '));
+  assert.ok(panel.includes('api.sign(patientId, euuid, portalHoldPayload(hold))'), 'Sign & submit must call the sign route (Portal P1: carrying the hold choice)');
   assert.ok(actions.includes('<SignNotePanel'), 'the H&P must offer the real sign panel');
   const shared = clinicalPage.slice(clinicalPage.indexOf('const useSharedNote = ('), clinicalPage.indexOf('const SignNotePanel = ('));
   assert.ok(shared.includes('api.createNote(') && shared.includes('api.saveNote('),
@@ -256,10 +256,12 @@ test('the facility picker is admin-only on screen, matching the route', () => {
     'the chart card must not write anything');
 });
 
-test('an unassigned patient is told plainly that it blocks signing', () => {
+test('an unassigned patient is told plainly that it blocks billing', () => {
+  // 2026-09-29: the place of service blocks SUBMITTING TO BILLING, not the
+  // clinician's signature — the clinician signs with the note and an ICD-10.
   const card = enrollPage.slice(enrollPage.indexOf('const PlaceOfServiceCard = ('));
   const body = card.slice(0, card.indexOf('const DetailView = ('));
-  assert.ok(/cannot be signed/i.test(body),
+  assert.ok(/cannot be submitted to billing/i.test(body),
     'the card must name the consequence, not just show an empty field');
   // Assigned-but-no-POS is a different problem with a different fix, and the
   // fix is not on this screen. Telling someone to set it here would send them
