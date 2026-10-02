@@ -471,7 +471,8 @@ const vitalsLine = (note) => {
     ? `BP right arm ${armText(v, 'bpRight')}; BP left arm ${armText(v, 'bpLeft')}`
     : `BP ${d('bpSys')}/${d('bpDia')}`;
   const telehealth = note.visit && note.visit.modality === 'telehealth';
-  return `VITALS${telehealth ? ' (patient-reported, telehealth)' : ''} — ${bp}; HR ${d('hr')}; Temp ${d('temp')}; RR ${d('rr')}; SpO2 ${d('spo2')}; Wt ${d('weight')}; Ht ${d('height')}${v.pain ? `; Pain ${v.pain}/10` : ''}`;
+  const phone = note.visit && note.visit.modality === 'phone';
+  return `VITALS${telehealth ? ' (patient-reported, telehealth)' : (phone ? ' (patient-reported, by phone)' : '')} — ${bp}; HR ${d('hr')}; Temp ${d('temp')}; RR ${d('rr')}; SpO2 ${d('spo2')}; Wt ${d('weight')}; Ht ${d('height')}${v.pain ? `; Pain ${v.pain}/10` : ''}`;
 };
 
 // The OpenEMR vitals ROW, written once at signing (there is no update route).

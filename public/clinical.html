@@ -2955,9 +2955,26 @@
       }, [catalog, visit.appointmentType, visit.modality]);
       const noteHasSection = (key) => noteSections.some(s => s.key === key);
       const visitType = catalog && (catalog.appointmentTypes || []).find(t => t.key === visit.appointmentType);
+      // A phone call (owner, 2026-10-02): no location, no vitals, no exam, and
+      // it saves as a follow-up-shaped note — never an H&P, which would demand
+      // a blood pressure in both arms and mark the initial visit as done.
+      const isPhone = visit.modality === 'phone';
+      const allowedModalities = (visitType && visitType.modalities) || null;
+      const chooseType = (key) => setVisit(v => {
+        const t = catalog && (catalog.appointmentTypes || []).find(x => x.key === key);
+        const allowed = (t && t.modalities) || null;
+        const modality = allowed && !allowed.includes(v.modality) ? allowed[0] : v.modality;
+        return { ...v, appointmentType: key, modality,
+          location: modality === 'phone' ? '' : (v.location || (catalog && catalog.usualLocation) || '') };
+      });
 
       // This form → the shared note's shape.
-      const toNote = () => ({
+      const toNote = () => (isPhone ? {
+        kind: 'followup',
+        chiefConcern: f.chiefConcern, subjective: f.subjective, objective: '',
+        assessment: f.assessment, plan: f.plan, sections: f.sections, vitals: {},
+        confirmedFields: confirmed, visit: { ...visit, location: '' }
+      } : {
         kind: 'hp',
         chiefConcern: f.chiefConcern, subjective: f.subjective, objective: f.objective,
         assessment: f.assessment, plan: f.plan, sections: f.sections, vitals: f.vitals,
@@ -3241,7 +3258,7 @@
             </div>
             <div className="p-4 grid md:grid-cols-3 gap-3 text-sm">
               <Field label="Appointment type">
-                <select className="inp" value={visit.appointmentType} onChange={e => setVisit(v => ({ ...v, appointmentType: e.target.value }))}>
+                <select className="inp" value={visit.appointmentType} onChange={e => chooseType(e.target.value)}>
                   <option value="">— choose —</option>
                   {(catalog ? catalog.services : []).map(svc => (
                     <optgroup key={svc.key} label={svc.label}>
@@ -3253,18 +3270,24 @@
                 </select>
               </Field>
               <Field label="Modality">
-                <select className="inp" value={visit.modality} onChange={e => setVisit(v => ({ ...v, modality: e.target.value }))}>
-                  {(catalog ? catalog.modalities : []).map(m => (
+                <select className="inp" value={visit.modality} onChange={e => setVisit(v => ({ ...v, modality: e.target.value, location: e.target.value === 'phone' ? '' : v.location }))}>
+                  {(catalog ? catalog.modalities : [])
+                    // Phone is only ever offered where the type allows it.
+                    .filter(m => m.key !== 'phone' || (allowedModalities && allowedModalities.includes('phone')))
+                    .map(m => (
                     <option key={m.key} value={m.key}
-                      disabled={m.key === 'telehealth' && visitType && !visitType.telehealthAllowed}>{m.label}</option>
+                      disabled={allowedModalities ? !allowedModalities.includes(m.key)
+                        : (m.key === 'telehealth' && visitType && !visitType.telehealthAllowed)}>{m.label}</option>
                   ))}
                 </select>
               </Field>
               <Field label="Location">
-                <select className="inp" value={visit.location} onChange={e => setVisit(v => ({ ...v, location: e.target.value }))}>
-                  <option value="">— choose —</option>
-                  {(catalog ? catalog.locations : []).map(l => <option key={l.key} value={l.key}>{l.label}</option>)}
-                </select>
+                {isPhone
+                  ? <div className="inp bg-stone-50 text-stone-500">Not needed for a phone call</div>
+                  : <select className="inp" value={visit.location} onChange={e => setVisit(v => ({ ...v, location: e.target.value }))}>
+                      <option value="">— choose —</option>
+                      {(catalog ? catalog.locations : []).map(l => <option key={l.key} value={l.key}>{l.label}</option>)}
+                    </select>}
               </Field>
             </div>
             <div className="px-4 pb-4 text-[11px] text-stone-500 grid gap-1">
@@ -3276,6 +3299,8 @@
                   Telehealth for this visit type depends on current CMS flexibilities. Confirm with the payer before billing.</span>}
               {visit.modality === 'telehealth' &&
                 <span>Vitals and exam findings recorded on a video visit are marked as patient-reported.</span>}
+              {isPhone &&
+                <span>A phone call has no vitals or exam. Record the minutes spent on this call — care management is billed on time across the month, and billing decides how each call is claimed.</span>}
             </div>
           </div>
 
@@ -3289,8 +3314,10 @@
               <DictationHint />
               {noteLayout({
                 sections: noteSections,
-                fixedBlocks: ['chiefConcern', 'subjective', 'vitals', 'exam', ...(noteHasSection('mentalStatusExam') ? ['mse'] : []), 'assessment', 'plan'],
-                extraBlocks: ['skinWound', 'pain', 'hazards', 'triage'],
+                fixedBlocks: isPhone
+                  ? ['chiefConcern', 'subjective', 'assessment', 'plan']
+                  : ['chiefConcern', 'subjective', 'vitals', 'exam', ...(noteHasSection('mentalStatusExam') ? ['mse'] : []), 'assessment', 'plan'],
+                extraBlocks: isPhone ? [] : ['skinWound', 'pain', 'hazards', 'triage'],
                 extraLabel: 'Home visit assessment',
                 stored: f.sections, labelFor: sectionLabelFor
               }).map((item, i) => (item.kind === 'heading'
@@ -5179,7 +5206,10 @@
               <DictationHint />
               {noteLayout({
                 sections: noteSections,
-                fixedBlocks: ['chiefConcern', 'subjective', 'vitals', 'exam', 'assessment', 'plan'],
+                // A phone call has no vitals or exam to record (owner, 2026-10-02).
+                fixedBlocks: visit && visit.modality === 'phone'
+                  ? ['chiefConcern', 'subjective', 'assessment', 'plan']
+                  : ['chiefConcern', 'subjective', 'vitals', 'exam', 'assessment', 'plan'],
                 extraBlocks: [], extraLabel: 'More of this note',
                 stored: f.sections, labelFor: sectionLabelFor
               }).map((item, i) => (item.kind === 'heading'

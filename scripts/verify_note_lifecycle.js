@@ -149,6 +149,7 @@ const CM = staff('cm_1', 'Casey Reed', 'readOnly', null, { role: 'caseManager', 
 // Billing (owner, 2026-09-29): an admin or a manager. The manager holds no
 // clinical role at all.
 const MGR = { id: 'mgr_1', name: 'Morgan Price (TEST DATA)', email: 'mgr_1@example.test', role: 'user', isManager: true, hasClinicalAccess: false, accountStatus: 'active' };
+const PHONEPATIENT = { ...PATIENT, id: 'c_phone', email: 'c_phone@example.test', name: 'Phone Probe Patient (TEST DATA)', slug: 'phone-probe', openEmrPatientId: 'uuid-phone-patient' };
 const BILLPATIENT = { ...PATIENT, id: 'c_bill', email: 'c_bill@example.test', name: 'Billing Probe Patient (TEST DATA)', slug: 'bill-probe', openEmrPatientId: 'uuid-bill-patient' };
 
 // Formatted markup, the way the editor stores it.
@@ -161,7 +162,7 @@ const HP_NOTE = {
 
 (async () => {
   const hash = await bcrypt.hash(PW, 4);
-  STORE.set('users', [PATIENT, OTHER, BILLPATIENT, RN, FNP, LCSW, LMSW, CM, MGR].map(u => ({ ...u, password: hash })));
+  STORE.set('users', [PATIENT, OTHER, BILLPATIENT, PHONEPATIENT, RN, FNP, LCSW, LMSW, CM, MGR].map(u => ({ ...u, password: hash })));
   STORE.set('gfc_payer_credentialing', { billing_npi_used: '1234567893', billing_provider_name: 'GFC' });
   const fresh = new Date().toISOString();
   STORE.set('gfc_ncci_source_version', { ptp: { quarter: '2026Q4', loadedAt: fresh }, mue: { quarter: '2026Q4', loadedAt: fresh } });
@@ -502,6 +503,30 @@ const HP_NOTE = {
   r = await call('POST', `${B}/encounters/${bv2}/billing-submit`, tok.mgr, { noCharge: true, reason: 'Courtesy follow-up' });
   check('billing closes it with no charge', r.status === 200 && record(bv2).billingStatus === 'no_charge' && !EMR.charges.some(c => c.euuid === bv2), r.body);
   CLINICIANS_READ_FACILITIES = true;
+
+  console.log('\n── 15. A phone call / care-management note (owner, 2026-10-02) ──');
+  // What the note screen sends for the phone type: a follow-up-shaped note,
+  // phone modality, no location, no vitals.
+  const PH = `/api/clinical/patients/${PHONEPATIENT.id}`;
+  const PHONE_NOTE = {
+    kind: 'followup', visit: { appointmentType: 'pc_phone_ccm', modality: 'phone', location: '' },
+    chiefConcern: 'Monthly CCM check-in call', subjective: 'Daughter reports BP readings 130s/80s at home', assessment: 'HTN, stable', plan: 'Continue lisinopril; call back in 4 weeks',
+    sections: { callParticipants: 'Patient and daughter (on speaker)' }, vitals: {}
+  };
+  r = await call('POST', `${PH}/notes`, tok.fnp, { note: PHONE_NOTE });
+  const ph = r.body && r.body.encounterUuid;
+  check('the phone note saves', r.status === 200 && !!ph, r.body);
+  check('it is stored as a phone call with no location', record(ph).visit && record(ph).visit.appointmentType === 'pc_phone_ccm' && record(ph).visit.modality === 'phone' && !record(ph).visit.location, record(ph).visit);
+  check('it does NOT mark the patient\'s initial visit as done', !rows('users').find(u => u.id === PHONEPATIENT.id).clinicalInitialVisit);
+  r = await call('PUT', `${PH}/encounters/${ph}/coding`, tok.fnp, { diagnoses: [{ code: 'I10', description: 'Essential hypertension' }], services: [] });
+  r = await call('POST', `${PH}/encounters/${ph}/sign`, tok.fnp, { attest: true });
+  check('signing asks for the minutes, never a blood pressure', r.status === 409 && r.body.code === 'SIGN_NOTE_SECTIONS_INCOMPLETE' && /Time Spent/.test(r.body.error) && !/blood pressure|Vitals|Exam/i.test(r.body.error), r.body);
+  r = await call('PUT', `${PH}/encounters/${ph}/note`, tok.fnp, { note: { ...PHONE_NOTE, sections: { ...PHONE_NOTE.sections, contactTime: '22' } }, baseVersion: 1 });
+  check('the minutes are added', r.status === 200, r.body);
+  r = await call('POST', `${PH}/encounters/${ph}/sign`, tok.fnp, { attest: true });
+  check('the phone note signs and goes to billing', r.status === 200 && record(ph).billingStatus === 'awaiting_billing', r.body);
+  check('no vitals row was written for a phone call', !EMR.vitals.some(v => v.euuid === ph));
+  check('nothing was billed by signing', !EMR.charges.some(c => c.euuid === ph));
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

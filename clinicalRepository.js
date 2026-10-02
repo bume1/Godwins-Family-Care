@@ -1199,6 +1199,7 @@ const visitLabel = (v) => {
   const type = apptTypes.typeByKey(n.appointmentType);
   const modality = apptTypes.modalityByKey(n.modality);
   const location = apptTypes.locationByKey(n.location);
+  if (type && modality && modality.key === 'phone') return `${type.label} · ${modality.label}`;
   if (!type || !modality || !location) return null;
   return `${type.label} · ${modality.label} · ${location.label}`;
 };
