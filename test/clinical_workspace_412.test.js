@@ -1504,8 +1504,11 @@ test('F build-enforced: the USUAL LOCATION is an admin write on enrollment; what
   // CLINICIAN'S note, chosen before they start writing, because it decides
   // which note they are about to write.
   assert.match(chart, /What kind of visit is this\?/, 'the note must ask what kind of visit it is');
-  assert.match(chart, /setVisit\(v => \(\{ \.\.\.v, appointmentType: e\.target\.value \}\)\)/);
-  assert.match(chart, /setVisit\(v => \(\{ \.\.\.v, modality: e\.target\.value \}\)\)/);
+  // The type is chosen through chooseType, which also snaps the modality to
+  // one the type allows (the phone type is phone-only, 2026-10-02).
+  assert.match(chart, /onChange=\{e => chooseType\(e\.target\.value\)\}/);
+  assert.match(chart, /const chooseType = \(key\) => setVisit\(v =>/);
+  assert.match(chart, /setVisit\(v => \(\{ \.\.\.v, modality: e\.target\.value/);
   assert.match(chart, /setVisit\(v => \(\{ \.\.\.v, location: e\.target\.value \}\)\)/);
   // And the chart carries no write for either admin field.
   assert.ok(!/\/usual-location`/.test(chart), 'the chart must not write the usual location');

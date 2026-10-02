@@ -14489,7 +14489,9 @@ app.get('/api/clinical/patients/:clientId/place-of-service', authenticateToken, 
     }));
     const appointmentTypes = apptTypes.APPOINTMENT_TYPES.map(t => ({
       key: t.key, label: t.label, service: t.service, defaultMinutes: t.defaultMinutes,
-      telehealthAllowed: !!t.telehealthAllowed, telehealthPayerCaveat: !!t.telehealthPayerCaveat
+      telehealthAllowed: !!t.telehealthAllowed, telehealthPayerCaveat: !!t.telehealthPayerCaveat,
+      // Served so the page never offers a modality the type refuses.
+      modalities: apptTypes.modalitiesForType(t.key)
     }));
     const services = apptTypes.SERVICES.map(x => ({ key: x.key, label: x.label }));
     const modalities = apptTypes.MODALITIES.map(x => ({ key: x.key, label: x.label }));

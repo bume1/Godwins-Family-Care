@@ -82,12 +82,12 @@ test('travel is needed exactly where somebody travels', () => {
   }
 });
 
-test('the eight types are declared once, each with a note template and a duration', () => {
-  assert.equal(A.APPOINTMENT_TYPES.length, 8);
+test('the nine types are declared once, each with a note template and a duration', () => {
+  assert.equal(A.APPOINTMENT_TYPES.length, 9);
   const keys = A.APPOINTMENT_TYPES.map(t => t.key);
   assert.equal(new Set(keys).size, keys.length, 'a duplicate key would make typeByKey silently pick one');
   assert.deepEqual(A.typesForService('primary_care').map(t => t.key),
-    ['pc_new_patient', 'pc_follow_up', 'pc_acute', 'pc_awv', 'pc_tcm']);
+    ['pc_new_patient', 'pc_follow_up', 'pc_acute', 'pc_awv', 'pc_tcm', 'pc_phone_ccm']);
   assert.equal(A.typesForService('behavioral_health').length, 2);
   assert.equal(A.typesForService('ime').length, 1);
   for (const t of A.APPOINTMENT_TYPES) {
@@ -181,9 +181,12 @@ test('an IME is examiner-only, never telehealth, and never a Medicare claim', ()
   assert.equal(A.canBeTelehealth('ime_exam'), false);
   // Every other type may be telehealth; behavioural telehealth to the home is
   // permanent, the rest carry a payer caveat.
-  for (const t of A.APPOINTMENT_TYPES.filter(x => x.key !== 'ime_exam')) {
+  // Every other VISIT type may be telehealth. The phone type is not a visit:
+  // a call written up as video would carry modifier 95 on a call.
+  for (const t of A.APPOINTMENT_TYPES.filter(x => x.key !== 'ime_exam' && x.key !== 'pc_phone_ccm')) {
     assert.equal(A.canBeTelehealth(t.key), true, `${t.key} must be bookable as telehealth`);
   }
+  assert.equal(A.canBeTelehealth('pc_phone_ccm'), false, 'a phone call is not a video visit');
   assert.equal(A.typeByKey('bh_initial').telehealthPayerCaveat, false, 'behavioural telehealth to the home is permanent');
   assert.equal(A.typeByKey('pc_follow_up').telehealthPayerCaveat, true, 'non-behavioural telehealth depends on current CMS flexibilities');
 });
@@ -435,4 +438,62 @@ test('the coverage catalog says the templates EXIST, and that writing one is ref
   // And the write stays refused FOR THAT REASON, not despite it.
   assert.equal(write.status, 'not_wired');
   assert.match(write.note, /second copy|already/i, 'writing one would duplicate an instrument that has an authoritative version');
+});
+
+// ---- Phone call / care management (owner, 2026-10-02) ---------------------
+// An interim home for between-visit and CCM phone notes. The rules that keep
+// it honest: phone-only, no location and therefore no place of service of its
+// own, no in-person sections, and the minutes are required.
+test('the phone type is phone-only, and phone is offered on no visit type', () => {
+  assert.deepEqual(A.modalitiesForType('pc_phone_ccm'), ['phone']);
+  for (const t of A.APPOINTMENT_TYPES.filter(x => x.key !== 'pc_phone_ccm')) {
+    assert.ok(!A.modalitiesForType(t.key).includes('phone'), `${t.key} is a visit, not a phone call`);
+  }
+  // A visit type booked as a phone call is refused by name; the phone type
+  // booked in person or by video is refused too.
+  const callAsVisit = A.resolveVisit({ appointmentType: 'pc_follow_up', bookedModality: 'phone', bookedLocation: 'home' });
+  assert.ok(callAsVisit.problems.some(p => p.code === 'MODALITY_NOT_ALLOWED'));
+  for (const m of ['in_person', 'telehealth']) {
+    const r = A.resolveVisit({ appointmentType: 'pc_phone_ccm', bookedModality: m, bookedLocation: 'home' });
+    assert.ok(r.problems.some(p => p.code === 'MODALITY_NOT_ALLOWED' || p.code === 'TELEHEALTH_NOT_ALLOWED'), `phone type as ${m} must be refused`);
+  }
+});
+
+test('a phone call has no location and no place of service of its own — billing decides', () => {
+  // The patient's usual location is NOT borrowed: a guessed location is a
+  // guessed place of service.
+  const r = A.resolveVisit({ appointmentType: 'pc_phone_ccm', bookedModality: 'phone', patientDefaultLocation: 'home' });
+  assert.equal(r.ok, true);
+  assert.equal(r.location, null);
+  assert.equal(r.locationSource, 'not_applicable');
+  assert.match(r.label, /Phone Call \/ Care Management/);
+  const pos = A.resolvePos({ modality: 'phone', location: 'home' });
+  assert.equal(pos.pos, null);
+  assert.equal(pos.source, 'billing_decides');
+  assert.ok(!pos.error, 'no location must not be an error for a call');
+  const fam = A.resolveCodeFamily({ modality: 'phone' });
+  assert.equal(fam.family.key, 'care_management');
+  assert.equal(fam.telehealthModifier, false, 'a call must never carry the video modifier');
+  assert.equal(A.visitNeedsTravel({ modality: 'phone', location: 'home' }), false);
+});
+
+test('the phone note demands the call, the plan and the minutes — never vitals or an exam', () => {
+  const req = A.requiredSectionKeys('pc_phone_ccm', { modality: 'phone' });
+  for (const k of ['reasonForVisit', 'callParticipants', 'assessment', 'plan', 'contactTime']) {
+    assert.ok(req.includes(k), `${k} is required on a phone note`);
+  }
+  for (const k of ['vitals', 'physicalExam', 'focusedExam']) assert.ok(!req.includes(k));
+  // And an in-person section on any type is not demanded over the phone.
+  assert.ok(!A.requiredSectionKeys('pc_follow_up', { modality: 'phone' }).includes('physicalExam'));
+});
+
+test('the note screen saves a phone call as a follow-up-shaped note, never an H&P', () => {
+  const fs = require('fs'); const path = require('path');
+  const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'clinical.html'), 'utf8');
+  // An H&P demands both-arm BP to sign and stamps the initial visit on first
+  // save; neither is true of a phone call.
+  assert.match(page, /const toNote = \(\) => \(isPhone \? \{\s*kind: 'followup'/);
+  assert.match(page, /fixedBlocks: isPhone\s*\?\s*\['chiefConcern', 'subjective', 'assessment', 'plan'\]/);
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(server, /modalities: apptTypes\.modalitiesForType\(t\.key\)/, 'the page is served each type\'s modalities');
 });
