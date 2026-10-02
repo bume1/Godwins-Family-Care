@@ -38,7 +38,14 @@ const SERVICES = Object.freeze([
 
 const MODALITIES = Object.freeze([
   { key: 'in_person', label: 'In-Person' },
-  { key: 'telehealth', label: 'Telehealth' }
+  { key: 'telehealth', label: 'Telehealth' },
+  // A phone call (owner, 2026-10-02): the interim home for care-management
+  // and between-visit calls until the dedicated CCM integration lands. It is
+  // NOT telehealth — telehealth here means video, which bills the office E/M
+  // set with modifier 95 — so treating a phone call as telehealth would put a
+  // video-visit claim on a call. A phone contact has no place of service of
+  // its own and no code family this file asserts: billing decides both.
+  { key: 'phone', label: 'Phone call (audio only)' }
 ]);
 
 // `pos: null` on `facility` is deliberate and load-bearing: an assisted living
@@ -56,7 +63,10 @@ const LOCATIONS = Object.freeze([
 // family is a RANGE a picker filters by, never a list this file asserts.
 const CODE_FAMILIES = Object.freeze({
   office: { key: 'office', label: 'Office / outpatient E/M', range: '99202–99215' },
-  home: { key: 'home', label: 'Home or residence E/M', range: '99341–99350' }
+  home: { key: 'home', label: 'Home or residence E/M', range: '99341–99350' },
+  // No range on purpose: care management is billed on time accumulated across
+  // a month, not per call, and which code applies is billing's decision.
+  care_management: { key: 'care_management', label: 'Care management / non-face-to-face (billing decides)', range: null }
 });
 
 const TELEHEALTH_POS_PATIENT_HOME = '10';   // telehealth to the patient's home
@@ -75,6 +85,9 @@ const resolvePos = ({ modality, location, facilityPos } = {}) => {
   const m = modalityByKey(modality);
   const l = locationByKey(location);
   if (!m) return { error: `Modality is required — one of: ${MODALITIES.map(x => x.key).join(', ')}`, code: 'MODALITY_REQUIRED' };
+  // A phone call has no place of service to derive. Answered as "billing
+  // decides", never guessed from where the patient happens to live.
+  if (m.key === 'phone') return { pos: null, source: 'billing_decides' };
   if (!l) return { error: `Location is required — one of: ${LOCATIONS.map(x => x.key).join(', ')}`, code: 'LOCATION_REQUIRED' };
   if (m.key === 'telehealth') {
     // The patient's own home is 10; everywhere else is 02. This is the ONE
@@ -102,6 +115,9 @@ const resolveCodeFamily = ({ modality, location } = {}) => {
   const m = modalityByKey(modality);
   const l = locationByKey(location);
   if (!m) return { error: 'Modality is required', code: 'MODALITY_REQUIRED' };
+  if (m.key === 'phone') {
+    return { family: CODE_FAMILIES.care_management, telehealthModifier: false, reason: 'A phone call is not a visit: it is care-management time, and billing chooses how it is claimed.' };
+  }
   if (!l) return { error: 'Location is required', code: 'LOCATION_REQUIRED' };
   if (m.key === 'telehealth') {
     return { family: CODE_FAMILIES.office, telehealthModifier: true, reason: 'Telehealth bills the office/outpatient set wherever the patient is; a video visit is not a home visit.' };
@@ -143,6 +159,11 @@ const SECTIONS = Object.freeze({
   ordersRxReferrals: 'Orders / Rx / Referrals',
   ordersRx: 'Orders / Rx',
   careManagementEligibility: 'Care Management Eligibility (CCM/BHI flag)',
+  // Phone call / care management (owner, 2026-10-02)
+  callParticipants: 'Who was on the call',
+  careCoordination: 'Care Coordination / Actions Taken',
+  ccmConsent: 'CCM Consent (verbal, documented)',
+  contactTime: 'Time Spent on This Contact (minutes)',
   returnPrecautions: 'Return / ER Precautions',
   followUp: 'Follow-up',
   mdmOrTime: 'MDM or Total Time statement',
@@ -403,6 +424,26 @@ const APPOINTMENT_TYPES = Object.freeze([
     ]
   },
   {
+    // ⚠️ INTERIM (owner, 2026-10-02) — a place to write phone and
+    // between-visit care-management notes until the CCM integration is built.
+    // It is phone-ONLY: a call written up as an in-person or video visit is a
+    // visit that never happened. It saves as a follow-up-shaped note, never an
+    // H&P, so it neither demands a blood pressure nor marks the patient's
+    // initial visit as done. The time section is required because care
+    // management is billed on minutes accumulated across the month.
+    key: 'pc_phone_ccm', service: 'primary_care', label: 'Phone Call / Care Management',
+    defaultMinutes: 20, telehealthAllowed: false, telehealthPayerCaveat: false,
+    modalities: ['phone'],
+    credentials: ['MD', 'DO', 'NP', 'PA'], specialty: null,
+    intake: [F('medications'), F('conditions')],
+    sections: [
+      t('reasonForVisit', R.ALWAYS), t('callParticipants', R.ALWAYS), t('intervalHistory', R.ALWAYS),
+      t('medicationReview', R.OPTIONAL), t('assessment', R.ALWAYS), t('plan', R.ALWAYS),
+      t('careCoordination', R.OPTIONAL), t('ccmConsent', R.OPTIONAL),
+      t('followUp', R.OPTIONAL), t('contactTime', R.ALWAYS)
+    ]
+  },
+  {
     key: 'bh_initial', service: 'behavioral_health', label: 'Psych Initial Evaluation',
     defaultMinutes: 60, telehealthAllowed: true, telehealthPayerCaveat: false,
     // A PMHNP is an NP; a psychiatrist is an MD. The SPECIALTY is what makes
@@ -511,6 +552,18 @@ const unbuiltIntake = () => [...toSurface(), ...toBuild()];
 const typeByKey = (k) => APPOINTMENT_TYPES.find(a => a.key === String(k || '')) || null;
 const typesForService = (svc) => APPOINTMENT_TYPES.filter(a => a.service === String(svc || ''));
 
+// Which modalities a type may be done by. Declared on the type where it is
+// narrower than the default (the phone type is phone-only); otherwise in
+// person, plus video where the type allows it. Phone is NEVER a default: a
+// visit type that assumes the clinician is in the room or on video is not a
+// phone call.
+const modalitiesForType = (typeKey) => {
+  const type = typeByKey(typeKey);
+  if (!type) return [];
+  if (Array.isArray(type.modalities) && type.modalities.length) return [...type.modalities];
+  return type.telehealthAllowed ? ['in_person', 'telehealth'] : ['in_person'];
+};
+
 // ---- What this note must contain ----------------------------------------
 // Resolved per VISIT, not per type: the same appointment type demands a
 // physical exam in person and does not over video.
@@ -518,15 +571,18 @@ const sectionsFor = (typeKey, { modality, riskPositive } = {}) => {
   const type = typeByKey(typeKey);
   if (!type) return [];
   const telehealth = modalityByKey(modality) && modalityByKey(modality).key === 'telehealth';
+  // Nobody is in the room on video OR on the phone, so neither may demand an
+  // in-person section.
+  const remote = telehealth || (modalityByKey(modality) && modalityByKey(modality).key === 'phone');
   return type.sections.map(s => {
     let required = s.required === true;
-    if (s.required === R.IN_PERSON) required = !telehealth;
+    if (s.required === R.IN_PERSON) required = !remote;
     if (s.required === R.RISK_POSITIVE) required = !!riskPositive;
     return {
       key: s.key, label: SECTIONS[s.key], required,
       // A vital sign taken over video was reported by the patient, and the
       // note says so rather than reading as though it was measured.
-      patientReported: s.required === R.IN_PERSON && telehealth
+      patientReported: s.required === R.IN_PERSON && !!remote
     };
   });
 };
@@ -607,20 +663,27 @@ const resolveVisit = ({ appointmentType, bookedModality, bookedLocation, patient
   const modality = modalityByKey(bookedModality);
   const booked = locationByKey(bookedLocation);
   const fallback = locationByKey(patientDefaultLocation);
-  const location = booked || fallback || null;
+  const phone = !!(modality && modality.key === 'phone');
+  // A phone call has no location: it would only ever be guessed, and a
+  // guessed location is a guessed place of service.
+  const location = phone ? null : (booked || fallback || null);
   const problems = [];
   if (!type) problems.push({ field: 'appointmentType', code: 'APPOINTMENT_TYPE_REQUIRED', error: 'This visit has no appointment type, so nothing can say what note it produces or what it bills as.' });
   if (!modality) problems.push({ field: 'modality', code: 'MODALITY_REQUIRED', error: 'This visit has no modality. In person and telehealth bill different code families, so it cannot be guessed.' });
-  if (!location) problems.push({ field: 'location', code: 'LOCATION_REQUIRED', error: 'This visit has no location, and none is recorded on the patient either. Location sets the place of service, so it is required before the visit can be saved.' });
+  if (!location && !phone) problems.push({ field: 'location', code: 'LOCATION_REQUIRED', error: 'This visit has no location, and none is recorded on the patient either. Location sets the place of service, so it is required before the visit can be saved.' });
   if (type && modality && type.telehealthAllowed === false && modality.key === 'telehealth') {
     problems.push({ field: 'modality', code: 'TELEHEALTH_NOT_ALLOWED', error: `${type.label} cannot be done by video.` });
+  } else if (type && modality && !modalitiesForType(type.key).includes(modality.key)) {
+    problems.push({ field: 'modality', code: 'MODALITY_NOT_ALLOWED',
+      error: phone ? `${type.label} is a visit, not a phone call. Use Phone Call / Care Management for a call.` : `${type.label} is phone-only.` });
   }
   return {
     appointmentType: type ? type.key : null,
     modality: modality ? modality.key : null,
     location: location ? location.key : null,
-    locationSource: booked ? 'booking' : (fallback ? 'patient_default' : 'unset'),
-    label: type && modality && location ? `${type.label} · ${modality.label} · ${location.label}` : null,
+    locationSource: phone ? 'not_applicable' : (booked ? 'booking' : (fallback ? 'patient_default' : 'unset')),
+    label: type && modality && location ? `${type.label} · ${modality.label} · ${location.label}`
+      : (type && phone ? `${type.label} · ${modality.label}` : null),
     problems, ok: problems.length === 0
   };
 };
@@ -647,7 +710,7 @@ const isBehavioralHealth = (appointmentType) => {
 
 module.exports = {
   SECTIONS, REQUIRED, APPOINTMENT_TYPES,
-  typeByKey, typesForService, sectionsFor, requiredSectionKeys,
+  typeByKey, typesForService, modalitiesForType, sectionsFor, requiredSectionKeys,
   canBookType, canBeTelehealth, awvEligibility, AWV_INTERVAL_DAYS,
   resolveVisit, isBehavioralHealth, visitDocumentsFor, visitDocumentsOutstanding,
   resolveIntakeRef, assertIntakeIsDeclared, unbuiltIntake, toSurface, toBuild, EXPECTED_DOCUMENT_KINDS,

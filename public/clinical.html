@@ -2955,9 +2955,26 @@
       }, [catalog, visit.appointmentType, visit.modality]);
       const noteHasSection = (key) => noteSections.some(s => s.key === key);
       const visitType = catalog && (catalog.appointmentTypes || []).find(t => t.key === visit.appointmentType);
+      // A phone call (owner, 2026-10-02): no location, no vitals, no exam, and
+      // it saves as a follow-up-shaped note — never an H&P, which would demand
+      // a blood pressure in both arms and mark the initial visit as done.
+      const isPhone = visit.modality === 'phone';
+      const allowedModalities = (visitType && visitType.modalities) || null;
+      const chooseType = (key) => setVisit(v => {
+        const t = catalog && (catalog.appointmentTypes || []).find(x => x.key === key);
+        const allowed = (t && t.modalities) || null;
+        const modality = allowed && !allowed.includes(v.modality) ? allowed[0] : v.modality;
+        return { ...v, appointmentType: key, modality,
+          location: modality === 'phone' ? '' : (v.location || (catalog && catalog.usualLocation) || '') };
+      });
 
       // This form → the shared note's shape.
-      const toNote = () => ({
+      const toNote = () => (isPhone ? {
+        kind: 'followup',
+        chiefConcern: f.chiefConcern, subjective: f.subjective, objective: '',
+        assessment: f.assessment, plan: f.plan, sections: f.sections, vitals: {},
+        confirmedFields: confirmed, visit: { ...visit, location: '' }
+      } : {
         kind: 'hp',
         chiefConcern: f.chiefConcern, subjective: f.subjective, objective: f.objective,
         assessment: f.assessment, plan: f.plan, sections: f.sections, vitals: f.vitals,
@@ -3241,7 +3258,7 @@
             </div>
             <div className="p-4 grid md:grid-cols-3 gap-3 text-sm">
               <Field label="Appointment type">
-                <select className="inp" value={visit.appointmentType} onChange={e => setVisit(v => ({ ...v, appointmentType: e.target.value }))}>
+                <select className="inp" value={visit.appointmentType} onChange={e => chooseType(e.target.value)}>
                   <option value="">— choose —</option>
                   {(catalog ? catalog.services : []).map(svc => (
                     <optgroup key={svc.key} label={svc.label}>
@@ -3253,18 +3270,24 @@
                 </select>
               </Field>
               <Field label="Modality">
-                <select className="inp" value={visit.modality} onChange={e => setVisit(v => ({ ...v, modality: e.target.value }))}>
-                  {(catalog ? catalog.modalities : []).map(m => (
+                <select className="inp" value={visit.modality} onChange={e => setVisit(v => ({ ...v, modality: e.target.value, location: e.target.value === 'phone' ? '' : v.location }))}>
+                  {(catalog ? catalog.modalities : [])
+                    // Phone is only ever offered where the type allows it.
+                    .filter(m => m.key !== 'phone' || (allowedModalities && allowedModalities.includes('phone')))
+                    .map(m => (
                     <option key={m.key} value={m.key}
-                      disabled={m.key === 'telehealth' && visitType && !visitType.telehealthAllowed}>{m.label}</option>
+                      disabled={allowedModalities ? !allowedModalities.includes(m.key)
+                        : (m.key === 'telehealth' && visitType && !visitType.telehealthAllowed)}>{m.label}</option>
                   ))}
                 </select>
               </Field>
               <Field label="Location">
-                <select className="inp" value={visit.location} onChange={e => setVisit(v => ({ ...v, location: e.target.value }))}>
-                  <option value="">— choose —</option>
-                  {(catalog ? catalog.locations : []).map(l => <option key={l.key} value={l.key}>{l.label}</option>)}
-                </select>
+                {isPhone
+                  ? <div className="inp bg-stone-50 text-stone-500">Not needed for a phone call</div>
+                  : <select className="inp" value={visit.location} onChange={e => setVisit(v => ({ ...v, location: e.target.value }))}>
+                      <option value="">— choose —</option>
+                      {(catalog ? catalog.locations : []).map(l => <option key={l.key} value={l.key}>{l.label}</option>)}
+                    </select>}
               </Field>
             </div>
             <div className="px-4 pb-4 text-[11px] text-stone-500 grid gap-1">
@@ -3276,6 +3299,8 @@
                   Telehealth for this visit type depends on current CMS flexibilities. Confirm with the payer before billing.</span>}
               {visit.modality === 'telehealth' &&
                 <span>Vitals and exam findings recorded on a video visit are marked as patient-reported.</span>}
+              {isPhone &&
+                <span>A phone call has no vitals or exam. Record the minutes spent on this call — care management is billed on time across the month, and billing decides how each call is claimed.</span>}
             </div>
           </div>
 
@@ -3289,8 +3314,10 @@
               <DictationHint />
               {noteLayout({
                 sections: noteSections,
-                fixedBlocks: ['chiefConcern', 'subjective', 'vitals', 'exam', ...(noteHasSection('mentalStatusExam') ? ['mse'] : []), 'assessment', 'plan'],
-                extraBlocks: ['skinWound', 'pain', 'hazards', 'triage'],
+                fixedBlocks: isPhone
+                  ? ['chiefConcern', 'subjective', 'assessment', 'plan']
+                  : ['chiefConcern', 'subjective', 'vitals', 'exam', ...(noteHasSection('mentalStatusExam') ? ['mse'] : []), 'assessment', 'plan'],
+                extraBlocks: isPhone ? [] : ['skinWound', 'pain', 'hazards', 'triage'],
                 extraLabel: 'Home visit assessment',
                 stored: f.sections, labelFor: sectionLabelFor
               }).map((item, i) => (item.kind === 'heading'
@@ -4269,6 +4296,30 @@
       const [services, setServices] = useState([]);
       const [settings, setSettings] = useState(null);
       const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+      // What kind of visit this is (owner, 2026-10-02): the same served
+      // catalog the Visit tab picks from, so an unscheduled visit can be a
+      // Phone Call / Care Management note, a psychiatric follow-up, and so on.
+      const [visit, setVisit] = useState({ appointmentType: '', modality: 'in_person', location: '' });
+      const [catalog, setCatalog] = useState(null);
+      useEffect(() => {
+        let live = true;
+        api.placeOfService(patient.id).then(d => {
+          if (!live) return;
+          setCatalog(d);
+          if (d.usualLocation) setVisit(v => v.location ? v : { ...v, location: d.usualLocation });
+        }).catch(() => {});
+        return () => { live = false; };
+      }, [patient.id]);
+      const visitType = catalog && (catalog.appointmentTypes || []).find(t => t.key === visit.appointmentType);
+      const allowedModalities = (visitType && visitType.modalities) || null;
+      const isPhone = visit.modality === 'phone';
+      const chooseVisitType = (key) => setVisit(v => {
+        const t = catalog && (catalog.appointmentTypes || []).find(x => x.key === key);
+        const allowed = (t && t.modalities) || null;
+        const modality = allowed && !allowed.includes(v.modality) ? allowed[0] : (v.modality === 'phone' ? 'in_person' : v.modality);
+        return { ...v, appointmentType: key, modality,
+          location: modality === 'phone' ? '' : (v.location || (catalog && catalog.usualLocation) || '') };
+      });
       useEffect(() => { api.settings().then(setSettings).catch(() => {}); }, []);
       // T1: the server proposes the patient's active coded problems; they arrive
       // pre-selected and the clinician unchecks what wasn't addressed.
@@ -4286,8 +4337,9 @@
         setBusy(true); setErr('');
         const note = {
           kind: 'followup', visitDate: f.date || undefined,
-          chiefConcern: f.reason, subjective: f.subjective, objective: f.objective, assessment: f.assessment, plan: f.plan,
-          vitals: f.vitals, sections: {}
+          chiefConcern: f.reason, subjective: f.subjective, objective: isPhone ? '' : f.objective, assessment: f.assessment, plan: f.plan,
+          vitals: isPhone ? {} : f.vitals, sections: {},
+          ...(visit.appointmentType ? { visit: { ...visit, location: isPhone ? '' : visit.location } } : {})
         };
         api.createNote(patient.id, { note, appointmentEid: appt ? appt.eid : undefined, carryForwardFrom: carry ? carry.fromEncounterUuid : undefined })
           .then(r => (diagnoses.length || services.length
@@ -4306,9 +4358,25 @@
       return (
         <div className="fixed inset-0 bg-black/40 z-40 flex items-start justify-center p-4 overflow-y-auto" onClick={onClose}>
           <div className="card w-full max-w-2xl mt-6 mb-10" onClick={e => e.stopPropagation()}>
-            <div className="card-h"><h2>Document follow-up visit</h2><button className="text-stone-400" onClick={onClose}><i className="ti ti-x" /></button></div>
+            <div className="card-h"><h2>Document a visit</h2><button className="text-stone-400" onClick={onClose}><i className="ti ti-x" /></button></div>
             <div className="p-4 grid gap-3">
               {appt && <p className="text-xs text-stone-500">From appointment: {fmtDayLabel(appt.date)} {fmt12h(appt.startTime)} — the Encounter links back to it.</p>}
+              <div className="grid md:grid-cols-2 gap-3">
+                <Field label="Visit type">
+                  <select className="inp" value={visit.appointmentType} onChange={e => chooseVisitType(e.target.value)}>
+                    <option value="">Follow-up (no specific type)</option>
+                    {((catalog && catalog.appointmentTypes) || []).map(t => <option key={t.key} value={t.key}>{t.label}</option>)}
+                  </select>
+                </Field>
+                <Field label="How the visit happened">
+                  <select className="inp" value={visit.modality} onChange={e => setVisit(v => ({ ...v, modality: e.target.value, location: e.target.value === 'phone' ? '' : (v.location || (catalog && catalog.usualLocation) || '') }))}>
+                    {((catalog && catalog.modalities) || [{ key: 'in_person', label: 'In person' }, { key: 'telehealth', label: 'Telehealth (video)' }])
+                      .filter(m => allowedModalities ? allowedModalities.includes(m.key) : m.key !== 'phone')
+                      .map(m => <option key={m.key} value={m.key}>{m.label}</option>)}
+                  </select>
+                </Field>
+              </div>
+              {visitType && <p className="text-xs text-stone-500 -mt-1">The note opens with this visit type's sections after you save the draft.</p>}
               {!showCarry && !carry && (
                 <button className="btn ghost !py-1.5 text-xs w-fit" onClick={() => setShowCarry(true)}><i className="ti ti-copy" />Start from a previous note</button>
               )}
@@ -4319,14 +4387,14 @@
                 <Field label="Visit date"><input className="inp" type="date" value={f.date} onChange={e => setF({ ...f, date: e.target.value })} /></Field>
               </div>
               <FormattedField label="Subjective" value={f.subjective} onChange={v => setF(p => ({ ...p, subjective: v }))} />
-              <div>
+              {!isPhone && <div>
                 <span className="lblu block mb-1">Vitals (optional — preserved verbatim in the note)</span>
                 <div className="grid grid-cols-1 sm:grid-cols-3 md:grid-cols-5 gap-2">
                   <FollowUpVital f={f} setV={setV} k="bpSys" label="BP sys" /><FollowUpVital f={f} setV={setV} k="bpDia" label="BP dia" /><FollowUpVital f={f} setV={setV} k="hr" label="HR" /><FollowUpVital f={f} setV={setV} k="temp" label="Temp °F" /><FollowUpVital f={f} setV={setV} k="rr" label="RR" />
                   <FollowUpVital f={f} setV={setV} k="spo2" label="SpO₂ %" /><FollowUpVital f={f} setV={setV} k="weight" label="Wt lb" /><FollowUpVital f={f} setV={setV} k="height" label="Ht in" /><FollowUpVital f={f} setV={setV} k="pain" label="Pain /10" />
                 </div>
-              </div>
-              <FormattedField label="Objective" value={f.objective} onChange={v => setF(p => ({ ...p, objective: v }))} />
+              </div>}
+              {!isPhone && <FormattedField label="Objective" value={f.objective} onChange={v => setF(p => ({ ...p, objective: v }))} />}
               <FormattedField label="Assessment" value={f.assessment} onChange={v => setF(p => ({ ...p, assessment: v }))} />
               <FormattedField label="Plan" value={f.plan} onChange={v => setF(p => ({ ...p, plan: v }))} />
               <div className="border-t border-stone-100 pt-3">
@@ -5179,7 +5247,10 @@
               <DictationHint />
               {noteLayout({
                 sections: noteSections,
-                fixedBlocks: ['chiefConcern', 'subjective', 'vitals', 'exam', 'assessment', 'plan'],
+                // A phone call has no vitals or exam to record (owner, 2026-10-02).
+                fixedBlocks: visit && visit.modality === 'phone'
+                  ? ['chiefConcern', 'subjective', 'assessment', 'plan']
+                  : ['chiefConcern', 'subjective', 'vitals', 'exam', 'assessment', 'plan'],
                 extraBlocks: [], extraLabel: 'More of this note',
                 stored: f.sections, labelFor: sectionLabelFor
               }).map((item, i) => (item.kind === 'heading'
