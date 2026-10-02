@@ -26,7 +26,11 @@ test('the chosen visit is sent with the note', () => {
   assert.match(modal, /visit\.appointmentType \? \{ visit: \{ \.\.\.visit, location: isPhone \? '' : visit\.location \} \}/);
 });
 
-test('a phone call sends no vitals or exam and hides those fields', () => {
-  assert.match(modal, /vitals: isPhone \? \{\} : f\.vitals/);
+test('a phone call is one open note box: no SOAP parts, vitals or exam', () => {
+  assert.match(modal, /vitals: \{\}, sections: \{ callNote: f\.callNote \}/);
+  assert.match(modal, /\{isPhone\s*\? <FormattedField label="Call note"/);
+  for (const label of ['Subjective', 'Objective', 'Assessment', 'Plan']) {
+    assert.match(modal, new RegExp(`\\{!isPhone && <FormattedField label="${label}"`), `${label} hidden on a call`);
+  }
   assert.match(modal, /\{!isPhone && <div>\s*<span className="lblu block mb-1">Vitals/);
 });

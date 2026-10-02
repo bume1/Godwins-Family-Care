@@ -510,8 +510,8 @@ const HP_NOTE = {
   const PH = `/api/clinical/patients/${PHONEPATIENT.id}`;
   const PHONE_NOTE = {
     kind: 'followup', visit: { appointmentType: 'pc_phone_ccm', modality: 'phone', location: '' },
-    chiefConcern: 'Monthly CCM check-in call', subjective: 'Daughter reports BP readings 130s/80s at home', assessment: 'HTN, stable', plan: 'Continue lisinopril; call back in 4 weeks',
-    sections: { callParticipants: 'Patient and daughter (on speaker)' }, vitals: {}
+    chiefConcern: '', subjective: '', assessment: '', plan: '',
+    sections: { callNote: 'Monthly CCM call with patient and daughter. BP 130s/80s at home.' }, vitals: {}
   };
   r = await call('POST', `${PH}/notes`, tok.fnp, { note: PHONE_NOTE });
   const ph = r.body && r.body.encounterUuid;
@@ -519,10 +519,9 @@ const HP_NOTE = {
   check('it is stored as a phone call with no location', record(ph).visit && record(ph).visit.appointmentType === 'pc_phone_ccm' && record(ph).visit.modality === 'phone' && !record(ph).visit.location, record(ph).visit);
   check('it does NOT mark the patient\'s initial visit as done', !rows('users').find(u => u.id === PHONEPATIENT.id).clinicalInitialVisit);
   r = await call('PUT', `${PH}/encounters/${ph}/coding`, tok.fnp, { diagnoses: [{ code: 'I10', description: 'Essential hypertension' }], services: [] });
-  r = await call('POST', `${PH}/encounters/${ph}/sign`, tok.fnp, { attest: true });
-  check('signing asks for the minutes, never a blood pressure', r.status === 409 && r.body.code === 'SIGN_NOTE_SECTIONS_INCOMPLETE' && /Time Spent/.test(r.body.error) && !/blood pressure|Vitals|Exam/i.test(r.body.error), r.body);
-  r = await call('PUT', `${PH}/encounters/${ph}/note`, tok.fnp, { note: { ...PHONE_NOTE, sections: { ...PHONE_NOTE.sections, contactTime: '22' } }, baseVersion: 1 });
-  check('the minutes are added', r.status === 200, r.body);
+  r = await call('PUT', `${PH}/encounters/${ph}/note`, tok.fnp, { note: { ...PHONE_NOTE, sections: { callNote: PHONE_NOTE.sections.callNote + ' Continue lisinopril; call back in 4 weeks. 22 minutes.' } }, baseVersion: 1 });
+  check('the one call note is updated', r.status === 200, r.body);
+  check('the call is one section and nothing else', JSON.stringify(Object.keys(record(ph).note.sections || {})) === '["callNote"]' && !record(ph).note.assessment && !record(ph).note.plan, record(ph).note);
   r = await call('POST', `${PH}/encounters/${ph}/sign`, tok.fnp, { attest: true });
   check('the phone note signs and goes to billing', r.status === 200 && record(ph).billingStatus === 'awaiting_billing', r.body);
   check('no vitals row was written for a phone call', !EMR.vitals.some(v => v.euuid === ph));
