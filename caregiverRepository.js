@@ -500,6 +500,65 @@ function skilledContentPresent(clean) {
 }
 
 // ============================================================================
+// describeVisitLog — a submitted log as LABELLED SECTIONS, for reading
+// ============================================================================
+// A visit log stores IDS: `tasks: { bathing: { done: true } }`,
+// `patientCondition: ['alert']`. The office review screen listed only the
+// header line, so everything a caregiver actually documented was stored,
+// served, and shown to nobody — the office could see THAT a visit was written
+// up and never WHAT it said. (Owner, 2026-10-03.)
+//
+// The labels live in THIS file's catalogs, and this is what resolves them, so
+// the screen renders what it is handed and names no task of its own. A page
+// that restated the catalog would drift from the validator that refuses an
+// answer it did not offer — the rule the competency editor set, and the
+// existing build guard on `caregivers.html` still holds.
+//
+// A task carrying only a note (`done: false`, note set) is kept and marked:
+// "I did not do this, and here is why" is exactly what a reviewer needs, and
+// `sanitizeVisitLogSubmission` deliberately stores that shape.
+function describeVisitLog(row) {
+  const r = row && typeof row === 'object' ? row : {};
+  const label = (list, id) => {
+    const hit = (list || []).find(x => x && x.id === id);
+    return (hit && hit.label) || String(id || '').replace(/_/g, ' ');
+  };
+
+  const tasks = [];
+  const stored = (r.tasks && typeof r.tasks === 'object') ? r.tasks : {};
+  for (const g of TASK_GROUPS) {
+    for (const item of g.items) {
+      const v = stored[item.id];
+      if (!v) continue;
+      const done = v === true || v.done === true;
+      const note = (v && typeof v === 'object' && v.note) ? String(v.note) : '';
+      if (!done && !note) continue;
+      tasks.push({ group: g.label, label: item.label, done, note });
+    }
+  }
+
+  const pairs = (obj, catalog) => Object.entries(obj && typeof obj === 'object' ? obj : {})
+    .filter(([, v]) => v !== null && v !== undefined && String(v) !== '')
+    .map(([k, v]) => ({ label: label(catalog, k), value: String(v) }));
+
+  const names = (ids, catalog) => (Array.isArray(ids) ? ids : []).map(id => label(catalog, id));
+
+  return {
+    tasks,
+    measurements: pairs(r.measurements, MEASUREMENT_FIELDS),
+    narratives: pairs(r.narratives, NARRATIVE_FIELDS),
+    standingInstructionsAcknowledged: names(r.standing_instructions_acknowledged, STANDING_INSTRUCTIONS),
+    patientCondition: names(r.patient_condition, PATIENT_CONDITIONS),
+    safetyConcerns: names(r.safety_concerns, SAFETY_CONCERNS),
+    // "Not satisfied" rather than "not_satisfied", and null stays null —
+    // "the caregiver did not answer" is not "the client was unhappy".
+    satisfaction: r.satisfaction
+      ? String(r.satisfaction).replace(/_/g, ' ').replace(/^./, c => c.toUpperCase())
+      : null
+  };
+}
+
+// ============================================================================
 // sanitizeVisitLogSubmission — the control, not the styling
 // ============================================================================
 // Takes what the client sent and returns ONLY what the schema offered. A
@@ -814,6 +873,7 @@ module.exports = {
   STANDING_INSTRUCTIONS, PATIENT_CONDITIONS, SAFETY_CONCERNS, INCIDENT_SAFETY_CONCERNS,
   MEASUREMENT_FIELDS, NARRATIVE_FIELDS, SATISFACTION_VALUES, VISIT_LOG_STATUSES,
   visitLogSchemaFor, authorizedTaskIds, standingInstructionsFor, sanitizeVisitLogSubmission, skilledContentPresent,
+  describeVisitLog,
   CONCERN_TYPES, CONCERN_META, normalizeConcernType, severityForConcernType,
   ESCALATION_STATUSES, ESCALATION_TRANSITIONS, ESCALATION_NOTE_REQUIRED, canAdvanceEscalation,
   routeEscalation, describeRecipients, escalationConfirmation,

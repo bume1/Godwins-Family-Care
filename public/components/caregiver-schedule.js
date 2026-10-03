@@ -137,6 +137,13 @@
     if (!T || isNaN(end.getTime())) return fmtWhen(a);
     return fmtWhen(a) + ' – ' + T.fmtTime(end);
   }
+  // A STORED "HH:MM" -> "9:00 AM". An availability window is the wall-clock
+  // string typed into an `<input type="time">`: no date, no zone, so it cannot
+  // go through fmtTime (which takes an instant). The input keeps HH:MM, which
+  // is what the element requires; only the read-back line is 12-hour.
+  function fmtClock(hhmm) {
+    return T ? T.fmtClock(hhmm) : String(hhmm === null || hhmm === undefined ? '' : hhmm);
+  }
   function titleize(s) { return String(s || '').replace(/_/g, ' ').replace(/\b\w/g, function (c) { return c.toUpperCase(); }); }
   function esc(s) {
     return String(s === null || s === undefined ? '' : s)
@@ -449,7 +456,7 @@
         return '<div class="grow" style="display:block">' +
           '<div class="gwhen">From ' + esc(a.effectiveFrom) + '</div>' +
           '<div class="gmu">' + (a.windows || []).map(function (w) {
-            return esc(w.day + ' ' + w.start + '–' + w.end);
+            return esc(w.day + ' ' + fmtClock(w.start) + '–' + fmtClock(w.end));
           }).join(' · ') + '</div>' +
           '<div class="gmu"><span class="gchip' + (a.status === 'reviewed' ? ' ok' : '') + '">' + esc(titleize(a.status)) + '</span>' +
             // Which one is actually in force. Submitting again does not erase

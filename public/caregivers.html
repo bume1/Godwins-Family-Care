@@ -106,7 +106,45 @@ const api = async (path, opts = {}) => {
 const fmtWhen = (iso) => {
   return window.GFC_TIME ? window.GFC_TIME.fmtDayTime(iso) : '';
 };
+// A bare calendar date read at midday UTC, so it never slips back a day for a
+// zone west of UTC — the fix the 2026-09-29 sweep made across both portals.
+const fmtPlainDate = (ymd) => (/^\d{4}-\d{2}-\d{2}$/.test(String(ymd || ''))
+  ? (window.GFC_TIME ? window.GFC_TIME.fmtDate(`${ymd}T12:00:00Z`) : String(ymd))
+  : String(ymd || ''));
 const titleize = (s) => String(s || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+
+// A VISIT LOG IS PHI, SO ITS TOKEN GOES IN THE HEADER, NEVER THE URL. A token
+// in a query string lands in browser history, in the access log and in any
+// Referer the page emits — and it is a live session token, not a one-shot
+// link. This is the pattern PR #103 settled for the signed consents; it is the
+// same question here. Hands over a download rather than opening a tab, because
+// `window.open` after an await is blocked by mobile Safari.
+const downloadDocument = async (path, fallbackName) => {
+  const token = getToken();
+  if (!token) throw new Error('You are signed out. Sign in again and retry the download.');
+  const res = await fetch(API + path, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) {
+    // Say what the SERVER said: an expired session and a log that is not there
+    // are different things to do next.
+    let msg = `The download failed (HTTP ${res.status}).`;
+    try { const d = await res.json(); if (d && d.error) msg = d.error; } catch (e) { /* not JSON */ }
+    if (res.status === 401) msg = 'Your session has expired. Sign in again and retry the download.';
+    throw new Error(msg);
+  }
+  // The server sends a proper RFC 6266 filename; read it back rather than
+  // inventing one.
+  const cd = res.headers.get('Content-Disposition') || '';
+  const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+  const plain = /filename="([^"]+)"/i.exec(cd);
+  let name = fallbackName;
+  if (utf8) { try { name = decodeURIComponent(utf8[1]); } catch (e) { /* fall through */ } }
+  else if (plain) name = plain[1];
+  const blobUrl = URL.createObjectURL(await res.blob());
+  const a = document.createElement('a');
+  a.href = blobUrl; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+};
 
 const Empty = ({ icon, children }) => (
   <div className="empty"><i className={`ti ti-${icon}`}></i>{children}</div>
@@ -219,10 +257,92 @@ const Escalations = ({ rows, reload, setErr, setOk }) => {
 // Visit logs — the review queue. An LPN's skilled note files as pending_review.
 // A submitted log is immutable: a clinician APPENDS a note, never edits it.
 // ============================================================================
+// What the caregiver documented, rendered from the LABELLED sections the
+// server resolves (`detail`, from caregiverRepository.describeVisitLog). This
+// page deliberately names no task, measurement or condition of its own: the
+// catalog lives in one module and a screen that restated it would drift from
+// the validator that refuses an answer it did not offer. A build guard on this
+// file already holds that line.
+const DetailSections = ({ d }) => {
+  if (!d) return null;
+  const has = (a) => Array.isArray(a) && a.length > 0;
+  const Block = ({ title, children }) => (
+    <div style={{ marginTop: 10 }}>
+      <div className="mu" style={{ fontWeight: 600, marginBottom: 3 }}>{title}</div>
+      {children}
+    </div>
+  );
+  return (
+    <div style={{ borderTop: '1px solid var(--line, #E1D9C9)', marginTop: 10, paddingTop: 4 }}>
+      {has(d.tasks) && (
+        <Block title="Care provided">
+          {d.tasks.map((t, i) => (
+            <div className="mu" key={i}>
+              {/* A task recorded as NOT done, with a reason, is the row a
+                  reviewer most needs — marked, never dropped. */}
+              {t.done ? '✓' : '✗'} {t.label}{t.done ? '' : ' (not done)'}
+              {t.note ? ` — ${t.note}` : ''}
+            </div>
+          ))}
+        </Block>
+      )}
+      {has(d.measurements) && (
+        <Block title="Measurements">
+          <div className="mu">{d.measurements.map(m => `${m.label} ${m.value}`).join(' · ')}</div>
+        </Block>
+      )}
+      {(has(d.patientCondition) || d.satisfaction) && (
+        <Block title="How the client was">
+          <div className="mu">
+            {has(d.patientCondition) ? d.patientCondition.join(', ') : ''}
+            {has(d.patientCondition) && d.satisfaction ? ' · ' : ''}
+            {d.satisfaction ? `Client ${String(d.satisfaction).toLowerCase()}` : ''}
+          </div>
+        </Block>
+      )}
+      {has(d.safetyConcerns) && (
+        <Block title="Safety concerns raised">
+          <div className="mu">{d.safetyConcerns.join(', ')}</div>
+        </Block>
+      )}
+      {has(d.standingInstructionsAcknowledged) && (
+        <Block title="Standing instructions acknowledged">
+          <div className="mu">{d.standingInstructionsAcknowledged.join(' · ')}</div>
+        </Block>
+      )}
+      {has(d.narratives) && d.narratives.map((n, i) => (
+        <Block title={n.label} key={i}>
+          <div className="mu" style={{ whiteSpace: 'pre-wrap' }}>{n.value}</div>
+        </Block>
+      ))}
+      {!has(d.tasks) && !has(d.measurements) && !has(d.narratives)
+        && !has(d.patientCondition) && !has(d.safetyConcerns)
+        && !has(d.standingInstructionsAcknowledged) && !d.satisfaction && (
+        /* "Nothing was recorded" and "we could not read it" are different
+           facts, and this is the first. */
+        <div className="mu" style={{ marginTop: 8 }}>No care detail was recorded on this log.</div>
+      )}
+    </div>
+  );
+};
+
 const VisitLogRow = ({ v, reload, setErr, setOk }) => {
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+
+  const download = async () => {
+    setErr(''); setOk(''); setDownloading(true);
+    try {
+      await downloadDocument(
+        `/api/caregiver/visit-logs/${encodeURIComponent(v.id)}/note.pdf`,
+        'GFC_visit_log.pdf'
+      );
+    } catch (e) { setErr(e.message); }
+    finally { setDownloading(false); }
+  };
 
   const addNote = async () => {
     if (!note.trim()) { setErr('A review note is required.'); return; }
@@ -243,15 +363,29 @@ const VisitLogRow = ({ v, reload, setErr, setOk }) => {
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
         <div>
           <b>{v.clientName || v.clientId} · {v.visitType || 'Visit'}</b>
-          <div className="mu">{v.caregiverName} · {v.licenseLevel ? titleize(v.licenseLevel) + ' · ' : ''}{v.visitDate}</div>
+          <div className="mu">
+            {v.caregiverName} · {v.licenseLevel ? titleize(v.licenseLevel) + ' · ' : ''}{fmtPlainDate(v.visitDate)}
+            {v.submittedAt ? ` · filed ${fmtWhen(v.submittedAt)}` : ''}
+          </div>
         </div>
         <span className={`chip ${v.status}`}>{titleize(v.status)}</span>
       </div>
+      {showAll && <DetailSections d={v.detail} />}
       {v.reviews && v.reviews.map(r => (
         <div className="trail" key={r.id}><div>{r.byName} · {fmtWhen(r.at)} — {r.note}</div></div>
       ))}
       {!open
-        ? <div className="btns"><button className="btn sm ghost" onClick={() => setOpen(true)}>Add review note</button></div>
+        ? (
+          <div className="btns">
+            <button className="btn sm ghost" onClick={() => setShowAll(!showAll)}>
+              {showAll ? 'Hide the visit' : 'Read the visit'}
+            </button>
+            <button className="btn sm ghost" disabled={downloading} onClick={download}>
+              {downloading ? 'Preparing…' : 'Download PDF'}
+            </button>
+            <button className="btn sm ghost" onClick={() => setOpen(true)}>Add review note</button>
+          </div>
+        )
         : (
           <div style={{ marginTop: 10 }}>
             <textarea placeholder="A submitted log is never edited — this is appended to it."

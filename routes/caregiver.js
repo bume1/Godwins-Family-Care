@@ -42,7 +42,9 @@ module.exports = function createCaregiverRoutes(deps) {
     db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4,
     // Document upload (2026-09-13). Injected rather than required here so this
     // module keeps no I/O of its own and the tests can drive a fake Drive.
-    drive, detectFileType
+    drive, detectFileType,
+    // The visit-log PDF download (2026-10-03), injected for the same reason.
+    pdfGenerator
   } = deps;
   const router = express.Router();
 
@@ -66,12 +68,24 @@ module.exports = function createCaregiverRoutes(deps) {
     return res.status(403).json({ error: 'Caregiver access required.', code: 'CAREGIVER_ONLY' });
   };
 
-  // Staff who review caregiver work: admin, clinical (FNP/RN), case manager.
+  // Staff who review caregiver work: admin, clinical (FNP/RN), case manager,
+  // and MANAGER (owner decision, 2026-10-03). A manager already runs the
+  // scheduling board — posts, edits, assigns, approves and cancels shifts
+  // (`isScheduleManager`, 2026-09-20) — so they are the person chasing the
+  // caregiver whose visit log is missing or whose escalation is open. Reading
+  // the supervision queue is narrower than what they can already do to the
+  // rota. It is a READ plus the append-only review note; the three things that
+  // stay admin's alone on the board stay admin's here too — the money, the
+  // client record and the compliance overrides — because none of them is on
+  // this surface at all.
+  //
   // The predicate is separate from the guard because some routes serve BOTH
   // audiences off one path (a caregiver sees their own rows, staff see all),
-  // and those must not answer a different question than the guard does.
+  // and those must not answer a different question than the guard does. Two
+  // routes restated it inline and so would NOT have picked this up; they call
+  // it now, which is what that sentence was asking for.
   const isReviewStaff = (u) =>
-    !!u && (u.role === ROLES.ADMIN || u.hasClinicalAccess || u.role === ROLES.CASE_MANAGER);
+    !!u && (u.role === ROLES.ADMIN || !!u.isManager || u.hasClinicalAccess || u.role === ROLES.CASE_MANAGER);
 
   const requireReviewStaff = (req, res, next) => {
     if (isReviewStaff(req.user)) return next();
@@ -457,7 +471,7 @@ module.exports = function createCaregiverRoutes(deps) {
   router.get('/api/caregiver/visit-logs', authenticateToken, async (req, res) => {
     try {
       const u = req.user;
-      const staff = u.role === ROLES.ADMIN || u.hasClinicalAccess || u.role === ROLES.CASE_MANAGER;
+      const staff = isReviewStaff(u);
       if (!staff && !cg.isCaregiver(u)) {
         return res.status(403).json({ error: 'Caregiver access required.', code: 'CAREGIVER_ONLY' });
       }
@@ -467,9 +481,23 @@ module.exports = function createCaregiverRoutes(deps) {
       if (staff && req.query.status) rows = rows.filter(r => r.status === String(req.query.status));
       if (req.query.clientId) rows = rows.filter(r => r.client_id === String(req.query.clientId));
       rows = rows.slice().sort((a, b) => String(b.submitted_at || '').localeCompare(String(a.submitted_at || '')));
+      const page = rows.slice(0, 200);
+
+      // The row stores `client_id` and no name, so the review screen was
+      // printing a raw uuid where the client belongs. Resolved here, for the
+      // rows being returned only — a name, never the rest of the record.
+      const names = new Map();
+      if (page.length > 0) {
+        const wanted = new Set(page.map(r => String(r.client_id)));
+        for (const c of await getUsers()) {
+          if (c && wanted.has(String(c.id))) names.set(String(c.id), c.name || '');
+        }
+      }
+
       res.json({
-        visitLogs: rows.slice(0, 200).map(r => ({
+        visitLogs: page.map(r => ({
           ...publicVisitLog(r),
+          clientName: names.get(String(r.client_id)) || '',
           reviews: reviews.filter(v => v && v.visit_log_id === r.id)
             .map(v => ({ id: v.id, note: v.note, byName: v.by_name, at: v.at }))
         }))
@@ -521,6 +549,58 @@ module.exports = function createCaregiverRoutes(deps) {
       res.json({ review: { id: row.id, note: row.note, byName: row.by_name, at: row.at }, status: logs[idx].status });
     } catch (error) {
       console.error('Caregiver review-note error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // GET /api/caregiver/visit-logs/:id/note.pdf — the log as a document, to
+  // file, hand over or attach (owner, 2026-10-03). There was nothing to
+  // download: the office could read a visit on screen and had no copy of it.
+  //
+  // TWO AUDIENCES, the same pair the list route serves: review staff read any
+  // log, a caregiver reads their OWN and nobody else's. Decided per ROW, not
+  // at the door, because that needs the row — and a caregiver asking for
+  // somebody else's log is answered 404, never a 403 that would confirm the
+  // log exists and whose it is.
+  router.get('/api/caregiver/visit-logs/:id/note.pdf', authenticateToken, async (req, res) => {
+    try {
+      const u = req.user;
+      const staff = isReviewStaff(u);
+      if (!staff && !cg.isCaregiver(u)) {
+        return res.status(403).json({ error: 'Caregiver access required.', code: 'CAREGIVER_ONLY' });
+      }
+      const logs = await readRows('caregiver_visit_logs');
+      const row = logs.find(r => r && r.id === req.params.id);
+      if (!row) return res.status(404).json({ error: 'That visit log was not found.', code: 'VISIT_LOG_NOT_FOUND' });
+      if (!staff && row.caregiver_id !== u.id) {
+        return res.status(404).json({ error: 'That visit log was not found.', code: 'VISIT_LOG_NOT_FOUND' });
+      }
+
+      const reviews = (await readRows('caregiver_visit_log_reviews'))
+        .filter(v => v && v.visit_log_id === row.id)
+        .map(v => ({ note: v.note, byName: v.by_name, at: v.at }));
+
+      const client = (await getUsers()).find(c => c && String(c.id) === String(row.client_id));
+      const buffer = await pdfGenerator.generateVisitLogPDF({
+        ...publicVisitLog(row),
+        clientName: (client && client.name) || '',
+        reviews
+      });
+
+      // Every read of a visit log is PHI leaving the building, so it is
+      // audited the same way the chart document reads are.
+      await logActivity(req.user.id, req.user.name || req.user.email,
+        'caregiver_visit_log_downloaded', 'visit_log', row.id,
+        { role: req.user.role, clientId: row.client_id });
+
+      const who = String((client && client.name) || 'client').replace(/[^A-Za-z0-9]+/g, '_');
+      const filename = `GFC_visit_log_${who}_${row.visit_date || ''}.pdf`;
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Content-Disposition', contentDisposition('attachment', filename));
+      res.send(buffer);
+    } catch (error) {
+      console.error('Caregiver visit-log PDF error:', error);
       res.status(500).json({ error: 'Server error' });
     }
   });
@@ -670,7 +750,7 @@ module.exports = function createCaregiverRoutes(deps) {
   router.get('/api/caregiver/escalations', authenticateToken, async (req, res) => {
     try {
       const u = req.user;
-      const isStaff = u.role === ROLES.ADMIN || u.hasClinicalAccess || u.role === ROLES.CASE_MANAGER;
+      const isStaff = isReviewStaff(u);
       if (!isStaff && !cg.isCaregiver(u)) {
         return res.status(403).json({ error: 'Caregiver access required.', code: 'CAREGIVER_ONLY' });
       }
@@ -903,6 +983,10 @@ module.exports = function createCaregiverRoutes(deps) {
     submittedOffline: r.submitted_offline,
     reviewedAt: r.reviewed_at || null,
     reviewedByName: r.reviewed_by_name || null,
+    // The same content as LABELLED SECTIONS, resolved against the catalogs in
+    // caregiverRepository.js. The raw id-keyed fields above are kept so no
+    // existing reader breaks; this is what a person reads.
+    detail: cg.describeVisitLog(r),
     immutable: true
   });
 
