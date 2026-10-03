@@ -642,6 +642,42 @@ const CAREGIVER_HOURS_CSV_COLUMNS = Object.freeze([
   { key: 'edited', header: 'Adjusted by office' }
 ]);
 
+// ---- Spreadsheet date and time formatting ---------------------------------
+// A stored time is a UTC ISO instant ("2026-10-03T23:00:00.000Z"). Three
+// exports used to put that straight into a cell, so payroll and billing opened
+// in Excel reading `2026-10-03T23:00:00.000Z` — not a format anybody asked
+// for, not a date Excel parses, and FOUR HOURS WRONG as a wall-clock reading
+// of a Georgia shift. These render the Eastern value a person would recognise,
+// through the one clock module (`public/gfc-time.js`), the same rule the
+// notices and the PDFs already follow.
+//
+// `csvLocalDate` IS NOT COSMETIC. The row's own date column, the date filter
+// and the pay period were all `iso.slice(0, 10)`, which is the UTC date: a
+// 9pm Georgia shift is already TOMORROW in UTC, so it filed under the wrong
+// day and could land in the wrong PAY PERIOD. The date a shift happened on is
+// the date it happened on in Georgia.
+const csvLocalDate = (value) => {
+  const p = practiceTime.zonedParts(value);
+  return p ? p.isoDate : '';
+};
+
+// "10/3/2026"
+const csvDate = (value) => practiceTime.fmtDate(value);
+
+// "9:00 AM" — or "10/4 6:00 AM" when the instant falls on a different Eastern
+// day than the row it sits on. Time alone is what a timesheet wants beside a
+// date column, but an overnight shift ends on the next day and a bare "6:00
+// AM" there reads as six hours before the start instead of nine hours after.
+// Date-stamping only the rows that cross keeps the common case clean without
+// ever being ambiguous.
+function csvTime(value, onIsoDate) {
+  const p = practiceTime.zonedParts(value);
+  if (!p) return '';
+  const time = practiceTime.fmtTime(value);
+  if (!onIsoDate || p.isoDate === onIsoDate) return time;
+  return `${p.month}/${p.day} ${time}`;
+}
+
 // RFC 4180 quoting. A field is quoted when it contains a comma, a quote, a
 // newline, or leading/trailing space; embedded quotes are doubled. A leading
 // =, +, - or @ is prefixed with a single quote so a spreadsheet does not
@@ -1208,5 +1244,6 @@ module.exports = {
   CLOCK_IN_WINDOW_MINUTES, clockInWindow,
   DEFAULT_PAY_PERIOD_ANCHOR, DEFAULT_PAY_PERIOD_DAYS, payPeriodFor,
   PAYROLL_CSV_COLUMNS, BILLING_CSV_COLUMNS, CAREGIVER_HOURS_CSV_COLUMNS, csvCell, toPayrollCsv,
+  csvLocalDate, csvDate, csvTime,
   SHIFT_REQUEST_STATUSES, SHIFT_REQUEST_TRANSITIONS, canTransitionRequest
 };

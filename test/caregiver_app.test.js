@@ -492,25 +492,46 @@ const serverSrc = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8
 
 test('every /api/caregiver route authenticates and carries a role guard', () => {
   const re = /router\.(get|post|put|delete)\(\s*'(\/api\/caregiver[^']*)'\s*,([^)]*?)(?:async\s*)?\(req/g;
-  let m, checked = 0;
+  // Some reads guard inline because they serve two audiences (a caregiver
+  // reads their own rows; staff read the queue). They must still branch — and
+  // through the same isReviewStaff predicate the named guard uses, so the two
+  // cannot answer a different question.
+  const INLINE_GUARDED = [
+    '/api/caregiver/visit-logs', '/api/caregiver/visit-logs/:id/note.pdf',
+    '/api/caregiver/escalations',
+    '/api/caregiver/documents', '/api/caregiver/documents/:id/file'
+  ];
+  let m, checked = 0, inlineSeen = 0;
   while ((m = re.exec(routeSrc)) !== null) {
     const [, method, routePath, middleware] = m;
     assert.ok(middleware.includes('authenticateToken'),
       `${method.toUpperCase()} ${routePath} must authenticate`);
     const guarded = /requireCaregiver|requireReviewStaff|requireAdmin/.test(middleware);
-    // Some reads guard inline because they serve two audiences (a caregiver
-    // reads their own rows; staff read the queue). They must still branch —
-    // and through the same isReviewStaff predicate the named guard uses, so
-    // the two cannot answer a different question.
-    const inlineGuarded = [
-      '/api/caregiver/visit-logs', '/api/caregiver/escalations',
-      '/api/caregiver/documents', '/api/caregiver/documents/:id/file'
-    ].includes(routePath) && method === 'get';
+    const inlineGuarded = INLINE_GUARDED.includes(routePath) && method === 'get';
     assert.ok(guarded || inlineGuarded,
       `${method.toUpperCase()} ${routePath} must carry a role guard, not rely on the UI`);
+
+    // AND the inline ones must actually do it. The sentence above has been
+    // the rule since Session 6 and nothing asserted it, so the allow-list was
+    // a list of routes exempted from the check rather than held to a
+    // different one — a guard that cannot tell the two states apart. The
+    // handler body is read here and must branch through the shared predicate
+    // (or, for the document routes, the admin/own-row split they use).
+    if (inlineGuarded) {
+      const from = m.index;
+      const next = routeSrc.indexOf('\n  router.', from + 1);
+      const body = routeSrc.slice(from, next === -1 ? routeSrc.length : next);
+      assert.ok(/isReviewStaff\(|ROLES\.ADMIN/.test(body),
+        `${method.toUpperCase()} ${routePath} guards inline, so its handler must branch ` +
+        `through isReviewStaff() — not decide the audience some other way`);
+      inlineSeen++;
+    }
     checked++;
   }
   assert.ok(checked >= 10, `expected the caregiver route surface, found ${checked}`);
+  // A path renamed out from under the list would silently stop being checked.
+  assert.strictEqual(inlineSeen, INLINE_GUARDED.length,
+    `every inline-guarded path should have been found and checked; saw ${inlineSeen} of ${INLINE_GUARDED.length}`);
 });
 
 test('there is NO route that edits a submitted visit log — immutability is structural', () => {
