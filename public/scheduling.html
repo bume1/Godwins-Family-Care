@@ -1027,6 +1027,17 @@ const App = () => {
   const [removeReason, setRemoveReason] = useState('');
   const [removeResult, setRemoveResult] = useState(null);
   const [removing, setRemoving] = useState(false);
+  // A BATCH TAKES A TIME OF DAY, NEVER AN INSTANT. One absolute start would
+  // stack every selected shift on the same moment; what "these all move to 10
+  // to 2" means is the hours, with each shift keeping its own date. The server
+  // refuses `start`/`end` outright so the two cannot drift.
+  const [bulkEdit, setBulkEdit] = useState({ startTime: '', endTime: '', requiredLicenseLevel: '', poolVisibility: '', payRate: '' });
+  const [bulkEditResult, setBulkEditResult] = useState(null);
+  const [bulkEditing, setBulkEditing] = useState(false);
+  // Which panel the selection is for. Removing and editing are different acts
+  // with different consequences, so they are not one form with a mode switch
+  // somebody can misread while forty shifts are ticked.
+  const [selectAction, setSelectAction] = useState('edit');
   // Clicking a shift in the grid switches to the list and scrolls to it, rather
   // than opening a second editor inside a calendar cell: one editor, one place.
   const [openShiftId, setOpenShiftId] = useState(null);
@@ -1115,6 +1126,37 @@ const App = () => {
       setErr(e.message);
       if (e.data && e.data.refused) setRemoveResult(e.data);
     } finally { setRemoving(false); }
+  };
+
+  // Only the boxes that were actually filled in are sent. An ABSENT key means
+  // "leave this alone" on the server; sending a blank one would clear a note or
+  // a pay rate nobody meant to touch.
+  const bulkEditApply = async () => {
+    setErr(''); setOk(''); setBulkEditResult(null); setBulkEditing(true);
+    try {
+      const edit = {};
+      if (bulkEdit.startTime || bulkEdit.endTime) {
+        edit.startTime = bulkEdit.startTime;
+        edit.endTime = bulkEdit.endTime;
+      }
+      if (bulkEdit.requiredLicenseLevel) edit.requiredLicenseLevel = bulkEdit.requiredLicenseLevel;
+      if (bulkEdit.poolVisibility) edit.poolVisibility = bulkEdit.poolVisibility;
+      if (bulkEdit.payRate !== '') edit.payRate = bulkEdit.payRate;
+      const res = await api('/api/scheduling/shifts/bulk-edit', {
+        method: 'POST', body: JSON.stringify({ shiftIds: selected, edit })
+      });
+      setBulkEditResult(res);
+      setOk(res.message || 'Shifts updated.');
+      setSelected([]);
+      setBulkEdit({ startTime: '', endTime: '', requiredLicenseLevel: '', poolVisibility: '', payRate: '' });
+      await refresh();
+    } catch (e) {
+      setErr(e.message);
+      // The per-shift outcomes matter more than the headline: a refusal names
+      // the shift and what to do about it, and throwing that away leaves
+      // somebody with a red banner and no next step.
+      if (e.data && (e.data.refused || e.data.errors)) setBulkEditResult(e.data);
+    } finally { setBulkEditing(false); }
   };
 
   const editLog = async (id, body) => {
@@ -1213,22 +1255,118 @@ const App = () => {
                   <button className={`btn ${view === 'calendar' ? 'gold' : 'ghost'}`} onClick={() => setView('calendar')}>Calendar</button>
                   <button className={`btn ${view === 'list' ? 'gold' : 'ghost'}`} onClick={() => setView('list')}>List</button>
                   <button className={`btn ${selecting ? 'gold' : 'ghost'}`}
-                    onClick={() => { setSelecting(v => !v); setSelected([]); setRemoveResult(null); }}>
-                    {selecting ? 'Done selecting' : 'Select to remove'}
+                    onClick={() => { setSelecting(v => !v); setSelected([]); setRemoveResult(null); setBulkEditResult(null); }}>
+                    {selecting ? 'Done selecting' : 'Select shifts'}
                   </button>
                 </div>
               </div>
               <p className="sub">
                 Every PHCP shift. Clinical visits are scheduled separately in the clinical workspace.
-                {selecting ? ' Tick the shifts to remove, then give a reason.' : ''}
+                {selecting ? ' Tick the shifts, then edit them together or take them off the board.' : ''}
               </p>
             </div>
+
+            {/* Two different acts on one selection, so they are two panels
+                rather than one form with a mode somebody can misread while
+                forty shifts are ticked. */}
+            {selecting && (
+              <div className="card">
+                <div className="btns" style={{ margin: 0 }}>
+                  <button className={`btn ${selectAction === 'edit' ? 'gold' : 'ghost'}`}
+                    onClick={() => setSelectAction('edit')}>Edit together</button>
+                  <button className={`btn ${selectAction === 'remove' ? 'gold' : 'ghost'}`}
+                    onClick={() => setSelectAction('remove')}>Take off the board</button>
+                  <span className="mu" style={{ marginLeft: 'auto' }}>
+                    {selected.length} selected
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* A BATCH TAKES A TIME OF DAY, NOT ONE INSTANT, and the panel says
+                so: forty shifts given one absolute start would all land on the
+                same moment. Each shift keeps its own date and gets the new
+                hours. Boxes left blank are not sent at all, so changing the
+                licence level cannot blank a note. */}
+            {selecting && selectAction === 'edit' && (
+              <div className="card">
+                <h2>Edit {selected.length} selected shift{selected.length === 1 ? '' : 's'}</h2>
+                <p className="sub">
+                  Fill in only what should change. The times are a <b>time of day</b> — every shift keeps
+                  its own date, so “10:00 to 14:00” moves the hours on each one. An end earlier than the
+                  start is read as overnight. A shift whose holder could not work it as edited is
+                  <b> left alone</b> and named below, rather than quietly releasing them.
+                </p>
+                <div className="grid">
+                  <div>
+                    <label>Start time</label>
+                    <input type="time" value={bulkEdit.startTime}
+                      onChange={e => setBulkEdit(v => ({ ...v, startTime: e.target.value }))} />
+                  </div>
+                  <div>
+                    <label>End time</label>
+                    <input type="time" value={bulkEdit.endTime}
+                      onChange={e => setBulkEdit(v => ({ ...v, endTime: e.target.value }))} />
+                  </div>
+                  <div>
+                    <label>Who can take them</label>
+                    <select value={bulkEdit.requiredLicenseLevel}
+                      onChange={e => setBulkEdit(v => ({ ...v, requiredLicenseLevel: e.target.value }))}>
+                      <option value="">— leave unchanged —</option>
+                      <option value="any">Anyone — all license levels</option>
+                      <option value="sitter">Sitter and above</option>
+                      <option value="pca">PCA and above</option>
+                      <option value="cna">CNA and above</option>
+                      <option value="lpn">LPN only</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label>Who can see them</label>
+                    <select value={bulkEdit.poolVisibility}
+                      onChange={e => setBulkEdit(v => ({ ...v, poolVisibility: e.target.value }))}>
+                      <option value="">— leave unchanged —</option>
+                      <option value="all_eligible">Every eligible caregiver</option>
+                      <option value="care_team">This client's care team only</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label>Pay rate on these shifts</label>
+                    <input type="number" step="0.01" min="0" placeholder="leave blank to keep"
+                      value={bulkEdit.payRate}
+                      onChange={e => setBulkEdit(v => ({ ...v, payRate: e.target.value }))} />
+                  </div>
+                </div>
+                <div className="btns">
+                  <button className="btn gold" disabled={!selected.length || bulkEditing}
+                    onClick={bulkEditApply}>
+                    {bulkEditing ? 'Updating…' : `Update ${selected.length || ''}`}
+                  </button>
+                  <button className="btn ghost" disabled={bulkEditing} onClick={() => setSelected([])}>Clear selection</button>
+                </div>
+                {bulkEditResult && (
+                  <div className="note" style={{ marginTop: 10 }}>
+                    {(bulkEditResult.errors || []).map((e, n) => (
+                      <div className="mu" key={`e${n}`}>{e.message}</div>
+                    ))}
+                    {(bulkEditResult.updated || []).length > 0 &&
+                      <div className="mu">{bulkEditResult.updated.length} updated.{bulkEditResult.notified ? ` ${bulkEditResult.notified} notice${bulkEditResult.notified === 1 ? '' : 's'} sent — one per person, not one per shift.` : ''}</div>}
+                    {(bulkEditResult.unchanged || []).length > 0 &&
+                      <div className="mu">{bulkEditResult.unchanged.length} already read that way.</div>}
+                    {(bulkEditResult.refused || []).map((r, n) => (
+                      <div className="mu" key={`r${n}`}>
+                        Left alone — {r.clientName} {fmtWhen(r.start)}: {r.reason}{r.hint ? ` ${r.hint}` : ''}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* REMOVING IS TWO DIFFERENT ACTS and the panel says so before
                 anything happens: a shift somebody holds is cancelled and keeps
                 its tombstone, while an open shift nobody ever claimed is a typo
                 and is taken off the board. */}
-            {selecting && (
+            {selecting && selectAction === 'remove' && (
               <div className="card">
                 <h2>Remove {selected.length} selected shift{selected.length === 1 ? '' : 's'}</h2>
                 <p className="sub">
