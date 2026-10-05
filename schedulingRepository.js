@@ -1225,6 +1225,137 @@ function isNeverHeld(shift, timeLogs) {
   return !(timeLogs || []).some(l => l && String(l.shift_id) === String(shift.id));
 }
 
+// ---- Editing a batch of shifts in one go ----------------------------------
+// Owner-directed, 2026-10-05: "add the option to bulk delete or bulk edit
+// shifts already released to the pool."
+//
+// Bulk REMOVAL already existed (PR #104) and already handles a pool shift
+// correctly — one nobody ever held is a posting mistake and is taken off the
+// board rather than left as a tombstone. What did not exist is editing a
+// batch, so correcting forty rows of a mistaken bulk post meant opening forty
+// editors.
+//
+// ⚠️ A BATCH EDIT CANNOT TAKE AN ABSOLUTE START AND END, and that is the whole
+// shape of this. Handing forty shifts one instant would stack all forty on top
+// of each other at one moment — forty visits to one client at 9am on one
+// Tuesday. What an office actually means by "these all move to 10 to 2" is a
+// TIME OF DAY, with every shift keeping its own calendar date. So the batch
+// speaks `startTime`/`endTime` as HH:MM, exactly as the bulk POST form already
+// does, and each shift's own date is read back out of its stored instant.
+//
+// THE DATE IS READ IN EASTERN, NEVER IN UTC. A 9pm Georgia shift is already
+// tomorrow in UTC, so `shift.start.slice(0, 10)` would move it to the wrong
+// day — the bug class this repo has now paid for three times (the availability
+// matcher, the calendar buckets, the payroll CSV). `zonedParts` answers the
+// date it is in Georgia.
+//
+// It returns a body for `validateShiftEdit`/`applyShiftEdit` and never writes
+// anything: ONE writer for a shift's time, and this is not it.
+const BULK_EDIT_FIELDS = Object.freeze([
+  'startTime', 'endTime', 'requiredLicenseLevel', 'poolVisibility', 'careTier', 'notes', 'payRate'
+]);
+
+// The batch spec itself, checked once before a single shift is touched. The
+// TEMPLATE is all-or-nothing and the OCCURRENCES are not — the rule bulk
+// posting settled: a malformed licence level writes nothing at all, while one
+// shift of forty clashing must not refuse the other thirty-nine.
+function validateBulkEdit(input) {
+  const body = input && typeof input === 'object' ? input : {};
+  const errors = [];
+  const has = (k) => Object.prototype.hasOwnProperty.call(body, k);
+
+  Object.keys(body).forEach(k => {
+    if (k === 'start' || k === 'end') {
+      errors.push({
+        field: k, code: 'ABSOLUTE_TIME_NOT_ALLOWED',
+        message: 'A batch takes a time of day (startTime/endTime), not one instant — every shift keeps its own date.'
+      });
+    }
+    if (k === 'clientId' || k === 'status') {
+      errors.push({
+        field: k, code: k === 'clientId' ? 'CLIENT_NOT_EDITABLE' : 'STATUS_NOT_EDITABLE',
+        message: k === 'clientId'
+          ? 'A shift cannot be moved to a different client. Cancel it and post a new one.'
+          : 'Use the shift actions to move a shift through its lifecycle.'
+      });
+    }
+  });
+
+  // BOTH ENDS OR NEITHER. A new start with the old end is ambiguous across a
+  // batch whose shifts are not all the same length: a 9–13 and a 9–17 given
+  // only "start 10:00" would become 10–13 and 10–17, which is two different
+  // decisions from one instruction. Asking for both is one extra box and it
+  // removes the guess.
+  if (has('startTime') !== has('endTime')) {
+    errors.push({
+      field: has('startTime') ? 'endTime' : 'startTime', code: 'TIME_PAIR_REQUIRED',
+      message: 'Give both a start time and an end time, or neither — a batch holds shifts of different lengths.'
+    });
+  }
+  if (has('startTime') && !isTime(body.startTime)) {
+    errors.push({ field: 'startTime', code: 'START_TIME_INVALID', message: 'Give a start time as HH:MM.' });
+  }
+  if (has('endTime') && !isTime(body.endTime)) {
+    errors.push({ field: 'endTime', code: 'END_TIME_INVALID', message: 'Give an end time as HH:MM.' });
+  }
+
+  if (has('requiredLicenseLevel')) {
+    const required = normalizeLicenseRequirement(body.requiredLicenseLevel);
+    if (!required.ok) {
+      errors.push({
+        field: 'requiredLicenseLevel', code: 'LICENSE_LEVEL_INVALID',
+        message: `"${body.requiredLicenseLevel}" is not a license level. Use a level, or "any" to open the shifts to every caregiver.`
+      });
+    }
+  }
+  if (has('poolVisibility') && !['all_eligible', 'care_team'].includes(body.poolVisibility || 'all_eligible')) {
+    errors.push({ field: 'poolVisibility', code: 'VISIBILITY_INVALID', message: 'Visibility is all_eligible or care_team.' });
+  }
+
+  const touched = BULK_EDIT_FIELDS.filter(k => has(k));
+  if (touched.length === 0) {
+    errors.push({ field: 'edit', code: 'NOTHING_TO_CHANGE', message: 'Say what to change on these shifts.' });
+  }
+
+  return { valid: errors.length === 0, errors, fields: touched };
+}
+
+// One shift's worth of the batch, as a body `validateShiftEdit` understands.
+// A batch key the spec does not carry is absent from the body, and an absent
+// key means "leave this alone" — the rule the single-shift editor already
+// follows, so a batch that changes only the licence level cannot blank a note.
+function buildBulkEditBody(shift, input) {
+  const body = input && typeof input === 'object' ? input : {};
+  const has = (k) => Object.prototype.hasOwnProperty.call(body, k);
+  const out = {};
+
+  if (has('startTime') && has('endTime') && isTime(body.startTime) && isTime(body.endTime)) {
+    // THE SHIFT'S OWN DATE, in Georgia. See the header: a UTC slice moves an
+    // evening shift to the next day.
+    const parts = practiceTime.zonedParts(shift.start);
+    if (parts) {
+      const startTime = String(body.startTime).trim();
+      const endTime = String(body.endTime).trim();
+      // An overnight shift ends on the NEXT calendar day — 10pm to 6am is a
+      // real home-care shift. Same rule `expandRecurrence` applies when it
+      // builds a pattern, rather than a second reading of it here.
+      const overnight = minutesOfDay(endTime) <= minutesOfDay(startTime);
+      const start = practiceTime.instantFromZoned(parts.isoDate, startTime);
+      const endDay = overnight
+        ? new Date(dayStartUtc(parts.isoDate) + DAY_MS).toISOString().slice(0, 10)
+        : parts.isoDate;
+      const end = practiceTime.instantFromZoned(endDay, endTime);
+      if (start && end) { out.start = start; out.end = end; }
+    }
+  }
+
+  ['requiredLicenseLevel', 'poolVisibility', 'careTier', 'notes', 'payRate'].forEach(k => {
+    if (has(k)) out[k] = body[k];
+  });
+
+  return out;
+}
+
 module.exports = {
   AVAILABILITY_LEAD_DAYS, DAYS, normalizeDay, isTime, minutesOfDay, isIsoDate, daysUntil,
   validateAvailability, availabilityCoversShift,
@@ -1237,6 +1368,7 @@ module.exports = {
   canRequestShiftChange, validateChangeRequest,
   describeNotice, isOpenChangeRequest, findOpenChangeRequest,
   MAX_BULK_OCCURRENCES, expandRecurrence, findDuplicateShift, isNeverHeld,
+  BULK_EDIT_FIELDS, validateBulkEdit, buildBulkEditBody,
   LICENSE_REQUIREMENT_ANY, normalizeLicenseRequirement, shiftLevelLabel, isOpenToAllLevels,
   isEligibleForShift, eligibilityReason, shiftVisibility, shiftsOverlap, findShiftConflict, BLOCKING_STATUSES,
   DEFAULT_GEOFENCE_METERS, DEFAULT_GRACE_MINUTES, distanceMeters, geofenceRadiusFor, clientCoords,
