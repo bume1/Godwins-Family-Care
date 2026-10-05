@@ -86,6 +86,11 @@
     .calshift.completed{background:#e7edf0;color:var(--navy)}
     .calshift.cancelled{background:#f3eaea;color:var(--red);text-decoration:line-through}
     .callegend{display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;font-size:11.5px;color:#8a8378}
+    .fbar{display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-top:10px}
+    .fchip{display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;cursor:pointer;user-select:none}
+    .fchip input{width:auto;margin:0}
+    .fchip.off{opacity:.42}
+    .bulkbar{display:flex;gap:14px;flex-wrap:wrap;align-items:center;border-top:1px solid var(--line);margin-top:14px;padding-top:12px}
     .callegend .dot{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:middle}
     .callegend .dot.open{background:#eee8db}
     .callegend .dot.claimed,.callegend .dot.assigned{background:#fdf3dd}
@@ -177,6 +182,22 @@ const dayKeyOf = (y, m, d) =>
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+// THE BOARD'S OWN STATUS FILTER. The ids are the shift state machine's own
+// (schedulingRepository SHIFT_STATUSES) rather than a friendlier grouping,
+// because the chip on every row already shows these words — a filter labelled
+// "Pending" that silently means two of them is a filter nobody can reconcile
+// with what they are looking at.
+const BOARD_STATUSES = [
+  { id: 'open', label: 'Open' },
+  { id: 'claimed', label: 'Claimed' },
+  { id: 'assigned', label: 'Assigned' },
+  { id: 'confirmed', label: 'Confirmed' },
+  { id: 'in_progress', label: 'In progress' },
+  { id: 'completed', label: 'Completed' },
+  { id: 'cancelled', label: 'Cancelled' }
+];
+const ALL_BOARD_STATUSES = BOARD_STATUSES.map(s => s.id);
 
 const Empty = ({ icon, children }) => (
   <div className="empty"><i className={`ti ti-${icon}`}></i>{children}</div>
@@ -360,7 +381,7 @@ const PostShift = ({ roster, onPosted, setErr, setOk }) => {
 // ============================================================================
 // Master calendar + lifecycle actions
 // ============================================================================
-const ShiftRow = ({ s, roster, act, onEdited, setErr, setOk, selected, onToggleSelect, selecting }) => {
+const ShiftRow = ({ s, roster, act, onEdited, setErr, setOk, selected, onToggleSelect, selectable }) => {
   const [assignee, setAssignee] = useState('');
   const [reason, setReason] = useState('');
   const [editing, setEditing] = useState(false);
@@ -373,9 +394,9 @@ const ShiftRow = ({ s, roster, act, onEdited, setErr, setOk, selected, onToggleS
   return (
     <div className="row" id={`shift-${s.id}`} style={{ display: 'block' }}>
       <div>
-        {selecting && (
+        {selectable && (
           <input type="checkbox" checked={selected} onChange={() => onToggleSelect(s.id)}
-            style={{ marginRight: 8 }} aria-label="Select this shift" />
+            style={{ width: 'auto', marginRight: 8 }} aria-label="Select this shift" />
         )}
         <b>{fmtRange(s.start, s.end)}</b> <span className={`chip ${s.status}`}>{titleize(s.status)}</span>
         {s.editedByName && (
@@ -453,7 +474,7 @@ const ShiftRow = ({ s, roster, act, onEdited, setErr, setOk, selected, onToggleS
 //
 // It reads the SAME shifts the list reads. No second fetch, no second filter,
 // so the two views cannot disagree about what exists.
-const ShiftCalendar = ({ shifts, onOpen, selected, onToggleSelect, selecting }) => {
+const ShiftCalendar = ({ shifts, onOpen, selected }) => {
   const today = window.GFC_TIME ? window.GFC_TIME.zonedParts(new Date().toISOString()) : null;
   const [cursor, setCursor] = useState(() => ({
     year: today ? today.year : new Date().getFullYear(),
@@ -515,7 +536,7 @@ const ShiftCalendar = ({ shifts, onOpen, selected, onToggleSelect, selecting }) 
                 <button key={sh.id}
                   className={`calshift ${sh.status}${selected.includes(sh.id) ? ' picked' : ''}`}
                   title={`${sh.clientName} · ${fmtRange(sh.start, sh.end)} · ${titleize(sh.status)}${sh.caregiverName ? ` · ${sh.caregiverName}` : ''}`}
-                  onClick={() => (selecting ? onToggleSelect(sh.id) : onOpen(sh.id))}>
+                  onClick={() => onOpen(sh.id)}>
                   <b>{window.GFC_TIME ? window.GFC_TIME.fmtTime(sh.start) : ''}</b>{' '}
                   {sh.clientName}
                   {sh.caregiverName ? <span className="calwho"> · {sh.caregiverName.split(' ')[0]}</span> : ''}
@@ -1033,7 +1054,14 @@ const App = () => {
   // Calendar or list — the same shifts either way, so the two cannot disagree.
   const [view, setView] = useState('calendar');
   const [selected, setSelected] = useState([]);
-  const [selecting, setSelecting] = useState(false);
+  // THE BOARD'S OWN RANGE, deliberately NOT the payroll `from`/`to` below.
+  // Those drive the time-log fetch and the payroll and billing exports, so
+  // narrowing the board to one week would quietly change what a payroll run
+  // covers. Blank at both ends means every shift, which is how the board read
+  // before this filter existed.
+  const [boardFrom, setBoardFrom] = useState('');
+  const [boardTo, setBoardTo] = useState('');
+  const [statusFilter, setStatusFilter] = useState(ALL_BOARD_STATUSES);
   const [removeReason, setRemoveReason] = useState('');
   const [removeResult, setRemoveResult] = useState(null);
   const [removing, setRemoving] = useState(false);
@@ -1044,10 +1072,6 @@ const App = () => {
   const [bulkEdit, setBulkEdit] = useState({ startTime: '', endTime: '', requiredLicenseLevel: '', poolVisibility: '', payRate: '' });
   const [bulkEditResult, setBulkEditResult] = useState(null);
   const [bulkEditing, setBulkEditing] = useState(false);
-  // Which panel the selection is for. Removing and editing are different acts
-  // with different consequences, so they are not one form with a mode switch
-  // somebody can misread while forty shifts are ticked.
-  const [selectAction, setSelectAction] = useState('edit');
   // Clicking a shift in the grid switches to the list and scrolls to it, rather
   // than opening a second editor inside a calendar cell: one editor, one place.
   const [openShiftId, setOpenShiftId] = useState(null);
@@ -1122,11 +1146,34 @@ const App = () => {
 
   const toggleSelect = (id) => setSelected(cur => cur.includes(id) ? cur.filter(x => x !== id) : [...cur, id]);
 
+  // WHAT IS ON THE BOARD RIGHT NOW. One filter answers both questions — what
+  // is listed, and what "select all" means — so the two cannot disagree.
+  const boardShifts = shifts.filter(sh => {
+    const day = easternDayKey(sh.start);        // Georgia's date, never a UTC slice
+    if (boardFrom && (!day || day < boardFrom)) return false;
+    if (boardTo && (!day || day > boardTo)) return false;
+    return statusFilter.includes(sh.status);
+  });
+  const boardIds = boardShifts.map(sh => sh.id);
+
+  // ONLY WHAT IS ON SCREEN CAN BE ACTED ON. A tick survives the filter being
+  // narrowed and comes back when it is widened, so nothing somebody ticked is
+  // lost — but a shift they cannot see is never edited or taken off the board,
+  // which is the whole hazard of a selection that outlives its filter.
+  const actOn = selected.filter(id => boardIds.includes(id));
+  const allShown = boardIds.length > 0 && actOn.length === boardIds.length;
+  const toggleSelectAll = () => {
+    if (allShown) setSelected(cur => cur.filter(id => !boardIds.includes(id)));
+    else setSelected(cur => Array.from(new Set(cur.concat(boardIds))));
+  };
+  const toggleStatus = (id) => setStatusFilter(cur =>
+    cur.includes(id) ? cur.filter(x => x !== id) : cur.concat([id]));
+
   const bulkRemove = async () => {
     setErr(''); setOk(''); setRemoving(true); setRemoveResult(null);
     try {
       const res = await api('/api/scheduling/shifts/bulk-remove', {
-        method: 'POST', body: JSON.stringify({ shiftIds: selected, reason: removeReason })
+        method: 'POST', body: JSON.stringify({ shiftIds: actOn, reason: removeReason })
       });
       setOk(res.message || 'Removed.');
       setRemoveResult(res);
@@ -1153,7 +1200,7 @@ const App = () => {
       if (bulkEdit.poolVisibility) edit.poolVisibility = bulkEdit.poolVisibility;
       if (bulkEdit.payRate !== '') edit.payRate = bulkEdit.payRate;
       const res = await api('/api/scheduling/shifts/bulk-edit', {
-        method: 'POST', body: JSON.stringify({ shiftIds: selected, edit })
+        method: 'POST', body: JSON.stringify({ shiftIds: actOn, edit })
       });
       setBulkEditResult(res);
       setOk(res.message || 'Shifts updated.');
@@ -1253,54 +1300,82 @@ const App = () => {
                 {pending.map(s => (
                   <ShiftRow key={s.id} s={s} roster={roster} act={act} onEdited={refresh}
                     setErr={setErr} setOk={setOk}
-                    selected={selected.includes(s.id)} onToggleSelect={toggleSelect} selecting={false} />
+                    selected={false} onToggleSelect={toggleSelect} selectable={false} />
                 ))}
               </div>
             )}
 
+            {/* ONE BAR: filter the board, select what it is showing, then edit
+                or remove. Owner, 2026-10-05 — the mode switch between "edit
+                together" and "take them off the board" was a step with nothing
+                behind it, and ticking forty rows by hand is not a multiselect.
+                The range plus the status filter ARE the selector: narrow the
+                board to what you mean, then take all of it. Removing keeps its
+                own required reason and its own red button, so the two acts are
+                still told apart by what they ask for rather than by a mode. */}
             <div className="card">
               <div className="calhdr">
                 <h2 style={{ margin: 0 }}>Master calendar</h2>
                 <div className="btns" style={{ margin: 0 }}>
                   <button className={`btn ${view === 'calendar' ? 'gold' : 'ghost'}`} onClick={() => setView('calendar')}>Calendar</button>
                   <button className={`btn ${view === 'list' ? 'gold' : 'ghost'}`} onClick={() => setView('list')}>List</button>
-                  <button className={`btn ${selecting ? 'gold' : 'ghost'}`}
-                    onClick={() => { setSelecting(v => !v); setSelected([]); setRemoveResult(null); setBulkEditResult(null); }}>
-                    {selecting ? 'Done selecting' : 'Select shifts'}
-                  </button>
                 </div>
               </div>
               <p className="sub">
                 Every PHCP shift. Clinical visits are scheduled separately in the clinical workspace.
-                {selecting ? ' Tick the shifts, then edit them together or take them off the board.' : ''}
+                Narrow the board to the dates and statuses you mean, then take all of them at once.
               </p>
-            </div>
 
-            {/* Two different acts on one selection, so they are two panels
-                rather than one form with a mode somebody can misread while
-                forty shifts are ticked. */}
-            {selecting && (
-              <div className="card">
-                <div className="btns" style={{ margin: 0 }}>
-                  <button className={`btn ${selectAction === 'edit' ? 'gold' : 'ghost'}`}
-                    onClick={() => setSelectAction('edit')}>Edit together</button>
-                  <button className={`btn ${selectAction === 'remove' ? 'gold' : 'ghost'}`}
-                    onClick={() => setSelectAction('remove')}>Take off the board</button>
-                  <span className="mu" style={{ marginLeft: 'auto' }}>
-                    {selected.length} selected
-                  </span>
+              <div className="grid">
+                <div>
+                  <label>Shifts from</label>
+                  <input type="date" value={boardFrom} onChange={e => setBoardFrom(e.target.value)} />
+                </div>
+                <div>
+                  <label>Shifts to</label>
+                  <input type="date" value={boardTo} onChange={e => setBoardTo(e.target.value)} />
                 </div>
               </div>
-            )}
 
-            {/* A BATCH TAKES A TIME OF DAY, NOT ONE INSTANT, and the panel says
-                so: forty shifts given one absolute start would all land on the
-                same moment. Each shift keeps its own date and gets the new
-                hours. Boxes left blank are not sent at all, so changing the
-                licence level cannot blank a note. */}
-            {selecting && selectAction === 'edit' && (
-              <div className="card">
-                <h2>Edit {selected.length} selected shift{selected.length === 1 ? '' : 's'}</h2>
+              <div className="fbar">
+                {BOARD_STATUSES.map(st => (
+                  <label key={st.id} className={`fchip ${statusFilter.includes(st.id) ? '' : 'off'}`}>
+                    <input type="checkbox" checked={statusFilter.includes(st.id)}
+                      onChange={() => toggleStatus(st.id)} />
+                    <span className={`chip ${st.id}`}>{st.label}</span>
+                  </label>
+                ))}
+                <button className="btn ghost" style={{ marginLeft: 'auto' }}
+                  disabled={statusFilter.length === ALL_BOARD_STATUSES.length && !boardFrom && !boardTo}
+                  onClick={() => { setStatusFilter(ALL_BOARD_STATUSES); setBoardFrom(''); setBoardTo(''); }}>
+                  Show everything
+                </button>
+              </div>
+
+              <div className="bulkbar">
+                <label className="fchip">
+                  <input type="checkbox" checked={allShown} disabled={!boardIds.length}
+                    onChange={toggleSelectAll} aria-label="Select every shift the board is showing" />
+                  Select all {boardIds.length} shown
+                </label>
+                <span className="mu">
+                  {actOn.length} selected
+                  {selected.length > actOn.length
+                    ? ` · ${selected.length - actOn.length} ticked but filtered out, and left alone`
+                    : ''}
+                </span>
+                <button className="btn ghost" disabled={!selected.length || bulkEditing || removing}
+                  onClick={() => setSelected([])}>Clear selection</button>
+              </div>
+
+              {/* A BATCH TAKES A TIME OF DAY, NOT ONE INSTANT, and the bar says
+                  so: forty shifts given one absolute start would all land on the
+                  same moment. Each shift keeps its own date and gets the new
+                  hours. Boxes left blank are not sent at all, so changing the
+                  licence level cannot blank a note. */}
+              {(actOn.length > 0 || bulkEditResult || removeResult) && (
+                <div style={{ borderTop: '1px solid var(--line)', marginTop: 14, paddingTop: 12 }}>
+                {actOn.length > 0 && (<>
                 <p className="sub">
                   Fill in only what should change. The times are a <b>time of day</b> — every shift keeps
                   its own date, so “10:00 to 14:00” moves the hours on each one. An end earlier than the
@@ -1347,12 +1422,35 @@ const App = () => {
                   </div>
                 </div>
                 <div className="btns">
-                  <button className="btn gold" disabled={!selected.length || bulkEditing}
-                    onClick={bulkEditApply}>
-                    {bulkEditing ? 'Updating…' : `Update ${selected.length || ''}`}
+                  <button className="btn gold" disabled={bulkEditing || removing} onClick={bulkEditApply}>
+                    {bulkEditing ? 'Updating…' : `Update ${actOn.length}`}
                   </button>
-                  <button className="btn ghost" disabled={bulkEditing} onClick={() => setSelected([])}>Clear selection</button>
                 </div>
+
+                {/* REMOVING IS TWO DIFFERENT ACTS and the line says so before
+                    anything happens: a shift somebody holds is cancelled and
+                    keeps its tombstone, while an open shift nobody ever claimed
+                    is a typo and is taken off the board. It sits in the same bar
+                    as the edit, and what keeps the two apart is that this one
+                    will not fire without a reason typed into it. */}
+                <div className="bulkbar">
+                  <div style={{ flex: '1 1 100%' }}>
+                    <p className="sub" style={{ margin: 0 }}>
+                      Or take them off the board. A shift somebody claimed, accepted or worked is
+                      <b> cancelled</b> — it keeps its place with the reason, and the caregiver is told.
+                      A shift still open that nobody ever held is <b>removed outright</b>, because that is
+                      a posting mistake rather than care that was called off.
+                    </p>
+                  </div>
+                  <input placeholder="Reason — required to remove" value={removeReason}
+                    onChange={e => setRemoveReason(e.target.value)} style={{ maxWidth: 360 }} />
+                  <button className="btn danger" disabled={!removeReason.trim() || removing || bulkEditing}
+                    onClick={bulkRemove}>
+                    {removing ? 'Removing…' : `Remove ${actOn.length}`}
+                  </button>
+                </div>
+                </>)}
+
                 {bulkEditResult && (
                   <div className="note" style={{ marginTop: 10 }}>
                     {(bulkEditResult.errors || []).map((e, n) => (
@@ -1369,30 +1467,6 @@ const App = () => {
                     ))}
                   </div>
                 )}
-              </div>
-            )}
-
-            {/* REMOVING IS TWO DIFFERENT ACTS and the panel says so before
-                anything happens: a shift somebody holds is cancelled and keeps
-                its tombstone, while an open shift nobody ever claimed is a typo
-                and is taken off the board. */}
-            {selecting && selectAction === 'remove' && (
-              <div className="card">
-                <h2>Remove {selected.length} selected shift{selected.length === 1 ? '' : 's'}</h2>
-                <p className="sub">
-                  A shift somebody claimed, accepted or worked is <b>cancelled</b> — it keeps its place on the board
-                  with the reason, and the caregiver is told. A shift still open that nobody ever held is
-                  <b> removed outright</b>, because that is a posting mistake rather than care that was called off.
-                </p>
-                <div className="btns">
-                  <input placeholder="Reason (required)" value={removeReason}
-                    onChange={e => setRemoveReason(e.target.value)} style={{ maxWidth: 360 }} />
-                  <button className="btn danger" disabled={!selected.length || !removeReason.trim() || removing}
-                    onClick={bulkRemove}>
-                    {removing ? 'Removing…' : `Remove ${selected.length || ''}`}
-                  </button>
-                  <button className="btn ghost" disabled={removing} onClick={() => setSelected([])}>Clear selection</button>
-                </div>
                 {removeResult && (
                   <div className="note" style={{ marginTop: 10 }}>
                     {(removeResult.cancelled || []).length > 0 &&
@@ -1404,21 +1478,25 @@ const App = () => {
                     ))}
                   </div>
                 )}
-              </div>
-            )}
+                </div>
+              )}
+            </div>
 
             {view === 'calendar' ? (
-              <ShiftCalendar shifts={shifts} selected={selected} selecting={selecting}
-                onToggleSelect={toggleSelect}
+              <ShiftCalendar shifts={boardShifts} selected={actOn}
                 onOpen={(id) => { setView('list'); setOpenShiftId(id); }} />
             ) : (
               <div className="card">
-                {shifts.length === 0
-                  ? <Empty icon="calendar-off">No shifts posted yet.</Empty>
-                  : shifts.map(s => (
+                {boardShifts.length === 0
+                  ? <Empty icon="calendar-off">
+                      {shifts.length === 0
+                        ? 'No shifts posted yet.'
+                        : 'No shifts match that date range and those statuses.'}
+                    </Empty>
+                  : boardShifts.map(s => (
                     <ShiftRow key={s.id} s={s} roster={roster} act={act} onEdited={refresh}
                       setErr={setErr} setOk={setOk}
-                      selected={selected.includes(s.id)} onToggleSelect={toggleSelect} selecting={selecting} />
+                      selected={selected.includes(s.id)} onToggleSelect={toggleSelect} selectable={true} />
                   ))}
               </div>
             )}
