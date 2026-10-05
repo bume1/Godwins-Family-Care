@@ -533,6 +533,15 @@ module.exports = function createSchedulingRoutes(deps) {
   // `context` lets the caller say WHY the shift is moving, so the one email
   // this function sends can be accurate. It never changes what is written —
   // only the sentence the caregiver reads.
+  //
+  // `context.deferNotice` holds that email back and returns the facts instead,
+  // for ONE caller: the batch editor. Forty shifts edited one at a time would
+  // send a caregiver forty separate emails about one decision, which is the
+  // "one email for the batch, not forty" rule bulk posting already settled.
+  // It changes nothing that is written — the row, the time log, the audit
+  // entry and every refusal are identical — so the batch cannot drift from a
+  // hand-typed correction on anything that matters. The batch composes its own
+  // sentence per caregiver and per case from `notice`.
   async function applyShiftEdit({ shiftId, body, actor, context }) {
     const ERR = (status, errBody) => ({ error: { status, body: errBody } });
     const rows = await readRows('shifts');
@@ -668,8 +677,24 @@ module.exports = function createSchedulingRoutes(deps) {
     // rather than sending it back round for a second acceptance.
     const approvedRequest = !!(context && context.approvedRequest);
     const willConfirm = !!(context && context.willConfirm);
+    const deferNotice = !!(context && context.deferNotice);
     let notified = [];
-    if (timeMoved) {
+    // The facts a batch needs to write one accurate sentence later: who holds
+    // it, which of the three cases it is, and the times either side. Built
+    // whether or not the notice is deferred, so the two paths read the same
+    // row rather than one of them re-deriving it.
+    const notice = timeMoved ? {
+      shiftId: rows[idx].id,
+      caregiverId: rows[idx].caregiver_id || null,
+      clientId: rows[idx].client_id,
+      clientName: rows[idx].client_name,
+      status: rows[idx].status,
+      isOffer, stillAhead, logsTouched,
+      before: { start: before.start, end: before.end },
+      after: { start: rows[idx].start, end: rows[idx].end },
+      editedByName: rows[idx].edited_by_name
+    } : null;
+    if (timeMoved && !deferNotice) {
       const when = time.fmtDateTime(rows[idx].start);
       const holder = rows[idx].caregiver_id ? await freshUser(rows[idx].caregiver_id) : null;
       if (holder && holder.email) {
@@ -726,6 +751,7 @@ module.exports = function createSchedulingRoutes(deps) {
       shift: publicShift(rows[idx]),
       changes,
       logsTouched,
+      notice,
       message: notified.length
         ? `Shift updated. ${notified.join(' and ')} ${notified.length > 1 ? 'have' : 'has'} been told${stillAhead ? ' the time changed' : ' the record was corrected'}.`
         + (logsTouched ? ` ${logsTouched} time log${logsTouched > 1 ? 's' : ''} moved with it.` : '')
@@ -1001,6 +1027,200 @@ module.exports = function createSchedulingRoutes(deps) {
       });
     } catch (error) {
       console.error('Bulk shift remove error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // POST /api/scheduling/shifts/bulk-edit — correct several shifts at once.
+  //
+  // Owner-directed, 2026-10-05. Bulk removal has existed since PR #104; what
+  // was missing is the gentler half, so fixing forty rows of a mistaken bulk
+  // post meant opening forty editors. "These all move to 10 to 2" and "these
+  // are all CNA now" are one decision, and they should be one action.
+  //
+  // ⚠️ ONE WRITER FOR A SHIFT'S TIME, so this route writes nothing itself: it
+  // loops `applyShiftEdit`, the same editor a hand-typed correction and an
+  // approved change request both come through. Restating any of its guards
+  // here — the holder's eligibility, the overlap check, the time log following
+  // the shift, the derived flags being re-derived — is how the board and the
+  // timesheet start disagreeing about one visit, which is the failure this
+  // repo keeps paying for. Build-enforced.
+  //
+  // ⚠️ SEQUENTIALLY, never in parallel. `applyShiftEdit` read-modify-writes
+  // the whole `shifts` blob, so concurrent calls would each read the list
+  // before the others wrote and the last one would silently drop the rest —
+  // the same reason the OpenEMR document backfill files one at a time.
+  //
+  // THE SPEC IS ALL-OR-NOTHING; THE SHIFTS ARE NOT. A malformed licence level
+  // writes nothing at all, because it is a mistake in the instruction itself.
+  // But one shift of forty clashing with something the holder already has must
+  // not refuse the other thirty-nine: that one is reported with the editor's
+  // own reason and the rest go through. The rule bulk posting settled.
+  router.post('/api/scheduling/shifts/bulk-edit', authenticateToken, requireScheduleManager, async (req, res) => {
+    try {
+      const body = req.body || {};
+
+      const ids = Array.isArray(body.shiftIds) ? body.shiftIds.map(v => String(v)).filter(Boolean) : [];
+      if (ids.length === 0) return res.status(400).json({ error: 'Pick at least one shift.', code: 'NO_SHIFTS_SELECTED' });
+      if (ids.length > sched.MAX_BULK_OCCURRENCES) {
+        return res.status(400).json({
+          error: `Edit at most ${sched.MAX_BULK_OCCURRENCES} shifts at a time.`, code: 'TOO_MANY_SHIFTS'
+        });
+      }
+
+      // The instruction is checked ONCE, before a single shift is touched.
+      const spec = body.edit && typeof body.edit === 'object' ? body.edit : {};
+      const check = sched.validateBulkEdit(spec);
+      if (!check.valid) {
+        return res.status(400).json({ error: 'Some of those changes need correcting.', code: 'BULK_EDIT_INVALID', errors: check.errors });
+      }
+
+      const updated = [];
+      const unchanged = [];
+      const refused = [];
+      const notices = [];
+
+      for (const id of ids) {
+        const rows = await readRows('shifts');
+        const row = rows.find(r => r && r.id === id);
+        if (!row) { refused.push({ shiftId: id, reason: 'Shift not found.', code: 'SHIFT_NOT_FOUND' }); continue; }
+
+        // Each shift's own body: the time of day resolved against ITS date, in
+        // Georgia. A shift the batch would not actually change contributes an
+        // empty body, which the editor answers as "Nothing changed."
+        const editBody = sched.buildBulkEditBody(row, spec);
+        const result = await applyShiftEdit({
+          shiftId: id, body: editBody, actor: req.user, context: { deferNotice: true }
+        });
+
+        if (result.error) {
+          const errBody = result.error.body || {};
+          refused.push({
+            shiftId: id, start: row.start, clientName: row.client_name, status: row.status,
+            reason: errBody.error || 'That shift could not be edited.',
+            code: errBody.code || 'SHIFT_EDIT_REFUSED',
+            // The editor's own hint, where it has one — "cancel the shift, or
+            // release the caregiver first" is the next step, and dropping it
+            // leaves somebody with a refusal and nothing to do about it.
+            hint: errBody.hint || null
+          });
+          continue;
+        }
+        if (!result.changes || result.changes.length === 0) {
+          unchanged.push({ shiftId: id, start: row.start, clientName: row.client_name });
+          continue;
+        }
+        updated.push({
+          shiftId: id, start: result.shift.start, end: result.shift.end,
+          clientName: row.client_name, changed: result.changes, timeLogsUpdated: result.logsTouched
+        });
+        if (result.notice) notices.push(result.notice);
+      }
+
+      if (updated.length === 0) {
+        return res.status(409).json({
+          error: 'Nothing was changed.', code: 'BULK_EDIT_NOTHING_CHANGED', updated: [], unchanged, refused
+        });
+      }
+
+      // ONE EMAIL PER PERSON PER CASE, not one per shift.
+      //
+      // THE THREE CASES MUST NOT BE FLATTENED, and that is why this groups by
+      // case rather than just by caregiver. "4 of your shifts have moved" is an
+      // instruction about where to be; said over a batch that included last
+      // Tuesday it tells somebody they missed a visit, and said over an OFFER
+      // it tells them they are committed to work they never accepted. The
+      // single-shift editor already draws those three lines and the batch
+      // keeps them: a caregiver with a mixed selection gets two short emails
+      // rather than one wrong one.
+      const caseOf = (n) => (n.isOffer ? 'offer' : (n.stillAhead ? 'moved' : 'corrected'));
+      const holderGroups = new Map();
+      notices.forEach(n => {
+        if (!n.caregiverId) return;
+        const key = `${n.caregiverId}:${caseOf(n)}`;
+        if (!holderGroups.has(key)) holderGroups.set(key, { caregiverId: n.caregiverId, kind: caseOf(n), items: [] });
+        holderGroups.get(key).items.push(n);
+      });
+
+      let emailed = 0;
+      for (const [, group] of holderGroups) {
+        const holder = await freshUser(group.caregiverId);
+        if (!holder || !holder.email) continue;
+        const list = group.items.slice().sort((a, b) => String(a.after.start).localeCompare(String(b.after.start)));
+        const n = list.length;
+        const many = n > 1;
+        const first = list[0];
+        const who = first.clientName;
+        // Every shift in one group belongs to one case, so one sentence is
+        // accurate for all of them. The FIRST time is named because a list of
+        // forty is unreadable in an email and the schedule is the real answer.
+        const copy = group.kind === 'offer'
+          ? {
+            subject: `${n} shift offer${many ? 's' : ''} updated — still need${many ? '' : 's'} your answer`,
+            body: `${n} shift offer${many ? 's' : ''} for ${who} ${many ? 'have' : 'has'} been updated, starting with ${time.fmtDateTime(first.after.start)}–${time.fmtTime(first.after.end)}. ${many ? 'They are' : 'It is'} still ${many ? 'offers' : 'an offer'} — accept or decline in the app. You are not scheduled until you accept.`,
+            cta: 'Answer the offers'
+          }
+          : group.kind === 'moved'
+            ? {
+              subject: `${n} shift${many ? 's' : ''} rescheduled — ${who}`,
+              body: `${n} of your shifts for ${who} ${many ? 'have' : 'has'} been rescheduled, starting with ${time.fmtDateTime(first.after.start)}–${time.fmtTime(first.after.end)}. Open your schedule for the full list.`,
+              cta: 'View your schedule'
+            }
+            : {
+              // A PAST SHIFT IS A RECORD CORRECTION, and the question the
+              // caregiver will actually have is about their pay.
+              subject: `${n} shift record${many ? 's' : ''} corrected — ${who}`,
+              body: `${n} of your past shift${many ? 's' : ''} for ${who} ${many ? 'have' : 'has'} been corrected by ${first.editedByName}, starting with ${time.fmtDateTime(first.after.start)}. Your timesheet has been updated to match. The hours you clocked have not changed.`,
+              cta: 'View your schedule'
+            };
+        await queueNotification('shift_time_changed', holder.id, holder.email, holder.name,
+          { subject: copy.subject, body: copy.body, ctaUrl: links.shiftFor(), ctaLabel: copy.cta },
+          { relatedEntityId: `${first.shiftId}:bulk-edited:${n}`, relatedEntityType: 'shift', createdBy: req.user.id });
+        emailed += 1;
+      }
+
+      // THE CLIENT HEARS ONLY ABOUT VISITS STILL TO COME that they were already
+      // promised. "Your visit has been rescheduled" is false about one that has
+      // already happened, and a client has nothing to do about a correction to
+      // our own timesheet.
+      const clientGroups = new Map();
+      notices.forEach(n => {
+        if (!n.stillAhead || !['confirmed', 'in_progress'].includes(n.status)) return;
+        if (!clientGroups.has(n.clientId)) clientGroups.set(n.clientId, []);
+        clientGroups.get(n.clientId).push(n);
+      });
+      for (const [clientId, list] of clientGroups) {
+        const client = await loadClient(clientId);
+        if (!client || !client.email) continue;
+        const sorted = list.slice().sort((a, b) => String(a.after.start).localeCompare(String(b.after.start)));
+        const n = sorted.length;
+        await queueNotification('shift_time_changed_client', client.id, client.email, client.name,
+          {
+            subject: n > 1 ? 'Your care visits have been rescheduled' : 'Your care visit has been rescheduled',
+            body: `${n} of your upcoming visit${n > 1 ? 's have' : ' has'} moved, starting with ${time.fmtDateTime(sorted[0].after.start)}. Open your portal for the full schedule.`,
+            ctaUrl: links.PATHS.PORTAL, ctaLabel: 'Open your portal'
+          },
+          { relatedEntityId: `${sorted[0].shiftId}:bulk-edited-client:${n}`, relatedEntityType: 'shift', createdBy: req.user.id });
+        emailed += 1;
+      }
+
+      await logActivity(req.user.id, req.user.name || req.user.email, 'shifts_bulk_edited', 'shift', updated[0].shiftId,
+        {
+          fields: check.fields, shiftCount: updated.length, unchanged: unchanged.length,
+          refused: refused.length, notified: emailed, role: req.user.role
+        });
+
+      res.json({
+        updated, unchanged, refused, notified: emailed,
+        message: [
+          `${updated.length} shift${updated.length === 1 ? '' : 's'} updated`,
+          unchanged.length ? `${unchanged.length} already read that way` : '',
+          refused.length ? `${refused.length} left alone` : '',
+          emailed ? `${emailed} notice${emailed === 1 ? '' : 's'} sent` : ''
+        ].filter(Boolean).join(', ') + '.'
+      });
+    } catch (error) {
+      console.error('Bulk shift edit error:', error);
       res.status(500).json({ error: 'Server error' });
     }
   });
