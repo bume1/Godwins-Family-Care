@@ -661,11 +661,55 @@ test('the page sends only the boxes that were filled in', () => {
     'a pay rate of 0 is a number somebody chose, so the check is against empty, not falsiness');
 });
 
-test('the page offers both acts on one selection, and says which is which', () => {
-  assert.ok(/selectAction/.test(PAGE), 'the two acts must be distinguishable');
-  assert.ok(/Edit together/.test(PAGE) && /Take off the board/.test(PAGE));
-  assert.ok(/time of day/.test(PAGE),
+// REPOINTED, NOT DELETED (owner, 2026-10-05). This guard used to assert the
+// mode switch between an "Edit together" panel and a "Take off the board"
+// panel. The owner's instruction removed the switch — both acts belong in the
+// one bar — so what the guard protects is unchanged and what it reads is not:
+// the two acts must still be told apart, and now they are told apart by what
+// each one ASKS FOR rather than by a mode somebody can misread.
+test('both acts sit in one bar and are still told apart', () => {
+  const page = stripComments(PAGE);
+  assert.ok(!/selectAction/.test(page),
+    'the mode switch is gone; a mode is not how these two are kept apart');
+  assert.ok(/btn danger/.test(page) && /Reason — required to remove/.test(page),
+    'removing keeps its own red button and its own required reason');
+  assert.ok(/disabled=\{!removeReason\.trim\(\)/.test(page),
+    'remove must not fire without a reason, which is what separates it from update');
+  assert.ok(/time of day/.test(page),
     'the panel must say the times are a time of day, or somebody expects one instant');
+});
+
+test('the board filters by a Georgia date range and by status', () => {
+  const page = stripComments(PAGE);
+  const fn = page.slice(page.indexOf('const boardShifts = shifts.filter'),
+    page.indexOf('const boardIds'));
+  assert.ok(fn.length > 60 && fn.length < 900, 'the board filter moved; repoint this guard');
+  assert.ok(/easternDayKey\(sh\.start\)/.test(fn),
+    'the range must bucket by the day it is in GEORGIA — a UTC slice loses the evening shifts');
+  assert.ok(/boardFrom/.test(fn) && /boardTo/.test(fn) && /statusFilter\.includes/.test(fn),
+    'both ends of the range and the status filter answer one question, in one place');
+  // The payroll range is a DIFFERENT range. Reusing it would mean narrowing the
+  // board quietly changed what a payroll or billing export covers.
+  assert.ok(!/\bfrom\b/.test(fn) && !/\bto\b/.test(fn),
+    'the board filter must not read the payroll from/to');
+  assert.ok(/exportCsv[\s\S]{0,400}payroll\.csv\?from=\$\{from\}&to=\$\{to\}/.test(page),
+    'and the payroll export must still read its own range');
+});
+
+test('nothing the filter has hidden can be edited or removed', () => {
+  const page = stripComments(PAGE);
+  assert.ok(/const actOn = selected\.filter\(id => boardIds\.includes\(id\)\)/.test(page),
+    'the acted-on set is the selection INTERSECTED with what is on screen');
+  // Both handlers must send that set, never the raw selection: a tick that
+  // survived the filter being narrowed is a shift nobody can see.
+  for (const route of ['bulk-edit', 'bulk-remove']) {
+    const i = page.indexOf(`/api/scheduling/shifts/${route}`);
+    assert.ok(i > 0, `${route} call site missing`);
+    const call = page.slice(i, i + 220);
+    assert.ok(/shiftIds: actOn/.test(call), `${route} must post actOn, not selected`);
+  }
+  assert.ok(/Select all \{boardIds\.length\} shown/.test(page),
+    'select-all takes what the board is showing, which is what makes the range the selector');
 });
 
 test('bulk REMOVAL still handles a pool shift as a deletion, not a tombstone', () => {
