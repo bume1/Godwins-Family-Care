@@ -1167,6 +1167,134 @@ const ROI_CATEGORY_LABELS = {
   other: 'Other'
 };
 
+// ============================================================================
+// A CAREGIVER'S VISIT LOG, AS A DOCUMENT
+// ============================================================================
+// The office could read a visit log on screen and had nothing to file, hand to
+// a family member or attach to an email (owner, 2026-10-03). This renders the
+// submitted log and its review trail.
+//
+// It prints what the log SAYS and nothing it does not: no pay rate, no
+// geofence verdict, no distance. Those are between the agency and its
+// caregiver, and a document that travels should not carry them. The log is
+// immutable, so a review note appears as what it is — appended, with its own
+// author and timestamp — never folded into the body as though it had been
+// there all along.
+//
+// `d` is the shape `publicVisitLog` already serves, so the screen and the
+// document are reading one projection rather than two.
+async function generateVisitLogPDF(d) {
+  const doc = new PDFDocument({ size: 'LETTER', margin: 50, bufferPages: true });
+  const chunks = [];
+  doc.on('data', c => chunks.push(c));
+  const done = new Promise(resolve => doc.on('end', () => resolve(Buffer.concat(chunks))));
+
+  const detail = (d && d.detail) || {};
+  const W = 512;
+  let y = faceSheetHeader(doc, 'Caregiver Visit Log',
+    `${d.clientName || ''}${d.visitDate ? '  ·  ' + gfcTime.fmtDate(`${d.visitDate}T12:00:00Z`) : ''}`);
+
+  const heading = (text) => {
+    if (y > doc.page.height - 130) { doc.addPage(); y = 50; }
+    doc.font('Helvetica-Bold').fontSize(10).fillColor(GFC_COLORS.navy).text(text, 50, y, { width: W });
+    y = doc.y + 4;
+    doc.moveTo(50, y).lineTo(50 + W, y).lineWidth(0.5).strokeColor(GFC_COLORS.gold).stroke();
+    y += 8;
+  };
+  const line = (label, value) => {
+    if (y > doc.page.height - 110) { doc.addPage(); y = 50; }
+    doc.font('Helvetica-Bold').fontSize(8.5).fillColor(GFC_COLORS.muted).text(label, 50, y, { width: 150 });
+    doc.font('Helvetica').fontSize(9).fillColor(GFC_COLORS.ink)
+      .text(String(value === null || value === undefined || value === '' ? '—' : value), 205, y, { width: W - 155 });
+    y = Math.max(doc.y, y + 12) + 3;
+  };
+  const para = (text) => {
+    if (y > doc.page.height - 110) { doc.addPage(); y = 50; }
+    doc.font('Helvetica').fontSize(9).fillColor(GFC_COLORS.ink).text(String(text || ''), 50, y, { width: W });
+    y = doc.y + 6;
+  };
+
+  heading('The visit');
+  line('Client', d.clientName || d.clientId);
+  line('Caregiver', d.caregiverName);
+  line('License level', d.licenseLevel ? String(d.licenseLevel).toUpperCase() : '');
+  line('Visit type', d.visitType);
+  line('Visit date', d.visitDate ? gfcTime.fmtDate(`${d.visitDate}T12:00:00Z`) : '');
+  line('Filed', gfcTime.fmtDateTime(d.submittedAt));
+  line('Status', String(d.status || '').replace(/_/g, ' '));
+  if (d.submittedOffline) line('Filed offline', 'Yes — queued on the device and sent later');
+
+  if ((detail.tasks || []).length > 0) {
+    heading('Care provided');
+    // Grouped the way the form groups them, so a reviewer reads it in the
+    // order the caregiver filled it in.
+    let group = null;
+    for (const t of detail.tasks) {
+      if (t.group !== group) {
+        group = t.group;
+        if (y > doc.page.height - 110) { doc.addPage(); y = 50; }
+        doc.font('Helvetica-Bold').fontSize(8.5).fillColor(GFC_COLORS.muted).text(group, 50, y, { width: W });
+        y = doc.y + 3;
+      }
+      // A task recorded as NOT done, with a reason, is the row a reviewer most
+      // needs to see — it is marked rather than dropped.
+      const mark = t.done ? '✓' : '✗';
+      const suffix = t.done ? '' : '  (not done)';
+      para(`   ${mark}  ${t.label}${suffix}${t.note ? ' — ' + t.note : ''}`);
+    }
+  }
+
+  if ((detail.measurements || []).length > 0) {
+    heading('Measurements');
+    detail.measurements.forEach(m => line(m.label, m.value));
+  }
+
+  if ((detail.patientCondition || []).length > 0 || detail.satisfaction) {
+    heading('How the client was');
+    if ((detail.patientCondition || []).length > 0) line('Observed', detail.patientCondition.join(', '));
+    if (detail.satisfaction) line('Client satisfaction', detail.satisfaction);
+  }
+
+  if ((detail.safetyConcerns || []).length > 0) {
+    heading('Safety concerns raised');
+    para(detail.safetyConcerns.join(', '));
+  }
+
+  if ((detail.standingInstructionsAcknowledged || []).length > 0) {
+    heading('Standing instructions acknowledged');
+    detail.standingInstructionsAcknowledged.forEach(s => para(`   ·  ${s}`));
+  }
+
+  if ((detail.narratives || []).length > 0) {
+    heading('Notes');
+    detail.narratives.forEach(n => {
+      if (y > doc.page.height - 110) { doc.addPage(); y = 50; }
+      doc.font('Helvetica-Bold').fontSize(8.5).fillColor(GFC_COLORS.muted).text(n.label, 50, y, { width: W });
+      y = doc.y + 2;
+      para(n.value);
+    });
+  }
+
+  // Appended, never merged into the body above: this log is immutable and the
+  // review trail is its own append-only record.
+  if ((d.reviews || []).length > 0) {
+    heading('Review notes (appended after filing)');
+    d.reviews.forEach(r => {
+      para(`${r.byName || ''} · ${gfcTime.fmtDateTime(r.at)}`);
+      para(r.note || '');
+    });
+  }
+
+  if (y > doc.page.height - 120) { doc.addPage(); y = 50; }
+  doc.font('Helvetica-Oblique').fontSize(7.5).fillColor(GFC_COLORS.muted)
+    .text('A submitted visit log is never edited. Corrections are appended above, each with its own author and timestamp.',
+      50, y + 6, { width: W });
+
+  faceSheetFooters(doc);
+  doc.end();
+  return done;
+}
+
 /**
  * Generate one Transfer-of-Care ROI PDF for a single provider.
  *
@@ -2254,6 +2382,7 @@ module.exports = {
   generateFaceSheetPDF,
   renderConsentBody,
   generateProviderROIPDF,
+  generateVisitLogPDF,
   generateCarePlanPDF,
   generateRequisitionPDF,
   ROI_CATEGORY_LABELS

@@ -2462,8 +2462,12 @@ module.exports = function createSchedulingRoutes(deps) {
       }
       if (to < from) return res.status(400).json({ error: 'The end date is before the start date.', code: 'DATE_RANGE_INVERTED' });
 
+      // Filtered on the date the shift happened in GEORGIA, not in UTC. A 9pm
+      // Georgia clock-in is already tomorrow in UTC, so a UTC-date filter both
+      // dropped the last evening of the range and pulled in the evening before
+      // it — and then handed the wrong date to the pay period.
       const logs = (await readRows('time_logs')).filter(l => {
-        const d = String(l.clock_in_at || '').slice(0, 10);
+        const d = sched.csvLocalDate(l.clock_in_at);
         return d >= from && d <= to;
       }).sort((a, b) => String(a.clock_in_at).localeCompare(String(b.clock_in_at)));
 
@@ -2476,7 +2480,7 @@ module.exports = function createSchedulingRoutes(deps) {
       const shiftsById = new Map(shiftRows.filter(r => r && r.id).map(r => [r.id, r]));
 
       const rows = logs.map(l => {
-        const shiftDate = String(l.clock_in_at || '').slice(0, 10);
+        const shiftDate = sched.csvLocalDate(l.clock_in_at);
         const period = sched.payPeriodFor(shiftDate) || { start: '', end: '' };
         // Shift rate → this caregiver's rate for this client → their base rate.
         const resolved = cg.resolvePayRate(
@@ -2498,11 +2502,11 @@ module.exports = function createSchedulingRoutes(deps) {
           caregiverName: l.caregiver_name,
           licenseLevel: l.license_level ? cg.LICENSE_LABELS[l.license_level] || l.license_level : '',
           clientName: l.client_name,
-          shiftDate,
-          scheduledStart: l.scheduled_start,
-          scheduledEnd: l.scheduled_end,
-          clockInAt: l.clock_in_at,
-          clockOutAt: l.clock_out_at || '',
+          shiftDate: sched.csvDate(l.clock_in_at),
+          scheduledStart: sched.csvTime(l.scheduled_start, shiftDate),
+          scheduledEnd: sched.csvTime(l.scheduled_end, shiftDate),
+          clockInAt: sched.csvTime(l.clock_in_at, shiftDate),
+          clockOutAt: sched.csvTime(l.clock_out_at, shiftDate),
           hours: sched.minutesToHours(l.total_minutes),
           flags: (l.flags || []).join(' '),
           edited: l.edited ? 'yes' : '',
@@ -2547,7 +2551,7 @@ module.exports = function createSchedulingRoutes(deps) {
       const logs = (await readRows('time_logs')).filter(l => {
         if (!l || !l.clock_out_at) return false;          // not finished, not billable
         if (onlyClient && String(l.client_id) !== onlyClient) return false;
-        const d = String(l.clock_in_at || '').slice(0, 10);
+        const d = sched.csvLocalDate(l.clock_in_at);   // Georgia's date, not UTC's
         return d >= from && d <= to;
       }).sort((a, b) =>
         String(a.client_name || '').localeCompare(String(b.client_name || '')) ||
@@ -2555,13 +2559,13 @@ module.exports = function createSchedulingRoutes(deps) {
 
       const rows = logs.map(l => ({
         clientName: l.client_name,
-        serviceDate: String(l.clock_in_at || '').slice(0, 10),
+        serviceDate: sched.csvDate(l.clock_in_at),
         caregiverName: l.caregiver_name,
         licenseLevel: l.license_level ? cg.LICENSE_LABELS[l.license_level] || l.license_level : '',
-        scheduledStart: l.scheduled_start,
-        scheduledEnd: l.scheduled_end,
-        clockInAt: l.clock_in_at,
-        clockOutAt: l.clock_out_at || '',
+        scheduledStart: sched.csvTime(l.scheduled_start, sched.csvLocalDate(l.clock_in_at)),
+        scheduledEnd: sched.csvTime(l.scheduled_end, sched.csvLocalDate(l.clock_in_at)),
+        clockInAt: sched.csvTime(l.clock_in_at, sched.csvLocalDate(l.clock_in_at)),
+        clockOutAt: sched.csvTime(l.clock_out_at, sched.csvLocalDate(l.clock_in_at)),
         hours: sched.minutesToHours(l.total_minutes),
         // Says what the GPS check could actually establish, never more: an
         // unverifiable clock-in is not the same claim as a verified one, and
@@ -2596,19 +2600,19 @@ module.exports = function createSchedulingRoutes(deps) {
 
       const logs = (await readRows('time_logs')).filter(l => {
         if (!l || l.caregiver_id !== req.user.id) return false;
-        const d = String(l.clock_in_at || '').slice(0, 10);
+        const d = sched.csvLocalDate(l.clock_in_at);   // Georgia's date, not UTC's
         if (from && d < from) return false;
         if (to && d > to) return false;
         return true;
       }).sort((a, b) => String(a.clock_in_at).localeCompare(String(b.clock_in_at)));
 
       const rows = logs.map(l => ({
-        shiftDate: String(l.clock_in_at || '').slice(0, 10),
+        shiftDate: sched.csvDate(l.clock_in_at),
         clientName: l.client_name,
-        scheduledStart: l.scheduled_start,
-        scheduledEnd: l.scheduled_end,
-        clockInAt: l.clock_in_at,
-        clockOutAt: l.clock_out_at || '',
+        scheduledStart: sched.csvTime(l.scheduled_start, sched.csvLocalDate(l.clock_in_at)),
+        scheduledEnd: sched.csvTime(l.scheduled_end, sched.csvLocalDate(l.clock_in_at)),
+        clockInAt: sched.csvTime(l.clock_in_at, sched.csvLocalDate(l.clock_in_at)),
+        clockOutAt: sched.csvTime(l.clock_out_at, sched.csvLocalDate(l.clock_in_at)),
         hours: sched.minutesToHours(l.total_minutes),
         flags: (l.flags || []).join(' '),
         edited: l.edited ? 'yes' : ''
