@@ -477,12 +477,10 @@ test('a phone call has no location and no place of service of its own — billin
   assert.equal(A.visitNeedsTravel({ modality: 'phone', location: 'home' }), false);
 });
 
-test('the phone note demands the call, the plan and the minutes — never vitals or an exam', () => {
+test('the phone note is ONE open note box — never SOAP parts, vitals or an exam', () => {
   const req = A.requiredSectionKeys('pc_phone_ccm', { modality: 'phone' });
-  for (const k of ['reasonForVisit', 'callParticipants', 'assessment', 'plan', 'contactTime']) {
-    assert.ok(req.includes(k), `${k} is required on a phone note`);
-  }
-  for (const k of ['vitals', 'physicalExam', 'focusedExam']) assert.ok(!req.includes(k));
+  assert.deepEqual(req, ['callNote'], 'a call is written up in one box (owner, 2026-10-02)');
+  assert.deepEqual(A.sectionsFor('pc_phone_ccm', { modality: 'phone' }).map(s => s.key), ['callNote']);
   // And an in-person section on any type is not demanded over the phone.
   assert.ok(!A.requiredSectionKeys('pc_follow_up', { modality: 'phone' }).includes('physicalExam'));
 });
@@ -493,7 +491,8 @@ test('the note screen saves a phone call as a follow-up-shaped note, never an H&
   // An H&P demands both-arm BP to sign and stamps the initial visit on first
   // save; neither is true of a phone call.
   assert.match(page, /const toNote = \(\) => \(isPhone \? \{\s*kind: 'followup'/);
-  assert.match(page, /fixedBlocks: isPhone\s*\?\s*\['chiefConcern', 'subjective', 'assessment', 'plan'\]/);
+  assert.match(page, /fixedBlocks: isPhone\s*\?\s*\[\]/);
+  assert.match(page, /fixedBlocks: visit && visit\.modality === 'phone'\s*\?\s*\[\]/);
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(server, /modalities: apptTypes\.modalitiesForType\(t\.key\)/, 'the page is served each type\'s modalities');
 });
