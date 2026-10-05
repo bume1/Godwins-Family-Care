@@ -160,6 +160,7 @@ const SECTIONS = Object.freeze({
   ordersRx: 'Orders / Rx',
   careManagementEligibility: 'Care Management Eligibility (CCM/BHI flag)',
   // Phone call / care management (owner, 2026-10-02)
+  callNote: 'Call note',
   callParticipants: 'Who was on the call',
   careCoordination: 'Care Coordination / Actions Taken',
   ccmConsent: 'CCM Consent (verbal, documented)',
@@ -429,18 +430,16 @@ const APPOINTMENT_TYPES = Object.freeze([
     // It is phone-ONLY: a call written up as an in-person or video visit is a
     // visit that never happened. It saves as a follow-up-shaped note, never an
     // H&P, so it neither demands a blood pressure nor marks the patient's
-    // initial visit as done. The time section is required because care
-    // management is billed on minutes accumulated across the month.
+    // initial visit as done. ONE open note box (owner, 2026-10-02): a call is
+    // written up in the clinician's own words, not split into SOAP parts.
+    // Minutes for care-management billing go in that note.
     key: 'pc_phone_ccm', service: 'primary_care', label: 'Phone Call / Care Management',
     defaultMinutes: 20, telehealthAllowed: false, telehealthPayerCaveat: false,
     modalities: ['phone'],
     credentials: ['MD', 'DO', 'NP', 'PA'], specialty: null,
     intake: [F('medications'), F('conditions')],
     sections: [
-      t('reasonForVisit', R.ALWAYS), t('callParticipants', R.ALWAYS), t('intervalHistory', R.ALWAYS),
-      t('medicationReview', R.OPTIONAL), t('assessment', R.ALWAYS), t('plan', R.ALWAYS),
-      t('careCoordination', R.OPTIONAL), t('ccmConsent', R.OPTIONAL),
-      t('followUp', R.OPTIONAL), t('contactTime', R.ALWAYS)
+      t('callNote', R.ALWAYS)
     ]
   },
   {

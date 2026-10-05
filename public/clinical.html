@@ -2971,8 +2971,8 @@
       // This form → the shared note's shape.
       const toNote = () => (isPhone ? {
         kind: 'followup',
-        chiefConcern: f.chiefConcern, subjective: f.subjective, objective: '',
-        assessment: f.assessment, plan: f.plan, sections: f.sections, vitals: {},
+        chiefConcern: '', subjective: '', objective: '',
+        assessment: '', plan: '', sections: f.sections, vitals: {},
         confirmedFields: confirmed, visit: { ...visit, location: '' }
       } : {
         kind: 'hp',
@@ -3300,7 +3300,7 @@
               {visit.modality === 'telehealth' &&
                 <span>Vitals and exam findings recorded on a video visit are marked as patient-reported.</span>}
               {isPhone &&
-                <span>A phone call has no vitals or exam. Record the minutes spent on this call — care management is billed on time across the month, and billing decides how each call is claimed.</span>}
+                <span>A phone call is one open note. Include the minutes spent on the call — care management is billed on time across the month.</span>}
             </div>
           </div>
 
@@ -3314,8 +3314,9 @@
               <DictationHint />
               {noteLayout({
                 sections: noteSections,
+                // A phone call is ONE open note box (owner, 2026-10-02).
                 fixedBlocks: isPhone
-                  ? ['chiefConcern', 'subjective', 'assessment', 'plan']
+                  ? []
                   : ['chiefConcern', 'subjective', 'vitals', 'exam', ...(noteHasSection('mentalStatusExam') ? ['mse'] : []), 'assessment', 'plan'],
                 extraBlocks: isPhone ? [] : ['skinWound', 'pain', 'hazards', 'triage'],
                 extraLabel: 'Home visit assessment',
@@ -4289,7 +4290,7 @@
     const FollowUpModal = ({ patient, chart, appt, onClose, onSaved }) => {
       const [cands, setCands] = useState([]);
       const [f, setF] = useState({ reason: appt ? NF.fromPlainText(appt.title || '') : NF.fromPlainText('Follow-up visit'), date: appt ? appt.date : todayYmd(), subjective: '', objective: '', assessment: '', plan: '',
-        vitals: { bpSys: '', bpDia: '', hr: '', temp: '', rr: '', spo2: '', weight: '', height: '', pain: '' } });
+        vitals: { bpSys: '', bpDia: '', hr: '', temp: '', rr: '', spo2: '', weight: '', height: '', pain: '' }, callNote: '' });
       const [showCarry, setShowCarry] = useState(false);
       const [carry, setCarry] = useState(null);
       const [diagnoses, setDiagnoses] = useState([]);
@@ -4335,10 +4336,17 @@
       // then any codes chosen here. Nothing is signed.
       const submit = () => {
         setBusy(true); setErr('');
-        const note = {
+        // A phone call is ONE open note (owner, 2026-10-02), saved as the
+        // phone type's single section.
+        const note = isPhone ? {
           kind: 'followup', visitDate: f.date || undefined,
-          chiefConcern: f.reason, subjective: f.subjective, objective: isPhone ? '' : f.objective, assessment: f.assessment, plan: f.plan,
-          vitals: isPhone ? {} : f.vitals, sections: {},
+          chiefConcern: '', subjective: '', objective: '', assessment: '', plan: '',
+          vitals: {}, sections: { callNote: f.callNote },
+          ...(visit.appointmentType ? { visit: { ...visit, location: '' } } : {})
+        } : {
+          kind: 'followup', visitDate: f.date || undefined,
+          chiefConcern: f.reason, subjective: f.subjective, objective: f.objective, assessment: f.assessment, plan: f.plan,
+          vitals: f.vitals, sections: {},
           ...(visit.appointmentType ? { visit: { ...visit, location: isPhone ? '' : visit.location } } : {})
         };
         api.createNote(patient.id, { note, appointmentEid: appt ? appt.eid : undefined, carryForwardFrom: carry ? carry.fromEncounterUuid : undefined })
@@ -4377,16 +4385,18 @@
                 </Field>
               </div>
               {visitType && <p className="text-xs text-stone-500 -mt-1">The note opens with this visit type's sections after you save the draft.</p>}
-              {!showCarry && !carry && (
+              {!isPhone && !showCarry && !carry && (
                 <button className="btn ghost !py-1.5 text-xs w-fit" onClick={() => setShowCarry(true)}><i className="ti ti-copy" />Start from a previous note</button>
               )}
               {showCarry && <CarryForwardPicker patientId={patient.id} onPick={pickCarry} onClose={() => setShowCarry(false)} />}
               {carry && <p className="text-xs prefill rounded-lg p-2">Copied from the note of {carry.fromDate || 'an earlier visit'}. Each copied section is marked for review on the encounter — the note cannot be signed until each is edited or confirmed.</p>}
               <div className="grid md:grid-cols-[1fr_160px] gap-3">
-                <FormattedField label="Visit reason / chief concern" value={f.reason} onChange={v => setF(p => ({ ...p, reason: v }))} />
+                {isPhone
+                  ? <FormattedField label="Call note" value={f.callNote} onChange={v => setF(p => ({ ...p, callNote: v }))} />
+                  : <FormattedField label="Visit reason / chief concern" value={f.reason} onChange={v => setF(p => ({ ...p, reason: v }))} />}
                 <Field label="Visit date"><input className="inp" type="date" value={f.date} onChange={e => setF({ ...f, date: e.target.value })} /></Field>
               </div>
-              <FormattedField label="Subjective" value={f.subjective} onChange={v => setF(p => ({ ...p, subjective: v }))} />
+              {!isPhone && <FormattedField label="Subjective" value={f.subjective} onChange={v => setF(p => ({ ...p, subjective: v }))} />}
               {!isPhone && <div>
                 <span className="lblu block mb-1">Vitals (optional — preserved verbatim in the note)</span>
                 <div className="grid grid-cols-1 sm:grid-cols-3 md:grid-cols-5 gap-2">
@@ -4395,8 +4405,8 @@
                 </div>
               </div>}
               {!isPhone && <FormattedField label="Objective" value={f.objective} onChange={v => setF(p => ({ ...p, objective: v }))} />}
-              <FormattedField label="Assessment" value={f.assessment} onChange={v => setF(p => ({ ...p, assessment: v }))} />
-              <FormattedField label="Plan" value={f.plan} onChange={v => setF(p => ({ ...p, plan: v }))} />
+              {!isPhone && <FormattedField label="Assessment" value={f.assessment} onChange={v => setF(p => ({ ...p, assessment: v }))} />}
+              {!isPhone && <FormattedField label="Plan" value={f.plan} onChange={v => setF(p => ({ ...p, plan: v }))} />}
               <div className="border-t border-stone-100 pt-3">
                 <span className="lblu block mb-1">Encounter diagnoses (ICD-10) — active problems pre-selected; uncheck what wasn't addressed</span>
                 <DxEditor diagnoses={diagnoses} setDiagnoses={setDiagnoses} candidates={cands} clientId={patient.id} />
@@ -4409,7 +4419,7 @@
               {err && <p className="text-red-600 text-sm">{err}</p>}
               <div className="flex gap-2 justify-end">
                 <button className="btn ghost" onClick={onClose}>Close</button>
-                <button className="btn" disabled={busy || NF.isBlank(f.reason)} onClick={submit}><i className="ti ti-device-floppy" />{busy ? 'Saving to the app and OpenEMR…' : 'Save draft'}</button>
+                <button className="btn" disabled={busy || NF.isBlank(isPhone ? f.callNote : f.reason)} onClick={submit}><i className="ti ti-device-floppy" />{busy ? 'Saving to the app and OpenEMR…' : 'Save draft'}</button>
               </div>
               <p className="text-[11px] text-stone-400">Saves the note to the app and OpenEMR as a draft, stamped with your name and the time — it is <b>not</b> signed. The encounter then opens, where you or anyone working on this chart can keep editing, add orders and prescriptions, and <b>Sign &amp; submit</b> it.</p>
             </div>
@@ -5249,7 +5259,7 @@
                 sections: noteSections,
                 // A phone call has no vitals or exam to record (owner, 2026-10-02).
                 fixedBlocks: visit && visit.modality === 'phone'
-                  ? ['chiefConcern', 'subjective', 'assessment', 'plan']
+                  ? []
                   : ['chiefConcern', 'subjective', 'vitals', 'exam', 'assessment', 'plan'],
                 extraBlocks: [], extraLabel: 'More of this note',
                 stored: f.sections, labelFor: sectionLabelFor
