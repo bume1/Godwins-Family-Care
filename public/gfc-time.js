@@ -76,6 +76,27 @@
   // "9:00 AM"
   const fmtTime = (v) => fmt(v, { hour: 'numeric', minute: '2-digit' });
 
+  // A STORED WALL-CLOCK STRING -> "9:00 AM". Availability windows, and any
+  // other value a person typed into an `<input type="time">`, are kept as
+  // "HH:MM" with NO date and NO zone — "Tue 18:00–23:00" means those hours on
+  // any Tuesday. So this is a pure string conversion and deliberately never
+  // builds a Date: doing that would invent a date and a zone the value does
+  // not have, and then render whatever that invention happened to mean.
+  //
+  // The HH:MM form stays on the wire and in storage — it is what
+  // `<input type="time">` requires and what the matcher compares — so this is
+  // for DISPLAY only. 00:xx reads as 12:xx AM and 12:xx stays PM.
+  function fmtClock(hhmm) {
+    if (EMPTY(hhmm)) return '';
+    const m = /^(\d{1,2}):([0-5]\d)$/.exec(String(hhmm).trim());
+    if (!m) return String(hhmm);          // not ours to reformat; show it as-is
+    const h24 = Number(m[1]);
+    if (h24 > 23) return String(hhmm);
+    const suffix = h24 < 12 ? 'AM' : 'PM';
+    const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+    return `${h12}:${m[2]} ${suffix}`;
+  }
+
   // "Thu, Sep 17 · 9:00 AM" — the caregiver schedule and the admin board.
   function fmtDayTime(v) {
     if (EMPTY(v)) return '';
@@ -188,7 +209,7 @@
 
   return {
     PRACTICE_TIMEZONE, LOCALE,
-    fmtDateTime, fmtDate, fmtTime, fmtDayTime, fmtLongDayTime,
+    fmtDateTime, fmtDate, fmtTime, fmtClock, fmtDayTime, fmtLongDayTime,
     zonedParts, instantFromZoned, installDefaultTimeZone
   };
 });

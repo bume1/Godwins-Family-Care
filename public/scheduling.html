@@ -144,6 +144,16 @@ const fmtRange = (a, b) => {
   return isNaN(end.getTime()) ? fmtWhen(a)
     : `${fmtWhen(a)} – ${window.GFC_TIME ? window.GFC_TIME.fmtTime(end) : ''}`;
 };
+// A STORED "HH:MM" -> "6:00 PM". Availability windows and shift requests keep
+// the wall-clock string a person typed into an `<input type="time">`, which has
+// no date and no zone, so it cannot go through fmtTime (that takes an instant).
+// Shown in 12-hour because nobody at GFC reads a rota in 24-hour.
+const fmtClock = (hhmm) => (window.GFC_TIME ? window.GFC_TIME.fmtClock(hhmm) : String(hhmm || ''));
+// A bare calendar date ("2026-10-05") read at midday UTC, so every zone west
+// of UTC lands on the same day — the fix the 2026-09-29 sweep made everywhere.
+const fmtPlainDate = (ymd) => (/^\d{4}-\d{2}-\d{2}$/.test(String(ymd || ''))
+  ? (window.GFC_TIME ? window.GFC_TIME.fmtDate(`${ymd}T12:00:00Z`) : String(ymd))
+  : String(ymd || ''));
 const titleize = (s) => String(s || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 const todayPlus = (days) => new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
 
@@ -1427,7 +1437,7 @@ const App = () => {
               : requests.map(r => (
                 <div className="row" style={{ display: 'block' }} key={r.id}>
                   <div><b>{r.client_name || r.clientName}</b> <span className="chip open">{titleize(r.status)}</span></div>
-                  <div className="mu">{r.date} · {r.start}–{r.end} — requested by {r.requested_by_name || r.requestedByName}</div>
+                  <div className="mu">{fmtPlainDate(r.date)} · {fmtClock(r.start)}–{fmtClock(r.end)} — requested by {r.requested_by_name || r.requestedByName}</div>
                   {r.care_needs && <div className="mu">{r.care_needs}</div>}
                   {/* Enrollment as it stood when they ASKED. Surfaced here rather
                       than blocking the ask, so whoever works this queue knows
@@ -1460,7 +1470,7 @@ const App = () => {
                         been replaced. */}
                     {' '}<span className={`chip ${a.current ? 'confirmed' : ''}`}>{a.current ? 'In force' : 'Superseded'}</span>
                   </div>
-                  <div className="mu">{(a.windows || []).map(w => `${w.day} ${w.start}–${w.end}`).join(' · ')}</div>
+                  <div className="mu">{(a.windows || []).map(w => `${w.day} ${fmtClock(w.start)}–${fmtClock(w.end)}`).join(' · ')}</div>
                   {(a.blackoutDates || []).length > 0 && <div className="mu">Unavailable: {a.blackoutDates.join(', ')}</div>}
                   {a.status !== 'reviewed' && (
                     <div className="btns">

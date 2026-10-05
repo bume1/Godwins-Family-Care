@@ -2702,7 +2702,10 @@ app.use(caregiverRoutes({ db, config, logActivity, queueNotification, getUsers, 
   // ~7000 lines below this mount, so naming it here reads it in its temporal
   // dead zone and the app dies at require time. The arrow closes over the
   // binding and is only called on a request, long after initialization.
-  detectFileType: (buf) => detectFileType(buf) }));
+  detectFileType: (buf) => detectFileType(buf),
+  // The visit-log download (2026-10-03). `pdfGenerator` is required at the top
+  // of this file, so this one is safe to pass by reference.
+  pdfGenerator }));
 
 // PHCP scheduling (Session 7) — page shell + /api/scheduling/*. App-side only;
 // clinical appointments stay in OpenEMR (Session 4.2). Two systems by design.
