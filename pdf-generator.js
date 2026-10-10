@@ -1317,161 +1317,229 @@ async function generateVisitLogPDF(d) {
  * @param {string}  d.relationship
  * @returns {Promise<Buffer>}
  */
+// Plain-text value for a form field. A structured address (or any object) is
+// flattened rather than printed as "[object Object]"; null/undefined is blank.
+function roiText(v) {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'object') {
+    if (Array.isArray(v)) return v.map(roiText).filter(Boolean).join(', ');
+    const parts = [v.street || v.line1 || v.address1, v.line2 || v.address2 || v.unit, v.city,
+      [v.state, v.zip || v.postalCode].filter(Boolean).join(' ')];
+    return parts.map(p => String(p || '').trim()).filter(Boolean).join(', ');
+  }
+  return String(v).replace(/\s+/g, ' ').trim();
+}
+
+// A date as MM/DD/YYYY. A bare YYYY-MM-DD is read as a calendar date (never
+// through the clock, which would move it a day in Georgia's evening); anything
+// unparseable is printed as typed rather than dropped.
+function roiDate(v) {
+  const s = roiText(v);
+  if (!s) return '';
+  // Only a BARE date is a calendar date. A full timestamp goes through the
+  // clock in Georgia, or an evening signing prints as tomorrow.
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) return `${m[2]}/${m[3]}/${m[1]}`;
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return s;
+  return d.toLocaleDateString('en-US', { timeZone: 'America/New_York', month: '2-digit', day: '2-digit', year: 'numeric' });
+}
+
+// ONE page, built to survive a fax:
+//  - checkboxes are DRAWN (an outlined box, a stroked check when ticked). The
+//    old version printed the ☑/☐ characters in Helvetica, which cannot encode
+//    them, so every box came out as "&" ticked or not: a provider could not
+//    tell which records were asked for, and the specially protected line read
+//    as authorized when the patient had said no.
+//  - the protected-information answer is ALSO written in words, so it survives
+//    a fax that loses the box.
+//  - the patient, date of birth and provider are on every page, top and
+//    bottom, so a page that gets separated can still be matched.
+//  - the expiration printed is the date that actually applies, never a blank.
 async function generateProviderROIPDF(d) {
   return new Promise((resolve, reject) => {
     try {
-      const doc = new PDFDocument({ size: 'LETTER', margin: 44, bufferPages: true });
+      const doc = new PDFDocument({ size: 'LETTER', margins: { top: 36, bottom: 36, left: 40, right: 40 }, bufferPages: true });
       const chunks = [];
       doc.on('data', c => chunks.push(c));
       doc.on('end', () => resolve(Buffer.concat(chunks)));
       doc.on('error', reject);
 
-      const L = 44;               // left margin
-      const R = 612 - 44;         // right edge (LETTER width 612)
-      const W = R - L;            // content width
+      const L = 40, R = 612 - 40, W = R - L;
+      const BOTTOM = 792 - 38; // keep clear of the identifier strip
       const cat = d.categories || {};
       const provider = d.provider || {};
-      const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
-      let y = 40;
+      const patientName = roiText(d.patientName);
+      const patientDOB = roiDate(d.patientDOB);
+      const providerName = roiText(provider.name);
+      let y = 50;
 
-      const chk = (on) => (on ? '☑' : '☐'); // ☑ / ☐
+      const ensure = (h) => { if (y + h > BOTTOM) { doc.addPage(); y = 50; } };
 
-      // Section bar: navy strip, gold numeral, white caps label.
-      const section = (num, label) => {
-        if (y > 700) { doc.addPage(); y = 44; }
-        y += 6;
-        doc.rect(L, y, W, 17).fill(ROI_COLORS.navy);
-        doc.fontSize(9).fillColor(ROI_COLORS.gold).font('Helvetica-Bold').text(String(num), L + 8, y + 4.5);
-        doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(8.5)
-          .text(label.toUpperCase(), L + 22, y + 5, { characterSpacing: 0.6 });
-        y += 24;
+      // `room` is what the section needs below its bar, so a bar is never
+      // left alone at the foot of a page with its content on the next.
+      const section = (num, label, room = 30) => {
+        ensure(24 + room);
+        y += 4;
+        doc.rect(L, y, W, 15).fill(ROI_COLORS.navy);
+        doc.fontSize(8.5).fillColor(ROI_COLORS.gold).font('Helvetica-Bold').text(String(num), L + 7, y + 4, { lineBreak: false });
+        doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(8)
+          .text(label.toUpperCase(), L + 20, y + 4, { characterSpacing: 0.5, lineBreak: false });
+        y += 20;
         doc.fillColor(ROI_COLORS.ink);
       };
 
-      // Labeled underlined value field (one or two columns).
+      // Values wrap (up to two lines) rather than being cut off: a provider's
+      // name or address truncated on a release is a release nobody can act on.
       const fieldRow = (fields) => {
-        if (y > 715) { doc.addPage(); y = 44; }
-        const gap = 16;
-        const colW = (W - gap * (fields.length - 1)) / fields.length;
-        fields.forEach((f, i) => {
-          const x = L + i * (colW + gap);
-          doc.fontSize(7).fillColor(ROI_COLORS.muted).font('Helvetica').text((f.label || '').toUpperCase(), x, y, { width: colW, characterSpacing: 0.4 });
-          doc.fontSize(10.5).fillColor(ROI_COLORS.ink).font('Helvetica').text(f.value || ' ', x, y + 10, { width: colW });
-          doc.moveTo(x, y + 26).lineTo(x + colW, y + 26).strokeColor(ROI_COLORS.line).lineWidth(0.7).stroke();
+        const gap = 14;
+        const totalW = W - gap * (fields.length - 1);
+        const weights = fields.map(f => f.weight || 1);
+        const sum = weights.reduce((a, b) => a + b, 0);
+        doc.fontSize(10).font('Helvetica');
+        const cols = fields.map((f, i) => {
+          const w = totalW * weights[i] / sum;
+          const text = roiText(f.value) || ' ';
+          return { f, w, text, h: Math.min(24, doc.heightOfString(text, { width: w })) };
         });
-        y += 36;
+        const valueH = Math.max(12, ...cols.map(c => c.h));
+        ensure(valueH + 16);
+        let x = L;
+        cols.forEach(c => {
+          doc.fontSize(6.5).fillColor(ROI_COLORS.muted).font('Helvetica').text((c.f.label || '').toUpperCase(), x, y, { width: c.w, characterSpacing: 0.3, lineBreak: false });
+          doc.fontSize(10).fillColor(ROI_COLORS.ink).font('Helvetica').text(c.text, x, y + 8, { width: c.w, height: 24, ellipsis: true });
+          doc.moveTo(x, y + 10 + valueH).lineTo(x + c.w, y + 10 + valueH).strokeColor(ROI_COLORS.line).lineWidth(0.6).stroke();
+          x += c.w + gap;
+        });
+        y += valueH + 16;
       };
 
-      const checkLine = (on, label, indent) => {
-        if (y > 730) { doc.addPage(); y = 44; }
-        const x = L + (indent || 0);
-        doc.fontSize(11).fillColor(ROI_COLORS.navy).font('Helvetica').text(chk(on), x, y - 1, { continued: false });
-        doc.fontSize(9.5).fillColor(ROI_COLORS.ink).font('Helvetica').text(label, x + 16, y, { width: W - 16 - (indent || 0) });
-        y += Math.max(15, doc.heightOfString(label, { width: W - 16 - (indent || 0) }) + 4);
+      // A drawn checkbox: outlined square, plus a heavy check stroke when on.
+      const box = (x, yy, on) => {
+        doc.lineWidth(0.9).strokeColor('#000000').rect(x, yy, 9, 9).stroke();
+        if (on) {
+          doc.lineWidth(1.6).strokeColor('#000000')
+            .moveTo(x + 1.8, yy + 4.6).lineTo(x + 3.9, yy + 7).lineTo(x + 7.6, yy + 1.8).stroke();
+        }
+      };
+      const checkLine = (on, label, opts = {}) => {
+        const w = W - 16;
+        doc.fontSize(9).font(opts.bold ? 'Helvetica-Bold' : 'Helvetica');
+        const h = Math.max(13, doc.heightOfString(label, { width: w }) + 3);
+        ensure(h);
+        box(L, y, on);
+        doc.fillColor(ROI_COLORS.ink).text(label, L + 15, y, { width: w });
+        y += h;
       };
 
       // ── Header ───────────────────────────────────────────────
-      doc.fontSize(13).fillColor(ROI_COLORS.navy).font('Helvetica-Bold').text(ROI_ORG.name, L, y);
-      doc.fontSize(8).fillColor(ROI_COLORS.muted).font('Helvetica')
-        .text(`${ROI_ORG.address}   Tel ${ROI_ORG.tel}   Fax ${ROI_ORG.fax}`, L, y + 17, { width: W, align: 'right' });
-      y += 30;
-      doc.rect(L, y, W, 2).fill(ROI_COLORS.goldRule);
-      y += 12;
+      doc.fontSize(12).fillColor(ROI_COLORS.navy).font('Helvetica-Bold').text(ROI_ORG.name, L, y, { lineBreak: false });
+      doc.fontSize(7.5).fillColor(ROI_COLORS.muted).font('Helvetica')
+        .text(`${ROI_ORG.address}   Tel ${ROI_ORG.tel}   Fax ${ROI_ORG.fax}`, L, y + 3, { width: W, align: 'right', lineBreak: false });
+      y += 18;
+      doc.rect(L, y, W, 1.5).fill(ROI_COLORS.goldRule);
+      y += 8;
 
-      // ── Title ────────────────────────────────────────────────
-      doc.fontSize(21).fillColor(ROI_COLORS.navy).font('Times-Bold').text('Authorization to Obtain Medical Records', L, y);
-      y += 28;
-      doc.fontSize(9).fillColor(ROI_COLORS.muted).font('Times-Italic')
-        .text('HIPAA authorization for Godwins Family Care LLC to request and receive protected health information.', L, y, { width: W });
-      y += 16;
-      doc.fontSize(9.5).fillColor(ROI_COLORS.ink).font('Helvetica')
-        .text('I authorize the provider or facility named below to release the medical records described to Godwins Family Care LLC, for the purpose of my treatment, care coordination, and care planning.', L, y, { width: W });
-      y += doc.heightOfString('I authorize the provider or facility named below to release the medical records described to Godwins Family Care LLC, for the purpose of my treatment, care coordination, and care planning.', { width: W }) + 2;
+      doc.fontSize(17).fillColor(ROI_COLORS.navy).font('Times-Bold').text('Authorization to Obtain Medical Records', L, y, { lineBreak: false });
+      y += 21;
+      const intro = 'I authorize the provider or facility named below to release the medical records described to Godwins Family Care LLC, for the purpose of my treatment, care coordination, and care planning.';
+      doc.fontSize(8.5).fillColor(ROI_COLORS.ink).font('Helvetica').text(intro, L, y, { width: W });
+      y += doc.heightOfString(intro, { width: W }) + 2;
 
-      // ── Section 1: Patient ───────────────────────────────────
+      // ── 1 Patient ────────────────────────────────────────────
       section(1, 'Patient (whose records)');
-      fieldRow([{ label: 'Patient full name', value: d.patientName }, { label: 'Date of birth', value: d.patientDOB }]);
+      fieldRow([{ label: 'Patient full name', value: patientName }, { label: 'Date of birth', value: patientDOB }]);
       fieldRow([{ label: 'Address', value: d.patientAddress }, { label: 'Phone', value: d.patientPhone }]);
 
-      // ── Section 2: Release from (this provider) ──────────────
+      // ── 2 Release from ───────────────────────────────────────
       section(2, 'Release records from (provider or facility)');
-      fieldRow([{ label: 'Provider / facility name', value: provider.name }, { label: 'Department', value: provider.dept }]);
-      fieldRow([{ label: 'Address', value: provider.address }]);
-      fieldRow([{ label: 'Phone', value: provider.phone }, { label: 'Fax', value: provider.fax }]);
+      fieldRow([{ label: 'Provider / facility name', value: providerName, weight: 2 }, { label: 'Department', value: provider.dept }]);
+      fieldRow([{ label: 'Address', value: provider.address, weight: 2 }, { label: 'Phone', value: provider.phone }, { label: 'Fax', value: provider.fax }]);
 
-      // ── Section 3: Release to (static) ───────────────────────
+      // ── 3 Release to ─────────────────────────────────────────
       section(3, 'Release records to');
-      doc.rect(L, y, W, 34).fillAndStroke(ROI_COLORS.cream, '#cccccc');
-      doc.fontSize(11).fillColor(ROI_COLORS.navy).font('Helvetica-Bold').text(ROI_ORG.name, L + 10, y + 7);
-      doc.fontSize(9).fillColor(ROI_COLORS.ink).font('Helvetica')
-        .text(`${ROI_ORG.address}   Tel ${ROI_ORG.tel}   Fax ${ROI_ORG.fax}`, L + 10, y + 21, { width: W - 20 });
-      y += 44;
+      ensure(26);
+      doc.lineWidth(0.6).rect(L, y, W, 24).strokeColor('#999999').stroke();
+      doc.fontSize(9.5).fillColor(ROI_COLORS.navy).font('Helvetica-Bold').text(ROI_ORG.name, L + 8, y + 4, { lineBreak: false });
+      doc.fontSize(8).fillColor(ROI_COLORS.ink).font('Helvetica')
+        .text(`${ROI_ORG.address}   Tel ${ROI_ORG.tel}   Fax ${ROI_ORG.fax}`, L + 8, y + 14, { width: W - 16, lineBreak: false });
+      y += 30;
 
-      // ── Section 4: Information authorized ────────────────────
-      section(4, 'Information authorized for release');
+      // ── 4 Information authorized ─────────────────────────────
+      section(4, 'Information authorized for release', 60);
       const catKeys = ['hp', 'lab', 'diag', 'imaging', 'meds', 'discharge', 'allergies', 'immune'];
-      // Two-column checkbox grid.
+      ensure(Math.ceil(catKeys.length / 2) * 13 + 4);
       const colW2 = W / 2;
-      let gridStartY = y;
+      const gridTop = y;
       catKeys.forEach((k, i) => {
-        const col = i % 2;
-        const rowIdx = Math.floor(i / 2);
-        const x = L + col * colW2;
-        const yy = gridStartY + rowIdx * 16;
-        doc.fontSize(11).fillColor(ROI_COLORS.navy).font('Helvetica').text(chk(!!cat[k]), x, yy - 1);
-        doc.fontSize(9).fillColor(ROI_COLORS.ink).font('Helvetica').text(ROI_CATEGORY_LABELS[k], x + 15, yy, { width: colW2 - 20 });
+        const x = L + (i % 2) * colW2;
+        const yy = gridTop + Math.floor(i / 2) * 13;
+        box(x, yy, !!cat[k]);
+        doc.fontSize(9).fillColor(ROI_COLORS.ink).font('Helvetica').text(ROI_CATEGORY_LABELS[k], x + 15, yy, { width: colW2 - 20, lineBreak: false });
       });
-      y = gridStartY + Math.ceil(catKeys.length / 2) * 16 + 2;
-      checkLine(!!cat.other, 'Other: ' + (cat.otherText || ''), 0);
-      // Specially protected info opt-in.
-      y += 2;
-      doc.fontSize(8.5).fillColor(ROI_COLORS.muted).font('Helvetica-Oblique')
-        .text('Specially protected information. Records of mental health, substance use treatment, HIV/AIDS, or genetic testing are released ONLY if specifically authorized here:', L, y, { width: W });
-      y += doc.heightOfString('Specially protected information. Records of mental health, substance use treatment, HIV/AIDS, or genetic testing are released ONLY if specifically authorized here:', { width: W }) + 4;
-      checkLine(d.includesProtected === true, 'Yes, include specially protected information listed above', 0);
+      y = gridTop + Math.ceil(catKeys.length / 2) * 13 + 1;
+      checkLine(!!cat.other, 'Other: ' + (cat.other ? roiText(cat.otherText) : ''));
+      const protNote = 'Specially protected information. Records of mental health, substance use treatment, HIV/AIDS, or genetic testing are released ONLY if specifically authorized here:';
+      doc.fontSize(7.5).font('Helvetica-Oblique');
+      ensure(doc.heightOfString(protNote, { width: W }) + 18);
+      doc.fillColor(ROI_COLORS.muted).text(protNote, L, y + 1, { width: W });
+      y += doc.heightOfString(protNote, { width: W }) + 3;
+      const prot = d.includesProtected === true;
+      checkLine(prot, prot
+        ? 'YES: specially protected information IS authorized for release.'
+        : 'NOT AUTHORIZED: do not release specially protected information.', { bold: true });
 
-      // ── Section 5: Purpose ───────────────────────────────────
+      // ── 5 Purpose ────────────────────────────────────────────
       section(5, 'Purpose of disclosure');
-      checkLine(d.purposeTreatment !== false, 'Treatment, care coordination, and care planning', 0);
-      if (d.purposeOther) checkLine(true, 'Other: ' + (d.purposeOtherText || ''), 0);
+      checkLine(d.purposeTreatment !== false, 'Treatment, care coordination, and care planning');
+      if (d.purposeOther && roiText(d.purposeOtherText)) checkLine(true, 'Other: ' + roiText(d.purposeOtherText));
 
-      // ── Section 6: Expiration ────────────────────────────────
+      // ── 6 Expiration ─────────────────────────────────────────
       section(6, 'Expiration');
-      doc.fontSize(9.5).fillColor(ROI_COLORS.ink).font('Helvetica')
-        .text('Unless revoked sooner, this authorization expires one year from the date signed, or on the earlier of:', L, y, { width: W });
-      y += 16;
-      fieldRow([{ label: 'Expiration date (optional)', value: d.expDate }, { label: 'Expiration event (optional)', value: d.expEvent }]);
+      fieldRow([
+        { label: 'This authorization expires on', value: roiDate(d.expDate) || 'One year from the date signed' },
+        { label: 'Or on this event, if sooner', value: roiText(d.expEvent) || 'None stated' }
+      ]);
 
-      // ── Section 7: Rights (verbatim, required element) ───────
-      section(7, 'Your rights');
-      doc.fontSize(9).fillColor(ROI_COLORS.ink).font('Helvetica').text(AUTH_RIGHTS_TEXT, L, y, { width: W, align: 'left', lineGap: 1.5 });
-      y += doc.heightOfString(AUTH_RIGHTS_TEXT, { width: W, lineGap: 1.5 }) + 6;
+      // ── 7 Rights ─────────────────────────────────────────────
+      section(7, 'Your rights', 44);
+      doc.fontSize(8).font('Helvetica');
+      const rightsH = doc.heightOfString(AUTH_RIGHTS_TEXT, { width: W, lineGap: 1 });
+      ensure(rightsH + 4);
+      doc.fillColor(ROI_COLORS.ink).text(AUTH_RIGHTS_TEXT, L, y, { width: W, lineGap: 1 });
+      y += rightsH + 4;
 
-      // ── Section 8: Signature ─────────────────────────────────
-      section(8, 'Signature');
-      if (y > 640) { doc.addPage(); y = 44; }
-      const sigBoxY = y;
-      doc.fontSize(7).fillColor(ROI_COLORS.muted).font('Helvetica').text('SIGNATURE OF PATIENT OR PERSONAL REPRESENTATIVE', L, sigBoxY);
-      // Embed the canvas signature image.
+      // ── 8 Signature ──────────────────────────────────────────
+      section(8, 'Signature', 70);
+      const sigTop = y;
+      doc.fontSize(6.5).fillColor(ROI_COLORS.muted).font('Helvetica').text('SIGNATURE OF PATIENT OR PERSONAL REPRESENTATIVE', L, sigTop, { lineBreak: false });
       const sig = d.signatureImageB64;
       if (typeof sig === 'string' && sig.startsWith('data:image')) {
         try {
-          const b64 = sig.slice(sig.indexOf(',') + 1);
-          const buf = Buffer.from(b64, 'base64');
-          doc.image(buf, L, sigBoxY + 10, { fit: [240, 46] });
-        } catch (e) { /* non-fatal: leave signature area blank */ }
+          doc.image(Buffer.from(sig.slice(sig.indexOf(',') + 1), 'base64'), L, sigTop + 7, { fit: [220, 28] });
+        } catch (e) { /* unreadable image: leave the line blank rather than fail the form */ }
       }
-      doc.moveTo(L, sigBoxY + 58).lineTo(L + 300, sigBoxY + 58).strokeColor(ROI_COLORS.line).lineWidth(0.7).stroke();
-      // Date to the right.
-      doc.fontSize(7).fillColor(ROI_COLORS.muted).font('Helvetica').text('DATE', L + 330, sigBoxY);
-      doc.fontSize(10.5).fillColor(ROI_COLORS.ink).font('Helvetica').text(d.signedDate || today, L + 330, sigBoxY + 12);
-      doc.moveTo(L + 330, sigBoxY + 58).lineTo(R, sigBoxY + 58).strokeColor(ROI_COLORS.line).lineWidth(0.7).stroke();
-      y = sigBoxY + 66;
+      doc.moveTo(L, sigTop + 37).lineTo(L + 300, sigTop + 37).strokeColor(ROI_COLORS.line).lineWidth(0.6).stroke();
+      doc.fontSize(6.5).fillColor(ROI_COLORS.muted).font('Helvetica').text('DATE SIGNED', L + 320, sigTop, { lineBreak: false });
+      doc.fontSize(10).fillColor(ROI_COLORS.ink).font('Helvetica').text(roiDate(d.signedDate) || ' ', L + 320, sigTop + 20, { lineBreak: false });
+      doc.moveTo(L + 320, sigTop + 37).lineTo(R, sigTop + 37).strokeColor(ROI_COLORS.line).lineWidth(0.6).stroke();
+      y = sigTop + 42;
       fieldRow([{ label: 'Printed name', value: d.printedName }, { label: 'If representative, relationship / authority', value: d.relationship }]);
 
-      // ── Footer ───────────────────────────────────────────────
-      doc.fontSize(7.5).fillColor(ROI_COLORS.muted).font('Helvetica-Oblique')
-        .text(`${ROI_ORG.name}  ·  Authorization to Obtain Medical Records  ·  Submitted ${today}`, L, Math.min(y + 8, 760), { width: W });
+      // Identifiers on every page, top and bottom. Margins are dropped first so
+      // writing near the edge can never make pdfkit add a page of its own.
+      const range = doc.bufferedPageRange();
+      const ident = `Patient: ${patientName || '—'}   ·   DOB: ${patientDOB || '—'}   ·   Release from: ${providerName || '—'}`;
+      for (let i = range.start; i < range.start + range.count; i++) {
+        doc.switchToPage(i);
+        doc.page.margins.top = 0; doc.page.margins.bottom = 0;
+        const page = `Page ${i - range.start + 1} of ${range.count}`;
+        doc.fontSize(7).fillColor('#000000').font('Helvetica');
+        doc.text(ident, L, 22, { width: W - 70, lineBreak: false, ellipsis: true });
+        doc.text(page, L, 22, { width: W, align: 'right', lineBreak: false });
+        doc.text(ident, L, 792 - 28, { width: W - 70, lineBreak: false, ellipsis: true });
+        doc.text(page, L, 792 - 28, { width: W, align: 'right', lineBreak: false });
+      }
 
       doc.end();
     } catch (err) {
@@ -2382,6 +2450,8 @@ module.exports = {
   generateFaceSheetPDF,
   renderConsentBody,
   generateProviderROIPDF,
+  roiText,
+  roiDate,
   generateVisitLogPDF,
   generateCarePlanPDF,
   generateRequisitionPDF,

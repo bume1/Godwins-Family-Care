@@ -345,9 +345,11 @@ const buildChartDocumentIndex = (input) => {
       date: a.created_at || a.signed_at || null,
       contentType: 'application/pdf',
       source: CHART_DOC_SOURCE.APP,
-      openable: !!a.generated_pdf_drive_url,
+      // Always openable: the copy is rendered from the stored release, so it
+      // does not depend on the Drive upload having worked.
+      openable: true,
       inChart: false,
-      note: a.generated_pdf_drive_url ? null : 'No stored copy on file'
+      note: null
     });
   }
 

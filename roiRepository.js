@@ -174,6 +174,176 @@ function contentHash(parts) {
   return h.digest('hex');
 }
 
+// ------------------------------------------------------------------
+// Submission hygiene for the online form (2026-10-10 rebuild).
+//
+// The form produced a pile of PDFs with broken content. Three causes live
+// here: providers were taken as typed (an object, a stray space or a second
+// copy of the same practice each became its own authorization), a fax number
+// was never checked, and the expiration a patient chose was stored but never
+// reconciled with the one-year limit the form itself states.
+// ------------------------------------------------------------------
+const MAX_PROVIDERS_PER_SUBMISSION = 10;
+const FIELD_LIMITS = Object.freeze({ name: 120, dept: 80, address: 200, phone: 30, fax: 30, otherText: 200, purposeOtherText: 200, expEvent: 120 });
+
+// A value as plain, single-line text. An object (a structured address) is
+// flattened rather than becoming "[object Object]" on a release.
+function cleanText(v, max) {
+  let out;
+  if (v === null || v === undefined) out = '';
+  else if (typeof v === 'object') {
+    out = Array.isArray(v) ? v.map(x => cleanText(x)).filter(Boolean).join(', ')
+      : [v.street || v.line1 || v.address1, v.line2 || v.address2 || v.unit, v.city, [v.state, v.zip || v.postalCode].filter(Boolean).join(' ')]
+        .map(x => String(x || '').trim()).filter(Boolean).join(', ');
+  } else out = String(v);
+  out = out.replace(/\s+/g, ' ').trim();
+  return max ? out.slice(0, max) : out;
+}
+
+// Two entries are one provider when their names match once case, punctuation,
+// a leading "Dr" and spacing are set aside: "Dr. Smith" and "dr smith" are the
+// same office, and two releases to one office is two disclosures.
+function providerKey(name) {
+  return cleanText(name).toLowerCase()
+    .replace(/[^a-z0-9 ]/g, ' ')
+    .replace(/^\s*(dr|doctor)\s+/, '')
+    .replace(/\s+/g, ' ').trim();
+}
+
+// A US fax number as 123-456-7890. Blank is allowed (the office can add it);
+// anything that is not ten digits is refused, since a release faxed to a
+// wrong number is a disclosure to a stranger.
+function normalizeFax(v) {
+  const raw = cleanText(v);
+  if (!raw) return { value: '', ok: true };
+  let digits = raw.replace(/\D/g, '');
+  if (digits.length === 11 && digits[0] === '1') digits = digits.slice(1);
+  if (digits.length !== 10) return { value: raw, ok: false };
+  return { value: `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`, ok: true };
+}
+
+// Clean, de-duplicate and check the provider cards from one submission.
+// Returns { providers, errors } — errors keyed `providers` or `providers.<i>.fax`.
+function prepareProviders(list) {
+  const errors = {};
+  const byKey = new Map();
+  (Array.isArray(list) ? list : []).forEach((p, i) => {
+    if (!p || typeof p !== 'object') return;
+    const name = cleanText(p.name || p.provider_name, FIELD_LIMITS.name);
+    if (!name) return;
+    const fax = normalizeFax(p.fax);
+    if (!fax.ok) errors[`providers.${i}.fax`] = `The fax number for ${name} is not a 10-digit number.`;
+    const row = {
+      provider_name: name,
+      dept: cleanText(p.dept, FIELD_LIMITS.dept),
+      address: cleanText(p.address, FIELD_LIMITS.address),
+      phone: cleanText(p.phone, FIELD_LIMITS.phone),
+      fax: fax.value
+    };
+    const key = providerKey(name);
+    const prev = byKey.get(key);
+    if (!prev) { byKey.set(key, row); return; }
+    // The same office twice: keep one, filling any blank from the other.
+    for (const k of ['dept', 'address', 'phone', 'fax']) if (!prev[k] && row[k]) prev[k] = row[k];
+  });
+  const providers = [...byKey.values()];
+  if (providers.length === 0) errors.providers = 'Add at least one provider before submitting.';
+  if (providers.length > MAX_PROVIDERS_PER_SUBMISSION) {
+    errors.providers = `Up to ${MAX_PROVIDERS_PER_SUBMISSION} providers can be authorized in one form.`;
+  }
+  return { providers, errors };
+}
+
+// The calendar date (YYYY-MM-DD) an authorization actually expires on: the
+// date the patient chose, but never later than one year from signing, which is
+// what the form tells them. Accepts YYYY-MM-DD or MM/DD/YYYY.
+function resolveExpiration(input, signedAtIso) {
+  const signedDay = String(signedAtIso || new Date().toISOString()).slice(0, 10);
+  const [sy, sm, sd] = signedDay.split('-').map(Number);
+  // Built through Date so a Feb 29 signing lands on a real day (Mar 1).
+  const oneYear = new Date(Date.UTC(sy + 1, sm - 1, sd)).toISOString().slice(0, 10);
+  const raw = cleanText(input);
+  if (!raw) return { date: oneYear, chosen: false };
+  let m = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  let iso = m ? raw : null;
+  if (!iso) {
+    m = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (m) iso = `${m[3]}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`;
+  }
+  const t = iso ? Date.parse(`${iso}T12:00:00Z`) : NaN;
+  if (!iso || Number.isNaN(t) || new Date(t).toISOString().slice(0, 10) !== iso) {
+    return { error: 'Expiration date is not a valid date.' };
+  }
+  if (iso <= signedDay) return { error: 'Expiration date must be after today.' };
+  return { date: iso < oneYear ? iso : oneYear, chosen: true };
+}
+
+// Is this authorization still in force on `todayIso`?
+function isAuthorizationActive(event, todayIso) {
+  if (!event || event.revoked_at) return false;
+  const today = String(todayIso || new Date().toISOString()).slice(0, 10);
+  return !event.expiration_date || String(event.expiration_date).slice(0, 10) >= today;
+}
+
+// For the prefill: which of a client's providers already have a release in
+// force. Keyed by providerKey → { signedAt, expiresOn }, newest signing wins.
+function activeAuthorizationsByProvider(events, authRows, todayIso) {
+  const byEvent = new Map((events || []).map(e => [e.id, e]));
+  const out = {};
+  for (const a of authRows || []) {
+    const e = byEvent.get(a.consent_event_id);
+    if (!isAuthorizationActive(e, todayIso)) continue;
+    const key = providerKey(a.provider_name);
+    if (!key) continue;
+    if (!out[key] || String(e.signed_at) > String(out[key].signedAt)) {
+      out[key] = { signedAt: e.signed_at, expiresOn: e.expiration_date || null };
+    }
+  }
+  return out;
+}
+
+// What the PDF prints, built from the STORED records. Generating at signing
+// and re-rendering later both go through here, so the copy a clinician opens
+// says what the copy the provider received said.
+function pdfInputFromRecords({ event, auth, categoryRows, patient, labelDate }) {
+  const ev = event || {};
+  const cats = {};
+  let otherText = '';
+  for (const r of categoryRows || []) {
+    if (!r || !RECORD_CATEGORIES.includes(r.category)) continue; // protected categories never appear as boxes
+    cats[r.category] = true;
+    if (r.category === 'other') otherText = r.other_text || '';
+  }
+  if (otherText) cats.otherText = otherText;
+  const pt = ev.patient_snapshot || patient || {};
+  return {
+    patientName: pt.patientName || '',
+    patientDOB: pt.patientDOB || '',
+    patientAddress: pt.patientAddress || '',
+    patientPhone: pt.patientPhone || '',
+    provider: { name: auth.provider_name, dept: auth.dept, address: auth.address, phone: auth.phone, fax: auth.fax },
+    categories: cats,
+    includesProtected: ev.includes_protected_info === true,
+    purposeTreatment: ev.purpose_treatment !== false,
+    purposeOther: !!ev.purpose_other_text,
+    purposeOtherText: ev.purpose_other_text || '',
+    expDate: ev.expiration_date || '',
+    expEvent: ev.expiration_event || '',
+    signatureImageB64: ev.signature_image_b64 || '',
+    signedDate: labelDate || ev.signed_at || '',
+    printedName: ev.printed_name || '',
+    relationship: ev.relationship_authority || ''
+  };
+}
+
+// The file name a release is stored and downloaded under.
+function roiFileName({ patientName, providerName, signedAt, seq }) {
+  const last = (cleanText(patientName) || 'Client').split(' ').pop().replace(/[^a-zA-Z0-9]/g, '') || 'Client';
+  const prov = (cleanText(providerName) || 'Provider').replace(/[^a-zA-Z0-9 ]/g, '').trim().replace(/\s+/g, '_').substring(0, 30) || 'Provider';
+  const day = String(signedAt || '').slice(0, 10).replace(/-/g, '');
+  return `ROI_${last}_${prov}_${day}${seq ? `_${seq}` : ''}.pdf`;
+}
+
 function uuid() {
   return crypto.randomUUID();
 }
@@ -219,6 +389,9 @@ function createRepository(db) {
       // 42 CFR Part 2 opt-in — defaults FALSE, only true when explicitly true.
       includes_protected_info: input.includes_protected_info === true,
       revoked_at: input.revoked_at || null, // no revocation UI this session (schema-ready)
+      // Who the release is ABOUT, as it printed at signing, so a later copy
+      // reprints the same identity even if the client record changes.
+      patient_snapshot: input.patient_snapshot || null,
       source: input.source || SOURCE.ONLINE_FORM,
       created_at: input.created_at || now
     };
@@ -335,6 +508,17 @@ module.exports = {
   validateAuthorizationElements,
   hashIp,
   contentHash,
+  MAX_PROVIDERS_PER_SUBMISSION,
+  FIELD_LIMITS,
+  cleanText,
+  providerKey,
+  normalizeFax,
+  prepareProviders,
+  resolveExpiration,
+  isAuthorizationActive,
+  activeAuthorizationsByProvider,
+  pdfInputFromRecords,
+  roiFileName,
   // Storage-bound surface:
   createRepository
 };

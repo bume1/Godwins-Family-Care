@@ -5532,19 +5532,39 @@
           <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '.6px', textTransform: 'uppercase', color: 'var(--navy)' }}>{p.label || 'Provider / facility'}</span>
           {removable && <button onClick={onRemove} style={{ background: 'none', border: 'none', color: '#B5462E', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Remove</button>}
         </div>
-        <TextField label="Provider / facility name" value={p.name} onChange={v => onChange(idx, 'name', v)} placeholder="e.g. Northside Hospital" />
-        <TextField label="Department" value={p.dept} onChange={v => onChange(idx, 'dept', v)} placeholder="e.g. Medical Records" />
-        <TextField label="Address" value={p.address} onChange={v => onChange(idx, 'address', v)} placeholder="Street, City, State ZIP" />
-        <TextField label="Phone" type="tel" value={p.phone} onChange={v => onChange(idx, 'phone', v)} />
-        <TextField label="Fax" type="tel" value={p.fax} onChange={v => onChange(idx, 'fax', v)} />
+        <TextField label="Provider / facility name" value={p.name} onChange={v => onChange(idx, 'name', v)} placeholder="e.g. Northside Hospital" maxLength={120} />
+        <TextField label="Department" value={p.dept} onChange={v => onChange(idx, 'dept', v)} placeholder="e.g. Medical Records" maxLength={80} />
+        <TextField label="Address" value={p.address} onChange={v => onChange(idx, 'address', v)} placeholder="Street, City, State ZIP" maxLength={200} />
+        <TextField label="Phone" type="tel" value={p.phone} onChange={v => onChange(idx, 'phone', v)} maxLength={30} />
+        <TextField label="Fax" type="tel" value={p.fax} onChange={v => onChange(idx, 'fax', v)} maxLength={30} />
+        {roiFaxState(p.fax) === 'bad' && <div className="err" style={{ marginTop: 4 }}>A fax number needs 10 digits, e.g. 404-555-1234.</div>}
+        {roiFaxState(p.fax) === 'blank' && (p.name || '').trim() && <div className="hint" style={{ fontSize: 11.5, color: '#8a5a00', marginTop: 4 }}>No fax number yet. Our office will need it to send this request, so add it if you have it.</div>}
       </div>
     );
+
+    // 'blank' · 'ok' · 'bad' — the same 10-digit rule the server enforces.
+    const roiFaxState = (v) => {
+      const digits = String(v || '').replace(/\D/g, '');
+      if (!digits) return 'blank';
+      return (digits.length === 10 || (digits.length === 11 && digits[0] === '1')) ? 'ok' : 'bad';
+    };
+    // YYYY-MM-DD as MM/DD/YYYY for display; anything else as typed.
+    const roiDisplayDate = (v) => {
+      const m = String(v || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+      return m ? `${m[2]}/${m[3]}/${m[1]}` : (v || '');
+    };
 
     const GfcTransferRoi = ({ token, onClose, onDone }) => {
       const [screen, setScreen] = useState('choice'); // choice | upload | form | success
       const [loaded, setLoaded] = useState(false);
       const [patient, setPatient] = useState({});
+      const [patientFromRecord, setPatientFromRecord] = useState({});
       const [providers, setProviders] = useState([]);
+      // Providers who already have a release in force: listed, not re-sent by default.
+      const [alreadySent, setAlreadySent] = useState([]);
+      const [maxProviders, setMaxProviders] = useState(10);
+      const [result, setResult] = useState(null);
+      const [signed, setSigned] = useState([]); // the client's own signed releases
       const [cats, setCats] = useState({});
       const [otherText, setOtherText] = useState('');
       const [includesProtected, setIncludesProtected] = useState(false); // 42 CFR Part 2 — defaults FALSE
@@ -5566,11 +5586,20 @@
           const r = await api.getGfcTransferRoi(token);
           if (!r.error) {
             setPatient(r.patient || {});
+            setPatientFromRecord(r.patientFromRecord || {});
+            setSigned(Array.isArray(r.authorizations) ? r.authorizations : []);
+            if (r.maxProviders) setMaxProviders(r.maxProviders);
             setPrintedName((r.patient && r.patient.patientName) || '');
-            const pre = (r.priorProviders || []).map(pp => ({
+            const toCard = pp => ({
               label: pp.roleLabel === 'pcp' ? 'Primary care physician' : pp.roleLabel === 'specialist' ? 'Specialist' : pp.roleLabel === 'hospital' ? 'Hospital / facility' : 'Provider / facility',
-              name: pp.name || '', dept: pp.dept || '', address: pp.address || '', phone: pp.phone || '', fax: pp.fax || ''
-            }));
+              name: pp.name || '', dept: pp.dept || '', address: pp.address || '', phone: pp.phone || '', fax: pp.fax || '',
+              activeAuthorization: pp.activeAuthorization || null
+            });
+            const all = (r.priorProviders || []).map(toCard);
+            // Only providers WITHOUT a release in force are pre-filled. Every
+            // provider used to be re-sent on every submission.
+            const pre = all.filter(p => !p.activeAuthorization);
+            setAlreadySent(all.filter(p => p.activeAuthorization));
             setProviders(pre.length ? pre : [{ label: 'Provider / facility', name: '', dept: '', address: '', phone: '', fax: '' }]);
           }
           setLoaded(true);
@@ -5613,7 +5642,14 @@
       };
 
       const setP = (i, k, v) => setProviders(ps => ps.map((p, idx) => idx === i ? { ...p, [k]: v } : p));
-      const addProvider = () => setProviders(ps => [...ps, { label: 'Additional provider', name: '', dept: '', address: '', phone: '', fax: '' }]);
+      const addProvider = () => setProviders(ps => ps.length >= maxProviders ? ps : [...ps, { label: 'Additional provider', name: '', dept: '', address: '', phone: '', fax: '' }]);
+      const requestAgain = (p) => {
+        setAlreadySent(list => list.filter(x => x !== p));
+        setProviders(ps => {
+          const blank = ps.length === 1 && !(ps[0].name || '').trim();
+          return [...(blank ? [] : ps), { ...p, activeAuthorization: null }];
+        });
+      };
       const rmProvider = (i) => setProviders(ps => ps.filter((_, idx) => idx !== i));
       const toggleCat = (k) => setCats(c => ({ ...c, [k]: !c[k] }));
 
@@ -5642,28 +5678,41 @@
         setErr('');
         const named = providers.filter(p => (p.name || '').trim());
         if (named.length === 0) { setErr('Add at least one provider before submitting.'); return; }
+        if (named.length > maxProviders) { setErr(`Up to ${maxProviders} providers can be authorized in one form.`); return; }
+        const badFax = named.find(p => roiFaxState(p.fax) === 'bad');
+        if (badFax) { setErr(`The fax number for ${badFax.name} needs 10 digits.`); return; }
+        if (!(patient.patientName || '').trim() || !(patient.patientDOB || '').trim()) { setErr('The patient\'s full name and date of birth are required.'); return; }
         if (sigState.current.empty) { setErr('Please draw your signature before submitting.'); return; }
         if (!printedName.trim()) { setErr('Printed name is required.'); return; }
-        const signatureImageB64 = canvasRef.current.toDataURL('image/png');
         const checkedAny = ROI_CATS.some(c => cats[c.key]) || cats.other;
         if (!checkedAny) { setErr('Select at least one type of record to request.'); return; }
+        if (cats.other && !otherText.trim()) { setErr('Describe the other records you are requesting.'); return; }
+        if (purposeOther && !purposeOtherText.trim()) { setErr('Describe the other purpose, or untick it.'); return; }
+        const signatureImageB64 = canvasRef.current.toDataURL('image/png');
         setBusy(true);
+        // Only true/false per category: the server reads nothing else.
+        const categories = {};
+        ROI_CATS.forEach(c => { categories[c.key] = !!cats[c.key]; });
+        categories.other = !!cats.other;
+        categories.otherText = cats.other ? otherText : '';
         const payload = {
+          // The server uses the record's identity; these only fill a blank.
           patientName: patient.patientName, patientDOB: patient.patientDOB, patientAddress: patient.patientAddress, patientPhone: patient.patientPhone,
           providers: named.map(p => ({ name: p.name, dept: p.dept, address: p.address, phone: p.phone, fax: p.fax })),
-          categories: { ...cats, otherText },
+          categories,
           includesProtected: includesProtected === true,
-          purposeTreatment: true, purposeOther, purposeOtherText,
+          purposeTreatment: true, purposeOther: purposeOther === true, purposeOtherText: purposeOther ? purposeOtherText : '',
           expDate, expEvent,
           signatureImageB64, printedName: printedName.trim(), relationship
         };
         const res = await api.submitGfcTransferRoi(token, payload);
         setBusy(false);
         if (res.error) {
-          if (res.fieldErrors) setErr('Missing required fields: ' + Object.values(res.fieldErrors).join(' '));
+          if (res.fieldErrors) setErr(Object.values(res.fieldErrors).join(' '));
           else setErr(res.error);
           return;
         }
+        setResult(res);
         onDone && onDone();
         setScreen('success');
       };
@@ -5684,7 +5733,18 @@
                 <i className="ti ti-check" style={{ color: 'var(--gold)', fontSize: 28 }} />
               </div>
               <h2 className="disp">Authorization received</h2>
-              <p className="sub" style={{ maxWidth: 360, margin: '12px auto' }}>Your form was submitted to our care team. We'll use it to request your records from your provider and will be in touch with next steps. A confirmation email is on its way.</p>
+              <p className="sub" style={{ maxWidth: 360, margin: '12px auto' }}>Your form was submitted to our care team. We'll use it to request your records and will be in touch with next steps. A confirmation email is on its way.</p>
+              {result && (
+                <p className="sub" style={{ maxWidth: 360, margin: '0 auto 8px' }}>
+                  {result.providerCount === 1 ? 'One authorization was created' : `${result.providerCount} authorizations were created, one for each provider`}
+                  {result.expiresOn ? `, valid until ${roiDisplayDate(result.expiresOn)}.` : '.'}
+                </p>
+              )}
+              {result && Array.isArray(result.missingFax) && result.missingFax.length > 0 && (
+                <p className="sub" style={{ maxWidth: 360, margin: '0 auto', color: '#8a5a00' }}>
+                  We still need a fax number for {result.missingFax.join(', ')}. Our office will look it up, or you can message us with it.
+                </p>
+              )}
               <button className="btn" style={{ maxWidth: 240, margin: '18px auto 0' }} onClick={onClose}>Back to Documents</button>
             </div>
           </div>
@@ -5709,6 +5769,18 @@
                 <div><b style={{ color: 'var(--navy)', fontSize: 14.5 }}>Complete the form online</b><div className="sub" style={{ marginTop: 2 }}>Fill it out now — we'll generate one authorization per provider.</div></div>
               </div>
             </div>
+            {signed.length > 0 && (
+              <>
+                <p className="lbl" style={{ marginTop: 18 }}>Your signed authorizations</p>
+                {signed.map(a => (
+                  <div key={a.id} className="doc" style={{ cursor: 'pointer' }}
+                    onClick={() => openPdfSecurely(`${API_URL}/api/gfc/transfer-roi/authorizations/${encodeURIComponent(a.id)}.pdf`, token, undefined, `Authorization - ${a.providerName || 'provider'}.pdf`)}>
+                    <i className="ti ti-file-text" />
+                    <div><b>{a.providerName || 'Provider'}</b><span>Signed {a.signedAt ? new Date(a.signedAt).toLocaleDateString('en-US', { timeZone: 'America/New_York' }) : ''}{a.expiresOn ? ` · valid until ${roiDisplayDate(a.expiresOn)}` : ''}</span></div>
+                  </div>
+                ))}
+              </>
+            )}
             {err && <div className="err">{err}</div>}
           </div>
         );
@@ -5744,18 +5816,36 @@
 
           <p className="lbl">1 · Patient (whose records)</p>
           <div className="card">
-            <TextField label="Patient full name" value={patient.patientName} onChange={v => setPatient(p => ({ ...p, patientName: v }))} />
-            <TextField label="Date of birth" value={patient.patientDOB} onChange={v => setPatient(p => ({ ...p, patientDOB: v }))} placeholder="MM/DD/YYYY" />
-            <TextField label="Address" value={patient.patientAddress} onChange={v => setPatient(p => ({ ...p, patientAddress: v }))} />
-            <TextField label="Phone" type="tel" value={patient.patientPhone} onChange={v => setPatient(p => ({ ...p, patientPhone: v }))} />
+            {/* What is on file prints as on file. Only a blank can be filled
+                here; a correction goes to the care team, so the release and
+                the chart never disagree about who the patient is. */}
+            {[['patientName', 'Patient full name', 'text'], ['patientDOB', 'Date of birth', 'date'], ['patientAddress', 'Address', 'text'], ['patientPhone', 'Phone', 'tel']].map(([k, label, type]) => (
+              patientFromRecord[k]
+                ? <div className="fld" key={k}><label>{label}</label><div style={{ padding: '8px 0', fontSize: 14 }}>{k === 'patientDOB' ? roiDisplayDate(patient[k]) : patient[k]}</div></div>
+                : <TextField key={k} label={label} type={type} value={patient[k]} onChange={v => setPatient(p => ({ ...p, [k]: v }))} maxLength={k === 'patientAddress' ? 200 : 120} />
+            ))}
+            <div className="hint" style={{ fontSize: 11.5, color: 'var(--mut)' }}>Taken from your file. If something is wrong, message your care team.</div>
           </div>
 
           <p className="lbl">2 · Release records from</p>
-          <div className="hint" style={{ fontSize: 11.5, color: 'var(--mut)', marginBottom: 8 }}>Providers from your intake are pre-filled. Edit any field and add more. A separate authorization PDF is generated for each provider.</div>
+          <div className="hint" style={{ fontSize: 11.5, color: 'var(--mut)', marginBottom: 8 }}>Providers from your file are pre-filled. Remove any you don't need, edit any field, and add more. One authorization is created for each provider listed here.</div>
           {providers.map((p, i) => (
             <RoiProviderCard key={i} p={p} idx={i} removable={providers.length > 1} onChange={setP} onRemove={() => rmProvider(i)} />
           ))}
-          <button className="btn ghost" onClick={addProvider} style={{ marginTop: 4 }}><i className="ti ti-plus" /> Add another provider</button>
+          {providers.length < maxProviders
+            ? <button className="btn ghost" onClick={addProvider} style={{ marginTop: 4 }}><i className="ti ti-plus" /> Add another provider</button>
+            : <div className="hint" style={{ fontSize: 11.5, color: 'var(--mut)' }}>Up to {maxProviders} providers per form.</div>}
+          {alreadySent.length > 0 && (
+            <div className="card" style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 12, color: 'var(--mut)', marginBottom: 6 }}>You already authorized these providers. They are not included unless you add them again.</div>
+              {alreadySent.map((p, i) => (
+                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', borderTop: i ? '1px solid var(--line2)' : 'none' }}>
+                  <div style={{ fontSize: 13 }}><b>{p.name}</b>{p.activeAuthorization && p.activeAuthorization.expiresOn ? <span className="sub" style={{ fontSize: 11.5 }}> · valid until {roiDisplayDate(p.activeAuthorization.expiresOn)}</span> : null}</div>
+                  {providers.length < maxProviders && <button className="btn ghost" style={{ width: 'auto', padding: '4px 10px', margin: 0, fontSize: 12 }} onClick={() => requestAgain(p)}>Request again</button>}
+                </div>
+              ))}
+            </div>
+          )}
 
           <p className="lbl">3 · Release records to</p>
           <div className="card" style={{ background: 'var(--cream)' }}>
@@ -5773,7 +5863,7 @@
             <div className={`check ${cats.other ? 'on' : ''}`} onClick={() => toggleCat('other')}>
               <span className="box">{cats.other && <i className="ti ti-check" />}</span>Other
             </div>
-            {cats.other && <TextField label="Other — specify" value={otherText} onChange={setOtherText} />}
+            {cats.other && <TextField label="Other — specify" value={otherText} onChange={setOtherText} maxLength={200} />}
             <div style={{ marginTop: 14, padding: '12px 14px', background: 'var(--cream)', borderRadius: 11, border: '1px solid var(--line2)' }}>
               <div style={{ fontSize: 12, color: 'var(--mut)', lineHeight: 1.55, marginBottom: 8 }}>
                 <b style={{ color: 'var(--navy)' }}>Specially protected information.</b> Records of mental health, substance use, HIV/AIDS, or genetic testing are released <b>only</b> if you specifically authorize it here.
@@ -5788,14 +5878,14 @@
           <div className="card">
             <div className="check on" style={{ cursor: 'default' }}><span className="box"><i className="ti ti-check" /></span>Treatment, care coordination, and care planning</div>
             <div className={`check ${purposeOther ? 'on' : ''}`} onClick={() => setPurposeOther(v => !v)}><span className="box">{purposeOther && <i className="ti ti-check" />}</span>Other</div>
-            {purposeOther && <TextField label="Other purpose — specify" value={purposeOtherText} onChange={setPurposeOtherText} />}
+            {purposeOther && <TextField label="Other purpose — specify" value={purposeOtherText} onChange={setPurposeOtherText} maxLength={200} />}
           </div>
 
           <p className="lbl">6 · Expiration</p>
           <div className="card">
-            <div className="hint" style={{ fontSize: 11.5, color: 'var(--mut)', marginBottom: 4 }}>Unless revoked sooner, this authorization expires one year from the date signed, or on the earlier of:</div>
-            <TextField label="Expiration date (optional)" value={expDate} onChange={setExpDate} placeholder="MM/DD/YYYY" />
-            <TextField label="Expiration event (optional)" value={expEvent} onChange={setExpEvent} placeholder="e.g. end of treatment" />
+            <div className="hint" style={{ fontSize: 11.5, color: 'var(--mut)', marginBottom: 4 }}>Unless revoked sooner, this authorization expires one year from the date signed. You can choose an earlier date or event:</div>
+            <TextField label="Expiration date (optional)" type="date" value={expDate} onChange={setExpDate} />
+            <TextField label="Expiration event (optional)" value={expEvent} onChange={setExpEvent} placeholder="e.g. end of treatment" maxLength={120} />
           </div>
 
           <p className="lbl">7 · Your rights</p>
@@ -5810,8 +5900,8 @@
               <canvas ref={canvasRef} style={{ display: 'block', width: '100%', height: 130, touchAction: 'none' }} />
               <button onClick={clearSig} style={{ position: 'absolute', top: 6, right: 8, background: '#fff', border: '1px solid var(--line2)', borderRadius: 6, fontSize: 11, color: 'var(--mut)', padding: '2px 8px', cursor: 'pointer' }}>Clear</button>
             </div>
-            <TextField label="Printed name" value={printedName} onChange={setPrintedName} />
-            <TextField label="Relationship / authority (if signing for patient)" value={relationship} onChange={setRelationship} placeholder="e.g. Power of attorney" />
+            <TextField label="Printed name" value={printedName} onChange={setPrintedName} maxLength={120} />
+            <TextField label="Relationship / authority (if signing for patient)" value={relationship} onChange={setRelationship} placeholder="e.g. Power of attorney" maxLength={120} />
             <div className="sub" style={{ fontSize: 12, marginTop: 8 }}>Date: {today}</div>
             <button className="btn" disabled={busy} onClick={submitForm}>{busy ? (providers.filter(p => (p.name || '').trim()).length > 1 ? 'Generating authorizations…' : 'Submitting…') : 'Submit authorization'}</button>
             {err && <div className="err">{err}</div>}
