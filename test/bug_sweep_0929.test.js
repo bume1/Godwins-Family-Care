@@ -111,7 +111,11 @@ test('portal: a failed care-plan load shows an error, not an endless spinner', (
 });
 
 test('record release: a structured address is printed as a line, never "[object Object]"', () => {
-  assert.match(server, /patientAddress: \(v => \(v && typeof v === 'object'\) \? consentRender\.addressLine\(v\) : String\(v \|\| ''\)\)\(intake\.address \|\| client\.address\)/);
+  // Repointed 2026-10-10: the identity comes from roiPatientIdentity, and a
+  // structured address is flattened by roiRepo.cleanText. Behaviour, not text:
+  const roiRepo = require('../roiRepository');
+  assert.match(server, /patientAddress: roiRepo\.cleanText\(intake\.address \|\| client\.address, 200\)/);
+  assert.equal(roiRepo.cleanText({ line1: '12 Main St', city: 'Atlanta', state: 'GA', zip: '30301' }), '12 Main St, Atlanta, GA 30301');
 });
 
 // ---- Clinician workspace ----
