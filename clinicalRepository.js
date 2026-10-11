@@ -691,7 +691,7 @@ const latestRiskAssessment = (rows, encounterUuid) =>
 // Asked of the VISIT, not the patient. A behavioural-health appointment type
 // is what makes a risk assessment mandatory; a patient's usual kind of visit
 // is not a fact about the one being signed.
-const riskAssessmentRequired = (visit) => isBehavioralVisit(visit);
+const riskAssessmentRequired = (visit) => apptTypes.requiresRiskAssessment(normalizeVisit(visit).appointmentType);
 const highestRisk = (assessment) => {
   if (!assessment || !assessment.levels) return null;
   let worst = null; let rank = -1;

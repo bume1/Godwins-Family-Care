@@ -82,13 +82,14 @@ test('travel is needed exactly where somebody travels', () => {
   }
 });
 
-test('the nine types are declared once, each with a note template and a duration', () => {
-  assert.equal(A.APPOINTMENT_TYPES.length, 9);
+test('the twelve types are declared once, each with a note template and a duration', () => {
+  assert.equal(A.APPOINTMENT_TYPES.length, 12);
   const keys = A.APPOINTMENT_TYPES.map(t => t.key);
   assert.equal(new Set(keys).size, keys.length, 'a duplicate key would make typeByKey silently pick one');
   assert.deepEqual(A.typesForService('primary_care').map(t => t.key),
     ['pc_new_patient', 'pc_follow_up', 'pc_acute', 'pc_awv', 'pc_tcm', 'pc_phone_ccm']);
-  assert.equal(A.typesForService('behavioral_health').length, 2);
+  assert.deepEqual(A.typesForService('behavioral_health').map(t => t.key), ['bh_initial', 'bh_follow_up', 'sw_therapy']);
+  assert.deepEqual(A.typesForService('social_work').map(t => t.key), ['sw_psychosocial', 'sw_follow_up']);
   assert.equal(A.typesForService('ime').length, 1);
   for (const t of A.APPOINTMENT_TYPES) {
     assert.ok(t.defaultMinutes > 0, `${t.key} needs a duration — booking has to put one number in the diary`);
@@ -314,7 +315,7 @@ test('something declared NEW has to say why nothing existing covers it', () => {
     assert.ok(keys.includes(expected), `${expected} is not satisfied yet and must appear`);
   }
   // It is DERIVED from the config, so a type that stops wanting one drops out.
-  assert.deepEqual(unbuilt.find(u => u.key === 'gad7').types.sort(), ['bh_follow_up', 'bh_initial']);
+  assert.deepEqual(unbuilt.find(u => u.key === 'gad7').types.sort(), ['bh_follow_up', 'bh_initial', 'sw_psychosocial', 'sw_therapy']);
   assert.deepEqual(unbuilt.find(u => u.key === 'hra').types, ['pc_awv']);
   for (const u of unbuilt) {
     assert.ok(u.description.length > 15, `${u.key} must say what it is`);
@@ -444,11 +445,16 @@ test('the coverage catalog says the templates EXIST, and that writing one is ref
 // An interim home for between-visit and CCM phone notes. The rules that keep
 // it honest: phone-only, no location and therefore no place of service of its
 // own, no in-person sections, and the minutes are required.
-test('the phone type is phone-only, and phone is offered on no visit type', () => {
+test('the phone type is phone-only, and phone is offered on no medical visit type', () => {
   assert.deepEqual(A.modalitiesForType('pc_phone_ccm'), ['phone']);
-  for (const t of A.APPOINTMENT_TYPES.filter(x => x.key !== 'pc_phone_ccm')) {
+  // A social work contact is often a call (owner, 2026-10-11), and none of
+  // those types bills E/M, so they declare phone explicitly. No medical visit
+  // type does: a visit written up as a call is a visit that never happened.
+  const SOCIAL_WORK = ['sw_psychosocial', 'sw_therapy', 'sw_follow_up'];
+  for (const t of A.APPOINTMENT_TYPES.filter(x => x.key !== 'pc_phone_ccm' && !SOCIAL_WORK.includes(x.key))) {
     assert.ok(!A.modalitiesForType(t.key).includes('phone'), `${t.key} is a visit, not a phone call`);
   }
+  for (const k of SOCIAL_WORK) assert.ok(A.modalitiesForType(k).includes('phone'), `${k} may be a phone contact`);
   // A visit type booked as a phone call is refused by name; the phone type
   // booked in person or by video is refused too.
   const callAsVisit = A.resolveVisit({ appointmentType: 'pc_follow_up', bookedModality: 'phone', bookedLocation: 'home' });
@@ -490,9 +496,16 @@ test('the note screen saves a phone call as a follow-up-shaped note, never an H&
   const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'clinical.html'), 'utf8');
   // An H&P demands both-arm BP to sign and stamps the initial visit on first
   // save; neither is true of a phone call.
-  assert.match(page, /const toNote = \(\) => \(isPhone \? \{\s*kind: 'followup'/);
-  assert.match(page, /fixedBlocks: isPhone\s*\?\s*\[\]/);
-  assert.match(page, /fixedBlocks: visit && visit\.modality === 'phone'\s*\?\s*\[\]/);
+  // `sectionsOnly` covers a phone call AND the social work types.
+  assert.match(page, /const sectionsOnly = isPhone \|\|/);
+  assert.match(page, /const toNote = \(\) => \(sectionsOnly \? \{\s*kind: 'followup'/);
+  assert.match(page, /fixedBlocks: sectionsOnly\s*\?\s*\[\]/);
+  assert.match(page, /fixedBlocks: \(sectionsOnly \|\| \(visit && visit\.modality === 'phone'\)\)\s*\?\s*\[\]/);
+  // And the server enforces the shape whatever the page sends.
+  const notes = require('../clinicalNotes');
+  const r = notes.sanitizeNote({ kind: 'hp', vitals: { hr: '80' }, sections: { callNote: 'Called.' }, visit: { appointmentType: 'pc_phone_ccm', modality: 'phone' } });
+  assert.equal(r.note.kind, 'followup');
+  assert.deepEqual(r.note.vitals, {});
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(server, /modalities: apptTypes\.modalitiesForType\(t\.key\)/, 'the page is served each type\'s modalities');
 });

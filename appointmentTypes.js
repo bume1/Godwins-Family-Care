@@ -33,6 +33,10 @@
 const SERVICES = Object.freeze([
   { key: 'primary_care', label: 'Primary Care' },
   { key: 'behavioral_health', label: 'Behavioral Health' },
+  // Social work (owner, 2026-10-11): LMSW and LCSW documentation. Kept apart
+  // from behavioral health because the psych types there carry medication
+  // decisions, which are a prescriber's.
+  { key: 'social_work', label: 'Social Work' },
   { key: 'ime', label: 'IME / C&P' }
 ]);
 
@@ -66,7 +70,10 @@ const CODE_FAMILIES = Object.freeze({
   home: { key: 'home', label: 'Home or residence E/M', range: '99341–99350' },
   // No range on purpose: care management is billed on time accumulated across
   // a month, not per call, and which code applies is billing's decision.
-  care_management: { key: 'care_management', label: 'Care management / non-face-to-face (billing decides)', range: null }
+  care_management: { key: 'care_management', label: 'Care management / non-face-to-face (billing decides)', range: null },
+  // Psychotherapy and psychosocial work bill the behavioral-health set, never
+  // E/M. No range: the permitted list is clinicalRoles.BEHAVIORAL_HEALTH_SERVICE_CODES.
+  behavioral_health: { key: 'behavioral_health', label: 'Behavioral health / psychotherapy', range: null }
 });
 
 const TELEHEALTH_POS_PATIENT_HOME = '10';   // telehealth to the patient's home
@@ -111,10 +118,16 @@ const resolvePos = ({ modality, location, facilityPos } = {}) => {
 // ---- Code family ---------------------------------------------------------
 // Modality first, and that ordering IS the rule. Reading location first would
 // bill a video visit to a home patient as a home visit.
-const resolveCodeFamily = ({ modality, location } = {}) => {
+const resolveCodeFamily = ({ modality, location, appointmentType } = {}) => {
   const m = modalityByKey(modality);
   const l = locationByKey(location);
   if (!m) return { error: 'Modality is required', code: 'MODALITY_REQUIRED' };
+  // A type that declares its own family (social work) bills that set however
+  // it was delivered: a therapy session is never an E/M visit.
+  const own = typeByKey(appointmentType);
+  if (own && own.codeFamily && CODE_FAMILIES[own.codeFamily]) {
+    return { family: CODE_FAMILIES[own.codeFamily], telehealthModifier: m.key === 'telehealth', reason: `${own.label} bills the ${CODE_FAMILIES[own.codeFamily].label} set.` };
+  }
   if (m.key === 'phone') {
     return { family: CODE_FAMILIES.care_management, telehealthModifier: false, reason: 'A phone call is not a visit: it is care-management time, and billing chooses how it is claimed.' };
   }
@@ -206,6 +219,27 @@ const SECTIONS = Object.freeze({
   medicationAdherence: 'Medication Adherence & Side Effects',
   planMedChanges: 'Plan / Medication Changes',
   psychotherapyTime: 'Psychotherapy Time (separate from E/M time)',
+  // Social work (owner, 2026-10-11)
+  referralReason: 'Reason for Referral / Presenting Concern',
+  sourcesOfInfo: 'Sources of Information',
+  livingSituation: 'Living Situation & Home Environment',
+  familySupport: 'Family, Caregivers & Support System',
+  psychosocialHistory: 'Psychosocial History (education, work, military, trauma, culture, faith)',
+  functionalStatus: 'Functional Status & Care Needs',
+  financialBenefits: 'Financial, Insurance & Benefits',
+  legalPlanning: 'Legal: POA, Guardianship, Advance Directives',
+  sdohNeeds: 'Social Needs (food, housing, transportation, utilities, safety)',
+  strengthsCoping: 'Strengths & Coping',
+  swAssessment: 'Social Work Assessment / Clinical Impression',
+  swPlan: 'Plan: Goals, Interventions & Referrals',
+  sessionParticipants: 'Session Type & Who Attended',
+  sessionFocus: 'Presenting Concern / Session Focus',
+  interventionsUsed: 'Interventions Used (e.g., CBT, MI, supportive)',
+  clientResponse: 'Client Response & Progress Toward Goals',
+  sessionTime: 'Session Start, Stop & Total Minutes',
+  contactPurpose: 'Purpose of Contact',
+  contactParticipants: 'Who Was Involved',
+  progressUpdate: 'Update Since Last Contact',
   // IME / C&P
   examRequest: 'Exam Request / Referring Entity',
   identityVerification: 'Identity Verification',
@@ -483,6 +517,82 @@ const APPOINTMENT_TYPES = Object.freeze([
       t('safetyPlan', R.RISK_POSITIVE), t('followUp', R.ALWAYS), t('psychotherapyTime', R.OPTIONAL)
     ]
   },
+  // ---- Social work (owner, 2026-10-11) ----------------------------------
+  // `socialWorkRoles` is who may document one WITHOUT a prescriber credential.
+  // A provider may still write one under `credentials`. None of these carries
+  // a medication decision, which is what keeps social workers out of the psych
+  // types above.
+  {
+    key: 'sw_psychosocial', service: 'social_work', label: 'Psychosocial Assessment',
+    defaultMinutes: 60, telehealthAllowed: true, telehealthPayerCaveat: false,
+    modalities: ['in_person', 'telehealth', 'phone'],
+    credentials: ['MD', 'DO', 'NP', 'PA'], specialty: null,
+    socialWorkRoles: ['lcsw', 'lmsw'],
+    // The note is ONLY its template sections: no vitals, no physical exam, no
+    // home-visit nursing blocks.
+    noteShape: 'sections', codeFamily: 'behavioral_health',
+    // A full psychosocial assessment screens for risk; the structured risk
+    // card must be completed before it is signed.
+    riskAssessmentRequired: true,
+    intake: [
+      F('emergencyContacts'), F('primaryContact'), F('payerType'), F('conditions'),
+      C('consentToTreat'),
+      E('phq9', 'PHQ-9 depression screen. A template OpenEMR already holds; surface it, do not rebuild it.'),
+      E('gad7', 'GAD-7 anxiety screen. A template OpenEMR already holds; surface it, do not rebuild it.'),
+      E('sdoh_screen', 'Social needs (SDOH) screen: food, housing, transportation, utilities, safety. Expected to be an existing OpenEMR template — confirm which.')
+    ],
+    sections: [
+      t('referralReason', R.ALWAYS), t('sourcesOfInfo', R.OPTIONAL),
+      t('livingSituation', R.ALWAYS), t('familySupport', R.ALWAYS),
+      t('psychosocialHistory', R.ALWAYS), t('functionalStatus', R.OPTIONAL),
+      t('financialBenefits', R.ALWAYS), t('legalPlanning', R.ALWAYS),
+      t('sdohNeeds', R.ALWAYS), t('substanceUse', R.OPTIONAL),
+      t('mentalStatusExam', R.OPTIONAL), t('riskAssessment', R.ALWAYS), t('screeningScores', R.OPTIONAL),
+      t('strengthsCoping', R.ALWAYS), t('swAssessment', R.ALWAYS), t('swPlan', R.ALWAYS),
+      t('safetyPlan', R.RISK_POSITIVE), t('followUp', R.ALWAYS), t('contactTime', R.ALWAYS)
+    ]
+  },
+  {
+    // Psychotherapy is billed by time (90832/90834/90837), so the session's
+    // minutes are a required part of the note.
+    key: 'sw_therapy', service: 'behavioral_health', label: 'Therapy Session',
+    defaultMinutes: 53, telehealthAllowed: true, telehealthPayerCaveat: false,
+    modalities: ['in_person', 'telehealth', 'phone'],
+    credentials: ['MD', 'DO', 'NP'], specialty: 'behavioral_health',
+    // An LMSW does not practise psychotherapy independently, so only an LCSW.
+    socialWorkRoles: ['lcsw'],
+    // Psychotherapy is outside RN scope: an RN cannot author one either.
+    psychotherapy: true,
+    noteShape: 'sections', codeFamily: 'behavioral_health',
+    intake: [
+      C('consentToTreat'),
+      E('phq9', 'PHQ-9 depression screen. A template OpenEMR already holds; surface it, do not rebuild it.'),
+      E('gad7', 'GAD-7 anxiety screen. A template OpenEMR already holds; surface it, do not rebuild it.')
+    ],
+    sections: [
+      t('sessionParticipants', R.ALWAYS), t('sessionFocus', R.ALWAYS),
+      t('mentalStatusExam', R.ALWAYS), t('riskAssessment', R.ALWAYS), t('screeningScores', R.OPTIONAL),
+      t('interventionsUsed', R.ALWAYS), t('clientResponse', R.ALWAYS),
+      t('swAssessment', R.ALWAYS), t('swPlan', R.ALWAYS),
+      t('safetyPlan', R.RISK_POSITIVE), t('followUp', R.ALWAYS), t('sessionTime', R.ALWAYS)
+    ]
+  },
+  {
+    key: 'sw_follow_up', service: 'social_work', label: 'Social Work Follow-up / Care Coordination',
+    defaultMinutes: 30, telehealthAllowed: true, telehealthPayerCaveat: false,
+    modalities: ['in_person', 'telehealth', 'phone'],
+    credentials: ['MD', 'DO', 'NP', 'PA'], specialty: null,
+    socialWorkRoles: ['lcsw', 'lmsw'],
+    noteShape: 'sections', codeFamily: 'care_management',
+    intake: [F('emergencyContacts'), F('primaryContact')],
+    sections: [
+      t('contactPurpose', R.ALWAYS), t('contactParticipants', R.ALWAYS),
+      t('progressUpdate', R.ALWAYS), t('sdohNeeds', R.OPTIONAL),
+      t('riskAssessment', R.OPTIONAL), t('careCoordination', R.ALWAYS),
+      t('referralsResources', R.OPTIONAL), t('swPlan', R.ALWAYS),
+      t('safetyPlan', R.RISK_POSITIVE), t('followUp', R.ALWAYS), t('contactTime', R.ALWAYS)
+    ]
+  },
   {
     key: 'ime_exam', service: 'ime', label: 'Exam',
     defaultMinutes: 90, telehealthAllowed: false, telehealthPayerCaveat: false,
@@ -593,9 +703,21 @@ const requiredSectionKeys = (typeKey, opts) => sectionsFor(typeKey, opts).filter
 // CONSTRUCTION — neither appears in any `credentials` list — because both
 // types include medication decisions and those are a prescriber's. If therapy
 // is added later it gets its own type rather than widening these.
-const canBookType = (typeKey, { prescriberCredential, specialties } = {}) => {
+//
+// A social worker holds no prescriber credential, so they qualify through
+// their CLINICAL ROLE instead: a type that lists `socialWorkRoles` admits that
+// role whatever the credential says. Only the social work types list any.
+const canBookType = (typeKey, { prescriberCredential, specialties, clinicalRole } = {}) => {
   const type = typeByKey(typeKey);
   if (!type) return { ok: false, code: 'UNKNOWN_APPOINTMENT_TYPE', error: `"${typeKey}" is not an appointment type.` };
+  const role = String(clinicalRole || '').trim();
+  if (role && (type.socialWorkRoles || []).includes(role)) return { ok: true, error: null, code: null };
+  if (role === 'lcsw' || role === 'lmsw') {
+    const label = role.toUpperCase();
+    const allowed = APPOINTMENT_TYPES.filter(x => (x.socialWorkRoles || []).includes(role)).map(x => x.label);
+    return { ok: false, code: 'SOCIAL_WORK_TYPE_ONLY',
+      error: `An ${label} documents ${allowed.join(' or ')}. ${type.label} is not one of them.` };
+  }
   const cred = String(prescriberCredential || '').trim().toUpperCase();
   if (!cred) {
     return { ok: false, code: 'NO_CREDENTIAL', error: 'This clinician has no prescriber credential on file. An admin sets it on their user record.' };
@@ -610,6 +732,24 @@ const canBookType = (typeKey, { prescriberCredential, specialties } = {}) => {
       return { ok: false, code: 'SPECIALTY_REQUIRED',
         error: `${type.label} needs the ${type.specialty.replace(/_/g, ' ')} specialty on this clinician's record. A PMHNP is an NP who holds it; a psychiatrist is an MD who holds it.` };
     }
+  }
+  return { ok: true, error: null, code: null };
+};
+
+// WHO MAY WRITE THIS NOTE, by clinical role. Different from canBookType's
+// credential check because the app holds no specialty on a user record, so the
+// psych half of that check cannot be asked at note time. What CAN be asked:
+//   - an LCSW or LMSW writes only the types that name their role
+//   - an RN writes no psychotherapy note
+//   - a provider writes any type (their credential is checked at booking)
+const SOCIAL_WORK_ROLES = Object.freeze(['lcsw', 'lmsw']);
+const canDocumentType = (typeKey, clinicalRole) => {
+  const type = typeByKey(typeKey);
+  if (!type) return { ok: false, code: 'UNKNOWN_APPOINTMENT_TYPE', error: `"${typeKey}" is not an appointment type.` };
+  const role = String(clinicalRole || '').trim();
+  if (SOCIAL_WORK_ROLES.includes(role)) return canBookType(typeKey, { clinicalRole: role });
+  if (role === 'rn' && type.psychotherapy) {
+    return { ok: false, code: 'PSYCHOTHERAPY_NOT_RN', error: `${type.label} is psychotherapy, which an RN does not document. Use Social Work Follow-up / Care Coordination or a nursing visit type.` };
   }
   return { ok: true, error: null, code: null };
 };
@@ -706,12 +846,24 @@ const isBehavioralHealth = (appointmentType) => {
   const t = typeByKey(appointmentType);
   return !!(t && t.service === 'behavioral_health');
 };
+// Whether signing needs the structured risk assessment: every behavioral
+// health type, plus any type that asks for it (the psychosocial assessment).
+const requiresRiskAssessment = (appointmentType) => {
+  const t = typeByKey(appointmentType);
+  return !!(t && (t.service === 'behavioral_health' || t.riskAssessmentRequired === true));
+};
+// A note made only of its template sections (no vitals, exam or nursing
+// blocks). The phone call is one by modality; the social work types by shape.
+const isSectionsOnly = (appointmentType, modality) => {
+  const t = typeByKey(appointmentType);
+  return String(modality || '') === 'phone' || !!(t && t.noteShape === 'sections');
+};
 
 module.exports = {
   SECTIONS, REQUIRED, APPOINTMENT_TYPES,
   typeByKey, typesForService, modalitiesForType, sectionsFor, requiredSectionKeys,
-  canBookType, canBeTelehealth, awvEligibility, AWV_INTERVAL_DAYS,
-  resolveVisit, isBehavioralHealth, visitDocumentsFor, visitDocumentsOutstanding,
+  canBookType, canDocumentType, SOCIAL_WORK_ROLES, canBeTelehealth, awvEligibility, AWV_INTERVAL_DAYS,
+  resolveVisit, isBehavioralHealth, requiresRiskAssessment, isSectionsOnly, visitDocumentsFor, visitDocumentsOutstanding,
   resolveIntakeRef, assertIntakeIsDeclared, unbuiltIntake, toSurface, toBuild, EXPECTED_DOCUMENT_KINDS,
 
   SERVICES, MODALITIES, LOCATIONS, CODE_FAMILIES,

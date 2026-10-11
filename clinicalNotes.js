@@ -108,6 +108,14 @@ const sanitizeNote = (input) => {
       if (v) note.visit[k] = v;
     }
   }
+  // A note made only of its template sections (a phone call, a social work
+  // note) is never an H&P and carries no vitals or exam: an H&P would demand
+  // a blood pressure in both arms and mark the client's initial visit as done.
+  if (note.visit && apptTypes.isSectionsOnly(note.visit.appointmentType, note.visit.modality)) {
+    note.kind = 'followup';
+    note.vitals = {};
+    note.hp = {};
+  }
   if (JSON.stringify(note).length > NOTE_MAX_TOTAL) return { error: 'This note is too large to save', code: 'NOTE_TOO_LARGE' };
   if (isEmptyNote(note)) return { error: 'There is nothing in this note to save yet', code: 'NOTE_EMPTY' };
   return { note };
@@ -444,11 +452,13 @@ const carriedPending = (note) => {
 // other way to show one.
 const OBJECTIVE_SECTIONS = new Set(['vitals', 'awvVitals', 'physicalExam', 'focusedExam', 'mentalStatusExam', 'examination',
   'screeningScores', 'cognitiveAssessment', 'depressionScreen', 'functionalFallRisk']);
-const ASSESSMENT_SECTIONS = new Set(['assessment', 'riskAssessment', 'medicalOpinion', 'mdmComplexity', 'careManagementEligibility']);
+const ASSESSMENT_SECTIONS = new Set(['assessment', 'riskAssessment', 'medicalOpinion', 'mdmComplexity', 'careManagementEligibility',
+  'swAssessment', 'clientResponse']);
 const PLAN_SECTIONS = new Set(['plan', 'ordersRxReferrals', 'ordersRx', 'returnPrecautions', 'followUp', 'mdmOrTime',
   'preventionPlan', 'screeningSchedule', 'careGapsOrders', 'advanceCarePlanning', 'referralsResources',
   'patientCaregiverEducation', 'followUpAppointments', 'treatmentPlan', 'medicationsRx', 'safetyPlan', 'planMedChanges',
-  'psychotherapyTime', 'dbqForms', 'reportAttachment', 'riskFactorsInterventions', 'twoDayContact']);
+  'psychotherapyTime', 'dbqForms', 'reportAttachment', 'riskFactorsInterventions', 'twoDayContact',
+  'swPlan', 'interventionsUsed', 'sessionTime']);
 const slotForSection = (key) => (OBJECTIVE_SECTIONS.has(key) ? 'objective'
   : ASSESSMENT_SECTIONS.has(key) ? 'assessment'
     : PLAN_SECTIONS.has(key) ? 'plan' : 'subjective');
@@ -637,13 +647,16 @@ const itemPlainText = (item) => {
   return item.inline ? `${item.label}: ${body}` : `${item.label.toUpperCase()}:\n${body}`;
 };
 
-const composeNarrative = ({ note, revisions, signature, voided }) => {
+const composeNarrative = ({ note, revisions, signature, voided, screenLines }) => {
   if (voided) {
     const line = `ENTERED IN ERROR — encounter deleted by ${personLine(voided.by)} — ${fmtEt(voided.at)} — ${voided.reason}`;
     return { subjective: line, objective: 'Deleted encounter — no clinical content.', assessment: 'Deleted encounter.', plan: 'Deleted encounter — this encounter does not bill.' };
   }
   const slots = { subjective: [], objective: [], assessment: [], plan: [] };
   for (const item of noteReadingOrder(note)) slots[item.slot].push(itemPlainText(item));
+  // Screening results recorded on the encounter (PHQ-9, GAD-7, SDOH).
+  const screens = (Array.isArray(screenLines) ? screenLines : []).filter(Boolean);
+  if (screens.length) slots.objective.push(['SCREENINGS RECORDED', ...screens.map(l => `- ${l}`)].join('\n'));
   const foot = [...noteHistoryLines(revisions), ...(signature ? ['', ...signatureBlockLines(signature)] : [])];
   if (foot.length) slots.plan.push(foot.join('\n'));
   const join = (arr) => clip(arr.filter(Boolean).join('\n\n')) || OPENEMR_EMPTY;
