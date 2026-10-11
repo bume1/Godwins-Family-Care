@@ -662,6 +662,24 @@ test('the timing route refuses an event it does not know, by name', () => {
     'the refusal names the events that do work rather than dead-ending');
 });
 
+// Without this button `endedAt` could never be set from the UI at all — the
+// server has accepted the 'end' event since 4.12, but My Day only ever sent
+// en_route/arrive/start. So `billableMinutes` (myDay.js) stayed null for every
+// visit regardless of how it actually went, because nothing could stop the
+// clock (owner report, 2026-10-11).
+test('My Day has an End visit button once a visit is in progress', () => {
+  const body = routeBody(pageCode, 'const DayVisitRow =');
+  assert.match(body, /v\.state === 'in_progress'/,
+    'the button is gated on the IN-PROGRESS state, the one `startedAt` alone produces');
+  assert.match(body, /onStamp\(v, 'end'\)/,
+    'it must call the SAME route the other three stamps use, with the end event');
+  // The button must not appear for every state — only once a visit is running.
+  const endButtonIdx = body.indexOf("onStamp(v, 'end')");
+  const gateIdx = body.lastIndexOf("v.state === 'in_progress'", endButtonIdx);
+  assert.ok(gateIdx > 0 && endButtonIdx - gateIdx < 200,
+    'the end-visit button must sit behind the in_progress gate, not loose in the row');
+});
+
 test('My Day is the default landing view', () => {
   assert.match(pageCode, /useState\('myday'\)/,
     'the workspace must open on the day, not on a patient list');

@@ -2023,6 +2023,7 @@
               <div className="text-[11px] text-stone-500 mt-1">
                 {v.timing.arrivedAt && <>Arrived {fmtTs(v.timing.arrivedAt)}. </>}
                 {v.timing.startedAt && <>Started {fmtTs(v.timing.startedAt)}. </>}
+                {v.timing.endedAt && <>Ended {fmtTs(v.timing.endedAt)}. </>}
                 {v.timing.totalMinutes != null && <b>{v.timing.totalMinutes} min total.</b>}
               </div>
             )}
@@ -2048,6 +2049,15 @@
               {canWrite && v.state === 'arrived' && (
                 <button className="btn !py-1 !px-2.5 text-[11.5px]" disabled={busy === v.eid}
                   onClick={() => onStamp(v, 'start')}><i className="ti ti-player-play" />Start visit</button>
+              )}
+              {/* THE ONLY WAY `billableMinutes` is ever non-null (myDay.js) — the
+                  clinician's own start and end, with no fallback to the diary.
+                  Without this button `endedAt` could never be set at all, so
+                  every visit's time statement stayed "no time recorded" forever
+                  (owner report, 2026-10-11). */}
+              {canWrite && v.state === 'in_progress' && (
+                <button className="btn gold !py-1 !px-2.5 text-[11.5px]" disabled={busy === v.eid}
+                  onClick={() => onStamp(v, 'end')}><i className="ti ti-player-stop" />End visit</button>
               )}
             </div>
           </div>
