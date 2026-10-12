@@ -1,0 +1,68 @@
+{
+  "_comment": "A WHOLLY INVENTED chart used by the admin 'Run test' button to prove the Gemini path end to end. No real person, no real patient, no PHI. The name is deliberately absurd so a row that ever leaked into a real screen would be unmistakable. Two dated encounters, so the test can force a two-pass split.",
+  "clientId": "SYNTHETIC-NOT-A-PATIENT",
+  "emr": {
+    "demographics": { "age": 71, "sex": "female", "language": "English" },
+    "problems": [
+      { "description": "Type 2 diabetes mellitus without complications" },
+      { "description": "Essential hypertension" }
+    ],
+    "medications": [
+      { "drug": "metformin", "dose": "500 mg", "frequency": "twice daily" },
+      { "drug": "lisinopril", "dose": "10 mg", "frequency": "daily" }
+    ],
+    "allergies": [{ "substance": "penicillin", "reaction": "rash" }],
+    "vitals": [
+      { "date": "2026-01-10", "bp": "152/94", "pulse": 78 },
+      { "date": "2026-05-04", "bp": "148/90", "pulse": 80 }
+    ]
+  },
+  "encounters": [
+    {
+      "clientId": "SYNTHETIC-NOT-A-PATIENT",
+      "encounterUuid": "SYN-ENC-1",
+      "type": "Home visit",
+      "date": "2026-01-10",
+      "clinician": "Testerson, FNP",
+      "diagnoses": ["E11.9", "I10"],
+      "serviceCodes": ["99349"],
+      "note": "Blood pressure 152/94 today, above goal. Discussed salt intake. Plan: recheck in three months and consider titrating lisinopril. No A1c on file since 2024.",
+      "addenda": [],
+      "coSignStatus": null
+    },
+    {
+      "clientId": "SYNTHETIC-NOT-A-PATIENT",
+      "encounterUuid": "SYN-ENC-2",
+      "type": "Home visit",
+      "date": "2026-05-04",
+      "clinician": "Testerson, FNP",
+      "diagnoses": ["I10"],
+      "serviceCodes": ["99348"],
+      "note": "Blood pressure 148/90, still above goal. Lisinopril unchanged at 10 mg. No A1c ordered. Patient reports one fall in April, not previously documented.",
+      "addenda": [],
+      "coSignStatus": null
+    }
+  ],
+  "orders": [
+    {
+      "clientId": "SYNTHETIC-NOT-A-PATIENT", "id": "SYN-ORD-1", "orderType": "lab",
+      "date": "2026-01-10", "encounterUuid": "SYN-ENC-1",
+      "tests": ["Hemoglobin A1c"], "status": "sent"
+    }
+  ],
+  "results": [],
+  "prescriptions": [],
+  "carePlanVersions": [
+    {
+      "clientId": "SYNTHETIC-NOT-A-PATIENT", "version": 1, "effectiveDate": "2026-01-10",
+      "problems": ["Hypertension above goal", "Diabetes, monitoring overdue"],
+      "goals": ["Blood pressure under 140/90 within six months"]
+    }
+  ],
+  "intake": { "history": "Lives alone, one flight of stairs.", "advanceDirective": { "status": "none on file" } },
+  "medReconciliations": [],
+  "caregiverLogs": [],
+  "messageThreads": [],
+  "consentElections": [{ "type": "consentToTreat", "status": "signed", "choices": null }],
+  "notRead": []
+}

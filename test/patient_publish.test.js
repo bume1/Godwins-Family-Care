@@ -1330,7 +1330,7 @@ test('P2-6. the portal shows ONE schedule: clinical visits and caregiver visits 
   // The redesign (10/2026) labels it Appointments; one NAV list drives the
   // sidebar, the bottom menu and the More menu.
   assert.match(portal, /\{ id: 'schedule', icon: 'ti-calendar-event', label: 'Appointments', short: 'Appts' \}/);
-  assert.match(portal, /\{view === 'schedule' && <GfcSchedule shifts=\{shifts\} shiftsErr=\{shiftsErr\} clinical=\{clinicalAvailable \? clinical : null\} \/>\}/);
+  assert.match(portal, /\{view === 'schedule' && <GfcSchedule shifts=\{shifts\} shiftsErr=\{shiftsErr\} clinical=\{clinicalAvailable \? clinical : null\} onNavigate=\{onNavigate\} \/>\}/);
   // Home's next clinical visit reads the published state, not a raw OpenEMR row.
   // (Redesign: Home's next visit is the first item of the shared builder, which
   // reads clinical.appointments — the published copy — and drops past ones.)

@@ -1,0 +1,10 @@
+{
+  "type": "external_account",
+  "audience": "//iam.googleapis.com/projects/000000000000/locations/global/workloadIdentityPools/gfc-aws-pool/providers/gfc-aws-provider",
+  "subject_token_type": "urn:ietf:params:aws:token-type:aws4_request",
+  "token_url": "https://sts.googleapis.com/v1/token",
+  "credential_source": {
+    "environment_id": "aws1",
+    "regional_cred_verification_url": "https://sts.{region}.amazonaws.com?Action=GetCallerIdentity&Version=2011-06-15"
+  }
+}
