@@ -3896,6 +3896,33 @@
 
     // Sign & submit: saves first, then signs. The server decides whether this
     // is a billable signature or an author's; a refusal says what is missing.
+    // Whether the note on screen differs from the one last loaded or saved
+    // (owner report, 2026-10-12). The encounter's Sign & Submit card reads the
+    // SAVED note, so while typing is unsaved it would list sections that are
+    // plainly filled in. The editor reports { dirty, save } up so the card can
+    // say "save first" instead. `markSaved()` takes the next render's form as
+    // the saved copy: after a load (the server's note as shown) or a save.
+    const useNoteDirty = (f, onNoteState, save) => {
+      const savedRef = useRef(null);
+      const pendingRef = useRef(true);
+      const saveRef = useRef(save); saveRef.current = save;
+      const cur = JSON.stringify(f);
+      useEffect(() => {
+        if (pendingRef.current) { savedRef.current = cur; pendingRef.current = false; }
+        if (onNoteState) onNoteState({ dirty: savedRef.current != null && cur !== savedRef.current, save: () => saveRef.current() });
+      });
+      useEffect(() => () => { if (onNoteState) onNoteState({ dirty: false, save: null }); }, []);
+      return () => { pendingRef.current = true; };
+    };
+
+    // Shown on the Sign & Submit card while the note has unsaved typing.
+    const UnsavedNoteLine = ({ onSave }) => (
+      <div className="flex flex-wrap items-center gap-2 text-xs text-amber-700">
+        <span><i className="ti ti-alert-triangle mr-1" />Your note has unsaved changes. Save it to check what signing still needs.</span>
+        <button className="btn !py-1 text-xs" onClick={onSave}><i className="ti ti-device-floppy" />Save Note</button>
+      </div>
+    );
+
     const SignNotePanel = ({ patientId, euuid, saveFirst, signsAsAuthor, onSigned, onGoToCoding, onCancel }) => {
       const [attest, setAttest] = useState(false);
       const [hold, setHold] = useState({ on: false, reason: '' });
@@ -4079,7 +4106,7 @@
       .some(([k, v]) => String(v || '').trim() && !(part === 'skinWound' && k === 'woundPresent' && v === 'no'));
     const noteHasHpContent = (note) => !!(note && note.hp && Object.keys(note.hp).some(k => hpPartHasContent(k, note.hp[k])));
 
-    const HpTab = ({ patient, chart, appointmentEid, onDone, onGoToEncounter, encounterUuid, embedded, onChanged, codingDirty }) => {
+    const HpTab = ({ patient, chart, appointmentEid, onDone, onGoToEncounter, encounterUuid, embedded, onChanged, codingDirty, onNoteState }) => {
       const pf = (chart && chart.intakePrefill) || {};
       const [confirmed, setConfirmed] = useState([]);
       const confirm = (k) => setConfirmed(c => c.includes(k) ? c : [...c, k]);
@@ -4133,7 +4160,7 @@
       useEffect(() => {
         let live = true;
         if (encounterUuid) {
-          sn.load().then(r => { if (live && r && r.note) { applyNote(r.note); setRestored(true); } })
+          sn.load().then(r => { if (live && r && r.note) { applyNote(r.note); setRestored(true); } if (live) markSaved(); })
             .catch(e => live && setMsg({ ok: false, text: e.message }));
         } else {
           api.getDraft(patient.id).then(r => {
@@ -4211,6 +4238,8 @@
           location: modality === 'phone' ? '' : (v.location || (catalog && catalog.usualLocation) || '') };
       });
 
+      // Typed and not yet saved — see useNoteDirty.
+      const markSaved = useNoteDirty(f, onNoteState, () => saveDraft());
       // This form → the shared note's shape.
       const toNote = () => (sectionsOnly ? {
         kind: 'followup',
@@ -4238,6 +4267,7 @@
         setBusy('draft'); setMsg(null);
         return sn.save(toNote())
           .then(r => {
+            markSaved();
             setDraftAt(null);
             setMsg({ ok: true, text: `${r.message}${(r.warnings || []).length ? ` — ${r.warnings.join(' · ')}` : ''}. Saved as a draft — it is NOT signed yet, and anyone working on this chart can keep editing it.` });
             onDone && onDone(); onChanged && onChanged();
@@ -6646,7 +6676,7 @@
 
     // A follow-up (or older) note being edited on its encounter. The H&P has its
     // own, larger form (HpTab) and is embedded the same way.
-    const FollowUpNoteEditor = ({ patient, euuid, noteSections, sectionsOnly, typeLabel, onGoToCoding, onChanged, codingDirty }) => {
+    const FollowUpNoteEditor = ({ patient, euuid, noteSections, sectionsOnly, typeLabel, onGoToCoding, onChanged, codingDirty, onNoteState }) => {
       const sn = useSharedNote({ patientId: patient.id, encounterUuid: euuid });
       const blank = { chiefConcern: '', subjective: '', objective: '', assessment: '', plan: '', sections: {},
         vitals: { bpSys: '', bpDia: '', hr: '', temp: '', rr: '', spo2: '', weight: '', height: '', pain: '' } };
@@ -6664,14 +6694,16 @@
         if (n.visit) setVisit(n.visit);
       };
       useEffect(() => {
-        sn.load().then(r => { if (r) { applyNote(r.note); setSeeded(!!r.seededFromOpenEmr); } }).catch(e => setMsg({ ok: false, text: e.message }));
+        sn.load().then(r => { if (r) { applyNote(r.note); setSeeded(!!r.seededFromOpenEmr); } markSaved(); }).catch(e => setMsg({ ok: false, text: e.message }));
       }, [patient.id, euuid]);
       const toNote = () => ({ kind, chiefConcern: f.chiefConcern, subjective: f.subjective, objective: f.objective,
         assessment: f.assessment, plan: f.plan, sections: f.sections, vitals: f.vitals, ...(visit ? { visit } : {}) });
+      // Typed and not yet saved — see useNoteDirty.
+      const markSaved = useNoteDirty(f, onNoteState, () => save());
       const save = (opts) => {
         setBusy('draft'); setMsg(null);
         return sn.save(toNote(), opts)
-          .then(r => { setMsg({ ok: true, text: `${r.message}${(r.warnings || []).length ? ` — ${r.warnings.join(' · ')}` : ''}. Saved as a draft — NOT signed yet.` }); setSeeded(false); onChanged && onChanged(); return r; })
+          .then(r => { markSaved(); setMsg({ ok: true, text: `${r.message}${(r.warnings || []).length ? ` — ${r.warnings.join(' · ')}` : ''}. Saved as a draft — NOT signed yet.` }); setSeeded(false); onChanged && onChanged(); return r; })
           .catch(e => { setMsg({ ok: false, text: e.message }); throw e; })
           .finally(() => setBusy(false));
       };
@@ -6993,6 +7025,13 @@
       // them, never cleared "add to problem list", and "Unsaved changes" (and
       // the Sign block) stayed on after every save (owner report, 2026-10-12).
       const adoptCodingRef = useRef(false);
+      // The note editor's unsaved state: the Sign & Submit card reads the
+      // SAVED note, so it says "save first" rather than listing sections
+      // that are typed but not saved (owner report, 2026-10-12).
+      const [noteDirty, setNoteDirty] = useState(false);
+      const noteSaveRef = useRef(null);
+      const onNoteState = useCallback((s) => { setNoteDirty(!!s.dirty); noteSaveRef.current = s.save; }, []);
+      const saveNoteFirst = () => { if (noteSaveRef.current) Promise.resolve(noteSaveRef.current()).catch(() => {}); };
       codingRef.current = { diagnoses, services, facing, addToProblemList, record: d && d.record, key: `${patient.id}|${euuid}` };
       const load = useCallback(() => {
         api.encounterDetail(patient.id, euuid).then(r => {
@@ -7158,9 +7197,9 @@
             // boxes, so they are shown and kept (it renders a follow-up type
             // as the same SOAP note). Everything else: the SOAP editor.
             (((ns.note && ns.note.kind) || d.record.noteKind) === 'hp' || noteHasHpContent(ns.note))
-              ? <HpTab patient={patient} chart={chart} encounterUuid={euuid} embedded codingDirty={!locked && dirty}
+              ? <HpTab patient={patient} chart={chart} encounterUuid={euuid} embedded codingDirty={!locked && dirty} onNoteState={onNoteState}
                   onChanged={() => { load(); onChanged && onChanged(); }} onGoToEncounter={() => setStep('coding')} />
-              : <FollowUpNoteEditor patient={patient} euuid={euuid} noteSections={d.noteSections} sectionsOnly={!!d.sectionsOnly} typeLabel={d.noteTypeLabel} codingDirty={!locked && dirty}
+              : <FollowUpNoteEditor patient={patient} euuid={euuid} noteSections={d.noteSections} sectionsOnly={!!d.sectionsOnly} typeLabel={d.noteTypeLabel} codingDirty={!locked && dirty} onNoteState={onNoteState}
                   onGoToCoding={() => setStep('coding')} onChanged={() => { load(); onChanged && onChanged(); }} />
           )}
           {on('visit') && !(ns.status === 'draft' && na.canEdit) && <div className="card mb-4">
@@ -7346,12 +7385,15 @@
           {on('sign') && !locked && ns.status === 'draft' && na.canEdit && (
             <div className="card mb-4">
               <div className="card-h"><h2>Sign &amp; Submit</h2>
-                <span className={`chip ${d.signReadiness.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-800'}`}>{d.signReadiness.ok ? 'Ready to sign' : `${d.signReadiness.missing.length} blocker${d.signReadiness.missing.length > 1 ? 's' : ''}`}</span>
+                {noteDirty
+                  ? <span className="chip bg-amber-50 text-amber-800">Unsaved note</span>
+                  : <span className={`chip ${d.signReadiness.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-800'}`}>{d.signReadiness.ok ? 'Ready to sign' : `${d.signReadiness.missing.length} blocker${d.signReadiness.missing.length > 1 ? 's' : ''}`}</span>}
               </div>
               <div className="p-4 grid gap-3 text-sm">
                 {na.signsAsAuthor && <p className="text-xs text-stone-600">You sign as the note's <b>author</b>. It locks, and it is not billable until a provider — or an LCSW, for a behavioral-health note — adds the clinician addendum. Diagnoses are theirs to confirm.</p>}
                 {!na.signsAsAuthor && <p className="text-xs text-stone-600">Signing locks the note for clinicians and sends it to <b>billing</b>, who add the service codes and submit. You need the note and at least one ICD-10 diagnosis.</p>}
-                {!d.signReadiness.ok && <p className="text-xs text-amber-700">{d.signReadiness.message}{dirty ? ' Save your coding changes first.' : ''}</p>}
+                {noteDirty && <UnsavedNoteLine onSave={saveNoteFirst} />}
+                {!noteDirty && !d.signReadiness.ok && <p className="text-xs text-amber-700">{d.signReadiness.message}{dirty ? ' Save your coding changes first.' : ''}</p>}
                 {!String((d.record && d.record.patientSummary) || '').trim() && !String(facing.patientSummary || '').trim() &&
                   <p className="text-xs text-amber-700"><i className="ti ti-alert-triangle mr-1" />"What we did today, in plain words" is empty. You can still sign, but the patient's visit summary will have no plain-language account of this visit.</p>}
                 <label className="flex items-start gap-2 text-xs">
@@ -7360,7 +7402,7 @@
                 </label>
                 {!d.me.npi && <p className="text-[11px] text-amber-700"><i className="ti ti-alert-triangle mr-1" />Your NPI is not on file — an admin can add it in your user profile. Signing is allowed for test use and will be flagged.</p>}
                 <PortalHoldControl hold={portalHold} setHold={setPortalHold} />
-                <button className="btn gold w-fit" disabled={!attest || !d.signReadiness.ok || dirty || busy === 'sign' || (portalHold.on && !portalHold.reason)} onClick={() => run('sign', () => api.sign(patient.id, euuid, portalHoldPayload(portalHold)))}>
+                <button className="btn gold w-fit" disabled={!attest || !d.signReadiness.ok || dirty || noteDirty || busy === 'sign' || (portalHold.on && !portalHold.reason)} onClick={() => run('sign', () => api.sign(patient.id, euuid, portalHoldPayload(portalHold)))}>
                   <i className="ti ti-writing-sign" />{busy === 'sign' ? 'Signing…' : 'Sign & Submit'}
                 </button>
                 <p className="text-[10.5px] text-stone-400">Locks the note with your name, NPI and the time, bold at the bottom of the note — in OpenEMR and in the formatted copy filed to the patient's Documents. The signed note and visit summary then publish to the patient's portal.</p>
@@ -7378,14 +7420,15 @@
                 )}
                 {na.canAddClinicianAddendum && <>
                   <p className="text-xs text-stone-600">Review the author's note, confirm the diagnoses on the Coding step, and add your addendum. <b>Your addendum is the billable signature</b> — you become the rendering clinician on the claim, and the note goes to billing.</p>
-                  {d.addendumReadiness && !d.addendumReadiness.ok && <p className="text-xs text-amber-700">{d.addendumReadiness.message}{dirty ? ' Save your coding changes first.' : ''}</p>}
+                  {noteDirty && <UnsavedNoteLine onSave={saveNoteFirst} />}
+                  {!noteDirty && d.addendumReadiness && !d.addendumReadiness.ok && <p className="text-xs text-amber-700">{d.addendumReadiness.message}{dirty ? ' Save your coding changes first.' : ''}</p>}
                   <FormattedField label="Your addendum" minRows={3} value={clinAddendum} onChange={setClinAddendum}
                     placeholder="e.g. Patient seen with the RN; I agree with the assessment and plan above, with these additions…" />
                   <label className="flex items-start gap-2 text-xs">
                     <input type="checkbox" className="mt-0.5" checked={clinAttest} onChange={e => setClinAttest(e.target.checked)} />
                     <span>I attest that I reviewed this note, that the services recorded were performed as documented under my supervision or by me, and that the diagnoses are supported. Signing as <b>{npiLabel(d.me)}</b>.</span>
                   </label>
-                  <button className="btn gold w-fit" disabled={!clinAttest || NF.isBlank(clinAddendum) || dirty || (d.addendumReadiness && !d.addendumReadiness.ok) || busy === 'clinAddendum'}
+                  <button className="btn gold w-fit" disabled={!clinAttest || NF.isBlank(clinAddendum) || dirty || noteDirty || (d.addendumReadiness && !d.addendumReadiness.ok) || busy === 'clinAddendum'}
                     onClick={() => run('clinAddendum', () => api.clinicianAddendum(patient.id, euuid, clinAddendum)).then(onOk(() => { setClinAddendum(''); setClinAttest(false); }))}>
                     <i className="ti ti-writing-sign" />{busy === 'clinAddendum' ? 'Signing…' : 'Add Clinician Addendum'}
                   </button>

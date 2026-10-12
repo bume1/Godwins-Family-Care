@@ -217,3 +217,57 @@ test('any other reload still keeps coding that has not been saved', async () => 
 test('the adopt flag is set only by a SUCCESSFUL coding save', () => {
   assert.match(page, /api\.saveCoding\(patient\.id, euuid, \{ diagnoses, services, addToProblemList, \.\.\.facing \}\)\.then\(r => \{ adoptCodingRef\.current = true; return r; \}\)/);
 });
+
+// Owner report, 2026-10-12 ("same here"): the encounter's Sign & Submit card
+// read the SAVED note, so while Subjective, Assessment and Plan were typed and
+// not yet saved it listed them as missing. The editors now report whether the
+// note on screen differs from the one last loaded or saved. The real hook is
+// lifted out of the page and run with a tiny fake hook runner.
+const makeHookRunner = () => {
+  const slots = []; let i = 0; const effects = [];
+  const React = {
+    useRef: (init) => { const k = i++; if (!slots[k]) slots[k] = { current: init }; return slots[k]; },
+    useEffect: (fn, deps) => { const k = i++; const first = !slots[k]; slots[k] = true; if (!deps || first) effects.push(fn); }
+  };
+  const src = slice('const useNoteDirty = (', '// Shown on the Sign & Submit card');
+  const hook = new Function('useRef', 'useEffect', `${src}; return useNoteDirty;`)(React.useRef, React.useEffect);
+  return (f, onNoteState, save) => { i = 0; effects.length = 0; const r = hook(f, onNoteState, save); effects.forEach(e => e()); return r; };
+};
+
+test('the note reads as unsaved only after typing, and clean again after a save', () => {
+  const render = makeHookRunner();
+  const seen = [];
+  const report = (s) => seen.push(s);
+  let markSaved = render({ subjective: '' }, report, () => 'saved');
+  assert.strictEqual(seen.at(-1).dirty, false, 'a blank note before load is not "unsaved"');
+  markSaved(); // the load lands
+  markSaved = render({ subjective: 'Feels better' }, report, () => 'saved');
+  assert.strictEqual(seen.at(-1).dirty, false, 'the note as loaded is the saved copy');
+  markSaved = render({ subjective: 'Feels better today' }, report, () => 'saved');
+  assert.strictEqual(seen.at(-1).dirty, true, 'typing makes it unsaved');
+  assert.strictEqual(seen.at(-1).save(), 'saved', 'the card can save it');
+  markSaved(); // the save succeeded
+  render({ subjective: 'Feels better today' }, report, () => 'saved');
+  assert.strictEqual(seen.at(-1).dirty, false, 'a successful save makes it clean again');
+});
+
+test('both editors report their note state, and mark it saved after a load and a save', () => {
+  const hp = slice('const HpTab = (', 'const MedRecTab');
+  const fu = slice('const FollowUpNoteEditor = (', 'const SignedNoteView');
+  for (const [name, src, saver] of [['HpTab', hp, 'saveDraft'], ['FollowUpNoteEditor', fu, 'save']]) {
+    assert.match(src, new RegExp(`const markSaved = useNoteDirty\\(f, onNoteState, \\(\\) => ${saver}\\(\\)\\)`), `${name} reports up`);
+    assert.match(src, /\.then\(r => \{ (if \(live && r && r\.note\)|if \(r\))[^\n]*markSaved\(\)/, `${name} marks the loaded note as saved`);
+    assert.match(src, /\.then\(r => \{\s*markSaved\(\);/, `${name} marks a successful save`);
+  }
+  assert.strictEqual((page.match(/onNoteState=\{onNoteState\}/g) || []).length, 2, 'the encounter listens to both editors');
+});
+
+test('while the note is unsaved, the sign card says save first and cannot sign', () => {
+  const card = slice('{on(\'sign\') && !locked && ns.status === \'draft\' && na.canEdit && (', '{/* The clinician addendum');
+  assert.match(card, /\{noteDirty && <UnsavedNoteLine onSave=\{saveNoteFirst\} \/>\}/);
+  assert.match(card, /\{!noteDirty && !d\.signReadiness\.ok && <p/, 'the stale section list is hidden while the note is unsaved');
+  assert.match(card, /disabled=\{!attest \|\| !d\.signReadiness\.ok \|\| dirty \|\| noteDirty \|\|/);
+  const add = slice('{/* The clinician addendum', '{/* BILLING');
+  assert.match(add, /\{!noteDirty && d\.addendumReadiness/);
+  assert.match(add, /dirty \|\| noteDirty \|\|/);
+});

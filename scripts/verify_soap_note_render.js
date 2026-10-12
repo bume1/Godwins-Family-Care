@@ -15,6 +15,8 @@
 //   - New Patient is still the H&P, unchanged;
 //   - saving a follow-up POSTs kind 'followup';
 //   - the "Document a visit" popup is a short starter with no S/O/A/P form.
+//   - on a saved encounter, the Sign & Submit card says "save first" while the
+//     note has unsaved typing, instead of listing typed sections as missing.
 //
 // The API is stubbed; the visit-type catalog is built from the REAL
 // appointmentTypes/clinicalNotes modules the server serves it from. The CDN
@@ -82,6 +84,20 @@ const catalog = () => {
   };
 };
 const posted = [];
+// Section H: a saved follow-up encounter, opened from the Encounters tab.
+let encRows = [];
+const ENC = 'e-9';
+const followUpSections = () => catalog().noteTemplates.pc_follow_up.filter(s => s.modality === 'in_person');
+const encounterDetail = () => ({
+  encounter: { uuid: ENC, eid: '42', date: '2026-10-12', reason: 'Follow-up' },
+  record: { diagnoses: [], services: [], noteKind: 'followup', patientSummary: '', followUpInstructions: '', renderingProvider: null },
+  state: 'draft', closed: false, prescriptions: [], orders: [], attestation: null, addenda: [], candidates: [],
+  narrativeNotes: [], orderTypes: [], orderPriorities: [], documentOrderTypes: [],
+  favorites: { practiceServices: [], services: [], diagnoses: [] }, billingActions: {},
+  signReadiness: { ok: false, missing: ['SIGN_SECTIONS'], message: 'Cannot sign: this Follow-up note still needs Subjective, Assessment / Diagnoses, Plan.' },
+  noteActions: { canEdit: true }, noteState: { status: 'draft', note: { kind: 'followup', chiefConcern: 'BP check' } },
+  noteSections: followUpSections(), noteTypeLabel: 'Follow-up', me: PROVIDER, access: { canWrite: true }
+});
 
 (async () => {
   const srv = http.createServer((req, res) => {
@@ -120,7 +136,9 @@ const posted = [];
     if (p === '/api/clinical/patients') return json({ patients: [PATIENT] });
     if (p.endsWith('/chart')) return json({ banner: { name: PATIENT.name }, intakePrefill: {}, problems: [], medications: [], allergies: [], encounters: [], vitals: [], documents: [] });
     if (p.endsWith('/place-of-service')) return json(catalog());
-    if (p.endsWith('/encounters')) return json({ linked: true, encounters: [] });
+    if (p.endsWith('/encounters')) return json({ linked: true, encounters: encRows });
+    if (p.endsWith(`/encounters/${ENC}/note`)) return json({ version: 1, status: 'draft', revisions: [], note: { kind: 'followup', chiefConcern: 'BP check', subjective: '', assessment: '', plan: '', sections: {}, vitals: {} } });
+    if (p.endsWith(`/encounters/${ENC}`)) return json(encounterDetail());
     if (p.endsWith('/my-day')) return json({ date: '2026-10-12', visits: [], totals: { visits: 0, miles: null }, calendar: { ok: true }, unsignedEarlier: [], openTasks: [] });
     return json({});
   });
@@ -137,8 +155,8 @@ const posted = [];
     await page.waitForTimeout(300);
     await page.locator(`text=${PATIENT.name}`).first().click();
     await page.waitForTimeout(400);
-    await page.locator('button:has-text("Start visit")').first().click();
-    await page.waitForSelector('text=Appointment type', { timeout: 15000 });
+    await page.locator('button:has-text("Start Visit")').first().click();
+    await page.waitForSelector('text=Visit Type', { timeout: 15000 });
   };
   try { await openVisit(); }
   catch (e) {
@@ -199,7 +217,7 @@ const posted = [];
   await pick('Follow-up');
   await noteCard.locator('[contenteditable="true"]').first().click();
   await page.keyboard.type('Blood pressure follow-up');
-  await page.locator('button:has-text("Save draft")').first().click();
+  await page.locator('button:has-text("Save Draft")').first().click();
   await page.waitForTimeout(500);
   const save = posted.find(x => /\/notes$|\/note$/.test(x.path));
   ok('E1 the saved note is a follow-up of type Follow-up', !!save && save.body.note && save.body.note.kind === 'followup' && save.body.note.visit.appointmentType === 'pc_follow_up',
@@ -224,6 +242,37 @@ const posted = [];
   ok('G3 it carries no S/O/A/P boxes, vitals or coding',
     !labels.some(l => ['SUBJECTIVE', 'OBJECTIVE', 'ASSESSMENT', 'PLAN', 'BP SYS'].includes(l)) && !/ICD-10/.test(mt) && labels.includes('CHIEF COMPLAINT'),
     JSON.stringify(labels));
+
+  // --- H. The encounter's Sign & Submit card while the note is unsaved -------
+  // (owner report, 2026-10-12): it read the SAVED note, so it listed
+  // Subjective, Assessment and Plan as missing while they were typed.
+  encRows = [{ id: ENC, date: '2026-10-12', reason: 'Follow-up', state: 'draft' }];
+  await page.goto(`${base}/clinical`, { waitUntil: 'networkidle' });
+  await page.locator('button:has-text("Patients"), a:has-text("Patients")').first().click();
+  await page.waitForTimeout(300);
+  await page.locator(`text=${PATIENT.name}`).first().click();
+  await page.waitForTimeout(400);
+  await page.locator('.tabbtn:text-is("Encounters")').first().click();
+  await page.waitForTimeout(400);
+  await page.locator('div.cursor-pointer', { hasText: 'Not coded' }).first().click();
+  const signCard = page.locator('.card', { has: page.locator('h2:text-is("Sign & Submit")') }).first();
+  try { await signCard.waitFor({ timeout: 15000 }); } catch (e) { console.log('   pageErrors:', pageErrors.join(' | ')); throw e; }
+  await page.waitForTimeout(400);
+  let sc = await signCard.innerText();
+  ok('H1 a saved note shows what signing still needs', /still needs Subjective/.test(sc) && !/unsaved changes/i.test(sc), sc.slice(0, 200));
+  const subj = page.locator('.card', { hasText: 'Subjective' }).locator('[contenteditable="true"]').nth(1);
+  await subj.click(); await page.keyboard.type('Feels better, no dizziness');
+  await page.waitForTimeout(300);
+  sc = await signCard.innerText();
+  ok('H2 typing in the note: the card says save first and no longer lists the sections', /unsaved changes/i.test(sc) && !/still needs Subjective/.test(sc), sc.slice(0, 200));
+  ok('H3 and the card cannot sign while the note is unsaved', await signCard.locator('button:has-text("Sign & Submit")').isDisabled());
+  const before = posted.length;
+  await signCard.locator('button:has-text("Save Note")').click();
+  await page.waitForTimeout(600);
+  const put = posted.slice(before).find(x => x.path.endsWith(`/encounters/${ENC}/note`));
+  ok('H4 Save Note saves the typed note', !!put && /Feels better/.test(JSON.stringify(put.body)), put ? put.path : 'nothing posted');
+  sc = await signCard.innerText();
+  ok('H5 after the save the card reads the saved note again', !/unsaved changes/i.test(sc) && /still needs Subjective/.test(sc), sc.slice(0, 200));
 
   ok('F1 no page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close(); srv.close();
