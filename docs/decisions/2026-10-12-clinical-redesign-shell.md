@@ -29,7 +29,7 @@
 - Four guards in `test/clinical_workspace_412.test.js` were repointed, not deleted. They now protect the same rules: every view declared once, every view reachable on a laptop and a phone, and the content column never collapsing to zero width. Four mutations each fail one: a view with no group, More listing the wrong views, the content track losing `minmax(0, …)`, and a view dropped from the list.
 - The page compiles (esbuild). It was rendered in Chromium with real Tailwind at 390, 1024, 1440 and 1920px, as a provider and as a read-only viewer. My Day, Patients, a chart, Inbox, Settings and More all rendered with no page errors and no horizontal overflow.
 
-## Next (owner picks)
+## Next (as written before Parts 2 and 3)
 - Part 2: the chart (header, tab strip, Overview grid, Results table without values, phone chart menu).
 - Part 3: Inbox and Results restyle, the phone visit checklist, New Encounter on a phone, Care Plan, Messages tabs.
 
@@ -48,3 +48,19 @@
   - Full suite passes, including `test/clinical_redesign.test.js` (6 tests). Six mutations each fail one: a dash invented for a missing vital, the oldest reading winning, a value column added, Start visit ungated, the phone menu not switching tabs, and an unset flag read as Normal.
   - Rendered in Chromium at 1440 and 390 (Overview, Results, the phone section menu): no page errors, no sideways scroll.
   - Babel now notes the page script is over 500KB. It's informational, not an error.
+
+## Part 3: work screens, wiring and button labels (same branch, same PR)
+- **Inbox (mockup 7):** All · Co-Sign · Orders · Other filters by item kind. Who may act stays the server's `actionable`.
+  - **Wiring fix:** "Open Care Plan" used to open the chart's Overview. It now opens the Care Plan tab.
+- **Results inbox (mockup 8):** grouped Critical, then Needs Review. Each row opens to the unchanged acknowledgement controls plus an Open Chart button that lands on the patient's Results tab. No result values are shown.
+- **Visit checklist (mockup 6):** each Key Information line in Visit Details opens its chart section (Problems, Allergies, Orders, Referrals, Results, Care Plan).
+- **Care Plan (mockups 11 and 12):** problems, goals, a collapsible Tasks list and Visit Schedule. Goals are a list, not checkboxes, because nothing records a goal as met. Writing a new version sits behind a "Write Version N" button.
+- **Messages (mockup 12):** Patient / Care Team tabs on the chart.
+  - The server marks each thread and channel `withPatient` (`messagingRepository.withPatient`, read from the channel's own participants). The shared component takes an optional `audience` option and only filters on that mark.
+  - No channel list is restated on the page.
+- **Chart tabs** wrap to a second row instead of scrolling the open tab out of sight.
+- **Button labels (owner rule, 2026-10-12):** every button is short and Title Case, with small joining words in lower case. Sentences and status chips stay in sentence case.
+  - Applied across `clinical.html`, `portal.html`, `admin-hub.html`, `admin-enrollment.html`, `caregiver.html`, `scheduling.html`, `caregivers.html`, `login.html`, `upload-link.html` and the messaging component.
+  - A guard in `test/clinical_redesign.test.js` fails the build on any sentence-case or over-five-word button in the clinical app. It covers the clinical page only; the other pages were fixed by hand this pass.
+  - Seven older tests that matched the old wording were repointed to the new labels, keeping the rule each one protects.
+- **Verified:** full suite 2267 pass, 0 fail. Five mutations each fail a new guard (care-plan routing dropped, Results opens the chart without a tab, a checklist line unwired, the messaging filter ignored, a sentence-case label). Every edited page compiles. Rendered in Chromium (Inbox, Results, Care Plan, Messages, phone My Day and Inbox) with no page errors and no sideways scroll.

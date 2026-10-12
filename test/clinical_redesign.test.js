@@ -69,3 +69,69 @@ test('the header keeps every action behind its gate', () => {
   assert.match(body, /\{patient && patient\.id && access\.canWrite && \(/, 'Refresh portal chart stays a write');
   assert.match(body, /\{canBill && <BannerFact label="Facility &amp; POS">/, 'place of service stays billing\'s');
 });
+
+// Owner rule, 2026-10-12: "No reason for Open care plan with a capital O and
+// lower case c… I want succinct/concise text buttons." Every button label is
+// Title Case and at most five words; small joining words stay lower case.
+// Progress text ("Saving…") and sentences are not labels and are skipped.
+const SMALL = new Set(['a', 'an', 'the', 'and', 'or', 'to', 'of', 'in', 'on', 'for', 'as', 'at', 'by', 'vs', 'via', 'with', 'from', 'per', 'no']);
+const buttonLabelProblems = (src) => {
+  const bad = [];
+  const re = /<button\b([^>]*)>([\s\S]*?)<\/button>/g;
+  let m;
+  while ((m = re.exec(src))) {
+    if (!/className="[^"]*\b(btn|chip)\b|className=\{`[^`]*\b(btn|chip)\b/.test(m[1])) continue;
+    const cands = [];
+    ('>' + m[2]).replace(/(?:>|\/>)\s*([A-Z][A-Za-z'’&;.\- ]{2,60}?)\s*(?=<|\{|$)/g, (_, t) => cands.push(t));
+    m[2].replace(/[?:]\s*'([A-Z][A-Za-z'’& .\-]{2,60})'/g, (_, t) => cands.push(t));
+    for (const c of cands) {
+      const t = c.replace(/&amp;/g, '&').trim();
+      if (!t.includes(' ') || /[.…]$/.test(t)) continue;
+      const words = t.split(/\s+/);
+      const line = src.slice(0, m.index).split('\n').length;
+      if (words.length > 5) bad.push(`${line}: "${t}" is longer than five words`);
+      else if (words.slice(1).some(w => /^[a-z]/.test(w) && !SMALL.has(w))) bad.push(`${line}: "${t}" is not Title Case`);
+    }
+  }
+  return bad;
+};
+
+test('every clinical button label is Title Case and short (owner rule)', () => {
+  assert.deepStrictEqual(buttonLabelProblems(page), []);
+});
+
+test('the label guard actually catches a sentence-case button', () => {
+  assert.deepStrictEqual(buttonLabelProblems('<button className="btn ghost">Open care plan</button>').length, 1);
+  assert.deepStrictEqual(buttonLabelProblems('<button className="btn">Open Care Plan</button>'), []);
+  assert.deepStrictEqual(buttonLabelProblems("<button className=\"btn\">{busy ? 'Saving…' : 'Save Draft'}</button>"), []);
+});
+
+// Part 3 wiring: every row opens the place where its work is done.
+test('Inbox, Results and the visit checklist open the right chart section', () => {
+  const inbox = slice('const InboxView = (', '\n    // ── Session 4.12 — the persistent patient banner');
+  assert.match(inbox, /onOpenChart\(i\.clientId, i\.kind === 'care_plan_co_sign' \? \{ tab: 'careplan' \} : undefined\)/);
+  const app = slice('const App = () => {', 'ReactDOM.createRoot');
+  assert.match(app, /<InboxView[\s\S]{0,200}onOpenChart=\{\(clientId, opts\) => openChartById\(clientId, opts\)\}/);
+  assert.match(app, /<ResultsInbox onOpenChart=\{\(clientId, opts\) => openChartById\(clientId, opts\)\} \/>/);
+  assert.match(app, /<MyDayView user=\{user\} onOpenChart=\{\(clientId, opts\) => openChartById\(clientId, opts\)\}/);
+  const details = slice('const VisitDetails = (', '\n    // ── The AI review card');
+  for (const t of ['problems', 'allergies', 'orders', 'referrals', 'results', 'careplan']) {
+    assert.ok(details.includes(`goTab('${t}')`), `the ${t} line must open its section`);
+  }
+  assert.match(details, /const goTab = \(t\) => \(\) => onOpenChart\(v\.clientId, \{ tab: t \}\);/);
+});
+
+test('the chart Messages split is the server\'s mark, never a list on the page', () => {
+  const msg = slice('const MessagesTab = (', '\n    const App = () => {');
+  assert.match(msg, /audience,/);
+  assert.ok(!/care_team|clinical_escalation|behavioral_escalation/.test(msg), 'no channel ids on the page');
+  const comp = fs.readFileSync(path.join(__dirname, '..', 'public', 'components', 'gfc-messaging.js'), 'utf8');
+  assert.match(comp, /state\.audience === 'patient' \? !!x\.withPatient : !x\.withPatient/);
+  const repo = require('../messagingRepository');
+  assert.strictEqual(repo.withPatient('care_team'), true);
+  assert.strictEqual(repo.withPatient('clinical_escalation'), true, 'the client is a participant');
+  assert.strictEqual(repo.withPatient('clinical_oversight'), false, 'clinician and caregiver only');
+  assert.strictEqual(repo.withPatient('behavioral_escalation'), false);
+  const routes = fs.readFileSync(path.join(__dirname, '..', 'routes', 'messaging.js'), 'utf8');
+  assert.match(routes, /withPatient: msg\.withPatient\(t\.channel\)/);
+});

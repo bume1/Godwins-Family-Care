@@ -874,7 +874,7 @@ test('the H&P is still reachable, and says where you are while it is open', () =
   assert.match(pageCode, /tab === 'visit' && \(chart \?/, 'the H&P body still renders');
   // With no tab highlighted, a clinician has to be told where they are.
   assert.match(pageCode, /Documenting a visit/);
-  assert.match(pageCode, /Back to the chart/);
+  assert.match(pageCode, /Back to Chart/);
 });
 
 test('med reconciliation renders INSIDE medications', () => {

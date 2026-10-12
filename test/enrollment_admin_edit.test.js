@@ -185,8 +185,9 @@ test('the enrollment page offers no control the API will refuse', () => {
   assert.match(SERVER, /canEdit: canEditEnrollment\(req\.user\)/);
   assert.ok(!/canEditSubmission = isAdminRole|canEditSubmission = user\./.test(ENROL),
     'the page must not decide the submission gate for itself');
-  for (const ctl of ['Mark as reviewed', 'Request follow-up', 'Change service line',
-                     'Approve enrollment', 'Request documents', 'Record paper signature']) {
+  // Labels are Title Case since the owner's 2026-10-12 rule.
+  for (const ctl of ['Mark Reviewed', 'Request Follow-Up', 'Change Service Line',
+                     'Approve Enrollment', 'Request Documents', 'Record Paper Signature']) {
     assert.ok(ENROL.includes(ctl), `control missing: ${ctl}`);
   }
   // A viewer is TOLD which of the two states they are in rather than left with
@@ -194,14 +195,14 @@ test('the enrollment page offers no control the API will refuse', () => {
   assert.match(ENROL, /Read-only — an admin or clinician makes changes here/);
   assert.match(ENROL, /You can correct this submission/);
   // Note the arrow function in the onClick — [^>]* would stop at its ">".
-  assert.match(ENROL, /\{canEdit && <button [\s\S]{0,120}?>Record paper signature<\/button>\}/);
+  assert.match(ENROL, /\{canEdit && <button [\s\S]{0,120}?>Record Paper Signature<\/button>\}/);
   assert.match(ENROL, /<DocumentExchange clientId=\{clientId\} canEdit=\{canEdit\} isAdmin=\{isAdminRole\(user\)\} \/>/);
 });
 
 test('printing a blank consent stays open to staff — it is a read', () => {
   // The distinction is the point: printing a document for a visit is reading,
   // recording the signature that comes back is writing.
-  const at = ENROL.indexOf('Print for signature');
+  const at = ENROL.indexOf('Print for Signature');
   assert.notStrictEqual(at, -1);
   const line = ENROL.slice(ENROL.lastIndexOf('\n', at), ENROL.indexOf('\n', at));
   assert.ok(!line.includes('canEdit'), 'the blank-copy link must not be admin-gated');

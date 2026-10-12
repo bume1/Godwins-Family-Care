@@ -1215,7 +1215,7 @@ test('portal: the live-read wording is gone, the note renders escaped, and a hol
   assert.match(portal, /Not yet reviewed by your care team/);
   assert.match(portal, /const LatestVisitCard =/);
   assert.match(portal, /<LatestVisitCard visit=\{clinical\.visits\[0\]\}/);
-  assert.match(portal, /Message the care team/);
+  assert.match(portal, /Message Care Team/);
   assert.match(portal, /k="results" label="Test results"/, 'the sharing screen offers results');
   // Module scope (input-focus rule): none of these is declared inside another component.
   for (const name of ['PublishedNote', 'LatestVisitCard', 'ResultRow']) {
