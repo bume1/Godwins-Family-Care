@@ -58,6 +58,7 @@ const screenings = require('./screenings');  // PHQ-2/9, GAD-7, SDOH results (so
 const patientRead = require('./patientReadRepository');
 const familyInvites = require('./familyInvites');
 const portalProfile = require('./portalProfile');
+const signups = require('./signupRequests');
 const patientPublish = require('./patientPublish');   // Portal P1: the published copies the portal reads (patients never read OpenEMR)
 // Session 4.8 — the clinical role enum, capability matrix and credential
 // ceiling. THE one place that answers "may this person do this"; the clinical
@@ -3373,6 +3374,15 @@ app.post('/api/auth/login', async (req, res) => {
     const users = await getUsers();
     const user = users.find(u => u.email?.toLowerCase() === email.toLowerCase());
     if (!user) {
+      // A self sign-up that is not an account yet says where it stands, but
+      // only to someone who knows its password: an email alone reveals nothing.
+      const pending = ((await db.get('signup_requests')) || [])
+        .filter(r => r && r.email === String(email).toLowerCase().trim() && r.status !== 'approved')
+        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0];
+      if (pending && await bcrypt.compare(password, pending.passwordHash)) {
+        const m = signups.loginMessageFor(pending);
+        if (m) return res.status(403).json(m);
+      }
       console.log('Login failed: unknown account');
       return res.status(400).json({ error: 'Invalid credentials' });
     }
@@ -3482,6 +3492,70 @@ app.post('/api/auth/client-login', async (req, res) => {
     } }));
   } catch (error) {
     console.error('Client login error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============== SELF SIGN-UP (owner, 2026-10-12) ==============
+// A sign-up is a REQUEST, never an account: see signupRequests.js. These two
+// routes are public, so both answer the same way whether or not an email is
+// already known, and both are rate-limited by hashed address.
+const signupLimited = signups.makeLimiter({ max: 5, windowMs: 3600 * 1000 });
+const SIGNUP_DONE = 'Thanks. Check your email for a link to confirm your address. Our office reviews every new account and will email you when it is ready.';
+
+app.post('/api/auth/self-signup', async (req, res) => {
+  try {
+    const b = req.body || {};
+    // A field people cannot see. A form filled in by a bot fills it in.
+    if (b.website) return res.json({ message: SIGNUP_DONE });
+    const ipKey = roiRepo.hashIp(clientIpFrom(req), JWT_SECRET);
+    if (signupLimited(ipKey)) return res.status(429).json({ error: 'Too many sign-ups from here. Please try again in an hour, or call the office.', code: 'SIGNUP_RATE_LIMITED' });
+    const n = signups.normalizeSignup(b, { minPasswordLength: config.MIN_PASSWORD_LENGTH });
+    if (n.error) return res.status(400).json(n);
+    const v = n.value;
+    const users = await getUsers();
+    const rows = (await db.get('signup_requests')) || [];
+    // Already an account, or already asked: say the same thing, do nothing.
+    // Telling a stranger "that email has an account" is how accounts get found.
+    const taken = users.some(u => u && String(u.email || '').toLowerCase() === v.email)
+      || rows.some(r => r && r.email === v.email && (r.status === 'verified' || (r.status === 'unverified' && Date.parse(r.verifyExpiresAt) > Date.now())));
+    if (taken) return res.json({ message: SIGNUP_DONE });
+    const token = require('crypto').randomBytes(24).toString('hex');
+    const row = signups.buildSignupRow({ id: uuidv4(), value: v, passwordHash: await bcrypt.hash(v.password, config.BCRYPT_SALT_ROUNDS), token, at: new Date().toISOString(), ipHash: ipKey });
+    rows.push(row);
+    await db.set('signup_requests', rows);
+    const link = `${await getAppBaseUrl()}/signup?verify=${token}`;
+    // No health information in this email: it only confirms an address.
+    const htmlBody = emailTemplates.renderGfcEmail({
+      greeting: v.name.split(' ')[0],
+      headline: 'Confirm your email',
+      paragraphs: ['Thanks for signing up with Godwins Family Care. Please confirm this is your email address.', `The link works for ${signups.VERIFY_HOURS} hours. If you didn't sign up, you can ignore this email.`],
+      ctaUrl: link, ctaLabel: 'Confirm my email'
+    }).html;
+    sendEmail(v.email, 'Confirm your email for Godwins Family Care', `Confirm your email: ${link}`, { htmlBody })
+      .catch(err => console.error('Sign-up email error (non-fatal):', err.message));
+    res.json({ message: SIGNUP_DONE });
+  } catch (error) {
+    console.error('Sign-up error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/auth/self-signup/verify', async (req, res) => {
+  try {
+    const token = String((req.body && req.body.token) || '');
+    if (!/^[a-f0-9]{48}$/.test(token)) return res.status(400).json({ error: 'That link is not valid. Try signing up again.', code: 'SIGNUP_LINK_INVALID' });
+    const rows = (await db.get('signup_requests')) || [];
+    const f = signups.findByToken(rows, token, new Date().toISOString());
+    if (f.error) return res.status(400).json(f);
+    if (!f.already) {
+      rows[f.idx] = { ...f.row, status: 'verified', verifiedAt: new Date().toISOString() };
+      await db.set('signup_requests', rows);
+      await logActivity('self_signup', 'Self sign-up', 'signup_email_verified', 'signup', f.row.id, { who: f.row.who });
+    }
+    res.json({ message: 'Your email is confirmed. Our office will review your account and email you when it is ready.' });
+  } catch (error) {
+    console.error('Sign-up verify error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -16363,6 +16437,118 @@ app.get('/api/gfc/admin/enrollment/list', authenticateToken, requireEnrollmentSt
 });
 
 // GET /api/gfc/admin/enrollment/:clientId — full submission detail.
+// Self sign-ups waiting on staff (owner, 2026-10-12). Staff read the confirmed
+// ones, with any client already on file who shares the surname and date of
+// birth (a likely duplicate or a family link). An ADMIN decides.
+app.get('/api/gfc/admin/signups', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const rows = ((await db.get('signup_requests')) || []).filter(r => r && (r.status === 'verified' || r.status === 'declined' || r.status === 'approved'));
+    const users = await getUsers();
+    const clients = users.filter(u => u && u.role === config.ROLES.CLIENT);
+    const fold = (x) => String(x || '').toLowerCase().normalize('NFD').replace(/[^a-z]/g, '');
+    const matchesFor = (r) => {
+      const who = r.who === 'self' ? { name: r.name, dob: r.dob } : { name: r.patient.name, dob: r.patient.dob };
+      const last = fold((signups.splitName(who.name) || {}).lastName);
+      return clients.filter(c => {
+        const i = c.intake || {};
+        return fold(i.lastName || String(c.name || '').split(' ').pop()) === last && (i.dob || c.dob) === who.dob;
+      }).map(c => ({ id: c.id, name: c.name }));
+    };
+    res.json({
+      signups: rows.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+        .map(r => ({ ...signups.staffRow(r), possibleMatches: r.status === 'verified' ? matchesFor(r) : [] })),
+      clients: clients.map(c => ({ id: c.id, name: c.name }))
+    });
+  } catch (error) {
+    console.error('Sign-ups read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/gfc/admin/signups/:id/decide', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { action, clientId, reason } = req.body || {};
+    const rows = (await db.get('signup_requests')) || [];
+    const idx = rows.findIndex(r => r && r.id === req.params.id);
+    const row = idx === -1 ? null : rows[idx];
+    const bad = signups.checkDecision(row, { action, clientId, reason });
+    if (bad) return res.status(bad.code === 'SIGNUP_NOT_FOUND' ? 404 : bad.code.endsWith('_REQUIRED') || bad.code === 'SIGNUP_BAD_ACTION' ? 400 : 409).json(bad);
+    const at = new Date().toISOString();
+    const by = { id: req.user.id, name: req.user.name || req.user.email };
+    if (action === 'decline') {
+      rows[idx] = { ...row, status: 'declined', decidedAt: at, decidedBy: by, declineReason: String(reason).trim().slice(0, 500) };
+      await db.set('signup_requests', rows);
+      await logActivity(req.user.id, by.name, 'signup_declined', 'signup', row.id, {});
+      return res.json({ signup: signups.staffRow(rows[idx]) });
+    }
+    const users = await getUsers();
+    // Checked again now: an account may have been made since they signed up.
+    if (users.some(u => u && String(u.email || '').toLowerCase() === row.email)) {
+      return res.status(409).json({ error: 'An account with that email already exists. Decline this sign-up, or link that account on the user form.', code: 'SIGNUP_EMAIL_IN_USE' });
+    }
+    const familyUser = (forClientId, relationship) => ({
+      id: uuidv4(), email: row.email, name: row.name, password: row.passwordHash,
+      role: config.ROLES.FAMILY, familyOfClientId: forClientId, familyIsPoa: false, familyRelationship: relationship || null,
+      phone: row.phone, accountStatus: 'active', source: 'self_signup', signupRequestId: row.id,
+      isManager: false, hasServicePortalAccess: false, hasAdminHubAccess: false, hasImplementationsAccess: false, hasClientPortalAdminAccess: false,
+      createdAt: at
+    });
+    let created = [];
+    let linkedClientId = null;
+    if (action === 'link_family') {
+      const client = users.find(u => u && u.id === clientId && u.role === config.ROLES.CLIENT);
+      if (!client) return res.status(404).json({ error: 'That client was not found.', code: 'SIGNUP_LINK_CLIENT_NOT_FOUND' });
+      const fam = familyUser(client.id, row.patient ? row.patient.relationship : null);
+      users.push(fam); created.push(fam.id); linkedClientId = client.id;
+    } else {
+      const forSelf = row.who === 'self';
+      const cid = uuidv4();
+      const intake = signups.intakeFor(row);
+      const clientName = `${intake.firstName} ${intake.lastName}`;
+      const client = {
+        id: cid,
+        // A loved one gets a client record with no login of their own; the
+        // person who signed up signs in as their family member.
+        email: forSelf ? row.email : `signup+${cid}@placeholder.local`,
+        name: clientName,
+        password: forSelf ? row.passwordHash : await bcrypt.hash(uuidv4() + uuidv4(), config.BCRYPT_SALT_ROUNDS),
+        role: config.ROLES.CLIENT,
+        practiceName: clientName,
+        slug: await generateClientUserSlug(clientName),
+        source: 'self_signup', signupRequestId: row.id,
+        // The enrollment gate, the intake and every consent still run.
+        enrollmentStatus: 'intake_pending',
+        serviceLine: signups.serviceLineFor(row.interests),
+        dob: intake.dob, phone: intake.phone,
+        careTeam: { assignedFNPs: [], assignedCaseManager: null, primaryCaregiver: null, backupCaregiver: null },
+        intake,
+        accountStatus: 'active', hasPortalLogin: forSelf,
+        isManager: false, hasServicePortalAccess: false, hasAdminHubAccess: false, hasImplementationsAccess: false, hasClientPortalAdminAccess: false,
+        createdAt: at
+      };
+      users.push(client); created.push(client.id); linkedClientId = cid;
+      if (!forSelf) { const fam = familyUser(cid, row.patient.relationship); users.push(fam); created.push(fam.id); }
+    }
+    await db.set('users', users);
+    invalidateUsersCache();
+    rows[idx] = { ...row, status: 'approved', decidedAt: at, decidedBy: by, action, clientId: linkedClientId, userIds: created };
+    await db.set('signup_requests', rows);
+    await logActivity(req.user.id, by.name, `signup_${action}`, 'signup', row.id, { clientId: linkedClientId, userIds: created });
+    const htmlBody = emailTemplates.renderGfcEmail({
+      greeting: row.name.split(' ')[0],
+      headline: 'Your account is ready',
+      paragraphs: ['Our office has set up your Godwins Family Care account. Sign in with the email and password you chose.'],
+      ctaUrl: `${await getAppBaseUrl()}/login`, ctaLabel: 'Sign in'
+    }).html;
+    sendEmail(row.email, 'Your Godwins Family Care account is ready', 'Your account is ready. Sign in with the email and password you chose.', { htmlBody })
+      .catch(err => console.error('Sign-up approval email error (non-fatal):', err.message));
+    res.json({ signup: signups.staffRow(rows[idx]), clientId: linkedClientId, userIds: created });
+  } catch (error) {
+    console.error('Sign-up decision error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Family invites waiting on staff (portal redesign, 2026-10-12). Staff read;
 // an ADMIN decides, because approving creates an account. Approving makes a
 // plain family account linked to this client and emails its sign-in details.
@@ -23460,6 +23646,10 @@ app.get('/changelog', (req, res) => {
 });
 
 // Password reset link page (public)
+app.get('/signup', (req, res) => {
+  res.sendFile(__dirname + '/public/signup.html');
+});
+
 app.get('/password-reset-:token', (req, res) => {
   res.sendFile(__dirname + '/public/password-reset.html');
 });

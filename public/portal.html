@@ -7446,7 +7446,10 @@
       // Handle central /portal login (no slug) - show login page or admin view
       if (!slug) {
         if (!token || !user) {
-          return <LoginPage slug={null} onLogin={handleLogin} />;
+          // One sign-in page for everyone (owner, 2026-10-12): /login routes
+          // each role to its own destination, the portal included.
+          window.location.replace('/login');
+          return null;
         }
         // Super Admin, Manager, or users with Client Portal Admin access get the admin portal view directly at /portal
         if (user.role === 'admin' || user.isManager || user.hasClientPortalAdminAccess) {
@@ -7473,7 +7476,8 @@
       }
       
       if (!token || !user) {
-        return <LoginPage slug={slug} onLogin={handleLogin} />;
+        window.location.replace('/login');
+        return null;
       }
       
       return <Portal token={token} user={user} />;
