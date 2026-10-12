@@ -59,8 +59,21 @@
 - **Profile** (`portalProfile.js`, `GET /api/gfc/profile`, client or POA only):
   contact details and insurance on file, **member IDs to the last four only**.
 
+- **One sign-in page for everyone** (owner, 2026-10-12): `/login` restyled from
+  mockup 1 for every role; the portal's own sign-in box redirects there.
+  "Remember me" keeps the EMAIL only.
+- **Self sign-up** (`/signup`, `signupRequests.js`, collection `signup_requests`,
+  PHI). A request, never an account: email confirmed first (token hashed), an
+  ADMIN approves as a new client / links as family of a client on file / declines
+  with a reason. Approved clients start at `intake_pending`; a loved one's record
+  has no login and the signer gets a family login, never POA. Sign-in reveals a
+  pending request only to its password. Public routes are `/api/auth/self-signup`
+  because `/api/auth/signup` is an old lab-tracker admin route. The rate limit is
+  per hashed address from X-Forwarded-For, so it is a speed bump, not a wall.
+  Probe `scripts/verify_self_signup.js`.
+
 ## Not built yet (owner-approved order)
-1. Rest of the redesign: sign-in restyle and sign-up (pending until staff approve).
+1. (Redesign part 1 is complete.)
 2. Test result values, ranges and trends.
 3. Patient booking. 4. Video visits on Google Meet. 5. Billing and payments.
 
