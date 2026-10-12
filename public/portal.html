@@ -299,7 +299,11 @@
     .gfc.v2 .btnrow{display:flex;gap:10px;margin-top:14px;}
     .gfc.v2 .btnrow .btn{margin-top:0;padding:11px 12px;font-size:14px;}
     /* greeting banner (desktop shows a photo when one is supplied) */
-    .gfc.v2 .hello{margin-bottom:6px;}
+    /* Banner photo (owner-supplied, 10/2026). Text sits on the cream end of a
+       fade so it stays readable whatever the photo does behind it. */
+    .gfc.v2 .hello{margin:-18px -16px 6px;padding:26px 16px 30px;min-height:150px;
+      background:linear-gradient(90deg,rgba(250,247,242,.97) 0%,rgba(250,247,242,.9) 48%,rgba(250,247,242,.15) 100%),
+        url('/banners/banner-portal-sm.jpg') right center / cover no-repeat;border-bottom:1px solid var(--edge);}
     .gfc.v2 .hello h2{font-family:'Cormorant Garamond',serif;font-size:32px;font-weight:600;color:var(--navy);margin:0;line-height:1.1;}
     .gfc.v2 .hello p{font-size:15.5px;color:var(--mut);margin:4px 0 0;}
     /* home tiles */
@@ -376,7 +380,7 @@
       .gfc.v2 .gfc-side .foot{margin-top:auto;padding-top:16px;border-top:1px solid var(--edge);}
       .gfc.v2 .gfc-top,.gfc.v2 .gfc-tabs{display:none;}
       .gfc.v2 .gfc-body{padding:32px 40px 48px;max-width:1120px;width:100%;}
-      .gfc.v2 .hello{background:linear-gradient(90deg,#fff 0%,#fff 42%,rgba(255,255,255,.4) 75%,rgba(255,255,255,0) 100%),var(--gfc-banner,linear-gradient(120deg,#E9DFCB,#D9CBB0));background-size:cover;background-position:right center;border:1px solid var(--edge);border-radius:20px;padding:34px 32px;min-height:150px;display:flex;flex-direction:column;justify-content:center;}
+      .gfc.v2 .hello{margin:0 0 6px;background:linear-gradient(90deg,#fff 0%,#fff 38%,rgba(255,255,255,.35) 68%,rgba(255,255,255,0) 100%),url('/banners/banner-portal.jpg') right center / cover no-repeat;border:1px solid var(--edge);border-radius:20px;padding:38px 34px;min-height:180px;display:flex;flex-direction:column;justify-content:center;}
       .gfc.v2 .hello h2{font-size:40px;}
       .gfc.v2 .tiles2{grid-template-columns:repeat(4,1fr);gap:16px;}
       .gfc.v2 .home-cols{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:24px;align-items:start;}
