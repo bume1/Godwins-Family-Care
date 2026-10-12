@@ -93,7 +93,18 @@ const authenticateToken = async (req, res, next) => {
 
 const app = express();
 app.use(bodyParser.json({ limit: '2mb' }));
-const router = messagingRoutes({ db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4 });
+// THE REAL NOTIFIER, built as server.js builds it. The STAFF half of the
+// message notice moved onto it on 2026-10-12; a probe that left `notify` out
+// would report staff as never told and be reporting on its own harness.
+const notify = require('../notifications').createNotifier({
+  getUsers, queueNotification,
+  getAppBaseUrl: async () => 'https://app.test.local',
+  emailTransport: { transportStatus: () => ({ baaCovered: true }) },
+  staffRoles: [config.ROLES.ADMIN, config.ROLES.USER, config.ROLES.CASE_MANAGER].filter(Boolean),
+  clientRole: config.ROLES.CLIENT,
+  familyRole: config.ROLES.FAMILY
+});
+const router = messagingRoutes({ db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4, notify: () => notify });
 app.use(router);
 
 // ---- Harness ---------------------------------------------------------------

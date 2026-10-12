@@ -40,6 +40,20 @@ const nf = require('../public/note-format.js');   // the message formatting: pla
 module.exports = function createMessagingRoutes(deps) {
   const { db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4,
     upload, uploadLimiter, googledrive, detectFileType, contentDisposition } = deps;
+  // The STAFF message notice goes through the shared notifier, so "how much may
+  // this email say" is answered once, by `transportAllowsDetail()`, rather than
+  // restated here. A getter because the notifier is built further down
+  // server.js than this router is registered; only ever called at request time.
+  //
+  // A MISSING NOTIFIER IS LOUD, NEVER SILENT. The notice is best-effort and must
+  // not fail the send that triggered it, so this does not throw — but a wiring
+  // slip that quietly stops telling staff a message is waiting is the exact
+  // class of failure this repo keeps paying for.
+  const notifier = () => {
+    const n = typeof deps.notify === 'function' ? deps.notify() : null;
+    if (!n) console.error('[MSG] no notifier injected — staff were NOT told a message is waiting');
+    return n;
+  };
   const router = express.Router();
 
   const ROLES = config.ROLES;
@@ -741,20 +755,24 @@ module.exports = function createMessagingRoutes(deps) {
           { relatedEntityId: message.id, relatedEntityType: 'message', createdBy: senderId });
         continue;
       }
-      await queueNotification('message_received', u.id, u.email, u.name,
-        {
-          subject: `${label} — ${thread.client_name}`,
-          // The BODY is deliberately not in the email. A notification that
-          // carries the message carries PHI into an inbox; one that says a
-          // message is waiting does not.
-          // WHERE THIS PERSON READS MESSAGES, not where a client does.
-          // Messaging mounts on four surfaces; this notice goes to whoever is
-          // on the thread, so a single `/portal` sent caregivers, clinicians,
-          // case managers and admins to the CLIENT's portal.
-          body: `${message.display_name} sent you a message about ${thread.client_name}. Open the app to read it.`,
-          ctaUrl: links.messagesFor(u), ctaLabel: 'Open messages'
-        },
-        { relatedEntityId: message.id, relatedEntityType: 'message', createdBy: senderId });
+      // A STAFF RECIPIENT. The wording, the detail level and the PHI marking
+      // are the notifier's; WHO is on the thread stays here, because that is
+      // thread visibility and belongs with the matrix. `messagesFor(u)` is
+      // resolved per recipient: messaging mounts on four surfaces, and a single
+      // `/portal` once sent caregivers, clinicians, case managers and admins to
+      // the CLIENT's portal.
+      const notice = notifier();
+      if (notice) {
+        await notice.staffMessageWaiting({
+          user: u,
+          clientName: thread.client_name || null,
+          channelLabel: label || null,
+          senderName: message.display_name || null,
+          messageId: message.id,
+          ctaUrl: links.messagesFor(u),
+          actorId: senderId
+        });
+      }
     }
   }
 
