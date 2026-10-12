@@ -115,6 +115,13 @@ const sanitizeNote = (input) => {
     note.kind = 'followup';
     note.vitals = {};
     note.hp = {};
+  } else if (note.visit && apptTypes.noteFormFor(note.visit.appointmentType) === 'followup') {
+    // A follow-up visit is never an H&P, whatever screen it was started from
+    // (owner report, 2026-10-12): the Visit tab used to send `hp` for every
+    // type, so a follow-up could not be signed without BP in both arms — even
+    // over video — and stamped the initial visit as done. Any `hp` blocks a
+    // draft already holds are KEPT, so nothing typed is lost.
+    note.kind = 'followup';
   }
   if (JSON.stringify(note).length > NOTE_MAX_TOTAL) return { error: 'This note is too large to save', code: 'NOTE_TOO_LARGE' };
   if (isEmptyNote(note)) return { error: 'There is nothing in this note to save yet', code: 'NOTE_EMPTY' };
@@ -219,6 +226,7 @@ const FIELD_FOR_SECTION = Object.freeze({
   reasonForVisit: ['chiefConcern'],
   hpi: ['subjective'],
   intervalHistory: ['subjective'],
+  subjective: ['subjective'],
   vitals: ['vitals'],
   awvVitals: ['vitals'],
   physicalExam: ['objective', 'hp.systemsExam'],
@@ -450,7 +458,9 @@ const carriedPending = (note) => {
 // OpenEMR holds four plain-text SOAP fields. Template sections are placed in
 // the one a reader would look in; headings are capitals because OpenEMR has no
 // other way to show one.
-const OBJECTIVE_SECTIONS = new Set(['vitals', 'awvVitals', 'physicalExam', 'focusedExam', 'mentalStatusExam', 'examination',
+// Medication reconciliation sits under Objective on the follow-up SOAP note
+// (owner, 2026-10-12), so OpenEMR's copy puts it there too.
+const OBJECTIVE_SECTIONS = new Set(['medReconciliation', 'vitals', 'awvVitals', 'physicalExam', 'focusedExam', 'mentalStatusExam', 'examination',
   'screeningScores', 'cognitiveAssessment', 'depressionScreen', 'functionalFallRisk']);
 const ASSESSMENT_SECTIONS = new Set(['assessment', 'riskAssessment', 'medicalOpinion', 'mdmComplexity', 'careManagementEligibility',
   'swAssessment', 'clientResponse']);
@@ -509,6 +519,16 @@ const buildVitalsRow = (note) => {
 
 // The both-arms rule for an H&P moved from SAVE to SIGN: refusing to save an
 // incomplete note is how home-visit documentation is lost.
+// The kind the SIGN gate judges by. Read from the visit type where it has one,
+// so a draft saved as `hp` before the visit type decided it still signs as
+// the follow-up it is.
+const effectiveNoteKind = (note) => {
+  if (!note) return null;
+  const visit = note.visit || {};
+  if (apptTypes.isSectionsOnly(visit.appointmentType, visit.modality)) return 'followup';
+  return apptTypes.noteFormFor(visit.appointmentType) === 'followup' ? 'followup' : note.kind;
+};
+
 const checkNoteForSigning = (note) => {
   if (!note) return { ok: false, code: 'SIGN_NO_NOTE', error: 'There is no note on this encounter yet. Save a draft first.' };
   const pending = carriedPending(note);
@@ -518,7 +538,7 @@ const checkNoteForSigning = (note) => {
       error: `This note carries text forward from an earlier visit that has not been reviewed: ${pending.map(fieldLabel).join(', ')}. Edit or confirm each one before signing.`
     };
   }
-  if (note.kind === 'hp') {
+  if (effectiveNoteKind(note) === 'hp') {
     const v = note.vitals || {};
     // Each arm needs a reading — or, when it cannot be used (pacemaker side,
     // fistula), "Unable to take" with the reason (owner, 2026-09-28).
@@ -709,6 +729,7 @@ module.exports = {
   vitalsLine,
   buildVitalsRow,
   checkNoteForSigning,
+  effectiveNoteKind,
   buildSignatureSummary,
   signatureBlockLines,
   noteHistoryLines,
