@@ -1257,8 +1257,8 @@ const DEFAULT_EMAIL_TEMPLATES = [
     id: 'welcome_email',
     name: 'Welcome Email — New User',
     category: 'automated',
-    subject: `Welcome to ${config.BRAND.COMPANY_NAME} — Your Account is Ready`,
-    body: `Welcome, {{recipientName}}!\n\nYour account has been created. Use the details below to log in for the first time. You will be prompted to set a new password after your first login.\n\nUsername / Email: {{recipientEmail}}\nTemporary Password: {{temporaryPassword}}\n\nLog in here: {{loginUrl}}\n\n${config.BRAND.COMPANY_NAME}`,
+    subject: `Welcome to ${config.BRAND.COMPANY_NAME} — your account is ready`,
+    body: `Hi {{recipientName}},\n\nYour account is ready. Use the details below to sign in for the first time. You will be asked to choose your own password once you are in.\n\nUsername: {{recipientEmail}}\nTemporary password: {{temporaryPassword}}\n\nIf you were not expecting this email, call our office and we will look into it.\n\nSign in: {{loginUrl}}\n\n${config.BRAND.COMPANY_NAME}`,
     htmlBody: null,
     isDefault: true, updatedAt: null, updatedBy: null
   },
@@ -2824,7 +2824,12 @@ app.use(welcomePacketRoutes({ db, config, logActivity, queueNotification, getUse
   // rule the consent signatures follow.
   hashIp: (req) => roiRepo.hashIp(clientIpFrom(req), JWT_SECRET) }));
 
-app.use(schedulingRoutes({ db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4 }));
+app.use(schedulingRoutes({
+  db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4,
+  // A GETTER, not the notifier itself: `notify` is built far below this line
+  // and would be in its temporal dead zone here. Called only at request time.
+  notify: () => notify
+}));
 // Message attachments (2026-09-29): multipart parsing, private Drive storage, and
 // the byte-sniff. `detectFileType` is defined further down this file, so it is
 // passed as a closure; `contentDisposition` is imported at the top.

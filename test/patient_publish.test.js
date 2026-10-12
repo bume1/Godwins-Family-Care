@@ -519,7 +519,23 @@ test('9e. the result notice reaches a POA by name and says nothing about the res
   const fn = src.slice(src.indexOf('async function resultReviewed'), src.indexOf('// ---- 5. Staff asked the client for documents'));
   assert.match(fn, /paragraphs: \['Your test result has been reviewed/, 'opens with "Your test result" so a POA is told whose it is');
   assert.ok(!/resultDate|performedBy|label|interpretation|patientNote|summary/.test(fn.replace(/relatedEntityType|entityType/g, '')), 'no result detail in the notice');
-  assert.match(src, /replace\(\/\^Your \(visit\|test result\)\//);
+  // REPOINTED 2026-10-12. This asserted the rewrite's exact regex source
+  // (`/^Your (visit|test result)/`), so widening it to cover the caregiver and
+  // clinician phrasings failed a test about a rule that had not changed. It now
+  // RUNS the rewrite the module actually applies, over every opening phrase a
+  // client-side paragraph is allowed to use — which also catches an alternation
+  // reordered so that a longer phrase stops matching.
+  const rewrite = (para) => para.replace(
+    /^Your (caregiver visit|clinician visit|visit|test result)/,
+    (m, what) => `Ada Bell's ${what}`);
+  for (const [para, want] of [
+    ['Your test result has been reviewed.', "Ada Bell's test result has been reviewed."],
+    ['Your visit is tomorrow.', "Ada Bell's visit is tomorrow."],
+    ['Your caregiver visit has moved.', "Ada Bell's caregiver visit has moved."],
+    ['Your clinician visit has moved.', "Ada Bell's clinician visit has moved."]
+  ]) assert.equal(rewrite(para), want, `a POA must be told whose it is: ${para}`);
+  assert.match(src, /\/\^Your \(caregiver visit\|clinician visit\|visit\|test result\)\//,
+    'the longer phrases come first — alternation is ordered');
   assert.match(fn, /entityId: `\$\{resultId\}:reviewed`/);
 });
 test('9f. a result filed while Drive is down is still filed, listed, and warned about', async () => {
