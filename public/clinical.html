@@ -33,7 +33,12 @@
           colors: {
             primary: { DEFAULT: '#033D50', 50: '#e8f0f4', 100: '#c5d9e3', 500: '#033D50', 600: '#02334a', 700: '#022A38' },
             accent: '#C9A44A',
-            cream: '#FAF7F2', creamdeep: '#efe9db'
+            cream: '#FAF7F2', creamdeep: '#efe9db',
+            // The 2026-10-12 redesign: Tailwind's generic stone greys (150+
+            // uses) are remapped to the brand's warm edges and ink, so every
+            // screen picks up the portal's palette without a JSX edit.
+            stone: { 50: '#FCFAF6', 100: '#F1ECE2', 200: '#E8E0D2', 300: '#D9CFBE', 400: '#8E9BA1',
+              500: '#5b6b73', 600: '#4a5a62', 700: '#34444c', 800: '#1a2a32', 900: '#11202a' }
           },
           fontFamily: {
             serif: ['"Cormorant Garamond"', 'Georgia', 'serif'],
@@ -45,24 +50,72 @@
   </script>
   <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
   <style>
+    /* 2026-10-12 redesign (owner mockups): the patient portal's v2 look on the
+       clinician side. Tokens are the portal's (portal.html .gfc.v2), restated
+       here as :root variables because this page is not inside .gfc. Dense on
+       purpose: a clinician reads more per screen than a patient, so the
+       portal's 18px reader size is NOT carried over. */
+    :root { --navy:#033D50; --navy2:#0a5066; --navyd:#022A38; --goldd:#C9A44A; --gold:#F5CD85; --gold-ink:#9A7430;
+      --cream:#FAF7F2; --wash:#F6EFE2; --edge:#ECE4D6; --edge2:#E1D7C5; --ink:#1a2a32; --mut:#5b6b73; --danger:#B5462E;
+      --shadow:0 1px 2px rgba(3,61,80,.04),0 6px 18px -12px rgba(3,61,80,.18); }
     * { font-family: 'DM Sans', system-ui, sans-serif; }
-    body { background: #efe9db; color: #2b2b28; }
+    body { background: var(--cream); color: var(--ink); }
     .serif { font-family: 'Cormorant Garamond', Georgia, serif; }
-    .card { background: #fff; border: 1px solid #e5ddcb; border-radius: 12px; }
-    .card-h { display:flex; align-items:center; justify-content:space-between; padding: 12px 16px; border-bottom: 1px solid #eee9dc; }
-    .card-h h2 { font-family: 'Cormorant Garamond', serif; font-size: 17px; color: #033D50; font-weight: 600; }
-    .lblu { font-size: 10px; letter-spacing: 1.2px; text-transform: uppercase; color: #7a746a; font-weight: 600; }
-    .inp { width:100%; border:1px solid #e5ddcb; border-radius:8px; padding:8px 10px; font-size:13px; background:#fff; }
-    .inp:focus { outline:2px solid #C9A44A55; border-color:#C9A44A; }
-    .btn { display:inline-flex; align-items:center; gap:6px; border-radius:8px; padding:8px 14px; font-size:13px; font-weight:600; cursor:pointer; border:1px solid #033D50; background:#033D50; color:#fff; }
+    .card { background: #fff; border: 1px solid var(--edge); border-radius: 16px; box-shadow: var(--shadow); }
+    .card-h { display:flex; align-items:center; justify-content:space-between; gap:8px; padding: 14px 18px; border-bottom: 1px solid var(--edge); }
+    .card-h h2 { font-family: 'Cormorant Garamond', serif; font-size: 20px; color: var(--navy); font-weight: 600; line-height:1.15; }
+    .lblu { font-size: 10.5px; letter-spacing: 1.2px; text-transform: uppercase; color: var(--gold-ink); font-weight: 700; }
+    .inp { width:100%; border:1px solid var(--edge2); border-radius:10px; padding:8px 11px; font-size:13.5px; background:#fff; color:var(--ink); }
+    .inp:focus { outline:none; border-color:var(--navy); box-shadow:0 0 0 3px rgba(3,61,80,.10); }
+    .btn { display:inline-flex; align-items:center; gap:6px; border-radius:10px; padding:8px 15px; font-size:13px; font-weight:600; cursor:pointer; border:1px solid var(--navy); background:var(--navy); color:#fff; transition:background .15s, box-shadow .15s; }
+    .btn:hover:not(:disabled) { background:var(--navy2); }
     .btn:disabled { opacity:.5; cursor:not-allowed; }
-    .btn.gold { background:#C9A44A; border-color:#C9A44A; color:#033D50; }
-    .btn.ghost { background:#fff; color:#033D50; }
-    .chip { border-radius:999px; padding:2px 9px; font-size:10.5px; font-weight:700; }
+    .btn.gold { background:#A9853A; border-color:#A9853A; color:#fff; box-shadow:0 6px 14px -8px rgba(154,116,48,.8); }
+    .btn.gold:hover:not(:disabled) { background:var(--gold-ink); }
+    .btn.ghost { background:#fff; color:var(--navy); border-color:var(--edge2); }
+    .btn.ghost:hover:not(:disabled) { background:var(--wash); }
+    .chip { display:inline-flex; align-items:center; gap:4px; border-radius:999px; padding:2px 10px; font-size:11px; font-weight:600; }
     .prefill { background:#FDF6E7; border:1px dashed #C9A44A; }
     .prefill-badge { font-size:9.5px; color:#9a6a1e; font-weight:700; letter-spacing:.4px; }
-    .tabbtn { padding:9px 14px; font-size:13px; font-weight:600; color:#7a746a; border-bottom:2.5px solid transparent; cursor:pointer; white-space:nowrap; }
-    .tabbtn.on { color:#033D50; border-color:#C9A44A; }
+    .tabbtn { padding:10px 14px; font-size:13.5px; font-weight:600; color:var(--mut); border-bottom:2.5px solid transparent; cursor:pointer; white-space:nowrap; }
+    .tabbtn:hover { color:var(--navy); }
+    .tabbtn.on { color:#8a6a2c; border-color:var(--goldd); }
+    /* Tiny text is the main thing that made the old screens read as clunky.
+       A floor here lifts every 10–11px label at once without touching JSX. */
+    .text-\[10px\], .text-\[10\.5px\] { font-size:11px !important; }
+    .text-\[11px\] { font-size:11.5px !important; }
+
+    /* ── Shell: navy sidebar, cream page, phone bottom bar ── */
+    .cw-side { background:linear-gradient(180deg,var(--navy) 0%,var(--navyd) 100%); color:#fff; }
+    .cw-side .brand img { height:44px; }
+    .cw-nav button { display:flex; align-items:center; gap:12px; width:100%; background:none; border:none; border-radius:12px; padding:10px 14px; font-size:14px; font-weight:500; color:rgba(255,255,255,.88); cursor:pointer; text-align:left; margin-bottom:2px; }
+    .cw-nav button i { font-size:20px; color:rgba(255,255,255,.75); }
+    .cw-nav button:hover { background:rgba(255,255,255,.07); }
+    .cw-nav button.on { background:linear-gradient(90deg,#A9853A,#C2A060); color:#fff; font-weight:600; box-shadow:0 6px 16px -10px rgba(0,0,0,.6); }
+    .cw-nav button.on i { color:#fff; }
+    .cw-nav .grp { font-size:10px; letter-spacing:1.6px; text-transform:uppercase; color:rgba(245,205,133,.7); font-weight:700; padding:14px 14px 6px; }
+    .cw-badge { margin-left:auto; min-width:22px; height:22px; border-radius:11px; background:var(--danger); color:#fff; font-size:11.5px; font-weight:700; display:inline-flex; align-items:center; justify-content:center; padding:0 6px; }
+    .cw-top { background:rgba(250,247,242,.94); backdrop-filter:blur(6px); border-bottom:1px solid var(--edge); }
+    .cw-search { background:#fff; border:1px solid var(--edge); border-radius:12px; }
+    .cw-title { font-family:'Cormorant Garamond',serif; color:var(--navy); font-weight:600; font-size:30px; line-height:1.1; }
+    @media (min-width:1024px){ .cw-title { font-size:38px; } }
+    .cw-avatar { border-radius:999px; background:var(--wash); color:var(--navy); border:1px solid var(--edge2); display:flex; align-items:center; justify-content:center; font-weight:700; flex-shrink:0; }
+    .cw-tabs { display:flex; gap:4px; border-bottom:1px solid var(--edge); overflow-x:auto; }
+    .cw-bottom { background:#fff; border-top:1px solid var(--edge); box-shadow:0 -6px 18px -14px rgba(3,61,80,.35); }
+    .cw-bottom button { flex:1; display:flex; flex-direction:column; align-items:center; gap:2px; padding:8px 2px 10px; font-size:10.5px; font-weight:600; color:var(--mut); background:none; border:none; position:relative; }
+    .cw-bottom button i { font-size:21px; }
+    .cw-bottom button.on { color:#8a6a2c; }
+    .cw-bottom button .dot { position:absolute; top:5px; left:calc(50% + 6px); min-width:16px; height:16px; border-radius:8px; background:var(--danger); color:#fff; font-size:9.5px; display:flex; align-items:center; justify-content:center; padding:0 4px; }
+    /* status pill with a dot, the mockups' Scheduled / En Route / Arrived */
+    .pill { display:inline-flex; align-items:center; gap:6px; border-radius:999px; padding:3px 10px; font-size:11.5px; font-weight:600; border:1px solid transparent; white-space:nowrap; }
+    .pill::before { content:''; width:7px; height:7px; border-radius:50%; background:currentColor; }
+    .cw-row { transition:background .12s; }
+    .cw-row:hover { background:#FCFAF6; }
+    .cw-row.on { background:var(--wash); box-shadow:inset 3px 0 0 var(--goldd); }
+    .cw-table th { font-size:12px; font-weight:600; color:var(--mut); text-align:left; padding:10px 14px; border-bottom:1px solid var(--edge); white-space:nowrap; }
+    .cw-table td { padding:11px 14px; border-bottom:1px solid #F1ECE2; font-size:13.5px; vertical-align:middle; }
+    .cw-table tr:last-child td { border-bottom:0; }
+    .care-chip { display:inline-flex; align-items:center; justify-content:center; min-width:30px; height:24px; border-radius:7px; font-size:11.5px; font-weight:700; padding:0 7px; }
     ::-webkit-scrollbar { width:8px; height:8px; } ::-webkit-scrollbar-thumb { background:#d8d0bd; border-radius:8px; }
     /* Formatted note fields. Tailwind's reset strips list markers and heading
        sizes, so the six shapes get their own, in the editor and when read. */
@@ -326,8 +379,9 @@
     // chain is what collided when 4.9 and 4.10 both added a view, and a fifth
     // would collide again.
     const VIEW_TITLES = {
-      myday: 'My Day', queues: 'Work Queues', analytics: 'Analytics', charts: 'Patient Chart', schedule: 'Schedule', queue: 'Coding Queue',
-      inbox: 'Inbox', results: 'Results Inbox', overdue: 'Overdue Orders'
+      myday: 'My Day', queues: 'Work Queues', analytics: 'Reports', charts: 'Patients', schedule: 'Schedule', queue: 'Coding Queue',
+      inbox: 'Inbox', results: 'Results Inbox', overdue: 'Overdue Orders',
+      messages: 'Messages', settings: 'Settings', patients: 'Patients', more: 'More'
     };
 
     // The nav strip, DECLARED ONCE (owner report 2026-09-23: the top bar was
@@ -341,21 +395,27 @@
     // Charts leaves the patient list showing on a phone, and every other view
     // is full-width so it closes it.
     const NAV_VIEWS = Object.freeze([
-      { key: 'myday', tab: 'My Day', icon: 'ti-sun' },
-      { key: 'charts', tab: 'Charts', icon: 'ti-folder-open', keepsPatient: true },
-      { key: 'schedule', tab: 'Schedule', icon: 'ti-calendar-week' },
-      { key: 'queue', tab: 'Coding', icon: 'ti-receipt' },
+      // `group` places a view in the sidebar (2026-10-12 redesign): the main
+      // list follows the owner's mockup, and the work queues that the mockup
+      // does not show keep their own group rather than disappearing. `phone`
+      // puts a view on the bottom bar; everything else is under More.
+      { key: 'myday', tab: 'My Day', icon: 'ti-layout-dashboard', group: 'main', phone: true },
+      { key: 'charts', tab: 'Patients', icon: 'ti-user', keepsPatient: true, group: 'main', phone: true },
       // 4.9's Inbox is what is waiting on a clinician INSIDE the app —
       // unsigned encounters, pending co-signs, visit-log reviews. 4.10's
       // Results is what has COME IN from outside and needs acknowledging, and
       // Overdue is what went out and never came back. Three different
       // questions, and each answers one; see the note where clinicalResults is
       // required in server.js.
-      { key: 'inbox', tab: 'Inbox', icon: 'ti-inbox' },
-      { key: 'results', tab: 'Results', icon: 'ti-flask' },
-      { key: 'overdue', tab: 'Overdue', icon: 'ti-clock-exclamation' },
-      { key: 'queues', tab: 'Tasks', icon: 'ti-checkbox' },
-      { key: 'analytics', tab: 'Analytics', icon: 'ti-chart-bar' }
+      { key: 'inbox', tab: 'Inbox', icon: 'ti-mail', group: 'main', phone: true },
+      { key: 'results', tab: 'Results', icon: 'ti-flask', group: 'main' },
+      { key: 'messages', tab: 'Messages', icon: 'ti-message-circle', group: 'main', phone: true },
+      { key: 'analytics', tab: 'Reports', icon: 'ti-file-analytics', group: 'main' },
+      { key: 'schedule', tab: 'Schedule', icon: 'ti-calendar-week', group: 'work' },
+      { key: 'queue', tab: 'Coding', icon: 'ti-receipt', group: 'work' },
+      { key: 'overdue', tab: 'Overdue', icon: 'ti-clock-exclamation', group: 'work' },
+      { key: 'queues', tab: 'Tasks', icon: 'ti-checkbox', group: 'work' },
+      { key: 'settings', tab: 'Settings', icon: 'ti-settings', group: 'foot' }
     ]);
 
     // A bare calendar date ("2026-10-01") parses as UTC midnight: the evening
@@ -2206,14 +2266,23 @@
     // carries what you read in the car: who, when, where, how to get in, and
     // who will be there.
     const VISIT_STATE_STYLE = {
-      scheduled: 'bg-stone-100 text-stone-600',
-      en_route: 'bg-sky-100 text-sky-800',
-      arrived: 'bg-amber-100 text-amber-800',
-      in_progress: 'bg-emerald-100 text-emerald-800',
-      signed: 'bg-primary text-white',
-      cancelled: 'bg-stone-200 text-stone-500',
-      no_show: 'bg-red-100 text-red-700'
+      scheduled: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+      en_route: 'bg-sky-50 text-sky-700 border-sky-200',
+      arrived: 'bg-amber-50 text-amber-700 border-amber-200',
+      in_progress: 'bg-indigo-50 text-indigo-700 border-indigo-200',
+      signed: 'bg-primary/10 text-primary border-primary/20',
+      cancelled: 'bg-stone-100 text-stone-500 border-stone-200',
+      no_show: 'bg-red-50 text-red-700 border-red-200'
     };
+    const VISIT_STATE_LABEL = {
+      scheduled: 'Scheduled', en_route: 'En Route', arrived: 'Arrived', in_progress: 'In Progress',
+      signed: 'Signed', cancelled: 'Cancelled', no_show: 'No-show'
+    };
+    const VisitStatePill = ({ state }) => (
+      <span className={`pill ${VISIT_STATE_STYLE[state] || 'bg-stone-100 text-stone-600 border-stone-200'}`}>
+        {VISIT_STATE_LABEL[state] || String(state || '').replace(/_/g, ' ')}
+      </span>
+    );
 
     // NAVIGATE hands off to the device's own map app rather than drawing a map
     // in a browser tab: the clinician is about to drive, and the phone's map has
@@ -2234,100 +2303,83 @@
       return <span className="text-[11.5px] text-stone-500">{d.miles} mi in a straight line from the last stop</span>;
     };
 
+    // 2026-10-12 redesign: the row on the schedule list is now compact (time,
+    // patient, status), and the visit's ACTIONS live here, in the Visit Details
+    // pane for the visit the clinician picked. Every gate below is unchanged.
     const DayVisitRow = ({ v, onOpenChart, onPacket, onStamp, onStartVideo, busy, canWrite }) => (
-      <div className={`border-b border-stone-100 py-3 ${v.state === 'cancelled' ? 'opacity-50' : ''}`}>
-        <div className="flex items-start gap-3">
-          <div className="w-[68px] shrink-0 text-right">
-            <div className="text-[13.5px] font-bold text-primary">{v.time || '—'}</div>
-            {v.endTime && <div className="text-[10.5px] text-stone-400">to {v.endTime}</div>}
+      <div>
+        {v.timing && (v.timing.arrivedAt || v.timing.startedAt) && (
+          <div className="text-[11px] text-stone-500 mt-1">
+            {v.timing.arrivedAt && <>Arrived {fmtTs(v.timing.arrivedAt)}. </>}
+            {v.timing.startedAt && <>Started {fmtTs(v.timing.startedAt)}. </>}
+            {v.timing.endedAt && <>Ended {fmtTs(v.timing.endedAt)}. </>}
+            {v.timing.totalMinutes != null && <b>{v.timing.totalMinutes} min total.</b>}
           </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="font-semibold text-[14px] text-stone-800">{v.patientName || 'Unnamed patient'}</span>
-              <span className={`chip ${VISIT_STATE_STYLE[v.state] || 'bg-stone-100 text-stone-600'}`}>
-                {(v.state || '').replace(/_/g, ' ').toUpperCase()}
-              </span>
-            </div>
-            <div className="text-[12px] text-stone-600">
-              {[v.visitType, v.serviceLine].filter(Boolean).join(' • ')}
-            </div>
-            {/* T1 B1 — a video visit has no address to drive to, so it says what
-                it is instead of showing the patient's home as a destination. */}
-            {v.video
-              ? <div className="text-[12px] text-stone-500 mt-0.5"><i className="ti ti-video mr-1" />Video visit</div>
-              : (v.address && <div className="text-[12px] text-stone-500 mt-0.5">{v.address}</div>)}
-            {!v.video && <div className="mt-0.5"><DayDistance distance={v.distance} /></div>}
-            {/* A2 — access notes and who will be there. From the PATIENT record,
-                so they are here for whoever covers, not just whoever entered
-                them. This is what you read before getting out of the car. */}
-            {v.homeVisit && v.homeVisit.length > 0 && (
-              <div className="mt-2 bg-cream border border-creamdeep rounded-lg px-3 py-2 space-y-1">
-                {v.homeVisit.map(h => (
-                  <div key={h.key} className="text-[12px] text-stone-700">
-                    <span className="lblu mr-1.5">{h.label}</span>{h.value}
-                  </div>
-                ))}
-              </div>
-            )}
-            {v.timing && (v.timing.arrivedAt || v.timing.startedAt) && (
-              <div className="text-[11px] text-stone-500 mt-1">
-                {v.timing.arrivedAt && <>Arrived {fmtTs(v.timing.arrivedAt)}. </>}
-                {v.timing.startedAt && <>Started {fmtTs(v.timing.startedAt)}. </>}
-                {v.timing.endedAt && <>Ended {fmtTs(v.timing.endedAt)}. </>}
-                {v.timing.totalMinutes != null && <b>{v.timing.totalMinutes} min total.</b>}
-              </div>
-            )}
-            <div className="flex gap-2 mt-2 flex-wrap">
-              {/* T1 B1 — ONE button: it opens the room AND stamps the visit as
-                  started. A video visit has no arrival to record, so a join
-                  link beside a Start visit button people had to remember is how
-                  every telehealth note ended up with no time statement. */}
-              {canWrite && v.video && ['scheduled', 'en_route', 'arrived'].includes(v.state) && (
-                <button className="btn gold !py-1 !px-2.5 text-[11.5px]" disabled={busy === v.eid}
-                  onClick={() => onStartVideo(v)}><i className="ti ti-video" />Start video visit</button>
-              )}
-              {v.video && v.state === 'in_progress' && (
-                <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" disabled={busy === v.eid}
-                  onClick={() => onStartVideo(v)}><i className="ti ti-video" />Rejoin room</button>
-              )}
-              {!v.video && v.address && (
-                <a className="btn ghost !py-1 !px-2.5 text-[11.5px]" href={navigateHref(v.address)}
-                  target="_blank" rel="noopener noreferrer"><i className="ti ti-navigation" />Navigate</a>
-              )}
-              <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" onClick={() => onPacket(v)}>
-                <i className="ti ti-file-description" />Pre-visit
-              </button>
-              <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" onClick={() => onOpenChart(v.clientId)}>
-                <i className="ti ti-folder-open" />Open chart
-              </button>
-              {/* Nobody drives to or arrives at a video visit, so those two
-                  stamps are not offered on one. Ending it still is: the end is
-                  what makes the time statement. */}
-              {canWrite && !v.video && v.state === 'scheduled' && (
-                <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" disabled={busy === v.eid}
-                  onClick={() => onStamp(v, 'en_route')}><i className="ti ti-car" />En route</button>
-              )}
-              {canWrite && !v.video && ['scheduled', 'en_route'].includes(v.state) && (
-                <button className="btn gold !py-1 !px-2.5 text-[11.5px]" disabled={busy === v.eid}
-                  onClick={() => onStamp(v, 'arrive')}><i className="ti ti-door-enter" />Arrive</button>
-              )}
-              {canWrite && !v.video && v.state === 'arrived' && (
-                <button className="btn !py-1 !px-2.5 text-[11.5px]" disabled={busy === v.eid}
-                  onClick={() => onStamp(v, 'start')}><i className="ti ti-player-play" />Start visit</button>
-              )}
-              {/* THE ONLY WAY `billableMinutes` is ever non-null (myDay.js) — the
-                  clinician's own start and end, with no fallback to the diary.
-                  Without this button `endedAt` could never be set at all, so
-                  every visit's time statement stayed "no time recorded" forever
-                  (owner report, 2026-10-11). */}
-              {canWrite && v.state === 'in_progress' && (
-                <button className="btn gold !py-1 !px-2.5 text-[11.5px]" disabled={busy === v.eid}
-                  onClick={() => onStamp(v, 'end')}><i className="ti ti-player-stop" />End visit</button>
-              )}
-            </div>
-          </div>
+        )}
+        <div className="flex gap-2 mt-2 flex-wrap">
+          {/* T1 B1 — ONE button: it opens the room AND stamps the visit as
+              started. A video visit has no arrival to record, so a join
+              link beside a Start visit button people had to remember is how
+              every telehealth note ended up with no time statement. */}
+          {canWrite && v.video && ['scheduled', 'en_route', 'arrived'].includes(v.state) && (
+            <button className="btn gold !py-1.5 !px-3 text-[12px]" disabled={busy === v.eid}
+              onClick={() => onStartVideo(v)}><i className="ti ti-video" />Start video visit</button>
+          )}
+          {v.video && v.state === 'in_progress' && (
+            <button className="btn ghost !py-1.5 !px-3 text-[12px]" disabled={busy === v.eid}
+              onClick={() => onStartVideo(v)}><i className="ti ti-video" />Rejoin room</button>
+          )}
+          {!v.video && v.address && (
+            <a className="btn ghost !py-1.5 !px-3 text-[12px]" href={navigateHref(v.address)}
+              target="_blank" rel="noopener noreferrer"><i className="ti ti-navigation" />Navigate</a>
+          )}
+          {/* Nobody drives to or arrives at a video visit, so those two
+              stamps are not offered on one. Ending it still is: the end is
+              what makes the time statement. */}
+          {canWrite && !v.video && v.state === 'scheduled' && (
+            <button className="btn ghost !py-1.5 !px-3 text-[12px]" disabled={busy === v.eid}
+              onClick={() => onStamp(v, 'en_route')}><i className="ti ti-car" />En route</button>
+          )}
+          {canWrite && !v.video && ['scheduled', 'en_route'].includes(v.state) && (
+            <button className="btn gold !py-1.5 !px-3 text-[12px]" disabled={busy === v.eid}
+              onClick={() => onStamp(v, 'arrive')}><i className="ti ti-door-enter" />Arrive</button>
+          )}
+          {canWrite && !v.video && v.state === 'arrived' && (
+            <button className="btn !py-1.5 !px-3 text-[12px]" disabled={busy === v.eid}
+              onClick={() => onStamp(v, 'start')}><i className="ti ti-player-play" />Start visit</button>
+          )}
+          {/* THE ONLY WAY `billableMinutes` is ever non-null (myDay.js) — the
+              clinician's own start and end, with no fallback to the diary.
+              Without this button `endedAt` could never be set at all, so
+              every visit's time statement stayed "no time recorded" forever
+              (owner report, 2026-10-11). */}
+          {canWrite && v.state === 'in_progress' && (
+            <button className="btn gold !py-1.5 !px-3 text-[12px]" disabled={busy === v.eid}
+              onClick={() => onStamp(v, 'end')}><i className="ti ti-player-stop" />End visit</button>
+          )}
         </div>
       </div>
+    );
+
+    // One line on the day's schedule. Picking it fills the Visit Details pane.
+    const DayScheduleRow = ({ v, on, onSelect }) => (
+      <button type="button" onClick={() => onSelect(v)}
+        className={`cw-row w-full text-left flex items-center gap-3 px-4 lg:px-5 py-3.5 border-b border-stone-100 last:border-0 ${on ? 'on' : ''} ${v.state === 'cancelled' ? 'opacity-50' : ''}`}>
+        <div className="w-[64px] shrink-0">
+          <div className="text-[13.5px] font-semibold text-stone-700">{v.time || '—'}</div>
+          {v.endTime && <div className="text-[11px] text-stone-400">to {v.endTime}</div>}
+        </div>
+        <div className="cw-avatar w-11 h-11 text-[14px] hidden sm:flex">{initials(v.patientName)}</div>
+        <div className="min-w-0 flex-1">
+          <div className="serif text-[18px] leading-tight font-semibold text-primary truncate">{v.patientName || 'Unnamed patient'}</div>
+          <div className="text-[12.5px] text-stone-600 truncate">{[v.visitType, v.serviceLine].filter(Boolean).join(' • ')}</div>
+          <div className="text-[12px] text-stone-500 truncate">
+            {v.video ? <><i className="ti ti-video mr-1" />Video visit</> : (v.address || '')}
+          </div>
+        </div>
+        <VisitStatePill state={v.state} />
+        <i className="ti ti-chevron-right text-stone-400" />
+      </button>
     );
 
     const PreVisitPacket = ({ clientId, eid, onClose, onOpenChart }) => {
@@ -2411,7 +2463,7 @@
       );
     };
 
-    const MyDayView = ({ user, onOpenChart }) => {
+    const MyDayView = ({ user, onOpenChart, onAddVisit }) => {
       const access = useContext(AccessContext);
       const [date, setDate] = useState(() => GFC_TIME.zonedParts(new Date()).isoDate);
       const [day, setDay] = useState(null);
@@ -2419,12 +2471,27 @@
       const [busy, setBusy] = useState(null);
       const [packet, setPacket] = useState(null);
       const [proposal, setProposal] = useState(null);
-      const [mode, setMode] = useState('list'); // B1 list | B2 map
+      // B1 list | B2 map, plus the "due nearby" finder, as the three tabs the
+      // 2026-10-12 mockup shows over the day.
+      const [mode, setMode] = useState('list');
+      // The visit shown in the Visit Details pane. Kept as an eid so a reload
+      // of the day keeps the same visit open.
+      const [selEid, setSelEid] = useState(null);
       const load = useCallback(() => {
         setErr('');
         api.myDay(date).then(setDay).catch(e => { setErr(e.message); setDay(null); });
       }, [date]);
       useEffect(() => { load(); }, [load]);
+      // On a wide screen (1280px+, where the two panes sit side by side) the
+      // first visit opens in the details pane, as in the mockup. Narrower, nothing is picked, or the list would be hidden
+      // behind the details before the clinician has seen the day.
+      useEffect(() => {
+        if (!day || !day.visits || !day.visits.length) return;
+        if (selEid && day.visits.some(v => v.eid === selEid)) return;
+        let wide = false;
+        try { wide = window.matchMedia('(min-width: 1280px)').matches; } catch { wide = false; }
+        setSelEid(wide ? day.visits[0].eid : null);
+      }, [day]);
 
       const stamp = (v, event) => {
         setBusy(v.eid); setErr('');
@@ -2466,92 +2533,149 @@
       // evening of the 22nd and print the wrong weekday — the same trap the
       // bulk-shift generator paid for on 2026-09-20.
       const longDate = new Date(`${date}T12:00:00Z`).toLocaleDateString('en-US',
-        { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
+        { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+      // The ‹ Today › stepper moves by whole calendar days, also at midday UTC.
+      const stepDay = (n) => {
+        const d = new Date(`${date}T12:00:00Z`);
+        d.setUTCDate(d.getUTCDate() + n);
+        setDate(d.toISOString().slice(0, 10));
+      };
+      const today = GFC_TIME.zonedParts(new Date()).isoDate;
 
       if (packet) {
         return (
-          <div className="p-4 lg:p-7 max-w-2xl mx-auto">
+          <div className="p-4 lg:p-8 max-w-2xl mx-auto">
             <PreVisitPacket clientId={packet.clientId} eid={packet.eid}
               onClose={() => setPacket(null)} onOpenChart={onOpenChart} />
           </div>
         );
       }
+      const visits = (day && day.visits) || [];
+      const selected = visits.find(v => v.eid === selEid) || null;
       return (
-        <div className="p-4 lg:p-7 max-w-3xl mx-auto">
-          <div className="card mb-4">
-            <div className="bg-primary text-white px-4 py-3 rounded-t-[11px]">
-              <div className="serif text-xl font-semibold">{greeting}, {String(user && user.name || '').split(' ')[0] || 'there'}</div>
-              <div className="text-[12px] text-accent">{longDate}</div>
+        <div className="px-4 lg:px-8 py-5 lg:py-7">
+          <div className="flex flex-wrap items-end justify-between gap-3 mb-5">
+            <div className="min-w-0">
+              <div className="text-[13px] text-stone-500">{greeting}, {String(user && user.name || '').split(' ')[0] || 'there'}</div>
+              <div className="flex items-baseline gap-3 flex-wrap">
+                <h1 className="cw-title">My Day</h1>
+                <span className="text-[15px] text-stone-600">{longDate}</span>
+              </div>
             </div>
-            <div className="px-4 py-2 border-b border-stone-100 flex items-center gap-2 flex-wrap">
-              <input className="inp !w-auto !py-1 text-xs" type="date" value={date} onChange={e => setDate(e.target.value)} />
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="inline-flex items-center bg-white border border-stone-200 rounded-xl shadow-sm">
+                <button className="px-2.5 py-2 text-primary" onClick={() => stepDay(-1)} aria-label="Previous day"><i className="ti ti-chevron-left" /></button>
+                <button className={`px-3 py-2 text-[13px] font-semibold border-x border-stone-200 ${date === today ? 'text-stone-400' : 'text-primary'}`}
+                  onClick={() => setDate(today)}>Today</button>
+                <button className="px-2.5 py-2 text-primary" onClick={() => stepDay(1)} aria-label="Next day"><i className="ti ti-chevron-right" /></button>
+              </div>
+              <input className="inp !w-auto !py-1.5" type="date" value={date} onChange={e => e.target.value && setDate(e.target.value)} aria-label="Pick a date" />
+              {access.canWrite && onAddVisit && (
+                <button className="btn gold" onClick={onAddVisit}><i className="ti ti-plus" />Add Visit</button>
+              )}
+            </div>
+          </div>
+
+          {err && <div className="card border-red-200 bg-red-50 text-red-700 text-sm px-4 py-3 mb-4">{err}</div>}
+          {day && day.calendar && !day.calendar.ok && (
+            <div className="card !bg-amber-50 border-amber-200 px-4 py-3 mb-4 text-[13px] text-amber-900">
+              <b>The calendar could not be read.</b> {day.calendar.error} This is not an empty day — it is a day we could not load.
+            </div>
+          )}
+          {/* An unsigned note from an earlier day is the practice's biggest
+              silent risk: nothing chases it, and the longer it sits the less
+              anybody remembers of the visit. Pinned at the top, in red. */}
+          {day && day.unsigned && day.unsigned.length > 0 && (
+            <div className="card !bg-red-50 border-red-200 px-4 py-3 mb-4">
+              <div className="text-[13px] font-bold text-red-800 mb-1">
+                <i className="ti ti-alert-triangle-filled mr-1" />
+                {day.unsigned.length} unsigned {day.unsigned.length === 1 ? 'note' : 'notes'} from earlier days
+              </div>
+              {day.unsigned.map(u => (
+                <div key={u.eid} className="text-[13px] text-red-900 flex items-center justify-between gap-2 py-0.5">
+                  <span>{u.date} · {u.patientName} · {u.visitType} <span className="text-red-600">({u.daysOld}d)</span></span>
+                  <button className="btn ghost !py-0.5 !px-2 text-[11.5px]" onClick={() => onOpenChart(u.clientId)}>Open</button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="grid gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)] items-start">
+            <div className={`card overflow-hidden ${selected ? 'hidden xl:block' : ''}`}>
               {/* B1 + B2 — the same day, two ways of reading it. Both render
                   the SAME visits from the SAME fetch, so the list and the map
                   cannot disagree about what exists. */}
-              <div className="inline-flex rounded-lg overflow-hidden border border-primary">
-                {[['list', 'ti-list', 'List'], ['map', 'ti-map-2', 'Map']].map(([k, icon, label]) => (
-                  <button key={k} className={`px-2.5 py-1 text-[11.5px] font-semibold ${mode === k ? 'bg-primary text-white' : 'bg-white text-primary'}`}
-                    onClick={() => setMode(k)}><i className={`ti ${icon} mr-1`} />{label}</button>
-                ))}
-              </div>
-              <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" onClick={load}><i className="ti ti-refresh" />Refresh</button>
-              {access.canWrite && day && day.visits && day.visits.length > 1 && (
-                <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" onClick={optimize}>
-                  <i className="ti ti-route" />Optimize route
-                </button>
-              )}
-            </div>
-            {err && <p className="text-red-600 text-sm px-4 py-2">{err}</p>}
-            {day && day.calendar && !day.calendar.ok && (
-              <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[12px] text-amber-900">
-                <b>The calendar could not be read.</b> {day.calendar.error} This is not an empty day — it is a day we could not load.
-              </div>
-            )}
-            {/* An unsigned note from an earlier day is the practice's biggest
-                silent risk: nothing chases it, and the longer it sits the less
-                anybody remembers of the visit. Pinned at the top, in red. */}
-            {day && day.unsigned && day.unsigned.length > 0 && (
-              <div className="bg-red-50 border-b border-red-200 px-4 py-3">
-                <div className="text-[12px] font-bold text-red-800 mb-1">
-                  <i className="ti ti-alert-triangle-filled mr-1" />
-                  {day.unsigned.length} unsigned {day.unsigned.length === 1 ? 'note' : 'notes'} from earlier days
+              <div className="flex items-center justify-between gap-2 px-3 lg:px-4 border-b border-stone-100">
+                <div className="flex overflow-x-auto -mb-px">
+                  {[['list', 'Schedule'], ['nearby', 'Due Nearby'], ['map', 'Map']].map(([k, label]) => (
+                    <div key={k} className={`tabbtn ${mode === k ? 'on' : ''}`} onClick={() => setMode(k)}>{label}</div>
+                  ))}
                 </div>
-                {day.unsigned.map(u => (
-                  <div key={u.eid} className="text-[12.5px] text-red-900 flex items-center justify-between gap-2 py-0.5">
-                    <span>{u.date} · {u.patientName} · {u.visitType} <span className="text-red-600">({u.daysOld}d)</span></span>
-                    <button className="btn ghost !py-0.5 !px-2 text-[11px]" onClick={() => onOpenChart(u.clientId)}>Open</button>
-                  </div>
-                ))}
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button className="btn ghost !py-1 !px-2 text-[12px]" onClick={load} title="Refresh"><i className="ti ti-refresh" /></button>
+                  {access.canWrite && visits.length > 1 && (
+                    <button className="btn ghost !py-1 !px-2.5 text-[12px]" onClick={optimize} title="Optimize route">
+                      <i className="ti ti-route" /><span className="hidden sm:inline">Optimize</span>
+                    </button>
+                  )}
+                </div>
               </div>
-            )}
-            {mode === 'map' && day && <DayMap plot={day.plot} />}
-            <div className="px-4">
-              {!day && !err && <p className="text-sm text-stone-500 py-4">Loading your day…</p>}
-              {day && day.visits.length === 0 && (
-                <p className="text-sm text-stone-500 py-6">No visits scheduled for this day.</p>
+              {mode === 'map' && day && <DayMap plot={day.plot} />}
+              {mode === 'nearby' && (
+                <div className="p-4">
+                  {selected
+                    ? <>
+                      <p className="text-[12.5px] text-stone-500 mb-2">Patients due to be seen near <b>{selected.patientName}</b>.</p>
+                      <NearbyDue clientId={selected.clientId} onOpenChart={onOpenChart} />
+                    </>
+                    : <p className="text-[13px] text-stone-500">Pick a visit on the schedule to see who else is due nearby.</p>}
+                </div>
               )}
-              {day && mode === 'list' && day.visits.map(v => (
-                <DayVisitRow key={v.eid} v={v} busy={busy} canWrite={access.canWrite}
-                  onOpenChart={onOpenChart}
-                  onPacket={(vv) => setPacket({ clientId: vv.clientId, eid: vv.eid })}
-                  onStamp={stamp} onStartVideo={startVideo} />
-              ))}
+              {mode === 'list' && (
+                <div>
+                  {!day && !err && <p className="text-sm text-stone-500 px-5 py-6">Loading your day…</p>}
+                  {day && visits.length === 0 && (
+                    <div className="px-5 py-10 text-center">
+                      <i className="ti ti-calendar-off text-3xl text-stone-300" />
+                      <p className="text-sm text-stone-500 mt-2">No visits scheduled for this day.</p>
+                    </div>
+                  )}
+                  {visits.map(v => (
+                    <DayScheduleRow key={v.eid} v={v} on={v.eid === selEid} onSelect={(vv) => setSelEid(vv.eid)} />
+                  ))}
+                </div>
+              )}
+              {day && (
+                <div className="bg-cream border-t border-stone-100 px-4 lg:px-5 py-3 text-[12.5px] text-stone-600 flex gap-4 flex-wrap">
+                  <span><b>{day.totals.visits}</b> {day.totals.visits === 1 ? 'visit' : 'visits'}</span>
+                  <span>
+                    {day.totals.miles != null
+                      ? <><b>{day.totals.miles}</b> mi straight-line{day.totals.milesPartial ? ` (${day.totals.unplaceableStops} stop${day.totals.unplaceableStops === 1 ? '' : 's'} without coordinates)` : ''}</>
+                      : <span className="text-amber-700">Distances unavailable — no address coordinates</span>}
+                  </span>
+                  <span><b>{day.totals.openTasks}</b> open {day.totals.openTasks === 1 ? 'task' : 'tasks'}</span>
+                </div>
+              )}
             </div>
-            {day && (
-              <div className="bg-cream border-t border-creamdeep px-4 py-3 text-[12px] text-stone-700 flex gap-4 flex-wrap">
-                <span><b>{day.totals.visits}</b> {day.totals.visits === 1 ? 'visit' : 'visits'}</span>
-                <span>
-                  {day.totals.miles != null
-                    ? <><b>{day.totals.miles}</b> mi straight-line{day.totals.milesPartial ? ` (${day.totals.unplaceableStops} stop${day.totals.unplaceableStops === 1 ? '' : 's'} without coordinates)` : ''}</>
-                    : <span className="text-amber-700">Distances unavailable — no address coordinates</span>}
-                </span>
-                <span><b>{day.totals.openTasks}</b> open {day.totals.openTasks === 1 ? 'task' : 'tasks'}</span>
-              </div>
-            )}
+
+            <div className={selected ? '' : 'hidden xl:block'}>
+              {selected
+                ? <VisitDetails key={selected.eid} v={selected} busy={busy} canWrite={access.canWrite}
+                    onBack={() => setSelEid(null)}
+                    onOpenChart={onOpenChart}
+                    onPacket={(vv) => setPacket({ clientId: vv.clientId, eid: vv.eid })}
+                    onStamp={stamp} onStartVideo={startVideo} />
+                : (
+                  <div className="card px-6 py-12 text-center">
+                    <i className="ti ti-hand-click text-3xl text-stone-300" />
+                    <p className="text-sm text-stone-500 mt-2">{visits.length ? 'Pick a visit to see its details.' : 'Visit details show here once a visit is booked.'}</p>
+                  </div>
+                )}
+            </div>
           </div>
 
           {proposal && (
-            <div className="card">
+            <div className="card mt-5">
               <div className="card-h">
                 <h2>Proposed order</h2>
                 <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={() => setProposal(null)}>Discard</button>
@@ -2580,6 +2704,140 @@
               </div>
             </div>
           )}
+        </div>
+      );
+    };
+
+    // ── Visit Details (2026-10-12 redesign) ───────────────────────────────
+    // The right-hand pane of My Day. Everything on it comes from the SAME
+    // pre-visit read the full packet uses; no count is shown that the packet
+    // did not carry (there is no medication count on the packet, so none is
+    // shown). The action buttons are DayVisitRow, unchanged in what they gate.
+    // One line of the Visit Details "Key information" list. Module scope, like
+    // every component here (test/react_input_focus.test.js).
+    const KeyLine = ({ icon, children, tone }) => (
+      <div className={`flex items-center gap-3 py-1.5 text-[13.5px] ${tone === 'red' ? 'text-red-700' : 'text-primary'}`}>
+        <i className={`ti ${icon} text-[17px] ${tone === 'red' ? 'text-red-600' : 'text-stone-500'} w-5 text-center`} />
+        <span>{children}</span>
+      </div>
+    );
+    const VisitDetails = ({ v, busy, canWrite, onBack, onOpenChart, onPacket, onStamp, onStartVideo }) => {
+      const [p, setP] = useState(null);
+      const [err, setErr] = useState('');
+      const [tab, setTab] = useState('pre');
+      useEffect(() => {
+        let live = true;
+        setP(null); setErr('');
+        api.preVisit(v.clientId, v.eid).then(r => { if (live) setP(r); })
+          .catch(e => { if (live) setErr(e.message); });
+        return () => { live = false; };
+      }, [v.clientId, v.eid]);
+      const k = (p && p.packet) || {};
+      const b = k.banner || {};
+      const items = k.openItems || [];
+      const count = (kind) => items.filter(i => i.kind === kind).length;
+      const allergyRows = (b.allergies && b.allergies.rows) || [];
+      const allergyText = !b.allergies ? null
+        : b.allergies.state === 'none_known' ? 'No known allergies'
+        : allergyRows.length ? `${allergyRows.length} ${allergyRows.length === 1 ? 'allergy' : 'allergies'}`
+        : 'Allergies not confirmed';
+      return (
+        <div className="card overflow-hidden">
+          <div className="card-h">
+            <div className="flex items-center gap-2">
+              <button className="xl:hidden btn ghost !py-1 !px-2" onClick={onBack} aria-label="Back to the schedule"><i className="ti ti-arrow-left" /></button>
+              <h2>Visit Details</h2>
+            </div>
+            <span className="text-[12px] text-stone-500">{v.time}{v.endTime ? ` – ${v.endTime}` : ''}</span>
+          </div>
+          <div className="flex border-b border-stone-100 px-2">
+            {[['pre', 'Pre-Visit'], ['chart', 'Chart'], ['dir', v.video ? 'Video' : 'Directions']].map(([key, label]) => (
+              <div key={key} className={`tabbtn flex-1 text-center ${tab === key ? 'on' : ''}`} onClick={() => setTab(key)}>{label}</div>
+            ))}
+          </div>
+          <div className="p-4 lg:p-5">
+            <div className="flex items-start gap-3 mb-4">
+              <div className="cw-avatar w-14 h-14 text-[17px]">{initials(v.patientName)}</div>
+              <div className="min-w-0 flex-1">
+                <div className="serif text-[22px] leading-tight font-semibold text-primary">{v.patientName || 'Unnamed patient'}</div>
+                <div className="text-[12.5px] text-stone-500">
+                  {[b.dob ? `DOB ${fmtDate(b.dob)}${b.age != null ? ` (${b.age})` : ''}` : null, b.mrn ? `MRN ${b.mrn}` : null].filter(Boolean).join(' • ') || ' '}
+                </div>
+              </div>
+              <VisitStatePill state={v.state} />
+            </div>
+            {err && <p className="text-red-600 text-sm mb-3">{err}</p>}
+            {!p && !err && <p className="text-sm text-stone-500 mb-3">Loading the visit…</p>}
+
+            {p && tab === 'pre' && (
+              <div>
+                <div className="lblu mb-1">Reason for visit</div>
+                <p className="text-[14px] text-stone-700 mb-4">{k.reason || v.visitType || '—'}</p>
+                <div className="lblu mb-1">Key information</div>
+                <div className="mb-3">
+                  <KeyLine icon="ti-list-details">{(k.activeProblems || []).length} active {(k.activeProblems || []).length === 1 ? 'problem' : 'problems'}</KeyLine>
+                  {allergyText && <KeyLine icon="ti-alert-triangle">{allergyText}</KeyLine>}
+                  {count('order') > 0 && <KeyLine icon="ti-flask">{count('order')} open {count('order') === 1 ? 'order' : 'orders'}</KeyLine>}
+                  {count('referral') > 0 && <KeyLine icon="ti-send">{count('referral')} open {count('referral') === 1 ? 'referral' : 'referrals'}</KeyLine>}
+                  {count('result') > 0 && <KeyLine icon="ti-alert-circle" tone="red">{count('result')} unacknowledged {count('result') === 1 ? 'result' : 'results'}</KeyLine>}
+                  {count('goal') > 0 && <KeyLine icon="ti-heart-handshake">Care plan: {count('goal')} {count('goal') === 1 ? 'goal' : 'goals'}</KeyLine>}
+                </div>
+                <AllergyStrip allergies={b.allergies} />
+                {p.emrNotice && <p className="text-[12px] text-amber-700 mt-2">{p.emrNotice}</p>}
+              </div>
+            )}
+            {p && tab === 'chart' && (
+              <div className="space-y-3 text-[13.5px] text-stone-700">
+                <div><div className="lblu mb-0.5">Last visit</div>{k.lastVisitAt || '—'}</div>
+                <div>
+                  <div className="lblu mb-0.5">Last vitals</div>
+                  {k.lastVitals ? [k.lastVitals.label || k.lastVitals.name, k.lastVitals.value].filter(Boolean).join(' ') : '—'}
+                  {k.lastVitals && k.lastVitals.draft && <DraftVitalsChip />}
+                </div>
+                <div>
+                  <div className="lblu mb-0.5">Active problems</div>
+                  {(k.activeProblems || []).length
+                    ? <ul className="space-y-0.5">{k.activeProblems.map((x, i) => (
+                      <li key={i} className="flex gap-2"><span className="text-red-400">•</span>{x.description || x.title || x.code}</li>))}</ul>
+                    : '—'}
+                </div>
+                <div>
+                  <div className="lblu mb-0.5">Recent results</div>
+                  {(k.recentResults || []).length
+                    ? k.recentResults.map(r => `${r.label}${r.interpretation ? ` (${r.interpretation})` : ''}`).join(' • ')
+                    : '—'}
+                </div>
+              </div>
+            )}
+            {p && tab === 'dir' && (
+              <div className="space-y-3 text-[13.5px] text-stone-700">
+                {v.video
+                  ? <p><i className="ti ti-video mr-1" />Video visit. Start or rejoin the room below.</p>
+                  : <>
+                    <div><div className="lblu mb-0.5">Address</div>{v.address || 'No address on file.'}</div>
+                    <DayDistance distance={v.distance} />
+                  </>}
+                {/* A2 — access notes and who will be there. From the PATIENT
+                    record, so they are here for whoever covers. */}
+                {(k.homeVisit || []).length > 0 && (
+                  <div className="bg-cream border border-stone-200 rounded-xl p-3 space-y-1">
+                    {k.homeVisit.map(h => (
+                      <div key={h.key} className="text-[13px] text-stone-700"><span className="lblu mr-1.5">{h.label}</span>{h.value}</div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="mt-4 pt-3 border-t border-stone-100">
+              <DayVisitRow v={v} busy={busy} canWrite={canWrite} onOpenChart={onOpenChart}
+                onPacket={onPacket} onStamp={onStamp} onStartVideo={onStartVideo} />
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-4">
+              <button className="btn gold justify-center" onClick={() => onOpenChart(v.clientId)}><i className="ti ti-folder-open" />Open Chart</button>
+              <button className="btn ghost justify-center" onClick={() => onPacket(v)}><i className="ti ti-file-description" />View Pre-Visit Packet</button>
+            </div>
+          </div>
         </div>
       );
     };
@@ -6901,6 +7159,231 @@
       );
     };
 
+    // ── Messages across every patient (2026-10-12 redesign) ──
+    // The sidebar's Messages. Same shared component as the chart's Messages
+    // tab, mounted WITHOUT a client scope, so it carries its own client
+    // picker — which the server scopes by the same rule as the write gate.
+    const StaffMessagesView = () => {
+      const el = 'gfc-messaging-clinical-all';
+      React.useEffect(() => {
+        const lib = window.GFCMessaging;
+        const token = getToken();
+        if (!lib || !token) return undefined;
+        lib.mount(el, {
+          userId: (JSON.parse(localStorage.getItem('admin_user') || 'null') || {}).id,
+          role: 'clinical',
+          authToken: token
+        });
+        return () => lib.unmount(el);
+      }, []);
+      if (!window.GFCMessaging) {
+        return <p className="text-sm text-stone-500">Messages did not load. Refresh the page.</p>;
+      }
+      return <div className="card p-3 lg:p-4"><div id={el} /></div>;
+    };
+
+    // ── Patients (2026-10-12 redesign) ──
+    // The patient list that used to sit in the left column, as its own page.
+    // Columns are only what the list route already serves: no last/next visit,
+    // because answering those needs an OpenEMR read per patient, and a blank
+    // column is better than an invented one.
+    const CARE_CHIPS = {
+      IHPC: [['PC', 'Primary care', 'bg-rose-50 text-rose-700']],
+      BOTH: [['PC', 'Primary care', 'bg-rose-50 text-rose-700'], ['HC', 'Home care', 'bg-sky-50 text-sky-700']]
+    };
+    const ENROLL_LABEL = { intake_pending: 'Intake pending', intake_complete: 'Intake complete', enrolled: 'Enrolled' };
+    const ageFromDob = (dob) => {
+      if (!/^\d{4}-\d{2}-\d{2}/.test(String(dob || ''))) return null;
+      const t = GFC_TIME.zonedParts(new Date()).isoDate;
+      const [ty, tm, td] = t.split('-').map(Number);
+      const [y, m, d] = String(dob).slice(0, 10).split('-').map(Number);
+      return ty - y - ((tm < m || (tm === m && td < d)) ? 1 : 0);
+    };
+    const patientStatus = (p) => p.activatedAt
+      ? { label: 'Active', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' }
+      : { label: ENROLL_LABEL[p.enrollmentStatus] || 'Enrolling', cls: 'bg-amber-50 text-amber-700 border-amber-200' };
+    const readRecent = () => {
+      try { const v = JSON.parse(window.localStorage.getItem('gfc.clinical.recent') || '[]'); return Array.isArray(v) ? v : []; }
+      catch { return []; }
+    };
+    const PatientsView = ({ patients, err, q, setQ, onClearSearch, onRetry, onOpen, isAdmin }) => {
+      const [tab, setTab] = useState('all');
+      const recent = readRecent();
+      const rows = tab === 'recent'
+        ? recent.map(id => (patients || []).find(p => p.id === id)).filter(Boolean)
+        : (patients || []);
+      return (
+        <div className="px-4 lg:px-8 py-5 lg:py-7">
+          <div className="flex flex-wrap items-end justify-between gap-3 mb-4">
+            <h1 className="cw-title">Patients</h1>
+            <div className="flex items-center gap-2 flex-wrap">
+              {q && (
+                <button className="btn ghost" onClick={() => { setQ(''); onClearSearch(); }} title="Show every patient">
+                  <i className="ti ti-x" />Clear “{q}”
+                </button>
+              )}
+              {isAdmin && (
+                <a className="btn gold" href="/admin" title="New patients are added in the admin hub"><i className="ti ti-plus" />Add Patient</a>
+              )}
+            </div>
+          </div>
+          <div className="cw-tabs mb-4">
+            {[['all', 'All Patients'], ['recent', 'Recent']].map(([k, label]) => (
+              <div key={k} className={`tabbtn ${tab === k ? 'on' : ''}`} onClick={() => setTab(k)}>{label}</div>
+            ))}
+          </div>
+          <div className="card overflow-hidden">
+            {patients === null && err && (
+              <div className="px-5 py-4">
+                <p className="text-sm text-red-600 mb-2">{err}</p>
+                <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={onRetry}>Retry</button>
+              </div>
+            )}
+            {patients === null && !err && <p className="text-sm text-stone-500 px-5 py-6">Loading…</p>}
+            {patients && rows.length === 0 && (
+              <p className="text-sm text-stone-500 px-5 py-8 text-center">
+                {tab === 'recent' ? 'Patients you open show here.' : q ? 'No patients match that search.' : 'No IHPC clients yet.'}
+              </p>
+            )}
+            {rows.length > 0 && (
+              <>
+                <table className="cw-table w-full hidden md:table">
+                  <thead><tr>
+                    <th>Name</th><th>DOB / Age</th><th>Care type</th><th>Track</th><th>Chart</th><th>Status</th><th />
+                  </tr></thead>
+                  <tbody>
+                    {rows.map(p => {
+                      const st = patientStatus(p);
+                      const age = ageFromDob(p.dob);
+                      return (
+                        <tr key={p.id} className="cw-row cursor-pointer" onClick={() => onOpen(p)}>
+                          <td>
+                            <div className="flex items-center gap-3">
+                              <div className="cw-avatar w-9 h-9 text-[12.5px]">{initials(p.name)}</div>
+                              <div className="min-w-0">
+                                <div className="font-semibold text-primary truncate">{p.name}</div>
+                                {p.preferredName && <div className="text-[11.5px] text-stone-500">“{p.preferredName}”</div>}
+                              </div>
+                            </div>
+                          </td>
+                          <td className="text-stone-600 whitespace-nowrap">{p.dob ? `${fmtDate(p.dob)}${age != null ? ` (${age})` : ''}` : '—'}</td>
+                          <td>
+                            <div className="flex gap-1.5">
+                              {(CARE_CHIPS[String(p.serviceLine || '').toUpperCase()] || []).map(([c, title, cls]) => (
+                                <span key={c} className={`care-chip ${cls}`} title={title}>{c}</span>
+                              ))}
+                            </div>
+                          </td>
+                          <td className="text-stone-600">{p.careTierLabel || p.careTier || '—'}</td>
+                          <td className="text-[12.5px]">
+                            {p.openEmrPatientId
+                              ? <span className="text-emerald-700"><i className="ti ti-link mr-1" />Linked</span>
+                              : <span className="text-stone-400">Not linked</span>}
+                          </td>
+                          <td><span className={`pill ${st.cls}`}>{st.label}</span></td>
+                          <td className="text-right"><i className="ti ti-chevron-right text-stone-400" /></td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <div className="md:hidden">
+                  {rows.map(p => {
+                    const st = patientStatus(p);
+                    const age = ageFromDob(p.dob);
+                    return (
+                      <button key={p.id} type="button" className="cw-row w-full text-left flex items-center gap-3 px-4 py-3 border-b border-stone-100 last:border-0"
+                        onClick={() => onOpen(p)}>
+                        <div className="cw-avatar w-10 h-10 text-[13px]">{initials(p.name)}</div>
+                        <div className="min-w-0 flex-1">
+                          <div className="font-semibold text-primary truncate">{p.name}</div>
+                          <div className="text-[12px] text-stone-500">
+                            {[p.dob ? `${fmtDate(p.dob)}${age != null ? ` (${age})` : ''}` : null,
+                              (CARE_CHIPS[String(p.serviceLine || '').toUpperCase()] || []).map(c => c[0]).join(' + ') || null].filter(Boolean).join(' • ')}
+                          </div>
+                        </div>
+                        <span className={`pill ${st.cls}`}>{st.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      );
+    };
+
+    // ── Settings (2026-10-12 redesign) ──
+    // Where the OpenEMR connection, the enrollment link and sign-out went when
+    // the top bar was simplified. Nothing here is new; it is the old top bar's
+    // right-hand group, given room.
+    const SettingsView = ({ user, emrStatus, connectEmr, signOut, canWrite, access }) => (
+      <div className="px-4 lg:px-8 py-5 lg:py-7 max-w-3xl">
+        <h1 className="cw-title mb-5">Settings</h1>
+        <div className="card mb-4">
+          <div className="card-h"><h2>Your account</h2></div>
+          <div className="p-5 flex items-center gap-4">
+            <div className="cw-avatar w-14 h-14 text-[17px]">{initials(user.name)}</div>
+            <div className="min-w-0 flex-1">
+              <div className="font-semibold text-primary text-[15px]">{user.name}</div>
+              <div className="text-[13px] text-stone-500">{access.clinicalRoleLabel || user.role}{!canWrite ? ' · Read-only' : ''}</div>
+            </div>
+            <button className="btn ghost" onClick={signOut}><i className="ti ti-logout" />Sign out</button>
+          </div>
+        </div>
+        <div className="card mb-4">
+          <div className="card-h"><h2>OpenEMR</h2></div>
+          <div className="p-5 text-[13.5px] text-stone-700 space-y-3">
+            <div className="flex items-center gap-2">
+              <span className={`w-2.5 h-2.5 rounded-full ${emrStatus === null ? 'bg-stone-300' : emrStatus.connected ? 'bg-emerald-500' : (emrStatus.reachable ? 'bg-amber-500' : 'bg-red-500')}`} />
+              {emrStatus === null ? 'Checking OpenEMR…'
+                : !emrStatus.configured ? 'OpenEMR not configured'
+                : !emrStatus.reachable ? 'OpenEMR unreachable'
+                : emrStatus.connected ? `Signed in to OpenEMR as ${(emrStatus.emrUser && (emrStatus.emrUser.username || emrStatus.emrUser.name)) || 'you'}`
+                : 'Not signed in to OpenEMR'}
+            </div>
+            {emrStatus && emrStatus.configured && emrStatus.reachable && !emrStatus.connected && (
+              <button className="btn" onClick={connectEmr}><i className="ti ti-login" />Sign in to OpenEMR</button>
+            )}
+            {emrStatus && emrStatus.serverStartedAt && (
+              <p className="text-[12px] text-stone-500" title="When this server process started — older than your last deploy means it was never restarted.">
+                Server up since {fmtTs(emrStatus.serverStartedAt)}
+              </p>
+            )}
+          </div>
+        </div>
+        {(user.role === 'admin' || user.role === 'caseManager') && (
+          <div className="card">
+            <div className="card-h"><h2>Staff tools</h2></div>
+            <div className="p-5">
+              <a className="btn ghost" href="/admin/enrollment"><i className="ti ti-clipboard-list" />Enrollment</a>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+
+    // ── Phone "More" (2026-10-12 redesign) ──
+    // Every view that is not on the bottom bar, so nothing is out of reach on
+    // a phone.
+    const MoreView = ({ onPick, badges }) => (
+      <div className="px-4 py-5">
+        <h1 className="cw-title mb-4">More</h1>
+        <div className="card overflow-hidden">
+          {NAV_VIEWS.filter(v => !v.phone).map(v => (
+            <button key={v.key} type="button" className="cw-row w-full text-left flex items-center gap-3 px-4 py-3.5 border-b border-stone-100 last:border-0"
+              onClick={() => onPick(v)}>
+              <i className={`ti ${v.icon} text-[20px] text-primary`} />
+              <span className="font-semibold text-primary flex-1">{v.tab}</span>
+              {badges[v.key] > 0 && <span className="cw-badge">{badges[v.key]}</span>}
+              <i className="ti ti-chevron-right text-stone-400" />
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+
     // ── App shell ──
     // ── Messages (Session 9) ──
     // At MODULE scope on purpose. A component defined inside another is a new
@@ -6954,20 +7437,20 @@
       const [linking, setLinking] = useState(false);
       const [linkCandidates, setLinkCandidates] = useState([]);
       const [err, setErr] = useState('');
-      const [listOpen, setListOpen] = useState(true);
-      // Whether the patient panel is open, remembered per browser. A clinician
-      // who collapses it wants it collapsed next time; a preference like this is
-      // exactly what localStorage is for, and it is read in a try/catch because
-      // a private window or blocked site data makes the accessor throw. Open is
-      // the default, so a failed read gives the panel rather than hiding it.
-      const [panelOpen, setPanelOpen] = useState(() => {
-        try { return window.localStorage.getItem('gfc.clinical.panel') !== 'closed'; }
-        catch { return true; }
-      });
-      useEffect(() => {
-        try { window.localStorage.setItem('gfc.clinical.panel', panelOpen ? 'open' : 'closed'); }
-        catch { /* a preference that cannot be saved is not an error worth showing */ }
-      }, [panelOpen]);
+      // 2026-10-12 redesign: the patient list is its own page (Patients), so
+      // the old collapsible left column and its phone overlay are gone. The
+      // counts on the Inbox and Results items come from the same reads those
+      // screens make; a failed read shows no badge, never a guessed number.
+      const [badges, setBadges] = useState({});
+      const loadBadges = useCallback(() => {
+        if (!getToken()) return;
+        Promise.allSettled([api.inbox(), api.resultsInbox()]).then(([ib, rs]) => {
+          setBadges({
+            inbox: ib.status === 'fulfilled' && ib.value && ib.value.counts ? ib.value.counts.actionable : 0,
+            results: rs.status === 'fulfilled' && rs.value && Array.isArray(rs.value.results) ? rs.value.results.length : 0
+          });
+        });
+      }, []);
       // Session 4.12 I1 — MY DAY is the default route after sign-in. The
       // workspace used to open on a patient list, which is not how a house-call
       // day starts.
@@ -6984,6 +7467,7 @@
           });
       }, [q]);
       useEffect(() => { if (user) { loadPatients(); api.status().then(setEmrStatus).catch(() => {}); } }, [user, loadPatients]);
+      useEffect(() => { if (user) loadBadges(); }, [user, view, loadBadges]);
 
       // Clear every stored credential key the portals share, so signing out of
       // the workspace really signs out (not just this tab's view).
@@ -6999,7 +7483,14 @@
       const selIdRef = useRef(null);
       const openPatient = (p, opts) => {
         selIdRef.current = p.id;
-        setSel(p); setChart(null); setTab((opts && opts.tab) || 'summary'); setListOpen(false);
+        setSel(p); setChart(null); setTab((opts && opts.tab) || 'summary');
+        // "Recent" on the Patients page: a per-browser convenience, so it is
+        // localStorage, read and written defensively.
+        try {
+          const prior = JSON.parse(window.localStorage.getItem('gfc.clinical.recent') || '[]');
+          const next = [p.id, ...(Array.isArray(prior) ? prior : []).filter(x => x !== p.id)].slice(0, 12);
+          window.localStorage.setItem('gfc.clinical.recent', JSON.stringify(next));
+        } catch { /* a convenience that cannot be saved is not an error */ }
         setLinkCandidates([]);  // candidates belong to the patient that produced them
         setView('charts'); setHpApptEid((opts && opts.appointmentEid) || null);
         setEncTarget((opts && opts.encounterUuid) || null);
@@ -7087,128 +7578,71 @@
         ['extras', 'Rest of the record'],
         ['messages', 'Messages']
       ];
+      // One click handler for the sidebar, the phone bottom bar and More.
+      // Patients always lands on the list: a chart is reached FROM it.
+      const goView = (v) => { setView(v.key); if (v.key === 'charts') setSel(null); };
+      const navButton = (v) => (
+        <button key={v.key} className={view === v.key ? 'on' : ''} title={VIEW_TITLES[v.key]}
+          onClick={() => { setView(v.key); if (v.key === 'charts') setSel(null); }}>
+          <i className={`ti ${v.icon}`} />
+          <span>{v.tab}</span>
+          {badges[v.key] > 0 && <span className="cw-badge">{badges[v.key]}</span>}
+        </button>
+      );
+      const runSearch = () => { setSel(null); setView('charts'); loadPatients(); };
+      const ownHeader = ['myday', 'charts', 'settings', 'more'];
       return (
         <AccessContext.Provider value={access}>
-        {/* The patient panel collapses (owner, 2026-09-23). The grid column
-            goes to zero rather than the aside being hidden inside a 290px
-            track, or the chart would keep a 290px gutter of nothing. */}
-        <div className={`min-h-screen lg:grid ${panelOpen ? 'lg:grid-cols-[290px_1fr]' : 'lg:grid-cols-[0_1fr]'}`}>
-          {/* Patient list */}
-          <aside className={`bg-white border-r border-stone-200 ${listOpen ? '' : 'hidden'} ${panelOpen ? 'lg:block' : 'lg:hidden'}`}>
-            <div className="bg-primary text-white px-5 py-4">
-              <img src="/brand/logo-mark-transparent.png" alt="" className="h-10 mb-1.5" />
-              <div className="text-[9px] tracking-[2px] uppercase text-accent font-bold">Clinical Workspace</div>
+        {/* 2026-10-12 redesign (owner mockups): a navy sidebar on a laptop, a
+            top bar and a bottom bar on a phone. One NAV_VIEWS list drives all
+            three, so they cannot disagree about what exists. The content
+            column is `minmax(0,1fr)` so a wide table scrolls inside its card
+            instead of pushing the page sideways. */}
+        <div className="min-h-screen lg:grid lg:grid-cols-[248px_minmax(0,1fr)]">
+          <aside className="cw-side hidden lg:flex flex-col sticky top-0 h-screen overflow-y-auto px-3 py-5">
+            <div className="brand flex flex-col items-center text-center px-2 mb-6">
+              <img src="/brand/logo-full-white-trimmed.png" alt="Godwins Family Care" className="!h-auto w-[150px]" />
+              <div className="text-[9.5px] tracking-[2px] uppercase text-accent font-bold mt-2">Clinical Workspace</div>
             </div>
-            <div className="p-3">
-              <input className="inp" placeholder="Search patients…" value={q}
-                onChange={e => setQ(e.target.value)} onKeyDown={e => e.key === 'Enter' && loadPatients()} />
-            </div>
-            <div className="px-5 pb-1 lblu">IHPC panel{patients ? ` · ${patients.length}` : ''}</div>
-            <div className="overflow-y-auto" style={{ maxHeight: 'calc(100vh - 190px)' }}>
-              {patients === null && err && (
-                <div className="px-5 py-3">
-                  <p className="text-xs text-red-600 mb-2">{err}</p>
-                  <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={loadPatients}>Retry</button>
+            <nav className="cw-nav">
+              {NAV_VIEWS.filter(v => v.group === 'main').map(navButton)}
+              <div className="grp">Work</div>
+              {NAV_VIEWS.filter(v => v.group === 'work').map(navButton)}
+            </nav>
+            <div className="mt-auto pt-4">
+              <nav className="cw-nav">{NAV_VIEWS.filter(v => v.group === 'foot').map(navButton)}</nav>
+              <div className="flex items-center gap-3 px-3 pt-4 mt-3 border-t border-white/10">
+                <div className="w-10 h-10 rounded-full bg-accent text-primary flex items-center justify-center font-bold text-[13px] shrink-0">{initials(user.name)}</div>
+                <div className="min-w-0">
+                  <div className="text-[13.5px] font-semibold truncate">{user.name}</div>
+                  <div className="text-[11.5px] text-white/60 truncate">{access.clinicalRoleLabel || user.role}{!canWrite ? ' · Read-only' : ''}</div>
                 </div>
-              )}
-              {patients === null && !err && <p className="text-xs text-stone-400 px-5 py-3">Loading…</p>}
-              {patients && patients.length === 0 && <p className="text-xs text-stone-400 px-5 py-3">No IHPC clients yet.</p>}
-              {(patients || []).map(p => (
-                <div key={p.id}
-                  className={`flex items-center gap-3 px-5 py-2.5 border-b border-stone-100 cursor-pointer ${sel && sel.id === p.id ? 'bg-cream border-l-4 border-l-accent' : ''}`}
-                  onClick={() => openPatient(p)}>
-                  <div className="w-9 h-9 rounded-full bg-creamdeep text-primary flex items-center justify-center font-bold text-[13px] border border-stone-200">{initials(p.name)}</div>
-                  <div className="min-w-0">
-                    <div className="font-semibold text-[13.5px] truncate">{p.name}</div>
-                    <div className="text-[11.5px] text-stone-500">
-                      {[p.careTier, p.serviceLine, p.activatedAt ? 'Active' : (p.openEmrPatientId ? 'Linked' : 'Not linked')].filter(Boolean).join(' · ')}
-                    </div>
-                  </div>
-                </div>
-              ))}
+              </div>
             </div>
           </aside>
 
-          {/* Chart. `lg:col-start-2` is load-bearing, not decoration: when the
-              panel is collapsed, `aside` gets `display:none` and CSS Grid
-              drops a display:none item from its item list entirely — so with
-              nothing pinning `main`, it auto-places into the now-empty FIRST
-              (0-width) track instead of the second, and the whole chart
-              renders at zero width. Found by measuring the live layout, not
-              by reading the CSS: `main`'s own bounding rect reported width 0
-              with the grid track correctly sized underneath it. */}
-          <main className={`${listOpen ? 'hidden' : ''} lg:block lg:col-start-2`}>
-            {/* WRAPS. Two groups in a `justify-between` row with nothing
-                allowed to wrap is why the right-hand group pushed the nav off
-                the edge instead of dropping below it. */}
-            <div className="bg-white border-b border-stone-200 px-4 lg:px-7 py-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
-              <div className="flex items-center gap-3 min-w-0 flex-1">
-                <button className="lg:hidden btn ghost !px-2.5 !py-1.5" onClick={() => setListOpen(true)}><i className="ti ti-users" /></button>
-                {/* The panel toggle is desktop-only: on a phone the list is a
-                    full-screen overlay with its own button to the left. */}
-                <button className="hidden lg:inline-flex btn ghost !px-2 !py-1.5 shrink-0"
-                  onClick={() => setPanelOpen(o => !o)}
-                  title={panelOpen ? 'Hide the patient list' : 'Show the patient list'}
-                  aria-label={panelOpen ? 'Hide the patient list' : 'Show the patient list'}
-                  aria-expanded={panelOpen}>
-                  <i className={`ti ${panelOpen ? 'ti-layout-sidebar-left-collapse' : 'ti-layout-sidebar-left-expand'}`} />
-                </button>
-                {/* The heading gives up its width before the nav does — it is
-                    a label, and the nav is the thing you click. */}
-                <div className="serif text-lg text-primary font-semibold truncate shrink">{VIEW_TITLES[view] || 'Patient Chart'}</div>
-                {/* WRAPS, never scrolls invisibly. The first version made this
-                    strip `overflow-x-auto`, which technically fit nine views —
-                    but a horizontal scrollbar on a nav bar is not a fix, it is
-                    the same clipping with an affordance nobody sees. Labels
-                    show only once there is genuinely room for all nine words
-                    (2xl, 1536px+); below that it is icons, which is what makes
-                    nine views actually fit on a laptop instead of technically
-                    scrolling past it. `flex-wrap` is the backstop under that —
-                    if even nine icons cannot fit (a narrow phone), the strip
-                    grows to a second row inside its own border rather than
-                    cutting the last button off at the edge. */}
-                <div className="flex flex-wrap rounded-lg border border-stone-200 ml-1 nav-strip">
-                  {NAV_VIEWS.map(v => (
-                    <button key={v.key}
-                      className={`px-2.5 py-1.5 text-xs font-semibold whitespace-nowrap ${view === v.key ? 'bg-primary text-white' : 'bg-white text-primary'}`}
-                      title={VIEW_TITLES[v.key]}
-                      onClick={() => { setView(v.key); if (!v.keepsPatient) setListOpen(false); }}>
-                      <i className={`ti ${v.icon}`} />
-                      <span className="hidden 2xl:inline ml-1">{v.tab}</span>
-                    </button>
-                  ))}
-                </div>
+          <main className="min-w-0 pb-24 lg:pb-0">
+            <div className="cw-top sticky top-0 z-30 px-4 lg:px-8 py-2.5 flex items-center gap-3">
+              <img src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" className="h-9 shrink-0 lg:hidden" />
+              <div className="cw-search flex-1 min-w-0 max-w-xl mx-auto flex items-center gap-2 px-3">
+                <i className="ti ti-search text-stone-400" />
+                <input className="flex-1 bg-transparent py-2 text-[13.5px] outline-none min-w-0" placeholder="Search patients by name…"
+                  value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => e.key === 'Enter' && runSearch()} aria-label="Search patients" />
               </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <div className="flex items-center gap-2 text-[11.5px] text-stone-500 bg-cream border border-stone-200 px-3 py-1.5 rounded-full whitespace-nowrap">
-                  <span className={`w-2 h-2 rounded-full ${emrStatus === null ? 'bg-stone-300' : emrStatus.connected ? 'bg-emerald-500' : (emrStatus.reachable ? 'bg-amber-500' : 'bg-red-500')}`} />
-                  {emrStatus === null ? 'OpenEMR…'
-                    : !emrStatus.configured ? 'OpenEMR not configured'
-                    : !emrStatus.reachable ? 'OpenEMR unreachable'
-                    : emrStatus.connected ? `OpenEMR: ${(emrStatus.emrUser && (emrStatus.emrUser.username || emrStatus.emrUser.name)) || 'signed in'}`
-                    : 'OpenEMR: not signed in'}
-                </div>
-                {emrStatus && emrStatus.serverStartedAt && (
-                  <span className="text-[10.5px] text-stone-400 hidden 2xl:inline" title="When this server process started — older than your last deploy means it was never restarted.">
-                    server up since {fmtTs(emrStatus.serverStartedAt)}
-                  </span>
-                )}
-                {!canWrite && <span className="chip bg-amber-50 text-amber-800" title="Case-manager scoped read: every write route answers 403.">Read-only</span>}
-                {(user.role === 'admin' || user.role === 'caseManager') && (
-                  <a className="btn ghost !py-1.5 !px-2.5 text-xs" href="/admin/enrollment" title="Staff enrollment view"><i className="ti ti-clipboard-list" /><span className="hidden sm:inline">Enrollment</span></a>
-                )}
-                <div className="flex items-center gap-2 pl-1 border-l border-stone-200">
-                  <span className="text-[11.5px] text-stone-500 hidden sm:inline">{user.name}</span>
-                  <button className="btn ghost !py-1.5 !px-2.5 text-xs" onClick={signOut} title="Sign out">
-                    <i className="ti ti-logout" /><span className="hidden sm:inline">Sign out</span>
-                  </button>
-                </div>
-              </div>
+              {!canWrite && <span className="chip bg-amber-50 text-amber-800 hidden sm:inline-flex" title="Case-manager scoped read: every write route answers 403.">Read-only</span>}
+              <button className="relative shrink-0 w-10 h-10 rounded-xl flex items-center justify-center text-primary hover:bg-white" title="Inbox"
+                onClick={() => setView('inbox')} aria-label="Inbox">
+                <i className="ti ti-bell text-[21px]" />
+                {(badges.inbox > 0 || badges.results > 0) && <span className="absolute top-2 right-2 w-2.5 h-2.5 rounded-full bg-[#B5462E] border-2 border-cream" />}
+              </button>
+              <button className="shrink-0 w-10 h-10 rounded-full bg-accent text-primary flex items-center justify-center font-bold text-[13px]" title="Settings"
+                onClick={() => setView('settings')} aria-label="Settings">{initials(user.name)}</button>
             </div>
+
             {/* Setup diagnostics: names the exact blocker so an admin can fix it
                 without opening dev tools. Never renders secret VALUES. */}
             {emrStatus && !emrStatus.connected && (
-              <div className="bg-amber-50 border-b border-amber-200 px-4 lg:px-7 py-2 text-[12px] text-amber-900">
+              <div className="bg-amber-50 border-b border-amber-200 px-4 lg:px-8 py-2.5 text-[12.5px] text-amber-900">
                 {!emrStatus.configured ? (
                   (emrStatus.missing || []).length ? (
                     <span>
@@ -7234,7 +7668,7 @@
                       Charts, notes and orders are written under your own OpenEMR account
                       {emrStatus.emrUser && emrStatus.emrUser.username ? ` (last signed in as ${emrStatus.emrUser.username})` : ''}. You will be sent to OpenEMR's login page and back.
                     </span>
-                    <button type="button" onClick={connectEmr} className="px-3 py-1 rounded bg-[#033D50] text-white text-[12px] font-semibold hover:opacity-90">Sign in to OpenEMR</button>
+                    <button type="button" onClick={connectEmr} className="btn !py-1 !px-3 text-[12px]">Sign in to OpenEMR</button>
                   </span>
                 ) : (
                   <span><b>OpenEMR is configured but unreachable.</b> {emrStatus.error || 'The EMR did not respond.'}</span>
@@ -7242,7 +7676,7 @@
               </div>
             )}
             {emrReturn && (
-              <div className={`border-b px-4 lg:px-7 py-2 text-[12px] ${emrReturn === 'connected' ? 'bg-emerald-50 border-emerald-200 text-emerald-900' : 'bg-red-50 border-red-200 text-red-900'}`}>
+              <div className={`border-b px-4 lg:px-8 py-2.5 text-[12.5px] ${emrReturn === 'connected' ? 'bg-emerald-50 border-emerald-200 text-emerald-900' : 'bg-red-50 border-red-200 text-red-900'}`}>
                 {emrReturn === 'connected' ? <span><b>OpenEMR account connected.</b> Your clinical writes are now attributed to you in OpenEMR.</span>
                   : <span><b>OpenEMR sign-in did not complete</b> ({emrReturnReason || 'unknown'}). Try again; if it repeats, tell an admin the code shown here.</span>}
               </div>
@@ -7250,7 +7684,7 @@
             {/* 4.4 deploy diagnostics: the appointment-scoped OAuth client swap
                 (P0 deploy step) and the billing NPI (spec §2.5). */}
             {emrStatus && emrStatus.connected && emrStatus.appointmentScopes === false && (
-              <div className="bg-amber-50 border-b border-amber-200 px-4 lg:px-7 py-2 text-[12px] text-amber-900">
+              <div className="bg-amber-50 border-b border-amber-200 px-4 lg:px-8 py-2.5 text-[12.5px] text-amber-900">
                 <b>Appointment OAuth client swap not deployed.</b> The token OpenEMR issued to this server carries no appointment scopes, so scheduling will 401. Swap <code className="font-mono">OPENEMR_CLIENT_ID</code>/<code className="font-mono">OPENEMR_CLIENT_SECRET</code> to the appointment-scoped client (enabled 2026-08-29), then stop and run the app.
               </div>
             )}
@@ -7261,7 +7695,7 @@
                 healthy green while every new route 401s "Unauthorized". Name the
                 shortfall here or nobody finds out until a write fails. */}
             {emrStatus && emrStatus.connected && (emrStatus.billingRouteScopes === false || emrStatus.nativeWriteScopes === false) && (
-              <div className="bg-amber-50 border-b border-amber-200 px-4 lg:px-7 py-2 text-[12px] text-amber-900">
+              <div className="bg-amber-50 border-b border-amber-200 px-4 lg:px-8 py-2.5 text-[12.5px] text-amber-900">
                 <b>OpenEMR client is out of date for 8.4.</b> The token this server holds carries{' '}
                 <b>{emrStatus.grantedScopeCount} of {emrStatus.requestedScopeCount}</b> scopes, so{' '}
                 {[emrStatus.billingRouteScopes === false && 'charges, orders and code search',
@@ -7275,13 +7709,19 @@
               </div>
             )}
             {emrStatus && emrStatus.billingNpiConfigured === false && access.canSubmitBilling && (
-              <div className="bg-amber-50 border-b border-amber-200 px-4 lg:px-7 py-2 text-[12px] text-amber-900">
+              <div className="bg-amber-50 border-b border-amber-200 px-4 lg:px-8 py-2.5 text-[12.5px] text-amber-900">
                 <b>Billing provider NPI not configured.</b> Signed visits cannot be submitted to billing until an admin sets it under Coding queue → Billing settings (or seeds <code className="font-mono">GFC_BILLING_NPI_USED</code> in the env).
               </div>
             )}
-            {err && <p className="text-red-600 text-sm px-7 pt-3">{err}</p>}
+            {err && view !== 'charts' && <p className="text-red-600 text-sm px-4 lg:px-8 pt-3">{err}</p>}
+            {!ownHeader.includes(view) && (
+              <div className="px-4 lg:px-7 pt-5 lg:pt-7 -mb-2">
+                <h1 className="cw-title">{VIEW_TITLES[view]}</h1>
+              </div>
+            )}
             {view === 'myday' && (
-              <MyDayView user={user} onOpenChart={(clientId) => openChartById(clientId)} />
+              <MyDayView user={user} onOpenChart={(clientId) => openChartById(clientId)}
+                onAddVisit={() => setView('schedule')} />
             )}
             {view === 'queues' && (
               <WorkQueuesView
@@ -7299,14 +7739,29 @@
             )}
             {view === 'results' && <ResultsInbox />}
             {view === 'overdue' && <OverdueOrders />}
+            {view === 'messages' && <div className="p-4 lg:p-7"><StaffMessagesView /></div>}
+            {view === 'settings' && (
+              <SettingsView user={user} emrStatus={emrStatus} connectEmr={connectEmr} signOut={signOut} canWrite={canWrite} access={access} />
+            )}
+            {view === 'more' && <MoreView badges={badges} onPick={goView} />}
             {view === 'schedule' && (
               <ScheduleView user={user} patients={patients || []}
                 onOpenChart={(clientId) => openChartById(clientId)}
                 onDocument={documentFromSchedule} />
             )}
-            {view === 'charts' && !sel && <div className="p-10 text-stone-400 text-sm">Select a patient to open their chart, or switch to Schedule for the calendar.</div>}
+            {view === 'charts' && !sel && (
+              <PatientsView patients={patients} err={err} q={q} setQ={setQ} onRetry={loadPatients}
+                onClearSearch={() => api.patients('').then(r => setPatients(r.patients)).catch(e => setErr(e.message))}
+                onOpen={(p) => openPatient(p)} isAdmin={user.role === 'admin'} />
+            )}
             {view === 'charts' && sel && (
               <div>
+                <div className="px-4 lg:px-8 pt-4 text-[12.5px] text-stone-500">
+                  <button className="hover:text-primary" onClick={() => setSel(null)}>Patients</button>
+                  <i className="ti ti-chevron-right mx-1 text-[11px]" />
+                  <span className="text-stone-700">{sel.name || (chart && chart.banner && chart.banner.name) || 'Patient'}</span>
+                </div>
+                {err && <p className="text-red-600 text-sm px-4 lg:px-8 pt-2">{err}</p>}
                 {/* Session 4.12 — the banner, above the tab bar and therefore
                     present on EVERY tab. It replaced a header that showed DOB,
                     Track and a truncated OpenEMR uuid and no age, MRN, MBI or
@@ -7323,7 +7778,7 @@
                     highlighted, and a clinician needs to be told where they are
                     and how to get back. */}
                 {tab === 'visit' && (
-                  <div className="bg-accent/20 border-b border-accent px-4 lg:px-7 py-2 flex items-center justify-between gap-2 flex-wrap">
+                  <div className="bg-accent/20 border-b border-accent px-4 lg:px-8 py-2 flex items-center justify-between gap-2 flex-wrap">
                     <span className="text-[12.5px] text-primary font-semibold">
                       <i className="ti ti-writing mr-1" />Documenting a visit
                     </span>
@@ -7332,7 +7787,7 @@
                     </button>
                   </div>
                 )}
-                <div className="bg-white border-b border-stone-200 px-4 lg:px-7">
+                <div className="bg-white border-b border-stone-200 px-4 lg:px-8">
                   <div className="flex overflow-x-auto -mb-px">
                     {tabs.map(([k, label]) => (
                       <div key={k} className={`tabbtn ${tab === k ? 'on' : ''}`} onClick={() => setTab(k)}>{label}</div>
@@ -7362,10 +7817,24 @@
                 </div>
               </div>
             )}
-            <footer className="px-7 py-4 text-[10.5px] text-stone-400">
+            <footer className="px-4 lg:px-8 py-4 text-[11px] text-stone-400">
               Authorized users only. This system contains protected health information; all access is logged.
             </footer>
           </main>
+
+          {/* Phone bottom bar: the four most used views and More. */}
+          <nav className="cw-bottom lg:hidden fixed bottom-0 inset-x-0 z-40 flex">
+            {NAV_VIEWS.filter(v => v.phone).map(v => (
+              <button key={v.key} className={view === v.key ? 'on' : ''} onClick={() => goView(v)}>
+                <i className={`ti ${v.icon}`} />
+                <span>{v.tab}</span>
+                {badges[v.key] > 0 && <span className="dot">{badges[v.key]}</span>}
+              </button>
+            ))}
+            <button className={!NAV_VIEWS.some(v => v.phone && v.key === view) ? 'on' : ''} onClick={() => setView('more')}>
+              <i className="ti ti-menu-2" /><span>More</span>
+            </button>
+          </nav>
         </div>
         </AccessContext.Provider>
       );

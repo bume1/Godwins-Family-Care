@@ -978,45 +978,46 @@ test('a documented appointment is not on the thread twice', () => {
 // Owner report 2026-09-23, with a screenshot: the top bar clipped "Analytics"
 // off the right edge with no way to reach it, and the left patient panel
 // could not be collapsed.
-test('the nine views are declared once, so the overflow handling lives in one place', () => {
+// REPOINTED 2026-10-12 (clinical redesign, owner mockups). The nine-button
+// strip in the top bar became a navy sidebar on a laptop and a bottom bar plus
+// More on a phone. The rules these guards protected are kept: every view is
+// declared ONCE, every view is reachable on every screen size, nothing scrolls
+// out of sight, and the content column can never collapse to zero width.
+test('the views are declared once, and the sidebar, bottom bar and More all read that one list', () => {
   // The bug this replaces: nine hand-written buttons, so a crowding fix had
   // nine places to land in and landed in none.
   assert.match(pageCode, /const NAV_VIEWS = Object\.freeze\(\[/);
   const keys = [...pageCode.matchAll(/\{ key: '(\w+)', tab: '/g)].map(m => m[1]);
-  assert.deepEqual(keys, ['myday', 'charts', 'schedule', 'queue', 'inbox', 'results', 'overdue', 'queues', 'analytics']);
-  assert.match(pageCode, /NAV_VIEWS\.map\(v =>/, 'the strip must render from the declared list, not repeat nine buttons');
+  for (const k of ['myday', 'charts', 'schedule', 'queue', 'inbox', 'results', 'overdue', 'queues', 'analytics', 'messages', 'settings']) {
+    assert.ok(keys.includes(k), `view ${k} must stay declared`);
+  }
+  assert.strictEqual(new Set(keys).size, keys.length, 'no view is declared twice');
+  assert.match(pageCode, /NAV_VIEWS\.filter\(v => v\.group === 'main'\)\.map\(navButton\)/);
+  assert.match(pageCode, /NAV_VIEWS\.filter\(v => v\.group === 'work'\)\.map\(navButton\)/);
+  assert.match(pageCode, /NAV_VIEWS\.filter\(v => v\.phone\)\.map\(v =>/, 'the phone bottom bar reads the same list');
+  assert.match(pageCode, /NAV_VIEWS\.filter\(v => !v\.phone\)\.map\(v =>/, 'More lists everything the bottom bar does not');
 });
 
-test('the nav strip WRAPS rather than scrolling invisibly, and labels wait for real room', () => {
-  // A horizontal scrollbar on a nav bar is the same clipping with an
-  // affordance nobody sees. It must wrap to a second row instead.
-  const i = pageCode.indexOf('nav-strip');
-  const strip = pageCode.slice(i - 120, i + 100);
-  assert.match(strip, /flex-wrap/);
-  assert.ok(!/overflow-x-auto/.test(strip), 'the strip must not fall back to a scrolling container');
-  // Labels hide until 2xl (1536px) — below that it is icons only, which is
-  // what makes nine views fit a laptop instead of technically scrolling past it.
-  assert.match(pageCode, /<span className="hidden 2xl:inline ml-1">\{v\.tab\}<\/span>/);
+test('every view is reachable on a laptop AND on a phone', () => {
+  // A view in no group would be in the list and on no screen.
+  const decl = pageCode.slice(pageCode.indexOf('const NAV_VIEWS'), pageCode.indexOf(']);', pageCode.indexOf('const NAV_VIEWS')));
+  const lines = decl.split('\n').filter(l => /\{ key: '/.test(l));
+  for (const l of lines) {
+    assert.match(l, /group: '(main|work|foot)'/, `every view sits in a sidebar group: ${l.trim()}`);
+  }
+  // On a phone: on the bottom bar, or under More (which lists every !phone).
+  assert.match(pageCode, /setView\('more'\)/, 'the bottom bar must offer More');
+  assert.match(pageCode, /<MoreView /);
 });
 
-test('the patient panel actually collapses in a real browser, not just in the markup', () => {
-  // LIFTED FROM A LIVE BUG. The panel toggle existed, `aside` got
-  // `display:none`, and the chart rendered at WIDTH 0 — because a
-  // `display:none` grid item drops out of CSS Grid's item list entirely, so
-  // `main`, with nothing pinning it, auto-placed into the now-empty FIRST
-  // (0-width) track instead of the second. Measured live: `main`'s own
-  // bounding rect reported width 0 with the grid track correctly sized
-  // underneath it — reading the CSS predicted nothing was wrong.
-  assert.match(pageCode, /<main className=\{`\$\{listOpen \? 'hidden' : ''\} lg:block lg:col-start-2`\}>/,
-    'main must be pinned to the second grid column — without it, collapsing the panel blanks the chart');
-  assert.match(pageCode, /const \[panelOpen, setPanelOpen\] = useState/);
-  assert.match(pageCode, /lg:grid-cols-\[290px_1fr\]/);
-  assert.match(pageCode, /lg:grid-cols-\[0_1fr\]/);
-  // Remembered per browser — a clinician who collapses it wants it collapsed
-  // next time — and read defensively, since a private window throws.
-  assert.match(pageCode, /localStorage\.getItem\('gfc\.clinical\.panel'\)/);
-  assert.match(pageCode, /localStorage\.setItem\('gfc\.clinical\.panel'/);
-  assert.match(pageCode, /try \{ return window\.localStorage\.getItem/, 'the read must be defensive — a private window throws');
+test('the content column cannot collapse to zero width, and the sidebar never pushes it', () => {
+  // LIFTED FROM A LIVE BUG (2026-09-23): a display:none grid item dropped out
+  // of the grid and `main` auto-placed into a 0-width track. The new grid has
+  // no collapsible track, and its content track is minmax(0,1fr) so a wide
+  // table scrolls inside its card instead of widening the page.
+  assert.match(pageCode, /lg:grid-cols-\[248px_minmax\(0,1fr\)\]/);
+  assert.ok(!/lg:grid-cols-\[0_1fr\]/.test(pageCode), 'no zero-width track may come back');
+  assert.match(pageCode, /<main className="min-w-0/, 'main must be allowed to shrink inside its track');
 });
 
 test('a document on the timeline shows its real title and category, never "Document" and the internal source flag', () => {
@@ -1143,9 +1144,11 @@ test('both new destinations are reachable and neither is hidden when empty', () 
   // `setView('queues')`-style calls; the nav-bar rebuild declared them once in
   // NAV_VIEWS, so "is this reachable" is now a question about that list and
   // the click handler that reads it, not about a literal call site per view.
+  // REPOINTED again 2026-10-12: Analytics is labelled Reports in the sidebar
+  // (owner mockup); the view and its key are unchanged.
   assert.match(pageCode, /key: 'queues', tab: 'Tasks'/);
-  assert.match(pageCode, /key: 'analytics', tab: 'Analytics'/);
-  assert.match(pageCode, /onClick=\{\(\) => \{ setView\(v\.key\)/, 'the nav strip must actually call setView with the clicked entry');
+  assert.match(pageCode, /key: 'analytics', tab: 'Reports'/);
+  assert.match(pageCode, /onClick=\{\(\) => \{ setView\(v\.key\)/, 'the sidebar must actually call setView with the clicked entry');
   assert.match(pageCode, /<WorkQueuesView/);
   assert.match(pageCode, /<AnalyticsView/);
   const i = pageCode.indexOf('const VIEW_TITLES');
