@@ -685,3 +685,61 @@ test('R13. the welcome email says the SAME thing in both halves', () => {
     assert.ok(tpl.includes(v), `the text half keeps ${v}`);
   }
 });
+
+test('R14. a patient is told PHI-free on EVERY channel they are on, never the staff wording', async () => {
+  // Driven through the shipped messaging router. The patient-facing wording
+  // used to be wired to `care_team` alone, so on Support, Clinical Escalation,
+  // Admin Direct and Care Coordination the patient received the STAFF notice:
+  // "Clinical Escalation — Ada Bell", and a body telling Ada that somebody had
+  // "sent you a message about Ada Bell". Source-reading would not have shown
+  // it; the channel list is in a different file from the branch that reads it.
+  const expressLib = require('express');
+  const cfg = require('../config');
+  const CLIENT = { id: 'rc1', role: cfg.ROLES.CLIENT, name: 'Ada Bell', email: 'ada@test.local', slug: 'ada',
+                   careTeam: { assignedFNPs: ['ru1'], assignedCaseManager: 'rm1' } };
+  const CLIN = { id: 'ru1', role: cfg.ROLES.USER, name: 'Bethel Godwins', email: 'b@test.local',
+                 clinicalRole: 'provider', hasClinicalAccess: true };
+  const ADMIN = { id: 'ra1', role: cfg.ROLES.ADMIN, name: 'GFC Admin', email: 'ad@test.local' };
+  const CM = { id: 'rm1', role: cfg.ROLES.CASE_MANAGER, name: 'Courtney Hale', email: 'cm@test.local', assignedClients: ['rc1'] };
+  const USERS = [CLIENT, CLIN, ADMIN, CM];
+  const store = new Map([['users', USERS]]);
+  const db = { get: async k => (store.has(k) ? JSON.parse(JSON.stringify(store.get(k))) : null),
+               set: async (k, v) => store.set(k, JSON.parse(JSON.stringify(v))) };
+  const notices = [];
+  const app = expressLib();
+  app.use(expressLib.json());
+  app.use(require('../routes/messaging')({
+    db, config: cfg, logActivity: async () => {},
+    queueNotification: async (type, id, email, name, data) => { notices.push({ email, ...data }); return { id: 'q' }; },
+    getUsers: async () => await db.get('users'),
+    authenticateToken: (req, _r, next) => { req.user = USERS.find(u => u.id === req.headers['x-as']); next(); },
+    uuidv4: () => 'id-' + Math.random().toString(36).slice(2, 9),
+    upload: { array: () => (q, r, n) => n() }, uploadLimiter: (q, r, n) => n(),
+    googledrive: {}, detectFileType: () => null, contentDisposition: () => 'inline'
+  }));
+  const server = await new Promise(r => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+  const port = server.address().port;
+  try {
+    for (const [channel, sender] of [['care_team', 'ru1'], ['support', 'ra1'],
+                                     ['clinical_escalation', 'ru1'], ['admin_direct', 'ra1'],
+                                     ['care_coordination', 'rm1']]) {
+      notices.length = 0;
+      const res = await fetch(`http://127.0.0.1:${port}/api/messaging/threads`, {
+        method: 'POST', headers: { 'x-as': sender, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clientId: 'rc1', channel, subject: 'Test', body: 'Please call the office.' })
+      });
+      assert.strictEqual(res.status, 200, `${channel} thread must open`);
+      const toPatient = notices.filter(n => n.email === CLIENT.email);
+      assert.strictEqual(toPatient.length, 1, `${channel}: the patient is told exactly once`);
+      const m = toPatient[0];
+      assert.ok(!/Ada Bell/.test(m.subject + m.body),
+        `${channel}: the patient's own name is never in their own notice`);
+      assert.ok(!/Clinical Escalation|Care Coordination|Admin Broadcast|Support —/.test(m.subject),
+        `${channel}: the channel is never named in the subject — a lock screen is not where that belongs`);
+      assert.ok(!/Bethel|Courtney|GFC Admin/.test(m.body),
+        `${channel}: no sender name either`);
+      assert.match(m.body, /Sign in to your portal/, `${channel}: it says a message is waiting`);
+      assert.strictEqual(m.ctaUrl, '/portal#messages', `${channel}: straight to Messages, not the portal home`);
+    }
+  } finally { server.close(); }
+});

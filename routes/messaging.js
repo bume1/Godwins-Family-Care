@@ -714,16 +714,27 @@ module.exports = function createMessagingRoutes(deps) {
         const owner = users.find(x => x && x.id === thread.client_id && x.role === ROLES.CLIENT);
         if (!owner || !poaIdsFor(users, owner).includes(u.id)) continue;
       }
-      // The patient side of a Care Team conversation is told in a PHI-free
-      // sentence that points at the Messages tab of their portal: no client
-      // name, no clinician name, no words from the message.
-      const fromCareTeam = ![msg.ROLE.CLIENT, msg.ROLE.FAMILY, 'POA'].includes(message.from_role);
-      const clientSide = thread.channel === 'care_team' && (u.role === ROLES.CLIENT || u.role === ROLES.FAMILY);
+      // A PATIENT OR THEIR FAMILY IS TOLD IN A PHI-FREE SENTENCE, ON EVERY
+      // CHANNEL. This used to be wired to `care_team` alone, so on the other
+      // four channels a client is a participant of — Support, Clinical
+      // Escalation, Admin Direct, Care Coordination — the patient received the
+      // STAFF notice instead: a subject reading "Clinical Escalation — Ada
+      // Bell" and a body telling Ada that somebody "sent you a message about
+      // Ada Bell". Three things wrong with that and the channel was only one:
+      // it talks about the reader in the third person, it puts their name and
+      // the nature of the conversation in a subject line anyone glancing at the
+      // inbox can read, and it was not marked as PHI so it would send on a
+      // transport outside the BAA.
+      //
+      // The wording names no channel either. "A clinical escalation about you"
+      // is not news to break by email, and the portal is one click away.
+      const fromStaff = ![msg.ROLE.CLIENT, msg.ROLE.FAMILY, 'POA'].includes(message.from_role);
+      const clientSide = u.role === ROLES.CLIENT || u.role === ROLES.FAMILY;
       if (clientSide) {
         await queueNotification('message_received', u.id, u.email, u.name,
           {
-            subject: fromCareTeam ? 'A new message from your care team' : 'A new message in your care team conversation',
-            body: (fromCareTeam ? 'Your care team has sent you a message.' : 'There is a new message in your care team conversation.')
+            subject: fromStaff ? 'A new message from your care team' : 'A new message in your conversation',
+            body: (fromStaff ? 'Your care team has sent you a message.' : 'There is a new message in your conversation.')
               + ' Sign in to your portal to read it. For privacy we do not put messages in email.',
             ctaUrl: links.PATHS.PORTAL_MESSAGES, ctaLabel: 'Open your messages'
           },
