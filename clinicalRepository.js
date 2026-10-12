@@ -2112,7 +2112,7 @@ const buildOrderPayload = (order, { providerId } = {}) => ({
 const TEST_ORDER_TYPES = ['lab', 'imaging', 'procedure'];
 const ORDER_TYPES = [...TEST_ORDER_TYPES, 'referral', 'dme'];
 const ORDER_PRIORITIES = ['routine', 'urgent', 'stat'];
-const ORDER_STATUSES = ['ordered', 'sent', 'scheduled', 'resulted', 'completed', 'cancelled'];
+const ORDER_STATUSES = ['ordered', 'sent', 'scheduled', 'accepted', 'resulted', 'completed', 'cancelled'];
 // Status is advanced manually by staff. Terminal states never move.
 const ORDER_TRANSITIONS = Object.freeze({
   ordered: ['sent', 'resulted', 'cancelled'],
@@ -2126,7 +2126,9 @@ const ORDER_TRANSITIONS = Object.freeze({
 // function which transitions apply to the order in front of it rather than
 // assuming the lab map.
 const transitionsFor = (order) => {
-  if (order && order.orderType === 'referral') return require('./orderRequisitions').REFERRAL_TRANSITIONS;
+  // An internal referral (to someone on the team) has its own lifecycle:
+  // assigned, accepted, completed. orderRequisitions answers which applies.
+  if (order && order.orderType === 'referral') return require('./orderRequisitions').transitionsForReferral(order);
   return ORDER_TRANSITIONS;
 };
 
@@ -2143,9 +2145,15 @@ const transitionsFor = (order) => {
 const EVIDENCE_BACKED_STATUSES = Object.freeze({
   sent: 'Record the send with "Mark as faxed", which captures who it went to, the fax number and the channel.',
   resulted: 'Attach the result document — an order cannot be marked resulted without one.',
-  completed: 'A referral completes when its consult note is attached.',
-  scheduled: 'Record the appointment date with "Mark as scheduled".'
+  completed: 'A referral completes when its consult note is attached, or, inside the team, when the colleague it went to completes it with a note.',
+  scheduled: 'Record the appointment date with "Mark as scheduled".',
+  accepted: 'Only the colleague a referral went to accepts it, from their inbox.'
 });
+// CANCELLING NEEDS A REASON (owner, 2026-10-12). A cancelled order is a
+// decision somebody will ask about later: whether the test was still needed,
+// whether the referral should have gone elsewhere. "Cancelled" with nothing
+// said answers none of it.
+const CANCEL_REASON_MAX = 500;
 
 const buildOrder = ({ id, clientId, puuid, encounterUuid, input, actor, encounterDiagnoses, at, orderReference }) => {
   const i = input || {};
@@ -2194,12 +2202,18 @@ const advanceOrderStatus = (order, next, actor, note, at) => {
   if (!allowed.includes(next)) {
     return { error: `An order that is "${order.status}" cannot move to "${next}"${allowed.length ? ` (allowed: ${allowed.join(', ')})` : ' — it is final'}`, code: 'ORDER_BAD_TRANSITION' };
   }
+  const text = String(note || '').trim().slice(0, CANCEL_REASON_MAX);
+  if (next === 'cancelled' && !text) {
+    return { error: 'Say why this order is being cancelled', code: 'ORDER_CANCEL_REASON_REQUIRED', status: 400 };
+  }
   const now = at || new Date().toISOString();
+  const by = actorRecord(actor);
   return {
     order: {
       ...order,
       status: next,
-      statusHistory: [...(order.statusHistory || []), { status: next, at: now, by: actorRecord(actor), note: String(note || '').trim().slice(0, 500) || null }],
+      ...(next === 'cancelled' ? { cancelledAt: now, cancelledBy: { id: by.id, name: by.name }, cancelReason: text } : {}),
+      statusHistory: [...(order.statusHistory || []), { status: next, at: now, by, note: text || null }],
       updatedAt: now
     }
   };

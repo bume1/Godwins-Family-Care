@@ -26,8 +26,8 @@
 const CLINICAL_ROLES = Object.freeze({
   PROVIDER: 'provider',   // FNP, MD, PA — full clinical authority
   RN: 'rn',               // RN, including RN case managers
-  LCSW: 'lcsw',           // independently licensed clinical social worker (archetype A9)
-  LMSW: 'lmsw',           // master's-level SW requiring supervision (A10) — GFC's case managers
+  LCSW: 'lcsw',           // clinical social worker, independently licensed (archetype A9)
+  LMSW: 'lmsw',           // master's-level SW under supervision (A10): GFC's case managers and counselors
   READ_ONLY: 'readOnly'   // staff without a clinical licence
 });
 const ALL_CLINICAL_ROLES = Object.freeze([
@@ -41,8 +41,8 @@ const LICENSED_CLINICAL_ROLES = Object.freeze([
 const CLINICAL_ROLE_LABELS = Object.freeze({
   provider: 'Provider (FNP / MD / PA)',
   rn: 'Registered Nurse',
-  lcsw: 'LCSW (independently licensed)',
-  lmsw: 'LMSW (supervised — case manager)',
+  lcsw: 'LCSW (clinical social worker)',
+  lmsw: 'LMSW (case manager / counselor)',
   readOnly: 'Read-only (unlicensed staff)'
 });
 
@@ -72,7 +72,14 @@ const CAPABILITIES = Object.freeze({
   SELECT_SERVICE_CODES: 'selectServiceCodes',  // CPT / E/M selection
   SIGN_BILLABLE_ENCOUNTER: 'signBillableEncounter',
   ACKNOWLEDGE_ABNORMAL_RESULT: 'acknowledgeAbnormalResult',
-  AUTHOR_STANDING_ORDER: 'authorStandingOrder' // only a provider signs a protocol (§4 rule 1)
+  AUTHOR_STANDING_ORDER: 'authorStandingOrder', // only a provider signs a protocol (§4 rule 1)
+  // Referrals, by scope of practice (owner, 2026-10-12). A referral is not a
+  // test: referring a patient to a colleague is coordination every licensed
+  // role does, so it is no longer only a provider's.
+  REFER_INTERNAL: 'referInternal',             // refer to someone on GFC's own clinical team
+  REFER_EXTERNAL: 'referExternal',             // refer out to another practice (provider, LCSW)
+  REFERRAL_COORDINATION: 'referralCoordination', // fax, schedule, file the consult note, cancel a referral
+  BEHAVIORAL_DIAGNOSIS: 'behavioralDiagnosis'  // add a mental health (ICD-10 F) diagnosis to the problem list
 });
 
 // role → the capabilities it carries. Anything absent is refused: the matrix
@@ -84,21 +91,33 @@ const ROLE_CAPABILITIES = Object.freeze({
     'carePlanAuthor', 'carePlanSign', 'medRec', 'problemListWrite', 'documentUpload',
     'scheduling', 'orderStatusAdvance', 'prescribe', 'orderDirect', 'orderStanding',
     'selectServiceCodes', 'signBillableEncounter', 'acknowledgeAbnormalResult',
-    'authorStandingOrder'
+    'authorStandingOrder', 'referInternal', 'referExternal', 'referralCoordination'
   ]),
   rn: Object.freeze([
     'chartRead', 'vitalsWrite', 'nursingNote', 'screeningInstrument',
     'carePlanAuthor', 'carePlanSign', 'medRec', 'problemListWrite', 'documentUpload',
-    'scheduling', 'orderStatusAdvance', 'orderStanding'
+    'scheduling', 'orderStatusAdvance', 'orderStanding', 'referInternal', 'referralCoordination'
   ]),
+  // LCSW (owner, 2026-10-12): assesses, diagnoses and treats behavioural and
+  // mental health conditions, practises independently, bills in their own
+  // name and supervises LMSWs. So: refers in and out, coordinates referrals,
+  // and records a MENTAL HEALTH diagnosis on the problem list. Not the rest of
+  // the problem list and not allergies: those stay an RN's or a provider's.
   lcsw: Object.freeze([
     'chartRead', 'behavioralNote', 'screeningInstrument',
     'carePlanAuthor', 'carePlanSign', 'documentUpload', 'scheduling',
-    'orderStanding', 'selectServiceCodes', 'signBillableEncounter'
+    'orderStanding', 'selectServiceCodes', 'signBillableEncounter',
+    'referInternal', 'referExternal', 'referralCoordination', 'behavioralDiagnosis'
   ]),
+  // LMSW (owner, 2026-10-12): case management, intake and service
+  // coordination, plus non-clinical or supervised counseling. Cannot
+  // diagnose independently or bill without oversight. So: refers within the
+  // team and works referrals through (fax, schedule, consult note), but places
+  // no referral out on their own, adds no diagnosis, and bills nothing.
   lmsw: Object.freeze([
     'chartRead', 'behavioralNote', 'screeningInstrument',
-    'carePlanAuthor', 'documentUpload', 'scheduling', 'orderStanding'
+    'carePlanAuthor', 'documentUpload', 'scheduling', 'orderStanding',
+    'referInternal', 'referralCoordination'
   ]),
   readOnly: Object.freeze(['chartRead'])
 });
@@ -119,6 +138,10 @@ const CAPABILITY_REASONS = Object.freeze({
   problemListWrite: 'Writing to the problem list is limited to an RN or a provider.',
   vitalsWrite: 'Recording vitals is limited to an RN or a provider.',
   orderStatusAdvance: 'Advancing an order status is limited to an RN or a provider.',
+  referInternal: 'Referring a patient to a colleague requires a clinical licence.',
+  referExternal: 'Referring a patient to an outside practice is limited to a provider or an LCSW. An LMSW refers within the team.',
+  referralCoordination: 'Working a referral through requires a clinical licence.',
+  behavioralDiagnosis: 'Adding a diagnosis to the problem list is limited to an RN, a provider, or an LCSW for mental health diagnoses.',
   carePlanSign: 'Signing a care plan requires a clinical licence.',
   carePlanAuthor: 'Authoring a care plan requires a clinical licence.',
   documentUpload: 'Uploading a document requires a clinical licence.',
@@ -143,8 +166,10 @@ const resolveClinicalRole = (user) => {
   if (user.role === 'admin') return CLINICAL_ROLES.PROVIDER;
   if (isValidClinicalRole(user.clinicalRole)) return String(user.clinicalRole);
   // Derived fallback — today's model, preserved.
-  // A case manager reads and never writes, flag or no flag (the 4.3 rule).
-  if (user.role === 'caseManager') return CLINICAL_ROLES.READ_ONLY;
+  // GFC's case managers ARE LMSW (owner, 2026-10-12), so a case manager with
+  // no stored role resolves to `lmsw`. An admin can still set one to readOnly
+  // deliberately, and that stored value wins above.
+  if (user.role === 'caseManager') return CLINICAL_ROLES.LMSW;
   if (user.hasClinicalAccess) return CLINICAL_ROLES.PROVIDER;
   return null;
 };
@@ -315,6 +340,73 @@ const canEditOrderDestination = (user) => !!user && user.accountStatus !== 'inac
   (user.role === 'admin' || user.role === 'caseManager' || user.isManager === true ||
     LICENSED_CLINICAL_ROLES.includes(resolveClinicalRole(user)));
 
+// ---- A mental health diagnosis (owner, 2026-10-12) ----------------------
+// An LCSW diagnoses behavioural and mental health conditions on their own
+// licence; an LMSW does not. ICD-10-CM chapter 5 (F01–F99) is that set. The
+// rest of the problem list stays an RN's or a provider's, so an LCSW adding
+// "Type 2 diabetes" is refused by name.
+const isBehavioralHealthDiagnosis = (code) =>
+  /^F\d{2}/.test(String(code || '').trim().toUpperCase().replace(/^ICD10:/, ''));
+const canAddProblem = (user, icd10) => {
+  if (can(user, CAPABILITIES.PROBLEM_LIST_WRITE)) return true;
+  return can(user, CAPABILITIES.BEHAVIORAL_DIAGNOSIS) && isBehavioralHealthDiagnosis(icd10);
+};
+const problemRefusal = (user, icd10) => ({
+  error: can(user, CAPABILITIES.BEHAVIORAL_DIAGNOSIS)
+    ? `${String(icd10 || '').trim() ? `${String(icd10).toUpperCase()} is not` : 'A problem with no ICD-10 code is not'} a mental health diagnosis. An LCSW adds F codes (F01–F99); other diagnoses are added by an RN or a provider.`
+    : CAPABILITY_REASONS.problemListWrite,
+  code: 'CLINICAL_CREDENTIAL',
+  capability: CAPABILITIES.PROBLEM_LIST_WRITE,
+  clinicalRole: resolveClinicalRole(user)
+});
+
+// ---- Working an order through (owner, 2026-10-12) -----------------------
+// Faxing, recording the appointment, filing the result and cancelling are
+// operational steps. An RN or a provider does them on any order. Everyone who
+// coordinates referrals (LCSW, LMSW) does them on a REFERRAL, which is what
+// case management is; a lab, imaging, procedure or DME order stays with the
+// RN and the provider.
+const isReferral = (order) => !!order && order.orderType === 'referral';
+const canCoordinateOrder = (user, order) => {
+  if (!order) return false;
+  if (can(user, CAPABILITIES.ORDER_STATUS_ADVANCE)) return true;
+  return isReferral(order) && can(user, CAPABILITIES.REFERRAL_COORDINATION);
+};
+const coordinationRefusal = (user, order) => ({
+  error: isReferral(order)
+    ? CAPABILITY_REASONS.referralCoordination
+    : 'Working a lab, imaging, procedure or equipment order through is limited to an RN or a provider. Social work coordinates referrals.',
+  code: 'CLINICAL_CREDENTIAL',
+  capability: isReferral(order) ? CAPABILITIES.REFERRAL_COORDINATION : CAPABILITIES.ORDER_STATUS_ADVANCE,
+  clinicalRole: resolveClinicalRole(user)
+});
+
+// ---- Referring a patient (owner, 2026-10-12) ----------------------------
+// WHERE a referral goes decides who may place it. Inside the team: any
+// licensed role. Out to another practice: a provider (who may order anything)
+// or an LCSW (an independent practitioner). Never under a standing order: a
+// referral is not a protocol test, and STANDING_ORDER_TYPES still excludes it.
+const REFERRAL_DESTINATIONS = Object.freeze(['internal', 'external']);
+const canRefer = (user, destination) => {
+  if (destination === 'internal') return can(user, CAPABILITIES.REFER_INTERNAL);
+  if (destination === 'external') {
+    return can(user, CAPABILITIES.ORDER_DIRECT) || can(user, CAPABILITIES.REFER_EXTERNAL);
+  }
+  return false;
+};
+const referralRefusal = (user, destination) => refusalFor(user,
+  destination === 'internal' ? CAPABILITIES.REFER_INTERNAL : CAPABILITIES.REFER_EXTERNAL);
+// Who a patient may be referred TO inside GFC: an active account carrying a
+// licensed clinical role. An office admin account is skipped unless it has an
+// NPI on file, because admin resolves to `provider` for the owner's sake and
+// the office login is not a clinician anyone should be referred to.
+const isReferralTarget = (user) => {
+  if (!user || user.accountStatus === 'inactive') return false;
+  if (!LICENSED_CLINICAL_ROLES.includes(resolveClinicalRole(user))) return false;
+  if (user.role === 'admin') return /^\d{10}$/.test(String(user.npi || '').replace(/\D/g, ''));
+  return true;
+};
+
 // ---- Care-plan signature branches on the SERVICE LINE (§3) --------------
 //   Track A / PHC  → an RN signature satisfies the care plan
 //   IHPC / clinical → a provider signature is required; an RN signature is
@@ -382,18 +474,43 @@ const withinCredentialCeiling = (roleOrUser, orderTypes) => {
 // today's behaviour EXACTLY. Nobody is silently downgraded; the boot warning
 // names every auto-mapped user so an admin reassigns the RNs deliberately.
 //
-// A CASE MANAGER maps to `readOnly`, not to `lmsw`, even though GFC's case
-// managers ARE LMSW (owner, 2026-09-13). Auto-assigning lmsw would WIDEN them
-// — care-plan authoring, document upload, screening execution — and a
-// migration must not hand anyone a write they did not have this morning. They
-// are named in the warning for deliberate reassignment.
+// A CASE MANAGER maps to `lmsw`. 4.8 held them at `readOnly` and named them
+// for a decision because lmsw widens what they may do; the owner made that
+// decision on 2026-10-12 (case managers and counselors are LMSW).
 const migrationRoleFor = (user) => {
   if (!user) return null;
   if (isValidClinicalRole(user.clinicalRole)) return String(user.clinicalRole);
   if (user.role === 'admin') return CLINICAL_ROLES.PROVIDER;
-  if (user.role === 'caseManager') return CLINICAL_ROLES.READ_ONLY;
+  if (user.role === 'caseManager') return CLINICAL_ROLES.LMSW;
   if (user.hasClinicalAccess) return CLINICAL_ROLES.PROVIDER;
   return null;
+};
+
+// ---- Case managers become LMSW (owner, 2026-10-12) ----------------------
+// The 4.8 migration left every case manager at `readOnly` on purpose and named
+// them for a decision. The owner made it: case managers and counselors are
+// LMSW. This moves each case manager still stored as `readOnly` to `lmsw`,
+// ONCE. The marker is what keeps it once: an admin who later sets somebody
+// back to readOnly deliberately is not overridden on the next boot.
+const CASE_MANAGER_LMSW_MARKER = '2026-10-12';
+const applyCaseManagerLmswMigration = (users, at) => {
+  const out = [];
+  const changed = [];
+  const now = at || new Date().toISOString();
+  for (const u of Array.isArray(users) ? users : []) {
+    if (!u || typeof u !== 'object' || u.role !== 'caseManager' ||
+        u.caseManagerLmswMigration || String(u.clinicalRole || '') !== CLINICAL_ROLES.READ_ONLY) {
+      out.push(u);
+      continue;
+    }
+    out.push({
+      ...u, clinicalRole: CLINICAL_ROLES.LMSW, hasClinicalAccess: true,
+      clinicalRoleAutoAssigned: false,
+      caseManagerLmswMigration: { version: CASE_MANAGER_LMSW_MARKER, at: now, from: CLINICAL_ROLES.READ_ONLY }
+    });
+    changed.push({ id: u.id, name: u.name || '(no name)', clinicalRole: CLINICAL_ROLES.LMSW });
+  }
+  return { users: out, changed };
 };
 // Returns { users, changed, warnings } — pure, so the boot path and the tests
 // exercise the same function.
@@ -442,6 +559,7 @@ const buildMigrationWarning = (changed) => {
   const rows = Array.isArray(changed) ? changed : [];
   if (!rows.length) return null;
   const providers = rows.filter(r => r.clinicalRole === CLINICAL_ROLES.PROVIDER);
+  const lmsw = rows.filter(r => r.clinicalRole === CLINICAL_ROLES.LMSW);
   const readOnly = rows.filter(r => r.clinicalRole === CLINICAL_ROLES.READ_ONLY);
   const lines = [
     '⚠️  SESSION 4.8 — clinical roles were assigned automatically. REVIEW THEM.',
@@ -455,12 +573,13 @@ const buildMigrationWarning = (changed) => {
     lines.push(`   Mapped to PROVIDER (${providers.length}):`);
     for (const r of providers) lines.push(`     • ${r.name} <${r.email}>`);
   }
+  if (lmsw.length) {
+    lines.push(`   Case managers mapped to LMSW (${lmsw.length}) — owner rule, 2026-10-12:`);
+    for (const r of lmsw) lines.push(`     • ${r.name} <${r.email}>`);
+  }
   if (readOnly.length) {
-    lines.push(`   Mapped to READ-ONLY — unchanged from today (${readOnly.length}):`);
+    lines.push(`   Mapped to READ-ONLY (${readOnly.length}):`);
     for (const r of readOnly) lines.push(`     • ${r.name} <${r.email}>`);
-    lines.push("   GFC's case managers are LMSW (owner, 2026-09-13). Assigning them");
-    lines.push('   `lmsw` widens what they may do, so it is a deliberate admin action,');
-    lines.push('   not something this migration does on their behalf.');
   }
   return lines.join('\n');
 };
@@ -495,6 +614,17 @@ module.exports = {
   canCoSignNote,
   canSubmitBilling,
   canEditOrderDestination,
+  isBehavioralHealthDiagnosis,
+  canAddProblem,
+  problemRefusal,
+  canCoordinateOrder,
+  coordinationRefusal,
+  REFERRAL_DESTINATIONS,
+  canRefer,
+  referralRefusal,
+  isReferralTarget,
+  CASE_MANAGER_LMSW_MARKER,
+  applyCaseManagerLmswMigration,
   CARE_PLAN_OUTCOME,
   evaluateCarePlanSignature,
   canCoSignCarePlan,

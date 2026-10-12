@@ -151,10 +151,11 @@ test('an admin and a licensed clinician may edit; a case manager still may not',
   assert.ok(canEdit({ role: 'user', hasClinicalAccess: true }), 'a clinician edits');
   assert.ok(canEdit({ role: 'user', clinicalRole: 'rn' }), 'an RN edits');
   assert.ok(canEdit({ role: 'user', clinicalRole: 'lcsw' }), 'an LCSW edits');
-  // A case manager resolves to readOnly. Widening them here would turn the 4.3
-  // scoped READ into a write, which is a different decision and not this one.
-  assert.ok(!canEdit({ role: 'caseManager' }), 'a case manager reads only');
-  assert.ok(!canEdit({ role: 'caseManager', hasClinicalAccess: true }), 'still read-only with the legacy flag');
+  // 2026-10-12 (owner): a case manager is an LMSW, and intake is LMSW scope, so
+  // a case manager corrects a submission. One an admin set to readOnly does not.
+  assert.ok(canEdit({ role: 'caseManager' }), 'a case manager (LMSW) edits');
+  assert.ok(!canEdit({ role: 'caseManager', clinicalRole: 'readOnly' }), 'a read-only case manager reads only');
+  assert.ok(!canEdit({ role: 'caseManager', clinicalRole: 'readOnly', hasClinicalAccess: true }), 'still read-only with the legacy flag');
   assert.ok(!canEdit({ role: 'user', clinicalRole: 'readOnly' }), 'readOnly is read-only');
   assert.ok(!canEdit({ role: 'user' }), 'a non-clinical staff user does not edit');
   assert.ok(!canEdit({ role: 'client' }), 'a client does not edit their own file from here');

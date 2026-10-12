@@ -178,9 +178,15 @@ test('a social worker is not offered med rec, the problem list, order sends or a
 });
 
 test('the coding route never writes the problem list for someone who may not', () => {
-  assert.match(server, /const mayWriteProblems = clinicalRoles\.can\(req\.user, clinicalRoles\.CAPABILITIES\.PROBLEM_LIST_WRITE\);/);
-  assert.match(server, /\(billingEdit && !awaitingAddendum\) \|\| !mayWriteProblems \? \[\]/);
+  // 2026-10-12: decided PER CODE. An LCSW diagnoses mental health conditions
+  // (owner), so their F codes go to the problem list and nothing else does;
+  // an LMSW writes none of it.
+  assert.match(server, /const problemCodes = wantedProblems\.filter\(c => clinicalRoles\.canAddProblem\(req\.user, c\)\);/);
+  assert.match(server, /for \(const code of \(billingEdit && !awaitingAddendum\) \? \[\] : problemCodes\)/);
   assert.equal(roles.can({ role: 'user', clinicalRole: 'lcsw' }, 'problemListWrite'), false);
+  assert.equal(roles.canAddProblem({ role: 'user', clinicalRole: 'lcsw' }, 'F32.9'), true);
+  assert.equal(roles.canAddProblem({ role: 'user', clinicalRole: 'lcsw' }, 'E11.9'), false);
+  assert.equal(roles.canAddProblem({ role: 'user', clinicalRole: 'lmsw' }, 'F32.9'), false);
   assert.equal(roles.can({ role: 'user', clinicalRole: 'rn' }, 'problemListWrite'), true);
 });
 

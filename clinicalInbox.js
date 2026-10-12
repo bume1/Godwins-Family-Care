@@ -29,7 +29,8 @@ const KINDS = Object.freeze({
   CARE_PLAN_CO_SIGN: 'care_plan_co_sign',
   VISIT_LOG_REVIEW: 'visit_log_review',
   ENCOUNTER_UNSIGNED: 'encounter_unsigned',
-  ENCOUNTER_AWAITING_BILLING: 'encounter_awaiting_billing'
+  ENCOUNTER_AWAITING_BILLING: 'encounter_awaiting_billing',
+  INTERNAL_REFERRAL: 'internal_referral'
 });
 
 const KIND_LABELS = Object.freeze({
@@ -38,7 +39,8 @@ const KIND_LABELS = Object.freeze({
   [KINDS.CARE_PLAN_CO_SIGN]: 'Care plan awaiting provider signature',
   [KINDS.VISIT_LOG_REVIEW]: 'Caregiver note awaiting review',
   [KINDS.ENCOUNTER_UNSIGNED]: 'Encounter documented but not signed',
-  [KINDS.ENCOUNTER_AWAITING_BILLING]: 'Signed note awaiting billing'
+  [KINDS.ENCOUNTER_AWAITING_BILLING]: 'Signed note awaiting billing',
+  [KINDS.INTERNAL_REFERRAL]: 'Referral from the team'
 });
 
 const iso = (v) => {
@@ -72,6 +74,7 @@ const notSelf = (v, signerId) => !!v.id && !!signerId && String(v.id) !== String
 
 const item = (o) => ({
   kind: o.kind,
+  status: o.status || null,
   label: KIND_LABELS[o.kind],
   id: String(o.id),
   clientId: o.clientId != null ? String(o.clientId) : null,
@@ -211,6 +214,29 @@ const buildInbox = ({
       actionable: v.canSubmitBilling,
       waitingOn: v.canSubmitBilling ? 'you' : 'billing',
       detail: `Signed by ${(att.signedBy && att.signedBy.name) || 'the clinician'}. ${(r.services || []).length} service code(s) so far.`
+    }));
+  }
+
+  // 7. A referral to someone on the team (owner, 2026-10-12). It waits on the
+  //    one person it was referred to, by name, and only they can act on it:
+  //    the accept and complete routes refuse anybody else (REFERRAL_NOT_YOURS).
+  //    Everyone else sees it under Everything, so a referral nobody picks up is
+  //    visible to the practice rather than sitting in one inbox unseen.
+  for (const o of (orders || [])) {
+    if (!o || o.orderType !== 'referral') continue;
+    const r = o.referral || {};
+    if (r.destination !== 'internal' || !['ordered', 'accepted'].includes(o.status)) continue;
+    const to = r.assignedTo || {};
+    const mine = !!v.id && !!to.id && String(v.id) === String(to.id);
+    const from = (o.orderingClinician && o.orderingClinician.name) || 'a colleague';
+    items.push(item({
+      kind: KINDS.INTERNAL_REFERRAL,
+      status: o.status,
+      id: o.id, clientId: o.clientId, patientName: nameOf(o.clientId),
+      at: o.createdAt,
+      actionable: mine,
+      waitingOn: mine ? 'you' : (to.name || 'the colleague it was referred to'),
+      detail: `${o.status === 'accepted' ? 'Accepted. ' : ''}From ${from}${r.reason ? `: ${r.reason}` : ''}`
     }));
   }
 

@@ -486,8 +486,11 @@ test('existing hasClinicalAccess users migrate to provider with no behaviour cha
   const by = (id) => users.find(u => u.id === id);
   assert.equal(by('1').clinicalRole, 'provider', 'today’s behaviour, preserved exactly');
   assert.equal(by('1').hasClinicalAccess, true);
-  assert.equal(by('2').clinicalRole, 'readOnly', 'a case manager is NOT silently widened to lmsw');
-  assert.equal(roles.canClinicalWrite(by('2')), false, 'and gains no clinical write');
+  // 2026-10-12 (owner): case managers ARE LMSW. 4.8 held them at readOnly and
+  // named them for exactly this decision; it is made, so they map to lmsw.
+  assert.equal(by('2').clinicalRole, 'lmsw', 'a case manager is an LMSW (owner rule, 2026-10-12)');
+  assert.equal(roles.can(by('2'), 'prescribe'), false, 'and an LMSW still prescribes nothing');
+  assert.equal(roles.can(by('2'), 'signBillableEncounter'), false, 'and bills nothing');
   assert.equal(roles.canClinicalRead(by('2')), true, 'while keeping the read they already had');
   assert.equal(by('3').clinicalRole, undefined, 'a client is untouched');
   assert.equal(by('4').clinicalRole, undefined, 'a caregiver is untouched');
@@ -529,9 +532,11 @@ test('the boot warning STANDS until an admin has actually reviewed the roles', (
 test('a user record written before this session still behaves correctly before the migration runs', () => {
   // The derived fallback, so there is no window where the app is wrong.
   assert.equal(roles.resolveClinicalRole({ role: 'user', hasClinicalAccess: true }), 'provider');
-  assert.equal(roles.resolveClinicalRole({ role: 'caseManager' }), 'readOnly');
-  assert.equal(roles.resolveClinicalRole({ role: 'caseManager', hasClinicalAccess: true }), 'readOnly',
-    'the flag never widened a case manager and still does not');
+  assert.equal(roles.resolveClinicalRole({ role: 'caseManager' }), 'lmsw', 'a case manager is an LMSW (owner, 2026-10-12)');
+  assert.equal(roles.resolveClinicalRole({ role: 'caseManager', hasClinicalAccess: true }), 'lmsw',
+    'the old flag never makes a case manager a provider');
+  assert.equal(roles.resolveClinicalRole({ role: 'caseManager', clinicalRole: 'readOnly' }), 'readOnly',
+    'a case manager an admin set to readOnly stays readOnly');
   assert.equal(roles.resolveClinicalRole({ role: 'admin' }), 'provider');
   assert.equal(roles.resolveClinicalRole({ role: 'client' }), null);
   assert.equal(roles.resolveClinicalRole({ role: 'user', hasClinicalAccess: false }), null);
@@ -565,7 +570,8 @@ test('readOnly case-manager behaviour and its audit line are unchanged', () => {
   assert.equal(roles.canClinicalRead(READ_ONLY), true);
   assert.equal(roles.canClinicalWrite(READ_ONLY), false);
   assert.equal(roles.canClinicalRead({ role: 'caseManager' }), true, 'even before the migration writes the field');
-  assert.equal(roles.canClinicalWrite({ role: 'caseManager', hasClinicalAccess: true }), false);
+  assert.equal(roles.canClinicalWrite({ role: 'caseManager', clinicalRole: 'readOnly', hasClinicalAccess: true }), false,
+    'a case manager set to readOnly cannot be widened by the old flag');
   assert.equal(roles.canClinicalRead(CLIENT), false);
   assert.equal(roles.canClinicalRead({ role: 'family' }), false);
   // The guard still audits them, and still answers with the specific code.
