@@ -328,7 +328,7 @@
     /* appointment card with a date block */
     .gfc.v2 .appt{background:#fff;border:1px solid var(--edge);border-radius:16px;padding:16px;box-shadow:0 1px 2px rgba(3,61,80,.04),0 6px 18px -12px rgba(3,61,80,.18);}
     .gfc.v2 .appt .row{display:flex;gap:14px;align-items:center;}
-    .gfc.v2 .lrow .dblk{width:48px;} .gfc.v2 .lrow .dblk .d{font-size:22px;}
+    .gfc.v2 .lrow .dblk{width:48px;} .gfc.v2 .lrow.srow .lm span{white-space:normal;} .gfc.v2 .lrow .lm .kind{display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.9px;font-weight:700;margin-bottom:1px;} .gfc.v2 .lrow .kind.clinical{color:#2b7a8c;} .gfc.v2 .lrow .kind.caregiver{color:var(--gold-ink);} .gfc.v2 .lrow.hl{background:#fcf3da;border-color:rgba(245,205,133,.7);} .gfc.v2 .lrow .dblk .d{font-size:22px;}
     .gfc.v2 .dblk{width:58px;flex-shrink:0;border:1px solid var(--edge2);border-radius:12px;overflow:hidden;text-align:center;background:#fff;}
     .gfc.v2 .dblk .m{background:var(--wash);color:var(--gold-ink);font-size:11px;font-weight:700;letter-spacing:1px;padding:3px 0;text-transform:uppercase;}
     .gfc.v2 .dblk .d{font-family:'Cormorant Garamond',serif;font-size:28px;font-weight:600;color:var(--navy);line-height:1.15;padding:2px 0 4px;}
@@ -5206,16 +5206,23 @@
       });
       return items.sort((x, y) => x.sortKey - y.sortKey);
     };
+    // One visit row, used on Home, Care and the calendar: a date block, the
+    // kind of visit (clinical or caregiver), what it is, when and with whom.
     const ScheduleRow = ({ v }) => (
-      <div className={`visit ${v.live ? 'hl' : ''}`}>
-        <span className="vt">{prettyDate(v.date)}<br />{v.time}</span>
-        <div className="vm">
+      <div className={`lrow srow ${v.live ? 'hl' : ''}`} style={{ cursor: 'default' }}>
+        <div className="dblk"><div className="m">{monthShortOf(v.date)}</div><div className="d">{Number(String(v.date || '').slice(8, 10)) || ''}</div></div>
+        <span className="lm">
           <span className={`kind ${v.kind}`}>{v.kind === 'clinical' ? 'Clinical visit' : 'Caregiver'}</span>
-          <b>{v.title}</b><span>{v.detail}</span>
-        </div>
-        {v.past && <i className="ti ti-circle-check chk" />}
+          <b>{v.title}</b>
+          <span>{[v.time, v.detail].filter(Boolean).join(' · ')}</span>
+        </span>
+        {v.past && <i className="ti ti-circle-check" style={{ color: 'var(--teal)', fontSize: 20 }} />}
       </div>
     );
+    const monthShortOf = (ymd) => {
+      const d = new Date(`${ymd}T12:00:00Z`);
+      return isNaN(d) ? '' : d.toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' });
+    };
 
     // The patient's calendar: the same month grid a clinician works from,
     // showing only this patient's own visits.
@@ -5254,7 +5261,7 @@
       const clinicalNotYet = clinical && !clinical.error && clinical.appointmentsPublished === false;
       return (
         <div className="gfc-body">
-          <h2 className="disp">Your schedule</h2>
+          <h2 className="disp">Appointments</h2>
           <p className="sub">Every visit on your calendar: clinical visits with your provider and visits from your caregiver.</p>
           <div className="cal">
             <div className="cal-hd">
@@ -5429,13 +5436,7 @@
               {/* The next two after it, so a caregiver visit tomorrow never hides
                   the clinical visit later in the week (or the other way round). */}
               {coming.length > 1 && <p className="lbl">Also coming up</p>}
-              {coming.slice(1, 3).map(v => (
-                <button className="lrow" key={v.id} onClick={() => onNavigate('schedule')}>
-                  <DateBlock ymd={v.date} />
-                  <span className="lm"><span className={`k ${v.kind}`} style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '.9px', fontWeight: 700, color: v.kind === 'clinical' ? '#2b7a8c' : 'var(--gold-ink)' }}>{v.kind === 'clinical' ? 'Clinical visit' : 'Caregiver visit'}</span><b>{v.title}</b><span>{[v.time, v.detail].filter(Boolean).join(' · ')}</span></span>
-                  <i className="ti ti-chevron-right" />
-                </button>
-              ))}
+              {coming.slice(1, 3).map(v => <ScheduleRow key={v.id} v={v} />)}
               {clinical && !clinical.error && (clinical.visits || [])[0] && <LatestVisitCard visit={clinical.visits[0]} onNavigate={onNavigate} />}
             </div>
             <div>
@@ -5501,7 +5502,7 @@
       );
     };
 
-    const GfcCarePlan = ({ data, readOnly, token, shifts, shiftsErr, clinical }) => {
+    const GfcCarePlan = ({ data, readOnly, token, shifts, shiftsErr, clinical, me, onNavigate }) => {
       const careSchedule = buildScheduleItems(shifts, clinical).filter(v => !v.live && !v.past && v.date >= georgiaDate(new Date().toISOString()));
       const cp = data.carePlan || {};
       const hasPlan = !!data.carePlan;               // null until the RN-authored plan exists (Session 4)
@@ -5517,7 +5518,10 @@
       // Canvas signature pad — same drawn-signature mechanism as the provider ROI.
       const sigCanvasRef = useRef(null);
       const sigState = useRef({ drawing: false, empty: true });
-      const padVisible = !readOnly && !coSigned && cp.version != null;
+      // Overview · Goals · Care Team · Documents (redesign). The signature pad
+      // lives on Documents, so it is set up when that tab is open.
+      const [tab, setTab] = useState('overview');
+      const padVisible = tab === 'documents' && hasPlan && !readOnly && !coSigned && cp.version != null;
       useEffect(() => {
         if (!padVisible) return;
         const canvas = sigCanvasRef.current;
@@ -5562,140 +5566,170 @@
         setSignedBy(res.signedBy || null);
       };
       const openSignedPdf = () => cp.signedPdf && cp.signedPdf.url && openPdfSecurely(`${API_URL}${cp.signedPdf.url}`, token);
+      // ── Layout (portal redesign, owner mockups 6 and 12) ──
+      // Overview · Goals · Care Team · Documents. Every value below is the
+      // plan's own; a service card shows only for a service this client is
+      // actually enrolled in (owner, 2026-10-12).
+      const line = (me && me.serviceLine) || null;
+      const services = [
+        (line === 'PHC' || line === 'BOTH') && { key: 'home', icon: 'ti-home-heart', bg: '#E7F1EA', fg: '#3F7A5C', title: 'Home Care', text: 'Private caregiver support with daily living and safety.' },
+        (line === 'IHPC' || line === 'BOTH') && { key: 'primary', icon: 'ti-stethoscope', bg: '#E4EEF2', fg: '#033D50', title: 'Primary Care', text: 'Visits with your provider for ongoing conditions, prevention and new concerns.' },
+        teamList.some(m => /case manager/i.test(m.role || '')) && { key: 'coord', icon: 'ti-users-group', bg: '#F6EFE2', fg: '#9A7430', title: 'Care Coordination', text: 'Your care team works together to keep you supported.' }
+      ].filter(Boolean);
+      const needsSignature = !readOnly && hasPlan && !coSigned && cp.version != null;
+      const TABS = [['overview', 'Overview'], ['goals', 'Goals'], ['team', 'Care Team'], ['documents', 'Documents']];
       return (
         <div className="gfc-body">
-          {readOnly && <span className="ro"><i className="ti ti-eye" />Family view · read-only</span>}
-          {data.isPoa && <span className="ro"><i className="ti ti-user-shield" />Acting as {data.actingAs}</span>}
-          {!hasPlan && data.carePlanShared === false && (
-            <div className="card" style={{ marginTop: 0 }}>
-              <div className="prow">
-                <Avatar initials="GF" size={34} />
-                <div>
-                  <div style={{ fontSize: 14.5, fontWeight: 600, color: 'var(--navy)' }}>The care plan isn't shared with family accounts</div>
-                  <div style={{ fontSize: 12.5, color: 'var(--mut)', marginTop: 2 }}>{data.greetingName} can change this under My Health → Sharing in their portal.</div>
-                </div>
-              </div>
-            </div>
-          )}
-          {!hasPlan && data.carePlanShared !== false && (
-            <div className="card" style={{ marginTop: 0 }}>
-              <div className="prow">
-                <Avatar initials="GF" size={34} />
-                <div>
-                  <div style={{ fontSize: 14.5, fontWeight: 600, color: 'var(--navy)' }}>Your care plan is being prepared</div>
-                  <div style={{ fontSize: 12.5, color: 'var(--mut)', marginTop: 2 }}>Your nurse will write your personalized plan and review it with you{readOnly ? '' : ' — you’ll co-sign it right here'}.</div>
-                </div>
-              </div>
-            </div>
-          )}
-          {hasPlan && cp.signedPdf && cp.signedPdf.available && (
-            <div className="doc" onClick={openSignedPdf} style={{ cursor: 'pointer', marginBottom: 12 }}>
-              <i className="ti ti-file-certificate" />
-              <div><b>Signed care plan (PDF)</b><span>Version {cp.version} · both signatures · stored in HIPAA Google Drive</span></div>
-              <i className="ti ti-download" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
-            </div>
-          )}
-          {hasPlan && (cp.version != null) && (
-            <p className="sub" style={{ marginTop: 0, marginBottom: 12 }}>
-              Version {cp.version}{cp.effectiveDate ? ` · effective ${prettyDate(cp.effectiveDate)}` : ''}{cp.targetDate ? ` · review by ${prettyDate(cp.targetDate)}` : ''}{cp.authoredBy ? ` · written by ${cp.authoredBy}` : ''}, reviewed with you and your family.
-            </p>
-          )}
-          {hasPlan && (
-          <React.Fragment>
-          {(cp.problems || []).length > 0 && (
+          <h2 className="disp">My Care Plan</h2>
+          <p className="sub">A coordinated approach to your whole health.</p>
+          {readOnly && <span className="ro" style={{ marginTop: 10 }}><i className="ti ti-eye" />Family view · read-only</span>}
+          {data.isPoa && <span className="ro" style={{ marginTop: 10 }}><i className="ti ti-user-shield" />Acting as {data.actingAs}</span>}
+          <div className="stabs">
+            {TABS.map(([id, label]) => <button key={id} className={tab === id ? 'on' : ''} onClick={() => setTab(id)}>{label}{id === 'documents' && needsSignature ? ' •' : ''}</button>)}
+          </div>
+
+          {tab === 'overview' && (
             <React.Fragment>
-              <p className="lbl" style={{ marginTop: 0 }}>What we are working on</p>
-              {cp.problems.map((p, i) => <div className="goal" key={i}><i className="ti ti-list-details" style={{ color: 'var(--navy)' }} />{p}</div>)}
+              {!hasPlan && data.carePlanShared === false && (
+                <div className="status wait"><i className="ti ti-lock" /><div><b>The care plan isn't shared with family accounts</b><span>{data.greetingName} can change this under Settings → Sharing.</span></div></div>
+              )}
+              {!hasPlan && data.carePlanShared !== false && (
+                <div className="status wait"><i className="ti ti-clipboard-heart" /><div><b>Your care plan is being prepared</b><span>Your nurse will write your plan and review it with you{readOnly ? '' : ', then you co-sign it here'}.</span></div></div>
+              )}
+              {hasPlan && (
+                <div className="status"><i className="ti ti-leaf" /><div><b>Active care plan</b><span>{[cp.version != null ? `Version ${cp.version}` : null, cp.updatedAt ? `last updated ${prettyDate(cp.updatedAt)}` : (cp.effectiveDate ? `effective ${prettyDate(cp.effectiveDate)}` : null)].filter(Boolean).join(' · ')}</span></div></div>
+              )}
+              {needsSignature && (
+                <button className="lrow" onClick={() => setTab('documents')} style={{ borderColor: 'var(--goldd)' }}>
+                  <span className="lic"><i className="ti ti-signature" /></span>
+                  <span className="lm"><b>Your signature is needed</b><span>Review and co-sign version {cp.version} of your plan</span></span>
+                  <i className="ti ti-chevron-right" />
+                </button>
+              )}
+              <GfcVisitInProgress shifts={shifts} />
+              {services.length > 0 && (
+                <React.Fragment>
+                  <div className="sech"><h3>Your Care at a Glance</h3></div>
+                  <div className="svcs">
+                    {services.map(s => (
+                      <div className="svc" key={s.key}>
+                        <span className="sic" style={{ background: s.bg, color: s.fg }}><i className={`ti ${s.icon}`} /></span>
+                        <div><b>{s.title}</b><span>{s.text}</span></div>
+                      </div>
+                    ))}
+                  </div>
+                </React.Fragment>
+              )}
+              <div className="sech"><h3>Upcoming Care</h3></div>
+              <ScheduleEmpty empty={careSchedule.length === 0} shiftsErr={shiftsErr} />
+              {careSchedule.slice(0, 4).map(v => <ScheduleRow key={v.id} v={v} />)}
+              {hasPlan && <button className="btn line" onClick={() => setTab('goals')}>View full care plan</button>}
             </React.Fragment>
           )}
-          <p className="lbl" style={{ marginTop: (cp.problems || []).length ? undefined : 0 }}>Goals</p>
-          {(cp.goals || []).map((g, i) => (
-            <div className="goal" key={i}><i className="ti ti-circle-check" />{g}</div>
-          ))}
-          {(cp.eachVisit || []).length > 0 && (
+
+          {tab === 'goals' && (
             <React.Fragment>
-              <p className="lbl">Each visit</p>
-              {cp.eachVisit.map((t, i) => (
-                <div className="goal" key={i}><i className="ti ti-square-check" style={{ color: 'var(--navy)' }} />{t}</div>
+              {!hasPlan && <p className="sub" style={{ marginTop: 0 }}>Your goals appear here once your nurse has written your plan with you.</p>}
+              {hasPlan && (cp.version != null) && (
+                <p className="sub" style={{ marginTop: 0, marginBottom: 12 }}>
+                  Version {cp.version}{cp.effectiveDate ? ` · effective ${prettyDate(cp.effectiveDate)}` : ''}{cp.targetDate ? ` · review by ${prettyDate(cp.targetDate)}` : ''}{cp.authoredBy ? ` · written by ${cp.authoredBy}` : ''}.
+                </p>
+              )}
+              {hasPlan && (
+                <React.Fragment>
+                  {(cp.problems || []).length > 0 && (
+                    <div className="card">
+                      <p className="lbl" style={{ marginTop: 0 }}>What we are working on</p>
+                      {cp.problems.map((p, i) => <div className="goal" key={i}><i className="ti ti-list-details" style={{ color: 'var(--navy)' }} />{p}</div>)}
+                    </div>
+                  )}
+                  <div className="card">
+                    <p className="lbl" style={{ marginTop: 0 }}>Your goals</p>
+                    {(cp.goals || []).length === 0 && <p className="sub" style={{ marginTop: 0 }}>No goals listed yet.</p>}
+                    {(cp.goals || []).map((g, i) => <div className="goal" key={i}><i className="ti ti-target-arrow" style={{ color: 'var(--goldd)' }} />{g}</div>)}
+                  </div>
+                  {(cp.eachVisit || []).length > 0 && (
+                    <div className="card">
+                      <p className="lbl" style={{ marginTop: 0 }}>Each visit</p>
+                      {cp.eachVisit.map((t, i) => <div className="goal" key={i}><i className="ti ti-square-check" style={{ color: 'var(--navy)' }} />{t}</div>)}
+                    </div>
+                  )}
+                  {cp.visitSchedule && (
+                    <div className="card">
+                      <p className="lbl" style={{ marginTop: 0 }}>Visit schedule</p>
+                      {/* 4.1 stores visitSchedule as the RN's summary string; the older prototype shape was an object */}
+                      <div style={{ fontSize: 14.5, fontWeight: 600, color: 'var(--navy)' }}>{typeof cp.visitSchedule === 'string' ? cp.visitSchedule : `${cp.visitSchedule.days || ''} · ${cp.visitSchedule.hours || ''}`}</div>
+                      {cp.duration && <div style={{ fontSize: 12.5, color: 'var(--mut)', marginTop: 2 }}>{cp.duration}</div>}
+                      {typeof cp.visitSchedule === 'object' && cp.visitSchedule.caregiver && <div style={{ fontSize: 12.5, color: 'var(--mut)', marginTop: 2 }}>{cp.visitSchedule.caregiver}</div>}
+                    </div>
+                  )}
+                  {(cp.authorizedServices || []).length > 0 && (
+                    <div className="card">
+                      <p className="lbl" style={{ marginTop: 0 }}>Authorized services</p>
+                      <div className="seg">{(cp.authorizedServices || []).map((s, i) => <span className="on" key={i}>{s}</span>)}</div>
+                    </div>
+                  )}
+                </React.Fragment>
+              )}
+            </React.Fragment>
+          )}
+
+          {tab === 'team' && (
+            <React.Fragment>
+              {teamList.length === 0 && <p className="sub" style={{ marginTop: 0 }}>Your care team will appear here once it's assigned.</p>}
+              {teamList.length > 0 && <TeamCards team={teamList} onNavigate={onNavigate || (() => {})} canMessage={!!onNavigate} />}
+              <div className="sech"><h3>Recent Visits</h3></div>
+              {recent.length === 0 && <p className="sub" style={{ marginTop: 0 }}>No completed visits yet.</p>}
+              {recent.map(v => (
+                <div className="visit" key={v.id}>
+                  <span className="vt">{v.day}<br />{v.time}</span>
+                  <div className="vm"><b>{v.type}</b><span>{v.with}</span></div>
+                  {v.completed && <i className="ti ti-circle-check chk" />}
+                </div>
               ))}
             </React.Fragment>
           )}
-          {cp.visitSchedule && (
+
+          {tab === 'documents' && (
             <React.Fragment>
-              <p className="lbl">Visit schedule</p>
-              <div className="card" style={{ margin: 0 }}>
-                {/* 4.1 stores visitSchedule as the RN's summary string; the older prototype shape was an object */}
-                <div style={{ fontSize: 14.5, fontWeight: 600, color: 'var(--navy)' }}>{typeof cp.visitSchedule === 'string' ? cp.visitSchedule : `${cp.visitSchedule.days || ''} · ${cp.visitSchedule.hours || ''}`}</div>
-                {cp.duration && <div style={{ fontSize: 12.5, color: 'var(--mut)', marginTop: 2 }}>{cp.duration}</div>}
-                {typeof cp.visitSchedule === 'object' && cp.visitSchedule.caregiver && <div style={{ fontSize: 12.5, color: 'var(--mut)', marginTop: 2 }}>{cp.visitSchedule.caregiver}</div>}
-              </div>
-            </React.Fragment>
-          )}
-          {(cp.authorizedServices || []).length > 0 && (
-            <React.Fragment>
-              <p className="lbl">Authorized services</p>
-              <div className="seg">{(cp.authorizedServices || []).map((s, i) => <span className="on" key={i}>{s}</span>)}</div>
-            </React.Fragment>
-          )}
-          </React.Fragment>
-          )}
-          {teamList.length > 0 && (
-            <React.Fragment>
-              <p className="lbl">Care team</p>
-              <div className="card" style={{ margin: 0 }}>
-                {teamList.map((m, i) => (
-                  <div className="prow" style={{ marginBottom: i < (teamList.length - 1) ? 10 : 0 }} key={i}>
-                    <Avatar initials={m.initials} size={34} bg={teamColors[i % 3]} color={teamTextColors[i % 3]} />
-                    <div><div style={{ fontSize: 14, fontWeight: 600, color: 'var(--navy)' }}>{m.name}</div><div style={{ fontSize: 12, color: 'var(--mut)' }}>{m.role}</div></div>
+              {!hasPlan && <p className="sub" style={{ marginTop: 0 }}>Your signed care plan appears here once it's written and signed.</p>}
+              {hasPlan && cp.signedPdf && cp.signedPdf.available && (
+                <div className="doc" onClick={openSignedPdf} style={{ cursor: 'pointer', marginBottom: 12 }}>
+                  <i className="ti ti-file-certificate" />
+                  <div><b>Signed care plan (PDF)</b><span>Version {cp.version} · both signatures</span></div>
+                  <i className="ti ti-download" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
+                </div>
+              )}
+              {!readOnly && hasPlan && (
+                <React.Fragment>
+                  <p className="lbl">Your co-signature</p>
+                  <div className="card" style={{ margin: 0 }}>
+                    {coSigned ? (
+                      <React.Fragment>
+                        <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: 22, fontWeight: 600, color: 'var(--navy)', borderBottom: '1px solid var(--line2)', paddingBottom: 8, marginBottom: 8 }}>{signedBy || data.greetingName}</div>
+                        <div className="goal" style={{ margin: 0 }}><i className="ti ti-circle-check" style={{ color: 'var(--teal)' }} />{signedBy && signedBy.includes(' as POA for ') ? `Co-signed by ${signedBy}` : `You co-signed care plan v${cp.version}`} · versions are retained.</div>
+                        {(cp.signedPdf && cp.signedPdf.available) || signedBy ? <button className="btn ghost" style={{ marginTop: 12 }} onClick={openSignedPdf}><i className="ti ti-download" style={{ verticalAlign: -2 }} /> Download the signed care plan</button> : null}
+                      </React.Fragment>
+                    ) : (
+                      <React.Fragment>
+                        <div className="goal" style={{ margin: '0 0 10px', alignItems: 'flex-start' }}><i className="ti ti-square-check" style={{ color: 'var(--navy)' }} />I reviewed this plan and agree to it · sign below. Co-signature required, every version kept.</div>
+                        <div style={{ position: 'relative', border: '1px solid var(--line2)', borderRadius: 10, background: '#fff' }}>
+                          <canvas ref={sigCanvasRef} style={{ display: 'block', width: '100%', height: 130, touchAction: 'none' }} />
+                          <button type="button" onClick={clearSig} style={{ position: 'absolute', top: 6, right: 8, background: 'none', border: 'none', color: 'var(--mut)', fontSize: 12, cursor: 'pointer' }}>Clear</button>
+                        </div>
+                        <div style={{ fontSize: 11.5, color: 'var(--mut)', margin: '6px 0 10px' }}>Draw your signature above — {data.actingAs || data.greetingName}</div>
+                        {data.isPoa && <div style={{ fontSize: 11.5, color: 'var(--mut)', margin: '0 0 10px' }}>You are signing as the designated Power of Attorney. The record and the signed PDF will read "{data.actingAs}".</div>}
+                        <button className="btn" disabled={coSignBusy || cp.version == null} onClick={handleCoSign}>{coSignBusy ? 'Signing…' : `Co-sign care plan v${cp.version}`}</button>
+                        {coSignErr && <div className="err">{coSignErr}</div>}
+                      </React.Fragment>
+                    )}
                   </div>
-                ))}
-              </div>
+                </React.Fragment>
+              )}
+              {hasPlan && (
+                <p className="micro"><i className="ti ti-history" />{[cp.careTierLabel, cp.version != null ? `Version ${cp.version}` : null, cp.updatedAt ? `updated ${prettyDate(cp.updatedAt)}${cp.updatedBy ? ` by ${cp.updatedBy}` : ''}` : null].filter(Boolean).join(' · ')}</p>
+              )}
             </React.Fragment>
-          )}
-          <GfcVisitInProgress shifts={shifts} />
-          <p className="lbl">Upcoming visits</p>
-          <ScheduleEmpty empty={careSchedule.length === 0} shiftsErr={shiftsErr} />
-          {careSchedule.map(v => <ScheduleRow key={v.id} v={v} />)}
-          <p className="lbl">Recent visits</p>
-          {recent.length === 0 && <p className="sub" style={{ marginTop: 0 }}>No completed visits yet.</p>}
-          {recent.map(v => (
-            <div className="visit" key={v.id}>
-              <span className="vt">{v.day}<br />{v.time}</span>
-              <div className="vm"><b>{v.type}</b><span>{v.with}</span></div>
-              {v.completed && <i className="ti ti-circle-check chk" />}
-            </div>
-          ))}
-          {!readOnly && hasPlan && (
-            <React.Fragment>
-              <p className="lbl">Your co-signature</p>
-              <div className="card" style={{ margin: 0 }}>
-                {coSigned ? (
-                  <React.Fragment>
-                    <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: 22, fontWeight: 600, color: 'var(--navy)', borderBottom: '1px solid var(--line2)', paddingBottom: 8, marginBottom: 8 }}>{signedBy || data.greetingName}</div>
-                    <div className="goal" style={{ margin: 0 }}><i className="ti ti-circle-check" style={{ color: 'var(--teal)' }} />{signedBy && signedBy.includes(' as POA for ') ? `Co-signed by ${signedBy}` : `You co-signed care plan v${cp.version}`} · versions are retained.</div>
-                    {(cp.signedPdf && cp.signedPdf.available) || signedBy ? <button className="btn ghost" style={{ marginTop: 12 }} onClick={openSignedPdf}><i className="ti ti-download" style={{ verticalAlign: -2 }} /> Download the signed care plan</button> : null}
-                  </React.Fragment>
-                ) : (
-                  <React.Fragment>
-                    <div className="goal" style={{ margin: '0 0 10px', alignItems: 'flex-start' }}><i className="ti ti-square-check" style={{ color: 'var(--navy)' }} />I reviewed this plan and agree to it · sign below. Co-signature required, every version kept.</div>
-                    <div style={{ position: 'relative', border: '1px solid var(--line2)', borderRadius: 10, background: '#fff' }}>
-                      <canvas ref={sigCanvasRef} style={{ display: 'block', width: '100%', height: 130, touchAction: 'none' }} />
-                      <button type="button" onClick={clearSig} style={{ position: 'absolute', top: 6, right: 8, background: 'none', border: 'none', color: 'var(--mut)', fontSize: 12, cursor: 'pointer' }}>Clear</button>
-                    </div>
-                    <div style={{ fontSize: 11.5, color: 'var(--mut)', margin: '6px 0 10px' }}>Draw your signature above — {data.actingAs || data.greetingName}</div>
-                    {data.isPoa && <div style={{ fontSize: 11.5, color: 'var(--mut)', margin: '0 0 10px' }}>You are signing as the designated Power of Attorney. The record and the signed PDF will read "{data.actingAs}".</div>}
-                    <button className="btn" disabled={coSignBusy || cp.version == null} onClick={handleCoSign}>{coSignBusy ? 'Signing…' : `Co-sign care plan v${cp.version}`}</button>
-                    {coSignErr && <div className="err">{coSignErr}</div>}
-                  </React.Fragment>
-                )}
-              </div>
-              {/* Visit requests arrive with the scheduling session (Session 7) —
-                  labeled and disabled, no fake interactivity. */}
-              <button className="btn ghost" disabled style={{ opacity: .55, cursor: 'default' }}><i className="ti ti-calendar-plus" style={{ verticalAlign: -2 }} /> Visit requests — coming with scheduling</button>
-            </React.Fragment>
-          )}
-          {hasPlan && (
-            <p className="micro"><i className="ti ti-history" />{[cp.careTierLabel, cp.version != null ? `Version ${cp.version}` : null, cp.updatedAt ? `updated ${prettyDate(cp.updatedAt)}${cp.updatedBy ? ` by ${cp.updatedBy}` : ''}` : null].filter(Boolean).join(' · ')}</p>
           )}
         </div>
       );
@@ -6955,7 +6989,7 @@
               <button className="ib" onClick={() => go('messages')} aria-label={unread ? `${unread} unread messages` : 'Messages'}><i className="ti ti-bell" />{unread > 0 && <span className="rd" />}</button>
             </header>
             {view === 'home' && data && <GfcDashboard data={data} onNavigate={onNavigate} me={me} clinical={clinicalAvailable ? clinical : null} shifts={shifts} shiftsErr={shiftsErr} threads={threads} threadsErr={threadsErr} />}
-            {view === 'care' && data && <GfcCarePlan data={data} readOnly={readOnly} token={token} shifts={shifts} shiftsErr={shiftsErr} clinical={clinicalAvailable ? clinical : null} />}
+            {view === 'care' && data && <GfcCarePlan data={data} readOnly={readOnly} token={token} shifts={shifts} shiftsErr={shiftsErr} clinical={clinicalAvailable ? clinical : null} me={me} onNavigate={onNavigate} />}
             {view === 'schedule' && <GfcSchedule shifts={shifts} shiftsErr={shiftsErr} clinical={clinicalAvailable ? clinical : null} />}
             {view === 'results' && clinicalAvailable && <GfcResults clinical={clinical} token={token} />}
             {view === 'health' && clinicalBlocked && <GfcHealth clinical={{ error: me.clinicalRead.reason || 'Your care team is still setting up your health record.' }} me={me} token={token} readOnly={readOnly} />}
