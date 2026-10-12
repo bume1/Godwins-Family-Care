@@ -1,5 +1,5 @@
 // test/document_templates.test.js — reading a document WITHOUT a model
-// (2026-09-23, owner-directed: Bedrock is blocked behind an AWS agreement and
+// (2026-09-23, owner-directed: the model path was blocked behind a cloud agreement and
 // document reading is the thing the office needs most).
 //
 // Session 4.9b built the whole safety apparatus and then made a model the only

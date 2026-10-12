@@ -16479,27 +16479,70 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/upload', authenticateTok
 // path writes to a client record without a review, and that is enforced in the
 // module rather than promised here.
 //
-// The engine is INERT until Bedrock is wired. That is not a stub: the boundary
-// refusal is the honest state, it names every missing setting, and the screen
-// shows it — so the day the owner sets three variables this path works with no
-// code change. A fake that pretended to extract would be worse than nothing,
-// because a reviewer would trust it.
+// The engine is INERT until Gemini on Vertex AI is configured. That is not a
+// stub: the boundary refusal is the honest state, it names every missing
+// setting AND every failed Google-side check, and the screen shows it — so the
+// day the owner finishes the setup guide this path works with no code change.
+// A fake that pretended to extract would be worse than nothing, because a
+// reviewer would trust it.
+//
+// THE DETERMINISTIC READER IS NOT A STOPGAP AND STAYS (2026-10-12). For a form
+// the office receives a hundred times, a declared label beats a model: it is
+// cheaper, auditable, reproducible, and it cannot invent a member ID. The model
+// takes precedence where it is available and the template reader is the
+// fallback when the boundary refuses — see the extract route below.
 const modelEngine = require('./modelEngine');
 const documentExtraction = require('./documentExtraction');
 const documentTemplates = require('./documentTemplates');   // reading a document WITHOUT a model,
                                                             // out of the text it already carries.
-const bedrockTransport = require('./bedrockTransport');     // the one Bedrock client (2026-09-24)
+const vertexTransport = require('./vertexTransport');       // the one Gemini client (2026-10-12)
 
 const gfcModelEngine = modelEngine.createEngine({
   env: process.env,
   // The transport is always wired — modelEngine.js refuses to call it at all
-  // unless BEDROCK_REGION / BEDROCK_MODEL_ID / BEDROCK_ZERO_DATA_RETENTION are
-  // set and no static AWS keys are present, so a server with none of that
-  // configured behaves exactly as it did with transport: null. Requiring
-  // bedrockTransport.js only needs the SDK to resolve, never AWS credentials.
-  transport: bedrockTransport.transport,
+  // unless the Vertex settings are present, the location is "us", the model is
+  // a released one, ZDR is affirmative, the credential is federated rather
+  // than a key, and the daily Google-side checks have passed. So a server with
+  // none of that configured behaves exactly as it did with transport: null.
+  // Requiring vertexTransport.js only needs the SDK to resolve, never a
+  // credential.
+  transport: vertexTransport.transport,
+  // The two Google-side checks (caching off, staging bucket shape) live beside
+  // the generation call, in vertexTransport.js. The engine decides what a
+  // failure MEANS; the transport only reports what Google said.
+  liveChecks: vertexTransport.liveChecks,
   logActivity
 });
+
+// THE BOUNDARY IS RE-PROVEN DAILY, NOT ONCE AT SETUP. Caching off and the
+// staging bucket's retention are account settings somebody can change in the
+// console at any time, so modelEngine.js treats a check older than 24 hours as
+// a blocker. This is what keeps it fresh. It is deliberately NOT awaited at
+// boot: a slow or unreachable Google must not hold up the server starting, and
+// until the first check lands the engine refuses — which is the safe state.
+const AI_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const runAiBoundaryChecks = async () => {
+  try {
+    const r = await gfcModelEngine.runLiveChecks();
+    if (r && r.ok) {
+      console.log('[AI] Google-side boundary checks passed.');
+    } else {
+      // Named individually so a setup is fixed in one pass rather than one
+      // restart per blocker.
+      console.warn('[AI] Google-side boundary checks did not pass; nothing will be sent to Gemini:');
+      for (const f of (r && r.failures) || []) console.warn(`[AI]   - ${f}`);
+    }
+  } catch (e) {
+    console.warn('[AI] Google-side boundary checks could not be run:', e.message);
+  }
+};
+// Only when there is something to check. With no Vertex settings at all the
+// engine is already refusing for a reason that names the missing settings, and
+// a failing check every six hours in the log adds nothing to that.
+if (String(process.env.VERTEX_PROJECT_ID || '').trim()) {
+  runAiBoundaryChecks();
+  setInterval(runAiBoundaryChecks, AI_CHECK_INTERVAL_MS).unref?.();
+}
 
 // Reads a value out of the intake by the same dotted path the editor writes.
 const intakeValueAt = (client, path) => readIntakePath(client.intake || {}, path);
