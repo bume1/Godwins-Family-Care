@@ -129,7 +129,7 @@ test('a refused action keeps the form open and what was typed', () => {
 
 test('coding typed on the encounter survives a reload, and signing waits for it to be saved', () => {
   assert.match(clinical, /if \(!unsaved\) \{\s*setDiagnoses\(r\.record\.diagnoses \|\| \[\]\)/);
-  assert.match(clinical, /<FollowUpNoteEditor patient=\{patient\} euuid=\{euuid\} noteSections=\{d\.noteSections\} codingDirty=\{!locked && dirty\}/);
+  assert.match(clinical, /<FollowUpNoteEditor patient=\{patient\} euuid=\{euuid\} noteSections=\{d\.noteSections\} sectionsOnly=\{!!d\.sectionsOnly\} codingDirty=\{!locked && dirty\}/);
   assert.match(clinical, /disabled=\{!!busy \|\| showSign \|\| codingDirty\}/);
   assert.match(clinical, /if \(codingDirty\) \{ setMsg\(\{ ok: false, text: 'Save your diagnoses and coding on this encounter before signing\.' \}\); return; \}/);
 });

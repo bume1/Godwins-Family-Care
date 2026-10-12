@@ -52,7 +52,8 @@ const { createAuditLog } = require('./auditLog');        // durable append-only 
 const { createSessionStore } = require('./sessionStore'); // server-side sessions: idle timeout + revocation (Session 5.3)
 const QRCode = require('qrcode');                        // enrollment QR for the authenticator app (Session 5.3)
 const clinicalRepo = require('./clinicalRepository');
-const apptTypes = require('./appointmentTypes');  // clinical workspace pure helpers (Session 4.1)
+const apptTypes = require('./appointmentTypes');
+const screenings = require('./screenings');  // PHQ-2/9, GAD-7, SDOH results (social work, 2026-10-11)  // clinical workspace pure helpers (Session 4.1)
 // Session 4.3 — patient/family/POA clinical read rules + the case-manager read/write split
 const patientRead = require('./patientReadRepository');
 const patientPublish = require('./patientPublish');   // Portal P1: the published copies the portal reads (patients never read OpenEMR)
@@ -2553,6 +2554,25 @@ const requireNoteWriter = (req, res, next) => {
     ...clinicalRoles.refusalFor(req.user, clinicalRoles.CAPABILITIES.NURSING_NOTE),
     error: 'Writing a clinical note requires a clinical licence (RN, LCSW, LMSW or provider).'
   });
+};
+
+// WHICH note a clinician may write (owner, 2026-10-11). An LCSW or LMSW
+// writes the social work types and nothing else; an RN writes no
+// psychotherapy note. Asked when the visit type is set or changed, so editing
+// text on a draft someone else typed is not refused over its type.
+const noteTypeRefusal = (user, note, before) => {
+  const role = clinicalRoles.resolveClinicalRole(user);
+  const type = note && note.visit && note.visit.appointmentType;
+  const beforeType = before && before.visit && before.visit.appointmentType;
+  if (!type) {
+    if (apptTypes.SOCIAL_WORK_ROLES.includes(role) && !beforeType) {
+      return { status: 400, body: { error: 'Choose what kind of visit this is first: a Psychosocial Assessment, a Social Work Follow-up, or (LCSW) a Therapy Session.', code: 'VISIT_TYPE_REQUIRED' } };
+    }
+    return null;
+  }
+  if (type === beforeType) return null;
+  const r = apptTypes.canDocumentType(type, role);
+  return r.ok ? null : { status: 403, body: { error: r.error, code: r.code, clinicalRole: role } };
 };
 
 // Require Admin Hub access (super admins, managers, or users with hasAdminHubAccess)
@@ -8087,7 +8107,11 @@ app.get('/api/clinical/status', authenticateToken, requireClinicalRead, async (r
       // this answer and never decides it itself.
       canSubmitBilling: clinicalRoles.canSubmitBilling(req.user),
       // Where an order goes: the one order edit a case manager holds.
-      canEditOrderDestination: clinicalRoles.canEditOrderDestination(req.user)
+      canEditOrderDestination: clinicalRoles.canEditOrderDestination(req.user),
+      // Who may add the second signature an IHPC or LMSW-authored care plan
+      // waits on (a provider or an LCSW). Served so the page offers the pad
+      // only to someone the route will accept.
+      canCoSignCarePlan: clinicalRoles.canCoSignCarePlan(req.user)
     },
     ...(await openemr.getStatus(req.user)), serverStartedAt: SERVER_STARTED_AT,
     // Session 4.4 deploy diagnostics: billing NPI (spec §2.5) + the caller's
@@ -10043,11 +10067,12 @@ const saveBillingRecord = async (rows, record) => {
 };
 
 const loadEncounterSideRecords = async (encounterUuid) => {
-  const [rx, orders, attestations, addenda, risks] = await Promise.all([
+  const [rx, orders, attestations, addenda, risks, screens] = await Promise.all([
     loadRows('prescriptions'), loadRows('clinical_orders'), loadRows('encounter_attestations'), loadRows('encounter_addenda'),
-    loadRows('encounter_risk_assessments')
+    loadRows('encounter_risk_assessments'), loadRows('clinical_screenings')
   ]);
   return {
+    screenings: forEncounter(screens, encounterUuid).sort((a, b) => String(a.at).localeCompare(String(b.at))),
     prescriptions: forEncounter(rx, encounterUuid).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))),
     orders: forEncounter(orders, encounterUuid).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))),
     attestation: forEncounter(attestations, encounterUuid)[0] || null,
@@ -10800,7 +10825,9 @@ const noteSatisfiers = (ctx) => ({
   // as an order — the note no longer offers a free-text copy of either.
   ordersRxReferrals: (ctx.orders || []).length > 0 || (ctx.prescriptions || []).length > 0,
   medicationsRx: (ctx.prescriptions || []).length > 0,
-  riskAssessment: !!ctx.riskAssessment
+  riskAssessment: !!ctx.riskAssessment,
+  // A screening recorded on the encounter IS the screening-scores section.
+  screeningScores: (ctx.screenings || []).length > 0
 });
 const noteReason = (note, visitLabel) => {
   const first = noteFormat.toPlainText((note && note.chiefConcern) || '').trim().split('\n')[0];
@@ -10820,8 +10847,12 @@ const writeNarrativeNote = async (emr, client, record, { signature, revisions } 
   try {
     let soap;
     if (record.note) {
+      // Screening results recorded on this encounter travel into the OpenEMR
+      // note, so the chart does not depend on the app to show them.
+      const screenLines = (await loadRows('clinical_screenings'))
+        .filter(r => r && r.encounterUuid === String(record.encounterUuid)).map(screenings.describe);
       soap = clinicalNotes.composeNarrative({
-        note: record.note, revisions, signature,
+        note: record.note, revisions, signature, screenLines,
         voided: record.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED ? record.voided : null
       });
     } else if (signature && record.narrativeNoteSid) {
@@ -11069,6 +11100,8 @@ app.post('/api/clinical/patients/:clientId/notes', authenticateToken, requireCli
     const clean = clinicalNotes.sanitizeNote(body.note);
     if (clean.error) return res.status(400).json({ error: clean.error, code: clean.code });
     const note = clean.note;
+    const typeRefusal = noteTypeRefusal(req.user, note, null);
+    if (typeRefusal) return res.status(typeRefusal.status).json(typeRefusal.body);
     const actor = actorFromReq(req);
     const emr = openemr.forActor(req.user);
     const puuid = client.openEmrPatientId;
@@ -11306,6 +11339,8 @@ app.put('/api/clinical/patients/:clientId/encounters/:euuid/note', authenticateT
     const clean = clinicalNotes.sanitizeNote(body.note);
     if (clean.error) return res.status(400).json({ error: clean.error, code: clean.code });
     const before = ctx.record.note || null;
+    const typeRefusal = noteTypeRefusal(req.user, clean.note, before);
+    if (typeRefusal) return res.status(typeRefusal.status).json(typeRefusal.body);
     const carry = await applyCarryRequest(ctx.emr, ctx.client, clean.note,
       body, before ? before.carriedForward : null);
     if (carry.error) return res.status(carry.status).json({ error: carry.error, code: carry.code });
@@ -11725,7 +11760,9 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
         canAttachAppointment: clinicalRoles.canClinicalWrite(req.user) && !ctx.closed && !linkedEid && record.noteStatus !== clinicalNotes.NOTE_STATUS.VOIDED
       },
       riskAssessment: ctx.riskAssessment, riskHistory: ctx.riskHistory,
-      riskRequired: clinicalRepo.riskAssessmentRequired(record.visit),
+      // Screenings recorded on this visit, each with its one-line summary.
+      screenings: (ctx.screenings || []).map(r => ({ ...r, summary: screenings.describe(r), needsRisk: screenings.needsRiskAssessment(r) })),
+      riskRequired: clinicalRepo.riskAssessmentRequired(record.visit) || (ctx.screenings || []).some(screenings.needsRiskAssessment),
       riskLevels: clinicalRepo.RISK_LEVELS, riskDomains: clinicalRepo.RISK_DOMAINS,
       riskNeedsPlan: clinicalRepo.RISK_NEEDS_PLAN,
       visit: record.visit || null,
@@ -11737,6 +11774,10 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
         riskPositive: !!(ctx.riskAssessment && ctx.riskAssessment.levels &&
           clinicalRepo.RISK_DOMAINS.some(d => clinicalRepo.RISK_NEEDS_PLAN.includes(ctx.riskAssessment.levels[d])))
       }).map(sec => ({ ...sec, ownField: clinicalNotes.sectionHasOwnField(sec.key) })),
+      // Only its template sections (a phone call, a social work note): the
+      // editor shows no vitals, exam or SOAP boxes.
+      sectionsOnly: apptTypes.isSectionsOnly(((record.note && record.note.visit) || record.visit || {}).appointmentType,
+        ((record.note && record.note.visit) || record.visit || {}).modality),
       completedSections: derivedSections,
       candidates, candidatesError: cands.error,
       favorites: {
@@ -11876,7 +11917,14 @@ app.put('/api/clinical/patients/:clientId/encounters/:euuid/coding', authenticat
     await recordUsageFor(ctx.actor, 'HCPCS', record.services.filter(s => s.codeType === 'HCPCS' && !prevSvc.has(s.code)));
     const warnings = [];
     const problemAdds = [];
-    for (const code of (billingEdit && !awaitingAddendum) ? [] : (Array.isArray(body.addToProblemList) ? body.addToProblemList : [])) {
+    // Writing the problem list is an RN's or a provider's. A social worker
+    // coding a note keeps their diagnoses on the encounter; nothing goes to
+    // the problem list on their say-so.
+    const mayWriteProblems = clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.PROBLEM_LIST_WRITE);
+    if (!mayWriteProblems && Array.isArray(body.addToProblemList) && body.addToProblemList.length) {
+      warnings.push('Not added to the problem list: that is done by an RN or a provider. The diagnoses are saved on this encounter.');
+    }
+    for (const code of (billingEdit && !awaitingAddendum) || !mayWriteProblems ? [] : (Array.isArray(body.addToProblemList) ? body.addToProblemList : [])) {
       const d = record.diagnoses.find(x => x.code === clinicalRepo.normalizeIcd10(code));
       if (!d) continue;
       try {
@@ -12979,6 +13027,12 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
       const noteCheck = clinicalNotes.checkNoteForSigning(ctx.record.note);
       if (!noteCheck.ok) return res.status(409).json({ error: noteCheck.error, code: noteCheck.code, pending: noteCheck.pending || [] });
     }
+    // A PHQ-9 with item 9 above 0 means the client reported thoughts of
+    // self-harm. Whatever the visit type, it is not signed without the risk
+    // assessment that answer calls for.
+    if ((ctx.screenings || []).some(screenings.needsRiskAssessment) && !ctx.riskAssessment) {
+      return res.status(409).json({ error: 'A PHQ-9 on this visit has item 9 above 0 (thoughts of self-harm). Record the risk assessment on this encounter before signing.', code: 'SIGN_SCREENING_NEEDS_RISK' });
+    }
     // The CLINICIAN's gate (owner, 2026-09-29): a complete note and at least
     // one ICD-10. CPT, the billing NPI and the place of service are billing's,
     // settled after this signature and checked at Submit to billing.
@@ -13661,8 +13715,11 @@ const VISIT_TIMING_EVENTS = Object.freeze({
   en_route: 'enRouteAt', arrive: 'arrivedAt', start: 'startedAt', end: 'endedAt'
 });
 
+// Gated on writing ANY clinical note, not the nursing one alone: an LCSW bills
+// psychotherapy on time, so the recorded start and end are theirs to record
+// too (owner, 2026-10-11).
 app.post('/api/clinical/visits/:eid/timing', authenticateToken, requireClinicalWrite,
-  requireCapability(clinicalRoles.CAPABILITIES.NURSING_NOTE), async (req, res) => {
+  requireNoteWriter, async (req, res) => {
     try {
       const eid = String(req.params.eid || '').trim();
       if (!/^\d+$/.test(eid)) return res.status(400).json({ error: 'A numeric appointment id is required', code: 'BAD_EID' });
@@ -14490,11 +14547,18 @@ app.get('/api/clinical/patients/:clientId/place-of-service', authenticateToken, 
     const locations = apptTypes.LOCATIONS.map(l => ({
       key: l.key, label: l.label, pos: l.pos || null, fromFacilityRecord: !!l.fromFacilityRecord
     }));
+    const viewerRole = clinicalRoles.resolveClinicalRole(req.user);
     const appointmentTypes = apptTypes.APPOINTMENT_TYPES.map(t => ({
       key: t.key, label: t.label, service: t.service, defaultMinutes: t.defaultMinutes,
       telehealthAllowed: !!t.telehealthAllowed, telehealthPayerCaveat: !!t.telehealthPayerCaveat,
       // Served so the page never offers a modality the type refuses.
-      modalities: apptTypes.modalitiesForType(t.key)
+      modalities: apptTypes.modalitiesForType(t.key),
+      // 'sections': the note is only its template sections (no vitals, exam
+      // or nursing blocks). Served so the page cannot restate which types.
+      noteShape: t.noteShape || null,
+      // Whether THIS viewer may write this note. The page offers only these;
+      // the note routes refuse the rest (noteTypeRefusal).
+      canDocument: apptTypes.canDocumentType(t.key, viewerRole).ok
     }));
     const services = apptTypes.SERVICES.map(x => ({ key: x.key, label: x.label }));
     const modalities = apptTypes.MODALITIES.map(x => ({ key: x.key, label: x.label }));
@@ -14730,6 +14794,82 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/charges/repost', au
     res.status(502).json({ error: `Re-post failed: ${error.message}` });
   }
 });
+
+// ── Screenings (social work, owner 2026-10-11) ───────────────────────────
+// PHQ-2, PHQ-9, GAD-7 and a social-needs screen, recorded on the encounter.
+// Any licensed role may administer one (screeningInstrument). Naming a
+// standing order records the screening under that protocol's authority, with
+// the same checks an order gets: active, signed, the role permitted, within
+// the credential ceiling, the instrument on the protocol and a linked
+// indication. APPEND-ONLY, like the risk assessment.
+app.get('/api/clinical/screenings/catalog', authenticateToken, requireClinicalRead, (req, res) => {
+  res.json({ instruments: screenings.catalog() });
+});
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/screenings', authenticateToken, requireClinicalWrite,
+  requireCapability(clinicalRoles.CAPABILITIES.SCREENING_INSTRUMENT), async (req, res) => {
+    try {
+      const ctx = await loadEncounterContext(req, res);
+      if (!ctx || refuseIfClosed(ctx, res)) return;
+      const body = req.body || {};
+      const standingOrderId = String(body.standingOrderId || '').trim();
+      let standingOrder = null; let auth = null;
+      if (standingOrderId) {
+        standingOrder = (await loadRows('standing_orders')).find(o => o && o.id === standingOrderId) || null;
+        const inst = screenings.INSTRUMENTS[String(body.instrument || '').trim()];
+        const dx = (Array.isArray(body.diagnosisCodes) ? body.diagnosisCodes : []).map(clinicalRepo.normalizeIcd10).filter(Boolean);
+        const onEncounter = new Set((ctx.record.diagnoses || []).map(d => d.code));
+        const unknown = dx.filter(c => !onEncounter.has(c));
+        if (unknown.length) return res.status(400).json({ error: `${unknown.join(', ')} is not a diagnosis on this encounter — add it to the encounter first`, code: 'ORDER_DX_UNKNOWN' });
+        auth = standingOrders.authorizeExecution({
+          standingOrder, actor: ctx.actor, orderType: 'screening',
+          tests: inst ? [inst.label] : [], diagnosisCodes: dx, clientId: ctx.client.id
+        });
+        if (auth.error) return res.status(auth.status || 403).json({ error: auth.error, code: auth.code, ...(auth.ceiling ? { ceiling: auth.ceiling, requested: auth.requested } : {}) });
+      }
+      const built = screenings.buildScreening({
+        id: uuidv4(), clientId: ctx.client.id, encounterUuid: ctx.encounterUuid, input: body, actor: ctx.actor,
+        standingOrderRef: auth ? auth.standingOrderRef : null, authorizedBy: auth ? auth.orderingClinician : null
+      });
+      if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+      const rows = await loadRows('clinical_screenings');
+      rows.push(built.screening);
+      await db.set('clinical_screenings', rows);
+      if (auth) {
+        const execRows = await loadRows('standing_order_executions');
+        execRows.push({
+          id: uuidv4(),
+          ...standingOrders.buildExecutionAudit({
+            order: { id: built.screening.id, orderType: 'screening', tests: [built.screening.label],
+              diagnosisCodes: (Array.isArray(body.diagnosisCodes) ? body.diagnosisCodes : []).map(clinicalRepo.normalizeIcd10).filter(Boolean),
+              encounterUuid: ctx.encounterUuid, createdAt: built.screening.at },
+            standingOrder, actor: ctx.actor, clientId: ctx.client.id
+          })
+        });
+        await db.set('standing_order_executions', execRows);
+      }
+      // The narrative in OpenEMR carries the result too.
+      const warnings = [];
+      if (ctx.record.note) {
+        const w = await writeNarrativeNote(ctx.emr, ctx.client, ctx.record, { revisions: clinicalNotes.revisionsFor(await loadNoteRevisions(), ctx.encounterUuid) });
+        if (w) warnings.push(w);
+        await saveBillingRecord(ctx.rows, ctx.record);
+      }
+      if (screenings.needsRiskAssessment(built.screening)) {
+        warnings.push('PHQ-9 item 9 is above 0. Complete the risk assessment on this encounter now; the visit cannot be signed without it.');
+      }
+      // The instrument and whether it was positive are audited; the score and
+      // the notes are not (an audit trail is not a second copy of the chart).
+      await logActivity(req.user.id, req.user.name || req.user.email, 'screening_recorded', 'client', ctx.client.id, {
+        encounterUuid: ctx.encounterUuid, screeningId: built.screening.id, instrument: built.screening.instrument,
+        positive: built.screening.positive, authority: built.screening.authority,
+        standingOrderId: auth ? auth.standingOrderRef.id : null, standingOrderVersion: auth ? auth.standingOrderRef.version : null
+      });
+      res.json({ message: `${built.screening.label} recorded`, screening: built.screening, warnings });
+    } catch (error) {
+      console.error('Screening error:', error);
+      res.status(502).json({ error: `Screening could not be saved: ${error.message}` });
+    }
+  });
 
 // ── Risk assessment (Session 4.12 Scope G) ────────────────────────────────
 // A psychiatric encounter cannot be SIGNED without one. Documenting the visit
