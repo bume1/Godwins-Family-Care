@@ -7394,6 +7394,7 @@
                 {!na.signsAsAuthor && <p className="text-xs text-stone-600">Signing locks the note for clinicians and sends it to <b>billing</b>, who add the service codes and submit. You need the note and at least one ICD-10 diagnosis.</p>}
                 {noteDirty && <UnsavedNoteLine onSave={saveNoteFirst} />}
                 {!noteDirty && !d.signReadiness.ok && <p className="text-xs text-amber-700">{d.signReadiness.message}{dirty ? ' Save your coding changes first.' : ''}</p>}
+                {!noteDirty && d.signReadiness.ok && dirty && <p className="text-xs text-amber-700"><i className="ti ti-alert-triangle mr-1" />Save your coding changes first. Signing reads the saved diagnoses.</p>}
                 {!String((d.record && d.record.patientSummary) || '').trim() && !String(facing.patientSummary || '').trim() &&
                   <p className="text-xs text-amber-700"><i className="ti ti-alert-triangle mr-1" />"What we did today, in plain words" is empty. You can still sign, but the patient's visit summary will have no plain-language account of this visit.</p>}
                 <label className="flex items-start gap-2 text-xs">
@@ -7422,6 +7423,7 @@
                   <p className="text-xs text-stone-600">Review the author's note, confirm the diagnoses on the Coding step, and add your addendum. <b>Your addendum is the billable signature</b> — you become the rendering clinician on the claim, and the note goes to billing.</p>
                   {noteDirty && <UnsavedNoteLine onSave={saveNoteFirst} />}
                   {!noteDirty && d.addendumReadiness && !d.addendumReadiness.ok && <p className="text-xs text-amber-700">{d.addendumReadiness.message}{dirty ? ' Save your coding changes first.' : ''}</p>}
+                  {!noteDirty && (!d.addendumReadiness || d.addendumReadiness.ok) && dirty && <p className="text-xs text-amber-700"><i className="ti ti-alert-triangle mr-1" />Save your coding changes first. Signing reads the saved diagnoses.</p>}
                   <FormattedField label="Your addendum" minRows={3} value={clinAddendum} onChange={setClinAddendum}
                     placeholder="e.g. Patient seen with the RN; I agree with the assessment and plan above, with these additions…" />
                   <label className="flex items-start gap-2 text-xs">

@@ -19,3 +19,14 @@
 - `scripts/verify_soap_note_render.js` gained section H (a saved follow-up encounter in Chromium: type, see "unsaved", Save Note, the check returns). It now runs **20/20**. Its labels were repointed to the Title Case buttons ("Start Visit", "Visit Type", "Save Draft"), because it had been failing since the label sweep.
 - Showing the stale list while the note is unsaved fails H2.
 - Full suite: 0 failing. The page compiles.
+
+## Follow-up: a call note read "Ready to sign" with the button grey (same day)
+- **Owner report:** Bethel couldn't sign a Care Management call note, and the owner asked to drop any rule tying notes to a scheduled appointment.
+- **No such rule exists.** The sign check never looks at an appointment, and a phone note needs no location. Calls between visits already sign.
+- **The grey button was unsaved coding.** After "Coding saved", the old reload kept coding marked unsaved: the bug fixed earlier on this branch. The card gave no reason, because its coding hint only showed when the sign check failed.
+- **Now:** when the check passes but coding is unsaved, the card says "Save your coding changes first. Signing reads the saved diagnoses." The same applies to the Clinician Addendum. The button still waits for the save.
+- **Verified:** probe section I (Chromium) covers three cases:
+  - A ready note with no appointment signs.
+  - Unsaved coding greys the button and says why.
+  - Saving coding enables it.
+- Putting either bug back fails the probe (I3 for the reload, I2 for the hint). It runs 23/23.

@@ -86,6 +86,7 @@ const catalog = () => {
 const posted = [];
 // Section H: a saved follow-up encounter, opened from the Encounters tab.
 let encRows = [];
+let readyCheck = false;
 const ENC = 'e-9';
 const followUpSections = () => catalog().noteTemplates.pc_follow_up.filter(s => s.modality === 'in_person');
 const encounterDetail = () => ({
@@ -94,7 +95,7 @@ const encounterDetail = () => ({
   state: 'draft', closed: false, prescriptions: [], orders: [], attestation: null, addenda: [], candidates: [],
   narrativeNotes: [], orderTypes: [], orderPriorities: [], documentOrderTypes: [],
   favorites: { practiceServices: [], services: [], diagnoses: [] }, billingActions: {},
-  signReadiness: { ok: false, missing: ['SIGN_SECTIONS'], message: 'Cannot sign: this Follow-up note still needs Subjective, Assessment / Diagnoses, Plan.' },
+  signReadiness: readyCheck ? { ok: true, missing: [], message: '' } : { ok: false, missing: ['SIGN_SECTIONS'], message: 'Cannot sign: this Follow-up note still needs Subjective, Assessment / Diagnoses, Plan.' },
   noteActions: { canEdit: true }, noteState: { status: 'draft', note: { kind: 'followup', chiefConcern: 'BP check' } },
   noteSections: followUpSections(), noteTypeLabel: 'Follow-up', me: PROVIDER, access: { canWrite: true }
 });
@@ -273,6 +274,32 @@ const encounterDetail = () => ({
   ok('H4 Save Note saves the typed note', !!put && /Feels better/.test(JSON.stringify(put.body)), put ? put.path : 'nothing posted');
   sc = await signCard.innerText();
   ok('H5 after the save the card reads the saved note again', !/unsaved changes/i.test(sc) && /still needs Subjective/.test(sc), sc.slice(0, 200));
+
+  // --- I. A ready note with unsaved coding says why it cannot sign ---------
+  // (owner report, 2026-10-12: a call note read "Ready to sign" with the
+  // button grey and no reason). No appointment is involved anywhere.
+  readyCheck = true;
+  await page.goto(`${base}/clinical`, { waitUntil: 'networkidle' });
+  await page.locator('button:has-text("Patients"), a:has-text("Patients")').first().click();
+  await page.waitForTimeout(300);
+  await page.locator(`text=${PATIENT.name}`).first().click();
+  await page.waitForTimeout(400);
+  await page.locator('.tabbtn:text-is("Encounters")').first().click();
+  await page.waitForTimeout(400);
+  await page.locator('div.cursor-pointer', { hasText: 'Not coded' }).first().click();
+  const card2 = page.locator('.card', { has: page.locator('h2:text-is("Sign & Submit")') }).first();
+  await card2.waitFor({ timeout: 15000 });
+  await card2.locator('input[type="checkbox"]').first().check();
+  const signBtn = card2.locator('button:has-text("Sign & Submit")');
+  ok('I1 a ready, clean note with no appointment can be signed', !(await signBtn.isDisabled()));
+  await page.locator('textarea[placeholder^="e.g. We checked"]').fill('We talked about your blood pressure.');
+  await page.waitForTimeout(300);
+  let c2 = await card2.innerText();
+  ok('I2 unsaved coding: the button is grey and the card says why', (await signBtn.isDisabled()) && /Save your coding changes first/.test(c2), c2.slice(0, 200));
+  await page.locator('button', { hasText: /^Save Coding$/ }).first().click();
+  await page.waitForTimeout(600);
+  c2 = await card2.innerText();
+  ok('I3 after saving coding the line goes and the button enables', !(await signBtn.isDisabled()) && !/Save your coding changes first/.test(c2), c2.slice(0, 200));
 
   ok('F1 no page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close(); srv.close();

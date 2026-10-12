@@ -271,3 +271,14 @@ test('while the note is unsaved, the sign card says save first and cannot sign',
   assert.match(add, /\{!noteDirty && d\.addendumReadiness/);
   assert.match(add, /dirty \|\| noteDirty \|\|/);
 });
+
+// Owner report, 2026-10-12: a Care Management call note read "Ready to sign"
+// with Sign & Submit greyed and no reason given. Unsaved coding greys the
+// button (signing reads the saved diagnoses); the card now says so even when
+// the sign check itself passes. No appointment is required to sign.
+test('a ready note with unsaved coding says why it cannot sign', () => {
+  const card = slice('{on(\'sign\') && !locked && ns.status === \'draft\' && na.canEdit && (', '{/* The clinician addendum');
+  assert.match(card, /\{!noteDirty && d\.signReadiness\.ok && dirty && <p[^>]*>.*Save your coding changes first\./);
+  const add = slice('{/* The clinician addendum', '{/* BILLING');
+  assert.match(add, /\(!d\.addendumReadiness \|\| d\.addendumReadiness\.ok\) && dirty && <p/);
+});
