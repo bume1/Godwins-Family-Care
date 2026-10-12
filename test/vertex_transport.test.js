@@ -126,9 +126,21 @@ test('a staged object name identifies NOBODY — it appears in Google logs and i
     }
   });
   const name = store.saved[0].objectName;
-  for (const leak of ['Juanita', 'Guess', 'client_123', 'facesheet', 'doc:77', '77']) {
+  // The identifying strings, none of which can occur in hex.
+  for (const leak of ['Juanita', 'Guess', 'client_123', 'facesheet', 'doc:77']) {
     assert.ok(!name.includes(leak), `"${leak}" must not appear in the staged object name (${name})`);
   }
+  // THE ACTUAL GUARANTEE, and the only one worth asserting: the name is
+  // `stage/` plus 48 hex characters and nothing else, so there is nowhere for
+  // an identifier to be.
+  //
+  // DELIBERATELY NOT ASSERTED: that the name does not contain the bare string
+  // "77" (the document's id). A random 48-character hex string contains any
+  // given digit pair about 17% of the time, so that check failed roughly one
+  // run in six — which is exactly what it did, twice, before this was
+  // understood. A test that fails at random is worse than no test: it trains
+  // people to re-run the suite instead of reading it. The shape assertion
+  // below subsumes it anyway.
   assert.match(name, /^stage\/[0-9a-f]{48}$/, 'a random name and nothing else');
 });
 
