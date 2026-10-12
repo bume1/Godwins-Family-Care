@@ -385,6 +385,8 @@ const buildChartDocumentIndex = (input) => {
       // hardcoded false because there was no such route — a client upload had
       // no path into the real EMR at all, unlike a care plan or a consent.
       inChart: !!u.emrFiled,
+      // Sent by someone with no OpenEMR sign-in; files when a clinician opens the chart.
+      emrWaiting: !u.emrFiled && !!u.emrFilingWaitingSince,
       // Only an UPLOAD row can be read into proposals: it is the one kind that
       // corresponds to a stored file the extractor can fetch. A consent, a care
       // plan and a record release are documents this app GENERATED from the

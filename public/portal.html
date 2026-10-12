@@ -17,6 +17,7 @@
        outlives a shim. See public/gfc-time.js. -->
   <script src="/gfc-time.js"></script>
   <script src="/note-format.js"></script>
+  <script src="/patient-files.js"></script>
   <script>window.GFC_TIME && window.GFC_TIME.installDefaultTimeZone();</script>
   <script src="https://cdn.tailwindcss.com"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -6548,13 +6549,7 @@
     };
 
     const GfcDocuments = ({ docs, readOnly, token, onOpenTransferRoi, onRefresh, clinicalDocs, docsErr, clinicalDocsErr }) => {
-      const signed = docs?.signedConsents || [];
-      const files = docs?.documents || [];
-      const packet = docs?.enrollmentPacket || null;
-      const packetZip = docs?.consentPacketZip || null;
-      const faceSheet = docs?.faceSheet || null;
       const checklist = docs?.checklist || [];
-      const offlinePacketFiles = docs?.offlinePacketFiles || [];
       const [chartBusy, setChartBusy] = useState('');
       const [chartErr, setChartErr] = useState('');
       // Opens a chart-document row (careplan:/consent:/roi:/upload:/emr:).
@@ -6598,152 +6593,103 @@
         if (url.startsWith('http')) window.open(url, '_blank');
         else openPdfSecurely(`${API_URL}${url}`, token);
       };
-      // Needed first, then optional-and-not-yet-sent, then everything on file.
-      const rank = (r) => (r.status === 'missing' ? (r.required || r.requested ? 0 : 1) : 2);
-      const needed = checklist.slice().sort((a, b) => rank(a) - rank(b));
-      const outstanding = checklist.filter(r => r.status === 'missing' && (r.required || r.requested)).length;
+      // One list, each document once (owner, 2026-10-12). The sorting lives in
+      // public/patient-files.js so a test can run it.
+      const PF = window.GFC_PATIENT_FILES;
+      const { items, groups } = PF.buildPatientFiles({ docs, clinicalDocs });
+      const { needed, optional } = PF.neededFrom(checklist);
+      const [group, setGroup] = useState('all');
+      const [showOptional, setShowOptional] = useState(false);
+      const activeGroup = group === 'all' || groups.some(g => g.key === group) ? group : 'all';
+      const shown = activeGroup === 'all' ? items : items.filter(i => i.group === activeGroup);
+      const groupLabel = (k) => (PF.GROUPS.find(g => g.key === k) || {}).label || '';
+
+      const openItem = (o, title) => {
+        if (!o) return;
+        if (o.type === 'link') return openDoc(o.url);
+        if (o.type === 'chart') return openChartDoc({ id: o.id, openable: true, title });
+        if (o.type === 'zip') return openPdfSecurely(`${API_URL}${o.url}`, token, 'zip');
+        return openPdfSecurely(`${API_URL}${o.url}`, token);
+      };
 
       return (
         <div className="gfc-body">
+          <h2 className="disp">Documents</h2>
+          <p className="sub">Everything on file with Godwins Family Care, in one place.</p>
           {readOnly && <span className="ro"><i className="ti ti-eye" />Family view · read-only</span>}
 
           {!readOnly && needed.length > 0 && (
             <React.Fragment>
-              <p className="lbl" style={{ marginTop: 0 }}>
-                Send us your documents{outstanding ? ` · ${outstanding} still needed` : ''}
-              </p>
-              {outstanding === 0 && <p className="sub">Nothing outstanding — thank you. You can still send anything else here.</p>}
+              <p className="lbl">We still need · {needed.length}</p>
               {needed.map(r => (
-                <GfcNeededDoc key={r.kind} row={r} token={token} readOnly={readOnly}
-                  onUploaded={onRefresh || (() => {})} />
+                <GfcNeededDoc key={r.kind} row={r} token={token} readOnly={readOnly} onUploaded={onRefresh || (() => {})} />
+              ))}
+            </React.Fragment>
+          )}
+          {!readOnly && needed.length === 0 && checklist.length > 0 && (
+            <div className="doc" style={{ cursor: 'default' }}>
+              <i className="ti ti-circle-check" />
+              <div><b>Nothing outstanding</b><span>We have everything we asked for. Thank you.</span></div>
+            </div>
+          )}
+
+          <p className="lbl">Your files</p>
+          {docsErr && <div className="lockcard"><i className="ti ti-alert-triangle" /><div><b>Some of your documents didn't load</b><span>{docsErr} Refresh to try again.</span></div></div>}
+          {clinicalDocsErr && <div className="err">Your clinical documents didn't load: {clinicalDocsErr} Refresh to try again.</div>}
+          {chartErr && <div className="err">{chartErr}</div>}
+          {groups.length > 1 && (
+            <div className="pills">
+              <button className={activeGroup === 'all' ? 'on' : ''} onClick={() => setGroup('all')}>All</button>
+              {groups.map(g => (
+                <button key={g.key} className={activeGroup === g.key ? 'on' : ''} onClick={() => setGroup(g.key)}>{g.label}</button>
+              ))}
+            </div>
+          )}
+          {items.length === 0 && !docsErr && <p className="sub">Nothing on file yet. Forms you sign and documents you send will show up here.</p>}
+          {shown.map(it => (
+            <div className="doc" key={it.id} style={{ alignItems: 'flex-start', cursor: it.open ? 'pointer' : 'default', opacity: it.open ? 1 : 0.7 }}
+              onClick={it.open ? () => openItem(it.open, it.title) : undefined}>
+              <i className={`ti ${it.icon}`} style={{ marginTop: 2 }} />
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <b>{it.title}</b>
+                <span>{[activeGroup === 'all' ? groupLabel(it.group) : null, it.sub, it.date ? prettyDate(it.date) : null].filter(Boolean).join(' · ')}</span>
+                {it.extra && (
+                  <div onClick={(e) => { e.stopPropagation(); openItem(it.extra.open, it.title); }}
+                    style={{ marginTop: 3, fontSize: 12, color: 'var(--goldd)', fontWeight: 600, cursor: 'pointer' }}>
+                    {it.extra.label}
+                  </div>
+                )}
+              </div>
+              {chartBusy === it.id
+                ? <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--mut)' }}>Opening…</span>
+                : it.open
+                  ? <i className="ti ti-download" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
+                  : <span style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 700, color: 'var(--mut)' }}>Not yet available</span>}
+            </div>
+          ))}
+
+          {!readOnly && optional.length > 0 && (
+            <React.Fragment>
+              <button className="link" style={{ background: 'none', border: 'none', color: 'var(--navy)', fontWeight: 600, marginTop: 16, padding: 0, cursor: 'pointer' }}
+                onClick={() => setShowOptional(v => !v)}>
+                {showOptional ? 'Hide' : 'Send something else'} <i className={`ti ti-chevron-${showOptional ? 'up' : 'down'}`} />
+              </button>
+              {showOptional && optional.map(r => (
+                <GfcNeededDoc key={r.kind} row={r} token={token} readOnly={readOnly} onUploaded={onRefresh || (() => {})} />
               ))}
             </React.Fragment>
           )}
 
-          <GfcShareUploadLink link={docs?.uploadLink || null} token={token} readOnly={readOnly}
-            onChanged={onRefresh || (() => {})} />
+          <GfcShareUploadLink link={docs?.uploadLink || null} token={token} readOnly={readOnly} onChanged={onRefresh || (() => {})} />
 
           {!readOnly && onOpenTransferRoi && (
-            <React.Fragment>
-              <p className="lbl">Record release</p>
-              <div className="doc" onClick={onOpenTransferRoi} style={{ cursor: 'pointer' }}>
-                <i className="ti ti-file-symlink" />
-                <div><b>Authorize record release from prior providers</b><span>Request your records from a prior doctor, specialist, or hospital</span></div>
-                <i className="ti ti-chevron-right" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
-              </div>
-            </React.Fragment>
-          )}
-
-          <p className="lbl">Your documents</p>
-          {docsErr && <div className="lockcard"><i className="ti ti-alert-triangle" /><div><b>Your documents didn't load</b><span>{docsErr} Refresh to try again.</span></div></div>}
-          {packet && (
-            <div className="doc" onClick={() => openDoc(packet.url)} style={{ cursor: 'pointer' }}>
-              <i className="ti ti-file-certificate" />
-              <div><b>{packet.title}</b><span>{packet.description}</span></div>
-              <i className="ti ti-download" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
+            <div className="doc" onClick={onOpenTransferRoi} style={{ cursor: 'pointer', marginTop: 12 }}>
+              <i className="ti ti-file-symlink" />
+              <div><b>Ask a past doctor to send us your records</b><span>Sign a record release for a prior doctor, specialist or hospital</span></div>
+              <i className="ti ti-chevron-right" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
             </div>
           )}
-          {faceSheet && (
-            <div className="doc" onClick={() => openDoc(faceSheet.url)} style={{ cursor: 'pointer' }}>
-              <i className="ti ti-id" />
-              <div><b>{faceSheet.title}</b><span>{faceSheet.description}</span></div>
-              <i className="ti ti-download" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
-            </div>
-          )}
-
-          <p className="lbl" style={{ marginTop: packet ? undefined : 0 }}>Signed consents</p>
-          {signed.length === 0 && !docsErr && <p className="sub">No consents on file yet.</p>}
-          {packetZip && (
-            <div className="doc" onClick={() => openPdfSecurely(`${API_URL}${packetZip.url}`, token, 'zip')} style={{ cursor: 'pointer' }}>
-              <i className="ti ti-file-zip" />
-              <div><b>{packetZip.title}</b><span>Every document you signed, in one download</span></div>
-              <i className="ti ti-download" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
-            </div>
-          )}
-          {signed.map(s => {
-            // Each executed consent now has its OWN copy — the document as
-            // presented at signing, at the version it was signed against. Before
-            // Session 4.6 this row opened the whole enrollment packet, because no
-            // per-consent generator existed.
-            const openConsentPdf = () => openPdfSecurely(`${API_URL}${s.copyUrl}`, token);
-            const sub = s.status === 'na' ? 'Declined / not applicable'
-              : s.status === 'optin_recorded' ? 'Preference recorded — not a signed consent'
-              : s.status === 'signed_offline' ? `Signed on paper${s.signedAt ? ` ${prettyDate(s.signedAt)}` : ''}`
-              : `Signed ${s.signedAt ? prettyDate(s.signedAt) : ''}${s.signerName ? ` · ${s.signerName}` : ''}`.trim();
-            return (
-              <div className="doc" key={s.key} style={{ alignItems: 'flex-start' }}>
-                <i className="ti ti-file-certificate" style={{ marginTop: 2 }} />
-                <div style={{ minWidth: 0, flex: 1, cursor: s.copyUrl ? 'pointer' : 'default' }} onClick={s.copyUrl ? openConsentPdf : undefined}>
-                  <b>{s.label}</b><span>{sub}</span>
-                  {/* The copy above is regenerated from stored text and metadata —
-                      for a paper signature it never carried the actual scan.
-                      This opens the original file staff uploaded, when it filed. */}
-                  {s.scanUrl && (
-                    <div onClick={(e) => { e.stopPropagation(); openDoc(s.scanUrl); }}
-                      style={{ marginTop: 3, fontSize: 11.5, color: 'var(--goldd)', fontWeight: 600, cursor: 'pointer' }}>
-                      View the signed scan
-                    </div>
-                  )}
-                </div>
-                {s.copyUrl && <span style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 700, letterSpacing: '.06em', color: 'var(--goldd)' }}>PDF</span>}
-              </div>
-            );
-          })}
-
-          {offlinePacketFiles.length > 0 && (
-            <React.Fragment>
-              <p className="lbl">Paper intake packet</p>
-              {offlinePacketFiles.map(f => (
-                <div className="doc" key={f.id} onClick={() => openDoc(f.url)} style={{ cursor: 'pointer' }}>
-                  <i className="ti ti-file-text" />
-                  <div><b>{f.title}</b><span>Scanned by your care team</span></div>
-                  <i className="ti ti-download" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
-                </div>
-              ))}
-            </React.Fragment>
-          )}
-
-          {clinicalDocs !== null && clinicalDocs !== undefined && (
-            <React.Fragment>
-              <p className="lbl">Your clinical record</p>
-              {chartErr && <div className="err">{chartErr}</div>}
-              {clinicalDocsErr && <div className="err">Your clinical record didn't load: {clinicalDocsErr} Refresh to try again.</div>}
-              {clinicalDocs.length === 0 && !clinicalDocsErr && <p className="sub">Nothing on your clinical chart yet.</p>}
-              {clinicalDocs.map(d => (
-                <div className="doc" key={d.id} onClick={() => openChartDoc(d)}
-                  style={{ cursor: d.openable ? 'pointer' : 'default', opacity: d.openable ? 1 : 0.7 }}>
-                  <i className="ti ti-file-text" />
-                  <div>
-                    <b>{d.title}</b>
-                    <span>{[d.category, d.date ? prettyDate(d.date) : null, d.note].filter(Boolean).join(' · ')}</span>
-                  </div>
-                  {chartBusy === d.id
-                    ? <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--mut)' }}>Opening…</span>
-                    : d.openable
-                      ? <i className="ti ti-download" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
-                      : <span style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 700, color: 'var(--mut)' }}>Not yet available</span>}
-                </div>
-              ))}
-            </React.Fragment>
-          )}
-
-          <p className="lbl">From your care team</p>
-          {files.length === 0 && <p className="sub">Shared documents from your care team will appear here.</p>}
-          {files.map(f => {
-            // A file stored on this app (/uploads/…) needs the login token, and a
-            // plain link sends none, so it answered AUTH_MISSING. Fetch it with
-            // the header; an outside link (Drive) stays a link.
-            const local = typeof f.url === 'string' && f.url.startsWith('/');
-            return (
-              <a className="doc" key={f.id} href={local ? '#' : (f.url || '#')} target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'none' }}
-                onClick={local ? (e) => { e.preventDefault(); openPdfSecurely(`${API_URL}${f.url}`, token); } : undefined}>
-                <i className="ti ti-file-text" />
-                <div><b>{f.title || f.name || 'Document'}</b><span>{f.description || 'Shared by your care team'}</span></div>
-                <i className="ti ti-download" style={{ marginLeft: 'auto', color: 'var(--goldd)' }} />
-              </a>
-            );
-          })}
-          <p className="micro"><i className="ti ti-cloud-lock" />Documents stored in HIPAA Google Drive</p>
+          <p className="micro"><i className="ti ti-cloud-lock" />Stored securely and HIPAA protected</p>
         </div>
       );
     };
