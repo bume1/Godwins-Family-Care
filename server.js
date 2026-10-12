@@ -59,6 +59,8 @@ const patientRead = require('./patientReadRepository');
 const familyInvites = require('./familyInvites');
 const portalProfile = require('./portalProfile');
 const signups = require('./signupRequests');
+const googleCalendar = require('./googleCalendar');
+const billing = require('./patientBilling');
 const patientPublish = require('./patientPublish');   // Portal P1: the published copies the portal reads (patients never read OpenEMR)
 // Session 4.8 — the clinical role enum, capability matrix and credential
 // ceiling. THE one place that answers "may this person do this"; the clinical
@@ -205,6 +207,10 @@ if (!process.env.JWT_SECRET) {
 }
 
 app.use(cors());
+// The Stripe webhook's signature is over the RAW bytes, so its body is read
+// raw here, before the JSON parser (which skips a body already read). The
+// route itself is registered with the billing routes, after the audit layer.
+app.use('/api/webhooks/stripe', express.raw({ type: 'application/json', limit: '1mb' }));
 app.use(bodyParser.json({ limit: config.BODY_PARSER_LIMIT }));
 // Session 5.4: request context (request id, hashed IP) for every request, and
 // the PHI-access audit row for every request under a PHI prefix. Registered
@@ -9953,6 +9959,9 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
       clientId: client.id, eid: String(eid), visitDate: body.date, startTime: body.startTime,
       when: bookedWhen, clinician: bookedClinician, place: bookedPlace, actorId: req.user.id
     });
+    // And onto the practice's Google clinical calendar (one way; best-effort).
+    await mirrorVisitToGoogle({ clientId: client.id, eid: String(eid), title: built.fields.pc_title, date: body.date,
+      startTime: body.startTime, durationMinutes: built.minutes, location: built.location, providerId });
 
     // Read-back proves the round-trip (acceptance requirement); the single-row
     // GET carries the full record (list rows omit notes/location on 7.0.4).
@@ -9969,6 +9978,30 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
     res.status(502).json({ error: `OpenEMR write failed: ${error.message}` });
   }
 });
+
+// Google clinical calendar (owner, 2026-10-12): the facts an event needs,
+// from OUR records. Best-effort by design — see googleCalendar.js.
+const calendarPatientFacts = async (clientId) => {
+  const u = clientId ? (await getUsers()).find(x => x && x.id === clientId) : null;
+  if (!u) return { patientName: null, address: null };
+  const a = (u.intake && u.intake.address) || u.address || null;
+  const address = a && typeof a === 'object'
+    ? [a.line1 || a.street, a.line2, a.city, [a.state, a.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ') || null
+    : (a ? String(a) : null);
+  return { patientName: u.preferredName ? `${u.preferredName} ${String(u.name || '').split(' ').slice(-1)[0]}` : u.name, address };
+};
+const mirrorVisitToGoogle = async ({ clientId, eid, previousEid, title, date, startTime, durationMinutes, location, providerId, status }) => {
+  try {
+    const facts = await calendarPatientFacts(clientId);
+    const r = await googleCalendar.upsertVisit(db, {
+      eid, clientId, title, date, startTime, durationMinutes, location, status,
+      patientName: facts.patientName, address: facts.address,
+      clinicianName: providerId ? await clinicianNameForProviderId(providerId) : null
+    }, { previousEid });
+    if (!r.synced && r.reason !== 'not_configured') console.warn(`[CALENDAR] visit ${eid} not mirrored: ${r.reason}`);
+    return r;
+  } catch (e) { console.warn('[CALENDAR] mirror error (non-fatal):', e.message); return { synced: false }; }
+};
 
 // POST /api/clinical/appointments/:eid/reschedule — tombstone swap: new slot
 // row + cancelled tombstone preserving the old slot, then remove the
@@ -10057,6 +10090,9 @@ app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requir
         when: movedTo, clinician: movedClinician, place: movedPlace, actorId: req.user.id
       });
     }
+    // The Google event moves with the visit (it is keyed on the OLD eid).
+    await mirrorVisitToGoogle({ clientId: appClient ? appClient.clientId : null, eid: String(newEid), previousEid: String(row.pc_eid),
+      title: row.pc_title, date: body.date, startTime: body.startTime, durationMinutes: built.minutes, location: built.location, providerId });
     // Portal P2: the patient's calendar follows every change.
     await republishAppointmentsByPuuid(emr, row.puuid, req);
     res.json({
@@ -10109,6 +10145,8 @@ app.post('/api/clinical/appointments/:eid/cancel', authenticateToken, requireCli
       // 4.11: a cancelled visit must not keep reminding anybody about it.
       await voidVisitReminders({ eid: String(row.pc_eid), reason: 'cancelled', clientId: appClient.clientId, actorId: req.user.id });
     }
+    // A cancelled visit leaves the clinicians' Google calendar.
+    await googleCalendar.removeVisit(db, String(row.pc_eid));
     // Portal P2: the patient's calendar follows every change.
     await republishAppointmentsByPuuid(emr, row.puuid, req);
     res.json({
@@ -10145,6 +10183,11 @@ app.post('/api/clinical/appointments/:eid/no-show', authenticateToken, requireCl
       role: req.user.role, appointmentEid: newEid, previousEid: String(row.pc_eid),
       slot: `${row.pc_eventDate} ${String(row.pc_startTime).slice(0, 5)}`, supersededRowRemoved: swap.deleted
     });
+    // The Google event stays, marked as a no-show, and follows the new eid.
+    await mirrorVisitToGoogle({ clientId: appClient ? appClient.clientId : null, eid: String(newEid), previousEid: String(row.pc_eid),
+      title: row.pc_title, date: row.pc_eventDate, startTime: String(row.pc_startTime).slice(0, 5),
+      durationMinutes: clinicalRepo.rowDurationMinutes(row), location: clinicalRepo.decodeAppointmentNotes(row.pc_hometext).location,
+      providerId: row.pc_aid, status: 'no_show' });
     // Portal P2: the patient's calendar follows every change.
     await republishAppointmentsByPuuid(emr, row.puuid, req);
     res.json({
@@ -13630,6 +13673,11 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/billing-submit', au
       renderingProviderId: record.renderingProvider ? record.renderingProvider.id : null,
       chargesPosted: !!record.chargesPosted, postedChargeIds: (record.postedCharges || []).map(c => c.id), chargeError: record.chargeError || null
     });
+    // A fixed copay, when the office set one for this patient (patientBilling.js).
+    try {
+      const copay = await createCopayInvoice({ client: ctx.client, encounterUuid: ctx.encounterUuid, visitDate: record.date || null, by: req.user });
+      if (copay) warnings.push(`Copay statement ${copay.number} (${billing.fmtUsd(copay.totalCents)}) sent to the patient's portal.`);
+    } catch (e) { warnings.push(`The copay statement could not be created (${e.message.slice(0, 120)}).`); }
     res.json({
       message: record.chargesPosted ? 'Submitted to billing; charges posted to Billing Manager' : 'Submitted to billing',
       record, billingStatus: record.billingStatus,
@@ -13638,6 +13686,240 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/billing-submit', au
   } catch (error) {
     console.error('Billing submit error:', error);
     res.status(502).json({ error: `Submit to billing failed: ${error.message}` });
+  }
+});
+
+// ============================================================
+// PATIENT BILLING + STRIPE (owner, 2026-10-12: copays and home care hours)
+// Rules: patientBilling.js. Invoices live in the app (`patient_invoices`);
+// Stripe sees an invoice number, an amount and our internal id, nothing else.
+// Who bills: an admin or a manager (clinicalRoles.canSubmitBilling, requireBilling).
+// Who pays: the client or a designated POA. Plain family never see money.
+// ============================================================
+const INVOICES = 'patient_invoices';
+const readInvoices = async () => (await db.get(INVOICES)) || [];
+const saveInvoice = async (inv) => {
+  const rows = await readInvoices();
+  const i = rows.findIndex(r => r && r.id === inv.id);
+  if (i === -1) rows.push(inv); else rows[i] = inv;
+  await db.set(INVOICES, rows);
+  return inv;
+};
+const newInvoiceNumber = async () => {
+  const taken = new Set((await readInvoices()).map(r => r.number));
+  for (let i = 0; i < 20; i++) { const n = billing.invoiceNumber(); if (!taken.has(n)) return n; }
+  throw new Error('could not make a unique invoice number');
+};
+// "You have a statement" — no amount, no service, no date. The portal says the rest.
+const notifyStatement = async (clientId) => {
+  try {
+    const users = await getUsers();
+    const client = users.find(u => u && u.id === clientId);
+    if (!client) return;
+    const to = [client, ...users.filter(u => u && u.role === config.ROLES.FAMILY && String(u.familyOfClientId) === String(clientId) && u.familyIsPoa && u.accountStatus !== 'inactive')]
+      .map(u => u.email).filter(e => e && !/@placeholder\.local$/i.test(e));
+    const htmlBody = emailTemplates.renderGfcEmail({
+      headline: 'You have a new statement',
+      paragraphs: ['A new statement from Godwins Family Care is ready. Sign in to your portal to view it and pay online.'],
+      ctaUrl: `${await getAppBaseUrl()}/portal`, ctaLabel: 'View my statement'
+    }).html;
+    for (const e of [...new Set(to)]) {
+      sendEmail(e, 'You have a new statement from Godwins Family Care', 'A new statement is ready. Sign in to your portal to view it and pay online.', { htmlBody })
+        .catch(err => console.error('Statement email error (non-fatal):', err.message));
+    }
+  } catch (e) { console.error('Statement notice error (non-fatal):', e.message); }
+};
+// Created when billing submits a signed visit, if the office set a fixed copay.
+const createCopayInvoice = async ({ client, encounterUuid, visitDate, by }) => {
+  const cents = client && client.billingSettings && client.billingSettings.copayCents;
+  if (!(cents > 0)) return null;
+  const existing = (await readInvoices()).find(r => r.kind === 'copay' && r.encounterUuid === encounterUuid && r.status !== 'void');
+  if (existing) return existing;   // a re-submit never bills the copay twice
+  const at = new Date().toISOString();
+  const inv = billing.buildInvoice({ id: uuidv4(), number: await newInvoiceNumber(), clientId: client.id, kind: 'copay', encounterUuid, status: 'open', at, by,
+    lines: [{ date: visitDate || at.slice(0, 10), description: billing.LINE_LABEL.copay, amountCents: cents }] });
+  await saveInvoice(inv);
+  await logActivity(by ? by.id : 'system', by ? by.name : 'Billing', 'invoice_created', 'client', client.id, { invoiceId: inv.id, kind: 'copay', totalCents: inv.totalCents });
+  notifyStatement(client.id);
+  return inv;
+};
+const isClientOrPoaFor = async (req) => {
+  const client = await resolveGfcClientRecord(req.user);
+  if (!client) return { client: null };
+  const acting = patientRead.buildActingIdentity(req.user, client);
+  return { client, ok: req.user.role === config.ROLES.CLIENT || acting.isPoa, acting };
+};
+
+// ---- The patient's side ----
+app.get('/api/gfc/billing', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const { client, ok } = await isClientOrPoaFor(req);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    if (!ok) return res.status(403).json({ error: 'Only the client or their designated Power of Attorney can see billing.', code: 'BILLING_CLIENT_ONLY' });
+    const mine = (await readInvoices()).filter(r => r.clientId === client.id && r.status !== 'draft')
+      .sort((a, b) => String(b.sentAt || b.createdAt).localeCompare(String(a.sentAt || a.createdAt)));
+    const open = mine.filter(r => r.status === 'open');
+    const balanceCents = open.reduce((a, r) => a + r.totalCents, 0);
+    res.json({
+      balanceCents, balance: billing.fmtUsd(balanceCents), openCount: open.length,
+      invoices: mine.map(billing.publicInvoice),
+      onlinePayment: billing.stripeStatus().configured
+    });
+  } catch (error) {
+    console.error('Patient billing read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Start a Stripe Checkout for one open invoice. The patient pays on Stripe's
+// own page; card details never touch this server.
+app.post('/api/gfc/billing/invoices/:id/pay', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const { client, ok } = await isClientOrPoaFor(req);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    if (!ok) return res.status(403).json({ error: 'Only the client or their designated Power of Attorney can pay.', code: 'BILLING_CLIENT_ONLY' });
+    const inv = (await readInvoices()).find(r => r.id === req.params.id && r.clientId === client.id);
+    if (!inv) return res.status(404).json({ error: 'Invoice not found', code: 'INVOICE_NOT_FOUND' });
+    if (inv.status !== 'open') return res.status(409).json({ error: inv.status === 'paid' ? 'This invoice is already paid.' : 'This invoice cannot be paid online.', code: 'INVOICE_NOT_OPEN' });
+    const st = billing.stripeStatus();
+    if (!st.configured) return res.status(503).json({ error: 'Online payment is not set up yet. Please call the office to pay.', code: 'STRIPE_NOT_CONFIGURED' });
+    const base = await getAppBaseUrl();
+    const form = billing.checkoutForm(inv, { successUrl: `${base}/portal?billing=paid`, cancelUrl: `${base}/portal?billing=cancelled` });
+    const r = await fetch('https://api.stripe.com/v1/checkout/sessions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${process.env.STRIPE_SECRET_KEY}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams(form).toString()
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.url) {
+      console.error('Stripe checkout error:', (j.error && j.error.message) || r.status);
+      return res.status(502).json({ error: 'The payment page could not be opened. Please try again, or call the office.', code: 'STRIPE_CHECKOUT_FAILED' });
+    }
+    await saveInvoice({ ...inv, lastCheckoutSessionId: j.id });
+    res.json({ url: j.url });
+  } catch (error) {
+    console.error('Patient pay error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ---- The office's side ----
+app.get('/api/gfc/admin/billing/:clientId', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const client = (await getUsers()).find(u => u && u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+    const ra = client.rateAgreement || null;
+    res.json({
+      copayCents: (client.billingSettings && client.billingSettings.copayCents) || null,
+      rate: ra ? { hourlyRate: ra.hourlyRate, dailyMinimumHours: ra.dailyMinimumHours } : null,
+      invoices: (await readInvoices()).filter(r => r.clientId === client.id).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
+      stripe: billing.stripeStatus()
+    });
+  } catch (error) {
+    console.error('Staff billing read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.put('/api/gfc/admin/billing/:clientId/copay', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const n = billing.normalizeCopaySetting(req.body);
+    if (n.error) return res.status(400).json(n);
+    const { users, idx } = await loadClientForMutation(req.params.clientId);
+    if (idx === -1) return res.status(404).json({ error: 'Client not found' });
+    users[idx].billingSettings = { ...(users[idx].billingSettings || {}), copayCents: n.value.copayCents, updatedAt: new Date().toISOString(), updatedBy: req.user.name || req.user.email };
+    await db.set('users', users);
+    invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'billing_copay_set', 'client', req.params.clientId, { copayCents: n.value.copayCents });
+    res.json({ copayCents: n.value.copayCents });
+  } catch (error) {
+    console.error('Copay setting error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+const homeCareFor = async (clientId, body) => {
+  const from = String((body || {}).from || ''), to = String((body || {}).to || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to) || to < from) return { error: 'Give a from and to date.', code: 'DATE_RANGE_REQUIRED' };
+  const client = (await getUsers()).find(u => u && u.id === clientId && u.role === config.ROLES.CLIENT);
+  if (!client) return { error: 'Client not found', code: 'CLIENT_NOT_FOUND', status: 404 };
+  const ra = client.rateAgreement || {};
+  const r = billing.homeCareLines((await db.get('time_logs')) || [], {
+    clientId, from, to, hourlyRate: ra.hourlyRate, dailyMinimumHours: ra.dailyMinimumHours,
+    localDate: require('./schedulingRepository').csvLocalDate
+  });
+  return { ...r, client, from, to };
+};
+app.post('/api/gfc/admin/billing/:clientId/home-care/preview', authenticateToken, requireBilling, async (req, res) => {
+  const r = await homeCareFor(req.params.clientId, req.body);
+  if (r.error) return res.status(r.status || 400).json({ error: r.error, code: r.code });
+  res.json({ lines: r.lines, totalCents: r.lines.reduce((a, l) => a + l.amountCents, 0) });
+});
+app.post('/api/gfc/admin/billing/:clientId/home-care', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const r = await homeCareFor(req.params.clientId, req.body);
+    if (r.error) return res.status(r.status || 400).json({ error: r.error, code: r.code });
+    if (!r.lines.length) return res.status(409).json({ error: 'No completed caregiver visits in those dates.', code: 'BILLING_NO_VISITS' });
+    const at = new Date().toISOString();
+    const inv = billing.buildInvoice({ id: uuidv4(), number: await newInvoiceNumber(), clientId: r.client.id, kind: 'home_care', lines: r.lines, at, by: req.user, status: 'draft' });
+    inv.period = { from: r.from, to: r.to };
+    await saveInvoice(inv);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'invoice_created', 'client', r.client.id, { invoiceId: inv.id, kind: 'home_care', totalCents: inv.totalCents, from: r.from, to: r.to });
+    res.json({ invoice: inv });
+  } catch (error) {
+    console.error('Home care invoice error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/gfc/admin/billing/invoices/:id/:action', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const to = { send: 'open', void: 'void', 'record-payment': 'paid' }[req.params.action];
+    if (!to) return res.status(404).json({ error: 'Unknown action' });
+    const inv = (await readInvoices()).find(r => r.id === req.params.id);
+    const b = req.body || {};
+    const t = billing.transition(inv, to, { at: new Date().toISOString(), by: req.user, reason: b.reason, method: to === 'paid' ? (b.method === 'stripe' ? null : b.method) : undefined, reference: b.reference });
+    if (t.error) return res.status(t.code === 'INVOICE_NOT_FOUND' ? 404 : 409).json(t);
+    await saveInvoice(t.inv);
+    await logActivity(req.user.id, req.user.name || req.user.email, `invoice_${req.params.action.replace('-', '_')}`, 'client', t.inv.clientId, { invoiceId: t.inv.id, totalCents: t.inv.totalCents });
+    if (to === 'open') notifyStatement(t.inv.clientId);
+    res.json({ invoice: t.inv });
+  } catch (error) {
+    console.error('Invoice action error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Stripe tells us a payment went through. Only a correctly signed event moves
+// an invoice; only our own invoice id in its metadata names one. The raw body
+// is read by the express.raw() registered before the JSON parser.
+app.post('/api/webhooks/stripe', async (req, res) => {
+  try {
+    if (!billing.verifyStripeSignature(req.body, req.headers['stripe-signature'], process.env.STRIPE_WEBHOOK_SECRET)) {
+      return res.status(400).json({ error: 'bad signature' });
+    }
+    const evt = JSON.parse(req.body.toString('utf8'));
+    if (evt.type !== 'checkout.session.completed' && evt.type !== 'checkout.session.async_payment_succeeded') return res.json({ received: true });
+    const s = (evt.data && evt.data.object) || {};
+    if (s.payment_status !== 'paid') return res.json({ received: true });
+    const id = s.metadata && s.metadata.invoice_id;
+    const rows = (await db.get('patient_invoices')) || [];
+    const i = rows.findIndex(r => r && r.id === id);
+    if (i === -1) return res.json({ received: true, unknown: true });
+    if (rows[i].status === 'paid') return res.json({ received: true });          // Stripe retries; paying twice is not a thing
+    if (Number(s.amount_total) !== Number(rows[i].totalCents)) {
+      console.error(`[BILLING] Stripe amount ${s.amount_total} does not match invoice ${rows[i].number}; not marked paid`);
+      return res.json({ received: true, mismatch: true });
+    }
+    const t = billing.transition(rows[i], 'paid', { at: new Date().toISOString(), method: 'stripe', reference: s.payment_intent || s.id });
+    if (t.error) return res.json({ received: true, note: t.code });
+    rows[i] = t.inv;
+    await db.set('patient_invoices', rows);
+    await logActivity('stripe', 'Stripe', 'invoice_paid_online', 'client', t.inv.clientId, { invoiceId: t.inv.id, totalCents: t.inv.totalCents });
+    res.json({ received: true });
+  } catch (error) {
+    console.error('Stripe webhook error:', error);
+    res.status(500).json({ error: 'webhook error' });
   }
 });
 
@@ -25996,6 +26278,11 @@ app.listen(PORT, () => {
       `${driveState.rootFolderId ? ` → folder ${driveState.rootFolderId}` : ' (no root folder set)'}`);
     console.log(`         Credential parses; run scripts/verify_drive_access.js to prove Google accepts it.`);
   }
+  // And the Google clinical calendar visits are mirrored onto.
+  const calState = googleCalendar.calendarStatus();
+  console.log(calState.configured
+    ? `📅 Clinical calendar: mirroring app-booked visits to ${calState.calendarId} as ${calState.impersonating}`
+    : `📅 Clinical calendar: NOT CONFIGURED — visits are not mirrored to Google (${calState.blockers.join('; ')})`);
 
   // Safety net: reactivate any admin accounts that are inactive (prevent lockout)
   (async () => {
