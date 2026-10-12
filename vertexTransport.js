@@ -88,7 +88,10 @@ const responseSchemaFor = (schema) => {
       const prop = { type: TYPES[def.type] || Type.STRING };
       if (Array.isArray(def.enum) && def.enum.length) prop.enum = def.enum.map(String);
       if (def.type === 'string' && def.maxLength) prop.maxLength = String(def.maxLength);
-      if (def.type === 'array') prop.items = { type: Type.OBJECT, ...build(def.items) };
+      if (def.type === 'array') {
+        const scalar = { string: Type.STRING, number: Type.NUMBER, boolean: Type.BOOLEAN }[def.itemType];
+        prop.items = scalar ? { type: scalar } : { type: Type.OBJECT, ...build(def.items) };
+      }
       if (def.type === 'object') Object.assign(prop, build(def.items));
       if (def.description) prop.description = def.description;
       properties[key] = prop;

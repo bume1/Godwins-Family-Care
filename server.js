@@ -16898,6 +16898,604 @@ app.get('/api/clinical/patients/:clientId/extraction', authenticateToken, requir
 app.post('/api/clinical/patients/:clientId/documents/:docId/extract', authenticateToken, requireClinicalWrite, requireClinicalOnLine, extractDocumentHandler);
 app.post('/api/clinical/patients/:clientId/extraction/:id/review', authenticateToken, requireClinicalWrite, requireClinicalOnLine, extractionReviewHandler);
 
+// ── The comprehensive chart review (Session G1, 2026-10-12) ───────────────
+//
+// Owner decision 5: the review reads EVERYTHING the requesting clinician can
+// already read for that patient — no time window, no count caps, no document
+// cap. Owner decision 7: licensed clinicians only; read-only staff cannot run
+// one. Owner decision 8: the output is NOT part of the medical record.
+//
+// THE GATHERING HAPPENS WITH THE CLINICIAN'S OWN OPENEMR SESSION
+// (`openemr.forActor(req.user)`), which is the Session 5.2 rule and is what
+// makes "only what they can already read" true rather than asserted. A
+// section their session refuses is LISTED AS NOT READ and never filled
+// another way: a review that quietly substituted a different source would be
+// a review of something other than what it claims.
+const chartPacket = require('./chartPacket');
+
+// E2. The shape every pass and the merge are held to. `citations` has
+// minItems 1 because a finding with no source is one a clinician cannot
+// check, and `enforceCitations` drops it server-side anyway — declaring it
+// here just means the model is told before it answers rather than after.
+const AI_REVIEW_SCHEMA = Object.freeze({
+  fields: {
+    summary: { type: 'string', maxLength: 4000, required: true },
+    timeline: {
+      type: 'array',
+      items: {
+        date: { type: 'string', maxLength: 40 },
+        event: { type: 'string', maxLength: 400, required: true },
+        citations: {
+          type: 'array', minItems: 1,
+          items: {
+            sourceId: { type: 'string', maxLength: 120, required: true },
+            page: { type: 'number' },
+            quote: { type: 'string', maxLength: 300 }
+          }
+        }
+      }
+    },
+    findings: {
+      type: 'array',
+      items: {
+        category: {
+          type: 'string', required: true,
+          enum: ['care_gap', 'medication_issue', 'allergy_conflict', 'missing_follow_up',
+            'unaddressed_abnormal_result', 'documentation_gap', 'safety_concern', 'discrepancy', 'other']
+        },
+        statement: { type: 'string', maxLength: 600, required: true },
+        priority: { type: 'string', required: true, enum: ['info', 'attention', 'urgent'] },
+        citations: {
+          type: 'array', minItems: 1,
+          items: {
+            sourceId: { type: 'string', maxLength: 120, required: true },
+            page: { type: 'number' },
+            quote: { type: 'string', maxLength: 300 }
+          }
+        }
+      }
+    },
+    questionsForClinician: { type: 'array', itemType: 'string', maxLength: 500 },
+    notReviewed: { type: 'array', itemType: 'string', maxLength: 300 }
+  }
+});
+
+// How long a review is kept (owner decision 8). It is an AI draft a clinician
+// checked, not a medical record, so it is purged rather than retained.
+const AI_REVIEW_RETENTION_DAYS = Number(process.env.GFC_AI_REVIEW_RETENTION_DAYS || 180);
+
+const loadAiReviews = () => loadRows('ai_reviews');
+
+// ── D1: gather one client's chart, as this clinician ──────────────────────
+const gatherChartPacketInput = async (req, client, { excludeDocumentIds = [] } = {}) => {
+  const exclude = new Set((excludeDocumentIds || []).map(String));
+  const notRead = [];
+  const mine = (r) => r && String(r.clientId) === String(client.id);
+
+  const [
+    orderRows, resultRows, rxRows, planVersions, medChanges,
+    cgLogs, escalations, threadRows, messageRows, billingRows,
+    addendaRows, riskRows, docUploads
+  ] = await Promise.all([
+    loadRows('clinical_orders'), loadRows('clinical_results'), loadRows('prescriptions'),
+    loadRows('care_plan_versions'), loadRows('medication_changes'),
+    loadRows('caregiver_visit_logs'), loadRows('escalation_events'),
+    loadRows('message_threads'), loadRows('messages'), loadRows('encounter_billing'),
+    loadRows('encounter_addenda'), loadRows('encounter_risk_assessments'),
+    loadRows('client_document_uploads')
+  ]);
+
+  // ── the EMR, as this clinician ──
+  const emrOut = {};
+  const encounterSections = [];
+  if (!client.openEmrPatientId || !openemr.isConfigured()) {
+    notRead.push({
+      sourceId: 'emr:*',
+      why: client.openEmrPatientId ? 'the EMR is not configured' : 'this client is not linked to an EMR chart'
+    });
+  } else {
+    const emr = openemr.forActor(req.user);
+    const puuid = client.openEmrPatientId;
+    const [problems, meds, allergies, vitals, encs, immun, procs, goals, careTeam, coverage, demo] =
+      await Promise.allSettled([
+        emr.getProblems(puuid), emr.getMedicationRequests(puuid), emr.getAllergies(puuid),
+        emr.getVitalObservations(puuid), emr.getEncounters(puuid),
+        emr.getImmunizations ? emr.getImmunizations(puuid) : Promise.reject(new Error('no immunization read on this instance')),
+        emr.getProcedures ? emr.getProcedures(puuid) : Promise.reject(new Error('no procedure read on this instance')),
+        emr.getGoals ? emr.getGoals(puuid) : Promise.reject(new Error('no goal read on this instance')),
+        emr.getCareTeam ? emr.getCareTeam(puuid) : Promise.reject(new Error('no care-team read on this instance')),
+        emr.getCoverage ? emr.getCoverage(puuid) : Promise.reject(new Error('no coverage read on this instance')),
+        emr.getPatient ? emr.getPatient(puuid) : Promise.reject(new Error('no demographic read on this instance'))
+      ]);
+
+    // Each section is either read, or reported as not read with the reason.
+    // The record-extras reads are unproven on this instance (D2), so a
+    // failure is listed rather than fatal.
+    const put = (key, sourceId, settled, map) => {
+      if (settled.status === 'fulfilled' && settled.value !== undefined && settled.value !== null) {
+        emrOut[key] = map ? map(settled.value) : settled.value;
+        return;
+      }
+      notRead.push({
+        sourceId,
+        why: (settled.reason && settled.reason.message) ? String(settled.reason.message).slice(0, 200) : 'not returned'
+      });
+    };
+    // DEMOGRAPHICS ARE NARROWED HERE, NOT BY THE MODEL: age, sex and language
+    // are clinical context; an address and an SSN are identifiers with no
+    // bearing on a review, so they are never put in a prompt (D2).
+    put('demographics', chartPacket.SECTION_KINDS.DEMOGRAPHICS, demo, (p) => ({
+      age: p && (p.age ?? null), sex: p && (p.sex || p.gender || null), language: p && (p.language || null)
+    }));
+    put('problems', chartPacket.SECTION_KINDS.PROBLEMS, problems, (rows) => rows.map(clinicalRepo.summarizeCondition));
+    put('medications', chartPacket.SECTION_KINDS.MEDICATIONS, meds, (rows) => rows.map(clinicalRepo.summarizeMedicationRequest));
+    put('allergies', chartPacket.SECTION_KINDS.ALLERGIES, allergies, (rows) => rows.map(clinicalRepo.summarizeAllergy));
+    put('vitals', chartPacket.SECTION_KINDS.VITALS, vitals, clinicalRepo.summarizeVitalObservations);
+    put('encounters', chartPacket.SECTION_KINDS.ENCOUNTERS, encs, (rows) => rows.map(clinicalRepo.summarizeEncounter));
+    put('immunizations', chartPacket.SECTION_KINDS.IMMUNIZATIONS, immun);
+    put('procedures', chartPacket.SECTION_KINDS.PROCEDURES, procs);
+    put('goals', chartPacket.SECTION_KINDS.GOALS, goals);
+    put('careTeam', chartPacket.SECTION_KINDS.CARE_TEAM, careTeam);
+    // PAYER NAME ONLY (D2). What they are covered by is clinical context;
+    // a member id is an identifier.
+    put('coverage', chartPacket.SECTION_KINDS.COVERAGE, coverage, (c) => ({
+      payer: Array.isArray(c) ? c.map(x => x && (x.payer || x.name)).filter(Boolean) : (c && (c.payer || c.name)) || null
+    }));
+
+    // Every encounter the app has a record for, with its SIGNED narrative read
+    // by the RECORDED sid. `getSoapNotes` can return another encounter's notes
+    // (openemr.js), so it is deliberately not used here.
+    for (const rec of (billingRows || []).filter(mine)) {
+      let note = null;
+      if (rec.narrativeNoteSid) {
+        try {
+          const soap = await emr.getSoapNote(puuid, rec.encounterUuid, rec.narrativeNoteSid);
+          note = (soap && (soap.subjective || soap.description || soap.note)) || null;
+        } catch (e) {
+          notRead.push({ sourceId: `enc:${rec.encounterUuid}`, why: 'the narrative note could not be read' });
+        }
+      }
+      encounterSections.push({
+        clientId: client.id,
+        encounterUuid: rec.encounterUuid,
+        type: rec.visit || rec.reason || 'Encounter',
+        date: rec.date || null,
+        clinician: (rec.actor && rec.actor.name) || null,
+        diagnoses: rec.diagnoses || [],
+        serviceCodes: rec.services || [],
+        note,
+        addenda: (addendaRows || []).filter(a => a && String(a.encounterUuid) === String(rec.encounterUuid)).map(a => a.text || a.note || null),
+        coSignStatus: rec.coSignStatus || null,
+        riskAssessment: clinicalRepo.latestRiskAssessment(riskRows || [], rec.encounterUuid),
+        // An UNSIGNED note goes in under its own heading and nowhere else.
+        unsigned: !rec.attestedAt && !rec.signedAt
+      });
+    }
+  }
+
+  // ── message threads this clinician can see ──
+  //
+  // threadVisibility IS THE RULE AND NEVER A COPY OF IT. That function is
+  // where the cross-client leak lived (PR #88).
+  //
+  // BODIES ARE INCLUDED HERE, deliberately, and that is a difference from the
+  // chart timeline a few hundred lines up, which carries a thread's existence
+  // only. Owner decision 5 names care-team messages among the things the
+  // review reads, and a thread title tells a reviewer nothing. Do not
+  // "fix" one to match the other.
+  const threads = [];
+  for (const t of (threadRows || [])) {
+    if (!t || String(t.client_id) !== String(client.id)) continue;
+    const v = messagingRepo.threadVisibility(req.user, t, { client });
+    if (!v || !v.visible) continue;
+    threads.push({
+      clientId: client.id,
+      threadId: t.id,
+      channel: t.channel,
+      subject: messagingRepo.threadTitle(t),
+      lastAt: t.last_message_at || t.updated_at || t.created_at || null,
+      messages: (messageRows || [])
+        .filter(m => m && String(m.thread_id) === String(t.id))
+        .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
+        .map(m => ({ at: m.created_at, from: m.from_role || m.from_name || null, body: m.body || null }))
+    });
+  }
+
+  // ── documents: every one the chart can produce bytes for (D3) ──
+  //
+  // Bytes come from the EXISTING helpers, never from listing a Drive folder:
+  // folders are named by client name and can collide. A signed-note PDF is
+  // skipped because its text is already in enc:<euuid>, and a document the
+  // clinician unticked is skipped because they said so.
+  const documents = [];
+  for (const u of (docUploads || []).filter(mine)) {
+    const sourceId = `${chartPacket.PREFIX.DOCUMENT}:upload:${u.id}`;
+    if (exclude.has(String(u.id)) || exclude.has(sourceId)) continue;
+    if (u.status === 'rejected') continue;
+    try {
+      const bytes = await googledrive.downloadFileBuffer(u.driveFileId);
+      documents.push({
+        clientId: client.id, sourceId, id: u.id,
+        title: u.fileName || u.kind || 'Document',
+        date: u.at || u.uploadedAt || null,
+        mimeType: u.mimeType || 'application/pdf',
+        bytes
+      });
+    } catch (e) {
+      // A document that could not be fetched is REPORTED. Silently leaving it
+      // out would mean a review that says nothing about the one record that
+      // mattered.
+      notRead.push({ sourceId, why: 'the stored file could not be retrieved' });
+    }
+  }
+
+  return {
+    clientId: client.id,
+    emr: emrOut,
+    encounters: encounterSections,
+    orders: (orderRows || []).filter(mine),
+    results: (resultRows || []).filter(mine),
+    prescriptions: (rxRows || []).filter(mine),
+    carePlanVersions: (planVersions || []).filter(mine),
+    intake: client.intake || null,
+    medReconciliations: (medChanges || []).filter(mine),
+    caregiverLogs: [...(cgLogs || []).filter(mine), ...(escalations || []).filter(mine)],
+    messageThreads: threads,
+    // ELECTIONS ONLY (D2): what the patient CHOSE, per consent, and whether
+    // they signed it. Never the consent TEXT — a review of a patient does not
+    // turn on our wording — and never the signature block, which is
+    // provenance rather than a clinical fact. A code-status election changes
+    // how a patient is treated, which is why the choices are in at all.
+    consentElections: Object.entries((client.consents || {}))
+      .map(([type, rec]) => ({
+        type,
+        status: (rec && rec.status) || null,
+        choices: (rec && (rec.choices || (rec.signature && rec.signature.choices))) || null
+      }))
+      .filter(e => e.status || (e.choices && Object.keys(e.choices).length)),
+    documents,
+    notRead
+  };
+};
+
+// ── D5: a review of a large chart takes minutes, so it runs in the background
+const AI_REVIEW_STATUS = Object.freeze({ RUNNING: 'running', DONE: 'done', FAILED: 'failed' });
+
+const saveAiReview = async (id, patch) => {
+  const rows = await loadAiReviews();
+  const i = rows.findIndex(r => r && r.id === id);
+  if (i < 0) return null;
+  rows[i] = { ...rows[i], ...patch };
+  await db.set('ai_reviews', rows);
+  return rows[i];
+};
+
+// Runs the passes in sequence and merges. Sequential on purpose: the passes
+// share a rate limit, and a 429 storm would take a review down that a slower
+// run completes.
+const runAiReview = async ({ reviewId, req, client, focus, excludeDocumentIds }) => {
+  const actor = { id: req.user.id, name: req.user.name || req.user.email };
+  try {
+    const input = await gatherChartPacketInput(req, client, { excludeDocumentIds });
+    const built = chartPacket.buildSections(input);
+
+    // How many passes? Count the real tokens for the whole packet; if it fits
+    // under 90% of the model's input limit, one pass. The count is best-effort
+    // — when it cannot be obtained the packet is attempted in one pass and a
+    // MAX_TOKENS refusal from the model is what reports the problem, which is
+    // a named failure rather than a silent truncation.
+    let passCount = 1;
+    const st = gfcModelEngine.status();
+    const limit = Number(process.env.VERTEX_INPUT_TOKEN_LIMIT || 0) || null;
+    if (limit) {
+      try {
+        const contents = vertexTransport.buildContents({ input: { sections: built.sections } });
+        const total = await vertexTransport.countTokens({
+          contents, project: st.projectId, location: st.location, modelId: st.modelId
+        });
+        if (total && !chartPacket.fitsInOnePass(total, limit)) {
+          passCount = Math.ceil(total / (limit * chartPacket.BUDGET_FRACTION));
+        }
+      } catch (e) {
+        console.warn('[AI] token count unavailable, attempting one pass:', e.message);
+      }
+    }
+
+    const passes = chartPacket.splitIntoPasses({ ...built, passCount });
+    await saveAiReview(reviewId, { passes: passes.length });
+
+    const manifest = chartPacket.buildManifest({
+      sections: passes.flatMap(p => p.sections.map(s => ({ ...s, pass: p.pass }))),
+      documents: passes.flatMap(p => p.documents.map(d => ({ ...d, pass: p.pass }))),
+      notRead: built.notRead,
+      passes: passes.length
+    });
+
+    const invocationIds = [];
+    const outputs = [];
+    for (const p of passes) {
+      await saveAiReview(reviewId, { currentPass: p.pass });
+      const r = await gfcModelEngine.invoke({
+        purpose: modelEngine.PURPOSES.CHART_REVIEW,
+        input: {
+          sections: p.sections,
+          documents: p.documents,
+          focus: focus || null,
+          instruction: passes.length > 1
+            ? `This is pass ${p.pass} of ${passes.length} over one patient's record.`
+            : null
+        },
+        schema: AI_REVIEW_SCHEMA,
+        actor: req.user, patientId: client.id,
+        feature: 'chart_review', pass: p.pass,
+        sourceIds: [...p.sections.map(s => s.sourceId), ...p.documents.map(d => d.sourceId)]
+      });
+      invocationIds.push(r.invocationId);
+      outputs.push(r.proposal);
+    }
+
+    // One pass: that output. Several: a merge call that de-duplicates and
+    // keeps every citation.
+    let merged = outputs[0] || { summary: '', findings: [], timeline: [] };
+    if (outputs.length > 1) {
+      const m = await gfcModelEngine.invoke({
+        purpose: modelEngine.PURPOSES.CHART_REVIEW_MERGE,
+        input: {
+          sections: outputs.map((o, i) => ({
+            sourceId: `pass:${i + 1}`, kind: 'pass findings',
+            title: `Pass ${i + 1} of ${outputs.length}`, value: o
+          }))
+        },
+        schema: AI_REVIEW_SCHEMA,
+        actor: req.user, patientId: client.id, feature: 'chart_review_merge'
+      });
+      invocationIds.push(m.invocationId);
+      merged = m.proposal;
+    }
+
+    // E3. Enforced on the SERVER, after the model, because a citation that
+    // does not resolve cannot be checked.
+    const { output, droppedUncited } = chartPacket.enforceCitations(merged, manifest);
+    // Everything the packet could not read is told to the reader, whether the
+    // model mentioned it or not.
+    const notReviewed = [
+      ...new Set([
+        ...(output.notReviewed || []),
+        ...manifest.notRead.map(n => `${n.sourceId}: ${n.why}`)
+      ])
+    ];
+
+    await saveAiReview(reviewId, {
+      status: AI_REVIEW_STATUS.DONE,
+      finishedAt: new Date().toISOString(),
+      invocationIds, model: st.modelId, manifest,
+      output: { ...output, notReviewed },
+      droppedUncited,
+      droppedForeign: built.droppedForeign.length,
+      currentPass: null
+    });
+  } catch (e) {
+    // The reason is scrubbed by the engine before it gets here; scrub again
+    // because a gathering failure (OpenEMR, Drive) did not pass through it.
+    await saveAiReview(reviewId, {
+      status: AI_REVIEW_STATUS.FAILED,
+      finishedAt: new Date().toISOString(),
+      error: modelEngine.scrubForLog(String((e && e.message) || e)).slice(0, 400),
+      code: (e && e.code) || null,
+      blockers: (e && e.blockers) || null
+    });
+    console.error('[AI] chart review failed:', (e && e.code) || e.message);
+  }
+};
+
+// E1. POST …/ai/review — start one.
+app.post('/api/clinical/patients/:clientId/ai/review', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) {
+      return res.status(wrongLine ? 409 : 404).json({
+        error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found',
+        code: wrongLine ? 'NOT_CLINICAL_LINE' : 'CLIENT_NOT_FOUND'
+      });
+    }
+    // Refused BEFORE anything is gathered, so a chart is not assembled in
+    // memory for a call that was never going to be allowed.
+    const st = gfcModelEngine.status();
+    if (!st.configured) {
+      return res.status(503).json({
+        error: 'AI review is not switched on yet.',
+        code: 'MODEL_BOUNDARY_REFUSED',
+        blockers: st.blockers
+      });
+    }
+    const body = req.body || {};
+    const focus = String(body.focus || '').trim().slice(0, 500) || null;
+    const excludeDocumentIds = Array.isArray(body.excludeDocumentIds) ? body.excludeDocumentIds.map(String) : [];
+
+    const row = {
+      id: `air_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      clientId: client.id,
+      purpose: modelEngine.PURPOSES.CHART_REVIEW,
+      status: AI_REVIEW_STATUS.RUNNING,
+      requestedBy: { id: req.user.id, name: req.user.name || req.user.email },
+      at: new Date().toISOString(),
+      focus, excludeDocumentIds,
+      passes: null, currentPass: null,
+      invocationIds: [], model: st.modelId,
+      manifest: null, output: null, findingDecisions: [], droppedUncited: 0
+    };
+    await db.set('ai_reviews', [...(await loadAiReviews()), row]);
+    // WHICH review, on whose record. Never a finding.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'ai_chart_review_started', 'client', client.id,
+      { reviewId: row.id, hasFocus: !!focus, excludedDocuments: excludeDocumentIds.length });
+
+    // Not awaited: the review takes minutes and the UI polls.
+    runAiReview({ reviewId: row.id, req, client, focus, excludeDocumentIds });
+    res.status(202).json({ reviewId: row.id, status: row.status });
+  } catch (error) {
+    console.error('AI review start error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// E6. The list and the poll are READS, so a case manager can see what a
+// clinician asked and what came back without being able to run or decide one.
+const aiReviewListHandler = async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) {
+      return res.status(wrongLine ? 409 : 404).json({
+        error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found'
+      });
+    }
+    const rows = (await loadAiReviews())
+      .filter(r => r && String(r.clientId) === String(client.id))
+      .sort((a, b) => String(b.at).localeCompare(String(a.at)));
+    const st = gfcModelEngine.status();
+    res.json({
+      available: st.configured,
+      // Only an admin is shown the blockers: they are the person who can
+      // clear them, and a clinician reading a list of settings can do nothing
+      // with it.
+      blockers: req.user.role === 'admin' ? st.blockers : undefined,
+      canRun: clinicalRoles.canClinicalWrite(req.user),
+      reviews: rows.map(r => ({
+        id: r.id, status: r.status, at: r.at, finishedAt: r.finishedAt || null,
+        requestedBy: r.requestedBy ? r.requestedBy.name : null,
+        passes: r.passes || null, currentPass: r.currentPass || null,
+        findings: r.output ? (r.output.findings || []).length : 0,
+        droppedUncited: r.droppedUncited || 0,
+        focus: r.focus || null,
+        error: r.error || null, blockers: r.blockers || null
+      }))
+    });
+  } catch (error) {
+    console.error('AI review list error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+const aiReviewGetHandler = async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) {
+      return res.status(wrongLine ? 409 : 404).json({
+        error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found'
+      });
+    }
+    const row = (await loadAiReviews()).find(r => r && r.id === req.params.id && String(r.clientId) === String(client.id));
+    if (!row) return res.status(404).json({ error: 'Review not found', code: 'AI_REVIEW_NOT_FOUND' });
+    res.json({
+      review: {
+        id: row.id, status: row.status, at: row.at, finishedAt: row.finishedAt || null,
+        requestedBy: row.requestedBy ? row.requestedBy.name : null,
+        passes: row.passes || null, currentPass: row.currentPass || null,
+        model: row.model || null, focus: row.focus || null,
+        manifest: row.manifest || null, output: row.output || null,
+        findingDecisions: row.findingDecisions || [],
+        droppedUncited: row.droppedUncited || 0,
+        error: row.error || null, blockers: row.blockers || null,
+        // Said on every read, because the screen must never imply otherwise.
+        notPartOfRecord: true
+      },
+      canDecide: clinicalRoles.canClinicalWrite(req.user)
+    });
+  } catch (error) {
+    console.error('AI review read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+app.get('/api/clinical/patients/:clientId/ai/reviews', authenticateToken, requireClinicalRead, aiReviewListHandler);
+app.get('/api/clinical/patients/:clientId/ai/reviews/:id', authenticateToken, requireClinicalRead, aiReviewGetHandler);
+
+// E6. A decision per finding. When every finding has one, the outcome is
+// recorded — §10.3's accept/edit/discard signal, which is the only honest
+// measure of whether this helps.
+app.post('/api/clinical/ai/reviews/:id/decisions', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const rows = await loadAiReviews();
+    const row = rows.find(r => r && r.id === req.params.id);
+    if (!row) return res.status(404).json({ error: 'Review not found', code: 'AI_REVIEW_NOT_FOUND' });
+    // The review belongs to a client, and reaching it means being allowed to
+    // reach that client's chart.
+    const { client, wrongLine } = await loadClinicalClient(row.clientId);
+    if (!client) {
+      return res.status(wrongLine ? 409 : 404).json({
+        error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found'
+      });
+    }
+    const decisions = Array.isArray((req.body || {}).decisions) ? req.body.decisions : [];
+    if (!decisions.length) return res.status(400).json({ error: 'No decisions were sent.', code: 'AI_NO_DECISIONS' });
+
+    const total = (row.output && (row.output.findings || []).length) || 0;
+    const kept = [...(row.findingDecisions || [])];
+    const at = new Date().toISOString();
+    for (const d of decisions) {
+      const index = Number(d && d.index);
+      const decision = String((d && d.decision) || '');
+      if (!Number.isInteger(index) || index < 0 || index >= total) {
+        return res.status(400).json({ error: `There is no finding ${index} in this review.`, code: 'AI_NO_SUCH_FINDING' });
+      }
+      if (!['noted', 'dismissed'].includes(decision)) {
+        return res.status(400).json({ error: `"${decision}" is not a decision.`, code: 'AI_BAD_DECISION' });
+      }
+      const i = kept.findIndex(k => k.index === index);
+      const entry = { index, decision, by: { id: req.user.id, name: req.user.name || req.user.email }, at };
+      if (i >= 0) kept[i] = entry; else kept.push(entry);
+    }
+
+    const complete = total > 0 && kept.length === total;
+    await saveAiReview(row.id, { findingDecisions: kept });
+    // Only once every finding has been decided: a partial review tells us
+    // nothing about whether the output was useful.
+    if (complete) {
+      const anyNoted = kept.some(k => k.decision === 'noted');
+      for (const invocationId of (row.invocationIds || [])) {
+        await gfcModelEngine.recordOutcome({
+          invocationId,
+          outcome: anyNoted ? modelEngine.OUTCOMES.ACCEPTED : modelEngine.OUTCOMES.DISCARDED,
+          actor: req.user, patientId: row.clientId
+        });
+      }
+    }
+    // WHICH findings were decided and how. Never the finding's text.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'ai_review_decided', 'client', row.clientId,
+      { reviewId: row.id, decided: kept.length, of: total, complete });
+
+    res.json({ message: complete ? 'Recorded. Every finding has been decided.' : 'Recorded.', decided: kept.length, of: total, complete });
+  } catch (error) {
+    console.error('AI review decision error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// E5. The daily purge. A review is an AI draft a clinician checked, not a
+// medical record, so it goes. The COUNT is logged and never the content.
+const purgeAiReviews = async () => {
+  try {
+    const rows = await loadAiReviews();
+    if (!rows.length) return 0;
+    const cutoff = Date.now() - (AI_REVIEW_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+    const keep = rows.filter(r => {
+      const t = Date.parse(r && (r.finishedAt || r.at));
+      // A row with an unreadable date is KEPT rather than purged: deleting
+      // something because its timestamp could not be parsed is the wrong way
+      // round.
+      return Number.isNaN(t) ? true : t >= cutoff;
+    });
+    if (keep.length !== rows.length) {
+      await db.set('ai_reviews', keep);
+      console.log(`[AI] purged ${rows.length - keep.length} chart review(s) past ${AI_REVIEW_RETENTION_DAYS} days.`);
+    }
+    return rows.length - keep.length;
+  } catch (e) {
+    console.warn('[AI] review purge failed:', e.message);
+    return 0;
+  }
+};
+setInterval(purgeAiReviews, 24 * 60 * 60 * 1000).unref?.();
+
 app.post('/api/gfc/admin/enrollment/:clientId/documents/request', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const users = await getUsers();

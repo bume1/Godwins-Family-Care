@@ -253,6 +253,12 @@ const validateSchemaShape = (schema, where = 'schema') => {
     if (!['string', 'number', 'boolean', 'array', 'object'].includes(type)) {
       return `${where}.${key} has an unsupported type "${type}"`;
     }
+    // An array is either rows (a field map in `items`) or scalars
+    // (`itemType`). BOTH are needed: a review's findings are rows, and its
+    // "questions for the clinician" and "what I could not read" are plain
+    // strings — expressing those as single-key rows would put a wrapper
+    // object in front of every sentence a clinician reads.
+    if (type === 'array' && ['string', 'number', 'boolean'].includes(def.itemType)) continue;
     if (type === 'array' || type === 'object') {
       const nested = validateSchemaShape(def.items ? { fields: def.items } : null, `${where}.${key}.items`);
       if (nested) return nested;
@@ -305,8 +311,23 @@ const validateAgainstSchema = (value, schema, where = '') => {
       }
       const rows = [];
       let bad = null;
+      const scalar = ['string', 'number', 'boolean'].includes(def.itemType) ? def.itemType : null;
       raw.forEach((row, i) => {
         if (bad) return;
+        if (scalar) {
+          // A scalar of the wrong type is dropped rather than coerced: a
+          // number where a sentence belongs is not a sentence.
+          if (typeof row !== scalar) { bad = `${at(key)}[${i}] must be a ${scalar}`; return; }
+          if (scalar === 'string') {
+            const trimmed = row.trim();
+            if (!trimmed) return;
+            if (def.maxLength && trimmed.length > def.maxLength) { bad = `${at(key)}[${i}] is longer than the ${def.maxLength} characters declared`; return; }
+            rows.push(trimmed);
+            return;
+          }
+          rows.push(row);
+          return;
+        }
         const checked = validateAgainstSchema(row, { fields: def.items }, `${at(key)}[${i}]`);
         if (checked.error) { bad = checked.error; return; }
         rows.push(checked.value);

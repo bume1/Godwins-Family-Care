@@ -48,6 +48,15 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'gfc_messages', phi: true, owner: '3.5', note: 'interim messages; migrated into message_threads/messages by Session 9, source retained' },
   { key: 'client_document_uploads', phi: true, owner: '4.6+' },
   { key: 'document_extractions', phi: true, owner: '4.9' },
+  // A Gemini chart review: the manifest of what was read, the findings, and
+  // the clinician's noted/dismissed decision on each. PHI throughout — the
+  // findings quote the chart.
+  //
+  // DELIBERATELY NOT PART OF THE MEDICAL RECORD (owner decision 8). It is an
+  // AI draft a clinician checked, kept for audit and purged at
+  // GFC_AI_REVIEW_RETENTION_DAYS (default 180), which is why it is its own
+  // collection rather than anything hanging off an encounter.
+  { key: 'ai_reviews', phi: true, owner: 'G1' },
   { key: 'client_document_requests', phi: true, owner: '4.6+' },
   // The branded no-login upload link: one live row per client, revoked ones
   // kept as tombstones. The row is a pointer (a client id and a token), not
