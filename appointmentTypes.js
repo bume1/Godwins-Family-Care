@@ -156,6 +156,8 @@ const SECTIONS = Object.freeze({
   reasonForVisit: 'Chief Complaint / Reason for Visit',
   hpi: 'HPI',
   intervalHistory: 'Interval History',
+  // The SOAP follow-up core (owner, 2026-10-12): one name per idea.
+  subjective: 'Subjective',
   pmhSurgical: 'Past Medical / Surgical History',
   familyHistory: 'Family History',
   socialHistory: 'Social History',
@@ -264,6 +266,36 @@ const R = REQUIRED;
 
 const t = (key, required) => ({ key, required });
 
+// ---- The follow-up SOAP core (owner, 2026-10-12) --------------------------
+// "The note breakdown for visits is confusing." Follow-up, Acute / Sick and
+// Psych Follow-up share ONE core, titled exactly as the owner set it:
+//
+//   Chief Complaint · Subjective · Objective (medication reconciliation,
+//   vitals, physical exam) · Assessment · Plan
+//
+// and then each visit type's own questions after it. Built by one helper so
+// the three cannot drift into three spellings of the same note again.
+//
+// `group` says where a section sits on the page: cc / s / o / a / p for the
+// core, `extra` for the type's own questions. Requirement levels are passed in
+// per type so moving to the shared core tightens no sign rule that was looser
+// before (Acute and Psych FU never required medication reconciliation).
+const g = (key, required, group) => ({ key, required, group });
+const soapCore = ({ medRec, vitalsExam, followUp, time }) => [
+  g('chiefComplaint', R.ALWAYS, 'cc'),
+  g('subjective', R.ALWAYS, 's'),
+  g('medReconciliation', medRec, 'o'),
+  g('vitals', vitalsExam, 'o'),
+  g('physicalExam', vitalsExam, 'o'),
+  g('assessment', R.ALWAYS, 'a'),
+  g('plan', R.ALWAYS, 'p'),
+  g('ordersRxReferrals', R.OPTIONAL, 'p'),
+  g('followUp', followUp, 'p'),
+  g('mdmOrTime', time, 'p')
+];
+const extra = (key, required) => g(key, required, 'extra');
+const SOAP_GROUPS = Object.freeze(['cc', 's', 'o', 'a', 'p', 'extra']);
+
 // ---- What must be in hand before the visit -------------------------------
 // ⚠️ THE MISTAKE THIS REPLACES, RECORDED SO IT IS NOT REPEATED. The first
 // version of this file listed intake as free strings transcribed straight out
@@ -366,6 +398,7 @@ const APPOINTMENT_TYPES = Object.freeze([
   {
     key: 'pc_new_patient', service: 'primary_care', label: 'New Patient',
     defaultMinutes: 60, telehealthAllowed: true, telehealthPayerCaveat: true,
+    noteForm: 'hp',
     credentials: ['MD', 'DO', 'NP'], specialty: null,
     intake: [
       // Already collected at enrollment — referenced, never renamed.
@@ -388,21 +421,20 @@ const APPOINTMENT_TYPES = Object.freeze([
   {
     key: 'pc_follow_up', service: 'primary_care', label: 'Follow-up',
     defaultMinutes: 30, telehealthAllowed: true, telehealthPayerCaveat: true,
+    noteForm: 'followup', layout: 'soap',
     credentials: ['MD', 'DO', 'NP'], specialty: null,
     intake: [
       // A follow-up CONFIRMS what is on file rather than collecting it again.
       F('dob'), F('phone'), F('payerType'), F('medications')
     ],
-    sections: [
-      t('reasonForVisit', R.ALWAYS), t('intervalHistory', R.ALWAYS), t('medReconciliation', R.ALWAYS),
-      t('ros', R.OPTIONAL), t('vitals', R.IN_PERSON), t('physicalExam', R.IN_PERSON),
-      t('assessment', R.ALWAYS), t('plan', R.ALWAYS), t('ordersRxReferrals', R.OPTIONAL),
-      t('followUp', R.ALWAYS), t('mdmOrTime', R.ALWAYS)
-    ]
+    // The core and nothing after it. Its old optional ROS box is gone: a
+    // review of systems is written in Subjective.
+    sections: soapCore({ medRec: R.ALWAYS, vitalsExam: R.IN_PERSON, followUp: R.ALWAYS, time: R.ALWAYS })
   },
   {
     key: 'pc_acute', service: 'primary_care', label: 'Acute / Sick',
     defaultMinutes: 30, telehealthAllowed: true, telehealthPayerCaveat: true,
+    noteForm: 'followup', layout: 'soap',
     credentials: ['MD', 'DO', 'NP'], specialty: null,
     intake: [
       // The reason and the onset are the note's own chief complaint and HPI,
@@ -410,15 +442,14 @@ const APPOINTMENT_TYPES = Object.freeze([
       F('medications')
     ],
     sections: [
-      t('chiefComplaint', R.ALWAYS), t('hpi', R.ALWAYS), t('pertinentRos', R.ALWAYS),
-      t('vitals', R.IN_PERSON), t('focusedExam', R.IN_PERSON), t('medicationReview', R.OPTIONAL),
-      t('assessment', R.ALWAYS), t('plan', R.ALWAYS), t('ordersRx', R.OPTIONAL),
-      t('returnPrecautions', R.ALWAYS), t('followUp', R.OPTIONAL), t('mdmOrTime', R.ALWAYS)
+      ...soapCore({ medRec: R.OPTIONAL, vitalsExam: R.IN_PERSON, followUp: R.OPTIONAL, time: R.ALWAYS }),
+      extra('pertinentRos', R.ALWAYS), extra('returnPrecautions', R.ALWAYS)
     ]
   },
   {
     key: 'pc_awv', service: 'primary_care', label: 'Annual Wellness Visit',
     defaultMinutes: 60, telehealthAllowed: true, telehealthPayerCaveat: true,
+    noteForm: 'followup',
     credentials: ['MD', 'DO', 'NP'], specialty: null,
     // See awvEligibility(): this app cannot ASK Medicare. It warns from a
     // recorded date and says where the date came from.
@@ -442,6 +473,7 @@ const APPOINTMENT_TYPES = Object.freeze([
   {
     key: 'pc_tcm', service: 'primary_care', label: 'Transitional Care',
     defaultMinutes: 60, telehealthAllowed: true, telehealthPayerCaveat: true,
+    noteForm: 'followup',
     credentials: ['MD', 'DO', 'NP'], specialty: null,
     requiresDischargeDate: true,
     intake: [
@@ -469,6 +501,7 @@ const APPOINTMENT_TYPES = Object.freeze([
     // Minutes for care-management billing go in that note.
     key: 'pc_phone_ccm', service: 'primary_care', label: 'Phone Call / Care Management',
     defaultMinutes: 20, telehealthAllowed: false, telehealthPayerCaveat: false,
+    noteForm: 'followup',
     modalities: ['phone'],
     credentials: ['MD', 'DO', 'NP', 'PA'], specialty: null,
     intake: [F('medications'), F('conditions')],
@@ -479,6 +512,7 @@ const APPOINTMENT_TYPES = Object.freeze([
   {
     key: 'bh_initial', service: 'behavioral_health', label: 'Psych Initial Evaluation',
     defaultMinutes: 60, telehealthAllowed: true, telehealthPayerCaveat: false,
+    noteForm: 'hp',
     // A PMHNP is an NP; a psychiatrist is an MD. The SPECIALTY is what makes
     // either one a psych prescriber — see canBookType.
     credentials: ['MD', 'DO', 'NP'], specialty: 'behavioral_health',
@@ -503,6 +537,7 @@ const APPOINTMENT_TYPES = Object.freeze([
   {
     key: 'bh_follow_up', service: 'behavioral_health', label: 'Psych Follow-up / Med Mgmt',
     defaultMinutes: 30, telehealthAllowed: true, telehealthPayerCaveat: false,
+    noteForm: 'followup', layout: 'soap',
     credentials: ['MD', 'DO', 'NP'], specialty: 'behavioral_health',
     intake: [
       F('medications'),
@@ -510,11 +545,13 @@ const APPOINTMENT_TYPES = Object.freeze([
       E('gad7', 'GAD-7 anxiety screen. A template OpenEMR already holds; surface it, do not rebuild it.'),
       E('medication_adherence', 'Adherence and side effects since the last visit, asked on the psych follow-up template.')
     ],
+    // Vitals and a physical exam were never part of this note, so they are
+    // offered and not demanded; the MSE is this visit's own exam.
     sections: [
-      t('intervalHistory', R.ALWAYS), t('medicationAdherence', R.ALWAYS), t('mentalStatusExam', R.ALWAYS),
-      t('riskAssessment', R.ALWAYS), t('screeningScores', R.OPTIONAL),
-      t('assessment', R.ALWAYS), t('planMedChanges', R.ALWAYS),
-      t('safetyPlan', R.RISK_POSITIVE), t('followUp', R.ALWAYS), t('psychotherapyTime', R.OPTIONAL)
+      ...soapCore({ medRec: R.OPTIONAL, vitalsExam: R.OPTIONAL, followUp: R.ALWAYS, time: R.OPTIONAL }),
+      extra('medicationAdherence', R.ALWAYS), extra('mentalStatusExam', R.ALWAYS),
+      extra('riskAssessment', R.ALWAYS), extra('screeningScores', R.OPTIONAL),
+      extra('safetyPlan', R.RISK_POSITIVE), extra('psychotherapyTime', R.OPTIONAL)
     ]
   },
   // ---- Social work (owner, 2026-10-11) ----------------------------------
@@ -530,7 +567,7 @@ const APPOINTMENT_TYPES = Object.freeze([
     socialWorkRoles: ['lcsw', 'lmsw'],
     // The note is ONLY its template sections: no vitals, no physical exam, no
     // home-visit nursing blocks.
-    noteShape: 'sections', codeFamily: 'behavioral_health',
+    noteForm: 'followup', noteShape: 'sections', codeFamily: 'behavioral_health',
     // A full psychosocial assessment screens for risk; the structured risk
     // card must be completed before it is signed.
     riskAssessmentRequired: true,
@@ -563,7 +600,7 @@ const APPOINTMENT_TYPES = Object.freeze([
     socialWorkRoles: ['lcsw'],
     // Psychotherapy is outside RN scope: an RN cannot author one either.
     psychotherapy: true,
-    noteShape: 'sections', codeFamily: 'behavioral_health',
+    noteForm: 'followup', noteShape: 'sections', codeFamily: 'behavioral_health',
     intake: [
       C('consentToTreat'),
       E('phq9', 'PHQ-9 depression screen. A template OpenEMR already holds; surface it, do not rebuild it.'),
@@ -583,7 +620,7 @@ const APPOINTMENT_TYPES = Object.freeze([
     modalities: ['in_person', 'telehealth', 'phone'],
     credentials: ['MD', 'DO', 'NP', 'PA'], specialty: null,
     socialWorkRoles: ['lcsw', 'lmsw'],
-    noteShape: 'sections', codeFamily: 'care_management',
+    noteForm: 'followup', noteShape: 'sections', codeFamily: 'care_management',
     intake: [F('emergencyContacts'), F('primaryContact')],
     sections: [
       t('contactPurpose', R.ALWAYS), t('contactParticipants', R.ALWAYS),
@@ -596,6 +633,7 @@ const APPOINTMENT_TYPES = Object.freeze([
   {
     key: 'ime_exam', service: 'ime', label: 'Exam',
     defaultMinutes: 90, telehealthAllowed: false, telehealthPayerCaveat: false,
+    noteForm: 'hp',
     credentials: ['MD', 'DO', 'NP', 'PA'], specialty: 'ime_examiner',
     // An IME is billed to the contracting entity and NEVER attached to a
     // Medicare claim. Build-enforced downstream; declared here so the rule
@@ -689,6 +727,9 @@ const sectionsFor = (typeKey, { modality, riskPositive } = {}) => {
     if (s.required === R.RISK_POSITIVE) required = !!riskPositive;
     return {
       key: s.key, label: SECTIONS[s.key], required,
+      // Where it sits on a SOAP note (cc / s / o / a / p / extra); null on the
+      // templates that are not laid out as SOAP.
+      group: s.group || null,
       // A vital sign taken over video was reported by the patient, and the
       // note says so rather than reading as though it was measured.
       patientReported: s.required === R.IN_PERSON && !!remote
@@ -854,6 +895,21 @@ const requiresRiskAssessment = (appointmentType) => {
 };
 // A note made only of its template sections (no vitals, exam or nursing
 // blocks). The phone call is one by modality; the social work types by shape.
+// WHICH NOTE a visit type produces: 'hp' (the initial H&P screen, with BP in
+// both arms and the home-visit assessment) or 'followup' (one BP, no H&P
+// blocks, never the initial visit). Declared on every type and answered here
+// so the server decides it, not whichever screen the note was started from —
+// the Visit tab used to save every type as an H&P (owner report, 2026-10-12).
+const NOTE_FORMS = Object.freeze(['hp', 'followup']);
+const noteFormFor = (appointmentType) => {
+  const t = typeByKey(appointmentType);
+  return t && NOTE_FORMS.includes(t.noteForm) ? t.noteForm : null;
+};
+const isSoapLayout = (appointmentType) => {
+  const t = typeByKey(appointmentType);
+  return !!(t && t.layout === 'soap');
+};
+
 const isSectionsOnly = (appointmentType, modality) => {
   const t = typeByKey(appointmentType);
   return String(modality || '') === 'phone' || !!(t && t.noteShape === 'sections');
@@ -863,7 +919,8 @@ module.exports = {
   SECTIONS, REQUIRED, APPOINTMENT_TYPES,
   typeByKey, typesForService, modalitiesForType, sectionsFor, requiredSectionKeys,
   canBookType, canDocumentType, SOCIAL_WORK_ROLES, canBeTelehealth, awvEligibility, AWV_INTERVAL_DAYS,
-  resolveVisit, isBehavioralHealth, requiresRiskAssessment, isSectionsOnly, visitDocumentsFor, visitDocumentsOutstanding,
+  resolveVisit, isBehavioralHealth, requiresRiskAssessment, isSectionsOnly,
+  noteFormFor, isSoapLayout, NOTE_FORMS, SOAP_GROUPS, visitDocumentsFor, visitDocumentsOutstanding,
   resolveIntakeRef, assertIntakeIsDeclared, unbuiltIntake, toSurface, toBuild, EXPECTED_DOCUMENT_KINDS,
 
   SERVICES, MODALITIES, LOCATIONS, CODE_FAMILIES,

@@ -1490,7 +1490,8 @@ test('F: signing REFUSES an unfinished note and NAMES the sections, never a coun
   assert.ok(empty.codes.includes('SIGN_NOTE_SECTIONS_INCOMPLETE'));
   // NAMED. "3 sections outstanding" is a number a clinician has to go hunting
   // through their own note for.
-  assert.match(empty.message, /Interval History/);
+  // The follow-up SOAP core (owner, 2026-10-12): "Subjective", not "Interval History".
+  assert.match(empty.message, /Subjective/);
   assert.match(empty.message, /Physical Exam/);
   assert.match(empty.message, /Follow-up/);
 

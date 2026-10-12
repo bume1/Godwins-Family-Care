@@ -12428,6 +12428,9 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
         riskPositive: !!(ctx.riskAssessment && ctx.riskAssessment.levels &&
           clinicalRepo.RISK_DOMAINS.some(d => clinicalRepo.RISK_NEEDS_PLAN.includes(ctx.riskAssessment.levels[d])))
       }).map(sec => ({ ...sec, ownField: clinicalNotes.sectionHasOwnField(sec.key) })),
+      // The visit type's name, for the "<type> — additional" heading a SOAP
+      // note puts above that type's own questions.
+      noteTypeLabel: (apptTypes.typeByKey((record.visit || {}).appointmentType) || {}).label || null,
       // Only its template sections (a phone call, a social work note): the
       // editor shows no vitals, exam or SOAP boxes.
       sectionsOnly: apptTypes.isSectionsOnly(((record.note && record.note.visit) || record.visit || {}).appointmentType,
@@ -15546,6 +15549,10 @@ app.get('/api/clinical/patients/:clientId/place-of-service', authenticateToken, 
       // 'sections': the note is only its template sections (no vitals, exam
       // or nursing blocks). Served so the page cannot restate which types.
       noteShape: t.noteShape || null,
+      // 'hp' or 'followup', and whether the note is laid out as SOAP. Served
+      // so the Visit tab shows the screen the server will save it as.
+      noteForm: apptTypes.noteFormFor(t.key),
+      layout: apptTypes.isSoapLayout(t.key) ? 'soap' : null,
       // Whether THIS viewer may write this note. The page offers only these;
       // the note routes refuse the rest (noteTypeRefusal).
       canDocument: apptTypes.canDocumentType(t.key, viewerRole).ok
