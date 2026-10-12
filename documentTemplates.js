@@ -5,7 +5,8 @@
 // into PROPOSALS a person approves — the allow-list, the identity-conflict
 // guard, the stale-field refusal, the staff-verified provenance, the review
 // screen and the ledger. It then made the only source of those proposals a
-// model on Bedrock, which is not reachable until an AWS agreement lands.
+// model behind the model engine, which was not reachable until the Gemini on
+// Vertex AI setup landed (2026-10-12).
 //
 // NONE OF THAT SAFETY WORK IS MODEL-SPECIFIC. `documentExtraction.buildProposals`
 // takes a plain `{ path: value }` map and has no idea where the values came
@@ -13,7 +14,8 @@
 // document already carries — and every proposal it makes goes through exactly
 // the same review a model's would.
 //
-// THIS IS NOT A STOPGAP AND SHOULD NOT BE REMOVED WHEN BEDROCK ARRIVES. For a
+// THIS IS NOT A STOPGAP AND SHOULD NOT BE REMOVED NOW THE MODEL ENGINE IS
+// REACHABLE (owner, 2026-10-12: the template reader stays as the fallback). For a
 // form the office receives a hundred times — the same referring practice's
 // face sheet, the same carrier's insurance card — a declared label beats a
 // model: it is cheaper, it is auditable, it is reproducible, and it cannot

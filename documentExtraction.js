@@ -147,7 +147,16 @@ const validateTargets = (targets) => {
   if (bad.length) throw new Error(`documentExtraction targets are invalid:\n  ${bad.join('\n  ')}`);
 }
 
-const extractableKinds = () => Object.keys(TARGETS).concat(CONSENT_PACKET_KIND);
+// WHAT CAN ACTUALLY BE READ, which is not the same as what has a kind.
+//
+// `consentPacket` is DELIBERATELY NOT HERE (2026-10-12). It was advertised as
+// extractable and has no schema at all, so every attempt to read one was a
+// request that could never succeed: before the schema check moved ahead of the
+// transport it sent the document first and failed afterwards, and now it is
+// refused at the boundary — either way the office was offered a button that
+// could not work. A kind belongs on this list when it has a schema, and
+// `buildConsentProposals` is waiting here for the day one is written.
+const extractableKinds = () => Object.keys(TARGETS);
 const isExtractable = (kind) => extractableKinds().includes(String(kind || ''));
 
 // ---- The schema handed to the model --------------------------------------

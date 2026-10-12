@@ -90,6 +90,15 @@ openemr.forActor = (actor) => {
   };
 };
 
+// Who has an OpenEMR sign-in. A patient never does; the staff here do.
+const EMR_CONNECTED = new Set(['admin_vis_1', 'rn_vis_1', 'mgr_vis_1']);
+const emrAuthMod = require(path.join(__dirname, '..', 'emrAuth.js'));
+const realCreateEmrAuth = emrAuthMod.createEmrAuth;
+emrAuthMod.createEmrAuth = (o) => {
+  const a = realCreateEmrAuth(o);
+  return { ...a, statusFor: async (id) => ({ ...(await a.statusFor(id)), connected: EMR_CONNECTED.has(id) }) };
+};
+
 const jwt = require('jsonwebtoken');
 const config = require(path.join(__dirname, '..', 'config.js'));
 
@@ -170,6 +179,10 @@ const CASE_MANAGER = { id: 'cm_vis_1', role: 'caseManager', email: 'viscm@exampl
   let r = await call('POST', '/api/gfc/documents/upload', ct, { kind: 'photoId', fileName: 'my-licence.png', fileDataB64: b64(PNG) });
   check('the client uploads their own', r.status === 200, JSON.stringify(r.body).slice(0, 200));
   const ownId = r.body.document && r.body.document.id;
+  // The patient has no OpenEMR sign-in, so their upload files when a
+  // clinician opens the chart.
+  await call('GET', `/api/clinical/patients/${CLIENT.id}/chart`, rt);
+  await new Promise(res => setTimeout(res, 400));
   r = await call('POST', `${P}/upload`, at, { kind: 'priorRecords', fileName: 'medical-summary.png', fileDataB64: b64(PNG) });
   check('the office files one', r.status === 200, JSON.stringify(r.body).slice(0, 200));
   const staffId = r.body.document && r.body.document.id;

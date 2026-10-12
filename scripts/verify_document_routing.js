@@ -109,6 +109,16 @@ openemr.forActor = (actor) => {
   };
 };
 
+// Who has an OpenEMR sign-in (Session 5.2). A patient never does; the staff
+// user does. Upload filing checks this before it asks OpenEMR.
+const EMR_CONNECTED = new Set();
+const emrAuthMod = require(path.join(__dirname, '..', 'emrAuth.js'));
+const realCreateEmrAuth = emrAuthMod.createEmrAuth;
+emrAuthMod.createEmrAuth = (o) => {
+  const a = realCreateEmrAuth(o);
+  return { ...a, statusFor: async (id) => ({ ...(await a.statusFor(id)), connected: EMR_CONNECTED.has(id) }) };
+};
+
 const jwt = require('jsonwebtoken');
 const config = require(path.join(__dirname, '..', 'config.js'));
 
@@ -184,6 +194,7 @@ const CAREGIVER = {
 
 (async () => {
   STORE.set('users', [CLIENT, LINKED_CLIENT, STAFF, CAREGIVER]);
+  EMR_CONNECTED.add(STAFF.id);
   require(path.join(__dirname, '..', 'server.js'));
   await new Promise(r => setTimeout(r, 2500));
 
@@ -229,15 +240,19 @@ const CAREGIVER = {
     JSON.stringify(r.body.documentsFiling));
   check('still exactly one document in the (stubbed) chart', EMR_DOCS.length === 1, String(EMR_DOCS.length));
 
-  console.log('\n── Automatic filing: an already-linked client files immediately, inline in the upload response ──');
+  console.log('\n── A patient has no OpenEMR sign-in: their upload WAITS, and files when staff open the chart ──');
   r = await call('POST', '/api/gfc/documents/upload', lct, { kind: 'referral', fileName: 'referral.png', fileDataB64: b64(PNG) });
   check('upload accepted on the linked client', r.status === 200, JSON.stringify(r.body).slice(0, 200));
   const uploadId = r.body.document.id;
-  check('the upload response says it filed, with no button or second call needed',
-    r.body.emrFiling && r.body.emrFiling.filed === true, JSON.stringify(r.body.emrFiling));
-  check('the stubbed EMR actually received the bytes', EMR_DOCS.length === 2 && EMR_DOCS[1].puuid === 'emr-uuid-123', JSON.stringify(EMR_DOCS));
+  check('the upload response says it is waiting for a clinician, not that it failed',
+    r.body.emrFiling && r.body.emrFiling.filed === false && r.body.emrFiling.reason === 'WAITING_FOR_CLINICIAN', JSON.stringify(r.body.emrFiling));
+  check('nothing was sent under the patient\'s name', EMR_DOCS.length === 1, String(EMR_DOCS.length));
+  let chartNow = await call('GET', `/api/clinical/patients/${LINKED_CLIENT.id}/chart`, st);
+  await new Promise(res => setTimeout(res, 400));
+  check('opening the chart filed it with the staff member\'s sign-in',
+    EMR_DOCS.length === 2 && EMR_DOCS[1].puuid === 'emr-uuid-123' && EMR_DOCS[1].byId === STAFF.id, JSON.stringify(EMR_DOCS));
   check('a "referral" kind uses the /Consult category — not the /Medical Record default',
-    EMR_DOCS[1].categoryPath === '/Consult', EMR_DOCS[1].categoryPath);
+    EMR_DOCS[1] && EMR_DOCS[1].categoryPath === '/Consult', EMR_DOCS[1] && EMR_DOCS[1].categoryPath);
 
   r = await getAdminDocs(LINKED_CLIENT.id);
   filedRow = checklistOf(LINKED_CLIENT.id, r).find(f => f.id === uploadId);
@@ -253,17 +268,20 @@ const CAREGIVER = {
     !!(staffFiledRow && staffFiledRow.emrFiled), JSON.stringify(staffFiledRow));
   check('a "physicianOrder" kind uses the /Orders category', EMR_DOCS.length === 3 && EMR_DOCS[2].categoryPath === '/Orders', JSON.stringify(EMR_DOCS[2]));
 
-  console.log('\n── Automatic filing: the no-login link is the third door, and it files too ──');
+  console.log('\n── The no-login link waits too, and accepting the document files it ──');
   r = await call('POST', `/api/gfc/admin/enrollment/${LINKED_CLIENT.id}/documents/upload-link`, st, {});
   check('a link was generated', r.status === 200 && r.body.link && r.body.link.url, JSON.stringify(r.body));
   const linkToken = (r.body.link.url.match(/\/upload\/([^/?#]+)/) || [])[1];
   check('a token was carried in the url', !!linkToken, r.body.link.url);
   r = await call('POST', `/api/gfc/upload/${linkToken}`, null, { kind: 'otherDocument', fileName: 'fromlink.png', fileDataB64: b64(PNG) });
   check('the link upload is accepted with no login at all', r.status === 200, JSON.stringify(r.body).slice(0, 200));
-  check('and it files automatically too, with no admin ever seeing this document',
-    r.body.emrFiling && r.body.emrFiling.filed === true, JSON.stringify(r.body.emrFiling));
+  const linkUploadId = r.body.document.id;
+  check('and it waits for a clinician', r.body.emrFiling && r.body.emrFiling.reason === 'WAITING_FOR_CLINICIAN', JSON.stringify(r.body.emrFiling));
+  r = await call('POST', `/api/gfc/admin/enrollment/${LINKED_CLIENT.id}/documents/${linkUploadId}/review`, st, { decision: 'accepted' });
+  await new Promise(res => setTimeout(res, 400));
+  check('accepting it filed it', EMR_DOCS.length === 4 && EMR_DOCS[3].fileName === 'fromlink.png', JSON.stringify(EMR_DOCS[3]));
   check('an "otherDocument" kind falls to the /Medical Record default',
-    EMR_DOCS.length === 4 && EMR_DOCS[3].categoryPath === '/Medical Record', JSON.stringify(EMR_DOCS[3]));
+    EMR_DOCS[3] && EMR_DOCS[3].categoryPath === '/Medical Record', JSON.stringify(EMR_DOCS[3]));
 
   console.log('\n── No button exists to trigger filing manually — the old routes are gone ──');
   r = await call('POST', `/api/gfc/admin/enrollment/${LINKED_CLIENT.id}/documents/${uploadId}/file-to-emr`, st);
@@ -338,7 +356,7 @@ const CAREGIVER = {
 
   console.log('\n── An EMR failure never fails the upload it rides on — it rides along as a skip ──');
   emrShouldFail = true;
-  r = await call('POST', '/api/gfc/documents/upload', lct, { kind: 'otherDocument', fileName: 'fail.png', fileDataB64: b64(PNG) });
+  r = await call('POST', `/api/gfc/admin/enrollment/${LINKED_CLIENT.id}/documents/upload`, st, { kind: 'otherDocument', fileName: 'fail.png', fileDataB64: b64(PNG) });
   check('the upload itself still succeeds even though filing will fail', r.status === 200, JSON.stringify(r.body).slice(0, 200));
   const failId = r.body.document.id;
   check('the upload response says why filing failed, inline — no separate call needed',
@@ -359,8 +377,10 @@ const CAREGIVER = {
   console.log('\n── A transient failure is not the end of the story — the next link-time pass can still pick it up ──');
   r = await call('POST', `/api/clinical/patients/${LINKED_CLIENT.id}/link`, st, { openEmrPatientId: LINKED_CLIENT.openEmrPatientId, relink: true });
   check('relink accepted', r.status === 200, JSON.stringify(r.body).slice(0, 200));
-  check('the previously-failed upload was the one candidate, and it was picked up this time',
-    !!r.body.documentsFiling && r.body.documentsFiling.filed === 1 && r.body.documentsFiling.skipped === 0, JSON.stringify(r.body.documentsFiling));
+  // Opening the chart above already retried it with the staff sign-in, so the
+  // relink has nothing left to do.
+  check('the previously-failed upload was already picked up by opening the chart; the relink finds nothing left',
+    !!r.body.documentsFiling && r.body.documentsFiling.filed === 0 && r.body.documentsFiling.skipped === 0, JSON.stringify(r.body.documentsFiling));
   r = await getAdminDocs(LINKED_CLIENT.id);
   const nowFiled = checklistOf(LINKED_CLIENT.id, r).find(f => f.id === failId);
   check('and now the checklist shows it filed', !!(nowFiled && nowFiled.emrFiled), JSON.stringify(nowFiled));

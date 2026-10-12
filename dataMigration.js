@@ -48,6 +48,15 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'gfc_messages', phi: true, owner: '3.5', note: 'interim messages; migrated into message_threads/messages by Session 9, source retained' },
   { key: 'client_document_uploads', phi: true, owner: '4.6+' },
   { key: 'document_extractions', phi: true, owner: '4.9' },
+  // A Gemini chart review: the manifest of what was read, the findings, and
+  // the clinician's noted/dismissed decision on each. PHI throughout — the
+  // findings quote the chart.
+  //
+  // DELIBERATELY NOT PART OF THE MEDICAL RECORD (owner decision 8). It is an
+  // AI draft a clinician checked, kept for audit and purged at
+  // GFC_AI_REVIEW_RETENTION_DAYS (default 180), which is why it is its own
+  // collection rather than anything hanging off an encounter.
+  { key: 'ai_reviews', phi: true, owner: 'G1' },
   { key: 'client_document_requests', phi: true, owner: '4.6+' },
   // A patient's request to give a family member portal access: their name,
   // email and relationship to a named client. Approved rows point at the user.
@@ -55,11 +64,31 @@ const COLLECTION_REGISTRY = Object.freeze([
   // Self sign-ups waiting on staff: a name, date of birth, address and
   // insurance details, plus a password HASH and a verify-token HASH.
   { key: 'signup_requests', phi: true, owner: 'portal redesign 10/2026' },
+  // Which Google Calendar event mirrors which OpenEMR appointment eid.
+  { key: 'google_calendar_events', phi: true, owner: 'calendar sync 10/2026' },
+  // Patient statements: copays and home care hours. Amounts and dates of
+  // service for a named client. Stripe holds only the invoice number.
+  { key: 'patient_invoices', phi: true, owner: 'billing 10/2026' },
   // The branded no-login upload link: one live row per client, revoked ones
   // kept as tombstones. The row is a pointer (a client id and a token), not
   // a document — but the token is a standing door onto that client's file,
   // so it moves with the same care as anything else naming a patient.
   { key: 'client_upload_links', phi: true, owner: '4.13' },
+  // A Meet room per telehealth visit: a POINTER, deliberately not a ledger.
+  //
+  // It holds the eid, the client, the space name and the join link, and NO
+  // date, time or status — those live on the OpenEMR appointment, which is the
+  // one place a visit's schedule is recorded. A second copy here would be a
+  // second answer to "when is this visit", and the two would drift the first
+  // time somebody rescheduled in OpenEMR's own calendar.
+  //
+  // PHI because it names a client and the room they will be seen in, even
+  // though nothing identifying was ever sent to Google.
+  { key: 'appointment_video_links', phi: true, owner: 'T1' },
+  // One-tap join tokens for the reminder email. Hashed, bound to one eid and
+  // one recipient, and dead outside the join window — but a live token is a
+  // door onto a patient's video visit, so it moves with the same care.
+  { key: 'appointment_join_tokens', phi: true, owner: 'T1' },
   { key: 'caregiver_documents', phi: false, owner: '6+', note: 'employment paperwork (timesheets, certs) — pointers only, bytes in Drive' },
   // The caregiver welcome packet: their profile answers, their signature, and
   // the office's own onboarding checklist. NOT patient PHI — it is employment

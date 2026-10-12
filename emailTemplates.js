@@ -120,11 +120,21 @@ function ctaButton(url, label) {
 // The cream callout with the gold left rule — the marketing engine uses it for
 // testimonials; here it carries the one thing the reader must not miss, such
 // as why a document came back.
-function calloutBlock(text) {
+//
+// THE LABEL IS NOT DECORATION. In HTML the cream panel and the gold rule set
+// this text apart on their own; in the TEXT half there is no panel, so an
+// unlabelled reason arrived as a bare paragraph reading as though it had
+// wandered in from somewhere else — "The photo is too blurry to read the expiry
+// date." with nothing saying what it answers. A caller that has a reason names
+// what the reason is FOR, and the name renders in both halves.
+function calloutBlock(text, label) {
   if (!text) return '';
+  const heading = label
+    ? `<p style="margin:0 0 6px 0;font-family:Georgia,serif;font-size:12px;letter-spacing:0.08em;text-transform:uppercase;color:${PALETTE.navy};opacity:0.72;">${esc(label)}</p>`
+    : '';
   return `<table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px 0;"><tr>
 <td style="padding:18px 22px;background:${PALETTE.cream};border-left:4px solid ${PALETTE.gold};">
-<p style="margin:0;font-family:Georgia,serif;font-size:15px;color:${PALETTE.navy};line-height:1.6;">${esc(text)}</p>
+${heading}<p style="margin:0;font-family:Georgia,serif;font-size:15px;color:${PALETTE.navy};line-height:1.6;">${esc(text)}</p>
 </td></tr></table>`;
 }
 
@@ -175,7 +185,7 @@ ${headline}
 <p style="margin:0 0 16px 0;">${greeting}</p>
 ${bodyHtml}
 ${fieldsBlock(o.fields)}
-${calloutBlock(o.callout)}
+${calloutBlock(o.callout, o.calloutLabel)}
 ${ctaButton(o.ctaUrl, o.ctaLabel)}
 ${signatureBlock(o.signoff)}
 </div></td></tr>
@@ -190,7 +200,7 @@ ${footerBlock(o.unsubscribeUrl)}
     fieldRows.forEach(f => textParts.push(`${f.label}: ${f.value}`));
     textParts.push('');
   }
-  if (o.callout) textParts.push(o.callout, '');
+  if (o.callout) textParts.push(o.calloutLabel ? `${o.calloutLabel}: ${o.callout}` : o.callout, '');
   if (safeUrl(o.ctaUrl)) textParts.push(`${o.ctaLabel || 'Open your portal'}: ${safeUrl(o.ctaUrl)}`, '');
   textParts.push(
     'Warmly,',

@@ -35,6 +35,22 @@ const { ORG } = require('../public/consent-text');
 
 module.exports = function createSchedulingRoutes(deps) {
   const { db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4 } = deps;
+  // The client-facing visit notices go through the SAME notifier the clinical
+  // ones use, so the recipient rules (the client plus a designated POA, never
+  // non-POA family), the house template and the transport-detail rule are not
+  // restated here. It arrives as a GETTER because the notifier is built further
+  // down server.js than this router is registered, and would be in its temporal
+  // dead zone at registration; it is only ever called at request time.
+  //
+  // A MISSING NOTIFIER IS LOUD, NEVER SILENT. These notices are best-effort and
+  // must not undo a shift edit, so this does not throw — but a wiring slip that
+  // quietly stops telling clients their visit moved is the exact class of
+  // failure this repo keeps paying for, so it says so every time.
+  const notifier = () => {
+    const n = typeof deps.notify === 'function' ? deps.notify() : null;
+    if (!n) console.error('[PHCP] no notifier injected — the client was NOT told about this visit change');
+    return n;
+  };
   const router = express.Router();
 
   const ROLES = config.ROLES;
@@ -734,15 +750,18 @@ module.exports = function createSchedulingRoutes(deps) {
       // to do about a correction to our own timesheet.
       if (stillAhead && ['confirmed', 'in_progress'].includes(rows[idx].status)) {
         const client = await loadClient(rows[idx].client_id);
-        if (client && client.email) {
-          await queueNotification('shift_time_changed_client', client.id, client.email, client.name,
-            {
-              subject: 'Your care visit has been rescheduled',
-              body: `Your visit has moved to ${when}. It was previously ${time.fmtDateTime(before.start)}.`,
-              ctaUrl: links.PATHS.PORTAL, ctaLabel: 'Open your portal'
-            },
-            { relatedEntityId: `${rows[idx].id}:edited-client:${rows[idx].edit_count}`, relatedEntityType: 'shift', createdBy: actor.id });
-          notified.push(client.name);
+        const notice = notifier();
+        if (client && notice) {
+          const out = await notice.caregiverVisitMoved({
+            clientId: rows[idx].client_id,
+            caregiverName: rows[idx].caregiver_name || null,
+            from: time.fmtDateTime(before.start),
+            to: when,
+            shiftId: rows[idx].id,
+            editCount: rows[idx].edit_count,
+            actorId: actor.id
+          });
+          if (out && out.notified) notified.push(client.name);
         }
       }
     }
@@ -1196,8 +1215,8 @@ module.exports = function createSchedulingRoutes(deps) {
         const n = sorted.length;
         await queueNotification('shift_time_changed_client', client.id, client.email, client.name,
           {
-            subject: n > 1 ? 'Your care visits have been rescheduled' : 'Your care visit has been rescheduled',
-            body: `${n} of your upcoming visit${n > 1 ? 's have' : ' has'} moved, starting with ${time.fmtDateTime(sorted[0].after.start)}. Open your portal for the full schedule.`,
+            subject: n > 1 ? 'Your caregiver visits have been rescheduled' : 'Your caregiver visit has been rescheduled',
+            body: `${n} of your upcoming caregiver visit${n > 1 ? 's have' : ' has'} moved, starting with ${time.fmtDateTime(sorted[0].after.start)}. Your portal has the full schedule.`,
             ctaUrl: links.PATHS.PORTAL, ctaLabel: 'Open your portal'
           },
           { relatedEntityId: `${sorted[0].shiftId}:bulk-edited-client:${n}`, relatedEntityType: 'shift', createdBy: req.user.id });
@@ -2068,15 +2087,13 @@ module.exports = function createSchedulingRoutes(deps) {
         },
         { relatedEntityId: `${shift.id}:confirmed`, relatedEntityType: 'shift', createdBy: actor.id });
     }
-    const client = users.find(u => u.id === shift.client_id);
-    if (client && client.email) {
-      await queueNotification('shift_confirmed_client', client.id, client.email, client.name,
-        {
-          subject: 'Your care visit is confirmed',
-          body: `${shift.caregiver_name || 'A caregiver'} is confirmed for ${when}.`,
-          ctaUrl: links.PATHS.PORTAL, ctaLabel: 'Open your portal'
-        },
-        { relatedEntityId: `${shift.id}:confirmed-client`, relatedEntityType: 'shift', createdBy: actor.id });
+    const notice = notifier();
+    if (notice) {
+      await notice.caregiverVisitConfirmed({
+        clientId: shift.client_id,
+        caregiverName: shift.caregiver_name || null,
+        when, shiftId: shift.id, actorId: actor.id
+      });
     }
   };
 

@@ -36,7 +36,11 @@ const currentContext = () => als.getStore() || null;
 const PHI_PREFIXES = Object.freeze([
   '/api/gfc', '/api/clinical', '/api/caregiver', '/api/scheduling', '/api/messaging', '/api/emr',
   '/api/users', '/api/client', '/api/client-documents', '/api/client-portal', '/api/client-portals',
-  '/api/service-reports', '/api/service-portal', '/api/admin', '/api/admin-hub', '/api/hubspot', '/api/projects', '/api/team-members', '/api/reporting'
+  '/api/service-reports', '/api/service-portal', '/api/admin', '/api/admin-hub', '/api/hubspot', '/api/projects', '/api/team-members', '/api/reporting',
+  // T1 C4: the one-tap video join link. Not under /api at all, because it is a
+  // link somebody taps in a text message — and it opens a live door into a
+  // patient's consultation, so it is as much a PHI access as any chart read.
+  '/v'
 ]);
 // Not PHI by construction: auth handshakes (audited by their own events),
 // templates/config/announcements, email unsubscribe tokens, bootstrap.

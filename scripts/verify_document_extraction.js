@@ -12,7 +12,7 @@
 // a typed correction goes through.
 //
 // What this does NOT prove, stated plainly:
-//   • That Bedrock reads a document correctly. There is no transport wired, so
+//   • That Gemini reads a document correctly. The boundary refuses here, so
 //     the extract route refuses at the boundary and the probe asserts THAT —
 //     which is the honest state of the feature today. The proposal/review half
 //     below is driven by seeding a proposal the way the route would store one.
@@ -26,7 +26,7 @@
 //     that the route delegates to the same allow-list and the same commit
 //     helper a typed correction uses is build-enforced in
 //     test/enrollment_admin_edit.test.js.
-//   Run this against the deployment, with Bedrock configured, to close all three.
+//   Run this against the deployment, with Vertex AI configured, to close all three.
 
 const BASE = process.env.GFC_PROBE_BASE || 'http://localhost:3213';
 const ADMIN_EMAIL = process.env.GFC_PROBE_ADMIN || 'admin@godwinsfamilycarellc.com';
@@ -81,7 +81,7 @@ const makeUser = async (token, name, role, extra) => {
   console.log('\n--- 1. the boundary is unsatisfied, and the app says which settings would satisfy it ---');
   const st = await call('GET', `/api/gfc/admin/enrollment/${patient.id}/extraction`, admin);
   ok('the extraction status route answers', st.status === 200, st.body);
-  ok('  it reports reading as NOT available (no Bedrock wired)', st.body && st.body.available === false, st.body && st.body.available);
+  ok('  it reports reading as NOT available (the model boundary refuses here)', st.body && st.body.available === false, st.body && st.body.available);
   ok('  and names every missing setting, not the first',
     st.body && Array.isArray(st.body.blockers) && st.body.blockers.length >= 3, st.body && st.body.blockers);
   ok('  the readable kinds are SERVED, so no screen restates them',

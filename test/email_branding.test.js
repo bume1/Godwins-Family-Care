@@ -458,6 +458,16 @@ test('no GFC address anywhere is on a domain other than godwinsfamilycarellc.com
   // The misspelling is deliberately not written out here: this file is inside
   // its own sweep, and a guard that trips on its own explanation is no guard.
   const dirs = ['.', 'routes', 'scripts', 'public', 'test'];
+  // ONE named exception, and it is the only kind that can ever be justified:
+  // a test whose SUBJECT is refusing a lookalike domain has to contain
+  // lookalike domains. `meetRooms.clinicianWorkspaceEmail` matches the
+  // Workspace domain EXACTLY, and the thing that proves it is an address on a
+  // domain that merely STARTS with the real one and gets refused. (The
+  // lookalikes are not written out here for the same reason the misspelling
+  // is not: this file is inside its own sweep.) Building them from string
+  // concatenation to dodge this grep would be worse — it would make the next
+  // person's grep lie about what is in the tree.
+  const LOOKALIKE_FIXTURES = Object.freeze(['test/meet_rooms.test.js']);
   const bad = [];
   for (const dir of dirs) {
     const abs = path.join(root, dir);
@@ -465,6 +475,7 @@ test('no GFC address anywhere is on a domain other than godwinsfamilycarellc.com
     for (const f of fs.readdirSync(abs)) {
       if (!/\.(js|json|md|example|html)$/.test(f) && f !== '.env.example') continue;
       const rel = dir === '.' ? f : `${dir}/${f}`;
+      if (LOOKALIKE_FIXTURES.includes(rel)) continue;
       const full = path.join(root, rel);
       if (!fs.statSync(full).isFile()) continue;
       // Read raw. A regex literal in a test spells the domain with an escaped
@@ -478,6 +489,14 @@ test('no GFC address anywhere is on a domain other than godwinsfamilycarellc.com
     }
   }
   assert.deepStrictEqual(bad, [], `misspelled GFC domain(s) found:\n  ${bad.join('\n  ')}`);
+  // The exemption is pinned to what earns it. If that file stops asserting
+  // that a lookalike domain is refused, it stops being a fixture and goes
+  // back under the sweep.
+  const fixture = fs.readFileSync(path.join(root, 'test', 'meet_rooms.test.js'), 'utf8');
+  assert.match(fixture, /clinicianWorkspaceEmail/,
+    'the exempted file must be the one testing exact-domain matching');
+  assert.match(fixture, /evil\.net/,
+    'the exempted file must actually exercise a lookalike domain');
 });
 
 test('the default admin address is the real mailbox', () => {

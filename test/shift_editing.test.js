@@ -283,7 +283,22 @@ function harness(seed = {}, hooks = {}) {
       req.user = { ...u, isManager: !!u.isManager, hasClinicalAccess: !!u.hasClinicalAccess };
       next();
     },
-    uuidv4: () => `id-${Math.random().toString(36).slice(2, 10)}`
+    uuidv4: () => `id-${Math.random().toString(36).slice(2, 10)}`,
+    // THE REAL NOTIFIER, built exactly as server.js builds it. The client-facing
+    // visit notices moved onto it on 2026-10-12 so they get the POA, the house
+    // template and the transport rule; a harness that left `notify` out would
+    // exercise a different function and report the client as never told.
+    notify: () => require('../notifications').createNotifier({
+      getUsers: async () => await db.get('users'),
+      queueNotification: async (type, id, email, name, tpl) => {
+        notifications.push({ type, email, tpl }); return { id: 'q' };
+      },
+      getAppBaseUrl: async () => 'https://app.test.local',
+      emailTransport: { transportStatus: () => ({ baaCovered: true }) },
+      staffRoles: ['admin', 'user', 'caseManager'],
+      clientRole: require('../config').ROLES.CLIENT,
+      familyRole: require('../config').ROLES.FAMILY
+    })
   });
   const app = express();
   app.use(express.json());
@@ -750,4 +765,34 @@ test('there is ONE writer for a shift time, and every door comes through it', ()
   const approveBody = approve.slice(0, nextRoute);
   assert.ok(approveBody.includes('applyShiftEdit('),
     'approving a time-change request must go through the shared editor, never its own write');
+});
+
+// ---------------------------------------------------------------------------
+// 2026-10-12 — the two client-facing visit notices moved onto the shared
+// notifier. M19 of that pass (disabling the confirm notice outright) survived
+// every unit test until this one existed: the only coverage was the scheduling
+// probe, which is not part of `npm test`. A notice nothing asserts is a notice
+// that can be switched off in a refactor and nobody finds out.
+// ---------------------------------------------------------------------------
+test('accepting an assigned shift tells BOTH the caregiver and the client', async () => {
+  const assigned = {
+    ...POSTED(), status: 'assigned', caregiver_id: 'cna-1', caregiver_name: 'Cam CNA',
+    start: '2099-10-01T13:00:00.000Z', end: '2099-10-01T17:00:00.000Z'
+  };
+  const h = harness({ shifts: [assigned] });
+  try {
+    const res = await h.call('POST', '/api/scheduling/shifts/shift-1/accept', {}, 'cna-1');
+    assert.strictEqual(res.status, 200, JSON.stringify(res.body));
+    const types = h.notifications.map(n => n.type).sort();
+    assert.ok(types.includes('shift_confirmed'), 'the caregiver is told');
+    assert.ok(types.includes('shift_confirmed_client'), 'and so is the client');
+
+    const toClient = h.notifications.find(n => n.type === 'shift_confirmed_client');
+    // It goes through the house template, so it has an HTML half and a When line.
+    assert.ok(toClient.tpl.htmlBody, 'rendered through the house template, not a bare sentence');
+    assert.match(toClient.tpl.body, /When: /, 'a client is told when, not only that something is confirmed');
+    assert.match(toClient.tpl.body, /Cam CNA/, 'and who is coming');
+    assert.match(toClient.tpl.subject, /caregiver visit/,
+      'named as a caregiver visit, so it cannot be confused with a clinician visit');
+  } finally { h.close(); }
 });

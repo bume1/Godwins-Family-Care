@@ -59,6 +59,8 @@ const patientRead = require('./patientReadRepository');
 const familyInvites = require('./familyInvites');
 const portalProfile = require('./portalProfile');
 const signups = require('./signupRequests');
+const googleCalendar = require('./googleCalendar');
+const billing = require('./patientBilling');
 const patientPublish = require('./patientPublish');   // Portal P1: the published copies the portal reads (patients never read OpenEMR)
 // Session 4.8 — the clinical role enum, capability matrix and credential
 // ceiling. THE one place that answers "may this person do this"; the clinical
@@ -205,6 +207,10 @@ if (!process.env.JWT_SECRET) {
 }
 
 app.use(cors());
+// The Stripe webhook's signature is over the RAW bytes, so its body is read
+// raw here, before the JSON parser (which skips a body already read). The
+// route itself is registered with the billing routes, after the audit layer.
+app.use('/api/webhooks/stripe', express.raw({ type: 'application/json', limit: '1mb' }));
 app.use(bodyParser.json({ limit: config.BODY_PARSER_LIMIT }));
 // Session 5.4: request context (request id, hashed IP) for every request, and
 // the PHI-access audit row for every request under a PHI prefix. Registered
@@ -1251,8 +1257,8 @@ const DEFAULT_EMAIL_TEMPLATES = [
     id: 'welcome_email',
     name: 'Welcome Email — New User',
     category: 'automated',
-    subject: `Welcome to ${config.BRAND.COMPANY_NAME} — Your Account is Ready`,
-    body: `Welcome, {{recipientName}}!\n\nYour account has been created. Use the details below to log in for the first time. You will be prompted to set a new password after your first login.\n\nUsername / Email: {{recipientEmail}}\nTemporary Password: {{temporaryPassword}}\n\nLog in here: {{loginUrl}}\n\n${config.BRAND.COMPANY_NAME}`,
+    subject: `Welcome to ${config.BRAND.COMPANY_NAME} — your account is ready`,
+    body: `Hi {{recipientName}},\n\nYour account is ready. Use the details below to sign in for the first time. You will be asked to choose your own password once you are in.\n\nUsername: {{recipientEmail}}\nTemporary password: {{temporaryPassword}}\n\nIf you were not expecting this email, call our office and we will look into it.\n\nSign in: {{loginUrl}}\n\n${config.BRAND.COMPANY_NAME}`,
     htmlBody: null,
     isDefault: true, updatedAt: null, updatedBy: null
   },
@@ -1660,11 +1666,19 @@ const sendDueVisitReminders = async () => {
       if (i === undefined) continue;
       rows[i] = { ...rows[i], status: 'void', voidReason: 'missed_window', voidedAt: new Date().toISOString() };
       dirty = true;
-      console.log(`[REMINDER] Voided ${r.id} — more than ${visitReminders.MISSED_WINDOW_HOURS}h past its send window; a late reminder is worse than none.`);
+      console.log(`[REMINDER] Voided ${r.id} — more than ${visitReminders.missedWindowHoursFor(visitReminders.kindOf(r))}h past its send window; a late reminder is worse than none.`);
     }
 
     for (const r of due) {
-      const out = await notify.visitReminder({ reminder: r, orgPhone: consentText.ORG.phone });
+      const out = visitReminders.kindOf(r) === visitReminders.REMINDER_KINDS.VIDEO_JOIN
+        // T1 C4: the day-of nudge, with a one-tap link minted for THIS
+        // recipient. The room is checked first: a nudge sent for a visit whose
+        // room has gone would hand somebody a link to nothing.
+        ? await notify.videoReminder({
+          reminder: r, orgPhone: consentText.ORG.phone,
+          ctaFor: (user, actingFor) => mintJoinCta(r, user, actingFor)
+        })
+        : await notify.visitReminder({ reminder: r, orgPhone: consentText.ORG.phone });
       const i = byId.get(r.id);
       if (i === undefined) continue;
       // MARKED 'sent' ONLY AFTER THE QUEUE ACCEPTS IT. A skip (the recipient
@@ -1683,6 +1697,34 @@ const sendDueVisitReminders = async () => {
   } catch (err) {
     console.error('[REMINDER] Send sweep failed (non-fatal):', err.message);
   }
+};
+
+// T1 C4: one tap, one person, one visit. The token is bound to this recipient
+// and this appointment, so a patient's link is not their POA's and neither
+// survives onto the next visit. A LIVE TOKEN IS REUSED rather than reminted:
+// sending a second link while the first still worked leaves somebody holding
+// two and guessing which one is real.
+const mintJoinCta = async (reminder, user, actingFor) => {
+  if (!user || !user.id) return null;
+  // No room, no link. The pointer store is the authority, so a visit moved out
+  // of video between the booking and the nudge gets the portal button instead.
+  const link = videoLinkFor(await loadVideoLinks(), reminder.eid);
+  if (!link || !link.meetingUri) return null;
+  const rows = await loadRows('appointment_join_tokens');
+  const live = videoJoinTokens.liveTokenFor(rows, reminder.eid, user.id);
+  if (live) return null;  // one live link per person; the first one still works
+  const { token, row } = videoJoinTokens.buildToken({
+    eid: reminder.eid, clientId: reminder.clientId, recipientUserId: user.id,
+    recipientRole: actingFor ? 'poa' : 'patient', salt: JWT_SECRET
+  });
+  rows.push(row);
+  await db.set('appointment_join_tokens', rows);
+  // WHICH visit and WHO for — never the token or the room URL. A link in an
+  // audit row is a door into a patient's visit sitting in a log.
+  await logActivity(null, 'system', 'video_join_link_issued', 'client', reminder.clientId, {
+    appointmentEid: String(reminder.eid), recipientUserId: String(user.id), recipientRole: row.recipientRole
+  });
+  return { url: `${await getAppBaseUrl()}${appLinks.videoJoinFor(token)}`, label: 'Join the video visit' };
 };
 
 // Generate a URL-friendly slug from client name
@@ -2782,7 +2824,12 @@ app.use(welcomePacketRoutes({ db, config, logActivity, queueNotification, getUse
   // rule the consent signatures follow.
   hashIp: (req) => roiRepo.hashIp(clientIpFrom(req), JWT_SECRET) }));
 
-app.use(schedulingRoutes({ db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4 }));
+app.use(schedulingRoutes({
+  db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4,
+  // A GETTER, not the notifier itself: `notify` is built far below this line
+  // and would be in its temporal dead zone here. Called only at request time.
+  notify: () => notify
+}));
 // Message attachments (2026-09-29): multipart parsing, private Drive storage, and
 // the byte-sniff. `detectFileType` is defined further down this file, so it is
 // passed as a closure; `contentDisposition` is imported at the top.
@@ -8040,6 +8087,74 @@ app.get('/api/gfc/clinical/visits/:visitId/summary.pdf', authenticateToken, requ
   }
 });
 
+// ── T1 C2 — the patient asks for the join link ───────────────────────────
+//
+// GET /api/gfc/clinical/appointments/:eid/join. `:eid` names an appointment
+// WITHIN the session-resolved patient's own published calendar — the same
+// shape as :docId and :visitId — and a row that is not theirs is simply not
+// there, so it answers 404 rather than a 403 that confirms it exists.
+//
+// THE LINK IS NEVER STORED IN A PATIENT PAYLOAD. It is handed out here, on
+// request, inside the join window, and every hand-out is logged — so a link
+// cannot sit in a cached portal response or an old email and open the room
+// months later.
+//
+// PATIENT AND POA ONLY, and that is a deliberate narrowing of
+// requireEnrolledClient. Appearing on a video call is ATTENDING the visit, not
+// reading about it: the sharing toggle that lets a cousin see that a visit is
+// on Tuesday is not consent for them to be in the room. A POA acts for the
+// patient everywhere else (4.3) and acts for them here. Other family are told
+// the patient can invite them, rather than given a link.
+const joinInstant = (date, time) => {
+  const iso = practiceTime.instantFromZoned(date, time);
+  return iso ? Date.parse(iso) : NaN;
+};
+app.get('/api/gfc/clinical/appointments/:eid/join', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const ctx = await resolvePatientClinicalContext(req, res);
+    if (!ctx) return;
+    const { client, audience, sections } = ctx;
+    if (audience !== 'patient' && audience !== 'poa') {
+      return res.status(403).json({
+        error: 'Only the patient or their designated Power of Attorney can open the video room. Ask them to invite you from inside the visit.',
+        code: 'JOIN_NOT_PERMITTED'
+      });
+    }
+    if (!sections.appointments || sections.appointments === 'none') {
+      return res.status(403).json({ error: 'Visits are not shared with you.', code: 'APPOINTMENTS_NOT_SHARED' });
+    }
+    const eid = String(req.params.eid || '').trim();
+    const row = (await loadRows('patient_published_appointments')).find(r => r && r.clientId === client.id) || null;
+    const appt = ((row && row.appointments) || []).find(a => a && String(a.id) === eid) || null;
+    if (!appt) return res.status(404).json({ error: 'Visit not found', code: 'APPOINTMENT_NOT_FOUND' });
+    // The ROOM is the authority on whether there is one, not the flag: the
+    // published copy is a snapshot and the pointer store is live.
+    const link = videoLinkFor(await loadVideoLinks(), eid);
+    if (!link || !link.meetingUri) {
+      return res.status(409).json({
+        error: 'This visit does not have a video room. Call the office if you were expecting a video visit.',
+        code: 'MEET_NO_ROOM'
+      });
+    }
+    const state = patientPublish.joinState(patientPublish.joinWindow(appt, joinInstant), Date.now());
+    if (!state.ok) {
+      return res.status(409).json({
+        error: state.error, code: state.code,
+        opensAt: state.opensAt || null, closesAt: state.closesAt || null
+      });
+    }
+    await logPatientClinicalRead(req, ctx, 'video_join_link', { appointmentEid: eid });
+    res.json({
+      join: { url: link.meetingUri, code: link.meetingCode || null },
+      opensAt: state.opensAt, closesAt: state.closesAt,
+      visit: { date: appt.date, startTime: appt.startTime, provider: appt.provider || null }
+    });
+  } catch (error) {
+    console.error('Patient video join error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // GET /api/gfc/clinical/care-plan.pdf — the SIGNED care plan (both
 // signatures). Served from the Drive reference on client.carePlanDocs — never
 // from OpenEMR Documents (server defect). When the Drive copy is not
@@ -8686,6 +8801,9 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
         visitDraft: { open: !!unlinkedDraft, savedAt: (unlinkedDraft && unlinkedDraft.updatedAt) || null }
       });
     }
+    // Anything the patient sent that could not file under their own login
+    // files now, with this clinician's (best-effort, not awaited).
+    fileWaitingUploads(client.id, req.user);
     const emr = openemr.forActor(req.user);
     const puuid = client.openEmrPatientId;
     // Started here rather than awaited at banner-build time: the banner needs
@@ -9652,8 +9770,136 @@ const clinicianNameForProviderId = async (providerId) => {
   return u ? visitReminders.visitClinicianLabel(u) : null;
 };
 
+// ── Session T1: a Meet room per telehealth visit ──────────────────────────
+//
+// Owner decision 10. The room is created when the visit is booked (or moved
+// into telehealth) and SHUT when the visit is cancelled, marked a no-show, or
+// moved out of telehealth. Google does not allow Meet to be embedded in
+// another site, so it opens in its own tab — which is also why the patient's
+// door is a link rather than a screen inside the portal.
+//
+// A MEET FAILURE NEVER BLOCKS A BOOKING. The appointment is on the calendar
+// and the patient has been told; losing that because Google was briefly
+// unreachable would be the worse outcome by a long way. Every call site takes
+// the outcome back as a value and surfaces it as a warning with a retry, the
+// same shape the charge write and the care-plan PDF already use.
+const meetRooms = require('./meetRooms');
+const videoJoinTokens = require('./videoJoinTokens');   // T1 C4 — the one-tap join link
+
+const loadVideoLinks = () => loadRows('appointment_video_links');
+const videoLinkFor = (rows, eid) => (rows || []).find(r => r && String(r.eid) === String(eid)) || null;
+
+// The clinician who will host. Resolved from the appointment's OpenEMR
+// provider id through our own user records, never from the acting user: an
+// admin books on a clinician's behalf, and a room hosted by the admin would
+// leave the clinician a guest in their own visit.
+const hostForProviderId = async (providerId) => {
+  if (!providerId) return null;
+  const users = await getUsers();
+  return users.find(u => u && String(u.openEmrProviderId || '') === String(providerId)) || null;
+};
+
+// Create the room for a telehealth visit. Returns a RESULT, never throws.
+const createVideoRoomFor = async ({ eid, client, providerId, actor }) => {
+  const st = meetRooms.meetStatus();
+  if (!st.configured) return { created: false, code: 'MEET_NOT_CONFIGURED', reason: st.blockers.join('; '), blockers: st.blockers };
+  const host = await hostForProviderId(providerId);
+  const hostEmail = meetRooms.clinicianWorkspaceEmail(host);
+  if (!hostEmail) {
+    // Named rather than silent: the fix is a Google account, and nobody finds
+    // that out from a missing button.
+    return {
+      created: false, code: 'MEET_NO_HOST_ACCOUNT',
+      reason: host
+        ? `${host.name || 'This clinician'} needs a GFC Google account to host video visits.`
+        : 'This appointment has no clinician mapped to an OpenEMR provider, so nobody can host the video visit.'
+    };
+  }
+  let room;
+  try {
+    room = await meetRooms.createSpace(hostEmail);
+  } catch (e) {
+    console.error('[MEET] room creation failed:', e.code || e.message);
+    return { created: false, code: e.code || 'MEET_CALL_FAILED', reason: e.message };
+  }
+  const rows = await loadVideoLinks();
+  const row = {
+    // A POINTER, not a ledger: no date, no time, no status. The appointment in
+    // OpenEMR is the one record of when the visit is, and a second copy here
+    // would drift the first time somebody moved it in OpenEMR's own calendar.
+    eid: String(eid),
+    clientId: client.id,
+    spaceName: room.spaceName,
+    meetingUri: room.meetingUri,
+    meetingCode: room.meetingCode,
+    createdFor: host.id,
+    createdForEmail: hostEmail,
+    createdAt: new Date().toISOString()
+  };
+  await db.set('appointment_video_links', [...rows.filter(r => String(r.eid) !== String(eid)), row]);
+  // WHICH visit got a room, never the join link: a meeting URI in the activity
+  // log is a door into a patient's visit sitting in a log nobody gates.
+  await logActivity(actor && actor.id, actor && (actor.name || actor.email), 'video_room_created', 'client', client.id, {
+    appointmentEid: String(eid), hostUserId: host.id, spaceName: room.spaceName
+  });
+  return { created: true, meetingUri: room.meetingUri, meetingCode: room.meetingCode };
+};
+
+// Shut the room for a visit that is no longer happening, or is no longer a
+// video visit. The POINTER GOES whatever Google says: a pointer kept after a
+// cancellation is a join button on a visit that was called off, which is worse
+// than a room left open that nothing links to. A failure to shut it is
+// reported so somebody can close it by hand.
+const closeVideoRoomFor = async ({ eid, actor, why }) => {
+  const rows = await loadVideoLinks();
+  const row = videoLinkFor(rows, eid);
+  if (!row) return { closed: false, code: 'NO_ROOM' };
+  let result = { ok: false, failures: ['Meet is not configured, so the room could not be shut.'] };
+  if (meetRooms.meetStatus().configured) {
+    try {
+      result = await meetRooms.closeSpace(row.createdForEmail, row.spaceName);
+    } catch (e) {
+      result = { ok: false, failures: [e.message] };
+    }
+  }
+  await db.set('appointment_video_links', rows.filter(r => String(r.eid) !== String(eid)));
+  // T1 C4: and every one-tap link for it. A link that still opened the room
+  // after a cancellation is a door into a meeting nobody agreed to — and the
+  // link outlives the pointer unless it is shut here, because it carries no
+  // expiry of its own.
+  const tokens = await loadRows('appointment_join_tokens');
+  const revoked = videoJoinTokens.revokeForEid(tokens, eid, why || 'room closed');
+  if (revoked) await db.set('appointment_join_tokens', tokens);
+  await logActivity(actor && actor.id, actor && (actor.name || actor.email), 'video_room_closed', 'client', row.clientId, {
+    appointmentEid: String(eid), spaceName: row.spaceName, why: why || null, shut: result.ok, linksRevoked: revoked
+  });
+  return { closed: true, shut: result.ok, failures: result.failures || [], linksRevoked: revoked };
+};
+
+// Move a room to the eid the tombstone swap just created. Called beside
+// migrateAppointmentLinkage for the same reason it exists: the swap CHANGES
+// the eid, so a pointer left on the old one is a room nothing can find.
+const migrateVideoLink = async (oldEid, newEid) => {
+  const rows = await loadVideoLinks();
+  let changed = false;
+  for (const r of rows) {
+    if (String(r.eid) === String(oldEid)) { r.eid = String(newEid); r.movedFromEid = String(oldEid); changed = true; }
+  }
+  if (changed) await db.set('appointment_video_links', rows);
+  // The one-tap links move with the room rather than being reminted: a
+  // reschedule keeps the room, and sending a second link while the first still
+  // worked would leave a patient holding two and guessing.
+  const tokens = await loadRows('appointment_join_tokens');
+  if (videoJoinTokens.migrateEid(tokens, oldEid, newEid)) await db.set('appointment_join_tokens', tokens);
+  return changed;
+};
+
+// What a patient is told about where their visit happens. "Video visit" is the
+// owner's wording (T1 C5) and it appears here and on the portal from this one
+// declaration, so an email and a screen cannot describe the same visit
+// differently.
 const VISIT_PLACE_LABEL = Object.freeze({
-  home: 'Your home', telehealth: 'By video visit', office: 'Our office'
+  home: 'Your home', telehealth: 'Video visit', office: 'Our office', phone: 'Phone call'
 });
 
 // ── Session 4.11: the day-before reminder, captured at WRITE time ──────────
@@ -9663,20 +9909,24 @@ const VISIT_PLACE_LABEL = Object.freeze({
 // SKIP is a normal outcome and is logged as one — the commonest skip is a visit
 // booked so close to the day that the booking email already covers it, and
 // logging that as an error would make the log useless.
-const scheduleVisitReminder = async ({ clientId, eid, visitDate, startTime, when, clinician, place, actorId }) => {
+// `kind` picks which reminder this is: the day-before one by default, or T1's
+// day-of video nudge. ONE writer, so both go through the same skip reporting
+// and the same store — a second scheduler would be a second set of rules
+// about what counts as a skip.
+const scheduleVisitReminder = async ({ clientId, eid, visitDate, startTime, when, clinician, place, actorId, kind }) => {
   try {
     const built = visitReminders.buildVisitReminder({
-      id: uuidv4(), clientId, eid, visitDate, startTime, when, clinician, place
+      id: uuidv4(), clientId, eid, visitDate, startTime, when, clinician, place, kind
     });
     if (built.skipped) {
-      console.log(`[REMINDER] No reminder for appointment ${eid}: ${built.reason}`);
+      console.log(`[REMINDER] No ${kind || 'day-before'} reminder for appointment ${eid}: ${built.reason}`);
       return { scheduled: false, reason: built.reason };
     }
     const rows = (await db.get('visit_reminders')) || [];
     rows.push(built.reminder);
     await db.set('visit_reminders', rows);
     await logActivity(actorId || 'system', 'system', 'visit_reminder_scheduled', 'client', clientId, {
-      appointmentEid: String(eid), visitDate, sendAt: built.reminder.sendAt
+      appointmentEid: String(eid), visitDate, sendAt: built.reminder.sendAt, kind: built.reminder.kind
     });
     return { scheduled: true, sendAt: built.reminder.sendAt };
   } catch (e) {
@@ -9688,14 +9938,14 @@ const scheduleVisitReminder = async ({ clientId, eid, visitDate, startTime, when
 // Voiding is keyed on the OLD eid. The tombstone swap CHANGES the eid on a
 // reschedule, so keying it on the new one would leave the old reminder live and
 // send a patient to yesterday's time.
-const voidVisitReminders = async ({ eid, reason, clientId, actorId }) => {
+const voidVisitReminders = async ({ eid, reason, clientId, actorId, kind }) => {
   try {
     const rows = (await db.get('visit_reminders')) || [];
-    const out = visitReminders.voidRemindersForEid(rows, eid, reason);
+    const out = visitReminders.voidRemindersForEid(rows, eid, reason, null, kind);
     if (!out.voided) return { voided: 0 };
     await db.set('visit_reminders', out.rows);
     await logActivity(actorId || 'system', 'system', 'visit_reminder_voided', 'client', clientId || null, {
-      appointmentEid: String(eid), reason, voided: out.voided
+      appointmentEid: String(eid), reason, voided: out.voided, kind: kind || 'all'
     });
     return { voided: out.voided };
   } catch (e) {
@@ -9927,6 +10177,18 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
     }
 
     const eid = await emr.createAppointmentRow(client.openEmrPatientId, built.fields);
+
+    // T1 A4: a telehealth visit gets its room here, at booking, so the join
+    // link exists before anybody needs it. A MEET FAILURE NEVER BLOCKS THE
+    // BOOKING — the visit is on the calendar and a video visit with no room is
+    // still a visit somebody can phone about, whereas a refused booking is
+    // care not scheduled. The shortfall is returned as a warning and the room
+    // can be opened later from the encounter.
+    let apptVideo = null;
+    if (clinicalRepo.locationNeedsVideoRoom(built.location)) {
+      apptVideo = await createVideoRoomFor({ eid: String(eid), client, providerId, actor: actorFromReq(req) });
+      if (!apptVideo.created) apptWarnings.push(`Video room not created: ${apptVideo.reason}`);
+    }
     await logActivity(req.user.id, req.user.name || req.user.email, 'appointment_created', 'client', client.id, {
       role: req.user.role, appointmentEid: eid, providerId,
       date: body.date, startTime: body.startTime, durationMinutes: built.minutes, location: built.location,
@@ -9953,6 +10215,19 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
       clientId: client.id, eid: String(eid), visitDate: body.date, startTime: body.startTime,
       when: bookedWhen, clinician: bookedClinician, place: bookedPlace, actorId: req.user.id
     });
+    // T1 C4: and, for a video visit with a room, the day-of nudge carrying the
+    // one-tap link. Gated on the ROOM, not the location: a nudge for a visit
+    // with no room would hand somebody a link to nothing.
+    if (apptVideo && apptVideo.created) {
+      await scheduleVisitReminder({
+        clientId: client.id, eid: String(eid), visitDate: body.date, startTime: body.startTime,
+        when: bookedWhen, clinician: bookedClinician, place: bookedPlace, actorId: req.user.id,
+        kind: visitReminders.REMINDER_KINDS.VIDEO_JOIN
+      });
+    }
+    // And onto the practice's Google clinical calendar (one way; best-effort).
+    await mirrorVisitToGoogle({ clientId: client.id, eid: String(eid), title: built.fields.pc_title, date: body.date,
+      startTime: body.startTime, durationMinutes: built.minutes, location: built.location, providerId });
 
     // Read-back proves the round-trip (acceptance requirement); the single-row
     // GET carries the full record (list rows omit notes/location on 7.0.4).
@@ -9962,6 +10237,7 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
     res.json({
       message: 'Appointment created in OpenEMR',
       appointment: readBack ? clinicalRepo.summarizeAppointmentRow(readBack, null) : { eid },
+      video: apptVideo && apptVideo.created ? { meetingUri: apptVideo.meetingUri, meetingCode: apptVideo.meetingCode } : undefined,
       warnings: apptWarnings.length ? apptWarnings : undefined
     });
   } catch (error) {
@@ -9969,6 +10245,30 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
     res.status(502).json({ error: `OpenEMR write failed: ${error.message}` });
   }
 });
+
+// Google clinical calendar (owner, 2026-10-12): the facts an event needs,
+// from OUR records. Best-effort by design — see googleCalendar.js.
+const calendarPatientFacts = async (clientId) => {
+  const u = clientId ? (await getUsers()).find(x => x && x.id === clientId) : null;
+  if (!u) return { patientName: null, address: null };
+  const a = (u.intake && u.intake.address) || u.address || null;
+  const address = a && typeof a === 'object'
+    ? [a.line1 || a.street, a.line2, a.city, [a.state, a.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ') || null
+    : (a ? String(a) : null);
+  return { patientName: u.preferredName ? `${u.preferredName} ${String(u.name || '').split(' ').slice(-1)[0]}` : u.name, address };
+};
+const mirrorVisitToGoogle = async ({ clientId, eid, previousEid, title, date, startTime, durationMinutes, location, providerId, status }) => {
+  try {
+    const facts = await calendarPatientFacts(clientId);
+    const r = await googleCalendar.upsertVisit(db, {
+      eid, clientId, title, date, startTime, durationMinutes, location, status,
+      patientName: facts.patientName, address: facts.address,
+      clinicianName: providerId ? await clinicianNameForProviderId(providerId) : null
+    }, { previousEid });
+    if (!r.synced && r.reason !== 'not_configured') console.warn(`[CALENDAR] visit ${eid} not mirrored: ${r.reason}`);
+    return r;
+  } catch (e) { console.warn('[CALENDAR] mirror error (non-fatal):', e.message); return { synced: false }; }
+};
 
 // POST /api/clinical/appointments/:eid/reschedule — tombstone swap: new slot
 // row + cancelled tombstone preserving the old slot, then remove the
@@ -9984,12 +10284,25 @@ app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requir
 
     const dec = clinicalRepo.decodeAppointmentNotes(row.pc_hometext);
     const providerId = (req.user.role === config.ROLES.ADMIN && body.providerId) ? String(body.providerId) : String(row.pc_aid);
+    // T1 A4: A RESCHEDULE NEVER DEFAULTS THE PLACE. The location lives in a
+    // marker inside pc_hometext and the 7.0.4 list endpoints omit that field,
+    // so a hydration failure used to fall through to 'home' and silently turn
+    // a video visit into a house call nobody was driving to. Refuse instead:
+    // the clinician picks the place and saves again, which costs one click and
+    // cannot send somebody to the wrong kind of visit.
+    const rsLocation = body.location || dec.location || null;
+    if (!clinicalRepo.APPT_LOCATIONS.includes(rsLocation)) {
+      return res.status(409).json({
+        error: 'This visit\u2019s place could not be read back from OpenEMR, so the reschedule was refused rather than guessed. Choose the place (home, video visit, our office or phone) and save again.',
+        code: 'APPT_LOCATION_UNKNOWN'
+      });
+    }
     const built = clinicalRepo.buildAppointmentFields({
       date: body.date, startTime: body.startTime,
       durationMinutes: body.durationMinutes || clinicalRepo.rowDurationMinutes(row),
       providerId, categoryId: row.pc_catid,
       title: body.title || row.pc_title,
-      location: body.location || dec.location || 'home',
+      location: rsLocation,
       notes: body.notes !== undefined ? body.notes : dec.notes
     }, { categoryId: row.pc_catid });
     if (built.error) return res.status(400).json({ error: built.error, code: built.code });
@@ -10026,6 +10339,29 @@ app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requir
     const swap = await emr.swapAppointment(row.puuid, row.pc_eid, [newRow, tombstone]);
     const [newEid, tombstoneEid] = swap.newEids;
     await migrateAppointmentLinkage(row.pc_eid, newEid);
+    // T1 A4: the room follows the visit. The swap CHANGES the eid, so a pointer
+    // left on the old one is a room nothing can find — the same reason
+    // migrateAppointmentLinkage exists, one layer along.
+    await migrateVideoLink(row.pc_eid, newEid);
+    const rsWarnings = [];
+    let rsVideo = null;
+    const rsClient = (await clinicalClientsByPuuid()).get(String(row.puuid)) || null;
+    if (clinicalRepo.locationNeedsVideoRoom(rsLocation)) {
+      // Rescheduled INTO video, or still video: open a room if there is none.
+      // An EXISTING room is kept — a patient who already holds the link must
+      // not be handed a different one because the time moved.
+      if (rsClient && !videoLinkFor(await loadVideoLinks(), newEid)) {
+        rsVideo = await createVideoRoomFor({
+          eid: String(newEid), client: { id: rsClient.clientId }, providerId, actor: actorFromReq(req)
+        });
+        if (!rsVideo.created) rsWarnings.push(`Video room not created: ${rsVideo.reason}`);
+      }
+    } else {
+      // Rescheduled AWAY from video: shut the room. Leaving it open leaves a
+      // join link live for a visit now happening somewhere else.
+      const rsShut = await closeVideoRoomFor({ eid: String(newEid), actor: actorFromReq(req), why: 'rescheduled away from video' });
+      if (rsShut.closed && !rsShut.shut) rsWarnings.push(`The video room could not be shut (${(rsShut.failures || []).join('; ')}) — close it by hand in Google Meet.`);
+    }
 
     const clientMap = await clinicalClientsByPuuid();
     const appClient = clientMap.get(String(row.puuid)) || null;
@@ -10056,13 +10392,30 @@ app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requir
         clientId: appClient.clientId, eid: String(newEid), visitDate: body.date, startTime: body.startTime,
         when: movedTo, clinician: movedClinician, place: movedPlace, actorId: req.user.id
       });
+      // T1 C4: the day-of nudge follows the same rule. The void above keyed on
+      // the OLD eid already took the old nudge with it, so a visit still done
+      // by video gets a fresh one and a visit moved out of video gets none.
+      if (videoLinkFor(await loadVideoLinks(), newEid)) {
+        await scheduleVisitReminder({
+          clientId: appClient.clientId, eid: String(newEid), visitDate: body.date, startTime: body.startTime,
+          when: movedTo, clinician: movedClinician, place: movedPlace, actorId: req.user.id,
+          kind: visitReminders.REMINDER_KINDS.VIDEO_JOIN
+        });
+      }
     }
+    // The Google event moves with the visit (it is keyed on the OLD eid).
+    await mirrorVisitToGoogle({ clientId: appClient ? appClient.clientId : null, eid: String(newEid), previousEid: String(row.pc_eid),
+      title: row.pc_title, date: body.date, startTime: body.startTime, durationMinutes: built.minutes, location: built.location, providerId });
     // Portal P2: the patient's calendar follows every change.
     await republishAppointmentsByPuuid(emr, row.puuid, req);
     res.json({
       message: 'Appointment rescheduled in OpenEMR (original slot preserved as a cancelled entry)',
       appointmentEid: newEid, tombstoneEid,
-      warnings: swap.deleted ? [] : [`The superseded row could not be removed (${swap.deleteError}) — it is still visible on the calendar; retry the cancel on it.`]
+      video: rsVideo && rsVideo.created ? { meetingUri: rsVideo.meetingUri, meetingCode: rsVideo.meetingCode } : undefined,
+      warnings: [
+        ...(swap.deleted ? [] : [`The superseded row could not be removed (${swap.deleteError}) — it is still visible on the calendar; retry the cancel on it.`]),
+        ...rsWarnings
+      ]
     });
   } catch (error) {
     console.error('Clinical appointment reschedule error:', error);
@@ -10089,6 +10442,14 @@ app.post('/api/clinical/appointments/:eid/cancel', authenticateToken, requireCli
     const swap = await emr.swapAppointment(row.puuid, row.pc_eid, [tombstone]);
     const [tombstoneEid] = swap.newEids;
     await migrateAppointmentLinkage(row.pc_eid, tombstoneEid);
+    // T1 A4: a cancelled visit must not keep a live join link. The POINTER
+    // GOES whatever Google says — a join button on a visit that was called off
+    // is worse than a room nothing links to — and a failure to shut the room is
+    // reported so somebody can close it by hand.
+    const cxShut = await closeVideoRoomFor({ eid: String(row.pc_eid), actor: actorFromReq(req), why: 'appointment cancelled' });
+    const cxWarnings = (cxShut.closed && !cxShut.shut)
+      ? [`The video room could not be shut (${(cxShut.failures || []).join('; ')}) — close it by hand in Google Meet.`]
+      : [];
 
     const clientMap = await clinicalClientsByPuuid();
     const appClient = clientMap.get(String(row.puuid)) || null;
@@ -10109,12 +10470,17 @@ app.post('/api/clinical/appointments/:eid/cancel', authenticateToken, requireCli
       // 4.11: a cancelled visit must not keep reminding anybody about it.
       await voidVisitReminders({ eid: String(row.pc_eid), reason: 'cancelled', clientId: appClient.clientId, actorId: req.user.id });
     }
+    // A cancelled visit leaves the clinicians' Google calendar.
+    await googleCalendar.removeVisit(db, String(row.pc_eid));
     // Portal P2: the patient's calendar follows every change.
     await republishAppointmentsByPuuid(emr, row.puuid, req);
     res.json({
       message: 'Appointment cancelled — it stays on the calendar as a cancelled entry with the reason',
       appointmentEid: tombstoneEid,
-      warnings: swap.deleted ? [] : [`The superseded row could not be removed (${swap.deleteError}) — it is still visible on the calendar.`]
+      warnings: [
+        ...(swap.deleted ? [] : [`The superseded row could not be removed (${swap.deleteError}) — it is still visible on the calendar.`]),
+        ...cxWarnings
+      ]
     });
   } catch (error) {
     console.error('Clinical appointment cancel error:', error);
@@ -10138,6 +10504,17 @@ app.post('/api/clinical/appointments/:eid/no-show', authenticateToken, requireCl
     const swap = await emr.swapAppointment(row.puuid, row.pc_eid, [swapRow]);
     const [newEid] = swap.newEids;
     await migrateAppointmentLinkage(row.pc_eid, newEid);
+    // T1 A4: the visit did not happen, so the room is shut and the pointer
+    // goes. A no-show whose room stays open is a door into an empty meeting
+    // that anybody holding the old link can still walk through.
+    const nsShut = await closeVideoRoomFor({ eid: String(row.pc_eid), actor: actorFromReq(req), why: 'marked no-show' });
+    // T1 C4: and the nudge. A no-show sends no notice of its own (that stays a
+    // clinician's conversation), but a join nudge for a visit already marked
+    // as missed would be a reminder to attend something that is over.
+    await voidVisitReminders({ eid: String(row.pc_eid), reason: 'cancelled', actorId: req.user.id });
+    const nsWarnings = (nsShut.closed && !nsShut.shut)
+      ? [`The video room could not be shut (${(nsShut.failures || []).join('; ')}) — close it by hand in Google Meet.`]
+      : [];
 
     const clientMap = await clinicalClientsByPuuid();
     const appClient = clientMap.get(String(row.puuid)) || null;
@@ -10145,12 +10522,20 @@ app.post('/api/clinical/appointments/:eid/no-show', authenticateToken, requireCl
       role: req.user.role, appointmentEid: newEid, previousEid: String(row.pc_eid),
       slot: `${row.pc_eventDate} ${String(row.pc_startTime).slice(0, 5)}`, supersededRowRemoved: swap.deleted
     });
+    // The Google event stays, marked as a no-show, and follows the new eid.
+    await mirrorVisitToGoogle({ clientId: appClient ? appClient.clientId : null, eid: String(newEid), previousEid: String(row.pc_eid),
+      title: row.pc_title, date: row.pc_eventDate, startTime: String(row.pc_startTime).slice(0, 5),
+      durationMinutes: clinicalRepo.rowDurationMinutes(row), location: clinicalRepo.decodeAppointmentNotes(row.pc_hometext).location,
+      providerId: row.pc_aid, status: 'no_show' });
     // Portal P2: the patient's calendar follows every change.
     await republishAppointmentsByPuuid(emr, row.puuid, req);
     res.json({
       message: 'Appointment marked as no-show',
       appointmentEid: newEid,
-      warnings: swap.deleted ? [] : [`The superseded row could not be removed (${swap.deleteError}) — it is still visible on the calendar.`]
+      warnings: [
+        ...(swap.deleted ? [] : [`The superseded row could not be removed (${swap.deleteError}) — it is still visible on the calendar.`]),
+        ...nsWarnings
+      ]
     });
   } catch (error) {
     console.error('Clinical appointment no-show error:', error);
@@ -10614,9 +10999,15 @@ const publishAppointmentsForClient = async (emr, client, actor, summaries) => {
     }
     const users = await getUsers();
     const byProvider = new Map(users.filter(u => u && u.openEmrProviderId).map(u => [String(u.openEmrProviderId), visitReminders.visitClinicianLabel(u)]));
+    // T1 C1: which of these appointments has a video room. From this app's own
+    // pointer store, so it is right even when the calendar read could not show
+    // the location marker. The join LINK is never published — the patient
+    // asks for it through the window-checked join route.
+    const videoEids = new Set((await loadVideoLinks()).filter(r => r && r.eid != null).map(r => String(r.eid)));
     const built = patientPublish.buildPublishedAppointments({
       summaries: rows, today: practiceTime.zonedParts(new Date()).isoDate,
-      providerName: (id) => (id != null ? byProvider.get(String(id)) : null) || null
+      providerName: (id) => (id != null ? byProvider.get(String(id)) : null) || null,
+      hasVideoFor: (eid) => videoEids.has(String(eid))
     });
     const all = await loadRows('patient_published_appointments');
     const i = all.findIndex(r => r && r.clientId === client.id);
@@ -11936,6 +12327,12 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
       : (record.completedSections || []);
     const linkRow = (await getAppointmentLinkage()).find(r => String(r.encounterUuid) === String(encounterUuid));
     const linkedEid = linkRow ? String(linkRow.eid) : null;
+    // T1 B1/B2: the room for THIS visit, and the pre-join checklist. The room
+    // is keyed on the linked appointment, because the room belongs to the
+    // appointment and the encounter is what it becomes.
+    const encVideo = linkedEid ? videoLinkFor(await loadVideoLinks(), linkedEid) : null;
+    const isVideoVisit = !!encVideo || clinicalRepo.locationNeedsVideoRoom((record.visit || {}).location) ||
+      clinicalRepo.isVideoModality(((record.note && record.note.visit) || record.visit || {}).modality);
     // T1 candidates (proposals only) — see loadDxCandidates
     const candidates = cands.candidates;
     const attestationWarnings = ctx.attestation ? ctx.attestation.warnings || [] : [];
@@ -11993,6 +12390,13 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
       // The shared note, its versions and its signatures.
       noteState: await noteView(ctx, { signsAsAuthor: clinicalRoles.isAuthorSigner(req.user) }),
       linkedAppointmentEid: linkedEid,
+      // T1: the clinician's own door into the room, and nothing about it to a
+      // viewer whose visit is not a video visit — an empty card on a house call
+      // is a control that invites a click that does nothing.
+      video: encVideo ? { meetingUri: encVideo.meetingUri, meetingCode: encVideo.meetingCode, createdAt: encVideo.createdAt } : null,
+      isVideoVisit,
+      telehealthChecklist: isVideoVisit ? clinicalRepo.buildTelehealthChecklist(record, client) : null,
+      telehealthCheckKeys: clinicalRepo.TELEHEALTH_CHECK_KEYS,
       // What THIS viewer may do with the note, answered by the server so the
       // page never decides a credential question itself.
       noteActions: {
@@ -13388,6 +13792,18 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
     if (!String(record.patientSummary || '').trim()) {
       warnings.push('"What we did today" is empty, so the patient\'s visit summary has no plain-language account of this visit. Add it from the coding panel before billing submits, or in an addendum.');
     }
+    // T1 B2: the pre-join checks WARN and never block. The clinician on the
+    // call is the person who knows whether identity was confirmed, and a note
+    // refused over a tick box is an hour of documentation held hostage. Only
+    // for a video visit — an in-person note has no pre-join checks to make.
+    if (clinicalRepo.locationNeedsVideoRoom((record.visit || {}).location) ||
+      clinicalRepo.isVideoModality((record.visit || {}).modality)) {
+      const tele = clinicalRepo.buildTelehealthChecklist(record, ctx.client);
+      if (!tele.complete) {
+        warnings.push(`Video visit pre-join checks not recorded: ${tele.outstanding.join('; ')}. Record them on this encounter, or note them in an addendum.`);
+      }
+      if (tele.electionWarning) warnings.push(tele.electionWarning);
+    }
     // Portal P1: publish, now that the attestation is persisted. An author's
     // note waits for the clinician addendum (publishEncounterToPortal skips it).
     // Soft-fail: a publish failure never voids the signature.
@@ -13630,6 +14046,11 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/billing-submit', au
       renderingProviderId: record.renderingProvider ? record.renderingProvider.id : null,
       chargesPosted: !!record.chargesPosted, postedChargeIds: (record.postedCharges || []).map(c => c.id), chargeError: record.chargeError || null
     });
+    // A fixed copay, when the office set one for this patient (patientBilling.js).
+    try {
+      const copay = await createCopayInvoice({ client: ctx.client, encounterUuid: ctx.encounterUuid, visitDate: record.date || null, by: req.user });
+      if (copay) warnings.push(`Copay statement ${copay.number} (${billing.fmtUsd(copay.totalCents)}) sent to the patient's portal.`);
+    } catch (e) { warnings.push(`The copay statement could not be created (${e.message.slice(0, 120)}).`); }
     res.json({
       message: record.chargesPosted ? 'Submitted to billing; charges posted to Billing Manager' : 'Submitted to billing',
       record, billingStatus: record.billingStatus,
@@ -13638,6 +14059,240 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/billing-submit', au
   } catch (error) {
     console.error('Billing submit error:', error);
     res.status(502).json({ error: `Submit to billing failed: ${error.message}` });
+  }
+});
+
+// ============================================================
+// PATIENT BILLING + STRIPE (owner, 2026-10-12: copays and home care hours)
+// Rules: patientBilling.js. Invoices live in the app (`patient_invoices`);
+// Stripe sees an invoice number, an amount and our internal id, nothing else.
+// Who bills: an admin or a manager (clinicalRoles.canSubmitBilling, requireBilling).
+// Who pays: the client or a designated POA. Plain family never see money.
+// ============================================================
+const INVOICES = 'patient_invoices';
+const readInvoices = async () => (await db.get(INVOICES)) || [];
+const saveInvoice = async (inv) => {
+  const rows = await readInvoices();
+  const i = rows.findIndex(r => r && r.id === inv.id);
+  if (i === -1) rows.push(inv); else rows[i] = inv;
+  await db.set(INVOICES, rows);
+  return inv;
+};
+const newInvoiceNumber = async () => {
+  const taken = new Set((await readInvoices()).map(r => r.number));
+  for (let i = 0; i < 20; i++) { const n = billing.invoiceNumber(); if (!taken.has(n)) return n; }
+  throw new Error('could not make a unique invoice number');
+};
+// "You have a statement" — no amount, no service, no date. The portal says the rest.
+const notifyStatement = async (clientId) => {
+  try {
+    const users = await getUsers();
+    const client = users.find(u => u && u.id === clientId);
+    if (!client) return;
+    const to = [client, ...users.filter(u => u && u.role === config.ROLES.FAMILY && String(u.familyOfClientId) === String(clientId) && u.familyIsPoa && u.accountStatus !== 'inactive')]
+      .map(u => u.email).filter(e => e && !/@placeholder\.local$/i.test(e));
+    const htmlBody = emailTemplates.renderGfcEmail({
+      headline: 'You have a new statement',
+      paragraphs: ['A new statement from Godwins Family Care is ready. Sign in to your portal to view it and pay online.'],
+      ctaUrl: `${await getAppBaseUrl()}/portal`, ctaLabel: 'View my statement'
+    }).html;
+    for (const e of [...new Set(to)]) {
+      sendEmail(e, 'You have a new statement from Godwins Family Care', 'A new statement is ready. Sign in to your portal to view it and pay online.', { htmlBody })
+        .catch(err => console.error('Statement email error (non-fatal):', err.message));
+    }
+  } catch (e) { console.error('Statement notice error (non-fatal):', e.message); }
+};
+// Created when billing submits a signed visit, if the office set a fixed copay.
+const createCopayInvoice = async ({ client, encounterUuid, visitDate, by }) => {
+  const cents = client && client.billingSettings && client.billingSettings.copayCents;
+  if (!(cents > 0)) return null;
+  const existing = (await readInvoices()).find(r => r.kind === 'copay' && r.encounterUuid === encounterUuid && r.status !== 'void');
+  if (existing) return existing;   // a re-submit never bills the copay twice
+  const at = new Date().toISOString();
+  const inv = billing.buildInvoice({ id: uuidv4(), number: await newInvoiceNumber(), clientId: client.id, kind: 'copay', encounterUuid, status: 'open', at, by,
+    lines: [{ date: visitDate || at.slice(0, 10), description: billing.LINE_LABEL.copay, amountCents: cents }] });
+  await saveInvoice(inv);
+  await logActivity(by ? by.id : 'system', by ? by.name : 'Billing', 'invoice_created', 'client', client.id, { invoiceId: inv.id, kind: 'copay', totalCents: inv.totalCents });
+  notifyStatement(client.id);
+  return inv;
+};
+const isClientOrPoaFor = async (req) => {
+  const client = await resolveGfcClientRecord(req.user);
+  if (!client) return { client: null };
+  const acting = patientRead.buildActingIdentity(req.user, client);
+  return { client, ok: req.user.role === config.ROLES.CLIENT || acting.isPoa, acting };
+};
+
+// ---- The patient's side ----
+app.get('/api/gfc/billing', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const { client, ok } = await isClientOrPoaFor(req);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    if (!ok) return res.status(403).json({ error: 'Only the client or their designated Power of Attorney can see billing.', code: 'BILLING_CLIENT_ONLY' });
+    const mine = (await readInvoices()).filter(r => r.clientId === client.id && r.status !== 'draft')
+      .sort((a, b) => String(b.sentAt || b.createdAt).localeCompare(String(a.sentAt || a.createdAt)));
+    const open = mine.filter(r => r.status === 'open');
+    const balanceCents = open.reduce((a, r) => a + r.totalCents, 0);
+    res.json({
+      balanceCents, balance: billing.fmtUsd(balanceCents), openCount: open.length,
+      invoices: mine.map(billing.publicInvoice),
+      onlinePayment: billing.stripeStatus().configured
+    });
+  } catch (error) {
+    console.error('Patient billing read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Start a Stripe Checkout for one open invoice. The patient pays on Stripe's
+// own page; card details never touch this server.
+app.post('/api/gfc/billing/invoices/:id/pay', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const { client, ok } = await isClientOrPoaFor(req);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    if (!ok) return res.status(403).json({ error: 'Only the client or their designated Power of Attorney can pay.', code: 'BILLING_CLIENT_ONLY' });
+    const inv = (await readInvoices()).find(r => r.id === req.params.id && r.clientId === client.id);
+    if (!inv) return res.status(404).json({ error: 'Invoice not found', code: 'INVOICE_NOT_FOUND' });
+    if (inv.status !== 'open') return res.status(409).json({ error: inv.status === 'paid' ? 'This invoice is already paid.' : 'This invoice cannot be paid online.', code: 'INVOICE_NOT_OPEN' });
+    const st = billing.stripeStatus();
+    if (!st.configured) return res.status(503).json({ error: 'Online payment is not set up yet. Please call the office to pay.', code: 'STRIPE_NOT_CONFIGURED' });
+    const base = await getAppBaseUrl();
+    const form = billing.checkoutForm(inv, { successUrl: `${base}/portal?billing=paid`, cancelUrl: `${base}/portal?billing=cancelled` });
+    const r = await fetch('https://api.stripe.com/v1/checkout/sessions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${process.env.STRIPE_SECRET_KEY}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams(form).toString()
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.url) {
+      console.error('Stripe checkout error:', (j.error && j.error.message) || r.status);
+      return res.status(502).json({ error: 'The payment page could not be opened. Please try again, or call the office.', code: 'STRIPE_CHECKOUT_FAILED' });
+    }
+    await saveInvoice({ ...inv, lastCheckoutSessionId: j.id });
+    res.json({ url: j.url });
+  } catch (error) {
+    console.error('Patient pay error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ---- The office's side ----
+app.get('/api/gfc/admin/billing/:clientId', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const client = (await getUsers()).find(u => u && u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+    const ra = client.rateAgreement || null;
+    res.json({
+      copayCents: (client.billingSettings && client.billingSettings.copayCents) || null,
+      rate: ra ? { hourlyRate: ra.hourlyRate, dailyMinimumHours: ra.dailyMinimumHours } : null,
+      invoices: (await readInvoices()).filter(r => r.clientId === client.id).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
+      stripe: billing.stripeStatus()
+    });
+  } catch (error) {
+    console.error('Staff billing read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.put('/api/gfc/admin/billing/:clientId/copay', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const n = billing.normalizeCopaySetting(req.body);
+    if (n.error) return res.status(400).json(n);
+    const { users, idx } = await loadClientForMutation(req.params.clientId);
+    if (idx === -1) return res.status(404).json({ error: 'Client not found' });
+    users[idx].billingSettings = { ...(users[idx].billingSettings || {}), copayCents: n.value.copayCents, updatedAt: new Date().toISOString(), updatedBy: req.user.name || req.user.email };
+    await db.set('users', users);
+    invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'billing_copay_set', 'client', req.params.clientId, { copayCents: n.value.copayCents });
+    res.json({ copayCents: n.value.copayCents });
+  } catch (error) {
+    console.error('Copay setting error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+const homeCareFor = async (clientId, body) => {
+  const from = String((body || {}).from || ''), to = String((body || {}).to || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to) || to < from) return { error: 'Give a from and to date.', code: 'DATE_RANGE_REQUIRED' };
+  const client = (await getUsers()).find(u => u && u.id === clientId && u.role === config.ROLES.CLIENT);
+  if (!client) return { error: 'Client not found', code: 'CLIENT_NOT_FOUND', status: 404 };
+  const ra = client.rateAgreement || {};
+  const r = billing.homeCareLines((await db.get('time_logs')) || [], {
+    clientId, from, to, hourlyRate: ra.hourlyRate, dailyMinimumHours: ra.dailyMinimumHours,
+    localDate: require('./schedulingRepository').csvLocalDate
+  });
+  return { ...r, client, from, to };
+};
+app.post('/api/gfc/admin/billing/:clientId/home-care/preview', authenticateToken, requireBilling, async (req, res) => {
+  const r = await homeCareFor(req.params.clientId, req.body);
+  if (r.error) return res.status(r.status || 400).json({ error: r.error, code: r.code });
+  res.json({ lines: r.lines, totalCents: r.lines.reduce((a, l) => a + l.amountCents, 0) });
+});
+app.post('/api/gfc/admin/billing/:clientId/home-care', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const r = await homeCareFor(req.params.clientId, req.body);
+    if (r.error) return res.status(r.status || 400).json({ error: r.error, code: r.code });
+    if (!r.lines.length) return res.status(409).json({ error: 'No completed caregiver visits in those dates.', code: 'BILLING_NO_VISITS' });
+    const at = new Date().toISOString();
+    const inv = billing.buildInvoice({ id: uuidv4(), number: await newInvoiceNumber(), clientId: r.client.id, kind: 'home_care', lines: r.lines, at, by: req.user, status: 'draft' });
+    inv.period = { from: r.from, to: r.to };
+    await saveInvoice(inv);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'invoice_created', 'client', r.client.id, { invoiceId: inv.id, kind: 'home_care', totalCents: inv.totalCents, from: r.from, to: r.to });
+    res.json({ invoice: inv });
+  } catch (error) {
+    console.error('Home care invoice error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/gfc/admin/billing/invoices/:id/:action', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const to = { send: 'open', void: 'void', 'record-payment': 'paid' }[req.params.action];
+    if (!to) return res.status(404).json({ error: 'Unknown action' });
+    const inv = (await readInvoices()).find(r => r.id === req.params.id);
+    const b = req.body || {};
+    const t = billing.transition(inv, to, { at: new Date().toISOString(), by: req.user, reason: b.reason, method: to === 'paid' ? (b.method === 'stripe' ? null : b.method) : undefined, reference: b.reference });
+    if (t.error) return res.status(t.code === 'INVOICE_NOT_FOUND' ? 404 : 409).json(t);
+    await saveInvoice(t.inv);
+    await logActivity(req.user.id, req.user.name || req.user.email, `invoice_${req.params.action.replace('-', '_')}`, 'client', t.inv.clientId, { invoiceId: t.inv.id, totalCents: t.inv.totalCents });
+    if (to === 'open') notifyStatement(t.inv.clientId);
+    res.json({ invoice: t.inv });
+  } catch (error) {
+    console.error('Invoice action error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Stripe tells us a payment went through. Only a correctly signed event moves
+// an invoice; only our own invoice id in its metadata names one. The raw body
+// is read by the express.raw() registered before the JSON parser.
+app.post('/api/webhooks/stripe', async (req, res) => {
+  try {
+    if (!billing.verifyStripeSignature(req.body, req.headers['stripe-signature'], process.env.STRIPE_WEBHOOK_SECRET)) {
+      return res.status(400).json({ error: 'bad signature' });
+    }
+    const evt = JSON.parse(req.body.toString('utf8'));
+    if (evt.type !== 'checkout.session.completed' && evt.type !== 'checkout.session.async_payment_succeeded') return res.json({ received: true });
+    const s = (evt.data && evt.data.object) || {};
+    if (s.payment_status !== 'paid') return res.json({ received: true });
+    const id = s.metadata && s.metadata.invoice_id;
+    const rows = (await db.get('patient_invoices')) || [];
+    const i = rows.findIndex(r => r && r.id === id);
+    if (i === -1) return res.json({ received: true, unknown: true });
+    if (rows[i].status === 'paid') return res.json({ received: true });          // Stripe retries; paying twice is not a thing
+    if (Number(s.amount_total) !== Number(rows[i].totalCents)) {
+      console.error(`[BILLING] Stripe amount ${s.amount_total} does not match invoice ${rows[i].number}; not marked paid`);
+      return res.json({ received: true, mismatch: true });
+    }
+    const t = billing.transition(rows[i], 'paid', { at: new Date().toISOString(), method: 'stripe', reference: s.payment_intent || s.id });
+    if (t.error) return res.json({ received: true, note: t.code });
+    rows[i] = t.inv;
+    await db.set('patient_invoices', rows);
+    await logActivity('stripe', 'Stripe', 'invoice_paid_online', 'client', t.inv.clientId, { invoiceId: t.inv.id, totalCents: t.inv.totalCents });
+    res.json({ received: true });
+  } catch (error) {
+    console.error('Stripe webhook error:', error);
+    res.status(500).json({ error: 'webhook error' });
   }
 });
 
@@ -13852,9 +14507,9 @@ app.get('/api/clinical/my-day', authenticateToken, requireClinicalRead, async (r
     const scope = resolveProviderScope(req.user, req.query.providerId);
     const scopeProblem = scope.error ? { error: scope.error, code: scope.code } : null;
 
-    const [timingRows, linkRows, attestations, orderRows, resultRows, users] = await Promise.all([
+    const [timingRows, linkRows, attestations, orderRows, resultRows, users, videoRows] = await Promise.all([
       loadVisitTimings(), getAppointmentLinkage(), loadRows('encounter_attestations'),
-      loadRows('clinical_orders'), loadRows('clinical_results'), getUsers()
+      loadRows('clinical_orders'), loadRows('clinical_results'), getUsers(), loadVideoLinks()
     ]);
     const clientsById = new Map(users
       .filter(u => u.role === config.ROLES.CLIENT)
@@ -13936,7 +14591,10 @@ app.get('/api/clinical/my-day', authenticateToken, requireClinicalRead, async (r
       openTasks,
       blocks: [],
       homeVisitFields: clinicalRepo.HOME_VISIT_FIELDS,
-      startCoords: null
+      startCoords: null,
+      // T1 B1: which of today's visits have a video room, by eid.
+      videoByEid: new Map((videoRows || []).filter(r => r && r.eid != null)
+        .map(r => [String(r.eid), { meetingUri: r.meetingUri, meetingCode: r.meetingCode }]))
     });
     // The plot is computed HERE, not in the browser: myDay.js reaches into the
     // scheduling module for the one coordinate reader, and that chain does not
@@ -13962,6 +14620,52 @@ const VISIT_TIMING_EVENTS = Object.freeze({
   en_route: 'enRouteAt', arrive: 'arrivedAt', start: 'startedAt', end: 'endedAt'
 });
 
+// ONE WRITER FOR A VISIT'S TIMES. Extracted when T1 B3 made starting a video
+// visit stamp the start: two places writing `startedAt` is how the board and
+// the time statement start disagreeing about one visit, which is the mistake
+// `applyShiftEdit` was extracted to stop on the scheduling side.
+// Returns a RESULT; the caller decides the status code.
+const stampVisitTiming = async ({ eid, field, event, at, clientId, user, reason }) => {
+  const rows = await loadVisitTimings();
+  const id = myDay.timingId(eid);
+  const idx = rows.findIndex(r => r && r.id === id);
+  const existing = idx >= 0 ? rows[idx] : null;
+  // A time already stamped is EDITABLE and a correction requires a reason, the
+  // same rule every other time correction in this app follows. Re-stamping
+  // silently would quietly change how long a visit was.
+  if (existing && existing[field] && !reason) {
+    return {
+      ok: false, code: 'TIMING_ALREADY_SET', already: existing[field],
+      error: `This visit already has a ${event} time (${existing[field]}). Correcting it needs a reason.`,
+      timing: existing
+    };
+  }
+  const when = String(at || '').trim() || new Date().toISOString();
+  if (isNaN(new Date(when))) return { ok: false, code: 'BAD_TIME', error: 'That is not a usable time' };
+  const next = {
+    ...(existing || { id, eid: String(eid), createdAt: new Date().toISOString() }),
+    clientId: clientId || (existing && existing.clientId) || null,
+    providerId: user.openEmrProviderId ? String(user.openEmrProviderId) : null,
+    [field]: when,
+    updatedAt: new Date().toISOString(),
+    byId: user.id, byName: user.name || user.email
+  };
+  if (existing && existing[field] && reason) {
+    next.corrections = [...(existing.corrections || []), {
+      field, from: existing[field], to: when, reason,
+      byId: user.id, byName: user.name || user.email, at: new Date().toISOString()
+    }];
+  }
+  if (idx >= 0) rows[idx] = next; else rows.push(next);
+  await db.set('visit_timings', rows);
+  await logActivity(user.id, user.name || user.email, `visit_${event}`, 'client', next.clientId, {
+    eid: String(eid), at: when, corrected: !!(existing && existing[field])
+  });
+  return { ok: true, timing: next, corrected: !!(existing && existing[field]) };
+};
+
+const timingPayload = (t) => ({ ...t, totalMinutes: myDay.totalVisitMinutes(t), timeStatement: myDay.timeStatement(t) });
+
 // Gated on writing ANY clinical note, not the nursing one alone: an LCSW bills
 // psychotherapy on time, so the recorded start and end are theirs to record
 // too (owner, 2026-10-11).
@@ -13982,49 +14686,87 @@ app.post('/api/clinical/visits/:eid/timing', authenticateToken, requireClinicalW
       const { client, wrongLine } = clientId ? await loadClinicalClient(clientId) : { client: null };
       if (clientId && !client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
 
-      const rows = await loadVisitTimings();
-      const id = myDay.timingId(eid);
-      const idx = rows.findIndex(r => r && r.id === id);
-      const existing = idx >= 0 ? rows[idx] : null;
-
-      // An end time is EDITABLE and a correction requires a reason, the same
-      // rule every other time correction in this app follows. Re-stamping
-      // arrival or start silently would quietly change how long a visit was.
-      const reason = String((req.body || {}).reason || '').trim();
-      if (existing && existing[field] && !reason) {
-        return res.status(409).json({
-          error: `This visit already has a ${event} time (${existing[field]}). Correcting it needs a reason.`,
-          code: 'TIMING_ALREADY_SET'
-        });
-      }
-      const at = String((req.body || {}).at || '').trim() || new Date().toISOString();
-      if (isNaN(new Date(at))) return res.status(400).json({ error: 'That is not a usable time', code: 'BAD_TIME' });
-
-      const next = {
-        ...(existing || { id, eid, createdAt: new Date().toISOString() }),
-        clientId: clientId || (existing && existing.clientId) || null,
-        providerId: req.user.openEmrProviderId ? String(req.user.openEmrProviderId) : null,
-        [field]: at,
-        updatedAt: new Date().toISOString(),
-        byId: req.user.id, byName: req.user.name || req.user.email
-      };
-      if (existing && existing[field] && reason) {
-        next.corrections = [...(existing.corrections || []), {
-          field, from: existing[field], to: at, reason,
-          byId: req.user.id, byName: req.user.name || req.user.email, at: new Date().toISOString()
-        }];
-      }
-      if (idx >= 0) rows[idx] = next; else rows.push(next);
-      await db.set('visit_timings', rows);
-      await logActivity(req.user.id, req.user.name || req.user.email, `visit_${event}`, 'client', next.clientId, {
-        eid, at, corrected: !!(existing && existing[field])
+      const out = await stampVisitTiming({
+        eid, field, event, at: (req.body || {}).at, clientId,
+        user: req.user, reason: String((req.body || {}).reason || '').trim()
       });
-      res.json({
-        message: `Recorded.`,
-        timing: { ...next, totalMinutes: myDay.totalVisitMinutes(next), timeStatement: myDay.timeStatement(next) }
-      });
+      if (!out.ok) return res.status(out.code === 'BAD_TIME' ? 400 : 409).json({ error: out.error, code: out.code });
+      res.json({ message: `Recorded.`, timing: timingPayload(out.timing) });
     } catch (error) {
       console.error('Visit timing error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+// ── T1 B1/B3 — the clinician's own door into the video room ───────────────
+//
+// GET returns the room; POST opens it and STAMPS THE VISIT AS STARTED. The
+// stamp is the point: a video visit has no arrival to record, so without it a
+// telehealth note carries no start time and the billing guide's required time
+// statement reads "no time recorded" for every visit done by video.
+//
+// Re-joining after a dropped call does NOT move the start. The clinician is
+// returning to a visit that is already running, and re-stamping would shorten
+// the recorded time of the visit they are billing.
+app.get('/api/clinical/visits/:eid/video', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const row = videoLinkFor(await loadVideoLinks(), req.params.eid);
+    res.json({
+      video: row ? { meetingUri: row.meetingUri, meetingCode: row.meetingCode, createdAt: row.createdAt } : null,
+      meet: meetRooms.meetStatus()
+    });
+  } catch (error) {
+    console.error('Video room read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/clinical/visits/:eid/video/start', authenticateToken, requireClinicalWrite,
+  requireNoteWriter, async (req, res) => {
+    try {
+      const eid = String(req.params.eid || '').trim();
+      if (!/^\d+$/.test(eid)) return res.status(400).json({ error: 'A numeric appointment id is required', code: 'BAD_EID' });
+      const row = videoLinkFor(await loadVideoLinks(), eid);
+      if (!row) {
+        return res.status(409).json({
+          error: 'This visit has no video room. If it should be a video visit, reschedule it as one so a room is created.',
+          code: 'MEET_NO_ROOM'
+        });
+      }
+      if (!row.meetingUri) {
+        return res.status(502).json({
+          error: 'The video room has no join link on file — create a new one by rescheduling the visit as a video visit.',
+          code: 'MEET_NO_ROOM'
+        });
+      }
+      // The stamp is best-effort relative to JOINING: a clinician must never be
+      // kept out of a visit because a time could not be written.
+      let timing = null; let timingNote = null;
+      try {
+        const out = await stampVisitTiming({
+          eid, field: VISIT_TIMING_EVENTS.start, event: 'start',
+          clientId: row.clientId, user: req.user
+        });
+        if (out.ok) timing = timingPayload(out.timing);
+        else if (out.code === 'TIMING_ALREADY_SET') {
+          timing = out.timing ? timingPayload(out.timing) : null;
+          timingNote = `This visit was already started at ${out.already} — rejoining did not change it.`;
+        } else timingNote = out.error;
+      } catch (e) {
+        timingNote = `The start time could not be recorded (${e.message}) — record it on the visit.`;
+      }
+      // WHICH visit was joined, never the join link: a meeting URI in the
+      // activity log is a door into a patient's visit sitting in a log.
+      await logActivity(req.user.id, req.user.name || req.user.email, 'video_visit_started', 'client', row.clientId, {
+        appointmentEid: eid, spaceName: row.spaceName, startStamped: !!(timing && !timingNote)
+      });
+      res.json({
+        message: 'Opening the video room.',
+        video: { meetingUri: row.meetingUri, meetingCode: row.meetingCode },
+        timing, timingNote
+      });
+    } catch (error) {
+      console.error('Video visit start error:', error);
       res.status(500).json({ error: 'Server error' });
     }
   });
@@ -14033,9 +14775,7 @@ app.post('/api/clinical/visits/:eid/timing', authenticateToken, requireClinicalW
 app.get('/api/clinical/visits/:eid/timing', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     const row = (await loadVisitTimings()).find(r => r && r.id === myDay.timingId(req.params.eid)) || null;
-    res.json({
-      timing: row ? { ...row, totalMinutes: myDay.totalVisitMinutes(row), timeStatement: myDay.timeStatement(row) } : null
-    });
+    res.json({ timing: row ? timingPayload(row) : null });
   } catch (error) {
     console.error('Visit timing read error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -15165,6 +15905,56 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/risk-assessment', a
   } catch (error) {
     console.error('Risk assessment error:', error);
     res.status(502).json({ error: `Risk assessment could not be saved: ${error.message}` });
+  }
+});
+
+// ── T1 B2 — record a pre-join check ──────────────────────────────────────
+//
+// NON-BLOCKING BY DESIGN. It warns at signing and never refuses a signature:
+// the clinician on the call is the person who knows whether identity was
+// confirmed, and a note held hostage to a tick box is an hour of home-visit
+// documentation at risk. The three items and the consent prefill come from
+// clinicalRepository, served to the page, so the screen names no check of its
+// own and cannot drift from the validator that refuses one it did not offer.
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/telehealth-checks', authenticateToken, requireClinicalWrite, requireNoteWriter, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res);
+    if (!ctx) return;
+    // A signed note is read-only, so a check recorded afterwards would change
+    // what was attested to. The same rule the coding and the risk assessment
+    // follow; a correction is an addendum.
+    if (refuseIfClosed(ctx, res)) return;
+    const key = String((req.body || {}).key || '').trim();
+    if (!clinicalRepo.TELEHEALTH_CHECK_KEYS.includes(key)) {
+      return res.status(400).json({
+        error: `Unknown pre-join check "${key}". One of: ${clinicalRepo.TELEHEALTH_CHECK_KEYS.join(', ')}.`,
+        code: 'BAD_TELEHEALTH_CHECK'
+      });
+    }
+    const confirmed = (req.body || {}).confirmed !== false;
+    const note = String((req.body || {}).note || '').trim().slice(0, 500) || null;
+    const record = ctx.record;
+    record.telehealthChecks = {
+      ...(record.telehealthChecks || {}),
+      [key]: confirmed
+        ? { confirmed: true, note, at: new Date().toISOString(), by: { id: req.user.id, name: req.user.name || req.user.email } }
+        // Un-ticking keeps WHO un-ticked it. A check that simply disappears
+        // reads as one nobody ever made.
+        : { confirmed: false, note, at: new Date().toISOString(), by: { id: req.user.id, name: req.user.name || req.user.email } }
+    };
+    await saveBillingRecord(ctx.rows, record);
+    // WHICH check, never the note: where a patient said they were sitting is
+    // clinical content, and an audit trail is not a second copy of it.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'telehealth_check_recorded', 'client', ctx.client.id, {
+      encounterUuid: ctx.encounterUuid, check: key, confirmed
+    });
+    res.json({
+      message: confirmed ? 'Recorded.' : 'Un-ticked.',
+      telehealthChecklist: clinicalRepo.buildTelehealthChecklist(record, ctx.client)
+    });
+  } catch (error) {
+    console.error('Telehealth check error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -16818,27 +17608,70 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/upload', authenticateTok
 // path writes to a client record without a review, and that is enforced in the
 // module rather than promised here.
 //
-// The engine is INERT until Bedrock is wired. That is not a stub: the boundary
-// refusal is the honest state, it names every missing setting, and the screen
-// shows it — so the day the owner sets three variables this path works with no
-// code change. A fake that pretended to extract would be worse than nothing,
-// because a reviewer would trust it.
+// The engine is INERT until Gemini on Vertex AI is configured. That is not a
+// stub: the boundary refusal is the honest state, it names every missing
+// setting AND every failed Google-side check, and the screen shows it — so the
+// day the owner finishes the setup guide this path works with no code change.
+// A fake that pretended to extract would be worse than nothing, because a
+// reviewer would trust it.
+//
+// THE DETERMINISTIC READER IS NOT A STOPGAP AND STAYS (2026-10-12). For a form
+// the office receives a hundred times, a declared label beats a model: it is
+// cheaper, auditable, reproducible, and it cannot invent a member ID. The model
+// takes precedence where it is available and the template reader is the
+// fallback when the boundary refuses — see the extract route below.
 const modelEngine = require('./modelEngine');
 const documentExtraction = require('./documentExtraction');
 const documentTemplates = require('./documentTemplates');   // reading a document WITHOUT a model,
                                                             // out of the text it already carries.
-const bedrockTransport = require('./bedrockTransport');     // the one Bedrock client (2026-09-24)
+const vertexTransport = require('./vertexTransport');       // the one Gemini client (2026-10-12)
 
 const gfcModelEngine = modelEngine.createEngine({
   env: process.env,
   // The transport is always wired — modelEngine.js refuses to call it at all
-  // unless BEDROCK_REGION / BEDROCK_MODEL_ID / BEDROCK_ZERO_DATA_RETENTION are
-  // set and no static AWS keys are present, so a server with none of that
-  // configured behaves exactly as it did with transport: null. Requiring
-  // bedrockTransport.js only needs the SDK to resolve, never AWS credentials.
-  transport: bedrockTransport.transport,
+  // unless the Vertex settings are present, the location is "us", the model is
+  // a released one, ZDR is affirmative, the credential is federated rather
+  // than a key, and the daily Google-side checks have passed. So a server with
+  // none of that configured behaves exactly as it did with transport: null.
+  // Requiring vertexTransport.js only needs the SDK to resolve, never a
+  // credential.
+  transport: vertexTransport.transport,
+  // The two Google-side checks (caching off, staging bucket shape) live beside
+  // the generation call, in vertexTransport.js. The engine decides what a
+  // failure MEANS; the transport only reports what Google said.
+  liveChecks: vertexTransport.liveChecks,
   logActivity
 });
+
+// THE BOUNDARY IS RE-PROVEN DAILY, NOT ONCE AT SETUP. Caching off and the
+// staging bucket's retention are account settings somebody can change in the
+// console at any time, so modelEngine.js treats a check older than 24 hours as
+// a blocker. This is what keeps it fresh. It is deliberately NOT awaited at
+// boot: a slow or unreachable Google must not hold up the server starting, and
+// until the first check lands the engine refuses — which is the safe state.
+const AI_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const runAiBoundaryChecks = async () => {
+  try {
+    const r = await gfcModelEngine.runLiveChecks();
+    if (r && r.ok) {
+      console.log('[AI] Google-side boundary checks passed.');
+    } else {
+      // Named individually so a setup is fixed in one pass rather than one
+      // restart per blocker.
+      console.warn('[AI] Google-side boundary checks did not pass; nothing will be sent to Gemini:');
+      for (const f of (r && r.failures) || []) console.warn(`[AI]   - ${f}`);
+    }
+  } catch (e) {
+    console.warn('[AI] Google-side boundary checks could not be run:', e.message);
+  }
+};
+// Only when there is something to check. With no Vertex settings at all the
+// engine is already refusing for a reason that names the missing settings, and
+// a failing check every six hours in the log adds nothing to that.
+if (String(process.env.VERTEX_PROJECT_ID || '').trim()) {
+  runAiBoundaryChecks();
+  setInterval(runAiBoundaryChecks, AI_CHECK_INTERVAL_MS).unref?.();
+}
 
 // Reads a value out of the intake by the same dotted path the editor writes.
 const intakeValueAt = (client, path) => readIntakePath(client.intake || {}, path);
@@ -17029,7 +17862,22 @@ const extractDocumentHandler = async (req, res) => {
 
     res.json({
       message: 'Read — nothing has been saved yet. Check each value before it counts.',
-      extraction: { id: row.id, kind: row.kind, rows: row.rows, identityConflicts: row.identityConflicts, reviewCount: row.reviewCount }
+      // THE SHAPE MUST MATCH WHAT THE STATUS ROUTE'S `pending` LIST CARRIES,
+      // because both screens render the review panel from whichever they were
+      // handed and key it on `docId`. Leaving `docId` out meant the panel
+      // NEVER OPENED after a fresh read — the row was stored correctly and the
+      // reviewer saw nothing, which reads as "the read did nothing".
+      //
+      // The reader fields come with it for the same reason: a reviewer has to
+      // be told a value came out of a PICTURE rather than a text layer, and a
+      // panel that only gets them on a later page load tells them late.
+      extraction: {
+        id: row.id, docId: row.docId, kind: row.kind, fileName: row.fileName, at: row.at,
+        rows: row.rows, identityConflicts: row.identityConflicts, reviewCount: row.reviewCount,
+        reader: row.reader, source: row.source, readNotice: row.readNotice,
+        pagesRead: row.pagesRead, pagesTotal: row.pagesTotal,
+        stoppedBecause: row.stoppedBecause, skippedReads: row.skippedReads
+      }
     });
   } catch (error) {
     console.error('Document extraction error:', error);
@@ -17179,6 +18027,1007 @@ app.get('/api/clinical/patients/:clientId/extraction', authenticateToken, requir
 app.post('/api/clinical/patients/:clientId/documents/:docId/extract', authenticateToken, requireClinicalWrite, requireClinicalOnLine, extractDocumentHandler);
 app.post('/api/clinical/patients/:clientId/extraction/:id/review', authenticateToken, requireClinicalWrite, requireClinicalOnLine, extractionReviewHandler);
 
+// ── The comprehensive chart review (Session G1, 2026-10-12) ───────────────
+//
+// Owner decision 5: the review reads EVERYTHING the requesting clinician can
+// already read for that patient — no time window, no count caps, no document
+// cap. Owner decision 7: licensed clinicians only; read-only staff cannot run
+// one. Owner decision 8: the output is NOT part of the medical record.
+//
+// THE GATHERING HAPPENS WITH THE CLINICIAN'S OWN OPENEMR SESSION
+// (`openemr.forActor(req.user)`), which is the Session 5.2 rule and is what
+// makes "only what they can already read" true rather than asserted. A
+// section their session refuses is LISTED AS NOT READ and never filled
+// another way: a review that quietly substituted a different source would be
+// a review of something other than what it claims.
+const chartPacket = require('./chartPacket');
+
+// E2. The shape every pass and the merge are held to. `citations` has
+// minItems 1 because a finding with no source is one a clinician cannot
+// check, and `enforceCitations` drops it server-side anyway — declaring it
+// here just means the model is told before it answers rather than after.
+const AI_REVIEW_SCHEMA = Object.freeze({
+  fields: {
+    summary: { type: 'string', maxLength: 4000, required: true },
+    timeline: {
+      type: 'array',
+      items: {
+        date: { type: 'string', maxLength: 40 },
+        event: { type: 'string', maxLength: 400, required: true },
+        citations: {
+          type: 'array', minItems: 1,
+          items: {
+            sourceId: { type: 'string', maxLength: 120, required: true },
+            page: { type: 'number' },
+            quote: { type: 'string', maxLength: 300 }
+          }
+        }
+      }
+    },
+    findings: {
+      type: 'array',
+      items: {
+        category: {
+          type: 'string', required: true,
+          enum: ['care_gap', 'medication_issue', 'allergy_conflict', 'missing_follow_up',
+            'unaddressed_abnormal_result', 'documentation_gap', 'safety_concern', 'discrepancy', 'other']
+        },
+        statement: { type: 'string', maxLength: 600, required: true },
+        priority: { type: 'string', required: true, enum: ['info', 'attention', 'urgent'] },
+        citations: {
+          type: 'array', minItems: 1,
+          items: {
+            sourceId: { type: 'string', maxLength: 120, required: true },
+            page: { type: 'number' },
+            quote: { type: 'string', maxLength: 300 }
+          }
+        }
+      }
+    },
+    questionsForClinician: { type: 'array', itemType: 'string', maxLength: 500 },
+    notReviewed: { type: 'array', itemType: 'string', maxLength: 300 }
+  }
+});
+
+// How long a review is kept (owner decision 8). It is an AI draft a clinician
+// checked, not a medical record, so it is purged rather than retained.
+const AI_REVIEW_RETENTION_DAYS = Number(process.env.GFC_AI_REVIEW_RETENTION_DAYS || 180);
+
+const loadAiReviews = () => loadRows('ai_reviews');
+
+// ── D1: gather one client's chart, as this clinician ──────────────────────
+const gatherChartPacketInput = async (req, client, { excludeDocumentIds = [] } = {}) => {
+  const exclude = new Set((excludeDocumentIds || []).map(String));
+  const notRead = [];
+  const mine = (r) => r && String(r.clientId) === String(client.id);
+
+  const [
+    orderRows, resultRows, rxRows, planVersions, medChanges,
+    cgLogs, escalations, threadRows, messageRows, billingRows,
+    addendaRows, riskRows, docUploads
+  ] = await Promise.all([
+    loadRows('clinical_orders'), loadRows('clinical_results'), loadRows('prescriptions'),
+    loadRows('care_plan_versions'), loadRows('medication_changes'),
+    loadRows('caregiver_visit_logs'), loadRows('escalation_events'),
+    loadRows('message_threads'), loadRows('messages'), loadRows('encounter_billing'),
+    loadRows('encounter_addenda'), loadRows('encounter_risk_assessments'),
+    loadRows('client_document_uploads')
+  ]);
+
+  // ── the EMR, as this clinician ──
+  const emrOut = {};
+  const encounterSections = [];
+  if (!client.openEmrPatientId || !openemr.isConfigured()) {
+    notRead.push({
+      sourceId: 'emr:*',
+      why: client.openEmrPatientId ? 'the EMR is not configured' : 'this client is not linked to an EMR chart'
+    });
+  } else {
+    const emr = openemr.forActor(req.user);
+    const puuid = client.openEmrPatientId;
+    const [problems, meds, allergies, vitals, encs, immun, procs, goals, careTeam, coverage, demo] =
+      await Promise.allSettled([
+        emr.getProblems(puuid), emr.getMedicationRequests(puuid), emr.getAllergies(puuid),
+        emr.getVitalObservations(puuid), emr.getEncounters(puuid),
+        emr.getImmunizations ? emr.getImmunizations(puuid) : Promise.reject(new Error('no immunization read on this instance')),
+        emr.getProcedures ? emr.getProcedures(puuid) : Promise.reject(new Error('no procedure read on this instance')),
+        emr.getGoals ? emr.getGoals(puuid) : Promise.reject(new Error('no goal read on this instance')),
+        emr.getCareTeam ? emr.getCareTeam(puuid) : Promise.reject(new Error('no care-team read on this instance')),
+        emr.getCoverage ? emr.getCoverage(puuid) : Promise.reject(new Error('no coverage read on this instance')),
+        emr.getPatient ? emr.getPatient(puuid) : Promise.reject(new Error('no demographic read on this instance'))
+      ]);
+
+    // Each section is either read, or reported as not read with the reason.
+    // The record-extras reads are unproven on this instance (D2), so a
+    // failure is listed rather than fatal.
+    const put = (key, sourceId, settled, map) => {
+      if (settled.status === 'fulfilled' && settled.value !== undefined && settled.value !== null) {
+        emrOut[key] = map ? map(settled.value) : settled.value;
+        return;
+      }
+      notRead.push({
+        sourceId,
+        why: (settled.reason && settled.reason.message) ? String(settled.reason.message).slice(0, 200) : 'not returned'
+      });
+    };
+    // DEMOGRAPHICS ARE NARROWED HERE, NOT BY THE MODEL: age, sex and language
+    // are clinical context; an address and an SSN are identifiers with no
+    // bearing on a review, so they are never put in a prompt (D2).
+    put('demographics', chartPacket.SECTION_KINDS.DEMOGRAPHICS, demo, (p) => ({
+      age: p && (p.age ?? null), sex: p && (p.sex || p.gender || null), language: p && (p.language || null)
+    }));
+    put('problems', chartPacket.SECTION_KINDS.PROBLEMS, problems, (rows) => rows.map(clinicalRepo.summarizeCondition));
+    put('medications', chartPacket.SECTION_KINDS.MEDICATIONS, meds, (rows) => rows.map(clinicalRepo.summarizeMedicationRequest));
+    put('allergies', chartPacket.SECTION_KINDS.ALLERGIES, allergies, (rows) => rows.map(clinicalRepo.summarizeAllergy));
+    put('vitals', chartPacket.SECTION_KINDS.VITALS, vitals, clinicalRepo.summarizeVitalObservations);
+    put('encounters', chartPacket.SECTION_KINDS.ENCOUNTERS, encs, (rows) => rows.map(clinicalRepo.summarizeEncounter));
+    put('immunizations', chartPacket.SECTION_KINDS.IMMUNIZATIONS, immun);
+    put('procedures', chartPacket.SECTION_KINDS.PROCEDURES, procs);
+    put('goals', chartPacket.SECTION_KINDS.GOALS, goals);
+    put('careTeam', chartPacket.SECTION_KINDS.CARE_TEAM, careTeam);
+    // PAYER NAME ONLY (D2). What they are covered by is clinical context;
+    // a member id is an identifier.
+    put('coverage', chartPacket.SECTION_KINDS.COVERAGE, coverage, (c) => ({
+      payer: Array.isArray(c) ? c.map(x => x && (x.payer || x.name)).filter(Boolean) : (c && (c.payer || c.name)) || null
+    }));
+
+    // Every encounter the app has a record for, with its SIGNED narrative read
+    // by the RECORDED sid. `getSoapNotes` can return another encounter's notes
+    // (openemr.js), so it is deliberately not used here.
+    for (const rec of (billingRows || []).filter(mine)) {
+      let note = null;
+      if (rec.narrativeNoteSid) {
+        try {
+          const soap = await emr.getSoapNote(puuid, rec.encounterUuid, rec.narrativeNoteSid);
+          note = (soap && (soap.subjective || soap.description || soap.note)) || null;
+        } catch (e) {
+          notRead.push({ sourceId: `enc:${rec.encounterUuid}`, why: 'the narrative note could not be read' });
+        }
+      }
+      encounterSections.push({
+        clientId: client.id,
+        encounterUuid: rec.encounterUuid,
+        type: rec.visit || rec.reason || 'Encounter',
+        date: rec.date || null,
+        clinician: (rec.actor && rec.actor.name) || null,
+        diagnoses: rec.diagnoses || [],
+        serviceCodes: rec.services || [],
+        note,
+        addenda: (addendaRows || []).filter(a => a && String(a.encounterUuid) === String(rec.encounterUuid)).map(a => a.text || a.note || null),
+        coSignStatus: rec.coSignStatus || null,
+        riskAssessment: clinicalRepo.latestRiskAssessment(riskRows || [], rec.encounterUuid),
+        // An UNSIGNED note goes in under its own heading and nowhere else.
+        unsigned: !rec.attestedAt && !rec.signedAt
+      });
+    }
+  }
+
+  // ── message threads this clinician can see ──
+  //
+  // threadVisibility IS THE RULE AND NEVER A COPY OF IT. That function is
+  // where the cross-client leak lived (PR #88).
+  //
+  // BODIES ARE INCLUDED HERE, deliberately, and that is a difference from the
+  // chart timeline a few hundred lines up, which carries a thread's existence
+  // only. Owner decision 5 names care-team messages among the things the
+  // review reads, and a thread title tells a reviewer nothing. Do not
+  // "fix" one to match the other.
+  const threads = [];
+  for (const t of (threadRows || [])) {
+    if (!t || String(t.client_id) !== String(client.id)) continue;
+    const v = messagingRepo.threadVisibility(req.user, t, { client });
+    if (!v || !v.visible) continue;
+    threads.push({
+      clientId: client.id,
+      threadId: t.id,
+      channel: t.channel,
+      subject: messagingRepo.threadTitle(t),
+      lastAt: t.last_message_at || t.updated_at || t.created_at || null,
+      messages: (messageRows || [])
+        .filter(m => m && String(m.thread_id) === String(t.id))
+        .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
+        .map(m => ({ at: m.created_at, from: m.from_role || m.from_name || null, body: m.body || null }))
+    });
+  }
+
+  // ── documents: every one the chart can produce bytes for (D3) ──
+  //
+  // Bytes come from the EXISTING helpers, never from listing a Drive folder:
+  // folders are named by client name and can collide. A signed-note PDF is
+  // skipped because its text is already in enc:<euuid>, and a document the
+  // clinician unticked is skipped because they said so.
+  const documents = [];
+  for (const u of (docUploads || []).filter(mine)) {
+    const sourceId = `${chartPacket.PREFIX.DOCUMENT}:upload:${u.id}`;
+    if (exclude.has(String(u.id)) || exclude.has(sourceId)) continue;
+    if (u.status === 'rejected') continue;
+    try {
+      const bytes = await googledrive.downloadFileBuffer(u.driveFileId);
+      documents.push({
+        clientId: client.id, sourceId, id: u.id,
+        title: u.fileName || u.kind || 'Document',
+        date: u.at || u.uploadedAt || null,
+        mimeType: u.mimeType || 'application/pdf',
+        bytes
+      });
+    } catch (e) {
+      // A document that could not be fetched is REPORTED. Silently leaving it
+      // out would mean a review that says nothing about the one record that
+      // mattered.
+      notRead.push({ sourceId, why: 'the stored file could not be retrieved' });
+    }
+  }
+
+  return {
+    clientId: client.id,
+    emr: emrOut,
+    encounters: encounterSections,
+    orders: (orderRows || []).filter(mine),
+    results: (resultRows || []).filter(mine),
+    prescriptions: (rxRows || []).filter(mine),
+    carePlanVersions: (planVersions || []).filter(mine),
+    intake: client.intake || null,
+    medReconciliations: (medChanges || []).filter(mine),
+    caregiverLogs: [...(cgLogs || []).filter(mine), ...(escalations || []).filter(mine)],
+    messageThreads: threads,
+    // ELECTIONS ONLY (D2): what the patient CHOSE, per consent, and whether
+    // they signed it. Never the consent TEXT — a review of a patient does not
+    // turn on our wording — and never the signature block, which is
+    // provenance rather than a clinical fact. A code-status election changes
+    // how a patient is treated, which is why the choices are in at all.
+    consentElections: Object.entries((client.consents || {}))
+      .map(([type, rec]) => ({
+        type,
+        status: (rec && rec.status) || null,
+        choices: (rec && (rec.choices || (rec.signature && rec.signature.choices))) || null
+      }))
+      .filter(e => e.status || (e.choices && Object.keys(e.choices).length)),
+    documents,
+    notRead
+  };
+};
+
+// ── D5: a review of a large chart takes minutes, so it runs in the background
+const AI_REVIEW_STATUS = Object.freeze({ RUNNING: 'running', DONE: 'done', FAILED: 'failed' });
+
+const saveAiReview = async (id, patch) => {
+  const rows = await loadAiReviews();
+  const i = rows.findIndex(r => r && r.id === id);
+  if (i < 0) return null;
+  rows[i] = { ...rows[i], ...patch };
+  await db.set('ai_reviews', rows);
+  return rows[i];
+};
+
+// Runs the passes in sequence and merges. Sequential on purpose: the passes
+// share a rate limit, and a 429 storm would take a review down that a slower
+// run completes.
+const runAiReview = async ({ reviewId, req, client, focus, excludeDocumentIds }) => {
+  const actor = { id: req.user.id, name: req.user.name || req.user.email };
+  try {
+    const input = await gatherChartPacketInput(req, client, { excludeDocumentIds });
+    const built = chartPacket.buildSections(input);
+
+    // How many passes? Count the real tokens for the whole packet; if it fits
+    // under 90% of the model's input limit, one pass. The count is best-effort
+    // — when it cannot be obtained the packet is attempted in one pass and a
+    // MAX_TOKENS refusal from the model is what reports the problem, which is
+    // a named failure rather than a silent truncation.
+    let passCount = 1;
+    const st = gfcModelEngine.status();
+    const limit = Number(process.env.VERTEX_INPUT_TOKEN_LIMIT || 0) || null;
+    if (limit) {
+      try {
+        const contents = vertexTransport.buildContents({ input: { sections: built.sections } });
+        const total = await vertexTransport.countTokens({
+          contents, project: st.projectId, location: st.location, modelId: st.modelId
+        });
+        if (total && !chartPacket.fitsInOnePass(total, limit)) {
+          passCount = Math.ceil(total / (limit * chartPacket.BUDGET_FRACTION));
+        }
+      } catch (e) {
+        console.warn('[AI] token count unavailable, attempting one pass:', e.message);
+      }
+    }
+
+    const passes = chartPacket.splitIntoPasses({ ...built, passCount });
+    await saveAiReview(reviewId, { passes: passes.length });
+
+    const manifest = chartPacket.buildManifest({
+      sections: passes.flatMap(p => p.sections.map(s => ({ ...s, pass: p.pass }))),
+      documents: passes.flatMap(p => p.documents.map(d => ({ ...d, pass: p.pass }))),
+      notRead: built.notRead,
+      passes: passes.length
+    });
+
+    const invocationIds = [];
+    const outputs = [];
+    for (const p of passes) {
+      await saveAiReview(reviewId, { currentPass: p.pass });
+      const r = await gfcModelEngine.invoke({
+        purpose: modelEngine.PURPOSES.CHART_REVIEW,
+        input: {
+          sections: p.sections,
+          documents: p.documents,
+          focus: focus || null,
+          instruction: passes.length > 1
+            ? `This is pass ${p.pass} of ${passes.length} over one patient's record.`
+            : null
+        },
+        schema: AI_REVIEW_SCHEMA,
+        actor: req.user, patientId: client.id,
+        feature: 'chart_review', pass: p.pass,
+        sourceIds: [...p.sections.map(s => s.sourceId), ...p.documents.map(d => d.sourceId)]
+      });
+      invocationIds.push(r.invocationId);
+      outputs.push(r.proposal);
+    }
+
+    // One pass: that output. Several: a merge call that de-duplicates and
+    // keeps every citation.
+    let merged = outputs[0] || { summary: '', findings: [], timeline: [] };
+    if (outputs.length > 1) {
+      const m = await gfcModelEngine.invoke({
+        purpose: modelEngine.PURPOSES.CHART_REVIEW_MERGE,
+        input: {
+          sections: outputs.map((o, i) => ({
+            sourceId: `pass:${i + 1}`, kind: 'pass findings',
+            title: `Pass ${i + 1} of ${outputs.length}`, value: o
+          }))
+        },
+        schema: AI_REVIEW_SCHEMA,
+        actor: req.user, patientId: client.id, feature: 'chart_review_merge'
+      });
+      invocationIds.push(m.invocationId);
+      merged = m.proposal;
+    }
+
+    // E3. Enforced on the SERVER, after the model, because a citation that
+    // does not resolve cannot be checked.
+    const { output, droppedUncited } = chartPacket.enforceCitations(merged, manifest);
+    // Everything the packet could not read is told to the reader, whether the
+    // model mentioned it or not.
+    const notReviewed = [
+      ...new Set([
+        ...(output.notReviewed || []),
+        ...manifest.notRead.map(n => `${n.sourceId}: ${n.why}`)
+      ])
+    ];
+
+    await saveAiReview(reviewId, {
+      status: AI_REVIEW_STATUS.DONE,
+      finishedAt: new Date().toISOString(),
+      invocationIds, model: st.modelId, manifest,
+      output: { ...output, notReviewed },
+      droppedUncited,
+      droppedForeign: built.droppedForeign.length,
+      currentPass: null
+    });
+  } catch (e) {
+    // The reason is scrubbed by the engine before it gets here; scrub again
+    // because a gathering failure (OpenEMR, Drive) did not pass through it.
+    await saveAiReview(reviewId, {
+      status: AI_REVIEW_STATUS.FAILED,
+      finishedAt: new Date().toISOString(),
+      error: modelEngine.scrubForLog(String((e && e.message) || e)).slice(0, 400),
+      code: (e && e.code) || null,
+      blockers: (e && e.blockers) || null
+    });
+    console.error('[AI] chart review failed:', (e && e.code) || e.message);
+  }
+};
+
+// E1. POST …/ai/review — start one.
+app.post('/api/clinical/patients/:clientId/ai/review', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) {
+      return res.status(wrongLine ? 409 : 404).json({
+        error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found',
+        code: wrongLine ? 'NOT_CLINICAL_LINE' : 'CLIENT_NOT_FOUND'
+      });
+    }
+    // Refused BEFORE anything is gathered, so a chart is not assembled in
+    // memory for a call that was never going to be allowed.
+    const st = gfcModelEngine.status();
+    if (!st.configured) {
+      return res.status(503).json({
+        error: 'AI review is not switched on yet.',
+        code: 'MODEL_BOUNDARY_REFUSED',
+        blockers: st.blockers
+      });
+    }
+    const body = req.body || {};
+    const focus = String(body.focus || '').trim().slice(0, 500) || null;
+    const excludeDocumentIds = Array.isArray(body.excludeDocumentIds) ? body.excludeDocumentIds.map(String) : [];
+
+    const row = {
+      id: `air_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      clientId: client.id,
+      purpose: modelEngine.PURPOSES.CHART_REVIEW,
+      status: AI_REVIEW_STATUS.RUNNING,
+      requestedBy: { id: req.user.id, name: req.user.name || req.user.email },
+      at: new Date().toISOString(),
+      focus, excludeDocumentIds,
+      passes: null, currentPass: null,
+      invocationIds: [], model: st.modelId,
+      manifest: null, output: null, findingDecisions: [], droppedUncited: 0
+    };
+    await db.set('ai_reviews', [...(await loadAiReviews()), row]);
+    // WHICH review, on whose record. Never a finding.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'ai_chart_review_started', 'client', client.id,
+      { reviewId: row.id, hasFocus: !!focus, excludedDocuments: excludeDocumentIds.length });
+
+    // Not awaited: the review takes minutes and the UI polls.
+    runAiReview({ reviewId: row.id, req, client, focus, excludeDocumentIds });
+    res.status(202).json({ reviewId: row.id, status: row.status });
+  } catch (error) {
+    console.error('AI review start error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// E6. The list and the poll are READS, so a case manager can see what a
+// clinician asked and what came back without being able to run or decide one.
+const aiReviewListHandler = async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) {
+      return res.status(wrongLine ? 409 : 404).json({
+        error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found'
+      });
+    }
+    const rows = (await loadAiReviews())
+      .filter(r => r && String(r.clientId) === String(client.id))
+      .sort((a, b) => String(b.at).localeCompare(String(a.at)));
+    const st = gfcModelEngine.status();
+    res.json({
+      available: st.configured,
+      // Only an admin is shown the blockers: they are the person who can
+      // clear them, and a clinician reading a list of settings can do nothing
+      // with it.
+      blockers: req.user.role === 'admin' ? st.blockers : undefined,
+      canRun: clinicalRoles.canClinicalWrite(req.user),
+      reviews: rows.map(r => ({
+        id: r.id, status: r.status, at: r.at, finishedAt: r.finishedAt || null,
+        requestedBy: r.requestedBy ? r.requestedBy.name : null,
+        passes: r.passes || null, currentPass: r.currentPass || null,
+        findings: r.output ? (r.output.findings || []).length : 0,
+        droppedUncited: r.droppedUncited || 0,
+        focus: r.focus || null,
+        error: r.error || null, blockers: r.blockers || null
+      }))
+    });
+  } catch (error) {
+    console.error('AI review list error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+const aiReviewGetHandler = async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) {
+      return res.status(wrongLine ? 409 : 404).json({
+        error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found'
+      });
+    }
+    const row = (await loadAiReviews()).find(r => r && r.id === req.params.id && String(r.clientId) === String(client.id));
+    if (!row) return res.status(404).json({ error: 'Review not found', code: 'AI_REVIEW_NOT_FOUND' });
+    res.json({
+      review: {
+        id: row.id, status: row.status, at: row.at, finishedAt: row.finishedAt || null,
+        requestedBy: row.requestedBy ? row.requestedBy.name : null,
+        passes: row.passes || null, currentPass: row.currentPass || null,
+        model: row.model || null, focus: row.focus || null,
+        manifest: row.manifest || null, output: row.output || null,
+        findingDecisions: row.findingDecisions || [],
+        droppedUncited: row.droppedUncited || 0,
+        error: row.error || null, blockers: row.blockers || null,
+        // Said on every read, because the screen must never imply otherwise.
+        notPartOfRecord: true
+      },
+      canDecide: clinicalRoles.canClinicalWrite(req.user),
+      // F3. WHICH "Add" BUTTONS THIS VIEWER MAY USE, answered by the server
+      // from the same capability the target route enforces. A page that works
+      // this out itself is a page that offers a button the route then refuses.
+      can: {
+        medRec: clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.MED_REC),
+        allergy: clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.PROBLEM_LIST_WRITE),
+        problem: clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.PROBLEM_LIST_WRITE)
+      }
+    });
+  } catch (error) {
+    console.error('AI review read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+app.get('/api/clinical/patients/:clientId/ai/reviews', authenticateToken, requireClinicalRead, aiReviewListHandler);
+app.get('/api/clinical/patients/:clientId/ai/reviews/:id', authenticateToken, requireClinicalRead, aiReviewGetHandler);
+
+// E6. A decision per finding. When every finding has one, the outcome is
+// recorded — §10.3's accept/edit/discard signal, which is the only honest
+// measure of whether this helps.
+app.post('/api/clinical/ai/reviews/:id/decisions', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const rows = await loadAiReviews();
+    const row = rows.find(r => r && r.id === req.params.id);
+    if (!row) return res.status(404).json({ error: 'Review not found', code: 'AI_REVIEW_NOT_FOUND' });
+    // The review belongs to a client, and reaching it means being allowed to
+    // reach that client's chart.
+    const { client, wrongLine } = await loadClinicalClient(row.clientId);
+    if (!client) {
+      return res.status(wrongLine ? 409 : 404).json({
+        error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found'
+      });
+    }
+    const decisions = Array.isArray((req.body || {}).decisions) ? req.body.decisions : [];
+    if (!decisions.length) return res.status(400).json({ error: 'No decisions were sent.', code: 'AI_NO_DECISIONS' });
+
+    const total = (row.output && (row.output.findings || []).length) || 0;
+    const kept = [...(row.findingDecisions || [])];
+    const at = new Date().toISOString();
+    for (const d of decisions) {
+      const index = Number(d && d.index);
+      const decision = String((d && d.decision) || '');
+      if (!Number.isInteger(index) || index < 0 || index >= total) {
+        return res.status(400).json({ error: `There is no finding ${index} in this review.`, code: 'AI_NO_SUCH_FINDING' });
+      }
+      if (!['noted', 'dismissed'].includes(decision)) {
+        return res.status(400).json({ error: `"${decision}" is not a decision.`, code: 'AI_BAD_DECISION' });
+      }
+      const i = kept.findIndex(k => k.index === index);
+      const entry = { index, decision, by: { id: req.user.id, name: req.user.name || req.user.email }, at };
+      if (i >= 0) kept[i] = entry; else kept.push(entry);
+    }
+
+    const complete = total > 0 && kept.length === total;
+    await saveAiReview(row.id, { findingDecisions: kept });
+    // Only once every finding has been decided: a partial review tells us
+    // nothing about whether the output was useful.
+    if (complete) {
+      const anyNoted = kept.some(k => k.decision === 'noted');
+      for (const invocationId of (row.invocationIds || [])) {
+        await gfcModelEngine.recordOutcome({
+          invocationId,
+          outcome: anyNoted ? modelEngine.OUTCOMES.ACCEPTED : modelEngine.OUTCOMES.DISCARDED,
+          actor: req.user, patientId: row.clientId
+        });
+      }
+    }
+    // WHICH findings were decided and how. Never the finding's text.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'ai_review_decided', 'client', row.clientId,
+      { reviewId: row.id, decided: kept.length, of: total, complete });
+
+    res.json({ message: complete ? 'Recorded. Every finding has been decided.' : 'Recorded.', decided: kept.length, of: total, complete });
+  } catch (error) {
+    console.error('AI review decision error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// E5. The daily purge. A review is an AI draft a clinician checked, not a
+// medical record, so it goes. The COUNT is logged and never the content.
+const purgeAiReviews = async () => {
+  try {
+    const rows = await loadAiReviews();
+    if (!rows.length) return 0;
+    const cutoff = Date.now() - (AI_REVIEW_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+    const keep = rows.filter(r => {
+      const t = Date.parse(r && (r.finishedAt || r.at));
+      // A row with an unreadable date is KEPT rather than purged: deleting
+      // something because its timestamp could not be parsed is the wrong way
+      // round.
+      return Number.isNaN(t) ? true : t >= cutoff;
+    });
+    if (keep.length !== rows.length) {
+      await db.set('ai_reviews', keep);
+      console.log(`[AI] purged ${rows.length - keep.length} chart review(s) past ${AI_REVIEW_RETENTION_DAYS} days.`);
+    }
+    return rows.length - keep.length;
+  } catch (e) {
+    console.warn('[AI] review purge failed:', e.message);
+    return 0;
+  }
+};
+setInterval(purgeAiReviews, 24 * 60 * 60 * 1000).unref?.();
+
+// ── F: reading outside records into proposals ─────────────────────────────
+//
+// Owner decision 6 approves this now, though §10.4 had deferred it until
+// volume justified it. It is the SAME machinery as the chart review — same
+// engine, same schema validation, same background job, same ai_reviews row —
+// pointed at a handful of documents instead of a whole chart.
+//
+// NO CODE FIELD, ANYWHERE (F2, §10.4). No ICD-10, no CPT, nothing that looks
+// like one. Coding is a clinician's decision with a billing consequence, and a
+// code proposed by a model reads exactly as plausibly as a right one. A test
+// fails the build if a code field appears in this schema.
+const AI_RECORDS_SCHEMA = Object.freeze({
+  fields: {
+    medications: {
+      type: 'array',
+      items: {
+        name: { type: 'string', maxLength: 200, required: true },
+        dose: { type: 'string', maxLength: 100 },
+        route: { type: 'string', maxLength: 60 },
+        frequency: { type: 'string', maxLength: 100 },
+        status: { type: 'string', required: true, enum: ['active', 'stopped', 'unclear'] },
+        // Set against the chart sections sent with the documents. "I cannot
+        // tell" is treated as NOT matching, because a wrong "already in the
+        // chart" is how a medication quietly fails to get added.
+        matchesChart: { type: 'boolean', required: true },
+        citation: {
+          type: 'object',
+          items: {
+            sourceId: { type: 'string', maxLength: 120, required: true },
+            page: { type: 'number' },
+            quote: { type: 'string', maxLength: 300 }
+          }
+        }
+      }
+    },
+    allergies: {
+      type: 'array',
+      items: {
+        substance: { type: 'string', maxLength: 200, required: true },
+        reaction: { type: 'string', maxLength: 200 },
+        matchesChart: { type: 'boolean', required: true },
+        citation: {
+          type: 'object',
+          items: {
+            sourceId: { type: 'string', maxLength: 120, required: true },
+            page: { type: 'number' },
+            quote: { type: 'string', maxLength: 300 }
+          }
+        }
+      }
+    },
+    problems: {
+      type: 'array',
+      items: {
+        description: { type: 'string', maxLength: 300, required: true },
+        matchesChart: { type: 'boolean', required: true },
+        citation: {
+          type: 'object',
+          items: {
+            sourceId: { type: 'string', maxLength: 120, required: true },
+            page: { type: 'number' },
+            quote: { type: 'string', maxLength: 300 }
+          }
+        }
+      }
+    },
+    events: {
+      type: 'array',
+      items: {
+        type: { type: 'string', required: true, enum: ['hospitalization', 'er_visit', 'procedure', 'imaging', 'lab', 'other'] },
+        date: { type: 'string', maxLength: 40 },
+        description: { type: 'string', maxLength: 400, required: true },
+        citation: {
+          type: 'object',
+          items: {
+            sourceId: { type: 'string', maxLength: 120, required: true },
+            page: { type: 'number' },
+            quote: { type: 'string', maxLength: 300 }
+          }
+        }
+      }
+    },
+    unreadable: { type: 'array', itemType: 'string', maxLength: 300 }
+  }
+});
+
+// Every proposed item must cite a source that was actually sent, exactly as a
+// review finding must. The shape differs — one `citation` rather than a list —
+// so the check is its own, and it drops rather than softens.
+const enforceRecordCitations = (output, manifest) => {
+  const ids = chartPacket.manifestIds(manifest);
+  let dropped = 0;
+  const keep = (list) => (Array.isArray(list) ? list : []).filter(row => {
+    const c = row && row.citation;
+    if (c && ids.has(String(c.sourceId))) return true;
+    dropped++;
+    return false;
+  });
+  return {
+    output: {
+      ...output,
+      medications: keep(output && output.medications),
+      allergies: keep(output && output.allergies),
+      problems: keep(output && output.problems),
+      events: keep(output && output.events)
+    },
+    droppedUncited: dropped
+  };
+};
+
+const runRecordsExtraction = async ({ reviewId, req, client, documentIds }) => {
+  try {
+    const wanted = new Set((documentIds || []).map(String));
+    const uploads = (await loadRows('client_document_uploads'))
+      .filter(u => u && String(u.clientId) === String(client.id) && wanted.has(String(u.id)) && u.status !== 'rejected');
+
+    const notRead = [];
+    const documents = [];
+    for (const u of uploads) {
+      try {
+        documents.push({
+          clientId: client.id,
+          sourceId: `${chartPacket.PREFIX.DOCUMENT}:upload:${u.id}`,
+          id: u.id, title: u.fileName || u.kind || 'Document',
+          date: u.at || u.uploadedAt || null,
+          mimeType: u.mimeType || 'application/pdf',
+          bytes: await googledrive.downloadFileBuffer(u.driveFileId)
+        });
+      } catch (e) {
+        notRead.push({ sourceId: `doc:upload:${u.id}`, why: 'the stored file could not be retrieved' });
+      }
+    }
+    if (!documents.length) {
+      await saveAiReview(reviewId, {
+        status: AI_REVIEW_STATUS.FAILED,
+        finishedAt: new Date().toISOString(),
+        error: 'None of those documents could be read.',
+        code: 'AI_NO_DOCUMENTS'
+      });
+      return;
+    }
+
+    // ONLY the three chart sections needed for matching go with them (F1).
+    // A records extraction is not a chart review and does not need the chart.
+    const emr = {};
+    if (client.openEmrPatientId && openemr.isConfigured()) {
+      const api = openemr.forActor(req.user);
+      const [meds, allergies, problems] = await Promise.allSettled([
+        api.getMedicationRequests(client.openEmrPatientId),
+        api.getAllergies(client.openEmrPatientId),
+        api.getProblems(client.openEmrPatientId)
+      ]);
+      if (meds.status === 'fulfilled') emr.medications = meds.value.map(clinicalRepo.summarizeMedicationRequest);
+      else notRead.push({ sourceId: chartPacket.SECTION_KINDS.MEDICATIONS, why: 'not returned by the clinician\'s own EMR session' });
+      if (allergies.status === 'fulfilled') emr.allergies = allergies.value.map(clinicalRepo.summarizeAllergy);
+      else notRead.push({ sourceId: chartPacket.SECTION_KINDS.ALLERGIES, why: 'not returned by the clinician\'s own EMR session' });
+      if (problems.status === 'fulfilled') emr.problems = problems.value.map(clinicalRepo.summarizeCondition);
+      else notRead.push({ sourceId: chartPacket.SECTION_KINDS.PROBLEMS, why: 'not returned by the clinician\'s own EMR session' });
+    } else {
+      notRead.push({ sourceId: 'emr:*', why: 'this client is not linked to an EMR chart, so nothing could be matched against it' });
+    }
+
+    const built = chartPacket.buildSections({ clientId: client.id, emr, documents, notRead });
+    const manifest = chartPacket.buildManifest({ ...built, passes: 1 });
+    await saveAiReview(reviewId, { passes: 1, currentPass: 1 });
+
+    const r = await gfcModelEngine.invoke({
+      purpose: modelEngine.PURPOSES.RECORDS_EXTRACTION,
+      input: { sections: built.sections, documents: built.documents },
+      schema: AI_RECORDS_SCHEMA,
+      actor: req.user, patientId: client.id, feature: 'records_extraction',
+      sourceIds: [...built.sections.map(s => s.sourceId), ...built.documents.map(d => d.sourceId)]
+    });
+
+    const { output, droppedUncited } = enforceRecordCitations(r.proposal, manifest);
+    const unreadable = [
+      ...new Set([...(output.unreadable || []), ...manifest.notRead.map(n => `${n.sourceId}: ${n.why}`)])
+    ];
+    await saveAiReview(reviewId, {
+      status: AI_REVIEW_STATUS.DONE,
+      finishedAt: new Date().toISOString(),
+      invocationIds: [r.invocationId], model: r.modelId,
+      manifest, output: { ...output, unreadable },
+      droppedUncited, currentPass: null
+    });
+  } catch (e) {
+    await saveAiReview(reviewId, {
+      status: AI_REVIEW_STATUS.FAILED,
+      finishedAt: new Date().toISOString(),
+      error: modelEngine.scrubForLog(String((e && e.message) || e)).slice(0, 400),
+      code: (e && e.code) || null,
+      blockers: (e && e.blockers) || null
+    });
+    console.error('[AI] records extraction failed:', (e && e.code) || e.message);
+  }
+};
+
+// F1. POST …/ai/extract-records
+app.post('/api/clinical/patients/:clientId/ai/extract-records', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) {
+      return res.status(wrongLine ? 409 : 404).json({
+        error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found',
+        code: wrongLine ? 'NOT_CLINICAL_LINE' : 'CLIENT_NOT_FOUND'
+      });
+    }
+    const st = gfcModelEngine.status();
+    if (!st.configured) {
+      return res.status(503).json({
+        error: 'Reading records with AI is not switched on yet.',
+        code: 'MODEL_BOUNDARY_REFUSED', blockers: st.blockers
+      });
+    }
+    const documentIds = Array.isArray((req.body || {}).documentIds) ? req.body.documentIds.map(String) : [];
+    if (!documentIds.length) return res.status(400).json({ error: 'Pick at least one document to read.', code: 'AI_NO_DOCUMENT_IDS' });
+
+    const row = {
+      id: `aix_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      clientId: client.id,
+      purpose: modelEngine.PURPOSES.RECORDS_EXTRACTION,
+      status: AI_REVIEW_STATUS.RUNNING,
+      requestedBy: { id: req.user.id, name: req.user.name || req.user.email },
+      at: new Date().toISOString(),
+      documentIds, passes: null, currentPass: null,
+      invocationIds: [], model: st.modelId,
+      manifest: null, output: null, findingDecisions: [], droppedUncited: 0
+    };
+    await db.set('ai_reviews', [...(await loadAiReviews()), row]);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'ai_records_extraction_started', 'client', client.id,
+      { reviewId: row.id, documents: documentIds.length });
+
+    runRecordsExtraction({ reviewId: row.id, req, client, documentIds });
+    res.status(202).json({ reviewId: row.id, status: row.status });
+  } catch (error) {
+    console.error('Records extraction start error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── H: the admin setup screen, and the owner's go-live proof ──────────────
+//
+// H1 answers "is this switched on and why not", and H2 is the only thing in
+// this repo that proves the GOOGLE side: a review of a wholly invented chart
+// through the real engine, the real transport and the real schema. Everything
+// else here can be true while Google still refuses the identity.
+//
+// NEITHER ROUTE EVER RETURNS A SECRET OR A FILE'S CONTENTS. `status()` reports
+// the KIND of credential, never the credential, and the test reports pass/fail
+// and token counts, never a prompt.
+app.get('/api/admin/ai/status', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const st = gfcModelEngine.status();
+    res.json({
+      configured: st.configured,
+      blockers: st.blockers,
+      proof: st.proof,
+      model: st.modelId,
+      location: st.location,
+      projectId: st.projectId,
+      stagingBucket: st.stagingBucket,
+      // The KIND of credential, which is the thing that matters, and never
+      // the credential. `external_account` is federation; `service_account`
+      // is a static key and is refused.
+      credentialType: st.credentialType,
+      usesStaticKeys: st.usesStaticKeys,
+      zeroDataRetention: st.zeroDataRetention,
+      checks: st.checks,
+      retentionDays: AI_REVIEW_RETENTION_DAYS
+    });
+  } catch (error) {
+    console.error('AI status error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Re-run the daily Google-side checks on demand, so an admin who has just
+// changed a setting in the console does not wait up to six hours to find out.
+app.post('/api/admin/ai/recheck', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const r = await gfcModelEngine.runLiveChecks();
+    res.json({ checks: r, status: gfcModelEngine.status() });
+  } catch (error) {
+    console.error('AI recheck error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// H2. THE GO-LIVE PROOF. A wholly invented chart and document, bundled in the
+// repo, through the real path — including a FORCED TWO-PASS SPLIT, because a
+// single-pass review working says nothing about whether a long chart does, and
+// the merge is the part with the most moving parts in it.
+//
+// NO PATIENT DATA IS INVOLVED, and that is structural rather than promised:
+// the fixtures are the only input and the route takes no client id at all.
+app.post('/api/admin/ai/test', authenticateToken, requireAdmin, async (req, res) => {
+  const started = Date.now();
+  try {
+    const st = gfcModelEngine.status();
+    if (!st.configured) {
+      return res.status(503).json({
+        ok: false,
+        error: 'AI is not switched on yet, so there is nothing to test.',
+        code: 'MODEL_BOUNDARY_REFUSED',
+        blockers: st.blockers
+      });
+    }
+    const fixtureDir = path.join(__dirname, 'test', 'fixtures');
+    const synthetic = JSON.parse(fs.readFileSync(path.join(fixtureDir, 'ai_synthetic_chart.json'), 'utf8'));
+    const noteBytes = fs.readFileSync(path.join(fixtureDir, 'ai_synthetic_note.pdf'));
+
+    const built = chartPacket.buildSections({
+      ...synthetic,
+      documents: [{
+        clientId: synthetic.clientId, id: 'SYN-DOC-1', sourceId: 'doc:SYN-DOC-1',
+        title: 'Synthetic cardiology consult', date: '2026-03-02',
+        mimeType: 'application/pdf', bytes: noteBytes
+      }]
+    });
+
+    // FORCED to two passes regardless of size: that is the point of the test.
+    const passes = chartPacket.splitIntoPasses({ ...built, passCount: 2 });
+    const manifest = chartPacket.buildManifest({
+      sections: passes.flatMap(p => p.sections.map(s => ({ ...s, pass: p.pass }))),
+      documents: passes.flatMap(p => p.documents.map(d => ({ ...d, pass: p.pass }))),
+      notRead: built.notRead, passes: passes.length
+    });
+
+    const perPass = [];
+    const outputs = [];
+    for (const p of passes) {
+      const r = await gfcModelEngine.invoke({
+        purpose: modelEngine.PURPOSES.CHART_REVIEW,
+        input: {
+          sections: p.sections, documents: p.documents,
+          instruction: `This is pass ${p.pass} of ${passes.length} over one patient's record. This is a SYNTHETIC test record.`
+        },
+        schema: AI_REVIEW_SCHEMA,
+        actor: req.user,
+        // No patient: there isn't one. The audit row carries null rather than
+        // a made-up id.
+        patientId: null,
+        feature: 'admin_ai_test', pass: p.pass,
+        sourceIds: [...p.sections.map(s => s.sourceId), ...p.documents.map(d => d.sourceId)]
+      });
+      perPass.push({
+        pass: p.pass,
+        sections: p.sections.length,
+        documents: p.documents.length,
+        findings: (r.proposal.findings || []).length,
+        inputTokens: (r.usage && r.usage.inputTokens) ?? null,
+        outputTokens: (r.usage && r.usage.outputTokens) ?? null
+      });
+      outputs.push(r.proposal);
+    }
+
+    const merge = await gfcModelEngine.invoke({
+      purpose: modelEngine.PURPOSES.CHART_REVIEW_MERGE,
+      input: {
+        sections: outputs.map((o, i) => ({
+          sourceId: `pass:${i + 1}`, kind: 'pass findings',
+          title: `Pass ${i + 1} of ${outputs.length}`, value: o
+        }))
+      },
+      schema: AI_REVIEW_SCHEMA, actor: req.user, patientId: null, feature: 'admin_ai_test_merge'
+    });
+    const { output, droppedUncited } = chartPacket.enforceCitations(merge.proposal, manifest);
+
+    res.json({
+      ok: true,
+      message: `Passed. Two passes and a merge completed in ${Math.round((Date.now() - started) / 1000)}s.`,
+      model: st.modelId, location: st.location,
+      passes: perPass,
+      mergeTokens: {
+        inputTokens: (merge.usage && merge.usage.inputTokens) ?? null,
+        outputTokens: (merge.usage && merge.usage.outputTokens) ?? null
+      },
+      findings: (output.findings || []).length,
+      droppedUncited,
+      // Shown so the owner can SEE it worked rather than take "ok" on trust.
+      sampleFinding: (output.findings || [])[0] || null,
+      syntheticOnly: true
+    });
+  } catch (error) {
+    // The engine scrubs before it throws; scrub again because a fixture or
+    // filesystem failure did not pass through it.
+    res.status(502).json({
+      ok: false,
+      error: modelEngine.scrubForLog(String((error && error.message) || error)).slice(0, 400),
+      code: (error && error.code) || null,
+      blockers: (error && error.blockers) || null
+    });
+  }
+});
+
 app.post('/api/gfc/admin/enrollment/:clientId/documents/request', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const users = await getUsers();
@@ -17306,6 +19155,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authe
       label: uploads[i].label || uploads[i].kind, reason,
       uploadId: uploads[i].id, actorId: req.user.id
     });
+    if (decision === 'accepted') fileWaitingUploads(uploads[i].clientId, req.user);
     res.json({ message: decision === 'accepted' ? 'Document accepted.' : 'Document rejected and re-requested.', status: decision });
   } catch (error) {
     console.error('GFC document review error:', error);
@@ -17352,6 +19202,16 @@ const attemptEmrFiling = async ({ client, row, actor }) => {
   if (row.emrFiled) return { filed: false, reason: 'ALREADY_FILED' };
   if (!client.openEmrPatientId) return { filed: false, reason: 'NOT_LINKED' };
   if (!openemr.isConfigured()) return { filed: false, reason: 'EMR_NOT_CONFIGURED' };
+  // A patient, POA or upload link has no OpenEMR identity (Session 5.2), and
+  // neither does a staff member who has not signed in to OpenEMR. Asking
+  // OpenEMR anyway only ever failed. The upload is marked as waiting, and
+  // the next clinician who opens the chart (or the admin who accepts it)
+  // files it with their own sign-in: `fileWaitingUploads` below.
+  const actorConnected = !!(actor && actor.id) && await emrAuth.statusFor(actor.id).then(s => !!s.connected).catch(() => false);
+  if (!actorConnected) {
+    await markEmrFilingWaiting(row.id);
+    return { filed: false, reason: 'WAITING_FOR_CLINICIAN' };
+  }
 
   let bytes;
   try {
@@ -17374,8 +19234,9 @@ const attemptEmrFiling = async ({ client, row, actor }) => {
   const j = fresh.findIndex(u => u.id === row.id);
   const at = new Date().toISOString();
   if (j !== -1) {
+    const { emrFilingWaitingSince, ...rest } = fresh[j];
     fresh[j] = {
-      ...fresh[j],
+      ...rest,
       emrFiled: { at, byId: actor.id, byName: actor.name || actor.email, category }
     };
     await db.set('client_document_uploads', fresh);
@@ -17383,6 +19244,26 @@ const attemptEmrFiling = async ({ client, row, actor }) => {
   await logActivity(actor.id, actor.name || actor.email, 'client_document_filed_to_emr', 'document', client.id,
     { uploadId: row.id, kind: row.kind, category });
   return { filed: true, reason: null, at, category };
+};
+
+// Stamp once, never overwrite: "waiting since" is when it first could not file.
+const markEmrFilingWaiting = async (uploadId) => {
+  const rows = (await db.get('client_document_uploads')) || [];
+  const i = rows.findIndex(u => u.id === uploadId);
+  if (i === -1 || rows[i].emrFiled || rows[i].emrFilingWaitingSince) return;
+  rows[i] = { ...rows[i], emrFilingWaitingSince: new Date().toISOString() };
+  await db.set('client_document_uploads', rows);
+};
+
+// A licensed clinician (or admin) with a live OpenEMR sign-in files whatever
+// this client sent that is still waiting. Called when they open the chart and
+// when an admin accepts a document. Best-effort and never awaited by the
+// response it rides on; a reader without write rights files nothing.
+const fileWaitingUploads = (clientId, user) => {
+  if (!clientId || !user || !clinicalRoles.canClinicalWrite(user)) return;
+  backfillEmrFilingForClient(clientId, user)
+    .then(r => { if (r.filed) console.log(`[AUTO FILE-TO-EMR] filed ${r.filed} waiting upload(s) for a client`); })
+    .catch(e => console.warn('[AUTO FILE-TO-EMR] waiting uploads not filed:', e.message));
 };
 
 // The catch-up pass. A document can arrive before a client is ever linked to
@@ -20035,6 +21916,89 @@ app.put('/api/admin/ticket-polling/config', authenticateToken, requireAdmin, asy
     res.json({ success: true, config });
   } catch (error) {
     res.status(500).json({ error: 'Failed to update polling config', details: error.message });
+  }
+});
+
+// ── T1 D1 — is video actually set up? ────────────────────────────────────
+//
+// `meetStatus()` says whether the settings PARSE, which is a different fact
+// from Google honouring them — the distinction a narrowed OAuth token sitting
+// behind a green "OpenEMR connected" cost this repo weeks. So the status read
+// is cheap and honest about what it knows, and the TEST is a separate,
+// deliberate action that proves the thing: it creates a real space and
+// immediately restricts it.
+//
+// It also names the clinicians who have no Workspace account, because that is
+// the one blocker nobody finds out about from a setting: their visits book
+// fine and then have no room, and the fix is a Google account.
+app.get('/api/admin/meet/status', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const st = meetRooms.meetStatus();
+    const users = await getUsers();
+    // Anyone who could be the host of a video visit: a clinician mapped to an
+    // OpenEMR provider id, which is what an appointment carries.
+    const hosts = users.filter(u => u && u.openEmrProviderId && clinicalRoles.canClinicalWrite(u));
+    const missing = hosts
+      .filter(u => !meetRooms.clinicianWorkspaceEmail(u))
+      .map(u => ({ id: u.id, name: u.name || u.email || 'Unnamed', providerId: String(u.openEmrProviderId) }));
+    const links = await loadVideoLinks();
+    res.json({
+      meet: st,
+      // Domains, not addresses: which domain counts as GFC's is a setting, and
+      // a list of staff email addresses is not.
+      workspaceDomains: meetRooms.workspaceDomains(),
+      hosts: { total: hosts.length, withoutWorkspaceAccount: missing },
+      openRooms: links.length
+    });
+  } catch (error) {
+    console.error('Meet status error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/admin/meet/test — the proof, not the setting. Creates a real space
+// as the named clinician (or the caller) and IMMEDIATELY restricts it and ends
+// any conference, so the test leaves nothing joinable behind. No patient is
+// involved and nothing is stored: this is a handshake, not a visit.
+app.post('/api/admin/meet/test', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const st = meetRooms.meetStatus();
+    if (!st.configured) {
+      return res.status(409).json({ error: `Video visits are not set up yet: ${st.blockers.join('; ')}`, code: 'MEET_NOT_CONFIGURED', blockers: st.blockers });
+    }
+    const asUserId = String((req.body || {}).userId || '').trim();
+    const users = await getUsers();
+    const who = asUserId ? users.find(u => u && String(u.id) === asUserId) : req.user;
+    if (asUserId && !who) return res.status(404).json({ error: 'No such user', code: 'USER_NOT_FOUND' });
+    const email = meetRooms.clinicianWorkspaceEmail(who);
+    if (!email) {
+      return res.status(409).json({
+        error: `${(who && (who.name || who.email)) || 'That user'} has no GFC Google account, so they cannot host a video visit.`,
+        code: 'MEET_NO_HOST_ACCOUNT'
+      });
+    }
+    let room;
+    try {
+      room = await meetRooms.createSpace(email);
+    } catch (e) {
+      // Google's own reason, which is the only thing that says what to fix.
+      return res.status(502).json({ error: e.message, code: e.code || 'MEET_CALL_FAILED' });
+    }
+    const shut = await meetRooms.closeSpace(email, room.spaceName).catch(e => ({ ok: false, failures: [e.message] }));
+    await logActivity(req.user.id, req.user.name || req.user.email, 'meet_test_room', 'user', (who && who.id) || null, {
+      spaceName: room.spaceName, shut: !!shut.ok
+    });
+    res.json({
+      message: shut.ok
+        ? 'Google accepted the room and it was shut again. Video visits are working.'
+        : 'Google accepted the room, but it could not be shut again — close it by hand in Google Meet.',
+      hostedBy: (who && (who.name || who.email)) || null,
+      roomCreated: true, shut: !!shut.ok,
+      failures: shut.failures || []
+    });
+  } catch (error) {
+    console.error('Meet test error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -23776,6 +25740,91 @@ app.get('/upload/:token', (req, res) => {
   res.sendFile(__dirname + '/public/upload-link.html');
 });
 
+// ── T1 C4 — the one-tap video join link ───────────────────────────────────
+//
+// /v/<token>, and nothing else: no login, no portal, one tap from a text
+// message. It is registered as a PHI path in auditLog.js, because it opens a
+// live door into a patient's consultation and that is a disclosure whoever
+// taps it should be recorded as making.
+//
+// IT NEVER SENDS ANYBODY TO THE ROOM OUTSIDE THE WINDOW, and the window is
+// the SAME one the portal's own Join button checks — one rule, two doors, so
+// a link cannot outlive the button beside it. A refusal is a small branded
+// page rather than a redirect to nowhere: a patient holding a link that will
+// not open needs a sentence and a phone number, not a blank tab.
+const joinPage = ({ heading, body, link }) => { const esc = noteFormat.escapeHtml; return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Video visit — ${esc(consentText.ORG.name)}</title>
+<style>
+  :root { --navy:#13294b; --gold:#b89b5e; --cream:#faf7f1; --ink:#2b2b2b; }
+  body { margin:0; background:var(--cream); color:var(--ink);
+    font:16px/1.55 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { max-width:34rem; margin:0 auto; padding:2.5rem 1rem; }
+  .card { background:#fff; border-radius:14px; padding:1.75rem 1.5rem; box-shadow:0 1px 3px rgba(0,0,0,.08); }
+  .brand { color:var(--navy); font-weight:700; letter-spacing:.02em; margin-bottom:.25rem; }
+  .rule { height:3px; width:3.5rem; background:var(--gold); border-radius:2px; margin:.5rem 0 1.25rem; }
+  h1 { font-size:1.3rem; color:var(--navy); margin:0 0 .6rem; }
+  a.btn { display:inline-block; margin-top:1.25rem; background:var(--navy); color:#fff;
+    text-decoration:none; padding:.8rem 1.4rem; border-radius:10px; font-weight:600; }
+  p.small { color:#6b6b6b; font-size:.9rem; }
+</style></head>
+<body><div class="wrap"><div class="card">
+  <div class="brand">${esc(consentText.ORG.name)}</div><div class="rule"></div>
+  <h1>${esc(heading)}</h1>
+  <p>${esc(body)}</p>
+  ${link ? `<a class="btn" href="${esc(link)}">Join the video visit</a>` : ''}
+  <p class="small">Need help? Call ${esc(consentText.ORG.phone)}.</p>
+</div></div></body></html>`; };
+
+app.get('/v/:token', async (req, res) => {
+  const refuse = (status, heading, body) =>
+    res.status(status).type('html').send(joinPage({ heading, body }));
+  try {
+    const rows = await loadRows('appointment_join_tokens');
+    const row = videoJoinTokens.findByToken(rows, req.params.token, JWT_SECRET);
+    // "Never existed" and "was shut off" need different next steps from
+    // whoever is holding the link, so they get different answers — the
+    // distinction the upload link and the password reset both draw.
+    if (!row) return refuse(404, 'This link is not valid', 'Check the message it came in, or sign in to your portal to join your visit.');
+    if (row.revokedAt) return refuse(410, 'This link has been turned off', 'Your visit may have moved or been cancelled. Call the office and we will sort it out.');
+    const appts = (await loadRows('patient_published_appointments')).find(r => r && r.clientId === row.clientId) || null;
+    const appt = ((appts && appts.appointments) || []).find(a => a && String(a.id) === String(row.eid)) || null;
+    if (!appt) return refuse(404, 'We could not find that visit', 'Sign in to your portal to see your visits, or call the office.');
+    const state = patientPublish.joinState(patientPublish.joinWindow(appt, joinInstant), Date.now());
+    if (!state.ok) {
+      const when = state.opensAt ? practiceTime.fmtDayTime(state.opensAt) : null;
+      return refuse(409,
+        state.code === 'JOIN_TOO_EARLY' ? 'Not quite yet' : 'This visit\u2019s room has closed',
+        state.code === 'JOIN_TOO_EARLY'
+          ? `The room opens ${patientPublish.JOIN_OPENS_MINUTES_BEFORE} minutes before your visit${when ? `, at ${when}` : ''}. Tap this link again then.`
+          : 'Call the office if you still need to be seen.');
+    }
+    const link = videoLinkFor(await loadVideoLinks(), row.eid);
+    if (!link || !link.meetingUri) {
+      return refuse(409, 'There is no video room for this visit', 'Call the office and we will arrange it.');
+    }
+    videoJoinTokens.stampUse(row);
+    await db.set('appointment_join_tokens', rows);
+    // WHO tapped it and WHICH visit, never the join link: a meeting URI in the
+    // audit log is a door into a patient's visit sitting in a log.
+    await logActivity(row.recipientUserId, null, 'video_join_link_used', 'client', row.clientId, {
+      appointmentEid: String(row.eid), recipientRole: row.recipientRole, useCount: row.useCount
+    });
+    // A PAGE, not a 302. A redirect would put the room's URL in the browser's
+    // history and in any Referer the next hop sends; one tap on a button the
+    // patient can see is the same number of taps and leaks neither.
+    res.type('html').send(joinPage({
+      heading: 'Your video visit is ready',
+      body: appt.provider ? `${appt.provider} is expecting you. Tap below to join.` : 'Tap below to join.',
+      link: link.meetingUri
+    }));
+  } catch (error) {
+    console.error('Video join link error:', error);
+    refuse(500, 'Something went wrong', 'Please try again, or call the office.');
+  }
+});
+
 // ============== CHANGELOG API ==============
 
 // Get all changelog entries (public, sorted by version descending)
@@ -24937,6 +26986,11 @@ app.listen(PORT, () => {
       `${driveState.rootFolderId ? ` → folder ${driveState.rootFolderId}` : ' (no root folder set)'}`);
     console.log(`         Credential parses; run scripts/verify_drive_access.js to prove Google accepts it.`);
   }
+  // And the Google clinical calendar visits are mirrored onto.
+  const calState = googleCalendar.calendarStatus();
+  console.log(calState.configured
+    ? `📅 Clinical calendar: mirroring app-booked visits to ${calState.calendarId} as ${calState.impersonating}`
+    : `📅 Clinical calendar: NOT CONFIGURED — visits are not mirrored to Google (${calState.blockers.join('; ')})`);
 
   // Safety net: reactivate any admin accounts that are inactive (prevent lockout)
   (async () => {

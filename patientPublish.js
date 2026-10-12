@@ -340,15 +340,29 @@ const resultForPatient = (r) => {
 // APPOINTMENT_PAST_DAYS days of visits that happened. Cancelled tombstones and
 // no-shows are never a patient's appointment. Clinician notes never leave.
 const APPOINTMENT_PAST_DAYS = 90;
-const APPOINTMENT_LOCATION_LABELS = { home: 'Your home', telehealth: 'Video / phone visit', office: 'Office visit' };
+// T1 C5: "Video visit" everywhere, and a PHONE CALL IS NOT A VIDEO VISIT. The
+// old single label read "Video / phone visit", which told a patient expecting a
+// phone call to look for a video link and a patient expecting video that a
+// phone call would do. One label per location, from one declaration.
+const APPOINTMENT_LOCATION_LABELS = {
+  home: 'Your home', telehealth: 'Video visit', office: 'Office visit', phone: 'Phone call'
+};
 const isoMinusDays = (isoDate, days) => {
   const t = Date.parse(`${isoDate}T12:00:00Z`);
   return Number.isFinite(t) ? new Date(t - days * 86400000).toISOString().slice(0, 10) : isoDate;
 };
 // `summaries` are clinicalRepository.summarizeAppointmentRow rows; `today` is
 // the practice's calendar date (Georgia); `providerName(id)` names a clinician
-// from the app's user records (never guessed, never an id).
-const buildPublishedAppointments = ({ summaries, today, providerName }) => {
+// from the app's user records (never guessed, never an id); `hasVideoFor(eid)`
+// answers whether a video room exists for that appointment.
+//
+// T1 C1: `hasVideo` comes from the ROOM POINTER, never from the location
+// marker, because the OpenEMR calendar LIST omits pc_hometext — so a copy
+// written from a list read has `location: null` on every row and a flag keyed
+// on it would be false for every video visit. THE JOIN LINK IS NEVER
+// PUBLISHED: the patient asks for it through a window-checked route, so a
+// stored copy cannot be read months later or by somebody who should not have it.
+const buildPublishedAppointments = ({ summaries, today, providerName, hasVideoFor }) => {
   const from = isoMinusDays(today, APPOINTMENT_PAST_DAYS);
   const seen = new Set();
   return (summaries || [])
@@ -365,9 +379,14 @@ const buildPublishedAppointments = ({ summaries, today, providerName }) => {
       title: a.title || 'Clinical visit',
       // Unknown location is left unknown rather than claimed to be "your home".
       location: a.location ? (APPOINTMENT_LOCATION_LABELS[a.location] || null) : null,
+      hasVideo: !!(hasVideoFor && hasVideoFor(String(a.eid))),
       provider: (providerName && providerName(a.providerId)) || 'Your care team',
       state: String(a.date) >= today ? 'upcoming' : 'completed'
     }))
+    // A video visit whose location the list read could not see still says what
+    // it is, from the room. "Video visit" with no place beside it is better
+    // than a blank where the patient looks for where to be.
+    .map(a => (!a.location && a.hasVideo) ? { ...a, location: APPOINTMENT_LOCATION_LABELS.telehealth } : a)
     .sort((a, b) => `${a.date} ${a.startTime || ''}`.localeCompare(`${b.date} ${b.startTime || ''}`));
 };
 // A later read that could not see a row's location (the calendar list omits
@@ -376,12 +395,74 @@ const mergeAppointments = (prior, next) => {
   const before = new Map((prior || []).map(a => [String(a.id), a]));
   return (next || []).map(a => {
     const p = before.get(String(a.id));
-    return (!a.location && p && p.location) ? { ...a, location: p.location } : a;
+    if (!p) return a;
+    const out = { ...a };
+    if (!out.location && p.location) out.location = p.location;
+    // `hasVideo` is NOT carried forward when the new read says false. Unlike a
+    // location the calendar simply could not show, the room pointer is read
+    // from this app's own store on every publish — so false means the room is
+    // gone (cancelled, or rescheduled away from video), and keeping a stale
+    // true would leave a Join button on a visit with no room behind it.
+    return out;
   });
+};
+
+// ---- T1 C2: when a patient may open the video room -----------------------
+//
+// A JOIN WINDOW, not a permanent link. The room is a live door into a
+// consultation, so the link is handed out only around the time of the visit:
+// a link that worked forever would still open the room months later, to
+// whoever had the message it arrived in.
+//
+// It opens 15 minutes BEFORE the start, because a patient who arrives early
+// should be able to sit in the room rather than be told to come back; and it
+// closes 60 minutes after the visit's scheduled END, because visits run over
+// and a door that shuts while the clinician is still talking is worse than one
+// that stays open for an hour afterwards. Measured against the scheduled end,
+// not the start: a 60-minute visit measured from its start would close exactly
+// as it was meant to finish.
+const JOIN_OPENS_MINUTES_BEFORE = 15;
+const JOIN_CLOSES_MINUTES_AFTER = 60;
+const DEFAULT_VISIT_MINUTES = 60;
+// `appointment` is a PUBLISHED row (date + startTime in the practice's own wall
+// clock); `instantOf(date, time)` turns that wall clock into an instant in the
+// practice timezone — passed in so this file does nothing with timezones
+// itself, which is how the DST bug of 2026-09-16 got in.
+// NOTE, because a later simplification could get this wrong: the FIRST guard
+// below is belt-and-braces, and mutation-checking proved it rather than
+// assuming it. A row with no date or no startTime produces a non-finite
+// `start` one line down and is refused there anyway. It is here so the refusal
+// is by SHAPE as well as by arithmetic. WHAT ACTUALLY DOES THE WORK is the
+// `Number.isFinite` check — remove that one and a visit with no time gets a
+// window built out of NaN.
+const joinWindow = (appointment, instantOf) => {
+  const a = appointment || {};
+  if (!a.date || !a.startTime) return { ok: false, code: 'JOIN_NO_TIME', error: 'This visit has no time on it yet, so the video room cannot be opened.' };
+  const start = instantOf(a.date, String(a.startTime).slice(0, 5));
+  if (!Number.isFinite(start)) return { ok: false, code: 'JOIN_NO_TIME', error: 'This visit has no usable time on it, so the video room cannot be opened.' };
+  const minutes = Number(a.durationMinutes) > 0 ? Number(a.durationMinutes) : DEFAULT_VISIT_MINUTES;
+  const end = a.endTime ? instantOf(a.date, String(a.endTime).slice(0, 5)) : start + minutes * 60000;
+  return {
+    ok: true,
+    opensAt: new Date(start - JOIN_OPENS_MINUTES_BEFORE * 60000).toISOString(),
+    closesAt: new Date((Number.isFinite(end) ? end : start + minutes * 60000) + JOIN_CLOSES_MINUTES_AFTER * 60000).toISOString()
+  };
+};
+// Three answers, and they are three different sentences to read on a phone:
+// too early (and when to come back), too late, or open.
+const joinState = (window, nowMs) => {
+  if (!window.ok) return window;
+  const opens = Date.parse(window.opensAt);
+  const closes = Date.parse(window.closesAt);
+  if (nowMs < opens) return { ...window, ok: false, code: 'JOIN_TOO_EARLY', error: 'The video room opens 15 minutes before your visit.' };
+  if (nowMs > closes) return { ...window, ok: false, code: 'JOIN_CLOSED', error: 'This visit\u2019s video room has closed. Call the office if you still need to be seen.' };
+  return { ...window, ok: true };
 };
 
 module.exports = {
   buildPublishedAppointments, mergeAppointments, APPOINTMENT_PAST_DAYS,
+  joinWindow, joinState, JOIN_OPENS_MINUTES_BEFORE, JOIN_CLOSES_MINUTES_AFTER,
+  APPOINTMENT_LOCATION_LABELS,
   HOLD_REASONS, HOLD_REASON_LABELS, validateHold, holdStamp,
   isStructuredRecordNote,
   buildPublishedChart, mergeChart, CHART_SECTIONS, appHeldHealth, reconciledAppMeds, CHART_HISTORY_MAX,

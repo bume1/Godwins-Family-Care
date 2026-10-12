@@ -87,7 +87,10 @@ test('portal signed-consents list: only executed consents, and a copy link only 
   const gate = between(server, 'const isClientOrPoa = async', 'const requireClientForOwnConsents');
   assert.match(gate, /user\.role === config\.ROLES\.CLIENT\) return true/);
   assert.match(gate, /buildActingIdentity\(user, client\)\.isPoa/);
-  assert.match(portal, /onClick=\{s\.copyUrl \? openConsentPdf : undefined\}/);
+  // Repointed 2026-10-12: the Documents screen lists through public/patient-files.js.
+  // A consent with no copy link has nothing to open.
+  const pf = require('fs').readFileSync(require('path').join(__dirname, '../public/patient-files.js'), 'utf8');
+  assert.match(pf, /open: s\.copyUrl \? \{ type: 'pdf', url: s\.copyUrl \} : null/);
 });
 
 test('portal documents: family and POA get no client-only upload controls', () => {
@@ -95,7 +98,10 @@ test('portal documents: family and POA get no client-only upload controls', () =
 });
 
 test('portal: files stored on this app are fetched with the login token', () => {
-  assert.match(portal, /onClick=\{local \? \(e\) => \{ e\.preventDefault\(\); openPdfSecurely\(`\$\{API_URL\}\$\{f\.url\}`, token\); \} : undefined\}/);
+  // Repointed 2026-10-12: an app-stored file is type 'file', opened with the token.
+  const pf = require('fs').readFileSync(require('path').join(__dirname, '../public/patient-files.js'), 'utf8');
+  assert.match(pf, /type: typeof f\.url === 'string' && f\.url\.startsWith\('\/'\) \? 'file' : 'link'/);
+  assert.match(portal, /return openPdfSecurely\(`\$\{API_URL\}\$\{o\.url\}`, token\);/);
   assert.match(server, /allDocs\.filter\(d => \(!d\.slug \|\| d\.slug === client\.slug\) && d\.active !== false\)/);
 });
 

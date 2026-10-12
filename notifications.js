@@ -110,9 +110,9 @@ function createNotifier(deps) {
     return { client, recipients };
   };
 
-  const send = async ({ type, user, subject, headline, paragraphs, fields, callout, ctaUrl, ctaLabel, relatedEntityId, relatedEntityType, actorId, phi }) => {
+  const send = async ({ type, user, subject, headline, paragraphs, fields, callout, calloutLabel, ctaUrl, ctaLabel, relatedEntityId, relatedEntityType, actorId, phi }) => {
     const rendered = renderGfcEmail({
-      greeting: firstNameOf(user), headline, paragraphs, fields, callout, ctaUrl, ctaLabel
+      greeting: firstNameOf(user), headline, paragraphs, fields, callout, calloutLabel, ctaUrl, ctaLabel
     });
     const queued = await queueNotification(
       type, user.id, user.email, user.name,
@@ -178,15 +178,16 @@ function createNotifier(deps) {
           paragraphs: rejected
             ? (detail
                 ? [`We looked at ${thing}${forWhom} and need it sent again.`,
-                   'You can upload a replacement from the Documents tab in the portal. There is nothing else to do in the meantime.']
+                   'Upload a replacement from the Documents tab in your portal. There is nothing else to do in the meantime.']
                 : [`One of the documents${forWhom} needs to be sent again.`,
                    'The reason is in the secure portal, along with the button to upload a replacement. For privacy we do not put document details in email.'])
             : (detail
-                ? [`We received ${thing}${forWhom} and it has been accepted. Nothing further is needed.`]
-                : [`A document${forWhom} was received and accepted. Nothing further is needed.`]),
+                ? [`We received ${thing}${forWhom} and it is accepted. Nothing further is needed from you.`]
+                : [`A document${forWhom} was received and accepted. Nothing further is needed from you.`]),
           // The reason rides in the callout, and ONLY when the transport can
           // carry it. Staff type this field freely, so it is treated as PHI.
           callout: rejected && detail && reason ? reason : null,
+          calloutLabel: 'Why we need it again',
           ctaUrl: url, ctaLabel: 'Open your portal',
           relatedEntityId: `${uploadId}:${decision}`, relatedEntityType: 'document',
           actorId, phi: detail
@@ -299,21 +300,42 @@ function createNotifier(deps) {
 
   const apptRecipients = (clientId) => clientSideRecipients(clientId);
 
-  const sendToClientSide = async ({ clientId, type, subject, headline, paragraphs, fields, callout, actorId, entityId, entityType }) => {
+  // `ctaFor` (T1 C4) lets ONE recipient get a different button from another:
+  // the video nudge's one-tap link is minted per person and bound to them, so
+  // a patient's link is not their POA's. It is a callback rather than a field
+  // because minting touches the token store, and this module deliberately
+  // knows nothing about it. Returning null falls back to the portal button,
+  // which is what every other notice gets.
+  const sendToClientSide = async ({ clientId, type, subject, headline, paragraphs, fields, callout, calloutLabel, actorId, entityId, entityType, ctaFor }) => {
     const { client, recipients } = await apptRecipients(clientId);
     if (!client) return { notified: 0, reason: 'no client record' };
     if (!recipients.length) return { notified: 0, reason: 'no email address on file' };
     const url = await portalUrlFor(client);
     let n = 0;
     for (const { user, actingFor } of recipients) {
+      let cta = null;
+      if (ctaFor) {
+        // A link that cannot be minted must not stop the reminder: the patient
+        // still gets the portal button, which is a working way in.
+        try { cta = await ctaFor(user, actingFor); }
+        catch (e) { console.error('[APPT] per-recipient link failed (non-fatal):', e.message); }
+      }
       const ok = await send({
         type, user, subject, headline,
         // A POA is told whose visit (or result) it is; the client is not told
-        // their own name. Every client-side paragraph opens with "Your visit"
-        // or "Your test result" for exactly this reason.
-        paragraphs: actingFor ? paragraphs.map(p => p.replace(/^Your (visit|test result)/, (m, what) => `${actingFor.name}'s ${what}`)) : paragraphs,
-        fields, callout,
-        ctaUrl: url, ctaLabel: 'Open your portal',
+        // their own name. EVERY client-side paragraph must open with one of the
+        // phrases below, and the longer ones come FIRST because alternation is
+        // ordered — with `visit` leading, "Your caregiver visit" fell through
+        // unrewritten and a POA read "Your caregiver visit has moved" about a
+        // visit that was not theirs. Found by rendering the POA's copy.
+        paragraphs: actingFor
+          ? paragraphs.map(p => p.replace(
+              /^Your (caregiver visit|clinician visit|visit|test result)/,
+              (m, what) => `${actingFor.name}'s ${what}`))
+          : paragraphs,
+        fields, callout, calloutLabel,
+        ctaUrl: (cta && cta.url) || url,
+        ctaLabel: (cta && cta.label) || 'Open your portal',
         relatedEntityId: entityId, relatedEntityType: entityType || 'appointment',
         actorId, phi: true
       });
@@ -342,7 +364,8 @@ function createNotifier(deps) {
         headline: 'Your visit is scheduled',
         paragraphs: detail
           ? ['Your visit is booked. The details are below and in your portal.',
-             'If the time does not work, call the office and we will move it.']
+             'If the time does not work, call the office and we will move it.',
+             'A reminder will reach you the day before.']
           : ['A visit has been scheduled for you. The date and time are in your secure portal.',
              'For privacy we do not put visit details in email.'],
         fields: visitFields(detail, { when, clinician, place }),
@@ -367,7 +390,10 @@ function createNotifier(deps) {
   async function visitReminder({ reminder, orgPhone, actorId }) {
     try {
       const detail = transportAllowsDetail();
-      const copy = reminders.reminderCopy({ detail, when: reminder.when, orgPhone });
+      const copy = reminders.reminderCopy({
+        detail, when: reminder.when, orgPhone,
+        timeOfDay: reminders.timeOfDayFor(reminder.visitDate, reminder.startTime)
+      });
       return await sendToClientSide({
         clientId: reminder.clientId,
         type: 'visit_reminder',
@@ -389,6 +415,43 @@ function createNotifier(deps) {
     }
   }
 
+  // ---- T1 C4: the day-of video nudge --------------------------------------
+  //
+  // Half an hour before a video visit, with the one-tap link. It rides the
+  // SAME reminder store, the same scanner and the same recipient rules as the
+  // day-before reminder; what differs is the copy, the timing and the button.
+  //
+  // THE LINK ONLY GOES OUT WHERE THE TRANSPORT IS COVERED. `videoReminderCopy`
+  // returns no joinUrl on the vague path, and `ctaFor` is only consulted when
+  // detail is allowed — so a transport outside the BAA sends "sign in to your
+  // portal" and nothing else.
+  async function videoReminder({ reminder, orgPhone, actorId, ctaFor }) {
+    try {
+      const detail = transportAllowsDetail();
+      const copy = reminders.videoReminderCopy({
+        detail, when: reminder.when, orgPhone,
+        timeOfDay: reminders.timeOfDayFor(reminder.visitDate, reminder.startTime)
+      });
+      return await sendToClientSide({
+        clientId: reminder.clientId,
+        type: 'visit_reminder',
+        subject: copy.subject,
+        headline: copy.headline,
+        paragraphs: copy.paragraphs,
+        fields: visitFields(detail, { when: reminder.when, clinician: reminder.clinician, place: reminder.place }),
+        actorId,
+        ctaFor: detail ? ctaFor : null,
+        // Its own dedupe key: a bare `${eid}:reminder` would collide with the
+        // day-before notice and the nudge would be swallowed as a duplicate of
+        // it — the trap the document-request chase already paid for.
+        entityId: `${reminder.eid}:video-join`
+      });
+    } catch (e) {
+      console.error('[APPT] video reminder failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
   // ---- Portal P1: a visit summary is ready (owner, 2026-09-29) --------------
   // Sent when a signed visit is PUBLISHED to the portal, and on a republish
   // only when the summary or note text changed (the caller decides that from
@@ -404,7 +467,7 @@ function createNotifier(deps) {
         headline: 'Your visit summary is ready',
         paragraphs: detail && visitDate
           ? [`Your visit summary from ${visitDate} is ready to read in your portal${hasNote ? ", along with your clinician's note" : ''}.`,
-             'If anything in it is unclear, send the care team a message from the portal.']
+             'If anything in it is unclear, message your care team from the portal.']
           : [`Your visit summary is ready to read in your secure portal${hasNote ? ', along with your clinician\'s note' : ''}.`,
              'For privacy we do not put visit details in email.'],
         actorId,
@@ -468,7 +531,7 @@ function createNotifier(deps) {
           ? [isReminder
               ? `A quick reminder — we are still waiting on ${count} ${noun}${forWhom} to finish setting up care.`
               : `We need ${count} ${noun}${forWhom} to finish setting up care.`,
-             'You can upload them from the Documents tab in your portal. A clear phone photo is fine for most of them.']
+             'Upload them from the Documents tab in your portal. A clear phone photo is fine for most of them.']
           : [isReminder
               ? `A quick reminder — we are still waiting on ${count} ${noun}${forWhom}.`
               : `We need ${count} ${noun}${forWhom} to finish setting up care.`,
@@ -486,6 +549,7 @@ function createNotifier(deps) {
           // "Guardianship order" say something about a named person's
           // circumstances, so they ride only on a transport that may carry it.
           callout: detail && count ? list.join(' · ') : null,
+          calloutLabel: 'What we need',
           ctaUrl: url, ctaLabel: 'Open your portal',
           // A reminder is a deliberate second ask, so it must not be collapsed
           // into the original request by the queue's duplicate check.
@@ -508,10 +572,15 @@ function createNotifier(deps) {
       return await sendToClientSide({
         clientId: client.id,
         type: 'appointment_rescheduled',
-        subject: detail ? `Your visit has moved to ${to}` : 'A visit has been rescheduled',
-        headline: 'Your visit has moved',
+        // "Your visit" here is the CLINICIAN's visit. The caregiver-shift
+        // notices say "your caregiver's visit", so a client reading either one
+        // knows which kind of visit moved. Two notices reading "Your care visit
+        // has been rescheduled" and "Your visit has moved to …" told them a
+        // visit had changed and left them to guess which.
+        subject: detail ? `Your clinician visit has moved to ${to}` : 'A clinician visit has been rescheduled',
+        headline: 'Your clinician visit has moved',
         paragraphs: detail
-          ? [`Your visit has been moved from ${from} to ${to}.`,
+          ? [`Your visit with the clinician has moved from ${from} to ${to}.`,
              'Nothing else about the visit has changed. Call the office if the new time does not work.']
           : ['A visit has been moved to a new time. The new details are in your secure portal.',
              'For privacy we do not put visit details in email.'],
@@ -549,11 +618,12 @@ function createNotifier(deps) {
           subject: 'Action needed to finish your enrollment',
           headline: 'A few things still need you',
           paragraphs: detail
-            ? [`${count} ${noun}${forWhom} still need your attention before we can finish enrollment.`,
+            ? [`${count} ${noun}${forWhom} still need you before we can finish enrollment.`,
                'Sign in to your portal to complete them. Everything else is already on file.']
             : [`${count} ${noun}${forWhom} still need your attention before we can finish enrollment.`,
                'The list is waiting in your secure portal. For privacy we do not put the details in email.'],
           callout: detail && count ? list.join(' · ') : null,
+          calloutLabel: 'What still needs you',
           ctaUrl: url, ctaLabel: 'Open your portal',
           relatedEntityId: `${client.id}:followup:${list.slice().sort().join(',')}`,
           relatedEntityType: 'enrollment',
@@ -578,17 +648,89 @@ function createNotifier(deps) {
         headline: 'Your visit is cancelled',
         paragraphs: detail
           ? [`Your visit on ${when} has been cancelled.`,
-             'Call the office when you are ready to rebook and we will find a new time.']
+             'Nothing else has changed about your care. Call the office when you are ready to rebook.']
           : ['A scheduled visit has been cancelled. The details are in your secure portal.',
              'Call the office when you are ready to rebook.'],
         fields: visitFields(detail, { when, clinician, place: null }),
         // The cancellation reason is staff free text. It rides only where the
         // transport can carry it, the same rule the document rejection follows.
         callout: detail && reason ? reason : null,
+        calloutLabel: 'Why it was cancelled',
         actorId, entityId: eid
       });
     } catch (e) {
       console.error('[APPT] cancel notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- Caregiver visits (PHCP), 2026-10-12 ---------------------------------
+  //
+  // These two were hand-rolled inside routes/scheduling.js: one bare sentence
+  // each, no headline, no When line, and sent to the CLIENT only. Beside the
+  // fourteen notices in this file they read as though a different company had
+  // sent them, and a designated POA managing someone's care was never told
+  // their caregiver visit had moved.
+  //
+  // Routing them here gets all of it from one place: the client plus a POA and
+  // never non-POA family, the unsubscribe honour, the house template, and the
+  // transport-aware detail rule. They say "your caregiver's visit" rather than
+  // "your visit", because the clinician notices above own that phrase and a
+  // client who gets both has to be able to tell them apart.
+  async function caregiverVisitConfirmed({ clientId, caregiverName, when, actorId, shiftId }) {
+    try {
+      const detail = transportAllowsDetail();
+      const who = caregiverName || 'A caregiver';
+      return await sendToClientSide({
+        clientId,
+        type: 'shift_confirmed_client',
+        subject: detail ? 'Your caregiver visit is confirmed' : 'A caregiver visit is confirmed',
+        headline: 'Your caregiver visit is confirmed',
+        paragraphs: detail
+          ? [`Your caregiver visit${when ? ` on ${when}` : ''} is confirmed. ${who} will be visiting.`,
+             'Call the office if anything about the time needs to change.']
+          : ['A caregiver visit has been confirmed. The time is in your secure portal.',
+             'For privacy we do not put visit details in email.'],
+        fields: detail
+          ? [{ label: 'When', value: when }, { label: 'Who', value: caregiverName }].filter(f => f.value)
+          : [],
+        actorId,
+        entityId: `${shiftId}:confirmed-client`,
+        entityType: 'shift'
+      });
+    } catch (e) {
+      console.error('[PHCP] caregiver visit confirmed notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // Only ever for a visit still to come. "Your visit has been rescheduled" is
+  // false about one that already happened, and a client has nothing to do about
+  // a correction to our own timesheet — that gate lives at the call site, which
+  // is the only place that knows whether the shift is ahead of us.
+  async function caregiverVisitMoved({ clientId, caregiverName, from, to, actorId, shiftId, editCount }) {
+    try {
+      const detail = transportAllowsDetail();
+      return await sendToClientSide({
+        clientId,
+        type: 'shift_time_changed_client',
+        subject: detail && to ? `Your caregiver visit has moved to ${to}` : 'A caregiver visit has been rescheduled',
+        headline: "Your caregiver's visit has moved",
+        paragraphs: detail
+          ? [`Your caregiver visit has moved${from ? ` from ${from}` : ''}${to ? ` to ${to}` : ''}.`,
+             'The same care is planned. Call the office if the new time does not work.']
+          : ['A caregiver visit has been moved to a new time. The new time is in your secure portal.',
+             'For privacy we do not put visit details in email.'],
+        fields: detail
+          ? [{ label: 'New time', value: to }, { label: 'Previous time', value: from },
+             { label: 'Who', value: caregiverName }].filter(f => f.value)
+          : [],
+        actorId,
+        entityId: `${shiftId}:edited-client:${editCount}`,
+        entityType: 'shift'
+      });
+    } catch (e) {
+      console.error('[PHCP] caregiver visit moved notice failed (non-fatal):', e.message);
       return { notified: 0, reason: e.message };
     }
   }
@@ -608,21 +750,24 @@ function createNotifier(deps) {
       let n = 0;
       for (const { user, actingFor } of recipients) {
         const forWhom = actingFor ? ` for ${actingFor.name}` : '';
-        const paragraphs = [
-          `Enrollment${forWhom} is approved and complete. Everything we needed is on file.`,
-          'We can now schedule care. Someone from our team will be in touch about start dates, and your portal has your plan, your documents and your signed paperwork whenever you want them.'
-        ];
-        // An override means enrollment was approved with items outstanding.
-        // Saying nothing would leave the client believing their file is
-        // complete when staff know it is not.
-        if (overridden) {
-          paragraphs.push('A few items are still outstanding on your file. We have gone ahead so care is not delayed, and we will follow up with you about them.');
-        }
+        // AN OVERRIDE AND A CLEAN APPROVAL ARE DIFFERENT NEWS, so they are
+        // different emails rather than the same one with a caveat stapled on.
+        // The earlier version opened "approved and complete, everything we
+        // needed is on file" and then said two paragraphs later that items
+        // were outstanding — both sentences in one message, the first of them
+        // untrue. The opening line now changes with the facts.
+        const paragraphs = overridden
+          ? [`Enrollment${forWhom} is approved and we can start care.`,
+             'A few items are still outstanding on your file. We have gone ahead so care is not delayed, and someone will follow up with you about them.',
+             'Your portal has your plan, your documents and your signed paperwork whenever you want them.']
+          : [`Enrollment${forWhom} is approved and complete. Everything we needed is on file.`,
+             'We can start care now. Someone will be in touch about start dates.',
+             'Your portal has your plan, your documents and your signed paperwork whenever you want them.'];
         const ok = await send({
           type: 'phc_enrollment_approved',
           user,
-          subject: 'Your enrollment is complete',
-          headline: 'Your enrollment is complete',
+          subject: overridden ? 'Your enrollment is approved' : 'Your enrollment is complete',
+          headline: overridden ? 'Your enrollment is approved' : 'Your enrollment is complete',
           paragraphs,
           ctaUrl: url, ctaLabel: 'Open your portal',
           relatedEntityId: `${client.id}:enrolled`,
@@ -643,9 +788,11 @@ function createNotifier(deps) {
     documentUploaded, documentReviewed, consentSigned, carePlanCoSigned,
     documentsRequested, enrollmentFollowUp, enrollmentApproved,
     // clinical visits
-    appointmentBooked, appointmentRescheduled, appointmentCancelled, visitReminder,
+    appointmentBooked, appointmentRescheduled, appointmentCancelled, visitReminder, videoReminder,
     // patient portal (P1)
-    visitSummaryReady, resultReviewed
+    visitSummaryReady, resultReviewed,
+    // caregiver visits (PHCP)
+    caregiverVisitConfirmed, caregiverVisitMoved
   };
 }
 

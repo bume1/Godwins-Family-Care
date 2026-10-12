@@ -180,8 +180,10 @@ test('patient-facing clinical routes take NO id parameter — the patient comes 
     const params = routePath.match(/:[A-Za-z]+/g) || [];
     // :visitId (2026-09-29) is the same kind of exception: it names an encounter
     // WITHIN the session patient's chart, and the route refuses one that is not
-    // theirs.
-    assert.ok(params.every(p => p === ':docId' || p === ':visitId'), `${routePath} must not take a patient-identifying parameter`);
+    // theirs. :eid (T1, 2026-10-12) is the third: it names an appointment
+    // within the session patient's own PUBLISHED calendar, and a row that is
+    // not theirs is simply not in it.
+    assert.ok(params.every(p => p === ':docId' || p === ':visitId' || p === ':eid'), `${routePath} must not take a patient-identifying parameter`);
     assert.match(l, /requireEnrolledClient/, `${routePath} must sit behind the enrollment gate`);
   }
 });

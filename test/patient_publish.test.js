@@ -121,7 +121,11 @@ const build = (opts = {}) => {
   const names = ['db', 'loadRows', 'notify', 'logActivity', 'openemr', 'app', 'patientPublish', 'patientRead', 'clinicalNotes', 'clinicalRepo',
     'clinicalResults', 'practiceTime', 'authenticateToken', 'requireEnrolledClient', 'requireClinicalWrite', 'resolveGfcClientRecord',
     'isConsentSatisfied', 'isClinicalServiceLine', 'getUsers', 'googledrive', 'contentDisposition', 'detectFileType', 'uuidv4',
-    'queueNotification', 'appLinks', 'clinicalRoles', 'loadEncounterContext', 'roiStore', 'consentDefsForServiceLine', 'buildCarePlanPdfForVersion', 'renderConsentPdf', 'serveStoredDocument', 'console', 'visitReminders', 'summarizeCalendarRows', 'config'];
+    'queueNotification', 'appLinks', 'clinicalRoles', 'loadEncounterContext', 'roiStore', 'consentDefsForServiceLine', 'buildCarePlanPdfForVersion', 'renderConsentPdf', 'serveStoredDocument', 'console', 'visitReminders', 'summarizeCalendarRows', 'config',
+    // T1: the two video-room pointer readers. Thin store readers in server.js,
+    // injected here the same way `loadRows` is, so the lifted publish and join
+    // code runs against the harness store rather than a stub of itself.
+    'loadVideoLinks', 'videoLinkFor'];
   // eslint-disable-next-line no-new-func
   const mk = new Function(...names, `
     ${actorSrc}
@@ -130,7 +134,7 @@ const build = (opts = {}) => {
     ${resultsSrc}
     ${ackSrc}
     ${pubRouteSrc}
-    return { loadPublishedVisits, upsertPublishedVisit, holdPublishedVisit, dropPublishedForClient, patchPortalOutcome, loadPublishedChart, upsertPublishedChart, publishChartFromEmr, publishEncounterToPortal, applyPublishOutcome, receiveClinicalResult, publishAppointmentsForClient, loadPublishedAppointments };`);
+    return { loadPublishedVisits, upsertPublishedVisit, holdPublishedVisit, dropPublishedForClient, patchPortalOutcome, loadPublishedChart, upsertPublishedChart, publishChartFromEmr, publishEncounterToPortal, applyPublishOutcome, receiveClinicalResult, publishAppointmentsForClient, loadPublishedAppointments, joinInstant };`);
   const fns = mk(db, loadRows, notify, logActivity, openemr, app, patientPublish, patientRead, clinicalNotes, clinicalRepo,
     clinicalResults, practiceTime, (q, s, n) => n(), (q, s, n) => n(), (q, s, n) => n(),
     async (u) => (u.role === 'client' ? CLIENT_LIVE(opts, u) : (u.familyOfClientId ? CLIENT_LIVE(opts, { id: u.familyOfClientId }) : null)),
@@ -142,7 +146,9 @@ const build = (opts = {}) => {
     { log() {}, error() {}, warn() {} },
     require('../visitReminders'),
     async (rows) => rows.map(r => clinicalRepo.summarizeAppointmentRow(r, r.__linked || null, opts.now || new Date())),
-    { ROLES: { CLIENT: 'client' } });
+    { ROLES: { CLIENT: 'client' } },
+    async () => (await db.get('appointment_video_links')) || [],
+    (rows, eid) => (rows || []).find(r => r && String(r.eid) === String(eid)) || null);
   const clinician = (fn) => async (...args) => { mode.clinician = true; try { return await fn(...args); } finally { mode.clinician = false; } };
   return { store, db, arm, loadRows, notices, activity, openemr, openemrTouched, handlers, drive, ...fns,
     receiveClinicalResult: clinician(fns.receiveClinicalResult) };
@@ -513,7 +519,23 @@ test('9e. the result notice reaches a POA by name and says nothing about the res
   const fn = src.slice(src.indexOf('async function resultReviewed'), src.indexOf('// ---- 5. Staff asked the client for documents'));
   assert.match(fn, /paragraphs: \['Your test result has been reviewed/, 'opens with "Your test result" so a POA is told whose it is');
   assert.ok(!/resultDate|performedBy|label|interpretation|patientNote|summary/.test(fn.replace(/relatedEntityType|entityType/g, '')), 'no result detail in the notice');
-  assert.match(src, /replace\(\/\^Your \(visit\|test result\)\//);
+  // REPOINTED 2026-10-12. This asserted the rewrite's exact regex source
+  // (`/^Your (visit|test result)/`), so widening it to cover the caregiver and
+  // clinician phrasings failed a test about a rule that had not changed. It now
+  // RUNS the rewrite the module actually applies, over every opening phrase a
+  // client-side paragraph is allowed to use — which also catches an alternation
+  // reordered so that a longer phrase stops matching.
+  const rewrite = (para) => para.replace(
+    /^Your (caregiver visit|clinician visit|visit|test result)/,
+    (m, what) => `Ada Bell's ${what}`);
+  for (const [para, want] of [
+    ['Your test result has been reviewed.', "Ada Bell's test result has been reviewed."],
+    ['Your visit is tomorrow.', "Ada Bell's visit is tomorrow."],
+    ['Your caregiver visit has moved.', "Ada Bell's caregiver visit has moved."],
+    ['Your clinician visit has moved.', "Ada Bell's clinician visit has moved."]
+  ]) assert.equal(rewrite(para), want, `a POA must be told whose it is: ${para}`);
+  assert.match(src, /\/\^Your \(caregiver visit\|clinician visit\|visit\|test result\)\//,
+    'the longer phrases come first — alternation is ordered');
   assert.match(fn, /entityId: `\$\{resultId\}:reviewed`/);
 });
 test('9f. a result filed while Drive is down is still filed, listed, and warned about', async () => {
@@ -1253,7 +1275,11 @@ test('P2-1. the calendar copy: upcoming and recent visits, never tombstones, no-
   assert.deepEqual(row.appointments.map(a => a.id), ['4', '1']);
   const next = row.appointments.find(a => a.id === '1');
   assert.equal(next.state, 'upcoming');
-  assert.equal(next.location, 'Video / phone visit', 'the location comes from the hydrated row');
+  // T1 C5 changed this label on purpose: "Video / phone visit" told a patient
+  // expecting a phone call to look for a video link, and a patient expecting
+  // video that a call would do. One label per location now.
+  assert.equal(next.location, 'Video visit', 'the location comes from the hydrated row');
+  assert.equal(next.hasVideo, false, 'no room pointer, so no join button \u2014 the flag is not the marker');
   assert.match(next.provider, /Bethel Godwins/, 'named from the app user mapped to the provider id');
   assert.equal(row.appointments.find(a => a.id === '4').state, 'completed');
   assert.ok(!JSON.stringify(row).includes('bring BP log'), 'clinician appointment notes never reach the patient copy');
@@ -1266,7 +1292,7 @@ test('P2-2. the patient reads their calendar from the copy, filtered by sharing,
   const mine = await readSummary(h, CLIENT);
   assert.equal(mine.appointmentsPublished, true);
   assert.deepEqual(mine.appointments.map(a => a.id), ['1']);
-  assert.deepEqual(Object.keys(mine.appointments[0]).sort(), ['date', 'durationMinutes', 'endTime', 'id', 'location', 'provider', 'startTime', 'state', 'title']);
+  assert.deepEqual(Object.keys(mine.appointments[0]).sort(), ['date', 'durationMinutes', 'endTime', 'hasVideo', 'id', 'location', 'provider', 'startTime', 'state', 'title']);
   assert.deepEqual(h.openemrTouched, [], 'the patient read touched OpenEMR');
   // A stored row carrying anything beyond the allow-list (an older writer, a
   // hand edit) still reaches the patient as the allow-list only.
@@ -1293,7 +1319,7 @@ test('P2-4. a later read without the location keeps the one an earlier read foun
   await h.publishAppointmentsForClient(apptEmr([apptRow({ pc_eid: '1' })]), CLIENT, { id: 'u-1' });
   const bare = { getPatientAppointmentRows: async () => [apptRow({ pc_eid: '1', pc_hometext: '' })], getAppointmentRow: async () => null };
   await h.publishAppointmentsForClient(bare, CLIENT, { id: 'u-1' });
-  assert.equal((await h.loadPublishedAppointments('c-1')).appointments[0].location, 'Video / phone visit');
+  assert.equal((await h.loadPublishedAppointments('c-1')).appointments[0].location, 'Video visit');
   const before = JSON.stringify(h.store.get('patient_published_appointments'));
   const down = await h.publishAppointmentsForClient({ getPatientAppointmentRows: async () => { throw new Error('EMR down'); } }, CLIENT, { id: 'u-1' });
   assert.equal(down.published, false, 'never throws, reports the failure');
@@ -1320,7 +1346,7 @@ test('P2-6. the portal shows ONE schedule: clinical visits and caregiver visits 
   // The redesign (10/2026) labels it Appointments; one NAV list drives the
   // sidebar, the bottom menu and the More menu.
   assert.match(portal, /\{ id: 'schedule', icon: 'ti-calendar-event', label: 'Appointments', short: 'Appts' \}/);
-  assert.match(portal, /\{view === 'schedule' && <GfcSchedule shifts=\{shifts\} shiftsErr=\{shiftsErr\} clinical=\{clinicalAvailable \? clinical : null\} \/>\}/);
+  assert.match(portal, /\{view === 'schedule' && <GfcSchedule shifts=\{shifts\} shiftsErr=\{shiftsErr\} clinical=\{clinicalAvailable \? clinical : null\} onNavigate=\{onNavigate\} \/>\}/);
   // Home's next clinical visit reads the published state, not a raw OpenEMR row.
   // (Redesign: Home's next visit is the first item of the shared builder, which
   // reads clinical.appointments — the published copy — and drops past ones.)
