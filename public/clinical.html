@@ -1035,6 +1035,7 @@
                           </button>
                         : <span className="chip bg-stone-100 text-stone-600">{d.sharedWithPatient ? 'Shared with patient' : 'Hidden from patient'}</span>)}
                       {d.inChart && <span className="chip bg-emerald-50 text-emerald-700">In EMR</span>}
+                      {d.emrWaiting && <span className="chip bg-amber-50 text-amber-800" title="Filing into OpenEMR with your sign-in now. Refresh to see it.">Filing to EMR</span>}
                       {!d.openable && <span className="chip bg-amber-50 text-amber-800">Open in OpenEMR</span>}
                       <ChartReadButton clientId={clientId} doc={d} status={readStatus}
                         onRead={(ex) => setReviewing(ex)} />

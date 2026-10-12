@@ -152,8 +152,20 @@ const srv = http.createServer((req, res) => {
       if (u === '/api/gfc/me') return j(me);
       if (u === '/api/gfc/care-plan') return j({ greetingName: 'Juanita', carePlan: null, careTierLabel: null, upcomingVisits: [], recentVisits: [] });
       if (u === '/api/gfc/clinical/summary') return j(payload(sc.audience, sc.sharing, sc));
-      if (u === '/api/gfc/clinical/documents') return j({ documents: [] });
-      if (u === '/api/gfc/documents') return j({ consents: [], files: [] });
+      // Documents (10/2026): the two lists overlap on purpose here, the way
+      // they do live, so the screen has to show each document once.
+      if (u === '/api/gfc/clinical/documents') return j({ documents: [
+        { id: 'consent:npp', title: 'Notice of Privacy Practices', openable: true },
+        { id: 'upload:u1', title: 'card.jpg', category: 'You sent this', openable: true },
+        { id: 'careplan:1', title: 'Plan of care — version 1 (signed)', openable: true, date: '2026-10-01' }] });
+      if (u === '/api/gfc/documents') return j({
+        signedConsents: [{ key: 'npp', label: 'Notice of Privacy Practices', status: 'signed', signedAt: '2026-10-01', copyUrl: '/api/gfc/consents/npp.pdf' }],
+        enrollmentPacket: { url: '/api/gfc/enrollment-packet.pdf' }, consentPacketZip: { url: '/api/gfc/enrollment-packet.zip' },
+        checklist: [
+          { kind: 'insuranceCard', label: 'Insurance card', status: 'received', required: true,
+            files: [{ id: 'u1', fileName: 'card.jpg', status: 'received', source: 'client', url: '/api/gfc/documents/uploads/u1/file', uploadedAt: '2026-10-02' }] },
+          { kind: 'photoId', label: 'Photo ID', status: 'missing', required: true, files: [] }],
+        documents: [] });
       if (u === '/api/scheduling/my-upcoming-shifts') return j({ shifts: SHIFTS });
       return j({});
     });
@@ -186,6 +198,13 @@ const srv = http.createServer((req, res) => {
     if (await sched.count()) { await sched.click(); await page.waitForTimeout(600); }
     out.scheduleText = (await page.locator('body').innerText()).slice(0, 3000);
     if (S) await page.screenshot({ path: `${S}/${name}-schedule.png`, fullPage: true });
+    // Documents, reached from More on a phone.
+    const more2 = page.locator('.gfc-tabs').getByText('More', { exact: true }).first();
+    if (await more2.count()) { await more2.click(); await page.waitForTimeout(400); }
+    const dl = page.locator('.gfc-main').getByText('Documents', { exact: true }).first();
+    if (await dl.count()) { await dl.click(); await page.waitForTimeout(600); }
+    out.docsText = (await page.locator('body').innerText()).slice(0, 3000);
+    if (S) await page.screenshot({ path: `${S}/${name}-documents.png`, fullPage: true });
     OUT[name] = out;
     console.log(`\n=== ${name}: errors=${errors.length} pwned=${out.pwned}`); if (errors.length) { failures++; console.log(errors.slice(0, 5).join('\n')); }
     await ctx.close();
@@ -211,12 +230,13 @@ const srv = http.createServer((req, res) => {
     expect('family at summary level: date, provider and reason only — no note, no results, no sections, no sharing card', !has(F.healthText, /what you told us/i) && !has(F.healthText, /not yet reviewed/i) && !has(F.healthText, /current medications/i) && !has(F.healthText, /what family members can see/i));
     expect('family at summary level: the Home card does not offer a summary they cannot read', has(F.homeText, /your latest visit/i) && !has(F.homeText, /read the full summary/i));
     expect('nothing published: says the summary is coming, and each section says the care team will add it (never "none recorded")', has(U.healthText, /health summary is coming/i) && (U.healthText.match(/will add this after a visit/gi) || []).length === 4 && !has(U.healthText, /no allergies recorded|no conditions listed|no medications on your record/i));
+    expect('documents: each signed form and each upload is listed once, the packet once, and what is still needed on top', (P.docsText.match(/Notice of Privacy Practices/g) || []).length === 1 && (P.docsText.match(/Insurance card/g) || []).length === 1 && (P.docsText.match(/Enrollment packet/g) || []).length === 1 && has(P.docsText, /we still need · 1/i) && has(P.docsText, /Photo ID/) && has(P.docsText, /Plan of care/));
     const A = OUT.appHeld, B = OUT.blocked;
     expect('nothing published but the app holds lists: the reconciled medicines and reported conditions show, labelled; NKDA reads as none', has(A.healthText, /Lisinopril 10 mg/) && has(A.healthText, /Reviewed with Bethel Godwins/) && has(A.healthText, /Diabetes/) && has(A.healthText, /what you told us when you enrolled/i) && has(A.healthText, /no known allergies/i));
     expect('clinical read refused: the Health tab is there and says why', has(B.healthText, /Consent to medical treatment must be on file/));
     expect('nothing published: no Latest visit card on Home', !has(U.homeText, /your latest visit/i));
     expect('schedule: Home lists the clinical visit and the caregiver visit together, labelled', has(P.homeText, /upcoming appointment/i) && has(P.homeText, /Follow-up visit/) && has(P.homeText, /Maria Lopez/) && has(P.homeText, /clinical visit/i) && has(P.homeText, /caregiver/i));
-    expect('schedule: the Schedule tab shows the month grid, both kinds of visit and the recent visit', has(P.scheduleText, /appointments/i) && has(P.scheduleText, /(mon|tue|wed|thu|fri|sat|sun), [a-z]{3} \d+/i) && has(P.scheduleText, /Telehealth check-in/) && has(P.scheduleText, /Maria Lopez/) && has(P.scheduleText, /Video \/ phone visit/));
+    expect('schedule: the Schedule tab shows the month grid, both kinds of visit and the recent visit', has(P.scheduleText, /appointments/i) && has(P.scheduleText, /(mon|tue|wed|thu|fri|sat|sun), [a-z]{3} \d+/i) && has(P.scheduleText, /Telehealth check-in/) && has(P.scheduleText, /Maria Lopez/) && has(P.scheduleText, /Video( \/ phone)? visit/));
     expect('schedule: family without shared visits sees no clinical visits on the calendar', !has(F.scheduleText, /Telehealth check-in/) || R.sectionsFor('family', {}).appointments !== 'none');
     expect('results: filed under Lab and Imaging, each still saying whether it was reviewed', has(P.resultsText, /All Results/) && has(P.resultsText, /\bLab\b/) && has(P.resultsText, /Imaging/) && has(P.resultsText, /not yet reviewed/i) && has(P.resultsText, /Reviewed by Bethel Godwins/));
     expect('results: family not sharing results are told so, and see no result', !has(F.resultsText || '', /not yet reviewed/i));

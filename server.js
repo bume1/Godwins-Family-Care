@@ -8801,6 +8801,9 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
         visitDraft: { open: !!unlinkedDraft, savedAt: (unlinkedDraft && unlinkedDraft.updatedAt) || null }
       });
     }
+    // Anything the patient sent that could not file under their own login
+    // files now, with this clinician's (best-effort, not awaited).
+    fileWaitingUploads(client.id, req.user);
     const emr = openemr.forActor(req.user);
     const puuid = client.openEmrPatientId;
     // Started here rather than awaited at banner-build time: the banner needs
@@ -19152,6 +19155,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authe
       label: uploads[i].label || uploads[i].kind, reason,
       uploadId: uploads[i].id, actorId: req.user.id
     });
+    if (decision === 'accepted') fileWaitingUploads(uploads[i].clientId, req.user);
     res.json({ message: decision === 'accepted' ? 'Document accepted.' : 'Document rejected and re-requested.', status: decision });
   } catch (error) {
     console.error('GFC document review error:', error);
@@ -19198,6 +19202,16 @@ const attemptEmrFiling = async ({ client, row, actor }) => {
   if (row.emrFiled) return { filed: false, reason: 'ALREADY_FILED' };
   if (!client.openEmrPatientId) return { filed: false, reason: 'NOT_LINKED' };
   if (!openemr.isConfigured()) return { filed: false, reason: 'EMR_NOT_CONFIGURED' };
+  // A patient, POA or upload link has no OpenEMR identity (Session 5.2), and
+  // neither does a staff member who has not signed in to OpenEMR. Asking
+  // OpenEMR anyway only ever failed. The upload is marked as waiting, and
+  // the next clinician who opens the chart (or the admin who accepts it)
+  // files it with their own sign-in: `fileWaitingUploads` below.
+  const actorConnected = !!(actor && actor.id) && await emrAuth.statusFor(actor.id).then(s => !!s.connected).catch(() => false);
+  if (!actorConnected) {
+    await markEmrFilingWaiting(row.id);
+    return { filed: false, reason: 'WAITING_FOR_CLINICIAN' };
+  }
 
   let bytes;
   try {
@@ -19220,8 +19234,9 @@ const attemptEmrFiling = async ({ client, row, actor }) => {
   const j = fresh.findIndex(u => u.id === row.id);
   const at = new Date().toISOString();
   if (j !== -1) {
+    const { emrFilingWaitingSince, ...rest } = fresh[j];
     fresh[j] = {
-      ...fresh[j],
+      ...rest,
       emrFiled: { at, byId: actor.id, byName: actor.name || actor.email, category }
     };
     await db.set('client_document_uploads', fresh);
@@ -19229,6 +19244,26 @@ const attemptEmrFiling = async ({ client, row, actor }) => {
   await logActivity(actor.id, actor.name || actor.email, 'client_document_filed_to_emr', 'document', client.id,
     { uploadId: row.id, kind: row.kind, category });
   return { filed: true, reason: null, at, category };
+};
+
+// Stamp once, never overwrite: "waiting since" is when it first could not file.
+const markEmrFilingWaiting = async (uploadId) => {
+  const rows = (await db.get('client_document_uploads')) || [];
+  const i = rows.findIndex(u => u.id === uploadId);
+  if (i === -1 || rows[i].emrFiled || rows[i].emrFilingWaitingSince) return;
+  rows[i] = { ...rows[i], emrFilingWaitingSince: new Date().toISOString() };
+  await db.set('client_document_uploads', rows);
+};
+
+// A licensed clinician (or admin) with a live OpenEMR sign-in files whatever
+// this client sent that is still waiting. Called when they open the chart and
+// when an admin accepts a document. Best-effort and never awaited by the
+// response it rides on; a reader without write rights files nothing.
+const fileWaitingUploads = (clientId, user) => {
+  if (!clientId || !user || !clinicalRoles.canClinicalWrite(user)) return;
+  backfillEmrFilingForClient(clientId, user)
+    .then(r => { if (r.filed) console.log(`[AUTO FILE-TO-EMR] filed ${r.filed} waiting upload(s) for a client`); })
+    .catch(e => console.warn('[AUTO FILE-TO-EMR] waiting uploads not filed:', e.message));
 };
 
 // The catch-up pass. A document can arrive before a client is ever linked to
