@@ -266,6 +266,126 @@
     .gfc .intake-foot .btn{margin-top:0;}
     .gfc .err{background:#fdecea;border:1px solid rgba(181,70,46,.3);color:var(--gfc-danger,#B5462E);border-radius:11px;padding:11px 13px;font-size:13px;margin-top:14px;}
     .gfc .ok-badge{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:600;color:var(--teal);}
+
+    /* ============================================================
+       Portal redesign (owner mockups, 10/2026). The unlocked portal only:
+       the gate, intake and record-release flows keep the rules above.
+       Brand stays the design system's (docs/design-system): teal-navy,
+       gold, cream, Cormorant Garamond + DM Sans. Mobile first; a
+       sidebar from 1024px up.
+       ============================================================ */
+    .gfc.v2{--edge:#ECE4D6;--edge2:#E1D7C5;--gold-ink:#9A7430;--wash:#F6EFE2;--danger:#B5462E;background:var(--cream);}
+    .gfc.v2 .gfc-app{max-width:480px;margin:0 auto;min-height:100vh;background:var(--cream);display:flex;flex-direction:column;position:relative;}
+    .gfc.v2 .gfc-side{display:none;}
+    .gfc.v2 .gfc-main{flex:1;display:flex;flex-direction:column;min-width:0;}
+    /* mobile top bar */
+    .gfc.v2 .gfc-top{position:sticky;top:0;z-index:20;background:rgba(250,247,242,.96);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--edge);}
+    .gfc.v2 .gfc-top img{height:34px;}
+    .gfc.v2 .gfc-top .ib{background:none;border:none;width:40px;height:40px;border-radius:12px;display:flex;align-items:center;justify-content:center;color:var(--navy);font-size:22px;cursor:pointer;position:relative;}
+    .gfc.v2 .gfc-top .ib .rd{position:absolute;top:7px;right:8px;width:9px;height:9px;border-radius:50%;background:var(--danger);border:2px solid var(--cream);}
+    .gfc.v2 .gfc-body{padding:18px 16px 110px;}
+    .gfc.v2 h2.disp{font-size:31px;font-weight:600;}
+    .gfc.v2 .sub{font-size:15px;}
+    .gfc.v2 .lbl{font-size:11px;letter-spacing:1.4px;color:var(--gold-ink);}
+    /* section heading with a "See all" link */
+    .gfc.v2 .sech{display:flex;align-items:baseline;justify-content:space-between;margin:22px 0 10px;}
+    .gfc.v2 .sech h3{font-family:'Cormorant Garamond',serif;font-size:22px;font-weight:600;color:var(--navy);margin:0;}
+    .gfc.v2 .sech button{background:none;border:none;color:var(--navy);font-size:13.5px;font-weight:600;cursor:pointer;padding:0;}
+    /* cards */
+    .gfc.v2 .card,.gfc.v2 .visit,.gfc.v2 .doc,.gfc.v2 .cal,.gfc.v2 .latest{border:1px solid var(--edge);border-radius:16px;box-shadow:0 1px 2px rgba(3,61,80,.04),0 6px 18px -12px rgba(3,61,80,.18);}
+    .gfc.v2 .btn{border-radius:12px;font-size:15px;}
+    .gfc.v2 .btn.navy{background:var(--navy);color:#fff;box-shadow:0 6px 16px -8px rgba(3,61,80,.6);}
+    .gfc.v2 .btn.line{background:#fff;border:1.5px solid var(--edge2);color:var(--navy);box-shadow:none;}
+    .gfc.v2 .btnrow{display:flex;gap:10px;margin-top:14px;}
+    .gfc.v2 .btnrow .btn{margin-top:0;padding:11px 12px;font-size:14px;}
+    /* greeting banner (desktop shows a photo when one is supplied) */
+    .gfc.v2 .hello{margin-bottom:6px;}
+    .gfc.v2 .hello h2{font-family:'Cormorant Garamond',serif;font-size:32px;font-weight:600;color:var(--navy);margin:0;line-height:1.1;}
+    .gfc.v2 .hello p{font-size:15.5px;color:var(--mut);margin:4px 0 0;}
+    /* home tiles */
+    .gfc.v2 .tiles2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:16px;}
+    .gfc.v2 .tile2{background:#fff;border:1px solid var(--edge);border-radius:16px;padding:14px;text-align:left;cursor:pointer;display:flex;flex-direction:column;gap:8px;min-height:118px;box-shadow:0 1px 2px rgba(3,61,80,.04),0 6px 18px -12px rgba(3,61,80,.18);position:relative;}
+    .gfc.v2 .tile2 .ic{width:42px;height:42px;border-radius:12px;background:var(--wash);display:flex;align-items:center;justify-content:center;color:var(--navy);font-size:22px;}
+    .gfc.v2 .tile2 .tt{font-size:15px;font-weight:700;color:var(--navy);}
+    .gfc.v2 .tile2 .ts{font-size:13px;color:var(--gold-ink);font-weight:600;margin-top:-4px;}
+    .gfc.v2 .tile2 .ts.mut{color:var(--mut);font-weight:500;}
+    .gfc.v2 .tile2 .n{position:absolute;top:12px;right:12px;min-width:22px;height:22px;border-radius:11px;background:var(--danger);color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;padding:0 6px;}
+    /* appointment card with a date block */
+    .gfc.v2 .appt{background:#fff;border:1px solid var(--edge);border-radius:16px;padding:16px;box-shadow:0 1px 2px rgba(3,61,80,.04),0 6px 18px -12px rgba(3,61,80,.18);}
+    .gfc.v2 .appt .row{display:flex;gap:14px;align-items:center;}
+    .gfc.v2 .lrow .dblk{width:48px;} .gfc.v2 .lrow .dblk .d{font-size:22px;}
+    .gfc.v2 .dblk{width:58px;flex-shrink:0;border:1px solid var(--edge2);border-radius:12px;overflow:hidden;text-align:center;background:#fff;}
+    .gfc.v2 .dblk .m{background:var(--wash);color:var(--gold-ink);font-size:11px;font-weight:700;letter-spacing:1px;padding:3px 0;text-transform:uppercase;}
+    .gfc.v2 .dblk .d{font-family:'Cormorant Garamond',serif;font-size:28px;font-weight:600;color:var(--navy);line-height:1.15;padding:2px 0 4px;}
+    .gfc.v2 .appt .t{font-size:16px;font-weight:700;color:var(--navy);}
+    .gfc.v2 .appt .w{font-size:13.5px;color:var(--mut);margin-top:2px;}
+    .gfc.v2 .appt .k{font-size:10.5px;text-transform:uppercase;letter-spacing:.9px;font-weight:700;margin-bottom:2px;}
+    .gfc.v2 .appt .k.clinical{color:#2b7a8c;} .gfc.v2 .appt .k.caregiver{color:var(--gold-ink);}
+    /* list rows (messages, activity, menus) */
+    .gfc.v2 .lrow{display:flex;align-items:center;gap:12px;padding:13px 14px;background:#fff;border:1px solid var(--edge);border-radius:14px;margin-bottom:8px;cursor:pointer;text-align:left;width:100%;}
+    .gfc.v2 .lrow .lic{width:40px;height:40px;border-radius:50%;background:var(--wash);color:var(--navy);display:flex;align-items:center;justify-content:center;font-size:19px;flex-shrink:0;}
+    .gfc.v2 .lrow .lm{flex:1;min-width:0;}
+    .gfc.v2 .lrow .lm b{display:block;font-size:14.5px;color:var(--navy);font-weight:700;}
+    .gfc.v2 .lrow .lm span{display:block;font-size:13px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .gfc.v2 .lrow .lr{font-size:12px;color:var(--mut);white-space:nowrap;display:flex;flex-direction:column;align-items:flex-end;gap:4px;}
+    .gfc.v2 .lrow .udot{width:9px;height:9px;border-radius:50%;background:var(--danger);}
+    .gfc.v2 .lrow > .ti-chevron-right{color:var(--mut);font-size:18px;}
+    /* sub-tabs (Overview · Goals · …, All · Lab · Imaging) */
+    .gfc.v2 .stabs{display:flex;gap:6px;overflow-x:auto;border-bottom:1px solid var(--edge2);margin:14px -2px 16px;padding:0 2px;scrollbar-width:none;}
+    .gfc.v2 .stabs button{background:none;border:none;padding:10px 10px 11px;font-size:14px;font-weight:600;color:var(--mut);white-space:nowrap;cursor:pointer;border-bottom:2.5px solid transparent;margin-bottom:-1px;}
+    .gfc.v2 .stabs button.on{color:var(--navy);border-bottom-color:var(--goldd);}
+    .gfc.v2 .pills{display:flex;gap:8px;margin:14px 0 16px;flex-wrap:wrap;}
+    .gfc.v2 .pills button{background:#fff;border:1px solid var(--edge2);border-radius:999px;padding:8px 16px;font-size:13.5px;font-weight:600;color:var(--navy);cursor:pointer;}
+    .gfc.v2 .pills button.on{background:var(--wash);border-color:var(--goldd);}
+    /* service cards on the care plan */
+    .gfc.v2 .svc{display:flex;gap:14px;align-items:center;background:#fff;border:1px solid var(--edge);border-radius:16px;padding:14px;margin-bottom:10px;}
+    .gfc.v2 .svc .sic{width:52px;height:52px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:24px;flex-shrink:0;}
+    .gfc.v2 .svc b{display:block;font-size:15.5px;color:var(--navy);font-weight:700;}
+    .gfc.v2 .svc span{font-size:13px;color:var(--mut);line-height:1.45;}
+    .gfc.v2 .status{display:flex;gap:12px;align-items:center;background:#EEF5EF;border:1px solid #D3E6D7;border-radius:14px;padding:12px 14px;margin-bottom:14px;}
+    .gfc.v2 .status i{font-size:22px;color:#3F7A5C;}
+    .gfc.v2 .status b{display:block;font-size:15px;color:#2E5E45;font-weight:700;}
+    .gfc.v2 .status span{font-size:13px;color:var(--mut);}
+    .gfc.v2 .status.wait{background:var(--wash);border-color:var(--edge2);} .gfc.v2 .status.wait i,.gfc.v2 .status.wait b{color:var(--gold-ink);}
+    /* team cards */
+    .gfc.v2 .team{display:grid;grid-template-columns:1fr;gap:10px;}
+    .gfc.v2 .tcard{display:flex;align-items:center;gap:12px;background:#fff;border:1px solid var(--edge);border-radius:16px;padding:12px 14px;}
+    .gfc.v2 .tcard b{display:block;font-size:14.5px;color:var(--navy);}
+    .gfc.v2 .tcard span{font-size:12.5px;color:var(--mut);}
+    .gfc.v2 .tcard .msg{margin-left:auto;background:none;border:1px solid var(--edge2);border-radius:10px;padding:7px 10px;font-size:12.5px;font-weight:600;color:var(--navy);cursor:pointer;display:flex;align-items:center;gap:5px;}
+    /* bottom menu */
+    .gfc.v2 .gfc-tabs{max-width:480px;background:#fff;border-top:1px solid var(--edge);padding-bottom:env(safe-area-inset-bottom);}
+    .gfc.v2 .gfc-tabs button{font-size:11px;color:var(--mut);padding:9px 2px 12px;position:relative;}
+    .gfc.v2 .gfc-tabs button i{font-size:23px;color:var(--navy);}
+    .gfc.v2 .gfc-tabs button.on{color:var(--gold-ink);}
+    .gfc.v2 .gfc-tabs button.on i{color:var(--gold-ink);}
+    .gfc.v2 .gfc-tabs button.on::before{content:"";position:absolute;top:0;left:28%;right:28%;height:3px;border-radius:0 0 3px 3px;background:var(--goldd);}
+    /* the "More" menu */
+    .gfc.v2 .menu .lrow{padding:14px;}
+    @media (min-width:1024px){
+      .gfc.v2{padding:0;}
+      .gfc.v2 .gfc-app{max-width:none;flex-direction:row;min-height:100vh;}
+      .gfc.v2 .gfc-side{display:flex;flex-direction:column;width:248px;flex-shrink:0;background:#fff;border-right:1px solid var(--edge);position:sticky;top:0;height:100vh;padding:22px 14px;overflow-y:auto;}
+      .gfc.v2 .gfc-side img{height:46px;align-self:flex-start;margin:0 10px 26px;}
+      .gfc.v2 .gfc-side button{display:flex;align-items:center;gap:13px;background:none;border:none;border-radius:12px;padding:12px 14px;font-size:15px;font-weight:600;color:var(--navy);cursor:pointer;text-align:left;margin-bottom:2px;position:relative;}
+      .gfc.v2 .gfc-side button i{font-size:21px;color:var(--navy);}
+      .gfc.v2 .gfc-side button:hover{background:var(--wash);}
+      .gfc.v2 .gfc-side button.on{background:var(--goldd);color:#fff;}
+      .gfc.v2 .gfc-side button.on i{color:#fff;}
+      .gfc.v2 .gfc-side button .sn{margin-left:auto;min-width:22px;height:22px;border-radius:11px;background:var(--danger);color:#fff;font-size:12px;display:flex;align-items:center;justify-content:center;padding:0 6px;}
+      .gfc.v2 .gfc-side .foot{margin-top:auto;padding-top:16px;border-top:1px solid var(--edge);}
+      .gfc.v2 .gfc-top,.gfc.v2 .gfc-tabs{display:none;}
+      .gfc.v2 .gfc-body{padding:32px 40px 48px;max-width:1120px;width:100%;}
+      .gfc.v2 .hello{background:linear-gradient(90deg,#fff 0%,#fff 42%,rgba(255,255,255,.4) 75%,rgba(255,255,255,0) 100%),var(--gfc-banner,linear-gradient(120deg,#E9DFCB,#D9CBB0));background-size:cover;background-position:right center;border:1px solid var(--edge);border-radius:20px;padding:34px 32px;min-height:150px;display:flex;flex-direction:column;justify-content:center;}
+      .gfc.v2 .hello h2{font-size:40px;}
+      .gfc.v2 .tiles2{grid-template-columns:repeat(4,1fr);gap:16px;}
+      .gfc.v2 .home-cols{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:24px;align-items:start;}
+      .gfc.v2 .team{grid-template-columns:repeat(3,1fr);}
+      .gfc.v2 .team .tcard{flex-direction:column;text-align:center;padding:18px 12px;}
+      .gfc.v2 .team .tcard .msg{margin:6px auto 0;}
+      .gfc.v2 .svcs{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;}
+      .gfc.v2 .svcs .svc{margin:0;}
+    }
   </style>
   <script src="/session-guard.js"></script>
   <script src="/mfa-step.js"></script>
@@ -413,6 +533,14 @@
       // The caregiver's confirmed schedule, scoped server-side to this client's
       // own assigned care only (Session 7 scheduling — separate system from
       // visit_logs, which is retrospective).
+      // The patient's own message threads (Session 9's route, scoped server-side).
+      // Read for the Home tiles and the recent-messages card; the Messages tab
+      // still loads its own copy through the shared component.
+      getMessageThreads: (token) =>
+        fetch(`${API_URL}/api/messaging/threads`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(asError),
+
       getMyUpcomingShifts: (token) =>
         fetch(`${API_URL}/api/scheduling/my-upcoming-shifts`, {
           headers: { 'Authorization': `Bearer ${token}` }
@@ -5141,98 +5269,180 @@
       );
     };
 
-    const GfcDashboard = ({ data, onNavigate, me, clinical, shifts, shiftsErr }) => {
+    // ── Home (portal redesign, owner mockups 10/2026) ─────────────────────
+    // Greeting, four tiles, the next visit, the latest visit summary, recent
+    // messages, the care team and recent activity. Every figure on it comes
+    // from data the portal already loads; nothing is invented to fill a slot.
+    // A tile that has nothing behind it says so in words, never a zero that
+    // reads as "checked and empty" when the section was never loaded.
+    const greetingForNow = () => {
+      const p = window.GFC_TIME && window.GFC_TIME.zonedParts(new Date());
+      const h = p ? p.hour : new Date().getHours();
+      return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
+    };
+    const monthShort = (ymd) => {
+      const d = new Date(`${ymd}T12:00:00Z`);
+      return isNaN(d) ? '' : d.toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' });
+    };
+    // The date block on an appointment card: OCT / 20.
+    const DateBlock = ({ ymd }) => (
+      <div className="dblk"><div className="m">{monthShort(ymd)}</div><div className="d">{Number(String(ymd || '').slice(8, 10)) || ''}</div></div>
+    );
+    const NextVisitCard = ({ v, onNavigate }) => (
+      <div className="appt">
+        <div className="row">
+          <DateBlock ymd={v.date} />
+          <div style={{ minWidth: 0 }}>
+            <div className={`k ${v.kind}`}>{v.kind === 'clinical' ? 'Clinical visit' : 'Caregiver visit'}</div>
+            <div className="t">{v.title}</div>
+            <div className="w">{[v.weekday, v.time].filter(Boolean).join(' · ')}</div>
+            {v.detail && <div className="w">{v.detail}</div>}
+          </div>
+        </div>
+        <div className="btnrow">
+          <button className="btn line" onClick={() => onNavigate('schedule')}>View details</button>
+        </div>
+      </div>
+    );
+    const weekdayOf = (ymd) => {
+      const d = new Date(`${ymd}T12:00:00Z`);
+      return isNaN(d) ? '' : d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+    };
+    const threadWhen = (iso) => {
+      if (!iso) return '';
+      const d = new Date(iso);
+      if (isNaN(d)) return '';
+      const today = georgiaDate(new Date().toISOString());
+      return georgiaDate(iso) === today && window.GFC_TIME ? window.GFC_TIME.fmtTime(iso) : prettyDate(georgiaDate(iso)).replace(/, \d{4}$/, '');
+    };
+    const MessageRows = ({ threads, onNavigate, limit }) => (
+      <React.Fragment>
+        {threads.slice(0, limit).map(t => (
+          <button className="lrow" key={t.id} onClick={() => onNavigate('messages')}>
+            <span className="lic"><i className="ti ti-message-circle" /></span>
+            <span className="lm"><b>{t.channelLabel || 'Message'}</b><span>{t.lastMessagePreview || ''}</span></span>
+            <span className="lr">{threadWhen(t.lastMessageAt)}{t.unread ? <span className="udot" /> : null}</span>
+          </button>
+        ))}
+      </React.Fragment>
+    );
+    // Care team cards. Initials until a photo is on file; a clinician's title
+    // is the one the server derived from their credential, never typed here.
+    const TeamCards = ({ team, onNavigate, canMessage }) => (
+      <div className="team">
+        {team.map((m, i) => (
+          <div className="tcard" key={`${m.name}|${m.role}`}>
+            <Avatar initials={m.initials} size={48} bg={['var(--gold)', '#CFE6DD', '#DCD8F3'][i % 3]} color={['var(--navy)', '#0f6e56', '#3c3489'][i % 3]} />
+            <div><b>{m.name}</b><span>{m.role}</span></div>
+            {canMessage && <button className="msg" onClick={() => onNavigate('messages')}><i className="ti ti-mail" />Message</button>}
+          </div>
+        ))}
+      </div>
+    );
+
+    const GfcDashboard = ({ data, onNavigate, me, clinical, shifts, shiftsErr, threads, threadsErr }) => {
       const cp = data.carePlan;                       // null until an RN authors the real plan (Session 4)
       const todayGa = georgiaDate(new Date().toISOString());
-      // Portal P2: the next clinical visit from the published calendar.
-      const nextClinical = clinical && !clinical.error && (clinical.appointments || []).find(a => a.state === 'upcoming' && a.date >= todayGa);
-      // The next clinical visit has its own card, so it is not listed twice.
-      const schedule = buildScheduleItems(shifts, clinical).filter(v => !v.past && v.date >= todayGa && !(nextClinical && v.id === `appt:${nextClinical.id}`));
-      // Who looks after them: from the plan, else the care team the office
-      // assigned (the plan does not have to be written yet to know that).
+      const clinicalOk = clinical && !clinical.error;
+      // Every visit still to come, clinical and caregiver, in one order.
+      const coming = buildScheduleItems(shifts, clinical).filter(v => !v.past && !v.live && v.date >= todayGa)
+        .map(v => ({ ...v, weekday: weekdayOf(v.date) }));
+      const next = coming[0] || null;
       const team = (cp && cp.careTeam && cp.careTeam.length ? cp.careTeam : data.careTeam) || [];
-      const pc = (cp && cp.primaryCaregiver) || team.find(m => m.role === 'Primary caregiver') || {};
-      // The client's own confirmed caregiver schedule (Session 7's shifts, not
-      // visit_logs — visit_logs is written retrospectively when a caregiver
-      // files a completed log, so it never actually carried a future visit).
-      // Eastern, always — see public/gfc-time.js.
-      const fmtShiftTime = (iso) => window.GFC_TIME ? window.GFC_TIME.fmtTime(iso) : '';
-      // A visit in progress has its own card above the list, so it is marked
-      // here and filtered out of the list rather than appearing twice.
-      const upcoming = (shifts || []).map(s => ({
-        id: s.id,
-        day: prettyDate(s.start),
-        time: `${fmtShiftTime(s.start)} – ${fmtShiftTime(s.end)}`,
-        type: s.status === 'in_progress' ? 'Visit in progress' : 'Scheduled visit',
-        with: s.caregiverName || 'Your caregiver',
-        live: s.status === 'in_progress',
-        highlight: s.status === 'in_progress'
-      }));
-
+      const results = (clinicalOk && clinical.results) || [];
+      const notReviewed = results.filter(r => r.reviewStatus !== 'reviewed').length;
+      const threadList = threads || [];
+      const unread = threadList.reduce((a, t) => a + (t.unread || 0), 0);
       const roiFamilySigned = me && me.roiFamilySigned;
-      const tierLabel = (cp && cp.careTierLabel) || data.careTierLabel;
+      // Recent activity: things that happened, newest first. Results and
+      // visit summaries the patient can open; nothing else is guessed at.
+      const activity = [
+        ...results.map(r => ({ key: `r:${r.id}`, icon: 'ti-flask', title: r.reviewStatus === 'reviewed' ? 'Test result reviewed' : 'Test result available', what: r.label, date: georgiaDate(r.reviewedAt || r.resultDate || ''), go: 'results' })),
+        ...((clinicalOk && clinical.visits) || []).map((v, i) => ({ key: `v:${i}`, icon: 'ti-file-description', title: 'Visit summary', what: v.reason || 'Your visit', date: v.date, go: 'health' }))
+      ].filter(a => a.date).sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 4);
       return (
         <div className="gfc-body">
-          <h2 className="disp">Good morning, {data.greetingName}</h2>
-          {/* "Arrives at 2:00 PM" is wrong when they are already standing in
-              the kitchen. The live visit gets its own sentence. */}
-          <p className="sub">{(() => {
-            const live = upcoming.find(v => v.live);
-            if (live) return `${(live.with || 'Your caregiver').split(' ')[0]} is with you now.`;
-            const next = upcoming.find(v => !v.live);
-            if (pc.name) return `${pc.name.split(' ')[0]} arrives at ${((next || {}).time || 'your next visit').split(' – ')[0]}.`;
-            return 'Welcome to your care portal.';
-          })()}</p>
-          {me && <EnrollmentPills status={me.enrollmentStatus} />}
-          <div className="planhero">
-            <div className="pe">Your care plan</div>
-            {cp ? (
-              <React.Fragment>
-                <div className="prow">
-                  <Avatar initials={pc.initials || 'GF'} />
-                  <div><div className="nm">{pc.name || 'Your care team'}{pc.credential ? `, ${pc.credential}` : ''}</div><div className="rl">{pc.role || 'Primary caregiver'}</div></div>
-                </div>
-                {tierLabel && <span className="pill"><i className="ti ti-heart-handshake" style={{ fontSize: 13 }} />{tierLabel}</span>}
-                <div className="plink" onClick={() => onNavigate('care')}>View full care plan <i className="ti ti-arrow-right" /></div>
-              </React.Fragment>
-            ) : (
-              <React.Fragment>
-                <div className="prow">
-                  <Avatar initials={pc.initials || 'GF'} />
-                  <div><div className="nm">Your care plan is being prepared</div><div className="rl">{pc.name ? `Your caregiver: ${pc.name}` : 'Your nurse will review it with you'}</div></div>
-                </div>
-                {tierLabel && <span className="pill"><i className="ti ti-heart-handshake" style={{ fontSize: 13 }} />{tierLabel}</span>}
-              </React.Fragment>
-            )}
+          <div className="hello">
+            <h2>{greetingForNow()}, {data.greetingName}</h2>
+            <p>We're here for you.</p>
           </div>
-          {clinical && !clinical.error && (clinical.visits || [])[0] && <LatestVisitCard visit={clinical.visits[0]} onNavigate={onNavigate} />}
-          {nextClinical && (
-            <React.Fragment>
-              <p className="lbl">Your next clinical visit</p>
-              <div className="visit hl" onClick={() => onNavigate('schedule')} style={{ cursor: 'pointer' }}>
-                <span className="vt">{prettyDate(nextClinical.date)}<br />{scheduleClock(nextClinical.startTime)}</span>
-                <div className="vm"><b>{nextClinical.title}</b><span>{[nextClinical.provider, nextClinical.location].filter(Boolean).join(' · ')}</span></div>
-              </div>
-            </React.Fragment>
-          )}
+          {/* Progress pills only while enrollment is still under way. */}
+          {me && me.enrollmentStatus !== 'enrolled' && <EnrollmentPills status={me.enrollmentStatus} />}
+          <div className="tiles2">
+            <button className="tile2" onClick={() => onNavigate('schedule')}>
+              <span className="ic"><i className="ti ti-calendar-event" /></span>
+              <span className="tt">Appointments</span>
+              <span className={`ts ${coming.length ? '' : 'mut'}`}>{coming.length ? `${coming.length} upcoming` : (shiftsErr ? 'Could not load' : 'None scheduled')}</span>
+            </button>
+            <button className="tile2" onClick={() => onNavigate('messages')}>
+              <span className="ic"><i className="ti ti-message-2" /></span>
+              <span className="tt">Messages</span>
+              <span className={`ts ${unread ? '' : 'mut'}`}>{threadsErr ? 'Open messages' : unread ? `${unread} unread` : 'No new messages'}</span>
+              {unread > 0 && <span className="n">{unread}</span>}
+            </button>
+            {clinicalOk ? (
+              <button className="tile2" onClick={() => onNavigate('results')}>
+                <span className="ic"><i className="ti ti-flask" /></span>
+                <span className="tt">Test Results</span>
+                <span className={`ts ${notReviewed ? '' : 'mut'}`}>{results.length === 0 ? 'None yet' : notReviewed ? `${notReviewed} new` : 'View results'}</span>
+              </button>
+            ) : (
+              <button className="tile2" onClick={() => onNavigate('documents')}>
+                <span className="ic"><i className="ti ti-file-text" /></span>
+                <span className="tt">Documents</span>
+                <span className="ts mut">Forms and records</span>
+              </button>
+            )}
+            <button className="tile2" onClick={() => onNavigate('care')}>
+              <span className="ic"><i className="ti ti-clipboard-heart" /></span>
+              <span className="tt">My Care Plan</span>
+              <span className={`ts ${cp ? '' : 'mut'}`}>{cp ? 'View plan' : 'Being prepared'}</span>
+            </button>
+          </div>
           {/* Same component the Care tab uses, so "is someone here right now"
               cannot be answered differently on two screens. */}
           <GfcVisitInProgress shifts={shifts} />
-          <p className="lbl">Upcoming visits</p>
-          <ScheduleEmpty empty={schedule.filter(v => !v.live).length === 0} shiftsErr={shiftsErr} other={!!nextClinical} />
-          {schedule.filter(v => !v.live).slice(0, 3).map(v => <ScheduleRow key={v.id} v={v} />)}
-          <div className="plink" style={{ marginTop: 4, cursor: 'pointer', color: 'var(--navy)', fontWeight: 600, fontSize: 13 }} onClick={() => onNavigate('schedule')}>See your full calendar <i className="ti ti-arrow-right" /></div>
-          <div className="tiles" style={{ marginTop: 14 }}>
-            {/* No unread badge here. The Session 9 component owns the count and
-                reports it through onUnread when it is open; a badge wired to a
-                payload this shell no longer fetches would sit at zero forever,
-                which reads as "no messages" rather than as "not counted". */}
-            <button className="tile" onClick={() => onNavigate('messages')}><i className="ti ti-message" /><span className="tl">Messages</span><span className="ts">Care team</span></button>
-            <button className="tile" onClick={() => onNavigate('documents')}><i className="ti ti-file-text" /><span className="tl">Documents</span><span className="ts">Consents signed</span></button>
-            {clinical && !clinical.error && (
-              <button className="tile" onClick={() => onNavigate('health')}><i className="ti ti-heart-rate-monitor" /><span className="tl">My Health</span><span className="ts">From your clinical record</span></button>
-            )}
+          <div className="home-cols">
+            <div>
+              <div className="sech"><h3>Upcoming Appointment</h3><button onClick={() => onNavigate('schedule')}>See all</button></div>
+              {next ? <NextVisitCard v={next} onNavigate={onNavigate} /> : <ScheduleEmpty empty shiftsErr={shiftsErr} />}
+              {/* The next two after it, so a caregiver visit tomorrow never hides
+                  the clinical visit later in the week (or the other way round). */}
+              {coming.length > 1 && <p className="lbl">Also coming up</p>}
+              {coming.slice(1, 3).map(v => (
+                <button className="lrow" key={v.id} onClick={() => onNavigate('schedule')}>
+                  <DateBlock ymd={v.date} />
+                  <span className="lm"><span className={`k ${v.kind}`} style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '.9px', fontWeight: 700, color: v.kind === 'clinical' ? '#2b7a8c' : 'var(--gold-ink)' }}>{v.kind === 'clinical' ? 'Clinical visit' : 'Caregiver visit'}</span><b>{v.title}</b><span>{[v.time, v.detail].filter(Boolean).join(' · ')}</span></span>
+                  <i className="ti ti-chevron-right" />
+                </button>
+              ))}
+              {clinical && !clinical.error && (clinical.visits || [])[0] && <LatestVisitCard visit={clinical.visits[0]} onNavigate={onNavigate} />}
+            </div>
+            <div>
+              <div className="sech"><h3>Recent Messages</h3><button onClick={() => onNavigate('messages')}>View all</button></div>
+              {threadsErr && <p className="sub" style={{ marginTop: 0 }}>Your messages could not be loaded here. Open Messages to see them.</p>}
+              {!threadsErr && threadList.length === 0 && <p className="sub" style={{ marginTop: 0 }}>No messages yet. You can reach your care team any time from Messages.</p>}
+              <MessageRows threads={threadList} onNavigate={onNavigate} limit={2} />
+            </div>
           </div>
+          {team.length > 0 && (
+            <React.Fragment>
+              <div className="sech"><h3>Your Care Team</h3><button onClick={() => onNavigate('care')}>See all</button></div>
+              <TeamCards team={team.slice(0, 3)} onNavigate={onNavigate} canMessage />
+            </React.Fragment>
+          )}
+          {activity.length > 0 && (
+            <React.Fragment>
+              <div className="sech"><h3>Recent Activity</h3></div>
+              {activity.map(a => (
+                <button className="lrow" key={a.key} onClick={() => onNavigate(a.go)}>
+                  <span className="lic"><i className={`ti ${a.icon}`} /></span>
+                  <span className="lm"><b>{a.title}</b><span>{a.what}</span></span>
+                  <span className="lr">{prettyDate(a.date)}</span>
+                </button>
+              ))}
+            </React.Fragment>
+          )}
           {roiFamilySigned && (
             <div className="card" style={{ marginTop: 14, background: 'var(--cream)', border: '1px solid var(--line2)', boxShadow: 'none' }}>
               <div style={{ fontSize: 13, color: 'var(--ink)', lineHeight: 1.55 }}>
@@ -6424,6 +6634,90 @@
       );
     };
 
+    // ── Test Results (portal redesign) ────────────────────────────────────
+    // The same rows the Health tab shows (ResultRow: "Reviewed by" or "Not
+    // yet reviewed", never the app's own interpretation flag), filed under
+    // Lab and Imaging by the order's type.
+    const RESULT_FILTERS = [
+      { id: 'all', label: 'All Results', test: () => true },
+      { id: 'lab', label: 'Lab', test: (r) => r.kind === 'lab' },
+      { id: 'imaging', label: 'Imaging', test: (r) => r.kind === 'imaging' },
+      { id: 'other', label: 'Other reports', test: (r) => r.kind !== 'lab' && r.kind !== 'imaging' }
+    ];
+    const GfcResults = ({ clinical, token }) => {
+      const [filter, setFilter] = useState('all');
+      if (!clinical) return <div className="gfc-body" style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}><div className="gfc-spin" /></div>;
+      if (clinical.error) {
+        return <div className="gfc-body"><div className="lockcard"><i className="ti ti-lock" /><div><b>Test results aren't available yet</b><span>{clinical.error}</span></div></div></div>;
+      }
+      const shared = clinical.sections && clinical.sections.results && clinical.sections.results !== 'none';
+      const results = clinical.results || [];
+      // A filter only appears when something would be under it.
+      const filters = RESULT_FILTERS.filter(f => f.id === 'all' || results.some(f.test));
+      const active = filters.find(f => f.id === filter) || filters[0];
+      const rows = results.filter(active.test);
+      return (
+        <div className="gfc-body">
+          <h2 className="disp">Test Results</h2>
+          <p className="sub">Your lab and imaging reports, all in one place.</p>
+          {!shared && <HealthEmpty title="Test results aren't shared with this account" sub="The patient can change this under Settings → Sharing." />}
+          {shared && (
+            <React.Fragment>
+              {filters.length > 1 && (
+                <div className="pills">
+                  {filters.map(f => <button key={f.id} className={active.id === f.id ? 'on' : ''} onClick={() => setFilter(f.id)}>{f.label}</button>)}
+                </div>
+              )}
+              {results.length === 0 && <HealthEmpty title="No test results yet" sub="When your care team receives a report, it appears here." />}
+              {rows.map(r => <ResultRow key={r.id} r={r} token={token} />)}
+            </React.Fragment>
+          )}
+        </div>
+      );
+    };
+
+    // ── Settings: who can see what, and signing out ───────────────────────
+    const GfcSettings = ({ me, token, readOnly, onSharingSaved }) => (
+      <div className="gfc-body">
+        <h2 className="disp">Settings</h2>
+        {!readOnly && me && me.sharing ? (
+          <React.Fragment>
+            <div className="sech"><h3>Sharing</h3></div>
+            <GfcSharingCard me={me} token={token} onSaved={onSharingSaved} />
+          </React.Fragment>
+        ) : (
+          <p className="sub">What family members can see is set by {me && me.clientName ? me.clientName : 'the patient'} or their Power of Attorney.</p>
+        )}
+        <div className="sech"><h3>Account</h3></div>
+        <button className="lrow" onClick={gfcLogout}>
+          <span className="lic"><i className="ti ti-logout" /></span>
+          <span className="lm"><b>Sign out</b><span>{me && me.name}</span></span>
+          <i className="ti ti-chevron-right" />
+        </button>
+      </div>
+    );
+
+    // ── More (mobile): everything the bottom menu has no room for ─────────
+    const GfcMore = ({ items, onNavigate, unread }) => (
+      <div className="gfc-body menu">
+        <h2 className="disp">More</h2>
+        <div style={{ marginTop: 14 }}>
+          {items.map(n => (
+            <button className="lrow" key={n.id} onClick={() => onNavigate(n.id)}>
+              <span className="lic"><i className={`ti ${n.icon}`} /></span>
+              <span className="lm"><b>{n.label}</b>{n.hint && <span>{n.hint}</span>}</span>
+              {n.id === 'messages' && unread > 0 ? <span className="lr"><span className="udot" /></span> : <i className="ti ti-chevron-right" />}
+            </button>
+          ))}
+          <button className="lrow" onClick={gfcLogout}>
+            <span className="lic"><i className="ti ti-logout" /></span>
+            <span className="lm"><b>Sign out</b></span>
+            <i className="ti ti-chevron-right" />
+          </button>
+        </div>
+      </div>
+    );
+
     const GfcClientPortal = ({ token, user }) => {
       const [me, setMe] = useState(null);
       const [loading, setLoading] = useState(true);
@@ -6445,6 +6739,10 @@
       const [shiftsErr, setShiftsErr] = useState('');
       const [docsErr, setDocsErr] = useState('');
       const [clinicalDocsErr, setClinicalDocsErr] = useState('');
+      // Thread list for the Home tiles, the bell and the sidebar badge. The
+      // Messages tab reads its own copy through the shared component.
+      const [threads, setThreads] = useState([]);
+      const [threadsErr, setThreadsErr] = useState('');
 
       const reloadMe = async () => {
         const result = await api.getGfcMe(token);
@@ -6497,12 +6795,14 @@
           // Messages are no longer fetched here: the Session 9 component owns
           // its own loading, so the portal shell does not hold a second copy
           // of a thread list that can go stale behind it.
-          const [cp, dc, sh] = await Promise.all([
+          const [cp, dc, sh, th] = await Promise.all([
             api.getGfcCarePlan(token),
             api.getGfcDocuments(token),
-            api.getMyUpcomingShifts(token)
+            api.getMyUpcomingShifts(token),
+            api.getMessageThreads(token)
           ]);
           if (cancelled) return;
+          if (!th.error) { setThreads(th.threads || []); setThreadsErr(''); } else setThreadsErr(th.error);
           if (!cp.error) { setData(cp); setDataErr(''); } else setDataErr(cp.error);
           if (!dc.error) { setDocs(dc); setDocsErr(''); } else setDocsErr(dc.error);
           if (!sh.error) { setShifts(sh.shifts || []); setShiftsErr(''); } else setShiftsErr(sh.error);
@@ -6589,45 +6889,76 @@
         );
       }
 
-      // UNLOCKED portal.
-      const titles = { home: 'My Care', care: 'Care Plan', schedule: 'Schedule', health: 'My Health', messages: 'Messages', documents: 'Documents' };
-      // The Health tab exists ONLY for clinical-line clients the server cleared
-      // (PHC-only clients never see a clinical section — schema §6).
-      const tabs = [
-        { id: 'home', icon: 'ti-home', label: 'Home' },
-        { id: 'care', icon: 'ti-clipboard-heart', label: 'Care' },
-        { id: 'schedule', icon: 'ti-calendar', label: 'Schedule' },
-        ...(clinicalAvailable || clinicalBlocked ? [{ id: 'health', icon: 'ti-heart-rate-monitor', label: 'Health' }] : []),
-        { id: 'messages', icon: 'ti-message', label: 'Messages' },
-        { id: 'documents', icon: 'ti-file-text', label: 'Documents' }
+      // UNLOCKED portal (redesign, owner mockups 10/2026).
+      // One list of destinations drives the desktop sidebar, the mobile
+      // bottom menu and the More menu, so the three cannot disagree about
+      // what exists. Health-record and results areas exist ONLY for
+      // clinical-line clients the server cleared (PHC-only clients never see
+      // a clinical section — schema §6).
+      const clinicalTab = clinicalAvailable || clinicalBlocked;
+      const unread = threads.reduce((a, t) => a + (t.unread || 0), 0);
+      const NAV = [
+        { id: 'home', icon: 'ti-home', label: 'Home', short: 'Home' },
+        { id: 'care', icon: 'ti-heart-handshake', label: 'My Care', short: 'Care' },
+        { id: 'schedule', icon: 'ti-calendar-event', label: 'Appointments', short: 'Appts' },
+        ...(clinicalAvailable ? [{ id: 'results', icon: 'ti-flask', label: 'Test Results', hint: 'Lab and imaging reports' }] : []),
+        ...(clinicalTab ? [{ id: 'health', icon: 'ti-heart-rate-monitor', label: 'Health Records', short: 'Records', hint: 'Visit summaries, medicines, allergies' }] : []),
+        { id: 'messages', icon: 'ti-message-2', label: 'Messages', hint: 'Your care team', badge: unread },
+        { id: 'documents', icon: 'ti-folder', label: 'Documents', short: clinicalTab ? undefined : 'Records', hint: 'Forms, consents and records' },
+        { id: 'settings', icon: 'ti-settings', label: 'Settings', hint: 'Sharing and sign out' }
       ];
+      // Bottom menu: Home · Care · Appts · Records · More.
+      const recordsId = clinicalTab ? 'health' : 'documents';
+      const bottom = [NAV[0], NAV[1], NAV[2], NAV.find(n => n.id === recordsId), { id: 'more', icon: 'ti-menu-2', short: 'More' }];
+      const inBottom = new Set(bottom.map(n => n.id));
+      const moreItems = NAV.filter(n => !inBottom.has(n.id));
+      const go = (id) => { setView(id); window.scrollTo && window.scrollTo(0, 0); };
+      const bottomOn = (id) => view === id || (id === 'more' && !inBottom.has(view));
+      const onNavigate = go;
       return (
-        <div className="gfc"><div className="gfc-shell desktopnav">
-          <div className="gfc-hdr">
-            <span className="ttl">{titles[view]}</span>
-            <button onClick={gfcLogout} title="Sign out"><i className="ti ti-logout" /></button>
+        <div className="gfc v2"><div className="gfc-app">
+          <aside className="gfc-side">
+            <img src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" />
+            {NAV.map(n => (
+              <button key={n.id} className={view === n.id ? 'on' : ''} onClick={() => go(n.id)}>
+                <i className={`ti ${n.icon}`} />{n.label}{n.badge ? <span className="sn">{n.badge}</span> : null}
+              </button>
+            ))}
+            <div className="foot">
+              <button onClick={gfcLogout}><i className="ti ti-logout" />Sign out</button>
+            </div>
+          </aside>
+          <div className="gfc-main">
+            <header className="gfc-top">
+              <button className="ib" onClick={() => go('more')} aria-label="Menu"><i className="ti ti-menu-2" /></button>
+              <img src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" />
+              <button className="ib" onClick={() => go('messages')} aria-label={unread ? `${unread} unread messages` : 'Messages'}><i className="ti ti-bell" />{unread > 0 && <span className="rd" />}</button>
+            </header>
+            {view === 'home' && data && <GfcDashboard data={data} onNavigate={onNavigate} me={me} clinical={clinicalAvailable ? clinical : null} shifts={shifts} shiftsErr={shiftsErr} threads={threads} threadsErr={threadsErr} />}
+            {view === 'care' && data && <GfcCarePlan data={data} readOnly={readOnly} token={token} shifts={shifts} shiftsErr={shiftsErr} clinical={clinicalAvailable ? clinical : null} />}
+            {view === 'schedule' && <GfcSchedule shifts={shifts} shiftsErr={shiftsErr} clinical={clinicalAvailable ? clinical : null} />}
+            {view === 'results' && clinicalAvailable && <GfcResults clinical={clinical} token={token} />}
+            {view === 'health' && clinicalBlocked && <GfcHealth clinical={{ error: me.clinicalRead.reason || 'Your care team is still setting up your health record.' }} me={me} token={token} readOnly={readOnly} />}
+            {view === 'health' && clinicalAvailable && <GfcHealth clinical={clinical} me={me} token={token} readOnly={readOnly}
+              onSharingSaved={(sharing) => setMe(m => m ? { ...m, sharing } : m)} />}
+            {view === 'messages' && <GfcMessages token={token} me={me} actingAs={me && me.actingAs} />}
+            {/* Uploads, the share link and the record release are client-only on the
+                server (requireClientForIntake), so a POA got a button that always
+                answered 403. On this tab every family login, POA included, reads. */}
+            {view === 'documents' && <GfcDocuments docs={docs} readOnly={!!isFamily} token={token} onOpenTransferRoi={() => setShowTransferRoi(true)} onRefresh={refreshDocs} clinicalDocs={clinicalAvailable ? clinicalDocs : null} docsErr={docsErr} clinicalDocsErr={clinicalDocsErr} />}
+            {view === 'settings' && <GfcSettings me={me} token={token} readOnly={readOnly} onSharingSaved={(sharing) => setMe(m => m ? { ...m, sharing } : m)} />}
+            {view === 'more' && <GfcMore items={moreItems} onNavigate={go} unread={unread} />}
+            {!data && dataErr && (view === 'home' || view === 'care') && (
+              <div className="gfc-body"><div className="lockcard"><i className="ti ti-alert-triangle" /><div><b>Your care information didn't load</b><span>{dataErr} Please refresh the page to try again.</span></div></div></div>
+            )}
+            {!data && !dataErr && view !== 'messages' && view !== 'documents' && view !== 'health' && (view === 'home' || view === 'care') && (
+              <div className="gfc-body" style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}><div className="gfc-spin" /></div>
+            )}
           </div>
-          {view === 'home' && data && <GfcDashboard data={data} onNavigate={setView} me={me} clinical={clinicalAvailable ? clinical : null} shifts={shifts} shiftsErr={shiftsErr} />}
-          {view === 'care' && data && <GfcCarePlan data={data} readOnly={readOnly} token={token} shifts={shifts} shiftsErr={shiftsErr} clinical={clinicalAvailable ? clinical : null} />}
-          {view === 'schedule' && <GfcSchedule shifts={shifts} shiftsErr={shiftsErr} clinical={clinicalAvailable ? clinical : null} />}
-          {view === 'health' && clinicalBlocked && <GfcHealth clinical={{ error: me.clinicalRead.reason || 'Your care team is still setting up your health record.' }} me={me} token={token} readOnly={readOnly} />}
-          {view === 'health' && clinicalAvailable && <GfcHealth clinical={clinical} me={me} token={token} readOnly={readOnly}
-            onSharingSaved={(sharing) => setMe(m => m ? { ...m, sharing } : m)} />}
-          {view === 'messages' && <GfcMessages token={token} me={me} actingAs={me && me.actingAs} />}
-          {/* Uploads, the share link and the record release are client-only on the
-              server (requireClientForIntake), so a POA got a button that always
-              answered 403. On this tab every family login, POA included, reads. */}
-          {view === 'documents' && <GfcDocuments docs={docs} readOnly={!!isFamily} token={token} onOpenTransferRoi={() => setShowTransferRoi(true)} onRefresh={refreshDocs} clinicalDocs={clinicalAvailable ? clinicalDocs : null} docsErr={docsErr} clinicalDocsErr={clinicalDocsErr} />}
-          {!data && dataErr && view !== 'messages' && view !== 'documents' && view !== 'health' && (
-            <div className="gfc-body"><div className="lockcard"><i className="ti ti-alert-triangle" /><div><b>Your care information didn't load</b><span>{dataErr} Please refresh the page to try again.</span></div></div></div>
-          )}
-          {!data && !dataErr && view !== 'messages' && view !== 'documents' && view !== 'health' && (
-            <div className="gfc-body" style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}><div className="gfc-spin" /></div>
-          )}
           <nav className="gfc-tabs">
-            {tabs.map(t => (
-              <button key={t.id} className={view === t.id ? 'on' : ''} onClick={() => setView(t.id)}>
-                <i className={`ti ${t.icon}`} />{t.label}
+            {bottom.map(t => (
+              <button key={t.id} className={bottomOn(t.id) ? 'on' : ''} onClick={() => go(t.id)}>
+                <i className={`ti ${t.icon}`} />{t.short || t.label}
               </button>
             ))}
           </nav>

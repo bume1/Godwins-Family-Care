@@ -1051,7 +1051,8 @@ test('T3. one client never reads another client\'s published visits, results, ch
 test('T4. the note section carries exactly these fields — pinned here, not derived from the constant it guards', () => {
   assert.deepEqual([...patientRead.NOTE_CONTENT_FIELDS].sort(), ['assessment', 'objective', 'plan', 'subjective']);
   assert.deepEqual([...patientRead.FILTER_MAP.note.full].sort(), ['addenda', 'assessment', 'objective', 'plan', 'signatures', 'signedAt', 'subjective']);
-  assert.deepEqual([...patientRead.FILTER_MAP.result.full].sort(), ['hasFile', 'id', 'label', 'patientNote', 'performedBy', 'resultDate', 'reviewStatus', 'reviewedAt', 'reviewedBy']);
+  // `kind` added 10/2026 (portal redesign) so results file under Lab / Imaging.
+  assert.deepEqual([...patientRead.FILTER_MAP.result.full].sort(), ['hasFile', 'id', 'kind', 'label', 'patientNote', 'performedBy', 'resultDate', 'reviewStatus', 'reviewedAt', 'reviewedBy']);
   for (const f of ['signatureImage', 'ipHash', 'billingProviderNpi', 'npi', 'attestationText', 'renderingProvider', 'uuid', 'openEmrPatientId']) {
     for (const [section, levels] of Object.entries(patientRead.FILTER_MAP)) {
       for (const [level, allow] of Object.entries(levels)) assert.ok(!allow.includes(f), `${section}.${level} must never allow ${f}`);
@@ -1316,10 +1317,15 @@ test('P2-5. every calendar write path republishes the patient copy (an unconditi
 
 test('P2-6. the portal shows ONE schedule: clinical visits and caregiver visits together, and a Schedule tab', () => {
   const portal = fs.readFileSync(path.join(__dirname, '..', 'public', 'portal.html'), 'utf8');
-  assert.match(portal, /\{ id: 'schedule', icon: 'ti-calendar', label: 'Schedule' \}/);
+  // The redesign (10/2026) labels it Appointments; one NAV list drives the
+  // sidebar, the bottom menu and the More menu.
+  assert.match(portal, /\{ id: 'schedule', icon: 'ti-calendar-event', label: 'Appointments', short: 'Appts' \}/);
   assert.match(portal, /\{view === 'schedule' && <GfcSchedule shifts=\{shifts\} shiftsErr=\{shiftsErr\} clinical=\{clinicalAvailable \? clinical : null\} \/>\}/);
   // Home's next clinical visit reads the published state, not a raw OpenEMR row.
-  assert.match(portal, /\(clinical\.appointments \|\| \[\]\)\.find\(a => a\.state === 'upcoming' && a\.date >= todayGa\)/);
+  // (Redesign: Home's next visit is the first item of the shared builder, which
+  // reads clinical.appointments — the published copy — and drops past ones.)
+  assert.match(portal, /const coming = buildScheduleItems\(shifts, clinical\)\.filter\(v => !v\.past && !v\.live && v\.date >= todayGa\)/);
+  assert.match(portal, /const appts = \(clinical && !clinical\.error && clinical\.appointments\) \|\| \[\];/);
   // Both lists are built from the shared builder, not from shifts alone.
   assert.equal((portal.match(/buildScheduleItems\(shifts, clinical\)/g) || []).length >= 3, true);
   assert.ok(!/const upcoming = \(shifts \|\| \[\]\)[\s\S]{0,400}\{upcoming\.map\(v =>/.test(portal), 'the Care tab no longer lists only caregiver shifts');
@@ -1442,4 +1448,22 @@ test('A8. the portal says when a load failed, and why the Health tab is locked, 
   assert.match(portal, /view === 'health' && clinicalBlocked && <GfcHealth clinical=\{\{ error: me\.clinicalRead\.reason/);
   assert.match(portal, /has\('vitals'\) && !vitals &&/);
   assert.match(portal, /cp\.problems\.map\(/, 'the plan\'s problem list is shown before the patient co-signs it');
+});
+
+// ---- Portal redesign (10/2026): results file under Lab / Imaging -------------
+test('R1. a result tells the portal its kind, from the order type only, and nothing else rides with it', () => {
+  const rel = { releasedToPatientAt: '2026-10-01T00:00:00Z' };
+  assert.equal(patientPublish.resultForPatient({ ...rel, id: 1, orderType: 'lab' }).kind, 'lab');
+  assert.equal(patientPublish.resultForPatient({ ...rel, id: 2, orderType: 'imaging' }).kind, 'imaging');
+  assert.equal(patientPublish.resultForPatient({ ...rel, id: 3, orderType: 'referral' }).kind, 'referral');
+  // An unmatched outside record, or a type the portal has no label for, is "outside":
+  // never a raw value copied through from the order row.
+  assert.equal(patientPublish.resultForPatient({ ...rel, id: 4 }).kind, 'outside');
+  assert.equal(patientPublish.resultForPatient({ ...rel, id: 5, orderType: '<b>x</b>' }).kind, 'outside');
+  // And it survives the sharing filter, which is an allow-list.
+  const row = patientPublish.resultForPatient({ ...rel, id: 6, orderType: 'lab', interpretation: 'abnormal', followUpNote: 'call her' });
+  const [out] = patientRead.filterRows('result', 'full', [row]);
+  assert.equal(out.kind, 'lab');
+  assert.equal(out.interpretation, undefined);
+  assert.equal(out.followUpNote, undefined);
 });

@@ -158,23 +158,31 @@ const srv = http.createServer((req, res) => {
       return j({});
     });
     await page.goto(`http://localhost:${port}/portal/juanita-guess`, { waitUntil: 'networkidle' }).catch(() => {});
-    await page.waitForFunction(() => !/Loading your care portal/.test(document.body.innerText) && /Good morning|Welcome|Lab results|My Health/.test(document.body.innerText), null, { timeout: 20000 }).catch(() => {});
+    await page.waitForFunction(() => !/Loading your care portal/.test(document.body.innerText) && /Good (morning|afternoon|evening)|Welcome|Lab results|My Health/.test(document.body.innerText), null, { timeout: 20000 }).catch(() => {});
     await page.waitForTimeout(800);
     const S = process.env.SHOTS_DIR || null;
     const out = { name };
     out.homeText = (await page.locator('body').innerText()).slice(0, 1800);
     if (S) await page.screenshot({ path: `${S}/${name}-home.png`, fullPage: true });
     // go to Health
-    const health = page.getByText('Health', { exact: true }).first();
+    // Redesign (10/2026): the bottom menu labels the health area Records.
+    const health = page.locator('.gfc-tabs').getByText('Records', { exact: true }).first();
     if (await health.count()) { await health.click(); await page.waitForTimeout(600); }
     // expand the first visit
     const rs = page.getByText(/Read summary/).first();
     if (await rs.count()) { await rs.click(); await page.waitForTimeout(400); }
     out.healthText = (await page.locator('body').innerText()).slice(0, 4000);
+    // Redesign (10/2026): Test Results has its own screen, reached from More on a phone.
+    const more = page.locator('.gfc-tabs').getByText('More', { exact: true }).first();
+    if (await more.count()) { await more.click(); await page.waitForTimeout(400); }
+    const tr = page.locator('.gfc-main').getByText('Test Results', { exact: true }).first();
+    if (await tr.count()) { await tr.click(); await page.waitForTimeout(500); }
+    out.resultsText = (await page.locator('body').innerText()).slice(0, 3000);
     out.pwned = await page.evaluate(() => window.__pwned === undefined ? 'not run (escaped)' : 'EXECUTED');
     out.errors = errors;
     if (S) await page.screenshot({ path: `${S}/${name}-health.png`, fullPage: true });
-    const sched = page.getByText('Schedule', { exact: true }).first();
+    // Redesign (10/2026): the bottom menu labels the schedule Appts.
+    const sched = page.locator('.gfc-tabs').getByText('Appts', { exact: true }).first();
     if (await sched.count()) { await sched.click(); await page.waitForTimeout(600); }
     out.scheduleText = (await page.locator('body').innerText()).slice(0, 3000);
     if (S) await page.screenshot({ path: `${S}/${name}-schedule.png`, fullPage: true });
@@ -207,9 +215,11 @@ const srv = http.createServer((req, res) => {
     expect('nothing published but the app holds lists: the reconciled medicines and reported conditions show, labelled; NKDA reads as none', has(A.healthText, /Lisinopril 10 mg/) && has(A.healthText, /Reviewed with Bethel Godwins/) && has(A.healthText, /Diabetes/) && has(A.healthText, /what you told us when you enrolled/i) && has(A.healthText, /no known allergies/i));
     expect('clinical read refused: the Health tab is there and says why', has(B.healthText, /Consent to medical treatment must be on file/));
     expect('nothing published: no Latest visit card on Home', !has(U.homeText, /your latest visit/i));
-    expect('schedule: Home lists the clinical visit and the caregiver visit together, labelled', has(P.homeText, /your next clinical visit/i) && has(P.homeText, /Follow-up visit/) && has(P.homeText, /Maria Lopez/) && has(P.homeText, /see your full calendar/i));
+    expect('schedule: Home lists the clinical visit and the caregiver visit together, labelled', has(P.homeText, /upcoming appointment/i) && has(P.homeText, /Follow-up visit/) && has(P.homeText, /Maria Lopez/) && has(P.homeText, /clinical visit/i) && has(P.homeText, /caregiver/i));
     expect('schedule: the Schedule tab shows the month grid, both kinds of visit and the recent visit', has(P.scheduleText, /your schedule/i) && has(P.scheduleText, /sun\s*mon/i) && has(P.scheduleText, /Telehealth check-in/) && has(P.scheduleText, /Maria Lopez/) && has(P.scheduleText, /Video \/ phone visit/));
     expect('schedule: family without shared visits sees no clinical visits on the calendar', !has(F.scheduleText, /Telehealth check-in/) || R.sectionsFor('family', {}).appointments !== 'none');
+    expect('results: filed under Lab and Imaging, each still saying whether it was reviewed', has(P.resultsText, /All Results/) && has(P.resultsText, /\bLab\b/) && has(P.resultsText, /Imaging/) && has(P.resultsText, /not yet reviewed/i) && has(P.resultsText, /Reviewed by Bethel Godwins/));
+    expect('results: family not sharing results are told so, and see no result', !has(F.resultsText || '', /not yet reviewed/i));
     expect('no page errors on any audience', Object.values(OUT).every(r => r.errors.length === 0));
   }
   await browser.close(); srv.close(); process.exit(failures ? 1 : 0);
