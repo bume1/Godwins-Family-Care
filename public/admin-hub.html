@@ -190,6 +190,14 @@
       // Resetting MFA and disconnecting OpenEMR are two independent things —
       // see the cards in the Edit User form — and neither touches the
       // password field above.
+      // "View as" (impersonation.js). Super Admin only; the server refuses
+      // admin targets, nested starts and anyone without an MFA-verified session.
+      startViewAs: (token, userId) =>
+        fetch(`${API_URL}/api/admin/impersonate/${userId}`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(err => ({ error: err.message })),
+
       resetUserMfa: (token, userId) =>
         fetch(`${API_URL}/api/users/${userId}/mfa/reset`, {
           method: 'POST',
@@ -1469,7 +1477,23 @@
       );
     };
 
-    const UsersPage = ({ token }) => {
+    // Stash the admin's own tokens, put the viewed person's token in every key
+    // a page reads, and go where their own login would send them. Exit (the
+    // banner from session-guard.js) puts the admin's tokens back.
+    const VIEW_AS_TOKEN_KEYS = ['unified_token', 'admin_token', 'portal_token', 'unified_user', 'admin_user', 'portal_user'];
+    const startViewAs = async (token, user, setMessage) => {
+      if (!window.confirm(`View the app as ${user.name || user.email}?\n\nYou will see and use exactly what they do for up to 60 minutes. Signing anything, OpenEMR and their account settings stay off. Emails and notifications still send for real.\n\nEvery action is logged as you acting as them. Use the Exit button in the gold banner to come back.`)) return;
+      const result = await api.startViewAs(token, user.id);
+      if (result.error || !result.token) { setMessage(`Error: ${result.error || 'Could not start View as.'}`); return; }
+      const tokens = {};
+      VIEW_AS_TOKEN_KEYS.forEach(k => { const v = localStorage.getItem(k); if (v) tokens[k] = v; });
+      localStorage.setItem('gfc_view_as_return', JSON.stringify({ tokens, startedAt: new Date().toISOString() }));
+      ['unified_token', 'admin_token', 'portal_token'].forEach(k => localStorage.setItem(k, result.token));
+      ['unified_user', 'admin_user', 'portal_user'].forEach(k => localStorage.setItem(k, JSON.stringify(result.user)));
+      window.location.href = result.destination || '/login';
+    };
+
+    const UsersPage = ({ token, isSuperAdmin }) => {
       const [users, setUsers] = useState([]);
       const [projects, setProjects] = useState([]);
       const [clients, setClients] = useState([]);
@@ -2419,6 +2443,20 @@
                       <p className="text-sm text-gray-500 mb-3">
                         For a lost or replaced device. Neither of these is the password field above — reset that separately if it also needs to change.
                       </p>
+                      {isSuperAdmin && editingUser.role !== 'admin' && editingUser.accountStatus !== 'inactive' && (
+                        <div className="p-3 mb-3 bg-gray-50 rounded-lg">
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <p className="text-sm font-medium text-gray-700">View as {editingUser.name || 'this user'}</p>
+                              <p className="text-xs text-gray-500 mt-0.5">See and use the app exactly as they do, for up to 60 minutes. Signing, OpenEMR and their account settings stay off. Emails still send.</p>
+                            </div>
+                            <button type="button" onClick={() => startViewAs(token, editingUser, setMessage)}
+                              className="px-3 py-1.5 bg-primary text-white text-sm rounded-lg hover:opacity-90 whitespace-nowrap">
+                              View as
+                            </button>
+                          </div>
+                        </div>
+                      )}
                       <div className="p-3 bg-gray-50 rounded-lg">
                         <div className="flex items-center justify-between gap-3">
                           <div>
@@ -3048,6 +3086,9 @@
                           <td className="px-4 py-4">
                             <div className="flex gap-2">
                               <button onClick={() => handleEdit(user)} className="p-1 text-primary hover:bg-primary/10 rounded" title="Edit">{Icons.edit}</button>
+                              {isSuperAdmin && user.role !== 'admin' && user.accountStatus !== 'inactive' && (
+                                <button onClick={() => startViewAs(token, user, setMessage)} className="px-2 py-0.5 text-xs font-medium text-primary border border-primary/40 rounded hover:bg-primary/10 whitespace-nowrap" title="See and use the app as this person">View as</button>
+                              )}
                               <button
                                 onClick={() => toggleEmailSubscription(user)}
                                 className={`p-1 rounded ${user.emailUnsubscribed ? 'text-orange-600 hover:bg-orange-50' : 'text-gray-400 hover:bg-gray-100'}`}
@@ -4579,7 +4620,7 @@
         switch (activePage) {
           case 'dashboard': return <DashboardPage token={token} onNavigate={handleNavigation} user={user} />;
           case 'inbox': return <InboxPage token={token} user={user} />;
-          case 'users': return <UsersPage token={token} />;
+          case 'users': return <UsersPage token={token} isSuperAdmin={isSuperAdmin} />;
           case 'notifications': return <NotificationsPage token={token} isSuperAdmin={isSuperAdmin} />;
           case 'service_portal': return <ServicePortalPage token={token} user={user} />;
           case 'messages': return <InboxPage token={token} user={user} initialTab="messages" />;

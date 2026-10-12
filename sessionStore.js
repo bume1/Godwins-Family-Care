@@ -25,10 +25,13 @@ const createSessionStore = ({ store, idleMinutes = 15, now = () => Date.now() })
   const key = (sid) => `${PREFIX}${sid}`;
   const idleMs = () => Math.max(1, idleMinutes) * 60 * 1000;
 
-  const create = async ({ userId, role, ipHash = null, userAgent = null, mfaVerified = false, surface = null, absoluteExpiresAt = null }) => {
+  // impersonator* are set only on a "View as" session (impersonation.js): the
+  // row's userId is the person being viewed, these name who really started it.
+  const create = async ({ userId, role, ipHash = null, userAgent = null, mfaVerified = false, surface = null, absoluteExpiresAt = null, impersonatorId = null, impersonatorName = null, impersonatorSid = null }) => {
     const sid = crypto.randomBytes(24).toString('base64url');
     const at = new Date(now()).toISOString();
     const row = { id: sid, userId, role, createdAt: at, lastSeenAt: at, absoluteExpiresAt, revokedAt: null, revokedReason: null, ipHash, userAgent: userAgent ? String(userAgent).slice(0, 200) : null, mfaVerified, surface };
+    if (impersonatorId) Object.assign(row, { impersonatorId, impersonatorName, impersonatorSid });
     await store.set(key(sid), row);
     return row;
   };

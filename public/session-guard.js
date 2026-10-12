@@ -52,8 +52,65 @@
   let last = Date.now(); let warned = null; let done = false;
 
   const clearTokens = () => { TOKEN_KEYS.forEach(k => { try { localStorage.removeItem(k); } catch (e) { /* ignore */ } }); try { sessionStorage.clear(); } catch (e) { /* ignore */ } };
-  const signOut = async (reason, { callServer = true, why = null } = {}) => {
+
+  // "View as" (impersonation.js, 2026-10-12). Starting it stashes the admin's
+  // own tokens under VIEW_AS_KEY and puts the viewed person's token in the
+  // usual keys, so every page works exactly as it would for them. Ending it —
+  // the Exit button, the 60-minute cap, an idle sign-out — puts the admin's
+  // tokens back and returns to the admin hub instead of the login screen.
+  const VIEW_AS_KEY = 'gfc_view_as_return';
+  const readStash = () => { try { return JSON.parse(localStorage.getItem(VIEW_AS_KEY) || 'null'); } catch (e) { return null; } };
+  const restoreAdmin = () => {
+    const stash = readStash();
+    if (!stash || !stash.tokens) return false;
+    TOKEN_KEYS.forEach(k => { try { localStorage.removeItem(k); } catch (e) { /* ignore */ } });
+    Object.keys(stash.tokens).forEach(k => { if (TOKEN_KEYS.includes(k) && stash.tokens[k]) { try { localStorage.setItem(k, stash.tokens[k]); } catch (e) { /* ignore */ } } });
+    try { localStorage.removeItem(VIEW_AS_KEY); } catch (e) { /* ignore */ }
+    return true;
+  };
+  const endViewAs = async () => {
     if (done) return; done = true;
+    const token = getStoredToken();
+    if (token) { try { await realFetchRef('/api/auth/impersonate/end', { method: 'POST', headers: { Authorization: `Bearer ${token}` } }); } catch (e) { /* the 60-minute cap ends it anyway */ } }
+    if (restoreAdmin()) window.location.replace('/admin?view_as=ended');
+    else { clearTokens(); window.location.replace('/login?reason=revoked'); }
+  };
+  let realFetchRef = (...a) => window.fetch(...a);
+  const showViewAsBanner = (info) => {
+    if (!info || document.getElementById('gfc-view-as-banner')) return;
+    const bar = document.createElement('div');
+    bar.id = 'gfc-view-as-banner';
+    bar.setAttribute('role', 'status');
+    bar.style.cssText = 'position:fixed;top:8px;left:50%;transform:translateX(-50%);max-width:calc(100% - 16px);background:#F5CD85;color:#033D50;border:2px solid #033D50;padding:6px 12px;border-radius:10px;font:12px/1.35 "DM Sans",system-ui,sans-serif;box-shadow:0 6px 20px rgba(0,0,0,.25);z-index:99999;display:flex;gap:10px;align-items:center;flex-wrap:wrap;justify-content:center';
+    const text = document.createElement('span');
+    const who = info.userName || 'this account';
+    const strong = document.createElement('strong'); strong.textContent = `Viewing as ${who}${(info.roleLabel || info.role) ? ` (${info.roleLabel || info.role})` : ''}.`;
+    text.append(strong, document.createTextNode(' Signing and OpenEMR are off. Emails still send.'));
+    const btn = document.createElement('button'); btn.type = 'button'; btn.textContent = 'Exit';
+    btn.style.cssText = 'background:#033D50;color:#fff;border:none;border-radius:6px;padding:4px 10px;font-weight:600;cursor:pointer';
+    btn.addEventListener('click', endViewAs);
+    bar.append(text, btn);
+    (document.body || document.documentElement).appendChild(bar);
+  };
+  const checkViewAs = async () => {
+    const token = getStoredToken();
+    if (!token) return;
+    try {
+      const r = await realFetchRef('/api/auth/heartbeat', { headers: { Authorization: `Bearer ${token}` } });
+      if (!r.ok) return;
+      const data = await r.json();
+      if (data && data.actingAs) showViewAsBanner(data.actingAs);
+      // Back on the admin's own session with a leftover stash: drop it, so a
+      // later sign-out cannot "restore" tokens that are already in place.
+      else if (readStash()) { try { localStorage.removeItem(VIEW_AS_KEY); } catch (e) { /* ignore */ } }
+    } catch (e) { /* no banner is better than a wrong one */ }
+  };
+
+  const signOut = async (reason, { callServer = true, why = null } = {}) => {
+    if (done) return;
+    // Inside "View as", any sign-out ends the view and goes back to the admin.
+    if (readStash()) return endViewAs();
+    done = true;
     const token = getStoredToken();
     if (callServer && token) { try { await fetch('/api/auth/logout', { method: 'POST', headers: { Authorization: `Bearer ${token}` } }); } catch (e) { /* the server-side idle rule catches it anyway */ } }
     clearTokens();
@@ -117,6 +174,8 @@
   // Auth-family responses → sign out. Only responses to requests that carried
   // a bearer token are considered, so a public page is never bounced.
   const realFetch = window.fetch;
+  realFetchRef = (...a) => realFetch.apply(window, a);
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', checkViewAs); else checkViewAs();
   window.fetch = async function (input, init) {
     const headers = (init && init.headers) || {};
     const auth = headers.Authorization || headers.authorization || (typeof Headers !== 'undefined' && headers instanceof Headers ? headers.get('Authorization') : null);
