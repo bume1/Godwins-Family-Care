@@ -1660,11 +1660,19 @@ const sendDueVisitReminders = async () => {
       if (i === undefined) continue;
       rows[i] = { ...rows[i], status: 'void', voidReason: 'missed_window', voidedAt: new Date().toISOString() };
       dirty = true;
-      console.log(`[REMINDER] Voided ${r.id} — more than ${visitReminders.MISSED_WINDOW_HOURS}h past its send window; a late reminder is worse than none.`);
+      console.log(`[REMINDER] Voided ${r.id} — more than ${visitReminders.missedWindowHoursFor(visitReminders.kindOf(r))}h past its send window; a late reminder is worse than none.`);
     }
 
     for (const r of due) {
-      const out = await notify.visitReminder({ reminder: r, orgPhone: consentText.ORG.phone });
+      const out = visitReminders.kindOf(r) === visitReminders.REMINDER_KINDS.VIDEO_JOIN
+        // T1 C4: the day-of nudge, with a one-tap link minted for THIS
+        // recipient. The room is checked first: a nudge sent for a visit whose
+        // room has gone would hand somebody a link to nothing.
+        ? await notify.videoReminder({
+          reminder: r, orgPhone: consentText.ORG.phone,
+          ctaFor: (user, actingFor) => mintJoinCta(r, user, actingFor)
+        })
+        : await notify.visitReminder({ reminder: r, orgPhone: consentText.ORG.phone });
       const i = byId.get(r.id);
       if (i === undefined) continue;
       // MARKED 'sent' ONLY AFTER THE QUEUE ACCEPTS IT. A skip (the recipient
@@ -1683,6 +1691,34 @@ const sendDueVisitReminders = async () => {
   } catch (err) {
     console.error('[REMINDER] Send sweep failed (non-fatal):', err.message);
   }
+};
+
+// T1 C4: one tap, one person, one visit. The token is bound to this recipient
+// and this appointment, so a patient's link is not their POA's and neither
+// survives onto the next visit. A LIVE TOKEN IS REUSED rather than reminted:
+// sending a second link while the first still worked leaves somebody holding
+// two and guessing which one is real.
+const mintJoinCta = async (reminder, user, actingFor) => {
+  if (!user || !user.id) return null;
+  // No room, no link. The pointer store is the authority, so a visit moved out
+  // of video between the booking and the nudge gets the portal button instead.
+  const link = videoLinkFor(await loadVideoLinks(), reminder.eid);
+  if (!link || !link.meetingUri) return null;
+  const rows = await loadRows('appointment_join_tokens');
+  const live = videoJoinTokens.liveTokenFor(rows, reminder.eid, user.id);
+  if (live) return null;  // one live link per person; the first one still works
+  const { token, row } = videoJoinTokens.buildToken({
+    eid: reminder.eid, clientId: reminder.clientId, recipientUserId: user.id,
+    recipientRole: actingFor ? 'poa' : 'patient', salt: JWT_SECRET
+  });
+  rows.push(row);
+  await db.set('appointment_join_tokens', rows);
+  // WHICH visit and WHO for — never the token or the room URL. A link in an
+  // audit row is a door into a patient's visit sitting in a log.
+  await logActivity(null, 'system', 'video_join_link_issued', 'client', reminder.clientId, {
+    appointmentEid: String(reminder.eid), recipientUserId: String(user.id), recipientRole: row.recipientRole
+  });
+  return { url: `${await getAppBaseUrl()}${appLinks.videoJoinFor(token)}`, label: 'Join the video visit' };
 };
 
 // Generate a URL-friendly slug from client name
@@ -8040,6 +8076,74 @@ app.get('/api/gfc/clinical/visits/:visitId/summary.pdf', authenticateToken, requ
   }
 });
 
+// ── T1 C2 — the patient asks for the join link ───────────────────────────
+//
+// GET /api/gfc/clinical/appointments/:eid/join. `:eid` names an appointment
+// WITHIN the session-resolved patient's own published calendar — the same
+// shape as :docId and :visitId — and a row that is not theirs is simply not
+// there, so it answers 404 rather than a 403 that confirms it exists.
+//
+// THE LINK IS NEVER STORED IN A PATIENT PAYLOAD. It is handed out here, on
+// request, inside the join window, and every hand-out is logged — so a link
+// cannot sit in a cached portal response or an old email and open the room
+// months later.
+//
+// PATIENT AND POA ONLY, and that is a deliberate narrowing of
+// requireEnrolledClient. Appearing on a video call is ATTENDING the visit, not
+// reading about it: the sharing toggle that lets a cousin see that a visit is
+// on Tuesday is not consent for them to be in the room. A POA acts for the
+// patient everywhere else (4.3) and acts for them here. Other family are told
+// the patient can invite them, rather than given a link.
+const joinInstant = (date, time) => {
+  const iso = practiceTime.instantFromZoned(date, time);
+  return iso ? Date.parse(iso) : NaN;
+};
+app.get('/api/gfc/clinical/appointments/:eid/join', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const ctx = await resolvePatientClinicalContext(req, res);
+    if (!ctx) return;
+    const { client, audience, sections } = ctx;
+    if (audience !== 'patient' && audience !== 'poa') {
+      return res.status(403).json({
+        error: 'Only the patient or their designated Power of Attorney can open the video room. Ask them to invite you from inside the visit.',
+        code: 'JOIN_NOT_PERMITTED'
+      });
+    }
+    if (!sections.appointments || sections.appointments === 'none') {
+      return res.status(403).json({ error: 'Visits are not shared with you.', code: 'APPOINTMENTS_NOT_SHARED' });
+    }
+    const eid = String(req.params.eid || '').trim();
+    const row = (await loadRows('patient_published_appointments')).find(r => r && r.clientId === client.id) || null;
+    const appt = ((row && row.appointments) || []).find(a => a && String(a.id) === eid) || null;
+    if (!appt) return res.status(404).json({ error: 'Visit not found', code: 'APPOINTMENT_NOT_FOUND' });
+    // The ROOM is the authority on whether there is one, not the flag: the
+    // published copy is a snapshot and the pointer store is live.
+    const link = videoLinkFor(await loadVideoLinks(), eid);
+    if (!link || !link.meetingUri) {
+      return res.status(409).json({
+        error: 'This visit does not have a video room. Call the office if you were expecting a video visit.',
+        code: 'MEET_NO_ROOM'
+      });
+    }
+    const state = patientPublish.joinState(patientPublish.joinWindow(appt, joinInstant), Date.now());
+    if (!state.ok) {
+      return res.status(409).json({
+        error: state.error, code: state.code,
+        opensAt: state.opensAt || null, closesAt: state.closesAt || null
+      });
+    }
+    await logPatientClinicalRead(req, ctx, 'video_join_link', { appointmentEid: eid });
+    res.json({
+      join: { url: link.meetingUri, code: link.meetingCode || null },
+      opensAt: state.opensAt, closesAt: state.closesAt,
+      visit: { date: appt.date, startTime: appt.startTime, provider: appt.provider || null }
+    });
+  } catch (error) {
+    console.error('Patient video join error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // GET /api/gfc/clinical/care-plan.pdf — the SIGNED care plan (both
 // signatures). Served from the Drive reference on client.carePlanDocs — never
 // from OpenEMR Documents (server defect). When the Drive copy is not
@@ -9652,8 +9756,136 @@ const clinicianNameForProviderId = async (providerId) => {
   return u ? visitReminders.visitClinicianLabel(u) : null;
 };
 
+// ── Session T1: a Meet room per telehealth visit ──────────────────────────
+//
+// Owner decision 10. The room is created when the visit is booked (or moved
+// into telehealth) and SHUT when the visit is cancelled, marked a no-show, or
+// moved out of telehealth. Google does not allow Meet to be embedded in
+// another site, so it opens in its own tab — which is also why the patient's
+// door is a link rather than a screen inside the portal.
+//
+// A MEET FAILURE NEVER BLOCKS A BOOKING. The appointment is on the calendar
+// and the patient has been told; losing that because Google was briefly
+// unreachable would be the worse outcome by a long way. Every call site takes
+// the outcome back as a value and surfaces it as a warning with a retry, the
+// same shape the charge write and the care-plan PDF already use.
+const meetRooms = require('./meetRooms');
+const videoJoinTokens = require('./videoJoinTokens');   // T1 C4 — the one-tap join link
+
+const loadVideoLinks = () => loadRows('appointment_video_links');
+const videoLinkFor = (rows, eid) => (rows || []).find(r => r && String(r.eid) === String(eid)) || null;
+
+// The clinician who will host. Resolved from the appointment's OpenEMR
+// provider id through our own user records, never from the acting user: an
+// admin books on a clinician's behalf, and a room hosted by the admin would
+// leave the clinician a guest in their own visit.
+const hostForProviderId = async (providerId) => {
+  if (!providerId) return null;
+  const users = await getUsers();
+  return users.find(u => u && String(u.openEmrProviderId || '') === String(providerId)) || null;
+};
+
+// Create the room for a telehealth visit. Returns a RESULT, never throws.
+const createVideoRoomFor = async ({ eid, client, providerId, actor }) => {
+  const st = meetRooms.meetStatus();
+  if (!st.configured) return { created: false, code: 'MEET_NOT_CONFIGURED', reason: st.blockers.join('; '), blockers: st.blockers };
+  const host = await hostForProviderId(providerId);
+  const hostEmail = meetRooms.clinicianWorkspaceEmail(host);
+  if (!hostEmail) {
+    // Named rather than silent: the fix is a Google account, and nobody finds
+    // that out from a missing button.
+    return {
+      created: false, code: 'MEET_NO_HOST_ACCOUNT',
+      reason: host
+        ? `${host.name || 'This clinician'} needs a GFC Google account to host video visits.`
+        : 'This appointment has no clinician mapped to an OpenEMR provider, so nobody can host the video visit.'
+    };
+  }
+  let room;
+  try {
+    room = await meetRooms.createSpace(hostEmail);
+  } catch (e) {
+    console.error('[MEET] room creation failed:', e.code || e.message);
+    return { created: false, code: e.code || 'MEET_CALL_FAILED', reason: e.message };
+  }
+  const rows = await loadVideoLinks();
+  const row = {
+    // A POINTER, not a ledger: no date, no time, no status. The appointment in
+    // OpenEMR is the one record of when the visit is, and a second copy here
+    // would drift the first time somebody moved it in OpenEMR's own calendar.
+    eid: String(eid),
+    clientId: client.id,
+    spaceName: room.spaceName,
+    meetingUri: room.meetingUri,
+    meetingCode: room.meetingCode,
+    createdFor: host.id,
+    createdForEmail: hostEmail,
+    createdAt: new Date().toISOString()
+  };
+  await db.set('appointment_video_links', [...rows.filter(r => String(r.eid) !== String(eid)), row]);
+  // WHICH visit got a room, never the join link: a meeting URI in the activity
+  // log is a door into a patient's visit sitting in a log nobody gates.
+  await logActivity(actor && actor.id, actor && (actor.name || actor.email), 'video_room_created', 'client', client.id, {
+    appointmentEid: String(eid), hostUserId: host.id, spaceName: room.spaceName
+  });
+  return { created: true, meetingUri: room.meetingUri, meetingCode: room.meetingCode };
+};
+
+// Shut the room for a visit that is no longer happening, or is no longer a
+// video visit. The POINTER GOES whatever Google says: a pointer kept after a
+// cancellation is a join button on a visit that was called off, which is worse
+// than a room left open that nothing links to. A failure to shut it is
+// reported so somebody can close it by hand.
+const closeVideoRoomFor = async ({ eid, actor, why }) => {
+  const rows = await loadVideoLinks();
+  const row = videoLinkFor(rows, eid);
+  if (!row) return { closed: false, code: 'NO_ROOM' };
+  let result = { ok: false, failures: ['Meet is not configured, so the room could not be shut.'] };
+  if (meetRooms.meetStatus().configured) {
+    try {
+      result = await meetRooms.closeSpace(row.createdForEmail, row.spaceName);
+    } catch (e) {
+      result = { ok: false, failures: [e.message] };
+    }
+  }
+  await db.set('appointment_video_links', rows.filter(r => String(r.eid) !== String(eid)));
+  // T1 C4: and every one-tap link for it. A link that still opened the room
+  // after a cancellation is a door into a meeting nobody agreed to — and the
+  // link outlives the pointer unless it is shut here, because it carries no
+  // expiry of its own.
+  const tokens = await loadRows('appointment_join_tokens');
+  const revoked = videoJoinTokens.revokeForEid(tokens, eid, why || 'room closed');
+  if (revoked) await db.set('appointment_join_tokens', tokens);
+  await logActivity(actor && actor.id, actor && (actor.name || actor.email), 'video_room_closed', 'client', row.clientId, {
+    appointmentEid: String(eid), spaceName: row.spaceName, why: why || null, shut: result.ok, linksRevoked: revoked
+  });
+  return { closed: true, shut: result.ok, failures: result.failures || [], linksRevoked: revoked };
+};
+
+// Move a room to the eid the tombstone swap just created. Called beside
+// migrateAppointmentLinkage for the same reason it exists: the swap CHANGES
+// the eid, so a pointer left on the old one is a room nothing can find.
+const migrateVideoLink = async (oldEid, newEid) => {
+  const rows = await loadVideoLinks();
+  let changed = false;
+  for (const r of rows) {
+    if (String(r.eid) === String(oldEid)) { r.eid = String(newEid); r.movedFromEid = String(oldEid); changed = true; }
+  }
+  if (changed) await db.set('appointment_video_links', rows);
+  // The one-tap links move with the room rather than being reminted: a
+  // reschedule keeps the room, and sending a second link while the first still
+  // worked would leave a patient holding two and guessing.
+  const tokens = await loadRows('appointment_join_tokens');
+  if (videoJoinTokens.migrateEid(tokens, oldEid, newEid)) await db.set('appointment_join_tokens', tokens);
+  return changed;
+};
+
+// What a patient is told about where their visit happens. "Video visit" is the
+// owner's wording (T1 C5) and it appears here and on the portal from this one
+// declaration, so an email and a screen cannot describe the same visit
+// differently.
 const VISIT_PLACE_LABEL = Object.freeze({
-  home: 'Your home', telehealth: 'By video visit', office: 'Our office'
+  home: 'Your home', telehealth: 'Video visit', office: 'Our office', phone: 'Phone call'
 });
 
 // ── Session 4.11: the day-before reminder, captured at WRITE time ──────────
@@ -9663,20 +9895,24 @@ const VISIT_PLACE_LABEL = Object.freeze({
 // SKIP is a normal outcome and is logged as one — the commonest skip is a visit
 // booked so close to the day that the booking email already covers it, and
 // logging that as an error would make the log useless.
-const scheduleVisitReminder = async ({ clientId, eid, visitDate, startTime, when, clinician, place, actorId }) => {
+// `kind` picks which reminder this is: the day-before one by default, or T1's
+// day-of video nudge. ONE writer, so both go through the same skip reporting
+// and the same store — a second scheduler would be a second set of rules
+// about what counts as a skip.
+const scheduleVisitReminder = async ({ clientId, eid, visitDate, startTime, when, clinician, place, actorId, kind }) => {
   try {
     const built = visitReminders.buildVisitReminder({
-      id: uuidv4(), clientId, eid, visitDate, startTime, when, clinician, place
+      id: uuidv4(), clientId, eid, visitDate, startTime, when, clinician, place, kind
     });
     if (built.skipped) {
-      console.log(`[REMINDER] No reminder for appointment ${eid}: ${built.reason}`);
+      console.log(`[REMINDER] No ${kind || 'day-before'} reminder for appointment ${eid}: ${built.reason}`);
       return { scheduled: false, reason: built.reason };
     }
     const rows = (await db.get('visit_reminders')) || [];
     rows.push(built.reminder);
     await db.set('visit_reminders', rows);
     await logActivity(actorId || 'system', 'system', 'visit_reminder_scheduled', 'client', clientId, {
-      appointmentEid: String(eid), visitDate, sendAt: built.reminder.sendAt
+      appointmentEid: String(eid), visitDate, sendAt: built.reminder.sendAt, kind: built.reminder.kind
     });
     return { scheduled: true, sendAt: built.reminder.sendAt };
   } catch (e) {
@@ -9688,14 +9924,14 @@ const scheduleVisitReminder = async ({ clientId, eid, visitDate, startTime, when
 // Voiding is keyed on the OLD eid. The tombstone swap CHANGES the eid on a
 // reschedule, so keying it on the new one would leave the old reminder live and
 // send a patient to yesterday's time.
-const voidVisitReminders = async ({ eid, reason, clientId, actorId }) => {
+const voidVisitReminders = async ({ eid, reason, clientId, actorId, kind }) => {
   try {
     const rows = (await db.get('visit_reminders')) || [];
-    const out = visitReminders.voidRemindersForEid(rows, eid, reason);
+    const out = visitReminders.voidRemindersForEid(rows, eid, reason, null, kind);
     if (!out.voided) return { voided: 0 };
     await db.set('visit_reminders', out.rows);
     await logActivity(actorId || 'system', 'system', 'visit_reminder_voided', 'client', clientId || null, {
-      appointmentEid: String(eid), reason, voided: out.voided
+      appointmentEid: String(eid), reason, voided: out.voided, kind: kind || 'all'
     });
     return { voided: out.voided };
   } catch (e) {
@@ -9927,6 +10163,18 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
     }
 
     const eid = await emr.createAppointmentRow(client.openEmrPatientId, built.fields);
+
+    // T1 A4: a telehealth visit gets its room here, at booking, so the join
+    // link exists before anybody needs it. A MEET FAILURE NEVER BLOCKS THE
+    // BOOKING — the visit is on the calendar and a video visit with no room is
+    // still a visit somebody can phone about, whereas a refused booking is
+    // care not scheduled. The shortfall is returned as a warning and the room
+    // can be opened later from the encounter.
+    let apptVideo = null;
+    if (clinicalRepo.locationNeedsVideoRoom(built.location)) {
+      apptVideo = await createVideoRoomFor({ eid: String(eid), client, providerId, actor: actorFromReq(req) });
+      if (!apptVideo.created) apptWarnings.push(`Video room not created: ${apptVideo.reason}`);
+    }
     await logActivity(req.user.id, req.user.name || req.user.email, 'appointment_created', 'client', client.id, {
       role: req.user.role, appointmentEid: eid, providerId,
       date: body.date, startTime: body.startTime, durationMinutes: built.minutes, location: built.location,
@@ -9953,6 +10201,16 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
       clientId: client.id, eid: String(eid), visitDate: body.date, startTime: body.startTime,
       when: bookedWhen, clinician: bookedClinician, place: bookedPlace, actorId: req.user.id
     });
+    // T1 C4: and, for a video visit with a room, the day-of nudge carrying the
+    // one-tap link. Gated on the ROOM, not the location: a nudge for a visit
+    // with no room would hand somebody a link to nothing.
+    if (apptVideo && apptVideo.created) {
+      await scheduleVisitReminder({
+        clientId: client.id, eid: String(eid), visitDate: body.date, startTime: body.startTime,
+        when: bookedWhen, clinician: bookedClinician, place: bookedPlace, actorId: req.user.id,
+        kind: visitReminders.REMINDER_KINDS.VIDEO_JOIN
+      });
+    }
 
     // Read-back proves the round-trip (acceptance requirement); the single-row
     // GET carries the full record (list rows omit notes/location on 7.0.4).
@@ -9962,6 +10220,7 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
     res.json({
       message: 'Appointment created in OpenEMR',
       appointment: readBack ? clinicalRepo.summarizeAppointmentRow(readBack, null) : { eid },
+      video: apptVideo && apptVideo.created ? { meetingUri: apptVideo.meetingUri, meetingCode: apptVideo.meetingCode } : undefined,
       warnings: apptWarnings.length ? apptWarnings : undefined
     });
   } catch (error) {
@@ -9984,12 +10243,25 @@ app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requir
 
     const dec = clinicalRepo.decodeAppointmentNotes(row.pc_hometext);
     const providerId = (req.user.role === config.ROLES.ADMIN && body.providerId) ? String(body.providerId) : String(row.pc_aid);
+    // T1 A4: A RESCHEDULE NEVER DEFAULTS THE PLACE. The location lives in a
+    // marker inside pc_hometext and the 7.0.4 list endpoints omit that field,
+    // so a hydration failure used to fall through to 'home' and silently turn
+    // a video visit into a house call nobody was driving to. Refuse instead:
+    // the clinician picks the place and saves again, which costs one click and
+    // cannot send somebody to the wrong kind of visit.
+    const rsLocation = body.location || dec.location || null;
+    if (!clinicalRepo.APPT_LOCATIONS.includes(rsLocation)) {
+      return res.status(409).json({
+        error: 'This visit\u2019s place could not be read back from OpenEMR, so the reschedule was refused rather than guessed. Choose the place (home, video visit, our office or phone) and save again.',
+        code: 'APPT_LOCATION_UNKNOWN'
+      });
+    }
     const built = clinicalRepo.buildAppointmentFields({
       date: body.date, startTime: body.startTime,
       durationMinutes: body.durationMinutes || clinicalRepo.rowDurationMinutes(row),
       providerId, categoryId: row.pc_catid,
       title: body.title || row.pc_title,
-      location: body.location || dec.location || 'home',
+      location: rsLocation,
       notes: body.notes !== undefined ? body.notes : dec.notes
     }, { categoryId: row.pc_catid });
     if (built.error) return res.status(400).json({ error: built.error, code: built.code });
@@ -10026,6 +10298,29 @@ app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requir
     const swap = await emr.swapAppointment(row.puuid, row.pc_eid, [newRow, tombstone]);
     const [newEid, tombstoneEid] = swap.newEids;
     await migrateAppointmentLinkage(row.pc_eid, newEid);
+    // T1 A4: the room follows the visit. The swap CHANGES the eid, so a pointer
+    // left on the old one is a room nothing can find — the same reason
+    // migrateAppointmentLinkage exists, one layer along.
+    await migrateVideoLink(row.pc_eid, newEid);
+    const rsWarnings = [];
+    let rsVideo = null;
+    const rsClient = (await clinicalClientsByPuuid()).get(String(row.puuid)) || null;
+    if (clinicalRepo.locationNeedsVideoRoom(rsLocation)) {
+      // Rescheduled INTO video, or still video: open a room if there is none.
+      // An EXISTING room is kept — a patient who already holds the link must
+      // not be handed a different one because the time moved.
+      if (rsClient && !videoLinkFor(await loadVideoLinks(), newEid)) {
+        rsVideo = await createVideoRoomFor({
+          eid: String(newEid), client: { id: rsClient.clientId }, providerId, actor: actorFromReq(req)
+        });
+        if (!rsVideo.created) rsWarnings.push(`Video room not created: ${rsVideo.reason}`);
+      }
+    } else {
+      // Rescheduled AWAY from video: shut the room. Leaving it open leaves a
+      // join link live for a visit now happening somewhere else.
+      const rsShut = await closeVideoRoomFor({ eid: String(newEid), actor: actorFromReq(req), why: 'rescheduled away from video' });
+      if (rsShut.closed && !rsShut.shut) rsWarnings.push(`The video room could not be shut (${(rsShut.failures || []).join('; ')}) — close it by hand in Google Meet.`);
+    }
 
     const clientMap = await clinicalClientsByPuuid();
     const appClient = clientMap.get(String(row.puuid)) || null;
@@ -10056,13 +10351,27 @@ app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requir
         clientId: appClient.clientId, eid: String(newEid), visitDate: body.date, startTime: body.startTime,
         when: movedTo, clinician: movedClinician, place: movedPlace, actorId: req.user.id
       });
+      // T1 C4: the day-of nudge follows the same rule. The void above keyed on
+      // the OLD eid already took the old nudge with it, so a visit still done
+      // by video gets a fresh one and a visit moved out of video gets none.
+      if (videoLinkFor(await loadVideoLinks(), newEid)) {
+        await scheduleVisitReminder({
+          clientId: appClient.clientId, eid: String(newEid), visitDate: body.date, startTime: body.startTime,
+          when: movedTo, clinician: movedClinician, place: movedPlace, actorId: req.user.id,
+          kind: visitReminders.REMINDER_KINDS.VIDEO_JOIN
+        });
+      }
     }
     // Portal P2: the patient's calendar follows every change.
     await republishAppointmentsByPuuid(emr, row.puuid, req);
     res.json({
       message: 'Appointment rescheduled in OpenEMR (original slot preserved as a cancelled entry)',
       appointmentEid: newEid, tombstoneEid,
-      warnings: swap.deleted ? [] : [`The superseded row could not be removed (${swap.deleteError}) — it is still visible on the calendar; retry the cancel on it.`]
+      video: rsVideo && rsVideo.created ? { meetingUri: rsVideo.meetingUri, meetingCode: rsVideo.meetingCode } : undefined,
+      warnings: [
+        ...(swap.deleted ? [] : [`The superseded row could not be removed (${swap.deleteError}) — it is still visible on the calendar; retry the cancel on it.`]),
+        ...rsWarnings
+      ]
     });
   } catch (error) {
     console.error('Clinical appointment reschedule error:', error);
@@ -10089,6 +10398,14 @@ app.post('/api/clinical/appointments/:eid/cancel', authenticateToken, requireCli
     const swap = await emr.swapAppointment(row.puuid, row.pc_eid, [tombstone]);
     const [tombstoneEid] = swap.newEids;
     await migrateAppointmentLinkage(row.pc_eid, tombstoneEid);
+    // T1 A4: a cancelled visit must not keep a live join link. The POINTER
+    // GOES whatever Google says — a join button on a visit that was called off
+    // is worse than a room nothing links to — and a failure to shut the room is
+    // reported so somebody can close it by hand.
+    const cxShut = await closeVideoRoomFor({ eid: String(row.pc_eid), actor: actorFromReq(req), why: 'appointment cancelled' });
+    const cxWarnings = (cxShut.closed && !cxShut.shut)
+      ? [`The video room could not be shut (${(cxShut.failures || []).join('; ')}) — close it by hand in Google Meet.`]
+      : [];
 
     const clientMap = await clinicalClientsByPuuid();
     const appClient = clientMap.get(String(row.puuid)) || null;
@@ -10114,7 +10431,10 @@ app.post('/api/clinical/appointments/:eid/cancel', authenticateToken, requireCli
     res.json({
       message: 'Appointment cancelled — it stays on the calendar as a cancelled entry with the reason',
       appointmentEid: tombstoneEid,
-      warnings: swap.deleted ? [] : [`The superseded row could not be removed (${swap.deleteError}) — it is still visible on the calendar.`]
+      warnings: [
+        ...(swap.deleted ? [] : [`The superseded row could not be removed (${swap.deleteError}) — it is still visible on the calendar.`]),
+        ...cxWarnings
+      ]
     });
   } catch (error) {
     console.error('Clinical appointment cancel error:', error);
@@ -10138,6 +10458,17 @@ app.post('/api/clinical/appointments/:eid/no-show', authenticateToken, requireCl
     const swap = await emr.swapAppointment(row.puuid, row.pc_eid, [swapRow]);
     const [newEid] = swap.newEids;
     await migrateAppointmentLinkage(row.pc_eid, newEid);
+    // T1 A4: the visit did not happen, so the room is shut and the pointer
+    // goes. A no-show whose room stays open is a door into an empty meeting
+    // that anybody holding the old link can still walk through.
+    const nsShut = await closeVideoRoomFor({ eid: String(row.pc_eid), actor: actorFromReq(req), why: 'marked no-show' });
+    // T1 C4: and the nudge. A no-show sends no notice of its own (that stays a
+    // clinician's conversation), but a join nudge for a visit already marked
+    // as missed would be a reminder to attend something that is over.
+    await voidVisitReminders({ eid: String(row.pc_eid), reason: 'cancelled', actorId: req.user.id });
+    const nsWarnings = (nsShut.closed && !nsShut.shut)
+      ? [`The video room could not be shut (${(nsShut.failures || []).join('; ')}) — close it by hand in Google Meet.`]
+      : [];
 
     const clientMap = await clinicalClientsByPuuid();
     const appClient = clientMap.get(String(row.puuid)) || null;
@@ -10150,7 +10481,10 @@ app.post('/api/clinical/appointments/:eid/no-show', authenticateToken, requireCl
     res.json({
       message: 'Appointment marked as no-show',
       appointmentEid: newEid,
-      warnings: swap.deleted ? [] : [`The superseded row could not be removed (${swap.deleteError}) — it is still visible on the calendar.`]
+      warnings: [
+        ...(swap.deleted ? [] : [`The superseded row could not be removed (${swap.deleteError}) — it is still visible on the calendar.`]),
+        ...nsWarnings
+      ]
     });
   } catch (error) {
     console.error('Clinical appointment no-show error:', error);
@@ -10614,9 +10948,15 @@ const publishAppointmentsForClient = async (emr, client, actor, summaries) => {
     }
     const users = await getUsers();
     const byProvider = new Map(users.filter(u => u && u.openEmrProviderId).map(u => [String(u.openEmrProviderId), visitReminders.visitClinicianLabel(u)]));
+    // T1 C1: which of these appointments has a video room. From this app's own
+    // pointer store, so it is right even when the calendar read could not show
+    // the location marker. The join LINK is never published — the patient
+    // asks for it through the window-checked join route.
+    const videoEids = new Set((await loadVideoLinks()).filter(r => r && r.eid != null).map(r => String(r.eid)));
     const built = patientPublish.buildPublishedAppointments({
       summaries: rows, today: practiceTime.zonedParts(new Date()).isoDate,
-      providerName: (id) => (id != null ? byProvider.get(String(id)) : null) || null
+      providerName: (id) => (id != null ? byProvider.get(String(id)) : null) || null,
+      hasVideoFor: (eid) => videoEids.has(String(eid))
     });
     const all = await loadRows('patient_published_appointments');
     const i = all.findIndex(r => r && r.clientId === client.id);
@@ -11936,6 +12276,12 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
       : (record.completedSections || []);
     const linkRow = (await getAppointmentLinkage()).find(r => String(r.encounterUuid) === String(encounterUuid));
     const linkedEid = linkRow ? String(linkRow.eid) : null;
+    // T1 B1/B2: the room for THIS visit, and the pre-join checklist. The room
+    // is keyed on the linked appointment, because the room belongs to the
+    // appointment and the encounter is what it becomes.
+    const encVideo = linkedEid ? videoLinkFor(await loadVideoLinks(), linkedEid) : null;
+    const isVideoVisit = !!encVideo || clinicalRepo.locationNeedsVideoRoom((record.visit || {}).location) ||
+      String(((record.note && record.note.visit) || record.visit || {}).modality || '') === 'video';
     // T1 candidates (proposals only) — see loadDxCandidates
     const candidates = cands.candidates;
     const attestationWarnings = ctx.attestation ? ctx.attestation.warnings || [] : [];
@@ -11993,6 +12339,13 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
       // The shared note, its versions and its signatures.
       noteState: await noteView(ctx, { signsAsAuthor: clinicalRoles.isAuthorSigner(req.user) }),
       linkedAppointmentEid: linkedEid,
+      // T1: the clinician's own door into the room, and nothing about it to a
+      // viewer whose visit is not a video visit — an empty card on a house call
+      // is a control that invites a click that does nothing.
+      video: encVideo ? { meetingUri: encVideo.meetingUri, meetingCode: encVideo.meetingCode, createdAt: encVideo.createdAt } : null,
+      isVideoVisit,
+      telehealthChecklist: isVideoVisit ? clinicalRepo.buildTelehealthChecklist(record, client) : null,
+      telehealthCheckKeys: clinicalRepo.TELEHEALTH_CHECK_KEYS,
       // What THIS viewer may do with the note, answered by the server so the
       // page never decides a credential question itself.
       noteActions: {
@@ -13388,6 +13741,18 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
     if (!String(record.patientSummary || '').trim()) {
       warnings.push('"What we did today" is empty, so the patient\'s visit summary has no plain-language account of this visit. Add it from the coding panel before billing submits, or in an addendum.');
     }
+    // T1 B2: the pre-join checks WARN and never block. The clinician on the
+    // call is the person who knows whether identity was confirmed, and a note
+    // refused over a tick box is an hour of documentation held hostage. Only
+    // for a video visit — an in-person note has no pre-join checks to make.
+    if (clinicalRepo.locationNeedsVideoRoom((record.visit || {}).location) ||
+      String((record.visit || {}).modality || '') === 'video') {
+      const tele = clinicalRepo.buildTelehealthChecklist(record, ctx.client);
+      if (!tele.complete) {
+        warnings.push(`Video visit pre-join checks not recorded: ${tele.outstanding.join('; ')}. Record them on this encounter, or note them in an addendum.`);
+      }
+      if (tele.electionWarning) warnings.push(tele.electionWarning);
+    }
     // Portal P1: publish, now that the attestation is persisted. An author's
     // note waits for the clinician addendum (publishEncounterToPortal skips it).
     // Soft-fail: a publish failure never voids the signature.
@@ -13852,9 +14217,9 @@ app.get('/api/clinical/my-day', authenticateToken, requireClinicalRead, async (r
     const scope = resolveProviderScope(req.user, req.query.providerId);
     const scopeProblem = scope.error ? { error: scope.error, code: scope.code } : null;
 
-    const [timingRows, linkRows, attestations, orderRows, resultRows, users] = await Promise.all([
+    const [timingRows, linkRows, attestations, orderRows, resultRows, users, videoRows] = await Promise.all([
       loadVisitTimings(), getAppointmentLinkage(), loadRows('encounter_attestations'),
-      loadRows('clinical_orders'), loadRows('clinical_results'), getUsers()
+      loadRows('clinical_orders'), loadRows('clinical_results'), getUsers(), loadVideoLinks()
     ]);
     const clientsById = new Map(users
       .filter(u => u.role === config.ROLES.CLIENT)
@@ -13936,7 +14301,10 @@ app.get('/api/clinical/my-day', authenticateToken, requireClinicalRead, async (r
       openTasks,
       blocks: [],
       homeVisitFields: clinicalRepo.HOME_VISIT_FIELDS,
-      startCoords: null
+      startCoords: null,
+      // T1 B1: which of today's visits have a video room, by eid.
+      videoByEid: new Map((videoRows || []).filter(r => r && r.eid != null)
+        .map(r => [String(r.eid), { meetingUri: r.meetingUri, meetingCode: r.meetingCode }]))
     });
     // The plot is computed HERE, not in the browser: myDay.js reaches into the
     // scheduling module for the one coordinate reader, and that chain does not
@@ -13962,6 +14330,52 @@ const VISIT_TIMING_EVENTS = Object.freeze({
   en_route: 'enRouteAt', arrive: 'arrivedAt', start: 'startedAt', end: 'endedAt'
 });
 
+// ONE WRITER FOR A VISIT'S TIMES. Extracted when T1 B3 made starting a video
+// visit stamp the start: two places writing `startedAt` is how the board and
+// the time statement start disagreeing about one visit, which is the mistake
+// `applyShiftEdit` was extracted to stop on the scheduling side.
+// Returns a RESULT; the caller decides the status code.
+const stampVisitTiming = async ({ eid, field, event, at, clientId, user, reason }) => {
+  const rows = await loadVisitTimings();
+  const id = myDay.timingId(eid);
+  const idx = rows.findIndex(r => r && r.id === id);
+  const existing = idx >= 0 ? rows[idx] : null;
+  // A time already stamped is EDITABLE and a correction requires a reason, the
+  // same rule every other time correction in this app follows. Re-stamping
+  // silently would quietly change how long a visit was.
+  if (existing && existing[field] && !reason) {
+    return {
+      ok: false, code: 'TIMING_ALREADY_SET', already: existing[field],
+      error: `This visit already has a ${event} time (${existing[field]}). Correcting it needs a reason.`,
+      timing: existing
+    };
+  }
+  const when = String(at || '').trim() || new Date().toISOString();
+  if (isNaN(new Date(when))) return { ok: false, code: 'BAD_TIME', error: 'That is not a usable time' };
+  const next = {
+    ...(existing || { id, eid: String(eid), createdAt: new Date().toISOString() }),
+    clientId: clientId || (existing && existing.clientId) || null,
+    providerId: user.openEmrProviderId ? String(user.openEmrProviderId) : null,
+    [field]: when,
+    updatedAt: new Date().toISOString(),
+    byId: user.id, byName: user.name || user.email
+  };
+  if (existing && existing[field] && reason) {
+    next.corrections = [...(existing.corrections || []), {
+      field, from: existing[field], to: when, reason,
+      byId: user.id, byName: user.name || user.email, at: new Date().toISOString()
+    }];
+  }
+  if (idx >= 0) rows[idx] = next; else rows.push(next);
+  await db.set('visit_timings', rows);
+  await logActivity(user.id, user.name || user.email, `visit_${event}`, 'client', next.clientId, {
+    eid: String(eid), at: when, corrected: !!(existing && existing[field])
+  });
+  return { ok: true, timing: next, corrected: !!(existing && existing[field]) };
+};
+
+const timingPayload = (t) => ({ ...t, totalMinutes: myDay.totalVisitMinutes(t), timeStatement: myDay.timeStatement(t) });
+
 // Gated on writing ANY clinical note, not the nursing one alone: an LCSW bills
 // psychotherapy on time, so the recorded start and end are theirs to record
 // too (owner, 2026-10-11).
@@ -13982,49 +14396,87 @@ app.post('/api/clinical/visits/:eid/timing', authenticateToken, requireClinicalW
       const { client, wrongLine } = clientId ? await loadClinicalClient(clientId) : { client: null };
       if (clientId && !client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
 
-      const rows = await loadVisitTimings();
-      const id = myDay.timingId(eid);
-      const idx = rows.findIndex(r => r && r.id === id);
-      const existing = idx >= 0 ? rows[idx] : null;
-
-      // An end time is EDITABLE and a correction requires a reason, the same
-      // rule every other time correction in this app follows. Re-stamping
-      // arrival or start silently would quietly change how long a visit was.
-      const reason = String((req.body || {}).reason || '').trim();
-      if (existing && existing[field] && !reason) {
-        return res.status(409).json({
-          error: `This visit already has a ${event} time (${existing[field]}). Correcting it needs a reason.`,
-          code: 'TIMING_ALREADY_SET'
-        });
-      }
-      const at = String((req.body || {}).at || '').trim() || new Date().toISOString();
-      if (isNaN(new Date(at))) return res.status(400).json({ error: 'That is not a usable time', code: 'BAD_TIME' });
-
-      const next = {
-        ...(existing || { id, eid, createdAt: new Date().toISOString() }),
-        clientId: clientId || (existing && existing.clientId) || null,
-        providerId: req.user.openEmrProviderId ? String(req.user.openEmrProviderId) : null,
-        [field]: at,
-        updatedAt: new Date().toISOString(),
-        byId: req.user.id, byName: req.user.name || req.user.email
-      };
-      if (existing && existing[field] && reason) {
-        next.corrections = [...(existing.corrections || []), {
-          field, from: existing[field], to: at, reason,
-          byId: req.user.id, byName: req.user.name || req.user.email, at: new Date().toISOString()
-        }];
-      }
-      if (idx >= 0) rows[idx] = next; else rows.push(next);
-      await db.set('visit_timings', rows);
-      await logActivity(req.user.id, req.user.name || req.user.email, `visit_${event}`, 'client', next.clientId, {
-        eid, at, corrected: !!(existing && existing[field])
+      const out = await stampVisitTiming({
+        eid, field, event, at: (req.body || {}).at, clientId,
+        user: req.user, reason: String((req.body || {}).reason || '').trim()
       });
-      res.json({
-        message: `Recorded.`,
-        timing: { ...next, totalMinutes: myDay.totalVisitMinutes(next), timeStatement: myDay.timeStatement(next) }
-      });
+      if (!out.ok) return res.status(out.code === 'BAD_TIME' ? 400 : 409).json({ error: out.error, code: out.code });
+      res.json({ message: `Recorded.`, timing: timingPayload(out.timing) });
     } catch (error) {
       console.error('Visit timing error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+// ── T1 B1/B3 — the clinician's own door into the video room ───────────────
+//
+// GET returns the room; POST opens it and STAMPS THE VISIT AS STARTED. The
+// stamp is the point: a video visit has no arrival to record, so without it a
+// telehealth note carries no start time and the billing guide's required time
+// statement reads "no time recorded" for every visit done by video.
+//
+// Re-joining after a dropped call does NOT move the start. The clinician is
+// returning to a visit that is already running, and re-stamping would shorten
+// the recorded time of the visit they are billing.
+app.get('/api/clinical/visits/:eid/video', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const row = videoLinkFor(await loadVideoLinks(), req.params.eid);
+    res.json({
+      video: row ? { meetingUri: row.meetingUri, meetingCode: row.meetingCode, createdAt: row.createdAt } : null,
+      meet: meetRooms.meetStatus()
+    });
+  } catch (error) {
+    console.error('Video room read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/clinical/visits/:eid/video/start', authenticateToken, requireClinicalWrite,
+  requireNoteWriter, async (req, res) => {
+    try {
+      const eid = String(req.params.eid || '').trim();
+      if (!/^\d+$/.test(eid)) return res.status(400).json({ error: 'A numeric appointment id is required', code: 'BAD_EID' });
+      const row = videoLinkFor(await loadVideoLinks(), eid);
+      if (!row) {
+        return res.status(409).json({
+          error: 'This visit has no video room. If it should be a video visit, reschedule it as one so a room is created.',
+          code: 'MEET_NO_ROOM'
+        });
+      }
+      if (!row.meetingUri) {
+        return res.status(502).json({
+          error: 'The video room has no join link on file — create a new one by rescheduling the visit as a video visit.',
+          code: 'MEET_NO_ROOM'
+        });
+      }
+      // The stamp is best-effort relative to JOINING: a clinician must never be
+      // kept out of a visit because a time could not be written.
+      let timing = null; let timingNote = null;
+      try {
+        const out = await stampVisitTiming({
+          eid, field: VISIT_TIMING_EVENTS.start, event: 'start',
+          clientId: row.clientId, user: req.user
+        });
+        if (out.ok) timing = timingPayload(out.timing);
+        else if (out.code === 'TIMING_ALREADY_SET') {
+          timing = out.timing ? timingPayload(out.timing) : null;
+          timingNote = `This visit was already started at ${out.already} — rejoining did not change it.`;
+        } else timingNote = out.error;
+      } catch (e) {
+        timingNote = `The start time could not be recorded (${e.message}) — record it on the visit.`;
+      }
+      // WHICH visit was joined, never the join link: a meeting URI in the
+      // activity log is a door into a patient's visit sitting in a log.
+      await logActivity(req.user.id, req.user.name || req.user.email, 'video_visit_started', 'client', row.clientId, {
+        appointmentEid: eid, spaceName: row.spaceName, startStamped: !!(timing && !timingNote)
+      });
+      res.json({
+        message: 'Opening the video room.',
+        video: { meetingUri: row.meetingUri, meetingCode: row.meetingCode },
+        timing, timingNote
+      });
+    } catch (error) {
+      console.error('Video visit start error:', error);
       res.status(500).json({ error: 'Server error' });
     }
   });
@@ -14033,9 +14485,7 @@ app.post('/api/clinical/visits/:eid/timing', authenticateToken, requireClinicalW
 app.get('/api/clinical/visits/:eid/timing', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
     const row = (await loadVisitTimings()).find(r => r && r.id === myDay.timingId(req.params.eid)) || null;
-    res.json({
-      timing: row ? { ...row, totalMinutes: myDay.totalVisitMinutes(row), timeStatement: myDay.timeStatement(row) } : null
-    });
+    res.json({ timing: row ? timingPayload(row) : null });
   } catch (error) {
     console.error('Visit timing read error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -15165,6 +15615,56 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/risk-assessment', a
   } catch (error) {
     console.error('Risk assessment error:', error);
     res.status(502).json({ error: `Risk assessment could not be saved: ${error.message}` });
+  }
+});
+
+// ── T1 B2 — record a pre-join check ──────────────────────────────────────
+//
+// NON-BLOCKING BY DESIGN. It warns at signing and never refuses a signature:
+// the clinician on the call is the person who knows whether identity was
+// confirmed, and a note held hostage to a tick box is an hour of home-visit
+// documentation at risk. The three items and the consent prefill come from
+// clinicalRepository, served to the page, so the screen names no check of its
+// own and cannot drift from the validator that refuses one it did not offer.
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/telehealth-checks', authenticateToken, requireClinicalWrite, requireNoteWriter, async (req, res) => {
+  try {
+    const ctx = await loadEncounterContext(req, res);
+    if (!ctx) return;
+    // A signed note is read-only, so a check recorded afterwards would change
+    // what was attested to. The same rule the coding and the risk assessment
+    // follow; a correction is an addendum.
+    if (refuseIfClosed(ctx, res)) return;
+    const key = String((req.body || {}).key || '').trim();
+    if (!clinicalRepo.TELEHEALTH_CHECK_KEYS.includes(key)) {
+      return res.status(400).json({
+        error: `Unknown pre-join check "${key}". One of: ${clinicalRepo.TELEHEALTH_CHECK_KEYS.join(', ')}.`,
+        code: 'BAD_TELEHEALTH_CHECK'
+      });
+    }
+    const confirmed = (req.body || {}).confirmed !== false;
+    const note = String((req.body || {}).note || '').trim().slice(0, 500) || null;
+    const record = ctx.record;
+    record.telehealthChecks = {
+      ...(record.telehealthChecks || {}),
+      [key]: confirmed
+        ? { confirmed: true, note, at: new Date().toISOString(), by: { id: req.user.id, name: req.user.name || req.user.email } }
+        // Un-ticking keeps WHO un-ticked it. A check that simply disappears
+        // reads as one nobody ever made.
+        : { confirmed: false, note, at: new Date().toISOString(), by: { id: req.user.id, name: req.user.name || req.user.email } }
+    };
+    await saveBillingRecord(ctx.rows, record);
+    // WHICH check, never the note: where a patient said they were sitting is
+    // clinical content, and an audit trail is not a second copy of it.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'telehealth_check_recorded', 'client', ctx.client.id, {
+      encounterUuid: ctx.encounterUuid, check: key, confirmed
+    });
+    res.json({
+      message: confirmed ? 'Recorded.' : 'Un-ticked.',
+      telehealthChecklist: clinicalRepo.buildTelehealthChecklist(record, ctx.client)
+    });
+  } catch (error) {
+    console.error('Telehealth check error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -23774,6 +24274,91 @@ app.get('/password-reset-:token', (req, res) => {
 // `/api/gfc/upload/:token`, exactly like the password-reset page above.
 app.get('/upload/:token', (req, res) => {
   res.sendFile(__dirname + '/public/upload-link.html');
+});
+
+// ── T1 C4 — the one-tap video join link ───────────────────────────────────
+//
+// /v/<token>, and nothing else: no login, no portal, one tap from a text
+// message. It is registered as a PHI path in auditLog.js, because it opens a
+// live door into a patient's consultation and that is a disclosure whoever
+// taps it should be recorded as making.
+//
+// IT NEVER SENDS ANYBODY TO THE ROOM OUTSIDE THE WINDOW, and the window is
+// the SAME one the portal's own Join button checks — one rule, two doors, so
+// a link cannot outlive the button beside it. A refusal is a small branded
+// page rather than a redirect to nowhere: a patient holding a link that will
+// not open needs a sentence and a phone number, not a blank tab.
+const joinPage = ({ heading, body, link }) => { const esc = noteFormat.escapeHtml; return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Video visit — ${esc(consentText.ORG.name)}</title>
+<style>
+  :root { --navy:#13294b; --gold:#b89b5e; --cream:#faf7f1; --ink:#2b2b2b; }
+  body { margin:0; background:var(--cream); color:var(--ink);
+    font:16px/1.55 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { max-width:34rem; margin:0 auto; padding:2.5rem 1rem; }
+  .card { background:#fff; border-radius:14px; padding:1.75rem 1.5rem; box-shadow:0 1px 3px rgba(0,0,0,.08); }
+  .brand { color:var(--navy); font-weight:700; letter-spacing:.02em; margin-bottom:.25rem; }
+  .rule { height:3px; width:3.5rem; background:var(--gold); border-radius:2px; margin:.5rem 0 1.25rem; }
+  h1 { font-size:1.3rem; color:var(--navy); margin:0 0 .6rem; }
+  a.btn { display:inline-block; margin-top:1.25rem; background:var(--navy); color:#fff;
+    text-decoration:none; padding:.8rem 1.4rem; border-radius:10px; font-weight:600; }
+  p.small { color:#6b6b6b; font-size:.9rem; }
+</style></head>
+<body><div class="wrap"><div class="card">
+  <div class="brand">${esc(consentText.ORG.name)}</div><div class="rule"></div>
+  <h1>${esc(heading)}</h1>
+  <p>${esc(body)}</p>
+  ${link ? `<a class="btn" href="${esc(link)}">Join the video visit</a>` : ''}
+  <p class="small">Need help? Call ${esc(consentText.ORG.phone)}.</p>
+</div></div></body></html>`; };
+
+app.get('/v/:token', async (req, res) => {
+  const refuse = (status, heading, body) =>
+    res.status(status).type('html').send(joinPage({ heading, body }));
+  try {
+    const rows = await loadRows('appointment_join_tokens');
+    const row = videoJoinTokens.findByToken(rows, req.params.token, JWT_SECRET);
+    // "Never existed" and "was shut off" need different next steps from
+    // whoever is holding the link, so they get different answers — the
+    // distinction the upload link and the password reset both draw.
+    if (!row) return refuse(404, 'This link is not valid', 'Check the message it came in, or sign in to your portal to join your visit.');
+    if (row.revokedAt) return refuse(410, 'This link has been turned off', 'Your visit may have moved or been cancelled. Call the office and we will sort it out.');
+    const appts = (await loadRows('patient_published_appointments')).find(r => r && r.clientId === row.clientId) || null;
+    const appt = ((appts && appts.appointments) || []).find(a => a && String(a.id) === String(row.eid)) || null;
+    if (!appt) return refuse(404, 'We could not find that visit', 'Sign in to your portal to see your visits, or call the office.');
+    const state = patientPublish.joinState(patientPublish.joinWindow(appt, joinInstant), Date.now());
+    if (!state.ok) {
+      const when = state.opensAt ? practiceTime.fmtDayTime(state.opensAt) : null;
+      return refuse(409,
+        state.code === 'JOIN_TOO_EARLY' ? 'Not quite yet' : 'This visit\u2019s room has closed',
+        state.code === 'JOIN_TOO_EARLY'
+          ? `The room opens ${patientPublish.JOIN_OPENS_MINUTES_BEFORE} minutes before your visit${when ? `, at ${when}` : ''}. Tap this link again then.`
+          : 'Call the office if you still need to be seen.');
+    }
+    const link = videoLinkFor(await loadVideoLinks(), row.eid);
+    if (!link || !link.meetingUri) {
+      return refuse(409, 'There is no video room for this visit', 'Call the office and we will arrange it.');
+    }
+    videoJoinTokens.stampUse(row);
+    await db.set('appointment_join_tokens', rows);
+    // WHO tapped it and WHICH visit, never the join link: a meeting URI in the
+    // audit log is a door into a patient's visit sitting in a log.
+    await logActivity(row.recipientUserId, null, 'video_join_link_used', 'client', row.clientId, {
+      appointmentEid: String(row.eid), recipientRole: row.recipientRole, useCount: row.useCount
+    });
+    // A PAGE, not a 302. A redirect would put the room's URL in the browser's
+    // history and in any Referer the next hop sends; one tap on a button the
+    // patient can see is the same number of taps and leaks neither.
+    res.type('html').send(joinPage({
+      heading: 'Your video visit is ready',
+      body: appt.provider ? `${appt.provider} is expecting you. Tap below to join.` : 'Tap below to join.',
+      link: link.meetingUri
+    }));
+  } catch (error) {
+    console.error('Video join link error:', error);
+    refuse(500, 'Something went wrong', 'Please try again, or call the office.');
+  }
 });
 
 // ============== CHANGELOG API ==============

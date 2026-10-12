@@ -299,13 +299,26 @@ function createNotifier(deps) {
 
   const apptRecipients = (clientId) => clientSideRecipients(clientId);
 
-  const sendToClientSide = async ({ clientId, type, subject, headline, paragraphs, fields, callout, actorId, entityId, entityType }) => {
+  // `ctaFor` (T1 C4) lets ONE recipient get a different button from another:
+  // the video nudge's one-tap link is minted per person and bound to them, so
+  // a patient's link is not their POA's. It is a callback rather than a field
+  // because minting touches the token store, and this module deliberately
+  // knows nothing about it. Returning null falls back to the portal button,
+  // which is what every other notice gets.
+  const sendToClientSide = async ({ clientId, type, subject, headline, paragraphs, fields, callout, actorId, entityId, entityType, ctaFor }) => {
     const { client, recipients } = await apptRecipients(clientId);
     if (!client) return { notified: 0, reason: 'no client record' };
     if (!recipients.length) return { notified: 0, reason: 'no email address on file' };
     const url = await portalUrlFor(client);
     let n = 0;
     for (const { user, actingFor } of recipients) {
+      let cta = null;
+      if (ctaFor) {
+        // A link that cannot be minted must not stop the reminder: the patient
+        // still gets the portal button, which is a working way in.
+        try { cta = await ctaFor(user, actingFor); }
+        catch (e) { console.error('[APPT] per-recipient link failed (non-fatal):', e.message); }
+      }
       const ok = await send({
         type, user, subject, headline,
         // A POA is told whose visit (or result) it is; the client is not told
@@ -313,7 +326,8 @@ function createNotifier(deps) {
         // or "Your test result" for exactly this reason.
         paragraphs: actingFor ? paragraphs.map(p => p.replace(/^Your (visit|test result)/, (m, what) => `${actingFor.name}'s ${what}`)) : paragraphs,
         fields, callout,
-        ctaUrl: url, ctaLabel: 'Open your portal',
+        ctaUrl: (cta && cta.url) || url,
+        ctaLabel: (cta && cta.label) || 'Open your portal',
         relatedEntityId: entityId, relatedEntityType: entityType || 'appointment',
         actorId, phi: true
       });
@@ -385,6 +399,40 @@ function createNotifier(deps) {
       });
     } catch (e) {
       console.error('[APPT] reminder notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
+  // ---- T1 C4: the day-of video nudge --------------------------------------
+  //
+  // Half an hour before a video visit, with the one-tap link. It rides the
+  // SAME reminder store, the same scanner and the same recipient rules as the
+  // day-before reminder; what differs is the copy, the timing and the button.
+  //
+  // THE LINK ONLY GOES OUT WHERE THE TRANSPORT IS COVERED. `videoReminderCopy`
+  // returns no joinUrl on the vague path, and `ctaFor` is only consulted when
+  // detail is allowed — so a transport outside the BAA sends "sign in to your
+  // portal" and nothing else.
+  async function videoReminder({ reminder, orgPhone, actorId, ctaFor }) {
+    try {
+      const detail = transportAllowsDetail();
+      const copy = reminders.videoReminderCopy({ detail, when: reminder.when, orgPhone });
+      return await sendToClientSide({
+        clientId: reminder.clientId,
+        type: 'visit_reminder',
+        subject: copy.subject,
+        headline: copy.headline,
+        paragraphs: copy.paragraphs,
+        fields: visitFields(detail, { when: reminder.when, clinician: reminder.clinician, place: reminder.place }),
+        actorId,
+        ctaFor: detail ? ctaFor : null,
+        // Its own dedupe key: a bare `${eid}:reminder` would collide with the
+        // day-before notice and the nudge would be swallowed as a duplicate of
+        // it — the trap the document-request chase already paid for.
+        entityId: `${reminder.eid}:video-join`
+      });
+    } catch (e) {
+      console.error('[APPT] video reminder failed (non-fatal):', e.message);
       return { notified: 0, reason: e.message };
     }
   }
@@ -643,7 +691,7 @@ function createNotifier(deps) {
     documentUploaded, documentReviewed, consentSigned, carePlanCoSigned,
     documentsRequested, enrollmentFollowUp, enrollmentApproved,
     // clinical visits
-    appointmentBooked, appointmentRescheduled, appointmentCancelled, visitReminder,
+    appointmentBooked, appointmentRescheduled, appointmentCancelled, visitReminder, videoReminder,
     // patient portal (P1)
     visitSummaryReady, resultReviewed
   };

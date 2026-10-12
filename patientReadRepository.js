@@ -71,7 +71,10 @@ const FILTER_MAP = Object.freeze({
   medication: { full: ['id', 'name', 'instructions', 'status', 'since'] },
   allergy: { full: ['id', 'name', 'severity', 'status'] },
   problem: { full: ['id', 'name', 'status', 'since'] },
-  appointment: { full: ['id', 'date', 'startTime', 'endTime', 'durationMinutes', 'title', 'location', 'provider', 'state'] },
+  // `hasVideo` is a flag, never the join link: the link is handed out by the
+  // window-checked join route so a copy cannot sit in a patient's payload
+  // months after the visit (T1 C1/C2).
+  appointment: { full: ['id', 'date', 'startTime', 'endTime', 'durationMinutes', 'title', 'location', 'provider', 'state', 'hasVideo'] },
   vital: { full: ['date', 'bloodPressure', 'bloodPressureNote', 'heartRate', 'temperature', 'respiration', 'oxygen', 'weight', 'height', 'pain'] },
   // The signed note (Portal P1). The ONLY section that may carry note content.
   note: { full: ['subjective', 'objective', 'assessment', 'plan', 'addenda', 'signatures', 'signedAt'] },

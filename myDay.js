@@ -297,9 +297,19 @@ const findNearbyDue = ({ origin, candidates, radiusMiles = 10, today, dueAfterDa
 // day reads as a day and not as a list of appointments with holes in it.
 const NON_VISIT_KINDS = Object.freeze(['lunch', 'travel', 'admin', 'blocked']);
 
-const buildDayRow = ({ appointment, client, timing, signed, previousCoords, homeVisitFields }) => {
+// A visit nobody drives to. The mileage total is a billing-adjacent figure, so
+// a video visit measured as a leg overstates every mile after it — the same
+// reasoning the cancelled-visit rule already follows. Detected from the ROOM
+// POINTER, which is the only location signal available here: the 7.0.4
+// calendar list omits pc_hometext, so a PHONE visit is still indistinguishable
+// from a house call on this screen and is still counted as one.
+const isRemoteRow = (appointment, video) =>
+  !!video || String((appointment || {}).location || '') === 'telehealth';
+
+const buildDayRow = ({ appointment, client, timing, signed, previousCoords, homeVisitFields, video }) => {
   const a = appointment || {};
-  const coords = coordsOf(client);
+  const remote = isRemoteRow(a, video);
+  const coords = remote ? null : coordsOf(client);
   const miles = haversineMiles(previousCoords, coords);
   const hv = (client && client.homeVisit) || {};
   return {
@@ -316,10 +326,11 @@ const buildDayRow = ({ appointment, client, timing, signed, previousCoords, home
     coords,
     // Straight-line only, and LABELLED as such. Drive time needs a routing
     // provider that does not exist yet (see DISTANCE_UNAVAILABLE above).
+    remote,
     distance: coords && previousCoords
       ? { miles, kind: 'straight_line', driveMinutes: null, reason: DISTANCE_UNAVAILABLE }
       : { miles: null, kind: null, driveMinutes: null,
-        reason: coords ? 'first_stop' : 'no_coordinates' },
+        reason: coords ? 'first_stop' : (remote ? 'video_visit' : 'no_coordinates') },
     state: deriveVisitState({ appointment: a, timing, signed }),
     timing: timing
       ? { enRouteAt: timing.enRouteAt || null, arrivedAt: timing.arrivedAt || null,
@@ -331,7 +342,13 @@ const buildDayRow = ({ appointment, client, timing, signed, previousCoords, home
       if (hv[k]) acc.push({ key: k, label, value: hv[k] });
       return acc;
     }, []),
-    location: a.location || null,
+    // T1 B1: whether this visit has a video room, and the link to host it.
+    // Read from the ROOM POINTER and not from `location`, because the 7.0.4
+    // calendar LIST omits pc_hometext — so the location marker is null on
+    // every row here and a button keyed on it would never appear. The room
+    // existing is the fact the screen needs.
+    video: video ? { meetingUri: video.meetingUri || null, meetingCode: video.meetingCode || null } : null,
+    location: a.location || (video ? 'telehealth' : null),
     notes: a.notes || null
   };
 };
@@ -345,7 +362,7 @@ const buildUnsignedBacklog = ({ rows, today }) => rows
 
 const buildMyDay = ({
   date, appointments, clientsById, timingsByEid, signedEids,
-  unsignedEarlier, openTasks, blocks, homeVisitFields, startCoords
+  unsignedEarlier, openTasks, blocks, homeVisitFields, startCoords, videoByEid
 }) => {
   const visits = [];
   let previousCoords = startCoords || null;
@@ -360,7 +377,8 @@ const buildMyDay = ({
         timing: (timingsByEid && timingsByEid.get(String(a.eid))) || null,
         signed: !!(signedEids && signedEids.has(String(a.eid))),
         previousCoords,
-        homeVisitFields
+        homeVisitFields,
+        video: (videoByEid && videoByEid.get(String(a.eid))) || null
       });
       // Only a stop you actually drive to advances the position. A cancelled
       // visit measured as a leg would inflate every mile after it.
@@ -373,7 +391,9 @@ const buildMyDay = ({
   // Every stop must be measurable for a total to mean anything. One patient with
   // no coordinates makes "31 miles" an understatement nobody can see, so the
   // total says it is partial and how many stops it could not place.
-  const unplaceable = counted.filter(v => !v.coords).length;
+  // A video visit is not an unplaceable stop. It has no place, so counting it
+  // would make an accurate total report itself as partial.
+  const unplaceable = counted.filter(v => !v.coords && !v.remote).length;
   return {
     date,
     visits,

@@ -643,8 +643,22 @@ const routeBody = (src, needle) => {
   return rest.slice(0, next > 0 ? next : rest.length);
 };
 
+// REPOINTED, not deleted (T1, 2026-10-12). The rule has not changed; the code
+// moved. Starting a video visit stamps the start too, so the write was
+// extracted into ONE writer (`stampVisitTiming`) and this guard pins BOTH
+// halves: the rule where it now lives, and that the route still delegates to
+// it rather than having re-grown its own copy. A bounded scan is a guard that
+// works on the code it was written against.
+const helperBody = (src, needle) => {
+  const i = src.indexOf(needle);
+  assert.ok(i > 0, `helper not found: ${needle}`);
+  const rest = src.slice(i + needle.length);
+  const next = rest.search(/\nconst [A-Za-z]/);
+  return rest.slice(0, next > 0 ? next : rest.length);
+};
+
 test('a re-stamp of a time already recorded needs a reason', () => {
-  const body = routeBody(serverCode, "app.post('/api/clinical/visits/:eid/timing'");
+  const body = helperBody(serverCode, 'const stampVisitTiming = async (');
   assert.match(body, /TIMING_ALREADY_SET/);
   assert.match(body, /!reason/, 'a correction without a reason is refused');
   // The correction keeps the value it replaced, who changed it and why — the
@@ -652,7 +666,20 @@ test('a re-stamp of a time already recorded needs a reason', () => {
   assert.match(body, /next\.corrections = \[/, 'corrections are appended, never overwritten');
   assert.match(body, /from: existing\[field\]/, 'the value being replaced is kept');
   assert.match(body, /reason,/, 'the reason is kept on the correction');
-  assert.match(body, /requireClinicalWrite/);
+});
+
+test('there is ONE writer of a visit timing, and both doors go through it', () => {
+  // Two places writing `startedAt` is how the board and the time statement
+  // start disagreeing about one visit.
+  const writers = serverCode.match(/db\.set\('visit_timings'/g) || [];
+  assert.equal(writers.length, 1, 'exactly one place writes visit_timings');
+  const route = routeBody(serverCode, "app.post('/api/clinical/visits/:eid/timing'");
+  assert.match(route, /await stampVisitTiming\(/, 'the timing route delegates to the one writer');
+  assert.match(route, /requireClinicalWrite/);
+  const start = routeBody(serverCode, "app.post('/api/clinical/visits/:eid/video/start'");
+  assert.match(start, /await stampVisitTiming\(/, 'starting a video visit goes through the same writer');
+  assert.match(start, /requireClinicalWrite/);
+  assert.doesNotMatch(start, /db\.set\('visit_timings'/, 'the video start route never writes the store itself');
 });
 
 test('the timing route refuses an event it does not know, by name', () => {
