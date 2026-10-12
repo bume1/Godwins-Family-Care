@@ -214,3 +214,36 @@ test('availability is matched on the Georgia weekday, not the UTC one', () => {
   assert.ok(!fn.includes('getUTCDay()'), 'getUTCDay put a Tuesday evening shift on Wednesday');
   assert.ok(!fn.includes('getUTCHours()'), 'and gave it the wrong hour of day');
 });
+
+// ── every page calls a clock function that actually exists ────────────────
+//
+// ADDED 2026-10-12 AFTER IT CAUGHT A REAL BUG. A new card called
+// `gfcTime.dateTime(...)`, which the module does not export — the name is
+// `fmtDateTime`. esbuild compiled it happily, because a property that does not
+// exist is a runtime TypeError rather than a syntax error, so the page would
+// have thrown the first time an admin opened it. A shared module with eleven
+// exports and six pages calling it needs this to be checked by something
+// other than whoever happens to open the screen.
+test('no page calls a gfcTime function the module does not export', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'gfc-time.js'), 'utf8');
+  const returned = src.slice(src.lastIndexOf('return {'), src.lastIndexOf('};'));
+  const exported = new Set(
+    returned.replace(/[{}]/g, '').split(',')
+      .map(s => s.split(':')[0].trim())
+      .filter(n => /^[A-Za-z_$][\w$]*$/.test(n))
+  );
+  assert.ok(exported.has('fmtDateTime') && exported.size >= 8,
+    `the export list must still be findable, got ${[...exported].join(',')}`);
+
+  const unknown = [];
+  const dir = path.join(__dirname, '..', 'public');
+  for (const f of fs.readdirSync(dir).filter(n => n.endsWith('.html') || n.endsWith('.js'))) {
+    if (f === 'gfc-time.js') continue;
+    const page = fs.readFileSync(path.join(dir, f), 'utf8');
+    for (const m of page.matchAll(/gfcTime\.([A-Za-z_$][\w$]*)/g)) {
+      if (!exported.has(m[1])) unknown.push(`${f} -> gfcTime.${m[1]}`);
+    }
+  }
+  assert.deepStrictEqual(unknown, [],
+    'a page calling a name the clock does not export throws the first time somebody opens it');
+});

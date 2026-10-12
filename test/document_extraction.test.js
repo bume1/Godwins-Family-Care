@@ -387,7 +387,7 @@ test('a consent the registry does not carry is reported, never proposed', () => 
 
 test('extraction goes through the one model engine, never a provider directly', () => {
   const s = code('documentExtraction.js');
-  assert.ok(!/BedrockRuntime|invokeModel|fetch\(|https?:\/\//.test(s),
+  assert.ok(!/@google\/genai|generateContent|BedrockRuntime|invokeModel|fetch\(|https?:\/\//.test(s),
     'a second call site is a second place the 10.3 boundary rules get implemented slightly differently');
 });
 
@@ -415,7 +415,7 @@ test('the review screen lists no readable kind and no target of its own', () => 
 test('the screen never decides whether the boundary is satisfied', () => {
   const page = src('public/admin-enrollment.html');
   const panel = page.slice(page.indexOf('const ExtractionRow'), page.indexOf('const DocumentExchange'));
-  assert.ok(!/BEDROCK_|ZERO_DATA_RETENTION|process\.env/.test(panel),
+  assert.ok(!/VERTEX_|BEDROCK_|ZERO_DATA_RETENTION|process\.env/.test(panel),
     'a page that decides the boundary offers a button the route then refuses');
   assert.ok(/extraction\.available/.test(panel), 'it renders the server verdict');
   assert.ok(/not switched on/i.test(panel),

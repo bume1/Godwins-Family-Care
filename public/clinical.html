@@ -187,6 +187,19 @@
       reviewExtraction: (id, exId, decisions) => authedFetch(`/api/clinical/patients/${id}/extraction/${encodeURIComponent(exId)}/review`, {
         method: 'POST', body: JSON.stringify({ decisions })
       }),
+      // The comprehensive chart review (Session G1). Starting one answers 202
+      // and the screen polls `aiReview` until it is done or failed.
+      aiReviews: (id) => authedFetch(`/api/clinical/patients/${id}/ai/reviews`),
+      extractRecords: (id, documentIds) => authedFetch(`/api/clinical/patients/${id}/ai/extract-records`, {
+        method: 'POST', body: JSON.stringify({ documentIds })
+      }),
+      aiReview: (id, reviewId) => authedFetch(`/api/clinical/patients/${id}/ai/reviews/${encodeURIComponent(reviewId)}`),
+      startAiReview: (id, body) => authedFetch(`/api/clinical/patients/${id}/ai/review`, {
+        method: 'POST', body: JSON.stringify(body || {})
+      }),
+      decideAiFindings: (reviewId, decisions) => authedFetch(`/api/clinical/ai/reviews/${encodeURIComponent(reviewId)}/decisions`, {
+        method: 'POST', body: JSON.stringify({ decisions })
+      }),
       patientOrders: (id) => authedFetch(`/api/clinical/patients/${id}/orders`),
       patientResults: (id) => authedFetch(`/api/clinical/patients/${id}/results`),
       timeline: (id, kinds) => authedFetch(`/api/clinical/patients/${id}/timeline${kinds && kinds.length ? `?kinds=${encodeURIComponent(kinds.join(','))}` : ''}`),
@@ -574,7 +587,7 @@
                   : row.value}
               </div>
               <div className="text-[11px] text-stone-500">
-                {[row.current ? `on file: ${row.current}` : 'nothing on file',
+                {[row.snapshot ? `on file: ${row.snapshot}` : 'nothing on file',
                   row.confidence != null ? `${Math.round(row.confidence * 100)}% confident` : null
                 ].filter(Boolean).join(' · ')}
               </div>
@@ -638,7 +651,7 @@
             <div className="text-[12px] text-red-800 bg-red-50 border border-red-200 rounded p-2 mt-2">
               <b>This document may not be about this patient.</b>
               {extraction.identityConflicts.map((c, i) => (
-                <div key={i}>{c.label}: document says <b>{c.value}</b>, record says <b>{c.current || '—'}</b></div>
+                <div key={i}>{c.label}: document says <b>{c.onDocument}</b>, record says <b>{c.onFile || '—'}</b></div>
               ))}
             </div>
           )}
@@ -687,6 +700,225 @@
           </button>
           {err && <span className="text-[11px] text-red-600">{err}</span>}
         </span>
+      );
+    };
+
+    // ── F3: reading outside records into proposals, from the chart ────────
+    //
+    // NOTHING HERE WRITES ANYTHING. Each proposal is added through the
+    // EXISTING route for that kind — the medication reconciliation, the
+    // allergy write, the problem write — with the clinician's own session and
+    // that route's own capability check. There is no second door into a
+    // patient's record, and which "Add" buttons this viewer gets is answered
+    // by the SERVER (`can.*`) rather than worked out here.
+    const AiRecordsExtract = ({ clientId, docs, onRefresh }) => {
+      const [picked, setPicked] = useState([]);
+      const [run, setRun] = useState(null);     // the ai_reviews row
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState(null);
+      const [done, setDone] = useState({});     // key -> 'added' | 'dismissed'
+      const [status, setStatus] = useState(null);
+
+      const uploads = (docs || []).filter(d => d.uploadId);
+
+      useEffect(() => {
+        if (!clientId) return;
+        let live = true;
+        api.aiReviews(clientId).then(r => { if (live) setStatus(r); }).catch(() => {});
+        return () => { live = false; };
+      }, [clientId]);
+
+      // Poll while it reads, the same way the review card does.
+      useEffect(() => {
+        if (!run || run.status !== 'running' || !clientId) return;
+        let live = true;
+        const t = setInterval(() => {
+          api.aiReview(clientId, run.id)
+            .then(r => { if (live && r && r.review) setRun({ ...r.review, can: r.can }); })
+            .catch(() => {});
+        }, 4000);
+        return () => { live = false; clearInterval(t); };
+      }, [run && run.id, run && run.status, clientId]);
+
+      if (!status || !status.available || !status.canRun || !uploads.length) return null;
+
+      const start = () => {
+        setBusy(true); setErr(null); setDone({});
+        api.extractRecords(clientId, picked)
+          .then(r => api.aiReview(clientId, r.reviewId))
+          .then(r => setRun({ ...r.review, can: r.can }))
+          .catch(e => setErr(e.message))
+          .finally(() => setBusy(false));
+      };
+
+      const out = (run && run.output) || null;
+      const mark = (key, how) => setDone(prev => ({ ...prev, [key]: how }));
+
+      const add = (key, path, body) => {
+        setErr(null);
+        authedFetch(`/api/clinical/patients/${clientId}/${path}`, { method: 'POST', body: JSON.stringify(body) })
+          .then(() => { mark(key, 'added'); onRefresh && onRefresh(); })
+          .catch(e => setErr(e.message));
+      };
+
+      const Cite = ({ c }) => !c ? null : (
+        <div className="text-[11px] text-stone-500 mt-0.5">
+          {c.sourceId}{c.page ? ` p${c.page}` : ''}{c.quote ? ` — “${c.quote}”` : ''}
+        </div>
+      );
+
+      const Row = ({ k, label, detail, inChart, citation, canAdd, onAdd }) => {
+        const state = done[k];
+        return (
+          <div className="border border-stone-200 rounded p-2">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <div className="text-[13px] text-stone-800">{label}</div>
+                {detail && <div className="text-[12px] text-stone-600">{detail}</div>}
+                <Cite c={citation} />
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <span className={`chip ${inChart ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-800'}`}>
+                  {inChart ? 'In chart' : 'New'}
+                </span>
+                {state
+                  ? <span className="chip bg-stone-100 text-stone-600">{state === 'added' ? 'Added' : 'Dismissed'}</span>
+                  : <>
+                      {/* A button the server would refuse is not shown. */}
+                      {canAdd && !inChart && <button className="chip border border-accent text-primary bg-white" onClick={onAdd}>Add</button>}
+                      <button className="chip border border-stone-200 bg-white text-stone-600" onClick={() => mark(k, 'dismissed')}>Dismiss</button>
+                    </>}
+              </div>
+            </div>
+          </div>
+        );
+      };
+
+      return (
+        <div className="border-t border-stone-100 mt-3 pt-3">
+          <div className="text-[13px] font-semibold text-primary"><i className="ti ti-sparkles mr-1" />Read outside records with AI</div>
+          <div className="text-[12px] text-stone-500">
+            Pick the records that came from somewhere else. Nothing is saved until you add it.
+          </div>
+
+          {!run && (
+            <>
+              <div className="mt-2 max-h-40 overflow-auto space-y-1">
+                {uploads.map(d => (
+                  <label key={d.uploadId} className="flex items-center gap-2 text-[12px] text-stone-700">
+                    <input type="checkbox" checked={picked.includes(String(d.uploadId))}
+                      onChange={e => setPicked(prev => e.target.checked
+                        ? [...prev, String(d.uploadId)]
+                        : prev.filter(x => x !== String(d.uploadId)))} />
+                    <span className="truncate">{d.description || 'Document'}</span>
+                  </label>
+                ))}
+              </div>
+              <button className="btn gold !py-1.5 mt-2" disabled={busy || !picked.length} onClick={start}>
+                {busy ? 'Starting…' : `Read ${picked.length || ''} record${picked.length === 1 ? '' : 's'}`}
+              </button>
+            </>
+          )}
+
+          {err && <div className="text-[12px] text-red-800 bg-red-50 border border-red-200 rounded p-2 mt-2">{err}</div>}
+
+          {run && run.status === 'running' && (
+            <div className="text-[13px] text-stone-700 mt-2"><i className="ti ti-loader-2 animate-spin mr-1" />Reading…</div>
+          )}
+          {run && run.status === 'failed' && (
+            <div className="text-[12px] text-red-800 bg-red-50 border border-red-200 rounded p-2 mt-2">
+              {run.error || 'That read did not finish.'}
+            </div>
+          )}
+
+          {out && (
+            <div className="mt-2 space-y-3">
+              <div className="text-[12px] text-amber-900 bg-amber-50 border border-amber-300 rounded p-2">
+                AI draft from Gemini. Check every item against its quote before adding it. Nothing here is in the chart yet.
+              </div>
+
+              {!!(out.medications || []).length && (
+                <div>
+                  <div className="text-[12px] font-semibold text-stone-700">Medications</div>
+                  <div className="mt-1 space-y-1">
+                    {out.medications.map((m, i) => (
+                      <Row key={`m${i}`} k={`m${i}`} label={m.name}
+                        detail={[m.dose, m.route, m.frequency, m.status].filter(Boolean).join(' · ')}
+                        inChart={m.matchesChart} citation={m.citation}
+                        canAdd={!!(run.can && run.can.medRec)}
+                        onAdd={() => add(`m${i}`, 'medrec', {
+                          decisions: [{ action: 'add', name: m.name, dose: m.dose || '', route: m.route || '', frequency: m.frequency || '' }]
+                        })} />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {!!(out.allergies || []).length && (
+                <div>
+                  <div className="text-[12px] font-semibold text-stone-700">Allergies</div>
+                  <div className="mt-1 space-y-1">
+                    {out.allergies.map((a, i) => (
+                      <Row key={`a${i}`} k={`a${i}`} label={a.substance} detail={a.reaction}
+                        inChart={a.matchesChart} citation={a.citation}
+                        canAdd={!!(run.can && run.can.allergy)}
+                        onAdd={() => add(`a${i}`, 'allergies', { allergen: a.substance, reaction: a.reaction || '' })} />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {!!(out.problems || []).length && (
+                <div>
+                  <div className="text-[12px] font-semibold text-stone-700">Problems</div>
+                  <div className="mt-1 space-y-1">
+                    {out.problems.map((pr, i) => (
+                      <Row key={`p${i}`} k={`p${i}`} label={pr.description}
+                        inChart={pr.matchesChart} citation={pr.citation}
+                        canAdd={!!(run.can && run.can.problem)}
+                        /* NO CODE IS SENT. §10.4 — coding is the clinician's
+                           decision and a model-proposed code reads exactly as
+                           plausibly as a right one. */
+                        onAdd={() => add(`p${i}`, 'problems', { title: pr.description })} />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {!!(out.events || []).length && (
+                <div>
+                  <div className="text-[12px] font-semibold text-stone-700">Events</div>
+                  <div className="mt-1 space-y-1">
+                    {out.events.map((e, i) => (
+                      <div key={i} className="border border-stone-200 rounded p-2">
+                        <div className="text-[13px] text-stone-800">{e.date || '—'} · {e.type.replace('_', ' ')}</div>
+                        <div className="text-[12px] text-stone-600">{e.description}</div>
+                        <Cite c={e.citation} />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {!!(out.unreadable || []).length && (
+                <div>
+                  <div className="text-[12px] font-semibold text-stone-700">Not read</div>
+                  <ul className="text-[12px] text-stone-600 list-disc pl-4 mt-1 space-y-0.5">
+                    {out.unreadable.map((u, i) => <li key={i}>{u}</li>)}
+                  </ul>
+                </div>
+              )}
+
+              {run.droppedUncited > 0 && (
+                <div className="text-[11px] text-stone-500">
+                  {run.droppedUncited} item{run.droppedUncited === 1 ? '' : 's'} were left out because they did not quote a source.
+                </div>
+              )}
+
+              <button className="btn !py-1.5" onClick={() => { setRun(null); setPicked([]); }}>Done</button>
+            </div>
+          )}
+        </div>
       );
     };
 
@@ -809,6 +1041,7 @@
               </div>
             ))}
           </div>
+          {clientId && <AiRecordsExtract clientId={clientId} docs={docs} onRefresh={onRefresh} />}
           {clientId && <ChartScanIn clientId={clientId} onFiled={onRefresh} />}
         </div>
       );
@@ -2304,6 +2537,292 @@
       );
     };
 
+    // ── The AI review card (Session G1, E7) ───────────────────────────────
+    //
+    // EVERY CREDENTIAL QUESTION IS THE SERVER'S. The card renders `canRun` and
+    // `canDecide` as the server sent them and decides nothing itself — the
+    // rule the clinical inbox set, and the reason a screen never offers a
+    // button the API then refuses.
+    //
+    // THE BANNER IS FIXED AND NOT DISMISSIBLE. Everything in here is an AI
+    // draft and the reader has to be told so wherever they are looking.
+    const AI_PRIORITY_ORDER = ['urgent', 'attention', 'info'];
+    const AI_PRIORITY_STYLE = {
+      urgent: 'border-red-300 bg-red-50 text-red-900',
+      attention: 'border-amber-300 bg-amber-50 text-amber-900',
+      info: 'border-stone-200 bg-white text-stone-800'
+    };
+    const AI_CATEGORY_LABEL = {
+      care_gap: 'Care gap', medication_issue: 'Medication', allergy_conflict: 'Allergy conflict',
+      missing_follow_up: 'Missing follow-up', unaddressed_abnormal_result: 'Abnormal result',
+      documentation_gap: 'Documentation', safety_concern: 'Safety', discrepancy: 'Discrepancy', other: 'Other'
+    };
+
+    const AiReviewCard = ({ clientId, chart, onOpenSource }) => {
+      const [state, setState] = useState(null);      // the list payload
+      const [open, setOpen] = useState(null);        // the review being read
+      const [starting, setStarting] = useState(false);
+      const [showPlan, setShowPlan] = useState(false);
+      const [focus, setFocus] = useState('');
+      const [excluded, setExcluded] = useState([]);
+      const [err, setErr] = useState(null);
+      const [busy, setBusy] = useState(false);
+
+      const load = useCallback(() => {
+        if (!clientId) return;
+        api.aiReviews(clientId).then(setState).catch(e => setErr(e.message));
+      }, [clientId]);
+      useEffect(() => { load(); }, [load]);
+
+      // Poll while a review is running. A long chart takes minutes, so the
+      // screen says which pass it is on rather than spinning silently.
+      const running = open && open.status === 'running';
+      useEffect(() => {
+        if (!running || !clientId || !open) return;
+        let live = true;
+        const t = setInterval(() => {
+          api.aiReview(clientId, open.id)
+            .then(r => { if (live && r && r.review) { setOpen(r.review); if (r.review.status !== 'running') load(); } })
+            .catch(() => {});
+        }, 4000);
+        return () => { live = false; clearInterval(t); };
+      }, [running, clientId, open && open.id, load]);
+
+      const start = () => {
+        setStarting(true); setErr(null);
+        api.startAiReview(clientId, { focus: focus.trim() || undefined, excludeDocumentIds: excluded })
+          .then(r => {
+            setShowPlan(false);
+            setOpen({ id: r.reviewId, status: r.status, passes: null, currentPass: null });
+            load();
+          })
+          .catch(e => setErr(e.message))
+          .finally(() => setStarting(false));
+      };
+
+      const openReview = (id) => {
+        setErr(null);
+        api.aiReview(clientId, id).then(r => setOpen(r.review)).catch(e => setErr(e.message));
+      };
+
+      const decide = (index, decision) => {
+        if (!open) return;
+        setBusy(true);
+        api.decideAiFindings(open.id, [{ index, decision }])
+          .then(() => api.aiReview(clientId, open.id))
+          .then(r => { setOpen(r.review); load(); })
+          .catch(e => setErr(e.message))
+          .finally(() => setBusy(false));
+      };
+
+      if (!state) return null;
+
+      // NOT CONFIGURED IS A SENTENCE, NOT A HIDDEN CONTROL. "Off" and "nothing
+      // to review" are different facts, and only an admin is handed the
+      // blockers because only an admin can clear them.
+      if (!state.available) {
+        return (
+          <div className="card p-4 mb-4">
+            <div className="font-semibold text-sm text-primary">AI review isn't switched on yet.</div>
+            {Array.isArray(state.blockers) && state.blockers.length > 0 && (
+              <ul className="text-xs text-stone-600 mt-2 list-disc pl-4 space-y-0.5">
+                {state.blockers.map((b, i) => <li key={i}>{b}</li>)}
+              </ul>
+            )}
+          </div>
+        );
+      }
+
+      const docs = ((chart && chart.chartDocuments) || []).filter(d => d.uploadId);
+      const decisionFor = (i) => (open && (open.findingDecisions || []).find(d => d.index === i)) || null;
+      const findings = (open && open.output && open.output.findings) || [];
+      const sorted = findings
+        .map((f, i) => ({ f, i }))
+        .sort((a, b) => AI_PRIORITY_ORDER.indexOf(a.f.priority) - AI_PRIORITY_ORDER.indexOf(b.f.priority));
+
+      return (
+        <div className="card p-4 mb-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="font-semibold text-sm text-primary"><i className="ti ti-sparkles mr-1" />AI review</div>
+            {state.canRun && !showPlan && !running && (
+              <button className="btn gold !py-1.5" onClick={() => setShowPlan(true)}>Review full chart</button>
+            )}
+          </div>
+
+          {err && <div className="text-[12px] text-red-800 bg-red-50 border border-red-200 rounded p-2 mt-2">{err}</div>}
+
+          {showPlan && (
+            <div className="border border-stone-200 rounded p-3 mt-3">
+              <div className="text-[13px] font-semibold text-stone-800">What will be read</div>
+              <div className="text-[12px] text-stone-600 mt-1">
+                Everything in this chart you can already open: the problem list, medications, allergies, vitals,
+                every encounter and its note, orders, results, prescriptions, every care-plan version, the intake,
+                medication reconciliations, caregiver records, and the care-team conversations you can see.
+                There is no time limit and nothing is capped.
+              </div>
+              {docs.length > 0 && (
+                <div className="mt-2">
+                  <div className="text-[12px] font-semibold text-stone-700">{docs.length} document{docs.length === 1 ? '' : 's'} — untick any to leave out</div>
+                  <div className="mt-1 max-h-40 overflow-auto space-y-1">
+                    {docs.map(d => (
+                      <label key={d.uploadId} className="flex items-center gap-2 text-[12px] text-stone-700">
+                        <input type="checkbox" checked={!excluded.includes(String(d.uploadId))}
+                          onChange={e => setExcluded(prev => e.target.checked
+                            ? prev.filter(x => x !== String(d.uploadId))
+                            : [...prev, String(d.uploadId)])} />
+                        <span className="truncate">{d.description || d.title || 'Document'}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div className="mt-2">
+                <label className="text-[12px] font-semibold text-stone-700">Anything particular to look at? (optional)</label>
+                <input className="inp !py-1 text-[13px] mt-1" maxLength={500} value={focus}
+                  onChange={e => setFocus(e.target.value)} placeholder="e.g. her falls since January" />
+              </div>
+              <div className="flex gap-2 mt-3">
+                <button className="btn gold !py-1.5" disabled={starting} onClick={start}>{starting ? 'Starting…' : 'Start review'}</button>
+                <button className="btn !py-1.5" onClick={() => setShowPlan(false)}>Cancel</button>
+              </div>
+            </div>
+          )}
+
+          {running && (
+            <div className="text-[13px] text-stone-700 mt-3">
+              <i className="ti ti-loader-2 animate-spin mr-1" />
+              {open.passes && open.currentPass
+                ? `Reading pass ${open.currentPass} of ${open.passes}…`
+                : 'Reading the chart…'}
+              <div className="text-[11px] text-stone-500 mt-0.5">A long history is read in passes and can take a few minutes.</div>
+            </div>
+          )}
+
+          {open && open.status === 'failed' && (
+            <div className="text-[12px] text-red-800 bg-red-50 border border-red-200 rounded p-2 mt-3">
+              <div className="font-semibold">That review did not finish.</div>
+              <div>{open.error || 'No reason was recorded.'}</div>
+              {Array.isArray(open.blockers) && open.blockers.map((b, i) => <div key={i}>· {b}</div>)}
+            </div>
+          )}
+
+          {open && open.status === 'done' && (
+            <div className="mt-3">
+              {/* FIXED, NEVER DISMISSIBLE. */}
+              <div className="text-[12px] text-amber-900 bg-amber-50 border border-amber-300 rounded p-2">
+                AI draft from Gemini. Check every item against its source before acting. Nothing here is saved to the chart.
+              </div>
+
+              {open.output.summary && (
+                <div className="text-[13px] text-stone-800 mt-3 whitespace-pre-wrap">{open.output.summary}</div>
+              )}
+
+              {!!(open.output.timeline || []).length && (
+                <div className="mt-3">
+                  <div className="text-[13px] font-semibold text-stone-800">Timeline</div>
+                  <div className="mt-1 space-y-1">
+                    {open.output.timeline.map((t, i) => (
+                      <div key={i} className="text-[12px] text-stone-700">
+                        <span className="text-stone-500">{t.date || '—'}</span> · {t.event}
+                        {(t.citations || []).map((c, j) => (
+                          <button key={j} className="chip border bg-white text-stone-600 border-stone-200 ml-1"
+                            onClick={() => onOpenSource && onOpenSource(c)}>{c.sourceId}{c.page ? ` p${c.page}` : ''}</button>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="mt-3">
+                <div className="text-[13px] font-semibold text-stone-800">
+                  {sorted.length} finding{sorted.length === 1 ? '' : 's'}
+                </div>
+                {sorted.length === 0 && <div className="text-[12px] text-stone-500">Nothing was flagged.</div>}
+                <div className="mt-1 space-y-2">
+                  {sorted.map(({ f, i }) => {
+                    const chosen = decisionFor(i);
+                    return (
+                      <div key={i} className={`border rounded p-2 ${AI_PRIORITY_STYLE[f.priority] || AI_PRIORITY_STYLE.info}`}>
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <div className="text-[11px] uppercase tracking-wide opacity-70">
+                              {f.priority} · {AI_CATEGORY_LABEL[f.category] || f.category}
+                            </div>
+                            <div className="text-[13px]">{f.statement}</div>
+                            <div className="mt-1 flex flex-wrap gap-1">
+                              {(f.citations || []).map((c, j) => (
+                                <button key={j} className="chip border bg-white text-stone-600 border-stone-200"
+                                  title={c.quote || ''}
+                                  onClick={() => onOpenSource && onOpenSource(c)}>
+                                  {c.sourceId}{c.page ? ` p${c.page}` : ''}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                          {state.canDecide !== false && open.findingDecisions && (
+                            <div className="flex gap-1 shrink-0">
+                              {[['noted', 'Noted'], ['dismissed', 'Dismiss']].map(([d, label]) => (
+                                <button key={d} disabled={busy}
+                                  className={`chip border ${chosen && chosen.decision === d ? 'bg-primary text-white border-primary' : 'bg-white text-stone-600 border-stone-200'}`}
+                                  onClick={() => decide(i, d)}>{label}</button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {!!(open.output.questionsForClinician || []).length && (
+                <div className="mt-3">
+                  <div className="text-[13px] font-semibold text-stone-800">Questions for you</div>
+                  <ul className="text-[12px] text-stone-700 list-disc pl-4 mt-1 space-y-0.5">
+                    {open.output.questionsForClinician.map((q, i) => <li key={i}>{q}</li>)}
+                  </ul>
+                </div>
+              )}
+
+              {/* WHAT IT COULD NOT READ. An omission nobody is told about is
+                  the dangerous kind. */}
+              {!!(open.output.notReviewed || []).length && (
+                <div className="mt-3">
+                  <div className="text-[13px] font-semibold text-stone-800">Not read</div>
+                  <ul className="text-[12px] text-stone-600 list-disc pl-4 mt-1 space-y-0.5">
+                    {open.output.notReviewed.map((n, i) => <li key={i}>{n}</li>)}
+                  </ul>
+                </div>
+              )}
+
+              {open.droppedUncited > 0 && (
+                <div className="text-[11px] text-stone-500 mt-2">
+                  {open.droppedUncited} item{open.droppedUncited === 1 ? '' : 's'} were left out because they did not cite a source in this chart.
+                </div>
+              )}
+            </div>
+          )}
+
+          {!!(state.reviews || []).length && (
+            <div className="border-t border-stone-100 mt-3 pt-2">
+              <div className="text-[11px] uppercase tracking-wide text-stone-500">Earlier reviews</div>
+              <div className="mt-1 space-y-0.5">
+                {state.reviews.slice(0, 6).map(r => (
+                  <button key={r.id} className="block text-left text-[12px] text-stone-700 hover:underline"
+                    onClick={() => openReview(r.id)}>
+                    {gfcTime.fmtDateTime(r.at)} · {r.status}
+                    {r.status === 'done' ? ` · ${r.findings} finding${r.findings === 1 ? '' : 's'}` : ''}
+                    {r.requestedBy ? ` · ${r.requestedBy}` : ''}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    };
+
     const SummaryTab = ({ chart, patient, onLink, linking, linkCandidates, onDismissCandidates, isAdmin, onChartChanged }) => {
       const canWrite = useCanWrite();
       const canBill = useCanBill();
@@ -2394,6 +2913,11 @@
           {/* Billing's only (owner, 2026-09-29): a clinician chooses what KIND
               of visit it is, never where it bills. */}
           {chart.linked && canBill && <PlaceOfServiceCard patient={patient} />}
+          {/* The AI review sits on Overview, above the chart sections it
+              reviews. It renders nothing at all until the server answers, and
+              says plainly when reading is not switched on — "off" and
+              "nothing to review" are different facts. */}
+          {chart.linked && <AiReviewCard clientId={patient && patient.id} chart={chart} />}
           {/* Session 4.12 Scope D — OVERVIEW is the at-a-glance. The problem
               list, medications, allergies, documents and the timeline each have
               their OWN place on the tab bar now, so nothing here is the
