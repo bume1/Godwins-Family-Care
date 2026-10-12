@@ -135,3 +135,39 @@ test('the chart Messages split is the server\'s mark, never a list on the page',
   const routes = fs.readFileSync(path.join(__dirname, '..', 'routes', 'messaging.js'), 'utf8');
   assert.match(routes, /withPatient: msg\.withPatient\(t\.channel\)/);
 });
+
+// Part 4 (owner, 2026-10-12: "complete messages", "yes to note screen", the
+// remaining screens to the mockups).
+test('Tasks and Overdue rows open the chart section where the work is done', () => {
+  const tasks = slice('const WorkQueuesView = (', 'const Metric = (');
+  assert.match(tasks, /onOpenChart\(r\.clientId, \{ tab: 'results' \}\)/);
+  assert.match(tasks, /onOpenChart\(r\.clientId, \{ tab: 'referrals' \}\)/);
+  assert.match(tasks, /onOpenChart\(r\.clientId, \{ tab: 'orders' \}\)/);
+  assert.match(tasks, /onOpenEncounter\(r\.clientId, r\.encounterUuid\)/);
+  const overdue = slice('const OverdueOrders = (', '// The encounter panel: coding, Rx, orders');
+  assert.match(overdue, /onOpenChart\(o\.clientId, \{ tab: 'orders' \}\)/);
+  const app = slice('const App = () => {', 'ReactDOM.createRoot');
+  assert.match(app, /<OverdueOrders onOpenChart=\{\(clientId, opts\) => openChartById\(clientId, opts\)\} \/>/);
+  assert.match(app, /<WorkQueuesView\s+onOpenChart=\{\(clientId, opts\) => openChartById\(clientId, opts\)\}/);
+});
+
+test('every queue still says so when it is empty', () => {
+  const tasks = slice('const WorkQueuesView = (', 'const Metric = (');
+  assert.ok(!/rows\.length === 0\) return null/.test(tasks), 'an empty queue is shown with its sentence, never hidden');
+});
+
+test('a chat bubble keeps the sender line, so a POA message says whose behalf it is on', () => {
+  const comp = fs.readFileSync(path.join(__dirname, '..', 'public', 'components', 'gfc-messaging.js'), 'utf8');
+  const i = comp.indexOf('function renderThread(state)');
+  const body = comp.slice(i, comp.indexOf('// ---- Bind', i));
+  assert.match(body, /<div class="mwrap ' \+ side \+ '"><div class="mbub ' \+ side \+ '">/);
+  assert.match(body, /'<div class="mwho">' \+ esc\(m\.from\)/);
+  assert.ok(!/innerHTML|m\.body \+/.test(body), 'the body goes through messageHtml, which escapes');
+});
+
+test('the note screen asks where the visit happened, never for a place of service', () => {
+  const hp = slice('const HpTab = (', 'const MedRecTab');
+  assert.match(hp, /<Field label="Visit Type">/);
+  assert.match(hp, /<Field label="Visit Location">/);
+  assert.ok(!/Place of Service|place of service/i.test(hp.replace(/\/\/.*$/gm, '')), 'POS is billing\'s, never the clinician\'s');
+});

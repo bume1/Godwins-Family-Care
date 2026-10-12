@@ -2172,23 +2172,20 @@
     // I3: a destination with nothing in it renders an empty state SAYING SO —
     // it is never hidden, because a missing menu item is indistinguishable
     // from a broken one.
-    const QueueCard = ({ title, icon, rows, empty, render }) => (
-      <div className="card mb-4">
-        <div className="card-h">
-          <h2><i className={`ti ${icon} mr-1 text-accent`} />{title}</h2>
-          {rows && <span className="chip bg-primary-50 text-primary">{rows.length}</span>}
-        </div>
-        <div className="p-4 text-sm">
-          {!rows && <p className="text-stone-500 text-xs">Loading…</p>}
-          {rows && rows.length === 0 && <p className="text-stone-500 text-[12.5px]">{empty}</p>}
-          {rows && rows.map(render)}
-        </div>
-      </div>
-    );
-
+    // 2026-10-12 redesign: the four queues as one list with filter chips,
+    // the same shape as the Inbox. Each row opens the place where its work is
+    // done: an encounter on its note, a result on Results, a referral on
+    // Referrals, an overdue order on Orders.
+    const TASK_QUEUES = [
+      ['unsignedEncounters', 'Unsigned', 'ti-signature', 'Every documented encounter is signed.'],
+      ['unacknowledgedResults', 'Results', 'ti-flask', 'No results are waiting to be acknowledged.'],
+      ['openReferrals', 'Referrals', 'ti-send', 'No referrals are outstanding.'],
+      ['overdueOrders', 'Overdue', 'ti-clock-exclamation', 'Nothing is overdue.']
+    ];
     const WorkQueuesView = ({ onOpenChart, onOpenEncounter }) => {
       const [data, setData] = useState(null);
       const [err, setErr] = useState('');
+      const [only, setOnly] = useState('all');
       useEffect(() => {
         let live = true;
         api.workQueues().then(r => { if (live) { setData(r); setErr(''); } })
@@ -2196,40 +2193,53 @@
         return () => { live = false; };
       }, []);
       if (err) return <div className="p-4 lg:p-7"><div className="card p-4 text-sm text-red-600">{err}</div></div>;
-      const q = (data && data.queues) || {};
-      const line = (main, sub, onClick, key) => (
-        <div key={key} className="flex items-center justify-between gap-2 py-1.5 border-b border-stone-100 last:border-0">
-          <div className="min-w-0">
-            <div className="text-[13px] font-semibold truncate">{main}</div>
-            {sub && <div className="text-[11.5px] text-stone-500">{sub}</div>}
-          </div>
-          {onClick && <button className="btn ghost !py-0.5 !px-2 text-[11px] shrink-0" onClick={onClick}>Open</button>}
-        </div>
-      );
+      if (!data) return <div className="p-4 lg:p-7"><div className="card p-6 text-sm text-stone-500">Loading…</div></div>;
+      const q = data.queues || {};
+      const rowFor = (key, r) => {
+        const name = r.patientName || 'Unnamed patient';
+        if (key === 'unsignedEncounters') return { title: name, sub: [r.date && fmtDate(r.date), r.codingStatus].filter(Boolean).join(' · '), open: () => onOpenEncounter(r.clientId, r.encounterUuid), cta: 'Open Encounter', id: r.encounterUuid };
+        if (key === 'unacknowledgedResults') return { title: r.label || 'Result', sub: [name, r.interpretation, r.receivedAt && fmtDate(r.receivedAt)].filter(Boolean).join(' · '), open: () => onOpenChart(r.clientId, { tab: 'results' }), cta: 'Open Results', id: r.id };
+        if (key === 'openReferrals') return { title: r.specialty || 'Referral', sub: [name, r.status, r.orderReference, r.createdAt && fmtDate(r.createdAt)].filter(Boolean).join(' · '), open: () => onOpenChart(r.clientId, { tab: 'referrals' }), cta: 'Open Referrals', id: r.id };
+        return { title: r.orderType ? r.orderType.charAt(0).toUpperCase() + r.orderType.slice(1) : 'Order', sub: [name, r.ageDays != null ? `${r.ageDays} days since sent` : null, r.recipientName, r.recipientFax].filter(Boolean).join(' · '), open: () => onOpenChart(r.clientId, { tab: 'orders' }), cta: 'Open Orders', id: r.id };
+      };
+      const shown = TASK_QUEUES.filter(([k]) => only === 'all' || only === k);
+      const total = TASK_QUEUES.reduce((n, [k]) => n + ((q[k] || []).length), 0);
       return (
-        <div className="p-4 lg:p-7 max-w-3xl mx-auto">
-          <QueueCard title="Unsigned Encounters" icon="ti-signature" rows={data ? q.unsignedEncounters : null}
-            empty="Every documented encounter is signed. Nothing is waiting here."
-            render={(r) => line(r.patientName || 'Unnamed patient',
-              [r.date, r.codingStatus].filter(Boolean).join(' · '),
-              () => onOpenEncounter(r.clientId, r.encounterUuid), r.encounterUuid)} />
-          <QueueCard title="Results to Acknowledge" icon="ti-flask" rows={data ? q.unacknowledgedResults : null}
-            empty="No results are waiting to be acknowledged."
-            render={(r) => line(`${r.patientName || 'Unnamed patient'} — ${r.label}`,
-              [r.interpretation, r.receivedAt && fmtDate(r.receivedAt)].filter(Boolean).join(' · '),
-              () => onOpenChart(r.clientId), r.id)} />
-          <QueueCard title="Open Referrals" icon="ti-share" rows={data ? q.openReferrals : null}
-            empty="No referrals are outstanding."
-            render={(r) => line(`${r.patientName || 'Unnamed patient'} — ${r.specialty || 'Referral'}`,
-              [r.status, r.orderReference, r.createdAt && fmtDate(r.createdAt)].filter(Boolean).join(' · '),
-              () => onOpenChart(r.clientId), r.id)} />
-          <QueueCard title="Overdue Orders" icon="ti-clock-exclamation" rows={data ? q.overdueOrders : null}
-            empty="Nothing is overdue."
-            render={(r) => line(`${r.patientName || 'Unnamed patient'} — ${r.orderType || 'Order'}`,
-              [r.ageDays != null ? `${r.ageDays} days since sent` : null,
-                r.recipientName, r.recipientFax].filter(Boolean).join(' · '),
-              () => onOpenChart(r.clientId), r.id)} />
-          {data && data.overdueThresholds && (
+        <div className="p-4 lg:p-7 max-w-4xl">
+          <div className="flex gap-2 mb-4 overflow-x-auto">
+            {[['all', 'All', total], ...TASK_QUEUES.map(([k, label]) => [k, label, (q[k] || []).length])].map(([k, label, n]) => (
+              <button key={k} onClick={() => setOnly(k)}
+                className={`px-4 py-1.5 rounded-full text-[13px] font-semibold border whitespace-nowrap ${only === k ? 'bg-[#A9853A] border-[#A9853A] text-white' : 'bg-white border-stone-200 text-primary'}`}>
+                {label}{n > 0 && <span className="ml-1.5 opacity-80">{n}</span>}
+              </button>
+            ))}
+          </div>
+          {shown.map(([k, label, icon, empty]) => {
+            const rows = q[k] || [];
+            return (
+              <div key={k} className="mb-5">
+                <h2 className="serif text-[21px] font-semibold text-primary mb-2">{label} ({rows.length})</h2>
+                <div className="card overflow-hidden">
+                  {rows.length === 0 && <p className="text-sm text-stone-500 px-5 py-6">{empty}</p>}
+                  {rows.map(r => {
+                    const x = rowFor(k, r);
+                    return (
+                      <div key={x.id} className="flex items-center gap-3 px-4 py-3.5 border-b border-stone-100 last:border-0">
+                        <div className="w-11 h-11 rounded-xl flex items-center justify-center shrink-0 bg-[#F6EFE2] text-[#9A7430]"><i className={`ti ${icon} text-[20px]`} /></div>
+                        <button type="button" className="min-w-0 flex-1 text-left" onClick={x.open}>
+                          <div className="text-[14px] font-semibold text-primary truncate">{x.title}</div>
+                          <div className="text-[12.5px] text-stone-500 truncate">{x.sub}</div>
+                        </button>
+                        <button className="btn ghost !py-1 !px-2.5 text-[12px] whitespace-nowrap hidden sm:inline-flex" onClick={x.open}>{x.cta}</button>
+                        <i className="ti ti-chevron-right text-stone-300 sm:hidden" />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+          {data.overdueThresholds && (
             <p className="text-[11.5px] text-stone-400">
               Overdue after {Object.entries(data.overdueThresholds).map(([k, v]) => `${k} ${v}d`).join(' · ')}.
             </p>
@@ -2238,13 +2248,16 @@
       );
     };
 
-    const Metric = ({ label, value, sub, unavailable, reason }) => (
-      <div className="card p-4">
-        <div className="lblu">{label}</div>
-        {unavailable
-          ? <div className="text-[12.5px] text-amber-700 mt-1">Not available — {String(reason || '').replace(/_/g, ' ')}</div>
-          : <div className="serif text-2xl text-primary font-semibold mt-0.5">{value == null ? '—' : value}</div>}
-        {!unavailable && sub && <div className="text-[11.5px] text-stone-500">{sub}</div>}
+    const Metric = ({ label, value, sub, unavailable, reason, icon }) => (
+      <div className="card p-4 flex gap-3 items-start">
+        <div className="w-11 h-11 rounded-xl flex items-center justify-center shrink-0 bg-[#F6EFE2] text-[#9A7430]"><i className={`ti ${icon || 'ti-chart-dots'} text-[20px]`} /></div>
+        <div className="min-w-0">
+          <div className="text-[12.5px] text-stone-500">{label}</div>
+          {unavailable
+            ? <div className="text-[12.5px] text-amber-700 mt-1">Not available: {String(reason || '').replace(/_/g, ' ')}</div>
+            : <div className="serif text-[30px] leading-tight text-primary font-semibold">{value == null ? '—' : value}</div>}
+          {!unavailable && sub && <div className="text-[12px] text-stone-500">{sub}</div>}
+        </div>
       </div>
     );
 
@@ -2263,20 +2276,20 @@
       const weeks = m.visitsPerWeek || [];
       const peak = Math.max(1, ...weeks.map(w => w.total));
       return (
-        <div className="p-4 lg:p-7 max-w-3xl mx-auto">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-4">
-            <Metric label="Average visit length"
+        <div className="p-4 lg:p-7 max-w-5xl">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 mb-5">
+            <Metric icon="ti-clock" label="Average Visit Length"
               value={m.averageVisitMinutes.value == null ? null : `${m.averageVisitMinutes.value} min`}
               sub={`from ${m.averageVisitMinutes.sampleSize} finished ${m.averageVisitMinutes.sampleSize === 1 ? 'visit' : 'visits'}`} />
-            <Metric label="Unsigned notes" value={m.unsignedNotesAgeing.count}
+            <Metric icon="ti-signature" label="Unsigned Notes" value={m.unsignedNotesAgeing.count}
               sub={m.unsignedNotesAgeing.oldestDays != null ? `oldest ${m.unsignedNotesAgeing.oldestDays} days` : null} />
-            <Metric label="Open orders" value={m.openOrdersAgeing.count}
+            <Metric icon="ti-clipboard-list" label="Open Orders" value={m.openOrdersAgeing.count}
               sub={m.openOrdersAgeing.oldestDays != null ? `oldest ${m.openOrdersAgeing.oldestDays} days` : null} />
             {/* Two metrics this app cannot observe yet. Reported as unavailable
                 with the reason rather than as a zero somebody would read as
                 "nobody drove anywhere" or "no screenings are done". */}
-            <Metric label="Miles driven" unavailable={m.milesDriven.unavailable} reason={m.milesDriven.reason} />
-            <Metric label="Screening completion"
+            <Metric icon="ti-car" label="Miles Driven" unavailable={m.milesDriven.unavailable} reason={m.milesDriven.reason} />
+            <Metric icon="ti-checklist" label="Screening Completion"
               unavailable={m.screeningCompletionRate.unavailable} reason={m.screeningCompletionRate.reason} />
           </div>
           <div className="card">
@@ -2286,8 +2299,8 @@
               {weeks.map(w => (
                 <div key={w.week} className="flex items-center gap-2 py-1">
                   <span className="text-[11.5px] text-stone-500 w-[84px] shrink-0">{w.week}</span>
-                  <div className="flex-1 bg-stone-100 rounded h-3 overflow-hidden">
-                    <div className="bg-accent h-3" style={{ width: `${Math.round((w.total / peak) * 100)}%` }} />
+                  <div className="flex-1 bg-stone-100 rounded-full h-3.5 overflow-hidden">
+                    <div className="bg-accent h-3.5 rounded-full" style={{ width: `${Math.round((w.total / peak) * 100)}%` }} />
                   </div>
                   <span className="text-[11.5px] text-stone-700 w-6 text-right">{w.total}</span>
                 </div>
@@ -4478,6 +4491,14 @@
               Documenting from a scheduled appointment — the Encounter will be linked to it on the chart.
             </div>
           )}
+          {!embedded && (
+            <div className="mb-4">
+              <h1 className="cw-title !text-[28px] lg:!text-[32px]">{sn.euuid ? 'Encounter Draft' : 'New Encounter'}</h1>
+              <div className="text-[13px] text-stone-500">
+                {[patient && patient.name, new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })].filter(Boolean).join(' · ')}
+              </div>
+            </div>
+          )}
           {sn.euuid && (
             <div className="card p-3 mb-4 text-xs text-stone-600 flex flex-wrap items-center gap-2">
               <span className="chip bg-amber-50 text-amber-800">DRAFT · v{sn.meta.version}</span>
@@ -4500,11 +4521,11 @@
           {/* FIRST, because it decides everything below it. */}
           <div className="card mb-4">
             <div className="card-h">
-              <h2><i className="ti ti-clipboard-list mr-1 text-accent" />What kind of visit is this?</h2>
+              <h2><i className="ti ti-clipboard-list mr-1 text-accent" />Visit</h2>
               {visitType && <span className="chip bg-primary-50 text-primary">{visitType.defaultMinutes} min</span>}
             </div>
             <div className="p-4 grid md:grid-cols-3 gap-3 text-sm">
-              <Field label="Appointment type">
+              <Field label="Visit Type">
                 <select className="inp" value={visit.appointmentType} onChange={e => chooseType(e.target.value)}>
                   <option value="">— choose —</option>
                   {(catalog ? catalog.services : []).map(svc => (
@@ -4516,7 +4537,7 @@
                   ))}
                 </select>
               </Field>
-              <Field label="Modality">
+              <Field label="Visit Mode">
                 <select className="inp" value={visit.modality} onChange={e => setVisit(v => ({ ...v, modality: e.target.value, location: e.target.value === 'phone' ? '' : v.location }))}>
                   {(catalog ? catalog.modalities : [])
                     // Phone is only ever offered where the type allows it.
@@ -4528,7 +4549,7 @@
                   ))}
                 </select>
               </Field>
-              <Field label="Location">
+              <Field label="Visit Location">
                 {isPhone
                   ? <div className="inp bg-stone-50 text-stone-500">Not needed for a phone call</div>
                   : <select className="inp" value={visit.location} onChange={e => setVisit(v => ({ ...v, location: e.target.value }))}>
@@ -4594,7 +4615,9 @@
               onGoToCoding={onGoToEncounter ? () => onGoToEncounter(sn.euuid) : null}
               onSigned={(r) => { setShowSign(false); setMsg({ ok: true, text: r.message }); onDone && onDone(); onChanged && onChanged(); if (!embedded && onGoToEncounter) onGoToEncounter(sn.euuid); }} />
           )}
-          <div className="card p-3 mb-3">
+          {/* The actions stay in reach on a phone: pinned above the bottom
+              bar while the note scrolls (owner mockup 10). */}
+          <div className="card p-3 mb-2 sticky bottom-[72px] lg:bottom-3 z-10">
             <div className="flex flex-wrap items-center gap-2">
               <button className="btn" disabled={!!busy} onClick={() => saveDraft().catch(() => {})}>
                 <i className="ti ti-device-floppy" />{busy === 'draft' ? 'Saving…' : 'Save Draft'}
@@ -4608,6 +4631,8 @@
                 </button>
               )}
             </div>
+          </div>
+          <div className="px-1 mb-3">
             <p className="text-[11px] text-stone-500 mt-2">
               <b>Save Draft</b> saves to the app and OpenEMR together, stamped with your name and the time — it does <b>not</b> sign, and anyone working on this chart can keep editing it.
               <b> Sign &amp; Submit</b> saves, then signs and locks it; after that, changes are addenda.
@@ -5073,7 +5098,10 @@
     const ScheduleView = ({ user, patients, onOpenChart, onDocument }) => {
       const canWrite = useCanWrite();
       const [providersData, setProvidersData] = useState(null);
-      const [mode, setMode] = useState('week');
+      // A week of seven columns does not fit a phone; a phone opens on the day.
+      const [mode, setMode] = useState(() => {
+        try { return window.matchMedia('(min-width: 768px)').matches ? 'week' : 'day'; } catch { return 'week'; }
+      });
       const [anchor, setAnchor] = useState(todayYmd());
       const [providerFilter, setProviderFilter] = useState('');
       const [data, setData] = useState(null);
@@ -5111,16 +5139,17 @@
       return (
         <div className="p-4 lg:p-7">
           <div className="flex flex-wrap items-center gap-2 mb-4">
-            <div className="flex rounded-lg border border-stone-200 overflow-hidden">
-              <button className={`px-3 py-1.5 text-xs font-semibold ${mode === 'day' ? 'bg-primary text-white' : 'bg-white text-primary'}`} onClick={() => setMode('day')}>Day</button>
-              <button className={`px-3 py-1.5 text-xs font-semibold ${mode === 'week' ? 'bg-primary text-white' : 'bg-white text-primary'}`} onClick={() => setMode('week')}>Week</button>
+            <div className="flex bg-white border border-stone-200 rounded-xl p-1">
+              {[['day', 'Day'], ['week', 'Week']].map(([k, l]) => (
+                <button key={k} className={`px-4 py-1.5 rounded-lg text-[13px] font-semibold ${mode === k ? 'bg-[#F6EFE2] text-[#8a6a2c]' : 'text-stone-500'}`} onClick={() => setMode(k)}>{l}</button>
+              ))}
             </div>
-            <div className="flex items-center gap-1">
-              <button className="btn ghost !px-2 !py-1.5" onClick={() => setAnchor(addDaysYmd(anchor, mode === 'day' ? -1 : -7))}><i className="ti ti-chevron-left" /></button>
-              <button className="btn ghost !px-2.5 !py-1.5 text-xs" onClick={() => setAnchor(todayYmd())}>Today</button>
-              <button className="btn ghost !px-2 !py-1.5" onClick={() => setAnchor(addDaysYmd(anchor, mode === 'day' ? 1 : 7))}><i className="ti ti-chevron-right" /></button>
+            <div className="inline-flex items-center bg-white border border-stone-200 rounded-xl shadow-sm">
+              <button className="px-2.5 py-2 text-primary" aria-label="Previous" onClick={() => setAnchor(addDaysYmd(anchor, mode === 'day' ? -1 : -7))}><i className="ti ti-chevron-left" /></button>
+              <button className="px-3 py-2 text-[13px] font-semibold text-primary border-x border-stone-200" onClick={() => setAnchor(todayYmd())}>Today</button>
+              <button className="px-2.5 py-2 text-primary" aria-label="Next" onClick={() => setAnchor(addDaysYmd(anchor, mode === 'day' ? 1 : 7))}><i className="ti ti-chevron-right" /></button>
             </div>
-            <div className="serif text-lg text-primary font-semibold">
+            <div className="serif text-[22px] text-primary font-semibold">
               {mode === 'day' ? fmtDayLabel(anchor) : `${fmtDayLabel(from)} – ${fmtDayLabel(to)}`}
             </div>
             <div className="ml-auto flex items-center gap-2">
@@ -5140,16 +5169,18 @@
           </div>
 
           {providersData && providersData.degraded && (
-            <p className="text-[11px] text-amber-700 mb-2"><i className="ti ti-alert-triangle mr-1" />{providersData.notice}</p>
+            <p className="text-[12px] text-amber-700 mb-2"><i className="ti ti-alert-triangle mr-1" />{providersData.notice}</p>
           )}
           {err && <p className="text-red-600 text-sm mb-3">{err.message}</p>}
           {!err && data === null && <p className="text-sm text-stone-500">Loading calendar from OpenEMR…</p>}
           {data !== null && (
             <div className="card overflow-x-auto">
-              <div className="flex border-b border-stone-200 bg-cream sticky top-0">
+              <div className="flex border-b border-stone-200 bg-[#FCFAF6] sticky top-0">
                 <div className="w-0" />
                 {days.map(d => (
-                  <div key={d} className={`flex-1 min-w-[130px] text-center py-2 text-xs font-bold ${d === todayYmd() ? 'text-accent' : 'text-primary'}`}>{fmtDayLabel(d)}</div>
+                  <div key={d} className="flex-1 min-w-[130px] text-center py-2.5">
+                    <span className={`inline-block px-3 py-1 rounded-full text-[12.5px] font-semibold ${d === todayYmd() ? 'bg-[#A9853A] text-white' : 'text-primary'}`}>{fmtDayLabel(d)}</span>
+                  </div>
                 ))}
               </div>
               <div className="flex">
@@ -5159,7 +5190,7 @@
                 <div className="text-center py-8 border-t border-stone-100">
                   <i className="ti ti-calendar-smile text-3xl text-accent" />
                   <p className="text-sm text-stone-500 mt-1">No appointments {mode === 'day' ? 'this day' : 'this week'}{providerFilter ? ' for this provider' : ''}.</p>
-                  <p className="text-xs text-stone-400">Book one with “New appointment” — it goes straight onto the OpenEMR calendar.</p>
+                  <p className="text-xs text-stone-400">Book one with New Appointment. It goes straight onto the OpenEMR calendar.</p>
                 </div>
               )}
             </div>
@@ -6319,58 +6350,66 @@
     // number it went to are on the row: the point of this screen is that
     // somebody can pick up the phone.
     // ══════════════════════════════════════════════════════════════════════
-    const OverdueOrders = () => {
+    const OverdueOrders = ({ onOpenChart }) => {
       const [d, setD] = useState(null);
       const [err, setErr] = useState('');
       useEffect(() => { api.overdueOrders().then(r => { setD(r); setErr(''); }).catch(e => setErr(e.message)); }, []);
-      if (err) return <div className="p-7"><p className="text-red-600 text-sm">{err}</p></div>;
-      if (!d) return <div className="p-10 text-stone-400 text-sm">Loading…</div>;
+      if (err) return <div className="p-4 lg:p-7"><div className="card p-4 text-red-600 text-sm">{err}</div></div>;
+      if (!d) return <div className="p-4 lg:p-7"><div className="card p-6 text-stone-500 text-sm">Loading…</div></div>;
       const rows = d.orders || [];
       const waitingAgency = d.agencyPending || [];
+      // Every row opens the patient's Orders, where the send and the
+      // destination are recorded. It used to open nothing at all.
+      const openBtn = (o) => (o.clientId && onOpenChart
+        ? <button className="btn ghost !py-1 !px-2.5 text-[12px] whitespace-nowrap" onClick={() => onOpenChart(o.clientId, { tab: 'orders' })}>Open Orders</button>
+        : null);
       return (
-        <div className="p-4 lg:p-7">
+        <div className="p-4 lg:p-7 max-w-4xl">
           {waitingAgency.length > 0 && (
-            <div className="card mb-4">
-              <div className="card-h"><h2>Waiting on an Agency</h2><span className="chip bg-amber-50 text-amber-800">{waitingAgency.length}</span></div>
-              <div className="p-4 text-sm">
+            <div className="mb-5">
+              <h2 className="serif text-[21px] font-semibold text-primary mb-2">Waiting on an Agency ({waitingAgency.length})</h2>
+              <div className="card overflow-hidden">
                 {waitingAgency.map(o => (
-                  <div key={o.id} className="py-2 border-b border-stone-100 last:border-0">
-                    <div className="font-semibold text-[13px]">
-                      Referral{o.specialty ? ` · ${o.specialty}` : ''} · {o.clientName || o.clientId} {o.orderReference ? <span className="text-stone-500">· {o.orderReference}</span> : null}
+                  <div key={o.id} className="flex items-start gap-3 px-4 py-3.5 border-b border-stone-100 last:border-0">
+                    <div className="w-11 h-11 rounded-xl flex items-center justify-center shrink-0 bg-amber-50 text-amber-700"><i className="ti ti-send text-[20px]" /></div>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[14px] font-semibold text-primary">Referral{o.specialty ? ` · ${o.specialty}` : ''}</div>
+                      <div className="text-[12.5px] text-stone-600">{o.clientName || o.clientId}{o.orderReference ? ` · ${o.orderReference}` : ''}</div>
+                      <div className="text-[12px] text-stone-500 mt-0.5">
+                        Placed {fmtTs(o.createdAt)}{o.orderingClinician && o.orderingClinician.name ? ` by ${o.orderingClinician.name}` : ''}. No agency or fax yet, so nothing can be sent. Use Add Agency &amp; Fax on the order.
+                      </div>
                     </div>
-                    <div className="text-xs text-stone-600 mt-0.5">
-                      Placed {fmtTs(o.createdAt)}{o.orderingClinician && o.orderingClinician.name ? ` by ${o.orderingClinician.name}` : ''}. No agency or fax yet, so nothing can be sent. Open the patient's encounter and use Add agency and fax.
-                    </div>
+                    {openBtn(o)}
                   </div>
                 ))}
               </div>
             </div>
           )}
-          <div className="card">
-            <div className="card-h"><h2>Sent, Never Answered</h2><span className="chip bg-amber-50 text-amber-800">{rows.length}</span></div>
-            <div className="p-4 text-sm">
-              {rows.length === 0 && <p className="text-stone-500">Nothing is overdue.</p>}
-              {rows.map(o => (
-                <div key={o.id} className="py-2 border-b border-stone-100 last:border-0">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="font-semibold text-[13px]">
-                      {o.orderType} · {o.clientName || o.clientId} {o.orderReference ? <span className="text-stone-500">· {o.orderReference}</span> : null}
-                    </div>
-                    <span className="chip bg-amber-50 text-amber-800">{o.ageDays} days · threshold {o.thresholdDays}</span>
+          <h2 className="serif text-[21px] font-semibold text-primary mb-2">Sent, Never Answered ({rows.length})</h2>
+          <div className="card overflow-hidden">
+            {rows.length === 0 && <p className="text-sm text-stone-500 px-5 py-6">Nothing is overdue.</p>}
+            {rows.map(o => (
+              <div key={o.id} className="flex items-start gap-3 px-4 py-3.5 border-b border-stone-100 last:border-0">
+                <div className="w-11 h-11 rounded-xl flex items-center justify-center shrink-0 bg-red-50 text-red-600"><i className="ti ti-clock-exclamation text-[20px]" /></div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[14px] font-semibold text-primary capitalize">{o.orderType}</span>
+                    <span className="pill bg-amber-50 text-amber-800 border-amber-200">{o.ageDays} days · limit {o.thresholdDays}</span>
                   </div>
-                  <div className="text-xs text-stone-500">{(o.tests || []).join(', ')}</div>
-                  <div className="text-xs text-stone-600 mt-0.5">
+                  <div className="text-[12.5px] text-stone-600">{o.clientName || o.clientId}{o.orderReference ? ` · ${o.orderReference}` : ''}{(o.tests || []).length ? ` · ${o.tests.join(', ')}` : ''}</div>
+                  <div className="text-[12px] text-stone-500 mt-0.5">
                     Sent {fmtTs(o.sentAt)} to <b>{o.recipientName || 'an unnamed recipient'}</b>
                     {o.recipientFax ? <span> at <b>{String(o.recipientFax).replace(/(\d{3})(\d{3})(\d{4})/, '($1) $2-$3')}</b></span> : null}
                     {o.orderingClinician && o.orderingClinician.name ? ` · ordered by ${o.orderingClinician.name}` : ''}
                   </div>
                 </div>
-              ))}
-              <p className="text-[10.5px] text-stone-400 mt-2">
-                Thresholds: {Object.entries(d.thresholds || {}).map(([k, v]) => `${k} ${v}d`).join(' · ')}.
-              </p>
-            </div>
+                {openBtn(o)}
+              </div>
+            ))}
           </div>
+          <p className="text-[11.5px] text-stone-400 mt-2">
+            Limits: {Object.entries(d.thresholds || {}).map(([k, v]) => `${k} ${v}d`).join(' · ')}.
+          </p>
         </div>
       );
     };
@@ -7522,6 +7561,9 @@
       const [s, setS] = useState(null);
       const [f, setF] = useState(null);
       const [busy, setBusy] = useState(false); const [msg, setMsg] = useState(null);
+      // Collapsed unless something needs doing: open while the billing NPI is
+      // missing, because that blocks every submission to billing.
+      const [open, setOpen] = useState(null);
       useEffect(() => { api.settings().then(r => { setS(r); setF({ billingNpiUsed: r.billingNpiUsed || '', billingProviderName: r.billingProviderName || '', favorites: (r.serviceCodeFavorites || []).map(x => `${x.code} | ${x.label || ''}`).join('\n') }); }).catch(e => setMsg({ ok: false, text: e.message })); }, []);
       if (!s || !f) return null;
       const save = () => {
@@ -7531,10 +7573,20 @@
           serviceCodeFavorites: f.favorites.split('\n').map(l => l.trim()).filter(Boolean).map(l => { const [code, ...rest] = l.split('|'); return { code: code.trim(), label: rest.join('|').trim() }; })
         }).then(r => setMsg({ ok: true, text: r.message })).catch(e => setMsg({ ok: false, text: e.message })).finally(() => setBusy(false));
       };
+      const isOpen = open == null ? !s.billingNpiUsed && s.billingNpiSource !== 'record' && s.billingNpiSource !== 'env_seed' : open;
       return (
         <div className="card mb-4">
-          <div className="card-h"><h2>Billing Settings</h2><span className="text-[10.5px] text-stone-500">gfc_payer_credentialing.billing_npi_used · admin only</span></div>
-          <div className="p-4 grid gap-3 text-sm">
+          <button type="button" className="card-h w-full text-left" onClick={() => setOpen(!isOpen)} aria-expanded={isOpen}>
+            <h2>Billing Settings</h2>
+            <span className="flex items-center gap-2">
+              {s.billingNpiSource === 'record' || s.billingNpiSource === 'env_seed'
+                ? <span className="chip bg-emerald-50 text-emerald-700">NPI set</span>
+                : <span className="chip bg-red-50 text-red-700">NPI not set</span>}
+              <span className="text-[11.5px] text-stone-500 hidden sm:inline">Admin only</span>
+              <i className={`ti ti-chevron-${isOpen ? 'up' : 'down'} text-stone-400`} />
+            </span>
+          </button>
+          {isOpen && <div className="p-4 grid gap-3 text-sm">
             <div className="grid md:grid-cols-2 gap-3">
               <Field label={`Billing provider NPI (${s.billingNpiSource === 'record' ? 'set here' : s.billingNpiSource === 'env_seed' ? 'seeded from env' : 'NOT SET — submitting to billing is blocked'})`}>
                 <input className="inp font-mono" maxLength={10} disabled={!s.isAdmin} value={f.billingNpiUsed} onChange={e => setF({ ...f, billingNpiUsed: e.target.value.replace(/\D/g, '') })} />
@@ -7546,8 +7598,8 @@
             </Field>
             {msg && <p className={`text-xs ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
             {s.isAdmin && <button className="btn w-fit" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save Settings'}</button>}
-            <p className="text-[10.5px] text-stone-400">The billing provider is the NPI every coded encounter bills under (currently Bethel Godwins's individual NPI; flip it here when the organizational Medicare enrollment lands). Never hardcoded. The rendering provider is always the signing clinician.</p>
-          </div>
+            <p className="text-[11px] text-stone-400">The billing provider is the NPI every coded encounter bills under. Never hardcoded. The rendering provider is always the signing clinician.</p>
+          </div>}
         </div>
       );
     };
@@ -7561,31 +7613,31 @@
       return (
         <div className="p-4 lg:p-7">
           <SettingsCard />
-          <div className="card">
-            <div className="card-h"><h2>Coding Queue</h2>
-              <div className="flex gap-1.5">
-                {[['open', 'Open'], ['not_coded', 'Not coded'], ['coded', 'Coded, unsigned'], ['awaiting_billing', 'Awaiting billing'], ['signed', 'Signed'], ['all', 'All']].map(([k, l]) => (
-                  <button key={k} className={`chip border ${filter === k ? 'bg-primary text-white border-primary' : 'bg-white text-primary border-stone-200'}`} onClick={() => setFilter(k)}>
-                    {l}{data && data.counts && k in data.counts ? ` ${data.counts[k]}` : ''}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div className="p-4">
-              {err && <p className="text-red-600 text-sm">{err}</p>}
-              {!err && !data && <p className="text-sm text-stone-500">Loading encounters from OpenEMR…</p>}
-              {data && data.degraded && <p className="text-xs text-amber-700 mb-2">OpenEMR encounter feed unavailable{data.emrError ? ` (${data.emrError})` : ''} — showing encounters the app has recorded.</p>}
-              {data && data.encounters.length === 0 && <p className="text-sm text-stone-400">Nothing here.</p>}
-              {data && data.encounters.map(e => (
-                <div key={e.encounterUuid} className="flex flex-wrap items-center justify-between gap-2 py-2.5 border-b border-stone-100 last:border-0 cursor-pointer" onClick={() => onOpenEncounter(e.clientId, e.encounterUuid)}>
-                  <div>
-                    <div className="font-semibold text-[13px]">{e.patientName || 'Patient'} — {e.reason}</div>
-                    <div className="text-xs text-stone-500">{[e.date && fmtDate(e.date), e.renderingProvider ? npiLabel(e.renderingProvider) : e.provider, `${e.diagnosisCount} dx · ${e.serviceCount} svc`, e.signedAt && `signed ${fmtTs(e.signedAt)}`].filter(Boolean).join(' · ')}</div>
-                  </div>
-                  <EncStateChip state={e.state} />
+          <div className="flex gap-2 mb-4 overflow-x-auto">
+            {[['open', 'Open'], ['not_coded', 'Not Coded'], ['coded', 'Coded, Unsigned'], ['awaiting_billing', 'Awaiting Billing'], ['signed', 'Signed'], ['all', 'All']].map(([k, l]) => (
+              <button key={k} onClick={() => setFilter(k)}
+                className={`px-4 py-1.5 rounded-full text-[13px] font-semibold border whitespace-nowrap ${filter === k ? 'bg-[#A9853A] border-[#A9853A] text-white' : 'bg-white border-stone-200 text-primary'}`}>
+                {l}{data && data.counts && k in data.counts ? <span className="ml-1.5 opacity-80">{data.counts[k]}</span> : null}
+              </button>
+            ))}
+          </div>
+          {err && <div className="card p-4 text-red-600 text-sm mb-3">{err}</div>}
+          {data && data.degraded && <div className="card !bg-amber-50 border-amber-200 p-3 text-[12.5px] text-amber-800 mb-3">OpenEMR encounter feed unavailable{data.emrError ? ` (${data.emrError})` : ''}. Showing encounters the app has recorded.</div>}
+          <div className="card overflow-hidden">
+            {!err && !data && <p className="text-sm text-stone-500 px-5 py-6">Loading encounters from OpenEMR…</p>}
+            {data && data.encounters.length === 0 && <p className="text-sm text-stone-500 px-5 py-6">Nothing here.</p>}
+            {data && data.encounters.map(e => (
+              <button type="button" key={e.encounterUuid} onClick={() => onOpenEncounter(e.clientId, e.encounterUuid)}
+                className="cw-row w-full text-left flex items-center gap-3 px-4 py-3.5 border-b border-stone-100 last:border-0">
+                <div className="cw-avatar w-10 h-10 text-[13px] hidden sm:flex">{initials(e.patientName)}</div>
+                <div className="min-w-0 flex-1">
+                  <div className="text-[14px] font-semibold text-primary truncate">{e.patientName || 'Patient'} · {e.reason}</div>
+                  <div className="text-[12.5px] text-stone-500 truncate">{[e.date && fmtDate(e.date), e.renderingProvider ? npiLabel(e.renderingProvider) : e.provider, `${e.diagnosisCount} dx · ${e.serviceCount} svc`, e.signedAt && `signed ${fmtTs(e.signedAt)}`].filter(Boolean).join(' · ')}</div>
                 </div>
-              ))}
-            </div>
+                <EncStateChip state={e.state} />
+                <i className="ti ti-chevron-right text-stone-300" />
+              </button>
+            ))}
           </div>
         </div>
       );
@@ -8172,7 +8224,7 @@
             )}
             {view === 'queues' && (
               <WorkQueuesView
-                onOpenChart={(clientId) => openChartById(clientId)}
+                onOpenChart={(clientId, opts) => openChartById(clientId, opts)}
                 onOpenEncounter={(clientId, euuid) => openChartById(clientId, { tab: 'encounters', encounterUuid: euuid })} />
             )}
             {view === 'analytics' && <AnalyticsView />}
@@ -8185,7 +8237,7 @@
                 onOpenChart={(clientId, opts) => openChartById(clientId, opts)} />
             )}
             {view === 'results' && <ResultsInbox onOpenChart={(clientId, opts) => openChartById(clientId, opts)} />}
-            {view === 'overdue' && <OverdueOrders />}
+            {view === 'overdue' && <OverdueOrders onOpenChart={(clientId, opts) => openChartById(clientId, opts)} />}
             {view === 'messages' && <div className="p-4 lg:p-7"><StaffMessagesView /></div>}
             {view === 'settings' && (
               <SettingsView user={user} emrStatus={emrStatus} connectEmr={connectEmr} signOut={signOut} canWrite={canWrite} access={access} />

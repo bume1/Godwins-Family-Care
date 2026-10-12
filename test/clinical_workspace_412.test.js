@@ -1128,7 +1128,8 @@ test('a metric this app cannot observe is reported as unavailable, never as zero
   const body = routeBody(serverCode, "app.get('/api/clinical/analytics'");
   assert.match(body, /milesDriven: \{ value: null, unavailable: true, reason: myDay\.DISTANCE_UNAVAILABLE \}/);
   assert.match(body, /screeningCompletionRate: \{ value: null, unavailable: true/);
-  assert.match(pageCode, /Not available — /);
+  // Reworded without the dash in the 2026-10-12 redesign; the rule is unchanged.
+  assert.match(pageCode, /Not available: /);
 });
 
 test('all six analytics metrics have a home', () => {

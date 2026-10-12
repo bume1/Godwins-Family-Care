@@ -68,8 +68,14 @@
     '.gfcm{--navy:#033D50;--gold:#F5CD85;--goldd:#C9A44A;--cream:#FAF7F2;--ink:#1a2a32;--mut:#41555f;--red:#A32D2D;--green:#0f6e56;--line:#e5ddcb;font-size:16px;line-height:1.5;color:var(--ink)}',
     '.gfcm *{box-sizing:border-box}',
     '.gfcm h3{font-family:"Cormorant Garamond",Georgia,serif;font-size:19px;color:var(--navy);font-weight:600;margin:0 0 8px}',
-    '.gfcm .mcard{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 15px;margin-bottom:12px}',
-    '.gfcm .mrow{display:block;width:100%;text-align:left;background:none;border:none;border-bottom:1px solid #ece6db;padding:12px 0;cursor:pointer;font-family:inherit;font-size:15px}',
+    '.gfcm .mcard{background:#fff;border:1px solid #ECE4D6;border-radius:16px;padding:14px 16px;margin-bottom:12px;box-shadow:0 1px 2px rgba(3,61,80,.04),0 6px 18px -12px rgba(3,61,80,.18)}',
+    '.gfcm .mrow{display:flex;gap:12px;align-items:flex-start;width:100%;text-align:left;background:none;border:none;border-bottom:1px solid #ece6db;padding:12px 4px;cursor:pointer;font-family:inherit;font-size:15px}',
+    '.gfcm .mrow .mbody{flex:1;min-width:0}',
+    '.gfcm .mav{width:40px;height:40px;border-radius:50%;background:#F6EFE2;color:var(--navy);border:1px solid #E1D7C5;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;flex-shrink:0}',
+    '.gfcm .mhead{display:flex;gap:12px;align-items:center;padding-bottom:12px;border-bottom:1px solid #ece6db}',
+    '.gfcm .mhead .mav{width:46px;height:46px;font-size:16px}',
+    '.gfcm .mhead h3{margin:0}',
+    '.gfcm .mlog{display:flex;flex-direction:column;padding:14px 0 6px}',
     '.gfcm .mrow:last-child{border-bottom:none}',
     '.gfcm .mrow:hover{background:#faf8f3}',
     '.gfcm .mtop{display:flex;justify-content:space-between;gap:10px;align-items:baseline}',
@@ -82,16 +88,19 @@
     '.gfcm .mchip.acknowledged{background:#e7edf0;color:var(--navy)}',
     '.gfcm .mchip.responded{background:#e3f0ea;color:var(--green)}',
     '.gfcm .mchip.closed{background:#eee;color:#555}',
-    '.gfcm .mbub{border-radius:12px;padding:10px 13px;margin-bottom:9px;max-width:88%}',
-    '.gfcm .mbub.them{background:#f2eee5;border:1px solid var(--line)}',
-    '.gfcm .mbub.me{background:var(--navy);color:var(--cream);margin-left:auto}',
+    '.gfcm .mbub{border-radius:18px;padding:10px 14px;margin-bottom:4px;max-width:78%}',
+    '.gfcm .mwrap{display:flex;flex-direction:column;margin-bottom:10px}',
+    '.gfcm .mwrap.me{align-items:flex-end}',
+    '.gfcm .mwrap.them{align-items:flex-start}',
+    '.gfcm .mbub.them{background:#fff;border:1px solid #E1D7C5;border-bottom-left-radius:6px}',
+    '.gfcm .mbub.me{background:#E6EEF3;color:var(--ink);border-bottom-right-radius:6px}',
     '.gfcm .mwho{font-size:13px;font-weight:600;margin-bottom:2px}',
     '.gfcm .mbub.them .mwho{color:var(--navy)}',
-    '.gfcm .mbub.me .mwho{color:var(--gold)}',
-    '.gfcm .mwhen{font-size:12px;opacity:.7;margin-top:3px}',
-    '.gfcm .mbtn{border-radius:9px;padding:11px 14px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;border:1px solid var(--navy);background:var(--navy);color:var(--cream)}',
-    '.gfcm .mbtn.gold{background:var(--gold);border-color:var(--gold);color:var(--navy)}',
-    '.gfcm .mbtn.ghost{background:#fff;color:var(--navy)}',
+    '.gfcm .mbub.me .mwho{color:var(--navy)}',
+    '.gfcm .mwhen{font-size:12px;color:var(--mut);opacity:.85;margin:0 6px}',
+    '.gfcm .mbtn{border-radius:12px;padding:11px 14px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;border:1px solid var(--navy);background:var(--navy);color:var(--cream)}',
+    '.gfcm .mbtn.gold{background:#A9853A;border-color:#A9853A;color:#fff}',
+    '.gfcm .mbtn.ghost{background:#fff;color:var(--navy);border-color:#E1D7C5}',
     '.gfcm .mbtn[disabled]{opacity:.5;cursor:not-allowed}',
     '.gfcm .mbtns{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}',
     '.gfcm textarea,.gfcm select,.gfcm input{width:100%;border:1px solid #d8cdb8;border-radius:9px;padding:10px 12px;font-size:16px;font-family:inherit;background:#fff;color:var(--ink)}',
@@ -118,7 +127,7 @@
     '.gfcm .matts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}',
     '.gfcm .matt{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--cream);border-radius:20px;padding:4px 10px;font-size:13px;color:var(--navy);cursor:pointer;font-family:inherit;max-width:100%}',
     '.gfcm .matt .mnm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:220px}',
-    '.gfcm .mbub.me .matt{background:rgba(250,247,242,.14);border-color:rgba(245,205,133,.5);color:var(--cream)}',
+    '.gfcm .mbub.me .matt{background:#fff;border-color:#cfdbe3;color:var(--navy)}',
     '.gfcm .mattx{border:none;background:none;font-size:16px;line-height:1;color:var(--mut);cursor:pointer;padding:0 2px}',
     '.gfcm .mfile{display:inline-block;cursor:pointer}'
   ].join('\n');
@@ -129,6 +138,12 @@
     el.id = 'gfcm-css';
     el.textContent = CSS;
     document.head.appendChild(el);
+  }
+
+  // Two initials for an avatar circle; a dash when there is no name.
+  function initialsOf(name) {
+    var w = String(name || '').split(/\s+/).filter(Boolean).slice(0, 2);
+    return w.length ? w.map(function (x) { return x.charAt(0).toUpperCase(); }).join('') : '–';
   }
 
   function esc(s) {
@@ -362,6 +377,7 @@
     } else {
       html += threads.map(function (t) {
         return '<button class="mrow" data-open="' + esc(t.id) + '">' +
+          '<span class="mav">' + esc(initialsOf(t.clientName || t.channelLabel)) + '</span><span class="mbody">' +
           '<div class="mtop"><span class="mlabel">' + esc(t.channelLabel) + '</span>' +
           '<span class="mmu">' + esc(fmtWhen(t.lastMessageAt)) +
           (t.unread ? ' <span class="mbadge">' + t.unread + '</span>' : '') + '</span></div>' +
@@ -369,7 +385,7 @@
           (t.responseStatus ? ' · <span class="mchip ' + esc(t.responseStatus) + '">' +
             esc(t.responseStatus.replace(/_/g, ' ')) + '</span>' : '') + '</div>' +
           '<div class="mprev">' + esc(t.lastMessagePreview) + '</div>' +
-          '</button>';
+          '</span></button>';
       }).join('');
     }
     html += '</div>';
@@ -419,17 +435,22 @@
     var canMoveStatus = t.responseStatus && (state.role === 'clinical' || state.role === 'admin');
     var html = '<div class="mcard">' +
       '<div class="mbtns" style="margin:0 0 10px"><button class="mbtn ghost" data-back="1">← All Messages</button></div>' +
-      '<h3>' + esc(t.channelLabel || 'Conversation') + '</h3>' +
-      '<div class="mmu">' + esc(t.clientName || '') +
+      '<div class="mhead"><span class="mav">' + esc(initialsOf(t.clientName || t.channelLabel)) + '</span><div>' +
+      '<h3>' + esc(t.clientName || t.channelLabel || 'Conversation') + '</h3>' +
+      '<div class="mmu">' + esc(t.clientName ? (t.channelLabel || '') : '') +
+      (t.lastMessageAt ? (t.clientName ? ' · ' : '') + 'Last message ' + esc(fmtWhen(t.lastMessageAt)) : '') +
       (t.responseStatus ? ' · <span class="mchip ' + esc(t.responseStatus) + '">' +
-        esc(t.responseStatus.replace(/_/g, ' ')) + '</span>' : '') + '</div>';
+        esc(t.responseStatus.replace(/_/g, ' ')) + '</span>' : '') + '</div></div></div>';
 
-    html += '<div style="margin-top:12px">' + state.messages.map(function (m) {
-      return '<div class="mbub ' + (m.mine ? 'me' : 'them') + '">' +
+    // Chat bubbles (owner mockup 12): theirs on the left, yours on the right,
+    // each with its sender and time. The attribution line stays on every
+    // bubble, because a POA's message must say whose behalf it is on.
+    html += '<div class="mlog">' + state.messages.map(function (m) {
+      var side = m.mine ? 'me' : 'them';
+      return '<div class="mwrap ' + side + '"><div class="mbub ' + side + '">' +
         '<div class="mwho">' + esc(m.from) + (m.isPoa ? '' : ' · ' + esc(m.fromRoleLabel)) + '</div>' +
         messageHtml(m) + attachmentsHtml(m) +
-        '<div class="mwhen">' + esc(fmtWhen(m.sentAt)) + '</div>' +
-        '</div>';
+        '</div><div class="mwhen">' + esc(fmtWhen(m.sentAt)) + '</div></div>';
     }).join('') + '</div>';
 
     if (state.canPost) {
