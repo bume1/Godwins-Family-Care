@@ -556,6 +556,13 @@
       // The patient's own message threads (Session 9's route, scoped server-side).
       // Read for the Home tiles and the recent-messages card; the Messages tab
       // still loads its own copy through the shared component.
+      // Channels this login may start, each with availability and the reason
+      // when it is off (Session 9's route; the server decides).
+      getMessageChannels: (token) =>
+        fetch(`${API_URL}/api/messaging/channels`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(asError),
+
       getMessageThreads: (token) =>
         fetch(`${API_URL}/api/messaging/threads`, {
           headers: { 'Authorization': `Bearer ${token}` }
@@ -5746,17 +5753,34 @@
     // Support) — and which ones they may open is answered by the server, not
     // by a prop. What they may not do is act as the client, and that is the
     // POA gate, enforced server-side.
-    const GfcMessages = ({ token, me, actingAs }) => {
+    // Redesign (owner mockup 8): Conversations · Ask a Question. Both tabs
+    // use the shared component and the server's channel list; "Ask a
+    // Question" only chooses who to ask, then opens the same composer.
+    const CHANNEL_ICONS = { care_team: 'ti-stethoscope', support: 'ti-headset', direct_care: 'ti-heart-handshake', clinical_escalation: 'ti-alert-triangle', care_coordination: 'ti-users-group', family_portal: 'ti-home-heart' };
+    const GfcMessages = ({ token, me, actingAs, onUnread }) => {
+      const [tab, setTab] = useState('conversations');
+      const [compose, setCompose] = useState(null);       // channel id to open straight into
+      const [channels, setChannels] = useState(null);
+      const [chErr, setChErr] = useState('');
       useEffect(() => {
         const lib = window.GFCMessaging;
-        if (!lib || !token) return undefined;
+        if (!lib || !token || tab !== 'conversations') return undefined;
         lib.mount('gfc-messaging-portal', {
           userId: me && me.id,
           role: me && me.role,
-          authToken: token
+          authToken: token,
+          startCompose: compose || undefined,
+          hostStartsMessages: true,
+          onUnread: onUnread || undefined
         });
         return () => lib.unmount('gfc-messaging-portal');
-      }, [token, me]);
+      }, [token, me, tab, compose]);
+      useEffect(() => {
+        if (tab !== 'ask' || channels) return;
+        let gone = false;
+        api.getMessageChannels(token).then(r => { if (gone) return; if (r.error) setChErr(r.error); else setChannels(r.channels || []); });
+        return () => { gone = true; };
+      }, [tab, token, channels]);
 
       if (!window.GFCMessaging) {
         return (
@@ -5765,10 +5789,33 @@
           </div>
         );
       }
+      // A channel this login can never start (a one-way update) is not a question to ask.
+      const askable = (channels || []).filter(c => !c.oneWay);
       return (
         <div className="gfc-body">
-          {actingAs && <span className="ro"><i className="ti ti-user-shield" />Acting as {actingAs}</span>}
-          <div id="gfc-messaging-portal"></div>
+          <h2 className="disp">Messages</h2>
+          {actingAs && <span className="ro" style={{ marginTop: 10 }}><i className="ti ti-user-shield" />Acting as {actingAs}</span>}
+          <div className="pills">
+            <button className={tab === 'conversations' ? 'on' : ''} onClick={() => { setCompose(null); setTab('conversations'); }}>Conversations</button>
+            <button className={tab === 'ask' ? 'on' : ''} onClick={() => setTab('ask')}>Ask a Question</button>
+          </div>
+          {tab === 'conversations' && <div id="gfc-messaging-portal"></div>}
+          {tab === 'ask' && (
+            <React.Fragment>
+              <p className="sub" style={{ marginTop: 0, marginBottom: 12 }}>Who would you like to ask? For an emergency, call 911.</p>
+              {!channels && !chErr && <div style={{ display: 'flex', justifyContent: 'center', padding: 30 }}><div className="gfc-spin" /></div>}
+              {chErr && <div className="err">{chErr}</div>}
+              {channels && askable.length === 0 && <p className="sub">There's no one you can start a message with from this account yet.</p>}
+              {askable.map(c => (
+                <button key={c.id} className="lrow" disabled={!c.available} style={c.available ? undefined : { opacity: .6, cursor: 'default' }}
+                  onClick={() => { if (!c.available) return; setCompose(c.id); setTab('conversations'); }}>
+                  <span className="lic"><i className={`ti ${CHANNEL_ICONS[c.id] || 'ti-message-2'}`} /></span>
+                  <span className="lm"><b>{c.label}</b><span style={{ whiteSpace: 'normal' }}>{c.available ? (c.blurb || '') : (c.reason || 'Not available yet')}</span></span>
+                  {c.available && <i className="ti ti-chevron-right" />}
+                </button>
+              ))}
+            </React.Fragment>
+          )}
         </div>
       );
     };
@@ -6798,6 +6845,13 @@
       const [threads, setThreads] = useState([]);
       const [threadsErr, setThreadsErr] = useState('');
 
+      // Re-read the thread list when the Messages component reports a change,
+      // so the bell, sidebar badge and Home tile follow what was just read.
+      const reloadThreads = useCallback(async () => {
+        const th = await api.getMessageThreads(token);
+        if (!th.error) { setThreads(th.threads || []); setThreadsErr(''); }
+      }, [token]);
+
       const reloadMe = async () => {
         const result = await api.getGfcMe(token);
         if (!result.error) setMe(result);
@@ -6995,7 +7049,8 @@
             {view === 'health' && clinicalBlocked && <GfcHealth clinical={{ error: me.clinicalRead.reason || 'Your care team is still setting up your health record.' }} me={me} token={token} readOnly={readOnly} />}
             {view === 'health' && clinicalAvailable && <GfcHealth clinical={clinical} me={me} token={token} readOnly={readOnly}
               onSharingSaved={(sharing) => setMe(m => m ? { ...m, sharing } : m)} />}
-            {view === 'messages' && <GfcMessages token={token} me={me} actingAs={me && me.actingAs} />}
+            {view === 'messages' && <GfcMessages token={token} me={me} actingAs={me && me.actingAs}
+              onUnread={reloadThreads} />}
             {/* Uploads, the share link and the record release are client-only on the
                 server (requireClientForIntake), so a POA got a button that always
                 answered 403. On this tab every family login, POA included, reads. */}
