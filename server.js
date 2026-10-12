@@ -16733,7 +16733,22 @@ const extractDocumentHandler = async (req, res) => {
 
     res.json({
       message: 'Read — nothing has been saved yet. Check each value before it counts.',
-      extraction: { id: row.id, kind: row.kind, rows: row.rows, identityConflicts: row.identityConflicts, reviewCount: row.reviewCount }
+      // THE SHAPE MUST MATCH WHAT THE STATUS ROUTE'S `pending` LIST CARRIES,
+      // because both screens render the review panel from whichever they were
+      // handed and key it on `docId`. Leaving `docId` out meant the panel
+      // NEVER OPENED after a fresh read — the row was stored correctly and the
+      // reviewer saw nothing, which reads as "the read did nothing".
+      //
+      // The reader fields come with it for the same reason: a reviewer has to
+      // be told a value came out of a PICTURE rather than a text layer, and a
+      // panel that only gets them on a later page load tells them late.
+      extraction: {
+        id: row.id, docId: row.docId, kind: row.kind, fileName: row.fileName, at: row.at,
+        rows: row.rows, identityConflicts: row.identityConflicts, reviewCount: row.reviewCount,
+        reader: row.reader, source: row.source, readNotice: row.readNotice,
+        pagesRead: row.pagesRead, pagesTotal: row.pagesTotal,
+        stoppedBecause: row.stoppedBecause, skippedReads: row.skippedReads
+      }
     });
   } catch (error) {
     console.error('Document extraction error:', error);

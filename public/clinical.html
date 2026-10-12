@@ -574,7 +574,7 @@
                   : row.value}
               </div>
               <div className="text-[11px] text-stone-500">
-                {[row.current ? `on file: ${row.current}` : 'nothing on file',
+                {[row.snapshot ? `on file: ${row.snapshot}` : 'nothing on file',
                   row.confidence != null ? `${Math.round(row.confidence * 100)}% confident` : null
                 ].filter(Boolean).join(' · ')}
               </div>
@@ -638,7 +638,7 @@
             <div className="text-[12px] text-red-800 bg-red-50 border border-red-200 rounded p-2 mt-2">
               <b>This document may not be about this patient.</b>
               {extraction.identityConflicts.map((c, i) => (
-                <div key={i}>{c.label}: document says <b>{c.value}</b>, record says <b>{c.current || '—'}</b></div>
+                <div key={i}>{c.label}: document says <b>{c.onDocument}</b>, record says <b>{c.onFile || '—'}</b></div>
               ))}
             </div>
           )}
