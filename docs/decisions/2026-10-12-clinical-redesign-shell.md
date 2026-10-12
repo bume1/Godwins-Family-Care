@@ -32,3 +32,19 @@
 ## Next (owner picks)
 - Part 2: the chart (header, tab strip, Overview grid, Results table without values, phone chart menu).
 - Part 3: Inbox and Results restyle, the phone visit checklist, New Encounter on a phone, Care Plan, Messages tabs.
+
+## Part 2: the patient chart (same branch, same PR)
+- **Header:**
+  - A large initials avatar and a serif name. Status (Active / Enrolling) and care-type chips. DOB (age), sex, MRN and MBI on one line.
+  - Message, Start visit / Resume draft, and a More menu holding Refresh portal chart and the address/contacts/insurance details.
+  - The allergy strip stays under the header on every tab. Start visit and Refresh stay write-gated, and Facility & POS stays billing-only.
+- **Tabs:** the gold-underline strip on a laptop. On a phone, a "Sections" tap-through list built from the same `tabs` array (mockup 9).
+- **Overview:** eight cards (Demographics, Active Problems, Current Medications, Allergies, Latest Vitals, Care Plan, Last Encounter, Coverage).
+  - Each card reads only what the chart read already returns, plus the care-plan read `CarePlanTab` already makes.
+  - A card with no rows says why: not linked, not enabled yet, a failed read, or nothing on file.
+  - Latest Vitals shows a dash for any vital it did not read. The unit is the reading's own, never one the page assumes.
+- **Results tab:** a table of Date · Test · Flag · Status · Reviewed by, with filters by kind and status. **No value, reference range or trend column**: the app stores none. The Flag is the interpretation recorded on filing, or "Not set".
+- **Verified:**
+  - Full suite passes, including `test/clinical_redesign.test.js` (6 tests). Six mutations each fail one: a dash invented for a missing vital, the oldest reading winning, a value column added, Start visit ungated, the phone menu not switching tabs, and an unset flag read as Normal.
+  - Rendered in Chromium at 1440 and 390 (Overview, Results, the phone section menu): no page errors, no sideways scroll.
+  - Babel now notes the page script is over 500KB. It's informational, not an error.

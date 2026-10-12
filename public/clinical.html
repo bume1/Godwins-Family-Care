@@ -1404,8 +1404,9 @@
       );
     };
 
-    const PatientBanner = ({ banner, patient, homeVisitFields, visitDraft, onStartVisit, onHomeVisitSaved }) => {
+    const PatientBanner = ({ banner, patient, homeVisitFields, visitDraft, onStartVisit, onHomeVisitSaved, onMessage }) => {
       const [open, setOpen] = useState(false);
+      const [menu, setMenu] = useState(false);
       const access = useContext(AccessContext);
       const canBill = !!access.canSubmitBilling;
       const b = banner || {};
@@ -1413,40 +1414,59 @@
       // The identity line, and it never collapses — not on a phone, not on any
       // tab. It is the line that stops a note being written in the wrong chart.
       const idBits = [
-        b.age != null ? `${b.age}` : null,
+        b.dob ? `DOB ${fmtDate(b.dob)}${b.age != null ? ` (${b.age})` : ''}` : (b.age != null ? `Age ${b.age}` : null),
         b.sex || null,
-        b.dob ? `DOB ${b.dob}` : null,
         b.mrn ? `MRN ${b.mrn}` : null,
         b.mbi ? `MBI ${b.mbi}` : null
       ].filter(Boolean);
       const draftOpen = !!(visitDraft && visitDraft.open);
+      const line = String(b.serviceLine || (patient && patient.serviceLine) || '').toUpperCase();
       return (
-        <div className="bg-white border-b border-stone-200 px-4 lg:px-7 pt-3 pb-3">
-          <div className="flex items-start gap-3">
-            <div className="w-11 h-11 rounded-full bg-accent text-primary hidden sm:flex items-center justify-center font-bold border border-stone-200 shrink-0">{initials(name)}</div>
+        <div className="bg-white border-b border-stone-200 px-4 lg:px-8 pt-4 pb-3">
+          <div className="flex items-start gap-4 flex-wrap">
+            <div className="cw-avatar w-14 h-14 lg:w-[72px] lg:h-[72px] text-[18px] lg:text-[22px] !bg-accent !border-0">{initials(name)}</div>
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2 flex-wrap">
-                <span className="serif text-xl text-primary font-semibold leading-tight">{name}</span>
-                {b.preferredName && <span className="text-[12px] text-stone-500">("{b.preferredName}")</span>}
+                <span className="serif text-[26px] lg:text-[32px] text-primary font-semibold leading-tight">{name}</span>
+                {b.preferredName && <span className="text-[13px] text-stone-500">("{b.preferredName}")</span>}
+                {b.activatedAt
+                  ? <span className="pill bg-emerald-50 text-emerald-700 border-emerald-200">Active</span>
+                  : <span className="pill bg-amber-50 text-amber-700 border-amber-200">Enrolling</span>}
+                {(CARE_CHIPS[line] || []).map(([c, title, cls]) => (
+                  <span key={c} className={`care-chip ${cls}`} title={title}>{title}</span>
+                ))}
                 {b.codeStatus && <span className="chip bg-red-100 text-red-800">{b.codeStatus}</span>}
-                {b.serviceLine && <span className="chip bg-primary text-white hidden sm:inline">{b.serviceLine}</span>}
-                {b.activatedAt && <span className="chip bg-emerald-50 text-emerald-700 hidden sm:inline">ACTIVATED</span>}
               </div>
-              <div className="text-[12px] text-stone-600 mt-0.5 break-words">{idBits.length ? idBits.join(' • ') : 'No identifiers on file'}</div>
+              <div className="text-[13.5px] text-stone-600 mt-0.5 break-words">{idBits.length ? idBits.join(' • ') : 'No identifiers on file'}</div>
             </div>
-            {onStartVisit && access.canWrite && (
-              <button className={`btn ${draftOpen ? 'gold' : ''} !py-1.5 !px-3 text-xs shrink-0`} onClick={onStartVisit}>
-                <i className={`ti ${draftOpen ? 'ti-writing' : 'ti-player-play'}`} />{draftOpen ? 'Resume draft' : 'Start visit'}
+            <div className="flex items-center gap-2 shrink-0 relative">
+              {onMessage && (
+                <button className="btn !py-2 !px-3.5 text-[13px]" onClick={onMessage}><i className="ti ti-message-circle" />Message</button>
+              )}
+              {onStartVisit && access.canWrite && (
+                <button className={`btn ${draftOpen ? 'gold' : 'ghost'} !py-2 !px-3.5 text-[13px]`} onClick={onStartVisit}>
+                  <i className={`ti ${draftOpen ? 'ti-writing' : 'ti-player-play'}`} />{draftOpen ? 'Resume draft' : 'Start visit'}
+                </button>
+              )}
+              <button className="btn ghost !py-2 !px-3 text-[13px]" onClick={() => setMenu(m => !m)} aria-expanded={menu}>
+                More<i className={`ti ti-chevron-${menu ? 'up' : 'down'}`} />
               </button>
-            )}
+              {menu && (
+                <div className="absolute right-0 top-full mt-2 z-20 w-64 card p-2">
+                  <button className="w-full text-left px-3 py-2 rounded-lg text-[13px] text-primary font-semibold hover:bg-cream flex items-center gap-2"
+                    onClick={() => { setOpen(true); setMenu(false); }}>
+                    <i className="ti ti-address-book" />Address, contacts, insurance
+                  </button>
+                  {patient && patient.id && access.canWrite && (
+                    <div className="px-3 pb-1"><RefreshPortalChart key={patient.id} clientId={patient.id} /></div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
-          {patient && patient.id && access.canWrite && <RefreshPortalChart key={patient.id} clientId={patient.id} />}
-          <div className="mt-2"><AllergyStrip allergies={b.allergies} /></div>
-          <button className="text-[11.5px] text-primary font-semibold mt-2 flex items-center gap-1" onClick={() => setOpen(!open)}>
-            <i className={`ti ti-chevron-${open ? 'up' : 'down'}`} />{open ? 'Hide details' : 'Address, contacts, insurance'}
-          </button>
+          <div className="mt-3"><AllergyStrip allergies={b.allergies} /></div>
           {open && (
-            <div className="mt-2 space-y-3">
+            <div className="mt-3 space-y-3 bg-cream border border-stone-200 rounded-xl p-4">
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                 <BannerFact label="Home address">
                   {b.address && (b.address.line1 || b.address.city)
@@ -1494,6 +1514,9 @@
               {access.canWrite && (
                 <HomeVisitEditor patient={patient} homeVisit={b.homeVisit} fields={homeVisitFields} onSaved={onHomeVisitSaved} />
               )}
+              <button className="text-[12px] text-primary font-semibold flex items-center gap-1" onClick={() => setOpen(false)}>
+                <i className="ti ti-chevron-up" />Hide details
+              </button>
             </div>
           )}
         </div>
@@ -1543,8 +1566,8 @@
     );
 
     const chartRow = (main, sub, right, key) => (
-      <div key={key} className="flex items-start justify-between py-1.5 border-b border-stone-100 last:border-0 gap-2">
-        <div className="min-w-0"><div className="font-semibold text-[13px]">{main}</div>{sub && <div className="text-xs text-stone-500">{sub}</div>}</div>
+      <div key={key} className="flex items-start justify-between py-2 border-b border-stone-100 last:border-0 gap-2">
+        <div className="min-w-0"><div className="font-semibold text-[13.5px] text-primary">{main}</div>{sub && <div className="text-[12px] text-stone-500">{sub}</div>}</div>
         {right && <span className="chip bg-primary-50 text-primary shrink-0">{right}</span>}
       </div>
     );
@@ -1553,7 +1576,10 @@
     // nothing in it are indistinguishable, and only one of them is correct —
     // the rule the clinical inbox set and Scope I3 restates for navigation.
     const EmptyPlace = ({ children }) => (
-      <div className="card p-6 text-center text-sm text-stone-500">{children}</div>
+      <div className="card px-6 py-10 text-center">
+        <i className="ti ti-folder-open text-3xl text-stone-300" />
+        <p className="text-sm text-stone-500 mt-2">{children}</p>
+      </div>
     );
 
     const ProblemsTab = ({ chart }) => {
@@ -1919,9 +1945,31 @@
       );
     };
 
+    // 2026-10-12 redesign (owner mockup 4). A table, but WITHOUT a value,
+    // range or trend column: the app stores the result document and its review
+    // state, never the numbers, so those columns would always be blank. The
+    // Flag is the interpretation recorded on filing, never one the page infers.
+    const RESULT_FLAG = {
+      critical: ['Critical', 'bg-red-50 text-red-700 border-red-200'],
+      abnormal: ['Abnormal', 'bg-amber-50 text-amber-700 border-amber-200'],
+      normal: ['Normal', 'bg-emerald-50 text-emerald-700 border-emerald-200']
+    };
+    const resultKind = (r) => {
+      const t = String((r.order && r.order.orderType) || r.orderType || '').toLowerCase();
+      return t === 'lab' ? 'lab' : t === 'imaging' ? 'imaging' : 'other';
+    };
+    const ResultFlag = ({ r }) => {
+      const f = RESULT_FLAG[String(r.interpretation || '')];
+      return f ? <span className={`pill ${f[1]}`}>{f[0]}</span> : <span className="text-[12px] text-stone-400">Not set</span>;
+    };
+    const ResultStatus = ({ r }) => r.acknowledgedAt
+      ? <span className="pill bg-emerald-50 text-emerald-700 border-emerald-200">Reviewed</span>
+      : <span className="pill bg-red-50 text-red-700 border-red-200">Unreviewed</span>;
     const ResultsTab = ({ patient }) => {
       const [rows, setRows] = useState(null);
       const [err, setErr] = useState('');
+      const [kind, setKind] = useState('all');
+      const [status, setStatus] = useState('all');
       useEffect(() => {
         if (!patient || !patient.id) return;
         let live = true;
@@ -1932,26 +1980,73 @@
       if (err) return <div className="card p-4 text-sm text-red-600">{err}</div>;
       if (!rows) return <div className="card p-4 text-sm text-stone-500">Loading…</div>;
       if (!rows.length) return <EmptyPlace>No results on this chart yet.</EmptyPlace>;
+      // A filter is offered only when something sits under it.
+      const kinds = [['all', 'All Results'], ['lab', 'Labs'], ['imaging', 'Imaging'], ['other', 'Other']]
+        .filter(([k]) => k === 'all' || rows.some(r => resultKind(r) === k));
+      const shown = rows
+        .filter(r => kind === 'all' || resultKind(r) === kind)
+        .filter(r => status === 'all' || (status === 'reviewed' ? !!r.acknowledgedAt : !r.acknowledgedAt));
       return (
-        <div className="card"><div className="p-4">
-          {rows.map(r => (
-            <div key={r.id} className="py-2 border-b border-stone-100 last:border-0">
-              <div className="flex items-center justify-between gap-2 flex-wrap">
-                <span className="font-semibold text-[13px]">{resultTitle(r, 'Result')}</span>
-                <span className={`chip ${r.interpretation === 'critical' ? 'bg-red-100 text-red-800'
-                  : r.interpretation === 'abnormal' ? 'bg-amber-100 text-amber-800' : 'bg-stone-100 text-stone-600'}`}>
-                  {String(r.interpretation || 'unread').toUpperCase()}
-                </span>
-              </div>
-              <div className="text-[11.5px] text-stone-500">
-                {[r.receivedAt && fmtDate(r.receivedAt),
-                  r.order && r.order.reference,
-                  r.acknowledgedAt ? `acknowledged ${fmtDate(r.acknowledgedAt)}` : 'not yet acknowledged'
-                ].filter(Boolean).join(' · ')}
-              </div>
+        <div>
+          <div className="flex flex-wrap items-end justify-between gap-3 mb-3">
+            <h2 className="serif text-[28px] font-semibold text-primary leading-tight">Results</h2>
+            <label className="text-[12px] text-stone-500">Status
+              <select className="inp !w-auto !py-1.5 ml-2" value={status} onChange={e => setStatus(e.target.value)}>
+                <option value="all">All</option><option value="unreviewed">Unreviewed</option><option value="reviewed">Reviewed</option>
+              </select>
+            </label>
+          </div>
+          {kinds.length > 2 && (
+            <div className="cw-tabs mb-3">
+              {kinds.map(([k, label]) => (
+                <div key={k} className={`tabbtn ${kind === k ? 'on' : ''}`} onClick={() => setKind(k)}>{label}</div>
+              ))}
             </div>
-          ))}
-        </div></div>
+          )}
+          <div className="card overflow-hidden">
+            {shown.length === 0 && <p className="text-sm text-stone-500 px-5 py-6">Nothing matches these filters.</p>}
+            {shown.length > 0 && (
+              <>
+                <table className="cw-table w-full hidden md:table">
+                  <thead><tr><th>Date</th><th>Test</th><th>Flag</th><th>Status</th><th>Reviewed by</th></tr></thead>
+                  <tbody>
+                    {shown.map(r => (
+                      <tr key={r.id}>
+                        <td className="whitespace-nowrap text-stone-600">{r.receivedAt ? fmtDate(r.receivedAt) : '—'}</td>
+                        <td>
+                          <div className="font-semibold text-primary">{resultTitle(r, 'Result')}</div>
+                          {r.order && r.order.reference && <div className="text-[11.5px] text-stone-500">{r.order.reference}</div>}
+                        </td>
+                        <td><ResultFlag r={r} /></td>
+                        <td><ResultStatus r={r} /></td>
+                        <td className="text-[12.5px] text-stone-600">
+                          {r.acknowledgedAt
+                            ? <>{(r.acknowledgedBy && r.acknowledgedBy.name) || 'A clinician'}<br /><span className="text-stone-400">{fmtDate(r.acknowledgedAt)}</span></>
+                            : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div className="md:hidden">
+                  {shown.map(r => (
+                    <div key={r.id} className="px-4 py-3 border-b border-stone-100 last:border-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-semibold text-primary text-[14px]">{resultTitle(r, 'Result')}</span>
+                        <ResultFlag r={r} />
+                      </div>
+                      <div className="flex items-center justify-between gap-2 mt-1">
+                        <span className="text-[12px] text-stone-500">{r.receivedAt ? fmtDate(r.receivedAt) : 'Undated'}</span>
+                        <ResultStatus r={r} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+          <p className="text-[11.5px] text-stone-400 mt-2">Result values are on the attached report. Acknowledge results from the Results inbox.</p>
+        </div>
       );
     };
 
@@ -3128,7 +3223,7 @@
       );
     };
 
-    const SummaryTab = ({ chart, patient, onLink, linking, linkCandidates, onDismissCandidates, isAdmin, onChartChanged }) => {
+    const SummaryTab = ({ chart, patient, onLink, linking, linkCandidates, onDismissCandidates, isAdmin, onChartChanged, onGoTab }) => {
       const canWrite = useCanWrite();
       const canBill = useCanBill();
       const [showLinkExisting, setShowLinkExisting] = useState(false);
@@ -3225,28 +3320,193 @@
           {chart.linked && <AiReviewCard clientId={patient && patient.id} chart={chart} />}
           {/* Session 4.12 Scope D — OVERVIEW is the at-a-glance. The problem
               list, medications, allergies, documents and the timeline each have
-              their OWN place on the tab bar now, so nothing here is the
-              authoritative copy and nothing is rendered twice. */}
-          <div className="grid md:grid-cols-2 gap-0 md:gap-4">
-            <div>
-              <ChartSection title="Problem list" icon="ti-list-details" data={emr.problems} linked={chart.linked}
-                render={(r, i) => chartRow(r.title, [r.code, r.onset && `since ${fmtDate(r.onset)}`].filter(Boolean).join(' · '), r.status, i)} />
-              <ChartSection title="Medications" icon="ti-pill" data={emr.medications} linked={chart.linked}
-                render={(r, i) => chartRow(r.title, r.instructions || (r.authoredOn && fmtDate(r.authoredOn)), r.status, i)} />
-            </div>
-            <div>
-              <ChartSection title="Encounters" icon="ti-stethoscope" data={emr.encounters} linked={chart.linked}
-                render={(r, i) => chartRow(r.type, [r.provider, r.start && fmtTs(r.start)].filter(Boolean).join(' · '), r.status, i)} />
-              <ChartSection title="Vitals (recent)" icon="ti-heart-rate-monitor" data={emr.vitals} linked={chart.linked}
-                render={(r, i) => chartRow(r.name, r.at && fmtTs(r.at), r.value, i)}>
-                {(chart.draftVitals || []).length > 0 && (
-                  <div className="mb-2 pb-2 border-b border-stone-100">
-                    <div className="mb-1"><DraftVitalsChip /></div>
-                    {chart.draftVitals.map((r, i) => chartRow(r.name, r.at && fmtDayLabel(String(r.at).slice(0, 10)), r.value, `draft-${i}`))}
+              their OWN place on the tab bar, so nothing here is the
+              authoritative copy and nothing is rendered twice. 2026-10-12: laid
+              out as the owner's mockup card grid; every card reads only what
+              the chart read already returned. */}
+          <OverviewGrid chart={chart} patient={patient} onGoTab={onGoTab} />
+        </div>
+      );
+    };
+
+    // ── Overview cards (2026-10-12 redesign) ───────────────────────────────
+    // Module scope (the input-focus rule). OvCard is one card; ovState says,
+    // in words, why a card has no rows — the same three states ChartSection
+    // has always told apart: not linked, not enabled yet, and a failed read.
+    const OvCard = ({ title, icon, onMore, moreLabel, className, children }) => (
+      <div className={`card flex flex-col ${className || ''}`}>
+        <div className="flex items-center justify-between gap-2 px-4 pt-3.5 pb-2">
+          <h2 className="serif text-[19px] font-semibold text-primary leading-tight">
+            {icon && <i className={`ti ${icon} mr-1.5 text-accent text-[17px]`} />}{title}
+          </h2>
+          {onMore && <button className="text-stone-400 hover:text-primary" onClick={onMore} aria-label={moreLabel || `Open ${title}`}><i className="ti ti-chevron-right" /></button>}
+        </div>
+        <div className="px-4 pb-4 text-[13px] text-stone-700 flex-1">{children}</div>
+        {onMore && moreLabel && (
+          <div className="px-4 pb-3.5"><button className="text-[12.5px] font-semibold text-primary hover:underline" onClick={onMore}>{moreLabel} →</button></div>
+        )}
+      </div>
+    );
+    const ovState = (data, linked, label) => {
+      if (!linked) return <p className="text-stone-400 text-[12.5px]">Link this patient to OpenEMR to read {label}.</p>;
+      if (!data) return <p className="text-stone-400 text-[12.5px]">Loading…</p>;
+      if (!data.ok && data.permissionPending) return <p className="text-amber-800 text-[12.5px]">OpenEMR has not enabled this read yet. Nothing is wrong with this record.</p>;
+      if (!data.ok) return <p className="text-red-600 text-[12.5px]">Could not be read from OpenEMR. {data.error}</p>;
+      if (!data.rows.length) return <p className="text-stone-400 text-[12.5px]">Nothing on file in OpenEMR.</p>;
+      return null;
+    };
+    // The newest reading of each vital the card shows, matched on the row's
+    // NAME. A vital with no reading shows a dash: the card never fills a gap.
+    const OV_VITALS = [
+      ['BP', /blood pressure|^bp\b|systolic/i],
+      ['HR', /heart rate|pulse/i],
+      ['Temp', /temp/i],
+      ['SpO₂', /oxygen|spo2|o2 sat/i]
+    ];
+    // Splits a served reading into the number to show large and the unit it
+    // came with. Blood pressure arrives as two labelled components and is
+    // shown as systolic/diastolic. The unit is the reading's OWN, never one
+    // this page assumes (a temperature may be °F or °C).
+    const vitalDisplay = (label, value) => {
+      const v = String(value == null ? '' : value).trim();
+      if (!v) return { big: null, small: '' };
+      if (label === 'BP') {
+        const n = v.match(/\d+(?:\.\d+)?/g) || [];
+        return n.length >= 2 ? { big: `${n[0]}/${n[1]}`, small: 'mmHg' } : { big: v, small: '' };
+      }
+      const m = v.match(/^([\d.]+)\s*(.*)$/);
+      return m ? { big: m[1], small: m[2] } : { big: v, small: '' };
+    };
+    const latestVitals = (rows) => OV_VITALS.map(([label, re]) => {
+      const list = rows || [];
+      for (let i = list.length - 1; i >= 0; i--) {
+        if (re.test(String(list[i].name || ''))) return { label, ...vitalDisplay(label, list[i].value), at: list[i].at, draft: !!list[i].draft };
+      }
+      return { label, big: null, small: '', at: null, draft: false };
+    });
+
+    const OvRow = ({ label, children }) => (
+      <div className="grid grid-cols-[110px_1fr] gap-2 py-1">
+        <span className="text-stone-500">{label}</span><span className="min-w-0 break-words">{children || '—'}</span>
+      </div>
+    );
+    const OverviewGrid = ({ chart, patient, onGoTab }) => {
+      const [plan, setPlan] = useState(undefined);
+      useEffect(() => {
+        if (!patient || !patient.id) return;
+        let live = true;
+        api.carePlan(patient.id).then(r => { if (live) setPlan(r || null); }).catch(() => { if (live) setPlan(null); });
+        return () => { live = false; };
+      }, [patient && patient.id]);
+      const emr = chart.emr || {};
+      const b = chart.banner || {};
+      const linked = chart.linked;
+      const go = (t) => onGoTab && (() => onGoTab(t));
+      const active = emr.problems && emr.problems.ok
+        ? emr.problems.rows.filter(r => !/resolved|inactive|remission/i.test(String(r.status || ''))) : [];
+      const meds = emr.medications && emr.medications.ok ? emr.medications.rows.filter(r => !/stopped|completed|cancel|entered/i.test(String(r.status || ''))) : [];
+      const allergies = emr.allergies && emr.allergies.ok ? emr.allergies.rows : [];
+      // Draft readings (a saved, unsigned note) are newer than OpenEMR's.
+      const vitalRows = [...((emr.vitals && emr.vitals.ok) ? emr.vitals.rows : []),
+        ...(chart.draftVitals || []).map(r => ({ ...r, draft: true }))];
+      const vitals = latestVitals(vitalRows);
+      const vitalsAt = vitals.map(v => v.at).filter(Boolean).sort().pop();
+      const encs = emr.encounters && emr.encounters.ok
+        ? [...emr.encounters.rows].sort((x, y) => String(y.start || '').localeCompare(String(x.start || ''))) : [];
+      const last = encs[0] || null;
+      const cp = plan && plan.carePlan;
+      const ins = b.insurance || {};
+      return (
+        <div className="space-y-4">
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-[1.3fr_1fr_1fr_0.8fr]">
+            <OvCard title="Demographics">
+              <OvRow label="Address">
+                {b.address && (b.address.line1 || b.address.city)
+                  ? <>{[b.address.line1, b.address.line2].filter(Boolean).join(', ')}<br />{[b.address.city, b.address.state, b.address.zip].filter(Boolean).join(' ')}</>
+                  : b.addressLine}
+              </OvRow>
+              <OvRow label="Phone">{b.phone}</OvRow>
+              <OvRow label="Emergency contact">
+                {b.responsibleParty && b.responsibleParty.name
+                  ? <>{b.responsibleParty.relationship ? `${b.responsibleParty.relationship} – ` : ''}{b.responsibleParty.name}{b.responsibleParty.phone ? <><br />{b.responsibleParty.phone}</> : null}</>
+                  : null}
+              </OvRow>
+              <OvRow label="Existing PCP">{b.pcp && b.pcp.name ? [b.pcp.name, b.pcp.practice].filter(Boolean).join(', ') : null}</OvRow>
+            </OvCard>
+            <OvCard title="Active Problems" onMore={go('problems')} moreLabel={active.length > 6 ? `View all ${active.length}` : 'View all'}>
+              {ovState(emr.problems, linked, 'problems') || (active.length === 0
+                ? <p className="text-stone-400 text-[12.5px]">No active problems on file.</p>
+                : <ul className="space-y-1.5">{active.slice(0, 6).map(r => (
+                  <li key={r.id} className="flex gap-2"><span className="text-red-500 mt-[1px]">●</span><span>{r.title}</span></li>))}</ul>)}
+            </OvCard>
+            <OvCard title={`Current Medications${meds.length ? ` (${meds.length})` : ''}`} onMore={go('medications')} moreLabel="View all">
+              {ovState(emr.medications, linked, 'medications') || (meds.length === 0
+                ? <p className="text-stone-400 text-[12.5px]">No current medications on file.</p>
+                : <ul className="space-y-1.5">{meds.slice(0, 5).map(r => (
+                  <li key={r.id} className="flex justify-between gap-2">
+                    <span className="flex gap-2 min-w-0"><i className="ti ti-pill text-stone-400 mt-[2px]" /><span className="truncate">{r.title}</span></span>
+                    {r.instructions && <span className="text-stone-500 text-[12px] text-right shrink-0 max-w-[45%] truncate" title={r.instructions}>{r.instructions}</span>}
+                  </li>))}</ul>)}
+            </OvCard>
+            <OvCard title={`Allergies${allergies.length ? ` (${allergies.length})` : ''}`} onMore={go('allergies')}>
+              {ovState(emr.allergies, linked, 'allergies') || (allergies.length === 0
+                ? <p className="text-stone-500 text-[12.5px]"><i className="ti ti-circle-check mr-1" />No known allergies on file.</p>
+                : <ul className="space-y-1.5">{allergies.map(r => (
+                  <li key={r.id} className="flex gap-2"><span className="text-red-500 mt-[1px]">●</span>
+                    <span><b className="font-semibold">{r.title}</b>{r.criticality ? <span className="block text-[11.5px] text-stone-500">{r.criticality} criticality</span> : null}</span></li>))}</ul>)}
+            </OvCard>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-[1.4fr_1fr_1fr_1fr]">
+            <OvCard title="Latest Vitals">
+              {!linked && !(chart.draftVitals || []).length ? ovState(null, false, 'vitals') : (
+                <>
+                  <div className="text-[12px] text-stone-500 mb-2">
+                    {vitalsAt ? fmtDate(String(vitalsAt).slice(0, 10)) : 'No readings on file'}
+                    {vitals.some(v => v.draft) && <DraftVitalsChip />}
                   </div>
-                )}
-              </ChartSection>
-            </div>
+                  <div className="flex flex-wrap gap-y-3">
+                    {vitals.map(v => (
+                      <div key={v.label} className="min-w-0 w-1/2 sm:w-1/4 pr-2">
+                        <div className="text-[11.5px] text-stone-500">{v.label}</div>
+                        <div className="text-[19px] font-semibold text-primary truncate">{v.big || '—'}</div>
+                        {v.small && <div className="text-[11px] text-stone-500 truncate">{v.small}</div>}
+                      </div>
+                    ))}
+                  </div>
+                  {emr.vitals && !emr.vitals.ok && <p className="text-red-600 text-[12px] mt-2">Vitals could not be read from OpenEMR.</p>}
+                </>
+              )}
+            </OvCard>
+            <OvCard title="Care Plan" onMore={go('careplan')} moreLabel="View plan">
+              {plan === undefined ? <p className="text-stone-400 text-[12.5px]">Loading…</p>
+                : !cp ? <p className="text-stone-400 text-[12.5px]">No care plan written yet.</p>
+                : <>
+                  <p className="font-semibold text-primary">{(cp.problems || []).slice(0, 2).join(', ') || `Version ${cp.version}`}</p>
+                  <p className="text-[12px] text-stone-500 mt-0.5">Version {cp.version}{cp.authoredAt ? ` · updated ${fmtDate(String(cp.authoredAt).slice(0, 10))}` : ''}</p>
+                  {cp.providerCoSignStatus === 'pending' && <span className="chip bg-amber-50 text-amber-800 mt-2">Awaiting provider signature</span>}
+                </>}
+            </OvCard>
+            <OvCard title="Last Encounter" onMore={go('encounters')} moreLabel="View encounters">
+              {ovState(emr.encounters, linked, 'encounters') || (last && (
+                <>
+                  <p className="text-[12px] text-stone-500">{last.start ? fmtDate(String(last.start).slice(0, 10)) : 'Undated'}</p>
+                  <p className="font-semibold text-primary">{last.type}</p>
+                  {last.provider && <p className="text-[12px] text-stone-500">{last.provider}</p>}
+                </>
+              ))}
+            </OvCard>
+            <OvCard title="Coverage">
+              {ins.primary || ins.secondary ? (
+                <>
+                  <p className="font-semibold text-primary">{ins.primary || '—'}</p>
+                  {ins.secondary && <p className="text-[12px] text-stone-500">Secondary: {ins.secondary}</p>}
+                  <div className="flex gap-1.5 flex-wrap mt-1.5">
+                    {ins.medicareAdvantage && <span className="chip bg-amber-100 text-amber-800">Medicare Advantage</span>}
+                    {ins.qmb && <span className="chip bg-amber-100 text-amber-800">QMB</span>}
+                  </div>
+                </>
+              ) : <p className="text-stone-400 text-[12.5px]">No coverage on file.</p>}
+            </OvCard>
           </div>
         </div>
       );
@@ -7442,6 +7702,7 @@
       // counts on the Inbox and Results items come from the same reads those
       // screens make; a failed read shows no badge, never a guessed number.
       const [badges, setBadges] = useState({});
+      const [sectionMenu, setSectionMenu] = useState(false);
       const loadBadges = useCallback(() => {
         if (!getToken()) return;
         Promise.allSettled([api.inbox(), api.resultsInbox()]).then(([ib, rs]) => {
@@ -7562,21 +7823,21 @@
       // is the per-patient calendar — removing a working surface is not what a
       // reorganisation is for.
       const tabs = [
-        ['summary', 'Overview'],
-        ['timeline', 'Timeline'],
-        ['encounters', 'Encounters'],
-        ['appts', 'Appointments'],
-        ['problems', 'Problems'],
-        ['medications', 'Medications'],
-        ['allergies', 'Allergies'],
-        ['orders', 'Orders'],
-        ['results', 'Results'],
-        ['imaging', 'Imaging'],
-        ['referrals', 'Referrals'],
-        ['documents', 'Documents'],
-        ['careplan', 'Care Plan'],
-        ['extras', 'Rest of the record'],
-        ['messages', 'Messages']
+        ['summary', 'Overview', 'ti-layout-grid'],
+        ['timeline', 'Timeline', 'ti-timeline'],
+        ['encounters', 'Encounters', 'ti-stethoscope'],
+        ['appts', 'Appointments', 'ti-calendar'],
+        ['problems', 'Problems', 'ti-list-details'],
+        ['medications', 'Medications', 'ti-pill'],
+        ['allergies', 'Allergies', 'ti-alert-triangle'],
+        ['orders', 'Orders', 'ti-clipboard-list'],
+        ['results', 'Results', 'ti-flask'],
+        ['imaging', 'Imaging', 'ti-photo-scan'],
+        ['referrals', 'Referrals', 'ti-send'],
+        ['documents', 'Documents', 'ti-file-text'],
+        ['careplan', 'Care Plan', 'ti-heart-handshake'],
+        ['extras', 'Rest of the record', 'ti-folders'],
+        ['messages', 'Messages', 'ti-message-circle']
       ];
       // One click handler for the sidebar, the phone bottom bar and More.
       // Patients always lands on the list: a chart is reached FROM it.
@@ -7772,7 +8033,37 @@
                   homeVisitFields={(emrStatus && emrStatus.homeVisitFields) || []}
                   visitDraft={chart ? chart.visitDraft : null}
                   onStartVisit={canWrite ? startVisit : null}
-                  onHomeVisitSaved={refreshChart} />
+                  onHomeVisitSaved={refreshChart}
+                  onMessage={() => setTab('messages')} />
+                <div className="bg-white border-b border-stone-200 px-4 lg:px-8 hidden lg:block">
+                  <div className="flex overflow-x-auto -mb-px">
+                    {tabs.map(([k, label]) => (
+                      <div key={k} className={`tabbtn ${tab === k ? 'on' : ''}`} onClick={() => setTab(k)}>{label}</div>
+                    ))}
+                  </div>
+                </div>
+                {/* On a phone the strip becomes a tap-through list of the SAME
+                    tabs (owner mockup 9): a row of fifteen tabs does not fit a
+                    phone, and a sideways-scrolling strip hides most of them. */}
+                <div className="lg:hidden bg-white border-b border-stone-200 px-4 py-2">
+                  <button className="w-full flex items-center justify-between py-1.5 text-primary font-semibold text-[14px]"
+                    onClick={() => setSectionMenu(m => !m)} aria-expanded={sectionMenu}>
+                    <span><i className={`ti ${(tabs.find(t => t[0] === tab) || [])[2] || 'ti-writing'} mr-2`} />{(tabs.find(t => t[0] === tab) || [])[1] || 'Visit'}</span>
+                    <span className="text-[12px] text-stone-500 flex items-center gap-1">Sections<i className={`ti ti-chevron-${sectionMenu ? 'up' : 'down'}`} /></span>
+                  </button>
+                  {sectionMenu && (
+                    <div className="mt-2 card overflow-hidden">
+                      {tabs.map(([k, label, icon]) => (
+                        <button key={k} type="button" onClick={() => { setTab(k); setSectionMenu(false); }}
+                          className={`cw-row w-full text-left flex items-center gap-3 px-4 py-3 border-b border-stone-100 last:border-0 ${tab === k ? 'on' : ''}`}>
+                          <i className={`ti ${icon} text-[18px] text-primary`} />
+                          <span className="flex-1 text-[14px] font-semibold text-primary">{label}</span>
+                          <i className="ti ti-chevron-right text-stone-400" />
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 {/* The H&P is NOT a tab (Scope D1) — it opens as a visit from
                     the banner. So when one is open nothing on the tab bar is
                     highlighted, and a clinician needs to be told where they are
@@ -7787,17 +8078,11 @@
                     </button>
                   </div>
                 )}
-                <div className="bg-white border-b border-stone-200 px-4 lg:px-8">
-                  <div className="flex overflow-x-auto -mb-px">
-                    {tabs.map(([k, label]) => (
-                      <div key={k} className={`tabbtn ${tab === k ? 'on' : ''}`} onClick={() => setTab(k)}>{label}</div>
-                    ))}
-                  </div>
-                </div>
                 <div className="p-4 lg:p-7">
                   {tab === 'summary' && <SummaryTab chart={chart} patient={sel} onLink={link} linking={linking}
                     linkCandidates={linkCandidates} onDismissCandidates={() => { setLinkCandidates([]); setErr(''); }}
-                    isAdmin={access.role === 'admin'} onChartChanged={() => { loadPatients(); refreshChart(); }} />}
+                    isAdmin={access.role === 'admin'} onChartChanged={() => { loadPatients(); refreshChart(); }}
+                    onGoTab={setTab} />}
                   {tab === 'appts' && <ApptsTab patient={sel} patients={patients || []} chart={chart} onDocumentHp={(eid) => { setHpApptEid(eid); setTab('visit'); }}
                     onEncounterCreated={(euuid) => { setEncTarget(euuid); setTab('encounters'); }} />}
                   {tab === 'encounters' && <EncountersTab patient={sel} chart={chart} initialEuuid={encTarget} onOpened={() => setEncTarget(null)} onChartChanged={() => { loadPatients(); refreshChart(); }} />}
