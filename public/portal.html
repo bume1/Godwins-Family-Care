@@ -558,6 +558,18 @@
       // still loads its own copy through the shared component.
       // Channels this login may start, each with availability and the reason
       // when it is off (Session 9's route; the server decides).
+      // Family & Caregivers (redesign): who has access, open invites, and a new invite.
+      getGfcFamily: (token) =>
+        fetch(`${API_URL}/api/gfc/family`, { headers: { 'Authorization': `Bearer ${token}` } }).then(handleResponse).catch(asError),
+      inviteGfcFamily: (token, invite) =>
+        fetch(`${API_URL}/api/gfc/family/invites`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify(invite)
+        }).then(handleResponse).catch(asError),
+      cancelGfcFamilyInvite: (token, id) =>
+        fetch(`${API_URL}/api/gfc/family/invites/${encodeURIComponent(id)}/cancel`, {
+          method: 'POST', headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(asError),
+
       getMessageChannels: (token) =>
         fetch(`${API_URL}/api/messaging/channels`, {
           headers: { 'Authorization': `Bearer ${token}` }
@@ -6777,6 +6789,110 @@
       );
     };
 
+    // ── Family & Caregivers (owner mockup 10) ─────────────────────────────
+    // Who has access to this portal, and inviting someone new. An invite is a
+    // REQUEST: the office confirms it and emails their sign-in details. A
+    // Power of Attorney is never granted from here; the office asks for the
+    // document. Staff (the care team) are on My Care → Care Team, not here.
+    const GfcFamily = ({ token }) => {
+      const [d, setD] = useState(null);
+      const [err, setErr] = useState('');
+      const [open, setOpen] = useState(false);
+      const [form, setForm] = useState({ name: '', email: '', relationship: '', saysPoa: false });
+      const [busy, setBusy] = useState(false);
+      const [msg, setMsg] = useState('');
+      const [formErr, setFormErr] = useState('');
+      const load = useCallback(async () => {
+        const r = await api.getGfcFamily(token);
+        if (r.error) setErr(r.error); else { setD(r); setErr(''); }
+      }, [token]);
+      useEffect(() => { load(); }, [load]);
+      const send = async () => {
+        setBusy(true); setFormErr(''); setMsg('');
+        const r = await api.inviteGfcFamily(token, form);
+        setBusy(false);
+        if (r.error) { setFormErr(r.error); return; }   // what they typed stays on screen
+        setMsg(r.message || 'Invite sent to the office.');
+        setForm({ name: '', email: '', relationship: '', saysPoa: false });
+        setOpen(false);
+        load();
+      };
+      const cancel = async (id) => { const r = await api.cancelGfcFamilyInvite(token, id); if (r.error) setMsg(r.error); load(); };
+      if (err) return <div className="gfc-body"><h2 className="disp">Family & Caregivers</h2><div className="err">{err}</div></div>;
+      if (!d) return <div className="gfc-body" style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}><div className="gfc-spin" /></div>;
+      const pending = d.invites.filter(i => i.status === 'pending');
+      const declined = d.invites.filter(i => i.status === 'declined');
+      return (
+        <div className="gfc-body">
+          <h2 className="disp">Family & Caregivers</h2>
+          {d.canManage && (
+            <div className="card" style={{ marginTop: 14 }}>
+              <div className="sech" style={{ margin: '0 0 6px' }}><h3>Add a family member</h3></div>
+              <p className="sub" style={{ marginTop: 0 }}>Invite someone you trust to follow your care. The office confirms each invite, then emails them how to sign in.</p>
+              {!d.roiFamilySigned && <p className="sub" style={{ color: 'var(--gold-ink)' }}><i className="ti ti-info-circle" /> They can sign in once your family Release of Information is signed. The office will help with that.</p>}
+              {msg && <p className="micro" style={{ justifyContent: 'flex-start' }}><i className="ti ti-check" />{msg}</p>}
+              {!open && <button className="btn line" onClick={() => { setOpen(true); setMsg(''); }}><i className="ti ti-plus" style={{ verticalAlign: -2 }} /> Add a family member</button>}
+              {open && (
+                <React.Fragment>
+                  <div className="fld"><label>Their name</label><input type="text" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} /></div>
+                  <div className="fld"><label>Their email</label><input type="email" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} /></div>
+                  <div className="fld"><label>How are they related to you?</label>
+                    <select value={form.relationship} onChange={e => setForm({ ...form, relationship: e.target.value })}>
+                      <option value="">Choose one</option>
+                      {d.relationships.map(r => <option key={r} value={r}>{r}</option>)}
+                    </select>
+                  </div>
+                  <label className={`check ${form.saysPoa ? 'on' : ''}`} style={{ marginTop: 12 }} onClick={() => setForm({ ...form, saysPoa: !form.saysPoa })}>
+                    <span className="box">{form.saysPoa && <i className="ti ti-check" />}</span>
+                    They are my Power of Attorney
+                  </label>
+                  {form.saysPoa && <p className="sub" style={{ marginTop: 0 }}>The office will ask for a copy of the Power of Attorney document before giving them full access.</p>}
+                  {formErr && <div className="err">{formErr}</div>}
+                  <div className="btnrow">
+                    <button className="btn" disabled={busy} onClick={send}>{busy ? 'Sending…' : 'Send invite'}</button>
+                    <button className="btn line" disabled={busy} onClick={() => { setOpen(false); setFormErr(''); }}>Cancel</button>
+                  </div>
+                </React.Fragment>
+              )}
+            </div>
+          )}
+          {pending.length > 0 && (
+            <React.Fragment>
+              <div className="sech"><h3>Waiting for the office</h3></div>
+              {pending.map(i => (
+                <div className="lrow" key={i.id} style={{ cursor: 'default' }}>
+                  <Avatar initials={nameInitialsOf(i.name)} size={42} bg="var(--wash)" />
+                  <span className="lm"><b>{i.name}</b><span>{i.relationship} · invited {prettyDate(georgiaDate(i.requestedAt))}</span></span>
+                  <button className="msg" style={{ background: 'none', border: '1px solid var(--edge2)', borderRadius: 10, padding: '7px 10px', fontSize: 12.5, fontWeight: 600, color: 'var(--navy)', cursor: 'pointer' }} onClick={() => cancel(i.id)}>Cancel</button>
+                </div>
+              ))}
+            </React.Fragment>
+          )}
+          <div className="sech"><h3>Who has access</h3></div>
+          {d.people.length === 0 && <p className="sub" style={{ marginTop: 0 }}>No family members have access yet.</p>}
+          {d.people.map(p => (
+            <div className="lrow" key={p.id} style={{ cursor: 'default' }}>
+              <Avatar initials={nameInitialsOf(p.name)} size={42} />
+              <span className="lm"><b>{p.name}{p.isYou ? ' (you)' : ''}</b><span style={{ whiteSpace: 'normal' }}>{[p.relationship, p.access].filter(Boolean).join(' · ')}</span></span>
+            </div>
+          ))}
+          {d.canManage && d.people.some(p => !p.isPoa) && <p className="sub">What family members can see is set under Settings → Sharing.</p>}
+          {declined.length > 0 && (
+            <React.Fragment>
+              <div className="sech"><h3>Not approved</h3></div>
+              {declined.map(i => (
+                <div className="lrow" key={i.id} style={{ cursor: 'default' }}>
+                  <Avatar initials={nameInitialsOf(i.name)} size={42} bg="#f1ece2" />
+                  <span className="lm"><b>{i.name}</b><span style={{ whiteSpace: 'normal' }}>{i.declineReason}</span></span>
+                </div>
+              ))}
+            </React.Fragment>
+          )}
+        </div>
+      );
+    };
+    const nameInitialsOf = (name) => String(name || '').split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join('') || '?';
+
     // ── Settings: who can see what, and signing out ───────────────────────
     const GfcSettings = ({ me, token, readOnly, onSharingSaved }) => (
       <div className="gfc-body">
@@ -7012,6 +7128,7 @@
         ...(clinicalAvailable ? [{ id: 'results', icon: 'ti-flask', label: 'Test Results', hint: 'Lab and imaging reports' }] : []),
         ...(clinicalTab ? [{ id: 'health', icon: 'ti-heart-rate-monitor', label: 'Health Records', short: 'Records', hint: 'Visit summaries, medicines, allergies' }] : []),
         { id: 'messages', icon: 'ti-message-2', label: 'Messages', hint: 'Your care team', badge: unread },
+        { id: 'family', icon: 'ti-users', label: 'Family & Caregivers', hint: 'Who can follow your care' },
         { id: 'documents', icon: 'ti-folder', label: 'Documents', short: clinicalTab ? undefined : 'Records', hint: 'Forms, consents and records' },
         { id: 'settings', icon: 'ti-settings', label: 'Settings', hint: 'Sharing and sign out' }
       ];
@@ -7055,6 +7172,7 @@
                 server (requireClientForIntake), so a POA got a button that always
                 answered 403. On this tab every family login, POA included, reads. */}
             {view === 'documents' && <GfcDocuments docs={docs} readOnly={!!isFamily} token={token} onOpenTransferRoi={() => setShowTransferRoi(true)} onRefresh={refreshDocs} clinicalDocs={clinicalAvailable ? clinicalDocs : null} docsErr={docsErr} clinicalDocsErr={clinicalDocsErr} />}
+            {view === 'family' && <GfcFamily token={token} />}
             {view === 'settings' && <GfcSettings me={me} token={token} readOnly={readOnly} onSharingSaved={(sharing) => setMe(m => m ? { ...m, sharing } : m)} />}
             {view === 'more' && <GfcMore items={moreItems} onNavigate={go} unread={unread} />}
             {!data && dataErr && (view === 'home' || view === 'care') && (

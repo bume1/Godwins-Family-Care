@@ -56,6 +56,7 @@ const apptTypes = require('./appointmentTypes');
 const screenings = require('./screenings');  // PHQ-2/9, GAD-7, SDOH results (social work, 2026-10-11)  // clinical workspace pure helpers (Session 4.1)
 // Session 4.3 — patient/family/POA clinical read rules + the case-manager read/write split
 const patientRead = require('./patientReadRepository');
+const familyInvites = require('./familyInvites');
 const patientPublish = require('./patientPublish');   // Portal P1: the published copies the portal reads (patients never read OpenEMR)
 // Session 4.8 — the clinical role enum, capability matrix and credential
 // ceiling. THE one place that answers "may this person do this"; the clinical
@@ -8029,6 +8030,84 @@ app.put('/api/gfc/sharing', authenticateToken, requireEnrolledClient, async (req
     res.json({ message: 'Sharing settings saved', sharing });
   } catch (error) {
     console.error('GFC sharing update error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================
+// FAMILY & CAREGIVERS (portal redesign, owner 2026-10-12)
+// The patient, or their POA, sees who has access and invites someone new.
+// An invite creates NOTHING but a request: an admin approves it, which makes
+// a plain family account (never a POA). The family ROI consent still decides
+// what that account can open. See familyInvites.js.
+// ============================================================
+app.get('/api/gfc/family', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const acting = patientRead.buildActingIdentity(req.user, client);
+    const canManage = req.user.role === config.ROLES.CLIENT || acting.isPoa;
+    const users = await getUsers();
+    const sharing = patientRead.normalizeSharing(client.sharing);
+    const people = users
+      .filter(u => u && u.role === config.ROLES.FAMILY && String(u.familyOfClientId || '') === String(client.id) && u.accountStatus !== 'inactive')
+      .map(u => ({ id: u.id, name: u.name, relationship: u.familyRelationship || null, isPoa: !!u.familyIsPoa, access: familyInvites.accessSummary(u, sharing), isYou: u.id === req.user.id }));
+    // Plain family see who else has access, but not the invites or their emails.
+    const invites = canManage
+      ? ((await db.get('family_invites')) || []).filter(i => i && i.clientId === client.id && i.status !== 'cancelled' && i.status !== 'approved').map(familyInvites.publicInvite)
+      : [];
+    res.json({ people, invites, canManage, roiFamilySigned: isConsentSatisfied((client.consents || {}).roiFamily), relationships: familyInvites.RELATIONSHIPS });
+  } catch (error) {
+    console.error('GFC family list error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/gfc/family/invites', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const acting = patientRead.buildActingIdentity(req.user, client);
+    if (req.user.role !== config.ROLES.CLIENT && !acting.isPoa) {
+      return res.status(403).json({ error: 'Only the client or their designated Power of Attorney can invite family.', code: 'FAMILY_READ_ONLY' });
+    }
+    const n = familyInvites.normalizeInvite(req.body);
+    if (n.error) return res.status(400).json({ error: n.error, code: n.code });
+    const invites = (await db.get('family_invites')) || [];
+    const clash = familyInvites.checkInvite(n.value, { users: await getUsers(), invites, clientId: client.id });
+    if (clash) return res.status(409).json(clash);
+    const row = familyInvites.buildInviteRow({ id: uuidv4(), clientId: client.id, value: n.value, by: req.user, at: new Date().toISOString() });
+    invites.push(row);
+    await db.set('family_invites', invites);
+    // The audit row says an invite was made, never who it names.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'family_invite_requested', 'client', client.id,
+      { role: req.user.role, actingFor: acting.actingFor, inviteId: row.id, saysPoa: row.saysPoa });
+    res.json({ invite: familyInvites.publicInvite(row), message: 'Invite sent to the office. We will confirm it and email them their sign-in details.' });
+  } catch (error) {
+    console.error('GFC family invite error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/gfc/family/invites/:inviteId/cancel', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const acting = patientRead.buildActingIdentity(req.user, client);
+    if (req.user.role !== config.ROLES.CLIENT && !acting.isPoa) {
+      return res.status(403).json({ error: 'Only the client or their designated Power of Attorney can change invites.', code: 'FAMILY_READ_ONLY' });
+    }
+    const invites = (await db.get('family_invites')) || [];
+    const i = invites.findIndex(x => x && x.id === req.params.inviteId && x.clientId === client.id);
+    if (i === -1) return res.status(404).json({ error: 'Invite not found', code: 'INVITE_NOT_FOUND' });
+    const d = familyInvites.decide(invites[i], { decision: 'cancelled', by: req.user, at: new Date().toISOString() });
+    if (d.error) return res.status(409).json(d);
+    invites[i] = d.row;
+    await db.set('family_invites', invites);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'family_invite_cancelled', 'client', client.id, { inviteId: d.row.id });
+    res.json({ invite: familyInvites.publicInvite(d.row) });
+  } catch (error) {
+    console.error('GFC family invite cancel error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -16261,6 +16340,65 @@ app.get('/api/gfc/admin/enrollment/list', authenticateToken, requireEnrollmentSt
 });
 
 // GET /api/gfc/admin/enrollment/:clientId — full submission detail.
+// Family invites waiting on staff (portal redesign, 2026-10-12). Staff read;
+// an ADMIN decides, because approving creates an account. Approving makes a
+// plain family account linked to this client and emails its sign-in details.
+// It never sets familyIsPoa: a patient saying "this is my POA" is a prompt to
+// ask for the document, and the admin sets POA on the user form once it is
+// verified, as before.
+app.get('/api/gfc/admin/enrollment/:clientId/family-invites', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const invites = ((await db.get('family_invites')) || []).filter(i => i && i.clientId === req.params.clientId);
+    res.json({ invites: invites.sort((a, b) => String(b.requestedAt).localeCompare(String(a.requestedAt))) });
+  } catch (error) {
+    console.error('Family invites read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/gfc/admin/enrollment/:clientId/family-invites/:inviteId/decide', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const decision = req.body && req.body.decision;
+    if (decision !== 'approved' && decision !== 'declined') return res.status(400).json({ error: 'decision must be approved or declined', code: 'INVITE_BAD_DECISION' });
+    const invites = (await db.get('family_invites')) || [];
+    const i = invites.findIndex(x => x && x.id === req.params.inviteId && x.clientId === req.params.clientId);
+    if (i === -1) return res.status(404).json({ error: 'Invite not found', code: 'INVITE_NOT_FOUND' });
+    const at = new Date().toISOString();
+    const d = familyInvites.decide(invites[i], { decision, by: req.user, at, reason: req.body && req.body.reason });
+    if (d.error) return res.status(d.code === 'INVITE_DECLINE_REASON_REQUIRED' ? 400 : 409).json(d);
+    let newUser = null;
+    if (decision === 'approved') {
+      const users = await getUsers();
+      const row = invites[i];
+      // Checked again at approval: an account may have been made since the ask.
+      if (users.some(u => u && String(u.email || '').toLowerCase() === row.email)) {
+        return res.status(409).json({ error: 'An account with that email already exists. Link it on the user form instead.', code: 'INVITE_EMAIL_IN_USE' });
+      }
+      const plain = generateTempPassword({ email: row.email });
+      newUser = {
+        id: uuidv4(), email: row.email, name: row.name,
+        password: await bcrypt.hash(plain, config.BCRYPT_SALT_ROUNDS),
+        role: config.ROLES.FAMILY, familyOfClientId: req.params.clientId, familyIsPoa: false,
+        familyRelationship: row.relationship, invitedThrough: row.id,
+        isManager: false, hasServicePortalAccess: false, hasAdminHubAccess: false, hasImplementationsAccess: false, hasClientPortalAdminAccess: false,
+        createdAt: at
+      };
+      users.push(newUser);
+      await db.set('users', users);
+      invalidateUsersCache();
+      sendWelcomeEmail(newUser, plain).catch(err => console.error('Welcome email error (non-fatal):', err));
+    }
+    invites[i] = newUser ? { ...d.row, userId: newUser.id } : d.row;
+    await db.set('family_invites', invites);
+    await logActivity(req.user.id, req.user.name || req.user.email, `family_invite_${decision}`, 'client', req.params.clientId,
+      { inviteId: d.row.id, userId: newUser ? newUser.id : null });
+    res.json({ invite: invites[i], userId: newUser ? newUser.id : null });
+  } catch (error) {
+    console.error('Family invite decision error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.get('/api/gfc/admin/enrollment/:clientId', authenticateToken, requireEnrollmentStaff, async (req, res) => {
   try {
     const users = await getUsers();

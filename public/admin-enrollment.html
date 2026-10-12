@@ -186,6 +186,10 @@
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ serviceLine })
       }),
       documents: (id) => authedFetch(`/api/gfc/admin/enrollment/${id}/documents`),
+      familyInvites: (id) => authedFetch(`/api/gfc/admin/enrollment/${id}/family-invites`),
+      decideFamilyInvite: (id, inviteId, decision, reason) => authedFetch(`/api/gfc/admin/enrollment/${id}/family-invites/${inviteId}/decide`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision, reason })
+      }),
       requestDocuments: (id, items, dueAt) => authedFetch(`/api/gfc/admin/enrollment/${id}/documents/request`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items, dueAt })
       }),
@@ -1673,6 +1677,55 @@
       );
     };
 
+    // Family invites the patient (or their POA) sent from the portal
+    // (redesign, 2026-10-12). Staff see them; an ADMIN approves, which creates
+    // a plain family account and emails the sign-in. Approving never makes
+    // someone a POA: when the patient says they are, ask for the document and
+    // set POA on the user form once it is verified.
+    const FamilyInvites = ({ clientId, isAdmin }) => {
+      const [rows, setRows] = useState(null);
+      const [err, setErr] = useState('');
+      const [busy, setBusy] = useState('');
+      const [reason, setReason] = useState({});
+      const load = useCallback(() => { api.familyInvites(clientId).then(r => setRows(r.invites || [])).catch(e => setErr(e.message)); }, [clientId]);
+      useEffect(() => { load(); }, [load]);
+      const decide = (row, decision) => {
+        setBusy(row.id); setErr('');
+        api.decideFamilyInvite(clientId, row.id, decision, reason[row.id]).then(load).catch(e => setErr(e.message)).finally(() => setBusy(''));
+      };
+      if (!rows) return <Section title="Family invites"><div className="text-sm text-gray-400">{err || 'Loading…'}</div></Section>;
+      if (rows.length === 0) return null;
+      return (
+        <Section title="Family invites">
+          {err && <div className="text-sm text-danger-600 mb-2">{err}</div>}
+          <div className="space-y-3">
+            {rows.map(r => (
+              <div key={r.id} className="border rounded-lg p-3">
+                <div className="flex justify-between gap-3">
+                  <div>
+                    <div className="font-semibold">{r.name} <span className="text-gray-500 font-normal">· {r.relationship}</span></div>
+                    <div className="text-sm text-gray-600">{r.email}</div>
+                    <div className="text-xs text-gray-500 mt-1">Requested by {(r.requestedBy && r.requestedBy.name) || 'the client'} · {new Date(r.requestedAt).toLocaleDateString()}</div>
+                    {r.saysPoa && <div className="text-xs mt-1 text-amber-700">The patient says this person is their Power of Attorney. Get a copy of the document, then set POA on their user record.</div>}
+                    {r.status === 'declined' && <div className="text-xs mt-1 text-gray-600">Declined: {r.declineReason}</div>}
+                  </div>
+                  <span className="text-xs font-semibold uppercase text-gray-500">{r.status}</span>
+                </div>
+                {r.status === 'pending' && isAdmin && (
+                  <div className="mt-3 flex flex-wrap gap-2 items-center">
+                    <button className="px-3 py-1.5 rounded bg-primary text-white text-sm disabled:opacity-50" disabled={busy === r.id} onClick={() => decide(r, 'approved')}>Approve and email sign-in</button>
+                    <input className="border rounded px-2 py-1.5 text-sm flex-1 min-w-[180px]" placeholder="Reason, if declining (the patient sees it)" value={reason[r.id] || ''} onChange={e => setReason({ ...reason, [r.id]: e.target.value })} />
+                    <button className="px-3 py-1.5 rounded border text-sm disabled:opacity-50" disabled={busy === r.id} onClick={() => decide(r, 'declined')}>Decline</button>
+                  </div>
+                )}
+                {r.status === 'pending' && !isAdmin && <div className="text-xs text-gray-500 mt-2">An admin approves family invites.</div>}
+              </div>
+            ))}
+          </div>
+        </Section>
+      );
+    };
+
     const DetailView = ({ clientId, user, onBack }) => {
       // THREE answers, because the API gives three shapes of "may write here",
       // and each is asked once so no control can drift from the route behind
@@ -2090,6 +2143,9 @@
 
             <div className="lg:col-span-2">
               <DocumentExchange clientId={clientId} canEdit={canEdit} isAdmin={isAdminRole(user)} />
+            </div>
+            <div className="lg:col-span-2">
+              <FamilyInvites clientId={clientId} isAdmin={isAdminRole(user)} />
             </div>
           </div>
         </div>
