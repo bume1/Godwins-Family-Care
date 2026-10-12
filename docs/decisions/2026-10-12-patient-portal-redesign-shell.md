@@ -64,8 +64,15 @@
 2. Test result values, ranges and trends.
 3. Patient booking. 4. Video visits on Google Meet. 5. Billing and payments.
 
-## Open for the owner
-- The house photo for the banner (desktop shows a beige stand-in) and staff headshots.
-- Where result values come from (staff entry, a lab feed, or the PDF).
-- Booking: clinician working hours in the app, or request-and-confirm.
-- Billing: Stripe account, what creates a bill, what "Financial assistance" opens.
+## Owner answers (2026-10-12), and what is still open
+- Photo: supplied and in use. Staff headshots: still to come (initials until then).
+- Results: values are read from the lab PDF with Gemini and trended; any high/low
+  flag comes from the lab's own report. **Open:** Gemini must run through Vertex AI
+  (BAA-covered), not the Gemini API; confirm it replaces the planned Bedrock reader;
+  confirm whether a person checks values before a patient sees them.
+- Booking: clinicians set availability in the app; a clinician or care coordinator
+  confirms, which writes to OpenEMR; the clinical Google Calendar mirrors visits the
+  app books (not ones made directly in OpenEMR).
+- Video: Google Meet, created with the calendar event.
+- Billing: no Stripe account yet; any Stripe account works if no PHI reaches it.
+  **Open:** what creates a bill, and what "Financial assistance" opens.
