@@ -184,6 +184,49 @@ const login = async (email, password) => {
   ok('the engine validates arrays of plain sentences',
     !scalarOk.error && scalarOk.value.questionsForClinician.length === 1, scalarOk);
 
+  // ---- 7. records extraction rides the same gates ----------------------
+  console.log('\n--- 7. reading outside records is the same machinery, same gates ---');
+  const recNoDocs = await call('POST', `/api/clinical/patients/${clientId}/ai/extract-records`, cTok, { documentIds: [] });
+  // The boundary is checked BEFORE the selection, so with nothing configured
+  // this is a 503 — which is itself the thing worth asserting: no document is
+  // fetched for a call that was never going to be allowed.
+  ok('records extraction refuses at the boundary before fetching anything',
+    recNoDocs.status === 503 && recNoDocs.body.code === 'MODEL_BOUNDARY_REFUSED', recNoDocs.body);
+  const recCm = await call('POST', `/api/clinical/patients/${clientId}/ai/extract-records`, rTok, { documentIds: ['x'] });
+  ok('a case manager may NOT read records with AI', recCm.status === 403, recCm.status);
+  const recPatient = await call('POST', `/api/clinical/patients/${clientId}/ai/extract-records`, pTok, { documentIds: ['x'] });
+  ok('a patient may NOT read records with AI', recPatient.status === 403, recPatient.status);
+
+  // The schema is the safety surface here: no code field, ever (§10.4).
+  const serverTxt = require('fs').readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const recSchema = serverTxt.slice(
+    serverTxt.indexOf('const AI_RECORDS_SCHEMA'),
+    serverTxt.indexOf('\n});', serverTxt.indexOf('const AI_RECORDS_SCHEMA'))
+  );
+  ok('the records schema carries no ICD-10, CPT or any other code field',
+    recSchema.length > 200 && !/icd|cpt|hcpcs|code/i.test(recSchema));
+
+  // ---- 8. the admin go-live surface -------------------------------------
+  console.log('\n--- 8. the admin setup surface is honest about what it knows ---');
+  const aiStatus = await call('GET', '/api/admin/ai/status', admin);
+  ok('the admin AI status answers', aiStatus.status === 200, aiStatus.body);
+  ok('  it reports NOT configured here', aiStatus.body.configured === false, aiStatus.body.configured);
+  ok('  it names the retention window', aiStatus.body.retentionDays === 180, aiStatus.body.retentionDays);
+  ok('  it never returns a credential or a file path',
+    !/private_key|BEGIN |\/.*\.json/.test(JSON.stringify(aiStatus.body)), aiStatus.body.credentialType);
+  ok('  and it says plainly that configured is not proof',
+    /Only a live invocation proves/.test(String(aiStatus.body.proof)), aiStatus.body.proof);
+
+  const aiTest = await call('POST', '/api/admin/ai/test', admin);
+  ok('the go-live test refuses rather than pretending to pass',
+    aiTest.status === 503 && aiTest.body.ok === false, aiTest.body);
+  const aiTestClin = await call('POST', '/api/admin/ai/test', cTok);
+  ok('a clinician cannot run the admin go-live test', aiTestClin.status === 403, aiTestClin.status);
+  const recheck = await call('POST', '/api/admin/ai/recheck', admin);
+  ok('an admin can re-run the Google-side checks on demand', recheck.status === 200, recheck.status);
+  ok('  and a check that could not run is never reported as a pass',
+    recheck.body.checks && recheck.body.checks.ok === false, recheck.body.checks);
+
   console.log(`\n${pass}/${pass + fail} assertions passed${fail ? ` — ${fail} FAILED` : ''}`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error('Probe crashed:', e); process.exit(1); });

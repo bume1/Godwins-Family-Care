@@ -17398,7 +17398,15 @@ const aiReviewGetHandler = async (req, res) => {
         // Said on every read, because the screen must never imply otherwise.
         notPartOfRecord: true
       },
-      canDecide: clinicalRoles.canClinicalWrite(req.user)
+      canDecide: clinicalRoles.canClinicalWrite(req.user),
+      // F3. WHICH "Add" BUTTONS THIS VIEWER MAY USE, answered by the server
+      // from the same capability the target route enforces. A page that works
+      // this out itself is a page that offers a button the route then refuses.
+      can: {
+        medRec: clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.MED_REC),
+        allergy: clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.PROBLEM_LIST_WRITE),
+        problem: clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.PROBLEM_LIST_WRITE)
+      }
     });
   } catch (error) {
     console.error('AI review read error:', error);
@@ -17495,6 +17503,246 @@ const purgeAiReviews = async () => {
   }
 };
 setInterval(purgeAiReviews, 24 * 60 * 60 * 1000).unref?.();
+
+// ── F: reading outside records into proposals ─────────────────────────────
+//
+// Owner decision 6 approves this now, though §10.4 had deferred it until
+// volume justified it. It is the SAME machinery as the chart review — same
+// engine, same schema validation, same background job, same ai_reviews row —
+// pointed at a handful of documents instead of a whole chart.
+//
+// NO CODE FIELD, ANYWHERE (F2, §10.4). No ICD-10, no CPT, nothing that looks
+// like one. Coding is a clinician's decision with a billing consequence, and a
+// code proposed by a model reads exactly as plausibly as a right one. A test
+// fails the build if a code field appears in this schema.
+const AI_RECORDS_SCHEMA = Object.freeze({
+  fields: {
+    medications: {
+      type: 'array',
+      items: {
+        name: { type: 'string', maxLength: 200, required: true },
+        dose: { type: 'string', maxLength: 100 },
+        route: { type: 'string', maxLength: 60 },
+        frequency: { type: 'string', maxLength: 100 },
+        status: { type: 'string', required: true, enum: ['active', 'stopped', 'unclear'] },
+        // Set against the chart sections sent with the documents. "I cannot
+        // tell" is treated as NOT matching, because a wrong "already in the
+        // chart" is how a medication quietly fails to get added.
+        matchesChart: { type: 'boolean', required: true },
+        citation: {
+          type: 'object',
+          items: {
+            sourceId: { type: 'string', maxLength: 120, required: true },
+            page: { type: 'number' },
+            quote: { type: 'string', maxLength: 300 }
+          }
+        }
+      }
+    },
+    allergies: {
+      type: 'array',
+      items: {
+        substance: { type: 'string', maxLength: 200, required: true },
+        reaction: { type: 'string', maxLength: 200 },
+        matchesChart: { type: 'boolean', required: true },
+        citation: {
+          type: 'object',
+          items: {
+            sourceId: { type: 'string', maxLength: 120, required: true },
+            page: { type: 'number' },
+            quote: { type: 'string', maxLength: 300 }
+          }
+        }
+      }
+    },
+    problems: {
+      type: 'array',
+      items: {
+        description: { type: 'string', maxLength: 300, required: true },
+        matchesChart: { type: 'boolean', required: true },
+        citation: {
+          type: 'object',
+          items: {
+            sourceId: { type: 'string', maxLength: 120, required: true },
+            page: { type: 'number' },
+            quote: { type: 'string', maxLength: 300 }
+          }
+        }
+      }
+    },
+    events: {
+      type: 'array',
+      items: {
+        type: { type: 'string', required: true, enum: ['hospitalization', 'er_visit', 'procedure', 'imaging', 'lab', 'other'] },
+        date: { type: 'string', maxLength: 40 },
+        description: { type: 'string', maxLength: 400, required: true },
+        citation: {
+          type: 'object',
+          items: {
+            sourceId: { type: 'string', maxLength: 120, required: true },
+            page: { type: 'number' },
+            quote: { type: 'string', maxLength: 300 }
+          }
+        }
+      }
+    },
+    unreadable: { type: 'array', itemType: 'string', maxLength: 300 }
+  }
+});
+
+// Every proposed item must cite a source that was actually sent, exactly as a
+// review finding must. The shape differs — one `citation` rather than a list —
+// so the check is its own, and it drops rather than softens.
+const enforceRecordCitations = (output, manifest) => {
+  const ids = chartPacket.manifestIds(manifest);
+  let dropped = 0;
+  const keep = (list) => (Array.isArray(list) ? list : []).filter(row => {
+    const c = row && row.citation;
+    if (c && ids.has(String(c.sourceId))) return true;
+    dropped++;
+    return false;
+  });
+  return {
+    output: {
+      ...output,
+      medications: keep(output && output.medications),
+      allergies: keep(output && output.allergies),
+      problems: keep(output && output.problems),
+      events: keep(output && output.events)
+    },
+    droppedUncited: dropped
+  };
+};
+
+const runRecordsExtraction = async ({ reviewId, req, client, documentIds }) => {
+  try {
+    const wanted = new Set((documentIds || []).map(String));
+    const uploads = (await loadRows('client_document_uploads'))
+      .filter(u => u && String(u.clientId) === String(client.id) && wanted.has(String(u.id)) && u.status !== 'rejected');
+
+    const notRead = [];
+    const documents = [];
+    for (const u of uploads) {
+      try {
+        documents.push({
+          clientId: client.id,
+          sourceId: `${chartPacket.PREFIX.DOCUMENT}:upload:${u.id}`,
+          id: u.id, title: u.fileName || u.kind || 'Document',
+          date: u.at || u.uploadedAt || null,
+          mimeType: u.mimeType || 'application/pdf',
+          bytes: await googledrive.downloadFileBuffer(u.driveFileId)
+        });
+      } catch (e) {
+        notRead.push({ sourceId: `doc:upload:${u.id}`, why: 'the stored file could not be retrieved' });
+      }
+    }
+    if (!documents.length) {
+      await saveAiReview(reviewId, {
+        status: AI_REVIEW_STATUS.FAILED,
+        finishedAt: new Date().toISOString(),
+        error: 'None of those documents could be read.',
+        code: 'AI_NO_DOCUMENTS'
+      });
+      return;
+    }
+
+    // ONLY the three chart sections needed for matching go with them (F1).
+    // A records extraction is not a chart review and does not need the chart.
+    const emr = {};
+    if (client.openEmrPatientId && openemr.isConfigured()) {
+      const api = openemr.forActor(req.user);
+      const [meds, allergies, problems] = await Promise.allSettled([
+        api.getMedicationRequests(client.openEmrPatientId),
+        api.getAllergies(client.openEmrPatientId),
+        api.getProblems(client.openEmrPatientId)
+      ]);
+      if (meds.status === 'fulfilled') emr.medications = meds.value.map(clinicalRepo.summarizeMedicationRequest);
+      else notRead.push({ sourceId: chartPacket.SECTION_KINDS.MEDICATIONS, why: 'not returned by the clinician\'s own EMR session' });
+      if (allergies.status === 'fulfilled') emr.allergies = allergies.value.map(clinicalRepo.summarizeAllergy);
+      else notRead.push({ sourceId: chartPacket.SECTION_KINDS.ALLERGIES, why: 'not returned by the clinician\'s own EMR session' });
+      if (problems.status === 'fulfilled') emr.problems = problems.value.map(clinicalRepo.summarizeCondition);
+      else notRead.push({ sourceId: chartPacket.SECTION_KINDS.PROBLEMS, why: 'not returned by the clinician\'s own EMR session' });
+    } else {
+      notRead.push({ sourceId: 'emr:*', why: 'this client is not linked to an EMR chart, so nothing could be matched against it' });
+    }
+
+    const built = chartPacket.buildSections({ clientId: client.id, emr, documents, notRead });
+    const manifest = chartPacket.buildManifest({ ...built, passes: 1 });
+    await saveAiReview(reviewId, { passes: 1, currentPass: 1 });
+
+    const r = await gfcModelEngine.invoke({
+      purpose: modelEngine.PURPOSES.RECORDS_EXTRACTION,
+      input: { sections: built.sections, documents: built.documents },
+      schema: AI_RECORDS_SCHEMA,
+      actor: req.user, patientId: client.id, feature: 'records_extraction',
+      sourceIds: [...built.sections.map(s => s.sourceId), ...built.documents.map(d => d.sourceId)]
+    });
+
+    const { output, droppedUncited } = enforceRecordCitations(r.proposal, manifest);
+    const unreadable = [
+      ...new Set([...(output.unreadable || []), ...manifest.notRead.map(n => `${n.sourceId}: ${n.why}`)])
+    ];
+    await saveAiReview(reviewId, {
+      status: AI_REVIEW_STATUS.DONE,
+      finishedAt: new Date().toISOString(),
+      invocationIds: [r.invocationId], model: r.modelId,
+      manifest, output: { ...output, unreadable },
+      droppedUncited, currentPass: null
+    });
+  } catch (e) {
+    await saveAiReview(reviewId, {
+      status: AI_REVIEW_STATUS.FAILED,
+      finishedAt: new Date().toISOString(),
+      error: modelEngine.scrubForLog(String((e && e.message) || e)).slice(0, 400),
+      code: (e && e.code) || null,
+      blockers: (e && e.blockers) || null
+    });
+    console.error('[AI] records extraction failed:', (e && e.code) || e.message);
+  }
+};
+
+// F1. POST …/ai/extract-records
+app.post('/api/clinical/patients/:clientId/ai/extract-records', authenticateToken, requireClinicalWrite, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) {
+      return res.status(wrongLine ? 409 : 404).json({
+        error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found',
+        code: wrongLine ? 'NOT_CLINICAL_LINE' : 'CLIENT_NOT_FOUND'
+      });
+    }
+    const st = gfcModelEngine.status();
+    if (!st.configured) {
+      return res.status(503).json({
+        error: 'Reading records with AI is not switched on yet.',
+        code: 'MODEL_BOUNDARY_REFUSED', blockers: st.blockers
+      });
+    }
+    const documentIds = Array.isArray((req.body || {}).documentIds) ? req.body.documentIds.map(String) : [];
+    if (!documentIds.length) return res.status(400).json({ error: 'Pick at least one document to read.', code: 'AI_NO_DOCUMENT_IDS' });
+
+    const row = {
+      id: `aix_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      clientId: client.id,
+      purpose: modelEngine.PURPOSES.RECORDS_EXTRACTION,
+      status: AI_REVIEW_STATUS.RUNNING,
+      requestedBy: { id: req.user.id, name: req.user.name || req.user.email },
+      at: new Date().toISOString(),
+      documentIds, passes: null, currentPass: null,
+      invocationIds: [], model: st.modelId,
+      manifest: null, output: null, findingDecisions: [], droppedUncited: 0
+    };
+    await db.set('ai_reviews', [...(await loadAiReviews()), row]);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'ai_records_extraction_started', 'client', client.id,
+      { reviewId: row.id, documents: documentIds.length });
+
+    runRecordsExtraction({ reviewId: row.id, req, client, documentIds });
+    res.status(202).json({ reviewId: row.id, status: row.status });
+  } catch (error) {
+    console.error('Records extraction start error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
 
 // ── H: the admin setup screen, and the owner's go-live proof ──────────────
 //

@@ -442,3 +442,127 @@ test('H3: the admin panel exists, is rendered, and restates no role rule', () =>
   // A static key is named as refused rather than shown as a neutral value.
   assert.match(body, /refused rather than used/);
 });
+
+// ── F: records extraction ─────────────────────────────────────────────────
+
+const liftRecordsSchema = () => {
+  const start = server.indexOf('const AI_RECORDS_SCHEMA = Object.freeze({');
+  assert.ok(start > 0, 'AI_RECORDS_SCHEMA must still be findable');
+  const end = server.indexOf('\n});', start);
+  const code = server.slice(start, end + 4).replace('const AI_RECORDS_SCHEMA =', 'return');
+  // eslint-disable-next-line no-new-func
+  return new Function(code)();
+};
+
+test('F2: the records schema carries NO code field of any kind', () => {
+  const schema = liftRecordsSchema();
+  const blob = JSON.stringify(schema);
+  for (const forbidden of ['icd', 'icd10', 'cpt', 'hcpcs', 'code']) {
+    assert.ok(!new RegExp(forbidden, 'i').test(blob),
+      `§10.4: no "${forbidden}" field — a model-proposed code reads exactly as plausibly as a right one, and it has a billing consequence`);
+  }
+  assert.strictEqual(M.validateSchemaShape(schema), null, 'and the engine must accept it before anything is sent');
+});
+
+test('F2: the records schema validates a plausible answer and drops what it did not declare', () => {
+  const schema = liftRecordsSchema();
+  const r = M.validateAgainstSchema({
+    medications: [{
+      name: 'lisinopril', dose: '20 mg', route: 'oral', frequency: 'daily',
+      status: 'active', matchesChart: false,
+      citation: { sourceId: 'doc:upload:9', page: 1, quote: 'lisinopril 20 mg daily' },
+      icd10: 'I10'
+    }],
+    allergies: [{ substance: 'penicillin', reaction: 'rash', matchesChart: true, citation: { sourceId: 'doc:upload:9' } }],
+    problems: [{ description: 'Hypertension', matchesChart: true, citation: { sourceId: 'doc:upload:9' } }],
+    events: [{ type: 'hospitalization', date: '2026-03-02', description: 'Three days for CHF', citation: { sourceId: 'doc:upload:9' } }],
+    unreadable: ['page 4 was a photograph']
+  }, schema);
+  assert.ok(!r.error, r.error);
+  assert.ok(!('icd10' in r.value.medications[0]), 'a code the model volunteered anyway is dropped by the allow-list');
+  assert.strictEqual(r.value.medications[0].matchesChart, false, 'false is a value, not an absence');
+  assert.strictEqual(r.value.events[0].type, 'hospitalization');
+});
+
+test('F1: the route is clinical-write and refuses an empty selection by name', () => {
+  const i = server.indexOf("app.post('/api/clinical/patients/:clientId/ai/extract-records'");
+  assert.ok(i > 0, 'the route must exist');
+  const body = server.slice(i, server.indexOf('\n});', i));
+  assert.match(body, /requireClinicalWrite/);
+  assert.match(body, /AI_NO_DOCUMENT_IDS/, 'an empty selection is refused rather than reading the whole chart');
+  assert.match(body, /MODEL_BOUNDARY_REFUSED/, 'and the boundary is checked before any document is fetched');
+});
+
+test('F1: only the three matching sections go with the documents, never the whole chart', () => {
+  const i = server.indexOf('const runRecordsExtraction');
+  const body = server.slice(i, server.indexOf('\n// F1.', i));
+  assert.match(body, /getMedicationRequests/);
+  assert.match(body, /getAllergies/);
+  assert.match(body, /getProblems/);
+  // A records extraction is not a chart review and must not drag one in.
+  for (const notNeeded of ['getEncounters', 'getVitalObservations', 'message_threads', 'caregiver_visit_logs']) {
+    assert.ok(!body.includes(notNeeded), `${notNeeded} has no part in matching three lists`);
+  }
+});
+
+test('F1: an uncited proposal is dropped and counted, as a finding would be', () => {
+  const i = server.indexOf('const enforceRecordCitations');
+  const body = server.slice(i, server.indexOf('\n};', i));
+  assert.match(body, /dropped\+\+/);
+  assert.match(body, /ids\.has\(String\(c\.sourceId\)\)/);
+  // The shape differs from a finding's (one citation, not a list), which is
+  // why it has its own check rather than reusing one that would pass anything.
+  assert.match(body, /row && row\.citation/);
+});
+
+test('F1: a document that could not be fetched is reported, and none at all fails by name', () => {
+  const i = server.indexOf('const runRecordsExtraction');
+  const body = server.slice(i, server.indexOf('\n// F1.', i));
+  assert.match(body, /the stored file could not be retrieved/);
+  assert.match(body, /AI_NO_DOCUMENTS/, 'reading nothing is a failure with its own name, not an empty result');
+});
+
+test('F3: the page is told which Add buttons it may show, and does not work it out', () => {
+  const i = server.indexOf('const aiReviewGetHandler');
+  const handler = server.slice(i, server.indexOf('\n};', i));
+  assert.match(handler, /medRec: clinicalRoles\.can\(req\.user, clinicalRoles\.CAPABILITIES\.MED_REC\)/);
+  assert.match(handler, /clinicalRoles\.CAPABILITIES\.PROBLEM_LIST_WRITE/);
+
+  const i2 = page.indexOf('const AiRecordsExtract = (');
+  assert.ok(i2 > 0, 'the records panel must exist');
+  const body = page.slice(i2, page.indexOf('\n    const ChartDocuments = (', i2));
+  assert.ok(!/clinicalRole|capabilit/i.test(body), 'the page must not decide a capability question');
+  assert.match(body, /run\.can && run\.can\.medRec/);
+  assert.match(body, /run\.can && run\.can\.allergy/);
+  assert.match(body, /run\.can && run\.can\.problem/);
+  assert.match(body, /canAdd && !inChart && <button/,
+    'a button the server would refuse, or for something already in the chart, is not shown');
+});
+
+test('F3: every Add goes through the EXISTING route for that kind — no second door', () => {
+  const i = page.indexOf('const AiRecordsExtract = (');
+  const body = page.slice(i, page.indexOf('\n    const ChartDocuments = (', i));
+  assert.match(body, /'medrec'/, 'the medication reconciliation route');
+  assert.match(body, /'allergies'/, 'the allergy route');
+  assert.match(body, /'problems'/, 'the problem route');
+  // And nothing is posted to an AI route to write a record.
+  assert.ok(!/ai\/(add|write|commit)/.test(body), 'there is no AI write path into a patient record');
+  assert.match(body, /Nothing here is in the chart yet/, 'the banner says so before anything is added');
+});
+
+test('F3: no code is ever sent when adding a problem', () => {
+  const i = page.indexOf('const AiRecordsExtract = (');
+  const body = page.slice(i, page.indexOf('\n    const ChartDocuments = (', i));
+  const addProblem = body.slice(body.indexOf("add(`p${i}`, 'problems'"), body.indexOf("add(`p${i}`, 'problems'") + 160);
+  assert.ok(!/icd|code/i.test(addProblem), `a code must never ride along: ${addProblem}`);
+  assert.match(addProblem, /title: pr\.description/);
+});
+
+test('F4: the enrollment document extraction now runs on the same engine', () => {
+  // Not a new path: the extract route already called the engine, and the
+  // engine is Gemini now. What is pinned is that it did not grow a second one.
+  const i = server.indexOf('const extractDocumentHandler');
+  const body = server.slice(i, server.indexOf('\nconst extractionReviewHandler', i));
+  assert.match(body, /gfcModelEngine\.invoke/);
+  assert.ok(!/vertexTransport|generateContent/.test(body), 'through the engine, never the transport');
+});

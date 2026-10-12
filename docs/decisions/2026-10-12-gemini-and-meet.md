@@ -2,7 +2,11 @@
 
 _Owner decisions, 2026-10-12. Recorded from `GFC_Gemini_AI_Reviewer_ClaudeCode_Spec.md` v2 section 1, verbatim — this file is the decision record those sessions are built against._
 
-**Build status.** Session G1 sections A–C (Bedrock removed; the engine moved to Vertex; the Gemini transport) are built. Sections D–H and session T1 are not yet built; nothing claims otherwise.
+**Build status.** **Session G1 is built in full** — A (Bedrock removed), B (the engine on Vertex), C (the Gemini transport), D (the chart packet and planner), E (the comprehensive review, its routes and the chart card), F (records extraction), G (the four extraction-UI bugs) and H (the admin setup screen and the go-live test).
+
+**Session T1 (Google Meet video visits) is NOT built.** It is independent of G1 and is its own branch and PR.
+
+**What is proven and what is not.** Everything above is proven by unit tests, mutation checks, and `scripts/verify_ai_chart_review.js` over real HTTP. **Nothing proves the Google side** — there is no Google credential in the build sandbox, so the engine refuses and the probe asserts that the refusal is correct and names its blockers. The owner's **Run test** button on the admin hub dashboard is the go-live proof: it sends a wholly invented chart and document through the real path, forcing a two-pass split and the merge.
 
 ---
 

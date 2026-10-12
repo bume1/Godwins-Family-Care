@@ -190,6 +190,9 @@
       // The comprehensive chart review (Session G1). Starting one answers 202
       // and the screen polls `aiReview` until it is done or failed.
       aiReviews: (id) => authedFetch(`/api/clinical/patients/${id}/ai/reviews`),
+      extractRecords: (id, documentIds) => authedFetch(`/api/clinical/patients/${id}/ai/extract-records`, {
+        method: 'POST', body: JSON.stringify({ documentIds })
+      }),
       aiReview: (id, reviewId) => authedFetch(`/api/clinical/patients/${id}/ai/reviews/${encodeURIComponent(reviewId)}`),
       startAiReview: (id, body) => authedFetch(`/api/clinical/patients/${id}/ai/review`, {
         method: 'POST', body: JSON.stringify(body || {})
@@ -700,6 +703,225 @@
       );
     };
 
+    // ── F3: reading outside records into proposals, from the chart ────────
+    //
+    // NOTHING HERE WRITES ANYTHING. Each proposal is added through the
+    // EXISTING route for that kind — the medication reconciliation, the
+    // allergy write, the problem write — with the clinician's own session and
+    // that route's own capability check. There is no second door into a
+    // patient's record, and which "Add" buttons this viewer gets is answered
+    // by the SERVER (`can.*`) rather than worked out here.
+    const AiRecordsExtract = ({ clientId, docs, onRefresh }) => {
+      const [picked, setPicked] = useState([]);
+      const [run, setRun] = useState(null);     // the ai_reviews row
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState(null);
+      const [done, setDone] = useState({});     // key -> 'added' | 'dismissed'
+      const [status, setStatus] = useState(null);
+
+      const uploads = (docs || []).filter(d => d.uploadId);
+
+      useEffect(() => {
+        if (!clientId) return;
+        let live = true;
+        api.aiReviews(clientId).then(r => { if (live) setStatus(r); }).catch(() => {});
+        return () => { live = false; };
+      }, [clientId]);
+
+      // Poll while it reads, the same way the review card does.
+      useEffect(() => {
+        if (!run || run.status !== 'running' || !clientId) return;
+        let live = true;
+        const t = setInterval(() => {
+          api.aiReview(clientId, run.id)
+            .then(r => { if (live && r && r.review) setRun({ ...r.review, can: r.can }); })
+            .catch(() => {});
+        }, 4000);
+        return () => { live = false; clearInterval(t); };
+      }, [run && run.id, run && run.status, clientId]);
+
+      if (!status || !status.available || !status.canRun || !uploads.length) return null;
+
+      const start = () => {
+        setBusy(true); setErr(null); setDone({});
+        api.extractRecords(clientId, picked)
+          .then(r => api.aiReview(clientId, r.reviewId))
+          .then(r => setRun({ ...r.review, can: r.can }))
+          .catch(e => setErr(e.message))
+          .finally(() => setBusy(false));
+      };
+
+      const out = (run && run.output) || null;
+      const mark = (key, how) => setDone(prev => ({ ...prev, [key]: how }));
+
+      const add = (key, path, body) => {
+        setErr(null);
+        authedFetch(`/api/clinical/patients/${clientId}/${path}`, { method: 'POST', body: JSON.stringify(body) })
+          .then(() => { mark(key, 'added'); onRefresh && onRefresh(); })
+          .catch(e => setErr(e.message));
+      };
+
+      const Cite = ({ c }) => !c ? null : (
+        <div className="text-[11px] text-stone-500 mt-0.5">
+          {c.sourceId}{c.page ? ` p${c.page}` : ''}{c.quote ? ` — “${c.quote}”` : ''}
+        </div>
+      );
+
+      const Row = ({ k, label, detail, inChart, citation, canAdd, onAdd }) => {
+        const state = done[k];
+        return (
+          <div className="border border-stone-200 rounded p-2">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <div className="text-[13px] text-stone-800">{label}</div>
+                {detail && <div className="text-[12px] text-stone-600">{detail}</div>}
+                <Cite c={citation} />
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <span className={`chip ${inChart ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-800'}`}>
+                  {inChart ? 'In chart' : 'New'}
+                </span>
+                {state
+                  ? <span className="chip bg-stone-100 text-stone-600">{state === 'added' ? 'Added' : 'Dismissed'}</span>
+                  : <>
+                      {/* A button the server would refuse is not shown. */}
+                      {canAdd && !inChart && <button className="chip border border-accent text-primary bg-white" onClick={onAdd}>Add</button>}
+                      <button className="chip border border-stone-200 bg-white text-stone-600" onClick={() => mark(k, 'dismissed')}>Dismiss</button>
+                    </>}
+              </div>
+            </div>
+          </div>
+        );
+      };
+
+      return (
+        <div className="border-t border-stone-100 mt-3 pt-3">
+          <div className="text-[13px] font-semibold text-primary"><i className="ti ti-sparkles mr-1" />Read outside records with AI</div>
+          <div className="text-[12px] text-stone-500">
+            Pick the records that came from somewhere else. Nothing is saved until you add it.
+          </div>
+
+          {!run && (
+            <>
+              <div className="mt-2 max-h-40 overflow-auto space-y-1">
+                {uploads.map(d => (
+                  <label key={d.uploadId} className="flex items-center gap-2 text-[12px] text-stone-700">
+                    <input type="checkbox" checked={picked.includes(String(d.uploadId))}
+                      onChange={e => setPicked(prev => e.target.checked
+                        ? [...prev, String(d.uploadId)]
+                        : prev.filter(x => x !== String(d.uploadId)))} />
+                    <span className="truncate">{d.description || 'Document'}</span>
+                  </label>
+                ))}
+              </div>
+              <button className="btn gold !py-1.5 mt-2" disabled={busy || !picked.length} onClick={start}>
+                {busy ? 'Starting…' : `Read ${picked.length || ''} record${picked.length === 1 ? '' : 's'}`}
+              </button>
+            </>
+          )}
+
+          {err && <div className="text-[12px] text-red-800 bg-red-50 border border-red-200 rounded p-2 mt-2">{err}</div>}
+
+          {run && run.status === 'running' && (
+            <div className="text-[13px] text-stone-700 mt-2"><i className="ti ti-loader-2 animate-spin mr-1" />Reading…</div>
+          )}
+          {run && run.status === 'failed' && (
+            <div className="text-[12px] text-red-800 bg-red-50 border border-red-200 rounded p-2 mt-2">
+              {run.error || 'That read did not finish.'}
+            </div>
+          )}
+
+          {out && (
+            <div className="mt-2 space-y-3">
+              <div className="text-[12px] text-amber-900 bg-amber-50 border border-amber-300 rounded p-2">
+                AI draft from Gemini. Check every item against its quote before adding it. Nothing here is in the chart yet.
+              </div>
+
+              {!!(out.medications || []).length && (
+                <div>
+                  <div className="text-[12px] font-semibold text-stone-700">Medications</div>
+                  <div className="mt-1 space-y-1">
+                    {out.medications.map((m, i) => (
+                      <Row key={`m${i}`} k={`m${i}`} label={m.name}
+                        detail={[m.dose, m.route, m.frequency, m.status].filter(Boolean).join(' · ')}
+                        inChart={m.matchesChart} citation={m.citation}
+                        canAdd={!!(run.can && run.can.medRec)}
+                        onAdd={() => add(`m${i}`, 'medrec', {
+                          decisions: [{ action: 'add', name: m.name, dose: m.dose || '', route: m.route || '', frequency: m.frequency || '' }]
+                        })} />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {!!(out.allergies || []).length && (
+                <div>
+                  <div className="text-[12px] font-semibold text-stone-700">Allergies</div>
+                  <div className="mt-1 space-y-1">
+                    {out.allergies.map((a, i) => (
+                      <Row key={`a${i}`} k={`a${i}`} label={a.substance} detail={a.reaction}
+                        inChart={a.matchesChart} citation={a.citation}
+                        canAdd={!!(run.can && run.can.allergy)}
+                        onAdd={() => add(`a${i}`, 'allergies', { allergen: a.substance, reaction: a.reaction || '' })} />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {!!(out.problems || []).length && (
+                <div>
+                  <div className="text-[12px] font-semibold text-stone-700">Problems</div>
+                  <div className="mt-1 space-y-1">
+                    {out.problems.map((pr, i) => (
+                      <Row key={`p${i}`} k={`p${i}`} label={pr.description}
+                        inChart={pr.matchesChart} citation={pr.citation}
+                        canAdd={!!(run.can && run.can.problem)}
+                        /* NO CODE IS SENT. §10.4 — coding is the clinician's
+                           decision and a model-proposed code reads exactly as
+                           plausibly as a right one. */
+                        onAdd={() => add(`p${i}`, 'problems', { title: pr.description })} />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {!!(out.events || []).length && (
+                <div>
+                  <div className="text-[12px] font-semibold text-stone-700">Events</div>
+                  <div className="mt-1 space-y-1">
+                    {out.events.map((e, i) => (
+                      <div key={i} className="border border-stone-200 rounded p-2">
+                        <div className="text-[13px] text-stone-800">{e.date || '—'} · {e.type.replace('_', ' ')}</div>
+                        <div className="text-[12px] text-stone-600">{e.description}</div>
+                        <Cite c={e.citation} />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {!!(out.unreadable || []).length && (
+                <div>
+                  <div className="text-[12px] font-semibold text-stone-700">Not read</div>
+                  <ul className="text-[12px] text-stone-600 list-disc pl-4 mt-1 space-y-0.5">
+                    {out.unreadable.map((u, i) => <li key={i}>{u}</li>)}
+                  </ul>
+                </div>
+              )}
+
+              {run.droppedUncited > 0 && (
+                <div className="text-[11px] text-stone-500">
+                  {run.droppedUncited} item{run.droppedUncited === 1 ? '' : 's'} were left out because they did not quote a source.
+                </div>
+              )}
+
+              <button className="btn !py-1.5" onClick={() => { setRun(null); setPicked([]); }}>Done</button>
+            </div>
+          )}
+        </div>
+      );
+    };
+
     const ChartDocuments = ({ docs, clientId, onRefresh }) => {
       const [busy, setBusy] = useState('');
       const [err, setErr] = useState('');
@@ -819,6 +1041,7 @@
               </div>
             ))}
           </div>
+          {clientId && <AiRecordsExtract clientId={clientId} docs={docs} onRefresh={onRefresh} />}
           {clientId && <ChartScanIn clientId={clientId} onFiled={onRefresh} />}
         </div>
       );
