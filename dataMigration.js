@@ -55,6 +55,8 @@ const COLLECTION_REGISTRY = Object.freeze([
   // Self sign-ups waiting on staff: a name, date of birth, address and
   // insurance details, plus a password HASH and a verify-token HASH.
   { key: 'signup_requests', phi: true, owner: 'portal redesign 10/2026' },
+  // Which Google Calendar event mirrors which OpenEMR appointment eid.
+  { key: 'google_calendar_events', phi: true, owner: 'calendar sync 10/2026' },
   // The branded no-login upload link: one live row per client, revoked ones
   // kept as tombstones. The row is a pointer (a client id and a token), not
   // a document — but the token is a standing door onto that client's file,

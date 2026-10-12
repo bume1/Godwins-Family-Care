@@ -375,6 +375,28 @@
     .gfc.v2 .gfc-tabs button.on{color:var(--gold-ink);}
     .gfc.v2 .gfc-tabs button.on i{color:var(--gold-ink);}
     .gfc.v2 .gfc-tabs button.on::before{content:"";position:absolute;top:0;left:28%;right:28%;height:3px;border-radius:0 0 3px 3px;background:var(--goldd);}
+    /* The patient's Day / Week grid, after the clinical workspace's (10/2026). */
+    .gfc.v2 .sg-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:14px 0 10px;}
+    .gfc.v2 .sg-seg{display:flex;border:1px solid var(--edge2);border-radius:10px;overflow:hidden;}
+    .gfc.v2 .sg-seg button{background:#fff;border:none;padding:8px 14px;font-size:13px;font-weight:600;color:var(--navy);cursor:pointer;}
+    .gfc.v2 .sg-seg button.on{background:var(--navy);color:#fff;}
+    .gfc.v2 .sg-nav{display:flex;gap:4px;}
+    .gfc.v2 .sg-nav button{background:#fff;border:1px solid var(--edge2);border-radius:10px;min-width:36px;height:36px;color:var(--navy);cursor:pointer;font-size:13px;font-weight:600;padding:0 10px;}
+    .gfc.v2 .sg-range{font-family:'Cormorant Garamond',serif;font-size:19px;font-weight:600;color:var(--navy);}
+    .gfc.v2 .sg-card{background:#fff;border:1px solid var(--edge);border-radius:16px;overflow-x:auto;box-shadow:0 1px 2px rgba(3,61,80,.04),0 6px 18px -12px rgba(3,61,80,.18);}
+    .gfc.v2 .sg-head,.gfc.v2 .sg-grid{display:flex;min-width:fit-content;}
+    .gfc.v2 .sg-head{border-bottom:1px solid var(--edge2);background:var(--cream);}
+    .gfc.v2 .sg-head div{flex:1;min-width:120px;text-align:center;padding:8px 2px;font-size:12px;font-weight:700;color:var(--navy);}
+    .gfc.v2 .sg-head div.today{color:var(--gold-ink);}
+    .gfc.v2 .sg-col{flex:1;min-width:120px;position:relative;border-left:1px solid var(--edge);}
+    .gfc.v2 .sg-col:first-child{border-left:none;}
+    .gfc.v2 .sg-hr{position:absolute;left:0;right:0;border-top:1px solid #F1ECE3;font-size:9px;color:#B8B0A2;padding-left:3px;}
+    .gfc.v2 .sg-blk{position:absolute;border:none;border-left:4px solid;border-radius:7px;padding:2px 6px;font-size:11px;line-height:1.25;text-align:left;overflow:hidden;cursor:pointer;}
+    .gfc.v2 .sg-blk.clinical{background:#E4EEF2;border-color:#2b7a8c;color:#0f4656;}
+    .gfc.v2 .sg-blk.caregiver{background:#FBF1DC;border-color:var(--goldd);color:#6b5121;}
+    .gfc.v2 .sg-blk.past{opacity:.6;}
+    .gfc.v2 .sg-blk.live{box-shadow:0 0 0 2px var(--goldd);}
+    .gfc.v2 .sg-empty{text-align:center;padding:16px;border-top:1px solid var(--edge);color:var(--mut);font-size:14px;}
     /* the "More" menu */
     .gfc.v2 .menu .lrow{padding:14px;}
     @media (min-width:1024px){
@@ -5204,8 +5226,14 @@
       const items = [];
       const T = window.GFC_TIME;
       (shifts || []).forEach(s => {
+        const ps = T && T.zonedParts(s.start), pe = T && T.zonedParts(s.end);
         items.push({
           id: `shift:${s.id}`, kind: 'caregiver', date: georgiaDate(s.start),
+          // Minutes after midnight in Georgia, for the time grid. A shift that
+          // runs past midnight ends at the end of its first day on the grid.
+          startMin: ps ? ps.minutesOfDay : null,
+          endMin: pe ? (pe.isoDate === (ps && ps.isoDate) ? pe.minutesOfDay : 24 * 60) : null,
+          timeStart: T ? T.fmtTime(s.start) : '',
           sortKey: Date.parse(s.start) || 0,
           time: T ? `${T.fmtTime(s.start)} – ${T.fmtTime(s.end)}` : '',
           title: s.status === 'in_progress' ? 'Caregiver visit in progress' : 'Caregiver visit',
@@ -5216,8 +5244,13 @@
       const appts = (clinical && !clinical.error && clinical.appointments) || [];
       appts.forEach(a => {
         const at = T && T.instantFromZoned ? T.instantFromZoned(a.date, a.startTime || '12:00') : null;
+        const hm = (t) => { const [h, m] = String(t || '').split(':').map(Number); return isNaN(h) ? null : h * 60 + (m || 0); };
+        const sm = hm(a.startTime);
         items.push({
           id: `appt:${a.id}`, kind: 'clinical', date: a.date,
+          startMin: sm,
+          endMin: hm(a.endTime) != null && hm(a.endTime) > sm ? hm(a.endTime) : (sm != null ? sm + 30 : null),
+          timeStart: scheduleClock(a.startTime),
           sortKey: at ? Date.parse(at) : Date.parse(`${a.date}T12:00:00Z`),
           time: [scheduleClock(a.startTime), scheduleClock(a.endTime)].filter(Boolean).join(' – '),
           title: a.title || 'Clinical visit',
@@ -5257,62 +5290,113 @@
       </React.Fragment>
     );
 
-    const GfcSchedule = ({ shifts, shiftsErr, clinical }) => {
+    // The patient's calendar (owner, 2026-10-12): "mimics the view in the
+    // clinical workspace BUT ONLY THE CLIENT'S VISITS". The same Day / Week
+    // time grid clinicians work from (7am to 7pm, blocks placed by time),
+    // filled only from this patient's own published visits and their own
+    // caregiver shifts. Dates and times are Georgia's (gfc-time.js).
+    const SCHED_START = 7 * 60, SCHED_END = 19 * 60, SCHED_PX = 0.8;
+    const ymdAdd = (ymd, n) => { const d = new Date(`${ymd}T12:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+    const ymdMonday = (ymd) => { const d = new Date(`${ymd}T12:00:00Z`); return ymdAdd(ymd, -((d.getUTCDay() + 6) % 7)); };
+    const ymdLabel = (ymd) => new Date(`${ymd}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+    // Overlapping visits sit side by side, as on the clinician's grid.
+    const laneVisits = (list) => {
+      const sorted = [...list].sort((a, b) => a.startMin - b.startMin);
+      const ends = [];
+      const out = sorted.map(v => {
+        let lane = ends.findIndex(e => e <= v.startMin);
+        if (lane === -1) { lane = ends.length; ends.push(v.endMin); } else ends[lane] = v.endMin;
+        return { ...v, lane };
+      });
+      return out.map(v => ({ ...v, lanes: Math.max(1, ends.length) }));
+    };
+    const SchedDay = ({ ymd, items, onPick }) => {
+      const timed = laneVisits(items.filter(v => v.date === ymd && v.startMin != null));
+      const hours = []; for (let h = 7; h < 19; h++) hours.push(h);
+      return (
+        <div className="sg-col" style={{ height: (SCHED_END - SCHED_START) * SCHED_PX }}>
+          {hours.map(h => <div key={h} className="sg-hr" style={{ top: (h * 60 - SCHED_START) * SCHED_PX }}>{((h + 11) % 12) + 1}{h >= 12 ? 'p' : 'a'}</div>)}
+          {timed.map(v => {
+            const top = Math.max(0, (Math.max(v.startMin, SCHED_START) - SCHED_START) * SCHED_PX);
+            const height = Math.max(20, (Math.min(v.endMin, SCHED_END) - Math.max(v.startMin, SCHED_START)) * SCHED_PX);
+            return (
+              <button key={v.id} className={`sg-blk ${v.kind} ${v.past ? 'past' : ''} ${v.live ? 'live' : ''}`}
+                style={{ top, height, left: `${(v.lane / v.lanes) * 100}%`, width: `${100 / v.lanes}%` }} onClick={() => onPick(v)}>
+                <b>{v.timeStart}</b> {v.title}
+              </button>
+            );
+          })}
+        </div>
+      );
+    };
+
+    const GfcSchedule = ({ shifts, shiftsErr, clinical, onNavigate }) => {
       const items = buildScheduleItems(shifts, clinical);
       const today = georgiaDate(new Date().toISOString());
-      const [month, setMonth] = useState(() => today.slice(0, 7));
-      const [sel, setSel] = useState(today);
-      const [y, m] = month.split('-').map(Number);
-      const first = new Date(Date.UTC(y, m - 1, 1));
-      const daysIn = new Date(Date.UTC(y, m, 0)).getUTCDate();
-      const lead = first.getUTCDay();
-      const cells = [];
-      for (let i = 0; i < lead; i++) cells.push(null);
-      for (let d = 1; d <= daysIn; d++) cells.push(`${month}-${String(d).padStart(2, '0')}`);
-      while (cells.length % 7) cells.push(null);
-      const byDay = {};
-      items.forEach(v => { (byDay[v.date] = byDay[v.date] || []).push(v); });
-      const shift = (n) => {
-        const d = new Date(Date.UTC(y, m - 1 + n, 1));
-        setMonth(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`);
-      };
-      const monthLabel = first.toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+      // Week on a desk, one day on a phone (seven columns do not fit there).
+      const [mode, setMode] = useState(() => (typeof window !== 'undefined' && window.innerWidth < 700 ? 'day' : 'week'));
+      const [anchor, setAnchor] = useState(today);
+      const [picked, setPicked] = useState(null);
+      const from = mode === 'day' ? anchor : ymdMonday(anchor);
+      const days = mode === 'day' ? [anchor] : [0, 1, 2, 3, 4, 5, 6].map(i => ymdAdd(from, i));
+      const shown = items.filter(v => v.date >= days[0] && v.date <= days[days.length - 1]);
+      const outside = shown.filter(v => v.startMin == null || v.endMin <= SCHED_START || v.startMin >= SCHED_END);
       const upcoming = items.filter(v => !v.past && v.date >= today);
-      const dayItems = byDay[sel] || [];
       const clinicalNotYet = clinical && !clinical.error && clinical.appointmentsPublished === false;
+      const step = mode === 'day' ? 1 : 7;
       return (
         <div className="gfc-body">
           <h2 className="disp">Appointments</h2>
-          <p className="sub">Every visit on your calendar: clinical visits with your provider and visits from your caregiver.</p>
-          <div className="cal">
-            <div className="cal-hd">
-              <button onClick={() => shift(-1)} aria-label="Previous month"><i className="ti ti-chevron-left" /></button>
-              <b>{monthLabel}</b>
-              <button onClick={() => shift(1)} aria-label="Next month"><i className="ti ti-chevron-right" /></button>
+          <p className="sub">Your visits: clinical visits with your provider and visits from your caregiver.</p>
+          <div className="sg-bar">
+            <div className="sg-seg">
+              <button className={mode === 'day' ? 'on' : ''} onClick={() => setMode('day')}>Day</button>
+              <button className={mode === 'week' ? 'on' : ''} onClick={() => setMode('week')}>Week</button>
             </div>
-            <div className="cal-grid">
-              {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => <div className="cal-dow" key={d}>{d}</div>)}
-              {cells.map((d, i) => d ? (
-                <div key={d} className={`cal-day ${d === today ? 'today' : ''} ${d === sel ? 'sel' : ''}`} onClick={() => setSel(d)}>
-                  <span>{Number(d.slice(8))}</span>
-                  <div className="cal-dots">
-                    {(byDay[d] || []).slice(0, 3).map(v => <span key={v.id} className={`cal-dot ${v.kind}`} />)}
-                  </div>
-                </div>
-              ) : <div key={`x${i}`} className="cal-day out" />)}
+            <div className="sg-nav">
+              <button aria-label="Previous" onClick={() => setAnchor(ymdAdd(anchor, -step))}><i className="ti ti-chevron-left" /></button>
+              <button className="t" onClick={() => setAnchor(today)}>Today</button>
+              <button aria-label="Next" onClick={() => setAnchor(ymdAdd(anchor, step))}><i className="ti ti-chevron-right" /></button>
             </div>
-            <div className="cal-key">
-              <span><i className="cal-dot clinical" style={{ display: 'inline-block' }} />Clinical visit</span>
-              <span><i className="cal-dot caregiver" style={{ display: 'inline-block' }} />Caregiver</span>
-            </div>
+            <div className="sg-range">{mode === 'day' ? ymdLabel(anchor) : `${ymdLabel(days[0])} – ${ymdLabel(days[6])}`}</div>
           </div>
-          <p className="lbl">{prettyDate(sel)}</p>
-          {dayItems.length === 0 && <p className="sub" style={{ marginTop: 0 }}>Nothing scheduled this day.</p>}
-          {dayItems.map(v => <ScheduleRow key={v.id} v={v} />)}
+          <div className="sg-card">
+            <div className="sg-head">
+              {days.map(d => <div key={d} className={d === today ? 'today' : ''}>{ymdLabel(d)}</div>)}
+            </div>
+            <div className="sg-grid">
+              {days.map(d => <SchedDay key={d} ymd={d} items={shown} onPick={setPicked} />)}
+            </div>
+            {shown.length === 0 && <div className="sg-empty"><i className="ti ti-calendar-smile" /> No visits {mode === 'day' ? 'this day' : 'this week'}.</div>}
+          </div>
+          <div className="cal-key" style={{ marginTop: 8 }}>
+            <span><i className="cal-dot clinical" style={{ display: 'inline-block' }} />Clinical visit</span>
+            <span><i className="cal-dot caregiver" style={{ display: 'inline-block' }} />Caregiver</span>
+          </div>
+          {picked && (
+            <div className="card" style={{ marginTop: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
+                <div>
+                  <span className={`kind ${picked.kind}`} style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '.9px', fontWeight: 700, color: picked.kind === 'clinical' ? '#2b7a8c' : 'var(--gold-ink)' }}>{picked.kind === 'clinical' ? 'Clinical visit' : 'Caregiver visit'}</span>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--navy)' }}>{picked.title}</div>
+                  <div className="sub" style={{ marginTop: 2 }}>{ymdLabel(picked.date)}{picked.time ? ` · ${picked.time}` : ''}</div>
+                  {picked.detail && <div className="sub" style={{ marginTop: 2 }}>{picked.detail}</div>}
+                </div>
+                <button onClick={() => setPicked(null)} aria-label="Close" style={{ background: 'none', border: 'none', fontSize: 20, color: 'var(--mut)', cursor: 'pointer' }}><i className="ti ti-x" /></button>
+              </div>
+            </div>
+          )}
+          {outside.length > 0 && (
+            <React.Fragment>
+              <p className="lbl">Outside 7am to 7pm</p>
+              {outside.map(v => <ScheduleRow key={v.id} v={v} />)}
+            </React.Fragment>
+          )}
           <p className="lbl">Coming up</p>
           <ScheduleEmpty empty={upcoming.length === 0} shiftsErr={shiftsErr} />
           {upcoming.slice(0, 10).map(v => <ScheduleRow key={v.id} v={v} />)}
           {clinicalNotYet && <p className="sub">Your clinical visits will appear here once your care team updates your calendar.</p>}
+          {onNavigate && <p className="sub" style={{ marginTop: 12 }}>Need to change a visit? <a href="#" onClick={(e) => { e.preventDefault(); onNavigate('messages'); }}>Message your care team</a>.</p>}
         </div>
       );
     };
@@ -7289,7 +7373,7 @@
             </header>
             {view === 'home' && data && <GfcDashboard data={data} onNavigate={onNavigate} me={me} clinical={clinicalAvailable ? clinical : null} shifts={shifts} shiftsErr={shiftsErr} threads={threads} threadsErr={threadsErr} />}
             {view === 'care' && data && <GfcCarePlan data={data} readOnly={readOnly} token={token} shifts={shifts} shiftsErr={shiftsErr} clinical={clinicalAvailable ? clinical : null} me={me} onNavigate={onNavigate} />}
-            {view === 'schedule' && <GfcSchedule shifts={shifts} shiftsErr={shiftsErr} clinical={clinicalAvailable ? clinical : null} />}
+            {view === 'schedule' && <GfcSchedule shifts={shifts} shiftsErr={shiftsErr} clinical={clinicalAvailable ? clinical : null} onNavigate={onNavigate} />}
             {view === 'results' && clinicalAvailable && <GfcResults clinical={clinical} token={token} />}
             {view === 'health' && clinicalBlocked && <GfcHealth clinical={{ error: me.clinicalRead.reason || 'Your care team is still setting up your health record.' }} me={me} token={token} readOnly={readOnly} />}
             {view === 'health' && clinicalAvailable && <GfcHealth clinical={clinical} me={me} token={token} readOnly={readOnly}

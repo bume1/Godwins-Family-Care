@@ -59,6 +59,7 @@ const patientRead = require('./patientReadRepository');
 const familyInvites = require('./familyInvites');
 const portalProfile = require('./portalProfile');
 const signups = require('./signupRequests');
+const googleCalendar = require('./googleCalendar');
 const patientPublish = require('./patientPublish');   // Portal P1: the published copies the portal reads (patients never read OpenEMR)
 // Session 4.8 — the clinical role enum, capability matrix and credential
 // ceiling. THE one place that answers "may this person do this"; the clinical
@@ -9953,6 +9954,9 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
       clientId: client.id, eid: String(eid), visitDate: body.date, startTime: body.startTime,
       when: bookedWhen, clinician: bookedClinician, place: bookedPlace, actorId: req.user.id
     });
+    // And onto the practice's Google clinical calendar (one way; best-effort).
+    await mirrorVisitToGoogle({ clientId: client.id, eid: String(eid), title: built.fields.pc_title, date: body.date,
+      startTime: body.startTime, durationMinutes: built.minutes, location: built.location, providerId });
 
     // Read-back proves the round-trip (acceptance requirement); the single-row
     // GET carries the full record (list rows omit notes/location on 7.0.4).
@@ -9969,6 +9973,30 @@ app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, req
     res.status(502).json({ error: `OpenEMR write failed: ${error.message}` });
   }
 });
+
+// Google clinical calendar (owner, 2026-10-12): the facts an event needs,
+// from OUR records. Best-effort by design — see googleCalendar.js.
+const calendarPatientFacts = async (clientId) => {
+  const u = clientId ? (await getUsers()).find(x => x && x.id === clientId) : null;
+  if (!u) return { patientName: null, address: null };
+  const a = (u.intake && u.intake.address) || u.address || null;
+  const address = a && typeof a === 'object'
+    ? [a.line1 || a.street, a.line2, a.city, [a.state, a.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ') || null
+    : (a ? String(a) : null);
+  return { patientName: u.preferredName ? `${u.preferredName} ${String(u.name || '').split(' ').slice(-1)[0]}` : u.name, address };
+};
+const mirrorVisitToGoogle = async ({ clientId, eid, previousEid, title, date, startTime, durationMinutes, location, providerId, status }) => {
+  try {
+    const facts = await calendarPatientFacts(clientId);
+    const r = await googleCalendar.upsertVisit(db, {
+      eid, clientId, title, date, startTime, durationMinutes, location, status,
+      patientName: facts.patientName, address: facts.address,
+      clinicianName: providerId ? await clinicianNameForProviderId(providerId) : null
+    }, { previousEid });
+    if (!r.synced && r.reason !== 'not_configured') console.warn(`[CALENDAR] visit ${eid} not mirrored: ${r.reason}`);
+    return r;
+  } catch (e) { console.warn('[CALENDAR] mirror error (non-fatal):', e.message); return { synced: false }; }
+};
 
 // POST /api/clinical/appointments/:eid/reschedule — tombstone swap: new slot
 // row + cancelled tombstone preserving the old slot, then remove the
@@ -10057,6 +10085,9 @@ app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requir
         when: movedTo, clinician: movedClinician, place: movedPlace, actorId: req.user.id
       });
     }
+    // The Google event moves with the visit (it is keyed on the OLD eid).
+    await mirrorVisitToGoogle({ clientId: appClient ? appClient.clientId : null, eid: String(newEid), previousEid: String(row.pc_eid),
+      title: row.pc_title, date: body.date, startTime: body.startTime, durationMinutes: built.minutes, location: built.location, providerId });
     // Portal P2: the patient's calendar follows every change.
     await republishAppointmentsByPuuid(emr, row.puuid, req);
     res.json({
@@ -10109,6 +10140,8 @@ app.post('/api/clinical/appointments/:eid/cancel', authenticateToken, requireCli
       // 4.11: a cancelled visit must not keep reminding anybody about it.
       await voidVisitReminders({ eid: String(row.pc_eid), reason: 'cancelled', clientId: appClient.clientId, actorId: req.user.id });
     }
+    // A cancelled visit leaves the clinicians' Google calendar.
+    await googleCalendar.removeVisit(db, String(row.pc_eid));
     // Portal P2: the patient's calendar follows every change.
     await republishAppointmentsByPuuid(emr, row.puuid, req);
     res.json({
@@ -10145,6 +10178,11 @@ app.post('/api/clinical/appointments/:eid/no-show', authenticateToken, requireCl
       role: req.user.role, appointmentEid: newEid, previousEid: String(row.pc_eid),
       slot: `${row.pc_eventDate} ${String(row.pc_startTime).slice(0, 5)}`, supersededRowRemoved: swap.deleted
     });
+    // The Google event stays, marked as a no-show, and follows the new eid.
+    await mirrorVisitToGoogle({ clientId: appClient ? appClient.clientId : null, eid: String(newEid), previousEid: String(row.pc_eid),
+      title: row.pc_title, date: row.pc_eventDate, startTime: String(row.pc_startTime).slice(0, 5),
+      durationMinutes: clinicalRepo.rowDurationMinutes(row), location: clinicalRepo.decodeAppointmentNotes(row.pc_hometext).location,
+      providerId: row.pc_aid, status: 'no_show' });
     // Portal P2: the patient's calendar follows every change.
     await republishAppointmentsByPuuid(emr, row.puuid, req);
     res.json({
@@ -24937,6 +24975,11 @@ app.listen(PORT, () => {
       `${driveState.rootFolderId ? ` → folder ${driveState.rootFolderId}` : ' (no root folder set)'}`);
     console.log(`         Credential parses; run scripts/verify_drive_access.js to prove Google accepts it.`);
   }
+  // And the Google clinical calendar visits are mirrored onto.
+  const calState = googleCalendar.calendarStatus();
+  console.log(calState.configured
+    ? `📅 Clinical calendar: mirroring app-booked visits to ${calState.calendarId} as ${calState.impersonating}`
+    : `📅 Clinical calendar: NOT CONFIGURED — visits are not mirrored to Google (${calState.blockers.join('; ')})`);
 
   // Safety net: reactivate any admin accounts that are inactive (prevent lockout)
   (async () => {
