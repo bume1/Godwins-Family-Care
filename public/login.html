@@ -164,8 +164,8 @@
             {resetMessage && <div className={resetMessage.includes('Error') ? 'err' : 'ok'}>{resetMessage}</div>}
             <label className="fl">Email</label>
             <input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
-            <button type="submit" disabled={loading} className="btn navy">{loading ? 'Sending…' : 'Request reset'}</button>
-            <div className="center"><button type="button" className="link" onClick={() => setShowForgotPassword(false)}>Back to sign in</button></div>
+            <button type="submit" disabled={loading} className="btn navy">{loading ? 'Sending…' : 'Request Reset'}</button>
+            <div className="center"><button type="button" className="link" onClick={() => setShowForgotPassword(false)}>Back to Sign In</button></div>
           </form>
         );
       }

@@ -243,7 +243,7 @@ const Escalations = ({ rows, reload, setErr, setOk }) => {
       <p className="sub">Concerns caregivers raised from a visit. Forward-only; closing one needs a note.</p>
       <div className="btns" style={{ marginTop: 0, marginBottom: 8 }}>
         <button className={`btn sm ${openOnly ? '' : 'ghost'}`} onClick={() => setOpenOnly(!openOnly)}>
-          {openOnly ? 'Showing open only' : 'Showing all'}
+          {openOnly ? 'Open Only' : 'Showing All'}
         </button>
       </div>
       {shown.length === 0
@@ -378,12 +378,12 @@ const VisitLogRow = ({ v, reload, setErr, setOk }) => {
         ? (
           <div className="btns">
             <button className="btn sm ghost" onClick={() => setShowAll(!showAll)}>
-              {showAll ? 'Hide the visit' : 'Read the visit'}
+              {showAll ? 'Hide Visit' : 'Read Visit'}
             </button>
             <button className="btn sm ghost" disabled={downloading} onClick={download}>
               {downloading ? 'Preparing…' : 'Download PDF'}
             </button>
-            <button className="btn sm ghost" onClick={() => setOpen(true)}>Add review note</button>
+            <button className="btn sm ghost" onClick={() => setOpen(true)}>Add Review Note</button>
           </div>
         )
         : (
@@ -391,7 +391,7 @@ const VisitLogRow = ({ v, reload, setErr, setOk }) => {
             <textarea placeholder="A submitted log is never edited — this is appended to it."
               value={note} onChange={e => setNote(e.target.value)} />
             <div className="btns">
-              <button className="btn sm" disabled={busy} onClick={addNote}>{busy ? 'Saving…' : 'Append note'}</button>
+              <button className="btn sm" disabled={busy} onClick={addNote}>{busy ? 'Saving…' : 'Append Note'}</button>
               <button className="btn sm ghost" disabled={busy} onClick={() => { setOpen(false); setNote(''); }}>Cancel</button>
             </div>
           </div>
@@ -497,7 +497,7 @@ const Broadcast = ({ setErr, setOk }) => {
         <textarea value={body} maxLength={4000} onChange={e => setBody(e.target.value)} />
       </div>
       <div className="btns">
-        <button className="btn gold" disabled={busy} onClick={send}>{busy ? 'Posting…' : 'Post to feed'}</button>
+        <button className="btn gold" disabled={busy} onClick={send}>{busy ? 'Posting…' : 'Post to Feed'}</button>
       </div>
       <div className="note">
         <b>This is not the place for anything about one client.</b>

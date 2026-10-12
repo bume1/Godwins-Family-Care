@@ -373,7 +373,7 @@
                 )}
                 {isAdmin ? (
                   <div className="mt-3 flex flex-wrap gap-2 items-center">
-                    <button className="btn btn-primary" disabled={busy === r.id} onClick={() => decide(r, { action: 'approve_client' })}>Approve as new client</button>
+                    <button className="btn btn-primary" disabled={busy === r.id} onClick={() => decide(r, { action: 'approve_client' })}>Approve as New Client</button>
                     <select className="input" style={{ width: 220 }} value={pick[r.id] || (r.possibleMatches[0] && r.possibleMatches[0].id) || ''} onChange={e => setPick({ ...pick, [r.id]: e.target.value })}>
                       <option value="">Link as family of…</option>
                       {d.clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
@@ -605,7 +605,7 @@
             </div>
             <div className="flex gap-2 shrink-0 text-xs">
               <button className={`underline ${chosen === 'accept' ? 'text-success-600 font-semibold' : 'text-primary-500'}`}
-                onClick={() => onDecide(row.path, { decision: 'accept' })}>Use this</button>
+                onClick={() => onDecide(row.path, { decision: 'accept' })}>Use This</button>
               <button className={`underline ${chosen === 'edit' ? 'text-success-600 font-semibold' : 'text-primary-500'}`}
                 onClick={() => onDecide(row.path, { decision: 'edit', value: draft })}>Change</button>
               <button className={`underline ${chosen === 'discard' ? 'text-gray-600 font-semibold' : 'text-gray-500'}`}
@@ -732,7 +732,7 @@
 
           <div className="flex items-center gap-3 mt-3">
             <button className="btn btn-primary text-sm" disabled={busy || !rows.length} onClick={save}>
-              {busy ? 'Saving…' : 'Save what I kept'}
+              {busy ? 'Saving…' : 'Save Selections'}
             </button>
             <span className="text-xs text-gray-500">
               {left ? `${left} still need a decision` : 'All decided'}
@@ -772,7 +772,7 @@
         <span>
           <button className="text-primary-500 underline" disabled={busy} onClick={run}
             title={templateOnly ? 'Read from the document\'s own text, or from the picture if it has none.' : undefined}>
-            {busy ? 'Reading…' : 'Read this document'}
+            {busy ? 'Reading…' : 'Read Document'}
           </button>
           {err && <span className="text-danger-500 ml-2">{err}</span>}
         </span>
@@ -899,8 +899,8 @@
           {err && <div className="bg-danger-50 text-danger-600 text-sm rounded-lg px-4 py-2 mb-3">{err}</div>}
           {canEdit && (
             <div className="flex gap-2 mb-3 flex-wrap">
-              <button className="btn btn-ghost" disabled={busy} onClick={() => setAsking(v => !v)}>Request documents</button>
-              <button className="btn btn-ghost" disabled={busy || !outstanding} onClick={remind}>Send reminder</button>
+              <button className="btn btn-ghost" disabled={busy} onClick={() => setAsking(v => !v)}>Request Documents</button>
+              <button className="btn btn-ghost" disabled={busy || !outstanding} onClick={remind}>Send Reminder</button>
             </div>
           )}
 
@@ -918,7 +918,7 @@
                   Text or email a link the client (or whoever is holding the paperwork) can open without signing in, to send a document straight into this file.
                 </p>
                 {isAdmin
-                  ? <button className="btn btn-ghost" disabled={linkBusy} onClick={() => setLink(false)}>{linkBusy ? 'Setting up…' : 'Get a link'}</button>
+                  ? <button className="btn btn-ghost" disabled={linkBusy} onClick={() => setLink(false)}>{linkBusy ? 'Setting up…' : 'Get Link'}</button>
                   : <span className="text-xs text-gray-400">Off — an admin turns this on.</span>}
               </React.Fragment>
             )}
@@ -927,9 +927,9 @@
                 <div className="text-xs break-all text-gray-700 bg-gray-50 rounded px-2 py-1.5 mb-2">{state.uploadLink.url}</div>
                 {isAdmin ? (
                   <div className="flex gap-2 flex-wrap">
-                    <button className="btn btn-ghost" disabled={linkBusy} onClick={copyLink}>{copied ? 'Copied!' : 'Copy link'}</button>
-                    <button className="btn btn-ghost" disabled={linkBusy} onClick={() => setLink(true)}>Get a new link</button>
-                    <button className="btn btn-ghost text-danger-500" disabled={linkBusy} onClick={turnOffLink}>Turn off</button>
+                    <button className="btn btn-ghost" disabled={linkBusy} onClick={copyLink}>{copied ? 'Copied!' : 'Copy Link'}</button>
+                    <button className="btn btn-ghost" disabled={linkBusy} onClick={() => setLink(true)}>New Link</button>
+                    <button className="btn btn-ghost text-danger-500" disabled={linkBusy} onClick={turnOffLink}>Turn Off</button>
                   </div>
                 ) : (
                   <span className="text-xs text-gray-400">On — an admin manages this link.</span>
@@ -956,7 +956,7 @@
                 <input type="date" className="input mt-1" value={dueAt} onChange={e => setDueAt(e.target.value)} />
               </label>
               <button className="btn btn-primary mt-3" disabled={busy || (!picked.length && !customLabel.trim())} onClick={sendRequest}>
-                Send request
+                Send Request
               </button>
               <p className="text-xs text-gray-500 mt-2">
                 The client gets one email and the items appear on their portal checklist.
@@ -1010,7 +1010,7 @@
                           ? <button className={`chip border ${f.sharedWithPatient ? 'border-emerald-300 text-emerald-700 bg-emerald-50' : 'border-gray-300 text-gray-600 bg-white'}`}
                               disabled={busy} onClick={() => shareDoc(f, !f.sharedWithPatient)}
                               title={f.sharedWithPatient ? 'The patient can see this. Click to hide it from them.' : 'The patient cannot see this. Click to share it with them.'}>
-                              {f.sharedWithPatient ? 'Shared with patient' : 'Hidden from patient'}
+                              {f.sharedWithPatient ? 'Shared with Patient' : 'Hidden from Patient'}
                             </button>
                           : <span className="chip bg-stone-100 text-stone-600">{f.sharedWithPatient ? 'Shared with patient' : 'Hidden from patient'}</span>
                       )}
@@ -1126,8 +1126,8 @@
           {!open && (
             <div className="flex items-center gap-3 text-xs">
               <button type="button" className="text-primary-500 underline" disabled={busy}
-                onClick={() => { setErr(''); openDocument(consent.blankCopyUrl).catch(e => setErr(e.message)); }}>Print for signature</button>
-              {canEdit && <button className="text-primary-500 underline" onClick={() => setOpen(true)}>Record paper signature</button>}
+                onClick={() => { setErr(''); openDocument(consent.blankCopyUrl).catch(e => setErr(e.message)); }}>Print for Signature</button>
+              {canEdit && <button className="text-primary-500 underline" onClick={() => setOpen(true)}>Record Paper Signature</button>}
             </div>
           )}
           {open && (
@@ -1145,7 +1145,7 @@
               </div>
               <p className="text-xs text-gray-400 mt-2">The scan is filed to HIPAA Drive against this client and is what evidences the consent. Your name and the time are recorded with it.</p>
               <div className="flex gap-2 mt-3">
-                <button className="btn btn-primary text-sm" disabled={busy} onClick={submit}>{busy ? 'Recording…' : 'Record as signed'}</button>
+                <button className="btn btn-primary text-sm" disabled={busy} onClick={submit}>{busy ? 'Recording…' : 'Record as Signed'}</button>
                 <button className="btn btn-ghost text-sm" disabled={busy} onClick={() => { setOpen(false); setErr(''); }}>Cancel</button>
               </div>
             </div>
@@ -1315,7 +1315,7 @@
       if (!open) {
         return (
           <div className="flex items-center gap-3 flex-wrap">
-            <button className="btn btn-ghost" onClick={openEditor}>Edit submission</button>
+            <button className="btn btn-ghost" onClick={openEditor}>Edit Submission</button>
             <span className="text-xs text-gray-500">
               Every answer on the enrollment, including what an office-added client never filled in.
             </span>
@@ -1436,7 +1436,7 @@
             A consent they have already signed is rendered from this record, so correcting something one of them prints flags it for re-signature. It does not change what they signed against.
           </p>
           <div className="flex gap-2 mt-3">
-            <button className="btn btn-primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save submission'}</button>
+            <button className="btn btn-primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save Submission'}</button>
             <button className="btn btn-ghost" disabled={busy} onClick={() => setOpen(false)}>Cancel</button>
           </div>
         </div>
@@ -1484,7 +1484,7 @@
               No agreed rate on file. The Financial Agreement and the home care Service Agreement both print this table, so neither can be presented to the client until it is set.
             </div>
           )}
-          {canEdit && !open && <button className="btn btn-ghost text-sm mt-3" onClick={() => setOpen(true)}>{client.rateSet ? 'Change rate' : 'Set rate'}</button>}
+          {canEdit && !open && <button className="btn btn-ghost text-sm mt-3" onClick={() => setOpen(true)}>{client.rateSet ? 'Change Rate' : 'Set Rate'}</button>}
           {canEdit && open && (
             <div className="mt-3">
               {err && <div className="bg-danger-50 text-danger-600 text-sm rounded-lg px-4 py-2 mb-3">{err}</div>}
@@ -1500,7 +1500,7 @@
                 <div className="col-span-2"><label className="label">Errand fuel and mileage</label><input className="input" value={f.errandFuel} onChange={e => setF(v => ({ ...v, errandFuel: e.target.value }))} /></div>
               </div>
               <div className="flex gap-2">
-                <button className="btn btn-primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save rate'}</button>
+                <button className="btn btn-primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save Rate'}</button>
                 <button className="btn btn-ghost" disabled={busy} onClick={() => setOpen(false)}>Cancel</button>
               </div>
             </div>
@@ -1597,7 +1597,7 @@
               <div className="flex items-center gap-1.5 shrink-0">
                 {canEdit && s.kind === 'manual' && !data.activated && (
                   <button className="btn btn-ghost !py-1 !px-2 text-xs" disabled={busy === s.key} onClick={() => mark(s.key, !s.done)}>
-                    {s.done ? 'Un-mark' : 'Mark done'}
+                    {s.done ? 'Un-mark' : 'Mark Done'}
                   </button>
                 )}
                 <span className={`badge ${s.done ? 'bg-success-50 text-success-600' : 'bg-gray-100 text-gray-500'}`}>{s.done ? 'Done' : 'Pending'}</span>
@@ -1608,7 +1608,7 @@
           {canEdit ? (
             !data.activated && (
               <button className="btn btn-primary mt-3" disabled={!data.allDone || busy === 'activate'} onClick={activate}>
-                {busy === 'activate' ? 'Activating…' : 'ACTIVATE IHPC enrollment'}
+                {busy === 'activate' ? 'Activating…' : 'Activate IHPC Enrollment'}
               </button>
             )
           ) : (
@@ -1796,7 +1796,7 @@
                 {preview.lines.length > 0 && (
                   <div className="flex justify-between font-semibold border-t mt-1 pt-1"><span>Total</span><span>{usd(preview.totalCents)}</span></div>
                 )}
-                {preview.lines.length > 0 && <button className="btn btn-primary mt-2" disabled={busy === 'create'} onClick={() => run('create', () => api.createHomeCare(clientId, range.from, range.to)).then(r => { if (r) { setPreview(null); setMsg(`Draft ${r.invoice.number} created. Check it, then send it.`); } })}>Create draft statement</button>}
+                {preview.lines.length > 0 && <button className="btn btn-primary mt-2" disabled={busy === 'create'} onClick={() => run('create', () => api.createHomeCare(clientId, range.from, range.to)).then(r => { if (r) { setPreview(null); setMsg(`Draft ${r.invoice.number} created. Check it, then send it.`); } })}>Create Draft Statement</button>}
               </div>
             )}
           </div>
@@ -1813,8 +1813,8 @@
                 {i.status === 'paid' && <div className="text-xs text-gray-500">Paid {new Date(i.paidAt).toLocaleDateString()} by {(i.payments.slice(-1)[0] || {}).method}</div>}
                 {(i.status === 'draft' || i.status === 'open') && (
                   <div className="flex flex-wrap gap-2 mt-2">
-                    {i.status === 'draft' && <button className="btn btn-primary" disabled={!!busy} onClick={() => run(i.id, () => api.invoiceAction(i.id, 'send'))}>Send to patient</button>}
-                    {i.status === 'open' && <button className="btn" disabled={!!busy} onClick={() => { const m = window.prompt('Paid how? Type check, cash or other.'); if (m) run(i.id, () => api.invoiceAction(i.id, 'record-payment', { method: m.trim().toLowerCase(), reference: window.prompt('Check number or note (optional)') || '' })); }}>Record payment</button>}
+                    {i.status === 'draft' && <button className="btn btn-primary" disabled={!!busy} onClick={() => run(i.id, () => api.invoiceAction(i.id, 'send'))}>Send to Patient</button>}
+                    {i.status === 'open' && <button className="btn" disabled={!!busy} onClick={() => { const m = window.prompt('Paid how? Type check, cash or other.'); if (m) run(i.id, () => api.invoiceAction(i.id, 'record-payment', { method: m.trim().toLowerCase(), reference: window.prompt('Check number or note (optional)') || '' })); }}>Record Payment</button>}
                     <button className="btn" disabled={!!busy} onClick={() => { const r = window.prompt('Why void this statement? The patient sees it as cancelled.'); if (r) run(i.id, () => api.invoiceAction(i.id, 'void', { reason: r })); }}>Void</button>
                   </div>
                 )}
@@ -1861,7 +1861,7 @@
                 </div>
                 {r.status === 'pending' && isAdmin && (
                   <div className="mt-3 flex flex-wrap gap-2 items-center">
-                    <button className="px-3 py-1.5 rounded bg-primary text-white text-sm disabled:opacity-50" disabled={busy === r.id} onClick={() => decide(r, 'approved')}>Approve and email sign-in</button>
+                    <button className="px-3 py-1.5 rounded bg-primary text-white text-sm disabled:opacity-50" disabled={busy === r.id} onClick={() => decide(r, 'approved')}>Approve & Email</button>
                     <input className="border rounded px-2 py-1.5 text-sm flex-1 min-w-[180px]" placeholder="Reason, if declining (the patient sees it)" value={reason[r.id] || ''} onChange={e => setReason({ ...reason, [r.id]: e.target.value })} />
                     <button className="px-3 py-1.5 rounded border text-sm disabled:opacity-50" disabled={busy === r.id} onClick={() => decide(r, 'declined')}>Decline</button>
                   </div>
@@ -1967,10 +1967,10 @@
             <div className="flex gap-2 flex-wrap">
               {canEdit ? (
                 <React.Fragment>
-                  <button className="btn btn-ghost" disabled={busy} onClick={doReview}>Mark as reviewed</button>
-                  <button className="btn btn-ghost" disabled={busy} onClick={() => setShowFollowUp(v => !v)}>Request follow-up</button>
-                  <button className="btn btn-ghost" disabled={busy} onClick={() => { setLineChoice(client.serviceLineResolved || 'PHC'); setLineOpen(v => !v); }}>Change service line</button>
-                  <button className="btn btn-primary" disabled={busy} onClick={() => doApprove(null)}>Approve enrollment</button>
+                  <button className="btn btn-ghost" disabled={busy} onClick={doReview}>Mark Reviewed</button>
+                  <button className="btn btn-ghost" disabled={busy} onClick={() => setShowFollowUp(v => !v)}>Request Follow-Up</button>
+                  <button className="btn btn-ghost" disabled={busy} onClick={() => { setLineChoice(client.serviceLineResolved || 'PHC'); setLineOpen(v => !v); }}>Change Service Line</button>
+                  <button className="btn btn-primary" disabled={busy} onClick={() => doApprove(null)}>Approve Enrollment</button>
                 </React.Fragment>
               ) : (
                 <span className="badge bg-gray-100 text-gray-600">
@@ -2006,7 +2006,7 @@
                     placeholder="Why is this being approved with items outstanding?" />
                   <button className="btn btn-ghost mt-2" disabled={busy || !overrideReason.trim()}
                     onClick={() => doApprove(overrideReason.trim())}>
-                    Approve with this reason
+                    Approve with Reason
                   </button>
                 </div>
               )}
@@ -2094,7 +2094,7 @@
                 ))}
               </div>
               <button className="btn btn-primary mt-3" disabled={busy || !lineChoice || lineChoice === client.serviceLineResolved} onClick={submitServiceLine}>
-                Save service line
+                Save Service Line
               </button>
               {!!(client.serviceLineHistory || []).length && (
                 <div className="text-xs text-gray-500 mt-4">
@@ -2125,7 +2125,7 @@
                   Missing data blocking a signature: {client.missing.fieldBlocks.map(f => `${f.label} → ${f.blocks.join(', ')}`).join(' · ')}
                 </p>
               )}
-              <button className="btn btn-primary mt-3" disabled={busy || !followUpItems.length} onClick={submitFollowUp}>Send follow-up notice</button>
+              <button className="btn btn-primary mt-3" disabled={busy || !followUpItems.length} onClick={submitFollowUp}>Send Follow-Up</button>
             </Section>
           )}
 
@@ -2600,7 +2600,7 @@
               Will create <strong>{form.firstName} {form.lastName}</strong> ({form.serviceLine}{isPhc ? `, ${form.careTier}` : ''}) with source <code>legacy_offline</code> and enrollment status <code>intake_complete</code>.
               {' '}{signedCount} of {consentDefs.filter(d => d.required).length} required consent(s) marked signed on paper.
             </p>
-            <button className="btn btn-primary" disabled={busy} onClick={submit}>{busy ? 'Creating…' : 'Create client record'}</button>
+            <button className="btn btn-primary" disabled={busy} onClick={submit}>{busy ? 'Creating…' : 'Create Client'}</button>
           </Section>
         </div>
       );

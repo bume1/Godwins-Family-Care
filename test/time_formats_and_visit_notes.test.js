@@ -332,7 +332,7 @@ test('the review screen renders the content and names no task of its own', () =>
   assert.ok(/\{showAll && <DetailSections d=\{v\.detail\} \/>\}/.test(page),
     'the content should render when the row is expanded, gated on showAll');
   assert.ok(/setShowAll\(!showAll\)/.test(page), 'the toggle should flip showAll');
-  assert.ok(/Read the visit/.test(page), 'there should be a way to open the content');
+  assert.ok(/Read Visit/.test(page), 'there should be a way to open the content');
   // The catalog lives in one module. A page that restated it would drift from
   // the validator that refuses an answer it did not offer.
   ['bathing', 'bloodPressure', 'report_falls', 'meal_consumption']

@@ -167,7 +167,7 @@ test('an LCSW or LMSW can record visit times', () => {
 
 test('a social worker is not offered med rec, the problem list, order sends or a care-plan co-sign they cannot do', () => {
   const code = strip(page);
-  assert.match(code, /const MedRecTab = \(\{ patient \}\) => \{\s*const canWrite = useCan\('medRec'\);/);
+  assert.match(code, /const MedRecTab = \(\{ patient, onSaved \}\) => \{\s*const canWrite = useCan\('medRec'\);/);
   assert.match(code, /setAddToProblemList && canWriteProblems && \(/);
   assert.match(code, /const canAdvance = useCan\('orderStatusAdvance'\);/);
   assert.equal((code.match(/\{canAdvance && /g) || []).length, 3, 'mark faxed, mark scheduled and attach result');

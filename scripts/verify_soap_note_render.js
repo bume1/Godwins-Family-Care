@@ -132,6 +132,9 @@ const posted = [];
 
   // Open the patient and the Visit tab (the banner's Start visit lands here).
   const openVisit = async () => {
+    // The workspace opens on My Day; the patient list is under Patients.
+    await page.locator('button:has-text("Patients"), a:has-text("Patients")').first().click();
+    await page.waitForTimeout(300);
     await page.locator(`text=${PATIENT.name}`).first().click();
     await page.waitForTimeout(400);
     await page.locator('button:has-text("Start visit")').first().click();
@@ -204,11 +207,11 @@ const posted = [];
   ok('E2 and carries no H&P blocks', !!save && !(save.body.note || {}).hp);
 
   // --- G. The popup is a short starter -------------------------------------
-  await page.locator('button:has-text("Back to the chart")').first().click();
+  await page.locator('button:has-text("Back to Chart")').first().click();
   await page.waitForTimeout(300);
   await page.locator('.tabbtn:text-is("Encounters")').first().click();
   await page.waitForTimeout(400);
-  await page.locator('button:has-text("Document follow-up visit")').first().click();
+  await page.locator('button:has-text("Document Follow-Up")').first().click();
   const modal = page.locator('.card', { hasText: 'Document a visit' }).first();
   await modal.waitFor({ timeout: 10000 });
   await page.waitForTimeout(300);

@@ -664,6 +664,68 @@ function createNotifier(deps) {
     }
   }
 
+  // ---- A message is waiting, for a STAFF recipient (2026-10-12) ------------
+  //
+  // The patient half of this notice follows the PHI-free rule; the staff half
+  // did not. It carried `"<channel> — <client name>"` in the subject and the
+  // client's name again in the body, and it was NOT marked as PHI — so a
+  // transport outside the BAA would have sent "Clinical Escalation — Ada Bell"
+  // anyway. Every other staff notice in this file gates its detail on the live
+  // transport; this one was the exception, and an exception nobody chose is a
+  // drift rather than a decision.
+  //
+  // It lives here rather than in the messaging router for one reason: the
+  // question "how much may this email say" is answered in ONE place, by
+  // `transportAllowsDetail()`, re-read on every send. A second copy in a route
+  // is how the two start disagreeing.
+  //
+  // The ROUTER still decides WHO is on the thread — that is thread visibility
+  // and it belongs with the matrix, not here. This takes the recipient it is
+  // given.
+  async function staffMessageWaiting({ user, clientName, channelLabel, senderName, messageId, ctaUrl, actorId }) {
+    try {
+      const detail = transportAllowsDetail();
+      const who = senderName || 'Someone';
+      return {
+        notified: await send({
+          type: 'message_received',
+          user,
+          // On a covered transport a staff member needs to know WHICH client
+          // and which conversation, or the notice is not actionable. On an
+          // uncovered one they are told a message is waiting and nothing else.
+          subject: detail && clientName
+            ? `${channelLabel ? `${channelLabel} — ` : ''}${clientName}`
+            : 'A new message is waiting',
+          headline: 'A new message is waiting',
+          // THE MESSAGE ITSELF IS NEVER IN THE EMAIL, on either path. A
+          // notification that carries the message carries PHI into an inbox;
+          // one that says a message is waiting does not.
+          // WHEN THE SENDER *IS* THE CLIENT, naming both reads "Ada Bell sent
+          // you a message about Ada Bell." The old wording did exactly that on
+          // every client-written thread, which is most of them — found by
+          // rendering it, not by reading it.
+          paragraphs: detail && clientName
+            ? [who === clientName
+                ? `${clientName} sent you a message.`
+                : `${who} sent you a message about ${clientName}.`,
+               'Open the app to read it. The message itself is not in this email.']
+            : ['Someone sent you a message about a client.',
+               'Open the app to read it. For privacy we do not name the client or the conversation in email.'],
+          // WHERE THIS PERSON READS MESSAGES, not where a client does.
+          // Messaging mounts on four surfaces, and the caller resolves it per
+          // recipient.
+          ctaUrl, ctaLabel: 'Open messages',
+          relatedEntityId: messageId, relatedEntityType: 'message',
+          actorId, phi: !!(detail && clientName)
+        }) ? 1 : 0,
+        detailed: detail
+      };
+    } catch (e) {
+      console.error('[MSG] staff message notice failed (non-fatal):', e.message);
+      return { notified: 0, reason: e.message };
+    }
+  }
+
   // ---- Caregiver visits (PHCP), 2026-10-12 ---------------------------------
   //
   // These two were hand-rolled inside routes/scheduling.js: one bare sentence
@@ -792,7 +854,9 @@ function createNotifier(deps) {
     // patient portal (P1)
     visitSummaryReady, resultReviewed,
     // caregiver visits (PHCP)
-    caregiverVisitConfirmed, caregiverVisitMoved
+    caregiverVisitConfirmed, caregiverVisitMoved,
+    // messaging
+    staffMessageWaiting
   };
 }
 

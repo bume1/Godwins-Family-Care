@@ -188,5 +188,5 @@ test('a release opens as a rendered PDF on both doors, never a Drive link', () =
 
 test('the form pre-fills only providers without a release in force', () => {
   assert.match(PORTAL, /const pre = all\.filter\(p => !p\.activeAuthorization\);/);
-  assert.match(PORTAL, /Request again/);
+  assert.match(PORTAL, /Request Again/);
 });

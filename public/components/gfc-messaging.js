@@ -18,6 +18,9 @@
  *             hostStartsMessages: false, // the host lists channels to start
  *                                       // (with each one's reason when off), so
  *                                       // the list leaves those cards out
+ *             audience:      null,      // optional 'patient' | 'team': list only
+ *                                       // threads with (or without) the patient's
+ *                                       // side on them, as the server marks them
  *             startCompose:  null,      // optional channel id: open straight
  *                                       // into a new message on that channel
  *                                       // (the portal's "Ask a Question").
@@ -195,7 +198,7 @@
       return '<span class="matt">&#128206; <span class="mnm">' + esc(f.name) + '</span> <span class="mmu">' + esc(fmtSize(f.size)) + '</span>' +
         '<button type="button" class="mattx" data-remove-file="' + i + '" aria-label="Remove ' + esc(f.name) + '">&times;</button></span>';
     }).join('') + '</div>';
-    html += '<div class="mbtns" style="align-items:center"><label class="mbtn ghost mfile">Attach a file' +
+    html += '<div class="mbtns" style="align-items:center"><label class="mbtn ghost mfile">Attach File' +
       '<input type="file" data-files="1" multiple accept="application/pdf,image/jpeg,image/png,.pdf,.jpg,.jpeg,.png" hidden></label>' +
       '<span class="mmu">PDF, JPEG or PNG &middot; up to ' + MAX_FILES + ' files, 10 MB each</span></div>';
     return html;
@@ -339,15 +342,25 @@
       '</div>';
   }
 
+  // `audience` narrows a list to conversations with the patient's side on them
+  // ('patient') or staff only ('team'). The SERVER marks each thread and channel
+  // (`withPatient`, from the channel's participants); this only filters on it.
+  function inAudience(state, x) {
+    if (!state.audience) return true;
+    return state.audience === 'patient' ? !!x.withPatient : !x.withPatient;
+  }
+
   function renderList(state) {
-    var openable = state.channels.filter(function (c) { return c.available; });
-    var blocked = state.channels.filter(function (c) { return !c.available; });
+    var channels = state.channels.filter(function (c) { return inAudience(state, c); });
+    var threads = state.threads.filter(function (t) { return inAudience(state, t); });
+    var openable = channels.filter(function (c) { return c.available; });
+    var blocked = channels.filter(function (c) { return !c.available; });
 
     var html = renderPicker(state) + '<div class="mcard"><h3>Messages</h3>';
-    if (!state.threads.length) {
+    if (!threads.length) {
       html += '<div class="mempty">No conversations yet.</div>';
     } else {
-      html += state.threads.map(function (t) {
+      html += threads.map(function (t) {
         return '<button class="mrow" data-open="' + esc(t.id) + '">' +
           '<div class="mtop"><span class="mlabel">' + esc(t.channelLabel) + '</span>' +
           '<span class="mmu">' + esc(fmtWhen(t.lastMessageAt)) +
@@ -366,7 +379,7 @@
     // passes hostStartsMessages, so the list does not say it twice.
     if (state.hostStartsMessages) return html;
     if (openable.length) {
-      html += '<div class="mcard"><h3>Start a message</h3>' +
+      html += '<div class="mcard"><h3>Start a Message</h3>' +
         '<div class="mbtns">' + openable.map(function (c) {
           return '<button class="mbtn ghost" data-compose="' + esc(c.id) + '">' + esc(c.label) + '</button>';
         }).join('') + '</div></div>';
@@ -380,7 +393,7 @@
     // withheld is a staff screen that has not named a client, where every
     // reason would read "none is selected" and say nothing about the client.
     if (blocked.length && scopeSettled(state)) {
-      html += '<div class="mcard mdis"><h3>Not available yet</h3>' +
+      html += '<div class="mcard mdis"><h3>Not Available Yet</h3>' +
         blocked.map(function (c) {
           return '<div class="mnote"><b>' + esc(c.label) + '</b>' + esc(c.reason || '') + '</div>';
         }).join('') + '</div>';
@@ -391,7 +404,7 @@
   function renderCompose(state) {
     var c = state.channels.filter(function (x) { return x.id === state.composeChannel; })[0] || {};
     return '<div class="mcard">' +
-      '<h3>' + esc(c.label || 'New message') + '</h3>' +
+      '<h3>' + esc(c.label || 'New Message') + '</h3>' +
       '<p class="mmu">' + esc(c.blurb || '') + '</p>' +
       (c.code ? '<div class="mnote"><b>Before you send</b>' + esc(c.reason || '') + '</div>' : '') +
       '<label>Message</label>' + renderEditor(state) +
@@ -405,7 +418,7 @@
     var t = state.thread || {};
     var canMoveStatus = t.responseStatus && (state.role === 'clinical' || state.role === 'admin');
     var html = '<div class="mcard">' +
-      '<div class="mbtns" style="margin:0 0 10px"><button class="mbtn ghost" data-back="1">← All messages</button></div>' +
+      '<div class="mbtns" style="margin:0 0 10px"><button class="mbtn ghost" data-back="1">← All Messages</button></div>' +
       '<h3>' + esc(t.channelLabel || 'Conversation') + '</h3>' +
       '<div class="mmu">' + esc(t.clientName || '') +
       (t.responseStatus ? ' · <span class="mchip ' + esc(t.responseStatus) + '">' +
@@ -421,7 +434,7 @@
 
     if (state.canPost) {
       html += '<label>Reply</label>' + renderEditor(state) +
-        '<div class="mbtns"><button class="mbtn gold" data-reply="1">Send reply</button></div>';
+        '<div class="mbtns"><button class="mbtn gold" data-reply="1">Send Reply</button></div>';
     } else {
       html += '<div class="mnote"><b>You cannot reply here</b>' + esc(state.cannotPostReason || '') + '</div>';
     }
@@ -429,7 +442,7 @@
     if (canMoveStatus) {
       html += '<div class="mbtns" style="border-top:1px solid #ece6db;padding-top:10px;margin-top:12px">' +
         ['acknowledged', 'responded', 'closed'].map(function (s) {
-          return '<button class="mbtn ghost" data-status="' + s + '">Mark ' + s.replace(/_/g, ' ') + '</button>';
+          return '<button class="mbtn ghost" data-status="' + s + '">Mark ' + s.split('_').map(function (w) { return w.charAt(0).toUpperCase() + w.slice(1); }).join(' ') + '</button>';
         }).join('') + '</div>';
     }
     return html + '</div>';
@@ -619,6 +632,7 @@
       authToken: options.authToken,
       onUnread: options.onUnread || null,
       hostStartsMessages: !!options.hostStartsMessages,
+      audience: options.audience === 'patient' || options.audience === 'team' ? options.audience : null,
       view: 'list',
       loading: true,
       error: '', notice: '',

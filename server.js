@@ -2837,7 +2837,10 @@ app.use(messagingRoutes({
   db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4,
   upload, uploadLimiter, googledrive,
   detectFileType: (buf) => detectFileType(buf),
-  contentDisposition
+  contentDisposition,
+  // A GETTER, not the notifier itself: `notify` is built far below this line
+  // and would be in its temporal dead zone here. Called only at request time.
+  notify: () => notify
 }));
 
 // Uploads require authentication - registered here after authenticateToken is defined

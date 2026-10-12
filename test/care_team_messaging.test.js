@@ -87,7 +87,20 @@ const boot = async (opts = {}) => {
   app.use(messagingRoutes({
     db, config: cfg, logActivity: async (...a) => { activity.push(a); },
     queueNotification: async (type, id, email, name, data, o) => { notices.push({ type, id, email, name, data, o }); return { queued: true }; },
-    getUsers, authenticateToken, uuidv4, upload, uploadLimiter: (req, res, next) => next(), googledrive, detectFileType, contentDisposition
+    getUsers, authenticateToken, uuidv4, upload, uploadLimiter: (req, res, next) => next(), googledrive, detectFileType, contentDisposition,
+    // THE REAL NOTIFIER, built as server.js builds it. The STAFF half of the
+    // message notice moved onto it on 2026-10-12 so the detail rule lives in
+    // one place; a harness that left `notify` out would exercise a different
+    // function and report staff as never told.
+    notify: () => require('../notifications').createNotifier({
+      getUsers,
+      queueNotification: async (type, id, email, name, data, o) => { notices.push({ type, id, email, name, data, o }); return { queued: true }; },
+      getAppBaseUrl: async () => 'https://app.test.local',
+      emailTransport: { transportStatus: () => ({ baaCovered: true }) },
+      staffRoles: [cfg.ROLES.ADMIN, cfg.ROLES.USER, cfg.ROLES.CASE_MANAGER],
+      clientRole: cfg.ROLES.CLIENT,
+      familyRole: cfg.ROLES.FAMILY
+    })
   }));
   const server = await new Promise(r => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   const port = server.address().port;

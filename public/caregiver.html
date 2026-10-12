@@ -485,8 +485,8 @@ const ShiftCard = ({ clients, shifts, onSchedule }) => {
         <button className="shiftlink" onClick={onSchedule}>
           <i className="ti ti-clock-stop"></i>
           {live.visitLogFiled === false
-            ? 'Go to Schedule to file the log and clock out'
-            : 'Go to Schedule to clock out'}
+            ? 'File Log & Clock Out'
+            : 'Clock Out'}
         </button>
       </div>
     );
@@ -542,10 +542,10 @@ const HomeTab = ({ me, clients, shifts, onVisitLog, onFlag, onSchedule, escalati
 
       <div className="grid2">
         <button className="qb o" onClick={onVisitLog}>
-          <i className="ti ti-clipboard-text"></i>Submit visit log
+          <i className="ti ti-clipboard-text"></i>Submit Visit Log
         </button>
         <button className="qb g" onClick={onFlag}>
-          <i className="ti ti-alert-triangle"></i>Flag a concern
+          <i className="ti ti-alert-triangle"></i>Flag a Concern
         </button>
       </div>
 
@@ -964,7 +964,7 @@ const VisitLogForm = ({ me, clients, onDone, onBack, online, shiftId, initialCli
             <span><b>You are offline.</b><span>This log saves on your phone and files when you reconnect.</span></span></div>}
 
           <button className="btn gold" disabled={blocked || busy} onClick={submit}>
-            {busy ? 'Filing…' : 'Submit visit log'}
+            {busy ? 'Filing…' : 'Submit Visit Log'}
           </button>
           <p className="sub" style={{ marginTop: 10, marginBottom: 0 }}>
             Once submitted this log is final. A clinician adds a review note rather than editing it.
@@ -1000,7 +1000,7 @@ const ClientsTab = ({ clients, detail, onOpen, onClose, onMessages }) => {
     const plan = c.carePlan;
     return (
       <div>
-        <button className="back" onClick={onClose}><i className="ti ti-chevron-left"></i>All clients</button>
+        <button className="back" onClick={onClose}><i className="ti ti-chevron-left"></i>All Clients</button>
         <h2 className="pg">{c.name}</h2>
         <p className="sub">{c.careTierLabel || c.careTier || 'Tier not set'}</p>
 
@@ -1199,7 +1199,7 @@ const DocumentsCard = () => {
       </div>
 
       <button className="btn" onClick={submit} disabled={busy || !file || !kind}>
-        {busy ? 'Sending…' : 'Send to the office'}
+        {busy ? 'Sending…' : 'Send to Office'}
       </button>
 
       {msg && (
@@ -1228,7 +1228,7 @@ const DocumentsCard = () => {
                 onClick={async () => {
                   try { await openCaregiverDocument(d.id); }
                   catch (e) { setMsg({ ok: false, text: e.message }); }
-                }}>Open this file</button>
+                }}>Open File</button>
               {/* A caregiver told only "not accepted" re-sends the same blurry
                   photo, so the reason is shown, not just the status. */}
               {d.status === 'rejected' && d.reviewNote && (
@@ -1284,7 +1284,7 @@ const OnboardingCard = ({ me, onChanged }) => {
             window.open(url, '_blank');
             setTimeout(() => URL.revokeObjectURL(url), 60000);
           } catch (e) { /* the button is a convenience; the checklist below is the work */ }
-        }}>Download my signed packet</button>
+        }}>Download Signed Packet</button>
       </div>
       <OnboardingChecklist checklist={packet.checklist || []}
         groupTitles={packet.groupTitles} groupIntros={packet.groupIntros}
@@ -1447,7 +1447,7 @@ const SignaturePad = ({ onChange }) => {
         style={{ width: '100%', height: 150, border: '1.5px dashed #d8cdb8', borderRadius: 10, background: '#fff', touchAction: 'none' }}
         onMouseDown={start} onMouseMove={move} onMouseUp={end} onMouseLeave={end}
         onTouchStart={start} onTouchMove={move} onTouchEnd={end} />
-      <button type="button" className="btn ghost" style={{ marginTop: 8 }} onClick={clear}>Clear signature</button>
+      <button type="button" className="btn ghost" style={{ marginTop: 8 }} onClick={clear}>Clear Signature</button>
     </div>
   );
 };
@@ -1702,9 +1702,9 @@ const AttestationForm = ({ doc, onSigned, onCancel }) => {
 
       <button className="btn gold" disabled={busy || !signature || !printedName.trim() || unanswered.length > 0}
         onClick={submit}>
-        {busy ? 'Saving…' : 'Sign this form'}
+        {busy ? 'Saving…' : 'Sign Form'}
       </button>
-      <button className="btn ghost" disabled={busy} onClick={onCancel}>Back to the list</button>
+      <button className="btn ghost" disabled={busy} onClick={onCancel}>Back to List</button>
     </div>
   );
 };
@@ -1824,7 +1824,7 @@ const OnboardingChecklist = ({ checklist, groupTitles, groupIntros, attestations
                       setMsg(null);
                       try { await openCaregiverDocument(u.id); }
                       catch (e) { setMsg({ ok: false, text: e.message }); }
-                    }}>Open this file</button>
+                    }}>Open File</button>
                 </div>
               ))}
 
@@ -1836,7 +1836,7 @@ const OnboardingChecklist = ({ checklist, groupTitles, groupIntros, attestations
                 <div style={{ marginTop: 8 }}>
                   {row.status === 'complete' ? (
                     <button className="btn ghost" onClick={() => downloadSigned(row)}>
-                      Download my signed copy
+                      Download Signed Copy
                     </button>
                   ) : (
                     <>
@@ -1850,7 +1850,7 @@ const OnboardingChecklist = ({ checklist, groupTitles, groupIntros, attestations
                         </p>
                       ) : null}
                       <button className="btn gold" onClick={() => setSigning(row.kind)}>
-                        {row.supersededSignature ? 'Read and sign the new version' : 'Read and sign'}
+                        {row.supersededSignature ? 'Sign New Version' : 'Read & Sign'}
                       </button>
                     </>
                   )}
@@ -2012,7 +2012,7 @@ const WelcomePacketWizard = ({ me, onComplete }) => {
           <div className="card">
             <h3>Start fresh</h3>
             <p className="sub">About ten minutes. It saves as you go, so you can stop and come back.</p>
-            <button className="btn" onClick={() => go((packet.sections[0] || {}).id)}>Fill it in here</button>
+            <button className="btn" onClick={() => go((packet.sections[0] || {}).id)}>Fill In Here</button>
             <button className="btn ghost" onClick={async () => {
               // Fetched with the auth header rather than linked, then handed to
               // the browser — the route is authenticated and a plain href
@@ -2027,7 +2027,7 @@ const WelcomePacketWizard = ({ me, onComplete }) => {
                 window.open(url, '_blank');
                 setTimeout(() => URL.revokeObjectURL(url), 60000);
               } catch (e) { setErr(e.message); }
-            }}>Download the blank PDF instead</button>
+            }}>Download Blank PDF</button>
           </div>
         </div>
       ) : null}
@@ -2055,7 +2055,7 @@ const WelcomePacketWizard = ({ me, onComplete }) => {
             ))}
           </div>
           <button className="btn" disabled={busy} onClick={() => go(steps[index + 1])}>
-            {busy ? 'Saving…' : 'Save and continue'}
+            {busy ? 'Saving…' : 'Save & Continue'}
           </button>
           {index > 1 ? (
             <button className="btn ghost" disabled={busy} onClick={() => go(steps[index - 1])}>Back</button>
@@ -2077,7 +2077,7 @@ const WelcomePacketWizard = ({ me, onComplete }) => {
             groupTitles={packet.groupTitles} groupIntros={packet.groupIntros}
             attestations={packet.attestations}
             onChanged={async () => { const p = await load(); setData(d => ({ ...d, ...(p.data || {}) })); }} />
-          <button className="btn" onClick={() => go('sign')}>Continue to sign</button>
+          <button className="btn" onClick={() => go('sign')}>Continue to Sign</button>
           <button className="btn ghost" onClick={() => go(steps[index - 1])}>Back</button>
         </div>
       ) : null}
@@ -2106,7 +2106,7 @@ const WelcomePacketWizard = ({ me, onComplete }) => {
             </div>
           </div>
           <button className="btn gold" disabled={busy || !signature || !printedName.trim()} onClick={submit}>
-            {busy ? 'Submitting…' : 'Submit my packet'}
+            {busy ? 'Submitting…' : 'Submit Packet'}
           </button>
           <button className="btn ghost" disabled={busy} onClick={() => go('documents')}>Back</button>
         </div>
@@ -2214,7 +2214,7 @@ const App = () => {
         <div className="hdr"><span className="ttl">Caregiver</span></div>
         <div className="main">
           <div className="err">{fatal || 'Could not load your account.'}</div>
-          <button className="btn ghost" onClick={logout}>Sign out</button>
+          <button className="btn ghost" onClick={logout}>Sign Out</button>
         </div>
       </div>
     );
