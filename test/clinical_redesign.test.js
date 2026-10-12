@@ -171,3 +171,49 @@ test('the note screen asks where the visit happened, never for a place of servic
   assert.match(hp, /<Field label="Visit Location">/);
   assert.ok(!/Place of Service|place of service/i.test(hp.replace(/\/\/.*$/gm, '')), 'POS is billing\'s, never the clinician\'s');
 });
+
+// Owner report, 2026-10-12: "when saving in the coding area, it still shows an
+// unsaved changes message". The reload after a save compared the boxes with
+// the record from BEFORE the save, so it kept them as "unsaved", never cleared
+// "add to problem list", and the flag (and the Sign block) never went away.
+// The real load callback is lifted out of the page and RUN against fakes.
+const encounterLoad = () => {
+  const src = slice('      const codingRef = useRef({});', '      useEffect(load, ');
+  const body = src.slice(src.indexOf('const load = useCallback('), src.lastIndexOf(', [patient.id, euuid]);'));
+  const fn = body.replace('const load = useCallback(', '');
+  return (env) => new Function(...Object.keys(env), `return (${fn})`)(...Object.values(env));
+};
+const runLoad = async ({ adopt, typed, before, saved }) => {
+  const state = {};
+  const env = {
+    api: { encounterDetail: () => Promise.resolve({ record: saved }) },
+    patient: { id: 'c1' }, euuid: 'e1',
+    codingRef: { current: { ...typed, record: before, key: 'c1|e1' } },
+    adoptCodingRef: { current: adopt },
+    setD: (v) => { state.d = v; }, setErr: () => {},
+    setDiagnoses: (v) => { state.diagnoses = v; }, setServices: (v) => { state.services = v; },
+    setAddToProblemList: (v) => { state.addToProblemList = v; }, setFacing: (v) => { state.facing = v; }
+  };
+  encounterLoad()(env)();
+  await new Promise(r => setTimeout(r, 0));
+  return { state, adoptLeft: env.adoptCodingRef.current };
+};
+const TYPED = { diagnoses: [{ code: 'R55.' }], services: [], facing: { patientSummary: '', followUpInstructions: '' }, addToProblemList: ['R55.'] };
+const BEFORE = { diagnoses: [], services: [] };
+const SAVED = { diagnoses: [{ code: 'R55', description: 'Syncope' }], services: [], patientSummary: '', followUpInstructions: '' };
+
+test('after a coding save, the reload takes the saved copy and clears "add to problem list"', async () => {
+  const { state, adoptLeft } = await runLoad({ adopt: true, typed: TYPED, before: BEFORE, saved: SAVED });
+  assert.deepStrictEqual(state.diagnoses, SAVED.diagnoses, 'the boxes now hold what the server stored');
+  assert.deepStrictEqual(state.addToProblemList, [], 'the ticks are cleared, or "Unsaved changes" never goes away');
+  assert.strictEqual(adoptLeft, false, 'the flag is spent by the one reload it was for');
+});
+
+test('any other reload still keeps coding that has not been saved', async () => {
+  const { state } = await runLoad({ adopt: false, typed: TYPED, before: BEFORE, saved: SAVED });
+  assert.strictEqual(state.diagnoses, undefined, 'typed coding is left alone after an Rx or order reload');
+});
+
+test('the adopt flag is set only by a SUCCESSFUL coding save', () => {
+  assert.match(page, /api\.saveCoding\(patient\.id, euuid, \{ diagnoses, services, addToProblemList, \.\.\.facing \}\)\.then\(r => \{ adoptCodingRef\.current = true; return r; \}\)/);
+});

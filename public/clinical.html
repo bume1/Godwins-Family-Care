@@ -6987,6 +6987,12 @@
       // long patient summary typed and not yet saved vanished. Unsaved coding
       // is kept; only a clean screen takes the server's copy.
       const codingRef = useRef({});
+      // Set by a SUCCESSFUL coding save, so the reload after it takes the
+      // server's copy. Without it the reload compared the boxes with the
+      // record from BEFORE the save, decided they were still unsaved, kept
+      // them, never cleared "add to problem list", and "Unsaved changes" (and
+      // the Sign block) stayed on after every save (owner report, 2026-10-12).
+      const adoptCodingRef = useRef(false);
       codingRef.current = { diagnoses, services, facing, addToProblemList, record: d && d.record, key: `${patient.id}|${euuid}` };
       const load = useCallback(() => {
         api.encounterDetail(patient.id, euuid).then(r => {
@@ -6999,7 +7005,8 @@
             (cur.facing.followUpInstructions || '') !== (prev.followUpInstructions || '') ||
             (cur.addToProblemList || []).length > 0);
           setD(r); setErr('');
-          if (!unsaved) {
+          if (!unsaved || adoptCodingRef.current) {
+            adoptCodingRef.current = false;
             setDiagnoses(r.record.diagnoses || []); setServices(r.record.services || []); setAddToProblemList([]);
             setFacing({ patientSummary: r.record.patientSummary || '', followUpInstructions: r.record.followUpInstructions || '' });
           }
@@ -7223,7 +7230,7 @@
               </div>
               {!codingLocked && (
                 <div className="flex items-center gap-3">
-                  <button className="btn" disabled={busy === 'coding' || !dirty} onClick={() => run('coding', () => api.saveCoding(patient.id, euuid, { diagnoses, services, addToProblemList, ...facing }))}>
+                  <button className="btn" disabled={busy === 'coding' || !dirty} onClick={() => run('coding', () => api.saveCoding(patient.id, euuid, { diagnoses, services, addToProblemList, ...facing }).then(r => { adoptCodingRef.current = true; return r; }))}>
                     <i className="ti ti-device-floppy" />{busy === 'coding' ? 'Saving…' : 'Save Coding'}
                   </button>
                   {dirty && <span className="text-xs text-amber-700">Unsaved changes</span>}
