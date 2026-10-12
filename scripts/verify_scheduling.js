@@ -181,7 +181,19 @@ const authenticateToken = async (req, res, next) => {
 
 const app = express();
 app.use(bodyParser.json({ limit: '5mb' }));
-app.use(schedulingRoutes({ db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4 }));
+// THE REAL NOTIFIER, built as server.js builds it. The client-facing visit
+// notices moved onto it on 2026-10-12; a probe that left `notify` out would
+// report the client as never told and would be reporting on its own harness.
+const notify = require('../notifications').createNotifier({
+  getUsers,
+  queueNotification,
+  getAppBaseUrl: async () => 'https://app.test.local',
+  emailTransport: { transportStatus: () => ({ baaCovered: true }) },
+  staffRoles: [config.ROLES.ADMIN, config.ROLES.USER, config.ROLES.CASE_MANAGER].filter(Boolean),
+  clientRole: config.ROLES.CLIENT,
+  familyRole: config.ROLES.FAMILY
+});
+app.use(schedulingRoutes({ db, config, logActivity, queueNotification, getUsers, invalidateUsersCache, authenticateToken, uuidv4, notify: () => notify }));
 
 // ---- Harness ---------------------------------------------------------------
 let PORT = 0;

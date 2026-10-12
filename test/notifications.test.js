@@ -505,3 +505,183 @@ test('the three new routes are wired, exactly once each', () => {
   // Request and reminder are two call sites of one notifier, by design.
   assert.strictEqual((src.match(/notify\.documentsRequested\(/g) || []).length, 2);
 });
+
+// ===========================================================================
+// 2026-10-12 — the patient-email revision pass
+//
+// Seventeen notices reach a patient. These guard the six things that were
+// wrong with their copy, each by RENDERING the notice rather than reading the
+// source: a defect in an email is only ever visible in the delivered message.
+// ===========================================================================
+const reminders2 = require('../visitReminders');
+
+const PT_CLIENT = { id: 'pc1', role: 'client', name: 'Ada Bell', email: 'ada@test.local', slug: 'ada-bell' };
+const PT_POA = { id: 'pp1', role: 'family', name: 'Marcus Bell', email: 'marcus@test.local',
+                 familyIsPoa: true, familyOfClientId: 'pc1' };
+
+const ptHarness = (baaCovered = true) => {
+  const sent = [];
+  const notifier = createNotifier({
+    getUsers: async () => [PT_CLIENT, PT_POA],
+    queueNotification: async (type, uid, email, name, tpl) => { sent.push({ type, email, ...tpl }); return { id: 'q' }; },
+    getAppBaseUrl: async () => 'https://app.test.local',
+    emailTransport: { transportStatus: () => ({ baaCovered }) },
+    staffRoles: ['admin'], clientRole: 'client', familyRole: 'family'
+  });
+  return { notifier, sent, toClient: () => sent.filter(s => s.email === PT_CLIENT.email),
+           toPoa: () => sent.filter(s => s.email === PT_POA.email) };
+};
+
+const REM = { clientId: 'pc1', eid: 'e9', when: 'Wednesday, October 14 at 9:00 AM',
+              visitDate: '2026-10-14', startTime: '09:00', clinician: 'Bethel Godwins', place: 'Your home' };
+
+test('R1. a reminder subject carries the CLOCK TIME, never the whole date after "at"', async () => {
+  const h = ptHarness();
+  await h.notifier.visitReminder({ reminder: REM, orgPhone: '404-913-6705' });
+  const m = h.toClient()[0];
+  assert.equal(m.subject, 'Reminder: your visit tomorrow at 9:00 AM');
+  // The long form is what the old subject printed after "tomorrow at".
+  assert.ok(!/October|Wednesday/.test(m.subject), 'the date never lands after "tomorrow at"');
+  assert.match(m.body, /Your visit is tomorrow at 9:00 AM\./);
+  // It is still available in full, in the When line, where it reads correctly.
+  assert.match(m.body, /When: Wednesday, October 14 at 9:00 AM/);
+});
+
+test('R2. the video nudge says the clock time too, and keeps its join button', async () => {
+  const h = ptHarness();
+  await h.notifier.videoReminder({
+    reminder: REM, orgPhone: '404-913-6705',
+    ctaFor: async () => ({ url: 'https://meet.google.com/abc-defg-hij', label: 'Join the video visit' })
+  });
+  const m = h.toClient()[0];
+  assert.equal(m.subject, 'Your video visit starts at 9:00 AM');
+  assert.ok(!/October|Wednesday/.test(m.subject));
+  assert.equal(m.ctaUrl, 'https://meet.google.com/abc-defg-hij');
+});
+
+test('R3. with no start time to hand, the subject names NO time rather than the long form', () => {
+  assert.equal(reminders2.timeOfDayFor('2026-10-14', null), null);
+  const copy = reminders2.reminderCopy({ detail: true, when: 'Wednesday, October 14 at 9:00 AM', orgPhone: 'x' });
+  assert.equal(copy.subject, 'Reminder: your visit is tomorrow');
+  assert.ok(!/at Wednesday/.test(copy.subject));
+});
+
+test('R4. an OVERRIDDEN approval never claims the file is complete', async () => {
+  const h = ptHarness();
+  await h.notifier.enrollmentApproved({ clientId: 'pc1', overridden: true });
+  const m = h.toClient()[0];
+  assert.equal(m.subject, 'Your enrollment is approved');
+  assert.ok(!/complete/i.test(m.subject), 'an overridden approval is not "complete"');
+  assert.ok(!/Everything we needed is on file/.test(m.body),
+    'it cannot say everything is on file and then that items are outstanding');
+  assert.match(m.body, /still outstanding/);
+});
+
+test('R5. a clean approval still says complete, and says it once', async () => {
+  const h = ptHarness();
+  await h.notifier.enrollmentApproved({ clientId: 'pc1', overridden: false });
+  const m = h.toClient()[0];
+  assert.equal(m.subject, 'Your enrollment is complete');
+  assert.match(m.body, /Everything we needed is on file/);
+  assert.ok(!/outstanding/.test(m.body), 'nothing is outstanding on a clean approval');
+});
+
+test('R6. a reason arrives LABELLED, in the text half as well as the HTML', async () => {
+  const h = ptHarness();
+  await h.notifier.documentReviewed({
+    clientId: 'pc1', decision: 'rejected', label: 'Photo ID', uploadId: 'u1',
+    reason: 'The photo is too blurry to read the expiry date.'
+  });
+  const m = h.toClient()[0];
+  assert.match(m.body, /Why we need it again: The photo is too blurry/,
+    'an unlabelled reason reads as though it wandered in');
+  assert.match(m.htmlBody, /Why we need it again/);
+});
+
+test('R7. the cancellation reason and both document lists are labelled too', async () => {
+  const h = ptHarness();
+  await h.notifier.appointmentCancelled({ client: PT_CLIENT, eid: 'e1', when: 'Wednesday', reason: 'The clinician is unwell.' });
+  await h.notifier.documentsRequested({ clientId: 'pc1', rows: [{ label: 'Insurance card' }] });
+  await h.notifier.enrollmentFollowUp({ clientId: 'pc1', itemLabels: ['Pharmacy'] });
+  const [cancel, docs, follow] = h.toClient();
+  assert.match(cancel.body, /Why it was cancelled: The clinician is unwell\./);
+  assert.match(docs.body, /What we need: Insurance card/);
+  assert.match(follow.body, /What still needs you: Pharmacy/);
+});
+
+test('R8. the two "rescheduled" notices can be told apart', async () => {
+  const h = ptHarness();
+  await h.notifier.appointmentRescheduled({ client: PT_CLIENT, eid: 'e1', from: 'Tuesday', to: 'Wednesday', clinician: 'Bethel' });
+  await h.notifier.caregiverVisitMoved({ clientId: 'pc1', caregiverName: 'Tasha Reed', from: 'Tuesday', to: 'Wednesday', shiftId: 's1', editCount: 1 });
+  const [clinical, caregiver] = h.toClient();
+  assert.match(clinical.subject, /clinician visit/);
+  assert.match(caregiver.subject, /caregiver visit/);
+  assert.notEqual(clinical.subject, caregiver.subject,
+    'a client who gets both must not have to guess which visit moved');
+});
+
+test('R9. a caregiver visit notice carries a headline and a When line, like every other notice', async () => {
+  const h = ptHarness();
+  await h.notifier.caregiverVisitConfirmed({ clientId: 'pc1', caregiverName: 'Tasha Reed', when: 'Wednesday at 9:00 AM', shiftId: 's1' });
+  const m = h.toClient()[0];
+  assert.ok(m.htmlBody, 'it renders through the house template rather than a bare sentence');
+  assert.match(m.body, /When: Wednesday at 9:00 AM/);
+  assert.match(m.body, /Who: Tasha Reed/);
+});
+
+test('R10. a POA is told WHOSE caregiver visit it is, on both notices', async () => {
+  const h = ptHarness();
+  await h.notifier.caregiverVisitConfirmed({ clientId: 'pc1', caregiverName: 'Tasha Reed', when: 'Wednesday', shiftId: 's1' });
+  await h.notifier.caregiverVisitMoved({ clientId: 'pc1', caregiverName: 'Tasha Reed', from: 'Tue', to: 'Wed', shiftId: 's1', editCount: 1 });
+  const poa = h.toPoa();
+  assert.equal(poa.length, 2, 'a designated POA gets both — they manage the care');
+  for (const m of poa) {
+    assert.match(m.body, /Ada Bell's caregiver visit/, 'named, never "your visit"');
+    assert.ok(!/^Your caregiver visit/m.test(m.body), 'a POA is never told it is theirs');
+  }
+});
+
+test('R11. a caregiver visit notice says nothing on a transport outside the BAA', async () => {
+  const h = ptHarness(false);
+  await h.notifier.caregiverVisitConfirmed({ clientId: 'pc1', caregiverName: 'Tasha Reed', when: 'Wednesday at 9:00 AM', shiftId: 's1' });
+  const m = h.toClient()[0];
+  assert.ok(!/Tasha|Wednesday|9:00/.test(m.body + m.subject), 'no name and no time where the transport is not covered');
+  assert.match(m.body, /secure portal/);
+});
+
+test('R12. the scheduling router is handed the notifier, and says so loudly if it is not', () => {
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(server, /schedulingRoutes\(\{[\s\S]{0,600}?notify: \(\) => notify/,
+    'server.js must inject the notifier, or clients stop being told');
+  const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'scheduling.js'), 'utf8');
+  assert.match(route, /no notifier injected — the client was NOT told/,
+    'a missing notifier is reported, never a silent skip');
+  // And the hand-rolled sends it replaced are gone.
+  assert.ok(!/queueNotification\('shift_confirmed_client'/.test(route),
+    'the client notice goes through the notifier, not a second hand-rolled copy');
+  assert.ok(!/subject: 'Your care visit is confirmed'/.test(route));
+});
+
+test('R13. the welcome email says the SAME thing in both halves', () => {
+  // The HTML half has rendered through the house template since PR #81; the
+  // TEXT half was still the lab-era wording ("Welcome, X!", "log in"), so the
+  // two halves of one email disagreed and nothing noticed. A text-only client
+  // gets the text half, and it carries the credentials, so it is not the
+  // half that may drift.
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const tpl = server.slice(server.indexOf("id: 'welcome_email'"), server.indexOf("id: 'task_attachment'"));
+  assert.ok(tpl.length > 100 && tpl.length < 4000, 'the welcome template slice is bounded and real');
+  assert.ok(!/Welcome, \{\{recipientName\}\}!/.test(tpl), 'the lab-era greeting is gone');
+  assert.ok(!/\blog in\b|\bLog in here\b/.test(tpl), '"log in" is the lab wording; the house copy says "sign in"');
+  // The sentences that must match the HTML half, which is WELCOME_HTML_BODY.
+  const htmlSrc = server.slice(server.indexOf('const WELCOME_HTML_BODY'), server.indexOf('// Render a template string'));
+  for (const shared of ['Your account is ready', 'choose your own password']) {
+    assert.ok(tpl.includes(shared), `the text half carries "${shared}"`);
+    assert.ok(htmlSrc.includes(shared), `the HTML half carries "${shared}"`);
+  }
+  // Both halves must still hand over the credentials: a text-only client that
+  // loses them cannot sign in at all.
+  for (const v of ['{{recipientEmail}}', '{{temporaryPassword}}', '{{loginUrl}}']) {
+    assert.ok(tpl.includes(v), `the text half keeps ${v}`);
+  }
+});

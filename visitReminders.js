@@ -216,12 +216,20 @@ const dueReminders = (rows, now) => {
 // consultation, so it goes out only where the transport is inside the BAA —
 // the same rule the visit date follows, applied to a capability instead of a
 // fact.
-const videoReminderCopy = ({ detail, when, joinUrl, orgPhone }) => (detail
+const videoReminderCopy = ({ detail, when, timeOfDay, joinUrl, orgPhone }) => (detail
   ? {
-      subject: `Your video visit starts at ${when}`,
+      // `timeOfDay` IS THE CLOCK TIME ON ITS OWN ("9:00 AM"). `when` is the whole
+      // thing — "Wednesday, October 14 at 9:00 AM" — and dropping that into a
+      // sentence that has already said "at" produced "starts at Wednesday,
+      // October 14 at 9:00 AM" on a notice that goes out half an hour before.
+      // With no clock time to hand, the sentence drops the time rather than
+      // printing the long form: the When line below carries it either way.
+      subject: timeOfDay ? `Your video visit starts at ${timeOfDay}` : 'Your video visit starts soon',
       headline: 'Your video visit is about to start',
       paragraphs: [
-        `Your visit is at ${when}, by video. Tap the button below to join \u2014 you do not need to sign in.`,
+        timeOfDay
+          ? `Your visit starts at ${timeOfDay}, by video. Tap the button below to join. You do not need to sign in.`
+          : 'Your visit starts shortly, by video. Tap the button below to join. You do not need to sign in.',
         `Somewhere quiet with a good signal works best. If you cannot get in, call the office at ${orgPhone} and we will help.`
       ],
       joinUrl: joinUrl || null
@@ -236,13 +244,28 @@ const videoReminderCopy = ({ detail, when, joinUrl, orgPhone }) => (detail
       joinUrl: null
     });
 
-const reminderCopy = ({ detail, when, orgPhone }) => (detail
+// The clock time on its own, for the sentences that have already said "at".
+// Derived from the row's OWN visitDate and startTime, so it needs no second
+// snapshot and no calendar read; a row written before this existed, or one with
+// no start time, yields null and the copy above drops the time instead.
+const timeOfDayFor = (visitDate, startTime) => {
+  if (!visitDate || !startTime) return null;
+  const instant = practiceTime.instantFromZoned(visitDate, String(startTime).slice(0, 5));
+  if (!instant) return null;
+  try { return practiceTime.fmtTime(instant); } catch (e) { return null; }
+};
+
+const reminderCopy = ({ detail, when, timeOfDay, orgPhone }) => (detail
   ? {
-      subject: `Reminder: your visit tomorrow at ${when}`,
+      // Same rule as the video nudge above: "tomorrow at 9:00 AM", never
+      // "tomorrow at Wednesday, October 14 at 9:00 AM".
+      subject: timeOfDay ? `Reminder: your visit tomorrow at ${timeOfDay}` : 'Reminder: your visit is tomorrow',
       headline: 'See you tomorrow',
       paragraphs: [
-        'Your visit is tomorrow. The details are below and in your portal.',
-        `If you need to change it, please call the office at ${orgPhone} as soon as you can.`
+        timeOfDay
+          ? `Your visit is tomorrow at ${timeOfDay}. The details are below and in your portal.`
+          : 'Your visit is tomorrow. The details are below and in your portal.',
+        `If you need to change it, call the office at ${orgPhone} as soon as you can.`
       ]
     }
   : {
@@ -330,6 +353,7 @@ const cliniciansWithUnrecognisedCredential = (users) => (Array.isArray(users) ? 
 
 module.exports = {
   REMINDER_SEND_HOUR_ET, MISSED_WINDOW_HOURS, STATUSES, VOID_REASONS,
+  timeOfDayFor,
   REMINDER_KINDS, VIDEO_JOIN_MINUTES_BEFORE, VIDEO_JOIN_MISSED_WINDOW_HOURS,
   kindOf, missedWindowHoursFor, videoJoinSendAt, videoReminderCopy,
   reminderSendAt, buildVisitReminder, voidRemindersForEid, dueReminders, reminderCopy,

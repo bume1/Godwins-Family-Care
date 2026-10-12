@@ -722,8 +722,8 @@ module.exports = function createMessagingRoutes(deps) {
       if (clientSide) {
         await queueNotification('message_received', u.id, u.email, u.name,
           {
-            subject: fromCareTeam ? 'You have a new message from your care team' : 'There is a new message in your care team conversation',
-            body: (fromCareTeam ? 'You have a new message from your care team.' : 'There is a new message in your care team conversation.')
+            subject: fromCareTeam ? 'A new message from your care team' : 'A new message in your care team conversation',
+            body: (fromCareTeam ? 'Your care team has sent you a message.' : 'There is a new message in your care team conversation.')
               + ' Sign in to your portal to read it. For privacy we do not put messages in email.',
             ctaUrl: links.PATHS.PORTAL_MESSAGES, ctaLabel: 'Open your messages'
           },

@@ -371,8 +371,20 @@ test('A5: a POA is told WHOSE visit it is; the client is not told their own name
 });
 
 test('A5: the detailed version carries When / Who / Where and the office phone from ORG', () => {
-  const copy = reminders.reminderCopy({ detail: true, when: 'Friday, September 25 at 9:00 AM', orgPhone: consentText.ORG.phone });
-  assert.match(copy.subject, /^Reminder: your visit tomorrow at Friday, September 25 at 9:00 AM$/);
+  // REPOINTED 2026-10-12. This asserted
+  //   "Reminder: your visit tomorrow at Friday, September 25 at 9:00 AM"
+  // which is the defect written down as an expectation: `when` is the whole
+  // date and time, and dropping it after "tomorrow at" is not a sentence. The
+  // subject takes the CLOCK TIME now, and falls back to naming no time at all
+  // rather than printing the long form.
+  const copy = reminders.reminderCopy({
+    detail: true, when: 'Friday, September 25 at 9:00 AM',
+    timeOfDay: '9:00 AM', orgPhone: consentText.ORG.phone
+  });
+  assert.match(copy.subject, /^Reminder: your visit tomorrow at 9:00 AM$/);
+  assert.ok(!/September|Friday/.test(copy.subject), 'the long form never lands after "tomorrow at"');
+  const noTime = reminders.reminderCopy({ detail: true, when: 'Friday, September 25 at 9:00 AM', orgPhone: consentText.ORG.phone });
+  assert.match(noTime.subject, /^Reminder: your visit is tomorrow$/, 'no clock time to hand → name no time');
   assert.equal(copy.headline, 'See you tomorrow');
   assert.ok(copy.paragraphs[1].includes(consentText.ORG.phone), 'the office number comes from ORG, never a literal');
   // NEVER A LITERAL. The number changes in one place.
