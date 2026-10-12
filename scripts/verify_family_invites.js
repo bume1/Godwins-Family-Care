@@ -128,6 +128,14 @@ const CM = { id: 'cm_fam_1', role: 'caseManager', email: 'famcm@example.test', n
   r = await call('POST', `/api/gfc/family/invites/${inv3}/cancel`, ct);
   check('the patient cancels their own invite', r.status === 200 && r.body.invite.status === 'cancelled');
 
+  console.log('\n── Profile ──');
+  r = await call('GET', '/api/gfc/profile', ct);
+  check('the patient reads their profile', r.status === 200 && Array.isArray(r.body.coverage));
+  r = await call('GET', '/api/gfc/profile', pt);
+  check('a POA reads it', r.status === 200);
+  r = await call('GET', '/api/gfc/profile', ft);
+  check('plain family cannot', r.status === 403 && r.body.code === 'PROFILE_CLIENT_ONLY');
+
   console.log('\n── The audit trail names no one ──');
   const acts = JSON.stringify(STORE.get('activity_log') || []);
   check('activity rows never carry the invited email', !acts.includes('dana@example.test') && !acts.includes('gina@example.test'));

@@ -57,6 +57,7 @@ const screenings = require('./screenings');  // PHQ-2/9, GAD-7, SDOH results (so
 // Session 4.3 — patient/family/POA clinical read rules + the case-manager read/write split
 const patientRead = require('./patientReadRepository');
 const familyInvites = require('./familyInvites');
+const portalProfile = require('./portalProfile');
 const patientPublish = require('./patientPublish');   // Portal P1: the published copies the portal reads (patients never read OpenEMR)
 // Session 4.8 — the clinical role enum, capability matrix and credential
 // ceiling. THE one place that answers "may this person do this"; the clinical
@@ -8030,6 +8031,28 @@ app.put('/api/gfc/sharing', authenticateToken, requireEnrolledClient, async (req
     res.json({ message: 'Sharing settings saved', sharing });
   } catch (error) {
     console.error('GFC sharing update error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// The patient's own Profile (portal redesign, owner mockup 9): contact details
+// and insurance on file, member IDs to the last four. The client and a
+// designated POA only; other family never see it.
+app.get('/api/gfc/profile', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const acting = patientRead.buildActingIdentity(req.user, client);
+    if (req.user.role !== config.ROLES.CLIENT && !acting.isPoa) {
+      return res.status(403).json({ error: 'Only the client or their designated Power of Attorney can see the profile.', code: 'PROFILE_CLIENT_ONLY' });
+    }
+    if (req.user.role !== config.ROLES.CLIENT) {
+      await logActivity(req.user.id, req.user.name || req.user.email, 'patient_clinical_read', 'client', client.id,
+        { role: req.user.role, audience: 'poa', actingFor: acting.actingFor, resource: 'profile' });
+    }
+    res.json(portalProfile.profileForPatient(client, req.user.role === config.ROLES.CLIENT ? req.user : client));
+  } catch (error) {
+    console.error('GFC profile error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });

@@ -559,6 +559,8 @@
       // Channels this login may start, each with availability and the reason
       // when it is off (Session 9's route; the server decides).
       // Family & Caregivers (redesign): who has access, open invites, and a new invite.
+      getGfcProfile: (token) =>
+        fetch(`${API_URL}/api/gfc/profile`, { headers: { 'Authorization': `Bearer ${token}` } }).then(handleResponse).catch(asError),
       getGfcFamily: (token) =>
         fetch(`${API_URL}/api/gfc/family`, { headers: { 'Authorization': `Bearer ${token}` } }).then(handleResponse).catch(asError),
       inviteGfcFamily: (token, invite) =>
@@ -6789,6 +6791,41 @@
       );
     };
 
+    // ── Profile (owner mockup 9's "Insurance on file") ────────────────────
+    // Contact details and coverage, read-only. Member IDs show the last four.
+    // A change goes to the office through Messages.
+    const GfcProfile = ({ token, onNavigate }) => {
+      const [p, setP] = useState(null);
+      const [err, setErr] = useState('');
+      useEffect(() => { api.getGfcProfile(token).then(r => r.error ? setErr(r.error) : setP(r)); }, [token]);
+      if (err) return <div className="gfc-body"><h2 className="disp">Profile</h2><div className="err">{err}</div></div>;
+      if (!p) return <div className="gfc-body" style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}><div className="gfc-spin" /></div>;
+      const Row = ({ label, value }) => value ? <div className="shr" style={{ cursor: 'default' }}><div><span>{label}</span><b>{value}</b></div></div> : null;
+      return (
+        <div className="gfc-body">
+          <h2 className="disp">Profile</h2>
+          <div className="card" style={{ marginTop: 14 }}>
+            <Row label="Name" value={p.name} />
+            <Row label="Preferred name" value={p.preferredName} />
+            <Row label="Date of birth" value={p.dateOfBirth ? prettyDate(p.dateOfBirth) : null} />
+            <Row label="Phone" value={p.phone} />
+            <Row label="Email" value={p.email} />
+            <Row label="Address" value={p.address} />
+            <Row label="Primary contact" value={p.primaryContact ? [p.primaryContact.name, p.primaryContact.relationship, p.primaryContact.phone].filter(Boolean).join(' · ') : null} />
+          </div>
+          <div className="sech"><h3>Insurance on file</h3></div>
+          {p.coverage.length === 0 && <p className="sub" style={{ marginTop: 0 }}>No insurance is on file.</p>}
+          {p.coverage.map((c, i) => (
+            <div className="lrow" key={i} style={{ cursor: 'default' }}>
+              <span className="lic"><i className="ti ti-id-badge-2" /></span>
+              <span className="lm"><b>{c.kind}</b><span style={{ whiteSpace: 'normal' }}>{[c.plan, c.memberIdLast4 ? `Member ID ending ${c.memberIdLast4}` : null, c.group ? `Group ${c.group}` : null].filter(Boolean).join(' · ')}</span></span>
+            </div>
+          ))}
+          <p className="sub">Something out of date? <a href="#" onClick={(e) => { e.preventDefault(); onNavigate('messages'); }}>Message the office</a> and we'll update it.</p>
+        </div>
+      );
+    };
+
     // ── Family & Caregivers (owner mockup 10) ─────────────────────────────
     // Who has access to this portal, and inviting someone new. An invite is a
     // REQUEST: the office confirms it and emails their sign-in details. A
@@ -7130,6 +7167,7 @@
         { id: 'messages', icon: 'ti-message-2', label: 'Messages', hint: 'Your care team', badge: unread },
         { id: 'family', icon: 'ti-users', label: 'Family & Caregivers', hint: 'Who can follow your care' },
         { id: 'documents', icon: 'ti-folder', label: 'Documents', short: clinicalTab ? undefined : 'Records', hint: 'Forms, consents and records' },
+        ...(!readOnly ? [{ id: 'profile', icon: 'ti-user-circle', label: 'Profile', hint: 'Contact details and insurance' }] : []),
         { id: 'settings', icon: 'ti-settings', label: 'Settings', hint: 'Sharing and sign out' }
       ];
       // Bottom menu: Home · Care · Appts · Records · More.
@@ -7173,6 +7211,7 @@
                 answered 403. On this tab every family login, POA included, reads. */}
             {view === 'documents' && <GfcDocuments docs={docs} readOnly={!!isFamily} token={token} onOpenTransferRoi={() => setShowTransferRoi(true)} onRefresh={refreshDocs} clinicalDocs={clinicalAvailable ? clinicalDocs : null} docsErr={docsErr} clinicalDocsErr={clinicalDocsErr} />}
             {view === 'family' && <GfcFamily token={token} />}
+            {view === 'profile' && !readOnly && <GfcProfile token={token} onNavigate={onNavigate} />}
             {view === 'settings' && <GfcSettings me={me} token={token} readOnly={readOnly} onSharingSaved={(sharing) => setMe(m => m ? { ...m, sharing } : m)} />}
             {view === 'more' && <GfcMore items={moreItems} onNavigate={go} unread={unread} />}
             {!data && dataErr && (view === 'home' || view === 'care') && (
