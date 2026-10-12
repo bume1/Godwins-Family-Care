@@ -449,7 +449,8 @@ test('every page that mounts messaging loads the formatter first', () => {
 test('the portal opens on Messages for the email\'s link, and keeps the fragment through a redirect', () => {
   const portal = fs.readFileSync(path.join(root, 'public/portal.html'), 'utf8');
   assert.match(portal, /useState\(\(\) => \(window\.location\.hash === '#messages' \? 'messages' : 'home'\)\)/);
-  assert.match(portal, /window\.location\.href = `\/portal\/\$\{user\.slug\}\$\{window\.location\.hash \|\| ''\}`;/);
+  // (10/2026: the query is kept too, so Stripe's ?billing=paid survives the redirect.)
+  assert.match(portal, /window\.location\.href = `\/portal\/\$\{user\.slug\}\$\{window\.location\.search \|\| ''\}\$\{window\.location\.hash \|\| ''\}`;/);
   assert.match(portal, /window\.location\.href = `\/portal\/\$\{result\.user\.slug\}\$\{window\.location\.hash \|\| ''\}`;/);
   assert.equal(links.routeOf(links.PATHS.PORTAL_MESSAGES), '/portal', 'the link resolves to a route that exists (the fragment is client-side)');
 });

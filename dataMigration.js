@@ -57,6 +57,9 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'signup_requests', phi: true, owner: 'portal redesign 10/2026' },
   // Which Google Calendar event mirrors which OpenEMR appointment eid.
   { key: 'google_calendar_events', phi: true, owner: 'calendar sync 10/2026' },
+  // Patient statements: copays and home care hours. Amounts and dates of
+  // service for a named client. Stripe holds only the invoice number.
+  { key: 'patient_invoices', phi: true, owner: 'billing 10/2026' },
   // The branded no-login upload link: one live row per client, revoked ones
   // kept as tombstones. The row is a pointer (a client id and a token), not
   // a document — but the token is a standing door onto that client's file,

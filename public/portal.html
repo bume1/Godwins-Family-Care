@@ -581,6 +581,10 @@
       // Channels this login may start, each with availability and the reason
       // when it is off (Session 9's route; the server decides).
       // Family & Caregivers (redesign): who has access, open invites, and a new invite.
+      getGfcBilling: (token) =>
+        fetch(`${API_URL}/api/gfc/billing`, { headers: { 'Authorization': `Bearer ${token}` } }).then(handleResponse).catch(asError),
+      payGfcInvoice: (token, id) =>
+        fetch(`${API_URL}/api/gfc/billing/invoices/${encodeURIComponent(id)}/pay`, { method: 'POST', headers: { 'Authorization': `Bearer ${token}` } }).then(handleResponse).catch(asError),
       getGfcProfile: (token) =>
         fetch(`${API_URL}/api/gfc/profile`, { headers: { 'Authorization': `Bearer ${token}` } }).then(handleResponse).catch(asError),
       getGfcFamily: (token) =>
@@ -6965,6 +6969,93 @@
       );
     };
 
+    // ── Billing & Payments (owner mockup 9; copays and home care hours) ──
+    // Statements the office sent, the balance, and paying online on Stripe's
+    // own page. Card details never touch this app. Insurance on file reads the
+    // same Profile route. Only the client or a designated POA sees this.
+    const GfcBilling = ({ token, onNavigate, returned }) => {
+      const [tab, setTab] = useState('overview');
+      const [b, setB] = useState(null);
+      const [p, setP] = useState(null);
+      const [err, setErr] = useState('');
+      const [paying, setPaying] = useState('');
+      const [payErr, setPayErr] = useState('');
+      useEffect(() => {
+        api.getGfcBilling(token).then(r => r.error ? setErr(r.error) : setB(r));
+        api.getGfcProfile(token).then(r => { if (!r.error) setP(r); });
+      }, [token]);
+      const pay = async (inv) => {
+        setPaying(inv.id); setPayErr('');
+        const r = await api.payGfcInvoice(token, inv.id);
+        if (r.error || !r.url) { setPaying(''); setPayErr(r.error || 'The payment page could not be opened.'); return; }
+        window.location.assign(r.url);   // Stripe's own checkout page
+      };
+      if (err) return <div className="gfc-body"><h2 className="disp">Billing & Payments</h2><div className="err">{err}</div></div>;
+      if (!b) return <div className="gfc-body" style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}><div className="gfc-spin" /></div>;
+      const open = b.invoices.filter(i => i.status === 'open');
+      const paid = b.invoices.filter(i => i.status === 'paid');
+      const InvRow = ({ i }) => (
+        <div className="lrow" style={{ cursor: 'default', alignItems: 'flex-start' }}>
+          <span className="lic"><i className={`ti ${i.kind === 'copay' ? 'ti-stethoscope' : 'ti-home-heart'}`} /></span>
+          <span className="lm">
+            <b>{i.kind === 'copay' ? 'Visit copay' : 'Home care'} · {i.number}</b>
+            <span style={{ whiteSpace: 'normal' }}>{i.lines.length === 1 ? prettyDate(i.lines[0].date) : `${prettyDate(i.lines[0].date)} to ${prettyDate(i.lines[i.lines.length - 1].date)} · ${i.lines.length} days`}</span>
+            {i.status === 'paid' && <span>Paid {i.paidAt ? prettyDate(georgiaDate(i.paidAt)) : ''}{i.paidBy && i.paidBy !== 'stripe' ? ` by ${i.paidBy}` : ''}</span>}
+            {i.status === 'void' && <span>Cancelled by the office</span>}
+          </span>
+          <span className="lr" style={{ alignItems: 'flex-end' }}>
+            <b style={{ fontSize: 15, color: 'var(--navy)' }}>{i.total}</b>
+            {i.status === 'open' && b.onlinePayment && <button className="btn" style={{ margin: 0, padding: '7px 12px', fontSize: 13 }} disabled={paying === i.id} onClick={() => pay(i)}>{paying === i.id ? 'Opening…' : 'Pay'}</button>}
+          </span>
+        </div>
+      );
+      return (
+        <div className="gfc-body">
+          <h2 className="disp">Billing & Payments</h2>
+          <div className="stabs">
+            {[['overview', 'Overview'], ['invoices', 'Invoices'], ['insurance', 'Insurance']].map(([id, l]) => <button key={id} className={tab === id ? 'on' : ''} onClick={() => setTab(id)}>{l}</button>)}
+          </div>
+          {returned === 'paid' && <div className="status"><i className="ti ti-circle-check" /><div><b>Thank you</b><span>Your payment went through. It can take a minute to show as paid here.</span></div></div>}
+          {payErr && <div className="err">{payErr}</div>}
+          {tab === 'overview' && (
+            <React.Fragment>
+              <div className="card" style={{ marginTop: 0 }}>
+                <p className="lbl" style={{ marginTop: 0 }}>Current balance</p>
+                <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: 40, fontWeight: 600, color: 'var(--navy)', lineHeight: 1 }}>{b.balance}</div>
+                <div className="sub">{b.openCount === 0 ? 'Nothing due' : `${b.openCount} open statement${b.openCount > 1 ? 's' : ''}`}</div>
+                {open.length > 0 && b.onlinePayment && (
+                  <button className="btn" disabled={!!paying} onClick={() => (open.length === 1 ? pay(open[0]) : setTab('invoices'))}>{open.length === 1 ? (paying ? 'Opening…' : 'Make a payment') : 'Choose a statement to pay'}</button>
+                )}
+                {open.length > 0 && !b.onlinePayment && <p className="sub">Online payment isn't set up yet. Please call the office to pay.</p>}
+              </div>
+              {open.length > 0 && <React.Fragment><div className="sech"><h3>Due now</h3></div>{open.map(i => <InvRow key={i.id} i={i} />)}</React.Fragment>}
+              <button className="lrow" onClick={() => setTab('invoices')}><span className="lic"><i className="ti ti-history" /></span><span className="lm"><b>Payment history</b><span>{paid.length} paid</span></span><i className="ti ti-chevron-right" /></button>
+              <button className="lrow" onClick={() => onNavigate('messages')}><span className="lic"><i className="ti ti-help-circle" /></span><span className="lm"><b>Questions about a bill?</b><span>Message the office</span></span><i className="ti ti-chevron-right" /></button>
+            </React.Fragment>
+          )}
+          {tab === 'invoices' && (
+            <React.Fragment>
+              {b.invoices.length === 0 && <p className="sub">No statements yet.</p>}
+              {b.invoices.map(i => <InvRow key={i.id} i={i} />)}
+            </React.Fragment>
+          )}
+          {tab === 'insurance' && (
+            <React.Fragment>
+              {!p && <p className="sub">Loading…</p>}
+              {p && p.coverage.length === 0 && <p className="sub">No insurance is on file.</p>}
+              {p && p.coverage.map((c, k) => (
+                <div className="lrow" key={k} style={{ cursor: 'default' }}>
+                  <span className="lic"><i className="ti ti-id-badge-2" /></span>
+                  <span className="lm"><b>{c.kind}</b><span style={{ whiteSpace: 'normal' }}>{[c.plan, c.memberIdLast4 ? `Member ID ending ${c.memberIdLast4}` : null].filter(Boolean).join(' · ')}</span></span>
+                </div>
+              ))}
+            </React.Fragment>
+          )}
+          <p className="micro"><i className="ti ti-lock" />Payments are processed securely by Stripe. Your card details never reach Godwins Family Care.</p>
+        </div>
+      );
+    };
+
     // ── Profile (owner mockup 9's "Insurance on file") ────────────────────
     // Contact details and coverage, read-only. Member IDs show the last four.
     // A change goes to the office through Messages.
@@ -7152,7 +7243,10 @@
       const [error, setError] = useState(null);
       // The email a patient gets about a new message links to /portal#messages,
       // so the fragment is read once, at mount. Anything else opens Home.
-      const [view, setView] = useState(() => (window.location.hash === '#messages' ? 'messages' : 'home'));       // home | care | messages | documents
+      const [view, setView] = useState(() => (window.location.hash === '#messages' ? 'messages' : 'home'));
+      // Back from Stripe's checkout page: /portal?billing=paid|cancelled opens Billing.
+      const [billingReturn] = useState(() => { try { return new URLSearchParams(window.location.search).get('billing'); } catch (_) { return null; } });
+      useEffect(() => { if (billingReturn) setView('billing'); }, [billingReturn]);       // home | care | messages | documents
       const [showIntake, setShowIntake] = useState(false);
       const [showTransferRoi, setShowTransferRoi] = useState(false); // Transfer-of-Care ROI overlay (Session 3.4)
       const [justEnrolled, setJustEnrolled] = useState(false); // one-time nudge right after intake completes (Session 3.4)
@@ -7341,6 +7435,7 @@
         { id: 'messages', icon: 'ti-message-2', label: 'Messages', hint: 'Your care team', badge: unread },
         { id: 'family', icon: 'ti-users', label: 'Family & Caregivers', hint: 'Who can follow your care' },
         { id: 'documents', icon: 'ti-folder', label: 'Documents', short: clinicalTab ? undefined : 'Records', hint: 'Forms, consents and records' },
+        ...(!readOnly ? [{ id: 'billing', icon: 'ti-credit-card', label: 'Billing', hint: 'Statements and payments' }] : []),
         ...(!readOnly ? [{ id: 'profile', icon: 'ti-user-circle', label: 'Profile', hint: 'Contact details and insurance' }] : []),
         { id: 'settings', icon: 'ti-settings', label: 'Settings', hint: 'Sharing and sign out' }
       ];
@@ -7386,6 +7481,7 @@
             {view === 'documents' && <GfcDocuments docs={docs} readOnly={!!isFamily} token={token} onOpenTransferRoi={() => setShowTransferRoi(true)} onRefresh={refreshDocs} clinicalDocs={clinicalAvailable ? clinicalDocs : null} docsErr={docsErr} clinicalDocsErr={clinicalDocsErr} />}
             {view === 'family' && <GfcFamily token={token} />}
             {view === 'profile' && !readOnly && <GfcProfile token={token} onNavigate={onNavigate} />}
+            {view === 'billing' && !readOnly && <GfcBilling token={token} onNavigate={onNavigate} returned={billingReturn} />}
             {view === 'settings' && <GfcSettings me={me} token={token} readOnly={readOnly} onSharingSaved={(sharing) => setMe(m => m ? { ...m, sharing } : m)} />}
             {view === 'more' && <GfcMore items={moreItems} onNavigate={go} unread={unread} />}
             {!data && dataErr && (view === 'home' || view === 'care') && (
@@ -7636,7 +7732,7 @@
         }
         // Client users logged in from central portal - redirect to their portal
         if (user.slug) {
-          window.location.href = `/portal/${user.slug}${window.location.hash || ''}`;
+          window.location.href = `/portal/${user.slug}${window.location.search || ''}${window.location.hash || ''}`;
           return null;
         }
         return (
