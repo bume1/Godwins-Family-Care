@@ -12281,7 +12281,7 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
     // appointment and the encounter is what it becomes.
     const encVideo = linkedEid ? videoLinkFor(await loadVideoLinks(), linkedEid) : null;
     const isVideoVisit = !!encVideo || clinicalRepo.locationNeedsVideoRoom((record.visit || {}).location) ||
-      String(((record.note && record.note.visit) || record.visit || {}).modality || '') === 'video';
+      clinicalRepo.isVideoModality(((record.note && record.note.visit) || record.visit || {}).modality);
     // T1 candidates (proposals only) — see loadDxCandidates
     const candidates = cands.candidates;
     const attestationWarnings = ctx.attestation ? ctx.attestation.warnings || [] : [];
@@ -13746,7 +13746,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
     // refused over a tick box is an hour of documentation held hostage. Only
     // for a video visit — an in-person note has no pre-join checks to make.
     if (clinicalRepo.locationNeedsVideoRoom((record.visit || {}).location) ||
-      String((record.visit || {}).modality || '') === 'video') {
+      clinicalRepo.isVideoModality((record.visit || {}).modality)) {
       const tele = clinicalRepo.buildTelehealthChecklist(record, ctx.client);
       if (!tele.complete) {
         warnings.push(`Video visit pre-join checks not recorded: ${tele.outstanding.join('; ')}. Record them on this encounter, or note them in an addendum.`);
@@ -20535,6 +20535,89 @@ app.put('/api/admin/ticket-polling/config', authenticateToken, requireAdmin, asy
     res.json({ success: true, config });
   } catch (error) {
     res.status(500).json({ error: 'Failed to update polling config', details: error.message });
+  }
+});
+
+// ── T1 D1 — is video actually set up? ────────────────────────────────────
+//
+// `meetStatus()` says whether the settings PARSE, which is a different fact
+// from Google honouring them — the distinction a narrowed OAuth token sitting
+// behind a green "OpenEMR connected" cost this repo weeks. So the status read
+// is cheap and honest about what it knows, and the TEST is a separate,
+// deliberate action that proves the thing: it creates a real space and
+// immediately restricts it.
+//
+// It also names the clinicians who have no Workspace account, because that is
+// the one blocker nobody finds out about from a setting: their visits book
+// fine and then have no room, and the fix is a Google account.
+app.get('/api/admin/meet/status', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const st = meetRooms.meetStatus();
+    const users = await getUsers();
+    // Anyone who could be the host of a video visit: a clinician mapped to an
+    // OpenEMR provider id, which is what an appointment carries.
+    const hosts = users.filter(u => u && u.openEmrProviderId && clinicalRoles.canClinicalWrite(u));
+    const missing = hosts
+      .filter(u => !meetRooms.clinicianWorkspaceEmail(u))
+      .map(u => ({ id: u.id, name: u.name || u.email || 'Unnamed', providerId: String(u.openEmrProviderId) }));
+    const links = await loadVideoLinks();
+    res.json({
+      meet: st,
+      // Domains, not addresses: which domain counts as GFC's is a setting, and
+      // a list of staff email addresses is not.
+      workspaceDomains: meetRooms.workspaceDomains(),
+      hosts: { total: hosts.length, withoutWorkspaceAccount: missing },
+      openRooms: links.length
+    });
+  } catch (error) {
+    console.error('Meet status error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/admin/meet/test — the proof, not the setting. Creates a real space
+// as the named clinician (or the caller) and IMMEDIATELY restricts it and ends
+// any conference, so the test leaves nothing joinable behind. No patient is
+// involved and nothing is stored: this is a handshake, not a visit.
+app.post('/api/admin/meet/test', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const st = meetRooms.meetStatus();
+    if (!st.configured) {
+      return res.status(409).json({ error: `Video visits are not set up yet: ${st.blockers.join('; ')}`, code: 'MEET_NOT_CONFIGURED', blockers: st.blockers });
+    }
+    const asUserId = String((req.body || {}).userId || '').trim();
+    const users = await getUsers();
+    const who = asUserId ? users.find(u => u && String(u.id) === asUserId) : req.user;
+    if (asUserId && !who) return res.status(404).json({ error: 'No such user', code: 'USER_NOT_FOUND' });
+    const email = meetRooms.clinicianWorkspaceEmail(who);
+    if (!email) {
+      return res.status(409).json({
+        error: `${(who && (who.name || who.email)) || 'That user'} has no GFC Google account, so they cannot host a video visit.`,
+        code: 'MEET_NO_HOST_ACCOUNT'
+      });
+    }
+    let room;
+    try {
+      room = await meetRooms.createSpace(email);
+    } catch (e) {
+      // Google's own reason, which is the only thing that says what to fix.
+      return res.status(502).json({ error: e.message, code: e.code || 'MEET_CALL_FAILED' });
+    }
+    const shut = await meetRooms.closeSpace(email, room.spaceName).catch(e => ({ ok: false, failures: [e.message] }));
+    await logActivity(req.user.id, req.user.name || req.user.email, 'meet_test_room', 'user', (who && who.id) || null, {
+      spaceName: room.spaceName, shut: !!shut.ok
+    });
+    res.json({
+      message: shut.ok
+        ? 'Google accepted the room and it was shut again. Video visits are working.'
+        : 'Google accepted the room, but it could not be shut again — close it by hand in Google Meet.',
+      hostedBy: (who && (who.name || who.email)) || null,
+      roomCreated: true, shut: !!shut.ok,
+      failures: shut.failures || []
+    });
+  } catch (error) {
+    console.error('Meet test error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 

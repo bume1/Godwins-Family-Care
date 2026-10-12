@@ -730,10 +730,18 @@ const APPT_STATUS = { none: '-', cancelled: 'x', noShow: '?' };
 // same distinction on the appointment's own location marker, which is what
 // decides whether a room is created.
 const APPT_LOCATIONS = ['home', 'telehealth', 'office', 'phone'];
-// The one place that answers "does this visit need a video room".
+// The one place that answers "does this visit need a video room". The
+// appointment's LOCATION marker and the note's MODALITY are two different
+// fields that happen to share this value — the marker decides whether a room
+// is created, the modality decides what the note is — so both are answered
+// here rather than compared against a literal at a call site. A literal
+// 'video' was exactly that mistake: the declared modality vocabulary is
+// in_person / telehealth / phone, and nothing called 'video' has ever existed.
 const LOCATION_NEEDS_VIDEO = 'telehealth';
 const locationNeedsVideoRoom = (location) =>
   String(location || '').toLowerCase() === LOCATION_NEEDS_VIDEO;
+const isVideoModality = (modality) =>
+  String(modality || '').toLowerCase() === LOCATION_NEEDS_VIDEO;
 const APPT_MIN_MINUTES = 5;
 const APPT_MAX_MINUTES = 8 * 60;
 
@@ -2831,7 +2839,7 @@ const buildPatientBanner = ({ client, linked, emrAllergies, facility, lastVisitA
 };
 
 module.exports = {
-  locationNeedsVideoRoom, LOCATION_NEEDS_VIDEO, APPT_LOCATIONS,
+  locationNeedsVideoRoom, isVideoModality, LOCATION_NEEDS_VIDEO, APPT_LOCATIONS,
   TELEHEALTH_CHECKS, TELEHEALTH_CHECK_KEYS, PRACTICE_STATE,
   telehealthElectionOf, buildTelehealthChecklist,
   // Read by clinicalNotes.js so the shared note keeps the H&P's own section

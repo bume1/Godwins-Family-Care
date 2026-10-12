@@ -432,6 +432,22 @@
     };
 
     // Helper function to handle fetch responses properly
+    // THE PAGE'S TOKEN HELPER. The portal reads three keys (its own, the
+    // unified login's, and an admin arriving from the Portal Hub) and until T1
+    // the only reader was App's own state initializer — so anything outside
+    // the prop chain had no way to authorize a request but an inline
+    // localStorage read, which is the `Bearer null` defect of 2026-09-22 in
+    // waiting. One helper, read by App and by anything that cannot be handed
+    // the token as a prop.
+    const portalToken = () => {
+      try {
+        return localStorage.getItem('portal_token') || localStorage.getItem('unified_token') || localStorage.getItem('admin_token');
+      } catch (_) {
+        // A private window can throw on any storage access.
+        return null;
+      }
+    };
+
     const handleResponse = async (response) => {
       if (!response.ok) {
         let errorData;
@@ -685,6 +701,14 @@
           method: 'POST',
           headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ version, signatureImageB64 })
+        }).then(handleResponse).catch(asError),
+
+      // T1 C2: the join link, asked for at the moment of joining. The window
+      // check happens then rather than when the page was drawn, and every
+      // hand-out is logged, so a link cannot sit in a cached page.
+      joinVideoVisit: (token, eid) =>
+        fetch(`${API_URL}/api/gfc/clinical/appointments/${encodeURIComponent(eid)}/join`, {
+          headers: { 'Authorization': `Bearer ${token}` }
         }).then(handleResponse).catch(asError),
 
       // ---- Patient clinical read (Session 4.3) — no ids: the server scopes to the session ----
@@ -5222,6 +5246,10 @@
           time: [scheduleClock(a.startTime), scheduleClock(a.endTime)].filter(Boolean).join(' – '),
           title: a.title || 'Clinical visit',
           detail: [a.provider, a.location].filter(Boolean).join(' · '),
+          // T1 C3: a flag, never the link. The link is asked for at the moment
+          // of joining, from a window-checked route, so it cannot sit in a
+          // cached page and open the room months later.
+          hasVideo: !!a.hasVideo, eid: a.id,
           live: false, past: a.state === 'completed'
         });
       });
@@ -5229,6 +5257,43 @@
     };
     // One visit row, used on Home, Care and the calendar: a date block, the
     // kind of visit (clinical or caregiver), what it is, when and with whom.
+    // T1 C3 — the patient's Join button. It asks the server for the link at
+    // the moment of the tap, so the window check happens then rather than when
+    // the page was drawn; a refusal says WHEN the room opens instead of
+    // dead-ending, because "not yet" and "this is broken" are different facts.
+    const JoinVideoButton = ({ v }) => {
+      const [busy, setBusy] = useState(false);
+      const [note, setNote] = useState('');
+      if (!v.hasVideo || v.past) return null;
+      const go = async () => {
+        // The tab is opened from the CLICK, not from the response: a
+        // `window.open` after an await is outside the user-gesture stack and
+        // mobile Safari blocks it (the trap the portal's PDFs already paid for).
+        const tab = window.open('', '_blank');
+        setBusy(true); setNote('');
+        const r = await api.joinVideoVisit(portalToken(), v.eid);
+        setBusy(false);
+        if (r && r.join && r.join.url) {
+          if (tab) tab.location = r.join.url; else window.location = r.join.url;
+          return;
+        }
+        if (tab) tab.close();
+        // "Not yet" and "this is broken" are different facts, so the refusal
+        // says WHEN the room opens rather than dead-ending.
+        const opens = r && r.opensAt && window.GFC_TIME ? window.GFC_TIME.fmtDayTime(r.opensAt) : null;
+        const why = (r && r.error) || 'The video room could not be opened.';
+        setNote(opens ? `${why} It opens at ${opens}.` : why);
+      };
+      return (
+        <div style={{ marginTop: 6 }}>
+          <button className="btn" disabled={busy} onClick={go}>
+            <i className="ti ti-video" /> {busy ? 'Opening…' : 'Join video visit'}
+          </button>
+          {note && <p className="sub" style={{ marginTop: 4, color: '#B5462E' }}>{note}</p>}
+        </div>
+      );
+    };
+
     const ScheduleRow = ({ v }) => (
       <div className={`lrow srow ${v.live ? 'hl' : ''}`} style={{ cursor: 'default' }}>
         <div className="dblk"><div className="m">{monthShortOf(v.date)}</div><div className="d">{Number(String(v.date || '').slice(8, 10)) || ''}</div></div>
@@ -5236,6 +5301,7 @@
           <span className={`kind ${v.kind}`}>{v.kind === 'clinical' ? 'Clinical visit' : 'Caregiver'}</span>
           <b>{v.title}</b>
           <span>{[v.time, v.detail].filter(Boolean).join(' · ')}</span>
+          <JoinVideoButton v={v} />
         </span>
         {v.past && <i className="ti ti-circle-check" style={{ color: 'var(--teal)', fontSize: 20 }} />}
       </div>
@@ -5313,9 +5379,31 @@
           <ScheduleEmpty empty={upcoming.length === 0} shiftsErr={shiftsErr} />
           {upcoming.slice(0, 10).map(v => <ScheduleRow key={v.id} v={v} />)}
           {clinicalNotYet && <p className="sub">Your clinical visits will appear here once your care team updates your calendar.</p>}
+          {/* T1 C5 — shown only when there IS a video visit to explain. A
+              permanent panel about video visits on the screen of somebody who
+              only ever gets home visits is noise. */}
+          {upcoming.some(v => v.hasVideo) && <VideoVisitHelp />}
         </div>
       );
     };
+
+    // T1 C5 — what a patient needs to know before their first video visit, in
+    // plain words. No app to install, because Meet opens in a browser; and the
+    // one thing that is actually theirs to arrange is a quiet spot with a
+    // decent signal.
+    const VideoVisitHelp = () => (
+      <div className="card" style={{ marginTop: 16 }}>
+        <p className="lbl" style={{ marginTop: 0 }}>How video visits work</p>
+        <ul className="sub" style={{ margin: 0, paddingLeft: 18 }}>
+          <li>We will email you a link about half an hour before. You can also tap <b>Join video visit</b> here.</li>
+          <li>Nothing to install. The visit opens in your browser, on a phone, tablet or computer.</li>
+          <li>The room opens 15 minutes early, so you can be waiting rather than rushing.</li>
+          <li>Somewhere quiet with a good signal works best. Have your medicines nearby if we are reviewing them.</li>
+          <li>Your clinician may ask you to confirm your name and date of birth, and where you are. We have to ask.</li>
+          <li>If you cannot get in, call us and we will sort it out or see you another way.</li>
+        </ul>
+      </div>
+    );
 
     // ── Home (portal redesign, owner mockups 10/2026) ─────────────────────
     // Greeting, four tiles, the next visit, the latest visit summary, recent
@@ -7514,10 +7602,9 @@
     };
     
     const App = () => {
-      // Check multiple token sources - portal_token, unified_token, or admin_token from Portal Hub
-      const [token, setToken] = useState(() => {
-        return localStorage.getItem('portal_token') || localStorage.getItem('unified_token') || localStorage.getItem('admin_token');
-      });
+      // The three token sources (portal_token, unified_token, or admin_token
+      // from the Portal Hub) are resolved by the one helper above.
+      const [token, setToken] = useState(portalToken);
       const [user, setUser] = useState(() => {
         try {
           const userData = localStorage.getItem('portal_user') || localStorage.getItem('unified_user') || localStorage.getItem('admin_user');

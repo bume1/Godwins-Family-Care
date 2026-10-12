@@ -428,6 +428,13 @@ const DEFAULT_VISIT_MINUTES = 60;
 // clock); `instantOf(date, time)` turns that wall clock into an instant in the
 // practice timezone — passed in so this file does nothing with timezones
 // itself, which is how the DST bug of 2026-09-16 got in.
+// NOTE, because a later simplification could get this wrong: the FIRST guard
+// below is belt-and-braces, and mutation-checking proved it rather than
+// assuming it. A row with no date or no startTime produces a non-finite
+// `start` one line down and is refused there anyway. It is here so the refusal
+// is by SHAPE as well as by arithmetic. WHAT ACTUALLY DOES THE WORK is the
+// `Number.isFinite` check — remove that one and a visit with no time gets a
+// window built out of NaN.
 const joinWindow = (appointment, instantOf) => {
   const a = appointment || {};
   if (!a.date || !a.startTime) return { ok: false, code: 'JOIN_NO_TIME', error: 'This visit has no time on it yet, so the video room cannot be opened.' };

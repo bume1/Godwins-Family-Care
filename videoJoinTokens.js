@@ -90,6 +90,15 @@ const buildToken = ({ eid, clientId, recipientUserId, recipientRole, salt, now }
 
 // Every row is a candidate, live or not, so a revoked link can still say it
 // was shut off. The caller decides what a tombstone means.
+// NOTE: the shape check below is belt-and-braces, and mutation-checking proved
+// it rather than assuming it. A malformed token hashes to a perfectly valid
+// 64-hex digest that matches no stored row, so correctness rests on
+// `hashesMatch` and on the hash never colliding — not on this line. It is here
+// to refuse an obviously wrong token before any hashing happens at all, which
+// keeps a flood of junk from doing work. WHAT ACTUALLY DOES THE WORK is
+// `hashesMatch`'s own length check: without it, timingSafeEqual THROWS on a
+// length mismatch rather than returning false, and a truncated guess becomes a
+// 500 instead of a refusal.
 const findByToken = (rows, token, salt) => {
   if (!TOKEN_PATTERN.test(String(token || ''))) return null;
   const want = hashToken(token, salt);
