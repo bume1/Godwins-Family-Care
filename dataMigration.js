@@ -49,6 +49,12 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'client_document_uploads', phi: true, owner: '4.6+' },
   { key: 'document_extractions', phi: true, owner: '4.9' },
   { key: 'client_document_requests', phi: true, owner: '4.6+' },
+  // A patient's request to give a family member portal access: their name,
+  // email and relationship to a named client. Approved rows point at the user.
+  { key: 'family_invites', phi: true, owner: 'portal redesign 10/2026' },
+  // Self sign-ups waiting on staff: a name, date of birth, address and
+  // insurance details, plus a password HASH and a verify-token HASH.
+  { key: 'signup_requests', phi: true, owner: 'portal redesign 10/2026' },
   // The branded no-login upload link: one live row per client, revoked ones
   // kept as tombstones. The row is a pointer (a client id and a token), not
   // a document — but the token is a standing door onto that client's file,

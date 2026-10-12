@@ -77,7 +77,7 @@ const FILTER_MAP = Object.freeze({
   note: { full: ['subjective', 'objective', 'assessment', 'plan', 'addenda', 'signatures', 'signedAt'] },
   // A filed test result: what the lab sent and whether the care team has
   // reviewed it. Never the app's own interpretation flag or inbox summary.
-  result: { full: ['id', 'label', 'resultDate', 'performedBy', 'reviewStatus', 'reviewedBy', 'reviewedAt', 'patientNote', 'hasFile'] },
+  result: { full: ['id', 'label', 'kind', 'resultDate', 'performedBy', 'reviewStatus', 'reviewedBy', 'reviewedAt', 'patientNote', 'hasFile'] },
   carePlan: {
     full: ['version', 'problems', 'goals', 'eachVisit', 'visitFrequency', 'visitDays', 'visitTimes', 'duration', 'effectiveDate', 'targetDate',
       'authoredBy', 'authoredAt', 'visitSchedule', 'careTier', 'careTierLabel', 'coSignedAt', 'coSignedBy', 'rnSignedAt', 'rnName', 'updatedAt', 'updatedBy', 'primaryCaregiver', 'careTeam', 'authorizedServices', 'signedPdf'],

@@ -318,6 +318,9 @@ const resultForPatient = (r) => {
   return {
     id: String(r.id),
     label: r.orderType ? (ORDER_LABELS[r.orderType] || 'Test results') : 'Outside record',
+    // What kind of result it is, so the portal can file it under Lab or Imaging.
+    // The order's type only; nothing a clinician wrote.
+    kind: ORDER_LABELS[r.orderType] ? r.orderType : 'outside',
     resultDate: r.resultDate || null,
     performedBy: r.performedBy || null,
     reviewStatus: reviewed ? 'reviewed' : 'not_reviewed',
