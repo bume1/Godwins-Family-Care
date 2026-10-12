@@ -39,7 +39,12 @@ const PATHS = Object.freeze({
   CAREGIVER_ADMIN: '/caregivers',           // admin supervision: escalations, reviews
   ADMIN: '/admin',                          // the admin hub. NOT `/admin-hub`, which 404s.
   ENROLLMENT: '/admin/enrollment',
-  LOGIN: '/login'
+  LOGIN: '/login',
+  // T1 C4: the one-tap video join link's PREFIX. The token is appended per
+  // recipient (`videoJoinFor`), so this entry is the prefix and not a whole
+  // path — which means the boot-time link sweep requests it with a bogus
+  // token and expects the page to refuse, rather than expecting a 200.
+  VIDEO_JOIN_PREFIX: '/v'
 });
 
 const ROLES = { ADMIN: 'admin', CLIENT: 'client', FAMILY: 'family', VENDOR: 'vendor', CLINICAL: 'user', CASE_MANAGER: 'caseManager' };
@@ -79,9 +84,17 @@ function messagesFor(user) {
 // admin board at `/scheduling`, which they cannot open.
 const shiftFor = () => PATHS.CAREGIVER_SCHEDULE;
 
+// The one-tap video join link for one minted token. Here rather than built at
+// the call site for the same reason every other destination is: a path that
+// moves gets corrected once.
+const videoJoinFor = (token) => `${PATHS.VIDEO_JOIN_PREFIX}/${encodeURIComponent(String(token || ''))}`;
+
 // The path without its #fragment, which is what a server route matches.
 const routeOf = (p) => String(p || '').split('#')[0].split('?')[0];
 
-const ALL_PATHS = Object.freeze(Object.values(PATHS));
+// The sweep requests each of these and expects the app to serve it. The video
+// join PREFIX is not a servable path on its own (it needs a token), so it is
+// excluded here and checked by its own assertion with a bogus token.
+const ALL_PATHS = Object.freeze(Object.values(PATHS).filter(p => p !== PATHS.VIDEO_JOIN_PREFIX));
 
-module.exports = { PATHS, ALL_PATHS, homeFor, messagesFor, shiftFor, routeOf, isCaregiver, isClinical };
+module.exports = { PATHS, ALL_PATHS, homeFor, messagesFor, shiftFor, videoJoinFor, routeOf, isCaregiver, isClinical };

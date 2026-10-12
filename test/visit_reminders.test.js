@@ -194,11 +194,22 @@ test('A3: booking creates one, cancel voids, and a no-show still sends nothing',
     'and it is an unconditional await, not a call behind a condition');
   assert.ok(awaitsUnconditionally(SERVER_CODE, 'voidVisitReminders'),
     'as is the void');
-  // Both of them, at every site: three notify calls, three reminder actions.
-  assert.equal((SERVER_CODE.match(/\n\s*await scheduleVisitReminder\(/g) || []).length, 2,
-    'scheduled unconditionally at booking AND at reschedule');
-  assert.equal((SERVER_CODE.match(/\n\s*await voidVisitReminders\(/g) || []).length, 2,
-    'voided unconditionally at reschedule AND at cancel');
+  // Both of them, at every site. WIDENED, not loosened, for T1's day-of video
+  // nudge (2026-10-12): booking and reschedule each gained a SECOND, gated
+  // schedule call for the video nudge, and the no-show gained a void. The
+  // unconditional day-before pair above is still the thing being pinned —
+  // what is counted here is that nothing LOST its call.
+  const schedules = SERVER_CODE.match(/\n\s*await scheduleVisitReminder\(/g) || [];
+  assert.equal(schedules.length, 4,
+    'day-before scheduled unconditionally at booking AND reschedule, plus T1\'s gated video nudge at each');
+  const voids = SERVER_CODE.match(/\n\s*await voidVisitReminders\(/g) || [];
+  assert.equal(voids.length, 3,
+    'voided at reschedule, cancel, and (T1) no-show');
+  // The two UNGATED ones are the day-before pair: a schedule call that is not
+  // preceded on its own line by an `if` is one nothing can switch off.
+  const ungated = (SERVER_CODE.match(/\n    await scheduleVisitReminder\(\{\n      clientId/g) || []).length +
+    (SERVER_CODE.match(/\n      await scheduleVisitReminder\(\{\n        clientId: appClient\.clientId, eid: String\(newEid\), visitDate: body\.date/g) || []).length;
+  assert.ok(ungated >= 2, 'the day-before reminder is still scheduled unconditionally at both sites');
   const cancel = SERVER_CODE.slice(SERVER_CODE.indexOf('notify.appointmentCancelled'));
   assert.match(cancel.slice(0, 900), /voidVisitReminders\(\{ eid: String\(row\.pc_eid\), reason: 'cancelled'/);
   // A NO-SHOW SENDS NOTHING, before or after. "You missed your appointment" is a
@@ -210,6 +221,9 @@ test('A3: booking creates one, cancel voids, and a no-show still sends nothing',
   // between two routes, which is a guard about the layout rather than the route.
   const noShowBody = noShow.slice(0, noShow.indexOf('\n});\n') > 0 ? noShow.indexOf('\n});\n') : 3000);
   assert.ok(!/notify\.|scheduleVisitReminder/.test(noShowBody), 'a no-show notifies nobody and schedules nothing');
+  // T1: it VOIDS, which is the opposite of notifying. A join nudge for a visit
+  // already marked as missed would be a reminder to attend something over.
+  assert.match(noShowBody, /voidVisitReminders\(/, 'a no-show voids the reminders it leaves behind');
 });
 
 test('A3: scheduling a reminder is BEST-EFFORT — it can never undo an appointment', () => {
@@ -510,7 +524,10 @@ test('non-goals: no SMS, no first-visit prep email, no facility contacts, no shi
   // PHCP caregiver shifts are a separate system by design — this must not couple
   // to the app-side shift store.
   assert.ok(!/schedulingRepository|caregiver/i.test(src));
-  assert.deepEqual(reminders.VOID_REASONS, ['rescheduled', 'cancelled', 'missed_window']);
+  // 'no_longer_video' is T1's: a visit rescheduled out of video loses its join
+  // nudge and KEEPS its day-before reminder. Voiding both would leave the
+  // patient with no reminder at all.
+  assert.deepEqual(reminders.VOID_REASONS, ['rescheduled', 'cancelled', 'missed_window', 'no_longer_video']);
 });
 
 test('build: the collection is claimed in the migration registry, as PHI', () => {

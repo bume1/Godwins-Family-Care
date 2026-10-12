@@ -177,6 +177,14 @@
       stampVisit: (eid, body) => authedFetch(`/api/clinical/visits/${eid}/timing`, {
         method: 'POST', body: JSON.stringify(body)
       }),
+      // T1 — the clinician's own door into the video room. Starting it stamps
+      // the visit as started, so there is ONE button rather than a join link
+      // plus a Start visit somebody has to remember to press.
+      videoRoom: (eid) => authedFetch(`/api/clinical/visits/${eid}/video`),
+      startVideoVisit: (eid) => authedFetch(`/api/clinical/visits/${eid}/video/start`, { method: 'POST' }),
+      telehealthCheck: (id, euuid, body) => authedFetch(`/api/clinical/patients/${id}/encounters/${encodeURIComponent(euuid)}/telehealth-checks`, {
+        method: 'POST', body: JSON.stringify(body)
+      }),
       nearby: (clientId, radiusMiles) => authedFetch(`/api/clinical/nearby?clientId=${encodeURIComponent(clientId)}&radiusMiles=${radiusMiles}`),
       workQueues: () => authedFetch('/api/clinical/work-queues'),
       analytics: () => authedFetch('/api/clinical/analytics'),
@@ -2225,7 +2233,7 @@
       return <span className="text-[11.5px] text-stone-500">{d.miles} mi in a straight line from the last stop</span>;
     };
 
-    const DayVisitRow = ({ v, onOpenChart, onPacket, onStamp, busy, canWrite }) => (
+    const DayVisitRow = ({ v, onOpenChart, onPacket, onStamp, onStartVideo, busy, canWrite }) => (
       <div className={`border-b border-stone-100 py-3 ${v.state === 'cancelled' ? 'opacity-50' : ''}`}>
         <div className="flex items-start gap-3">
           <div className="w-[68px] shrink-0 text-right">
@@ -2242,8 +2250,12 @@
             <div className="text-[12px] text-stone-600">
               {[v.visitType, v.serviceLine].filter(Boolean).join(' • ')}
             </div>
-            {v.address && <div className="text-[12px] text-stone-500 mt-0.5">{v.address}</div>}
-            <div className="mt-0.5"><DayDistance distance={v.distance} /></div>
+            {/* T1 B1 — a video visit has no address to drive to, so it says what
+                it is instead of showing the patient's home as a destination. */}
+            {v.video
+              ? <div className="text-[12px] text-stone-500 mt-0.5"><i className="ti ti-video mr-1" />Video visit</div>
+              : (v.address && <div className="text-[12px] text-stone-500 mt-0.5">{v.address}</div>)}
+            {!v.video && <div className="mt-0.5"><DayDistance distance={v.distance} /></div>}
             {/* A2 — access notes and who will be there. From the PATIENT record,
                 so they are here for whoever covers, not just whoever entered
                 them. This is what you read before getting out of the car. */}
@@ -2265,7 +2277,19 @@
               </div>
             )}
             <div className="flex gap-2 mt-2 flex-wrap">
-              {v.address && (
+              {/* T1 B1 — ONE button: it opens the room AND stamps the visit as
+                  started. A video visit has no arrival to record, so a join
+                  link beside a Start visit button people had to remember is how
+                  every telehealth note ended up with no time statement. */}
+              {canWrite && v.video && ['scheduled', 'en_route', 'arrived'].includes(v.state) && (
+                <button className="btn gold !py-1 !px-2.5 text-[11.5px]" disabled={busy === v.eid}
+                  onClick={() => onStartVideo(v)}><i className="ti ti-video" />Start video visit</button>
+              )}
+              {v.video && v.state === 'in_progress' && (
+                <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" disabled={busy === v.eid}
+                  onClick={() => onStartVideo(v)}><i className="ti ti-video" />Rejoin room</button>
+              )}
+              {!v.video && v.address && (
                 <a className="btn ghost !py-1 !px-2.5 text-[11.5px]" href={navigateHref(v.address)}
                   target="_blank" rel="noopener noreferrer"><i className="ti ti-navigation" />Navigate</a>
               )}
@@ -2275,15 +2299,18 @@
               <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" onClick={() => onOpenChart(v.clientId)}>
                 <i className="ti ti-folder-open" />Open chart
               </button>
-              {canWrite && v.state === 'scheduled' && (
+              {/* Nobody drives to or arrives at a video visit, so those two
+                  stamps are not offered on one. Ending it still is: the end is
+                  what makes the time statement. */}
+              {canWrite && !v.video && v.state === 'scheduled' && (
                 <button className="btn ghost !py-1 !px-2.5 text-[11.5px]" disabled={busy === v.eid}
                   onClick={() => onStamp(v, 'en_route')}><i className="ti ti-car" />En route</button>
               )}
-              {canWrite && ['scheduled', 'en_route'].includes(v.state) && (
+              {canWrite && !v.video && ['scheduled', 'en_route'].includes(v.state) && (
                 <button className="btn gold !py-1 !px-2.5 text-[11.5px]" disabled={busy === v.eid}
                   onClick={() => onStamp(v, 'arrive')}><i className="ti ti-door-enter" />Arrive</button>
               )}
-              {canWrite && v.state === 'arrived' && (
+              {canWrite && !v.video && v.state === 'arrived' && (
                 <button className="btn !py-1 !px-2.5 text-[11.5px]" disabled={busy === v.eid}
                   onClick={() => onStamp(v, 'start')}><i className="ti ti-player-play" />Start visit</button>
               )}
@@ -2405,6 +2432,25 @@
           .catch(e => setErr(e.message))
           .finally(() => setBusy(null));
       };
+      // T1 B1/B3 — open the room and stamp the start in one action. The window
+      // is opened from the CLICK, not from the response: a `window.open` after
+      // an await is outside the user-gesture stack and mobile Safari blocks it,
+      // which is the trap the portal's PDF downloads already paid for.
+      const startVideo = (v) => {
+        setBusy(v.eid); setErr('');
+        const tab = window.open('', '_blank');
+        api.startVideoVisit(v.eid)
+          .then(r => {
+            if (tab) tab.location = r.video.meetingUri;
+            else window.location = r.video.meetingUri;
+            // The stamp can fail while the room opens fine, and a clinician in
+            // a visit needs to know their time was not recorded.
+            if (r.timingNote) setErr(r.timingNote);
+            load();
+          })
+          .catch(e => { if (tab) tab.close(); setErr(e.message); })
+          .finally(() => setBusy(null));
+      };
       const optimize = () => {
         api.optimizeDay((day && day.visits) || [])
           .then(setProposal).catch(e => setErr(e.message));
@@ -2487,7 +2533,7 @@
                 <DayVisitRow key={v.eid} v={v} busy={busy} canWrite={access.canWrite}
                   onOpenChart={onOpenChart}
                   onPacket={(vv) => setPacket({ clientId: vv.clientId, eid: vv.eid })}
-                  onStamp={stamp} />
+                  onStamp={stamp} onStartVideo={startVideo} />
               ))}
             </div>
             {day && (
@@ -6091,6 +6137,73 @@
       );
     };
 
+    // ── T1 B1/B2 — the video room and the pre-join checks ───────────────────
+    //
+    // Shown only on a video visit. An empty card on a house call is a control
+    // that invites a click that does nothing, and the SERVER decides which
+    // this is (`isVideoVisit`): the page names no check and no rule of its own,
+    // so it cannot drift from the validator that refuses one it did not offer.
+    const VideoVisitCard = ({ d, eid, busy, onStart, onCheck }) => {
+      const tele = d.telehealthChecklist;
+      const [notes, setNotes] = useState({});
+      if (!d.isVideoVisit) return null;
+      return (
+        <div className="border border-primary/30 bg-primary/[0.03] rounded-lg p-2.5 mt-1 text-xs">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <b className="text-primary"><i className="ti ti-video mr-1" />Video visit</b>
+            {d.video
+              ? (eid
+                ? <button className="btn gold !py-1 !px-2.5 text-[11.5px]" disabled={busy === 'video'} onClick={onStart}>
+                  <i className="ti ti-video" />Start video visit
+                </button>
+                /* The room belongs to the APPOINTMENT, so without one there is
+                   nothing to key a start on. Said plainly rather than hidden. */
+                : <span className="text-stone-500">Attach this note to its appointment to open the room from here.</span>)
+              : <span className="text-amber-800">No video room for this visit. If it should be a video visit, reschedule it as one so a room is created.</span>}
+          </div>
+          {d.video && d.video.meetingCode && (
+            <p className="text-stone-500 mt-1">Meeting code <b>{d.video.meetingCode}</b> — read it out if someone cannot open the link.</p>
+          )}
+          {tele && (
+            <div className="mt-2">
+              <div className="lblu mb-1">Before you start</div>
+              {tele.electionWarning && (
+                <p className="text-amber-800 mb-1.5"><i className="ti ti-alert-triangle mr-1" />{tele.electionWarning}</p>
+              )}
+              <div className="grid gap-1.5">
+                {tele.items.map(it => (
+                  <div key={it.key} className="border border-stone-200 bg-white rounded-lg px-2.5 py-1.5">
+                    <label className="flex items-start gap-2 cursor-pointer">
+                      <input type="checkbox" className="mt-0.5" checked={it.confirmed} disabled={busy === `tele:${it.key}`}
+                        onChange={e => onCheck(it.key, e.target.checked, notes[it.key] || '')} />
+                      <span className="min-w-0">
+                        <span className={it.confirmed ? 'font-semibold text-emerald-800' : 'font-semibold text-stone-800'}>{it.label}</span>
+                        <span className="block text-stone-500">{it.hint}</span>
+                        {it.prefill && <span className="block text-emerald-800">{it.prefill}</span>}
+                        {it.confirmed && it.by && <span className="block text-stone-400">{it.by.name} · {fmtTs(it.at)}{it.note ? ` · ${it.note}` : ''}</span>}
+                      </span>
+                    </label>
+                    {it.key === 'location' && !it.confirmed && (
+                      <input className="inp mt-1.5 text-[11.5px]" placeholder="Where are they? (e.g. their home in Marietta, GA)"
+                        value={notes.location || ''} onChange={e => setNotes({ ...notes, location: e.target.value })} />
+                    )}
+                  </div>
+                ))}
+              </div>
+              {/* NEVER A BLOCK. The clinician on the call is the person who
+                  knows whether identity was confirmed, and a note refused over
+                  a tick box is an hour of documentation held hostage. */}
+              <p className="text-stone-500 mt-1.5">
+                {tele.complete
+                  ? 'All recorded.'
+                  : 'These do not stop you signing — the note will carry a note of anything not recorded.'}
+              </p>
+            </div>
+          )}
+        </div>
+      );
+    };
+
     const EncounterPanel = ({ patient, euuid, chart, onChartChanged, onBack, onChanged }) => {
       const [d, setD] = useState(null);
       const [err, setErr] = useState('');
@@ -6256,6 +6369,29 @@
                   </div>
                 </div>
               )}
+              <VideoVisitCard d={d} eid={d.linkedAppointmentEid} busy={busy}
+                onStart={() => {
+                  // Opened from the CLICK, not from the response: a
+                  // `window.open` after an await is outside the user-gesture
+                  // stack and mobile Safari blocks it.
+                  const tab = window.open('', '_blank');
+                  setBusy('video'); setMsg(null);
+                  api.startVideoVisit(d.linkedAppointmentEid)
+                    .then(r => {
+                      if (tab) tab.location = r.video.meetingUri; else window.location = r.video.meetingUri;
+                      if (r.timingNote) setMsg({ ok: false, text: r.timingNote });
+                      load();
+                    })
+                    .catch(e => { if (tab) tab.close(); setMsg({ ok: false, text: e.message }); })
+                    .finally(() => setBusy(''));
+                }}
+                onCheck={(key, confirmed, note) => {
+                  setBusy(`tele:${key}`); setMsg(null);
+                  api.telehealthCheck(patient.id, euuid, { key, confirmed, note })
+                    .then(() => load())
+                    .catch(e => setMsg({ ok: false, text: e.message }))
+                    .finally(() => setBusy(''));
+                }} />
               {closed && (
                 <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-2.5 text-xs text-emerald-900 mt-1">
                   <b>Signed {fmtTs(d.attestation.signedAt)} by {npiLabel(d.attestation.signedBy)}{awaitingAddendum ? ' as the note\'s author' : ''}.</b> The note is locked for clinicians. Corrections go in as addenda below, each with its own signer and timestamp.

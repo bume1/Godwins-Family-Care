@@ -37,8 +37,30 @@ const REMINDER_SEND_HOUR_ET = 9;
 // been and gone.
 const MISSED_WINDOW_HOURS = 12;
 
+// ── T1 C4: the day-of nudge for a video visit ─────────────────────────────
+//
+// A video visit needs a reminder the day-before email cannot give: the link,
+// half an hour before, when the patient is near their phone. It rides THIS
+// store and THIS scanner rather than getting its own — one writer, one drain,
+// the rule the whole reminder path already follows — and is told apart by
+// `kind`. A row with no kind is a day-before reminder, so every row written
+// before this change keeps behaving exactly as it did.
+const REMINDER_KINDS = Object.freeze({ DAY_BEFORE: 'day_before', VIDEO_JOIN: 'video_join' });
+const VIDEO_JOIN_MINUTES_BEFORE = 30;
+// A video nudge found more than an hour past its send time is VOIDED. Twelve
+// hours is right for "your visit is tomorrow" and absurd for "your visit
+// starts in 30 minutes": at worst this one arrives half an hour into the
+// visit, which is still useful to a patient running late, and never after it.
+const VIDEO_JOIN_MISSED_WINDOW_HOURS = 1;
+const kindOf = (r) => ((r && r.kind) === REMINDER_KINDS.VIDEO_JOIN ? REMINDER_KINDS.VIDEO_JOIN : REMINDER_KINDS.DAY_BEFORE);
+const missedWindowHoursFor = (kind) =>
+  (kind === REMINDER_KINDS.VIDEO_JOIN ? VIDEO_JOIN_MISSED_WINDOW_HOURS : MISSED_WINDOW_HOURS);
+
 const STATUSES = Object.freeze(['scheduled', 'sent', 'void']);
-const VOID_REASONS = Object.freeze(['rescheduled', 'cancelled', 'missed_window']);
+// 'no_longer_video' is the T1 case: a visit rescheduled out of video keeps its
+// day-before reminder and loses its join nudge, because there is nothing to
+// join. Voiding both would leave the patient with no reminder at all.
+const VOID_REASONS = Object.freeze(['rescheduled', 'cancelled', 'missed_window', 'no_longer_video']);
 
 const clean = (v, max) => String(v == null ? '' : v).trim().slice(0, max);
 const isYmd = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ''));
@@ -84,11 +106,33 @@ const reminderSendAt = (visitDate) => {
  * failure. (`queueNotification` learned the same lesson: unsubscribing is not a
  * failed send.)
  */
-const buildVisitReminder = ({ id, clientId, eid, visitDate, startTime, when, clinician, place, now }) => {
+// The instant a video nudge goes out: VIDEO_JOIN_MINUTES_BEFORE before the
+// visit's own start, in Eastern. Built through `instantFromZoned` for the same
+// reason the day-before one is: the start time is a wall clock reading, and
+// an offset from a UTC instant is right today and wrong after a clock change.
+const videoJoinSendAt = (visitDate, startTime) => {
+  if (!isYmd(visitDate)) return null;
+  const hhmm = String(startTime || '').slice(0, 5);
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(hhmm)) return null;
+  const startIso = practiceTime.instantFromZoned(visitDate, hhmm);
+  if (!startIso) return null;
+  const t = Date.parse(startIso);
+  if (!Number.isFinite(t)) return null;
+  return new Date(t - VIDEO_JOIN_MINUTES_BEFORE * 60000).toISOString();
+};
+
+const buildVisitReminder = ({ id, clientId, eid, visitDate, startTime, when, clinician, place, now, kind }) => {
   if (!clientId) return { skipped: true, reason: 'no client' };
   if (!eid) return { skipped: true, reason: 'no appointment id' };
-  const sendAt = reminderSendAt(visitDate);
-  if (!sendAt) return { skipped: true, reason: `unusable visit date ${visitDate}` };
+  const useKind = kind === REMINDER_KINDS.VIDEO_JOIN ? REMINDER_KINDS.VIDEO_JOIN : REMINDER_KINDS.DAY_BEFORE;
+  const sendAt = useKind === REMINDER_KINDS.VIDEO_JOIN
+    ? videoJoinSendAt(visitDate, startTime)
+    : reminderSendAt(visitDate);
+  if (!sendAt) {
+    return { skipped: true, reason: useKind === REMINDER_KINDS.VIDEO_JOIN
+      ? `unusable visit time ${visitDate} ${startTime}`
+      : `unusable visit date ${visitDate}` };
+  }
 
   // ALREADY PAST → NO REMINDER. Booked yesterday evening for tomorrow morning,
   // or booked the same day: the booking email has just gone out, and a second
@@ -101,6 +145,7 @@ const buildVisitReminder = ({ id, clientId, eid, visitDate, startTime, when, cli
   return {
     reminder: {
       id, clientId, eid: String(eid),
+      kind: useKind,
       visitDate: String(visitDate),
       startTime: clean(startTime, 8) || null,
       // SNAPSHOT THE DISPLAY STRINGS. The reminder must not need OpenEMR to
@@ -123,11 +168,15 @@ const buildVisitReminder = ({ id, clientId, eid, visitDate, startTime, when, cli
 // caller writes once. A reschedule voids the OLD eid and creates on the NEW one:
 // the tombstone swap CHANGES the eid, so keying the void on the new one would
 // leave the old reminder live and send a patient to yesterday's time.
-const voidRemindersForEid = (rows, eid, reason, at) => {
+// `kind` narrows the void to one kind of reminder. Left out, it voids both,
+// which is what a cancellation wants; a reschedule out of video passes
+// VIDEO_JOIN so the day-before reminder survives.
+const voidRemindersForEid = (rows, eid, reason, at, kind) => {
   const when = at || new Date().toISOString();
   let voided = 0;
   const next = (Array.isArray(rows) ? rows : []).map(r => {
     if (!r || String(r.eid) !== String(eid) || r.status !== 'scheduled') return r;
+    if (kind && kindOf(r) !== kind) return r;
     voided += 1;
     return { ...r, status: 'void', voidReason: VOID_REASONS.includes(reason) ? reason : 'cancelled', voidedAt: when };
   });
@@ -138,14 +187,15 @@ const voidRemindersForEid = (rows, eid, reason, at) => {
 // different actions and collapsing them is how a stale reminder gets sent.
 const dueReminders = (rows, now) => {
   const at = (now ? new Date(now) : new Date()).getTime();
-  const cutoff = at - MISSED_WINDOW_HOURS * 3600 * 1000;
   const due = [];
   const missed = [];
   for (const r of Array.isArray(rows) ? rows : []) {
     if (!r || r.status !== 'scheduled' || !r.sendAt) continue;
     const t = new Date(r.sendAt).getTime();
     if (Number.isNaN(t) || t > at) continue;
-    if (t < cutoff) missed.push(r);
+    // The missed window is PER KIND: twelve hours is right for "your visit is
+    // tomorrow" and absurd for "your visit starts in 30 minutes".
+    if (t < at - missedWindowHoursFor(kindOf(r)) * 3600 * 1000) missed.push(r);
     else due.push(r);
   }
   // Oldest first, so a backlog drains in the order the visits happen.
@@ -158,6 +208,34 @@ const dueReminders = (rows, now) => {
 // `sendToClientSide` rewrites /^Your visit/ to "{Name}'s visit" for a POA, so a
 // paragraph that starts any other way tells a POA "your visit" about somebody
 // else's appointment. That is not a style rule; it is the mechanism.
+// The video nudge. Its first paragraph must ALSO begin with "Your visit", for
+// the same mechanical reason: `sendToClientSide` rewrites /^Your visit/ to
+// "{Name}'s visit" for a POA.
+//
+// THE VAGUE VERSION CARRIES NO LINK. A one-tap link is a door into a live
+// consultation, so it goes out only where the transport is inside the BAA —
+// the same rule the visit date follows, applied to a capability instead of a
+// fact.
+const videoReminderCopy = ({ detail, when, joinUrl, orgPhone }) => (detail
+  ? {
+      subject: `Your video visit starts at ${when}`,
+      headline: 'Your video visit is about to start',
+      paragraphs: [
+        `Your visit is at ${when}, by video. Tap the button below to join \u2014 you do not need to sign in.`,
+        `Somewhere quiet with a good signal works best. If you cannot get in, call the office at ${orgPhone} and we will help.`
+      ],
+      joinUrl: joinUrl || null
+    }
+  : {
+      subject: 'Your video visit is coming up',
+      headline: 'Your video visit is about to start',
+      paragraphs: [
+        'Your visit is coming up, by video. Sign in to your secure portal to join it.',
+        'For privacy we do not put visit details or join links in email.'
+      ],
+      joinUrl: null
+    });
+
 const reminderCopy = ({ detail, when, orgPhone }) => (detail
   ? {
       subject: `Reminder: your visit tomorrow at ${when}`,
@@ -252,6 +330,8 @@ const cliniciansWithUnrecognisedCredential = (users) => (Array.isArray(users) ? 
 
 module.exports = {
   REMINDER_SEND_HOUR_ET, MISSED_WINDOW_HOURS, STATUSES, VOID_REASONS,
+  REMINDER_KINDS, VIDEO_JOIN_MINUTES_BEFORE, VIDEO_JOIN_MISSED_WINDOW_HOURS,
+  kindOf, missedWindowHoursFor, videoJoinSendAt, videoReminderCopy,
   reminderSendAt, buildVisitReminder, voidRemindersForEid, dueReminders, reminderCopy,
   ROLE_PHRASES, rolePhraseFor, visitClinicianLabel,
   cliniciansWithoutCredential, cliniciansWithUnrecognisedCredential

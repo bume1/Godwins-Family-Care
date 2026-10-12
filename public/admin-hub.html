@@ -424,6 +424,20 @@
           headers: { 'Authorization': `Bearer ${token}` }
         }).then(handleResponse).catch(err => ({ error: err.message })),
 
+      // T1 D1/D2 — video visits. The status says whether the settings PARSE;
+      // the test is what proves Google honours them.
+      getMeetStatus: (token) =>
+        fetch(`${API_URL}/api/admin/meet/status`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }).then(handleResponse).catch(err => ({ error: err.message })),
+
+      testMeetRoom: (token, userId) =>
+        fetch(`${API_URL}/api/admin/meet/test`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(userId ? { userId } : {})
+        }).then(handleResponse).catch(err => ({ error: err.message })),
+
       dismissPendingReviewTicket: (token, ticketId) =>
         fetch(`${API_URL}/api/admin/ticket-polling/pending-review/${ticketId}`, {
           method: 'DELETE',
@@ -832,6 +846,83 @@
       );
     };
 
+    // ── T1 D2 — video visits, and the proof that they work ─────────────────
+    //
+    // `configured` means the settings parse. It is NOT evidence that Google
+    // accepts them, and this panel says so in those words rather than showing
+    // a green tick that has not been earned — the distinction a narrowed OAuth
+    // token behind a green "OpenEMR connected" cost this repo weeks.
+    const MeetSetupPanel = ({ token }) => {
+      const [st, setSt] = useState(null);
+      const [busy, setBusy] = useState(false);
+      const [result, setResult] = useState(null);
+      useEffect(() => { api.getMeetStatus(token).then(setSt); }, [token]);
+      if (!st) return null;
+      if (st.error) return (
+        <div className="card-modern p-6">
+          <h2 className="text-lg font-semibold text-gray-900 mb-2">Video visits</h2>
+          <p className="text-sm text-red-700">{st.error}</p>
+        </div>
+      );
+      const m = st.meet || {};
+      const missing = (st.hosts && st.hosts.withoutWorkspaceAccount) || [];
+      const run = () => {
+        setBusy(true); setResult(null);
+        api.testMeetRoom(token).then(r => { setResult(r); setBusy(false); api.getMeetStatus(token).then(setSt); });
+      };
+      return (
+        <div className="card-modern p-6">
+          <div className="flex items-start justify-between gap-3 flex-wrap mb-4">
+            <h2 className="text-lg font-semibold text-gray-900">Video visits</h2>
+            <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${m.configured ? 'bg-teal-50 text-teal-700' : 'bg-amber-50 text-amber-800'}`}>
+              {m.configured ? 'Settings in place' : 'Not set up'}
+            </span>
+          </div>
+          {!m.configured && (
+            <div className="mb-4">
+              <p className="text-sm text-gray-700 mb-2">A telehealth visit booked now gets no video room. What is missing:</p>
+              <ul className="text-sm text-gray-700 list-disc pl-5 space-y-1">
+                {(m.blockers || []).map((b, i) => <li key={i}>{b}</li>)}
+              </ul>
+            </div>
+          )}
+          {m.configured && (
+            <p className="text-sm text-gray-700 mb-4">
+              The settings parse, which is not the same as Google accepting them. Press Test video room to find out.
+            </p>
+          )}
+          <div className="flex items-center gap-3 flex-wrap">
+            <button onClick={run} disabled={busy || !m.configured}
+              className="px-4 py-2 rounded-xl bg-primary-500 text-white text-sm font-medium disabled:opacity-50">
+              {busy ? 'Testing…' : 'Test video room'}
+            </button>
+            <span className="text-xs text-gray-500">
+              Creates a real room and shuts it again. No patient is involved.
+            </span>
+          </div>
+          {result && (
+            <p className={`text-sm mt-3 ${result.error ? 'text-red-700' : 'text-teal-700'}`}>
+              {result.error || result.message}
+            </p>
+          )}
+          {missing.length > 0 && (
+            <div className="mt-4 p-3 bg-amber-50 rounded-xl">
+              <p className="text-sm text-gray-800 mb-1">
+                <b>{missing.length}</b> {missing.length === 1 ? 'clinician has' : 'clinicians have'} no GFC Google account, so they cannot host a video visit.
+                Their visits will book and then have no room.
+              </p>
+              <p className="text-xs text-gray-600">
+                {missing.map(u => u.name).join(', ')} — each needs a mailbox on {(st.workspaceDomains || []).join(' or ')}.
+              </p>
+            </div>
+          )}
+          {st.openRooms > 0 && (
+            <p className="text-xs text-gray-500 mt-3">{st.openRooms} video {st.openRooms === 1 ? 'room is' : 'rooms are'} open for booked visits.</p>
+          )}
+        </div>
+      );
+    };
+
     const DashboardPage = ({ token, onNavigate, user }) => {
       const isManager = user?.isManager && user?.role !== 'admin';
       const [stats, setStats] = useState(null);
@@ -999,6 +1090,9 @@
               </div>
             </div>
           )}
+
+          {/* T1 D2 — admin-only, like every other setup panel here. */}
+          {!isManager && <MeetSetupPanel token={token} />}
 
           {/* Quick Actions & Projects */}
           <div className="grid lg:grid-cols-2 gap-6">

@@ -723,9 +723,107 @@ const VALID_TRACKS = ['A1', 'A2', 'A3', 'A4', 'B'];
 // OpenEMR pc_apptstatus values this build uses. 'x' (cancelled) and '?'
 // (no-show) rows never block a slot.
 const APPT_STATUS = { none: '-', cancelled: 'x', noShow: '?' };
-const APPT_LOCATIONS = ['home', 'telehealth', 'office'];
+// A5 (T1): 'phone' sits beside the other three. A PHONE CALL IS NOT A VIDEO
+// VISIT — it gets no Meet room, and conflating the two would create a room
+// nobody opens for every care-management call. The modality vocabulary in
+// appointmentTypes.js already distinguishes them for BILLING; this is the
+// same distinction on the appointment's own location marker, which is what
+// decides whether a room is created.
+const APPT_LOCATIONS = ['home', 'telehealth', 'office', 'phone'];
+// The one place that answers "does this visit need a video room". The
+// appointment's LOCATION marker and the note's MODALITY are two different
+// fields that happen to share this value — the marker decides whether a room
+// is created, the modality decides what the note is — so both are answered
+// here rather than compared against a literal at a call site. A literal
+// 'video' was exactly that mistake: the declared modality vocabulary is
+// in_person / telehealth / phone, and nothing called 'video' has ever existed.
+const LOCATION_NEEDS_VIDEO = 'telehealth';
+const locationNeedsVideoRoom = (location) =>
+  String(location || '').toLowerCase() === LOCATION_NEEDS_VIDEO;
+const isVideoModality = (modality) =>
+  String(modality || '').toLowerCase() === LOCATION_NEEDS_VIDEO;
 const APPT_MIN_MINUTES = 5;
 const APPT_MAX_MINUTES = 8 * 60;
+
+// ── T1 B2 — the pre-join checklist ────────────────────────────────────────
+//
+// Three things a telehealth visit needs on the record and an in-person visit
+// does not, and every one of them is a question somebody has to actually ask
+// the patient:
+//   - WHO is on the call. A video window is not identification, so two
+//     identifiers are read back by the patient, the same as at a front door.
+//   - WHERE the patient physically is. Licensure follows the PATIENT's
+//     location, not the clinician's, so a patient who answers from out of
+//     state is a visit a Georgia-licensed NP may not deliver. This is the one
+//     item the app cannot derive at all — nothing in the record knows where
+//     somebody is sitting right now.
+//   - WHETHER telehealth was consented to. Prefilled from the signed consent
+//     to treat's own election, because the patient already answered it.
+//
+// IT IS NON-BLOCKING, ON PURPOSE. It warns at signing and never refuses a
+// signature: a note refused over a tick box is an hour of documentation held
+// hostage to paperwork, and the clinician on the call is the person who knows
+// whether the identity was confirmed. Warn, record, never block.
+const TELEHEALTH_CHECKS = Object.freeze([
+  ['identity', 'Patient identity confirmed with two identifiers',
+    'Ask the patient to state their full name and date of birth.'],
+  ['location', 'Patient\u2019s physical location confirmed',
+    'Ask where they are right now. Licensure follows the patient, so an out-of-state patient needs an in-person or in-state plan.'],
+  ['consent', 'Telehealth consent confirmed',
+    'From the signed consent to treat. Confirm verbally if it is not on file.']
+]);
+const TELEHEALTH_CHECK_KEYS = Object.freeze(TELEHEALTH_CHECKS.map(([k]) => k));
+const PRACTICE_STATE = 'GA';
+
+// The election the patient already made, read from the signed consent to
+// treat. Three answers, and they are three different facts: consented,
+// declined, or never asked. `null` is "never asked" and must not read as
+// consent — the whole reason this returns a tri-state rather than a boolean.
+const telehealthElectionOf = (client) => {
+  const c = client || {};
+  const status = String((c.consents || {}).consentToTreat || '');
+  if (status !== 'signed' && status !== 'signed_offline') return null;
+  const choice = String((((c.consentMeta || {}).consentToTreat || {}).choices || {}).telehealth || '');
+  if (choice === 'consent' || choice === 'decline') return choice;
+  return null;
+};
+
+// The checklist as it stands for one encounter: each item, whether it is
+// ticked, who ticked it and when, plus what the record already knows.
+const buildTelehealthChecklist = (record, client) => {
+  const stored = (record && record.telehealthChecks) || {};
+  const election = telehealthElectionOf(client);
+  const items = TELEHEALTH_CHECKS.map(([key, label, hint]) => {
+    const row = stored[key] || null;
+    const prefill = key === 'consent' && election === 'consent'
+      ? 'Consented to telehealth on the signed consent to treat.'
+      : null;
+    return {
+      key, label, hint,
+      confirmed: !!(row && row.confirmed),
+      by: row && row.by ? row.by : null,
+      at: row && row.at ? row.at : null,
+      note: row && row.note ? row.note : null,
+      prefill
+    };
+  });
+  const outstanding = items.filter(i => !i.confirmed).map(i => i.label);
+  return {
+    items,
+    outstanding,
+    complete: outstanding.length === 0,
+    // Said plainly rather than as a tick: a patient who DECLINED telehealth is
+    // not the same as one nobody asked, and a video visit for the first is a
+    // visit they refused.
+    election,
+    electionWarning: election === 'decline'
+      ? 'This patient elected in-person visits only on their consent to treat. Confirm verbally before continuing, or see them in person.'
+      : (election === null
+        ? 'No telehealth election is on file for this patient. Confirm verbally that they consent to a video visit.'
+        : null),
+    practiceState: PRACTICE_STATE
+  };
+};
 
 const isDateStr = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
 const isTimeStr = (s) => /^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/.test(String(s || ''));
@@ -2741,6 +2839,9 @@ const buildPatientBanner = ({ client, linked, emrAllergies, facility, lastVisitA
 };
 
 module.exports = {
+  locationNeedsVideoRoom, isVideoModality, LOCATION_NEEDS_VIDEO, APPT_LOCATIONS,
+  TELEHEALTH_CHECKS, TELEHEALTH_CHECK_KEYS, PRACTICE_STATE,
+  telehealthElectionOf, buildTelehealthChecklist,
   // Read by clinicalNotes.js so the shared note keeps the H&P's own section
   // vocabulary rather than a second copy of it.
   HP_SECTION_LABELS,
