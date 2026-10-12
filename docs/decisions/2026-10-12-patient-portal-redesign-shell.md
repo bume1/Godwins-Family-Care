@@ -38,10 +38,29 @@
 - Mutations: `kind` dropped from the allow-list (T4, R1 fail); `kind` copied raw from
   the order row (R1 fails).
 
+## Added in later commits on the same branch
+- **Banner photo** (owner-supplied): sits behind the top of Home and fades into
+  the page. Phone crop puts open sky behind the greeting and the building on the
+  right (owner feedback, twice).
+- **My Care Plan tabs** (Overview · Goals · Care Team · Documents). Service cards
+  only for services the client is enrolled in: Home Care (PHC/BOTH), Primary Care
+  (IHPC/BOTH), Care Coordination (a case manager is assigned). No Behavioral
+  Health card: nothing on the record says a client is enrolled in it. Goals have
+  no progress bars: nothing tracks progress. The signature pad moved to Documents.
+- **One visit row** (date block + Clinical/Caregiver label) on Home, Care, calendar.
+- **Messages: Conversations · Ask a Question.** The shared component gained two
+  optional settings (`startCompose`, `hostStartsMessages`); other surfaces unchanged.
+  `care_team_messaging` guard counts the new draft reset and pins its rule.
+- **Family & Caregivers with invites** (`familyInvites.js`, collection
+  `family_invites`, PHI, registered). Patient or POA invites; an ADMIN approves on
+  the enrollment record, which creates a plain family account and emails sign-in.
+  **Approving never makes a POA**; a patient saying so prompts staff to get the
+  document. Probe `scripts/verify_family_invites.js`.
+- **Profile** (`portalProfile.js`, `GET /api/gfc/profile`, client or POA only):
+  contact details and insurance on file, **member IDs to the last four only**.
+
 ## Not built yet (owner-approved order)
-1. Rest of the redesign: My Care Plan tabs, Appointments restyle, Messages "Ask a
-   Question", Family & Caregivers (invite, staff confirm), Profile + insurance on
-   file, sign-in and sign-up (pending until staff approve).
+1. Rest of the redesign: sign-in restyle and sign-up (pending until staff approve).
 2. Test result values, ranges and trends.
 3. Patient booking. 4. Video visits on Google Meet. 5. Billing and payments.
 
