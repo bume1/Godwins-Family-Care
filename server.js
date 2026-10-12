@@ -17496,6 +17496,161 @@ const purgeAiReviews = async () => {
 };
 setInterval(purgeAiReviews, 24 * 60 * 60 * 1000).unref?.();
 
+// ── H: the admin setup screen, and the owner's go-live proof ──────────────
+//
+// H1 answers "is this switched on and why not", and H2 is the only thing in
+// this repo that proves the GOOGLE side: a review of a wholly invented chart
+// through the real engine, the real transport and the real schema. Everything
+// else here can be true while Google still refuses the identity.
+//
+// NEITHER ROUTE EVER RETURNS A SECRET OR A FILE'S CONTENTS. `status()` reports
+// the KIND of credential, never the credential, and the test reports pass/fail
+// and token counts, never a prompt.
+app.get('/api/admin/ai/status', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const st = gfcModelEngine.status();
+    res.json({
+      configured: st.configured,
+      blockers: st.blockers,
+      proof: st.proof,
+      model: st.modelId,
+      location: st.location,
+      projectId: st.projectId,
+      stagingBucket: st.stagingBucket,
+      // The KIND of credential, which is the thing that matters, and never
+      // the credential. `external_account` is federation; `service_account`
+      // is a static key and is refused.
+      credentialType: st.credentialType,
+      usesStaticKeys: st.usesStaticKeys,
+      zeroDataRetention: st.zeroDataRetention,
+      checks: st.checks,
+      retentionDays: AI_REVIEW_RETENTION_DAYS
+    });
+  } catch (error) {
+    console.error('AI status error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Re-run the daily Google-side checks on demand, so an admin who has just
+// changed a setting in the console does not wait up to six hours to find out.
+app.post('/api/admin/ai/recheck', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const r = await gfcModelEngine.runLiveChecks();
+    res.json({ checks: r, status: gfcModelEngine.status() });
+  } catch (error) {
+    console.error('AI recheck error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// H2. THE GO-LIVE PROOF. A wholly invented chart and document, bundled in the
+// repo, through the real path — including a FORCED TWO-PASS SPLIT, because a
+// single-pass review working says nothing about whether a long chart does, and
+// the merge is the part with the most moving parts in it.
+//
+// NO PATIENT DATA IS INVOLVED, and that is structural rather than promised:
+// the fixtures are the only input and the route takes no client id at all.
+app.post('/api/admin/ai/test', authenticateToken, requireAdmin, async (req, res) => {
+  const started = Date.now();
+  try {
+    const st = gfcModelEngine.status();
+    if (!st.configured) {
+      return res.status(503).json({
+        ok: false,
+        error: 'AI is not switched on yet, so there is nothing to test.',
+        code: 'MODEL_BOUNDARY_REFUSED',
+        blockers: st.blockers
+      });
+    }
+    const fixtureDir = path.join(__dirname, 'test', 'fixtures');
+    const synthetic = JSON.parse(fs.readFileSync(path.join(fixtureDir, 'ai_synthetic_chart.json'), 'utf8'));
+    const noteBytes = fs.readFileSync(path.join(fixtureDir, 'ai_synthetic_note.pdf'));
+
+    const built = chartPacket.buildSections({
+      ...synthetic,
+      documents: [{
+        clientId: synthetic.clientId, id: 'SYN-DOC-1', sourceId: 'doc:SYN-DOC-1',
+        title: 'Synthetic cardiology consult', date: '2026-03-02',
+        mimeType: 'application/pdf', bytes: noteBytes
+      }]
+    });
+
+    // FORCED to two passes regardless of size: that is the point of the test.
+    const passes = chartPacket.splitIntoPasses({ ...built, passCount: 2 });
+    const manifest = chartPacket.buildManifest({
+      sections: passes.flatMap(p => p.sections.map(s => ({ ...s, pass: p.pass }))),
+      documents: passes.flatMap(p => p.documents.map(d => ({ ...d, pass: p.pass }))),
+      notRead: built.notRead, passes: passes.length
+    });
+
+    const perPass = [];
+    const outputs = [];
+    for (const p of passes) {
+      const r = await gfcModelEngine.invoke({
+        purpose: modelEngine.PURPOSES.CHART_REVIEW,
+        input: {
+          sections: p.sections, documents: p.documents,
+          instruction: `This is pass ${p.pass} of ${passes.length} over one patient's record. This is a SYNTHETIC test record.`
+        },
+        schema: AI_REVIEW_SCHEMA,
+        actor: req.user,
+        // No patient: there isn't one. The audit row carries null rather than
+        // a made-up id.
+        patientId: null,
+        feature: 'admin_ai_test', pass: p.pass,
+        sourceIds: [...p.sections.map(s => s.sourceId), ...p.documents.map(d => d.sourceId)]
+      });
+      perPass.push({
+        pass: p.pass,
+        sections: p.sections.length,
+        documents: p.documents.length,
+        findings: (r.proposal.findings || []).length,
+        inputTokens: (r.usage && r.usage.inputTokens) ?? null,
+        outputTokens: (r.usage && r.usage.outputTokens) ?? null
+      });
+      outputs.push(r.proposal);
+    }
+
+    const merge = await gfcModelEngine.invoke({
+      purpose: modelEngine.PURPOSES.CHART_REVIEW_MERGE,
+      input: {
+        sections: outputs.map((o, i) => ({
+          sourceId: `pass:${i + 1}`, kind: 'pass findings',
+          title: `Pass ${i + 1} of ${outputs.length}`, value: o
+        }))
+      },
+      schema: AI_REVIEW_SCHEMA, actor: req.user, patientId: null, feature: 'admin_ai_test_merge'
+    });
+    const { output, droppedUncited } = chartPacket.enforceCitations(merge.proposal, manifest);
+
+    res.json({
+      ok: true,
+      message: `Passed. Two passes and a merge completed in ${Math.round((Date.now() - started) / 1000)}s.`,
+      model: st.modelId, location: st.location,
+      passes: perPass,
+      mergeTokens: {
+        inputTokens: (merge.usage && merge.usage.inputTokens) ?? null,
+        outputTokens: (merge.usage && merge.usage.outputTokens) ?? null
+      },
+      findings: (output.findings || []).length,
+      droppedUncited,
+      // Shown so the owner can SEE it worked rather than take "ok" on trust.
+      sampleFinding: (output.findings || [])[0] || null,
+      syntheticOnly: true
+    });
+  } catch (error) {
+    // The engine scrubs before it throws; scrub again because a fixture or
+    // filesystem failure did not pass through it.
+    res.status(502).json({
+      ok: false,
+      error: modelEngine.scrubForLog(String((error && error.message) || error)).slice(0, 400),
+      code: (error && error.code) || null,
+      blockers: (error && error.blockers) || null
+    });
+  }
+});
+
 app.post('/api/gfc/admin/enrollment/:clientId/documents/request', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const users = await getUsers();
