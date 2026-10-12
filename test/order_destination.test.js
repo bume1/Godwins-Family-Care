@@ -478,6 +478,6 @@ test('AGENCY PENDING (wiring): requisition refused while pending, waiting list s
   assert.match(SERVER.slice(od, od + 2500), /agencyPending: waiting/);
   assert.match(PAGE, /Agency not confirmed yet/);
   assert.match(PAGE, /Needs agency/);
-  assert.match(PAGE, /Waiting on an agency/);
+  assert.match(PAGE, /Waiting on an Agency/);
   assert.match(PAGE, /\{!agencyPending && <a className="chip[^>]*href=\{api\.requisitionUrl/, 'the requisition link is hidden while pending');
 });

@@ -1962,7 +1962,7 @@
                   ) : error ? (
                     <div className="text-center py-12 text-red-500">
                       <p>{error}</p>
-                      <button onClick={fetchTickets} className="mt-4 text-primary hover:underline">Try again</button>
+                      <button onClick={fetchTickets} className="mt-4 text-primary hover:underline">Try Again</button>
                     </div>
                   ) : filteredTickets.length === 0 ? (
                     <div className="text-center py-12 text-gray-500">
@@ -4084,7 +4084,7 @@
                 <div className={`crow ${consentDone ? '' : 'off'}`}><span className={`dot ${consentDone ? 'd-done' : 'd-lock'}`}><i className={`ti ${consentDone ? 'ti-check' : 'ti-lock'}`} /></span>Consents &amp; signatures</div>
                 <div className="crow off"><span className="dot d-lock"><i className="ti ti-lock" /></span>Enrollment</div>
               </div>
-              <button className="btn" onClick={onStartIntake}>{intakeStarted ? 'Continue intake' : 'Begin intake'}</button>
+              <button className="btn" onClick={onStartIntake}>{intakeStarted ? 'Continue Intake' : 'Begin Intake'}</button>
               <div className="navlocks">
                 <span className="nl"><i className="ti ti-lock" />Care plan</span>
                 <span className="nl"><i className="ti ti-lock" />Visits</span>
@@ -4317,7 +4317,7 @@
             {canEdit && !editing && (
               <button type="button" onClick={open}
                 style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontSize: 12, fontWeight: 600, color: 'var(--primary,#045E9F)', textDecoration: 'underline' }}>
-                This has changed
+                Update
               </button>
             )}
           </div>
@@ -4359,7 +4359,7 @@
               {err && <div className="err" style={{ marginTop: 6 }}>{err}</div>}
               <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                 <button className="btn" disabled={busy} onClick={save} style={{ marginTop: 0 }}>
-                  {busy ? 'Saving…' : 'Save correction'}
+                  {busy ? 'Saving…' : 'Save Correction'}
                 </button>
                 <button className="btn ghost" disabled={busy} onClick={() => setEditing(false)} style={{ marginTop: 0 }}>Cancel</button>
               </div>
@@ -4464,8 +4464,8 @@
             <React.Fragment>
               {inactive ? (
                 <div className="intake-foot">
-                  <button className="btn ghost" disabled={busy} onClick={() => handleSign(true)} style={{ marginTop: 0 }}>Not now</button>
-                  <button className="btn" disabled={busy} onClick={() => handleSign(false)} style={{ marginTop: 0 }}>Tell me when it launches</button>
+                  <button className="btn ghost" disabled={busy} onClick={() => handleSign(true)} style={{ marginTop: 0 }}>Not Now</button>
+                  <button className="btn" disabled={busy} onClick={() => handleSign(false)} style={{ marginTop: 0 }}>Notify Me</button>
                 </div>
               ) : (
                 <div className="sig">
@@ -4474,7 +4474,7 @@
                     <span className="ck">{ack && <i className="ti ti-check" />}</span>
                     <span>By typing my name above and checking this box, I electronically sign the {def.title} ({new Date().toLocaleDateString()}).</span>
                   </div>
-                  <button className="btn" disabled={busy} onClick={() => handleSign(false)}>{busy ? 'Signing…' : 'Sign & save'}</button>
+                  <button className="btn" disabled={busy} onClick={() => handleSign(false)}>{busy ? 'Signing…' : 'Sign & Save'}</button>
                 </div>
               )}
               {err && <div className="err">{err}</div>}
@@ -4883,7 +4883,7 @@
                   </div>
                 </div>
               ))}
-              <button className="addrow" onClick={addMed}><i className="ti ti-plus" /> Add another medication</button>
+              <button className="addrow" onClick={addMed}><i className="ti ti-plus" /> Add Medication</button>
               <TextArea label="Additional medication notes" value={form.medNotes} onChange={v => set('medNotes', v)} />
               <p className="lbl">Medical team</p>
               <div className="hint" style={{ fontSize: 11.5, color: 'var(--mut)', marginBottom: 8 }}>Used to coordinate care and to pre-fill any future record-release request.</div>
@@ -5026,7 +5026,7 @@
                   </div>
                 </div>
               ))}
-              <button className="addrow" onClick={addIns}><i className="ti ti-plus" /> Add another card</button>
+              <button className="addrow" onClick={addIns}><i className="ti ti-plus" /> Add Card</button>
             </React.Fragment>
           )}
 
@@ -5081,7 +5081,7 @@
               </div>
               {!consentsLoaded && <div className="err">We couldn't load your consent forms. Please refresh the page and try again.</div>}
               {consentsLoaded && !requiredSigned && <div className="err">Please sign all required consents before submitting (go back to {hasMedicalStage && !stageSigned(medicalDefs) ? 'Medical consents' : 'Consents'}).</div>}
-              <button className="btn" disabled={busy || !requiredSigned} onClick={submit}>{busy ? 'Submitting…' : 'Complete enrollment'}</button>
+              <button className="btn" disabled={busy || !requiredSigned} onClick={submit}>{busy ? 'Submitting…' : 'Complete Enrollment'}</button>
             </React.Fragment>
           )}
 
@@ -5198,8 +5198,8 @@
           {tests.length > 0 && <div className="lsec"><b>Tests ordered</b>{tests.map((t, i) => <div key={i}>{t.type}{(t.tests || []).length ? ` (${t.tests.join(', ')})` : ''} · {t.status}</div>)}</div>}
           {visit.followUp && <div className="lsec"><b>What happens next</b>{visit.followUp}</div>}
           {visit.noteHeld && <div className="lsec" style={{ fontSize: 13.5, color: 'var(--mut)' }}>{HELD_NOTE_TEXT}</div>}
-          {('summary' in visit) && <button className="btn" onClick={() => onNavigate('health')}>{visit.note ? 'Read the full summary and note' : 'Read the full summary'}</button>}
-          <button className="btn ghost" style={{ marginTop: 10 }} onClick={() => onNavigate('messages')}>Message the care team</button>
+          {('summary' in visit) && <button className="btn" onClick={() => onNavigate('health')}>{visit.note ? 'Read Summary & Note' : 'Read Summary'}</button>}
+          <button className="btn ghost" style={{ marginTop: 10 }} onClick={() => onNavigate('messages')}>Message Care Team</button>
         </div>
       );
     };
@@ -5229,7 +5229,7 @@
           {r.hasFile && (
             <button className="btn ghost" style={{ marginTop: 12 }} disabled={busy}
               onClick={async () => { setBusy(true); await openPdfSecurely(`${API_URL}/api/gfc/clinical/documents/${encodeURIComponent(`result:${r.id}`)}/file`, token, undefined, `${r.label}${r.resultDate ? ` ${r.resultDate}` : ''}.pdf`); setBusy(false); }}>
-              {busy ? 'Opening…' : 'Open the report'}
+              {busy ? 'Opening…' : 'Open Report'}
             </button>
           )}
         </div>
@@ -5325,7 +5325,7 @@
       return (
         <div style={{ marginTop: 6 }}>
           <button className="btn" disabled={busy} onClick={go}>
-            <i className="ti ti-video" /> {busy ? 'Opening…' : 'Join video visit'}
+            <i className="ti ti-video" /> {busy ? 'Opening…' : 'Join Video Visit'}
           </button>
           {note && <p className="sub" style={{ marginTop: 4, color: '#B5462E' }}>{note}</p>}
         </div>
@@ -5525,7 +5525,7 @@
           </div>
         </div>
         <div className="btnrow">
-          <button className="btn line" onClick={() => onNavigate('schedule')}>View details</button>
+          <button className="btn line" onClick={() => onNavigate('schedule')}>View Details</button>
         </div>
       </div>
     );
@@ -5602,26 +5602,26 @@
             <button className="tile2" onClick={() => onNavigate('messages')}>
               <span className="ic"><i className="ti ti-message-2" /></span>
               <span className="tt">Messages</span>
-              <span className={`ts ${unread ? '' : 'mut'}`}>{threadsErr ? 'Open messages' : unread ? `${unread} unread` : 'No new messages'}</span>
+              <span className={`ts ${unread ? '' : 'mut'}`}>{threadsErr ? 'Open Messages' : unread ? `${unread} unread` : 'No new messages'}</span>
               {unread > 0 && <span className="n">{unread}</span>}
             </button>
             {clinicalOk ? (
               <button className="tile2" onClick={() => onNavigate('results')}>
                 <span className="ic"><i className="ti ti-flask" /></span>
                 <span className="tt">Test Results</span>
-                <span className={`ts ${notReviewed ? '' : 'mut'}`}>{results.length === 0 ? 'None yet' : notReviewed ? `${notReviewed} new` : 'View results'}</span>
+                <span className={`ts ${notReviewed ? '' : 'mut'}`}>{results.length === 0 ? 'None yet' : notReviewed ? `${notReviewed} new` : 'View Results'}</span>
               </button>
             ) : (
               <button className="tile2" onClick={() => onNavigate('documents')}>
                 <span className="ic"><i className="ti ti-file-text" /></span>
                 <span className="tt">Documents</span>
-                <span className="ts mut">Forms and records</span>
+                <span className="ts mut">Forms & Records</span>
               </button>
             )}
             <button className="tile2" onClick={() => onNavigate('care')}>
               <span className="ic"><i className="ti ti-clipboard-heart" /></span>
               <span className="tt">My Care Plan</span>
-              <span className={`ts ${cp ? '' : 'mut'}`}>{cp ? 'View plan' : 'Being prepared'}</span>
+              <span className={`ts ${cp ? '' : 'mut'}`}>{cp ? 'View Plan' : 'Being prepared'}</span>
             </button>
           </div>
           {/* Same component the Care tab uses, so "is someone here right now"
@@ -5629,7 +5629,7 @@
           <GfcVisitInProgress shifts={shifts} />
           <div className="home-cols">
             <div>
-              <div className="sech"><h3>Upcoming Appointment</h3><button onClick={() => onNavigate('schedule')}>See all</button></div>
+              <div className="sech"><h3>Upcoming Appointment</h3><button onClick={() => onNavigate('schedule')}>See All</button></div>
               {next ? <NextVisitCard v={next} onNavigate={onNavigate} /> : <ScheduleEmpty empty shiftsErr={shiftsErr} />}
               {/* The next two after it, so a caregiver visit tomorrow never hides
                   the clinical visit later in the week (or the other way round). */}
@@ -5638,7 +5638,7 @@
               {clinical && !clinical.error && (clinical.visits || [])[0] && <LatestVisitCard visit={clinical.visits[0]} onNavigate={onNavigate} />}
             </div>
             <div>
-              <div className="sech"><h3>Recent Messages</h3><button onClick={() => onNavigate('messages')}>View all</button></div>
+              <div className="sech"><h3>Recent Messages</h3><button onClick={() => onNavigate('messages')}>View All</button></div>
               {threadsErr && <p className="sub" style={{ marginTop: 0 }}>Your messages could not be loaded here. Open Messages to see them.</p>}
               {!threadsErr && threadList.length === 0 && <p className="sub" style={{ marginTop: 0 }}>No messages yet. You can reach your care team any time from Messages.</p>}
               <MessageRows threads={threadList} onNavigate={onNavigate} limit={2} />
@@ -5646,7 +5646,7 @@
           </div>
           {team.length > 0 && (
             <React.Fragment>
-              <div className="sech"><h3>Your Care Team</h3><button onClick={() => onNavigate('care')}>See all</button></div>
+              <div className="sech"><h3>Your Care Team</h3><button onClick={() => onNavigate('care')}>See All</button></div>
               <TeamCards team={team.slice(0, 3)} onNavigate={onNavigate} canMessage />
             </React.Fragment>
           )}
@@ -5821,7 +5821,7 @@
               <div className="sech"><h3>Upcoming Care</h3></div>
               <ScheduleEmpty empty={careSchedule.length === 0} shiftsErr={shiftsErr} />
               {careSchedule.slice(0, 4).map(v => <ScheduleRow key={v.id} v={v} />)}
-              {hasPlan && <button className="btn line" onClick={() => setTab('goals')}>View full care plan</button>}
+              {hasPlan && <button className="btn line" onClick={() => setTab('goals')}>View Full Plan</button>}
             </React.Fragment>
           )}
 
@@ -5906,7 +5906,7 @@
                       <React.Fragment>
                         <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: 22, fontWeight: 600, color: 'var(--navy)', borderBottom: '1px solid var(--line2)', paddingBottom: 8, marginBottom: 8 }}>{signedBy || data.greetingName}</div>
                         <div className="goal" style={{ margin: 0 }}><i className="ti ti-circle-check" style={{ color: 'var(--teal)' }} />{signedBy && signedBy.includes(' as POA for ') ? `Co-signed by ${signedBy}` : `You co-signed care plan v${cp.version}`} · versions are retained.</div>
-                        {(cp.signedPdf && cp.signedPdf.available) || signedBy ? <button className="btn ghost" style={{ marginTop: 12 }} onClick={openSignedPdf}><i className="ti ti-download" style={{ verticalAlign: -2 }} /> Download the signed care plan</button> : null}
+                        {(cp.signedPdf && cp.signedPdf.available) || signedBy ? <button className="btn ghost" style={{ marginTop: 12 }} onClick={openSignedPdf}><i className="ti ti-download" style={{ verticalAlign: -2 }} /> Download Signed Plan</button> : null}
                       </React.Fragment>
                     ) : (
                       <React.Fragment>
@@ -6303,7 +6303,7 @@
                 <input type="file" accept=".pdf,.jpg,.jpeg,.png" style={{ display: 'none' }} onChange={e => handleFile(e.target.files[0])} />
               </label>
               {file && <div className="doc" style={{ marginTop: 12 }}><i className="ti ti-file-check" /><div><b>{file.name}</b><span>Ready to upload</span></div></div>}
-              <button className="btn" disabled={busy || !file} onClick={submitUpload}>{busy ? 'Uploading…' : 'Upload document'}</button>
+              <button className="btn" disabled={busy || !file} onClick={submitUpload}>{busy ? 'Uploading…' : 'Upload Document'}</button>
               {err && <div className="err">{err}</div>}
             </div>
           </div>
@@ -6335,7 +6335,7 @@
             <RoiProviderCard key={i} p={p} idx={i} removable={providers.length > 1} onChange={setP} onRemove={() => rmProvider(i)} />
           ))}
           {providers.length < maxProviders
-            ? <button className="btn ghost" onClick={addProvider} style={{ marginTop: 4 }}><i className="ti ti-plus" /> Add another provider</button>
+            ? <button className="btn ghost" onClick={addProvider} style={{ marginTop: 4 }}><i className="ti ti-plus" /> Add Provider</button>
             : <div className="hint" style={{ fontSize: 11.5, color: 'var(--mut)' }}>Up to {maxProviders} providers per form.</div>}
           {alreadySent.length > 0 && (
             <div className="card" style={{ marginTop: 10 }}>
@@ -6343,7 +6343,7 @@
               {alreadySent.map((p, i) => (
                 <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', borderTop: i ? '1px solid var(--line2)' : 'none' }}>
                   <div style={{ fontSize: 13 }}><b>{p.name}</b>{p.activeAuthorization && p.activeAuthorization.expiresOn ? <span className="sub" style={{ fontSize: 11.5 }}> · valid until {roiDisplayDate(p.activeAuthorization.expiresOn)}</span> : null}</div>
-                  {providers.length < maxProviders && <button className="btn ghost" style={{ width: 'auto', padding: '4px 10px', margin: 0, fontSize: 12 }} onClick={() => requestAgain(p)}>Request again</button>}
+                  {providers.length < maxProviders && <button className="btn ghost" style={{ width: 'auto', padding: '4px 10px', margin: 0, fontSize: 12 }} onClick={() => requestAgain(p)}>Request Again</button>}
                 </div>
               ))}
             </div>
@@ -6405,7 +6405,7 @@
             <TextField label="Printed name" value={printedName} onChange={setPrintedName} maxLength={120} />
             <TextField label="Relationship / authority (if signing for patient)" value={relationship} onChange={setRelationship} placeholder="e.g. Power of attorney" maxLength={120} />
             <div className="sub" style={{ fontSize: 12, marginTop: 8 }}>Date: {today}</div>
-            <button className="btn" disabled={busy} onClick={submitForm}>{busy ? (providers.filter(p => (p.name || '').trim()).length > 1 ? 'Generating authorizations…' : 'Submitting…') : 'Submit authorization'}</button>
+            <button className="btn" disabled={busy} onClick={submitForm}>{busy ? (providers.filter(p => (p.name || '').trim()).length > 1 ? 'Generating authorizations…' : 'Submitting…') : 'Submit Authorization'}</button>
             {err && <div className="err">{err}</div>}
           </div>
         </div>
@@ -6466,7 +6466,7 @@
                   style={{ display: 'none' }} onChange={pick} />
                 <button className="btn ghost" style={{ marginTop: 8, maxWidth: 220 }}
                   disabled={busy} onClick={() => inputRef.current && inputRef.current.click()}>
-                  {busy ? 'Sending…' : row.files && row.files.length ? 'Send another' : 'Upload'}
+                  {busy ? 'Sending…' : row.files && row.files.length ? 'Send Another' : 'Upload'}
                 </button>
               </React.Fragment>
             )}
@@ -6524,7 +6524,7 @@
                 <span>Text or email it to whoever is holding the paperwork — a family member, for example. They can send a document straight into your file with no account or password.</span>
                 {err && <span style={{ color: 'var(--goldd)' }}>{err}</span>}
                 <button className="btn ghost" style={{ marginTop: 8, maxWidth: 220 }} disabled={busy} onClick={() => create(false)}>
-                  {busy ? 'Setting up…' : 'Get a link'}
+                  {busy ? 'Setting up…' : 'Get Link'}
                 </button>
               </div>
             </div>
@@ -6537,9 +6537,9 @@
                 <span style={{ wordBreak: 'break-all' }}>{link.url}</span>
                 {err && <span style={{ color: 'var(--goldd)' }}>{err}</span>}
                 <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-                  <button className="btn ghost" style={{ maxWidth: 160 }} disabled={busy} onClick={copy}>{copied ? 'Copied!' : 'Copy link'}</button>
-                  <button className="btn ghost" style={{ maxWidth: 160 }} disabled={busy} onClick={() => create(true)}>Get a new link</button>
-                  <button className="btn ghost" style={{ maxWidth: 140, color: 'var(--goldd)' }} disabled={busy} onClick={turnOff}>Turn off</button>
+                  <button className="btn ghost" style={{ maxWidth: 160 }} disabled={busy} onClick={copy}>{copied ? 'Copied!' : 'Copy Link'}</button>
+                  <button className="btn ghost" style={{ maxWidth: 160 }} disabled={busy} onClick={() => create(true)}>New Link</button>
+                  <button className="btn ghost" style={{ maxWidth: 140, color: 'var(--goldd)' }} disabled={busy} onClick={turnOff}>Turn Off</button>
                 </div>
               </div>
             </div>
@@ -6672,7 +6672,7 @@
             <React.Fragment>
               <button className="link" style={{ background: 'none', border: 'none', color: 'var(--navy)', fontWeight: 600, marginTop: 16, padding: 0, cursor: 'pointer' }}
                 onClick={() => setShowOptional(v => !v)}>
-                {showOptional ? 'Hide' : 'Send something else'} <i className={`ti ti-chevron-${showOptional ? 'up' : 'down'}`} />
+                {showOptional ? 'Hide' : 'Send More'} <i className={`ti ti-chevron-${showOptional ? 'up' : 'down'}`} />
               </button>
               {showOptional && optional.map(r => (
                 <GfcNeededDoc key={r.kind} row={r} token={token} readOnly={readOnly} onUploaded={onRefresh || (() => {})} />
@@ -6756,7 +6756,7 @@
           <SharingRow s={s} setS={setS} k="problems" label="Conditions" sub="Problem list" />
           <SharingRow s={s} setS={setS} k="vitals" label="Vitals" sub="Latest readings from a visit" />
           <SharingRow s={s} setS={setS} k="results" label="Test results" sub="Reports from labs and imaging" />
-          <button className="btn" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save sharing settings'}</button>
+          <button className="btn" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save Sharing'}</button>
           {msg && (msg === 'Saved.' ? <p className="micro"><i className="ti ti-check" />Saved</p> : <div className="err">{msg}</div>)}
         </div>
       );
@@ -7058,13 +7058,13 @@
                 <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: 40, fontWeight: 600, color: 'var(--navy)', lineHeight: 1 }}>{b.balance}</div>
                 <div className="sub">{b.openCount === 0 ? 'Nothing due' : `${b.openCount} open statement${b.openCount > 1 ? 's' : ''}`}</div>
                 {open.length > 0 && b.onlinePayment && (
-                  <button className="btn" disabled={!!paying} onClick={() => (open.length === 1 ? pay(open[0]) : setTab('invoices'))}>{open.length === 1 ? (paying ? 'Opening…' : 'Make a payment') : 'Choose a statement to pay'}</button>
+                  <button className="btn" disabled={!!paying} onClick={() => (open.length === 1 ? pay(open[0]) : setTab('invoices'))}>{open.length === 1 ? (paying ? 'Opening…' : 'Make a Payment') : 'Choose a Statement'}</button>
                 )}
                 {open.length > 0 && !b.onlinePayment && <p className="sub">Online payment isn't set up yet. Please call the office to pay.</p>}
               </div>
               {open.length > 0 && <React.Fragment><div className="sech"><h3>Due now</h3></div>{open.map(i => <InvRow key={i.id} i={i} />)}</React.Fragment>}
-              <button className="lrow" onClick={() => setTab('invoices')}><span className="lic"><i className="ti ti-history" /></span><span className="lm"><b>Payment history</b><span>{paid.length} paid</span></span><i className="ti ti-chevron-right" /></button>
-              <button className="lrow" onClick={() => onNavigate('messages')}><span className="lic"><i className="ti ti-help-circle" /></span><span className="lm"><b>Questions about a bill?</b><span>Message the office</span></span><i className="ti ti-chevron-right" /></button>
+              <button className="lrow" onClick={() => setTab('invoices')}><span className="lic"><i className="ti ti-history" /></span><span className="lm"><b>Payment History</b><span>{paid.length} paid</span></span><i className="ti ti-chevron-right" /></button>
+              <button className="lrow" onClick={() => onNavigate('messages')}><span className="lic"><i className="ti ti-help-circle" /></span><span className="lm"><b>Questions about a bill?</b><span>Message the Office</span></span><i className="ti ti-chevron-right" /></button>
             </React.Fragment>
           )}
           {tab === 'invoices' && (
@@ -7167,7 +7167,7 @@
               <p className="sub" style={{ marginTop: 0 }}>Invite someone you trust to follow your care. The office confirms each invite, then emails them how to sign in.</p>
               {!d.roiFamilySigned && <p className="sub" style={{ color: 'var(--gold-ink)' }}><i className="ti ti-info-circle" /> They can sign in once your family Release of Information is signed. The office will help with that.</p>}
               {msg && <p className="micro" style={{ justifyContent: 'flex-start' }}><i className="ti ti-check" />{msg}</p>}
-              {!open && <button className="btn line" onClick={() => { setOpen(true); setMsg(''); }}><i className="ti ti-plus" style={{ verticalAlign: -2 }} /> Add a family member</button>}
+              {!open && <button className="btn line" onClick={() => { setOpen(true); setMsg(''); }}><i className="ti ti-plus" style={{ verticalAlign: -2 }} /> Add Family Member</button>}
               {open && (
                 <React.Fragment>
                   <div className="fld"><label>Their name</label><input type="text" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} /></div>
@@ -7185,7 +7185,7 @@
                   {form.saysPoa && <p className="sub" style={{ marginTop: 0 }}>The office will ask for a copy of the Power of Attorney document before giving them full access.</p>}
                   {formErr && <div className="err">{formErr}</div>}
                   <div className="btnrow">
-                    <button className="btn" disabled={busy} onClick={send}>{busy ? 'Sending…' : 'Send invite'}</button>
+                    <button className="btn" disabled={busy} onClick={send}>{busy ? 'Sending…' : 'Send Invite'}</button>
                     <button className="btn line" disabled={busy} onClick={() => { setOpen(false); setFormErr(''); }}>Cancel</button>
                   </div>
                 </React.Fragment>
@@ -7244,7 +7244,7 @@
         <div className="sech"><h3>Account</h3></div>
         <button className="lrow" onClick={gfcLogout}>
           <span className="lic"><i className="ti ti-logout" /></span>
-          <span className="lm"><b>Sign out</b><span>{me && me.name}</span></span>
+          <span className="lm"><b>Sign Out</b><span>{me && me.name}</span></span>
           <i className="ti ti-chevron-right" />
         </button>
       </div>
@@ -7264,7 +7264,7 @@
           ))}
           <button className="lrow" onClick={gfcLogout}>
             <span className="lic"><i className="ti ti-logout" /></span>
-            <span className="lm"><b>Sign out</b></span>
+            <span className="lm"><b>Sign Out</b></span>
             <i className="ti ti-chevron-right" />
           </button>
         </div>
@@ -7429,7 +7429,7 @@
               </div>
               <h2 className="disp">You're enrolled!</h2>
               <p className="sub" style={{ maxWidth: 340, margin: '12px auto 24px' }}>If you're transferring care from another doctor, specialist, or hospital, you can authorize us to request your records now — it only takes a minute.</p>
-              <button className="btn" style={{ maxWidth: 280, margin: '0 auto' }} onClick={() => { setJustEnrolled(false); setShowTransferRoi(true); }}>Authorize record release now</button>
+              <button className="btn" style={{ maxWidth: 280, margin: '0 auto' }} onClick={() => { setJustEnrolled(false); setShowTransferRoi(true); }}>Authorize Release</button>
               <button className="btn ghost" style={{ maxWidth: 280, margin: '10px auto 0' }} onClick={() => setJustEnrolled(false)}>Not now — I'll do this later</button>
             </div>
           </div></div>
@@ -7491,7 +7491,7 @@
               </button>
             ))}
             <div className="foot">
-              <button onClick={gfcLogout}><i className="ti ti-logout" />Sign out</button>
+              <button onClick={gfcLogout}><i className="ti ti-logout" />Sign Out</button>
             </div>
           </aside>
           <div className={`gfc-main ${view === 'home' ? 'home' : ''}`}>

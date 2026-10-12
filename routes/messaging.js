@@ -151,6 +151,7 @@ module.exports = function createMessagingRoutes(deps) {
     id: t.id,
     channel: t.channel,
     channelLabel: msg.threadTitle(t),
+    withPatient: msg.withPatient(t.channel),
     clientId: t.client_id,
     clientName: t.client_name,
     subject: t.subject,

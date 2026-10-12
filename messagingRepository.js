@@ -371,6 +371,15 @@ function channelAvailability(channelId, { user, client, users, isPoa = false }) 
 // Every channel this user could open for this client, each carrying its own
 // availability. The UI renders the unavailable ones disabled with their reason
 // rather than omitting them.
+// Whether the patient's side (the client, or family) is on this channel at all,
+// read from the channel's own participant list. The clinician chart files its
+// Messages under "Patient" and "Care Team" by this, so the split is the
+// matrix's answer and never a list restated on a page (2026-10-12 redesign).
+function withPatient(id) {
+  const c = CHANNELS[id];
+  return !!c && c.participants.some(r => r === ROLE.CLIENT || r === ROLE.FAMILY);
+}
+
 function channelsFor({ user, client, users, isPoa = false }) {
   const role = effectiveRole(user, isPoa);
   return CHANNEL_IDS
@@ -380,7 +389,8 @@ function channelsFor({ user, client, users, isPoa = false }) {
       return {
         id, label: CHANNELS[id].label, blurb: blurbFor(id, role),
         available: a.available, code: a.code, reason: a.reason,
-        oneWay: !!CHANNELS[id].oneWay
+        oneWay: !!CHANNELS[id].oneWay,
+        withPatient: withPatient(id)
       };
     });
 }
@@ -642,7 +652,7 @@ module.exports = {
   CHANNELS, CHANNEL_IDS, MATRIX_ROWS, channelById, blurbFor,
   STAFF_ROLES, isStaffRole, isUnrestricted,
   careTeamOf, assignedCaregiverIds, assignedClinicianIds, assignedCaseManagerId, hasActiveCaregiver,
-  clientInScope, channelAvailability, channelsFor,
+  clientInScope, channelAvailability, channelsFor, withPatient,
   isParty, ownClientId, threadVisibility, canPostToThread,
   senderIdentity, validateMessage, previewOf, effectiveRole, MAX_BODY, MAX_ATTACHMENTS, ATTACHMENT_MIMES,
   RESPONSE_STATUSES, RESPONSE_TRANSITIONS, canTransitionResponse, responseRefusal,

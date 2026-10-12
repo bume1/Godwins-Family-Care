@@ -371,7 +371,7 @@ const PostShift = ({ roster, onPosted, setErr, setOk }) => {
       )}
       <div className="btns">
         <button className="btn gold" disabled={!clientId || !level || busy} onClick={() => post(false)}>
-          {busy ? 'Posting…' : (assignTo ? 'Post to caregiver' : 'Post shift')}
+          {busy ? 'Posting…' : (assignTo ? 'Post to Caregiver' : 'Post Shift')}
         </button>
       </div>
     </div>
@@ -426,14 +426,14 @@ const ShiftRow = ({ s, roster, act, onEdited, setErr, setOk, selected, onToggleS
           onSaved={async () => { setEditing(false); await onEdited(); }} />
       ) : (s.status !== 'cancelled' && (
         <div className="btns">
-          <button className="btn ghost" onClick={() => setEditing(true)}>Edit time and details</button>
+          <button className="btn ghost" onClick={() => setEditing(true)}>Edit Shift</button>
         </div>
       ))}
 
       {s.status === 'claimed' && (
         <div className="btns">
-          <button className="btn" onClick={() => act(s.id, 'approve')}>Approve claim</button>
-          <button className="btn ghost" onClick={() => act(s.id, 'decline-claim', { reason })}>Decline claim</button>
+          <button className="btn" onClick={() => act(s.id, 'approve')}>Approve Claim</button>
+          <button className="btn ghost" onClick={() => act(s.id, 'decline-claim', { reason })}>Decline Claim</button>
         </div>
       )}
 
@@ -456,7 +456,7 @@ const ShiftRow = ({ s, roster, act, onEdited, setErr, setOk, selected, onToggleS
           <input placeholder="Reason (required to cancel)" value={reason}
             onChange={e => setReason(e.target.value)} style={{ maxWidth: 300 }} />
           <button className="btn danger" disabled={!reason.trim()} onClick={() => act(s.id, 'cancel', { reason })}>
-            Cancel shift
+            Cancel Shift
           </button>
         </div>
       )}
@@ -647,7 +647,7 @@ const EditShift = ({ s, onSaved, onCancel, setErr, setOk }) => {
         The client cannot be changed here. Moving a shift to another client is a different shift — cancel this one and post it.
       </p>
       <div className="btns" style={{ marginTop: 8 }}>
-        <button className="btn gold" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save changes'}</button>
+        <button className="btn gold" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save Changes'}</button>
         <button className="btn ghost" disabled={busy} onClick={onCancel}>Cancel</button>
       </div>
     </div>
@@ -841,7 +841,7 @@ const AddTimeEntry = ({ roster, onAdded, setErr, setOk }) => {
   if (!open) {
     return (
       <div className="btns" style={{ marginTop: 0 }}>
-        <button className="btn ghost" onClick={() => setOpen(true)}>Add hours manually</button>
+        <button className="btn ghost" onClick={() => setOpen(true)}>Add Hours</button>
       </div>
     );
   }
@@ -871,7 +871,7 @@ const AddTimeEntry = ({ roster, onAdded, setErr, setOk }) => {
         <input value={reason} onChange={e => setReason(e.target.value)} placeholder="Phone died mid-shift; hours confirmed with the client" />
       </div>
       <div className="btns">
-        <button className="btn gold" disabled={!ready || busy} onClick={submit}>{busy ? 'Saving…' : 'Enter hours'}</button>
+        <button className="btn gold" disabled={!ready || busy} onClick={submit}>{busy ? 'Saving…' : 'Enter Hours'}</button>
         <button className="btn ghost" disabled={busy} onClick={() => setOpen(false)}>Cancel</button>
       </div>
       <div className="note">
@@ -915,7 +915,7 @@ const TimeLogRow = ({ l, onEdit }) => {
           people who make those. No button rather than a button that 403s. */}
       {onEdit && (
         <div className="btns">
-          <button className="btn ghost" onClick={() => setOpen(!open)}>{open ? 'Close' : 'Correct times'}</button>
+          <button className="btn ghost" onClick={() => setOpen(!open)}>{open ? 'Close' : 'Correct Times'}</button>
         </div>
       )}
       {onEdit && open && (
@@ -936,7 +936,7 @@ const TimeLogRow = ({ l, onEdit }) => {
                 reason
               });
               setOpen(false); setReason('');
-            }}>Save correction</button>
+            }}>Save Correction</button>
           </div>
           <p className="mu" style={{ marginTop: 8 }}>
             The before and after values are written to the activity log with your name.
@@ -987,10 +987,10 @@ const ClientLocationRow = ({ c, onSave }) => {
           <input value={radius} onChange={e => setRadius(e.target.value)} placeholder="150" inputMode="numeric" /></div>
       </div>
       <div className="btns">
-        <button className="btn" disabled={!dirty || busy} onClick={save}>{busy ? 'Saving…' : 'Save location'}</button>
+        <button className="btn" disabled={!dirty || busy} onClick={save}>{busy ? 'Saving…' : 'Save Location'}</button>
         {(lat || lng) && (
           <button className="btn ghost" disabled={busy}
-            onClick={() => { setLat(''); setLng(''); }}>Clear coordinates</button>
+            onClick={() => { setLat(''); setLng(''); }}>Clear Coordinates</button>
         )}
       </div>
     </div>
@@ -1348,7 +1348,7 @@ const App = () => {
                 <button className="btn ghost" style={{ marginLeft: 'auto' }}
                   disabled={statusFilter.length === ALL_BOARD_STATUSES.length && !boardFrom && !boardTo}
                   onClick={() => { setStatusFilter(ALL_BOARD_STATUSES); setBoardFrom(''); setBoardTo(''); }}>
-                  Show everything
+                  Show Everything
                 </button>
               </div>
 
@@ -1365,7 +1365,7 @@ const App = () => {
                     : ''}
                 </span>
                 <button className="btn ghost" disabled={!selected.length || bulkEditing || removing}
-                  onClick={() => setSelected([])}>Clear selection</button>
+                  onClick={() => setSelected([])}>Clear Selection</button>
               </div>
 
               {/* A BATCH TAKES A TIME OF DAY, NOT ONE INSTANT, and the bar says
@@ -1555,7 +1555,7 @@ const App = () => {
                       <button className="btn ghost" onClick={async () => {
                         await api(`/api/scheduling/availability/${a.id}/review`, { method: 'POST', body: '{}' });
                         await refresh();
-                      }}>Mark reviewed</button>
+                      }}>Mark Reviewed</button>
                     </div>
                   )}
                 </div>
@@ -1644,15 +1644,15 @@ const App = () => {
               </div>
               <div className="btns">
                 <button className={`btn ${flaggedOnly ? '' : 'ghost'}`} onClick={() => setFlaggedOnly(!flaggedOnly)}>
-                  {flaggedOnly ? 'Showing flagged only' : 'Show flagged only'}
+                  {flaggedOnly ? 'Flagged Only' : 'Show Flagged Only'}
                 </button>
                 {/* THE MONEY IS ADMIN'S. A manager runs the board and reads the
                     hours behind it; payroll and billing are attestations about
                     what people are paid and what clients owe, and those stayed
                     where they were. The buttons are absent rather than present
                     and answering 403. */}
-                {access.managePay && <button className="btn gold" onClick={exportCsv}>Export payroll CSV</button>}
-                {access.managePay && <button className="btn" onClick={exportBillingCsv}>Export billing CSV</button>}
+                {access.managePay && <button className="btn gold" onClick={exportCsv}>Export Payroll CSV</button>}
+                {access.managePay && <button className="btn" onClick={exportBillingCsv}>Export Billing CSV</button>}
               </div>
               {access.managePay ? (
                 <div className="note">
