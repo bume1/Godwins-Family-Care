@@ -104,7 +104,9 @@ test('an EMR row is listed and marked unopenable, never dropped', () => {
   assert.match(SERVER, /code: 'EMR_DOCUMENT_READ_UNAVAILABLE'/);
 });
 
-test('a record release with no stored copy is not offered as openable', () => {
+test('a record release opens whether or not its Drive upload worked', () => {
+  // Repointed 2026-10-10: a release is now rendered from its stored records,
+  // so a failed Drive upload no longer leaves it unopenable.
   const rows = build({
     roiAuthorizations: [
       { id: 'a1', client_id: 'c1', provider_name: 'Emory', generated_pdf_drive_url: 'https://drive/x' },
@@ -112,8 +114,8 @@ test('a record release with no stored copy is not offered as openable', () => {
     ]
   });
   assert.equal(rows.find(r => r.id === 'roi:a1').openable, true);
-  assert.equal(rows.find(r => r.id === 'roi:a2').openable, false);
-  assert.match(rows.find(r => r.id === 'roi:a2').note, /No stored copy/);
+  assert.equal(rows.find(r => r.id === 'roi:a2').openable, true);
+  assert.equal(rows.find(r => r.id === 'roi:a2').note, null);
 });
 
 test('newest first, and an undated row sorts last rather than to 1970', () => {

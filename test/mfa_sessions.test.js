@@ -208,7 +208,9 @@ test('every signed-in page carries the session guard and every login surface car
 // warning and were handed AUTH_IDLE — and an emptied form — on Save. The
 // heartbeat is what keeps the two in agreement.
 test('the heartbeat route does nothing but pass through authenticateToken — hitting it IS the session touch', () => {
-  assert.match(serverSrc, /app\.get\('\/api\/auth\/heartbeat',\s*authenticateToken,\s*\(req, res\) => \{\s*res\.json\(\{ ok: true \}\);\s*\}\);/);
+  // It also reports req.actingAs ("View as", impersonation.js) so the banner
+  // reads the server; it still writes nothing and does no work of its own.
+  assert.match(serverSrc, /app\.get\('\/api\/auth\/heartbeat',\s*authenticateToken,\s*\(req, res\) => \{\s*(\/\/[^\n]*\n\s*)?res\.json\(\{ ok: true, actingAs: req\.actingAs \|\| null \}\);\s*\}\);/);
 });
 test('the guard pings the heartbeat while active, throttled to once a TOUCH_THROTTLE_MS window, and never once it has warned', () => {
   const guard = read('public/session-guard.js');

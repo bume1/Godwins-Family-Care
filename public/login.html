@@ -30,6 +30,7 @@
   </script>
   <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
   <link rel="stylesheet" href="/css/gfc-tokens.css">
+  <link rel="stylesheet" href="/css/gfc-auth.css">
   <style>
     * { font-family: 'Inter', system-ui, sans-serif; }
     body { background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 50%, #f1f5f9 100%); min-height: 100vh; }
@@ -45,6 +46,8 @@
     .glass-card { backdrop-filter: blur(10px); background: rgba(255,255,255,0.95); }
   </style>
   <script src="/mfa-step.js"></script>
+  <!-- The office phone lives in ONE place: ORG in consent-text.js. -->
+  <script src="/consent-text.js"></script>
 </head>
 <body>
   <div id="root"></div>
@@ -81,6 +84,10 @@
       const [loading, setLoading] = useState(false);
       const [showForgotPassword, setShowForgotPassword] = useState(false);
       const [resetMessage, setResetMessage] = useState('');
+      const [showPassword, setShowPassword] = useState(false);
+      // Reads guarded: a private window throws on localStorage.
+      const [remember, setRemember] = useState(() => { try { return !!localStorage.getItem('gfc_remember_email'); } catch (_) { return false; } });
+      useEffect(() => { try { const e = localStorage.getItem('gfc_remember_email'); if (e) setEmail(e); } catch (_) {} }, []);
 
       const handleSubmit = async (e) => {
         e.preventDefault();
@@ -100,6 +107,7 @@
           if (result.error) {
             setError(result.error);
           } else {
+            try { if (remember) localStorage.setItem('gfc_remember_email', email.trim()); else localStorage.removeItem('gfc_remember_email'); } catch (_) {}
             // Store token in multiple places for compatibility
             localStorage.setItem('unified_token', result.token);
             localStorage.setItem('unified_user', JSON.stringify(result.user));
@@ -134,87 +142,54 @@
         setLoading(false);
       };
 
+      // One sign-in page for every role (owner, 2026-10-12), styled from the
+      // patient mockup. "Remember me" remembers the EMAIL on this device,
+      // never the password.
+      const officePhone = (window.GFC_CONSENT_TEXT && window.GFC_CONSENT_TEXT.ORG && window.GFC_CONSENT_TEXT.ORG.phone) || '';
+      const shell = (body) => (
+        <div className="ga">
+          <main className="ga-main">
+            <img className="ga-logo" src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" />
+            {body}
+          </main>
+          <div className="ga-foot"><p>© 2026 Godwins Family Care LLC</p></div>
+        </div>
+      );
+
       if (showForgotPassword) {
-        return (
-          <div className="min-h-screen flex items-center justify-center p-4 relative">
-            <div className="absolute inset-0 overflow-hidden pointer-events-none">
-              <div className="absolute -top-40 -right-40 w-80 h-80 rounded-full opacity-20" style={{background: 'radial-gradient(circle, #033D50 0%, transparent 70%)'}}></div>
-              <div className="absolute -bottom-40 -left-40 w-96 h-96 rounded-full opacity-10" style={{background: 'radial-gradient(circle, #022A38 0%, transparent 70%)'}}></div>
-            </div>
-            <div className="glass-card p-5 sm:p-8 rounded-2xl shadow-xl w-full max-w-md animate-fade-in relative border border-white/50">
-              <div className="text-center mb-8">
-                <img src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" className="h-12 mx-auto mb-4" />
-                <h1 className="text-xl font-semibold text-gray-900">Reset Password</h1>
-                <p className="text-gray-500 mt-1 text-sm">Enter your email to request a reset</p>
-              </div>
-              <form onSubmit={handleForgotPassword} className="space-y-5">
-                {resetMessage && (
-                  <div className={`flex items-center gap-3 p-4 rounded-xl text-sm border ${resetMessage.includes('Error') ? 'bg-danger-50 text-danger-600 border-red-100' : 'bg-success-50 text-success-600 border-green-100'}`}>
-                    {resetMessage}
-                  </div>
-                )}
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Email Address</label>
-                  <input type="email" value={email} onChange={(e) => setEmail(e.target.value)}
-                    className="input-modern w-full px-4 py-3 text-gray-900 placeholder-gray-400" placeholder="you@godwinsfamilycarellc.com" required />
-                </div>
-                <button type="submit" disabled={loading}
-                  className="btn-primary w-full text-white py-3.5 rounded-xl font-semibold text-sm disabled:opacity-50 flex items-center justify-center gap-2">
-                  {loading ? <><svg className="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg><span>Submitting...</span></> : 'Request Reset'}
-                </button>
-                <button type="button" onClick={() => setShowForgotPassword(false)}
-                  className="w-full text-gray-500 py-2 text-sm hover:text-primary-500 transition">
-                  Back to Sign In
-                </button>
-              </form>
-            </div>
-          </div>
+        return shell(
+          <form onSubmit={handleForgotPassword}>
+            <h1>Reset password</h1>
+            <p className="lead">Enter your email and our office will help you reset it.</p>
+            {resetMessage && <div className={resetMessage.includes('Error') ? 'err' : 'ok'}>{resetMessage}</div>}
+            <label className="fl">Email</label>
+            <input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+            <button type="submit" disabled={loading} className="btn navy">{loading ? 'Sending…' : 'Request reset'}</button>
+            <div className="center"><button type="button" className="link" onClick={() => setShowForgotPassword(false)}>Back to sign in</button></div>
+          </form>
         );
       }
 
-      return (
-        <div className="min-h-screen flex items-center justify-center p-4 relative">
-          <div className="absolute inset-0 overflow-hidden pointer-events-none">
-            <div className="absolute -top-40 -right-40 w-80 h-80 rounded-full opacity-20" style={{background: 'radial-gradient(circle, #033D50 0%, transparent 70%)'}}></div>
-            <div className="absolute -bottom-40 -left-40 w-96 h-96 rounded-full opacity-10" style={{background: 'radial-gradient(circle, #022A38 0%, transparent 70%)'}}></div>
+      return shell(
+        <form onSubmit={handleSubmit}>
+          <h1>Welcome</h1>
+          <p className="lead">Access your care. Anytime. Anywhere.</p>
+          {error && <div className="err">{error}</div>}
+          <label className="fl">Email</label>
+          <input type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} required />
+          <label className="fl">Password</label>
+          <div className="pw">
+            <input type={showPassword ? 'text' : 'password'} autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required />
+            <button type="button" onClick={() => setShowPassword(!showPassword)} aria-label={showPassword ? 'Hide password' : 'Show password'}>{showPassword ? 'Hide' : 'Show'}</button>
           </div>
-          <div className="glass-card p-5 sm:p-8 rounded-2xl shadow-xl w-full max-w-md animate-fade-in relative border border-white/50">
-            <div className="text-center mb-8">
-              <img src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" className="h-12 mx-auto mb-4" />
-              <h1 className="text-xl font-semibold text-gray-900">Welcome Back</h1>
-              <p className="text-gray-500 mt-1 text-sm">Sign in to access your portals</p>
-            </div>
-            <form onSubmit={handleSubmit} className="space-y-5">
-              {error && (
-                <div className="flex items-center gap-3 bg-danger-50 text-danger-600 p-4 rounded-xl text-sm border border-red-100">
-                  <svg className="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
-                  <span>{error}</span>
-                </div>
-              )}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Email Address</label>
-                <input type="email" value={email} onChange={(e) => setEmail(e.target.value)}
-                  className="input-modern w-full px-4 py-3 text-gray-900 placeholder-gray-400" placeholder="you@godwinsfamilycarellc.com" required />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Password</label>
-                <input type="password" value={password} onChange={(e) => setPassword(e.target.value)}
-                  className="input-modern w-full px-4 py-3 text-gray-900 placeholder-gray-400" placeholder="Enter your password" required />
-              </div>
-              <button type="submit" disabled={loading}
-                className="btn-primary w-full text-white py-3.5 rounded-xl font-semibold text-sm disabled:opacity-50 flex items-center justify-center gap-2">
-                {loading ? <><svg className="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg><span>Signing in...</span></> : 'Sign In'}
-              </button>
-              <button type="button" onClick={() => setShowForgotPassword(true)}
-                className="w-full text-gray-500 py-2 text-sm hover:text-primary-500 transition">
-                Forgot your password?
-              </button>
-            </form>
-            <div className="mt-8 pt-6 border-t border-gray-100 text-center">
-              <p className="text-xs text-gray-400">&copy; 2026 Godwins Family Care LLC. All rights reserved.</p>
-            </div>
+          <div className="row">
+            <label className="chk"><input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />Remember me</label>
           </div>
-        </div>
+          <button type="submit" disabled={loading} className="btn navy">{loading ? 'Signing in…' : 'Sign in'}</button>
+          <div className="center"><button type="button" className="link" onClick={() => setShowForgotPassword(true)}>Forgot password?</button></div>
+          <a className="btn line" href="/signup">Create an account</a>
+          {officePhone && <p className="help">Need help? <a href={`tel:${officePhone.replace(/\D/g, '')}`}>Contact us</a></p>}
+        </form>
       );
     };
 

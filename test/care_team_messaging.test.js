@@ -415,7 +415,13 @@ test('the component keeps what people type, clears it only on success, and rende
   const code = stripComments(componentSrc);
   assert.match(code, /function newDraft\(\)/);
   // cleared ONLY inside the success handlers
-  assert.equal((code.match(/state\.draft = newDraft\(\);/g) || []).length, 5, 'three navigations and the two success handlers');
+  // Four navigations (the fourth is startCompose, 10/2026: opening straight
+  // into a new message on a FRESH mount, where there is nothing typed to lose)
+  // and the two success handlers.
+  assert.equal((code.match(/state\.draft = newDraft\(\);/g) || []).length, 6, 'four navigations and the two success handlers');
+  const start = code.slice(code.indexOf('var want = options.startCompose;'), code.indexOf('}).catch(function (err) {', code.indexOf('var want = options.startCompose;')));
+  assert.match(start, /state\.draft = newDraft\(\);/, 'the startCompose clear is the one on mount');
+  assert.match(start, /c\.id === want && c\.available/, 'and it only opens a channel the server lists as available');
   // render() must not read the editor (it would put a just-sent message back in the box)
   const render = code.slice(code.indexOf('function render(state)'), code.indexOf('function scopeSettled'));
   assert.ok(!/captureDraft\(/.test(render.replace(/\/\/.*$/gm, '')), 'render does not capture the draft');

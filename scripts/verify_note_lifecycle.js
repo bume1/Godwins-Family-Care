@@ -325,8 +325,16 @@ const HP_NOTE = {
   check('and the discarded one waits on nobody', Array.isArray(unsigned) && !unsigned.some(q => q.encounterUuid === second));
 
   console.log('\n── 10. Who may write a note at all ──');
+  // A social worker writes their own note types and must choose one (2026-10-11).
   r = await call('POST', `${P}/notes`, tok.lmsw, { note: { kind: 'followup', chiefConcern: 'Psychosocial check-in' } });
-  check('an LMSW writes a note', r.status === 200, r.body);
+  check('an LMSW with no visit type is asked to choose one', r.status === 400 && r.body.code === 'VISIT_TYPE_REQUIRED', r.body);
+  r = await call('POST', `${P}/notes`, tok.lmsw, { note: { kind: 'followup', chiefConcern: 'x', visit: { appointmentType: 'pc_follow_up', modality: 'in_person', location: 'home' } } });
+  check('an LMSW is refused a medical note type', r.status === 403 && r.body.code === 'SOCIAL_WORK_TYPE_ONLY', r.body);
+  r = await call('POST', `${P}/notes`, tok.lmsw, { note: { kind: 'followup', visit: { appointmentType: 'sw_follow_up', modality: 'phone' },
+    sections: { contactPurpose: 'Psychosocial check-in', contactParticipants: 'Client and daughter',
+      progressUpdate: 'Settling in at home.', careCoordination: 'Called Medicaid waiver office.',
+      swPlan: 'Follow up on waiver application.', followUp: 'One week.', contactTime: '20 minutes' } } });
+  check('an LMSW writes a social work follow-up', r.status === 200, r.body);
   const lm = r.body.encounterUuid;
   r = await call('POST', `${P}/encounters/${lm}/sign`, tok.lmsw, { attest: true });
   check('and signs it as author — held for a clinician addendum', r.status === 200 && record(lm).coSignStatus === 'pending', r.body);
@@ -526,6 +534,42 @@ const HP_NOTE = {
   check('the phone note signs and goes to billing', r.status === 200 && record(ph).billingStatus === 'awaiting_billing', r.body);
   check('no vitals row was written for a phone call', !EMR.vitals.some(v => v.euuid === ph));
   check('nothing was billed by signing', !EMR.charges.some(c => c.euuid === ph));
+
+  console.log('\n── 16. A social worker\'s visit end to end (owner, 2026-10-11) ──');
+  const SWN = (extra) => ({ kind: 'hp', vitals: { hr: '88' },
+    visit: { appointmentType: 'sw_psychosocial', modality: 'in_person', location: 'home' },
+    sections: { referralReason: 'Referred by PCP for caregiver strain.', livingSituation: 'Lives with daughter.',
+      familySupport: 'Daughter, son nearby.', psychosocialHistory: 'Retired teacher.', financialBenefits: 'Medicare + Medicaid.',
+      legalPlanning: 'Daughter is POA.', sdohNeeds: 'Transportation to appointments.', strengthsCoping: 'Faith community.',
+      swAssessment: 'Moderate caregiver strain; transport barrier.', swPlan: 'Refer to county transport program.',
+      followUp: 'Two weeks.', contactTime: '55 minutes', ...extra } });
+  r = await call('POST', `${PH}/notes`, tok.lcsw, { note: SWN({}) });
+  const sw = r.body && r.body.encounterUuid;
+  check('an LCSW saves a psychosocial assessment', r.status === 200 && !!sw, r.body);
+  check('it is never an H&P and carries no vitals', record(sw).note.kind === 'followup' && !Object.keys(record(sw).note.vitals || {}).length, record(sw).note);
+  r = await call('POST', `${PH}/encounters/${sw}/screenings`, tok.lcsw, { instrument: 'phq9', score: 11 });
+  check('a PHQ-9 without item 9 is refused', r.status === 400 && r.body.code === 'SCREENING_ITEM9_REQUIRED', r.body);
+  r = await call('POST', `${PH}/encounters/${sw}/screenings`, tok.lcsw, { instrument: 'phq9', score: 11, item9: 1 });
+  check('a PHQ-9 is recorded and flags item 9', r.status === 200 && r.body.screening.interpretation === 'Moderate' && (r.body.warnings || []).some(w => /item 9/.test(w)), r.body);
+  check('the screening reaches the OpenEMR note', /SCREENINGS RECORDED[\s\S]*PHQ-9 11\/27/.test(narrativeText(sw)));
+  r = await call('POST', `${PH}/encounters/${sw}/screenings`, tok.cm, { instrument: 'gad7', score: 3 });
+  check('read-only staff cannot record a screening', r.status === 403, r.body);
+  r = await call('GET', `${PH}/encounters/${sw}`, tok.lcsw);
+  check('the encounter lists the screening and says the note is sections-only', r.status === 200 && (r.body.screenings || []).length === 1 && r.body.sectionsOnly === true, { s: r.body.screenings, so: r.body.sectionsOnly });
+  r = await call('PUT', `${PH}/encounters/${sw}/coding`, tok.lcsw, { diagnoses: [{ code: 'Z63.6', description: 'Dependent relative needing care at home' }], services: [] });
+  check('the LCSW codes a diagnosis', r.status === 200, r.body);
+  r = await call('POST', `${PH}/encounters/${sw}/sign`, tok.lcsw, { attest: true });
+  check('signing waits for the risk assessment item 9 calls for', r.status === 409 && r.body.code === 'SIGN_SCREENING_NEEDS_RISK', r.body);
+  r = await call('POST', `${PH}/encounters/${sw}/risk-assessment`, tok.lcsw, { suicide: 'low', homicide: 'none', selfNeglect: 'none', protectiveFactors: 'Faith, family' });
+  check('the LCSW records the risk assessment', r.status === 200, r.body);
+  r = await call('POST', `${PH}/encounters/${sw}/sign`, tok.lcsw, { attest: true });
+  check('the LCSW signs the psychosocial assessment', r.status === 200 && record(sw).billingStatus === 'awaiting_billing', r.body);
+  check('no vitals row was written for a social work note', !EMR.vitals.some(v => v.euuid === sw));
+
+  r = await call('POST', `${PH}/notes`, tok.lmsw, { note: { kind: 'followup', visit: { appointmentType: 'sw_therapy', modality: 'telehealth', location: 'home' }, sections: { sessionFocus: 'x' } } });
+  check('an LMSW is refused a therapy note', r.status === 403 && r.body.code === 'SOCIAL_WORK_TYPE_ONLY', r.body);
+  r = await call('POST', `${PH}/notes`, tok.rn, { note: { kind: 'followup', visit: { appointmentType: 'sw_therapy', modality: 'telehealth', location: 'home' }, sections: { sessionFocus: 'x' } } });
+  check('an RN is refused a therapy note', r.status === 403 && r.body.code === 'PSYCHOTHERAPY_NOT_RN', r.body);
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

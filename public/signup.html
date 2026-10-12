@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Create Your Account — Godwins Family Care</title>
+  <link rel="icon" type="image/png" href="/brand/logo-mark-transparent.png">
+  <link rel="stylesheet" href="/css/gfc-tokens.css">
+  <link rel="stylesheet" href="/css/gfc-auth.css">
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+  <!-- The office phone lives in ONE place: ORG in consent-text.js. -->
+  <script src="/consent-text.js"></script>
+</head>
+<body style="margin:0">
+  <div id="root"></div>
+  <script type="text/babel">
+    // Self sign-up (owner, 2026-10-12). Four steps, as in mockup 2: Account,
+    // Profile, Insurance, Consent. What this creates is a REQUEST: the person
+    // confirms their email, then staff approve it or link it to a client on
+    // file. Nothing here signs anyone in. See signupRequests.js.
+    //
+    // The "Consent" step is agreeing to the terms and privacy notice and to
+    // being contacted. The care agreements and consents are signed in the
+    // portal after the office approves the account, as they always have been.
+    const { useState, useEffect } = React;
+    const STEPS = ['Account', 'Profile', 'Insurance', 'Consent'];
+    const RELATIONSHIPS = ['Spouse or partner', 'Child', 'Parent', 'Sibling', 'Grandchild', 'Other relative', 'Friend', 'Other'];
+    const COVERAGE = ['Medicare', 'Medicare Advantage', 'Medicaid', 'Private insurance', 'Long-term care insurance', 'Paying privately', 'Not sure'];
+    const INTERESTS = [['home_care', 'Home care (help at home)'], ['primary_care', 'Medical visits at home'], ['not_sure', 'Not sure yet']];
+    const OFFICE_PHONE = (window.GFC_CONSENT_TEXT && window.GFC_CONSENT_TEXT.ORG && window.GFC_CONSENT_TEXT.ORG.phone) || '';
+    // Which step owns each field, so a server refusal can send the person back to it.
+    const FIELD_STEP = { name: 0, dob: 0, email: 0, phone: 0, password: 0, who: 1, patientName: 1, patientDob: 1, relationship: 1, address: 1, interests: 1, agreeTerms: 3 };
+
+    const Field = ({ label, children, hint }) => (
+      <div><label className="fl">{label}</label>{children}{hint && <div className="hint">{hint}</div>}</div>
+    );
+
+    const Verify = ({ token }) => {
+      const [state, setState] = useState({ busy: true });
+      useEffect(() => {
+        fetch('/api/auth/self-signup/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) })
+          .then(r => r.json().then(j => ({ ok: r.ok, j })))
+          .then(({ ok, j }) => setState({ ok, msg: j.message || j.error }))
+          .catch(() => setState({ ok: false, msg: 'We could not reach the server. Please try the link again.' }));
+      }, [token]);
+      return (
+        <div>
+          <h1>{state.busy ? 'Confirming…' : state.ok ? 'Email confirmed' : 'That link didn’t work'}</h1>
+          {!state.busy && <p className="lead">{state.msg}</p>}
+          {!state.busy && !state.ok && <a className="btn line" href="/signup">Sign up again</a>}
+          <a className="btn navy" href="/login">Go to sign in</a>
+        </div>
+      );
+    };
+
+    const Signup = () => {
+      const [step, setStep] = useState(0);
+      const [f, setF] = useState({ name: '', dob: '', email: '', phone: '', password: '', who: '', patientName: '', patientDob: '', relationship: '',
+        address: { line1: '', city: '', state: 'GA', zip: '' }, interests: [], coverage: '', carrier: '', memberId: '', agreeTerms: false, contactOk: true, website: '' });
+      const [showPw, setShowPw] = useState(false);
+      const [err, setErr] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [done, setDone] = useState('');
+      const set = (k, v) => setF(p => ({ ...p, [k]: v }));
+      const setAddr = (k, v) => setF(p => ({ ...p, address: { ...p.address, [k]: v } }));
+      const toggleInterest = (k) => setF(p => ({ ...p, interests: p.interests.includes(k) ? p.interests.filter(x => x !== k) : [...p.interests, k] }));
+
+      // A quick check before moving on; the server checks everything again.
+      const stepError = () => {
+        if (step === 0) {
+          if (f.name.trim().split(/\s+/).length < 2) return 'Enter your first and last name.';
+          if (!f.dob) return 'Enter your date of birth.';
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.email.trim())) return 'Enter a valid email address.';
+          if (f.phone.replace(/\D/g, '').length < 10) return 'Enter a 10-digit phone number.';
+          if (f.password.length < 8) return 'Choose a password of at least 8 characters.';
+        }
+        if (step === 1) {
+          if (!f.who) return 'Tell us who the care is for.';
+          if (f.who === 'loved_one' && (f.patientName.trim().split(/\s+/).length < 2 || !f.patientDob || !f.relationship)) return 'Enter your loved one’s name, date of birth and how you are related.';
+          if (!f.address.line1 || !f.address.city || f.address.zip.replace(/\D/g, '').length !== 5) return 'Enter the street address, city and ZIP where care would happen.';
+          if (!f.interests.length) return 'Choose at least one kind of care, or "Not sure yet".';
+        }
+        if (step === 3 && !f.agreeTerms) return 'Please agree to the terms and privacy notice to continue.';
+        return '';
+      };
+      const next = () => { const e = stepError(); setErr(e); if (!e) setStep(s => s + 1); };
+      const submit = async () => {
+        const e = stepError(); if (e) { setErr(e); return; }
+        setBusy(true); setErr('');
+        try {
+          const r = await fetch('/api/auth/self-signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(f) });
+          const j = await r.json();
+          if (!r.ok) {
+            setErr(j.error || 'Something went wrong. Please try again.');
+            if (j.field && FIELD_STEP[j.field] != null) setStep(FIELD_STEP[j.field]);
+          } else setDone(j.message);
+        } catch (_) { setErr('We could not reach the server. Please try again.'); }
+        setBusy(false);
+      };
+
+      if (done) {
+        return (
+          <div>
+            <h1>Check your email</h1>
+            <p className="lead">{done}</p>
+            <a className="btn navy" href="/login">Back to sign in</a>
+          </div>
+        );
+      }
+      return (
+        <div>
+          <h1>Create Your Account</h1>
+          <div className="steps" style={{ marginTop: 18 }}>
+            {STEPS.map((s, i) => (
+              <div key={s} className={`st ${i === step ? 'on' : i < step ? 'done' : ''}`}><b>{i < step ? '✓' : i + 1}</b>{s}</div>
+            ))}
+          </div>
+          <div className="card">
+            {step === 0 && (
+              <React.Fragment>
+                <h2>Let's get started</h2>
+                <p className="hint" style={{ fontSize: 15 }}>Create an account to see your health information and connect with your care team.</p>
+                <Field label="Your full name"><input type="text" autoComplete="name" value={f.name} onChange={e => set('name', e.target.value)} /></Field>
+                <Field label="Your date of birth"><input type="date" value={f.dob} onChange={e => set('dob', e.target.value)} /></Field>
+                <Field label="Email"><input type="email" autoComplete="email" value={f.email} onChange={e => set('email', e.target.value)} /></Field>
+                <Field label="Phone number"><input type="tel" autoComplete="tel" value={f.phone} onChange={e => set('phone', e.target.value)} /></Field>
+                <Field label="Choose a password" hint="At least 8 characters.">
+                  <div className="pw"><input type={showPw ? 'text' : 'password'} autoComplete="new-password" value={f.password} onChange={e => set('password', e.target.value)} />
+                    <button type="button" onClick={() => setShowPw(!showPw)}>{showPw ? 'Hide' : 'Show'}</button></div>
+                </Field>
+              </React.Fragment>
+            )}
+            {step === 1 && (
+              <React.Fragment>
+                <h2>About the care</h2>
+                <label className="fl">Who is the care for?</label>
+                {[['self', 'Me'], ['loved_one', 'A loved one']].map(([k, l]) => (
+                  <label key={k} className={`opt ${f.who === k ? 'on' : ''}`}><input type="radio" name="who" checked={f.who === k} onChange={() => set('who', k)} />{l}</label>
+                ))}
+                {f.who === 'loved_one' && (
+                  <React.Fragment>
+                    <Field label="Their full name"><input type="text" value={f.patientName} onChange={e => set('patientName', e.target.value)} /></Field>
+                    <Field label="Their date of birth"><input type="date" value={f.patientDob} onChange={e => set('patientDob', e.target.value)} /></Field>
+                    <Field label="How are you related?">
+                      <select value={f.relationship} onChange={e => set('relationship', e.target.value)}>
+                        <option value="">Choose one</option>{RELATIONSHIPS.map(r => <option key={r}>{r}</option>)}
+                      </select>
+                    </Field>
+                  </React.Fragment>
+                )}
+                <Field label="Where would care happen?"><input type="text" placeholder="Street address" autoComplete="street-address" value={f.address.line1} onChange={e => setAddr('line1', e.target.value)} /></Field>
+                <div className="three" style={{ marginTop: 10 }}>
+                  <input type="text" placeholder="City" value={f.address.city} onChange={e => setAddr('city', e.target.value)} />
+                  <input type="text" placeholder="State" maxLength={2} value={f.address.state} onChange={e => setAddr('state', e.target.value)} />
+                  <input type="text" placeholder="ZIP" inputMode="numeric" value={f.address.zip} onChange={e => setAddr('zip', e.target.value)} />
+                </div>
+                <label className="fl">What kind of care are you looking for?</label>
+                {INTERESTS.map(([k, l]) => (
+                  <label key={k} className={`opt ${f.interests.includes(k) ? 'on' : ''}`}><input type="checkbox" checked={f.interests.includes(k)} onChange={() => toggleInterest(k)} />{l}</label>
+                ))}
+              </React.Fragment>
+            )}
+            {step === 2 && (
+              <React.Fragment>
+                <h2>Insurance</h2>
+                <p className="hint" style={{ fontSize: 15 }}>Optional. It helps our office get ready. You can skip anything you don't know.</p>
+                <Field label="How will care be paid for?">
+                  <select value={f.coverage} onChange={e => set('coverage', e.target.value)}>
+                    <option value="">Choose one</option>{COVERAGE.map(c => <option key={c}>{c}</option>)}
+                  </select>
+                </Field>
+                {f.coverage && !['Paying privately', 'Not sure', 'Medicare'].includes(f.coverage) && (
+                  <Field label="Insurance company or plan"><input type="text" value={f.carrier} onChange={e => set('carrier', e.target.value)} /></Field>
+                )}
+                {f.coverage && !['Paying privately', 'Not sure'].includes(f.coverage) && (
+                  <Field label="Member ID"><input type="text" value={f.memberId} onChange={e => set('memberId', e.target.value)} /></Field>
+                )}
+              </React.Fragment>
+            )}
+            {step === 3 && (
+              <React.Fragment>
+                <h2>Almost done</h2>
+                <p className="hint" style={{ fontSize: 15 }}>Our office reviews every new account. After that, you'll sign your care agreements in the portal.</p>
+                <label className="opt" style={{ alignItems: 'flex-start' }}><input type="checkbox" checked={f.agreeTerms} onChange={e => set('agreeTerms', e.target.checked)} />
+                  <span>I agree to the terms of use and have read the privacy notice. The information I gave is true to the best of my knowledge.</span></label>
+                <label className="opt" style={{ alignItems: 'flex-start' }}><input type="checkbox" checked={f.contactOk} onChange={e => set('contactOk', e.target.checked)} />
+                  <span>Godwins Family Care may call or email me about setting up care.</span></label>
+              </React.Fragment>
+            )}
+            {/* A field people never see. Bots fill it in; the server drops those. */}
+            <div className="hp" aria-hidden="true"><label>Website<input tabIndex={-1} autoComplete="off" value={f.website} onChange={e => set('website', e.target.value)} /></label></div>
+            {err && <div className="err" style={{ marginTop: 14 }}>{err}</div>}
+            <div className="nav2">
+              {step > 0 && <button className="btn line" disabled={busy} onClick={() => { setErr(''); setStep(s => s - 1); }}>Back</button>}
+              {step < 3 && <button className="btn navy" onClick={next}>Continue</button>}
+              {step === 3 && <button className="btn navy" disabled={busy} onClick={submit}>{busy ? 'Sending…' : 'Create account'}</button>}
+            </div>
+          </div>
+          <p className="help">Already have an account? <a href="/login">Sign in</a></p>
+          {OFFICE_PHONE && <p className="help" style={{ marginTop: 6 }}>Need help? <a href={`tel:${OFFICE_PHONE.replace(/\D/g, '')}`}>Call {OFFICE_PHONE}</a></p>}
+        </div>
+      );
+    };
+
+    const App = () => {
+      const token = new URLSearchParams(window.location.search).get('verify');
+      return (
+        <div className="ga">
+          <main className="ga-main">
+            <img className="ga-logo" src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" />
+            {token ? <Verify token={token} /> : <Signup />}
+          </main>
+          <div className="ga-foot"><p>© 2026 Godwins Family Care LLC</p></div>
+        </div>
+      );
+    };
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

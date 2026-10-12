@@ -345,9 +345,11 @@ const buildChartDocumentIndex = (input) => {
       date: a.created_at || a.signed_at || null,
       contentType: 'application/pdf',
       source: CHART_DOC_SOURCE.APP,
-      openable: !!a.generated_pdf_drive_url,
+      // Always openable: the copy is rendered from the stored release, so it
+      // does not depend on the Drive upload having worked.
+      openable: true,
       inChart: false,
-      note: a.generated_pdf_drive_url ? null : 'No stored copy on file'
+      note: null
     });
   }
 
@@ -691,7 +693,7 @@ const latestRiskAssessment = (rows, encounterUuid) =>
 // Asked of the VISIT, not the patient. A behavioural-health appointment type
 // is what makes a risk assessment mandatory; a patient's usual kind of visit
 // is not a fact about the one being signed.
-const riskAssessmentRequired = (visit) => isBehavioralVisit(visit);
+const riskAssessmentRequired = (visit) => apptTypes.requiresRiskAssessment(normalizeVisit(visit).appointmentType);
 const highestRisk = (assessment) => {
   if (!assessment || !assessment.levels) return null;
   let worst = null; let rank = -1;

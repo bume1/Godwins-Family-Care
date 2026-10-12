@@ -111,7 +111,11 @@ test('portal: a failed care-plan load shows an error, not an endless spinner', (
 });
 
 test('record release: a structured address is printed as a line, never "[object Object]"', () => {
-  assert.match(server, /patientAddress: \(v => \(v && typeof v === 'object'\) \? consentRender\.addressLine\(v\) : String\(v \|\| ''\)\)\(intake\.address \|\| client\.address\)/);
+  // Repointed 2026-10-10: the identity comes from roiPatientIdentity, and a
+  // structured address is flattened by roiRepo.cleanText. Behaviour, not text:
+  const roiRepo = require('../roiRepository');
+  assert.match(server, /patientAddress: roiRepo\.cleanText\(intake\.address \|\| client\.address, 200\)/);
+  assert.equal(roiRepo.cleanText({ line1: '12 Main St', city: 'Atlanta', state: 'GA', zip: '30301' }), '12 Main St, Atlanta, GA 30301');
 });
 
 // ---- Clinician workspace ----
@@ -129,7 +133,7 @@ test('a refused action keeps the form open and what was typed', () => {
 
 test('coding typed on the encounter survives a reload, and signing waits for it to be saved', () => {
   assert.match(clinical, /if \(!unsaved\) \{\s*setDiagnoses\(r\.record\.diagnoses \|\| \[\]\)/);
-  assert.match(clinical, /<FollowUpNoteEditor patient=\{patient\} euuid=\{euuid\} noteSections=\{d\.noteSections\} codingDirty=\{!locked && dirty\}/);
+  assert.match(clinical, /<FollowUpNoteEditor patient=\{patient\} euuid=\{euuid\} noteSections=\{d\.noteSections\} sectionsOnly=\{!!d\.sectionsOnly\} codingDirty=\{!locked && dirty\}/);
   assert.match(clinical, /disabled=\{!!busy \|\| showSign \|\| codingDirty\}/);
   assert.match(clinical, /if \(codingDirty\) \{ setMsg\(\{ ok: false, text: 'Save your diagnoses and coding on this encounter before signing\.' \}\); return; \}/);
 });

@@ -15,6 +15,14 @@
  *                                       // cover (the server decides which).
  *             authToken:     token,     // what actually authorizes
  *             onUnread:      (n) => {}  // optional badge callback
+ *             hostStartsMessages: false, // the host lists channels to start
+ *                                       // (with each one's reason when off), so
+ *                                       // the list leaves those cards out
+ *             startCompose:  null,      // optional channel id: open straight
+ *                                       // into a new message on that channel
+ *                                       // (the portal's "Ask a Question").
+ *                                       // Ignored unless the server lists the
+ *                                       // channel as available to this caller.
  *           });
  *   Unmount: window.GFCMessaging.unmount('some-element-id');
  *
@@ -353,6 +361,10 @@
     }
     html += '</div>';
 
+    // A host that offers starting a message itself (the client portal's "Ask a
+    // Question", which lists every channel WITH its reason when it is off)
+    // passes hostStartsMessages, so the list does not say it twice.
+    if (state.hostStartsMessages) return html;
     if (openable.length) {
       html += '<div class="mcard"><h3>Start a message</h3>' +
         '<div class="mbtns">' + openable.map(function (c) {
@@ -606,6 +618,7 @@
       pickerClients: [],
       authToken: options.authToken,
       onUnread: options.onUnread || null,
+      hostStartsMessages: !!options.hostStartsMessages,
       view: 'list',
       loading: true,
       error: '', notice: '',
@@ -616,7 +629,18 @@
     };
     instances[elementId] = state;
     render(state);
-    refresh(state).catch(function (err) {
+    refresh(state).then(function () {
+      // Open straight into a new message only on a channel the SERVER says this
+      // caller may start; anything else falls back to the list.
+      var want = options.startCompose;
+      if (!want) return;
+      var ch = state.channels.filter(function (c) { return c.id === want && c.available; })[0];
+      if (!ch) return;
+      state.composeChannel = ch.id;
+      state.draft = newDraft();
+      state.view = 'compose';
+      render(state);
+    }).catch(function (err) {
       state.loading = false;
       state.error = err.message;
       render(state);

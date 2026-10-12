@@ -52,15 +52,20 @@ const { createAuditLog } = require('./auditLog');        // durable append-only 
 const { createSessionStore } = require('./sessionStore'); // server-side sessions: idle timeout + revocation (Session 5.3)
 const QRCode = require('qrcode');                        // enrollment QR for the authenticator app (Session 5.3)
 const clinicalRepo = require('./clinicalRepository');
-const apptTypes = require('./appointmentTypes');  // clinical workspace pure helpers (Session 4.1)
+const apptTypes = require('./appointmentTypes');
+const screenings = require('./screenings');  // PHQ-2/9, GAD-7, SDOH results (social work, 2026-10-11)  // clinical workspace pure helpers (Session 4.1)
 // Session 4.3 — patient/family/POA clinical read rules + the case-manager read/write split
 const patientRead = require('./patientReadRepository');
+const familyInvites = require('./familyInvites');
+const portalProfile = require('./portalProfile');
+const signups = require('./signupRequests');
 const patientPublish = require('./patientPublish');   // Portal P1: the published copies the portal reads (patients never read OpenEMR)
 // Session 4.8 — the clinical role enum, capability matrix and credential
 // ceiling. THE one place that answers "may this person do this"; the clinical
 // vocabulary lives there rather than in config.js for the same reason the
 // caregiver vocabulary lives in caregiverRepository.js.
 const clinicalRoles = require('./clinicalRoles');
+const impersonation = require('./impersonation');      // "View as" for the Super Admin (2026-10-12)
 const standingOrders = require('./standingOrders');   // signed, versioned, expiring protocols (4.8 Scope C)
 const clinicalInbox = require('./clinicalInbox');     // what is waiting on a clinician (4.9)
 const clinicalNotes = require('./clinicalNotes');     // the shared, versioned clinical note (2026-09-27)
@@ -143,7 +148,18 @@ const roiStore = roiRepo.createRepository(db);
 const emrAuth = emrAuthModule.createEmrAuth({ store: db, config: (config.OPENEMR.TOKEN_ENCRYPTION_KEY || process.env.NODE_ENV === 'production') ? config
   // dev only: the same derived key as SECRETS_KEY below, so local runs work
   : { ...config, OPENEMR: { ...config.OPENEMR, TOKEN_ENCRYPTION_KEY: require('crypto').createHash('sha256').update(String(config.JWT_SECRET)).digest('hex') } } });
-const emrTokenProvider = (actor) => emrAuth.getAccessTokenFor(actor && actor.id);
+// "View as" (impersonation.js): OpenEMR tokens belong to one person, so a
+// session started by an admin acting as someone else never reaches the EMR.
+// Checked here because every EMR call passes through this provider.
+const emrTokenProvider = (actor) => {
+  const ctx = require('./auditLog').currentContext();
+  if (ctx && ctx.impersonatorId) {
+    const e = new Error('OpenEMR is turned off while you are viewing as someone else. Exit "View as" to use OpenEMR.');
+    e.code = 'EMR_BLOCKED_WHILE_ACTING_AS'; e.status = 409;
+    return Promise.reject(e);
+  }
+  return emrAuth.getAccessTokenFor(actor && actor.id);
+};
 emrTokenProvider.invalidate = (actor) => emrAuth.invalidateAccessToken(actor && actor.id);
 emrTokenProvider.statusFor = (actor) => emrAuth.statusFor(actor && actor.id);
 openemr.setTokenProvider(emrTokenProvider);
@@ -2240,10 +2256,29 @@ const authenticateToken = async (req, res, next) => {
         return res.status(403).json({ error: msg, code: sess.code });
       }
       req.session = sess.row;
+      // "View as" (impersonation.js): the session lives only while the admin
+      // who started it is still signed in. Checking their session here also
+      // keeps it from going idle while they work inside the other account.
+      if (impersonation.isActingAs(sess.row)) {
+        const parent = await sessions.check(sess.row.impersonatorSid);
+        if (!parent.ok || parent.row.userId !== sess.row.impersonatorId) {
+          await sessions.revoke(sess.row.id, 'impersonator_signed_out');
+          return res.status(403).json({ error: 'Your admin session ended, so "View as" ended too. Please sign in again.', code: 'AUTH_REVOKED', detail: 'acting_as_admin_signed_out' });
+        }
+      }
       // Fetch fresh user data from database to get current role and permissions
       const users = await getUsers();
       const freshUser = users.find(u => u.id === tokenUser.id);
       if (!freshUser) return res.status(403).json({ error: 'User not found', code: 'AUTH_INVALID', detail: 'no_account_for_token' });
+      if (impersonation.isActingAs(sess.row)) {
+        const admin = users.find(u => u.id === sess.row.impersonatorId);
+        // The admin was demoted or deactivated, or the viewed account became
+        // an admin: either way the rule that allowed this no longer holds.
+        if (!admin || admin.role !== 'admin' || admin.accountStatus === 'inactive' || freshUser.role === 'admin' || sess.row.userId !== tokenUser.id) {
+          await sessions.revoke(sess.row.id, 'impersonation_no_longer_allowed');
+          return res.status(403).json({ error: '"View as" is no longer allowed for this account. Please sign in again.', code: 'AUTH_REVOKED', detail: 'acting_as_not_allowed' });
+        }
+      }
       // Block inactive accounts
       if (freshUser.accountStatus === 'inactive') return res.status(403).json({ error: 'Account is inactive. Please contact an administrator.', code: 'AUTH_INACTIVE' });
       // Defense in depth: a session for an MFA-required role is only ever
@@ -2309,6 +2344,15 @@ const authenticateToken = async (req, res, next) => {
       // flag cannot widen someone the enum has narrowed.
       req.user.hasClinicalAccess = clinicalRoles.derivedHasClinicalAccess(req.user);
       audit.bindUser(req.user, req.session);   // 5.4: attribution for every logActivity() downstream
+      if (impersonation.isActingAs(req.session)) {
+        req.actingAs = impersonation.describe(req.session, req.user);
+        // Signatures and account changes stay with the real person. Not an
+        // AUTH_ code: the session is fine, this one action is not allowed.
+        const blocked = impersonation.blockedAction(req.method, req.path);
+        if (blocked) {
+          return res.status(403).json({ error: `You are viewing as ${req.user.name || req.user.email}. ${blocked.what.charAt(0).toUpperCase() + blocked.what.slice(1)} is turned off in "View as", because it would sign or change something in their name.`, code: 'ACTING_AS_BLOCKED', action: blocked.what });
+        }
+      }
       next();
     } catch (error) {
       console.error('Auth middleware error:', error);
@@ -2553,6 +2597,25 @@ const requireNoteWriter = (req, res, next) => {
     ...clinicalRoles.refusalFor(req.user, clinicalRoles.CAPABILITIES.NURSING_NOTE),
     error: 'Writing a clinical note requires a clinical licence (RN, LCSW, LMSW or provider).'
   });
+};
+
+// WHICH note a clinician may write (owner, 2026-10-11). An LCSW or LMSW
+// writes the social work types and nothing else; an RN writes no
+// psychotherapy note. Asked when the visit type is set or changed, so editing
+// text on a draft someone else typed is not refused over its type.
+const noteTypeRefusal = (user, note, before) => {
+  const role = clinicalRoles.resolveClinicalRole(user);
+  const type = note && note.visit && note.visit.appointmentType;
+  const beforeType = before && before.visit && before.visit.appointmentType;
+  if (!type) {
+    if (apptTypes.SOCIAL_WORK_ROLES.includes(role) && !beforeType) {
+      return { status: 400, body: { error: 'Choose what kind of visit this is first: a Psychosocial Assessment, a Social Work Follow-up, or (LCSW) a Therapy Session.', code: 'VISIT_TYPE_REQUIRED' } };
+    }
+    return null;
+  }
+  if (type === beforeType) return null;
+  const r = apptTypes.canDocumentType(type, role);
+  return r.ok ? null : { status: 403, body: { error: r.error, code: r.code, clinicalRole: role } };
 };
 
 // Require Admin Hub access (super admins, managers, or users with hasAdminHubAccess)
@@ -3258,6 +3321,47 @@ app.get('/api/auth/sessions', authenticateToken, async (req, res) => {
 // its warning window), so a genuinely active session no longer looks idle
 // to the server just because nothing else happened to phone home.
 app.get('/api/auth/heartbeat', authenticateToken, (req, res) => {
+  // actingAs is what the "View as" banner reads; null for a normal session.
+  res.json({ ok: true, actingAs: req.actingAs || null });
+});
+
+// ============================================================
+// "View as" (impersonation.js). A Super Admin opens the app AS a non-admin
+// account; signatures, OpenEMR and account changes stay blocked. The new
+// session is tied to the admin's own session and capped at 60 minutes.
+// ============================================================
+const viewAsDestination = (u) => {
+  const home = appLinks.homeFor(u);
+  if (home !== appLinks.PATHS.LOGIN) return home;
+  if (u.isManager || u.hasAdminHubAccess || u.hasClientPortalAdminAccess) return appLinks.PATHS.ADMIN;
+  if (u.role === config.ROLES.VENDOR || u.hasServicePortalAccess) return '/service-portal';
+  return appLinks.PATHS.LOGIN;
+};
+app.post('/api/admin/impersonate/:userId', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const target = users.find(u => u.id === req.params.userId) || null;
+    const verdict = impersonation.canStart({ admin: req.user, adminSession: req.session, target, mfaEnforced: config.MFA_ENFORCE });
+    if (!verdict.ok) return res.status(verdict.status).json({ error: verdict.error, code: verdict.code });
+    const row = await sessions.create({
+      userId: target.id, role: target.role, ipHash: sessionIpHash(req), userAgent: req.headers['user-agent'],
+      mfaVerified: !!req.session.mfaVerified, surface: 'view_as', absoluteExpiresAt: impersonation.expiresAt(),
+      impersonatorId: req.user.id, impersonatorName: req.user.name || req.user.email, impersonatorSid: req.session.id
+    });
+    const minutes = impersonation.IMPERSONATION_MINUTES;
+    const token = jwt.sign({ id: target.id, email: target.email, name: target.name, role: target.role, sid: row.id }, JWT_SECRET, { expiresIn: `${minutes}m` });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'impersonation_started', 'user', target.id, { targetName: target.name || target.email, targetRole: target.role, sid: row.id, expiresAt: row.absoluteExpiresAt });
+    const user = { id: target.id, email: target.email, name: target.name, role: target.role, slug: target.slug || null, hasClinicalAccess: clinicalRoles.derivedHasClinicalAccess({ ...target, clinicalRole: clinicalRoles.resolveClinicalRole(target) }), licenseLevel: target.licenseLevel || null };
+    res.json({ token, user, destination: viewAsDestination(target), actingAs: impersonation.describe(row, target) });
+  } catch (error) {
+    console.error('impersonation start failed:', error.message);
+    res.status(500).json({ error: 'Could not start "View as".' });
+  }
+});
+app.post('/api/auth/impersonate/end', authenticateToken, async (req, res) => {
+  if (!impersonation.isActingAs(req.session)) return res.status(400).json({ error: 'You are not viewing as anyone.', code: 'NOT_ACTING_AS' });
+  await sessions.revoke(req.session.id, 'impersonation_ended');
+  await logActivity(req.session.impersonatorId, req.session.impersonatorName, 'impersonation_ended', 'user', req.user.id, { targetName: req.user.name || req.user.email, targetRole: req.user.role, sid: req.session.id });
   res.json({ ok: true });
 });
 
@@ -3270,6 +3374,15 @@ app.post('/api/auth/login', async (req, res) => {
     const users = await getUsers();
     const user = users.find(u => u.email?.toLowerCase() === email.toLowerCase());
     if (!user) {
+      // A self sign-up that is not an account yet says where it stands, but
+      // only to someone who knows its password: an email alone reveals nothing.
+      const pending = ((await db.get('signup_requests')) || [])
+        .filter(r => r && r.email === String(email).toLowerCase().trim() && r.status !== 'approved')
+        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0];
+      if (pending && await bcrypt.compare(password, pending.passwordHash)) {
+        const m = signups.loginMessageFor(pending);
+        if (m) return res.status(403).json(m);
+      }
       console.log('Login failed: unknown account');
       return res.status(400).json({ error: 'Invalid credentials' });
     }
@@ -3379,6 +3492,70 @@ app.post('/api/auth/client-login', async (req, res) => {
     } }));
   } catch (error) {
     console.error('Client login error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============== SELF SIGN-UP (owner, 2026-10-12) ==============
+// A sign-up is a REQUEST, never an account: see signupRequests.js. These two
+// routes are public, so both answer the same way whether or not an email is
+// already known, and both are rate-limited by hashed address.
+const signupLimited = signups.makeLimiter({ max: 5, windowMs: 3600 * 1000 });
+const SIGNUP_DONE = 'Thanks. Check your email for a link to confirm your address. Our office reviews every new account and will email you when it is ready.';
+
+app.post('/api/auth/self-signup', async (req, res) => {
+  try {
+    const b = req.body || {};
+    // A field people cannot see. A form filled in by a bot fills it in.
+    if (b.website) return res.json({ message: SIGNUP_DONE });
+    const ipKey = roiRepo.hashIp(clientIpFrom(req), JWT_SECRET);
+    if (signupLimited(ipKey)) return res.status(429).json({ error: 'Too many sign-ups from here. Please try again in an hour, or call the office.', code: 'SIGNUP_RATE_LIMITED' });
+    const n = signups.normalizeSignup(b, { minPasswordLength: config.MIN_PASSWORD_LENGTH });
+    if (n.error) return res.status(400).json(n);
+    const v = n.value;
+    const users = await getUsers();
+    const rows = (await db.get('signup_requests')) || [];
+    // Already an account, or already asked: say the same thing, do nothing.
+    // Telling a stranger "that email has an account" is how accounts get found.
+    const taken = users.some(u => u && String(u.email || '').toLowerCase() === v.email)
+      || rows.some(r => r && r.email === v.email && (r.status === 'verified' || (r.status === 'unverified' && Date.parse(r.verifyExpiresAt) > Date.now())));
+    if (taken) return res.json({ message: SIGNUP_DONE });
+    const token = require('crypto').randomBytes(24).toString('hex');
+    const row = signups.buildSignupRow({ id: uuidv4(), value: v, passwordHash: await bcrypt.hash(v.password, config.BCRYPT_SALT_ROUNDS), token, at: new Date().toISOString(), ipHash: ipKey });
+    rows.push(row);
+    await db.set('signup_requests', rows);
+    const link = `${await getAppBaseUrl()}/signup?verify=${token}`;
+    // No health information in this email: it only confirms an address.
+    const htmlBody = emailTemplates.renderGfcEmail({
+      greeting: v.name.split(' ')[0],
+      headline: 'Confirm your email',
+      paragraphs: ['Thanks for signing up with Godwins Family Care. Please confirm this is your email address.', `The link works for ${signups.VERIFY_HOURS} hours. If you didn't sign up, you can ignore this email.`],
+      ctaUrl: link, ctaLabel: 'Confirm my email'
+    }).html;
+    sendEmail(v.email, 'Confirm your email for Godwins Family Care', `Confirm your email: ${link}`, { htmlBody })
+      .catch(err => console.error('Sign-up email error (non-fatal):', err.message));
+    res.json({ message: SIGNUP_DONE });
+  } catch (error) {
+    console.error('Sign-up error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/auth/self-signup/verify', async (req, res) => {
+  try {
+    const token = String((req.body && req.body.token) || '');
+    if (!/^[a-f0-9]{48}$/.test(token)) return res.status(400).json({ error: 'That link is not valid. Try signing up again.', code: 'SIGNUP_LINK_INVALID' });
+    const rows = (await db.get('signup_requests')) || [];
+    const f = signups.findByToken(rows, token, new Date().toISOString());
+    if (f.error) return res.status(400).json(f);
+    if (!f.already) {
+      rows[f.idx] = { ...f.row, status: 'verified', verifiedAt: new Date().toISOString() };
+      await db.set('signup_requests', rows);
+      await logActivity('self_signup', 'Self sign-up', 'signup_email_verified', 'signup', f.row.id, { who: f.row.who });
+    }
+    res.json({ message: 'Your email is confirmed. Our office will review your account and email you when it is ready.' });
+  } catch (error) {
+    console.error('Sign-up verify error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -7693,7 +7870,7 @@ app.get('/api/gfc/clinical/documents', authenticateToken, requireEnrolledClient,
     try {
       const events = (roiEvents || []).filter(e => e && e.client_id === client.id);
       const lists = await Promise.all(events.map(e => roiStore.listProviderAuthorizations(e.id)));
-      roiAuths = lists.flat().map(a => ({ ...a, client_id: client.id }));
+      roiAuths = lists.flat().map(a => ({ ...a, client_id: client.id, signed_at: (events.find(e => e.id === a.consent_event_id) || {}).signed_at || null }));
     } catch (e) { console.error('Patient chart ROI lookup failed (non-fatal):', e.message); }
 
     const documents = clinicalRepo.buildChartDocumentIndex({
@@ -7803,19 +7980,15 @@ app.get('/api/gfc/clinical/documents/:docId/file', authenticateToken, requireEnr
     }
 
     if (kind === 'roi') {
-      const events = ((await db.get('consent_events')) || []).filter(e => e && e.client_id === client.id);
-      let auth = null;
-      for (const e of events) {
-        const list = await roiStore.listProviderAuthorizations(e.id);
-        auth = (list || []).find(a => String(a.id) === ref) || auth;
-        if (auth) break;
-      }
-      if (!auth) return res.status(404).json({ error: 'Record release not found' });
-      if (!auth.generated_pdf_drive_url) {
-        return res.status(404).json({ error: 'No stored copy of that record release', code: 'ROI_PDF_MISSING' });
-      }
+      // Rendered from the stored records rather than handed back as a Drive
+      // link: the Drive copy is private, so the link opened nothing, and a
+      // release whose upload failed had no copy at all.
+      const rendered = await renderStoredRoiPdf(client, ref);
+      if (!rendered) return res.status(404).json({ error: 'Record release not found' });
       await audit(`roi_${ref}`);
-      return res.json({ url: auth.generated_pdf_drive_url, fileName: auth.generated_pdf_file_name || null });
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', contentDisposition('inline', rendered.fileName));
+      return res.send(rendered.buffer);
     }
 
     // Patients never read OpenEMR (Portal P1). An OpenEMR-only document is
@@ -7928,6 +8101,106 @@ app.put('/api/gfc/sharing', authenticateToken, requireEnrolledClient, async (req
     res.json({ message: 'Sharing settings saved', sharing });
   } catch (error) {
     console.error('GFC sharing update error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// The patient's own Profile (portal redesign, owner mockup 9): contact details
+// and insurance on file, member IDs to the last four. The client and a
+// designated POA only; other family never see it.
+app.get('/api/gfc/profile', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const acting = patientRead.buildActingIdentity(req.user, client);
+    if (req.user.role !== config.ROLES.CLIENT && !acting.isPoa) {
+      return res.status(403).json({ error: 'Only the client or their designated Power of Attorney can see the profile.', code: 'PROFILE_CLIENT_ONLY' });
+    }
+    if (req.user.role !== config.ROLES.CLIENT) {
+      await logActivity(req.user.id, req.user.name || req.user.email, 'patient_clinical_read', 'client', client.id,
+        { role: req.user.role, audience: 'poa', actingFor: acting.actingFor, resource: 'profile' });
+    }
+    res.json(portalProfile.profileForPatient(client, req.user.role === config.ROLES.CLIENT ? req.user : client));
+  } catch (error) {
+    console.error('GFC profile error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ============================================================
+// FAMILY & CAREGIVERS (portal redesign, owner 2026-10-12)
+// The patient, or their POA, sees who has access and invites someone new.
+// An invite creates NOTHING but a request: an admin approves it, which makes
+// a plain family account (never a POA). The family ROI consent still decides
+// what that account can open. See familyInvites.js.
+// ============================================================
+app.get('/api/gfc/family', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const acting = patientRead.buildActingIdentity(req.user, client);
+    const canManage = req.user.role === config.ROLES.CLIENT || acting.isPoa;
+    const users = await getUsers();
+    const sharing = patientRead.normalizeSharing(client.sharing);
+    const people = users
+      .filter(u => u && u.role === config.ROLES.FAMILY && String(u.familyOfClientId || '') === String(client.id) && u.accountStatus !== 'inactive')
+      .map(u => ({ id: u.id, name: u.name, relationship: u.familyRelationship || null, isPoa: !!u.familyIsPoa, access: familyInvites.accessSummary(u, sharing), isYou: u.id === req.user.id }));
+    // Plain family see who else has access, but not the invites or their emails.
+    const invites = canManage
+      ? ((await db.get('family_invites')) || []).filter(i => i && i.clientId === client.id && i.status !== 'cancelled' && i.status !== 'approved').map(familyInvites.publicInvite)
+      : [];
+    res.json({ people, invites, canManage, roiFamilySigned: isConsentSatisfied((client.consents || {}).roiFamily), relationships: familyInvites.RELATIONSHIPS });
+  } catch (error) {
+    console.error('GFC family list error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/gfc/family/invites', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const acting = patientRead.buildActingIdentity(req.user, client);
+    if (req.user.role !== config.ROLES.CLIENT && !acting.isPoa) {
+      return res.status(403).json({ error: 'Only the client or their designated Power of Attorney can invite family.', code: 'FAMILY_READ_ONLY' });
+    }
+    const n = familyInvites.normalizeInvite(req.body);
+    if (n.error) return res.status(400).json({ error: n.error, code: n.code });
+    const invites = (await db.get('family_invites')) || [];
+    const clash = familyInvites.checkInvite(n.value, { users: await getUsers(), invites, clientId: client.id });
+    if (clash) return res.status(409).json(clash);
+    const row = familyInvites.buildInviteRow({ id: uuidv4(), clientId: client.id, value: n.value, by: req.user, at: new Date().toISOString() });
+    invites.push(row);
+    await db.set('family_invites', invites);
+    // The audit row says an invite was made, never who it names.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'family_invite_requested', 'client', client.id,
+      { role: req.user.role, actingFor: acting.actingFor, inviteId: row.id, saysPoa: row.saysPoa });
+    res.json({ invite: familyInvites.publicInvite(row), message: 'Invite sent to the office. We will confirm it and email them their sign-in details.' });
+  } catch (error) {
+    console.error('GFC family invite error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/gfc/family/invites/:inviteId/cancel', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const acting = patientRead.buildActingIdentity(req.user, client);
+    if (req.user.role !== config.ROLES.CLIENT && !acting.isPoa) {
+      return res.status(403).json({ error: 'Only the client or their designated Power of Attorney can change invites.', code: 'FAMILY_READ_ONLY' });
+    }
+    const invites = (await db.get('family_invites')) || [];
+    const i = invites.findIndex(x => x && x.id === req.params.inviteId && x.clientId === client.id);
+    if (i === -1) return res.status(404).json({ error: 'Invite not found', code: 'INVITE_NOT_FOUND' });
+    const d = familyInvites.decide(invites[i], { decision: 'cancelled', by: req.user, at: new Date().toISOString() });
+    if (d.error) return res.status(409).json(d);
+    invites[i] = d.row;
+    await db.set('family_invites', invites);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'family_invite_cancelled', 'client', client.id, { inviteId: d.row.id });
+    res.json({ invite: familyInvites.publicInvite(d.row) });
+  } catch (error) {
+    console.error('GFC family invite cancel error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -8087,7 +8360,11 @@ app.get('/api/clinical/status', authenticateToken, requireClinicalRead, async (r
       // this answer and never decides it itself.
       canSubmitBilling: clinicalRoles.canSubmitBilling(req.user),
       // Where an order goes: the one order edit a case manager holds.
-      canEditOrderDestination: clinicalRoles.canEditOrderDestination(req.user)
+      canEditOrderDestination: clinicalRoles.canEditOrderDestination(req.user),
+      // Who may add the second signature an IHPC or LMSW-authored care plan
+      // waits on (a provider or an LCSW). Served so the page offers the pad
+      // only to someone the route will accept.
+      canCoSignCarePlan: clinicalRoles.canCoSignCarePlan(req.user)
     },
     ...(await openemr.getStatus(req.user)), serverStartedAt: SERVER_STARTED_AT,
     // Session 4.4 deploy diagnostics: billing NPI (spec §2.5) + the caller's
@@ -8316,21 +8593,15 @@ app.get('/api/clinical/patients/:clientId/documents/:docId/file', authenticateTo
     }
 
     if (kind === 'roi') {
-      const events = ((await db.get('consent_events')) || []).filter(e => e && e.client_id === client.id);
-      let auth = null;
-      for (const e of events) {
-        const list = await roiStore.listProviderAuthorizations(e.id);
-        auth = (list || []).find(a => String(a.id) === ref) || auth;
-        if (auth) break;
-      }
-      if (!auth) return res.status(404).json({ error: 'Record release not found' });
-      if (!auth.generated_pdf_drive_url) {
-        return res.status(404).json({ error: 'No stored copy of that record release', code: 'ROI_PDF_MISSING' });
-      }
+      // Rendered from the stored records rather than handed back as a Drive
+      // link: the Drive copy is private, so the link opened nothing, and a
+      // release whose upload failed had no copy at all.
+      const rendered = await renderStoredRoiPdf(client, ref);
+      if (!rendered) return res.status(404).json({ error: 'Record release not found' });
       await audit(`roi_${ref}`);
-      // The Drive copy is the filed original; hand back the reference rather
-      // than re-rendering, so what a clinician reads is what the provider got.
-      return res.json({ url: auth.generated_pdf_drive_url, fileName: auth.generated_pdf_file_name || null });
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', contentDisposition('inline', rendered.fileName));
+      return res.send(rendered.buffer);
     }
 
     if (kind === 'emr') {
@@ -8469,7 +8740,7 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
     try {
       const events = (roiEvents || []).filter(e => e && e.client_id === client.id);
       const lists = await Promise.all(events.map(e => roiStore.listProviderAuthorizations(e.id)));
-      roiAuths = lists.flat().map(a => ({ ...a, client_id: client.id }));
+      roiAuths = lists.flat().map(a => ({ ...a, client_id: client.id, signed_at: (events.find(e => e.id === a.consent_event_id) || {}).signed_at || null }));
     } catch (e) { console.error('Chart ROI lookup failed (non-fatal):', e.message); }
 
     const chartDocuments = clinicalRepo.buildChartDocumentIndex({
@@ -10043,11 +10314,12 @@ const saveBillingRecord = async (rows, record) => {
 };
 
 const loadEncounterSideRecords = async (encounterUuid) => {
-  const [rx, orders, attestations, addenda, risks] = await Promise.all([
+  const [rx, orders, attestations, addenda, risks, screens] = await Promise.all([
     loadRows('prescriptions'), loadRows('clinical_orders'), loadRows('encounter_attestations'), loadRows('encounter_addenda'),
-    loadRows('encounter_risk_assessments')
+    loadRows('encounter_risk_assessments'), loadRows('clinical_screenings')
   ]);
   return {
+    screenings: forEncounter(screens, encounterUuid).sort((a, b) => String(a.at).localeCompare(String(b.at))),
     prescriptions: forEncounter(rx, encounterUuid).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))),
     orders: forEncounter(orders, encounterUuid).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))),
     attestation: forEncounter(attestations, encounterUuid)[0] || null,
@@ -10800,7 +11072,9 @@ const noteSatisfiers = (ctx) => ({
   // as an order — the note no longer offers a free-text copy of either.
   ordersRxReferrals: (ctx.orders || []).length > 0 || (ctx.prescriptions || []).length > 0,
   medicationsRx: (ctx.prescriptions || []).length > 0,
-  riskAssessment: !!ctx.riskAssessment
+  riskAssessment: !!ctx.riskAssessment,
+  // A screening recorded on the encounter IS the screening-scores section.
+  screeningScores: (ctx.screenings || []).length > 0
 });
 const noteReason = (note, visitLabel) => {
   const first = noteFormat.toPlainText((note && note.chiefConcern) || '').trim().split('\n')[0];
@@ -10820,8 +11094,12 @@ const writeNarrativeNote = async (emr, client, record, { signature, revisions } 
   try {
     let soap;
     if (record.note) {
+      // Screening results recorded on this encounter travel into the OpenEMR
+      // note, so the chart does not depend on the app to show them.
+      const screenLines = (await loadRows('clinical_screenings'))
+        .filter(r => r && r.encounterUuid === String(record.encounterUuid)).map(screenings.describe);
       soap = clinicalNotes.composeNarrative({
-        note: record.note, revisions, signature,
+        note: record.note, revisions, signature, screenLines,
         voided: record.noteStatus === clinicalNotes.NOTE_STATUS.VOIDED ? record.voided : null
       });
     } else if (signature && record.narrativeNoteSid) {
@@ -11069,6 +11347,8 @@ app.post('/api/clinical/patients/:clientId/notes', authenticateToken, requireCli
     const clean = clinicalNotes.sanitizeNote(body.note);
     if (clean.error) return res.status(400).json({ error: clean.error, code: clean.code });
     const note = clean.note;
+    const typeRefusal = noteTypeRefusal(req.user, note, null);
+    if (typeRefusal) return res.status(typeRefusal.status).json(typeRefusal.body);
     const actor = actorFromReq(req);
     const emr = openemr.forActor(req.user);
     const puuid = client.openEmrPatientId;
@@ -11306,6 +11586,8 @@ app.put('/api/clinical/patients/:clientId/encounters/:euuid/note', authenticateT
     const clean = clinicalNotes.sanitizeNote(body.note);
     if (clean.error) return res.status(400).json({ error: clean.error, code: clean.code });
     const before = ctx.record.note || null;
+    const typeRefusal = noteTypeRefusal(req.user, clean.note, before);
+    if (typeRefusal) return res.status(typeRefusal.status).json(typeRefusal.body);
     const carry = await applyCarryRequest(ctx.emr, ctx.client, clean.note,
       body, before ? before.carriedForward : null);
     if (carry.error) return res.status(carry.status).json({ error: carry.error, code: carry.code });
@@ -11725,7 +12007,9 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
         canAttachAppointment: clinicalRoles.canClinicalWrite(req.user) && !ctx.closed && !linkedEid && record.noteStatus !== clinicalNotes.NOTE_STATUS.VOIDED
       },
       riskAssessment: ctx.riskAssessment, riskHistory: ctx.riskHistory,
-      riskRequired: clinicalRepo.riskAssessmentRequired(record.visit),
+      // Screenings recorded on this visit, each with its one-line summary.
+      screenings: (ctx.screenings || []).map(r => ({ ...r, summary: screenings.describe(r), needsRisk: screenings.needsRiskAssessment(r) })),
+      riskRequired: clinicalRepo.riskAssessmentRequired(record.visit) || (ctx.screenings || []).some(screenings.needsRiskAssessment),
       riskLevels: clinicalRepo.RISK_LEVELS, riskDomains: clinicalRepo.RISK_DOMAINS,
       riskNeedsPlan: clinicalRepo.RISK_NEEDS_PLAN,
       visit: record.visit || null,
@@ -11737,6 +12021,10 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
         riskPositive: !!(ctx.riskAssessment && ctx.riskAssessment.levels &&
           clinicalRepo.RISK_DOMAINS.some(d => clinicalRepo.RISK_NEEDS_PLAN.includes(ctx.riskAssessment.levels[d])))
       }).map(sec => ({ ...sec, ownField: clinicalNotes.sectionHasOwnField(sec.key) })),
+      // Only its template sections (a phone call, a social work note): the
+      // editor shows no vitals, exam or SOAP boxes.
+      sectionsOnly: apptTypes.isSectionsOnly(((record.note && record.note.visit) || record.visit || {}).appointmentType,
+        ((record.note && record.note.visit) || record.visit || {}).modality),
       completedSections: derivedSections,
       candidates, candidatesError: cands.error,
       favorites: {
@@ -11876,7 +12164,14 @@ app.put('/api/clinical/patients/:clientId/encounters/:euuid/coding', authenticat
     await recordUsageFor(ctx.actor, 'HCPCS', record.services.filter(s => s.codeType === 'HCPCS' && !prevSvc.has(s.code)));
     const warnings = [];
     const problemAdds = [];
-    for (const code of (billingEdit && !awaitingAddendum) ? [] : (Array.isArray(body.addToProblemList) ? body.addToProblemList : [])) {
+    // Writing the problem list is an RN's or a provider's. A social worker
+    // coding a note keeps their diagnoses on the encounter; nothing goes to
+    // the problem list on their say-so.
+    const mayWriteProblems = clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.PROBLEM_LIST_WRITE);
+    if (!mayWriteProblems && Array.isArray(body.addToProblemList) && body.addToProblemList.length) {
+      warnings.push('Not added to the problem list: that is done by an RN or a provider. The diagnoses are saved on this encounter.');
+    }
+    for (const code of (billingEdit && !awaitingAddendum) || !mayWriteProblems ? [] : (Array.isArray(body.addToProblemList) ? body.addToProblemList : [])) {
       const d = record.diagnoses.find(x => x.code === clinicalRepo.normalizeIcd10(code));
       if (!d) continue;
       try {
@@ -12979,6 +13274,12 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/sign', authenticate
       const noteCheck = clinicalNotes.checkNoteForSigning(ctx.record.note);
       if (!noteCheck.ok) return res.status(409).json({ error: noteCheck.error, code: noteCheck.code, pending: noteCheck.pending || [] });
     }
+    // A PHQ-9 with item 9 above 0 means the client reported thoughts of
+    // self-harm. Whatever the visit type, it is not signed without the risk
+    // assessment that answer calls for.
+    if ((ctx.screenings || []).some(screenings.needsRiskAssessment) && !ctx.riskAssessment) {
+      return res.status(409).json({ error: 'A PHQ-9 on this visit has item 9 above 0 (thoughts of self-harm). Record the risk assessment on this encounter before signing.', code: 'SIGN_SCREENING_NEEDS_RISK' });
+    }
     // The CLINICIAN's gate (owner, 2026-09-29): a complete note and at least
     // one ICD-10. CPT, the billing NPI and the place of service are billing's,
     // settled after this signature and checked at Submit to billing.
@@ -13661,8 +13962,11 @@ const VISIT_TIMING_EVENTS = Object.freeze({
   en_route: 'enRouteAt', arrive: 'arrivedAt', start: 'startedAt', end: 'endedAt'
 });
 
+// Gated on writing ANY clinical note, not the nursing one alone: an LCSW bills
+// psychotherapy on time, so the recorded start and end are theirs to record
+// too (owner, 2026-10-11).
 app.post('/api/clinical/visits/:eid/timing', authenticateToken, requireClinicalWrite,
-  requireCapability(clinicalRoles.CAPABILITIES.NURSING_NOTE), async (req, res) => {
+  requireNoteWriter, async (req, res) => {
     try {
       const eid = String(req.params.eid || '').trim();
       if (!/^\d+$/.test(eid)) return res.status(400).json({ error: 'A numeric appointment id is required', code: 'BAD_EID' });
@@ -14490,11 +14794,18 @@ app.get('/api/clinical/patients/:clientId/place-of-service', authenticateToken, 
     const locations = apptTypes.LOCATIONS.map(l => ({
       key: l.key, label: l.label, pos: l.pos || null, fromFacilityRecord: !!l.fromFacilityRecord
     }));
+    const viewerRole = clinicalRoles.resolveClinicalRole(req.user);
     const appointmentTypes = apptTypes.APPOINTMENT_TYPES.map(t => ({
       key: t.key, label: t.label, service: t.service, defaultMinutes: t.defaultMinutes,
       telehealthAllowed: !!t.telehealthAllowed, telehealthPayerCaveat: !!t.telehealthPayerCaveat,
       // Served so the page never offers a modality the type refuses.
-      modalities: apptTypes.modalitiesForType(t.key)
+      modalities: apptTypes.modalitiesForType(t.key),
+      // 'sections': the note is only its template sections (no vitals, exam
+      // or nursing blocks). Served so the page cannot restate which types.
+      noteShape: t.noteShape || null,
+      // Whether THIS viewer may write this note. The page offers only these;
+      // the note routes refuse the rest (noteTypeRefusal).
+      canDocument: apptTypes.canDocumentType(t.key, viewerRole).ok
     }));
     const services = apptTypes.SERVICES.map(x => ({ key: x.key, label: x.label }));
     const modalities = apptTypes.MODALITIES.map(x => ({ key: x.key, label: x.label }));
@@ -14730,6 +15041,82 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/charges/repost', au
     res.status(502).json({ error: `Re-post failed: ${error.message}` });
   }
 });
+
+// ── Screenings (social work, owner 2026-10-11) ───────────────────────────
+// PHQ-2, PHQ-9, GAD-7 and a social-needs screen, recorded on the encounter.
+// Any licensed role may administer one (screeningInstrument). Naming a
+// standing order records the screening under that protocol's authority, with
+// the same checks an order gets: active, signed, the role permitted, within
+// the credential ceiling, the instrument on the protocol and a linked
+// indication. APPEND-ONLY, like the risk assessment.
+app.get('/api/clinical/screenings/catalog', authenticateToken, requireClinicalRead, (req, res) => {
+  res.json({ instruments: screenings.catalog() });
+});
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/screenings', authenticateToken, requireClinicalWrite,
+  requireCapability(clinicalRoles.CAPABILITIES.SCREENING_INSTRUMENT), async (req, res) => {
+    try {
+      const ctx = await loadEncounterContext(req, res);
+      if (!ctx || refuseIfClosed(ctx, res)) return;
+      const body = req.body || {};
+      const standingOrderId = String(body.standingOrderId || '').trim();
+      let standingOrder = null; let auth = null;
+      if (standingOrderId) {
+        standingOrder = (await loadRows('standing_orders')).find(o => o && o.id === standingOrderId) || null;
+        const inst = screenings.INSTRUMENTS[String(body.instrument || '').trim()];
+        const dx = (Array.isArray(body.diagnosisCodes) ? body.diagnosisCodes : []).map(clinicalRepo.normalizeIcd10).filter(Boolean);
+        const onEncounter = new Set((ctx.record.diagnoses || []).map(d => d.code));
+        const unknown = dx.filter(c => !onEncounter.has(c));
+        if (unknown.length) return res.status(400).json({ error: `${unknown.join(', ')} is not a diagnosis on this encounter — add it to the encounter first`, code: 'ORDER_DX_UNKNOWN' });
+        auth = standingOrders.authorizeExecution({
+          standingOrder, actor: ctx.actor, orderType: 'screening',
+          tests: inst ? [inst.label] : [], diagnosisCodes: dx, clientId: ctx.client.id
+        });
+        if (auth.error) return res.status(auth.status || 403).json({ error: auth.error, code: auth.code, ...(auth.ceiling ? { ceiling: auth.ceiling, requested: auth.requested } : {}) });
+      }
+      const built = screenings.buildScreening({
+        id: uuidv4(), clientId: ctx.client.id, encounterUuid: ctx.encounterUuid, input: body, actor: ctx.actor,
+        standingOrderRef: auth ? auth.standingOrderRef : null, authorizedBy: auth ? auth.orderingClinician : null
+      });
+      if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+      const rows = await loadRows('clinical_screenings');
+      rows.push(built.screening);
+      await db.set('clinical_screenings', rows);
+      if (auth) {
+        const execRows = await loadRows('standing_order_executions');
+        execRows.push({
+          id: uuidv4(),
+          ...standingOrders.buildExecutionAudit({
+            order: { id: built.screening.id, orderType: 'screening', tests: [built.screening.label],
+              diagnosisCodes: (Array.isArray(body.diagnosisCodes) ? body.diagnosisCodes : []).map(clinicalRepo.normalizeIcd10).filter(Boolean),
+              encounterUuid: ctx.encounterUuid, createdAt: built.screening.at },
+            standingOrder, actor: ctx.actor, clientId: ctx.client.id
+          })
+        });
+        await db.set('standing_order_executions', execRows);
+      }
+      // The narrative in OpenEMR carries the result too.
+      const warnings = [];
+      if (ctx.record.note) {
+        const w = await writeNarrativeNote(ctx.emr, ctx.client, ctx.record, { revisions: clinicalNotes.revisionsFor(await loadNoteRevisions(), ctx.encounterUuid) });
+        if (w) warnings.push(w);
+        await saveBillingRecord(ctx.rows, ctx.record);
+      }
+      if (screenings.needsRiskAssessment(built.screening)) {
+        warnings.push('PHQ-9 item 9 is above 0. Complete the risk assessment on this encounter now; the visit cannot be signed without it.');
+      }
+      // The instrument and whether it was positive are audited; the score and
+      // the notes are not (an audit trail is not a second copy of the chart).
+      await logActivity(req.user.id, req.user.name || req.user.email, 'screening_recorded', 'client', ctx.client.id, {
+        encounterUuid: ctx.encounterUuid, screeningId: built.screening.id, instrument: built.screening.instrument,
+        positive: built.screening.positive, authority: built.screening.authority,
+        standingOrderId: auth ? auth.standingOrderRef.id : null, standingOrderVersion: auth ? auth.standingOrderRef.version : null
+      });
+      res.json({ message: `${built.screening.label} recorded`, screening: built.screening, warnings });
+    } catch (error) {
+      console.error('Screening error:', error);
+      res.status(502).json({ error: `Screening could not be saved: ${error.message}` });
+    }
+  });
 
 // ── Risk assessment (Session 4.12 Scope G) ────────────────────────────────
 // A psychiatric encounter cannot be SIGNED without one. Documenting the visit
@@ -15071,13 +15458,15 @@ const normalizePriorProviders = (arr, defaultAddedFrom) => {
   if (!Array.isArray(arr)) return [];
   return arr
     .map(p => p || {})
-    .filter(p => (p.name || '').trim())
+    .filter(p => roiRepo.cleanText(p.name))
+    // cleanText, not .trim(): a structured address object used to throw here
+    // (or print "[object Object]" on the release).
     .map(p => ({
-      name: (p.name || '').trim(),
-      dept: (p.dept || '').trim(),
-      address: (p.address || '').trim(),
-      phone: (p.phone || '').trim(),
-      fax: (p.fax || '').trim(),
+      name: roiRepo.cleanText(p.name, roiRepo.FIELD_LIMITS.name),
+      dept: roiRepo.cleanText(p.dept, roiRepo.FIELD_LIMITS.dept),
+      address: roiRepo.cleanText(p.address, roiRepo.FIELD_LIMITS.address),
+      phone: roiRepo.cleanText(p.phone, roiRepo.FIELD_LIMITS.phone),
+      fax: roiRepo.cleanText(p.fax, roiRepo.FIELD_LIMITS.fax),
       roleLabel: ['pcp', 'specialist', 'hospital', 'other'].includes(p.roleLabel) ? p.roleLabel : 'other',
       addedFrom: ['intake_prefill', 'manual', 'roi_form'].includes(p.addedFrom) ? p.addedFrom : (defaultAddedFrom || 'manual'),
       createdAt: p.createdAt || new Date().toISOString()
@@ -15286,10 +15675,10 @@ const resolvePriorProviders = (client, intake) => {
     ? normalizePriorProviders(intake.priorProviders, 'intake_prefill') : [];
   const derivedPrefill = deriveProvidersFromMedicalTeam(intake.medicalTeam)
     .map(p => ({ ...p, addedFrom: 'intake_prefill' }));
-  const seen = new Set(preserved.map(p => (p.name || '').toLowerCase()));
+  const seen = new Set(preserved.map(p => roiRepo.providerKey(p.name)));
   const merged = [];
   [...explicitPrefill, ...derivedPrefill].forEach(p => {
-    const key = (p.name || '').toLowerCase();
+    const key = roiRepo.providerKey(p.name);
     if (!key || seen.has(key)) return;
     seen.add(key);
     merged.push(p);
@@ -16040,6 +16429,177 @@ app.get('/api/gfc/admin/enrollment/list', authenticateToken, requireEnrollmentSt
 });
 
 // GET /api/gfc/admin/enrollment/:clientId — full submission detail.
+// Self sign-ups waiting on staff (owner, 2026-10-12). Staff read the confirmed
+// ones, with any client already on file who shares the surname and date of
+// birth (a likely duplicate or a family link). An ADMIN decides.
+app.get('/api/gfc/admin/signups', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const rows = ((await db.get('signup_requests')) || []).filter(r => r && (r.status === 'verified' || r.status === 'declined' || r.status === 'approved'));
+    const users = await getUsers();
+    const clients = users.filter(u => u && u.role === config.ROLES.CLIENT);
+    const fold = (x) => String(x || '').toLowerCase().normalize('NFD').replace(/[^a-z]/g, '');
+    const matchesFor = (r) => {
+      const who = r.who === 'self' ? { name: r.name, dob: r.dob } : { name: r.patient.name, dob: r.patient.dob };
+      const last = fold((signups.splitName(who.name) || {}).lastName);
+      return clients.filter(c => {
+        const i = c.intake || {};
+        return fold(i.lastName || String(c.name || '').split(' ').pop()) === last && (i.dob || c.dob) === who.dob;
+      }).map(c => ({ id: c.id, name: c.name }));
+    };
+    res.json({
+      signups: rows.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+        .map(r => ({ ...signups.staffRow(r), possibleMatches: r.status === 'verified' ? matchesFor(r) : [] })),
+      clients: clients.map(c => ({ id: c.id, name: c.name }))
+    });
+  } catch (error) {
+    console.error('Sign-ups read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/gfc/admin/signups/:id/decide', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { action, clientId, reason } = req.body || {};
+    const rows = (await db.get('signup_requests')) || [];
+    const idx = rows.findIndex(r => r && r.id === req.params.id);
+    const row = idx === -1 ? null : rows[idx];
+    const bad = signups.checkDecision(row, { action, clientId, reason });
+    if (bad) return res.status(bad.code === 'SIGNUP_NOT_FOUND' ? 404 : bad.code.endsWith('_REQUIRED') || bad.code === 'SIGNUP_BAD_ACTION' ? 400 : 409).json(bad);
+    const at = new Date().toISOString();
+    const by = { id: req.user.id, name: req.user.name || req.user.email };
+    if (action === 'decline') {
+      rows[idx] = { ...row, status: 'declined', decidedAt: at, decidedBy: by, declineReason: String(reason).trim().slice(0, 500) };
+      await db.set('signup_requests', rows);
+      await logActivity(req.user.id, by.name, 'signup_declined', 'signup', row.id, {});
+      return res.json({ signup: signups.staffRow(rows[idx]) });
+    }
+    const users = await getUsers();
+    // Checked again now: an account may have been made since they signed up.
+    if (users.some(u => u && String(u.email || '').toLowerCase() === row.email)) {
+      return res.status(409).json({ error: 'An account with that email already exists. Decline this sign-up, or link that account on the user form.', code: 'SIGNUP_EMAIL_IN_USE' });
+    }
+    const familyUser = (forClientId, relationship) => ({
+      id: uuidv4(), email: row.email, name: row.name, password: row.passwordHash,
+      role: config.ROLES.FAMILY, familyOfClientId: forClientId, familyIsPoa: false, familyRelationship: relationship || null,
+      phone: row.phone, accountStatus: 'active', source: 'self_signup', signupRequestId: row.id,
+      isManager: false, hasServicePortalAccess: false, hasAdminHubAccess: false, hasImplementationsAccess: false, hasClientPortalAdminAccess: false,
+      createdAt: at
+    });
+    let created = [];
+    let linkedClientId = null;
+    if (action === 'link_family') {
+      const client = users.find(u => u && u.id === clientId && u.role === config.ROLES.CLIENT);
+      if (!client) return res.status(404).json({ error: 'That client was not found.', code: 'SIGNUP_LINK_CLIENT_NOT_FOUND' });
+      const fam = familyUser(client.id, row.patient ? row.patient.relationship : null);
+      users.push(fam); created.push(fam.id); linkedClientId = client.id;
+    } else {
+      const forSelf = row.who === 'self';
+      const cid = uuidv4();
+      const intake = signups.intakeFor(row);
+      const clientName = `${intake.firstName} ${intake.lastName}`;
+      const client = {
+        id: cid,
+        // A loved one gets a client record with no login of their own; the
+        // person who signed up signs in as their family member.
+        email: forSelf ? row.email : `signup+${cid}@placeholder.local`,
+        name: clientName,
+        password: forSelf ? row.passwordHash : await bcrypt.hash(uuidv4() + uuidv4(), config.BCRYPT_SALT_ROUNDS),
+        role: config.ROLES.CLIENT,
+        practiceName: clientName,
+        slug: await generateClientUserSlug(clientName),
+        source: 'self_signup', signupRequestId: row.id,
+        // The enrollment gate, the intake and every consent still run.
+        enrollmentStatus: 'intake_pending',
+        serviceLine: signups.serviceLineFor(row.interests),
+        dob: intake.dob, phone: intake.phone,
+        careTeam: { assignedFNPs: [], assignedCaseManager: null, primaryCaregiver: null, backupCaregiver: null },
+        intake,
+        accountStatus: 'active', hasPortalLogin: forSelf,
+        isManager: false, hasServicePortalAccess: false, hasAdminHubAccess: false, hasImplementationsAccess: false, hasClientPortalAdminAccess: false,
+        createdAt: at
+      };
+      users.push(client); created.push(client.id); linkedClientId = cid;
+      if (!forSelf) { const fam = familyUser(cid, row.patient.relationship); users.push(fam); created.push(fam.id); }
+    }
+    await db.set('users', users);
+    invalidateUsersCache();
+    rows[idx] = { ...row, status: 'approved', decidedAt: at, decidedBy: by, action, clientId: linkedClientId, userIds: created };
+    await db.set('signup_requests', rows);
+    await logActivity(req.user.id, by.name, `signup_${action}`, 'signup', row.id, { clientId: linkedClientId, userIds: created });
+    const htmlBody = emailTemplates.renderGfcEmail({
+      greeting: row.name.split(' ')[0],
+      headline: 'Your account is ready',
+      paragraphs: ['Our office has set up your Godwins Family Care account. Sign in with the email and password you chose.'],
+      ctaUrl: `${await getAppBaseUrl()}/login`, ctaLabel: 'Sign in'
+    }).html;
+    sendEmail(row.email, 'Your Godwins Family Care account is ready', 'Your account is ready. Sign in with the email and password you chose.', { htmlBody })
+      .catch(err => console.error('Sign-up approval email error (non-fatal):', err.message));
+    res.json({ signup: signups.staffRow(rows[idx]), clientId: linkedClientId, userIds: created });
+  } catch (error) {
+    console.error('Sign-up decision error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Family invites waiting on staff (portal redesign, 2026-10-12). Staff read;
+// an ADMIN decides, because approving creates an account. Approving makes a
+// plain family account linked to this client and emails its sign-in details.
+// It never sets familyIsPoa: a patient saying "this is my POA" is a prompt to
+// ask for the document, and the admin sets POA on the user form once it is
+// verified, as before.
+app.get('/api/gfc/admin/enrollment/:clientId/family-invites', authenticateToken, requireEnrollmentStaff, async (req, res) => {
+  try {
+    const invites = ((await db.get('family_invites')) || []).filter(i => i && i.clientId === req.params.clientId);
+    res.json({ invites: invites.sort((a, b) => String(b.requestedAt).localeCompare(String(a.requestedAt))) });
+  } catch (error) {
+    console.error('Family invites read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/gfc/admin/enrollment/:clientId/family-invites/:inviteId/decide', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const decision = req.body && req.body.decision;
+    if (decision !== 'approved' && decision !== 'declined') return res.status(400).json({ error: 'decision must be approved or declined', code: 'INVITE_BAD_DECISION' });
+    const invites = (await db.get('family_invites')) || [];
+    const i = invites.findIndex(x => x && x.id === req.params.inviteId && x.clientId === req.params.clientId);
+    if (i === -1) return res.status(404).json({ error: 'Invite not found', code: 'INVITE_NOT_FOUND' });
+    const at = new Date().toISOString();
+    const d = familyInvites.decide(invites[i], { decision, by: req.user, at, reason: req.body && req.body.reason });
+    if (d.error) return res.status(d.code === 'INVITE_DECLINE_REASON_REQUIRED' ? 400 : 409).json(d);
+    let newUser = null;
+    if (decision === 'approved') {
+      const users = await getUsers();
+      const row = invites[i];
+      // Checked again at approval: an account may have been made since the ask.
+      if (users.some(u => u && String(u.email || '').toLowerCase() === row.email)) {
+        return res.status(409).json({ error: 'An account with that email already exists. Link it on the user form instead.', code: 'INVITE_EMAIL_IN_USE' });
+      }
+      const plain = generateTempPassword({ email: row.email });
+      newUser = {
+        id: uuidv4(), email: row.email, name: row.name,
+        password: await bcrypt.hash(plain, config.BCRYPT_SALT_ROUNDS),
+        role: config.ROLES.FAMILY, familyOfClientId: req.params.clientId, familyIsPoa: false,
+        familyRelationship: row.relationship, invitedThrough: row.id,
+        isManager: false, hasServicePortalAccess: false, hasAdminHubAccess: false, hasImplementationsAccess: false, hasClientPortalAdminAccess: false,
+        createdAt: at
+      };
+      users.push(newUser);
+      await db.set('users', users);
+      invalidateUsersCache();
+      sendWelcomeEmail(newUser, plain).catch(err => console.error('Welcome email error (non-fatal):', err));
+    }
+    invites[i] = newUser ? { ...d.row, userId: newUser.id } : d.row;
+    await db.set('family_invites', invites);
+    await logActivity(req.user.id, req.user.name || req.user.email, `family_invite_${decision}`, 'client', req.params.clientId,
+      { inviteId: d.row.id, userId: newUser ? newUser.id : null });
+    res.json({ invite: invites[i], userId: newUser ? newUser.id : null });
+  } catch (error) {
+    console.error('Family invite decision error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.get('/api/gfc/admin/enrollment/:clientId', authenticateToken, requireEnrollmentStaff, async (req, res) => {
   try {
     const users = await getUsers();
@@ -18232,7 +18792,7 @@ app.get('/api/gfc/admin/enrollment/:clientId/enrollment-packet.zip', authenticat
 // Shared side-effect dispatcher: legacy sheet log + admin email (PDFs attached)
 // + patient/submitter confirmation (no PDFs). All best-effort and non-fatal;
 // gated by config.PARALLEL_LEGACY_SYNC. NEVER attaches PHI to patient email.
-async function dispatchRoiNotifications({ client, event, fileNames, fileUrls, pdfAttachments, submitterEmail }) {
+async function dispatchRoiNotifications({ client, event, fileNames, fileUrls, pdfAttachments }) {
   if (!config.PARALLEL_LEGACY_SYNC) return;
   const clientName = client.preferredName || client.name || 'Client';
   // Sheet key: the client's legacy intake token if present, else a stable portal key.
@@ -18257,13 +18817,14 @@ async function dispatchRoiNotifications({ client, event, fileNames, fileUrls, pd
       config.ROI_ADMIN_EMAIL,
       `Provider ROI Submitted${providerCount > 1 ? ` (${providerCount} authorizations)` : ''}`,
       `A Transfer-of-Care authorization was received for ${clientName}. See attached PDF(s).`,
-      { htmlBody: adminHtml, attachments: (pdfAttachments || []) }
+      // The PDFs carry the patient's identity and records request: PHI.
+      { htmlBody: adminHtml, attachments: (pdfAttachments || []), phi: true }
     );
   } catch (e) { console.error('[ROI] admin email failed (non-fatal):', e.message); }
 
   // Patient + submitter confirmation — plain receipt, NEVER any PDF/PHI.
   try {
-    const recipients = [client.email, submitterEmail, (client.intake && client.intake.primaryContact && client.intake.primaryContact.email)]
+    const recipients = [client.email, (client.intake && client.intake.primaryContact && client.intake.primaryContact.email)]
       .filter(Boolean)
       .filter((v, i, a) => a.indexOf(v) === i);
     if (recipients.length) {
@@ -18277,36 +18838,129 @@ async function dispatchRoiNotifications({ client, event, fileNames, fileUrls, pd
   } catch (e) { console.error('[ROI] patient email failed (non-fatal):', e.message); }
 }
 
+// Who the release is about, from the client record. The form used to send
+// these back and the server printed whatever arrived, so a stale or blank page
+// produced releases with the wrong or missing identity. The record wins; a
+// value the client types is used only where the record has none.
+const roiPatientIdentity = (client, typed) => {
+  const intake = client.intake || {};
+  const pc = intake.primaryContact || {};
+  const t = typed || {};
+  const onFile = {
+    patientName: roiRepo.cleanText(client.preferredName || client.name || `${intake.firstName || ''} ${intake.lastName || ''}`, 120),
+    patientDOB: roiRepo.cleanText(intake.dob, 20),
+    // A structured address is flattened by cleanText (line1, line2, city,
+    // state zip), never printed as "[object Object]".
+    patientAddress: roiRepo.cleanText(intake.address || client.address, 200),
+    patientPhone: roiRepo.cleanText(intake.phone || pc.phone, 30)
+  };
+  const out = {};
+  const fromRecord = {};
+  for (const k of Object.keys(onFile)) {
+    fromRecord[k] = !!onFile[k];
+    out[k] = onFile[k] || roiRepo.cleanText(t[k], k === 'patientAddress' ? 200 : 120);
+  }
+  return { patient: out, fromRecord };
+};
+
+// One entry per provider. Lists saved before 2026-10-10 can hold the same
+// office twice under two spellings; the first keeps its place and takes any
+// detail the later copy had.
+const dedupePriorProviders = (list) => {
+  const out = [];
+  const byKey = new Map();
+  for (const p of list || []) {
+    const key = roiRepo.providerKey(p.name);
+    if (!key) continue;
+    const prev = byKey.get(key);
+    if (!prev) { const row = { ...p }; byKey.set(key, row); out.push(row); continue; }
+    for (const k of ['dept', 'address', 'phone', 'fax']) if (!prev[k] && p[k]) prev[k] = p[k];
+  }
+  return out;
+};
+
+// Every provider release on file for a client, with its event and categories.
+const loadClientRoiRecords = async (clientId) => {
+  const events = await roiStore.listConsentEventsByClient(clientId);
+  const auths = (await Promise.all(events.map(e => roiStore.listProviderAuthorizations(e.id)))).flat();
+  return { events, auths };
+};
+
+// Render one stored release as a PDF, from the stored records. Used by the
+// chart and the portal, so a copy opens whether or not the Drive upload worked
+// and is never a private Drive link the reader cannot open.
+const renderStoredRoiPdf = async (client, authId) => {
+  const { events, auths } = await loadClientRoiRecords(client.id);
+  const auth = auths.find(a => String(a.id) === String(authId));
+  if (!auth) return null;
+  const event = events.find(e => e.id === auth.consent_event_id);
+  if (!event) return null;
+  const categoryRows = await roiStore.listRecordCategories(event.id);
+  const patient = event.patient_snapshot || roiPatientIdentity(client).patient;
+  const buffer = await pdfGenerator.generateProviderROIPDF(
+    roiRepo.pdfInputFromRecords({ event, auth, categoryRows, patient }));
+  const fileName = auth.file_name || roiRepo.roiFileName({ patientName: patient.patientName, providerName: auth.provider_name, signedAt: event.signed_at });
+  return { buffer, fileName };
+};
+
 // GET /api/gfc/transfer-roi — prefill data for the flow: patient identity from
-// intake, prior-provider cards, prior signed events (summary), category catalog.
+// the record, prior-provider cards (each marked when a release is already in
+// force), prior signed events (summary), category catalog.
 app.get('/api/gfc/transfer-roi', authenticateToken, requireClientForIntake, async (req, res) => {
   try {
     const client = await resolveGfcClientRecord(req.user);
     if (!client) return res.status(404).json({ error: 'No client record on file' });
     const intake = client.intake || {};
-    const pc = intake.primaryContact || {};
-    const patient = {
-      patientName: client.preferredName || client.name || `${intake.firstName || ''} ${intake.lastName || ''}`.trim(),
-      patientDOB: intake.dob || '',
-      // The intake address is a structured object once staff edit it, and it
-      // printed as "[object Object]" on the form and on the faxed PDF.
-      patientAddress: (v => (v && typeof v === 'object') ? consentRender.addressLine(v) : String(v || ''))(intake.address || client.address),
-      patientPhone: intake.phone || pc.phone || ''
-    };
-    const events = (await roiStore.listConsentEventsByClient(client.id)).map(e => ({
-      id: e.id, signed_at: e.signed_at, source: e.source,
-      includes_protected_info: e.includes_protected_info, revoked_at: e.revoked_at
-    }));
+    const { patient, fromRecord } = roiPatientIdentity(client);
+    const { events, auths } = await loadClientRoiRecords(client.id);
+    const active = roiRepo.activeAuthorizationsByProvider(events, auths, practiceToday());
+    const prior = Array.isArray(client.priorProviders) ? client.priorProviders : (intake.priorProviders || []);
     res.json({
       patient,
-      priorProviders: Array.isArray(client.priorProviders) ? client.priorProviders : (intake.priorProviders || []),
+      patientFromRecord: fromRecord,
+      // A provider with a release still in force is listed with it, so the
+      // form does not send them a second one by default.
+      priorProviders: dedupePriorProviders(normalizePriorProviders(prior, 'manual')).map(p => ({
+        ...p, activeAuthorization: active[roiRepo.providerKey(p.name)] || null
+      })),
       status: (client.consents || {}).roiTransfer || 'pending',
-      events,
+      events: events.map(e => ({
+        id: e.id, signed_at: e.signed_at, source: e.source, expiration_date: e.expiration_date || null,
+        includes_protected_info: e.includes_protected_info, revoked_at: e.revoked_at
+      })),
+      // The signed releases themselves. The form tells the patient they are
+      // entitled to a copy; this is where they get it.
+      authorizations: auths
+        .map(a => {
+          const e = events.find(x => x.id === a.consent_event_id) || {};
+          return { id: a.id, providerName: a.provider_name, signedAt: e.signed_at || null, expiresOn: e.expiration_date || null, revoked: !!e.revoked_at };
+        })
+        .sort((x, y) => String(y.signedAt || '').localeCompare(String(x.signedAt || ''))),
+      maxProviders: roiRepo.MAX_PROVIDERS_PER_SUBMISSION,
       recordCategories: roiRepo.RECORD_CATEGORIES,
       categoryLabels: pdfGenerator.ROI_CATEGORY_LABELS
     });
   } catch (error) {
     console.error('GFC transfer-roi get error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/gfc/transfer-roi/authorizations/:authId.pdf — the client's copy of
+// one signed release (45 CFR 164.508(c)(4): the signer gets a copy). Scoped
+// to the session's own client; another client's id is a 404.
+app.get('/api/gfc/transfer-roi/authorizations/:authId.pdf', authenticateToken, requireClientForIntake, async (req, res) => {
+  try {
+    const client = await resolveGfcClientRecord(req.user);
+    if (!client) return res.status(404).json({ error: 'No client record on file' });
+    const rendered = await renderStoredRoiPdf(client, req.params.authId);
+    if (!rendered) return res.status(404).json({ error: 'Authorization not found' });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'roi_transfer_copy_downloaded', 'consent_provider_authorization', req.params.authId, {});
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', contentDisposition('inline', rendered.fileName));
+    res.send(rendered.buffer);
+  } catch (error) {
+    console.error('GFC transfer-roi copy error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -18390,115 +19044,138 @@ app.post('/api/gfc/transfer-roi/upload', authenticateToken, requireClientForInta
 });
 
 // POST /api/gfc/transfer-roi/submit — Screen 2B: the online form. One signing
-// event authorizes multiple providers; one PDF is generated per provider.
-// Validates the 45 CFR 164.508 required elements server-side before saving.
+// event authorizes up to MAX_PROVIDERS_PER_SUBMISSION providers; one PDF per
+// provider. Everything is checked and every PDF is rendered BEFORE anything is
+// written, so a failure leaves no half-filed authorization behind.
 app.post('/api/gfc/transfer-roi/submit', authenticateToken, requireClientForIntake, async (req, res) => {
   try {
     const b = req.body || {};
-    const providers = Array.isArray(b.providers)
-      ? b.providers.filter(p => p && (p.name || p.provider_name || '').trim())
-      : [];
-    if (providers.length === 0) return res.status(400).json({ error: 'Add at least one provider before submitting.', field: 'providers' });
+    const L = roiRepo.FIELD_LIMITS;
+    const fieldErrors = {};
 
-    // Collect checked standard categories (+ Other text).
-    const cat = b.categories || {};
-    const checkedCategories = roiRepo.RECORD_CATEGORIES.filter(k => cat[k]);
+    const { providers, errors: providerErrors } = roiRepo.prepareProviders(b.providers);
+    Object.assign(fieldErrors, providerErrors);
+
+    // Standard categories only; "Other" needs its description.
+    const cat = (b.categories && typeof b.categories === 'object') ? b.categories : {};
+    const checkedCategories = roiRepo.RECORD_CATEGORIES.filter(k => cat[k] === true);
+    const otherText = roiRepo.cleanText(cat.otherText, L.otherText);
+    if (checkedCategories.includes('other') && !otherText) fieldErrors.otherText = 'Describe the other records you are requesting.';
+
+    // A purpose "Other" is stored only when it was ticked AND described, so a
+    // half-typed box can never print on the release.
+    const purposeOtherText = b.purposeOther === true ? roiRepo.cleanText(b.purposeOtherText, L.purposeOtherText) : '';
+    if (b.purposeOther === true && !purposeOtherText) fieldErrors.purposeOtherText = 'Describe the other purpose.';
+
     const signedAt = new Date().toISOString();
+    const expiration = roiRepo.resolveExpiration(b.expDate, signedAt);
+    if (expiration.error) fieldErrors.expiration_date = expiration.error;
+
+    const printedName = roiRepo.cleanText(b.printedName, 120);
+    const relationship = roiRepo.cleanText(b.relationship, 120);
 
     // Server-side 45 CFR 164.508 element validation.
     const validation = roiRepo.validateAuthorizationElements({
       categories: checkedCategories,
       purpose_treatment: b.purposeTreatment !== false,
-      purpose_other_text: b.purposeOtherText,
-      expiration_date: b.expDate,
+      purpose_other_text: purposeOtherText,
       signature_image_b64: b.signatureImageB64,
-      printed_name: b.printedName,
+      printed_name: printedName,
       signed_at: signedAt
     });
-    if (!validation.ok) {
-      return res.status(400).json({ error: 'Some required fields are missing or invalid.', code: 'ROI_508_INCOMPLETE', fieldErrors: validation.errors });
-    }
+    Object.assign(fieldErrors, validation.errors);
 
     const { users, idx } = await loadClientForMutation(req.user.id);
     if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
     const client = users[idx];
 
-    const ipHash = roiRepo.hashIp(clientIpFrom(req), JWT_SECRET);
+    // Identity from the record. A provider cannot match a release to a chart
+    // without the patient's name and date of birth, so both are required.
+    const { patient } = roiPatientIdentity(client, b);
+    if (!patient.patientName) fieldErrors.patientName = 'The patient\'s full name is required.';
+    if (!patient.patientDOB) fieldErrors.patientDOB = 'The patient\'s date of birth is required.';
 
-    // Parent consent_event. includes_protected_info defaults FALSE and is only
-    // true when the client explicitly opted in (42 CFR Part 2).
-    const event = await roiStore.insertConsentEvent({
+    if (Object.keys(fieldErrors).length) {
+      return res.status(400).json({ error: 'Some required fields are missing or invalid.', code: 'ROI_508_INCOMPLETE', fieldErrors });
+    }
+
+    const ipHash = roiRepo.hashIp(clientIpFrom(req), JWT_SECRET);
+    // includes_protected_info is TRUE only on an explicit opt-in (42 CFR Part 2).
+    const event = roiStore.buildConsentEvent({
       client_id: client.id,
       signed_at: signedAt,
       signature_image_b64: b.signatureImageB64,
-      printed_name: b.printedName,
-      relationship_authority: b.relationship,
+      printed_name: printedName,
+      relationship_authority: relationship,
       signer_ip_hash: ipHash,
-      expiration_date: b.expDate || null,
-      expiration_event: b.expEvent || null,
+      expiration_date: expiration.date,
+      expiration_event: roiRepo.cleanText(b.expEvent, L.expEvent) || null,
       purpose_treatment: b.purposeTreatment !== false,
-      purpose_other_text: b.purposeOtherText,
+      purpose_other_text: purposeOtherText || null,
       includes_protected_info: b.includesProtected === true,
+      patient_snapshot: patient,
       source: roiRepo.SOURCE.ONLINE_FORM
     });
+    const categoryRows = checkedCategories.map(c => ({ category: c, other_text: c === 'other' ? otherText : null }));
+    const signedLabel = signedAt;
 
-    // Category rows (one per checked category).
-    await roiStore.insertRecordCategories(event.id, checkedCategories, cat.otherText);
-
-    // Provider authorization rows (one per provider card).
-    const providerInputs = providers.map(p => ({
-      provider_name: p.name || p.provider_name, dept: p.dept, address: p.address, phone: p.phone, fax: p.fax
-    }));
-    const authRows = await roiStore.insertProviderAuthorizations(event.id, providerInputs);
-
-    // Generate one PDF per provider, upload to Drive, record the URL.
-    const lastName = (client.name || client.preferredName || 'Client').trim().split(/\s+/).pop() || 'Client';
-    const dateStr = signedAt.slice(0, 10).replace(/-/g, '');
-    const fileNames = [], fileUrls = [], pdfAttachments = [];
-    for (let i = 0; i < authRows.length; i++) {
-      const row = authRows[i];
-      const provClean = (row.provider_name || 'Provider').replace(/[^a-zA-Z0-9 ]/g, '').replace(/\s+/g, '_').substring(0, 30);
-      const seq = authRows.length > 1 ? `_${i + 1}` : '';
-      const fileName = `ROI_${lastName}_${provClean}_${dateStr}${seq}.pdf`;
-      let pdfBuffer = null;
+    // Render every PDF first. One that fails stops the whole submission.
+    const rendered = [];
+    for (let i = 0; i < providers.length; i++) {
+      const p = providers[i];
+      const fileName = roiRepo.roiFileName({
+        patientName: patient.patientName, providerName: p.provider_name, signedAt,
+        seq: providers.length > 1 ? i + 1 : 0
+      });
       try {
-        pdfBuffer = await pdfGenerator.generateProviderROIPDF({
-          patientName: b.patientName, patientDOB: b.patientDOB, patientAddress: b.patientAddress, patientPhone: b.patientPhone,
-          provider: { name: row.provider_name, dept: row.dept, address: row.address, phone: row.phone, fax: row.fax },
-          categories: { ...cat },
-          includesProtected: event.includes_protected_info,
-          purposeTreatment: event.purpose_treatment,
-          purposeOther: !!b.purposeOther, purposeOtherText: b.purposeOtherText,
-          expDate: b.expDate, expEvent: b.expEvent,
-          signatureImageB64: b.signatureImageB64, signedDate: new Date(signedAt).toLocaleDateString('en-US'),
-          printedName: b.printedName, relationship: b.relationship
-        });
-      } catch (e) { console.error('[ROI] PDF generation failed for provider:', row.provider_name, e.message); }
-
-      let driveUrl = null;
-      if (pdfBuffer) {
-        pdfAttachments.push({ filename: fileName, content: pdfBuffer });
-        try {
-          const result = await googledrive.uploadProviderROIFile(config.ROI_DRIVE_FOLDER_NAME, fileName, pdfBuffer, 'application/pdf');
-          driveUrl = result && (result.webViewLink || result.webContentLink) || null;
-        } catch (e) { console.error('[ROI] provider PDF Drive upload failed (non-fatal):', e.message); }
+        const buffer = await pdfGenerator.generateProviderROIPDF(roiRepo.pdfInputFromRecords({
+          event, auth: p, categoryRows, patient, labelDate: signedLabel
+        }));
+        rendered.push({ provider: p, fileName, buffer });
+      } catch (e) {
+        console.error('[ROI] PDF generation failed:', e.message);
+        return res.status(500).json({ error: 'The authorization could not be generated. Nothing was saved; please try again.', code: 'ROI_PDF_FAILED' });
       }
-      await roiStore.updateProviderAuthorizationPdf(row.id, { driveUrl, fileName });
+    }
+
+    // Now write: the event, its categories, one provider row per PDF.
+    await roiStore.insertConsentEvent(event);
+    await roiStore.insertRecordCategories(event.id, checkedCategories, otherText);
+    const authRows = await roiStore.insertProviderAuthorizations(event.id,
+      rendered.map(r => ({ ...r.provider, file_name: r.fileName })));
+
+    // Drive is a filed copy, not the only one: the chart re-renders from the
+    // stored records, so an upload failure is reported, never fatal.
+    const fileNames = [], fileUrls = [], pdfAttachments = [], storageFailed = [];
+    for (let i = 0; i < authRows.length; i++) {
+      const { fileName, buffer, provider } = rendered[i];
+      pdfAttachments.push({ filename: fileName, content: buffer });
+      let driveUrl = null;
+      try {
+        const result = await googledrive.uploadProviderROIFile(config.ROI_DRIVE_FOLDER_NAME, fileName, buffer, 'application/pdf');
+        driveUrl = result && (result.webViewLink || result.webContentLink) || null;
+      } catch (e) { console.error('[ROI] provider PDF Drive upload failed (non-fatal):', e.message); }
+      if (!driveUrl) storageFailed.push(provider.provider_name);
+      await roiStore.updateProviderAuthorizationPdf(authRows[i].id, { driveUrl, fileName });
       fileNames.push(fileName);
       fileUrls.push(driveUrl || '');
     }
 
-    // Merge any new providers into the client's prior-provider list (roi_form).
-    const merged = normalizePriorProviders([
-      ...(Array.isArray(client.priorProviders) ? client.priorProviders : []),
-      ...providerInputs.map(p => ({ name: p.provider_name, dept: p.dept, address: p.address, phone: p.phone, fax: p.fax, addedFrom: 'roi_form' }))
-    ], 'roi_form');
-    // De-dupe by name (keep first occurrence).
-    const seen = new Set();
-    client.priorProviders = merged.filter(p => { const k = p.name.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; });
-    client.intake = { ...(client.intake || {}), priorProviders: client.priorProviders };
+    // Merge into the client's prior-provider list by provider, not by exact
+    // spelling, and let the newest details fill in what the list was missing.
+    const list = dedupePriorProviders(normalizePriorProviders(Array.isArray(client.priorProviders) ? client.priorProviders : [], 'manual'));
+    for (const p of providers) {
+      const key = roiRepo.providerKey(p.provider_name);
+      const existing = list.find(x => roiRepo.providerKey(x.name) === key);
+      if (existing) {
+        for (const k of ['dept', 'address', 'phone', 'fax']) if (p[k]) existing[k] = p[k];
+      } else {
+        list.push(...normalizePriorProviders([{ name: p.provider_name, dept: p.dept, address: p.address, phone: p.phone, fax: p.fax, addedFrom: 'roi_form' }], 'roi_form'));
+      }
+    }
+    client.priorProviders = list;
+    client.intake = { ...(client.intake || {}), priorProviders: list };
 
-    // Rollup status.
     client.consents = { ...(client.consents || {}), roiTransfer: 'signed' };
     users[idx] = client;
     await db.set('users', users);
@@ -18507,11 +19184,17 @@ app.post('/api/gfc/transfer-roi/submit', authenticateToken, requireClientForInta
       source: 'portal_online_form', providerCount: authRows.length, includesProtected: event.includes_protected_info
     });
 
-    // Parallel legacy sync: sheet + admin email (PDFs attached) + confirmations.
-    dispatchRoiNotifications({ client, event, fileNames, fileUrls, pdfAttachments, submitterEmail: b.submitterEmail })
+    // Parallel legacy sync: sheet + admin email (PDFs attached) + confirmation.
+    // The confirmation goes only to addresses already on file, never to one
+    // supplied in the request.
+    dispatchRoiNotifications({ client, event, fileNames, fileUrls, pdfAttachments })
       .catch(e => console.error('[ROI] dispatch failed (non-fatal):', e.message));
 
-    res.json({ message: 'Authorization submitted', eventId: event.id, providerCount: authRows.length, files: fileNames });
+    const missingFax = providers.filter(p => !p.fax).map(p => p.provider_name);
+    res.json({
+      message: 'Authorization submitted', eventId: event.id, providerCount: authRows.length, files: fileNames,
+      expiresOn: event.expiration_date, missingFax, storageFailed
+    });
   } catch (error) {
     console.error('GFC transfer-roi submit error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -23078,6 +23761,10 @@ app.get('/changelog', (req, res) => {
 });
 
 // Password reset link page (public)
+app.get('/signup', (req, res) => {
+  res.sendFile(__dirname + '/public/signup.html');
+});
+
 app.get('/password-reset-:token', (req, res) => {
   res.sendFile(__dirname + '/public/password-reset.html');
 });

@@ -49,6 +49,12 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'client_document_uploads', phi: true, owner: '4.6+' },
   { key: 'document_extractions', phi: true, owner: '4.9' },
   { key: 'client_document_requests', phi: true, owner: '4.6+' },
+  // A patient's request to give a family member portal access: their name,
+  // email and relationship to a named client. Approved rows point at the user.
+  { key: 'family_invites', phi: true, owner: 'portal redesign 10/2026' },
+  // Self sign-ups waiting on staff: a name, date of birth, address and
+  // insurance details, plus a password HASH and a verify-token HASH.
+  { key: 'signup_requests', phi: true, owner: 'portal redesign 10/2026' },
   // The branded no-login upload link: one live row per client, revoked ones
   // kept as tombstones. The row is a pointer (a client id and a token), not
   // a document — but the token is a standing door onto that client's file,
@@ -78,6 +84,7 @@ const COLLECTION_REGISTRY = Object.freeze([
   // Scope G. Append-only: a revision is a new row, so escalation within one
   // visit stays readable. PHI of the most sensitive kind this app holds.
   { key: 'encounter_risk_assessments', phi: true, owner: '4.12' },
+  { key: 'clinical_screenings', phi: true, owner: 'social-work', note: 'PHQ-2/9, GAD-7, SDOH results per encounter' },
   { key: 'appointment_encounters', phi: true, owner: '4.2', note: 'pointers only' },
   { key: 'clinical_code_usage', phi: false, owner: '4.4', note: 'per-clinician code favorites' },
   { key: 'clinical_settings', phi: false, owner: '4.4' },
