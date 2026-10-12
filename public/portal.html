@@ -299,11 +299,19 @@
     .gfc.v2 .btnrow{display:flex;gap:10px;margin-top:14px;}
     .gfc.v2 .btnrow .btn{margin-top:0;padding:11px 12px;font-size:14px;}
     /* greeting banner (desktop shows a photo when one is supplied) */
-    /* Banner photo (owner-supplied, 10/2026). Text sits on the cream end of a
-       fade so it stays readable whatever the photo does behind it. */
-    .gfc.v2 .hello{margin:-18px -16px 6px;padding:26px 16px 30px;min-height:150px;
-      background:linear-gradient(90deg,rgba(250,247,242,.97) 0%,rgba(250,247,242,.9) 48%,rgba(250,247,242,.15) 100%),
-        url('/banners/banner-portal-sm.jpg') right center / cover no-repeat;border-bottom:1px solid var(--edge);}
+    /* Banner photo (owner-supplied, 10/2026). On Home the photo sits behind
+       the top of the screen, under the menu bar, and fades into the page:
+       no box, no edge (owner: "seamlessly blends into the background"). The
+       light top keeps the greeting readable; the fade at the bottom lets the
+       tiles sit on it. */
+    .gfc.v2 .gfc-main.home{background:
+        linear-gradient(to bottom,rgba(250,247,242,.8) 0px,rgba(250,247,242,.55) 130px,rgba(250,247,242,0) 210px,rgba(250,247,242,0) 250px,rgba(250,247,242,.85) 330px,#FAF7F2 380px) center top / 100% 380px no-repeat,
+        url('/banners/banner-portal-sm.jpg') 72% top / auto 380px no-repeat,
+        var(--cream);}
+    .gfc.v2 .gfc-main.home .gfc-top{position:relative;background:transparent;border-bottom:none;backdrop-filter:none;}
+    .gfc.v2 .hello{margin:-8px 0 6px;padding:0 2px 118px;}
+    .gfc.v2 .hello h2,.gfc.v2 .hello p{text-shadow:0 0 14px rgba(250,247,242,.95),0 0 4px rgba(250,247,242,.9);}
+    .gfc.v2 .hello p{color:var(--ink);font-weight:500;}
     .gfc.v2 .hello h2{font-family:'Cormorant Garamond',serif;font-size:32px;font-weight:600;color:var(--navy);margin:0;line-height:1.1;}
     .gfc.v2 .hello p{font-size:15.5px;color:var(--mut);margin:4px 0 0;}
     /* home tiles */
@@ -380,7 +388,12 @@
       .gfc.v2 .gfc-side .foot{margin-top:auto;padding-top:16px;border-top:1px solid var(--edge);}
       .gfc.v2 .gfc-top,.gfc.v2 .gfc-tabs{display:none;}
       .gfc.v2 .gfc-body{padding:32px 40px 48px;max-width:1120px;width:100%;}
-      .gfc.v2 .hello{margin:0 0 6px;background:linear-gradient(90deg,#fff 0%,#fff 38%,rgba(255,255,255,.35) 68%,rgba(255,255,255,0) 100%),url('/banners/banner-portal.jpg') right center / cover no-repeat;border:1px solid var(--edge);border-radius:20px;padding:38px 34px;min-height:180px;display:flex;flex-direction:column;justify-content:center;}
+      .gfc.v2 .gfc-main.home{background:
+          linear-gradient(90deg,#FAF7F2 0%,rgba(250,247,242,.94) 28%,rgba(250,247,242,.25) 58%,rgba(250,247,242,0) 100%) left top / 100% 330px no-repeat,
+          linear-gradient(to bottom,rgba(250,247,242,0) 50%,#FAF7F2 100%) left top / 100% 330px no-repeat,
+          url('/banners/banner-portal.jpg') right top / auto 330px no-repeat,
+          var(--cream);}
+      .gfc.v2 .hello{margin:0 0 4px;padding:44px 0 70px;min-height:230px;display:flex;flex-direction:column;justify-content:center;background:none;}
       .gfc.v2 .hello h2{font-size:40px;}
       .gfc.v2 .tiles2{grid-template-columns:repeat(4,1fr);gap:16px;}
       .gfc.v2 .home-cols{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:24px;align-items:start;}
@@ -6932,7 +6945,7 @@
               <button onClick={gfcLogout}><i className="ti ti-logout" />Sign out</button>
             </div>
           </aside>
-          <div className="gfc-main">
+          <div className={`gfc-main ${view === 'home' ? 'home' : ''}`}>
             <header className="gfc-top">
               <button className="ib" onClick={() => go('more')} aria-label="Menu"><i className="ti ti-menu-2" /></button>
               <img src="/brand/logo-full-color-transparent.png" alt="Godwins Family Care" />
