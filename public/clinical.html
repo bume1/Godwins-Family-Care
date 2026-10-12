@@ -1519,13 +1519,17 @@
     // D4: med reconciliation is a SECTION under MEDICATIONS, not a tab beside
     // it. Reconciling is something you do to the medication list; it is not a
     // different place in the record.
-    const MedicationsTab = ({ chart, patient }) => {
+    // The list above and the reconciliation below read the same OpenEMR list,
+    // but the list comes from the chart, which loads once. Resolving writes to
+    // OpenEMR, so the chart is reloaded after it, or the list above keeps
+    // saying "Nothing on file" while the rows below read "Both".
+    const MedicationsTab = ({ chart, patient, onChartChanged }) => {
       const emr = (chart && chart.emr) || {};
       return (
         <div>
           <ChartSection title="Medications" icon="ti-pill" data={emr.medications} linked={chart && chart.linked}
             render={(r, i) => chartRow(r.title, r.instructions || (r.authoredOn && fmtDate(r.authoredOn)), r.status, i)} />
-          <MedRecTab patient={patient} />
+          <MedRecTab patient={patient} onSaved={onChartChanged} />
         </div>
       );
     };
@@ -3957,7 +3961,7 @@
     };
 
     // ── Medication reconciliation tab ──
-    const MedRecTab = ({ patient }) => {
+    const MedRecTab = ({ patient, onSaved }) => {
       // Reconciliation is an RN's or a provider's (medRec). A social worker
       // reads the list; offering them Save is offering a 403.
       const canWrite = useCan('medRec');
@@ -3982,7 +3986,7 @@
           // Decisions are keyed by row POSITION, and the rows change once saved.
           // Keeping them re-sent an earlier "add" on the next Resolve (a second
           // copy in OpenEMR) and applied it to whatever row moved into that slot.
-          .then(r => { setDecisions({}); setMsg({ ok: !r.emrResults.some(x => !x.ok), text: `${r.message}. Sent to OpenEMR: ${r.emrResults.filter(x => x.ok).length} of ${r.emrResults.length}.${r.emrResults.filter(x => !x.ok).map(x => ` ${x.med}: ${x.error}`).join('')}` }); load(); })
+          .then(r => { setDecisions({}); setMsg({ ok: !r.emrResults.some(x => !x.ok), text: `${r.message}. Sent to OpenEMR: ${r.emrResults.filter(x => x.ok).length} of ${r.emrResults.length}.${r.emrResults.filter(x => !x.ok).map(x => ` ${x.med}: ${x.error}`).join('')}` }); load(); onSaved && onSaved(); })
           .catch(e => setMsg({ ok: false, text: e.message }))
           .finally(() => setBusy(false));
       };
@@ -6085,7 +6089,7 @@
             {open && (
               <div className="mt-3 border-t border-stone-100 pt-3">
                 {open === 'allergies' && <AllergiesTab chart={chart} />}
-                {open === 'medications' && <MedicationsTab chart={chart} patient={patient} />}
+                {open === 'medications' && <MedicationsTab chart={chart} patient={patient} onChartChanged={onChartChanged} />}
                 {open === 'problems' && <ProblemsTab chart={chart} />}
                 {open === 'results' && <ResultsTab patient={patient} />}
                 {open === 'documents' && <DocumentsTab chart={chart} patient={patient} onChartChanged={onChartChanged} />}
@@ -7349,7 +7353,7 @@
                   {tab === 'visit' && (chart ? <HpTab patient={sel} chart={chart} appointmentEid={hpApptEid} onDone={() => { setHpApptEid(null); refreshChart(); loadPatients(); }} onGoToEncounter={(euuid) => { setEncTarget(euuid); setTab('encounters'); }} /> : <p className="text-sm text-stone-500">Loading…</p>)}
                   {tab === 'timeline' && <TimelineTab patient={sel} />}
                   {tab === 'problems' && <ProblemsTab chart={chart} />}
-                  {tab === 'medications' && <MedicationsTab chart={chart} patient={sel} />}
+                  {tab === 'medications' && <MedicationsTab chart={chart} patient={sel} onChartChanged={() => { loadPatients(); refreshChart(); }} />}
                   {tab === 'allergies' && <AllergiesTab chart={chart} />}
                   {tab === 'orders' && <OrdersTab patient={sel} />}
                   {tab === 'results' && <ResultsTab patient={sel} />}
