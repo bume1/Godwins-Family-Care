@@ -79,6 +79,12 @@ const createAuditLog = ({ store, salt, now = () => new Date() }) => {
       requestId: entry.requestId ?? ctx.requestId ?? null,
       details: entry.details == null ? null : entry.details
     };
+    const impersonatorId = entry.impersonatorId ?? ctx.impersonatorId ?? null;
+    if (impersonatorId) {
+      row.impersonatorId = impersonatorId;
+      row.impersonatorName = entry.impersonatorName ?? ctx.impersonatorName ?? null;
+      row.details = { ...(row.details || {}), actingAsBy: impersonatorId, actingAsByName: row.impersonatorName };
+    }
     await store.appendAudit(row);
     return row;
   };
@@ -96,6 +102,8 @@ const createAuditLog = ({ store, salt, now = () => new Date() }) => {
     ctx.userId = user.id; ctx.userName = user.name || user.email || null; ctx.role = user.role || null;
     ctx.sessionId = session ? session.id : null;
     if (user.role === 'family' && user.familyIsPoa && user.familyOfClientId) ctx.actingFor = user.familyOfClientId;
+    // "View as" (impersonation.js): every row says who was really at the keyboard.
+    if (session && session.impersonatorId) { ctx.impersonatorId = session.impersonatorId; ctx.impersonatorName = session.impersonatorName || null; }
   };
   // Express middleware #2: every completed request under a PHI prefix is a
   // row. Written on 'finish' so the status is known; a refused request (401,
@@ -110,6 +118,8 @@ const createAuditLog = ({ store, salt, now = () => new Date() }) => {
         userId: user ? user.id : null, userName: user ? (user.name || user.email) : null, role: user ? user.role : null,
         patientId: patientIdFrom(req), resource: `${req.baseUrl || ''}${req.path}`, method: req.method,
         actingFor: user && user.role === 'family' && user.familyIsPoa ? user.familyOfClientId : null,
+        impersonatorId: (req.session && req.session.impersonatorId) || null,
+        impersonatorName: (req.session && req.session.impersonatorName) || null,
         details: { status: res.statusCode, durationMs: ctx ? Date.now() - ctx.startedAt : null, sessionId: (req.session && req.session.id) || null }
       })).catch(err => console.error('audit_log write failed:', err.message));
     });

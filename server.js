@@ -62,6 +62,7 @@ const patientPublish = require('./patientPublish');   // Portal P1: the publishe
 // vocabulary lives there rather than in config.js for the same reason the
 // caregiver vocabulary lives in caregiverRepository.js.
 const clinicalRoles = require('./clinicalRoles');
+const impersonation = require('./impersonation');      // "View as" for the Super Admin (2026-10-12)
 const standingOrders = require('./standingOrders');   // signed, versioned, expiring protocols (4.8 Scope C)
 const clinicalInbox = require('./clinicalInbox');     // what is waiting on a clinician (4.9)
 const clinicalNotes = require('./clinicalNotes');     // the shared, versioned clinical note (2026-09-27)
@@ -144,7 +145,18 @@ const roiStore = roiRepo.createRepository(db);
 const emrAuth = emrAuthModule.createEmrAuth({ store: db, config: (config.OPENEMR.TOKEN_ENCRYPTION_KEY || process.env.NODE_ENV === 'production') ? config
   // dev only: the same derived key as SECRETS_KEY below, so local runs work
   : { ...config, OPENEMR: { ...config.OPENEMR, TOKEN_ENCRYPTION_KEY: require('crypto').createHash('sha256').update(String(config.JWT_SECRET)).digest('hex') } } });
-const emrTokenProvider = (actor) => emrAuth.getAccessTokenFor(actor && actor.id);
+// "View as" (impersonation.js): OpenEMR tokens belong to one person, so a
+// session started by an admin acting as someone else never reaches the EMR.
+// Checked here because every EMR call passes through this provider.
+const emrTokenProvider = (actor) => {
+  const ctx = require('./auditLog').currentContext();
+  if (ctx && ctx.impersonatorId) {
+    const e = new Error('OpenEMR is turned off while you are viewing as someone else. Exit "View as" to use OpenEMR.');
+    e.code = 'EMR_BLOCKED_WHILE_ACTING_AS'; e.status = 409;
+    return Promise.reject(e);
+  }
+  return emrAuth.getAccessTokenFor(actor && actor.id);
+};
 emrTokenProvider.invalidate = (actor) => emrAuth.invalidateAccessToken(actor && actor.id);
 emrTokenProvider.statusFor = (actor) => emrAuth.statusFor(actor && actor.id);
 openemr.setTokenProvider(emrTokenProvider);
@@ -2241,10 +2253,29 @@ const authenticateToken = async (req, res, next) => {
         return res.status(403).json({ error: msg, code: sess.code });
       }
       req.session = sess.row;
+      // "View as" (impersonation.js): the session lives only while the admin
+      // who started it is still signed in. Checking their session here also
+      // keeps it from going idle while they work inside the other account.
+      if (impersonation.isActingAs(sess.row)) {
+        const parent = await sessions.check(sess.row.impersonatorSid);
+        if (!parent.ok || parent.row.userId !== sess.row.impersonatorId) {
+          await sessions.revoke(sess.row.id, 'impersonator_signed_out');
+          return res.status(403).json({ error: 'Your admin session ended, so "View as" ended too. Please sign in again.', code: 'AUTH_REVOKED', detail: 'acting_as_admin_signed_out' });
+        }
+      }
       // Fetch fresh user data from database to get current role and permissions
       const users = await getUsers();
       const freshUser = users.find(u => u.id === tokenUser.id);
       if (!freshUser) return res.status(403).json({ error: 'User not found', code: 'AUTH_INVALID', detail: 'no_account_for_token' });
+      if (impersonation.isActingAs(sess.row)) {
+        const admin = users.find(u => u.id === sess.row.impersonatorId);
+        // The admin was demoted or deactivated, or the viewed account became
+        // an admin: either way the rule that allowed this no longer holds.
+        if (!admin || admin.role !== 'admin' || admin.accountStatus === 'inactive' || freshUser.role === 'admin' || sess.row.userId !== tokenUser.id) {
+          await sessions.revoke(sess.row.id, 'impersonation_no_longer_allowed');
+          return res.status(403).json({ error: '"View as" is no longer allowed for this account. Please sign in again.', code: 'AUTH_REVOKED', detail: 'acting_as_not_allowed' });
+        }
+      }
       // Block inactive accounts
       if (freshUser.accountStatus === 'inactive') return res.status(403).json({ error: 'Account is inactive. Please contact an administrator.', code: 'AUTH_INACTIVE' });
       // Defense in depth: a session for an MFA-required role is only ever
@@ -2310,6 +2341,15 @@ const authenticateToken = async (req, res, next) => {
       // flag cannot widen someone the enum has narrowed.
       req.user.hasClinicalAccess = clinicalRoles.derivedHasClinicalAccess(req.user);
       audit.bindUser(req.user, req.session);   // 5.4: attribution for every logActivity() downstream
+      if (impersonation.isActingAs(req.session)) {
+        req.actingAs = impersonation.describe(req.session, req.user);
+        // Signatures and account changes stay with the real person. Not an
+        // AUTH_ code: the session is fine, this one action is not allowed.
+        const blocked = impersonation.blockedAction(req.method, req.path);
+        if (blocked) {
+          return res.status(403).json({ error: `You are viewing as ${req.user.name || req.user.email}. ${blocked.what.charAt(0).toUpperCase() + blocked.what.slice(1)} is turned off in "View as", because it would sign or change something in their name.`, code: 'ACTING_AS_BLOCKED', action: blocked.what });
+        }
+      }
       next();
     } catch (error) {
       console.error('Auth middleware error:', error);
@@ -3278,6 +3318,47 @@ app.get('/api/auth/sessions', authenticateToken, async (req, res) => {
 // its warning window), so a genuinely active session no longer looks idle
 // to the server just because nothing else happened to phone home.
 app.get('/api/auth/heartbeat', authenticateToken, (req, res) => {
+  // actingAs is what the "View as" banner reads; null for a normal session.
+  res.json({ ok: true, actingAs: req.actingAs || null });
+});
+
+// ============================================================
+// "View as" (impersonation.js). A Super Admin opens the app AS a non-admin
+// account; signatures, OpenEMR and account changes stay blocked. The new
+// session is tied to the admin's own session and capped at 60 minutes.
+// ============================================================
+const viewAsDestination = (u) => {
+  const home = appLinks.homeFor(u);
+  if (home !== appLinks.PATHS.LOGIN) return home;
+  if (u.isManager || u.hasAdminHubAccess || u.hasClientPortalAdminAccess) return appLinks.PATHS.ADMIN;
+  if (u.role === config.ROLES.VENDOR || u.hasServicePortalAccess) return '/service-portal';
+  return appLinks.PATHS.LOGIN;
+};
+app.post('/api/admin/impersonate/:userId', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const target = users.find(u => u.id === req.params.userId) || null;
+    const verdict = impersonation.canStart({ admin: req.user, adminSession: req.session, target, mfaEnforced: config.MFA_ENFORCE });
+    if (!verdict.ok) return res.status(verdict.status).json({ error: verdict.error, code: verdict.code });
+    const row = await sessions.create({
+      userId: target.id, role: target.role, ipHash: sessionIpHash(req), userAgent: req.headers['user-agent'],
+      mfaVerified: !!req.session.mfaVerified, surface: 'view_as', absoluteExpiresAt: impersonation.expiresAt(),
+      impersonatorId: req.user.id, impersonatorName: req.user.name || req.user.email, impersonatorSid: req.session.id
+    });
+    const minutes = impersonation.IMPERSONATION_MINUTES;
+    const token = jwt.sign({ id: target.id, email: target.email, name: target.name, role: target.role, sid: row.id }, JWT_SECRET, { expiresIn: `${minutes}m` });
+    await logActivity(req.user.id, req.user.name || req.user.email, 'impersonation_started', 'user', target.id, { targetName: target.name || target.email, targetRole: target.role, sid: row.id, expiresAt: row.absoluteExpiresAt });
+    const user = { id: target.id, email: target.email, name: target.name, role: target.role, slug: target.slug || null, hasClinicalAccess: clinicalRoles.derivedHasClinicalAccess({ ...target, clinicalRole: clinicalRoles.resolveClinicalRole(target) }), licenseLevel: target.licenseLevel || null };
+    res.json({ token, user, destination: viewAsDestination(target), actingAs: impersonation.describe(row, target) });
+  } catch (error) {
+    console.error('impersonation start failed:', error.message);
+    res.status(500).json({ error: 'Could not start "View as".' });
+  }
+});
+app.post('/api/auth/impersonate/end', authenticateToken, async (req, res) => {
+  if (!impersonation.isActingAs(req.session)) return res.status(400).json({ error: 'You are not viewing as anyone.', code: 'NOT_ACTING_AS' });
+  await sessions.revoke(req.session.id, 'impersonation_ended');
+  await logActivity(req.session.impersonatorId, req.session.impersonatorName, 'impersonation_ended', 'user', req.user.id, { targetName: req.user.name || req.user.email, targetRole: req.user.role, sid: req.session.id });
   res.json({ ok: true });
 });
 
