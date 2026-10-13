@@ -64,3 +64,20 @@
   - A guard in `test/clinical_redesign.test.js` fails the build on any sentence-case or over-five-word button in the clinical app. It covers the clinical page only; the other pages were fixed by hand this pass.
   - Seven older tests that matched the old wording were repointed to the new labels, keeping the rule each one protects.
 - **Verified:** full suite 2267 pass, 0 fail. Five mutations each fail a new guard (care-plan routing dropped, Results opens the chart without a tab, a checklist line unwired, the messaging filter ignored, a sentence-case label). Every edited page compiles. Rendered in Chromium (Inbox, Results, Care Plan, Messages, phone My Day and Inbox) with no page errors and no sideways scroll.
+
+## Part 4: messages, the note screen and the remaining screens (same branch, same PR)
+- **Messages (mockup 12):** the thread is a chat. The other person's bubbles sit on the left in white, yours on the right in pale blue, each with a time under it. The header has an avatar and "Last message …", and list rows have avatars.
+  - **Every bubble keeps its sender line,** so a POA's message still says whose behalf it is on.
+  - This is the shared component, so the patient portal, caregiver app and admin hub get the same look.
+- **Note screen (mockup 10):**
+  - A "New Encounter" (or "Encounter Draft") heading with patient and date.
+  - The visit card reads Visit Type · Visit Mode · Visit Location. **Never "Place of Service",** which is guarded.
+  - Save Draft and Sign & Submit stay pinned above the phone's bottom bar; the explanation and history sit under them.
+  - The date is shown, not asked: the visit takes today's date, or the appointment's.
+- **Tasks:** filter chips and card rows like the Inbox. Each row opens where its work is done: Encounter, Results, Referrals or Orders. An empty queue still says so.
+- **Overdue Orders:** card rows with an **Open Orders** button. **Wiring fix:** these rows used to open nothing.
+- **Coding:** filter chips and card rows. Billing Settings collapses, and opens by itself only while the billing NPI is missing.
+- **Reports:** stat tiles with icons and rounded bars. "Not available" metrics still say why, never zero.
+- **Schedule:** Day/Week toggle and a ‹ Today › stepper like My Day. Today is marked in gold. A phone opens on Day.
+- **Removed:** `QueueCard`, the old per-queue card, no longer used.
+- **Verified:** full suite 2271 pass, 0 fail. Five mutations each fail a new guard (a referral opening the wrong tab, Overdue opening nothing, "Place of Service" back on the note, the bubble sender line dropped, an empty queue hidden). The page compiles. Rendered in Chromium (Tasks, Overdue, Coding, Reports, Schedule, the note on a phone, a message thread) with no page errors and no sideways scroll.
