@@ -708,7 +708,9 @@ test('My Day has an End visit button once a visit is in progress', () => {
 });
 
 test('My Day is the default landing view', () => {
-  assert.match(pageCode, /useState\('myday'\)/,
+  // 2026-10-12: `/clinical#inbox` (the referral email) opens the inbox; every
+  // other arrival still opens on the day.
+  assert.match(pageCode, /useState\(\(\) => \(String\(window\.location\.hash \|\| ''\)\.replace\(\/\^#\/, ''\) === 'inbox' \? 'inbox' : 'myday'\)\)/,
     'the workspace must open on the day, not on a patient list');
   assert.match(pageCode, /<MyDayView/);
 });

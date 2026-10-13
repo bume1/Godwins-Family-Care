@@ -148,7 +148,9 @@ test('a Medicare order can carry the 42 CFR 424.507 acknowledgment the server as
   assert.match(clinical, /enrollmentAcknowledgment: \{ acknowledged: ack\.acknowledged, reason: ack\.reason\.trim\(\) \}/);
   assert.match(clinical, /if \(e && e\.data && e\.data\.needsReason\) setOrderEnrollmentWarning\(e\.data\);/);
   // And a protocol that does not permit 'lab' no longer sends 'lab'.
-  assert.match(clinical, /setF\(\{ \.\.\.f, standingOrderId: e\.target\.value, tests: '', orderType: first \|\| 'lab' \}\)/);
+  // 2026-10-12: with no protocol, someone without direct authority who may
+  // refer lands on 'referral' rather than 'lab' (a referral needs no protocol).
+  assert.match(clinical, /setF\(\{ \.\.\.f, standingOrderId: e\.target\.value, tests: '', orderType: first \|\| \(requireStandingOrder && canRefer \? 'referral' : 'lab'\) \}\)/);
 });
 
 test('co-sign actions exist on the page for orders and IHPC care plans', () => {

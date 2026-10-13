@@ -250,5 +250,5 @@ test('the signed-note download reuses the filing builder and the page offers it'
 });
 
 test('a requisition greyed out while the agency is pending has a visible disabled chip', () => {
-  assert.match(stripComments(PAGE), /\{agencyPending && <span className="chip[^"]*cursor-not-allowed"[^>]*> ?<i className="ti ti-file-text" \/> Open requisition<\/span>\}/);
+  assert.match(stripComments(PAGE), /\{agencyPending && <span className="chip[^"]*cursor-not-allowed"[^>]*> ?<i className="ti ti-file-text" \/> Open Requisition<\/span>\}/);
 });

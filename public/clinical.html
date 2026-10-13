@@ -372,7 +372,13 @@
       addAddendum: (id, euuid, text) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/addenda`, { method: 'POST', body: JSON.stringify({ text }) }),
       resync: (id, euuid) => authedFetch(`/api/clinical/patients/${id}/encounters/${euuid}/resync`, { method: 'POST' }),
       queue: (state) => authedFetch(`/api/clinical/encounters/queue?state=${encodeURIComponent(state || 'open')}`),
-      inbox: () => authedFetch('/api/clinical/inbox')
+      inbox: () => authedFetch('/api/clinical/inbox'),
+      // ── Referrals to the team or to a saved outside provider (2026-10-12) ──
+      referralTargets: (clientId) => authedFetch(`/api/clinical/patients/${clientId}/referral-targets`),
+      addReferralProvider: (body) => authedFetch('/api/clinical/referral-providers', { method: 'POST', body: JSON.stringify(body) }),
+      updateReferralProvider: (id, body) => authedFetch(`/api/clinical/referral-providers/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+      acceptReferral: (orderId) => authedFetch(`/api/clinical/orders/${orderId}/accept`, { method: 'POST', body: '{}' }),
+      completeReferral: (orderId, note) => authedFetch(`/api/clinical/orders/${orderId}/complete`, { method: 'POST', body: JSON.stringify({ note }) })
     };
 
     // The workspace's top-level views. A MAP rather than a ternary chain: the
@@ -1201,7 +1207,8 @@
       care_plan_co_sign: 'ti-clipboard-heart',
       visit_log_review: 'ti-notes',
       encounter_unsigned: 'ti-file-pencil',
-      encounter_awaiting_billing: 'ti-receipt'
+      encounter_awaiting_billing: 'ti-receipt',
+      internal_referral: 'ti-arrow-forward-up'
     };
     // 2026-10-12 redesign (owner mockup 7): the same items, filed under
     // All · Co-sign · Orders · Other. The grouping is by KIND only; who may act
@@ -1209,7 +1216,7 @@
     const INBOX_GROUPS = [
       ['all', 'All', null],
       ['cosign', 'Co-Sign', ['encounter_co_sign', 'care_plan_co_sign']],
-      ['orders', 'Orders', ['order_co_sign']],
+      ['orders', 'Orders', ['order_co_sign', 'internal_referral']],
       ['other', 'Other', 'rest']
     ];
     const inboxGroupOf = (kind) => {
@@ -1222,6 +1229,10 @@
       const [mineOnly, setMineOnly] = useState(true);
       const [group, setGroup] = useState('all');
       const [rowErr, setRowErr] = useState({});
+      // A referral from the team: completing it needs a note, typed in place.
+      const [completing, setCompleting] = useState(null);
+      const [doneNote, setDoneNote] = useState('');
+      const [rowBusy, setRowBusy] = useState('');
       const load = () => api.inbox().then(r => { setData(r); setErr(''); }).catch(e => setErr(e.message));
       useEffect(() => { load(); }, []);
       if (err) return <div className="p-4 lg:p-7"><div className="card p-4 text-sm text-red-600">{err}</div></div>;
@@ -1238,7 +1249,13 @@
       // note, a care plan on the Care Plan tab, anything else on the chart.
       const open = (i) => {
         if (i.encounterUuid) return onOpenEncounter(i.clientId, i.encounterUuid);
-        return onOpenChart(i.clientId, i.kind === 'care_plan_co_sign' ? { tab: 'careplan' } : undefined);
+        return onOpenChart(i.clientId, i.kind === 'care_plan_co_sign' ? { tab: 'careplan' } : i.kind === 'internal_referral' ? { tab: 'referrals' } : undefined);
+      };
+      const referralStep = (i, fn) => {
+        setRowBusy(i.id); setRowErr({});
+        return fn().then(() => { setCompleting(null); setDoneNote(''); load(); })
+          .catch(e => setRowErr({ [i.id]: e.message }))
+          .finally(() => setRowBusy(''));
       };
       return (
         <div className="p-4 lg:p-7">
@@ -1300,11 +1317,29 @@
                       {i.kind === 'order_co_sign' && i.actionable && (
                         <button className="btn !py-1 !px-2.5 text-[12px] whitespace-nowrap" onClick={() => coSignOrder(i)}><i className="ti ti-writing-sign" />Co-Sign</button>
                       )}
+                      {i.kind === 'internal_referral' && i.actionable && i.status === 'ordered' && (
+                        <button className="btn !py-1 !px-2.5 text-[12px] whitespace-nowrap" disabled={rowBusy === i.id}
+                          onClick={() => referralStep(i, () => api.acceptReferral(i.id))}>Accept</button>
+                      )}
+                      {i.kind === 'internal_referral' && i.actionable && completing !== i.id && (
+                        <button className="btn ghost !py-1 !px-2.5 text-[12px] whitespace-nowrap"
+                          onClick={() => { setCompleting(i.id); setDoneNote(''); }}>Mark Complete</button>
+                      )}
                       <button className="btn ghost !py-1 !px-2.5 text-[12px] whitespace-nowrap" onClick={() => open(i)}>
                         {i.encounterUuid ? 'Open Encounter' : i.kind === 'care_plan_co_sign' ? 'Open Care Plan' : 'Open Chart'}
                       </button>
                     </div>
                   </div>
+                  {completing === i.id && (
+                    <div className="w-full grid gap-2 pl-14">
+                      <textarea className="inp" rows={2} placeholder="What did you do? The referring clinician reads this." value={doneNote} onChange={e => setDoneNote(e.target.value)} />
+                      <div className="flex justify-end gap-2">
+                        <button className="btn ghost !py-1 !px-2.5 text-[12px]" onClick={() => setCompleting(null)}>Back</button>
+                        <button className="btn !py-1 !px-2.5 text-[12px]" disabled={rowBusy === i.id || !doneNote.trim()}
+                          onClick={() => referralStep(i, () => api.completeReferral(i.id, doneNote.trim()))}>Complete Referral</button>
+                      </div>
+                    </div>
+                  )}
                   {rowErr[i.id] && <div className="w-full text-[11.5px] text-red-600">{rowErr[i.id]}</div>}
                 </div>
               ))}
@@ -1791,7 +1826,12 @@
                 </div>
                 {Array.isArray(o.sends) && o.sends.length > 0 && (
                   <div className="text-[11.5px] text-stone-500">
-                    Last sent {fmtTs(o.sends[o.sends.length - 1].at)} to {o.sends[o.sends.length - 1].recipient || 'recipient not recorded'}
+                    Last sent {fmtTs(o.sends[o.sends.length - 1].sentAt)} to {o.sends[o.sends.length - 1].recipientName || 'recipient not recorded'}
+                  </div>
+                )}
+                {o.orderType === 'referral' && o.referral && o.referral.destination === 'internal' && (
+                  <div className="text-[11.5px] text-stone-500">
+                    Referred to {(o.referral.assignedTo && o.referral.assignedTo.name) || 'a colleague'} inside the team
                   </div>
                 )}
               </button>
@@ -1806,6 +1846,16 @@
     // ever get added to.
     const OrderDetail = ({ order, data, onBack, onChanged }) => {
       const canAnnotate = useCanEditOrderDestination();
+      // What came back for THIS order: the result or consult note filed
+      // against it. Read from the same results list the Results tab reads.
+      const [results, setResults] = useState(null);
+      useEffect(() => {
+        if (!order || !order.clientId) return;
+        let live = true;
+        api.patientResults(order.clientId).then(r => { if (live) setResults((r.results || []).filter(x => String(x.orderId) === String(order.id))); })
+          .catch(() => { if (live) setResults([]); });
+        return () => { live = false; };
+      }, [order && order.id, order && order.status]);
       const [busy, setBusy] = useState('');
       const [msg, setMsg] = useState('');
       const [err, setErr] = useState('');
@@ -1846,6 +1896,9 @@
                 interpretations={data.resultInterpretations} busy={busy === 'act'}
                 destinationFields={data.destinationFields} editableStatuses={data.destinationEditableStatuses}
                 onDestination={(body) => run('act', () => api.updateOrderDestination(order.id, body))}
+                onCancel={(reason) => run('act', () => api.orderStatus(order.id, 'cancelled', reason))}
+                onAccept={() => run('act', () => api.acceptReferral(order.id))}
+                onComplete={(note) => run('act', () => api.completeReferral(order.id, note))}
                 onSent={(body) => run('act', () => api.markOrderSent(order.id, body))}
                 onScheduled={(date) => run('act', () => api.markReferralScheduled(order.id, date))}
                 onResult={(r) => {
@@ -1857,11 +1910,27 @@
             </div>
           </div>
 
+          {order.orderType !== 'referral' || (order.referral || {}).destination !== 'internal' ? (
+            <div className="card p-4">
+              <div className="font-semibold text-[13px] mb-1">{order.orderType === 'referral' ? 'Consult Notes' : 'Results'}</div>
+              {results === null && <div className="text-[12px] text-stone-500">Loading…</div>}
+              {results && results.length === 0 && <div className="text-[12px] text-stone-500">Nothing has come back yet.</div>}
+              {(results || []).map(r => (
+                <div key={r.id} className="py-1.5 border-b border-stone-100 last:border-0">
+                  <div className="text-[13px]">{resultTitle(r, 'Result')}{r.interpretation ? <span className="text-stone-500"> · {r.interpretation}</span> : ''}</div>
+                  <div className="text-[11px] text-stone-500">
+                    {[r.performedBy, r.resultDate && `dated ${r.resultDate}`, r.acknowledgedAt ? `reviewed ${fmtDate(r.acknowledgedAt)}` : 'not yet reviewed'].filter(Boolean).join(' · ')}
+                  </div>
+                  {r.followUpNote && <div className="text-[12px] text-stone-700 mt-0.5">Follow-up: {r.followUpNote}</div>}
+                </div>
+              ))}
+            </div>
+          ) : null}
           {(order.sends || []).length > 0 && (
             <div className="card p-4">
               <div className="font-semibold text-[13px] mb-1">Sent</div>
               {order.sends.map((sd, i) => (
-                <div key={i} className="text-[12px] text-stone-600">{fmtTs(sd.at)} · {sd.channel} · {sd.recipient || 'recipient not recorded'}{sd.recipientFax ? ` · ${sd.recipientFax}` : ''}{sd.by && sd.by.name ? ` · ${sd.by.name}` : ''}</div>
+                <div key={i} className="text-[12px] text-stone-600">{fmtTs(sd.sentAt)} · {sd.channelLabel || sd.channel} · {sd.recipientName || 'recipient not recorded'}{sd.recipientFax ? ` · ${fmtFax(sd.recipientFax)}` : ''}{sd.sentBy && sd.sentBy.name ? ` · ${sd.sentBy.name}` : ''}</div>
               ))}
             </div>
           )}
@@ -1869,7 +1938,10 @@
             <div className="card p-4">
               <div className="font-semibold text-[13px] mb-1">Destination changes</div>
               {order.destinationHistory.map((h, i) => (
-                <div key={i} className="text-[12px] text-stone-600">{fmtTs(h.at)} · {h.field}: {h.from || '(blank)'} → {h.to || '(blank)'}{h.by && h.by.name ? ` · ${h.by.name}` : ''}{h.reason ? ` · ${h.reason}` : ''}</div>
+                <div key={i} className="text-[12px] text-stone-600">
+                  {fmtTs(h.at)} · {(h.changes || []).map(c => `${c.label || c.field}: ${c.from || '(blank)'} → ${c.to || '(blank)'}`).join('; ')}
+                  {h.by && h.by.name ? ` · ${h.by.name}` : ''}{h.reason ? ` · ${h.reason}` : ''}
+                </div>
               ))}
             </div>
           )}
@@ -5469,8 +5541,12 @@
 
     // Encounter diagnoses editor (+ T1 carry-forward candidates as proposals).
     const DxEditor = ({ diagnoses, setDiagnoses, candidates, clientId, readOnly, addToProblemList, setAddToProblemList }) => {
-      // The problem list is an RN's or a provider's to write (server-enforced).
-      const canWriteProblems = useCan('problemListWrite');
+      // The problem list is an RN's or a provider's to write, and an LCSW's for
+      // a mental health (F) diagnosis (owner, 2026-10-12). Server-enforced per
+      // code; this only decides where the box is drawn.
+      const canWriteAllProblems = useCan('problemListWrite');
+      const canWriteBhDx = useCan('behavioralDiagnosis');
+      const canWriteProblemFor = (code) => canWriteAllProblems || (canWriteBhDx && /^F\d{2}/.test(String(code || '').toUpperCase()));
       const has = (code) => diagnoses.some(d => d.code === code);
       const add = (r) => { if (!has(r.code)) setDiagnoses([...diagnoses, { code: r.code, description: r.description || '', source: r.source === 'typed' ? 'manual' : r.source, problemUuid: r.problemUuid || null, primary: diagnoses.length === 0 }]); };
       const remove = (code) => setDiagnoses(diagnoses.filter(d => d.code !== code).map((d, i, a) => ({ ...d, primary: a.some(x => x.primary) ? d.primary : i === 0 })));
@@ -5495,7 +5571,7 @@
                   {!d.primary && <button type="button" className="text-primary underline" onClick={() => setPrimary(d.code)}>Make Primary</button>}
                   {/* A code picked from OpenEMR's own search arrives as 'openemr', and it
                       is just as absent from the problem list as one typed in. */}
-                  {(d.source === 'manual' || d.source === 'openemr') && setAddToProblemList && canWriteProblems && (
+                  {(d.source === 'manual' || d.source === 'openemr') && setAddToProblemList && canWriteProblemFor(d.code) && (
                     <label className="flex items-center gap-1 text-stone-500">
                       <input type="checkbox" checked={(addToProblemList || []).includes(d.code)}
                         onChange={e => setAddToProblemList(e.target.checked ? [...(addToProblemList || []), d.code] : (addToProblemList || []).filter(c => c !== d.code))} />
@@ -5802,35 +5878,188 @@
     // form says so before the click rather than after a 400.
     const faxOk = (v) => /^\d{10}$/.test(String(v || '').replace(/\D/g, ''));
 
-    const ReferralFields = ({ f, setF }) => (
-      <React.Fragment>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          <Field label="Specialty"><input className="inp" value={f.specialty || ''} onChange={e => setF({ ...f, specialty: e.target.value })} /></Field>
-          <Field label="Urgency"><select className="inp" value={f.urgency || 'routine'} onChange={e => setF({ ...f, urgency: e.target.value })}>{['routine', 'urgent', 'stat'].map(u => <option key={u} value={u}>{u}</option>)}</select></Field>
-          <Field label="Receiving practice"><input className="inp" value={f.receivingPractice || ''} onChange={e => setF({ ...f, receivingPractice: e.target.value })} /></Field>
-          <Field label="Receiving provider"><input className="inp" value={f.receivingProvider || ''} onChange={e => setF({ ...f, receivingProvider: e.target.value })} /></Field>
-          <Field label="Receiving fax (this is what gets faxed)">
-            <input className="inp" inputMode="tel" value={f.receivingFax || ''} onChange={e => setF({ ...f, receivingFax: e.target.value })} />
-            {f.receivingFax && !faxOk(f.receivingFax) && <p className="text-[11px] text-amber-700 mt-1">Ten digits. A mistyped fax number sends this patient's record to a stranger.</p>}
-            {!f.receivingFax && f.agencyPending && <p className="text-[11px] text-stone-500 mt-1">Left blank on purpose. Nothing can be faxed until the office adds it.</p>}
-          </Field>
-          <Field label="Receiving phone"><input className="inp" value={f.receivingPhone || ''} onChange={e => setF({ ...f, receivingPhone: e.target.value })} /></Field>
+    // ── Refer to (owner, 2026-10-12) ──────────────────────────────────────
+    // One list: our own clinical team first, then every outside provider GFC
+    // has referred to, then "New provider". WHO may be offered is the server's
+    // answer (referral-targets): a colleague must be an active licensed team
+    // member, and whether this viewer may refer out at all is its call too.
+    const faxDigits = (v) => String(v || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+    const fmtFax = (v) => { const d = faxDigits(v); return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : String(v || ''); };
+    const BLANK_EXTERNAL = { receivingPractice: '', receivingProvider: '', receivingFax: '', receivingPhone: '', agencyPending: false };
+
+    // Editing a SAVED provider is its own step. Every referral after this goes
+    // where it says, so a new fax needs a reason, and the referrals already
+    // placed keep the fax they were sent to.
+    const ProviderEditor = ({ provider, onSaved, onClose }) => {
+      const [p, setP] = useState({ name: provider.name || '', practice: provider.practice || '', specialty: provider.specialty || '', fax: provider.fax || '', phone: provider.phone || '' });
+      const [reason, setReason] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      const faxChanging = faxOk(p.fax) && faxDigits(p.fax) !== String(provider.fax || '');
+      const save = async () => {
+        setBusy(true); setErr('');
+        try {
+          const changed = Object.fromEntries(Object.entries(p).filter(([k, v]) => String(v || '') !== String(provider[k] || '')));
+          const r = await api.updateReferralProvider(provider.id, { ...changed, ...(faxChanging ? { changeReason: reason } : {}) });
+          onSaved(r.provider);
+        } catch (e) { setErr(e.message || 'That did not save.'); }
+        finally { setBusy(false); }
+      };
+      return (
+        <div className="grid gap-2 p-2.5 rounded border border-stone-200 bg-stone-50">
+          <p className="text-[11px] text-stone-600">This changes the saved provider for every referral from now on. Referrals already placed keep the details they were sent with.</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <Field label="Provider"><input className="inp" value={p.name} onChange={e => setP({ ...p, name: e.target.value })} /></Field>
+            <Field label="Practice"><input className="inp" value={p.practice} onChange={e => setP({ ...p, practice: e.target.value })} /></Field>
+            <Field label="Specialty"><input className="inp" value={p.specialty} onChange={e => setP({ ...p, specialty: e.target.value })} /></Field>
+            <Field label="Fax">
+              <input className="inp" inputMode="tel" value={p.fax} onChange={e => setP({ ...p, fax: e.target.value })} />
+              {p.fax && !faxOk(p.fax) && <p className="text-[11px] text-amber-700 mt-1">Ten digits.</p>}
+            </Field>
+            <Field label="Phone"><input className="inp" inputMode="tel" value={p.phone} onChange={e => setP({ ...p, phone: e.target.value })} /></Field>
+          </div>
+          {faxChanging && (
+            <Field label="Why is the fax changing? (required)">
+              <input className="inp" value={reason} onChange={e => setReason(e.target.value)} placeholder="e.g. The practice confirmed a new referral fax" />
+            </Field>
+          )}
+          {err && <p className="text-[11.5px] text-red-600">{err}</p>}
+          <div className="flex justify-end gap-2">
+            <button type="button" className="btn ghost !py-1.5" onClick={onClose}>Cancel</button>
+            <button type="button" className="btn !py-1.5" disabled={busy || !faxOk(p.fax) || (!p.name.trim() && !p.practice.trim()) || (faxChanging && !reason.trim())} onClick={save}>
+              {busy ? 'Saving…' : 'Save Provider'}
+            </button>
+          </div>
         </div>
-        <label className="flex items-start gap-2 text-xs mt-1">
-          <input type="checkbox" className="mt-0.5" checked={!!f.agencyPending} onChange={e => setF({ ...f, agencyPending: e.target.checked })} />
-          <span><b>Agency not confirmed yet.</b> Place the order now and leave the fax blank. It shows as "Needs agency" until the office or social work adds the agency and fax with Update destination. Nothing can be faxed before then.</span>
-        </label>
-        <Field label="Reason for referral"><input className="inp" value={f.reason || ''} onChange={e => setF({ ...f, reason: e.target.value })} /></Field>
-        <Field label="Clinical summary — the question you want answered">
-          <textarea className="inp" rows={3} value={f.clinicalSummary || ''} onChange={e => setF({ ...f, clinicalSummary: e.target.value })} />
-        </Field>
-        <label className="flex items-start gap-2 text-xs">
-          <input type="checkbox" className="mt-0.5" checked={!!f.priorAuthRequired} onChange={e => setF({ ...f, priorAuthRequired: e.target.checked })} />
-          <span>Prior authorization is required. <span className="text-stone-500">Medicare Advantage plans frequently require one; this is how it stops being forgotten.</span></span>
-        </label>
-        {f.priorAuthRequired && <Field label="Authorization number (if you already have it)"><input className="inp" value={f.priorAuthNumber || ''} onChange={e => setF({ ...f, priorAuthNumber: e.target.value })} /></Field>}
-      </React.Fragment>
-    );
+      );
+    };
+
+    const ReferralFields = ({ f, setF, targets, targetsErr, onProviderSaved }) => {
+      const [editing, setEditing] = useState(false);
+      const team = (targets && targets.canReferInternal && targets.internal) || [];
+      const saved = (targets && targets.canReferExternal && targets.external) || [];
+      const canExternal = !!(targets && targets.canReferExternal);
+      const chosenTeam = f.destination === 'internal' ? team.find(t => String(t.userId) === String(f.assigneeId)) : null;
+      const chosenSaved = f.destination === 'external' && f.referralProviderId ? saved.find(e => e.id === f.referralProviderId) : null;
+      const isNew = f.referTo === 'new';
+      // A typed fax already on the list: offer the saved one rather than a twin.
+      const faxTwin = isNew && faxOk(f.receivingFax) ? saved.find(e => e.fax === faxDigits(f.receivingFax)) : null;
+      const pickTarget = (value) => {
+        if (value.startsWith('team:')) {
+          const t = team.find(x => `team:${x.userId}` === value);
+          setF({ ...f, ...BLANK_EXTERNAL, referTo: value, destination: 'internal', assigneeId: t ? t.userId : '', referralProviderId: '', saveProvider: false, confirmDistinct: false, priorAuthRequired: false, specialty: t ? t.discipline : '' });
+        } else if (value.startsWith('saved:')) {
+          const e = saved.find(x => `saved:${x.id}` === value);
+          setF({ ...f, referTo: value, destination: 'external', assigneeId: '', referralProviderId: e ? e.id : '', saveProvider: false, confirmDistinct: false,
+            specialty: (e && e.specialty) || f.specialty || '', receivingPractice: (e && e.practice) || '', receivingProvider: (e && e.name) || '',
+            receivingFax: (e && e.fax) || '', receivingPhone: (e && e.phone) || '', agencyPending: false });
+        } else if (value === 'new') {
+          setF({ ...f, ...BLANK_EXTERNAL, referTo: 'new', destination: 'external', assigneeId: '', referralProviderId: '', saveProvider: true, confirmDistinct: false, specialty: '' });
+        } else {
+          setF({ ...f, referTo: '', destination: '', assigneeId: '', referralProviderId: '' });
+        }
+        setEditing(false);
+      };
+      return (
+        <React.Fragment>
+          <Field label="Refer to">
+            <select className="inp" value={f.referTo || ''} onChange={e => pickTarget(e.target.value)} disabled={!targets}>
+              <option value="">{targets ? 'Choose who this referral is for…' : 'Loading…'}</option>
+              {team.length > 0 && (
+                <optgroup label="Our care team">
+                  {team.map(t => <option key={t.userId} value={`team:${t.userId}`}>{[t.name, t.credential, t.discipline].filter(Boolean).join(' · ')}{t.onCareTeam ? ' (on care team)' : ''}</option>)}
+                </optgroup>
+              )}
+              {saved.length > 0 && (
+                <optgroup label="Referred before">
+                  {saved.map(e => <option key={e.id} value={`saved:${e.id}`}>{e.label}{e.specialty ? ` · ${e.specialty}` : ''}</option>)}
+                </optgroup>
+              )}
+              {canExternal && <option value="new">+ New Provider</option>}
+            </select>
+            {targetsErr && <p className="text-[11px] text-red-600 mt-1">{targetsErr}</p>}
+            {targets && !canExternal && <p className="text-[11px] text-stone-500 mt-1">You refer within the team. A provider or an LCSW refers to outside practices.</p>}
+          </Field>
+
+          {chosenTeam && (
+            <React.Fragment>
+              <p className="text-[11.5px] text-stone-600 -mt-1">
+                Lands in {chosenTeam.name}'s clinical inbox. Nothing is faxed.{' '}
+                {chosenTeam.onCareTeam ? 'Already on this patient’s care team.' : 'They will be added to this patient’s care team.'}
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <Field label="For"><input className="inp" value={f.specialty || ''} onChange={e => setF({ ...f, specialty: e.target.value })} /></Field>
+                <Field label="Urgency"><select className="inp" value={f.urgency || 'routine'} onChange={e => setF({ ...f, urgency: e.target.value })}>{['routine', 'urgent', 'stat'].map(u => <option key={u} value={u}>{u}</option>)}</select></Field>
+              </div>
+              <Field label="Reason for referral"><input className="inp" value={f.reason || ''} onChange={e => setF({ ...f, reason: e.target.value })} /></Field>
+              <Field label="What do you need from them?">
+                <textarea className="inp" rows={3} value={f.clinicalSummary || ''} onChange={e => setF({ ...f, clinicalSummary: e.target.value })} />
+              </Field>
+            </React.Fragment>
+          )}
+
+          {f.destination === 'external' && (
+            <React.Fragment>
+              {chosenSaved && !editing && (
+                <div className="flex flex-wrap items-center gap-2 text-[11.5px] text-stone-600 -mt-1">
+                  <span>Saved fax {chosenSaved.faxFormatted}. A change typed below applies to this referral only.</span>
+                  {targets.canEditProviders && <button type="button" className="chip border bg-white text-primary border-stone-200" onClick={() => setEditing(true)}>Edit Saved Provider</button>}
+                </div>
+              )}
+              {chosenSaved && editing && (
+                <ProviderEditor provider={chosenSaved} onClose={() => setEditing(false)}
+                  onSaved={(p) => { setEditing(false); onProviderSaved(p); setF({ ...f, specialty: p.specialty || f.specialty, receivingPractice: p.practice || '', receivingProvider: p.name || '', receivingFax: p.fax || '', receivingPhone: p.phone || '' }); }} />
+              )}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <Field label="Specialty"><input className="inp" value={f.specialty || ''} onChange={e => setF({ ...f, specialty: e.target.value })} /></Field>
+                <Field label="Urgency"><select className="inp" value={f.urgency || 'routine'} onChange={e => setF({ ...f, urgency: e.target.value })}>{['routine', 'urgent', 'stat'].map(u => <option key={u} value={u}>{u}</option>)}</select></Field>
+                <Field label="Receiving practice"><input className="inp" value={f.receivingPractice || ''} onChange={e => setF({ ...f, receivingPractice: e.target.value })} /></Field>
+                <Field label="Receiving provider"><input className="inp" value={f.receivingProvider || ''} onChange={e => setF({ ...f, receivingProvider: e.target.value })} /></Field>
+                <Field label="Receiving fax (this is what gets faxed)">
+                  <input className="inp" inputMode="tel" value={f.receivingFax || ''} onChange={e => setF({ ...f, receivingFax: e.target.value })} />
+                  {f.receivingFax && !faxOk(f.receivingFax) && <p className="text-[11px] text-amber-700 mt-1">Ten digits. A mistyped fax number sends this patient's record to a stranger.</p>}
+                  {!f.receivingFax && f.agencyPending && <p className="text-[11px] text-stone-500 mt-1">Left blank on purpose. Nothing can be faxed until the office adds it.</p>}
+                </Field>
+                <Field label="Receiving phone"><input className="inp" value={f.receivingPhone || ''} onChange={e => setF({ ...f, receivingPhone: e.target.value })} /></Field>
+              </div>
+              {faxTwin && (
+                <div className="flex flex-wrap items-center gap-2 text-[11.5px] text-amber-800">
+                  <span>That fax is already saved as {faxTwin.label}.</span>
+                  <button type="button" className="chip border bg-white text-primary border-stone-200" onClick={() => pickTarget(`saved:${faxTwin.id}`)}>Use Saved Provider</button>
+                </div>
+              )}
+              {isNew && (
+                <label className="flex items-start gap-2 text-xs">
+                  <input type="checkbox" className="mt-0.5" checked={!!f.saveProvider} onChange={e => setF({ ...f, saveProvider: e.target.checked })} />
+                  <span>Save to the provider list, so the next referral to them is one pick.</span>
+                </label>
+              )}
+              {isNew && f.saveProvider && faxTwin && (
+                <label className="flex items-start gap-2 text-xs">
+                  <input type="checkbox" className="mt-0.5" checked={!!f.confirmDistinct} onChange={e => setF({ ...f, confirmDistinct: e.target.checked })} />
+                  <span>Save as a separate provider anyway (for example, a second doctor at the same practice).</span>
+                </label>
+              )}
+              {isNew && (
+                <label className="flex items-start gap-2 text-xs mt-1">
+                  <input type="checkbox" className="mt-0.5" checked={!!f.agencyPending} onChange={e => setF({ ...f, agencyPending: e.target.checked })} />
+                  <span><b>Agency not confirmed yet.</b> Place the order now and leave the fax blank. It shows as "Needs agency" until the office or social work adds the agency and fax with Update Destination. Nothing can be faxed before then.</span>
+                </label>
+              )}
+              <Field label="Reason for referral"><input className="inp" value={f.reason || ''} onChange={e => setF({ ...f, reason: e.target.value })} /></Field>
+              <Field label="Clinical summary — the question you want answered">
+                <textarea className="inp" rows={3} value={f.clinicalSummary || ''} onChange={e => setF({ ...f, clinicalSummary: e.target.value })} />
+              </Field>
+              <label className="flex items-start gap-2 text-xs">
+                <input type="checkbox" className="mt-0.5" checked={!!f.priorAuthRequired} onChange={e => setF({ ...f, priorAuthRequired: e.target.checked })} />
+                <span>Prior authorization is required. <span className="text-stone-500">Medicare Advantage plans frequently require one; this is how it stops being forgotten.</span></span>
+              </label>
+              {f.priorAuthRequired && <Field label="Authorization number (if you already have it)"><input className="inp" value={f.priorAuthNumber || ''} onChange={e => setF({ ...f, priorAuthNumber: e.target.value })} /></Field>}
+            </React.Fragment>
+          )}
+        </React.Fragment>
+      );
+    };
 
     const DmeFields = ({ f, setF }) => (
       <React.Fragment>
@@ -5880,8 +6109,23 @@
     // for a credential that has no direct authority — the protocol picker then
     // has no blank option, and the TESTS come from the protocol's list rather
     // than a free-text box, because a test typed in is refused server-side.
-    const OrderForm = ({ diagnoses, types, priorities, onSave, busy, standingOrders, requireStandingOrder, docTypes, enrollmentWarning }) => {
-      const [f, setF] = useState({ orderType: 'lab', tests: '', priority: 'routine', diagnosisCodes: diagnoses.map(d => d.code), notes: '', standingOrderId: '' });
+    const OrderForm = ({ clientId, diagnoses, types, priorities, onSave, busy, standingOrders, requireStandingOrder, docTypes, enrollmentWarning }) => {
+      // A REFERRAL is decided by where it goes (owner, 2026-10-12): any licensed
+      // role refers within the team, a provider or an LCSW refers out. Someone
+      // with no direct ordering authority still refers, with no protocol.
+      const canReferInternal = useCan('referInternal');
+      const canReferOut = useCan('referExternal');
+      const canOrderOwn = useCan('orderDirect');
+      const canReferExternal = canReferOut || canOrderOwn;
+      const canRefer = canReferInternal || canReferExternal;
+      const [f, setF] = useState({ orderType: requireStandingOrder && canRefer ? 'referral' : 'lab', tests: '', priority: 'routine', diagnosisCodes: diagnoses.map(d => d.code), notes: '', standingOrderId: '' });
+      const [targets, setTargets] = useState(null);
+      const [targetsErr, setTargetsErr] = useState('');
+      const loadTargets = useCallback(() => {
+        if (!clientId) return;
+        api.referralTargets(clientId).then(r => { setTargets(r); setTargetsErr(''); }).catch(e => setTargetsErr(e.message || 'The referral list did not load.'));
+      }, [clientId]);
+      useEffect(() => { if (f.orderType === 'referral' && !targets) loadTargets(); }, [f.orderType, targets, loadTargets]);
       // 42 CFR 424.507: the server refuses a Medicare lab/imaging/DME order from
       // an ordering clinician not enrolled in approved status UNTIL it is
       // acknowledged with a reason. This form had no way to send one, so every
@@ -5904,25 +6148,31 @@
       });
       // Under a protocol the choice narrows to the types BOTH the protocol and
       // the caller's licence allow — the server computed that intersection, so
-      // the form does not re-derive it.
-      const typeOptions = picked ? orderTypesOf(picked) : (types || []);
+      // the form does not re-derive it. With no protocol, someone without direct
+      // authority is offered the referral alone.
+      const typeOptions = picked ? orderTypesOf(picked) : requireStandingOrder ? (canRefer ? ['referral'] : []) : (types || []);
+      const referralReady = f.orderType !== 'referral' || (f.destination === 'internal'
+        ? !!(f.assigneeId && f.reason && f.clinicalSummary)
+        : f.destination === 'external'
+          ? !!(f.specialty && f.reason && f.clinicalSummary && (f.agencyPending && !String(f.receivingFax || '').trim() ? true : faxOk(f.receivingFax)))
+          : false);
       return (
         <div className="grid gap-2 border-t border-stone-100 pt-3">
-          {(requireStandingOrder || protocols.length > 0) && (
-            <Field label={requireStandingOrder ? 'Standing order (required)' : 'Standing order (optional)'}>
+          {(protocols.length > 0 || (requireStandingOrder && !canRefer)) && (
+            <Field label={requireStandingOrder && !canRefer ? 'Standing order (required)' : 'Standing order (optional)'}>
               <select className="inp" value={f.standingOrderId}
                 onChange={e => {
                   // A protocol that does not permit 'lab' left the form sending
                   // 'lab' under an option list that did not contain it.
                   const next = protocols.find(o => o.id === e.target.value);
                   const first = next && orderTypesOf(next)[0];
-                  setF({ ...f, standingOrderId: e.target.value, tests: '', orderType: first || 'lab' });
+                  setF({ ...f, standingOrderId: e.target.value, tests: '', orderType: first || (requireStandingOrder && canRefer ? 'referral' : 'lab') });
                 }}>
                 {!requireStandingOrder && <option value="">No protocol — my own authority</option>}
-                {requireStandingOrder && <option value="">Select a protocol…</option>}
+                {requireStandingOrder && <option value="">{canRefer ? 'No protocol — a referral' : 'Select a protocol…'}</option>}
                 {protocols.map(o => <option key={o.id} value={o.id}>{o.title} (v{o.version})</option>)}
               </select>
-              {requireStandingOrder && protocols.length === 0 &&
+              {requireStandingOrder && protocols.length === 0 && !canRefer &&
                 <p className="text-[11px] text-amber-700 mt-1">No active standing order authorises your credential for this work. A provider authors and signs one.</p>}
               {picked && <p className="text-[11px] text-stone-500 mt-1">Ordering clinician of record: {picked.authorizingProvider && picked.authorizingProvider.name}. Expires {String(picked.expiresAt || '').slice(0, 10)}.</p>}
             </Field>
@@ -5932,7 +6182,9 @@
             <Field label="Priority"><select className="inp" value={f.priority} onChange={e => setF({ ...f, priority: e.target.value })}>{(priorities || []).map(t => <option key={t} value={t}>{t}</option>)}</select></Field>
           </div>
           {isDoc
-            ? (f.orderType === 'referral' ? <ReferralFields f={f} setF={setF} /> : <DmeFields f={f} setF={setF} />)
+            ? (f.orderType === 'referral'
+              ? <ReferralFields f={f} setF={setF} targets={targets} targetsErr={targetsErr} onProviderSaved={loadTargets} />
+              : <DmeFields f={f} setF={setF} />)
             : picked
             ? (
               <Field label="Tests / studies this protocol permits">
@@ -5965,18 +6217,18 @@
           )}
           <div className="flex justify-end">
             <button className="btn !py-1.5"
-              disabled={busy || !f.diagnosisCodes.length || (requireStandingOrder && !f.standingOrderId) ||
+              disabled={busy || !f.diagnosisCodes.length || (requireStandingOrder && !f.standingOrderId && f.orderType !== 'referral') ||
                 (enrollmentWarning && (!ack.acknowledged || !ack.reason.trim())) ||
                 (isDoc
                   ? (f.orderType === 'referral'
-                    ? (!f.specialty || !f.reason || !f.clinicalSummary || (f.agencyPending && !String(f.receivingFax || '').trim() ? false : !faxOk(f.receivingFax)))
+                    ? !referralReady
                     : (!f.itemDescription || !f.quantity || !f.supplierName || !f.lengthOfNeed || !faxOk(f.supplierFax) || (f.requiresF2F && !f.faceToFaceDate)))
                   : !f.tests.trim())}
               onClick={() => {
                 const body = isDoc ? f : { ...f, tests: f.tests.split('\n').map(s => s.trim()).filter(Boolean) };
                 onSave(enrollmentWarning ? { ...body, enrollmentAcknowledgment: { acknowledged: ack.acknowledged, reason: ack.reason.trim() } } : body);
               }}>
-              {busy ? 'Recording…' : f.orderType === 'referral' ? 'Record Referral' : f.orderType === 'dme' ? 'Record Written Order' : 'Record Order'}
+              {busy ? 'Recording…' : f.orderType === 'referral' ? (f.destination === 'internal' ? 'Send Referral' : 'Record Referral') : f.orderType === 'dme' ? 'Record Written Order' : 'Record Order'}
             </button>
           </div>
         </div>
@@ -5989,14 +6241,95 @@
     // open the requisition (it lands in the phone's PDF viewer, one tap from the
     // share sheet), fax it from Doximity, then come back and say it went — which
     // is what "Mark as faxed" records, with the number and the channel.
+    // ── Cancel Order (owner, 2026-10-12) ───────────────────────────────────
+    // A cancel needs a reason, and the server says per order whether this
+    // viewer may cancel it (order.can.cancel), so the button only shows where
+    // the route will accept it.
+    const CancelOrderControl = ({ order, busy, onCancel }) => {
+      const [open, setOpen] = useState(false);
+      const [reason, setReason] = useState('');
+      if (!(order.can && order.can.cancel) || !onCancel) return null;
+      if (!open) {
+        return (
+          <button type="button" className="chip border bg-white text-red-700 border-red-200" onClick={() => setOpen(true)}>
+            <i className="ti ti-x" /> Cancel Order
+          </button>
+        );
+      }
+      return (
+        <div className="w-full grid gap-2 mt-2 p-2.5 rounded border border-red-200 bg-red-50/40">
+          <Field label="Why is this order being cancelled? (required)">
+            <input className="inp" value={reason} onChange={e => setReason(e.target.value)} placeholder="e.g. Done at the hospital last week" />
+          </Field>
+          <div className="flex justify-end gap-2">
+            <button type="button" className="btn ghost !py-1.5" onClick={() => { setOpen(false); setReason(''); }}>Keep Order</button>
+            <button type="button" className="btn !py-1.5 !bg-red-700" disabled={busy || !reason.trim()}
+              onClick={() => onCancel(reason.trim()).then(r => { if (r) { setOpen(false); setReason(''); } })}>
+              {busy ? 'Cancelling…' : 'Confirm Cancel'}
+            </button>
+          </div>
+        </div>
+      );
+    };
+
+    // A referral to someone on the team: no requisition, no fax. The colleague
+    // it went to accepts it and completes it with a note; the server says
+    // whether this viewer is that person (order.can.acceptOrComplete).
+    const InternalReferralActions = ({ order, busy, onAccept, onComplete, onCancel }) => {
+      const [completing, setCompleting] = useState(false);
+      const [note, setNote] = useState('');
+      const r = order.referral || {};
+      const to = r.assignedTo || {};
+      const mine = !!(order.can && order.can.acceptOrComplete);
+      return (
+        <div className="mt-1.5">
+          <div className="text-[11.5px] text-stone-600">
+            Referred to <b>{to.name || 'a colleague'}</b>{to.roleLabel ? ` (${to.roleLabel})` : ''} inside the team.
+            {order.status === 'accepted' && r.acceptedAt && <span> Accepted {fmtTs(r.acceptedAt)}.</span>}
+          </div>
+          {order.status === 'completed' && (
+            <div className="mt-1 p-2 rounded border border-emerald-200 bg-emerald-50/50 text-[12.5px]">
+              <div className="text-[11px] text-emerald-800 font-semibold">Completed {fmtTs(r.completedAt)} by {(r.completedBy && r.completedBy.name) || to.name}</div>
+              <div className="whitespace-pre-wrap">{r.completionNote}</div>
+            </div>
+          )}
+          <div className="flex flex-wrap gap-1.5 mt-1.5">
+            {mine && order.status === 'ordered' && (
+              <button type="button" className="chip border bg-white text-primary border-stone-200" disabled={busy} onClick={() => onAccept()}>Accept</button>
+            )}
+            {mine && ['ordered', 'accepted'].includes(order.status) && !completing && (
+              <button type="button" className="chip border bg-white text-primary border-stone-200" onClick={() => setCompleting(true)}>Mark Complete</button>
+            )}
+            <CancelOrderControl order={order} busy={busy} onCancel={onCancel} />
+          </div>
+          {completing && (
+            <div className="grid gap-2 mt-2 p-2.5 rounded border border-stone-200 bg-stone-50">
+              <Field label="What did you do? (the referring clinician reads this)">
+                <textarea className="inp" rows={3} value={note} onChange={e => setNote(e.target.value)} />
+              </Field>
+              <div className="flex justify-end gap-2">
+                <button type="button" className="btn ghost !py-1.5" onClick={() => setCompleting(false)}>Back</button>
+                <button type="button" className="btn !py-1.5" disabled={busy || !note.trim()}
+                  onClick={() => onComplete(note.trim()).then(res => { if (res) { setCompleting(false); setNote(''); } })}>
+                  {busy ? 'Saving…' : 'Complete Referral'}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    };
+
     const OrderActions = ({ order, channels, channelLabels, defaultChannel, faxChannels, interpretations, onSent, onScheduled, onResult, busy,
-      destinationFields, editableStatuses, onDestination }) => {
+      destinationFields, editableStatuses, onDestination, onCancel, onAccept, onComplete }) => {
       const [mode, setMode] = useState('');
       const canEditDestination = useCanEditOrderDestination();
-      // Recording a send, a scheduled date or a result advances the order,
-      // which the server allows an RN or a provider. Offering the button to
-      // anyone else is offering a 403.
-      const canAdvance = useCan('orderStatusAdvance');
+      // Recording a send, a scheduled date or a result advances the order. The
+      // server answers per order (order.can.coordinate): an RN or a provider on
+      // any order, social work on a referral. Before it has, fall back to the
+      // capability. Offering the button to anyone else is offering a 403.
+      const canAdvanceAny = useCan('orderStatusAdvance');
+      const canAdvance = order.can ? !!order.can.coordinate : canAdvanceAny;
       // The fields for this order's type are the SERVER's list; a type it does
       // not list (a lab) has no destination to edit and gets no button.
       const destFields = (destinationFields && destinationFields[order.orderType]) || null;
@@ -6025,13 +6358,20 @@
       const [res, setRes] = useState({ interpretation: 'normal', resultDate: todayYmd(), performedBy: '', summary: '', file: null });
       const isFax = (faxChannels || []).includes(send.channel);
       const sends = order.sends || [];
+      // Every hook is above this line, so the early return keeps hook order.
+      if (order.orderType === 'referral' && (order.referral || {}).destination === 'internal') {
+        return <InternalReferralActions order={order} busy={busy} onAccept={onAccept} onComplete={onComplete} onCancel={onCancel} />;
+      }
       return (
         <div className="mt-1.5">
+          {order.status === 'cancelled' && order.cancelReason && (
+            <div className="text-[11.5px] text-stone-600 mb-1">Cancelled {fmtTs(order.cancelledAt)}{order.cancelledBy && order.cancelledBy.name ? ` by ${order.cancelledBy.name}` : ''}: {order.cancelReason}</div>
+          )}
           <div className="flex flex-wrap gap-1.5">
             {agencyPending && <span className="chip bg-amber-50 text-amber-800 border border-amber-200">Needs agency</span>}
-            {agencyPending && <span className="chip border bg-stone-100 text-stone-400 border-stone-200 cursor-not-allowed" title="Add the receiving agency and fax first, then the requisition can be opened."><i className="ti ti-file-text" /> Open requisition</span>}
+            {agencyPending && <span className="chip border bg-stone-100 text-stone-400 border-stone-200 cursor-not-allowed" title="Add the receiving agency and fax first, then the requisition can be opened."><i className="ti ti-file-text" /> Open Requisition</span>}
             {!agencyPending && <a className="chip border bg-white text-primary border-stone-200" href={api.requisitionUrl(order.id)} target="_blank" rel="noopener noreferrer">
-              <i className="ti ti-file-text" /> {order.requisitionGeneratedAt ? 'Open requisition again' : 'Open requisition'}
+              <i className="ti ti-file-text" /> Open Requisition
             </a>}
             {canAdvance && !agencyPending && ['ordered', 'sent', 'scheduled'].includes(order.status) &&
               <button className="chip border bg-white text-primary border-stone-200" onClick={() => {
@@ -6059,6 +6399,7 @@
               <button className="chip border bg-white text-primary border-stone-200" onClick={() => setMode(mode === 'result' ? '' : 'result')}>
                 {order.orderType === 'referral' ? 'Attach Consult Note' : 'Attach Result'}
               </button>}
+            <CancelOrderControl order={order} busy={busy} onCancel={onCancel} />
           </div>
 
           {order.resendNeeded && (
@@ -6935,7 +7276,11 @@
       const ceiling = useContext(AccessContext).credentialCeiling || [];
       const canOrderStanding = useCan('orderStanding') && ceiling.some(t => t !== 'screening');
       const canSelectCodes = useCan('selectServiceCodes');
-      const canAdvanceOrders = useCan('orderStatusAdvance');
+      // Anyone licensed refers within the team; a provider or an LCSW refers out
+      // (owner, 2026-10-12). Either one opens the order form, for a referral.
+      const canReferInternal = useCan('referInternal');
+      const canReferExternal = useCan('referExternal');
+      const canRefer = canReferInternal || canReferExternal;
       const myClinicalRole = useClinicalRole();
       const [standingOrders, setStandingOrders] = useState([]);
       const [orderEnrollmentWarning, setOrderEnrollmentWarning] = useState(null);
@@ -7011,7 +7356,7 @@
       const facingDirty = (facing.patientSummary || '') !== (d.record.patientSummary || '') || (facing.followUpInstructions || '') !== (d.record.followUpInstructions || '');
       // Ticking "add to problem list" is a change too: without it, Save stayed disabled.
       const dirty = JSON.stringify(diagnoses) !== JSON.stringify(d.record.diagnoses || []) || JSON.stringify(services) !== JSON.stringify(d.record.services || []) || facingDirty || (addToProblemList || []).length > 0;
-      const ORDER_LABEL = { ordered: 'Ordered', sent: 'Sent', resulted: 'Resulted', cancelled: 'Cancelled' };
+      const ORDER_LABEL = { ordered: 'Ordered', sent: 'Sent', scheduled: 'Scheduled', accepted: 'Accepted', resulted: 'Resulted', completed: 'Completed', cancelled: 'Cancelled' };
       // On a phone one step shows at a time; at a desk the whole encounter is
       // one scroll, because a reviewer wants to see all of it at once. Two
       // different jobs, so two different shapes rather than one compromise.
@@ -7213,15 +7558,17 @@
               </div>
             </div>
             <div className="card">
-              <div className="card-h"><h2>Orders</h2>{!locked && (canOrderDirect || canOrderStanding) && <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={() => setShowOrder(v => !v)}>{showOrder ? 'Close' : '+ Record Order'}</button>}</div>
+              <div className="card-h"><h2>Orders</h2>{!locked && (canOrderDirect || canOrderStanding || canRefer) && <button className="btn ghost !py-1 !px-2.5 text-xs" onClick={() => setShowOrder(v => !v)}>{showOrder ? 'Close' : '+ Record Order'}</button>}</div>
               <div className="p-4 text-sm">
                 {d.orders.length === 0 && <p className="text-xs text-stone-400">None recorded on this encounter.</p>}
                 {d.orders.map(o => {
                   // A referral's lifecycle is not a lab's, so the transitions
                   // come from the map the SERVER chose for this order's type.
-                  const trans = (o.orderType === 'referral' ? d.referralTransitions : d.orderTransitions) || {};
+                  const toWho = o.referral && (o.referral.destination === 'internal'
+                    ? ((o.referral.assignedTo && o.referral.assignedTo.name) || '')
+                    : o.referral.receivingPractice);
                   const headline = o.orderType === 'referral'
-                    ? `Referral · ${(o.referral && o.referral.specialty) || ''}${o.referral && o.referral.receivingPractice ? ` → ${o.referral.receivingPractice}` : ''}`
+                    ? `Referral · ${(o.referral && o.referral.specialty) || ''}${toWho ? ` → ${toWho}` : ''}`
                     : o.orderType === 'dme'
                       ? `DME · ${(o.dme && o.dme.itemDescription) || ''}${o.dme && o.dme.quantity ? ` ×${o.dme.quantity}` : ''}`
                       : `${o.orderType} · ${o.priority} — ${(o.tests || []).join(', ')}`;
@@ -7248,6 +7595,9 @@
                       interpretations={d.resultInterpretations} busy={busy === `o${o.id}`}
                       destinationFields={d.destinationFields} editableStatuses={d.destinationEditableStatuses}
                       onDestination={(body) => run(`o${o.id}`, () => api.updateOrderDestination(o.id, body))}
+                      onCancel={(reason) => run(`o${o.id}`, () => api.orderStatus(o.id, 'cancelled', reason))}
+                      onAccept={() => run(`o${o.id}`, () => api.acceptReferral(o.id))}
+                      onComplete={(note) => run(`o${o.id}`, () => api.completeReferral(o.id, note))}
                       onSent={(body) => run(`o${o.id}`, () => api.markOrderSent(o.id, body))}
                       onScheduled={(date) => run(`o${o.id}`, () => api.markReferralScheduled(o.id, date))}
                       onResult={(r) => {
@@ -7256,23 +7606,11 @@
                         ['interpretation', 'resultDate', 'performedBy', 'summary'].forEach(k => fd.append(k, r[k]));
                         return run(`o${o.id}`, () => api.attachResult(o.id, fd));
                       }} />
-                    <div className="flex flex-wrap gap-1.5 mt-1">
-                      {canAdvanceOrders && (trans[o.status] || [])
-                        // 4.10: only the statuses that carry NO evidence are
-                        // clickable. 'sent', 'scheduled', 'resulted' and
-                        // 'completed' have their own controls above; offering a
-                        // button the server refuses is worse than no button.
-                        .filter(n => n === 'cancelled')
-                        .map(n => (
-                        <button key={n} className="chip border bg-white text-primary border-stone-200" disabled={busy === `o${o.id}`}
-                          onClick={() => run(`o${o.id}`, () => api.orderStatus(o.id, n))}>mark {(ORDER_LABEL[n] || n).toLowerCase()}</button>
-                      ))}
-                    </div>
                   </div>
                   );
                 })}
-                {showOrder && !locked && (canOrderDirect || canOrderStanding) &&
-                  <OrderForm diagnoses={diagnoses} types={d.orderTypes} priorities={d.orderPriorities} busy={busy === 'order'}
+                {showOrder && !locked && (canOrderDirect || canOrderStanding || canRefer) &&
+                  <OrderForm clientId={patient.id} diagnoses={diagnoses} types={d.orderTypes} priorities={d.orderPriorities} busy={busy === 'order'}
                     docTypes={d.documentOrderTypes}
                     standingOrders={standingOrders} requireStandingOrder={!canOrderDirect} enrollmentWarning={orderEnrollmentWarning}
                     onSave={(f) => run('order', () => api.addOrder(patient.id, euuid, f).catch(e => {
@@ -7280,7 +7618,8 @@
                       if (e && e.data && e.data.needsReason) setOrderEnrollmentWarning(e.data);
                       throw e;
                     })).then(onOk(() => { setShowOrder(false); setOrderEnrollmentWarning(null); }))} />}
-                {!locked && !canOrderDirect && canOrderStanding && <p className="text-[11px] text-stone-400 mt-2">You place orders under a signed standing order. Pick the protocol, then the test it permits.</p>}
+                {!locked && !canOrderDirect && canOrderStanding && <p className="text-[11px] text-stone-400 mt-2">You place orders under a signed standing order. Pick the protocol, then the test it permits. A referral needs no protocol.</p>}
+                {!locked && !canOrderDirect && !canOrderStanding && canRefer && <p className="text-[11px] text-stone-400 mt-2">You can refer this patient{canReferExternal ? '' : ' to someone on the team'}. Tests and equipment are ordered by a provider.</p>}
                 <p className="text-[10.5px] text-stone-400 mt-2">The app generates; a person transmits. Open the requisition, fax it from Doximity, then record the send here — that is what moves an order to sent. Attaching the result is what moves it to resulted. Both still work after the encounter is signed.</p>
               </div>
             </div>
@@ -7901,7 +8240,9 @@
       // Session 4.12 I1 — MY DAY is the default route after sign-in. The
       // workspace used to open on a patient list, which is not how a house-call
       // day starts.
-      const [view, setView] = useState('myday'); // 'myday' (4.12) | 'charts' | 'schedule' (4.2) | 'queue' (4.4) | 'inbox' (4.9) | 'results' | 'overdue' (4.10)
+      // `/clinical#inbox` is where the referral email points (appLinks), so the
+      // fragment is read ONCE, at mount. Anything else lands on My Day.
+      const [view, setView] = useState(() => (String(window.location.hash || '').replace(/^#/, '') === 'inbox' ? 'inbox' : 'myday')); // 'myday' (4.12) | 'charts' | 'schedule' (4.2) | 'queue' (4.4) | 'inbox' (4.9) | 'results' | 'overdue' (4.10)
       const [hpApptEid, setHpApptEid] = useState(null); // H&P opened from an appointment
       const [encTarget, setEncTarget] = useState(null); // encounter to open on the Encounters tab (4.4)
 

@@ -168,8 +168,12 @@ test('an LCSW or LMSW can record visit times', () => {
 test('a social worker is not offered med rec, the problem list, order sends or a care-plan co-sign they cannot do', () => {
   const code = strip(page);
   assert.match(code, /const MedRecTab = \(\{ patient, onSaved \}\) => \{\s*const canWrite = useCan\('medRec'\);/);
-  assert.match(code, /setAddToProblemList && canWriteProblems && \(/);
-  assert.match(code, /const canAdvance = useCan\('orderStatusAdvance'\);/);
+  // 2026-10-12: an LCSW is offered the problem list for an F code only, and
+  // whether a viewer may work an order through is the server's per-order answer
+  // (order.can.coordinate): social work works REFERRALS, never a lab.
+  assert.match(code, /setAddToProblemList && canWriteProblemFor\(d\.code\) && \(/);
+  assert.match(code, /const canWriteProblemFor = \(code\) => canWriteAllProblems \|\| \(canWriteBhDx && \/\^F\\d\{2\}\/\.test/);
+  assert.match(code, /const canAdvance = order\.can \? !!order\.can\.coordinate : canAdvanceAny;/);
   assert.equal((code.match(/\{canAdvance && /g) || []).length, 3, 'mark faxed, mark scheduled and attach result');
   assert.match(code, /\{providerPending && canCoSignPlan && \(/);
   assert.match(server, /canCoSignCarePlan: clinicalRoles\.canCoSignCarePlan\(req\.user\)/);
