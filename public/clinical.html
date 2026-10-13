@@ -166,6 +166,43 @@
     };
     const useClinicalRole = () => useContext(AccessContext).clinicalRole;
 
+    // Help text (owner, 2026-10-12): the "how this works" notes under key
+    // buttons show in full only to a super admin. Everyone else gets a small
+    // "?" bubble beside the buttons that shows the same words on hover, focus
+    // or tap. One component, so the words live in one place either way.
+    // The tooltip is position:fixed and clamped to the window, so a bubble at
+    // the edge of a card or a phone screen never opens off-screen.
+    const HINT_WIDTH = 280;
+    const Hint = ({ children, className = '' }) => {
+      const isSuperAdmin = useContext(AccessContext).role === 'admin';
+      const [pos, setPos] = useState(null);
+      const ref = useRef(null);
+      if (isSuperAdmin) return <p className={`text-[11px] text-stone-400 ${className}`}>{children}</p>;
+      const show = () => {
+        const r = ref.current && ref.current.getBoundingClientRect();
+        if (!r) return;
+        const w = Math.min(HINT_WIDTH, window.innerWidth - 16);
+        const left = Math.max(8, Math.min(r.left + r.width / 2 - w / 2, window.innerWidth - w - 8));
+        const below = r.bottom + 160 < window.innerHeight;
+        setPos({ left, width: w, top: below ? r.bottom + 6 : undefined, bottom: below ? undefined : window.innerHeight - r.top + 6 });
+      };
+      const hide = () => setPos(null);
+      return (
+        <span ref={ref} role="button" tabIndex={0} aria-label="More information"
+          className="inline-flex items-center justify-center shrink-0 w-[18px] h-[18px] rounded-full border border-stone-300 text-stone-500 text-[11px] font-semibold leading-none cursor-help align-middle hover:bg-stone-100 focus:outline-none focus:ring-2 focus:ring-stone-300"
+          onMouseEnter={show} onMouseLeave={hide} onFocus={show} onBlur={hide}
+          onClick={(e) => { e.preventDefault(); e.stopPropagation(); pos ? hide() : show(); }}>
+          ?
+          {pos && (
+            <span role="tooltip" className="fixed z-[100] rounded-lg bg-stone-800 text-white text-[12px] font-normal leading-snug text-left p-2.5 shadow-lg pointer-events-none"
+              style={{ left: pos.left, width: pos.width, top: pos.top, bottom: pos.bottom }}>
+              {children}
+            </span>
+          )}
+        </span>
+      );
+    };
+
     const getToken = () => localStorage.getItem('admin_token') || localStorage.getItem('unified_token');
     const handleResponse = async (response) => {
       if (!response.ok) {
@@ -618,12 +655,12 @@
               <input type="file" className="hidden" accept=".pdf,.jpg,.jpeg,.png" disabled={busy || !kind}
                 onChange={e => { pick((e.target.files || [])[0]); e.target.value = ''; }} />
             </label>
+            <Hint className="w-full">
+              Filed to the client's documents — it ticks the office checklist and the client sees it on their portal.
+              PDF, JPG or PNG.
+            </Hint>
           </div>
           {!kinds && !msg && <p className="text-[11px] text-stone-400 mt-2">Reading the document list…</p>}
-          <p className="text-[11px] text-stone-400 mt-2">
-            Filed to the client's documents — it ticks the office checklist and the client sees it on their portal.
-            PDF, JPG or PNG.
-          </p>
           {msg && <p className={`text-xs mt-1 ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
         </div>
       );
@@ -1182,10 +1219,10 @@
               </p>
             )}
             {!agree.ok && <p className="text-xs text-red-600"><i className="ti ti-alert-triangle mr-1" />{agree.error}</p>}
-            <p className="text-[11px] text-stone-400">
+            <Hint>
               An admin sets both of these on the enrollment record (Enrollment → this client → Place of service).
               It decides the place of service on the claim, so it is not a clinician's pick.
-            </p>
+            </Hint>
           </div>
         </div>
       );
@@ -1915,7 +1952,7 @@
                     fd.append('file', f); fd.append('label', fileLabel);
                     run('file', () => api.addOrderFile(order.id, fd), () => { setFileLabel(''); if (fileRef.current) fileRef.current.value = ''; });
                   }}>Attach File</button>
-                <div className="w-full text-[11px] text-stone-400">PDF, JPG or PNG, up to 10 MB. It is filed to the patient's chart too.</div>
+                <Hint className="w-full">PDF, JPG or PNG, up to 10 MB. It is filed to the patient's chart too.</Hint>
               </div>
             )}
           </div>
@@ -2406,9 +2443,9 @@
                 <button className="btn ghost !py-0.5 !px-2 text-[11px] shrink-0" onClick={() => onOpenChart(n.clientId)}>Open</button>
               </div>
             ))}
-          <p className="text-[11px] text-stone-400 mt-2">
+          <Hint className="mt-2">
             "Due" means no visit on file, or none in the last {data.dueAfterDays} days.
-          </p>
+          </Hint>
         </div>
       );
     };
@@ -3366,7 +3403,7 @@
                       {linking ? 'Linking…' : 'Link'}
                     </button>
                     <button className="btn ghost" onClick={() => { setShowLinkExisting(false); setExistingId(''); }}>Cancel</button>
-                    <p className="text-[11px] text-stone-400 w-full">Find the UUID in OpenEMR on the patient's record (or ask an admin). The link is verified against the EMR before it is saved.</p>
+                    <Hint className="w-full">Find the UUID in OpenEMR on the patient's record (or ask an admin). The link is verified against the EMR before it is saved.</Hint>
                   </div>
                 )}
               </div>
@@ -3605,10 +3642,10 @@
     // slots in behind an IAM role with zero data retention confirmed, the same
     // way §10.3 governs Bedrock. That is a configuration, not a rewrite.
     const DictationHint = () => (
-      <p className="text-[11px] text-stone-400 mb-2">
+      <div className="mb-2"><Hint>
         <i className="ti ti-microphone mr-1" />
         To dictate, use the microphone on your phone or tablet keyboard — it types straight into any box here.
-      </p>
+      </Hint></div>
     );
 
     const TextArea = ({ path, label, rows, f, set }) => (
@@ -3762,7 +3799,7 @@
             <b className="text-sm text-primary"><i className="ti ti-copy mr-1" />Copy Previous Note</b>
             <button className="text-stone-400" onClick={onClose}><i className="ti ti-x" /></button>
           </div>
-          <p className="text-[11px] text-stone-500 mb-2">Copies the whole note except vitals and the date. Every copied section is marked, and the note cannot be signed until each one has been edited or confirmed.</p>
+          <div className="mb-2"><Hint>Copies the whole note except vitals and the date. Every copied section is marked, and the note cannot be signed until each one has been edited or confirmed.</Hint></div>
           {err && <p className="text-xs text-red-600">{err}</p>}
           {!sources && !err && <p className="text-xs text-stone-500">Loading earlier notes…</p>}
           {sources && sources.length === 0 && <p className="text-xs text-stone-500">No earlier notes on this chart.</p>}
@@ -4660,13 +4697,13 @@
                   {busy === 'discard' ? (sn.euuid ? 'Deleting…' : 'Discarding…') : (sn.euuid ? 'Delete Encounter' : 'Discard Draft')}
                 </button>
               )}
+              <Hint className="w-full">
+                <b>Save Draft</b> saves to the app and OpenEMR together, stamped with your name and the time — it does <b>not</b> sign, and anyone working on this chart can keep editing it.
+                <b> Sign &amp; Submit</b> saves, then signs and locks it; after that, changes are addenda.
+              </Hint>
             </div>
           </div>
           <div className="px-1 mb-3">
-            <p className="text-[11px] text-stone-500 mt-2">
-              <b>Save Draft</b> saves to the app and OpenEMR together, stamped with your name and the time — it does <b>not</b> sign, and anyone working on this chart can keep editing it.
-              <b> Sign &amp; Submit</b> saves, then signs and locks it; after that, changes are addenda.
-            </p>
             {draftAt && !sn.euuid && <p className="text-[11px] text-stone-400 mt-1">Your unsaved copy from {fmtTs(draftAt)}{restored ? ' · restored into this form' : ''}.</p>}
             <NoteHistory revisions={sn.meta.revisions} />
           </div>
@@ -4733,10 +4770,12 @@
                 );
               })}
               {msg && <p className={`text-sm mt-3 ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
-              {canWrite && <button className="btn mt-4" disabled={busy || rows.length === 0} onClick={save}>
-                {busy ? 'Saving…' : 'Save to OpenEMR'}
-              </button>}
-              {canWrite && <p className="text-[11px] text-stone-400 mt-2">Unmarked rows default to "keep". Every kept or added medication not already in OpenEMR is written to OpenEMR's prescriptions, marked as a home medication (not a new GFC prescription). "Discontinue" end-dates the OpenEMR row and removes it from the app's list.</p>}
+              {canWrite && <div className="flex flex-wrap items-center gap-2 mt-4">
+                <button className="btn" disabled={busy || rows.length === 0} onClick={save}>
+                  {busy ? 'Saving…' : 'Save to OpenEMR'}
+                </button>
+                <Hint className="w-full">Unmarked rows default to "keep". Every kept or added medication not already in OpenEMR is written to OpenEMR's prescriptions, marked as a home medication (not a new GFC prescription). "Discontinue" end-dates the OpenEMR row and removes it from the app's list.</Hint>
+              </div>}
               {!canWrite && <p className="text-[11px] text-stone-400 mt-2">Read-only view — reconciliation is resolved by an RN or a provider.</p>}
             </div>
           </div>
@@ -4900,10 +4939,12 @@
                 <SignaturePad padRef={padRef} />
               </div>
               {msg && <p className={`text-sm ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
-              <button className="btn" disabled={busy} onClick={save}>
-                <i className="ti ti-writing-sign" />{busy ? 'Saving…' : 'Sign & Save'}
-              </button>
-              <p className="text-[11px] text-stone-400">Saving writes the versioned plan to the client record (portal + co-sign unlock) and files the authored PDF to OpenEMR. The final signed PDF — with both signatures — is emitted when the client co-signs in their portal.</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <button className="btn" disabled={busy} onClick={save}>
+                  <i className="ti ti-writing-sign" />{busy ? 'Saving…' : 'Sign & Save'}
+                </button>
+                <Hint className="w-full">Saving writes the versioned plan to the client record (portal + co-sign unlock) and files the authored PDF to OpenEMR. The final signed PDF — with both signatures — is emitted when the client co-signs in their portal.</Hint>
+              </div>
             </div>
           </div>}
         </div>
@@ -5000,13 +5041,13 @@
               </div>
               <Field label="Notes"><textarea className="inp" rows={2} value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} /></Field>
               {err && <p className="text-red-600 text-sm">{err}</p>}
-              <div className="flex gap-2 justify-end">
+              <div className="flex flex-wrap items-center gap-2 justify-end">
+                {isRes && <Hint className="w-full order-last">The original slot stays on the calendar as a cancelled entry — nothing is deleted.</Hint>}
                 <button className="btn ghost" onClick={onClose}>Close</button>
                 <button className="btn" disabled={busy} onClick={submit}>
                   {busy ? 'Saving to OpenEMR…' : (isRes ? 'Reschedule' : 'Book Visit')}
                 </button>
               </div>
-              {isRes && <p className="text-[11px] text-stone-400">The original slot stays on the calendar as a cancelled entry — nothing is deleted.</p>}
             </div>
           </div>
         </div>
@@ -5771,13 +5812,15 @@
                 <Field label="Visit date"><input className="inp" type="date" value={f.date} onChange={e => setF({ ...f, date: e.target.value })} /></Field>
               </div>
               {sectionsOnly && templateSections.map(sec => renderOwnSection(sec, sections, setSection, [], () => {}))}
-              {!sectionsOnly && visitType && <p className="text-xs text-stone-500">Save opens the {visitType.label} note on its encounter, laid out as Subjective, Objective, Assessment and Plan where it applies. Diagnoses, orders and signing are done there.</p>}
               {err && <p className="text-red-600 text-sm">{err}</p>}
-              <div className="flex gap-2 justify-end">
+              <div className="flex flex-wrap items-center gap-2 justify-end">
+                <Hint className="w-full order-last">
+                  {!sectionsOnly && visitType && <>Save opens the {visitType.label} note on its encounter, laid out as Subjective, Objective, Assessment and Plan where it applies. Diagnoses, orders and signing are done there. </>}
+                  Saves a draft to the app and OpenEMR, stamped with your name and the time — it is <b>not</b> signed. The encounter then opens, where you or anyone working on this chart can keep writing, add codes, orders and prescriptions, and <b>Sign &amp; submit</b> it.
+                </Hint>
                 <button className="btn ghost" onClick={onClose}>Close</button>
                 <button className="btn" disabled={busy || !ready} onClick={submit}><i className="ti ti-device-floppy" />{busy ? 'Saving to the app and OpenEMR…' : 'Save Draft'}</button>
               </div>
-              <p className="text-[11px] text-stone-400">Saves a draft to the app and OpenEMR, stamped with your name and the time — it is <b>not</b> signed. The encounter then opens, where you or anyone working on this chart can keep writing, add codes, orders and prescriptions, and <b>Sign &amp; submit</b> it.</p>
             </div>
           </div>
         </div>
@@ -5895,11 +5938,11 @@
 
     const DmeFields = ({ f, setF }) => (
       <React.Fragment>
-        <p className="text-[11px] text-stone-500">
+        <Hint>
           CMS Standard Written Order. The beneficiary, the order date, the treating practitioner and the signature come
           from the record and your user account; the four fields below are yours. The requisition is refused if any of the
           six elements is missing.
-        </p>
+        </Hint>
         <Field label="Item — narrative, HCPCS, or brand and model"><input className="inp" value={f.itemDescription || ''} onChange={e => setF({ ...f, itemDescription: e.target.value })} /></Field>
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2">
           <Field label="HCPCS (optional)"><input className="inp" value={f.hcpcsCode || ''} onChange={e => setF({ ...f, hcpcsCode: e.target.value.toUpperCase() })} /></Field>
@@ -5927,12 +5970,12 @@
           <input type="checkbox" className="mt-0.5" checked={!!f.requiresWOPD} onChange={e => setF({ ...f, requiresWOPD: e.target.checked })} />
           <span>Written order prior to delivery. <span className="text-stone-500">The supplier may not deliver before they hold it — power mobility devices are the statutory case.</span></span>
         </label>
-        <p className="text-[11px] text-stone-500">
+        <Hint>
           Which items need a face-to-face encounter or a written order prior to delivery is CMS's{' '}
           <a className="underline" target="_blank" rel="noopener noreferrer"
             href="https://www.cms.gov/medicare/regulations-guidance/dmepos-face-to-face-written-order-prior-delivery-power-mobility-devices-list">Required List</a>,
           which changes. It is not embedded in this app — you set the flags.
-        </p>
+        </Hint>
       </React.Fragment>
     );
 
@@ -6776,8 +6819,8 @@
               <button className="btn gold" disabled={!!busy || showSign || codingDirty} title={codingDirty ? 'Save your diagnoses and coding first' : undefined} onClick={() => setShowSign(true)}><i className="ti ti-writing-sign" />Sign &amp; Submit</button>
               {codingDirty && <span className="text-[11px] text-amber-700">Save your diagnoses and coding below before signing.</span>}
               <button className="btn ghost text-red-600" disabled={!!busy} onClick={discard}>{busy === 'discard' ? 'Deleting…' : 'Delete Encounter'}</button>
+              <Hint className="w-full"><b>Save Draft</b> saves to the app and OpenEMR together, stamped with your name and the time — it does <b>not</b> sign. <b>Sign &amp; Submit</b> saves, then signs and locks it.</Hint>
             </div>
-            <p className="text-[11px] text-stone-500 mt-2"><b>Save Draft</b> saves to the app and OpenEMR together, stamped with your name and the time — it does <b>not</b> sign. <b>Sign &amp; Submit</b> saves, then signs and locks it.</p>
             <NoteHistory revisions={sn.meta.revisions} />
           </div>
         </div>
@@ -6839,7 +6882,7 @@
                 </button>
               ))}
             </div>
-            {!open && <p className="text-[11px] text-stone-400 mt-2">Open any of these here — you stay in the encounter and nothing you have typed is lost.</p>}
+            {!open && <Hint className="mt-2">Open any of these here — you stay in the encounter and nothing you have typed is lost.</Hint>}
             {open && (
               <div className="mt-3 border-t border-stone-100 pt-3">
                 {open === 'allergies' && <AllergiesTab chart={chart} />}
@@ -7244,7 +7287,7 @@
                 <DxEditor diagnoses={diagnoses} setDiagnoses={setDiagnoses} candidates={d.candidates} clientId={patient.id} readOnly={codingLocked || billerEditing}
                   addToProblemList={addToProblemList} setAddToProblemList={setAddToProblemList} />
                 {d.candidatesError && <p className="text-[11px] text-amber-700 mt-1">Problem list unavailable: {d.candidatesError}</p>}
-                {billerEditing && <p className="text-[11px] text-stone-400 mt-1">The diagnoses are the signing clinician's. Link services to them below; a change to a diagnosis goes back to the clinician as an addendum.</p>}
+                {billerEditing && <Hint className="mt-1">The diagnoses are the signing clinician's. Link services to them below; a change to a diagnosis goes back to the clinician as an addendum.</Hint>}
               </div>
               <div>
                 <span className="lblu block mb-1">Services (CPT / HCPCS) — each linked to ≥1 diagnosis</span>
@@ -7257,7 +7300,7 @@
                 <SvcEditor services={services} setServices={setServices} diagnoses={diagnoses} readOnly={codingLocked || (!canSelectCodes && !billerEditing)}
                   practiceFavorites={d.favorites.practiceServices} favorites={d.favorites.services} />
                 {!codingLocked && !canSelectCodes && !billerEditing && <p className="text-[11px] text-stone-400 mt-1">Service codes are added by billing after the note is signed. You can still correct the diagnoses.</p>}
-                {!closed && canSelectCodes && <p className="text-[11px] text-stone-400 mt-1">Optional before signing — billing adds or confirms the service codes after you sign.</p>}
+                {!closed && canSelectCodes && <Hint className="mt-1">Optional before signing — billing adds or confirms the service codes after you sign.</Hint>}
               </div>
               <div className="border-t border-stone-100 pt-3">
                 <span className="lblu block mb-1">Patient-facing summary (shown in the patient portal — plain language, optional)</span>
@@ -7265,7 +7308,7 @@
                   <Field label="What we did today, in plain words"><textarea className="inp" rows={6} maxLength={4000} disabled={codingLocked || billerEditing} value={facing.patientSummary} onChange={e => setFacing({ ...facing, patientSummary: e.target.value })} placeholder="e.g. We checked your blood pressure and adjusted your water pill." /></Field>
                   <Field label="Follow-up instructions for the patient"><textarea className="inp" rows={6} maxLength={4000} disabled={codingLocked || billerEditing} value={facing.followUpInstructions} onChange={e => setFacing({ ...facing, followUpInstructions: e.target.value })} placeholder="e.g. Take the new dose each morning; we will see you again in 4 weeks." /></Field>
                 </div>
-                <p className="text-[11px] text-stone-400 mt-1">Without this, the portal summary shows only the diagnoses addressed, prescriptions recorded and tests ordered. Since 2026-09-29 (owner decision) the signed note itself is also shown to the patient and their POA, unless you hold it from the portal when signing.</p>
+                <Hint className="mt-1">Without this, the portal summary shows only the diagnoses addressed, prescriptions recorded and tests ordered. Since 2026-09-29 (owner decision) the signed note itself is also shown to the patient and their POA, unless you hold it from the portal when signing.</Hint>
               </div>
               {!codingLocked && (
                 <div className="flex items-center gap-3">
@@ -7365,8 +7408,8 @@
                       if (e && e.data && e.data.needsReason) setOrderEnrollmentWarning(e.data);
                       throw e;
                     })).then(onOk(() => { setShowOrder(false); setOrderEnrollmentWarning(null); }))} />}
-                {!locked && !canOrderDirect && canOrderStanding && <p className="text-[11px] text-stone-400 mt-2">You place orders under a signed standing order. Pick the protocol, then the test it permits.</p>}
-                <p className="text-[10.5px] text-stone-400 mt-2">The app generates; a person transmits. Open the requisition, fax it from Doximity, then record the send here — that is what moves an order to sent. Attaching the result is what moves it to resulted. Both still work after the encounter is signed.</p>
+                {!locked && !canOrderDirect && canOrderStanding && <Hint className="mt-2">You place orders under a signed standing order. Pick the protocol, then the test it permits.</Hint>}
+                <Hint className="mt-2">The app generates; a person transmits. Open the requisition, fax it from Doximity, then record the send here — that is what moves an order to sent. Attaching the result is what moves it to resulted. Both still work after the encounter is signed.</Hint>
               </div>
             </div>
           </div>}
@@ -7462,7 +7505,7 @@
                 {d.billingStatus === 'awaiting_billing' && <>
                   {d.billingReadiness && !d.billingReadiness.ok && <p className="text-xs text-amber-700">{d.billingReadiness.message}{dirty ? ' Save your coding changes first.' : ''}</p>}
                   {d.billingReadiness && (d.billingReadiness.warnings || []).map((w, i) => <p key={i} className="text-[11px] text-amber-700">{w}</p>)}
-                  <p className="text-[11px] text-stone-500">A missing place of service is set from the patient's facility when you submit. Charges post to OpenEMR's Billing Manager with <b>{npiLabel(d.record.renderingProvider)}</b> as the rendering clinician.</p>
+                  <Hint>A missing place of service is set from the patient's facility when you submit. Charges post to OpenEMR's Billing Manager with <b>{npiLabel(d.record.renderingProvider)}</b> as the rendering clinician.</Hint>
                   <label className="flex items-start gap-2 text-xs">
                     <input type="checkbox" className="mt-0.5" checked={billAttest} onChange={e => setBillAttest(e.target.checked)} />
                     <span>The service codes and modifiers on this visit are supported by the signed note.</span>
