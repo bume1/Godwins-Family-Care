@@ -602,7 +602,9 @@ test('A7: the filename is clean and goes through contentDisposition', () => {
   // screenshot filename once 500'd every download in this repo.
   const obrien = { ...MEDICARE_CLIENT, intake: { ...MEDICARE_CLIENT.intake, lastName: "O'Brien" } };
   assert.match(orderReq.requisitionFileName(order, obrien), /GFC_dme_OBrien_/);
-  assert.match(SERVER_CODE, /requisition\.pdf[\s\S]{0,4000}contentDisposition\('inline', fileName\)/,
+  // Widened from 4000 on 2026-10-12: the route gained the internal-referral
+  // refusal at its top, which moved the header further down the handler.
+  assert.match(SERVER_CODE, /requisition\.pdf[\s\S]{0,5000}contentDisposition\('inline', fileName\)/,
     'the requisition streams through contentDisposition, inline so the share sheet is one tap away');
 });
 
@@ -625,8 +627,13 @@ test("A7: 'sent' is unreachable from the generic status route, BY NAME", () => {
     assert.equal(out.code, 'ORDER_STATUS_NEEDS_EVIDENCE', status);
     assert.ok(out.error.length > 20, 'the refusal names the route that does carry the evidence');
   }
-  // Cancelling carries no evidence to capture, so it stays this route's.
-  assert.equal(clinicalRepo.advanceOrderStatus(order, 'cancelled', PROVIDER).order.status, 'cancelled');
+  // Cancelling carries no evidence to capture, so it stays this route's, and
+  // since 2026-10-12 it needs a reason (owner: a cancel button "with a reason").
+  assert.equal(clinicalRepo.advanceOrderStatus(order, 'cancelled', PROVIDER).code, 'ORDER_CANCEL_REASON_REQUIRED');
+  const cancelled = clinicalRepo.advanceOrderStatus(order, 'cancelled', PROVIDER, 'Patient had it done at the hospital').order;
+  assert.equal(cancelled.status, 'cancelled');
+  assert.equal(cancelled.cancelReason, 'Patient had it done at the hospital');
+  assert.equal(cancelled.cancelledBy.name, PROVIDER.name);
 });
 
 test('A7: a send record captures the recipient, the number, the channel, who and when', () => {

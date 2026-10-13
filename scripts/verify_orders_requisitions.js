@@ -172,12 +172,24 @@ const usersById = async (token) => {
   // for proving a refusal: what we are proving is that the credential is
   // refused, not that the order would otherwise have been written.
   const ordersPath = '/api/clinical/patients/no-such-client/encounters/no-such-encounter/orders';
+  // 2026-10-12 (owner, scope of practice): a REFERRAL is decided by where it
+  // goes. An LCSW refers out on their own licence, so an outside referral gets
+  // past the credential gate for them (and stops at the unknown patient); an RN
+  // or an LMSW refers within the team only. DME stays provider-direct, and a
+  // referral named under a protocol is refused by its own code.
   for (const [label, token] of [['rn', rnToken], ['lcsw', lcswToken], ['lmsw', lmswToken]]) {
     for (const type of ['referral', 'dme']) {
       const direct = await call('POST', ordersPath, token, { orderType: type, diagnosisCodes: ['E11.9'] });
-      ok(`an ${label} placing a ${type} directly is refused`, direct.status === 403, { status: direct.status, body: direct.body });
+      if (type === 'referral' && label === 'lcsw') {
+        ok(`an lcsw referring out passes the credential gate (404 = past it, no such patient)`, direct.status !== 403, { status: direct.status, body: direct.body });
+      } else {
+        ok(`an ${label} placing ${type === 'referral' ? 'an outside referral' : 'a dme order'} is refused`, direct.status === 403, { status: direct.status, body: direct.body });
+      }
       const viaProtocol = await call('POST', ordersPath, token, { orderType: type, diagnosisCodes: ['E11.9'], standingOrderId: 'anything' });
-      ok(`  and naming a standing order does not widen it`, viaProtocol.status === 403 || viaProtocol.status === 404,
+      ok(`  and naming a standing order does not widen it`,
+        type === 'referral'
+          ? viaProtocol.status === 400 && viaProtocol.body && viaProtocol.body.code === 'REFERRAL_NOT_UNDER_PROTOCOL'
+          : viaProtocol.status === 403 || viaProtocol.status === 404,
         { status: viaProtocol.status, body: viaProtocol.body });
     }
   }
@@ -413,13 +425,25 @@ const usersById = async (token) => {
   ok('a CLIENT is refused', clientDest.status === 403 && clientDest.body.code === 'ORDER_DESTINATION_ONLY', clientDest.body);
   const anonDest = await call('PUT', DEST, null, dest);
   ok('  and so is an unauthenticated request', anonDest.status === 401 || anonDest.status === 403, anonDest.status);
+  // 2026-10-12 (owner): a case manager IS an LMSW, and service coordination is
+  // LMSW scope, so they reach the send and cancel routes; the per-order check
+  // then decides (a referral yes, a lab no — run in test/referrals.test.js).
+  // A case manager an admin sets to READ-ONLY is still refused both.
   const cmSend = await call('POST', '/api/clinical/orders/no-such-order/sent', cmToken, { recipientName: 'X', recipientFax: '4045550123' });
-  ok('THE CASE MANAGER STAYS READ-ONLY: recording a send is still refused', cmSend.status === 403, cmSend.body);
-  const cmStatus = await call('POST', '/api/clinical/orders/no-such-order/status', cmToken, { status: 'cancelled' });
-  ok('  and so is cancelling an order', cmStatus.status === 403, cmStatus.body);
+  ok('a case manager (LMSW) reaches the send route (404 = past the gate)', cmSend.status === 404, cmSend.body);
+  const cmStatus = await call('POST', '/api/clinical/orders/no-such-order/status', cmToken, { status: 'cancelled', note: 'probe' });
+  ok('  and the cancel route', cmStatus.status === 404, cmStatus.body);
+  const roCm = await makeUser(admin, 'Read Only Case Manager', 'caseManager');
+  await call('PUT', `/api/users/${roCm.id}`, admin, { clinicalRole: 'readOnly' });
+  const roCmToken = await login(roCm.email, PW);
+  const roSend = await call('POST', '/api/clinical/orders/no-such-order/sent', roCmToken, { recipientName: 'X', recipientFax: '4045550123' });
+  ok('A READ-ONLY CASE MANAGER STAYS READ-ONLY: recording a send is refused', roSend.status === 403, roSend.body);
+  const roStatus = await call('POST', '/api/clinical/orders/no-such-order/status', roCmToken, { status: 'cancelled', note: 'probe' });
+  ok('  and so is cancelling an order', roStatus.status === 403, roStatus.body);
   const cmServed = await call('GET', '/api/clinical/status', cmToken);
-  ok('the status the page draws from says the case manager may update a destination',
-    cmServed.status === 200 && cmServed.body.access && cmServed.body.access.canEditOrderDestination === true && cmServed.body.access.canWrite === false,
+  ok('the status the page draws from says the case manager is an LMSW who may update a destination',
+    cmServed.status === 200 && cmServed.body.access && cmServed.body.access.canEditOrderDestination === true &&
+      cmServed.body.access.clinicalRole === 'lmsw' && cmServed.body.access.canWrite === true,
     cmServed.body && cmServed.body.access);
   const clientServed = await call('GET', '/api/clinical/status', clientToken);
   ok('  and does not for a client', clientServed.status === 403, clientServed.status);

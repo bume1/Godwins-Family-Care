@@ -139,9 +139,13 @@ test("C3: 'resulted' is unreachable from the generic status route", () => {
   const out = clinicalRepo.advanceOrderStatus(LAB_ORDER(), 'resulted', PROVIDER);
   assert.equal(out.code, 'ORDER_STATUS_NEEDS_EVIDENCE');
   assert.match(out.error, /Attach the result/, 'the refusal names the route that carries the evidence');
-  // And the page does not offer the button either — it filters the transitions
-  // down to the ones that carry nothing.
-  assert.match(CODE(read('public/clinical.html')), /\.filter\(n => n === 'cancelled'\)/);
+  // And the page does not offer the button either. Since 2026-10-12 the only
+  // generic-status control is Cancel Order (with a reason), so every call the
+  // page makes to that route sends 'cancelled' and nothing else.
+  const page = CODE(read('public/clinical.html'));
+  const calls = page.match(/api\.orderStatus\([^)]*\)/g) || [];
+  assert.ok(calls.length >= 2, `expected the Cancel Order calls, found ${calls.length}`);
+  for (const c of calls) assert.match(c, /, 'cancelled', reason\)$/, c);
 });
 
 test("C3: attaching a result moves a lab to 'resulted' and a referral to 'completed'", () => {

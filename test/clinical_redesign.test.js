@@ -109,7 +109,8 @@ test('the label guard actually catches a sentence-case button', () => {
 // Part 3 wiring: every row opens the place where its work is done.
 test('Inbox, Results and the visit checklist open the right chart section', () => {
   const inbox = slice('const InboxView = (', '\n    // ── Session 4.12 — the persistent patient banner');
-  assert.match(inbox, /onOpenChart\(i\.clientId, i\.kind === 'care_plan_co_sign' \? \{ tab: 'careplan' \} : undefined\)/);
+  // 2026-10-12: a referral from the team opens on the Referrals tab.
+  assert.match(inbox, /onOpenChart\(i\.clientId, i\.kind === 'care_plan_co_sign' \? \{ tab: 'careplan' \} : i\.kind === 'internal_referral' \? \{ tab: 'referrals' \} : undefined\)/);
   const app = slice('const App = () => {', 'ReactDOM.createRoot');
   assert.match(app, /<InboxView[\s\S]{0,200}onOpenChart=\{\(clientId, opts\) => openChartById\(clientId, opts\)\}/);
   assert.match(app, /<ResultsInbox onOpenChart=\{\(clientId, opts\) => openChartById\(clientId, opts\)\} \/>/);
