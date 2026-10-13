@@ -34,7 +34,7 @@ const DOCUMENT_ORDER_TYPES = Object.freeze([REFERRAL, DME]);
 // is sent, the specialist's office schedules it, and it completes when the
 // consult note comes back. Collapsing the two would mean a referral sitting at
 // "sent" for six weeks with nothing saying an appointment exists.
-const REFERRAL_STATUSES = Object.freeze(['ordered', 'sent', 'scheduled', 'completed', 'cancelled']);
+const REFERRAL_STATUSES = Object.freeze(['ordered', 'sent', 'scheduled', 'accepted', 'completed', 'cancelled']);
 const REFERRAL_TRANSITIONS = Object.freeze({
   ordered: ['sent', 'cancelled'],
   sent: ['scheduled', 'completed', 'cancelled'],
@@ -42,6 +42,27 @@ const REFERRAL_TRANSITIONS = Object.freeze({
   completed: [],
   cancelled: []
 });
+
+// ---- An INTERNAL referral (owner, 2026-10-12) ---------------------------
+// Referred to somebody on GFC's own clinical team: a social worker, an LCSW,
+// another clinician. Nothing is faxed, so there is no requisition, no send and
+// no outside appointment. It lands in that person's clinical inbox; they accept
+// it and then complete it with a note saying what they did. That note is the
+// evidence, the way a consult note is for an outside referral.
+const INTERNAL = 'internal';
+const EXTERNAL = 'external';
+const INTERNAL_REFERRAL_TRANSITIONS = Object.freeze({
+  ordered: ['accepted', 'completed', 'cancelled'],
+  accepted: ['completed', 'cancelled'],
+  completed: [],
+  cancelled: []
+});
+const isInternalReferral = (order) => !!order && order.orderType === REFERRAL &&
+  ((order.referral || {}).destination === INTERNAL);
+const transitionsForReferral = (order) => isInternalReferral(order) ? INTERNAL_REFERRAL_TRANSITIONS : REFERRAL_TRANSITIONS;
+const notForInternal = (order, what) => isInternalReferral(order)
+  ? { error: `This referral went to ${((order.referral || {}).assignedTo || {}).name || 'a colleague'} inside the team, so there is nothing to ${what}. They accept and complete it from their inbox.`, code: 'ORDER_INTERNAL_REFERRAL', status: 409 }
+  : null;
 
 const URGENCIES = Object.freeze(['routine', 'urgent', 'stat']);
 
@@ -180,13 +201,19 @@ const buildEnvelope = ({ id, clientId, puuid, encounterUuid, orderType, input, a
 // you want answered, because a referral with no question is a referral the
 // specialist has to phone about.
 const REFERRAL_ATTACHMENT_KINDS = Object.freeze(['encounter_note', 'result']);
-const buildReferral = ({ id, clientId, puuid, encounterUuid, input, actor, encounterDiagnoses, at, reference }) => {
+// `destination` is chosen on the form. `assignee` (internal) and `provider`
+// (a saved outside provider) are RESOLVED BY THE SERVER from ids and passed in:
+// the builder never trusts a name, role or fax typed for somebody else.
+const referralDestinationOf = (input) => String((input || {}).destination || EXTERNAL) === INTERNAL ? INTERNAL : EXTERNAL;
+const buildReferral = ({ id, clientId, puuid, encounterUuid, input, actor, encounterDiagnoses, at, reference, assignee, provider }) => {
   const env = buildEnvelope({ id, clientId, puuid, encounterUuid, orderType: REFERRAL, input, actor, encounterDiagnoses, at, reference });
   if (env.error) return env;
   const i = input || {};
-  const specialty = clean(i.specialty, 120);
-  if (!specialty) return { error: 'A specialty is required', code: 'REFERRAL_NO_SPECIALTY' };
+  const destination = referralDestinationOf(i);
   const reason = clean(i.reason, 1000);
+  if (destination === INTERNAL) return buildInternalReferral({ env, i, reason, assignee, actor });
+  const specialty = clean(i.specialty, 120) || clean(provider && provider.specialty, 120);
+  if (!specialty) return { error: 'A specialty is required', code: 'REFERRAL_NO_SPECIALTY' };
   if (!reason) return { error: 'A reason for referral is required', code: 'REFERRAL_NO_REASON' };
   const clinicalSummary = clean(i.clinicalSummary, 4000);
   if (!clinicalSummary) {
@@ -200,7 +227,15 @@ const buildReferral = ({ id, clientId, puuid, encounterUuid, input, actor, encou
   // refused exactly as before. Nothing can be faxed while it is pending
   // (applySend, the requisition) and the office fills it in with
   // applyDestinationEdit, which clears the flag when a valid fax arrives.
-  const rawFax = String(i.receivingFax == null ? '' : i.receivingFax).trim();
+  // A SAVED PROVIDER fills only what the form left blank. What the clinician
+  // typed for this referral wins, and it changes this referral only: the saved
+  // entry is edited on its own, deliberately (referralDirectory).
+  const saved = (provider && typeof provider === 'object') ? provider : null;
+  const pick = (typed, fromSaved) => {
+    const t = String(typed == null ? '' : typed).trim();
+    return t || String(fromSaved == null ? '' : fromSaved).trim();
+  };
+  const rawFax = pick(i.receivingFax, saved && saved.fax);
   const receivingFax = normalizeFax(rawFax);
   const agencyPending = !!i.agencyPending && !rawFax;
   if (!receivingFax && !agencyPending) {
@@ -222,12 +257,14 @@ const buildReferral = ({ id, clientId, puuid, encounterUuid, input, actor, encou
       ...env.envelope,
       tests: [specialty],
       referral: {
+        destination: EXTERNAL,
+        referralProviderId: saved && saved.id ? String(saved.id) : null,
         specialty,
-        receivingPractice: clean(i.receivingPractice, 160) || null,
-        receivingProvider: clean(i.receivingProvider, 160) || null,
+        receivingPractice: clean(pick(i.receivingPractice, saved && saved.practice), 160) || null,
+        receivingProvider: clean(pick(i.receivingProvider, saved && saved.name), 160) || null,
         receivingFax: receivingFax || null,
         agencyPending,
-        receivingPhone: clean(i.receivingPhone, 40) || null,
+        receivingPhone: clean(pick(i.receivingPhone, saved && saved.phone), 40) || null,
         reason,
         urgency: URGENCIES.includes(i.urgency) ? i.urgency : env.envelope.priority,
         clinicalSummary,
@@ -237,6 +274,154 @@ const buildReferral = ({ id, clientId, puuid, encounterUuid, input, actor, encou
         appointmentDate: null
       }
     }
+  };
+};
+
+// The person a patient is referred to inside GFC. The SERVER resolves them from
+// an id against the user list and confirms they are a referral target; this only
+// shapes what the order carries about them.
+const assigneeRecord = (u) => ({
+  id: String(u.id),
+  name: clean(u.name, 160) || null,
+  clinicalRole: u.clinicalRole || null,
+  roleLabel: clean(u.roleLabel, 80) || null
+});
+const buildInternalReferral = ({ env, i, reason, assignee, actor }) => {
+  if (!assignee || !assignee.id) {
+    return { error: 'Choose who on the team this referral is for', code: 'REFERRAL_NO_ASSIGNEE' };
+  }
+  if (actor && actor.id && String(actor.id) === String(assignee.id)) {
+    return { error: 'You cannot refer a patient to yourself', code: 'REFERRAL_SELF' };
+  }
+  if (!reason) return { error: 'A reason for referral is required', code: 'REFERRAL_NO_REASON' };
+  const clinicalSummary = clean(i.clinicalSummary, 4000);
+  if (!clinicalSummary) {
+    return { error: 'Say what you need from them — it is the question you want answered', code: 'REFERRAL_NO_SUMMARY' };
+  }
+  const who = assigneeRecord(assignee);
+  // What it is "for" reads as the colleague's discipline when the form gives
+  // none (Social work, Counseling), so the order list still says something.
+  const specialty = clean(i.specialty, 120) || who.roleLabel || 'Care team';
+  return {
+    order: {
+      ...env.envelope,
+      tests: [specialty],
+      transmission: 'internal',
+      referral: {
+        destination: INTERNAL,
+        assignedTo: who,
+        specialty,
+        reason,
+        urgency: URGENCIES.includes(i.urgency) ? i.urgency : env.envelope.priority,
+        clinicalSummary,
+        attachments: [],
+        // Nothing leaves the building, so none of the outside-referral fields
+        // apply. They are null rather than absent so every reader sees one shape.
+        receivingPractice: null, receivingProvider: null, receivingFax: null,
+        receivingPhone: null, agencyPending: false,
+        priorAuthRequired: false, priorAuthNumber: null, appointmentDate: null,
+        acceptedAt: null, acceptedBy: null,
+        completedAt: null, completedBy: null, completionNote: null
+      }
+    }
+  };
+};
+
+const actorStamp = (actor) => ({ id: (actor && actor.id) || null, name: (actor && actor.name) || null });
+// Only the person it was referred to accepts or completes it. Anybody else who
+// should stop it cancels it (with a reason) instead.
+const internalOwnerCheck = (order, actor) => {
+  if (!order) return { error: 'Order not found', code: 'ORDER_NOT_FOUND', status: 404 };
+  if (!isInternalReferral(order)) {
+    return { error: 'Only a referral to someone on the team is accepted or completed this way', code: 'ORDER_NOT_INTERNAL_REFERRAL', status: 400 };
+  }
+  const to = (order.referral || {}).assignedTo || {};
+  if (!actor || String(actor.id) !== String(to.id)) {
+    return { error: `This referral is for ${to.name || 'someone else'}. Only they can accept or complete it.`, code: 'REFERRAL_NOT_YOURS', status: 403 };
+  }
+  return null;
+};
+const applyInternalAccept = ({ order, actor, at }) => {
+  const refused = internalOwnerCheck(order, actor);
+  if (refused) return refused;
+  if (!(INTERNAL_REFERRAL_TRANSITIONS[order.status] || []).includes('accepted')) {
+    return { error: `A referral that is "${order.status}" cannot be accepted.`, code: 'ORDER_BAD_TRANSITION', status: 409 };
+  }
+  const now = at || new Date().toISOString();
+  return {
+    order: {
+      ...order, status: 'accepted',
+      referral: { ...(order.referral || {}), acceptedAt: now, acceptedBy: actorStamp(actor) },
+      statusHistory: [...(order.statusHistory || []), { status: 'accepted', at: now, by: actorStamp(actor), note: null }],
+      updatedAt: now
+    }
+  };
+};
+const INTERNAL_COMPLETION_NOTE_MAX = 4000;
+const applyInternalComplete = ({ order, actor, note, at }) => {
+  const refused = internalOwnerCheck(order, actor);
+  if (refused) return refused;
+  if (!(INTERNAL_REFERRAL_TRANSITIONS[order.status] || []).includes('completed')) {
+    return { error: `A referral that is "${order.status}" cannot be completed.`, code: 'ORDER_BAD_TRANSITION', status: 409 };
+  }
+  // "Done" with nothing said is a record that somebody clicked, not that the
+  // patient was seen. The note is what the referring clinician reads.
+  const text = clean(note, INTERNAL_COMPLETION_NOTE_MAX);
+  if (!text) return { error: 'Say what you did — the referring clinician reads this', code: 'REFERRAL_COMPLETE_NO_NOTE', status: 400 };
+  const now = at || new Date().toISOString();
+  return {
+    order: {
+      ...order, status: 'completed',
+      referral: {
+        ...(order.referral || {}),
+        acceptedAt: (order.referral || {}).acceptedAt || now,
+        acceptedBy: (order.referral || {}).acceptedBy || actorStamp(actor),
+        completedAt: now, completedBy: actorStamp(actor), completionNote: text
+      },
+      statusHistory: [...(order.statusHistory || []), { status: 'completed', at: now, by: actorStamp(actor), note: 'Completed by the colleague it was referred to' }],
+      updatedAt: now
+    }
+  };
+};
+
+// The email to the colleague a patient was referred to. It takes NO arguments,
+// which is the strongest guarantee available that it carries no patient: a
+// builder that cannot be handed a name cannot leak one. The inbox has the rest.
+const buildInternalReferralNotice = () => ({
+  subject: 'A patient has been referred to you',
+  heading: 'A new referral is waiting',
+  body: 'A colleague has referred a patient to you. It is waiting in your clinical inbox, where you can accept it and complete it. This message deliberately carries no patient or clinical detail.',
+  ctaLabel: 'Open Your Inbox'
+});
+
+// THE CARE TEAM FOLLOWS THE REFERRAL (owner, 2026-10-12). Somebody a patient is
+// referred to joins that patient's care team, so they can message about them and
+// are reached by escalations. A case manager fills the case manager slot when it
+// is empty; when someone else already holds it they join as a SUPPORTING case
+// manager rather than replacing them. Anyone else joins the clinician list.
+// Pure: returns the new care team and what changed, writes nothing.
+const isOnCareTeam = (careTeam, userId) => {
+  const ct = (careTeam && typeof careTeam === 'object') ? careTeam : {};
+  const id = String(userId || '');
+  if (!id) return false;
+  const inList = (v) => Array.isArray(v) && v.map(String).includes(id);
+  return inList(ct.assignedFNPs) || inList(ct.supportingCaseManagers) ||
+    [ct.assignedCaseManager, ct.primaryCaregiver, ct.backupCaregiver].map(x => String(x || '')).includes(id);
+};
+const careTeamWithAssignee = (careTeam, assignee) => {
+  const ct = (careTeam && typeof careTeam === 'object') ? { ...careTeam } : {};
+  const id = assignee && assignee.id ? String(assignee.id) : '';
+  if (!id || isOnCareTeam(ct, id)) return { careTeam: ct, added: false, slot: null };
+  if (assignee.role === 'caseManager') {
+    if (!ct.assignedCaseManager) return { careTeam: { ...ct, assignedCaseManager: id }, added: true, slot: 'case_manager' };
+    return {
+      careTeam: { ...ct, supportingCaseManagers: [...(Array.isArray(ct.supportingCaseManagers) ? ct.supportingCaseManagers : []), id] },
+      added: true, slot: 'supporting_case_manager'
+    };
+  }
+  return {
+    careTeam: { ...ct, assignedFNPs: [...(Array.isArray(ct.assignedFNPs) ? ct.assignedFNPs : []), id] },
+    added: true, slot: 'clinician'
   };
 };
 
@@ -554,6 +739,8 @@ const isAgencyPending = (order) => !!order && order.orderType === REFERRAL &&
 const SENDABLE_STATUSES = Object.freeze(['ordered', 'sent', 'scheduled']);
 const applySend = ({ order, input, actor, at }) => {
   if (!order) return { error: 'Order not found', code: 'ORDER_NOT_FOUND', status: 404 };
+  const internal = notForInternal(order, 'fax');
+  if (internal) return internal;
   if (!SENDABLE_STATUSES.includes(String(order.status))) {
     return { error: `An order that is "${order.status}" cannot be recorded as faxed.`, code: 'ORDER_NOT_SENDABLE', status: 409 };
   }
@@ -595,6 +782,8 @@ const applyReferralScheduled = ({ order, appointmentDate, actor, at }) => {
   if (order.orderType !== REFERRAL) {
     return { error: 'Only a referral is scheduled', code: 'ORDER_NOT_REFERRAL', status: 400 };
   }
+  const internal = notForInternal(order, 'schedule with an outside office');
+  if (internal) return internal;
   if (!(REFERRAL_TRANSITIONS[order.status] || []).includes('scheduled')) {
     return { error: `A referral that is "${order.status}" cannot be marked scheduled.`, code: 'ORDER_BAD_TRANSITION', status: 409 };
   }
@@ -661,8 +850,10 @@ const destinationFormFields = () => Object.fromEntries(Object.entries(DESTINATIO
 const applyDestinationEdit = ({ order, input, actor, at }) => {
   if (!order) return { error: 'Order not found', code: 'ORDER_NOT_FOUND', status: 404 };
   const spec = DESTINATION_FIELDS[String(order.orderType)];
-  if (!spec) {
-    return { error: `A ${order.orderType} order has no receiving practice to update here.`, code: 'ORDER_NO_DESTINATION', status: 400 };
+  if (!spec || isInternalReferral(order)) {
+    return { error: isInternalReferral(order)
+      ? 'This referral went to someone on the team, so it has no outside practice or fax to update. Cancel it and refer again to send it elsewhere.'
+      : `A ${order.orderType} order has no receiving practice to update here.`, code: 'ORDER_NO_DESTINATION', status: 400 };
   }
   if (!DESTINATION_EDITABLE_STATUSES.includes(String(order.status))) {
     return { error: `An order that is "${order.status}" can no longer have its destination changed.`, code: 'ORDER_DESTINATION_LOCKED', status: 409 };
@@ -897,6 +1088,9 @@ module.exports = {
   publicOrder, ORDER_NOTE_MAX, ORDER_FILE_LABEL_MAX, buildOrderNote, buildOrderFile, publicOrderFile,
   REFERRAL, DME, DOCUMENT_ORDER_TYPES,
   REFERRAL_STATUSES, REFERRAL_TRANSITIONS, URGENCIES,
+  INTERNAL, EXTERNAL, INTERNAL_REFERRAL_TRANSITIONS, isInternalReferral, transitionsForReferral,
+  referralDestinationOf, applyInternalAccept, applyInternalComplete, INTERNAL_COMPLETION_NOTE_MAX,
+  buildInternalReferralNotice, isOnCareTeam, careTeamWithAssignee,
   SEND_CHANNELS, DEFAULT_SEND_CHANNEL, FAX_SEND_CHANNELS, SEND_CHANNEL_LABELS, SENDABLE_STATUSES,
   normalizeFax, formatFax,
   REF_ALPHABET, REF_PREFIX, buildOrderReference, parseOrderReference,

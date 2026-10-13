@@ -138,8 +138,10 @@ test('a refused action keeps the form open and what was typed', () => {
 });
 
 test('coding typed on the encounter survives a reload, and signing waits for it to be saved', () => {
-  assert.match(clinical, /if \(!unsaved\) \{\s*setDiagnoses\(r\.record\.diagnoses \|\| \[\]\)/);
-  assert.match(clinical, /<FollowUpNoteEditor patient=\{patient\} euuid=\{euuid\} noteSections=\{d\.noteSections\} sectionsOnly=\{!!d\.sectionsOnly\} codingDirty=\{!locked && dirty\}/);
+  // 2026-10-12: a successful coding save also takes the server's copy (adoptCodingRef);
+  // any other reload still keeps unsaved coding.
+  assert.match(clinical, /if \(!unsaved \|\| adoptCodingRef\.current\) \{\s*adoptCodingRef\.current = false;\s*setDiagnoses\(r\.record\.diagnoses \|\| \[\]\)/);
+  assert.match(clinical, /<FollowUpNoteEditor patient=\{patient\} euuid=\{euuid\} noteSections=\{d\.noteSections\} sectionsOnly=\{!!d\.sectionsOnly\} typeLabel=\{d\.noteTypeLabel\} codingDirty=\{!locked && dirty\}/);
   assert.match(clinical, /disabled=\{!!busy \|\| showSign \|\| codingDirty\}/);
   assert.match(clinical, /if \(codingDirty\) \{ setMsg\(\{ ok: false, text: 'Save your diagnoses and coding on this encounter before signing\.' \}\); return; \}/);
 });
@@ -148,7 +150,9 @@ test('a Medicare order can carry the 42 CFR 424.507 acknowledgment the server as
   assert.match(clinical, /enrollmentAcknowledgment: \{ acknowledged: ack\.acknowledged, reason: ack\.reason\.trim\(\) \}/);
   assert.match(clinical, /if \(e && e\.data && e\.data\.needsReason\) setOrderEnrollmentWarning\(e\.data\);/);
   // And a protocol that does not permit 'lab' no longer sends 'lab'.
-  assert.match(clinical, /setF\(\{ \.\.\.f, standingOrderId: e\.target\.value, tests: '', orderType: first \|\| 'lab' \}\)/);
+  // 2026-10-12: with no protocol, someone without direct authority who may
+  // refer lands on 'referral' rather than 'lab' (a referral needs no protocol).
+  assert.match(clinical, /setF\(\{ \.\.\.f, standingOrderId: e\.target\.value, tests: '', orderType: first \|\| \(requireStandingOrder && canRefer \? 'referral' : 'lab'\) \}\)/);
 });
 
 test('co-sign actions exist on the page for orders and IHPC care plans', () => {

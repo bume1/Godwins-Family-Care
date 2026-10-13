@@ -571,6 +571,31 @@ const HP_NOTE = {
   r = await call('POST', `${PH}/notes`, tok.rn, { note: { kind: 'followup', visit: { appointmentType: 'sw_therapy', modality: 'telehealth', location: 'home' }, sections: { sessionFocus: 'x' } } });
   check('an RN is refused a therapy note', r.status === 403 && r.body.code === 'PSYCHOTHERAPY_NOT_RN', r.body);
 
+  console.log('\n── 17. A follow-up is a SOAP note, never an H&P (owner, 2026-10-12) ──');
+  // The reported bug, sent exactly as the Visit tab used to send it: a
+  // follow-up by video, posted as kind 'hp', with no blood pressure at all.
+  const FU = {
+    kind: 'hp', visit: { appointmentType: 'pc_follow_up', modality: 'telehealth', location: 'home' },
+    chiefConcern: 'Blood pressure follow-up', subjective: 'Taking lisinopril daily; no dizziness.',
+    objective: 'Alert, speaking in full sentences on video.', assessment: 'Hypertension, controlled.',
+    plan: 'Continue lisinopril 10 mg.', vitals: {},
+    sections: { medReconciliation: 'Reviewed; no changes.', followUp: 'Four weeks.', mdmOrTime: '20 minutes total.' }
+  };
+  r = await call('POST', `${PH}/notes`, tok.fnp, { note: FU });
+  const fu = r.body && r.body.encounterUuid;
+  check('a telehealth follow-up sent as an H&P saves', r.status === 200 && !!fu, r.body);
+  check('the server stores it as a follow-up, not an H&P', record(fu).note.kind === 'followup', record(fu).note.kind);
+  check('it does NOT mark the patient\'s initial visit as done', !rows('users').find(u => u.id === PHONEPATIENT.id).clinicalInitialVisit);
+  r = await call('GET', `${PH}/encounters/${fu}`, tok.fnp);
+  check('the encounter serves the SOAP template and the type name', r.status === 200 && r.body.noteTypeLabel === 'Follow-up' &&
+    JSON.stringify((r.body.noteSections || []).slice(0, 7).map(s => s.key)) === JSON.stringify(['chiefComplaint', 'subjective', 'medReconciliation', 'vitals', 'physicalExam', 'assessment', 'plan']),
+    { label: r.body.noteTypeLabel, keys: (r.body.noteSections || []).map(s => s.key) });
+  check('by video, vitals and exam are offered, not required', (r.body.noteSections || []).filter(s => ['vitals', 'physicalExam'].includes(s.key)).every(s => s.required === false && s.patientReported === true));
+  check('medication reconciliation is in OpenEMR\'s Objective field', /MEDICATION RECONCILIATION/.test((narrative(fu) || {}).objective || '') && !/MEDICATION RECONCILIATION/.test((narrative(fu) || {}).subjective || ''), narrative(fu));
+  r = await call('PUT', `${PH}/encounters/${fu}/coding`, tok.fnp, { diagnoses: [{ code: 'I10', description: 'Essential hypertension' }], services: [] });
+  r = await call('POST', `${PH}/encounters/${fu}/sign`, tok.fnp, { attest: true });
+  check('it signs with NO blood pressure in either arm', r.status === 200 && record(fu).billingStatus === 'awaiting_billing', r.body);
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

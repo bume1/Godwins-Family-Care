@@ -165,8 +165,11 @@ test('the routes are wired behind the right middleware', () => {
   assert.match(code, /app\.post\('\/api\/clinical\/orders\/:orderId\/notes', authenticateToken, requireOrderAnnotator,/);
   assert.match(code, /app\.post\('\/api\/clinical\/orders\/:orderId\/files', authenticateToken, requireOrderAnnotator, uploadLimiter,/);
   assert.match(code, /app\.get\('\/api\/clinical\/orders\/:orderId\/files\/:fileId', authenticateToken, requireClinicalRead,/);
-  assert.match(code, /\.map\(orderReq\.publicOrder\)/, 'the chart order list strips storage ids');
-  assert.match(code, /orders: \(ctx\.orders \|\| \[\]\)\.map\(orderReq\.publicOrder\)/, 'the encounter detail strips them too');
+  // 2026-10-12: both lists go through orderForViewer (which also answers what
+  // this viewer may do with each order), and orderForViewer strips storage ids.
+  assert.match(code, /const orderForViewer = \(o, user\) => \{[\s\S]{0,400}\.\.\.orderReq\.publicOrder\(o\)/, 'orderForViewer strips storage ids');
+  assert.match(code, /\.map\(o => orderForViewer\(o, req\.user\)\),\n\s+internalReferralTransitions/, 'the chart order list strips storage ids');
+  assert.match(code, /orders: \(ctx\.orders \|\| \[\]\)\.map\(o => orderForViewer\(o, req\.user\)\)/, 'the encounter detail strips them too');
 });
 
 // ── the page ───────────────────────────────────────────────────────────────
@@ -247,5 +250,5 @@ test('the signed-note download reuses the filing builder and the page offers it'
 });
 
 test('a requisition greyed out while the agency is pending has a visible disabled chip', () => {
-  assert.match(stripComments(PAGE), /\{agencyPending && <span className="chip[^"]*cursor-not-allowed"[^>]*> ?<i className="ti ti-file-text" \/> Open requisition<\/span>\}/);
+  assert.match(stripComments(PAGE), /\{agencyPending && <span className="chip[^"]*cursor-not-allowed"[^>]*> ?<i className="ti ti-file-text" \/> Open Requisition<\/span>\}/);
 });

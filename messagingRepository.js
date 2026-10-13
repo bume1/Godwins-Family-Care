@@ -275,6 +275,16 @@ function assignedClinicianIds(client) {
 }
 
 const assignedCaseManagerId = (client) => careTeamOf(client).assignedCaseManager || null;
+// Every case manager attached to this client: the assigned one, plus anyone who
+// joined as a SUPPORTING case manager because a patient was referred to them
+// while the slot was held (owner, 2026-10-12). Used for SCOPE (who may read and
+// message about this client) only. Routing a behavioral escalation and the
+// "no case manager yet" carve-out stay on the assigned one.
+const caseManagerIds = (client) => {
+  const ct = careTeamOf(client);
+  const extra = Array.isArray(ct.supportingCaseManagers) ? ct.supportingCaseManagers.filter(Boolean) : [];
+  return [ct.assignedCaseManager, ...extra].filter(Boolean).map(String);
+};
 
 // Is a caregiver actively assigned to this client? The client↔caregiver channel
 // turns on and off with this, and the brief is explicit that when it is off the
@@ -308,7 +318,7 @@ function clientInScope(user, client, { caregiverAssigned = false } = {}) {
   if (isUnrestricted(user)) return true;
   const role = actorRole(user);
   if (role === ROLE.CLINICAL) return assignedClinicianIds(client).includes(user.id);
-  if (role === ROLE.CASE_MANAGER) return assignedCaseManagerId(client) === user.id;
+  if (role === ROLE.CASE_MANAGER) return caseManagerIds(client).includes(String(user.id));
   if (role === ROLE.CAREGIVER) return !!caregiverAssigned || assignedCaregiverIds(client).includes(user.id);
   if (role === ROLE.CLIENT || role === ROLE.FAMILY) return ownClientId(user) === client.id;
   return false;
@@ -371,6 +381,15 @@ function channelAvailability(channelId, { user, client, users, isPoa = false }) 
 // Every channel this user could open for this client, each carrying its own
 // availability. The UI renders the unavailable ones disabled with their reason
 // rather than omitting them.
+// Whether the patient's side (the client, or family) is on this channel at all,
+// read from the channel's own participant list. The clinician chart files its
+// Messages under "Patient" and "Care Team" by this, so the split is the
+// matrix's answer and never a list restated on a page (2026-10-12 redesign).
+function withPatient(id) {
+  const c = CHANNELS[id];
+  return !!c && c.participants.some(r => r === ROLE.CLIENT || r === ROLE.FAMILY);
+}
+
 function channelsFor({ user, client, users, isPoa = false }) {
   const role = effectiveRole(user, isPoa);
   return CHANNEL_IDS
@@ -380,7 +399,8 @@ function channelsFor({ user, client, users, isPoa = false }) {
       return {
         id, label: CHANNELS[id].label, blurb: blurbFor(id, role),
         available: a.available, code: a.code, reason: a.reason,
-        oneWay: !!CHANNELS[id].oneWay
+        oneWay: !!CHANNELS[id].oneWay,
+        withPatient: withPatient(id)
       };
     });
 }
@@ -443,7 +463,7 @@ function threadVisibility(user, thread, { client, isPoa = false } = {}) {
     // name them on it. That is wider than the brief's behavioral-only rule on
     // their own clients and NARROWER everywhere else, and it is consistent with
     // the 08/2026 owner decision that gave case managers scoped clinical READ.
-    if (assignedCaseManagerId(client) === user.id) return { visible: true, code: null, reason: null };
+    if (caseManagerIds(client).includes(String(user.id))) return { visible: true, code: null, reason: null };
     if (isParty(thread, user.id)) return { visible: true, code: null, reason: null };
     // The one carve-out, and it is the reason the brief made behavioral
     // role-based in the first place: a behavioral concern raised about a client
@@ -641,8 +661,8 @@ module.exports = {
   ROLE, ROLE_LABELS, actorRole,
   CHANNELS, CHANNEL_IDS, MATRIX_ROWS, channelById, blurbFor,
   STAFF_ROLES, isStaffRole, isUnrestricted,
-  careTeamOf, assignedCaregiverIds, assignedClinicianIds, assignedCaseManagerId, hasActiveCaregiver,
-  clientInScope, channelAvailability, channelsFor,
+  careTeamOf, assignedCaregiverIds, assignedClinicianIds, assignedCaseManagerId, caseManagerIds, hasActiveCaregiver,
+  clientInScope, channelAvailability, channelsFor, withPatient,
   isParty, ownClientId, threadVisibility, canPostToThread,
   senderIdentity, validateMessage, previewOf, effectiveRole, MAX_BODY, MAX_ATTACHMENTS, ATTACHMENT_MIMES,
   RESPONSE_STATUSES, RESPONSE_TRANSITIONS, canTransitionResponse, responseRefusal,

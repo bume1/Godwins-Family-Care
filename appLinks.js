@@ -35,6 +35,7 @@ const PATHS = Object.freeze({
   CAREGIVER_SCHEDULE: '/caregiver#schedule',// their shifts — where a shift notice belongs
   CAREGIVER_MORE: '/caregiver#more',        // messages + documents live here
   CLINICAL: '/clinical',                    // clinician workspace + case-manager read
+  CLINICAL_INBOX: '/clinical#inbox',        // straight to the clinical inbox (the page reads the fragment)
   SCHEDULING: '/scheduling',                // ADMIN shift board, not the caregiver's
   CAREGIVER_ADMIN: '/caregivers',           // admin supervision: escalations, reviews
   ADMIN: '/admin',                          // the admin hub. NOT `/admin-hub`, which 404s.

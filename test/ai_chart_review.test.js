@@ -436,9 +436,9 @@ test('H3: the admin panel exists, is rendered, and restates no role rule', () =>
   assert.match(body, /if \(!st\) return null/,
     'it renders nothing when the server refuses — the gate is the route, never the absence of a tile');
   assert.ok(!/isSuperAdmin|user\.role|isManager/.test(body), 'the page must not decide who may see this');
-  assert.match(body, /Run test/);
+  assert.match(body, /Run Test/); // labels are Title Case (owner rule, 2026-10-12)
   assert.match(body, /no real patient/i, 'the owner must know the test sends nothing real');
-  assert.match(body, /Re-run checks/, 'an admin who just changed a console setting should not wait six hours');
+  assert.match(body, /Re-Run Checks/, 'an admin who just changed a console setting should not wait six hours');
   // A static key is named as refused rather than shown as a neutral value.
   assert.match(body, /refused rather than used/);
 });

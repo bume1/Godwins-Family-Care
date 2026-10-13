@@ -187,8 +187,9 @@ test('no H&P action claims to sign unless it signs', () => {
     'no button may say "Sign" for an action that does not attest');
   assert.ok(!/Save &amp; file note to chart|File note &amp; go to coding/.test(actions),
     'the two separate filing buttons are gone — Save draft writes the app and OpenEMR together');
-  assert.ok(actions.includes('Save draft'), 'the save is missing');
-  assert.ok(actions.includes('Sign &amp; submit note'), 'the sign action is missing');
+  // Labels are Title Case since the 2026-10-12 redesign (owner rule).
+  assert.ok(actions.includes('Save Draft'), 'the save is missing');
+  assert.ok(actions.includes('Sign &amp; Submit'), 'the sign action is missing');
   // Scoped to the message SAVING actually produces, not the whole tab: the
   // explainer paragraph also says "not sign", so a looser assertion would pass
   // with the success message stripped (caught by mutation on 2026-09-22).

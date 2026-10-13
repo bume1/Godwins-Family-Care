@@ -123,6 +123,9 @@ const COLLECTION_REGISTRY = Object.freeze([
   { key: 'standing_orders', phi: true, owner: '4.8', note: 'versions are immutable — a revision is a new row' },
   { key: 'standing_order_executions', phi: true, owner: '4.8', note: 'the audit trail: who acted under whose authority, under which version' },
   { key: 'clinical_results', phi: true, owner: '4.10', note: 'received results: the interpretation, the chart pointer, and who acknowledged it' },
+  // The outside practices GFC refers to (owner, 2026-10-12). An address book of
+  // other providers: no client id and nothing about who was referred.
+  { key: 'referral_providers', phi: false, owner: 'referrals', note: 'saved outside providers: name, practice, specialty, fax, edit history' },
   // Portal P1: the patient-facing copies the portal reads. Patients never read
   // OpenEMR; these are written when a clinician signs, read by the portal.
   { key: 'patient_published_chart', phi: true, owner: 'portal-p1', note: 'one row per client: problems, allergies, meds, vitals, capped history' },

@@ -151,10 +151,11 @@ test('an admin and a licensed clinician may edit; a case manager still may not',
   assert.ok(canEdit({ role: 'user', hasClinicalAccess: true }), 'a clinician edits');
   assert.ok(canEdit({ role: 'user', clinicalRole: 'rn' }), 'an RN edits');
   assert.ok(canEdit({ role: 'user', clinicalRole: 'lcsw' }), 'an LCSW edits');
-  // A case manager resolves to readOnly. Widening them here would turn the 4.3
-  // scoped READ into a write, which is a different decision and not this one.
-  assert.ok(!canEdit({ role: 'caseManager' }), 'a case manager reads only');
-  assert.ok(!canEdit({ role: 'caseManager', hasClinicalAccess: true }), 'still read-only with the legacy flag');
+  // 2026-10-12 (owner): a case manager is an LMSW, and intake is LMSW scope, so
+  // a case manager corrects a submission. One an admin set to readOnly does not.
+  assert.ok(canEdit({ role: 'caseManager' }), 'a case manager (LMSW) edits');
+  assert.ok(!canEdit({ role: 'caseManager', clinicalRole: 'readOnly' }), 'a read-only case manager reads only');
+  assert.ok(!canEdit({ role: 'caseManager', clinicalRole: 'readOnly', hasClinicalAccess: true }), 'still read-only with the legacy flag');
   assert.ok(!canEdit({ role: 'user', clinicalRole: 'readOnly' }), 'readOnly is read-only');
   assert.ok(!canEdit({ role: 'user' }), 'a non-clinical staff user does not edit');
   assert.ok(!canEdit({ role: 'client' }), 'a client does not edit their own file from here');
@@ -185,8 +186,9 @@ test('the enrollment page offers no control the API will refuse', () => {
   assert.match(SERVER, /canEdit: canEditEnrollment\(req\.user\)/);
   assert.ok(!/canEditSubmission = isAdminRole|canEditSubmission = user\./.test(ENROL),
     'the page must not decide the submission gate for itself');
-  for (const ctl of ['Mark as reviewed', 'Request follow-up', 'Change service line',
-                     'Approve enrollment', 'Request documents', 'Record paper signature']) {
+  // Labels are Title Case since the owner's 2026-10-12 rule.
+  for (const ctl of ['Mark Reviewed', 'Request Follow-Up', 'Change Service Line',
+                     'Approve Enrollment', 'Request Documents', 'Record Paper Signature']) {
     assert.ok(ENROL.includes(ctl), `control missing: ${ctl}`);
   }
   // A viewer is TOLD which of the two states they are in rather than left with
@@ -194,14 +196,14 @@ test('the enrollment page offers no control the API will refuse', () => {
   assert.match(ENROL, /Read-only — an admin or clinician makes changes here/);
   assert.match(ENROL, /You can correct this submission/);
   // Note the arrow function in the onClick — [^>]* would stop at its ">".
-  assert.match(ENROL, /\{canEdit && <button [\s\S]{0,120}?>Record paper signature<\/button>\}/);
+  assert.match(ENROL, /\{canEdit && <button [\s\S]{0,120}?>Record Paper Signature<\/button>\}/);
   assert.match(ENROL, /<DocumentExchange clientId=\{clientId\} canEdit=\{canEdit\} isAdmin=\{isAdminRole\(user\)\} \/>/);
 });
 
 test('printing a blank consent stays open to staff — it is a read', () => {
   // The distinction is the point: printing a document for a visit is reading,
   // recording the signature that comes back is writing.
-  const at = ENROL.indexOf('Print for signature');
+  const at = ENROL.indexOf('Print for Signature');
   assert.notStrictEqual(at, -1);
   const line = ENROL.slice(ENROL.lastIndexOf('\n', at), ENROL.indexOf('\n', at));
   assert.ok(!line.includes('canEdit'), 'the blank-copy link must not be admin-gated');

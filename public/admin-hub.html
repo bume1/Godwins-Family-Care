@@ -792,7 +792,7 @@
               </div>
               <button onClick={recheck} disabled={busy === 'recheck'}
                 className="px-3 py-1.5 text-xs rounded border border-gray-300 text-gray-700 hover:bg-gray-50">
-                {busy === 'recheck' ? 'Checking…' : 'Re-run checks'}
+                {busy === 'recheck' ? 'Checking…' : 'Re-Run Checks'}
               </button>
             </div>
             {!!(st.checks && st.checks.failures || []).length && (
@@ -818,7 +818,7 @@
               </div>
               <button onClick={run} disabled={busy === 'test' || !st.configured}
                 className="px-3 py-1.5 text-xs rounded bg-primary-600 text-white disabled:opacity-50">
-                {busy === 'test' ? 'Running…' : 'Run test'}
+                {busy === 'test' ? 'Running…' : 'Run Test'}
               </button>
             </div>
             {result && (
@@ -894,7 +894,7 @@
           <div className="flex items-center gap-3 flex-wrap">
             <button onClick={run} disabled={busy || !m.configured}
               className="px-4 py-2 rounded-xl bg-primary-500 text-white text-sm font-medium disabled:opacity-50">
-              {busy ? 'Testing…' : 'Test video room'}
+              {busy ? 'Testing…' : 'Test Video Room'}
             </button>
             <span className="text-xs text-gray-500">
               Creates a real room and shuts it again. No patient is involved.
@@ -2346,7 +2346,7 @@
                     Go to enrollment
                   </a>
                   <button onClick={() => setJustCreatedClientId(null)} className="px-4 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 font-medium">
-                    Not now
+                    Not Now
                   </button>
                 </div>
               </div>
@@ -2705,7 +2705,7 @@
                           <button type="button" disabled={!editingUser.mfaEnrolled || accessActionBusy}
                             onClick={() => resetUserMfa(editingUser)}
                             className="px-3 py-1.5 bg-amber-100 text-amber-800 text-sm rounded-lg hover:bg-amber-200 disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap">
-                            Reset authenticator
+                            Reset Authenticator
                           </button>
                         </div>
                       </div>
@@ -4506,7 +4506,7 @@
                         {editingTemplate.category === 'announcement' ? 'Announcement' : 'Automated'}
                       </span>
                     </div>
-                    <button onClick={handleCancelEdit} className="text-sm text-gray-500 hover:text-gray-700">Back to list</button>
+                    <button onClick={handleCancelEdit} className="text-sm text-gray-500 hover:text-gray-700">Back to List</button>
                   </div>
 
                   <div className="grid lg:grid-cols-3 gap-4">

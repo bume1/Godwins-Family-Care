@@ -77,6 +77,7 @@ const myDay = require('./myDay');                     // the day, the visit stam
 // Session 4.10 — orders that leave the building. The app GENERATES, a person
 // TRANSMITS: there is no fax API here and there never claims to be one.
 const orderReq = require('./orderRequisitions');      // referrals, DME, requisitions, sends, overdue (4.10 A)
+const referralDirectory = require('./referralDirectory'); // saved outside providers for referrals (2026-10-12)
 const controlled = require('./controlledSubstances'); // the Schedule II guard (4.10 B)
 const clinicalResults = require('./clinicalResults'); // the RESULTS path — received documents and their
                                                       // acknowledgment. Distinct from 4.9's clinicalInbox,
@@ -2837,7 +2838,10 @@ app.use(messagingRoutes({
   db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4,
   upload, uploadLimiter, googledrive,
   detectFileType: (buf) => detectFileType(buf),
-  contentDisposition
+  contentDisposition,
+  // A GETTER, not the notifier itself: `notify` is built far below this line
+  // and would be in its temporal dead zone here. Called only at request time.
+  notify: () => notify
 }));
 
 // Uploads require authentication - registered here after authenticateToken is defined
@@ -6361,6 +6365,14 @@ async function migrateClinicalRoles() {
     const standing = clinicalRoles.buildPendingReviewWarning(pending);
     if (standing) console.warn(standing);
   }
+  // Case managers are LMSW (owner, 2026-10-12). Once per user: the marker on
+  // each record stops a later deliberate readOnly from being undone at boot.
+  const lmsw = clinicalRoles.applyCaseManagerLmswMigration(next);
+  if (lmsw.changed.length) {
+    await db.set('users', lmsw.users);
+    invalidateUsersCache();
+    console.log(`[roles] ${lmsw.changed.length} case manager${lmsw.changed.length === 1 ? '' : 's'} moved from read-only to LMSW (owner rule, 2026-10-12).`);
+  }
 }
 
 // ── Session 4.10: seed the return fax number, ONLY IF UNSET ───────────────
@@ -6374,6 +6386,19 @@ async function migrateClinicalRoles() {
 // boot after somebody has changed the number in admin does nothing. The decision
 // is stated in one pure function (`seedReturnFax`) so this path and the test
 // exercise the same rule rather than two copies of it.
+// ── The provider list starts from the referrals already on file ───────────
+// One entry per fax that an outside referral has gone to, so the "Refer to"
+// list is not empty on day one. Idempotent: a fax already on the list is left
+// alone, so a re-run, or an entry an admin has edited since, is never touched.
+async function seedReferralProviders() {
+  const [entries, orders] = await Promise.all([loadRows('referral_providers'), loadRows('clinical_orders')]);
+  const seeded = referralDirectory.seedFromOrders({ entries, orders, makeId: uuidv4 });
+  if (seeded.added.length) {
+    await db.set('referral_providers', seeded.entries);
+    console.log(`[referrals] ${seeded.added.length} outside provider${seeded.added.length === 1 ? '' : 's'} added to the list from past referrals.`);
+  }
+}
+
 async function seedRequisitionReturnFax() {
   const stored = (await db.get('requisition_settings')) || {};
   const out = orderReq.seedReturnFax(stored, consentText.ORG.fax);
@@ -6545,7 +6570,8 @@ const careTeamForPortal = (client, users) => {
     primaryCaregiver,
     person(team.backupCaregiver, 'Backup caregiver'),
     ...(Array.isArray(team.assignedFNPs) ? team.assignedFNPs : []).map(id => person(id, clinicianRole(id))),
-    person(team.assignedCaseManager, 'Case manager')
+    person(team.assignedCaseManager, 'Case manager'),
+    ...(Array.isArray(team.supportingCaseManagers) ? team.supportingCaseManagers : []).map(id => person(id, 'Case manager'))
   ].filter(Boolean);
   const seen = new Set();
   const careTeam = members.filter(m => { const k = `${m.name}|${m.role}`; if (seen.has(k)) return false; seen.add(k); return true; });
@@ -9254,12 +9280,24 @@ app.post('/api/clinical/patients/:clientId/medrec', authenticateToken, requireCl
 
 // POST /api/clinical/patients/:clientId/problems — problem-list management →
 // OpenEMR Condition (medical_problem) writes.
-app.post('/api/clinical/patients/:clientId/problems', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.PROBLEM_LIST_WRITE), async (req, res) => {
+// An RN or a provider writes any problem; an LCSW writes a mental health
+// diagnosis (ICD-10 chapter F) and nothing else on the list (owner, 2026-10-12).
+const requireProblemWriter = (req, res, next) => {
+  if (clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.PROBLEM_LIST_WRITE) ||
+      clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.BEHAVIORAL_DIAGNOSIS)) return next();
+  return res.status(403).json(clinicalRoles.refusalFor(req.user, clinicalRoles.CAPABILITIES.PROBLEM_LIST_WRITE));
+};
+app.post('/api/clinical/patients/:clientId/problems', authenticateToken, requireClinicalWrite, requireProblemWriter, async (req, res) => {
   try {
+    const { title, icd10, begdate, comments } = req.body || {};
+    // Checked before the patient is resolved: the answer depends on the code
+    // and the credential, not on who the patient is.
+    if (!clinicalRoles.canAddProblem(req.user, icd10)) {
+      return res.status(403).json(clinicalRoles.problemRefusal(req.user, icd10));
+    }
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
     if (!client.openEmrPatientId) return res.status(409).json({ error: 'Link this client to an OpenEMR patient first', code: 'EMR_NOT_LINKED' });
-    const { title, icd10, begdate, comments } = req.body || {};
     if (!title) return res.status(400).json({ error: 'Problem title is required' });
     const emr = openemr.forActor(req.user);
     const problem = {
@@ -12352,7 +12390,7 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
       narrativeNotes: narrative.map(n => ({ id: String(n.id), date: n.date, subjective: n.subjective, objective: n.objective, assessment: n.assessment, plan: n.plan })),
       notesError,
       record, state: encounterStateOf(record, ctx.attestation), closed: ctx.closed,
-      prescriptions: ctx.prescriptions, orders: (ctx.orders || []).map(orderReq.publicOrder), attestation: ctx.attestation, addenda: ctx.addenda,
+      prescriptions: ctx.prescriptions, orders: (ctx.orders || []).map(o => orderForViewer(o, req.user)), attestation: ctx.attestation, addenda: ctx.addenda,
       // Readiness as it applies to THIS viewer: an RN's or LMSW's signature is
       // an author signature and is held to the note-only gate; everyone else,
       // and the clinician addendum, to the full one.
@@ -12425,6 +12463,9 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
         riskPositive: !!(ctx.riskAssessment && ctx.riskAssessment.levels &&
           clinicalRepo.RISK_DOMAINS.some(d => clinicalRepo.RISK_NEEDS_PLAN.includes(ctx.riskAssessment.levels[d])))
       }).map(sec => ({ ...sec, ownField: clinicalNotes.sectionHasOwnField(sec.key) })),
+      // The visit type's name, for the "<type> — additional" heading a SOAP
+      // note puts above that type's own questions.
+      noteTypeLabel: (apptTypes.typeByKey((record.visit || {}).appointmentType) || {}).label || null,
       // Only its template sections (a phone call, a social work note): the
       // editor shows no vitals, exam or SOAP boxes.
       sectionsOnly: apptTypes.isSectionsOnly(((record.note && record.note.visit) || record.visit || {}).appointmentType,
@@ -12568,14 +12609,20 @@ app.put('/api/clinical/patients/:clientId/encounters/:euuid/coding', authenticat
     await recordUsageFor(ctx.actor, 'HCPCS', record.services.filter(s => s.codeType === 'HCPCS' && !prevSvc.has(s.code)));
     const warnings = [];
     const problemAdds = [];
-    // Writing the problem list is an RN's or a provider's. A social worker
-    // coding a note keeps their diagnoses on the encounter; nothing goes to
-    // the problem list on their say-so.
-    const mayWriteProblems = clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.PROBLEM_LIST_WRITE);
-    if (!mayWriteProblems && Array.isArray(body.addToProblemList) && body.addToProblemList.length) {
-      warnings.push('Not added to the problem list: that is done by an RN or a provider. The diagnoses are saved on this encounter.');
+    // Writing the problem list is an RN's or a provider's, and an LCSW's for a
+    // mental health (F) diagnosis (owner, 2026-10-12). An LMSW coding a note
+    // keeps their diagnoses on the encounter; nothing goes to the problem list
+    // on their say-so. Decided per code, so an LCSW's F32.9 goes and their
+    // E11.9 is named as skipped.
+    const wantedProblems = Array.isArray(body.addToProblemList) ? body.addToProblemList : [];
+    const problemCodes = wantedProblems.filter(c => clinicalRoles.canAddProblem(req.user, c));
+    const skippedProblems = wantedProblems.filter(c => !clinicalRoles.canAddProblem(req.user, c));
+    if (skippedProblems.length) {
+      warnings.push(clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.BEHAVIORAL_DIAGNOSIS)
+        ? `Not added to the problem list: ${skippedProblems.join(', ')}. An LCSW adds mental health (F) diagnoses; others are added by an RN or a provider. The diagnoses are saved on this encounter.`
+        : 'Not added to the problem list: that is done by an RN or a provider. The diagnoses are saved on this encounter.');
     }
-    for (const code of (billingEdit && !awaitingAddendum) || !mayWriteProblems ? [] : (Array.isArray(body.addToProblemList) ? body.addToProblemList : [])) {
+    for (const code of (billingEdit && !awaitingAddendum) ? [] : problemCodes) {
       const d = record.diagnoses.find(x => x.code === clinicalRepo.normalizeIcd10(code));
       if (!d) continue;
       try {
@@ -12675,6 +12722,256 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/prescriptions', aut
 });
 
 // ── Orders (Scope D) — labs / imaging / procedures; no HL7 ───────────────
+// ══════════════════════════════════════════════════════════════════════════
+// REFERRALS: TO THE TEAM, OR OUT TO A SAVED PROVIDER (owner, 2026-10-12)
+//
+// One "Refer to" list. Our own clinical team first (a referral to them lands in
+// their clinical inbox and adds them to the patient's care team), then every
+// outside provider GFC has referred to before, then "New provider".
+// ══════════════════════════════════════════════════════════════════════════
+
+// What a colleague's discipline reads as on a referral ("Social work"), so the
+// order list says what the referral was for. A case manager and a counselor are
+// both LMSW (owner, 2026-10-12); the app role is what tells them apart.
+function referralRoleLabel(user) {
+  const role = clinicalRoles.resolveClinicalRole(user);
+  if (role === clinicalRoles.CLINICAL_ROLES.LMSW) return user && user.role === config.ROLES.CASE_MANAGER ? 'Case management' : 'Counseling';
+  if (role === clinicalRoles.CLINICAL_ROLES.LCSW) return 'Clinical social work';
+  if (role === clinicalRoles.CLINICAL_ROLES.RN) return 'Nursing';
+  if (role === clinicalRoles.CLINICAL_ROLES.PROVIDER) return 'Primary care';
+  return 'Care team';
+}
+
+// Everything that happens after a referral is saved, in one place so the
+// response, the audit row and the tests read one answer:
+//   internal  — the colleague joins the care team and is emailed (no PHI).
+//   external  — a saved provider is bumped up the list; a NEW one is saved when
+//               the form asked, unless that place is already on the list.
+// Neither ever fails the referral: it is already saved, and a care-team or
+// address-book problem is a warning, not a lost order.
+async function afterReferralPlaced({ req, order, client, assigneeUser, savedProvider, warnings }) {
+  const out = { careTeamAdded: false, referralProviderId: null, provider: null };
+  const body = req.body || {};
+  try {
+    if (orderReq.isInternalReferral(order)) {
+      const users = await getUsers();
+      const idx = users.findIndex(u => u && u.id === client.id);
+      if (idx !== -1) {
+        const next = orderReq.careTeamWithAssignee(users[idx].careTeam, assigneeUser);
+        if (next.added) {
+          users[idx] = { ...users[idx], careTeam: next.careTeam };
+          await db.set('users', users);
+          invalidateUsersCache();
+          out.careTeamAdded = true;
+          await logActivity(req.user.id, req.user.name || req.user.email, 'care_team_member_added', 'client', client.id, {
+            memberId: assigneeUser.id, slot: next.slot, via: 'internal_referral', orderId: order.id
+          });
+        }
+      }
+      if (assigneeUser && assigneeUser.email && assigneeUser.accountStatus !== 'inactive') {
+        const notice = orderReq.buildInternalReferralNotice();
+        await queueNotification('internal_referral_assigned', assigneeUser.id, assigneeUser.email, assigneeUser.name || assigneeUser.email, {
+          subject: notice.subject, heading: notice.heading, body: notice.body,
+          ctaLabel: notice.ctaLabel, ctaUrl: appLinks.PATHS.CLINICAL_INBOX
+        }, { relatedEntityId: order.id });
+      }
+      return out;
+    }
+    const rows = await loadRows('referral_providers');
+    if (savedProvider) {
+      const i = rows.findIndex(e => e && e.id === savedProvider.id);
+      if (i !== -1) { rows[i] = referralDirectory.markUsed(rows[i]); await db.set('referral_providers', rows); }
+      out.referralProviderId = savedProvider.id;
+      return out;
+    }
+    if (!body.saveProvider) return out;
+    const r = order.referral || {};
+    const input = { name: r.receivingProvider, practice: r.receivingPractice, specialty: r.specialty, fax: r.receivingFax, phone: r.receivingPhone };
+    if (!r.receivingFax) {
+      warnings.push('Not added to the provider list: it needs a fax number. Add it from the list once the agency is confirmed.');
+      return out;
+    }
+    const same = rows.find(e => e && e.active !== false && referralDirectory.sameEntry(e, input));
+    const faxMatches = referralDirectory.findByFax(rows, r.receivingFax);
+    let entry = same || null;
+    if (!entry && faxMatches.length && !body.confirmDistinct) {
+      warnings.push(`Not added to the provider list: ${faxMatches.map(e => [e.name, e.practice].filter(Boolean).join(' · ')).join(', ')} already uses that fax. Pick them from the list next time, or save as a separate provider.`);
+      return out;
+    }
+    if (!entry) {
+      const built = referralDirectory.buildProviderEntry({ id: uuidv4(), input, actor: actorFromReq(req), source: 'referral' });
+      if (built.error) { warnings.push(`Not added to the provider list: ${built.error}.`); return out; }
+      entry = built.entry;
+      rows.push(entry);
+    }
+    const i = rows.findIndex(e => e && e.id === entry.id);
+    rows[i] = referralDirectory.markUsed(rows[i]);
+    await db.set('referral_providers', rows);
+    // Linked back onto the order, so a later read knows which entry it used.
+    const orders = await loadRows('clinical_orders');
+    const oi = orders.findIndex(o => o && o.id === order.id);
+    if (oi !== -1) {
+      orders[oi] = { ...orders[oi], referral: { ...(orders[oi].referral || {}), referralProviderId: entry.id } };
+      await db.set('clinical_orders', orders);
+      order.referral = orders[oi].referral;
+    }
+    out.referralProviderId = entry.id;
+    out.provider = referralDirectory.publicEntry(rows[i]);
+  } catch (e) {
+    warnings.push(`The referral is saved, but a follow-up step did not finish (${String(e.message || e).slice(0, 140)}).`);
+  }
+  return out;
+}
+
+// GET …/referral-targets — the "Refer to" list for one patient. A READ: it
+// names colleagues and outside practices, never another patient.
+app.get('/api/clinical/patients/:clientId/referral-targets', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
+    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    const [users, rows] = await Promise.all([getUsers(), loadRows('referral_providers')]);
+    const team = users
+      .filter(u => clinicalRoles.isReferralTarget(u) && String(u.id) !== String(req.user.id))
+      .map(u => {
+        const role = clinicalRoles.resolveClinicalRole(u);
+        return {
+          userId: u.id, name: u.name || u.email,
+          clinicalRole: role,
+          credential: { provider: 'Provider', rn: 'RN', lcsw: 'LCSW', lmsw: 'LMSW' }[role] || null,
+          discipline: referralRoleLabel(u),
+          onCareTeam: orderReq.isOnCareTeam(client.careTeam, u.id)
+        };
+      })
+      .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    res.json({
+      internal: team,
+      external: referralDirectory.listForForm(rows),
+      canReferInternal: clinicalRoles.canRefer(req.user, orderReq.INTERNAL),
+      canReferExternal: clinicalRoles.canRefer(req.user, orderReq.EXTERNAL),
+      canEditProviders: clinicalRoles.canEditOrderDestination(req.user)
+    });
+  } catch (error) {
+    console.error('Referral targets error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// The saved provider list. Adding and editing are the same door as updating
+// an order's destination (the office, case managers, licensed clinicians):
+// it is where-things-go information, not clinical content.
+const requireProviderListEditor = (req, res, next) => {
+  if (clinicalRoles.canEditOrderDestination(req.user)) return next();
+  return res.status(403).json({ error: 'The provider list is kept by the office, case managers and licensed clinicians.', code: 'REFERRAL_PROVIDER_EDIT_ONLY' });
+};
+app.post('/api/clinical/referral-providers', authenticateToken, requireProviderListEditor, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const rows = await loadRows('referral_providers');
+    const same = rows.find(e => e && e.active !== false && referralDirectory.sameEntry(e, body));
+    if (same) return res.status(409).json({ error: `${[same.name, same.practice].filter(Boolean).join(' · ')} is already on the list.`, code: 'REFERRAL_PROVIDER_EXISTS', provider: referralDirectory.publicEntry(same) });
+    const matches = referralDirectory.findByFax(rows, body.fax);
+    if (matches.length && !body.confirmDistinct) {
+      return res.status(409).json({
+        error: `${matches.map(e => [e.name, e.practice].filter(Boolean).join(' · ')).join(', ')} already uses that fax. Use them, or save this as a separate provider.`,
+        code: 'REFERRAL_PROVIDER_FAX_MATCH', matches: matches.map(referralDirectory.publicEntry)
+      });
+    }
+    const built = referralDirectory.buildProviderEntry({ id: uuidv4(), input: body, actor: actorFromReq(req) });
+    if (built.error) return res.status(built.status || 400).json({ error: built.error, code: built.code });
+    rows.push(built.entry);
+    await db.set('referral_providers', rows);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'referral_provider_added', 'referral_provider', built.entry.id, { fax: built.entry.fax });
+    res.json({ message: 'Provider saved.', provider: referralDirectory.publicEntry(built.entry) });
+  } catch (error) {
+    console.error('Referral provider add error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+app.put('/api/clinical/referral-providers/:id', authenticateToken, requireProviderListEditor, async (req, res) => {
+  try {
+    const rows = await loadRows('referral_providers');
+    const idx = rows.findIndex(e => e && e.id === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: 'Provider not found', code: 'REFERRAL_PROVIDER_NOT_FOUND' });
+    const applied = referralDirectory.applyProviderEdit({ entry: rows[idx], input: req.body, actor: actorFromReq(req) });
+    if (applied.error) return res.status(applied.status || 400).json({ error: applied.error, code: applied.code });
+    rows[idx] = applied.entry;
+    await db.set('referral_providers', rows);
+    // The fax is the record of where referrals go, so its from/to is audited
+    // the way an order's destination change is.
+    const fax = applied.changes.find(c => c.field === 'fax');
+    await logActivity(req.user.id, req.user.name || req.user.email, 'referral_provider_updated', 'referral_provider', applied.entry.id, {
+      fields: applied.changes.map(c => c.field), faxFrom: fax ? fax.from : null, faxTo: fax ? fax.to : null
+    });
+    res.json({
+      message: applied.faxChanged ? 'Provider updated. Referrals from now on go to the new fax; referrals already placed keep theirs.' : 'Provider updated.',
+      provider: referralDirectory.publicEntry(applied.entry)
+    });
+  } catch (error) {
+    console.error('Referral provider edit error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Working an order through: fax, schedule, file the result, cancel ──────
+// An RN or a provider on any order; social work (LCSW, LMSW) on a referral
+// (owner, 2026-10-12). The middleware lets in anyone who could act on SOME
+// order; the per-order answer is clinicalRoles.canCoordinateOrder, asked once
+// the order is loaded, so the two cannot disagree about a lab.
+const requireOrderCoordinator = (req, res, next) => {
+  if (clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.ORDER_STATUS_ADVANCE) ||
+      clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.REFERRAL_COORDINATION)) return next();
+  return res.status(403).json(clinicalRoles.refusalFor(req.user, clinicalRoles.CAPABILITIES.ORDER_STATUS_ADVANCE));
+};
+// An order as THIS viewer may act on it: the server answers which buttons the
+// page draws, so it never offers one the route refuses.
+const orderForViewer = (o, user) => {
+  const internal = orderReq.isInternalReferral(o);
+  const to = (internal && (o.referral || {}).assignedTo) || null;
+  return {
+    ...orderReq.publicOrder(o),
+    can: {
+      coordinate: !internal && clinicalRoles.canCoordinateOrder(user, o),
+      cancel: clinicalRoles.canCoordinateOrder(user, o) &&
+        (clinicalRepo.transitionsFor(o)[o.status] || []).includes('cancelled'),
+      acceptOrComplete: !!to && !!user && String(to.id) === String(user.id) && ['ordered', 'accepted'].includes(o.status)
+    }
+  };
+};
+const refuseUnlessCoordinator = (req, res, order) => {
+  if (clinicalRoles.canCoordinateOrder(req.user, order)) return false;
+  res.status(403).json(clinicalRoles.coordinationRefusal(req.user, order));
+  return true;
+};
+
+// ── A referral to someone on the team: accept, then complete with a note ──
+// Only the colleague it went to. Anyone else who needs to stop it cancels it.
+const internalReferralStep = (apply, verb) => async (req, res) => {
+  try {
+    const found = await loadOrderForActor(req.params.orderId, res);
+    if (!found) return;
+    const { rows, idx, order, client } = found;
+    const applied = apply({ order, actor: actorFromReq(req), note: (req.body || {}).note });
+    if (applied.error) return res.status(applied.status || 400).json({ error: applied.error, code: applied.code });
+    rows[idx] = applied.order;
+    await db.set('clinical_orders', rows);
+    // That a note was written, never what it says.
+    await logActivity(req.user.id, req.user.name || req.user.email, `internal_referral_${verb}`, 'client', client.id, {
+      orderId: order.id, orderReference: order.orderReference, completionNoted: verb === 'completed'
+    });
+    res.json({
+      message: verb === 'accepted' ? 'Accepted. Complete it with a note when you are done.' : 'Completed. The referring clinician can read your note on the order.',
+      order: orderReq.publicOrder(applied.order)
+    });
+  } catch (error) {
+    console.error(`Internal referral ${verb} error:`, error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+app.post('/api/clinical/orders/:orderId/accept', authenticateToken, requireClinicalWrite,
+  internalReferralStep(orderReq.applyInternalAccept, 'accepted'));
+app.post('/api/clinical/orders/:orderId/complete', authenticateToken, requireClinicalWrite,
+  internalReferralStep(orderReq.applyInternalComplete, 'completed'));
+
 app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authenticateToken, requireClinicalWrite, async (req, res) => {
   try {
     // ── DIRECT AUTHORITY IS CHECKED FIRST, for the same reason the Schedule II
@@ -12683,12 +12980,53 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authentica
     // answer is "execute it under a standing order instead" goes looking in the
     // wrong place. The standing-order half still runs after the order is built,
     // because it has to check the tests and the diagnoses against the protocol.
-    if (!String((req.body || {}).standingOrderId || '').trim() &&
+    //
+    // A REFERRAL IS DECIDED BY WHERE IT GOES (owner, 2026-10-12), not by
+    // direct ordering authority: any licensed role refers within the team, and
+    // a provider or an LCSW refers out (clinicalRoles.canRefer). It is never
+    // placed under a standing order.
+    const placing = req.body || {};
+    const isReferralOrder = String(placing.orderType || '').trim() === orderReq.REFERRAL;
+    const referralDestination = isReferralOrder ? orderReq.referralDestinationOf(placing) : null;
+    if (isReferralOrder) {
+      if (String(placing.standingOrderId || '').trim()) {
+        return res.status(400).json({ error: 'A referral is placed on your own authority, never under a standing order. Leave the protocol blank.', code: 'REFERRAL_NOT_UNDER_PROTOCOL' });
+      }
+      if (!clinicalRoles.canRefer(req.user, referralDestination)) {
+        return res.status(403).json(clinicalRoles.referralRefusal(req.user, referralDestination));
+      }
+    } else if (!String(placing.standingOrderId || '').trim() &&
         !clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.ORDER_DIRECT)) {
       return res.status(403).json(clinicalRoles.refusalFor(req.user, clinicalRoles.CAPABILITIES.ORDER_DIRECT));
     }
     const ctx = await loadEncounterContext(req, res);
     if (!ctx || refuseIfClosed(ctx, res)) return;
+    // WHO or WHERE is resolved HERE, from ids, never from names typed in the
+    // body: a colleague must be a real, active, licensed team member, and a saved
+    // provider must be one on the list.
+    let referralAssignee = null;
+    let referralAssigneeUser = null;
+    let savedProvider = null;
+    if (isReferralOrder && referralDestination === orderReq.INTERNAL) {
+      const teamUsers = await getUsers();
+      referralAssigneeUser = teamUsers.find(u => u && String(u.id) === String(placing.assigneeId || '')) || null;
+      if (!referralAssigneeUser || !clinicalRoles.isReferralTarget(referralAssigneeUser)) {
+        return res.status(400).json({ error: 'Choose someone on the clinical team to refer to. That person is not an active, licensed team member.', code: 'REFERRAL_BAD_ASSIGNEE' });
+      }
+      referralAssignee = {
+        id: referralAssigneeUser.id, name: referralAssigneeUser.name || referralAssigneeUser.email,
+        role: referralAssigneeUser.role,
+        clinicalRole: clinicalRoles.resolveClinicalRole(referralAssigneeUser),
+        roleLabel: referralRoleLabel(referralAssigneeUser)
+      };
+    }
+    if (isReferralOrder && referralDestination === orderReq.EXTERNAL && String(placing.referralProviderId || '').trim()) {
+      savedProvider = (await loadRows('referral_providers'))
+        .find(e => e && e.id === String(placing.referralProviderId) && e.active !== false) || null;
+      if (!savedProvider) {
+        return res.status(400).json({ error: 'That saved provider is no longer on the list. Choose another, or add them as new.', code: 'REFERRAL_PROVIDER_NOT_FOUND' });
+      }
+    }
     // ── Session 4.10: three builders, one envelope ────────────────────────
     // A referral and a DME order carry a PAYLOAD rather than a list of tests, so
     // they have their own builders. `buildOrder` still requires a non-empty
@@ -12701,7 +13039,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authentica
       encounterDiagnoses: ctx.record.diagnoses
     };
     const built = orderType === orderReq.REFERRAL
-      ? orderReq.buildReferral(buildArgs)
+      ? orderReq.buildReferral({ ...buildArgs, assignee: referralAssignee, provider: savedProvider })
       : orderType === orderReq.DME
         ? orderReq.buildDmeOrder({ ...buildArgs, client: ctx.client })
         : clinicalRepo.buildOrder(buildArgs);
@@ -12746,9 +13084,14 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authentica
       // patient is resolved, so the refusal names the credential rather than the
       // patient; kept HERE too because this is the branch that decides what the
       // order records, and a gate stated only at the top is a gate a later
-      // refactor moves the branch out from under.
-      if (!clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.ORDER_DIRECT)) {
-        return res.status(403).json(clinicalRoles.refusalFor(req.user, clinicalRoles.CAPABILITIES.ORDER_DIRECT));
+      // refactor moves the branch out from under. A referral's authority is
+      // where it goes (canRefer), answered by the same predicate as the top.
+      if (isReferralOrder
+        ? !clinicalRoles.canRefer(req.user, referralDestination)
+        : !clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.ORDER_DIRECT)) {
+        return res.status(403).json(isReferralOrder
+          ? clinicalRoles.referralRefusal(req.user, referralDestination)
+          : clinicalRoles.refusalFor(req.user, clinicalRoles.CAPABILITIES.ORDER_DIRECT));
       }
       built.order.authority = 'direct';
       built.order.standingOrder = null;
@@ -12807,7 +13150,13 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authentica
       providerId = (authorizer && authorizer.openEmrProviderId) || null;
       built.order.orderingClinician.openEmrProviderId = providerId ? String(providerId) : null;
     }
-    if (!providerId) {
+    // AN INTERNAL REFERRAL IS NOT FILED AS A PROCEDURE ORDER. It is a hand-off
+    // between two people on GFC's own team, and OpenEMR's procedure_order would
+    // record it as a lab test nobody is going to perform.
+    const internalReferral = orderReq.isInternalReferral(built.order);
+    if (internalReferral) {
+      // nothing to file
+    } else if (!providerId) {
       warnings.push(execution
         ? 'The order is recorded in the chart but was not filed in OpenEMR: the authorizing provider on this standing order has no OpenEMR provider id on file. An admin sets it on their user record.'
         : 'The order is recorded in the chart but was not filed in OpenEMR: this clinician has no OpenEMR provider id on file. An admin sets it on the user record.');
@@ -12839,7 +13188,14 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authentica
     const syncWarning = await syncStructuredNote(ctx.emr, ctx.client, ctx.record);
     if (syncWarning) warnings.push(syncWarning);
     await saveBillingRecord(ctx.rows, ctx.record);
+    const referralFollowUp = isReferralOrder
+      ? await afterReferralPlaced({ req, order: built.order, client: ctx.client, assigneeUser: referralAssigneeUser, savedProvider, warnings })
+      : null;
     await logActivity(req.user.id, req.user.name || req.user.email, 'order_recorded', 'client', ctx.client.id, {
+      referralDestination: referralDestination || null,
+      referredToUserId: referralAssignee ? referralAssignee.id : null,
+      careTeamAdded: referralFollowUp ? referralFollowUp.careTeamAdded : null,
+      referralProviderId: referralFollowUp ? referralFollowUp.referralProviderId : null,
       encounterUuid: ctx.encounterUuid, orderId: built.order.id, orderType: built.order.orderType, tests: built.order.tests,
       authority: built.order.authority,
       standingOrderId: execution ? execution.standingOrderRef.id : null,
@@ -12853,10 +13209,14 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authentica
       medicareEnrollmentAcknowledged: !!built.order.medicareEnrollmentAcknowledgment
     });
     res.json({
-      message: execution
-        ? `Order recorded under standing order "${execution.standingOrderRef.title}" v${execution.standingOrderRef.version} (transmission is manual)`
-        : 'Order recorded (transmission is manual)',
-      order: built.order, warnings
+      message: internalReferral
+        ? `Referred to ${referralAssignee.name}. It is waiting in their inbox${referralFollowUp && referralFollowUp.careTeamAdded ? ", and they have been added to this patient's care team" : ''}.`
+        : execution
+          ? `Order recorded under standing order "${execution.standingOrderRef.title}" v${execution.standingOrderRef.version} (transmission is manual)`
+          : 'Order recorded (transmission is manual)',
+      order: built.order, warnings,
+      careTeamAdded: referralFollowUp ? referralFollowUp.careTeamAdded : false,
+      referralProvider: referralFollowUp ? referralFollowUp.provider : null
     });
   } catch (error) {
     console.error('Clinical order error:', error);
@@ -12865,11 +13225,12 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/orders', authentica
 });
 // Status advance is an operational step (sent / resulted / cancelled), so it
 // stays allowed after the encounter is closed; every step is who/when-stamped.
-app.post('/api/clinical/orders/:orderId/status', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.ORDER_STATUS_ADVANCE), async (req, res) => {
+app.post('/api/clinical/orders/:orderId/status', authenticateToken, requireClinicalWrite, requireOrderCoordinator, async (req, res) => {
   try {
     const rows = await loadRows('clinical_orders');
     const idx = rows.findIndex(o => o && o.id === req.params.orderId);
     if (idx === -1) return res.status(404).json({ error: 'Order not found', code: 'ORDER_NOT_FOUND' });
+    if (refuseUnlessCoordinator(req, res, rows[idx])) return;
     const next = clinicalRepo.advanceOrderStatus(rows[idx], String((req.body || {}).status || ''), actorFromReq(req), (req.body || {}).note);
     if (next.error) return res.status(next.code === 'ORDER_BAD_TRANSITION' ? 409 : 400).json({ error: next.error, code: next.code });
     rows[idx] = next.order;
@@ -12910,7 +13271,8 @@ app.get('/api/clinical/patients/:clientId/orders', authenticateToken, requireCli
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
     const [orders, rx] = await Promise.all([loadRows('clinical_orders'), loadRows('prescriptions')]);
     res.json({
-      orders: orders.filter(o => o && o.clientId === client.id).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).map(orderReq.publicOrder),
+      orders: orders.filter(o => o && o.clientId === client.id).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).map(o => orderForViewer(o, req.user)),
+      internalReferralTransitions: orderReq.INTERNAL_REFERRAL_TRANSITIONS,
       destinationFields: orderReq.destinationFormFields(),
       destinationEditableStatuses: orderReq.DESTINATION_EDITABLE_STATUSES,
       noteMax: orderReq.ORDER_NOTE_MAX,
@@ -12964,6 +13326,10 @@ app.get('/api/clinical/orders/:orderId/requisition.pdf', authenticateToken, requ
     const found = await loadOrderForActor(req.params.orderId, res);
     if (!found) return;
     const { rows, idx, order, client } = found;
+    // A referral inside the team is never faxed, so it has no requisition.
+    if (orderReq.isInternalReferral(order)) {
+      return res.status(409).json({ error: 'This referral went to someone on the team, so there is no requisition to fax.', code: 'ORDER_INTERNAL_REFERRAL' });
+    }
     // No agency, no fax number: a requisition with a blank "send to" is a
     // document nobody can send. Refused by name, pointing at the fix.
     if (orderReq.isAgencyPending(order)) {
@@ -13067,11 +13433,12 @@ app.get('/api/clinical/orders/:orderId/requisition.pdf', authenticateToken, requ
 // channel, by WHOM and WHEN — which, when the recipient is a fax number, IS the
 // disclosure record.
 app.post('/api/clinical/orders/:orderId/sent', authenticateToken, requireClinicalWrite,
-  requireCapability(clinicalRoles.CAPABILITIES.ORDER_STATUS_ADVANCE), async (req, res) => {
+  requireOrderCoordinator, async (req, res) => {
   try {
     const found = await loadOrderForActor(req.params.orderId, res);
     if (!found) return;
     const { rows, idx, order, client } = found;
+    if (refuseUnlessCoordinator(req, res, order)) return;
     const applied = orderReq.applySend({ order, input: req.body, actor: actorFromReq(req) });
     if (applied.error) return res.status(applied.status || 400).json({ error: applied.error, code: applied.code });
     rows[idx] = applied.order;
@@ -13151,11 +13518,12 @@ app.put('/api/clinical/orders/:orderId/destination', authenticateToken, requireO
 // The state a lab order has no equivalent of. Without it a referral sits at
 // "sent" for six weeks with nothing saying an appointment exists.
 app.post('/api/clinical/orders/:orderId/scheduled', authenticateToken, requireClinicalWrite,
-  requireCapability(clinicalRoles.CAPABILITIES.ORDER_STATUS_ADVANCE), async (req, res) => {
+  requireOrderCoordinator, async (req, res) => {
   try {
     const found = await loadOrderForActor(req.params.orderId, res);
     if (!found) return;
     const { rows, idx, order, client } = found;
+    if (refuseUnlessCoordinator(req, res, order)) return;
     const applied = orderReq.applyReferralScheduled({
       order, appointmentDate: (req.body || {}).appointmentDate, actor: actorFromReq(req)
     });
@@ -13306,6 +13674,14 @@ app.post('/api/clinical/orders/:orderId/result', authenticateToken, requireClini
   try {
     const found = await loadOrderForActor(req.params.orderId, res);
     if (!found) return;
+    // The same rule as faxing and scheduling: the page only ever offered this
+    // to whoever may work the order through, and now the route agrees.
+    if (refuseUnlessCoordinator(req, res, found.order)) return;
+    // A referral inside the team is completed by its colleague with a note,
+    // not by a document arriving from outside.
+    if (orderReq.isInternalReferral(found.order)) {
+      return res.status(409).json({ error: 'This referral went to someone on the team. They complete it with a note from their inbox; attach any document to the order as a file instead.', code: 'ORDER_INTERNAL_REFERRAL' });
+    }
     await receiveClinicalResult(req, res, found);
   } catch (error) {
     console.error('Result attach error:', error);
@@ -15543,6 +15919,10 @@ app.get('/api/clinical/patients/:clientId/place-of-service', authenticateToken, 
       // 'sections': the note is only its template sections (no vitals, exam
       // or nursing blocks). Served so the page cannot restate which types.
       noteShape: t.noteShape || null,
+      // 'hp' or 'followup', and whether the note is laid out as SOAP. Served
+      // so the Visit tab shows the screen the server will save it as.
+      noteForm: apptTypes.noteFormFor(t.key),
+      layout: apptTypes.isSoapLayout(t.key) ? 'soap' : null,
       // Whether THIS viewer may write this note. The page offers only these;
       // the note routes refuse the rest (noteTypeRefusal).
       canDocument: apptTypes.canDocumentType(t.key, viewerRole).ok
@@ -27069,6 +27449,11 @@ app.listen(PORT, () => {
       await seedRequisitionReturnFax();
     } catch (err) {
       console.error('Return-fax seed failed (non-fatal):', err.message);
+    }
+    try {
+      await seedReferralProviders();
+    } catch (err) {
+      console.error('Referral provider seed failed (non-fatal):', err.message);
     }
     try {
       await migratePrescriptionSchedules();

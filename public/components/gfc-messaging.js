@@ -18,6 +18,9 @@
  *             hostStartsMessages: false, // the host lists channels to start
  *                                       // (with each one's reason when off), so
  *                                       // the list leaves those cards out
+ *             audience:      null,      // optional 'patient' | 'team': list only
+ *                                       // threads with (or without) the patient's
+ *                                       // side on them, as the server marks them
  *             startCompose:  null,      // optional channel id: open straight
  *                                       // into a new message on that channel
  *                                       // (the portal's "Ask a Question").
@@ -65,8 +68,14 @@
     '.gfcm{--navy:#033D50;--gold:#F5CD85;--goldd:#C9A44A;--cream:#FAF7F2;--ink:#1a2a32;--mut:#41555f;--red:#A32D2D;--green:#0f6e56;--line:#e5ddcb;font-size:16px;line-height:1.5;color:var(--ink)}',
     '.gfcm *{box-sizing:border-box}',
     '.gfcm h3{font-family:"Cormorant Garamond",Georgia,serif;font-size:19px;color:var(--navy);font-weight:600;margin:0 0 8px}',
-    '.gfcm .mcard{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 15px;margin-bottom:12px}',
-    '.gfcm .mrow{display:block;width:100%;text-align:left;background:none;border:none;border-bottom:1px solid #ece6db;padding:12px 0;cursor:pointer;font-family:inherit;font-size:15px}',
+    '.gfcm .mcard{background:#fff;border:1px solid #ECE4D6;border-radius:16px;padding:14px 16px;margin-bottom:12px;box-shadow:0 1px 2px rgba(3,61,80,.04),0 6px 18px -12px rgba(3,61,80,.18)}',
+    '.gfcm .mrow{display:flex;gap:12px;align-items:flex-start;width:100%;text-align:left;background:none;border:none;border-bottom:1px solid #ece6db;padding:12px 4px;cursor:pointer;font-family:inherit;font-size:15px}',
+    '.gfcm .mrow .mbody{flex:1;min-width:0}',
+    '.gfcm .mav{width:40px;height:40px;border-radius:50%;background:#F6EFE2;color:var(--navy);border:1px solid #E1D7C5;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;flex-shrink:0}',
+    '.gfcm .mhead{display:flex;gap:12px;align-items:center;padding-bottom:12px;border-bottom:1px solid #ece6db}',
+    '.gfcm .mhead .mav{width:46px;height:46px;font-size:16px}',
+    '.gfcm .mhead h3{margin:0}',
+    '.gfcm .mlog{display:flex;flex-direction:column;padding:14px 0 6px}',
     '.gfcm .mrow:last-child{border-bottom:none}',
     '.gfcm .mrow:hover{background:#faf8f3}',
     '.gfcm .mtop{display:flex;justify-content:space-between;gap:10px;align-items:baseline}',
@@ -79,16 +88,19 @@
     '.gfcm .mchip.acknowledged{background:#e7edf0;color:var(--navy)}',
     '.gfcm .mchip.responded{background:#e3f0ea;color:var(--green)}',
     '.gfcm .mchip.closed{background:#eee;color:#555}',
-    '.gfcm .mbub{border-radius:12px;padding:10px 13px;margin-bottom:9px;max-width:88%}',
-    '.gfcm .mbub.them{background:#f2eee5;border:1px solid var(--line)}',
-    '.gfcm .mbub.me{background:var(--navy);color:var(--cream);margin-left:auto}',
+    '.gfcm .mbub{border-radius:18px;padding:10px 14px;margin-bottom:4px;max-width:78%}',
+    '.gfcm .mwrap{display:flex;flex-direction:column;margin-bottom:10px}',
+    '.gfcm .mwrap.me{align-items:flex-end}',
+    '.gfcm .mwrap.them{align-items:flex-start}',
+    '.gfcm .mbub.them{background:#fff;border:1px solid #E1D7C5;border-bottom-left-radius:6px}',
+    '.gfcm .mbub.me{background:#E6EEF3;color:var(--ink);border-bottom-right-radius:6px}',
     '.gfcm .mwho{font-size:13px;font-weight:600;margin-bottom:2px}',
     '.gfcm .mbub.them .mwho{color:var(--navy)}',
-    '.gfcm .mbub.me .mwho{color:var(--gold)}',
-    '.gfcm .mwhen{font-size:12px;opacity:.7;margin-top:3px}',
-    '.gfcm .mbtn{border-radius:9px;padding:11px 14px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;border:1px solid var(--navy);background:var(--navy);color:var(--cream)}',
-    '.gfcm .mbtn.gold{background:var(--gold);border-color:var(--gold);color:var(--navy)}',
-    '.gfcm .mbtn.ghost{background:#fff;color:var(--navy)}',
+    '.gfcm .mbub.me .mwho{color:var(--navy)}',
+    '.gfcm .mwhen{font-size:12px;color:var(--mut);opacity:.85;margin:0 6px}',
+    '.gfcm .mbtn{border-radius:12px;padding:11px 14px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;border:1px solid var(--navy);background:var(--navy);color:var(--cream)}',
+    '.gfcm .mbtn.gold{background:#A9853A;border-color:#A9853A;color:#fff}',
+    '.gfcm .mbtn.ghost{background:#fff;color:var(--navy);border-color:#E1D7C5}',
     '.gfcm .mbtn[disabled]{opacity:.5;cursor:not-allowed}',
     '.gfcm .mbtns{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}',
     '.gfcm textarea,.gfcm select,.gfcm input{width:100%;border:1px solid #d8cdb8;border-radius:9px;padding:10px 12px;font-size:16px;font-family:inherit;background:#fff;color:var(--ink)}',
@@ -115,7 +127,7 @@
     '.gfcm .matts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}',
     '.gfcm .matt{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--cream);border-radius:20px;padding:4px 10px;font-size:13px;color:var(--navy);cursor:pointer;font-family:inherit;max-width:100%}',
     '.gfcm .matt .mnm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:220px}',
-    '.gfcm .mbub.me .matt{background:rgba(250,247,242,.14);border-color:rgba(245,205,133,.5);color:var(--cream)}',
+    '.gfcm .mbub.me .matt{background:#fff;border-color:#cfdbe3;color:var(--navy)}',
     '.gfcm .mattx{border:none;background:none;font-size:16px;line-height:1;color:var(--mut);cursor:pointer;padding:0 2px}',
     '.gfcm .mfile{display:inline-block;cursor:pointer}'
   ].join('\n');
@@ -126,6 +138,12 @@
     el.id = 'gfcm-css';
     el.textContent = CSS;
     document.head.appendChild(el);
+  }
+
+  // Two initials for an avatar circle; a dash when there is no name.
+  function initialsOf(name) {
+    var w = String(name || '').split(/\s+/).filter(Boolean).slice(0, 2);
+    return w.length ? w.map(function (x) { return x.charAt(0).toUpperCase(); }).join('') : '–';
   }
 
   function esc(s) {
@@ -195,7 +213,7 @@
       return '<span class="matt">&#128206; <span class="mnm">' + esc(f.name) + '</span> <span class="mmu">' + esc(fmtSize(f.size)) + '</span>' +
         '<button type="button" class="mattx" data-remove-file="' + i + '" aria-label="Remove ' + esc(f.name) + '">&times;</button></span>';
     }).join('') + '</div>';
-    html += '<div class="mbtns" style="align-items:center"><label class="mbtn ghost mfile">Attach a file' +
+    html += '<div class="mbtns" style="align-items:center"><label class="mbtn ghost mfile">Attach File' +
       '<input type="file" data-files="1" multiple accept="application/pdf,image/jpeg,image/png,.pdf,.jpg,.jpeg,.png" hidden></label>' +
       '<span class="mmu">PDF, JPEG or PNG &middot; up to ' + MAX_FILES + ' files, 10 MB each</span></div>';
     return html;
@@ -339,16 +357,27 @@
       '</div>';
   }
 
+  // `audience` narrows a list to conversations with the patient's side on them
+  // ('patient') or staff only ('team'). The SERVER marks each thread and channel
+  // (`withPatient`, from the channel's participants); this only filters on it.
+  function inAudience(state, x) {
+    if (!state.audience) return true;
+    return state.audience === 'patient' ? !!x.withPatient : !x.withPatient;
+  }
+
   function renderList(state) {
-    var openable = state.channels.filter(function (c) { return c.available; });
-    var blocked = state.channels.filter(function (c) { return !c.available; });
+    var channels = state.channels.filter(function (c) { return inAudience(state, c); });
+    var threads = state.threads.filter(function (t) { return inAudience(state, t); });
+    var openable = channels.filter(function (c) { return c.available; });
+    var blocked = channels.filter(function (c) { return !c.available; });
 
     var html = renderPicker(state) + '<div class="mcard"><h3>Messages</h3>';
-    if (!state.threads.length) {
+    if (!threads.length) {
       html += '<div class="mempty">No conversations yet.</div>';
     } else {
-      html += state.threads.map(function (t) {
+      html += threads.map(function (t) {
         return '<button class="mrow" data-open="' + esc(t.id) + '">' +
+          '<span class="mav">' + esc(initialsOf(t.clientName || t.channelLabel)) + '</span><span class="mbody">' +
           '<div class="mtop"><span class="mlabel">' + esc(t.channelLabel) + '</span>' +
           '<span class="mmu">' + esc(fmtWhen(t.lastMessageAt)) +
           (t.unread ? ' <span class="mbadge">' + t.unread + '</span>' : '') + '</span></div>' +
@@ -356,7 +385,7 @@
           (t.responseStatus ? ' · <span class="mchip ' + esc(t.responseStatus) + '">' +
             esc(t.responseStatus.replace(/_/g, ' ')) + '</span>' : '') + '</div>' +
           '<div class="mprev">' + esc(t.lastMessagePreview) + '</div>' +
-          '</button>';
+          '</span></button>';
       }).join('');
     }
     html += '</div>';
@@ -366,7 +395,7 @@
     // passes hostStartsMessages, so the list does not say it twice.
     if (state.hostStartsMessages) return html;
     if (openable.length) {
-      html += '<div class="mcard"><h3>Start a message</h3>' +
+      html += '<div class="mcard"><h3>Start a Message</h3>' +
         '<div class="mbtns">' + openable.map(function (c) {
           return '<button class="mbtn ghost" data-compose="' + esc(c.id) + '">' + esc(c.label) + '</button>';
         }).join('') + '</div></div>';
@@ -380,7 +409,7 @@
     // withheld is a staff screen that has not named a client, where every
     // reason would read "none is selected" and say nothing about the client.
     if (blocked.length && scopeSettled(state)) {
-      html += '<div class="mcard mdis"><h3>Not available yet</h3>' +
+      html += '<div class="mcard mdis"><h3>Not Available Yet</h3>' +
         blocked.map(function (c) {
           return '<div class="mnote"><b>' + esc(c.label) + '</b>' + esc(c.reason || '') + '</div>';
         }).join('') + '</div>';
@@ -391,7 +420,7 @@
   function renderCompose(state) {
     var c = state.channels.filter(function (x) { return x.id === state.composeChannel; })[0] || {};
     return '<div class="mcard">' +
-      '<h3>' + esc(c.label || 'New message') + '</h3>' +
+      '<h3>' + esc(c.label || 'New Message') + '</h3>' +
       '<p class="mmu">' + esc(c.blurb || '') + '</p>' +
       (c.code ? '<div class="mnote"><b>Before you send</b>' + esc(c.reason || '') + '</div>' : '') +
       '<label>Message</label>' + renderEditor(state) +
@@ -405,23 +434,28 @@
     var t = state.thread || {};
     var canMoveStatus = t.responseStatus && (state.role === 'clinical' || state.role === 'admin');
     var html = '<div class="mcard">' +
-      '<div class="mbtns" style="margin:0 0 10px"><button class="mbtn ghost" data-back="1">← All messages</button></div>' +
-      '<h3>' + esc(t.channelLabel || 'Conversation') + '</h3>' +
-      '<div class="mmu">' + esc(t.clientName || '') +
+      '<div class="mbtns" style="margin:0 0 10px"><button class="mbtn ghost" data-back="1">← All Messages</button></div>' +
+      '<div class="mhead"><span class="mav">' + esc(initialsOf(t.clientName || t.channelLabel)) + '</span><div>' +
+      '<h3>' + esc(t.clientName || t.channelLabel || 'Conversation') + '</h3>' +
+      '<div class="mmu">' + esc(t.clientName ? (t.channelLabel || '') : '') +
+      (t.lastMessageAt ? (t.clientName ? ' · ' : '') + 'Last message ' + esc(fmtWhen(t.lastMessageAt)) : '') +
       (t.responseStatus ? ' · <span class="mchip ' + esc(t.responseStatus) + '">' +
-        esc(t.responseStatus.replace(/_/g, ' ')) + '</span>' : '') + '</div>';
+        esc(t.responseStatus.replace(/_/g, ' ')) + '</span>' : '') + '</div></div></div>';
 
-    html += '<div style="margin-top:12px">' + state.messages.map(function (m) {
-      return '<div class="mbub ' + (m.mine ? 'me' : 'them') + '">' +
+    // Chat bubbles (owner mockup 12): theirs on the left, yours on the right,
+    // each with its sender and time. The attribution line stays on every
+    // bubble, because a POA's message must say whose behalf it is on.
+    html += '<div class="mlog">' + state.messages.map(function (m) {
+      var side = m.mine ? 'me' : 'them';
+      return '<div class="mwrap ' + side + '"><div class="mbub ' + side + '">' +
         '<div class="mwho">' + esc(m.from) + (m.isPoa ? '' : ' · ' + esc(m.fromRoleLabel)) + '</div>' +
         messageHtml(m) + attachmentsHtml(m) +
-        '<div class="mwhen">' + esc(fmtWhen(m.sentAt)) + '</div>' +
-        '</div>';
+        '</div><div class="mwhen">' + esc(fmtWhen(m.sentAt)) + '</div></div>';
     }).join('') + '</div>';
 
     if (state.canPost) {
       html += '<label>Reply</label>' + renderEditor(state) +
-        '<div class="mbtns"><button class="mbtn gold" data-reply="1">Send reply</button></div>';
+        '<div class="mbtns"><button class="mbtn gold" data-reply="1">Send Reply</button></div>';
     } else {
       html += '<div class="mnote"><b>You cannot reply here</b>' + esc(state.cannotPostReason || '') + '</div>';
     }
@@ -429,7 +463,7 @@
     if (canMoveStatus) {
       html += '<div class="mbtns" style="border-top:1px solid #ece6db;padding-top:10px;margin-top:12px">' +
         ['acknowledged', 'responded', 'closed'].map(function (s) {
-          return '<button class="mbtn ghost" data-status="' + s + '">Mark ' + s.replace(/_/g, ' ') + '</button>';
+          return '<button class="mbtn ghost" data-status="' + s + '">Mark ' + s.split('_').map(function (w) { return w.charAt(0).toUpperCase() + w.slice(1); }).join(' ') + '</button>';
         }).join('') + '</div>';
     }
     return html + '</div>';
@@ -619,6 +653,7 @@
       authToken: options.authToken,
       onUnread: options.onUnread || null,
       hostStartsMessages: !!options.hostStartsMessages,
+      audience: options.audience === 'patient' || options.audience === 'team' ? options.audience : null,
       view: 'list',
       loading: true,
       error: '', notice: '',

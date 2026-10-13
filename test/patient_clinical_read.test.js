@@ -243,10 +243,15 @@ test('the messaging acting gate lets a POA send, non-POA family stays read-only 
 });
 
 // ---- 6. Case manager read/write split ----
-test('case manager can read but not write; clinician and admin can write; client/family neither', () => {
-  assert.equal(R.canClinicalRead(CASE_MANAGER), true);
-  assert.equal(R.canClinicalWrite(CASE_MANAGER), false);
-  assert.equal(R.canClinicalWrite({ ...CASE_MANAGER, hasClinicalAccess: true }), false, 'the flag cannot widen a case manager to write');
+test('a read-only case manager reads and never writes; an LMSW case manager writes; client/family neither', () => {
+  // 2026-10-12 (owner): case managers ARE LMSW, so a case manager with no stored
+  // role resolves to lmsw and writes within that scope. One an admin set to
+  // readOnly still reads and never writes, and the old flag still cannot widen it.
+  const READ_ONLY_CM = { ...CASE_MANAGER, clinicalRole: 'readOnly' };
+  assert.equal(R.canClinicalRead(READ_ONLY_CM), true);
+  assert.equal(R.canClinicalWrite(READ_ONLY_CM), false);
+  assert.equal(R.canClinicalWrite({ ...READ_ONLY_CM, hasClinicalAccess: true }), false, 'the flag cannot widen a read-only case manager to write');
+  assert.equal(R.canClinicalWrite({ role: 'caseManager' }), true, 'a case manager is an LMSW by default');
   assert.equal(R.canClinicalWrite(CLINICIAN), true);
   assert.equal(R.canClinicalWrite(ADMIN), true);
   assert.equal(R.canClinicalRead(CLIENT_USER), false);
@@ -267,7 +272,7 @@ test('every /api/clinical route is registered with the matching guard (GET → r
     } else {
       // 2026-09-29: the order-destination edit carries requireOrderDestinationEditor,
       // the one order door a case manager holds (destination fields only).
-      assert.match(l, /requireClinicalWrite|requireAdmin|requireBilling|requireOrderDestinationEditor|requireOrderAnnotator|requireAvsRecorder/, `${method.toUpperCase()} route must use requireClinicalWrite (or requireAdmin / requireBilling / requireOrderDestinationEditor): ${l.slice(0, 90)}`);
+      assert.match(l, /requireClinicalWrite|requireAdmin|requireBilling|requireOrderDestinationEditor|requireOrderAnnotator|requireAvsRecorder|requireProviderListEditor/, `${method.toUpperCase()} route must use requireClinicalWrite (or requireAdmin / requireBilling / requireOrderDestinationEditor): ${l.slice(0, 90)}`);
       assert.doesNotMatch(l, /requireClinicalRead/, l.slice(0, 90));
     }
   }
