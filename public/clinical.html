@@ -332,6 +332,7 @@
       carePlan: (id) => authedFetch(`/api/clinical/patients/${id}/care-plan`),
       saveCarePlan: (id, body) => authedFetch(`/api/clinical/patients/${id}/care-plan`, { method: 'POST', body: JSON.stringify(body) }),
       // Two co-sign routes that had no button anywhere in the app.
+      goalStatus: (id, goalId, body) => authedFetch(`/api/clinical/patients/${id}/care-plan/goals/${encodeURIComponent(goalId)}/status`, { method: 'POST', body: JSON.stringify(body) }),
       providerCoSignCarePlan: (id, signatureImageB64) => authedFetch(`/api/clinical/patients/${id}/care-plan/provider-cosign`, { method: 'POST', body: JSON.stringify({ signatureImageB64 }) }),
       coSignOrder: (orderId) => authedFetch(`/api/clinical/orders/${encodeURIComponent(orderId)}/co-sign`, { method: 'POST', body: JSON.stringify({}) }),
       // The clinical enrollment sequence (checklist/mark/activate) moved to
@@ -4855,18 +4856,409 @@
       );
     };
 
-    // ── Care-plan authoring tab (Scope C) ──
+    // ── Care plan (format of 2026-10-14) ──
+    // Eight blocks: problems, goals, interventions, medication management,
+    // outside the practice, the service schedule, safety and escalation, and
+    // review. Every option list comes from the server (`vocabulary`), so this
+    // page restates none. A goal's status is updated on its own, without a new
+    // version, so the family is never asked to re-sign for a status change.
+    const cpTempId = (prefix) => `${prefix}-${Math.random().toString(36).slice(2, 12).padEnd(6, '0')}`;
+    const cpLabel = (list, value) => ((list || []).find(o => o.value === value) || {}).label || value || '—';
+    const cpLines = (s) => String(s || '').split('\n').map(x => x.trim()).filter(Boolean);
+    const CP_STATUS_TONE = {
+      not_started: 'bg-stone-100 text-stone-600', in_progress: 'bg-sky-50 text-sky-800', met: 'bg-emerald-50 text-emerald-700',
+      not_met: 'bg-red-50 text-red-700', deferred: 'bg-amber-50 text-amber-800'
+    };
+
+    // The author form starts from the current plan, so a new version is an
+    // edit rather than a retype. A brand-new plan starts from what intake holds.
+    const carePlanFormFrom = (existing) => {
+      const s = (existing && existing.structured) || null;
+      const sug = ((existing && existing.derived) || {}).suggested || {};
+      const withId = (rows, prefix) => (rows || []).map(r => ({ ...r, id: r.id || cpTempId(prefix) }));
+      const problemItems = withId(s ? s.problemItems : [], 'p');
+      return {
+        problemItems: problemItems.length ? problemItems : [{ id: cpTempId('p'), text: '', chartProblemId: null, prognosis: '', expectedOutcome: '' }],
+        goalItems: s && s.goalItems.length ? withId(s.goalItems, 'g').map(g => ({ ...g, status: g.status || 'not_started' }))
+          : [{ id: cpTempId('g'), problemId: null, statement: '', measure: '', baseline: '', target: '', targetDate: null, priority: 'medium', patientStated: false, status: 'not_started' }],
+        interventions: withId(s ? s.interventions : [], 'i'),
+        medicationManagement: s ? { ...s.medicationManagement } : { managedBy: null, adherenceConcerns: '', pharmacy: sug.pharmacy || '' },
+        outsideCare: s && !s.legacyFormat ? { externalTeam: [...s.outsideCare.externalTeam], communityServices: [...s.outsideCare.communityServices] }
+          : { externalTeam: (sug.externalTeam || []).map(r => ({ handles: '', lastContact: null, ...r })), communityServices: [] },
+        escalation: {
+          callGfcWhen: s ? s.escalation.callGfcWhen.join('\n') : '',
+          call911When: s ? s.escalation.call911When.join('\n') : '',
+          callOrder: s ? s.escalation.callOrder.join('\n') : '',
+          afterHours: s ? s.escalation.afterHours : '',
+          hospitalPreference: (s && s.escalation.hospitalPreference) || sug.hospitalPreference || ''
+        },
+        review: s ? { ...s.review } : { cadence: null, nextReviewDate: null },
+        eachVisit: s ? (s.eachVisit || []).join('\n') : '',
+        visitFrequency: (s && s.visitFrequency) || '', visitDays: (s && s.visitDays) || [], visitTimes: (s && s.visitTimes) || '',
+        duration: (s && s.duration) || '', chargePlanNote: (s && s.chargePlanNote) || '',
+        effectiveDate: (s && s.effectiveDate) || '', targetDate: (s && s.targetDate) || ''
+      };
+    };
+
+    const CpSection = ({ title, required, children }) => (
+      <div className="border-t border-stone-100 pt-4">
+        <div className="serif text-[18px] font-semibold text-primary mb-2">{title}{required && <span className="text-[11px] font-normal text-red-600 ml-2">required</span>}</div>
+        {children}
+      </div>
+    );
+
+    // One goal's status, changed without writing a new version.
+    const GoalStatusControl = ({ clientId, goal, vocab, onDone }) => {
+      const [open, setOpen] = useState(false);
+      const [status, setStatus] = useState(goal.status || 'not_started');
+      const [note, setNote] = useState('');
+      const [busy, setBusy] = useState(false); const [err, setErr] = useState(null);
+      const save = () => {
+        setBusy(true); setErr(null);
+        api.goalStatus(clientId, goal.id, { status, note })
+          .then(() => { setOpen(false); setNote(''); onDone && onDone(); })
+          .catch(e => setErr(e.message)).finally(() => setBusy(false));
+      };
+      if (!open) return <button className="text-[12px] text-primary underline" onClick={() => setOpen(true)}>Update Status</button>;
+      return (
+        <div className="grid gap-2 mt-2 rounded-xl border border-stone-200 p-3 bg-stone-50">
+          <select className="inp" value={status} onChange={e => setStatus(e.target.value)}>
+            {(vocab.goalStatuses || []).map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+          <input className="inp" placeholder="Note (optional), e.g. down to 179 lb" value={note} onChange={e => setNote(e.target.value)} />
+          {err && <p className="text-sm text-red-600">{err}</p>}
+          <div className="flex gap-2">
+            <button className="btn" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save Status'}</button>
+            <button className="btn ghost" onClick={() => setOpen(false)}>Cancel</button>
+          </div>
+          <p className="text-[11px] text-stone-500">A status update does not create a new version and does not ask the client to sign again.</p>
+        </div>
+      );
+    };
+
+    // The current plan, read-only, with the status control on each goal.
+    const CarePlanView = ({ clientId, existing, canWrite, onChanged }) => {
+      const cp = existing.structured;
+      const vocab = existing.vocabulary || {};
+      const derived = existing.derived || {};
+      const problemText = (id) => ((cp.problemItems || []).find(p => p.id === id) || {}).text;
+      const goalText = (id) => ((cp.goalItems || []).find(g => g.id === id) || {}).statement;
+      const esc = cp.escalation || {};
+      const mm = cp.medicationManagement || {};
+      const oc = cp.outsideCare || { externalTeam: [], communityServices: [] };
+      return (
+        <div className="grid gap-4 text-[13.5px]">
+          {cp.legacyFormat && <div className="rounded-xl bg-amber-50 border border-amber-200 p-3 text-[12.5px] text-amber-900">This plan was written before the full format. Write a new version to add goal measures, status, interventions and escalation.</div>}
+          <CpSection title="Problems">
+            {(cp.problemItems || []).length ? <ul className="space-y-2">{cp.problemItems.map((p, i) => (
+              <li key={p.id || i}>
+                <div className="font-medium">{p.text}</div>
+                {p.prognosis && <div className="text-stone-600"><span className="text-stone-500">Prognosis: </span>{p.prognosis}</div>}
+                {p.expectedOutcome && <div className="text-stone-600"><span className="text-stone-500">Expected outcome: </span>{p.expectedOutcome}</div>}
+              </li>))}</ul> : <p className="text-stone-400">No problems written.</p>}
+          </CpSection>
+          <CpSection title="Goals">
+            {(cp.goalItems || []).length ? <ul className="space-y-3">{cp.goalItems.map((g, i) => (
+              <li key={g.id || i} className="rounded-xl border border-stone-100 p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  {g.priority && !cp.legacyFormat && <span className="chip bg-[#F6EFE2] text-primary">{cpLabel(vocab.priorities, g.priority)}</span>}
+                  {g.patientStated && <span className="chip bg-[#F6EFE2] text-primary">Patient's own goal</span>}
+                  {g.status && <span className={`chip ${CP_STATUS_TONE[g.status] || ''}`}>{cpLabel(vocab.goalStatuses, g.status)}</span>}
+                </div>
+                <div className="mt-1 font-medium">{g.statement}</div>
+                {g.problemId && problemText(g.problemId) && <div className="text-[12px] text-stone-500">For: {problemText(g.problemId)}</div>}
+                {(g.measure || g.baseline || g.target || g.targetDate) && (
+                  <div className="text-[12.5px] text-stone-600 mt-1">
+                    {[g.measure && `Measure: ${g.measure}`, g.baseline && `Baseline ${g.baseline}`, g.target && `Target ${g.target}`, g.targetDate && `by ${fmtDate(g.targetDate)}`].filter(Boolean).join(' · ')}
+                  </div>)}
+                {g.statusAt && <div className="text-[12px] text-stone-500 mt-1">Status set {fmtDate(g.statusAt)}{g.statusBy ? ` by ${g.statusBy}` : ''}{g.statusNote ? ` — "${g.statusNote}"` : ''}</div>}
+                {canWrite && g.id && !cp.legacyFormat && <GoalStatusControl clientId={clientId} goal={g} vocab={vocab} onDone={onChanged} />}
+              </li>))}</ul> : <p className="text-stone-400">No goals written.</p>}
+          </CpSection>
+          {!cp.legacyFormat && <CpSection title="Interventions">
+            {(cp.interventions || []).length ? <ul className="space-y-2">{cp.interventions.map((iv, i) => (
+              <li key={iv.id || i}>
+                <div>{iv.description}</div>
+                <div className="text-[12px] text-stone-500">
+                  {[cpLabel(vocab.responsible, iv.responsible) + (iv.responsibleName ? ` (${iv.responsibleName})` : ''), cpLabel(vocab.frequencies, iv.frequency), cpLabel(vocab.interventionTypes, iv.type)].join(' · ')}
+                  {(iv.goalIds || []).length > 0 && ` · for: ${iv.goalIds.map(goalText).filter(Boolean).join('; ')}`}
+                </div>
+              </li>))}</ul> : <p className="text-stone-400">None written.</p>}
+          </CpSection>}
+          {!cp.legacyFormat && <CpSection title="Medication Management">
+            <div className="grid sm:grid-cols-2 gap-2 text-[13px]">
+              <div><span className="text-stone-500">Last reconciled: </span>{derived.medicationsReconciled ? `${fmtDate(derived.medicationsReconciled.at)}${derived.medicationsReconciled.byName ? ` by ${derived.medicationsReconciled.byName}` : ''}` : 'Not yet'}</div>
+              <div><span className="text-stone-500">Managed by: </span>{cpLabel(vocab.medManagedBy, mm.managedBy)}</div>
+              <div><span className="text-stone-500">Pharmacy: </span>{mm.pharmacy || '—'}</div>
+              <div className="sm:col-span-2"><span className="text-stone-500">Adherence concerns: </span>{mm.adherenceConcerns || 'None noted'}</div>
+            </div>
+          </CpSection>}
+          {!cp.legacyFormat && <CpSection title="Outside the Practice">
+            {oc.externalTeam.length === 0 && oc.communityServices.length === 0 && <p className="text-stone-400">None listed.</p>}
+            {oc.externalTeam.length > 0 && <ul className="space-y-1 mb-2">{oc.externalTeam.map((t, i) => (
+              <li key={i}>{[t.name, t.role, t.organization].filter(Boolean).join(', ')}{t.phone ? ` · ${t.phone}` : ''}{t.handles ? ` — ${t.handles}` : ''}{t.lastContact ? ` · last contact ${fmtDate(t.lastContact)}` : ''}</li>))}</ul>}
+            {oc.communityServices.length > 0 && <ul className="space-y-1">{oc.communityServices.map((c, i) => (
+              <li key={i}>{c.name} · {cpLabel(vocab.serviceStatuses, c.status)}{c.notes ? ` — ${c.notes}` : ''}</li>))}</ul>}
+          </CpSection>}
+          <CpSection title={`Each Visit (${(cp.eachVisit || []).length})`}>
+            {(cp.eachVisit || []).length ? <ul className="space-y-1">{cp.eachVisit.map((t, i) => <li key={i} className="flex gap-2"><span className="text-stone-400">{i + 1}.</span><span>{t}</span></li>)}</ul>
+              : <p className="text-stone-400">No tasks written.</p>}
+            <div className="mt-2 grid sm:grid-cols-2 gap-2 text-[13px]">
+              <div><span className="text-stone-500">Frequency: </span>{cp.visitFrequency || cp.visitSchedule || '—'}</div>
+              <div><span className="text-stone-500">Days: </span>{(cp.visitDays || []).join(', ') || '—'}</div>
+              <div><span className="text-stone-500">Times: </span>{cp.visitTimes || '—'}</div>
+              <div><span className="text-stone-500">Duration: </span>{cp.duration || '—'}</div>
+              <div><span className="text-stone-500">Effective: </span>{cp.effectiveDate ? fmtDate(cp.effectiveDate) : '—'}</div>
+            </div>
+          </CpSection>
+          {!cp.legacyFormat && <CpSection title="Safety and Escalation">
+            <div className="grid gap-2 text-[13px]">
+              <div><span className="text-stone-500">Call GFC when: </span>{(esc.callGfcWhen || []).join('; ') || '—'}</div>
+              <div><span className="text-stone-500">Call 911 when: </span>{(esc.call911When || []).join('; ') || '—'}</div>
+              <div><span className="text-stone-500">Who to call, in order: </span>{(esc.callOrder || []).join(' → ') || '—'}</div>
+              <div><span className="text-stone-500">After hours: </span>{esc.afterHours || '—'}</div>
+              <div><span className="text-stone-500">Hospital preference: </span>{esc.hospitalPreference || '—'}</div>
+              <div><span className="text-stone-500">Code status (from intake): </span>{derived.codeStatus || 'Not recorded at intake'}</div>
+            </div>
+          </CpSection>}
+          {!cp.legacyFormat && <CpSection title="Review">
+            <div className="grid sm:grid-cols-3 gap-2 text-[13px]">
+              <div><span className="text-stone-500">Cadence: </span>{cpLabel(vocab.reviewCadences, (cp.review || {}).cadence)}</div>
+              <div><span className="text-stone-500">Next review: </span>{(cp.review || {}).nextReviewDate ? fmtDate(cp.review.nextReviewDate) : '—'}</div>
+              <div><span className="text-stone-500">Last reviewed: </span>{cp.authoredAt ? `${fmtDate(cp.authoredAt)}${cp.authoredBy ? ` by ${cp.authoredBy}` : ''}` : '—'}</div>
+            </div>
+          </CpSection>}
+        </div>
+      );
+    };
+
+    // Writing a new version. Rows are edited in place; ids ride along so goal
+    // status carries over to the next version.
+    const CarePlanForm = ({ clientId, existing, chartProblems, padRef, onSave, busy, msg, onCancel }) => {
+      const [f, setF] = useState(() => carePlanFormFrom(existing));
+      const vocab = existing.vocabulary || {};
+      const line = String((existing.client && existing.client.serviceLine) || 'PHC').toUpperCase();
+      const reqs = (vocab.requirements || {})[line] || [];
+      const required = new Set(reqs.map(r => r.key));
+      const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+      const setRow = (key, i, patch) => setF(prev => ({ ...prev, [key]: prev[key].map((r, j) => (j === i ? { ...r, ...patch } : r)) }));
+      const dropRow = (key, i) => setF(prev => ({ ...prev, [key]: prev[key].filter((_, j) => j !== i) }));
+      const setNested = (key, patch) => setF(prev => ({ ...prev, [key]: { ...prev[key], ...patch } }));
+      const setOcRow = (list, i, patch) => setF(prev => ({ ...prev, outsideCare: { ...prev.outsideCare, [list]: prev.outsideCare[list].map((r, j) => (j === i ? { ...r, ...patch } : r)) } }));
+      const dropOcRow = (list, i) => setF(prev => ({ ...prev, outsideCare: { ...prev.outsideCare, [list]: prev.outsideCare[list].filter((_, j) => j !== i) } }));
+      const addOcRow = (list, row) => setF(prev => ({ ...prev, outsideCare: { ...prev.outsideCare, [list]: [...prev.outsideCare[list], row] } }));
+      const opts = (list) => (list || []).map(o => <option key={o.value} value={o.value}>{o.label}</option>);
+      const submit = () => onSave({
+        problemItems: f.problemItems.filter(p => p.text.trim()),
+        goalItems: f.goalItems.filter(g => g.statement.trim()),
+        interventions: f.interventions.filter(i => i.description.trim()),
+        medicationManagement: f.medicationManagement,
+        outsideCare: f.outsideCare,
+        escalation: { ...f.escalation, callGfcWhen: cpLines(f.escalation.callGfcWhen), call911When: cpLines(f.escalation.call911When), callOrder: cpLines(f.escalation.callOrder) },
+        review: f.review,
+        eachVisit: cpLines(f.eachVisit), visitFrequency: f.visitFrequency, visitDays: f.visitDays, visitTimes: f.visitTimes,
+        duration: f.duration, chargePlanNote: f.chargePlanNote,
+        effectiveDate: f.effectiveDate || null, targetDate: f.targetDate || null
+      });
+      const goalChoices = f.goalItems.filter(g => g.statement.trim());
+      return (
+        <div className="p-4 grid gap-2">
+          {reqs.length > 0 && <div className="text-[12px] text-stone-500">To save, this {line === 'PHC' ? 'home care' : 'clinical'} plan needs {reqs.map(r => r.label).join('; ')}.</div>}
+
+          <CpSection title="1 · Problems" required={required.has('problems')}>
+            {f.problemItems.map((p, i) => (
+              <div key={p.id} className="grid gap-2 mb-3 rounded-xl border border-stone-100 p-3">
+                <div className="flex gap-2">
+                  <input className="inp flex-1" placeholder="Problem, e.g. Heart failure" value={p.text} onChange={e => setRow('problemItems', i, { text: e.target.value })} />
+                  {chartProblems.length > 0 && (
+                    <select className="inp w-40" value="" onChange={e => {
+                      const cpRow = chartProblems.find(r => r.id === e.target.value);
+                      if (cpRow) setRow('problemItems', i, { text: cpRow.title, chartProblemId: cpRow.id });
+                    }}>
+                      <option value="">From chart…</option>
+                      {chartProblems.map(r => <option key={r.id} value={r.id}>{r.title}</option>)}
+                    </select>)}
+                  <button className="text-stone-400" onClick={() => dropRow('problemItems', i)} aria-label="Remove problem"><i className="ti ti-x" /></button>
+                </div>
+                <input className="inp" placeholder={`Prognosis${required.has('problemDetail') ? '' : ' (optional)'}`} value={p.prognosis} onChange={e => setRow('problemItems', i, { prognosis: e.target.value })} />
+                <input className="inp" placeholder={`Expected outcome${required.has('problemDetail') ? '' : ' (optional)'}`} value={p.expectedOutcome} onChange={e => setRow('problemItems', i, { expectedOutcome: e.target.value })} />
+              </div>))}
+            <button className="btn ghost" onClick={() => setF(prev => ({ ...prev, problemItems: [...prev.problemItems, { id: cpTempId('p'), text: '', chartProblemId: null, prognosis: '', expectedOutcome: '' }] }))}><i className="ti ti-plus" />Add Problem</button>
+          </CpSection>
+
+          <CpSection title="2 · Goals" required={required.has('goals')}>
+            {f.goalItems.map((g, i) => (
+              <div key={g.id} className="grid gap-2 mb-3 rounded-xl border border-stone-100 p-3">
+                <div className="flex gap-2">
+                  <input className="inp flex-1" placeholder="Goal in plain language" value={g.statement} onChange={e => setRow('goalItems', i, { statement: e.target.value })} />
+                  <button className="text-stone-400" onClick={() => dropRow('goalItems', i)} aria-label="Remove goal"><i className="ti ti-x" /></button>
+                </div>
+                <div className="grid md:grid-cols-3 gap-2">
+                  <select className="inp" value={g.problemId || ''} onChange={e => setRow('goalItems', i, { problemId: e.target.value || null })}>
+                    <option value="">For which problem?</option>
+                    {f.problemItems.filter(p => p.text.trim()).map(p => <option key={p.id} value={p.id}>{p.text}</option>)}
+                  </select>
+                  <select className="inp" value={g.priority || 'medium'} onChange={e => setRow('goalItems', i, { priority: e.target.value })}>{opts(vocab.priorities)}</select>
+                  <select className="inp" value={g.status || 'not_started'} onChange={e => setRow('goalItems', i, { status: e.target.value })}>{opts(vocab.goalStatuses)}</select>
+                </div>
+                <div className="grid md:grid-cols-4 gap-2">
+                  <input className="inp" placeholder={`Measure${required.has('goalMeasures') ? '' : ' (optional)'}`} value={g.measure} onChange={e => setRow('goalItems', i, { measure: e.target.value })} />
+                  <input className="inp" placeholder="Baseline" value={g.baseline} onChange={e => setRow('goalItems', i, { baseline: e.target.value })} />
+                  <input className="inp" placeholder={`Target${required.has('goalMeasures') ? '' : ' (optional)'}`} value={g.target} onChange={e => setRow('goalItems', i, { target: e.target.value })} />
+                  <input className="inp" type="date" value={g.targetDate || ''} onChange={e => setRow('goalItems', i, { targetDate: e.target.value || null })} />
+                </div>
+                <label className="flex items-center gap-2 text-[13px]"><input type="checkbox" checked={!!g.patientStated} onChange={e => setRow('goalItems', i, { patientStated: e.target.checked })} />The patient's own goal</label>
+              </div>))}
+            <button className="btn ghost" onClick={() => setF(prev => ({ ...prev, goalItems: [...prev.goalItems, { id: cpTempId('g'), problemId: null, statement: '', measure: '', baseline: '', target: '', targetDate: null, priority: 'medium', patientStated: false, status: 'not_started' }] }))}><i className="ti ti-plus" />Add Goal</button>
+          </CpSection>
+
+          <CpSection title="3 · Interventions" required={required.has('interventions')}>
+            {f.interventions.map((iv, i) => (
+              <div key={iv.id} className="grid gap-2 mb-3 rounded-xl border border-stone-100 p-3">
+                <div className="flex gap-2">
+                  <input className="inp flex-1" placeholder="What gets done" value={iv.description} onChange={e => setRow('interventions', i, { description: e.target.value })} />
+                  <button className="text-stone-400" onClick={() => dropRow('interventions', i)} aria-label="Remove intervention"><i className="ti ti-x" /></button>
+                </div>
+                <div className="grid md:grid-cols-4 gap-2">
+                  <select className="inp" value={iv.responsible} onChange={e => setRow('interventions', i, { responsible: e.target.value })}>{opts(vocab.responsible)}</select>
+                  <input className="inp" placeholder="Name (optional)" value={iv.responsibleName} onChange={e => setRow('interventions', i, { responsibleName: e.target.value })} />
+                  <select className="inp" value={iv.frequency} onChange={e => setRow('interventions', i, { frequency: e.target.value })}>{opts(vocab.frequencies)}</select>
+                  <select className="inp" value={iv.type} onChange={e => setRow('interventions', i, { type: e.target.value })}>{opts(vocab.interventionTypes)}</select>
+                </div>
+                {goalChoices.length > 0 && <div className="flex flex-wrap gap-1.5">
+                  {goalChoices.map(g => {
+                    const on = (iv.goalIds || []).includes(g.id);
+                    return <button key={g.id} type="button" className={`chip border ${on ? 'bg-primary text-white border-primary' : 'bg-white text-primary border-stone-200'}`}
+                      onClick={() => setRow('interventions', i, { goalIds: on ? iv.goalIds.filter(x => x !== g.id) : [...(iv.goalIds || []), g.id] })}>{g.statement.slice(0, 40)}</button>;
+                  })}
+                </div>}
+              </div>))}
+            <button className="btn ghost" onClick={() => setF(prev => ({ ...prev, interventions: [...prev.interventions, { id: cpTempId('i'), goalIds: [], description: '', responsible: 'gfc_clinician', responsibleName: '', frequency: 'each_visit', type: 'clinical' }] }))}><i className="ti ti-plus" />Add Intervention</button>
+          </CpSection>
+
+          <CpSection title="4 · Medication Management" required={required.has('medicationManagement')}>
+            <div className="grid md:grid-cols-2 gap-2">
+              <select className="inp" value={f.medicationManagement.managedBy || ''} onChange={e => setNested('medicationManagement', { managedBy: e.target.value || null })}>
+                <option value="">Who manages medications day to day?</option>{opts(vocab.medManagedBy)}
+              </select>
+              <input className="inp" placeholder="Pharmacy" value={f.medicationManagement.pharmacy} onChange={e => setNested('medicationManagement', { pharmacy: e.target.value })} />
+            </div>
+            <textarea className="inp mt-2" rows={2} placeholder="Adherence concerns" value={f.medicationManagement.adherenceConcerns} onChange={e => setNested('medicationManagement', { adherenceConcerns: e.target.value })} />
+            <p className="text-[11px] text-stone-500 mt-1">The medication list and its last reconciliation come from the chart, not from here.</p>
+          </CpSection>
+
+          <CpSection title="5 · Outside the Practice">
+            <div className="lblu mb-1">External care team</div>
+            {f.outsideCare.externalTeam.map((t, i) => (
+              <div key={i} className="grid md:grid-cols-6 gap-2 mb-2">
+                <input className="inp" placeholder="Name" value={t.name} onChange={e => setOcRow('externalTeam', i, { name: e.target.value })} />
+                <input className="inp" placeholder="Role" value={t.role} onChange={e => setOcRow('externalTeam', i, { role: e.target.value })} />
+                <input className="inp" placeholder="Organization" value={t.organization} onChange={e => setOcRow('externalTeam', i, { organization: e.target.value })} />
+                <input className="inp" placeholder="Phone" value={t.phone} onChange={e => setOcRow('externalTeam', i, { phone: e.target.value })} />
+                <input className="inp" placeholder="What they handle" value={t.handles} onChange={e => setOcRow('externalTeam', i, { handles: e.target.value })} />
+                <div className="flex gap-1"><input className="inp flex-1" type="date" value={t.lastContact || ''} onChange={e => setOcRow('externalTeam', i, { lastContact: e.target.value || null })} />
+                  <button className="text-stone-400" onClick={() => dropOcRow('externalTeam', i)} aria-label="Remove"><i className="ti ti-x" /></button></div>
+              </div>))}
+            <button className="btn ghost mb-3" onClick={() => addOcRow('externalTeam', { name: '', role: '', organization: '', phone: '', handles: '', lastContact: null })}><i className="ti ti-plus" />Add Provider</button>
+            <div className="lblu mb-1">Community services</div>
+            {f.outsideCare.communityServices.map((c, i) => (
+              <div key={i} className="grid md:grid-cols-3 gap-2 mb-2">
+                <input className="inp" placeholder="Service, e.g. Meals on Wheels" value={c.name} onChange={e => setOcRow('communityServices', i, { name: e.target.value })} />
+                <select className="inp" value={c.status} onChange={e => setOcRow('communityServices', i, { status: e.target.value })}>{opts(vocab.serviceStatuses)}</select>
+                <div className="flex gap-1"><input className="inp flex-1" placeholder="Notes" value={c.notes} onChange={e => setOcRow('communityServices', i, { notes: e.target.value })} />
+                  <button className="text-stone-400" onClick={() => dropOcRow('communityServices', i)} aria-label="Remove"><i className="ti ti-x" /></button></div>
+              </div>))}
+            <button className="btn ghost" onClick={() => addOcRow('communityServices', { name: '', status: 'active', notes: '' })}><i className="ti ti-plus" />Add Service</button>
+          </CpSection>
+
+          <CpSection title="6 · Service Schedule" required={required.has('eachVisit') || required.has('visitFrequency')}>
+            <Field label="Each visit (one task per line)"><textarea className="inp" rows={3} value={f.eachVisit} onChange={e => setF({ ...f, eachVisit: e.target.value })} /></Field>
+            <div className="grid md:grid-cols-2 gap-3 mt-2">
+              <Field label="Visit frequency"><input className="inp" placeholder="e.g. 2 visits / week" value={f.visitFrequency} onChange={e => setF({ ...f, visitFrequency: e.target.value })} /></Field>
+              <Field label="Times"><input className="inp" placeholder="e.g. mornings 9–11a" value={f.visitTimes} onChange={e => setF({ ...f, visitTimes: e.target.value })} /></Field>
+            </div>
+            <Field label="Days">
+              <div className="flex flex-wrap gap-1.5">
+                {days.map(d => (
+                  <button key={d} type="button"
+                    className={`chip border ${f.visitDays.includes(d) ? 'bg-primary text-white border-primary' : 'bg-white text-primary border-stone-200'}`}
+                    onClick={() => setF({ ...f, visitDays: f.visitDays.includes(d) ? f.visitDays.filter(x => x !== d) : [...f.visitDays, d] })}>{d}</button>
+                ))}
+              </div>
+            </Field>
+            <div className="grid md:grid-cols-2 gap-3">
+              <Field label="Duration"><input className="inp" placeholder="e.g. 4 hours" value={f.duration} onChange={e => setF({ ...f, duration: e.target.value })} /></Field>
+              <Field label="Effective date"><input className="inp" type="date" value={f.effectiveDate} onChange={e => setF({ ...f, effectiveDate: e.target.value })} /></Field>
+            </div>
+          </CpSection>
+
+          <CpSection title="7 · Safety and Escalation" required={required.has('escalation')}>
+            <div className="grid md:grid-cols-2 gap-3">
+              <Field label="Call GFC when (one per line)"><textarea className="inp" rows={3} placeholder="Weight up 3 lb overnight" value={f.escalation.callGfcWhen} onChange={e => setNested('escalation', { callGfcWhen: e.target.value })} /></Field>
+              <Field label="Call 911 when (one per line)"><textarea className="inp" rows={3} placeholder="Chest pain" value={f.escalation.call911When} onChange={e => setNested('escalation', { call911When: e.target.value })} /></Field>
+            </div>
+            <div className="grid md:grid-cols-3 gap-3 mt-2">
+              <Field label="Who to call, in order (one per line)"><textarea className="inp" rows={2} value={f.escalation.callOrder} onChange={e => setNested('escalation', { callOrder: e.target.value })} /></Field>
+              <Field label="After hours"><input className="inp" value={f.escalation.afterHours} onChange={e => setNested('escalation', { afterHours: e.target.value })} /></Field>
+              <Field label="Hospital preference"><input className="inp" value={f.escalation.hospitalPreference} onChange={e => setNested('escalation', { hospitalPreference: e.target.value })} /></Field>
+            </div>
+            <p className="text-[11px] text-stone-500 mt-1">Code status: {((existing.derived || {}).codeStatus) || 'not recorded at intake'} (from the intake record).</p>
+          </CpSection>
+
+          <CpSection title="8 · Review" required={required.has('review')}>
+            <div className="grid md:grid-cols-2 gap-3">
+              <select className="inp" value={f.review.cadence || ''} onChange={e => setNested('review', { cadence: e.target.value || null })}>
+                <option value="">Review cadence</option>{opts(vocab.reviewCadences)}
+              </select>
+              <input className="inp" type="date" value={f.review.nextReviewDate || ''} onChange={e => setNested('review', { nextReviewDate: e.target.value || null })} />
+            </div>
+          </CpSection>
+
+          <CpSection title="Charge-plan note (staff only)">
+            <textarea className="inp" rows={2} value={f.chargePlanNote} onChange={e => setF({ ...f, chargePlanNote: e.target.value })} />
+          </CpSection>
+
+          <div className="border-t border-stone-100 pt-4">
+            <span className="lblu block mb-1">Author signature (drawn)</span>
+            <SignaturePad padRef={padRef} />
+          </div>
+          {msg && <p className={`text-sm ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
+          <div className="flex flex-wrap items-center gap-2">
+            <button className="btn" disabled={busy} onClick={submit}><i className="ti ti-writing-sign" />{busy ? 'Saving…' : 'Sign & Save'}</button>
+            {onCancel && <button className="btn ghost" onClick={onCancel}>Cancel</button>}
+            <Hint className="w-full">Saving writes the versioned plan to the client record (portal + co-sign unlock) and, for a clinical patient linked to OpenEMR, files the authored PDF there. The final signed PDF carries every signature once the client co-signs in their portal. Goal status can be updated later without a new version.</Hint>
+          </div>
+        </div>
+      );
+    };
+
     const CarePlanTab = ({ patient, onSaved }) => {
       // Authoring a plan is any licensed role; the second signature is a
       // provider's or an LCSW's (served).
       const canWrite = useCan('carePlanAuthor');
       const canCoSignPlan = !!useContext(AccessContext).canCoSignCarePlan;
       const [existing, setExisting] = useState(null);
+      const [loadErr, setLoadErr] = useState(null);
+      const [chartProblems, setChartProblems] = useState([]);
       const padRef = useRef(null);
-      const [f, setF] = useState({ problems: '', goals: '', eachVisit: '', visitFrequency: '', visitDays: [], visitTimes: '', duration: '', chargePlanNote: '', effectiveDate: '', targetDate: '' });
       const [busy, setBusy] = useState(false); const [msg, setMsg] = useState(null);
+      const [warnings, setWarnings] = useState([]);
       const [authorOpen, setAuthorOpen] = useState(false);
-      useEffect(() => { api.carePlan(patient.id).then(setExisting).catch(() => {}); }, [patient.id]);
+      const reload = () => api.carePlan(patient.id).then(r => { setExisting(r); setLoadErr(null); }).catch(e => setLoadErr(e.message));
+      useEffect(() => { setExisting(null); reload(); }, [patient.id]);
+      // The chart's problem list, so a plan problem can point at it rather
+      // than be retyped. Clinical-line clients only; a home care client has
+      // no chart.
+      useEffect(() => {
+        let live = true;
+        const line = String(patient.serviceLine || '').toUpperCase();
+        if (line !== 'IHPC' && line !== 'BOTH') { setChartProblems([]); return; }
+        api.chart(patient.id).then(c => {
+          const rows = c && c.emr && c.emr.problems && c.emr.problems.ok ? c.emr.problems.rows : [];
+          if (live) setChartProblems(rows.filter(r => r.id && r.title && !/resolved|inactive|remission/i.test(String(r.status || ''))));
+        }).catch(() => {});
+        return () => { live = false; };
+      }, [patient.id]);
       const cp = existing && existing.carePlan;
       const coSigned = cp && existing.coSign && existing.coSign[`v${cp.version}`];
       // An IHPC plan (or one an LMSW authored) waits on a PROVIDER signature, and
@@ -4878,30 +5270,25 @@
         if (!providerPadRef.current || providerPadRef.current.isEmpty()) { setPMsg({ ok: false, text: 'Draw your signature first.' }); return; }
         setPBusy(true); setPMsg(null);
         api.providerCoSignCarePlan(patient.id, providerPadRef.current.toDataURL())
-          .then(r => { setPMsg({ ok: true, text: r.message || 'Signed.' }); return api.carePlan(patient.id).then(setExisting); })
+          .then(r => { setPMsg({ ok: true, text: r.message || 'Signed.' }); return reload(); })
           .catch(e => setPMsg({ ok: false, text: e.message }))
           .finally(() => setPBusy(false));
       };
-      const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-      const lines = (s) => s.split('\n').map(x => x.trim()).filter(Boolean);
-      const save = () => {
+      const save = (body) => {
         if (!padRef.current || padRef.current.isEmpty()) { setMsg({ ok: false, text: 'Draw your author signature before saving.' }); return; }
-        setBusy(true); setMsg(null);
-        api.saveCarePlan(patient.id, {
-          problems: lines(f.problems), goals: lines(f.goals), eachVisit: lines(f.eachVisit),
-          visitFrequency: f.visitFrequency, visitDays: f.visitDays, visitTimes: f.visitTimes,
-          duration: f.duration, chargePlanNote: f.chargePlanNote,
-          effectiveDate: f.effectiveDate || null, targetDate: f.targetDate || null,
-          rnSignatureImageB64: padRef.current.toDataURL()
-        }).then(r => {
+        setBusy(true); setMsg(null); setWarnings([]);
+        api.saveCarePlan(patient.id, { ...body, rnSignatureImageB64: padRef.current.toDataURL() }).then(r => {
           setMsg({ ok: true, text: r.message + (r.emrDocumented ? ' · authored PDF filed to OpenEMR' : '') });
+          setWarnings(r.warnings || []);
           setAuthorOpen(false);
-          api.carePlan(patient.id).then(setExisting).catch(() => {});
+          reload();
           onSaved && onSaved();
         }).catch(e => setMsg({ ok: false, text: e.message })).finally(() => setBusy(false));
       };
+      if (loadErr) return <div className="card p-5 text-sm text-red-600">{loadErr}</div>;
+      if (!existing) return <div className="card p-5 text-sm text-stone-500">Loading care plan…</div>;
       return (
-        <div className="max-w-3xl mx-auto">
+        <div className="max-w-4xl mx-auto">
           {cp && (
             <div className="card mb-4">
               <div className="card-h">
@@ -4913,40 +5300,8 @@
                   {providerPending ? 'Awaiting provider signature' : coSigned ? `Co-signed ${fmtDate(coSigned.at)}` : 'Awaiting client co-signature'}
                 </span>
               </div>
-              <div className="p-4 lg:p-5 grid gap-4 text-[13.5px]">
-                {(cp.problems || []).length > 0 && (
-                  <div>
-                    <div className="lblu mb-1">Problems</div>
-                    <div className="flex flex-wrap gap-1.5">{cp.problems.map((x, i) => <span key={i} className="chip bg-[#F6EFE2] text-primary">{x}</span>)}</div>
-                  </div>
-                )}
-                {/* Goals are a list, not checkboxes: nothing records a goal as
-                    met, and a tick would say it was. */}
-                <div>
-                  <div className="serif text-[20px] font-semibold text-primary mb-1">Goals</div>
-                  {(cp.goals || []).length
-                    ? <ul className="space-y-1.5">{cp.goals.map((g, i) => (
-                      <li key={i} className="flex gap-2"><i className="ti ti-target-arrow text-accent mt-[2px]" /><span>{g}</span></li>))}</ul>
-                    : <p className="text-stone-400">No goals written.</p>}
-                </div>
-                <details className="border-t border-stone-100 pt-3">
-                  <summary className="cursor-pointer serif text-[20px] font-semibold text-primary">Tasks ({(cp.eachVisit || []).length})</summary>
-                  {(cp.eachVisit || []).length
-                    ? <ul className="mt-2 space-y-1.5">{cp.eachVisit.map((t, i) => (
-                      <li key={i} className="flex gap-2"><span className="text-stone-400">{i + 1}.</span><span>{t}</span></li>))}</ul>
-                    : <p className="text-stone-400 mt-2">No tasks written.</p>}
-                </details>
-                <details className="border-t border-stone-100 pt-3">
-                  <summary className="cursor-pointer serif text-[20px] font-semibold text-primary">Visit Schedule</summary>
-                  <div className="mt-2 grid sm:grid-cols-2 gap-2 text-[13px]">
-                    <div><span className="text-stone-500">Frequency: </span>{cp.visitFrequency || cp.visitSchedule || '—'}</div>
-                    <div><span className="text-stone-500">Days: </span>{(cp.visitDays || []).join(', ') || '—'}</div>
-                    <div><span className="text-stone-500">Times: </span>{cp.visitTimes || '—'}</div>
-                    <div><span className="text-stone-500">Duration: </span>{cp.duration || '—'}</div>
-                    <div><span className="text-stone-500">Effective: </span>{cp.effectiveDate ? fmtDate(cp.effectiveDate) : '—'}</div>
-                    <div><span className="text-stone-500">Target: </span>{cp.targetDate ? fmtDate(cp.targetDate) : '—'}</div>
-                  </div>
-                </details>
+              <div className="p-4 lg:p-5 grid gap-4">
+                <CarePlanView clientId={patient.id} existing={existing} canWrite={canWrite} onChanged={reload} />
                 {existing.docs && existing.docs[`v${cp.version}`] && existing.docs[`v${cp.version}`].signed && (
                   <div className="text-[13px]"><span className="text-stone-500">Signed PDF: </span>
                     {existing.docs[`v${cp.version}`].signed.driveUrl
@@ -4974,51 +5329,40 @@
           )}
           {!canWrite && !cp && <div className="card p-5 text-center"><i className="ti ti-clipboard-heart text-3xl text-accent" /><p className="text-sm text-stone-500 mt-1">No care plan authored yet.</p></div>}
           {msg && msg.ok && !authorOpen && <p className="text-sm text-emerald-700 mb-3">{msg.text}</p>}
+          {warnings.length > 0 && !authorOpen && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 mb-3 text-[12.5px] text-amber-900">
+              <div className="font-semibold mb-1">Check caregiver scope</div>
+              <ul className="list-disc ml-5 space-y-1">{warnings.map((w, i) => <li key={i}><b>{w.where}:</b> {w.text} — {w.warning}</li>)}</ul>
+            </div>
+          )}
           {canWrite && cp && !authorOpen && (
             <button className="btn ghost" onClick={() => setAuthorOpen(true)}><i className="ti ti-pencil" />Write Version {cp.version + 1}</button>
           )}
           {canWrite && (!cp || authorOpen) && <div className="card">
-            <div className="card-h"><h2>{cp ? `New Version (v${cp.version + 1})` : 'Write Care Plan'}</h2>
-              {cp && <button className="text-stone-400" onClick={() => setAuthorOpen(false)} aria-label="Close"><i className="ti ti-x" /></button>}
-            </div>
-            <div className="p-4 grid gap-4">
-              <Field label="Problems addressed (one per line)"><textarea className="inp" rows={3} value={f.problems} onChange={e => setF({ ...f, problems: e.target.value })} /></Field>
-              <Field label="Goals & objectives (one per line)"><textarea className="inp" rows={3} value={f.goals} onChange={e => setF({ ...f, goals: e.target.value })} /></Field>
-              <Field label="Task list — each visit (one per line)"><textarea className="inp" rows={3} value={f.eachVisit} onChange={e => setF({ ...f, eachVisit: e.target.value })} /></Field>
-              <div className="grid md:grid-cols-2 gap-3">
-                <Field label="Visit frequency"><input className="inp" placeholder="e.g. 2 visits / week" value={f.visitFrequency} onChange={e => setF({ ...f, visitFrequency: e.target.value })} /></Field>
-                <Field label="Times"><input className="inp" placeholder="e.g. mornings 9–11a" value={f.visitTimes} onChange={e => setF({ ...f, visitTimes: e.target.value })} /></Field>
-              </div>
-              <Field label="Days">
-                <div className="flex flex-wrap gap-1.5">
-                  {days.map(d => (
-                    <button key={d} type="button"
-                      className={`chip border ${f.visitDays.includes(d) ? 'bg-primary text-white border-primary' : 'bg-white text-primary border-stone-200'}`}
-                      onClick={() => setF({ ...f, visitDays: f.visitDays.includes(d) ? f.visitDays.filter(x => x !== d) : [...f.visitDays, d] })}>
-                      {d}
-                    </button>
-                  ))}
-                </div>
-              </Field>
-              <div className="grid md:grid-cols-3 gap-3">
-                <Field label="Duration"><input className="inp" placeholder="e.g. 90 days, reassess" value={f.duration} onChange={e => setF({ ...f, duration: e.target.value })} /></Field>
-                <Field label="Effective date"><input className="inp" type="date" value={f.effectiveDate} onChange={e => setF({ ...f, effectiveDate: e.target.value })} /></Field>
-                <Field label="Target date"><input className="inp" type="date" value={f.targetDate} onChange={e => setF({ ...f, targetDate: e.target.value })} /></Field>
-              </div>
-              <Field label="Charge-plan note"><textarea className="inp" rows={2} value={f.chargePlanNote} onChange={e => setF({ ...f, chargePlanNote: e.target.value })} /></Field>
-              <div>
-                <span className="lblu block mb-1">RN / clinician author signature (drawn)</span>
-                <SignaturePad padRef={padRef} />
-              </div>
-              {msg && <p className={`text-sm ${msg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{msg.text}</p>}
-              <div className="flex flex-wrap items-center gap-2">
-                <button className="btn" disabled={busy} onClick={save}>
-                  <i className="ti ti-writing-sign" />{busy ? 'Saving…' : 'Sign & Save'}
-                </button>
-                <Hint className="w-full">Saving writes the versioned plan to the client record (portal + co-sign unlock) and files the authored PDF to OpenEMR. The final signed PDF — with both signatures — is emitted when the client co-signs in their portal.</Hint>
-              </div>
-            </div>
+            <div className="card-h"><h2>{cp ? `New Version (v${cp.version + 1})` : 'Write Care Plan'}</h2></div>
+            <CarePlanForm clientId={patient.id} existing={existing} chartProblems={chartProblems} padRef={padRef}
+              onSave={save} busy={busy} msg={msg} onCancel={cp ? () => setAuthorOpen(false) : null} />
           </div>}
+        </div>
+      );
+    };
+
+    // A home care client has no chart in this workspace, so their care plan
+    // opens on its own page: /clinical?carePlan=<clientId>. Linked from the
+    // enrollment screen.
+    const StandaloneCarePlan = ({ clientId }) => {
+      const [client, setClient] = useState(null);
+      useEffect(() => { api.carePlan(clientId).then(r => setClient(r.client || { id: clientId })).catch(() => setClient({ id: clientId })); }, [clientId]);
+      return (
+        <div className="min-h-screen bg-[#FBF8F2] p-4 lg:p-8">
+          <div className="max-w-4xl mx-auto mb-4 flex items-center justify-between">
+            <div>
+              <div className="text-[12px] text-stone-500">Care plan</div>
+              <h1 className="serif text-[26px] font-semibold text-primary">{(client && client.name) || 'Client'}</h1>
+            </div>
+            <a className="btn ghost" href="/admin/enrollment"><i className="ti ti-arrow-left" />Enrollment</a>
+          </div>
+          {client && <CarePlanTab patient={client} />}
         </div>
       );
     };
@@ -8488,6 +8832,9 @@
         canCoSignCarePlan: !!(emrStatus && emrStatus.access && emrStatus.access.canCoSignCarePlan),
         credentialCeiling: (emrStatus && emrStatus.access && emrStatus.access.credentialCeiling) || []
       };
+      // A home care client's care plan, on its own page (no chart).
+      const standaloneCarePlanId = new URLSearchParams(window.location.search).get('carePlan');
+      if (standaloneCarePlanId) return <AccessContext.Provider value={access}><StandaloneCarePlan clientId={standaloneCarePlanId} /></AccessContext.Provider>;
       // Session 4.12 Scope D — every one of these is a PLACE in the record.
       // No workflow is a tab: the H&P opens as a visit from the banner's Start
       // visit action, and med reconciliation is a section under MEDICATIONS

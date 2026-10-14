@@ -41,6 +41,7 @@ const COLLECTION_REGISTRY = Object.freeze([
   // ---- client portal (Session 3.x) ----
   { key: 'care_plan_versions', phi: true, owner: '4.1' },
   { key: 'care_plan_cosign_events', phi: true, owner: '3.x' },
+  { key: 'care_plan_goal_status_events', phi: true, owner: 'care-plan-format' },
   { key: 'consent_events', phi: true, owner: '3.4' },
   { key: 'consent_provider_authorizations', phi: true, owner: '3.4' },
   { key: 'consent_records_categories', phi: true, owner: '3.4' },

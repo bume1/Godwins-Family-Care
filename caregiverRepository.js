@@ -20,6 +20,8 @@
 // ============================================================================
 
 // ---- License levels (same enum as the matching schema, spec §2) ----
+const carePlanFormat = require('./carePlanFormat');
+
 const LICENSE_LEVELS = Object.freeze(['sitter', 'pca', 'cna', 'lpn']);
 
 const LICENSE_LABELS = Object.freeze({
@@ -808,7 +810,8 @@ const CAREGIVER_CLIENT_FIELDS = Object.freeze([
   'id', 'name', 'careTier', 'careTierLabel', 'serviceLine', 'address', 'phone'
 ]);
 const CAREGIVER_CARE_PLAN_FIELDS = Object.freeze([
-  'version', 'effectiveDate', 'targetDate', 'goals', 'tasks', 'frequency', 'days', 'times', 'duration'
+  'version', 'effectiveDate', 'targetDate', 'goals', 'tasks', 'frequency', 'days', 'times', 'duration',
+  'caregiverInterventions', 'escalation'
 ]);
 // Explicitly withheld from the caregiver view, and build-enforced. `chargeNote`
 // and every rate field are money; `problems`, `rnSignature` and the narrative
@@ -828,8 +831,13 @@ function caregiverClientView(client) {
   const plan = client.carePlan && typeof client.carePlan === 'object' ? client.carePlan : null;
   if (plan) {
     const view = {};
+    // The plan stores its schedule as eachVisit / visitFrequency / visitDays /
+    // visitTimes. This view used to read `tasks`, `frequency`, `days` and
+    // `times` straight off the plan, keys no plan has ever carried, so a
+    // caregiver saw no tasks and no schedule. The projection maps them.
+    const source = { ...plan, ...carePlanFormat.caregiverProjection(plan) };
     for (const key of CAREGIVER_CARE_PLAN_FIELDS) {
-      if (plan[key] !== undefined) view[key] = plan[key];
+      if (source[key] !== undefined) view[key] = source[key];
     }
     out.carePlan = view;
   } else {
