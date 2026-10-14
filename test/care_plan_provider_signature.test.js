@@ -36,21 +36,21 @@ test('a signed provider co-signature is printed, with name, credential and NPI',
   const text = await pdfText(await render({ providerCoSignStatus: 'pending' }, {
     providerSignature: { name: 'Bethel Godwins', at: '2026-10-15T09:00:00Z', signatureImage: PNG, ipHash: 'cccc', clinicalRole: 'provider', npi: '1234567890' }
   }));
-  assert.ok(/PROVIDER CO-SIGNATURE/i.test(text), text);
+  assert.ok(/CLINICIAN CO-SIGNATURE/i.test(text), text);
   assert.ok(text.includes('Bethel Godwins'));
   assert.ok(text.includes('Signed as Provider') && text.includes('NPI 1234567890'));
-  assert.ok(!text.includes('PENDING PROVIDER CO-SIGNATURE'), 'no pending banner once signed');
+  assert.ok(!text.includes('PENDING CLINICIAN CO-SIGNATURE'), 'no pending banner once signed');
 });
 
 test('a plan waiting on the provider says so, on the banner and in the block', async () => {
   const text = await pdfText(await render({ providerCoSignStatus: 'pending' }));
-  assert.ok(text.includes('PENDING PROVIDER CO-SIGNATURE'));
-  assert.ok(/PROVIDER CO-SIGNATURE.*Pending signature/i.test(text), text);
+  assert.ok(text.includes('PENDING CLINICIAN CO-SIGNATURE'));
+  assert.ok(/CLINICIAN CO-SIGNATURE.*Pending signature/i.test(text), text);
 });
 
 test('a plan that never needed a provider prints no provider block', async () => {
   const text = await pdfText(await render({ providerCoSignStatus: 'not_required' }));
-  assert.ok(!/PROVIDER CO-SIGNATURE/i.test(text), text);
+  assert.ok(!/CLINICIAN CO-SIGNATURE/i.test(text), text);
 });
 
 test('every PDF builder passes the stored provider signature', () => {

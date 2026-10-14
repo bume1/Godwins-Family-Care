@@ -145,11 +145,11 @@ test('a status update is refused when it cannot be applied, by name', () => {
   assert.equal(fmt.applyGoalStatus({ version: 1, goals: ['x'] }, 'g-bbbbbb', { status: 'met' }, actor, 't').code, 'CARE_PLAN_LEGACY_GOALS');
 });
 
-test('the status route writes no version row and is gated to clinicians who write plans', () => {
+test('the status route writes no version row and is gated to whoever writes plans (clinicians and coordinators)', () => {
   const start = SERVER.indexOf("app.post('/api/clinical/patients/:clientId/care-plan/goals/:goalId/status'");
   assert.ok(start > 0, 'the status route exists');
   const route = SERVER.slice(start, SERVER.indexOf('\n});', start));
-  assert.match(route, /requireClinicalWrite, requireCapability\(clinicalRoles\.CAPABILITIES\.CARE_PLAN_AUTHOR\)/);
+  assert.match(route, /requireClinicalDocumenter, requireCapability\(clinicalRoles\.CAPABILITIES\.CARE_PLAN_AUTHOR\)/);
   assert.ok(!route.includes("'care_plan_versions'"), 'a status change never writes a version row');
   assert.ok(route.includes("'care_plan_goal_status_events'"), 'every change is its own row');
   const logCall = route.slice(route.indexOf('logActivity('));

@@ -151,14 +151,16 @@ const buildInbox = ({
     const plan = c && c.carePlan;
     if (!plan || plan.providerCoSignStatus !== 'pending') continue;
     const authorId = plan.authoredById || (plan.authoredBy && plan.authoredBy.id) || null;
-    const canAct = v.canCoSignCarePlan && notSelf(v, authorId);
+    // Line-aware: an RN can complete a home care plan a coordinator or LMSW
+    // wrote, never a clinical patient's.
+    const canAct = clinicalRoles.canCompleteCarePlan(viewer, c.serviceLine) && notSelf(v, authorId);
     items.push(item({
       kind: KINDS.CARE_PLAN_CO_SIGN,
       id: `${c.id}:v${plan.version || 1}`, clientId: c.id, patientName: c.name || nameOf(c.id),
       at: plan.authoredAt || plan.updatedAt || null,
       actionable: canAct,
-      waitingOn: canAct ? 'you' : 'a provider',
-      detail: plan.providerCoSignReason || `Version ${plan.version || 1} is authored and waiting on a provider's signature.`
+      waitingOn: canAct ? 'you' : 'a clinician',
+      detail: plan.providerCoSignReason || `Version ${plan.version || 1} is written and waiting on a clinician's co-signature.`
     }));
   }
 

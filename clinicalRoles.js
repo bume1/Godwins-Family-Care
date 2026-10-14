@@ -127,10 +127,12 @@ const ROLE_CAPABILITIES = Object.freeze({
   ]),
   readOnly: Object.freeze(['chartRead']),
   // Documentation support only. No signing, prescribing, ordering, coding,
-  // medication reconciliation, problem list, care plan or result sign-off.
+  // medication reconciliation, problem list or result sign-off. A coordinator
+  // AUTHORS a care plan (owner, 2026-10-14); it is not active until a
+  // clinician co-signs it (evaluateCarePlanSignature).
   coordinator: Object.freeze([
     'chartRead', 'vitalsWrite', 'nursingNote', 'behavioralNote', 'screeningInstrument',
-    'documentUpload', 'scheduling'
+    'documentUpload', 'scheduling', 'carePlanAuthor'
   ])
 });
 
@@ -441,6 +443,14 @@ const CARE_PLAN_OUTCOME = Object.freeze({ COMPLETE: 'complete', PENDING_PROVIDER
 const isClinicalLine = (serviceLine) => ['IHPC', 'BOTH'].includes(String(serviceLine || 'PHC').toUpperCase());
 const evaluateCarePlanSignature = (user, serviceLine) => {
   const role = resolveClinicalRole(user);
+  if (role === CLINICAL_ROLES.COORDINATOR) {
+    // Owner, 2026-10-14: a care coordinator writes and updates the plan, and
+    // it is not active until a clinician co-signs it, on either line.
+    return {
+      outcome: CARE_PLAN_OUTCOME.PENDING_PROVIDER, clinicalRole: role, signatureRole: 'authoring',
+      reason: 'A care coordinator wrote this plan. It becomes active once a clinician co-signs it.'
+    };
+  }
   if (!role || !LICENSED_CLINICAL_ROLES.includes(role)) {
     return { outcome: CARE_PLAN_OUTCOME.REFUSED, code: 'CARE_PLAN_NO_CREDENTIAL', reason: 'Authoring a care plan requires a clinical licence.' };
   }
@@ -464,6 +474,16 @@ const evaluateCarePlanSignature = (user, serviceLine) => {
   return { outcome: CARE_PLAN_OUTCOME.COMPLETE, clinicalRole: role, signatureRole: 'signing' };
 };
 const canCoSignCarePlan = (user) => CO_SIGN_ROLES.includes(resolveClinicalRole(user));
+// Whether THIS person can supply the co-signature a pending plan is waiting
+// on, for THIS client: their own signature must complete a plan on that
+// service line. A home care plan an LMSW or coordinator wrote can be completed
+// by an RN; a clinical patient's needs a provider or an LCSW. The co-sign
+// route asks exactly this, so the screen and the inbox ask it too.
+// The CARE_PLAN_SIGN check is belt-and-braces: every role whose signature
+// completes a plan also holds it today, so removing it changes nothing until
+// a role is added that completes a plan without the capability.
+const canCompleteCarePlan = (user, serviceLine) =>
+  can(user, CAPABILITIES.CARE_PLAN_SIGN) && evaluateCarePlanSignature(user, serviceLine).outcome === CARE_PLAN_OUTCOME.COMPLETE;
 
 // ---- The credential ceiling (§4) ---------------------------------------
 // A standing order GRANTS authority; it cannot CREATE authority a licence does
@@ -655,6 +675,7 @@ module.exports = {
   CARE_PLAN_OUTCOME,
   evaluateCarePlanSignature,
   canCoSignCarePlan,
+  canCompleteCarePlan,
   isClinicalLine,
   STANDING_ORDER_TYPES,
   CREDENTIAL_CEILING,

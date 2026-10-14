@@ -122,6 +122,40 @@ const PHC_PLAN = {
   const en = await call('GET', `/api/gfc/admin/enrollment/${phc.id}`, admin);
   ok('enrollment detail carries the version only', en.body.client.carePlan && en.body.client.carePlan.version === 2 && !en.body.client.carePlan.goalItems, en.body.client.carePlan);
 
+  console.log('\n--- 6. a care coordinator writes a plan; a clinician activates it ---');
+  const coord = await makeUser(admin, 'Cora Coordinator', 'caseManager', { clinicalRole: 'coordinator' });
+  const coordT = await login(coord.email, PW);
+  const phc2 = await makeUser(admin, 'Hank Home', 'client');
+  const cw = await call('POST', `/api/clinical/patients/${phc2.id}/care-plan`, coordT, PHC_PLAN);
+  ok('a coordinator can write a home care plan', cw.status === 200, cw.body);
+  ok('  and it waits on a clinician', cw.body.providerCoSignStatus === 'pending', cw.body.providerCoSignStatus);
+  const cst = await call('POST', `/api/clinical/patients/${phc2.id}/care-plan/goals/g-probe1/status`, coordT, { status: 'in_progress' });
+  ok('a coordinator can update a goal status', cst.status === 200, cst.body);
+  const coordView = (await call('GET', `/api/clinical/patients/${phc2.id}/care-plan`, coordT)).body;
+  ok('  the coordinator is not offered the co-signature', coordView.canCoSign === false, coordView.canCoSign);
+  const coordSelf = await call('POST', `/api/clinical/patients/${phc2.id}/care-plan/provider-cosign`, coordT, { signatureImageB64: SIG });
+  ok('  and cannot co-sign their own plan', coordSelf.status === 403, coordSelf.status);
+  const rnView = (await call('GET', `/api/clinical/patients/${phc2.id}/care-plan`, rnT)).body;
+  ok('an RN is offered the co-signature on a home care plan', rnView.canCoSign === true, rnView.canCoSign);
+  const rnCo = await call('POST', `/api/clinical/patients/${phc2.id}/care-plan/provider-cosign`, rnT, { signatureImageB64: SIG });
+  ok('  and the RN co-signature makes it active', rnCo.status === 200 && rnCo.body.carePlan.providerCoSignStatus === 'complete', rnCo.body);
+
+  const ihpc2 = await makeUser(admin, 'Iris Clinic', 'client');
+  await call('PUT', `/api/gfc/admin/enrollment/${ihpc2.id}/service-line`, admin, { serviceLine: 'IHPC' });
+  const cwi = await call('POST', `/api/clinical/patients/${ihpc2.id}/care-plan`, coordT, {
+    ...PHC_PLAN,
+    problemItems: [{ id: 'p-probe3', text: 'Heart failure', prognosis: 'Stable', expectedOutcome: 'No admissions' }],
+    goalItems: [{ id: 'g-probe3', problemId: 'p-probe3', statement: 'Stay home', measure: 'Weight', target: '178 lb' }],
+    medicationManagement: { managedBy: 'family' }
+  });
+  ok('a coordinator can write a clinical patient\u2019s plan', cwi.status === 200 && cwi.body.providerCoSignStatus === 'pending', cwi.body);
+  const rnIhpc = await call('POST', `/api/clinical/patients/${ihpc2.id}/care-plan/provider-cosign`, rnT, { signatureImageB64: SIG });
+  ok('  an RN cannot activate a clinical patient\u2019s plan', rnIhpc.status === 403, rnIhpc.status);
+  const rnIhpcView = (await call('GET', `/api/clinical/patients/${ihpc2.id}/care-plan`, rnT)).body;
+  ok('  and is not offered the co-signature', rnIhpcView.canCoSign === false, rnIhpcView.canCoSign);
+  const adminCo = await call('POST', `/api/clinical/patients/${ihpc2.id}/care-plan/provider-cosign`, admin, { signatureImageB64: SIG });
+  ok('  a provider-level signature activates it', adminCo.status === 200 && adminCo.body.carePlan.providerCoSignStatus === 'complete', adminCo.body);
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });
