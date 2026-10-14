@@ -1796,6 +1796,7 @@
       // it lives outside formData because it is not a field the save
       // round-trips, it is a live status read fresh each time.
       const [emrStatus, setEmrStatus] = useState(null);
+      const [changePassword, setChangePassword] = useState(false);
       const [emrStatusLoading, setEmrStatusLoading] = useState(false);
       const [accessActionBusy, setAccessActionBusy] = useState(false);
 
@@ -1865,11 +1866,13 @@
           let result;
           if (editingUser) {
             const updateData = { ...formData };
-            if (!updateData.password) delete updateData.password;
-            console.log('Updating user:', editingUser.id, updateData);
+            delete updateData.password;
+            if (changePassword && formData.password) {
+              updateData.password = formData.password;
+              updateData.resetPassword = true;
+            }
             result = await api.updateUser(token, editingUser.id, updateData);
           } else {
-            console.log('Creating user:', formData);
             result = await api.createUser(token, formData);
           }
           console.log('API Result:', result);
@@ -1890,6 +1893,7 @@
             setShowForm(false);
             setEditingUser(null);
             setFormData(defaultFormData);
+            setChangePassword(false);
             setCompetencies([]);
             // A newly created client's natural next step is enrollment — offer
             // it instead of leaving the admin to go find it. An edit, or any
@@ -1909,6 +1913,7 @@
       };
 
       const handleEdit = (user) => {
+        setChangePassword(false);
         setEditingUser(user);
         setFormData({
           name: user.name || '',
@@ -2076,7 +2081,7 @@
       const handlePasswordReset = async (requestId, userId) => {
         const newPassword = prompt('Enter new password for user:');
         if (!newPassword) return;
-        const result = await api.updateUser(token, userId, { password: newPassword });
+        const result = await api.updateUser(token, userId, { password: newPassword, resetPassword: true });
         if (!result.error) {
           await api.dismissPasswordReset(token, requestId);
           setMessage('Password reset successfully');
@@ -2379,7 +2384,7 @@
                     </div>
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Email *</label>
-                      <input type="email" value={formData.email} onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                      <input type="email" autoComplete="off" value={formData.email} onChange={(e) => setFormData({ ...formData, email: e.target.value })}
                         className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" required />
                     </div>
                     <div>
@@ -2388,11 +2393,35 @@
                         placeholder="(555) 123-4567"
                         className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" />
                     </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Password {editingUser ? '(leave blank to keep)' : '*'}</label>
-                      <input type="password" value={formData.password} onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                        className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" required={!editingUser} />
-                    </div>
+                    {/* A browser fills a saved password into any password box it
+                        finds, so on an edit the box only exists once the admin
+                        ticks to set one. The server also refuses a password
+                        that arrives without resetPassword: true. */}
+                    {editingUser ? (
+                      <div>
+                        <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-1">
+                          <input type="checkbox" checked={changePassword}
+                            onChange={(e) => { setChangePassword(e.target.checked); setFormData({ ...formData, password: '' }); }} />
+                          Set a new password for this user
+                        </label>
+                        {changePassword && (
+                          <input type="password" autoComplete="new-password" value={formData.password}
+                            onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                            placeholder="New temporary password"
+                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" required />
+                        )}
+                        <p className="text-xs text-gray-500 mt-1">
+                          {changePassword ? 'Saving will reset their password and email them a link.' : 'Their password is not changed by saving this form.'}
+                        </p>
+                      </div>
+                    ) : (
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Password *</label>
+                        <input type="password" autoComplete="new-password" value={formData.password}
+                          onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                          className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" required />
+                      </div>
+                    )}
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
                       <select value={formData.role === 'user' && formData.isManager ? 'manager' : formData.role} onChange={(e) => {
