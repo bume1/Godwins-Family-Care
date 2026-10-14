@@ -277,6 +277,12 @@
       }),
       nearby: (clientId, radiusMiles) => authedFetch(`/api/clinical/nearby?clientId=${encodeURIComponent(clientId)}&radiusMiles=${radiusMiles}`),
       workQueues: () => authedFetch('/api/clinical/work-queues'),
+      // Patient to-dos (seen by the assignee and the author only) and the
+      // on-screen daily digest. Owner, 2026-10-13.
+      tasks: (qs) => authedFetch(`/api/clinical/tasks${qs ? `?${qs}` : ''}`),
+      createTask: (body) => authedFetch('/api/clinical/tasks', { method: 'POST', body: JSON.stringify(body) }),
+      updateTask: (id, body) => authedFetch(`/api/clinical/tasks/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) }),
+      digest: () => authedFetch('/api/clinical/digest'),
       analytics: () => authedFetch('/api/clinical/analytics'),
       // Reading a filed document into proposals, from the chart. The SAME three
       // routes the enrollment screen uses, gated on requireClinicalWrite.
@@ -422,7 +428,7 @@
     // chain is what collided when 4.9 and 4.10 both added a view, and a fifth
     // would collide again.
     const VIEW_TITLES = {
-      myday: 'My Day', queues: 'Work Queues', analytics: 'Reports', charts: 'Patients', schedule: 'Schedule', queue: 'Coding Queue',
+      myday: 'My Day', queues: 'Tasks', analytics: 'Reports', charts: 'Patients', schedule: 'Schedule', queue: 'Coding Queue',
       inbox: 'Inbox', results: 'Results Inbox', overdue: 'Overdue Orders',
       messages: 'Messages', settings: 'Settings', patients: 'Patients', more: 'More'
     };
@@ -2276,6 +2282,294 @@
       );
     };
 
+    // ── Patient to-dos and the daily digest (owner, 2026-10-13) ────────────
+    // A to-do is about one patient and is seen only by the person it is
+    // assigned to and the person who wrote it — the server decides that, and
+    // decides which bucket (overdue, today, upcoming) each one is in, so this
+    // page does no date math of its own.
+    const TODO_BUCKETS = [
+      ['overdue', 'Overdue'], ['today', 'Today'], ['upcoming', 'Next 7 Days'],
+      ['later', 'Later'], ['no_date', 'No Date']
+    ];
+    const PRIORITY_CHIP = {
+      urgent: 'bg-red-50 text-red-700', soon: 'bg-amber-50 text-amber-800', routine: 'bg-stone-100 text-stone-600'
+    };
+    const TodoForm = ({ meta, clientId, patientName, initial, onSaved, onCancel }) => {
+      const [patients, setPatients] = useState(null);
+      const [f, setF] = useState(() => ({
+        clientId: clientId || (initial && initial.clientId) || '',
+        title: (initial && initial.title) || '',
+        detail: (initial && initial.detail) || '',
+        dueDate: (initial && initial.dueDate) || '',
+        priority: (initial && initial.priority) || 'routine',
+        category: (initial && initial.category) || 'other',
+        assigneeId: (initial && initial.assigneeId) || ''
+      }));
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      useEffect(() => {
+        if (clientId || initial) return;
+        let live = true;
+        api.patients().then(r => { if (live) setPatients(r.patients || []); })
+          .catch(e => { if (live) setErr(e.message); });
+        return () => { live = false; };
+      }, [clientId, initial]);
+      const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+      const save = async (e) => {
+        e.preventDefault();
+        setBusy(true); setErr('');
+        try {
+          const body = { title: f.title, detail: f.detail, dueDate: f.dueDate || null, priority: f.priority, category: f.category };
+          if (f.assigneeId) body.assigneeId = f.assigneeId;
+          const r = initial
+            ? await api.updateTask(initial.id, { action: 'edit', ...body })
+            : await api.createTask({ clientId: f.clientId, ...body });
+          onSaved && onSaved(r.task);
+        } catch (x) { setErr(x.message); } finally { setBusy(false); }
+      };
+      const team = (meta && meta.team) || [];
+      return (
+        <form onSubmit={save} className="card p-4 mb-4 space-y-3">
+          <div className="text-[14px] font-semibold text-primary">{initial ? 'Edit To-Do' : 'New To-Do'}</div>
+          {clientId || initial
+            ? <div className="text-[13px] text-stone-600">Patient: <b>{patientName || (initial && initial.patientName) || '—'}</b></div>
+            : (
+              <Field label="Patient">
+                <select className="inp" value={f.clientId} onChange={set('clientId')} required>
+                  <option value="">{patients ? 'Choose a patient' : 'Loading patients…'}</option>
+                  {(patients || []).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+              </Field>
+            )}
+          <Field label="What needs doing">
+            <input className="inp" value={f.title} onChange={set('title')} maxLength={200} required
+              placeholder="e.g. Call daughter about PT schedule" />
+          </Field>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <Field label="Due date"><input className="inp" type="date" value={f.dueDate} onChange={set('dueDate')} /></Field>
+            <Field label="Priority">
+              <select className="inp" value={f.priority} onChange={set('priority')}>
+                {((meta && meta.priorities) || ['routine', 'soon', 'urgent']).map(p => <option key={p} value={p}>{p.charAt(0).toUpperCase() + p.slice(1)}</option>)}
+              </select>
+            </Field>
+            <Field label="Type">
+              <select className="inp" value={f.category} onChange={set('category')}>
+                {((meta && meta.categories) || []).map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
+              </select>
+            </Field>
+          </div>
+          <Field label="Assign to">
+            <select className="inp" value={f.assigneeId} onChange={set('assigneeId')}>
+              <option value="">{initial ? 'Keep current' : 'Me'}</option>
+              {team.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Details (optional)">
+            <textarea className="inp" rows={2} value={f.detail} onChange={set('detail')} maxLength={2000} />
+          </Field>
+          <p className="text-[11.5px] text-stone-500">Only you and the person it is assigned to can see this to-do.</p>
+          {err && <div className="text-[13px] text-red-600">{err}</div>}
+          <div className="flex gap-2">
+            <button className="btn gold" type="submit" disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
+            <button className="btn ghost" type="button" onClick={onCancel}>Cancel</button>
+          </div>
+        </form>
+      );
+    };
+
+    const TodoRow = ({ t, meta, onChanged, onOpenChart, showPatient }) => {
+      const [mode, setMode] = useState(null); // null | 'edit' | 'cancel'
+      const [reason, setReason] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      const act = async (action, extra) => {
+        setBusy(true); setErr('');
+        try { const r = await api.updateTask(t.id, { action, ...(extra || {}) }); setMode(null); onChanged && onChanged(r.task); }
+        catch (x) { setErr(x.message); } finally { setBusy(false); }
+      };
+      if (mode === 'edit') {
+        return <div className="px-3 pt-3"><TodoForm meta={meta} initial={t} onSaved={(task) => { setMode(null); onChanged && onChanged(task); }} onCancel={() => setMode(null)} /></div>;
+      }
+      const cat = ((meta && meta.categories) || []).find(c => c.value === t.category);
+      const who = t.mine
+        ? (t.assignedByMe ? null : `From ${t.createdByName || 'a colleague'}`)
+        : `Assigned to ${t.assigneeName || 'a colleague'}`;
+      return (
+        <div className="px-4 py-3 border-b border-stone-100 last:border-0">
+          <div className="flex items-start gap-3">
+            {t.status === 'open' && t.mine
+              ? <button className="mt-0.5 w-5 h-5 rounded border-2 border-stone-300 shrink-0 hover:border-[#A9853A]" title="Mark done" aria-label="Mark done"
+                  disabled={busy} onClick={() => act('done')} />
+              : <i className={`ti ${t.status === 'done' ? 'ti-circle-check text-emerald-600' : t.status === 'cancelled' ? 'ti-circle-x text-stone-400' : 'ti-point text-stone-400'} text-[20px] shrink-0`} />}
+            <div className="min-w-0 flex-1">
+              <div className={`text-[14px] font-semibold ${t.status === 'open' ? 'text-primary' : 'text-stone-400 line-through'}`}>{t.title}</div>
+              <div className="text-[12.5px] text-stone-500 flex flex-wrap gap-x-2">
+                {showPatient && <button type="button" className="underline decoration-dotted" onClick={() => onOpenChart && onOpenChart(t.clientId)}>{t.patientName || 'Patient'}</button>}
+                {t.dueDate && <span className={t.bucket === 'overdue' ? 'text-red-600 font-semibold' : ''}>Due {fmtDate(t.dueDate)}</span>}
+                {cat && <span>{cat.label}</span>}
+                {who && <span>{who}</span>}
+              </div>
+              {t.detail && <div className="text-[12.5px] text-stone-600 mt-1 whitespace-pre-wrap">{t.detail}</div>}
+              {t.status === 'done' && t.completionNote && <div className="text-[12px] text-emerald-700 mt-1">{t.completionNote}</div>}
+              {t.status === 'cancelled' && t.cancelReason && <div className="text-[12px] text-stone-500 mt-1">Cancelled: {t.cancelReason}</div>}
+            </div>
+            {t.priority !== 'routine' && <span className={`chip ${PRIORITY_CHIP[t.priority] || ''}`}>{t.priority === 'urgent' ? 'Urgent' : 'Soon'}</span>}
+          </div>
+          <div className="flex gap-2 mt-2 ml-8 flex-wrap">
+            {t.status === 'open' && <button className="btn ghost !py-0.5 !px-2 text-[11.5px]" disabled={busy} onClick={() => setMode('edit')}>Edit</button>}
+            {t.status === 'open' && <button className="btn ghost !py-0.5 !px-2 text-[11.5px]" disabled={busy} onClick={() => setMode(mode === 'cancel' ? null : 'cancel')}>Cancel To-Do</button>}
+            {t.status !== 'open' && <button className="btn ghost !py-0.5 !px-2 text-[11.5px]" disabled={busy} onClick={() => act('reopen')}>Reopen</button>}
+          </div>
+          {mode === 'cancel' && (
+            <div className="ml-8 mt-2 flex gap-2 items-center">
+              <input className="inp !py-1" placeholder="Why is this no longer needed?" value={reason} onChange={e => setReason(e.target.value)} />
+              <button className="btn !py-1 !px-2.5 text-[12px]" disabled={busy || !reason.trim()} onClick={() => act('cancel', { reason })}>Confirm</button>
+            </div>
+          )}
+          {err && <div className="ml-8 mt-1 text-[12.5px] text-red-600">{err}</div>}
+        </div>
+      );
+    };
+
+    // The to-do list. With `clientId` it is one patient's (the chart card);
+    // without, it is everything the viewer can see, grouped by when it is due.
+    const TodoList = ({ clientId, patientName, onOpenChart, compact }) => {
+      const [data, setData] = useState(null);
+      const [err, setErr] = useState('');
+      const [scope, setScope] = useState('mine');
+      const [showClosed, setShowClosed] = useState(false);
+      const [adding, setAdding] = useState(false);
+      const load = useCallback(() => {
+        const q = new URLSearchParams();
+        q.set('scope', clientId ? 'all' : scope);
+        if (clientId) q.set('clientId', clientId);
+        if (showClosed) q.set('includeClosed', 'true');
+        return api.tasks(q.toString()).then(r => { setData(r); setErr(''); }).catch(e => setErr(e.message));
+      }, [clientId, scope, showClosed]);
+      useEffect(() => { load(); }, [load]);
+      const tasks = (data && data.tasks) || [];
+      const open = tasks.filter(t => t.status === 'open');
+      const closed = tasks.filter(t => t.status !== 'open');
+      const rows = (list) => list.map(t => <TodoRow key={t.id} t={t} meta={data} onChanged={load} onOpenChart={onOpenChart} showPatient={!clientId} />);
+      return (
+        <div>
+          <div className="flex items-center gap-2 mb-3 flex-wrap">
+            {!clientId && [['mine', 'Assigned to Me'], ['assigned_by_me', 'I Assigned'], ['all', 'All Mine']].map(([k, label]) => (
+              <button key={k} onClick={() => setScope(k)}
+                className={`px-4 py-1.5 rounded-full text-[13px] font-semibold border whitespace-nowrap ${scope === k ? 'bg-[#A9853A] border-[#A9853A] text-white' : 'bg-white border-stone-200 text-primary'}`}>{label}</button>
+            ))}
+            <label className="text-[12.5px] text-stone-500 flex items-center gap-1 ml-auto">
+              <input type="checkbox" checked={showClosed} onChange={e => setShowClosed(e.target.checked)} /> Show done
+            </label>
+            {!adding && <button className="btn gold !py-1.5" onClick={() => setAdding(true)}><i className="ti ti-plus" />Add To-Do</button>}
+          </div>
+          {adding && <TodoForm meta={data} clientId={clientId} patientName={patientName}
+            onSaved={() => { setAdding(false); load(); }} onCancel={() => setAdding(false)} />}
+          {err && <div className="card p-4 text-sm text-red-600 mb-3">{err}</div>}
+          {!data && !err && <div className="card p-6 text-sm text-stone-500">Loading…</div>}
+          {data && open.length === 0 && (
+            <div className="card px-5 py-6 text-sm text-stone-500 mb-3">
+              {clientId ? 'No open to-dos for this patient that you can see.' : scope === 'assigned_by_me' ? 'You have not assigned any open to-dos to anyone.' : 'Nothing on your list. Add a to-do to keep track of follow-ups.'}
+            </div>
+          )}
+          {data && compact && open.length > 0 && <div className="card overflow-hidden mb-3">{rows(open)}</div>}
+          {data && !compact && TODO_BUCKETS.map(([b, label]) => {
+            const list = open.filter(t => t.bucket === b);
+            if (!list.length) return null;
+            return (
+              <div key={b} className="mb-4">
+                <h2 className={`serif text-[19px] font-semibold mb-2 ${b === 'overdue' ? 'text-red-700' : 'text-primary'}`}>{label} ({list.length})</h2>
+                <div className="card overflow-hidden">{rows(list)}</div>
+              </div>
+            );
+          })}
+          {data && showClosed && closed.length > 0 && (
+            <div className="mb-4">
+              <h2 className="serif text-[19px] font-semibold text-stone-500 mb-2">Done or Cancelled ({closed.length})</h2>
+              <div className="card overflow-hidden">{rows(closed)}</div>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    // The Tasks page: the viewer's own to-dos first, then the practice-wide
+    // work queues the app builds by itself (unchanged).
+    const TasksShell = ({ onOpenChart, children }) => {
+      const [tab, setTab] = useState('todos');
+      return (
+        <div className="p-4 lg:p-7 max-w-4xl">
+          <div className="flex gap-1 mb-5 border-b border-stone-200">
+            {[['todos', 'My To-Dos'], ['queues', 'Work Queues']].map(([k, label]) => (
+              <button key={k} onClick={() => setTab(k)}
+                className={`px-4 py-2 text-[14px] font-semibold -mb-px border-b-2 ${tab === k ? 'border-[#A9853A] text-primary' : 'border-transparent text-stone-500'}`}>{label}</button>
+            ))}
+          </div>
+          {tab === 'todos'
+            ? <TodoList onOpenChart={onOpenChart} />
+            : <div className="-m-4 lg:-m-7">{children}</div>}
+        </div>
+      );
+    };
+
+    // The daily digest on My Day: what needs the viewer now, against what is
+    // coming in the next week. Built on the server in one place.
+    const DIGEST_ICON = { todo: 'ti-checkbox', inbox: 'ti-mail', result: 'ti-flask', order: 'ti-clock-exclamation', visit: 'ti-calendar-event', referral: 'ti-send' };
+    const DigestCard = ({ onGo, onOpenChart }) => {
+      const [d, setD] = useState(null);
+      const [err, setErr] = useState('');
+      useEffect(() => {
+        let live = true;
+        api.digest().then(r => { if (live) setD(r); }).catch(e => { if (live) setErr(e.message); });
+        return () => { live = false; };
+      }, []);
+      if (err) return <div className="card px-4 py-3 mb-4 text-[13px] text-red-600">Today's digest could not be loaded: {err}</div>;
+      if (!d) return null;
+      const go = (line) => {
+        const o = line.open || {};
+        if (o.view === 'chart') return onOpenChart(line.clientId, { tab: o.tab });
+        if (line.kind === 'inbox' && line.encounterUuid) return onOpenChart(line.clientId, { tab: 'encounters', encounterUuid: line.encounterUuid });
+        return onGo(o.view);
+      };
+      const Col = ({ title, lines, empty, tone }) => (
+        <div className="min-w-0">
+          <div className={`text-[12px] font-bold uppercase tracking-wide mb-2 ${tone}`}>{title} ({lines.length})</div>
+          {lines.length === 0 && <p className="text-[13px] text-stone-500">{empty}</p>}
+          {lines.slice(0, 8).map(l => (
+            <button key={l.id} type="button" onClick={() => go(l)}
+              className="w-full text-left flex items-start gap-2 py-1.5 border-b border-stone-100 last:border-0 hover:bg-cream rounded">
+              <i className={`ti ${DIGEST_ICON[l.kind] || 'ti-point'} text-[16px] mt-0.5 ${l.overdue ? 'text-red-600' : 'text-[#9A7430]'}`} />
+              <span className="min-w-0 flex-1">
+                <span className="block text-[13px] font-semibold text-primary truncate">{l.title}</span>
+                <span className="block text-[12px] text-stone-500 truncate">
+                  {[l.patientName, l.when && (l.overdue && l.kind === 'todo' ? `was due ${fmtDate(l.when)}` : fmtDate(l.when)), l.time && fmt12h(l.time), l.from && `from ${l.from}`].filter(Boolean).join(' · ')}
+                </span>
+              </span>
+            </button>
+          ))}
+          {lines.length > 8 && <p className="text-[12px] text-stone-500 mt-1">and {lines.length - 8} more</p>}
+        </div>
+      );
+      return (
+        <div className="card mb-4">
+          <div className="card-h flex items-center justify-between gap-2">
+            <h2><i className="ti ti-list-check mr-1 text-accent" />Today's Digest</h2>
+            <span className="text-[12.5px] text-stone-500">
+              <b className={d.counts.overdue ? 'text-red-700' : ''}>{d.counts.pending}</b> pending · <b>{d.counts.upcoming}</b> upcoming
+            </span>
+          </div>
+          <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-5">
+            <Col title="Pending Now" lines={d.pending} tone="text-red-700" empty="Nothing is waiting on you right now." />
+            <Col title={`Coming Up (next ${d.upcomingDays} days)`} lines={d.upcoming} tone="text-primary" empty="Nothing scheduled in the next week." />
+          </div>
+          {d.calendar && !d.calendar.ok && d.calendar.code !== 'NO_OWN_CALENDAR' && (
+            <p className="px-4 pb-3 text-[12px] text-amber-700">Visits are missing from Coming Up: {d.calendar.error}</p>
+          )}
+          <div className="px-4 pb-3"><button className="btn ghost !py-1 !px-2.5 text-[12px]" onClick={() => onGo('queues')}>Open Tasks</button></div>
+        </div>
+      );
+    };
+
     // ── Session 4.12 Scope I — WORK QUEUES and ANALYTICS ──────────────────
     // I2: the cross-patient destinations are work queues, not chart tabs.
     // I3: a destination with nothing in it renders an empty state SAYING SO —
@@ -2725,7 +3019,7 @@
       );
     };
 
-    const MyDayView = ({ user, onOpenChart, onAddVisit }) => {
+    const MyDayView = ({ user, onOpenChart, onAddVisit, onGo }) => {
       const access = useContext(AccessContext);
       const [date, setDate] = useState(() => GFC_TIME.zonedParts(new Date()).isoDate);
       const [day, setDay] = useState(null);
@@ -2839,6 +3133,7 @@
           </div>
 
           {err && <div className="card border-red-200 bg-red-50 text-red-700 text-sm px-4 py-3 mb-4">{err}</div>}
+          {date === today && access.canManageTasks && onGo && <DigestCard onGo={onGo} onOpenChart={onOpenChart} />}
           {day && day.calendar && !day.calendar.ok && (
             <div className="card !bg-amber-50 border-amber-200 px-4 py-3 mb-4 text-[13px] text-amber-900">
               <b>The calendar could not be read.</b> {day.calendar.error} This is not an empty day — it is a day we could not load.
@@ -3496,6 +3791,19 @@
               out as the owner's mockup card grid; every card reads only what
               the chart read already returned. */}
           <OverviewGrid chart={chart} patient={patient} onGoTab={onGoTab} />
+          {/* This patient's to-dos that the viewer wrote or was handed. Shown
+              to everyone who may hold one, a case manager included. */}
+          {patient && <PatientTodosCard patient={patient} />}
+        </div>
+      );
+    };
+
+    const PatientTodosCard = ({ patient }) => {
+      if (!useContext(AccessContext).canManageTasks) return null;
+      return (
+        <div className="card mt-4">
+          <div className="card-h"><h2><i className="ti ti-checkbox mr-1 text-accent" />To-Dos</h2></div>
+          <div className="p-4"><TodoList clientId={patient.id} patientName={patient.name} compact /></div>
         </div>
       );
     };
@@ -8485,6 +8793,7 @@
         clinicalRoleLabel: (emrStatus && emrStatus.access && emrStatus.access.clinicalRoleLabel) || null,
         canSubmitBilling: !!(emrStatus && emrStatus.access && emrStatus.access.canSubmitBilling),
         canEditOrderDestination: !!(emrStatus && emrStatus.access && emrStatus.access.canEditOrderDestination),
+        canManageTasks: !!(emrStatus && emrStatus.access && emrStatus.access.canManageTasks),
         canCoSignCarePlan: !!(emrStatus && emrStatus.access && emrStatus.access.canCoSignCarePlan),
         credentialCeiling: (emrStatus && emrStatus.access && emrStatus.access.credentialCeiling) || []
       };
@@ -8656,12 +8965,14 @@
             )}
             {view === 'myday' && (
               <MyDayView user={user} onOpenChart={(clientId, opts) => openChartById(clientId, opts)}
-                onAddVisit={() => setView('schedule')} />
+                onAddVisit={() => setView('schedule')} onGo={(v) => setView(v)} />
             )}
             {view === 'queues' && (
-              <WorkQueuesView
-                onOpenChart={(clientId, opts) => openChartById(clientId, opts)}
-                onOpenEncounter={(clientId, euuid) => openChartById(clientId, { tab: 'encounters', encounterUuid: euuid })} />
+              <TasksShell onOpenChart={(clientId, opts) => openChartById(clientId, opts)}>
+                <WorkQueuesView
+                  onOpenChart={(clientId, opts) => openChartById(clientId, opts)}
+                  onOpenEncounter={(clientId, euuid) => openChartById(clientId, { tab: 'encounters', encounterUuid: euuid })} />
+              </TasksShell>
             )}
             {view === 'analytics' && <AnalyticsView />}
             {view === 'queue' && (

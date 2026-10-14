@@ -70,6 +70,7 @@ const clinicalRoles = require('./clinicalRoles');
 const impersonation = require('./impersonation');      // "View as" for the Super Admin (2026-10-12)
 const standingOrders = require('./standingOrders');   // signed, versioned, expiring protocols (4.8 Scope C)
 const clinicalInbox = require('./clinicalInbox');     // what is waiting on a clinician (4.9)
+const clinicalTasks = require('./clinicalTasks');
 const clinicalNotes = require('./clinicalNotes');     // the shared, versioned clinical note (2026-09-27)
 const noteFormat = require('./public/note-format');   // the six formatting shapes — app, OpenEMR and PDF read one rule set
 const myDay = require('./myDay');                     // the day, the visit stamps and the pre-visit
@@ -8502,6 +8503,9 @@ app.get('/api/clinical/status', authenticateToken, requireClinicalRead, async (r
       canSubmitBilling: clinicalRoles.canSubmitBilling(req.user),
       // Where an order goes: the one order edit a case manager holds.
       canEditOrderDestination: clinicalRoles.canEditOrderDestination(req.user),
+      // Patient to-dos: write, complete and be assigned one. A case manager
+      // holds this door too; the page draws the To-Dos UI from this answer.
+      canManageTasks: clinicalRoles.canManageTasks(req.user),
       // Who may add the second signature an IHPC or LMSW-authored care plan
       // waits on (a provider or an LCSW). Served so the page offers the pad
       // only to someone the route will accept.
@@ -15352,6 +15356,146 @@ app.get('/api/clinical/work-queues', authenticateToken, requireClinicalRead, asy
     console.error('Work queues error:', error);
     res.status(500).json({ error: 'Server error' });
   }
+});
+
+// ── Patient to-dos and the daily digest (owner, 2026-10-13) ────────────────
+// A to-do is seen ONLY by its assignee and its author (clinicalTasks.canSee).
+// A hidden one answers 404, never 403, so a refusal does not confirm it exists.
+// The audit records the action and the ids, never the title or the details.
+const requireTaskManager = (req, res, next) => {
+  if (clinicalRoles.canManageTasks(req.user)) return next();
+  return res.status(403).json({
+    error: 'Patient to-dos are for the clinical team: an admin, a manager, a case manager or a licensed clinician.',
+    code: 'TASKS_ONLY'
+  });
+};
+const sendTaskError = (res, e, label) => {
+  if (e instanceof clinicalTasks.TaskError) return res.status(e.status).json({ error: e.message, code: e.code });
+  console.error(`${label}:`, e);
+  return res.status(500).json({ error: 'Server error' });
+};
+const taskNameLookup = (users) => {
+  const byId = new Map((users || []).filter(Boolean).map(u => [String(u.id), u]));
+  return {
+    findUser: (id) => byId.get(String(id)) || null,
+    nameOf: (id) => { const u = byId.get(String(id)); return (u && u.name) || null; }
+  };
+};
+
+app.get('/api/clinical/tasks', authenticateToken, requireTaskManager, async (req, res) => {
+  try {
+    const today = practiceToday();
+    const [rows, users] = await Promise.all([loadRows('clinical_tasks'), getUsers()]);
+    const { nameOf } = taskNameLookup(users);
+    const viewer = actorFromReq(req);
+    const scope = ['mine', 'assigned_by_me', 'all'].includes(String(req.query.scope)) ? String(req.query.scope) : 'all';
+    const list = clinicalTasks.listForViewer({
+      tasks: rows, viewer, scope,
+      clientId: req.query.clientId ? String(req.query.clientId) : null,
+      includeClosed: String(req.query.includeClosed) === 'true'
+    });
+    const team = (users || []).filter(u => u && u.accountStatus !== 'inactive' && clinicalRoles.canManageTasks(u))
+      .map(u => ({ id: String(u.id), name: u.name || u.email || 'Unnamed' }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    res.json({
+      today,
+      tasks: clinicalTasks.sortTasks(list, today)
+        .map(t => clinicalTasks.publicTask({ ...t, patientName: nameOf(t.clientId) }, viewer, today)),
+      team,
+      categories: clinicalTasks.CATEGORIES,
+      priorities: clinicalTasks.PRIORITIES
+    });
+  } catch (e) { sendTaskError(res, e, 'Task list error'); }
+});
+
+app.post('/api/clinical/tasks', authenticateToken, requireTaskManager, async (req, res) => {
+  try {
+    const today = practiceToday();
+    const users = await getUsers();
+    const { findUser, nameOf } = taskNameLookup(users);
+    const clientId = req.body && req.body.clientId ? String(req.body.clientId) : null;
+    const client = clientId ? (users || []).find(u => u && String(u.id) === clientId && u.role === config.ROLES.CLIENT) : null;
+    if (clientId && !client) return res.status(404).json({ error: 'Patient not found.', code: 'TASK_CLIENT_NOT_FOUND' });
+    const actor = actorFromReq(req);
+    const task = clinicalTasks.createTask({ input: req.body, actor, client, findUser });
+    const rows = await loadRows('clinical_tasks');
+    rows.push(task);
+    await db.set('clinical_tasks', rows);
+    await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_task_created', 'client', task.clientId,
+      { taskId: task.id, assigneeId: task.assigneeId, assignedToSomeoneElse: task.assigneeId !== String(actor.id) });
+    res.status(201).json({ task: clinicalTasks.publicTask({ ...task, patientName: nameOf(task.clientId) }, actor, today) });
+  } catch (e) { sendTaskError(res, e, 'Task create error'); }
+});
+
+app.put('/api/clinical/tasks/:taskId', authenticateToken, requireTaskManager, async (req, res) => {
+  try {
+    const today = practiceToday();
+    const [rows, users] = await Promise.all([loadRows('clinical_tasks'), getUsers()]);
+    const { findUser, nameOf } = taskNameLookup(users);
+    const actor = actorFromReq(req);
+    const idx = rows.findIndex(t => t && t.id === String(req.params.taskId));
+    if (idx < 0 || !clinicalTasks.canSee(rows[idx], actor)) {
+      return res.status(404).json({ error: 'To-do not found.', code: 'TASK_NOT_FOUND' });
+    }
+    const action = String((req.body && req.body.action) || 'edit');
+    const { task, changed } = clinicalTasks.applyTaskAction({ task: rows[idx], action, input: req.body, actor, findUser });
+    if (changed.length) {
+      rows[idx] = task;
+      await db.set('clinical_tasks', rows);
+      await logActivity(req.user.id, req.user.name || req.user.email, `clinical_task_${action === 'edit' ? 'edited' : action}`, 'client', task.clientId,
+        { taskId: task.id, fields: changed });
+    }
+    res.json({ task: clinicalTasks.publicTask({ ...task, patientName: nameOf(task.clientId) }, actor, today) });
+  } catch (e) { sendTaskError(res, e, 'Task update error'); }
+});
+
+// GET /api/clinical/digest — "what needs me now" vs "what is coming", for the
+// signed-in person only. On screen only (owner): nothing here is emailed.
+app.get('/api/clinical/digest', authenticateToken, requireTaskManager, async (req, res) => {
+  try {
+    const today = practiceToday();
+    const viewer = actorFromReq(req);
+    const [tasks, records, attestations, orderRows, resultRows, visitLogs, users] = await Promise.all([
+      loadRows('clinical_tasks'), loadRows('encounter_billing'), loadRows('encounter_attestations'),
+      loadRows('clinical_orders'), loadRows('clinical_results'), loadRows('caregiver_visit_logs'), getUsers()
+    ]);
+    const { nameOf } = taskNameLookup(users);
+    const clients = users.filter(u => u.role === config.ROLES.CLIENT);
+    const patientNames = new Map(clients.map(c => [String(c.id), c.name || null]));
+    const inbox = clinicalInbox.buildInbox({
+      viewer, encounterRecords: records, attestations, orders: orderRows,
+      carePlanClients: clients.filter(c => isClinicalServiceLine(c.serviceLine)),
+      visitLogs, patientNames, now: new Date().toISOString()
+    });
+
+    // Upcoming visits come from the viewer's OWN calendar. Somebody with no
+    // calendar of their own (an admin, a case manager) gets none rather than
+    // the whole practice's, and the digest says so instead of looking empty.
+    let appointments = [];
+    let calendar = { ok: true, error: null };
+    if (!req.user.openEmrProviderId) {
+      calendar = { ok: false, code: 'NO_OWN_CALENDAR', error: 'You have no clinical calendar of your own, so visits are not listed here.' };
+    } else if (!openemr.isConfigured()) {
+      calendar = { ok: false, error: 'OpenEMR is not configured, so upcoming visits could not be read.' };
+    } else {
+      try {
+        const own = String(req.user.openEmrProviderId);
+        const rows = await openemr.forActor(req.user).listAppointmentRows();
+        appointments = await summarizeCalendarRows(rows, r => String(r.pc_aid) === own);
+      } catch (e) {
+        calendar = { ok: false, error: `Upcoming visits could not be read from OpenEMR: ${e.message}` };
+      }
+    }
+
+    res.json(clinicalTasks.buildDigest({
+      viewer, today, tasks,
+      inboxItems: inbox.items,
+      results: resultRows,
+      overdueOrders: orderReq.buildOverdueList(orderRows || []),
+      orders: orderRows,
+      appointments, calendar, nameOf
+    }));
+  } catch (e) { sendTaskError(res, e, 'Digest error'); }
 });
 
 // GET /api/clinical/analytics — Scope I4. Six metrics, and the frame they sit
