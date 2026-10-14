@@ -3079,8 +3079,10 @@
                           <select value={formData.careTeam.assignedCaseManager} onChange={(e) => setFormData({ ...formData, careTeam: { ...formData.careTeam, assignedCaseManager: e.target.value } })}
                             className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
                             <option value="">-- None --</option>
-                            {users.filter(u => u.role === 'caseManager').map(u => (
-                              <option key={u.id} value={u.id}>{u.name}</option>
+                            {/* Case managers, plus licensed social workers set up as
+                                clinician accounts (LMSW/LCSW), who can hold this role. */}
+                            {users.filter(u => u.role === 'caseManager' || (u.role === 'user' && ['lmsw', 'lcsw'].includes(u.clinicalRole))).map(u => (
+                              <option key={u.id} value={u.id}>{u.name}{u.role === 'user' ? ` (${String(u.clinicalRole).toUpperCase()})` : ''}</option>
                             ))}
                           </select>
                         </div>

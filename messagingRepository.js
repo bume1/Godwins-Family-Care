@@ -317,7 +317,10 @@ function clientInScope(user, client, { caregiverAssigned = false } = {}) {
   if (!user || !client) return false;
   if (isUnrestricted(user)) return true;
   const role = actorRole(user);
-  if (role === ROLE.CLINICAL) return assignedClinicianIds(client).includes(user.id);
+  // A licensed social worker set up as a clinician account (LMSW/LCSW) can be
+  // the client's case manager too (owner, 2026-10-14: Courtney could not see
+  // Juanita). Either slot puts the client in scope.
+  if (role === ROLE.CLINICAL) return assignedClinicianIds(client).includes(user.id) || caseManagerIds(client).includes(String(user.id));
   if (role === ROLE.CASE_MANAGER) return caseManagerIds(client).includes(String(user.id));
   if (role === ROLE.CAREGIVER) return !!caregiverAssigned || assignedCaregiverIds(client).includes(user.id);
   if (role === ROLE.CLIENT || role === ROLE.FAMILY) return ownClientId(user) === client.id;
@@ -476,7 +479,7 @@ function threadVisibility(user, thread, { client, isPoa = false } = {}) {
   }
 
   if (role === ROLE.CLINICAL) {
-    const assigned = client ? assignedClinicianIds(client).includes(user.id) : false;
+    const assigned = client ? (assignedClinicianIds(client).includes(user.id) || caseManagerIds(client).includes(String(user.id))) : false;
     if (assigned || isParty(thread, user.id)) return { visible: true, code: null, reason: null };
     return deny('CLINICAL_NOT_ASSIGNED', 'You are not on this client\'s care team.');
   }
