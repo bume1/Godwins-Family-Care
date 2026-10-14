@@ -79,7 +79,10 @@ const boot = async (opts = {}) => {
     const u = (await getUsers()).find(x => x.id === id);
     if (!u) return res.status(403).json({ error: 'no user', code: 'AUTH_INVALID' });
     req.user = { id: u.id, email: u.email, name: u.name, role: u.role, hasClinicalAccess: u.hasClinicalAccess || false,
-      licenseLevel: u.licenseLevel || null, familyOfClientId: u.familyOfClientId || null, familyIsPoa: u.familyIsPoa || false, careTeam: u.careTeam || null };
+      licenseLevel: u.licenseLevel || null, familyOfClientId: u.familyOfClientId || null, familyIsPoa: u.familyIsPoa || false, careTeam: u.careTeam || null,
+      // Production's req.user carries these; a harness without them tests a
+      // world with no managers in it.
+      isManager: !!u.isManager, accountStatus: u.accountStatus || 'active' };
     next();
   };
   const app = express();
@@ -430,8 +433,9 @@ test('the component keeps what people type, clears it only on success, and rende
   // cleared ONLY inside the success handlers
   // Four navigations (the fourth is startCompose, 10/2026: opening straight
   // into a new message on a FRESH mount, where there is nothing typed to lose)
-  // and the two success handlers.
-  assert.equal((code.match(/state\.draft = newDraft\(\);/g) || []).length, 6, 'four navigations and the two success handlers');
+  // and the two success handlers. A seventh since 2026-10-14: after a
+  // super admin's successful Delete Thread, when the thread no longer exists.
+  assert.equal((code.match(/state\.draft = newDraft\(\);/g) || []).length, 7, 'four navigations, the two success handlers and a successful delete');
   const start = code.slice(code.indexOf('var want = options.startCompose;'), code.indexOf('}).catch(function (err) {', code.indexOf('var want = options.startCompose;')));
   assert.match(start, /state\.draft = newDraft\(\);/, 'the startCompose clear is the one on mount');
   assert.match(start, /c\.id === want && c\.available/, 'and it only opens a channel the server lists as available');
@@ -547,4 +551,73 @@ test('a send that fails AFTER its files were stored removes them and writes noth
     assert.equal(h.drive.deleted.length, 2, 'and both removed when the message could not be written');
     assert.equal(rows(h, 'messages').length, 0);
   } finally { h.close(); }
+});
+
+// ============================================================
+// Owner, 2026-10-14: replies open everywhere a person can read, and only the
+// super admin deletes a thread.
+// ============================================================
+test('a Care Update a clinician sends is answered by the patient, the POA, family and the case manager over HTTP', async () => {
+  const h = await boot();
+  try {
+    const r = await h.call('fnp-1', 'POST', '/api/messaging/threads', { json: { channel: 'care_update', clientId: 'client-1', body: 'Labs look good' } });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+    const id = r.data.thread.id;
+    for (const who of ['client-1', 'poa-1', 'fam-1', 'cm-1']) {
+      const open = await h.call(who, 'GET', `/api/messaging/threads/${id}`);
+      assert.equal(open.status, 200, who);
+      assert.equal(open.data.canPost, true, `${who}: ${open.data.cannotPostReason}`);
+      const p = await h.call(who, 'POST', `/api/messaging/threads/${id}/messages`, { json: { body: `Thanks from ${who}` } });
+      assert.equal(p.status, 200, `${who}: ${JSON.stringify(p.data)}`);
+    }
+    assert.equal(rows(h, 'messages').filter(m => m.thread_id === id).length, 5);
+    assert.equal((await h.call('cg-1', 'GET', `/api/messaging/threads/${id}`)).status, 403, 'a caregiver still does not read it');
+  } finally { h.close(); }
+});
+
+test('only the super admin can delete a thread; it leaves every screen and is kept with who, when and why', async () => {
+  const h = await boot();
+  try {
+    const r = await h.call('client-1', 'POST', '/api/messaging/threads', { json: { channel: 'care_team', body: 'Question about my meds' } });
+    const id = r.data.thread.id;
+    await h.call('fnp-1', 'POST', `/api/messaging/threads/${id}/messages`, { json: { body: 'Happy to help' } });
+    // The page is told who may delete; it decides nothing itself.
+    assert.equal((await h.call('admin-1', 'GET', `/api/messaging/threads/${id}`)).data.canDelete, true);
+    assert.equal((await h.call('fnp-1', 'GET', `/api/messaging/threads/${id}`)).data.canDelete, false);
+    for (const who of ['fnp-1', 'cm-1', 'client-1', 'poa-1']) {
+      const d = await h.call(who, 'DELETE', `/api/messaging/threads/${id}`, { json: { reason: 'x' } });
+      assert.equal(d.status, 403, who);
+      assert.equal(d.data.code, 'DELETE_SUPER_ADMIN_ONLY');
+    }
+    // A manager is not the super admin.
+    h.store.get('users').push({ id: 'mgr-1', name: 'Manager', email: 'm@test.local', role: 'user', isManager: true, hasClinicalAccess: true });
+    assert.equal((await h.call('mgr-1', 'DELETE', `/api/messaging/threads/${id}`, { json: { reason: 'x' } })).status, 403);
+    const noReason = await h.call('admin-1', 'DELETE', `/api/messaging/threads/${id}`, { json: {} });
+    assert.equal(noReason.status, 400);
+    assert.equal(noReason.data.code, 'DELETE_REASON_REQUIRED');
+    assert.ok(rows(h, 'message_threads').some(t => t.id === id), 'a refusal deletes nothing');
+
+    const ok = await h.call('admin-1', 'DELETE', `/api/messaging/threads/${id}`, { json: { reason: 'Sent to the wrong patient' } });
+    assert.equal(ok.status, 200, JSON.stringify(ok.data));
+    assert.equal(ok.data.messageCount, 2);
+    assert.ok(!rows(h, 'message_threads').some(t => t.id === id), 'gone from the thread list');
+    assert.equal(rows(h, 'messages').filter(m => m.thread_id === id).length, 0, 'its messages are gone from view');
+    assert.equal((await h.call('client-1', 'GET', `/api/messaging/threads/${id}`)).status, 404);
+    const kept = rows(h, 'deleted_message_threads').find(a => a.thread.id === id);
+    assert.ok(kept, 'kept, never erased');
+    assert.equal(kept.messages.length, 2);
+    assert.equal(kept.deletedById, 'admin-1');
+    assert.equal(kept.reason, 'Sent to the wrong patient');
+    const audit = h.activity.find(a => a[2] === 'message_thread_deleted');
+    assert.ok(audit, 'the deletion is audited');
+    assert.ok(!JSON.stringify(audit).includes('Question about my meds') && !JSON.stringify(audit).includes('wrong patient'),
+      'the audit row names the thread, never its words');
+  } finally { h.close(); }
+});
+
+test('the component draws Delete Thread only from the server answer', () => {
+  const comp = fs.readFileSync(path.join(__dirname, '..', 'public', 'components', 'gfc-messaging.js'), 'utf8');
+  assert.match(comp, /state\.canDelete = !!res\.canDelete;/);
+  assert.match(comp, /\(state\.canDelete \? '<button class="mbtn ghost" data-delete-thread="1"/);
+  assert.match(comp, /method: 'DELETE', body: \{ reason: reason \}/);
 });

@@ -187,6 +187,7 @@ const COLLECTION_REGISTRY = Object.freeze([
   // cross-client leak repair. Tombstoned, never deleted: they are evidence of a
   // PHI exposure and a breach assessment may need to read them back.
   { key: 'quarantined_messages', phi: true, owner: '9', note: 'misfiled messages removed from view by scripts/repair_cross_client_messages.js; retained for breach assessment' },
+  { key: 'deleted_message_threads', phi: true, owner: '9', note: 'threads the super admin deleted, with their messages, who, when and why; kept, never erased' },
   // ---- notifications + email ----
   { key: 'pending_notifications', phi: true, owner: 'core', note: 'queued email bodies can name a client' },
   { key: 'notification_log', phi: true, owner: 'core' },

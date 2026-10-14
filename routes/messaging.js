@@ -369,10 +369,54 @@ module.exports = function createMessagingRoutes(deps) {
         messages: rows.map(m => ({ ...publicMessage(m), mine: m.from_user_id === req.user.id })),
         canPost: post.allowed,
         cannotPostReason: post.allowed ? null : post.reason,
-        cannotPostCode: post.allowed ? null : post.code
+        cannotPostCode: post.allowed ? null : post.code,
+        // The page draws Delete Thread from this answer and decides nothing.
+        canDelete: msg.canDeleteThread(req.user)
       });
     } catch (error) {
       console.error('Messaging thread read error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // ==========================================================================
+  // Delete a thread — SUPER ADMIN ONLY (owner, 2026-10-14)
+  // The thread and its messages leave every screen. They are moved, never
+  // erased: a conversation about a patient is a record, so the whole thread is
+  // kept in `deleted_message_threads` with who deleted it, when and why — the
+  // same rule the cross-client repair follows with `quarantined_messages`.
+  // Attachments stay where they are stored. The audit row names the thread,
+  // never its words.
+  // ==========================================================================
+  router.delete('/api/messaging/threads/:id', authenticateToken, requireMessagingRole, async (req, res) => {
+    try {
+      if (!msg.canDeleteThread(req.user)) {
+        return res.status(403).json({ error: 'Only the super admin can delete a message thread.', code: 'DELETE_SUPER_ADMIN_ONLY' });
+      }
+      const reason = String((req.body && req.body.reason) || '').trim().slice(0, 500);
+      if (!reason) return res.status(400).json({ error: 'Say why this thread is being deleted.', code: 'DELETE_REASON_REQUIRED' });
+      const threads = await readRows('message_threads');
+      const idx = threads.findIndex(t => t && t.id === req.params.id);
+      if (idx < 0) return res.status(404).json({ error: 'That conversation was not found.', code: 'THREAD_NOT_FOUND' });
+      const thread = threads[idx];
+      const all = await readRows('messages');
+      const removed = all.filter(m => m && m.thread_id === thread.id);
+      const deletedAt = new Date().toISOString();
+      const archive = await readRows('deleted_message_threads');
+      archive.push({
+        id: uuidv4(), thread, messages: removed, deletedAt,
+        deletedById: req.user.id, deletedByName: req.user.name || req.user.email || null, reason
+      });
+      // Archive FIRST, so a failure part-way leaves a copy rather than a gap.
+      await db.set('deleted_message_threads', archive);
+      await db.set('messages', all.filter(m => !(m && m.thread_id === thread.id)));
+      threads.splice(idx, 1);
+      await db.set('message_threads', threads);
+      await logActivity(req.user.id, req.user.name || req.user.email, 'message_thread_deleted', 'message_thread', thread.id,
+        { channel: thread.channel, clientId: thread.client_id, messageCount: removed.length });
+      res.json({ deleted: true, threadId: thread.id, messageCount: removed.length });
+    } catch (error) {
+      console.error('Messaging thread delete error:', error);
       res.status(500).json({ error: 'Server error' });
     }
   });
