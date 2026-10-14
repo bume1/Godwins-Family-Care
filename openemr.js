@@ -120,6 +120,19 @@ const rawRequest = async ({ actor, method, url, body, headers, formData }) => {
 };
 
 
+// The insurance route is gated on `user/insurance.write` / `.read` (derived
+// from the path). The deployed client predates B1, so this is the expected
+// failure until the owner registers a successor client — named as such.
+const insuranceScopeError = (res, kind) => {
+  const msg = String((res.data && (res.data.message || res.data.error)) || '');
+  const acl = /Organization policy/i.test(msg);
+  const e = new OpenEmrError(acl
+    ? `OpenEMR's access policy does not let this user ${kind} patient insurance (HTTP ${res.status}).`
+    : `The OpenEMR client this app uses does not carry the insurance ${kind} scope yet (HTTP ${res.status}). Register the successor client and swap its credentials.`, res.status, res.data);
+  e.code = acl ? 'EMR_INSURANCE_ACL' : 'EMR_INSURANCE_SCOPE';
+  return e;
+};
+
 const expectOk = (res, what) => {
   if (res.status >= 200 && res.status < 300) return res.data;
   const detail = res.data && (res.data.error_description || res.data.error ||
@@ -286,6 +299,46 @@ const forActor = (actor) => {
     // at all. Neither is "the patient has none". The callers carry that
     // distinction to the screen rather than rendering an empty list, because
     // an empty result is not a diagnosis.
+    // ---- B1 Scope C: patient insurance through the STANDARD REST route ----
+    // OpenEMR 8.4: POST/PUT /api/patient/:puuid/insurance, validated by
+    // src/Validators/CoverageValidator.php. FHIR Coverage is read-only on 8.4.
+    // A refused row answers HTTP 200 with a validationErrors map and writes
+    // nothing (InsuranceRestController::post → handleProcessingResult(…, 200)),
+    // so the BODY is checked, never the status code. The route needs
+    // `user/insurance.write`, which the deployed client may not carry; a 401
+    // here is reported as that, by name, never as "OpenEMR is down".
+    async listInsuranceCompanies() {
+      const res = await rawRequest({ actor, method: 'GET', url: apiUrl('insurance_company') });
+      if (res.status === 401 || res.status === 403) throw insuranceScopeError(res, 'read');
+      const rows = unwrapApi(expectOk(res, 'read insurance companies'));
+      logEmrAccess(actor, 'read', 'insurance_company', null, {});
+      return (Array.isArray(rows) ? rows : []).map(r => ({ id: r.id != null ? String(r.id) : null, name: r.name || '', cmsId: r.cms_id || null, inactive: String(r.inactive || '0') === '1' }))
+        .filter(r => r.id);
+    },
+    async listPatientInsurance(puuid) {
+      const res = await rawRequest({ actor, method: 'GET', url: apiUrl(`patient/${encodeURIComponent(puuid)}/insurance`) });
+      if (res.status === 401 || res.status === 403) throw insuranceScopeError(res, 'read');
+      const rows = unwrapApi(expectOk(res, 'read patient insurance'));
+      logEmrAccess(actor, 'read', 'insurance', puuid, {});
+      return Array.isArray(rows) ? rows : [];
+    },
+    async writePatientInsurance(puuid, row, insuranceUuid) {
+      const path = insuranceUuid
+        ? `patient/${encodeURIComponent(puuid)}/insurance/${encodeURIComponent(insuranceUuid)}`
+        : `patient/${encodeURIComponent(puuid)}/insurance`;
+      const res = await rawRequest({ actor, method: insuranceUuid ? 'PUT' : 'POST', url: apiUrl(path), body: row });
+      if (res.status === 401 || res.status === 403) throw insuranceScopeError(res, 'write');
+      const data = expectOk(res, 'write patient insurance');
+      const ve = data && data.validationErrors;
+      if (ve && (Array.isArray(ve) ? ve.length : Object.keys(ve).length)) {
+        throw new OpenEmrError(`OpenEMR rejected the insurance row: ${JSON.stringify(ve).slice(0, 400)}`, 422, data);
+      }
+      const out = unwrapApi(data);
+      const saved = Array.isArray(out) ? out[0] : out;
+      if (!saved || !saved.uuid) throw new OpenEmrError('OpenEMR did not return the insurance row it saved', 502, data);
+      logEmrAccess(actor, 'write', 'insurance', puuid, { type: row.type });
+      return saved;
+    },
     async getCoverage(puuid) {
       return bundleResources(await fhirGet(`Coverage?patient=${encodeURIComponent(puuid)}`, 'Coverage', puuid));
     },

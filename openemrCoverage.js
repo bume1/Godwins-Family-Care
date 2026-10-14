@@ -59,6 +59,16 @@ const CATALOG = Object.freeze([
   // three different fixes, so the screen names which one it got.
   { resource: 'Coverage', kind: 'read', status: 'wired_unproven', since: '4.12',
     note: 'Answered 403 on the org ACL before the 8.6 grant and 200 after (verified 2026-09-08) — but nothing has read an actual coverage row back. The payer summary the app bills from is its own, from intake.' },
+  // B1 (2026-10-13) REVISES a recorded decision. This used to be a deliberate
+  // omission ("writing a coverage row the app cannot verify would put an
+  // unchecked payer on a claim"). The reasoning is KEPT; the conclusion
+  // changed (owner, 2026-10-13): the app writes the row only after a biller has
+  // recorded a VERIFIED eligibility check and picked OpenEMR's insurance
+  // company, and the billing gate refuses a claim on unverified coverage.
+  { resource: 'insurance (patient)', kind: 'write', status: 'wired_unproven', since: 'B1',
+    note: 'Standard REST POST/PUT /api/patient/:puuid/insurance — FHIR Coverage is READ-ONLY on 8.4. Written only after a VERIFIED eligibility check, with the OpenEMR insurance company the biller picked; never from intake alone (owner, 2026-10-13, revising the earlier "do not write coverage" decision). Needs user/insurance.write, which the deployed v4 client does not carry: until the successor client is registered the write reports EMR_INSURANCE_SCOPE and the app record stands. A refused row answers HTTP 200 with validationErrors, so the body is checked. subscriber_ss is never sent.' },
+  { resource: 'insurance_company', kind: 'read', status: 'wired_unproven', since: 'B1',
+    note: 'GET /api/insurance_company, so the biller can pick the company the coverage is filed under. Its id is OpenEMR\'s own row id, not a payer id. Needs user/insurance_company.read (successor client).' },
   { resource: 'Immunization', kind: 'read', status: 'wired_unproven', since: '4.12',
     note: 'Never called before this session. Home-based primary care gives flu and COVID vaccines, so this is the one most likely to hold real rows.' },
   { resource: 'CareTeam', kind: 'read', status: 'wired_unproven', since: '4.12',
@@ -106,8 +116,6 @@ const CATALOG = Object.freeze([
   // ---- Deliberately not wired ----
   { resource: 'AuditEvent', kind: 'read', status: 'not_wired', since: '—',
     note: 'DELIBERATE — it 404s on 8.4, as do api/log and fhir/Provenance. An accounting of disclosures cannot be produced from OpenEMR; the app\'s own durable audit_log (Session 5.4) is the record.' },
-  { resource: 'Coverage', kind: 'write', status: 'not_wired', since: '—',
-    note: 'DELIBERATE — eligibility is Track D / B1 (Availity). Writing a coverage row the app cannot verify would put an unchecked payer on a claim.' },
   { resource: 'Immunization', kind: 'write', status: 'not_wired', since: '—',
     note: 'DELIBERATE — recording an administration needs lot, site, route and a VIS date, which nothing in the app collects. A half-recorded immunization is worse than none.' },
   { resource: 'Questionnaire', kind: 'write', status: 'not_wired', since: '—',

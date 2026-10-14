@@ -7,6 +7,7 @@ const path = require('path');
 const PDFDocument = require('pdfkit');
 const { PDFDocument: PDFLib, StandardFonts, rgb } = require('pdf-lib');
 const consentText = require('./public/consent-text');   // approved consent bodies, versioned (Session 4.6)
+const insuranceEligibility = require('./insuranceEligibility'); // B1: one payer vocabulary
 const consentRender = require('./consentRender');       // client-record values a body renders (4.6)
 const gfcTime = require('./public/gfc-time');           // the single source of the clock — Eastern, both sides
 // Fax formatting comes from the order module rather than a second copy here: a
@@ -1957,10 +1958,14 @@ async function generateRequisitionPDF(d) {
         .filter(Boolean).join(' ');
       twoUp({ label: 'Sex', value: intake.gender || client.gender }, { label: 'Phone', value: client.phone || intake.phone });
       pair('Address', addrLine);
-      const payer = client.payer || {};
-      twoUp({ label: 'MBI / Medicare id', value: mbi, id: true }, { label: 'Primary payer', value: [payer.primaryName || payer.name, payer.memberId].filter(Boolean).join(' — ') });
-      if (payer.secondaryName || payer.secondaryMemberId) {
-        pair('Secondary payer', [payer.secondaryName, payer.secondaryMemberId].filter(Boolean).join(' — '));
+      // B1: read through the ONE payer vocabulary. `primaryName` was never
+      // written by anything, so this line printed blank on every requisition.
+      const payers = insuranceEligibility.normalizePayers(client);
+      const p1 = payers.primary || payers.entries[0] || null;
+      const p2 = payers.secondary || null;
+      twoUp({ label: 'MBI / Medicare id', value: mbi, id: true }, { label: 'Primary payer', value: p1 ? [p1.payerName, p1.memberId].filter(Boolean).join(' — ') : '' });
+      if (p2) {
+        pair('Secondary payer', [p2.payerName, p2.memberId].filter(Boolean).join(' — '));
       }
 
       // ── Diagnoses ─────────────────────────────────────────────────────

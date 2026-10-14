@@ -69,6 +69,9 @@ const COLLECTION_REGISTRY = Object.freeze([
   // Patient statements: copays and home care hours. Amounts and dates of
   // service for a named client. Stripe holds only the invoice number.
   { key: 'patient_invoices', phi: true, owner: 'billing 10/2026' },
+  // B1: every eligibility result a biller recorded, append-only. The client
+  // record holds the CURRENT answer per rank; this is how it got there.
+  { key: 'insurance_verification_events', phi: true, owner: 'insurance eligibility 10/2026' },
   // The branded no-login upload link: one live row per client, revoked ones
   // kept as tombstones. The row is a pointer (a client id and a token), not
   // a document — but the token is a standing door onto that client's file,

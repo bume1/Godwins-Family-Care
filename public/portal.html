@@ -4524,9 +4524,47 @@
       </div>
     );
 
+    // B1 A5 — the insurance card photo, both sides, captured in the insurance
+    // step so the biller can check what was typed against the card. It files
+    // under the EXISTING insuranceCard document kind; there is no second upload.
+    const InsuranceCardUpload = ({ token }) => {
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      const [sent, setSent] = useState([]);
+      const pick = async (e) => {
+        const files = Array.from(e.target.files || []);
+        e.target.value = '';
+        if (!files.length) return;
+        setErr(''); setBusy(true);
+        try {
+          for (const file of files) {
+            if (file.size > 10 * 1024 * 1024) { setErr(`${file.name} is over 10 MB. Try a photo at a smaller size.`); continue; }
+            const b64 = await new Promise((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.onerror = reject; r.readAsDataURL(file); });
+            const res = await api.uploadGfcClientDocument(token, { kind: 'insuranceCard', fileName: file.name, fileDataB64: b64 });
+            if (res.error) { setErr(res.error); break; }
+            setSent(x => [...x, file.name]);
+          }
+        } catch (_) { setErr('That upload did not go through. Please try again.'); }
+        finally { setBusy(false); }
+      };
+      return (
+        <div className="fld">
+          <label>Photos of your insurance cards</label>
+          <div className="hint">The front and back of each card. Our billing team checks what you typed against them.</div>
+          <input type="file" accept="image/*,application/pdf" multiple disabled={busy} onChange={pick} />
+          {busy && <div className="hint">Uploading…</div>}
+          {sent.length > 0 && <div className="hint" style={{ color: 'var(--teal)' }}>Received: {sent.join(', ')}</div>}
+          {err && <div className="hint" style={{ color: 'var(--gfc-danger,#B5462E)' }}>{err}</div>}
+        </div>
+      );
+    };
+
     const GfcIntakeFlow = ({ token, me, onBack, onComplete }) => {
       const [loaded, setLoaded] = useState(false);
       const [serviceLine, setServiceLine] = useState(me.serviceLine || 'PHC');
+      // B1 A1: a Medicare number that does not look right is SAVED and flagged.
+      // The family is told once; a second Continue moves on regardless.
+      const [insWarn, setInsWarn] = useState([]);
       const [form, setForm] = useState({
         medications: [{ name: '', dose: '', route: '', frequency: '', prescriber: '', pharmacy: '' }],
         insuranceIds: [{ carrier: '', memberId: '', group: '' }],
@@ -4742,6 +4780,11 @@
         if (steps[step].key !== 'consents' && steps[step].key !== 'review') {
           const res = await saveDraft();
           if (res.error) { setBusy(false); setErr(res.error); return; }
+          const warn = (res.insuranceWarnings || []);
+          if (steps[step].key === 'insurance' && warn.length && !insWarn.length) {
+            setInsWarn(warn); setBusy(false); return;
+          }
+          if (steps[step].key === 'insurance') setInsWarn([]);
         }
         setBusy(false);
         setStep(s => Math.min(s + 1, steps.length - 1));
@@ -4987,7 +5030,7 @@
               <p className="sub">Capture full IDs now so enrollment can verify coverage.</p>
               <p className="lbl" style={{ marginTop: 8 }}>Identification</p>
               <TextField label="SSN (last 4 only)" value={form.ssnLast4} onChange={v => set('ssnLast4', (v || '').replace(/\D/g, '').slice(0, 4))} placeholder="1234" />
-              <SelectField label="Primary payer type" value={form.payerType} onChange={v => set('payerType', v)} options={['Private pay', 'LTC insurance', 'Medicaid waiver', 'VA', 'Medicare Part B', 'Dual eligible', 'Commercial', 'Combination']} />
+              <SelectField label="Primary payer type" value={form.payerType} onChange={v => set('payerType', v)} options={IO.payerType} />
               <CheckList label="Insurance types held" hint="Check all that apply." selected={form.insuranceTypes} onToggle={v => toggleArr('insuranceTypes', v)} options={IO.insuranceTypes} />
               <p className="lbl">Medicare</p>
               <TextField label="Medicare ID / beneficiary number" value={(form.medicare || {}).id} onChange={v => setNested('medicare', 'id', v)} />
@@ -4998,10 +5041,23 @@
                 <TextField label="Advantage group #" value={(form.medicare || {}).advGroupNum} onChange={v => setNested('medicare', 'advGroupNum', v)} />
               </div>
               <TextField label="Medicare Part D plan" value={(form.medicare || {}).partD} onChange={v => setNested('medicare', 'partD', v)} />
+              {insWarn.map((w, i) => <p key={i} className="sub" style={{ color: 'var(--gfc-danger,#B5462E)' }}>{w.message} Press Continue again to move on.</p>)}
+              <div className="grid2">
+                <TextField label="Medicare coverage start" type="date" value={(form.medicare || {}).coverageStart} onChange={v => setNested('medicare', 'coverageStart', v)} />
+                <TextField label="Coverage end (if ended)" type="date" value={(form.medicare || {}).coverageEnd} onChange={v => setNested('medicare', 'coverageEnd', v)} />
+              </div>
+              <SelectField label="Is Medicare billed first?" value={(form.medicare || {}).rank} onChange={v => setNested('medicare', 'rank', v)} options={IO.payerRank} />
+              <SelectField label="Qualified Medicare Beneficiary (QMB)?" value={form.qmb} onChange={v => set('qmb', v)} options={IO.qmb} />
+              <p className="micro" style={{ justifyContent: 'flex-start' }}><i className="ti ti-info-circle" />QMB is a Medicaid program that pays Medicare costs. If you are not sure, leave it as Unknown and we will check.</p>
               <p className="lbl">Medicaid</p>
               <TextField label="Medicaid member ID" value={(form.medicaid || {}).memberId} onChange={v => setNested('medicaid', 'memberId', v)} />
               <TextField label="Medicaid managed care plan" value={(form.medicaid || {}).plan} onChange={v => setNested('medicaid', 'plan', v)} />
               <SelectField label="Medicaid waiver program" value={(form.medicaid || {}).waiver} onChange={v => setNested('medicaid', 'waiver', v)} options={IO.medicaidWaiver} />
+              <div className="grid2">
+                <TextField label="Medicaid coverage start" type="date" value={(form.medicaid || {}).coverageStart} onChange={v => setNested('medicaid', 'coverageStart', v)} />
+                <TextField label="Coverage end (if ended)" type="date" value={(form.medicaid || {}).coverageEnd} onChange={v => setNested('medicaid', 'coverageEnd', v)} />
+              </div>
+              <SelectField label="Medicaid billing order" value={(form.medicaid || {}).rank} onChange={v => setNested('medicaid', 'rank', v)} options={IO.payerRank} />
               <div className="grid2">
                 <TextField label="Case manager name" value={(form.medicaid || {}).caseManager} onChange={v => setNested('medicaid', 'caseManager', v)} />
                 <TextField label="Case manager phone" type="tel" value={(form.medicaid || {}).caseManagerPhone} onChange={v => setNested('medicaid', 'caseManagerPhone', v)} />
@@ -5020,6 +5076,11 @@
               </div>
               <TextField label="Insurance phone (member services)" type="tel" value={(form.commercial || {}).insPhone} onChange={v => setNested('commercial', 'insPhone', v)} />
               <SelectField label="Home health / personal care benefit" value={(form.commercial || {}).homeBenefit} onChange={v => setNested('commercial', 'homeBenefit', v)} options={IO.homeBenefit} />
+              <div className="grid2">
+                <TextField label="Coverage start" type="date" value={(form.commercial || {}).coverageStart} onChange={v => setNested('commercial', 'coverageStart', v)} />
+                <TextField label="Coverage end (if ended)" type="date" value={(form.commercial || {}).coverageEnd} onChange={v => setNested('commercial', 'coverageEnd', v)} />
+              </div>
+              <SelectField label="Commercial billing order" value={(form.commercial || {}).rank} onChange={v => setNested('commercial', 'rank', v)} options={IO.payerRank} />
               <p className="lbl">Long-term care insurance</p>
               <SelectField label="LTC insurance carrier" value={(form.ltc || {}).carrier} onChange={v => setNested('ltc', 'carrier', v)} options={IO.ltcCarrier} />
               {(form.ltc || {}).carrier === 'Other' && <TextField label="Other carrier name" value={(form.ltc || {}).carrierOther} onChange={v => setNested('ltc', 'carrierOther', v)} />}
@@ -5030,6 +5091,10 @@
                 <TextField label="Elimination period" value={(form.ltc || {}).elimination} onChange={v => setNested('ltc', 'elimination', v)} />
               </div>
               <TextArea label="LTC insurance notes" value={(form.ltc || {}).notes} onChange={v => setNested('ltc', 'notes', v)} />
+              <div className="grid2">
+                <TextField label="LTC coverage start" type="date" value={(form.ltc || {}).coverageStart} onChange={v => setNested('ltc', 'coverageStart', v)} />
+                <TextField label="Coverage end (if ended)" type="date" value={(form.ltc || {}).coverageEnd} onChange={v => setNested('ltc', 'coverageEnd', v)} />
+              </div>
               <p className="lbl">Payment</p>
               <TextField label="Primary payment method" value={form.paymentMethod} onChange={v => set('paymentMethod', v)} />
               <TextField label="Billing contact (if different)" value={form.billingContact} onChange={v => set('billingContact', v)} />
@@ -5044,6 +5109,7 @@
                 </div>
               ))}
               <button className="addrow" onClick={addIns}><i className="ti ti-plus" /> Add Card</button>
+              <InsuranceCardUpload token={token} />
             </React.Fragment>
           )}
 

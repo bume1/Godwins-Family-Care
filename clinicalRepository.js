@@ -278,6 +278,7 @@ const summarizeDocument = (r) => ({
 // list; it is the EMR read gap, named on the row rather than hidden by omitting
 // it. Omitting it would tell the clinician the document does not exist.
 const clientDocs = require('./clientDocuments');
+const insuranceEligibility = require('./insuranceEligibility');
 const CHART_DOC_SOURCE = { APP: 'app', EMR: 'emr' };
 
 const buildChartDocumentIndex = (input) => {
@@ -2767,32 +2768,36 @@ const hasHomeVisitNotes = (notes) => !!notes && HOME_VISIT_FIELDS.some(([k]) => 
 // Not the whole payer block: the primary, the secondary, and the two flags that
 // change what can be ordered — a Medicare Advantage plan (prior authorization)
 // and QMB status (the patient may not be billed cost-share at all).
-const summarizePayerForBanner = (client) => {
+const summarizePayerForBanner = (client, { today } = {}) => {
+  // Read through the ONE payer vocabulary (insuranceEligibility.js). The
+  // labels a clinician reads come from the canonical entries, never from a
+  // stored code ('medicare_b') or a guess.
+  const norm = insuranceEligibility.normalizePayers(client);
   const intake = (client && client.intake) || {};
-  const payer = (client && client.payer) || {};
-  const medicare = intake.medicare || {};
-  const medicaid = intake.medicaid || {};
-  const commercial = intake.commercial || {};
   const types = Array.isArray(intake.insuranceTypes) ? intake.insuranceTypes : [];
-  const label = (name, id) => {
-    const n = String(name || '').trim();
-    const i = String(id || '').trim();
-    if (!n && !i) return null;
-    return i ? `${n || 'Coverage'} · ${i}` : n;
+  const label = (e) => {
+    if (!e) return null;
+    const id = String(e.memberId || '').trim();
+    return id ? `${e.payerName} · ${id}` : e.payerName;
   };
-  const candidates = [
-    medicare.id || medicare.type ? label(medicare.advantagePlan || medicare.type || 'Medicare', medicare.advMemberId || medicare.id) : null,
-    medicaid.memberId || medicaid.plan ? label(medicaid.plan || 'Medicaid', medicaid.memberId) : null,
-    commercial.carrier || commercial.memberId ? label(commercial.carrier || commercial.planName, commercial.memberId) : null
-  ].filter(Boolean);
+  const primary = norm.primary || norm.entries[0] || null;
+  const secondary = norm.secondary || norm.entries.find(e => e !== primary) || null;
+  // D4: verified shows the payer and the date; unverified says so; a
+  // mismatch shows BOTH values. Ages are shown, never enforced.
+  const v = insuranceEligibility.verificationState(client, { rank: 'primary', today });
   return {
-    primary: candidates[0] || payer.summary || payer.type || null,
-    secondary: candidates[1] || null,
-    medicareAdvantage: !!String(medicare.advantagePlan || '').trim(),
-    // QMB is not asked as its own question, so it is reported only when it is
-    // actually recorded. Inferring it from "has Medicare and Medicaid" would
-    // tell a clinician the patient cannot be billed when we do not know that.
-    qmb: payer.qmb === true || intake.qmb === true,
+    primary: label(primary),
+    secondary: label(secondary),
+    medicareAdvantage: norm.entries.some(e => e.kind === 'medicare_advantage'),
+    // QMB is STATED, never inferred: 'yes' only when somebody recorded it.
+    // Inferring it from "has Medicare and Medicaid" would tell a clinician
+    // the patient cannot be billed when we do not know that.
+    qmb: norm.qmb === 'yes',
+    qmbStatus: norm.qmb,
+    verification: { status: v.status, label: v.label, ageDays: v.ageDays,
+      found: v.verification && v.status === 'mismatch' ? { planType: insuranceEligibility.KIND_LABELS[v.verification.planTypeAsFound], payer: v.verification.payerAsFound } : null,
+      recorded: v.verification && v.status === 'mismatch' ? { planType: insuranceEligibility.KIND_LABELS[v.verification.recorded.kind], payer: v.verification.recorded.payerName } : null },
+    unresolved: norm.unresolved.map(u => u.message),
     types
   };
 };
@@ -2842,7 +2847,7 @@ const buildPatientBanner = ({ client, linked, emrAllergies, facility, lastVisitA
       practice: String(team.pcpPractice || '').trim() || null,
       phone: String(team.pcpPhone || '').trim() || null
     },
-    insurance: summarizePayerForBanner(c),
+    insurance: summarizePayerForBanner(c, { today }),
     facility: facility
       ? { id: facility.facilityId || null, name: facility.facilityName || null,
         posCode: facility.posCode || null, warning: facility.billingWarning || facility.warning || null }

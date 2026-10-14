@@ -22,7 +22,11 @@ test('config requests the five Phase 6B scopes', () => {
   }
   // A token is the intersection of requested and registered, so requesting
   // fewer than the v4 client holds silently re-creates the stale-client bug.
-  assert.strictEqual(scopes.length, 54, 'scope list must match the v4 client (54)');
+  // B1 (2026-10-13) requests two more AHEAD of the successor client
+  // (insurance write + the insurance-company list): the v4 client's 54 plus
+  // those two. Requesting a scope a client lacks is safe; dropping one is not.
+  assert.ok(scopes.includes('user/insurance.write') && scopes.includes('user/insurance_company.read'), 'B1 insurance scopes requested');
+  assert.strictEqual(scopes.length, 56, 'scope list = the v4 client (54) + the two B1 insurance scopes');
 });
 
 test('prescription scopes are requested (8.4 native Rx write)', () => {

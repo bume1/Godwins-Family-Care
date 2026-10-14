@@ -34,13 +34,15 @@ Exercised against the running EMR with the **stored value read back** — not a 
 | `order` | write | 4.5 | procedure_order plus order-code rows. The controller reads name/title on the order half and code_text on the charge half, so all three keys are sent. |
 | `codes` | read | 4.5 | Through OpenEMR's own main_code_set_search. ICD-10 returns; CPT returns 0 rows and that is CORRECT — AMA copyright, OpenEMR ships none. |
 
-## Wired, not proven (9)
+## Wired, not proven (11)
 
 The code exists and is called. **Nobody has run it against a real EMR.** It may 403 on the org-level ACL, 404 on a route 8.4 does not serve, or work perfectly — and those are three different problems with three different fixes. Saying so is the point of the row; an empty result is not a diagnosis.
 
 | Resource | Kind | Since | What to know |
 |---|---|---|---|
 | `Coverage` | read | 4.12 | Answered 403 on the org ACL before the 8.6 grant and 200 after (verified 2026-09-08) — but nothing has read an actual coverage row back. The payer summary the app bills from is its own, from intake. |
+| `insurance (patient)` | write | B1 | Standard REST POST/PUT /api/patient/:puuid/insurance — FHIR Coverage is READ-ONLY on 8.4. Written only after a VERIFIED eligibility check, with the OpenEMR insurance company the biller picked; never from intake alone (owner, 2026-10-13, revising the earlier "do not write coverage" decision). Needs user/insurance.write, which the deployed v4 client does not carry: until the successor client is registered the write reports EMR_INSURANCE_SCOPE and the app record stands. A refused row answers HTTP 200 with validationErrors, so the body is checked. subscriber_ss is never sent. |
+| `insurance_company` | read | B1 | GET /api/insurance_company, so the biller can pick the company the coverage is filed under. Its id is OpenEMR's own row id, not a payer id. Needs user/insurance_company.read (successor client). |
 | `Immunization` | read | 4.12 | Never called before this session. Home-based primary care gives flu and COVID vaccines, so this is the one most likely to hold real rows. |
 | `CareTeam` | read | 4.12 | The app holds its own careTeam on the client record and that stays the source of truth for routing an escalation. This read is for what OpenEMR believes, which may differ. |
 | `RelatedPerson` | read | 4.12 | Family and POA live on the app's user records; this is OpenEMR's own view. Never treat it as the POA designation — that is an app field set only after the document is verified. |
@@ -50,14 +52,13 @@ The code exists and is called. **Nobody has run it against a real EMR.** It may 
 | `QuestionnaireResponse` | read | 4.12 | OWNER 2026-09-23: OpenEMR ALREADY HOLDS these templates — PHQ-9, GAD-7 and the rest — so this read is how they surface and the app must not rebuild them. Unproven only in that nobody has run the read yet; that the templates exist is not in doubt. |
 | `Procedure` | read | 4.12 | Orders file into procedure_order through the 6B patch, not through FHIR. Whether they surface here is unknown. |
 
-## Deliberately not wired (8)
+## Deliberately not wired (7)
 
 A gap somebody **chose**, with the reason. That is a different fact from a gap nobody noticed, and only one of them is a bug.
 
 | Resource | Kind | Since | What to know |
 |---|---|---|---|
 | `AuditEvent` | read | — | DELIBERATE — it 404s on 8.4, as do api/log and fhir/Provenance. An accounting of disclosures cannot be produced from OpenEMR; the app's own durable audit_log (Session 5.4) is the record. |
-| `Coverage` | write | — | DELIBERATE — eligibility is Track D / B1 (Availity). Writing a coverage row the app cannot verify would put an unchecked payer on a claim. |
 | `Immunization` | write | — | DELIBERATE — recording an administration needs lot, site, route and a VIS date, which nothing in the app collects. A half-recorded immunization is worse than none. |
 | `Questionnaire` | write | — | DELIBERATE, and the reason is now stronger: the templates EXIST in OpenEMR (owner, 2026-09-23), so writing one from here would create a second copy of an instrument that already has an authoritative version. Scores are read; the instrument stays the EMR's. |
 | `Media` | write | — | DELIBERATE — a wound photograph goes to the chart as a document through the route that already exists and is proven, rather than through a second unproven path. |
