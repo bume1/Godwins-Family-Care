@@ -1558,6 +1558,8 @@ async function generateProviderROIPDF(d) {
 // in two states:
 //   - authored  (RN signed, client line blank, "PENDING CLIENT CO-SIGNATURE")
 //   - signed    (both signatures populated — the final legal artifact)
+// A plan that needs a provider's co-signature carries a third block
+// (d.providerSignature), shown as pending until the provider signs.
 // Brand: navy/gold/cream per ROI_COLORS (the 3.4 reference pattern).
 // ============================================================
 async function generateCarePlanPDF(d) {
@@ -1651,12 +1653,19 @@ async function generateCarePlanPDF(d) {
       doc.fontSize(9).fillColor(ROI_COLORS.muted).font('Times-Italic')
         .text(`Version ${plan.version ?? '—'} · authored ${fmt(plan.authoredAt)}${plan.authoredBy ? ` · ${plan.authoredBy}` : ''}`, L, y, { width: W });
       y += 16;
-      if (d.state === 'authored') {
+      // A plan that needs a provider's signature (IHPC authored by an RN, or
+      // any LMSW-authored plan) says so on the document. The version row keeps
+      // the status as it was at authoring ('pending'); the signature itself is
+      // what shows whether it has landed.
+      const providerRequired = ['pending', 'complete'].includes(plan.providerCoSignStatus) || !!(d.providerSignature && d.providerSignature.signatureImage);
+      const providerSigned = !!(d.providerSignature && d.providerSignature.signatureImage);
+      const banner = (text) => {
         doc.rect(L, y, W, 20).fillAndStroke('#FDF6E7', ROI_COLORS.goldRule);
-        doc.fontSize(9).fillColor('#9a6a1e').font('Helvetica-Bold')
-          .text('PENDING CLIENT CO-SIGNATURE — not yet in effect', L + 10, y + 6);
+        doc.fontSize(9).fillColor('#9a6a1e').font('Helvetica-Bold').text(text, L + 10, y + 6);
         y += 30;
-      }
+      };
+      if (d.state === 'authored') banner('PENDING CLIENT CO-SIGNATURE — not yet in effect');
+      if (providerRequired && !providerSigned) banner('PENDING PROVIDER CO-SIGNATURE — not yet in effect');
 
       // ── 1 Patient ──
       section(1, 'Patient');
@@ -1764,6 +1773,17 @@ async function generateCarePlanPDF(d) {
         .text('This care plan was developed with the client and family and is reviewed periodically. It takes effect when signed by the authoring clinician and co-signed by the client or authorized representative.', L, y, { width: W });
       y += doc.heightOfString('This care plan was developed with the client and family and is reviewed periodically. It takes effect when signed by the authoring clinician and co-signed by the client or authorized representative.', { width: W }) + 8;
       signatureBlock('RN / Clinician author signature', d.rnSignature);
+      if (providerRequired) {
+        // The provider (or LCSW) signature that completes an RN- or
+        // LMSW-authored plan, with the credential it was signed under.
+        signatureBlock('Provider co-signature', providerSigned ? d.providerSignature : { pending: true });
+        if (providerSigned && (d.providerSignature.clinicalRole || d.providerSignature.npi)) {
+          const role = { provider: 'Provider', lcsw: 'LCSW', rn: 'RN', lmsw: 'LMSW' }[d.providerSignature.clinicalRole] || d.providerSignature.clinicalRole || '';
+          doc.fontSize(8).fillColor(ROI_COLORS.muted).font('Helvetica')
+            .text([role && `Signed as ${role}`, d.providerSignature.npi && `NPI ${d.providerSignature.npi}`].filter(Boolean).join(' · '), L, y - 6, { width: W });
+          y += 10;
+        }
+      }
       signatureBlock('Client or authorized representative co-signature',
         d.clientSignature || { pending: true });
 

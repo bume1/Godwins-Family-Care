@@ -6626,6 +6626,7 @@ const emitSignedCarePlanPdf = async (clientId, version, clientSignature, actor) 
     const versionRows = (await db.get('care_plan_versions')) || [];
     const row = versionRows.find(r => r && r.client_id === clientId && String(r.version) === String(version));
     const rnSignature = row ? row.rnSignature : null;
+    const providerSignature = row ? row.providerSignature || null : null;
 
     const pdfBuffer = await pdfGenerator.generateCarePlanPDF({
       codeStatus: carePlanFormat.derivedFromClient(client).codeStatus,
@@ -6637,6 +6638,7 @@ const emitSignedCarePlanPdf = async (clientId, version, clientSignature, actor) 
       serviceLine: client.serviceLine || '',
       plan,
       rnSignature,
+      providerSignature,
       clientSignature
     });
 
@@ -6746,6 +6748,7 @@ const buildCarePlanPdfForVersion = async (client, version) => {
     serviceLine: client.serviceLine || '',
     plan: vrow ? vrow.plan : client.carePlan,
     rnSignature: vrow ? vrow.rnSignature : null,
+    providerSignature: vrow ? vrow.providerSignature || null : null,
     clientSignature: ev
       ? { at: ev.at, name: ev.name, ipHash: ev.ipHash, signatureImage: ev.signatureImage, signerRole: ev.signerRole }
       : { pending: true }
@@ -9618,7 +9621,20 @@ app.post('/api/clinical/patients/:clientId/care-plan/provider-cosign', authentic
     await logActivity(req.user.id, req.user.name || req.user.email, 'care_plan_provider_cosigned', 'care_plan', `v${plan.version}`, {
       clientId: client.id, authoredBy: plan.authoredById || null, authorClinicalRole: plan.authorClinicalRole || null
     });
-    res.json({ message: `Care plan v${plan.version} co-signed`, carePlan: users[idx].carePlan });
+    // If the client has already co-signed, the signed PDF stored and filed
+    // then shows the provider line as pending. Issue it again with all three
+    // signatures. Best-effort: a storage failure never voids the signature.
+    let signedPdf = null;
+    if ((client.carePlanCoSign || {})[`v${plan.version}`]) {
+      const ev = ((await db.get('care_plan_cosign_events')) || [])
+        .filter(e => e && e.client_id === client.id && String(e.version) === String(plan.version))
+        .sort((a, b) => String(b.at).localeCompare(String(a.at)))[0] || null;
+      if (ev) {
+        signedPdf = await emitSignedCarePlanPdf(client.id, plan.version,
+          { at: ev.at, name: ev.name, ipHash: ev.ipHash, signatureImage: ev.signatureImage, signerRole: ev.signerRole }, req.user);
+      }
+    }
+    res.json({ message: `Care plan v${plan.version} co-signed`, carePlan: users[idx].carePlan, signedPdf });
   } catch (error) {
     console.error('Care-plan provider co-sign error:', error);
     res.status(500).json({ error: 'Server error' });
