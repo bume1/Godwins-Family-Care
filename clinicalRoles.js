@@ -28,11 +28,16 @@ const CLINICAL_ROLES = Object.freeze({
   RN: 'rn',               // RN, including RN case managers
   LCSW: 'lcsw',           // clinical social worker, independently licensed (archetype A9)
   LMSW: 'lmsw',           // master's-level SW under supervision (A10): GFC's case managers and counselors
-  READ_ONLY: 'readOnly'   // staff without a clinical licence
+  READ_ONLY: 'readOnly',  // staff without a clinical licence
+  // Care coordinator (owner, 2026-10-14): unlicensed clinical support. Prepares
+  // notes, encounters and schedules for a licensed clinician; never signs,
+  // prescribes, codes or sends an order. NOT a licensed role, so every route
+  // behind the licensed write gate stays closed to them by default.
+  COORDINATOR: 'coordinator'
 });
 const ALL_CLINICAL_ROLES = Object.freeze([
   CLINICAL_ROLES.PROVIDER, CLINICAL_ROLES.RN, CLINICAL_ROLES.LCSW,
-  CLINICAL_ROLES.LMSW, CLINICAL_ROLES.READ_ONLY
+  CLINICAL_ROLES.LMSW, CLINICAL_ROLES.READ_ONLY, CLINICAL_ROLES.COORDINATOR
 ]);
 // The licensed roles — the ones `hasClinicalAccess` derives true for.
 const LICENSED_CLINICAL_ROLES = Object.freeze([
@@ -43,7 +48,8 @@ const CLINICAL_ROLE_LABELS = Object.freeze({
   rn: 'Registered Nurse',
   lcsw: 'LCSW (clinical social worker)',
   lmsw: 'LMSW (case manager / counselor)',
-  readOnly: 'Read-only (unlicensed staff)'
+  readOnly: 'Read-only (unlicensed staff)',
+  coordinator: 'Care Coordinator (unlicensed, prepares notes for a clinician to sign)'
 });
 
 // ---- The capability matrix ----------------------------------------------
@@ -119,7 +125,13 @@ const ROLE_CAPABILITIES = Object.freeze({
     'carePlanAuthor', 'documentUpload', 'scheduling', 'orderStanding',
     'referInternal', 'referralCoordination'
   ]),
-  readOnly: Object.freeze(['chartRead'])
+  readOnly: Object.freeze(['chartRead']),
+  // Documentation support only. No signing, prescribing, ordering, coding,
+  // medication reconciliation, problem list, care plan or result sign-off.
+  coordinator: Object.freeze([
+    'chartRead', 'vitalsWrite', 'nursingNote', 'behavioralNote', 'screeningInstrument',
+    'documentUpload', 'scheduling'
+  ])
 });
 
 // Why a capability was refused, in words a clinician can act on. A 403 that
@@ -178,10 +190,7 @@ const resolveClinicalRole = (user) => {
 // login destination, messaging role, MFA, the caregiver and scheduling routes
 // all read it. The field is not deleted in this session; it is no longer the
 // authority.
-const derivedHasClinicalAccess = (user) => {
-  const role = resolveClinicalRole(user);
-  return !!role && role !== CLINICAL_ROLES.READ_ONLY;
-};
+const derivedHasClinicalAccess = (user) => LICENSED_CLINICAL_ROLES.includes(resolveClinicalRole(user));
 
 const can = (user, capability) => {
   const role = resolveClinicalRole(user);
@@ -206,6 +215,11 @@ const refusalFor = (user, capability) => ({
 //         read-only access and must not regress.
 const canClinicalRead = (u) => !!resolveClinicalRole(u);
 const canClinicalWrite = (u) => derivedHasClinicalAccess(u);
+// A care coordinator documents (notes, encounters, scheduling) without being
+// licensed to write anything else. Routes open to them name this gate; every
+// other write route stays on canClinicalWrite and refuses them.
+const isCoordinator = (u) => resolveClinicalRole(u) === CLINICAL_ROLES.COORDINATOR;
+const canDocumentClinically = (u) => canClinicalWrite(u) || isCoordinator(u);
 
 // ---- The permitted code set (billing spec §4 item 4) --------------------
 // This is a PERMISSION BOUNDARY, not a fee schedule. OpenEMR owns the code
@@ -288,6 +302,9 @@ const isAuthorSigner = (user) => AUTHOR_SIGNER_ROLES.includes(resolveClinicalRol
 const evaluateEncounterSignature = (user, serviceCodes) => {
   const role = resolveClinicalRole(user);
   const codes = (Array.isArray(serviceCodes) ? serviceCodes : []).map(codeOf).filter(Boolean);
+  if (role === CLINICAL_ROLES.COORDINATOR) {
+    return { outcome: SIGN_OUTCOME.REFUSED, code: 'SIGN_COORDINATOR', reason: 'A care coordinator prepares the note. A licensed clinician signs it.' };
+  }
   if (!role || role === CLINICAL_ROLES.READ_ONLY) {
     return { outcome: SIGN_OUTCOME.REFUSED, code: 'SIGN_NO_CREDENTIAL', reason: 'Signing an encounter requires a clinical licence.' };
   }
@@ -424,7 +441,7 @@ const CARE_PLAN_OUTCOME = Object.freeze({ COMPLETE: 'complete', PENDING_PROVIDER
 const isClinicalLine = (serviceLine) => ['IHPC', 'BOTH'].includes(String(serviceLine || 'PHC').toUpperCase());
 const evaluateCarePlanSignature = (user, serviceLine) => {
   const role = resolveClinicalRole(user);
-  if (!role || role === CLINICAL_ROLES.READ_ONLY) {
+  if (!role || !LICENSED_CLINICAL_ROLES.includes(role)) {
     return { outcome: CARE_PLAN_OUTCOME.REFUSED, code: 'CARE_PLAN_NO_CREDENTIAL', reason: 'Authoring a care plan requires a clinical licence.' };
   }
   if (role === CLINICAL_ROLES.LMSW) {
@@ -464,7 +481,8 @@ const CREDENTIAL_CEILING = Object.freeze({
   rn: Object.freeze(['lab', 'imaging', 'procedure', 'screening']),
   lcsw: Object.freeze(['screening']),
   lmsw: Object.freeze(['screening']),
-  readOnly: Object.freeze([])
+  readOnly: Object.freeze([]),
+  coordinator: Object.freeze([])
 });
 const ceilingFor = (roleOrUser) => {
   const role = typeof roleOrUser === 'string' ? roleOrUser : resolveClinicalRole(roleOrUser);
@@ -606,7 +624,7 @@ module.exports = {
   can,
   capabilitiesFor,
   refusalFor,
-  canClinicalRead,
+  canClinicalRead, isCoordinator, canDocumentClinically,
   canClinicalWrite,
   BEHAVIORAL_HEALTH_SERVICE_CODES,
   isEvaluationAndManagementCode,

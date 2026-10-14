@@ -588,6 +588,18 @@ const checkEncounterDeletable = ({ record, closed, orders, prescriptions }) => {
 // Who signed, in what capacity, and who co-signed — read from the attestation
 // and the encounter record. The same summary drives the plain-text block in
 // OpenEMR, the bold block in the app and the signed-note PDF.
+// A care coordinator prepares a note and never signs it. Each coordinator who
+// saves it is remembered on the record, once, so the signature block can say
+// who did the documentation work beside who signed for it.
+const stampPreparedBy = (record, actor) => {
+  if (!record || !actor || actor.clinicalRole !== 'coordinator') return record;
+  const list = Array.isArray(record.preparedBy) ? record.preparedBy : [];
+  const key = String(actor.id || actor.name || '');
+  if (!list.some(p => String(p.id || p.name || '') === key)) {
+    record.preparedBy = list.concat([{ id: actor.id || null, name: actor.name || 'Unknown', at: new Date().toISOString() }]);
+  }
+  return record;
+};
 const buildSignatureSummary = ({ attestation, record }) => {
   if (!attestation || !attestation.signedAt) return null;
   const r = record || {};
@@ -598,7 +610,8 @@ const buildSignatureSummary = ({ attestation, record }) => {
       ? { ...r.coSignedBy, at: r.coSignedAt, capacity: 'clinician_addendum' }
       : null,
     awaitingAddendum: r.coSignStatus === 'pending',
-    coSignatures: (Array.isArray(r.coSignatures) ? r.coSignatures : []).map(c => ({ ...c }))
+    coSignatures: (Array.isArray(r.coSignatures) ? r.coSignatures : []).map(c => ({ ...c })),
+    preparedBy: (Array.isArray(r.preparedBy) ? r.preparedBy : []).map(p => ({ ...p }))
   };
 };
 const RULE = '========================================';
@@ -612,6 +625,7 @@ const signatureBlockLines = (summary) => {
   if (summary.billing) lines.push(`Clinician addendum and billing signature: ${personLine(summary.billing)} — ${fmtEt(summary.billing.at)}`);
   if (summary.awaitingAddendum) lines.push('AWAITING CLINICIAN ADDENDUM — not billable until a provider (or an LCSW, for behavioral health) adds it.');
   for (const c of summary.coSignatures) lines.push(`Co-signed by ${personLine(c)} — ${fmtEt(c.at)}`);
+  for (const p of summary.preparedBy || []) lines.push(`Prepared by ${p.name || 'Unknown'} — Care Coordinator (documentation support, not a signature)`);
   lines.push(RULE);
   return lines;
 };
@@ -710,6 +724,7 @@ module.exports = {
   fieldLabel,
   checkNoteVersion,
   buildNoteRevision,
+  stampPreparedBy,
   revisionsFor,
   contributorsFrom,
   sectionHasOwnField,

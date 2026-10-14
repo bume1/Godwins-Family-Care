@@ -150,6 +150,9 @@
     // accept, and every one is re-checked at the route regardless.
     const AccessContext = React.createContext({ canWrite: true, role: null, capabilities: {}, clinicalRole: null, canSubmitBilling: false });
     const useCanWrite = () => useContext(AccessContext).canWrite;
+    // A care coordinator documents and schedules without a licence: the note
+    // editor and the calendar read this, every other write reads canWrite.
+    const useCanDocument = () => { const c = useContext(AccessContext); return c.canDocument !== undefined ? !!c.canDocument : !!c.canWrite; };
     // Billing (an admin or a manager, owner 2026-09-29): the only viewer who
     // ever sees a place of service, edits codes after signing, or submits.
     // Answered by the server; false until it has answered.
@@ -1690,7 +1693,7 @@
               {onMessage && (
                 <button className="btn !py-2 !px-3.5 text-[13px]" onClick={onMessage}><i className="ti ti-message-circle" />Message</button>
               )}
-              {onStartVisit && access.canWrite && (
+              {onStartVisit && access.canDocument && (
                 <button className={`btn ${draftOpen ? 'gold' : 'ghost'} !py-2 !px-3.5 text-[13px]`} onClick={onStartVisit}>
                   <i className={`ti ${draftOpen ? 'ti-writing' : 'ti-player-play'}`} />{draftOpen ? 'Resume Draft' : 'Start Visit'}
                 </button>
@@ -1759,7 +1762,7 @@
                 <BannerFact label="Track" value={b.careTierLabel} />
               </div>
               <HomeVisitFacts homeVisit={b.homeVisit} fields={homeVisitFields} />
-              {access.canWrite && (
+              {access.canDocument && (
                 <HomeVisitEditor patient={patient} homeVisit={b.homeVisit} fields={homeVisitFields} onSaved={onHomeVisitSaved} />
               )}
               <button className="text-[12px] text-primary font-semibold flex items-center gap-1" onClick={() => setOpen(false)}>
@@ -3260,7 +3263,7 @@
                 <button className="px-2.5 py-2 text-primary" onClick={() => stepDay(1)} aria-label="Next day"><i className="ti ti-chevron-right" /></button>
               </div>
               <input className="inp !w-auto !py-1.5" type="date" value={date} onChange={e => e.target.value && setDate(e.target.value)} aria-label="Pick a date" />
-              {access.canWrite && onAddVisit && (
+              {access.canDocument && onAddVisit && (
                 <button className="btn gold" onClick={onAddVisit}><i className="ti ti-plus" />Add Visit</button>
               )}
             </div>
@@ -3304,7 +3307,7 @@
                 </div>
                 <div className="flex items-center gap-1.5 shrink-0">
                   <button className="btn ghost !py-1 !px-2 text-[12px]" onClick={load} title="Refresh"><i className="ti ti-refresh" /></button>
-                  {access.canWrite && visits.length > 1 && (
+                  {access.canDocument && visits.length > 1 && (
                     <button className="btn ghost !py-1 !px-2.5 text-[12px]" onClick={optimize} title="Optimize route">
                       <i className="ti ti-route" /><span className="hidden sm:inline">Optimize</span>
                     </button>
@@ -3351,7 +3354,7 @@
 
             <div className={selected ? '' : 'hidden xl:block'}>
               {selected
-                ? <VisitDetails key={selected.eid} v={selected} busy={busy} canWrite={access.canWrite}
+                ? <VisitDetails key={selected.eid} v={selected} busy={busy} canWrite={access.canDocument}
                     onBack={() => setSelEid(null)}
                     onOpenChart={onOpenChart}
                     onPacket={(vv) => setPacket({ clientId: vv.clientId, eid: vv.eid })}
@@ -5914,7 +5917,7 @@
 
     // Detail + actions for one appointment (calendar block or chart row).
     const AppointmentDetail = ({ appt: apptProp, providers, onClose, onChanged, onOpenChart, onReschedule, onDocument }) => {
-      const canWrite = useCanWrite();
+      const canWrite = useCanDocument();
       const [cancelOpen, setCancelOpen] = useState(false);
       const [reason, setReason] = useState('');
       const [busy, setBusy] = useState(''); const [err, setErr] = useState('');
@@ -6025,7 +6028,7 @@
     };
 
     const ScheduleView = ({ user, patients, onOpenChart, onDocument }) => {
-      const canWrite = useCanWrite();
+      const canWrite = useCanDocument();
       const [providersData, setProvidersData] = useState(null);
       // A week of seven columns does not fit a phone; a phone opens on the day.
       const [mode, setMode] = useState(() => {
@@ -6145,7 +6148,7 @@
     // Chart tab: this patient's upcoming + past appointments with
     // documented / no-show / not-yet-documented state (Scope B).
     const ApptsTab = ({ patient, patients, chart, onDocumentHp, onEncounterCreated }) => {
-      const canWrite = useCanWrite();
+      const canWrite = useCanDocument();
       const [data, setData] = useState(null);
       const [err, setErr] = useState('');
       const [providersData, setProvidersData] = useState(null);
@@ -8245,7 +8248,8 @@
       if (!d) return <p className="text-sm text-stone-500 p-4">Loading encounter from OpenEMR…</p>;
       const closed = d.closed;
       // Read-only for a signed encounter OR a read-only role (case manager)
-      const locked = closed || !canWrite;
+      const canDocument = useCanDocument();
+      const locked = closed || !canDocument;
       // What this viewer may do with the NOTE is answered by the server
       // (noteActions) — the page decides no credential question itself.
       const na = d.noteActions || {};
@@ -8406,7 +8410,7 @@
               onSave={(form) => run('screen', () => api.saveScreening(patient.id, euuid, form))} />
           )}
           {on('visit') && (
-            <RiskCard d={d} patient={patient} euuid={euuid} locked={locked} busy={busy === 'risk'}
+            <RiskCard d={d} patient={patient} euuid={euuid} locked={locked || !canWrite} busy={busy === 'risk'}
               onSave={(form) => run('risk', () => api.saveRisk(patient.id, euuid, form))} />
           )}
 
@@ -8543,6 +8547,13 @@
             </div>
           </div>}
 
+          {on('sign') && !locked && ns.status === 'draft' && na.canEdit && na.canSign === false && (
+            <div className="card mb-4">
+              <div className="card-h"><h2>Sign &amp; Submit</h2></div>
+              <div className="p-4 text-sm text-stone-700">You prepare this note as a <b>care coordinator</b>. Save the draft and the clinician on the visit reviews it, edits anything they need and signs. Your name stays on the note as the person who prepared it.</div>
+            </div>
+          )}
+
           {on('sign') && !locked && ns.status === 'draft' && !na.canEdit && (
             <div className="card mb-4">
               <div className="card-h"><h2>Sign &amp; Submit</h2></div>
@@ -8554,7 +8565,7 @@
               behavioral-health set) is the billable one; an RN's or LMSW's is
               the AUTHOR's and waits for a clinician addendum. The server
               decides which, and the readiness shown is the one for THIS viewer. */}
-          {on('sign') && !locked && ns.status === 'draft' && na.canEdit && (
+          {on('sign') && !locked && ns.status === 'draft' && na.canEdit && na.canSign !== false && (
             <div className="card mb-4">
               <div className="card-h"><h2>Sign &amp; Submit</h2>
                 {noteDirty
@@ -8727,7 +8738,7 @@
 
     // Chart tab: this patient's encounters with coded / signed state.
     const EncountersTab = ({ patient, chart, initialEuuid, onOpened, onChartChanged }) => {
-      const canWrite = useCanWrite();
+      const canWrite = useCanDocument();
       const [data, setData] = useState(null);
       const [err, setErr] = useState('');
       const [open, setOpen] = useState(initialEuuid || null);
@@ -9045,7 +9056,7 @@
             <div className="cw-avatar w-14 h-14 text-[17px]">{initials(user.name)}</div>
             <div className="min-w-0 flex-1">
               <div className="font-semibold text-primary text-[15px]">{user.name}</div>
-              <div className="text-[13px] text-stone-500">{access.clinicalRoleLabel || user.role}{!canWrite ? ' · Read-only' : ''}</div>
+              <div className="text-[13px] text-stone-500">{access.clinicalRoleLabel || user.role}{!canWrite && !access.canDocument ? ' · Read-only' : ''}</div>
             </div>
             <button className="btn ghost" onClick={signOut}><i className="ti ti-logout" />Sign Out</button>
           </div>
@@ -9280,6 +9291,8 @@
       const canWrite = emrStatus && emrStatus.access ? !!emrStatus.access.canWrite : canWriteFor(user);
       const access = {
         canWrite, role: user.role,
+        canDocument: emrStatus && emrStatus.access && emrStatus.access.canDocument !== undefined ? !!emrStatus.access.canDocument : canWrite,
+        isCoordinator: !!(emrStatus && emrStatus.access && emrStatus.access.isCoordinator),
         capabilities: (emrStatus && emrStatus.access && emrStatus.access.capabilities) || {},
         clinicalRole: (emrStatus && emrStatus.access && emrStatus.access.clinicalRole) || null,
         clinicalRoleLabel: (emrStatus && emrStatus.access && emrStatus.access.clinicalRoleLabel) || null,
@@ -9354,7 +9367,7 @@
                 <div className="w-10 h-10 rounded-full bg-accent text-primary flex items-center justify-center font-bold text-[13px] shrink-0">{initials(user.name)}</div>
                 <div className="min-w-0">
                   <div className="text-[13.5px] font-semibold truncate">{user.name}</div>
-                  <div className="text-[11.5px] text-white/60 truncate">{access.clinicalRoleLabel || user.role}{!canWrite ? ' · Read-only' : ''}</div>
+                  <div className="text-[11.5px] text-white/60 truncate">{access.clinicalRoleLabel || user.role}{!canWrite && !access.canDocument ? ' · Read-only' : ''}</div>
                 </div>
               </div>
             </div>
@@ -9368,7 +9381,8 @@
                 <input className="flex-1 bg-transparent py-2 text-[13.5px] outline-none min-w-0" placeholder="Search patients by name…"
                   value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => e.key === 'Enter' && runSearch()} aria-label="Search patients" />
               </div>
-              {!canWrite && <span className="chip bg-amber-50 text-amber-800 hidden sm:inline-flex" title="Case-manager scoped read: every write route answers 403.">Read-only</span>}
+              {!canWrite && !access.canDocument && <span className="chip bg-amber-50 text-amber-800 hidden sm:inline-flex" title="Case-manager scoped read: every write route answers 403.">Read-only</span>}
+              {access.isCoordinator && <span className="chip bg-teal-50 text-teal-800 hidden sm:inline-flex" title="Prepares notes and books visits. A licensed clinician signs.">Care Coordinator</span>}
               <button className="relative shrink-0 w-10 h-10 rounded-xl flex items-center justify-center text-primary hover:bg-white" title="Inbox"
                 onClick={() => setView('inbox')} aria-label="Inbox">
                 <i className="ti ti-bell text-[21px]" />
@@ -9512,7 +9526,7 @@
                   patient={sel}
                   homeVisitFields={(emrStatus && emrStatus.homeVisitFields) || []}
                   visitDraft={chart ? chart.visitDraft : null}
-                  onStartVisit={canWrite ? startVisit : null}
+                  onStartVisit={access.canDocument ? startVisit : null}
                   onHomeVisitSaved={refreshChart}
                   onMessage={() => setTab('messages')} />
                 <div className="bg-white border-b border-stone-200 px-4 lg:px-8 hidden lg:block">

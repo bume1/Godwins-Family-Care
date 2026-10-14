@@ -2602,6 +2602,17 @@ const requireClinicalRead = (req, res, next) => {
   }
   return next();
 };
+// Care coordinators (owner, 2026-10-14) document and schedule without being
+// licensed to write anything else. ONLY the note, encounter and scheduling
+// routes name this gate; every other write route stays on requireClinicalWrite
+// and refuses them. A route added later is closed to coordinators by default.
+const requireClinicalDocumenter = (req, res, next) => {
+  if (clinicalRoles.canDocumentClinically(req.user)) return next();
+  if (req.user.role === config.ROLES.CASE_MANAGER) {
+    return res.status(403).json({ error: 'Case managers have read-only clinical access.', code: 'CLINICAL_READ_ONLY' });
+  }
+  return res.status(403).json({ error: 'Clinical access required.', code: 'CLINICAL_ONLY' });
+};
 const requireClinicalWrite = (req, res, next) => {
   if (patientRead.canClinicalWrite(req.user)) return next();
   if (req.user.role === config.ROLES.CASE_MANAGER) {
@@ -2967,6 +2978,11 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       hasClinicalAccess: clinicalRoles.isValidClinicalRole(clinicalRole)
         ? clinicalRoles.derivedHasClinicalAccess({ clinicalRole })
         : (hasClinicalAccess || false),
+      // A case manager created with a chosen role keeps it: the boot LMSW
+      // migration only moves case managers nobody chose a role for.
+      ...(role === config.ROLES.CASE_MANAGER && clinicalRoles.isValidClinicalRole(clinicalRole)
+        ? { caseManagerLmswMigration: { version: clinicalRoles.CASE_MANAGER_LMSW_MARKER, at: new Date().toISOString(), from: 'admin_set' } }
+        : {}),
       licenseLevel: licenseLevel || null,
       // OpenEMR provider mapping for clinician calendars (Session 4.2)
       openEmrProviderId: openEmrProviderId || null,
@@ -3035,7 +3051,7 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       }
       // GFC client enrollment & care team defaults
       newUser.enrollmentStatus = enrollmentStatus || 'intake_pending';
-      newUser.careTeam = careTeam || { assignedFNPs: [], assignedCaseManager: null, primaryCaregiver: null, backupCaregiver: null };
+      newUser.careTeam = careTeam || { assignedFNPs: [], assignedCaseManager: null, primaryCaregiver: null, backupCaregiver: null, careCoordinators: [] };
       // If adding user to an existing portal, inherit slug and practice settings
       if (existingPortalSlug) {
         const existingClient = users.find(u => u.role === config.ROLES.CLIENT && u.slug === existingPortalSlug);
@@ -4131,6 +4147,11 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
       users[idx].clinicalRole = wanted;
       users[idx].clinicalRoleAutoAssigned = false;   // an admin chose it — the boot reminder stops for this user
       users[idx].hasClinicalAccess = clinicalRoles.derivedHasClinicalAccess({ clinicalRole: wanted });
+      // A case manager's role an admin chose is final: the boot migration that
+      // moves read-only case managers to LMSW must not overrule it next restart.
+      if (users[idx].role === config.ROLES.CASE_MANAGER && !users[idx].caseManagerLmswMigration) {
+        users[idx].caseManagerLmswMigration = { version: clinicalRoles.CASE_MANAGER_LMSW_MARKER, at: new Date().toISOString(), from: 'admin_set' };
+      }
       await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_role_set', 'user', users[idx].id, {
         clinicalRole: wanted, targetName: users[idx].name, targetEmail: users[idx].email
       });
@@ -6583,7 +6604,8 @@ const careTeamForPortal = (client, users) => {
     person(team.backupCaregiver, 'Backup caregiver'),
     ...(Array.isArray(team.assignedFNPs) ? team.assignedFNPs : []).map(id => person(id, clinicianRole(id))),
     person(team.assignedCaseManager, 'Case manager'),
-    ...(Array.isArray(team.supportingCaseManagers) ? team.supportingCaseManagers : []).map(id => person(id, 'Case manager'))
+    ...(Array.isArray(team.supportingCaseManagers) ? team.supportingCaseManagers : []).map(id => person(id, 'Case manager')),
+    ...(Array.isArray(team.careCoordinators) ? team.careCoordinators : []).map(id => person(id, 'Care coordinator'))
   ].filter(Boolean);
   const seen = new Set();
   const careTeam = members.filter(m => { const k = `${m.name}|${m.role}`; if (seen.has(k)) return false; seen.add(k); return true; });
@@ -8612,6 +8634,10 @@ app.get('/api/clinical/status', authenticateToken, requireClinicalRead, async (r
     // what to draw — every one of these is re-checked at the route.
     access: {
       canRead: true, canWrite: patientRead.canClinicalWrite(req.user), role: req.user.role,
+      // A care coordinator documents and schedules but holds no license:
+      // canDocument is the note and calendar door, canWrite everything else.
+      canDocument: clinicalRoles.canDocumentClinically(req.user),
+      isCoordinator: clinicalRoles.isCoordinator(req.user),
       clinicalRole: clinicalRoles.resolveClinicalRole(req.user),
       clinicalRoleLabel: clinicalRoles.CLINICAL_ROLE_LABELS[clinicalRoles.resolveClinicalRole(req.user)] || null,
       capabilities: clinicalRoles.capabilitiesFor(req.user),
@@ -9134,7 +9160,7 @@ app.get('/api/clinical/patients/:clientId/visit/draft', authenticateToken, requi
   }
 });
 
-app.put('/api/clinical/patients/:clientId/visit/draft', authenticateToken, requireClinicalWrite, requireNoteWriter, async (req, res) => {
+app.put('/api/clinical/patients/:clientId/visit/draft', authenticateToken, requireClinicalDocumenter, requireNoteWriter, async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -9170,7 +9196,7 @@ app.put('/api/clinical/patients/:clientId/visit/draft', authenticateToken, requi
   }
 });
 
-app.delete('/api/clinical/patients/:clientId/visit/draft', authenticateToken, requireClinicalWrite, requireNoteWriter, async (req, res) => {
+app.delete('/api/clinical/patients/:clientId/visit/draft', authenticateToken, requireClinicalDocumenter, requireNoteWriter, async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -9183,7 +9209,7 @@ app.delete('/api/clinical/patients/:clientId/visit/draft', authenticateToken, re
   }
 });
 
-app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.NURSING_NOTE), async (req, res) => {
+app.post('/api/clinical/patients/:clientId/visit', authenticateToken, requireClinicalDocumenter, requireCapability(clinicalRoles.CAPABILITIES.NURSING_NOTE), async (req, res) => {
   try {
     const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -9959,7 +9985,7 @@ const resolveProviderScope = (reqUser, requestedProviderId) => {
   // Admin: unified view. Case manager (4.3 scoped READ — every appointment
   // write route is requireClinicalWrite, so this widens nothing): the same
   // unified read view, since they own no calendar of their own.
-  if (reqUser.role === config.ROLES.ADMIN || reqUser.role === config.ROLES.CASE_MANAGER) {
+  if (reqUser.role === config.ROLES.ADMIN || reqUser.role === config.ROLES.CASE_MANAGER || clinicalRoles.isCoordinator(reqUser)) {
     return { providerId: requestedProviderId ? String(requestedProviderId) : null, all: !requestedProviderId };
   }
   if (!reqUser.openEmrProviderId) {
@@ -10216,7 +10242,7 @@ const loadAppointmentForMutation = async (emr, eid, reqUser) => {
   const rows = await emr.listAppointmentRows();
   const listRow = rows.find(r => String(r.pc_eid) === String(eid));
   if (!listRow) return { status: 404, error: 'No OpenEMR appointment with that id (it may have been superseded — refresh the calendar)', code: 'APPT_NOT_FOUND' };
-  if (reqUser.role !== config.ROLES.ADMIN && String(listRow.pc_aid) !== String(reqUser.openEmrProviderId || '')) {
+  if (reqUser.role !== config.ROLES.ADMIN && !clinicalRoles.isCoordinator(reqUser) && String(listRow.pc_aid) !== String(reqUser.openEmrProviderId || '')) {
     return { status: 403, error: 'Clinicians can only change appointments on their own calendar.', code: 'PROVIDER_SCOPE' };
   }
   if (listRow.pc_apptstatus === clinicalRepo.APPT_STATUS.cancelled) {
@@ -10334,7 +10360,7 @@ app.get('/api/clinical/appointments/:eid', authenticateToken, requireClinicalRea
     const rows = await emr.listAppointmentRows();
     const listRow = rows.find(r => String(r.pc_eid) === String(req.params.eid));
     if (!listRow) return res.status(404).json({ error: 'No OpenEMR appointment with that id', code: 'APPT_NOT_FOUND' });
-    if (![config.ROLES.ADMIN, config.ROLES.CASE_MANAGER].includes(req.user.role) && String(listRow.pc_aid) !== String(req.user.openEmrProviderId || '')) {
+    if (![config.ROLES.ADMIN, config.ROLES.CASE_MANAGER].includes(req.user.role) && !clinicalRoles.isCoordinator(req.user) && String(listRow.pc_aid) !== String(req.user.openEmrProviderId || '')) {
       return res.status(403).json({ error: 'Clinicians can only view appointments on their own calendar.', code: 'PROVIDER_SCOPE' });
     }
     const full = await emr.getAppointmentRow(listRow.puuid, listRow.pc_eid).catch(() => null);
@@ -10349,7 +10375,7 @@ app.get('/api/clinical/appointments/:eid', authenticateToken, requireClinicalRea
 // POST /api/clinical/patients/:clientId/appointments — create on the
 // provider's OpenEMR calendar. Double-booking is rejected against the LIVE
 // OpenEMR list (the availability authority) with a specific 409.
-app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.SCHEDULING), async (req, res) => {
+app.post('/api/clinical/patients/:clientId/appointments', authenticateToken, requireClinicalDocumenter, requireCapability(clinicalRoles.CAPABILITIES.SCHEDULING), async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -10506,7 +10532,7 @@ const mirrorVisitToGoogle = async ({ clientId, eid, previousEid, title, date, st
 // POST /api/clinical/appointments/:eid/reschedule — tombstone swap: new slot
 // row + cancelled tombstone preserving the old slot, then remove the
 // superseded row. Conflict-checked against the live calendar first.
-app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.SCHEDULING), async (req, res) => {
+app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requireClinicalDocumenter, requireCapability(clinicalRoles.CAPABILITIES.SCHEDULING), async (req, res) => {
   try {
     if (!openemr.isConfigured()) return res.status(503).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
     const body = req.body || {};
@@ -10659,7 +10685,7 @@ app.post('/api/clinical/appointments/:eid/reschedule', authenticateToken, requir
 // POST /api/clinical/appointments/:eid/cancel — reason REQUIRED; the slot
 // becomes a cancelled row (status 'x') with the reason on it. Never a bare
 // hard delete.
-app.post('/api/clinical/appointments/:eid/cancel', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.SCHEDULING), async (req, res) => {
+app.post('/api/clinical/appointments/:eid/cancel', authenticateToken, requireClinicalDocumenter, requireCapability(clinicalRoles.CAPABILITIES.SCHEDULING), async (req, res) => {
   try {
     if (!openemr.isConfigured()) return res.status(503).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
     const reason = String((req.body || {}).reason || '').trim();
@@ -10723,7 +10749,7 @@ app.post('/api/clinical/appointments/:eid/cancel', authenticateToken, requireCli
 
 // POST /api/clinical/appointments/:eid/no-show — same swap, status '?'; the
 // chart list shows it as no-show (Scope B).
-app.post('/api/clinical/appointments/:eid/no-show', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.SCHEDULING), async (req, res) => {
+app.post('/api/clinical/appointments/:eid/no-show', authenticateToken, requireClinicalDocumenter, requireCapability(clinicalRoles.CAPABILITIES.SCHEDULING), async (req, res) => {
   try {
     if (!openemr.isConfigured()) return res.status(503).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
     const emr = openemr.forActor(req.user);
@@ -10865,6 +10891,7 @@ const getNcciTables = async () => {
 
 // Shown when the acting clinician has no OpenEMR provider id, so the encounter
 // falls back to the configured default provider instead of naming them.
+const COORDINATOR_NO_APPOINTMENT_WARNING = 'This note is not attached to a booked visit, so OpenEMR filed it under the practice default provider. Attach it to the visit it belongs to before the clinician signs.';
 const NO_PROVIDER_ID_WARNING = 'This visit was filed under the practice default provider, not you: your user record has no OpenEMR provider id. An admin sets it in Admin hub \u2192 Users. Charges will not post at sign-and-close until it is set.';
 
 // The acting clinician as stamped onto records (name, credential, NPI).
@@ -11574,7 +11601,7 @@ app.get('/api/clinical/patients/:clientId/dx-candidates', authenticateToken, req
 // Shorter SOAP form (S / O incl. vitals / A / P) → Encounter + narrative note
 // in OpenEMR (attribution stamped, §4), the app-side encounter_billing record,
 // optional T1-selected diagnoses and services, and the GFC structured note.
-app.post('/api/clinical/patients/:clientId/encounters', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.NURSING_NOTE), async (req, res) => {
+app.post('/api/clinical/patients/:clientId/encounters', authenticateToken, requireClinicalDocumenter, requireCapability(clinicalRoles.CAPABILITIES.NURSING_NOTE), async (req, res) => {
   try {
     const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -11962,7 +11989,7 @@ const noteView = async (ctx, extra = {}) => {
 };
 
 // ── First save: the encounter, the narrative and revision 1, in one action ──
-app.post('/api/clinical/patients/:clientId/notes', authenticateToken, requireClinicalWrite, requireNoteWriter, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/notes', authenticateToken, requireClinicalDocumenter, requireNoteWriter, async (req, res) => {
   try {
     const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -12010,6 +12037,10 @@ app.post('/api/clinical/patients/:clientId/notes', authenticateToken, requireCli
     if (place.posCode) encounter.pos_code = place.posCode;
     const bill = await resolveBillingForVisit(emr);
     if (bill.facilityId) encounter.billing_facility = bill.facilityId;
+    // A care coordinator has no provider id of their own: the encounter files
+    // under the clinician the visit is booked with, who will sign it.
+    const coordinator = clinicalRoles.isCoordinator(req.user);
+    if (coordinator && appointment && appointment.pc_aid) encounter.provider_id = String(appointment.pc_aid);
     const enc = await emr.createEncounter(puuid, encounter);
     const encounterUuid = enc && (enc.euuid || enc.uuid || enc.encounter_uuid || enc.id);
     if (!encounterUuid) return res.status(502).json({ error: 'OpenEMR did not return an encounter id. Your note is kept as a draft on this device.' });
@@ -12017,7 +12048,9 @@ app.post('/api/clinical/patients/:clientId/notes', authenticateToken, requireCli
     const warnings = [];
     if (place.warning) warnings.push(place.warning);
     if (bill.warning) warnings.push(bill.warning);
-    if (!req.user.openEmrProviderId) warnings.push(NO_PROVIDER_ID_WARNING);
+    if (coordinator) {
+      if (!encounter.provider_id) warnings.push(COORDINATOR_NO_APPOINTMENT_WARNING);
+    } else if (!req.user.openEmrProviderId) warnings.push(NO_PROVIDER_ID_WARNING);
     const payer = await getPayerCredentialing();
     const rows = await loadRows('encounter_billing');
     const record = clinicalRepo.buildEncounterBillingRecord({
@@ -12031,6 +12064,7 @@ app.post('/api/clinical/patients/:clientId/notes', authenticateToken, requireCli
     record.noteKind = note.kind;
     record.noteVersion = 1;
     record.noteStatus = clinicalNotes.NOTE_STATUS.DRAFT;
+    clinicalNotes.stampPreparedBy(record, actor);
     rows.push(record);
     await db.set('encounter_billing', rows);
     if (appointment) await linkAppointmentEncounter(appointment.pc_eid, client.id, encounterUuid, req.user);
@@ -12085,7 +12119,7 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid/note', authenticateT
         if (content.note) { ctx.record = { ...ctx.record, note: content.note, noteVersion: 0 }; seeded = true; }
       } catch (e) { /* no seed — the page offers an empty note */ }
     }
-    res.json(await noteView(ctx, { signsAsAuthor: clinicalRoles.isAuthorSigner(req.user), seededFromOpenEmr: seeded, canEdit: clinicalRoles.canClinicalWrite(req.user) && !ctx.closed && ctx.record.noteStatus !== clinicalNotes.NOTE_STATUS.VOIDED }));
+    res.json(await noteView(ctx, { signsAsAuthor: clinicalRoles.isAuthorSigner(req.user), seededFromOpenEmr: seeded, canEdit: clinicalRoles.canDocumentClinically(req.user) && !ctx.closed && ctx.record.noteStatus !== clinicalNotes.NOTE_STATUS.VOIDED }));
   } catch (error) {
     console.error('Clinical note read error:', error);
     res.status(500).json({ error: 'Could not read this note' });
@@ -12192,7 +12226,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/visit-summary/given
   }
 });
 
-app.put('/api/clinical/patients/:clientId/encounters/:euuid/note', authenticateToken, requireClinicalWrite, requireNoteWriter, async (req, res) => {
+app.put('/api/clinical/patients/:clientId/encounters/:euuid/note', authenticateToken, requireClinicalDocumenter, requireNoteWriter, async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res);
     if (!ctx || refuseIfClosed(ctx, res)) return;
@@ -12239,6 +12273,7 @@ app.put('/api/clinical/patients/:clientId/encounters/:euuid/note', authenticateT
       warnings.push(...(await applyVisitToEncounter(ctx.emr, ctx.client, record, next.visit, null)));
     }
     record.noteVersion = version.version + 1;
+    clinicalNotes.stampPreparedBy(record, ctx.actor);
     const revisions = await appendNoteRevision(clinicalNotes.buildNoteRevision({
       id: uuidv4(), record, version: record.noteVersion, actor: ctx.actor, clinicalRole: ctx.actor.clinicalRole,
       changed: changed.length ? changed : ['carriedForward'], action: carry.carriedFrom ? 'carry_forward' : 'save', carriedFrom: carry.carriedFrom
@@ -12264,7 +12299,7 @@ app.put('/api/clinical/patients/:clientId/encounters/:euuid/note', authenticateT
 // (clinicalNotes.checkEncounterDeletable), so nothing downstream is orphaned.
 // Anything that pointed at it is released: an appointment it documented goes
 // back to "not yet documented", and it stops counting as the initial visit.
-app.post('/api/clinical/patients/:clientId/encounters/:euuid/note/void', authenticateToken, requireClinicalWrite, requireNoteWriter, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/note/void', authenticateToken, requireClinicalDocumenter, requireNoteWriter, async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res);
     if (!ctx) return;
@@ -12422,7 +12457,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/co-signatures', aut
 // appointment, and a signed encounter is a claim that must not move.
 const appointmentLinkedElsewhere = async (eid, encounterUuid) => (await getAppointmentLinkage())
   .some(r => String(r.eid) === String(eid) && String(r.encounterUuid) !== String(encounterUuid || ''));
-app.put('/api/clinical/patients/:clientId/encounters/:euuid/appointment', authenticateToken, requireClinicalWrite, async (req, res) => {
+app.put('/api/clinical/patients/:clientId/encounters/:euuid/appointment', authenticateToken, requireClinicalDocumenter, async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res);
     if (!ctx) return;
@@ -12458,6 +12493,16 @@ app.put('/api/clinical/patients/:clientId/encounters/:euuid/appointment', authen
         if (record.note) record.note = { ...record.note, visitDate: appointment.pc_eventDate };
       } catch (e) {
         warnings.push(`Attached, but OpenEMR did not accept the appointment's date on the encounter (${e.message.slice(0, 120)}).`);
+      }
+    }
+    // A note a care coordinator started with no visit was filed under the
+    // practice default provider. Attaching it moves it to the clinician the
+    // visit is booked with, who is the one who will sign it.
+    if (Array.isArray(record.preparedBy) && record.preparedBy.length && appointment.pc_aid) {
+      try {
+        await ctx.emr.updateEncounter(ctx.client.openEmrPatientId, ctx.encounterUuid, { provider_id: String(appointment.pc_aid) });
+      } catch (e) {
+        warnings.push(`Attached, but OpenEMR did not move the encounter to the visit's clinician (${e.message.slice(0, 120)}).`);
       }
     }
     await linkAppointmentEncounter(eid, ctx.client.id, ctx.encounterUuid, req.user);
@@ -12633,15 +12678,18 @@ app.get('/api/clinical/patients/:clientId/encounters/:euuid', authenticateToken,
       // What THIS viewer may do with the note, answered by the server so the
       // page never decides a credential question itself.
       noteActions: {
-        canEdit: clinicalRoles.canClinicalWrite(req.user) && !ctx.closed && record.noteStatus !== clinicalNotes.NOTE_STATUS.VOIDED &&
+        canEdit: clinicalRoles.canDocumentClinically(req.user) && !ctx.closed && record.noteStatus !== clinicalNotes.NOTE_STATUS.VOIDED &&
           (clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.NURSING_NOTE) || clinicalRoles.can(req.user, clinicalRoles.CAPABILITIES.BEHAVIORAL_NOTE)),
         signsAsAuthor: clinicalRoles.isAuthorSigner(req.user),
+        // A care coordinator prepares the note and never signs it; the
+        // licensed clinician on the visit does.
+        canSign: clinicalRoles.canClinicalWrite(req.user),
         canAddClinicianAddendum: record.coSignStatus === 'pending' && clinicalRoles.canCoSignEncounter(req.user) &&
           !(ctx.attestation && ctx.attestation.signedBy && String(ctx.attestation.signedBy.id) === String(req.user.id)),
         canCoSign: ctx.closed && clinicalRoles.canCoSignNote(req.user) &&
           ![ctx.attestation && ctx.attestation.signedBy && ctx.attestation.signedBy.id, record.coSignedBy && record.coSignedBy.id, ...((record.coSignatures || []).map(c => c.id))]
             .some(id => id != null && String(id) === String(req.user.id)),
-        canAttachAppointment: clinicalRoles.canClinicalWrite(req.user) && !ctx.closed && !linkedEid && record.noteStatus !== clinicalNotes.NOTE_STATUS.VOIDED
+        canAttachAppointment: clinicalRoles.canDocumentClinically(req.user) && !ctx.closed && !linkedEid && record.noteStatus !== clinicalNotes.NOTE_STATUS.VOIDED
       },
       riskAssessment: ctx.riskAssessment, riskHistory: ctx.riskHistory,
       // Screenings recorded on this visit, each with its one-line summary.
@@ -15401,7 +15449,7 @@ const timingPayload = (t) => ({ ...t, totalMinutes: myDay.totalVisitMinutes(t), 
 // Gated on writing ANY clinical note, not the nursing one alone: an LCSW bills
 // psychotherapy on time, so the recorded start and end are theirs to record
 // too (owner, 2026-10-11).
-app.post('/api/clinical/visits/:eid/timing', authenticateToken, requireClinicalWrite,
+app.post('/api/clinical/visits/:eid/timing', authenticateToken, requireClinicalDocumenter,
   requireNoteWriter, async (req, res) => {
     try {
       const eid = String(req.params.eid || '').trim();
@@ -15453,7 +15501,7 @@ app.get('/api/clinical/visits/:eid/video', authenticateToken, requireClinicalRea
   }
 });
 
-app.post('/api/clinical/visits/:eid/video/start', authenticateToken, requireClinicalWrite,
+app.post('/api/clinical/visits/:eid/video/start', authenticateToken, requireClinicalDocumenter,
   requireNoteWriter, async (req, res) => {
     try {
       const eid = String(req.params.eid || '').trim();
@@ -15518,7 +15566,7 @@ app.get('/api/clinical/visits/:eid/timing', authenticateToken, requireClinicalRe
 // (Scope B4). Accepting rebooks through the existing appointment routes, so the
 // patient is told; a schedule that silently rewrote itself would move a visit
 // somebody is expecting without anybody deciding to.
-app.post('/api/clinical/my-day/optimize', authenticateToken, requireClinicalWrite, async (req, res) => {
+app.post('/api/clinical/my-day/optimize', authenticateToken, requireClinicalDocumenter, async (req, res) => {
   try {
     const visits = Array.isArray((req.body || {}).visits) ? req.body.visits : null;
     if (!visits) return res.status(400).json({ error: 'The day\'s visits are required', code: 'NO_VISITS' });
@@ -16125,7 +16173,7 @@ app.get('/api/clinical/patients/:clientId/timeline', authenticateToken, requireC
 // A clinical WRITE, not an admin one: the person who finds out that the front
 // gate is locked is the clinician standing at it, and a note they cannot record
 // until an admin is back at a desk is a note that never gets recorded.
-app.put('/api/clinical/patients/:clientId/home-visit', authenticateToken, requireClinicalWrite, async (req, res) => {
+app.put('/api/clinical/patients/:clientId/home-visit', authenticateToken, requireClinicalDocumenter, async (req, res) => {
   try {
     const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -16668,7 +16716,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/charges/repost', au
 app.get('/api/clinical/screenings/catalog', authenticateToken, requireClinicalRead, (req, res) => {
   res.json({ instruments: screenings.catalog() });
 });
-app.post('/api/clinical/patients/:clientId/encounters/:euuid/screenings', authenticateToken, requireClinicalWrite,
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/screenings', authenticateToken, requireClinicalDocumenter,
   requireCapability(clinicalRoles.CAPABILITIES.SCREENING_INSTRUMENT), async (req, res) => {
     try {
       const ctx = await loadEncounterContext(req, res);
@@ -16792,7 +16840,7 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/risk-assessment', a
 // documentation at risk. The three items and the consent prefill come from
 // clinicalRepository, served to the page, so the screen names no check of its
 // own and cannot drift from the validator that refuses one it did not offer.
-app.post('/api/clinical/patients/:clientId/encounters/:euuid/telehealth-checks', authenticateToken, requireClinicalWrite, requireNoteWriter, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/telehealth-checks', authenticateToken, requireClinicalDocumenter, requireNoteWriter, async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res);
     if (!ctx) return;
@@ -16984,7 +17032,7 @@ app.post('/api/clinical/patients/:clientId/portal/refresh-chart', authenticateTo
 });
 
 // Retry the structured-note write after an EMR failure (no record change).
-app.post('/api/clinical/patients/:clientId/encounters/:euuid/resync', authenticateToken, requireClinicalWrite, async (req, res) => {
+app.post('/api/clinical/patients/:clientId/encounters/:euuid/resync', authenticateToken, requireClinicalDocumenter, async (req, res) => {
   try {
     const ctx = await loadEncounterContext(req, res);
     if (!ctx) return;
@@ -17786,6 +17834,13 @@ const requireEnrollmentStaff = (req, res, next) => {
 // reader — the 4.3 scoped-read rule this must not regress.
 const canEditEnrollment = (user) => !!user &&
   (user.role === config.ROLES.ADMIN || patientRead.canClinicalWrite(user));
+// Filing a scanned document into a client's file (2026-10-14): the editors,
+// plus a care coordinator, whose job includes keeping the chart's paperwork in
+// order. Editing the enrollment submission itself stays with the editors.
+const requireDocumentFiler = (req, res, next) => {
+  if (canEditEnrollment(req.user) || clinicalRoles.isCoordinator(req.user)) return next();
+  return res.status(403).json({ error: 'An admin, a clinician or a care coordinator files documents here.', code: 'DOCUMENT_FILER_ONLY' });
+};
 const requireEnrollmentEditor = (req, res, next) => {
   if (canEditEnrollment(req.user)) return next();
   return res.status(403).json({
@@ -18190,7 +18245,7 @@ app.post('/api/gfc/admin/signups/:id/decide', authenticateToken, requireAdmin, a
         enrollmentStatus: 'intake_pending',
         serviceLine: signups.serviceLineFor(row.interests),
         dob: intake.dob, phone: intake.phone,
-        careTeam: { assignedFNPs: [], assignedCaseManager: null, primaryCaregiver: null, backupCaregiver: null },
+        careTeam: { assignedFNPs: [], assignedCaseManager: null, primaryCaregiver: null, backupCaregiver: null, careCoordinators: [] },
         intake,
         accountStatus: 'active', hasPortalLogin: forSelf,
         isManager: false, hasServicePortalAccess: false, hasAdminHubAccess: false, hasImplementationsAccess: false, hasClientPortalAdminAccess: false,
@@ -18413,7 +18468,7 @@ app.get('/api/gfc/admin/enrollment/:clientId/documents', authenticateToken, requ
 // Admin OR licensed clinician, because the clinician sitting with the patient
 // is often the person holding the document. Same gate as the submission
 // editor; the WORKFLOW decisions (approve, service line) stay admin-only.
-app.post('/api/gfc/admin/enrollment/:clientId/documents/upload', authenticateToken, requireEnrollmentEditor, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/documents/upload', authenticateToken, requireDocumentFiler, async (req, res) => {
   try {
     const users = await getUsers();
     const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -20978,7 +21033,7 @@ app.post('/api/gfc/admin/enrollment/offline', authenticateToken, requireAdmin, u
         setById: req.user.id, setByName: req.user.name || req.user.email, setAt: nowIso
       } : null,
       offlinePacketDriveUrls,
-      careTeam: d.careTeam || { assignedFNPs: [], assignedCaseManager: null, primaryCaregiver: null, backupCaregiver: null },
+      careTeam: d.careTeam || { assignedFNPs: [], assignedCaseManager: null, primaryCaregiver: null, backupCaregiver: null, careCoordinators: [] },
       intake,
       accountStatus: 'active',
       requirePasswordChange: true,

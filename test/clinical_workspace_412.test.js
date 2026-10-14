@@ -313,7 +313,8 @@ test('the home-visit route is a clinical WRITE and logs which fields changed, ne
   const i = serverCode.indexOf("app.put('/api/clinical/patients/:clientId/home-visit'");
   assert.ok(i > 0, 'the home-visit route is not registered');
   const body = serverCode.slice(i, i + 2200);
-  assert.match(body, /requireClinicalWrite/,
+  // 2026-10-14: a documenting route, so a care coordinator can record it too.
+  assert.match(body, /requireClinicalDocumenter/,
     'a clinician standing at a locked gate must be able to record it');
   assert.match(body, /patient_home_visit_notes_updated/);
   assert.match(body, /\{\s*fields:\s*changed\s*\}/,
@@ -675,10 +676,10 @@ test('there is ONE writer of a visit timing, and both doors go through it', () =
   assert.equal(writers.length, 1, 'exactly one place writes visit_timings');
   const route = routeBody(serverCode, "app.post('/api/clinical/visits/:eid/timing'");
   assert.match(route, /await stampVisitTiming\(/, 'the timing route delegates to the one writer');
-  assert.match(route, /requireClinicalWrite/);
+  assert.match(route, /requireClinicalDocumenter/);
   const start = routeBody(serverCode, "app.post('/api/clinical/visits/:eid/video/start'");
   assert.match(start, /await stampVisitTiming\(/, 'starting a video visit goes through the same writer');
-  assert.match(start, /requireClinicalWrite/);
+  assert.match(start, /requireClinicalDocumenter/);
   assert.doesNotMatch(start, /db\.set\('visit_timings'/, 'the video start route never writes the store itself');
 });
 
@@ -866,7 +867,7 @@ test('every chart tab is a place in the record, and no workflow is one', () => {
 test('the H&P is still reachable, and says where you are while it is open', () => {
   // Removing it from the tab bar must not strand it. It opens from the
   // banner's Start visit action and from an appointment.
-  assert.match(pageCode, /onStartVisit=\{canWrite \? startVisit : null\}/);
+  assert.match(pageCode, /onStartVisit=\{access\.canDocument \? startVisit : null\}/);
   // Start visit opens the H&P, unless a shared draft is already saved on an
   // encounter: then it resumes THAT (a blank H&P would become a second
   // encounter, which can only be voided).

@@ -275,7 +275,9 @@ test('every /api/clinical route is registered with the matching guard (GET → r
     } else {
       // 2026-09-29: the order-destination edit carries requireOrderDestinationEditor,
       // the one order door a case manager holds (destination fields only).
-      assert.match(l, /requireClinicalWrite|requireAdmin|requireBilling|requireOrderDestinationEditor|requireOrderAnnotator|requireAvsRecorder|requireProviderListEditor|requireTaskManager/, `${method.toUpperCase()} route must use requireClinicalWrite (or requireAdmin / requireBilling / requireOrderDestinationEditor): ${l.slice(0, 90)}`);
+      // 2026-10-14: note and calendar routes carry requireClinicalDocumenter —
+      // licensed clinicians plus care coordinators, never a read-only case manager.
+      assert.match(l, /requireClinicalWrite|requireClinicalDocumenter|requireAdmin|requireBilling|requireOrderDestinationEditor|requireOrderAnnotator|requireAvsRecorder|requireProviderListEditor|requireTaskManager/, `${method.toUpperCase()} route must use requireClinicalWrite (or requireAdmin / requireBilling / requireOrderDestinationEditor): ${l.slice(0, 90)}`);
       assert.doesNotMatch(l, /requireClinicalRead/, l.slice(0, 90));
     }
   }
@@ -377,7 +379,7 @@ test('4.12: the risk assessment can NEVER reach a patient, family or POA payload
     const route = before.find(l => /^app\.(get|post|put|delete)\(/.test(l));
     assert.ok(route, `could not find the route containing line ${r.i}`);
     assert.ok(!route.includes('/api/gfc'), `a patient-facing route reads risk assessments: ${route.slice(0, 90)}`);
-    assert.match(route, /requireClinical(Read|Write)|requireAdmin/,
+    assert.match(route, /requireClinical(Read|Write|Documenter)|requireAdmin/,
       `risk assessments may only be read behind a clinical gate: ${route.slice(0, 90)}`);
   }
   // 3. The sharing filter is an ALLOW-LIST and carries no risk section, so

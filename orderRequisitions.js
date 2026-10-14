@@ -406,7 +406,7 @@ const isOnCareTeam = (careTeam, userId) => {
   const id = String(userId || '');
   if (!id) return false;
   const inList = (v) => Array.isArray(v) && v.map(String).includes(id);
-  return inList(ct.assignedFNPs) || inList(ct.supportingCaseManagers) ||
+  return inList(ct.assignedFNPs) || inList(ct.supportingCaseManagers) || inList(ct.careCoordinators) ||
     [ct.assignedCaseManager, ct.primaryCaregiver, ct.backupCaregiver].map(x => String(x || '')).includes(id);
 };
 const careTeamWithAssignee = (careTeam, assignee) => {

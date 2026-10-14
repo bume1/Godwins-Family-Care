@@ -1762,7 +1762,7 @@
         sendWelcomeEmail: true,
         // GFC extended fields
         licenseLevel: '', hasClinicalAccess: false, clinicalRole: '', enrollmentStatus: 'intake_pending',
-        careTeam: { assignedFNPs: [], assignedCaseManager: '', primaryCaregiver: '', backupCaregiver: '' },
+        careTeam: { assignedFNPs: [], assignedCaseManager: '', primaryCaregiver: '', backupCaregiver: '', careCoordinators: [] },
         familyOfClientId: '', // family role: the client (user id) this contact is linked to
         familyIsPoa: false, // family role: designated Power of Attorney (client-equivalent portal access)
         openEmrProviderId: '', // clinician: OpenEMR provider (numeric id) their calendar maps to (4.2)
@@ -1944,7 +1944,7 @@
           clinicalRole: user.clinicalRole || '',
           clinicalRoleAutoAssigned: !!user.clinicalRoleAutoAssigned,
           enrollmentStatus: user.enrollmentStatus || 'intake_pending',
-          careTeam: user.careTeam || { assignedFNPs: [], assignedCaseManager: '', primaryCaregiver: '', backupCaregiver: '' },
+          careTeam: { assignedFNPs: [], assignedCaseManager: '', primaryCaregiver: '', backupCaregiver: '', careCoordinators: [], ...(user.careTeam || {}) },
           familyOfClientId: user.familyOfClientId || '',
           familyIsPoa: user.familyIsPoa || false,
           openEmrProviderId: user.openEmrProviderId || '',
@@ -2424,10 +2424,17 @@
                     )}
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
-                      <select value={formData.role === 'user' && formData.isManager ? 'manager' : formData.role} onChange={(e) => {
+                      <select value={formData.role === 'user' && formData.isManager ? 'manager' : (formData.role === 'caseManager' && formData.clinicalRole === 'coordinator' ? 'coordinator' : formData.role)} onChange={(e) => {
                           const val = e.target.value;
                           if (val === 'manager') {
                             setFormData({ ...formData, role: 'user', isManager: true });
+                          } else if (val === 'coordinator') {
+                            // A care coordinator is a case-management account with the
+                            // unlicensed coordinator clinical role: they prepare notes and
+                            // schedule, and a licensed clinician signs.
+                            setFormData({ ...formData, role: 'caseManager', isManager: false, clinicalRole: 'coordinator', hasClinicalAccess: false });
+                          } else if (val === 'caseManager' && formData.clinicalRole === 'coordinator') {
+                            setFormData({ ...formData, role: val, isManager: false, clinicalRole: '' });
                           } else {
                             setFormData({ ...formData, role: val, isManager: false });
                           }
@@ -2439,6 +2446,7 @@
                         <option value="client">Client</option>
                         <option value="vendor">Caregiver</option>
                         <option value="caseManager">Case Manager</option>
+                        <option value="coordinator">Care Coordinator</option>
                         <option value="family">Family / Authorized Contact</option>
                       </select>
                     </div>
@@ -2548,7 +2556,7 @@
                       <div className="p-3 bg-teal-50 rounded-lg">
                         <label className="block text-sm font-medium text-gray-700 mb-1">Clinical role</label>
                         <select value={formData.clinicalRole}
-                          onChange={(e) => setFormData({ ...formData, clinicalRole: e.target.value, hasClinicalAccess: !!e.target.value && e.target.value !== 'readOnly' })}
+                          onChange={(e) => { const v = e.target.value; const r = clinicalRoleCatalog.find(x => x.value === v); setFormData({ ...formData, clinicalRole: v, hasClinicalAccess: !!(r && r.licensed) }); }}
                           className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary">
                           <option value="">No clinical access</option>
                           {clinicalRoleCatalog.map(r => (
@@ -2559,7 +2567,7 @@
                           Certification decides what this person may do: prescribing, placing an order on their own
                           authority, selecting CPT codes and signing a billable encounter are a provider's. An RN or an
                           LMSW places orders under a signed standing order. Read-only is chart access without a clinical
-                          licence.
+                          licence. A Care Coordinator prepares notes and books visits, and a licensed clinician signs.
                         </p>
                         {selectedClinicalRole && (
                           <p className="text-xs text-teal-800 mt-2">
@@ -3081,7 +3089,7 @@
                             <option value="">-- None --</option>
                             {/* Case managers, plus licensed social workers set up as
                                 clinician accounts (LMSW/LCSW), who can hold this role. */}
-                            {users.filter(u => u.role === 'caseManager' || (u.role === 'user' && ['lmsw', 'lcsw'].includes(u.clinicalRole))).map(u => (
+                            {users.filter(u => (u.role === 'caseManager' && u.clinicalRole !== 'coordinator') || (u.role === 'user' && ['lmsw', 'lcsw'].includes(u.clinicalRole))).map(u => (
                               <option key={u.id} value={u.id}>{u.name}{u.role === 'user' ? ` (${String(u.clinicalRole).toUpperCase()})` : ''}</option>
                             ))}
                           </select>
@@ -3098,6 +3106,19 @@
                             ))}
                           </select>
                           <p className="text-xs text-gray-500 mt-1">Hold Ctrl/Cmd to select multiple</p>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Care Coordinators</label>
+                          <select multiple value={formData.careTeam.careCoordinators || []} onChange={(e) => {
+                              const selected = Array.from(e.target.selectedOptions).map(o => o.value);
+                              setFormData({ ...formData, careTeam: { ...formData.careTeam, careCoordinators: selected } });
+                            }}
+                            className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary" size="4">
+                            {users.filter(u => u.clinicalRole === 'coordinator' && u.accountStatus !== 'inactive').map(u => (
+                              <option key={u.id} value={u.id}>{u.name}</option>
+                            ))}
+                          </select>
+                          <p className="text-xs text-gray-500 mt-1">They support this client's case manager and prepare notes for the clinician to sign.</p>
                         </div>
                       </div>
                     </div>
