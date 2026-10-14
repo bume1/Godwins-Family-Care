@@ -1,0 +1,15 @@
+# The care plan's sections change with the service line, and the owner review is closed out (owner, 2026-10-14)
+
+Owner: "I thought the care plan changes format depending on the service options? The version now shows everything." Then: make sure it follows the format review (the five points agreed on 2026-10-14). The first build changed only what was REQUIRED by service line; every client still saw all eight sections.
+
+- **One table, `carePlanFormat.SECTIONS_BY_LINE`, decides which sections a plan has**, and the form, the plan view and the save all read it (served as `vocabulary.sections`):
+  - **Home care (PHC):** problems (plain text), goals (statement, problem, priority, status, target date, patient's own; no measure, baseline or target), outside the practice, the service schedule with the caregiver's each-visit tasks, safety and escalation, review. No prognosis, expected outcome, interventions or medication management.
+  - **Clinical (IHPC):** every clinical section; the schedule is the visit schedule without a caregiver task list.
+  - **BOTH:** everything.
+- **What a line does not have is not stored**, even if posted (`buildStructuredBlocks` blanks it). An older plan that already holds something in a section the line lacks still shows it.
+- **Point 1, a medical patient's plan requires all eight sections:** IHPC and BOTH now also require at least one outside provider or community service, and IHPC requires a visit frequency.
+- **Point 2, scope is checked against the caregivers actually assigned:** the save reads the client's assigned caregivers with only their verified, unexpired sign-offs and names who cannot record a task ("Paula PCA has no verified vital signs sign-off…"). An LPN records vitals under their own licence. With nobody assigned, it names the sign-off whoever is assigned will need. Filling a pill organizer is flagged as a counsel question at every level. Still advice, never a refusal.
+- **Point 3** was already done (status outside the signed plan; clinicians and coordinators update it). **Point 5** was already done (no diagnosis code is typed into a problem; outside care starts from intake; KaiCare settled).
+- **Point 4, escalation feeds the existing flow:** the plan's "call 911 when" and "call GFC when" signs now appear inside the caregiver's Flag a concern screen for the selected client. A 911 sign says call 911 first and files as an urgent safety concern; a call-GFC sign files as clinical. Both go through the one escalation route, which already routes by type.
+- **Verified:** `test/care_plan_format.test.js` 33 tests (6 new); 9 of 9 deliberate breaks caught. Full suite 2475 pass, 0 fail. `scripts/verify_care_plan_format.js` 37/37 and `scripts/verify_care_plan_patient_visibility.js` 16/16 against the real server. The home care form rendered in Chromium: no prognosis, measures, interventions or medication section, no page errors.
+- **Open for the owner:** requiring an outside provider on every clinical plan assumes there is always one (usually the PCP or a specialist from intake). Say if a clinical patient can legitimately have none.

@@ -78,11 +78,14 @@ const PHC_PLAN = {
   ok('a complete home care plan saves', saved.status === 200 && saved.body.carePlan.version === 1, saved.body);
   ok('  an RN signature completes a home care plan', saved.body.providerCoSignStatus === 'not_required', saved.body.providerCoSignStatus);
   ok('  caregiver-scope advice comes back for the blood pressure task',
-    (saved.body.warnings || []).some(w => w.where === 'Each visit' && /signed off/.test(w.warning)), saved.body.warnings);
+    (saved.body.warnings || []).some(w => w.where === 'Each visit' && /vital signs sign-off/.test(w.warning)), saved.body.warnings);
 
   const g1 = (await call('GET', `/api/clinical/patients/${phc.id}/care-plan`, rnT)).body;
   const goal = g1.carePlan.goalItems[0];
-  ok('the stored goal keeps its id, measure and target', goal.id === 'g-probe1' && goal.measure === 'Falls per month' && goal.target === '0', goal);
+  ok('the stored goal keeps its id', goal.id === 'g-probe1', goal);
+  ok('  a home care plan stores no goal measure, even when one is posted', goal.measure === '' && goal.target === '', goal);
+  ok('  and no interventions', (g1.carePlan.interventions || []).length === 0, g1.carePlan.interventions);
+  ok('  the served sections say a home care plan has no medication block', g1.vocabulary.sections.PHC.medicationManagement === false);
   ok('problems/goals are derived plain lists', JSON.stringify(g1.carePlan.goals) === '["No falls this quarter"]', g1.carePlan.goals);
 
   console.log('\n--- 2. goal status without a new version ---');
@@ -107,13 +110,14 @@ const PHC_PLAN = {
   console.log('\n--- 4. a clinical patient needs the clinical blocks ---');
   const ib = await call('POST', `/api/clinical/patients/${ihpc.id}/care-plan`, rnT, PHC_PLAN);
   ok('the home care plan shape is refused for an IHPC patient',
-    ib.status === 400 && ['problemDetail', 'medicationManagement'].every(k => ib.body.missing.includes(k)), ib.body);
+    ib.status === 400 && ['problemDetail', 'medicationManagement', 'outsideCare'].every(k => ib.body.missing.includes(k)), ib.body);
   const full = await call('POST', `/api/clinical/patients/${ihpc.id}/care-plan`, rnT, {
     ...PHC_PLAN,
     problemItems: [{ id: 'p-probe2', text: 'Heart failure', prognosis: 'Stable with adherence', expectedOutcome: 'No admissions' }],
     goalItems: [{ id: 'g-probe2', problemId: 'p-probe2', statement: 'Stay out of hospital', measure: 'Daily weight', target: '178 lb' }],
     interventions: [{ goalIds: ['g-probe2'], description: 'Furosemide review', responsible: 'gfc_clinician', frequency: 'each_visit', type: 'medication' }],
-    medicationManagement: { managedBy: 'family', pharmacy: 'Kroger' }
+    medicationManagement: { managedBy: 'family', pharmacy: 'Kroger' },
+    outsideCare: { externalTeam: [{ name: 'Dr. Patel', role: 'Cardiology' }] }
   });
   ok('a complete IHPC plan saves', full.status === 200, full.body);
   ok('  and an RN signature leaves it waiting on a provider', full.body.providerCoSignStatus === 'pending', full.body.providerCoSignStatus);
@@ -146,7 +150,8 @@ const PHC_PLAN = {
     ...PHC_PLAN,
     problemItems: [{ id: 'p-probe3', text: 'Heart failure', prognosis: 'Stable', expectedOutcome: 'No admissions' }],
     goalItems: [{ id: 'g-probe3', problemId: 'p-probe3', statement: 'Stay home', measure: 'Weight', target: '178 lb' }],
-    medicationManagement: { managedBy: 'family' }
+    medicationManagement: { managedBy: 'family' },
+    outsideCare: { externalTeam: [{ name: 'Dr. Patel', role: 'Cardiology' }] }
   });
   ok('a coordinator can write a clinical patient\u2019s plan', cwi.status === 200 && cwi.body.providerCoSignStatus === 'pending', cwi.body);
   const rnIhpc = await call('POST', `/api/clinical/patients/${ihpc2.id}/care-plan/provider-cosign`, rnT, { signatureImageB64: SIG });

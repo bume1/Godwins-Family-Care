@@ -661,6 +661,38 @@ const FlagConcern = ({ clients, onDone, onBack, online }) => {
         </div>
       )}
 
+      {/* The care plan's "when to call" signs for this client, inside the
+          flow that routes them (owner review, 2026-10-14: the plan's rules
+          feed the existing escalation, never a second call list). A 911 sign
+          says call 911 first; tapping a sign picks the route and fills the
+          description. */}
+      {(() => {
+        const sel = clients.find(c => c.id === clientId);
+        const esc = sel && sel.carePlan && sel.carePlan.escalation;
+        if (!esc || (!(esc.call911When || []).length && !(esc.callGfcWhen || []).length)) return null;
+        return (
+          <div className="card" style={{ marginBottom: 12 }}>
+            <h3>From {sel.name}'s care plan</h3>
+            {(esc.call911When || []).length > 0 && (
+              <div className="note warn" style={{ marginBottom: 8 }}>
+                <i className="ti ti-phone-call"></i>
+                <span><b>Call 911 first if:</b><span>{esc.call911When.join('; ')}. Then flag it here as urgent.</span></span>
+              </div>
+            )}
+            {(esc.call911When || []).map((t, i) => (
+              <button key={`911-${i}`} className={`opt urg ${description === t && type === 'safety_urgent' ? 'sel' : ''}`} onClick={() => { setType('safety_urgent'); setDescription(t); }}>
+                <i className="ti ti-urgent"></i><span><b>{t}</b><span>Urgent safety concern</span></span>
+              </button>
+            ))}
+            {(esc.callGfcWhen || []).map((t, i) => (
+              <button key={`gfc-${i}`} className={`opt ${description === t && type === 'clinical' ? 'sel' : ''}`} onClick={() => { setType('clinical'); setDescription(t); }}>
+                <i className="ti ti-stethoscope"></i><span><b>{t}</b><span>Goes to the assigned clinician</span></span>
+              </button>
+            ))}
+          </div>
+        );
+      })()}
+
       {CONCERNS.map(c => (
         <button key={c.id} className={`opt ${c.urgent ? 'urg' : ''} ${type === c.id ? 'sel' : ''}`} onClick={() => setType(c.id)}>
           <i className={`ti ti-${c.icon}`}></i>
