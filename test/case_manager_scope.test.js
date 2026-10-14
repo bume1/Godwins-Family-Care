@@ -35,5 +35,7 @@ test('a Case Manager account still reaches its assigned client, and only that on
 
 test('the Assigned Case Manager picker offers LMSW/LCSW clinician accounts too', () => {
   const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-hub.html'), 'utf8');
-  assert.match(page, /users\.filter\(u => u\.role === 'caseManager' \|\| \(u\.role === 'user' && \['lmsw', 'lcsw'\]\.includes\(u\.clinicalRole\)\)\)/);
+  // A care coordinator is a case-management account but never the assigned
+  // case manager (2026-10-14): they have their own Care Coordinators slot.
+  assert.match(page, /users\.filter\(u => \(u\.role === 'caseManager' && u\.clinicalRole !== 'coordinator'\) \|\| \(u\.role === 'user' && \['lmsw', 'lcsw'\]\.includes\(u\.clinicalRole\)\)\)/);
 });

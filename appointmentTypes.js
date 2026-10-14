@@ -789,6 +789,9 @@ const canDocumentType = (typeKey, clinicalRole) => {
   if (!type) return { ok: false, code: 'UNKNOWN_APPOINTMENT_TYPE', error: `"${typeKey}" is not an appointment type.` };
   const role = String(clinicalRole || '').trim();
   if (SOCIAL_WORK_ROLES.includes(role)) return canBookType(typeKey, { clinicalRole: role });
+  if (role === 'coordinator' && type.psychotherapy) {
+    return { ok: false, code: 'PSYCHOTHERAPY_NOT_COORDINATOR', error: `${type.label} is psychotherapy, which the treating therapist documents. A care coordinator can prepare the other visit types.` };
+  }
   if (role === 'rn' && type.psychotherapy) {
     return { ok: false, code: 'PSYCHOTHERAPY_NOT_RN', error: `${type.label} is psychotherapy, which an RN does not document. Use Social Work Follow-up / Care Coordination or a nursing visit type.` };
   }

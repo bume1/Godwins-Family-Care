@@ -65,7 +65,9 @@ test('the phone section menu reads the SAME tabs list as the strip', () => {
 
 test('the header keeps every action behind its gate', () => {
   const body = slice('const PatientBanner = (', '\n    // ── Session 4.12 Scope D — CHART NAVIGATION');
-  assert.match(body, /\{onStartVisit && access\.canWrite && \(/, 'Start visit stays a write');
+  // 2026-10-14: a care coordinator documents visits, so Start visit reads
+  // canDocument (licensed clinicians and coordinators); everything else stays canWrite.
+  assert.match(body, /\{onStartVisit && access\.canDocument && \(/, 'Start visit is a documenting action');
   assert.match(body, /\{patient && patient\.id && access\.canWrite && \(/, 'Refresh portal chart stays a write');
   assert.match(body, /\{canBill && <BannerFact label="Facility &amp; POS">/, 'place of service stays billing\'s');
 });
@@ -264,7 +266,7 @@ test('both editors report their note state, and mark it saved after a load and a
 });
 
 test('while the note is unsaved, the sign card says save first and cannot sign', () => {
-  const card = slice('{on(\'sign\') && !locked && ns.status === \'draft\' && na.canEdit && (', '{/* The clinician addendum');
+  const card = slice('{on(\'sign\') && !locked && ns.status === \'draft\' && na.canEdit && na.canSign !== false && (', '{/* The clinician addendum');
   assert.match(card, /\{noteDirty && <UnsavedNoteLine onSave=\{saveNoteFirst\} \/>\}/);
   assert.match(card, /\{!noteDirty && !d\.signReadiness\.ok && <p/, 'the stale section list is hidden while the note is unsaved');
   assert.match(card, /disabled=\{!attest \|\| !d\.signReadiness\.ok \|\| dirty \|\| noteDirty \|\|/);
@@ -278,7 +280,7 @@ test('while the note is unsaved, the sign card says save first and cannot sign',
 // button (signing reads the saved diagnoses); the card now says so even when
 // the sign check itself passes. No appointment is required to sign.
 test('a ready note with unsaved coding says why it cannot sign', () => {
-  const card = slice('{on(\'sign\') && !locked && ns.status === \'draft\' && na.canEdit && (', '{/* The clinician addendum');
+  const card = slice('{on(\'sign\') && !locked && ns.status === \'draft\' && na.canEdit && na.canSign !== false && (', '{/* The clinician addendum');
   assert.match(card, /\{!noteDirty && d\.signReadiness\.ok && dirty && <p[^>]*>.*Save your coding changes first\./);
   const add = slice('{/* The clinician addendum', '{/* BILLING');
   assert.match(add, /\(!d\.addendumReadiness \|\| d\.addendumReadiness\.ok\) && dirty && <p/);

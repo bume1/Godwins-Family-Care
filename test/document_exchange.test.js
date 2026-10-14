@@ -232,8 +232,12 @@ test('a staff filing answers the open request rather than leaving it chasing', (
 test('the staff filing door is admin OR clinician, never the wider staff gate', () => {
   const line = (SERVER.match(/app\.post\('\/api\/gfc\/admin\/enrollment\/:clientId\/documents\/upload'[^\n]*/) || [])[0];
   assert.ok(line, 'the staff filing route is missing');
-  assert.ok(line.includes('requireEnrollmentEditor'),
+  // 2026-10-14: requireDocumentFiler = the enrollment editors (admin or
+  // licensed clinician) plus a care coordinator. Still never the read gate.
+  assert.ok(line.includes('requireDocumentFiler'),
     'the clinician holding the document must be able to file it');
+  const mw = SERVER.slice(SERVER.indexOf('const requireDocumentFiler ='), SERVER.indexOf('const requireEnrollmentEditor ='));
+  assert.match(mw, /canEditEnrollment\(req\.user\) \|\| clinicalRoles\.isCoordinator\(req\.user\)/);
   assert.ok(!line.includes('requireEnrollmentStaff'),
     'a case manager reads this surface; filing into a patient file is a write');
 });

@@ -283,7 +283,10 @@ const assignedCaseManagerId = (client) => careTeamOf(client).assignedCaseManager
 const caseManagerIds = (client) => {
   const ct = careTeamOf(client);
   const extra = Array.isArray(ct.supportingCaseManagers) ? ct.supportingCaseManagers.filter(Boolean) : [];
-  return [ct.assignedCaseManager, ...extra].filter(Boolean).map(String);
+  // Care coordinators support the case manager on this client and share
+  // their scope (owner, 2026-10-14).
+  const coordinators = Array.isArray(ct.careCoordinators) ? ct.careCoordinators.filter(Boolean) : [];
+  return [ct.assignedCaseManager, ...extra, ...coordinators].filter(Boolean).map(String);
 };
 
 // Is a caregiver actively assigned to this client? The client↔caregiver channel
