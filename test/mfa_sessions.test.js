@@ -73,6 +73,102 @@ test('MFA is required for admin, clinical and case-manager roles and for anyone 
   assert.equal(mfa.isEnrolled({ mfa: { secret: 'x' } }), false);
 });
 
+// Owner, 2026-10-14: managers and social workers must need 2FA because of what
+// they can reach, not because of which account type the form happened to file
+// them under. Each case below is on an account type OUTSIDE the role list, so
+// only the new rules can be what gates it.
+test('a manager needs MFA on any account type, through any of the three manager-level flags', () => {
+  const roles = ['admin', 'user', 'caseManager'];
+  assert.deepEqual([...mfa.MANAGER_LEVEL_FLAGS].sort(), ['hasAdminHubAccess', 'hasClientPortalAdminAccess', 'isManager']);
+  assert.equal(mfa.mfaRequiredFor({ role: 'user', isManager: true }, roles), true, 'the form\'s Manager (role user)');
+  for (const flag of mfa.MANAGER_LEVEL_FLAGS) {
+    assert.equal(mfa.mfaRequiredFor({ role: 'vendor', [flag]: true }, roles), true, `a caregiver account holding ${flag}`);
+  }
+  assert.equal(mfa.mfaRequiredFor({ role: 'vendor', isManager: true, hasServicePortalAccess: true }, roles), true,
+    'the lab-era service-portal manager (vendor + isManager) signed in with a password before this');
+});
+
+test('a social worker needs MFA by clinical role alone, even when the stored flag is out of sync', () => {
+  const roles = ['admin', 'user', 'caseManager'];
+  for (const clinicalRole of ['lcsw', 'lmsw', 'rn', 'provider', 'readOnly']) {
+    assert.equal(mfa.mfaRequiredFor({ role: 'vendor', clinicalRole, hasClinicalAccess: false }, roles), true,
+      `${clinicalRole} opens a chart, whatever hasClinicalAccess says`);
+  }
+  assert.equal(mfa.mfaRequiredFor({ role: 'caseManager' }, []), true, 'a case manager resolves to LMSW even with no role list at all');
+});
+
+test('the widening stops there: clients, family and plain caregivers are still not gated', () => {
+  const roles = ['admin', 'user', 'caseManager'];
+  assert.equal(mfa.mfaRequiredFor({ role: 'client' }, roles), false);
+  assert.equal(mfa.mfaRequiredFor({ role: 'family', familyIsPoa: true }, roles), false);
+  assert.equal(mfa.mfaRequiredFor({ role: 'vendor', licenseLevel: 'cna' }, roles), false);
+  assert.equal(mfa.mfaRequiredFor({ role: 'vendor', hasServicePortalAccess: true, isManager: false }, roles), false,
+    'a service technician is not a manager');
+  assert.equal(mfa.mfaRequiredFor({ role: 'vendor', clinicalRole: 'not-a-role' }, roles), false, 'an unrecognised role string grants nothing');
+  assert.equal(mfa.mfaRequiredFor(null, roles), false);
+});
+
+test('every door the server opens to manager-level access is a door MFA covers', () => {
+  // If a later change admits a new flag through one of these gates, 2FA has to
+  // follow it — otherwise that flag becomes a password-only way in.
+  const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+  const covered = new Set([...mfa.MANAGER_LEVEL_FLAGS, 'hasClinicalAccess']);
+  const gates = [
+    'const requireAdminHubAccess = ', 'const requireClientPortalAdmin = ',
+    'const requireEnrollmentStaff = ', 'const requireEnrolledClient = '
+  ];
+  let seen = 0;
+  for (const anchor of gates) {
+    const i = serverSrc.indexOf(anchor);
+    assert.ok(i > 0, `gate not found: ${anchor}`);
+    const body = strip(serverSrc.slice(i, serverSrc.indexOf('\n};', i)));
+    for (const [, flag] of body.matchAll(/req\.user\.(isManager|has\w+Access)\b/g)) {
+      seen++;
+      assert.ok(covered.has(flag), `${anchor.trim()} admits req.user.${flag}, which mfaRequiredFor does not cover`);
+    }
+  }
+  const usersList = serverSrc.slice(serverSrc.indexOf("app.get('/api/users', authenticateToken"), serverSrc.indexOf("app.get('/api/users', authenticateToken") + 400);
+  for (const [, flag] of strip(usersList).matchAll(/req\.user\.(isManager|has\w+Access)\b/g)) {
+    seen++;
+    assert.ok(covered.has(flag), `GET /api/users admits req.user.${flag}, which mfaRequiredFor does not cover`);
+  }
+  assert.ok(seen >= 9, `expected the gates to name their flags (found ${seen}); a scan that finds nothing proves nothing`);
+});
+
+test('everyone the clinical workspace admits needs MFA (owner, 2026-10-14)', () => {
+  // requireClinicalRead has two doors: a clinical role, or billing (admin or
+  // manager). Walk every role × clinical role × manager combination and assert
+  // nobody gets through either door without MFA being required.
+  const clinicalRoles = require('../clinicalRoles');
+  const roles = require('../config').MFA_REQUIRED_ROLES;
+  const accountTypes = ['admin', 'user', 'caseManager', 'vendor', 'client', 'family'];
+  const clinical = [undefined, ...clinicalRoles.ALL_CLINICAL_ROLES];
+  let admitted = 0;
+  for (const role of accountTypes) for (const clinicalRole of clinical) for (const isManager of [false, true]) {
+    for (const hasClinicalAccess of [false, true]) {
+      const u = { role, clinicalRole, isManager, hasClinicalAccess };
+      if (!clinicalRoles.canClinicalRead(u) && !clinicalRoles.canSubmitBilling(u)) continue;
+      admitted++;
+      assert.equal(mfa.mfaRequiredFor(u, roles), true, `admitted to the clinical workspace without MFA: ${JSON.stringify(u)}`);
+    }
+  }
+  assert.ok(admitted > 20, 'the sweep must actually admit people, or it proves nothing');
+  const gate = serverSrc.slice(serverSrc.indexOf('const requireClinicalRead ='), serverSrc.indexOf('const requireClinicalWrite ='));
+  assert.match(gate, /patientRead\.canClinicalRead\(req\.user\) && !clinicalRoles\.canSubmitBilling\(req\.user\)/,
+    'the gate still has exactly the two doors this test sweeps; a new door needs adding here');
+});
+
+test('MFA_REQUIRED_ROLES can widen the floor but never narrow it', () => {
+  const { execFileSync } = require('child_process');
+  const rolesWith = (value) => JSON.parse(execFileSync(process.execPath,
+    ['-e', "process.stdout.write(JSON.stringify(require('./config').MFA_REQUIRED_ROLES))"],
+    { cwd: root, env: { ...process.env, NODE_ENV: 'test', MFA_REQUIRED_ROLES: value } }).toString());
+  assert.deepEqual(rolesWith('admin'), ['admin', 'user', 'caseManager'], 'narrowing to admin keeps clinicians and case managers');
+  assert.deepEqual(rolesWith(''), ['admin', 'user', 'caseManager']);
+  assert.deepEqual(rolesWith('vendor, client'), ['admin', 'user', 'caseManager', 'vendor', 'client'], 'widening still works');
+  assert.deepEqual(rolesWith('caseManager,admin'), ['admin', 'user', 'caseManager'], 'no duplicates');
+});
+
 // ---- 2. Sessions ----
 const mkSessions = (idleMinutes = 15) => {
   let t = Date.parse('2026-09-10T12:00:00.000Z');

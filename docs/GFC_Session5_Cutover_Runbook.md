@@ -12,7 +12,7 @@ This document is the committed cutover plan the Session 5 brief asked for: deplo
 | PHI store inside the boundary | One data module, three adapters (`kv` dev / `postgres` production / `memory` tests); **production refuses to boot on anything but Postgres** | `dataStore.js`, `server.js` boot | `test/data_layer.test.js`; `scripts/verify_session5.js` §1 |
 | Migration cannot leave data behind | Source keys are enumerated dynamically; an unclaimed collection **refuses the whole run before any copy**; idempotent; read-back verified | `dataMigration.js`, `scripts/migrate_kv_to_postgres.js` | throwaway-collection test; re-run = 0 writes |
 | Clinicians act as themselves in OpenEMR | authorization_code + PKCE per user; server-held refresh tokens encrypted at rest; **no password grant, no shared token anywhere** | `emrAuth.js`, `openemr.js`, `/api/emr/connect`, `/oauth/callback` | `test/emr_auth.test.js`; live: `scripts/verify_emr_authcode.js` (owner-run) |
-| MFA for admin / clinical / case manager | TOTP (RFC 6238) enrolment at first login, recovery codes shown once, replay refused, 5 attempts per challenge; `MFA_ENFORCE=false` refused in production | `mfa.js`, `finishLogin` in `server.js`, `public/mfa-step.js` | `test/mfa_sessions.test.js`; probe §3 |
+| MFA for admin / clinical / case manager / manager / anyone with a clinical role | TOTP (RFC 6238) enrolment at first login, recovery codes shown once, replay refused, 5 attempts per challenge; `MFA_ENFORCE=false` refused in production | `mfa.js`, `finishLogin` in `server.js`, `public/mfa-step.js` | `test/mfa_sessions.test.js`; probe §3 |
 | 15-minute inactivity logout | Server-side session rows; idle → revoked on next request; client guard warns and signs out | `sessionStore.js`, `public/session-guard.js` | probe §4 (real 1-minute wait) |
 | Logout and revocation actually invalidate a token | Every JWT names a session; logout / password change / admin reset / deactivation revoke server-side | `authenticateToken` in `server.js` | probe §4 |
 | Every PHI access is a durable audit row | Append-only `audit_log` (table on Postgres), PHI-prefix middleware on every request, `logActivity()` writes it first; hashed IP, request id, actingFor for a POA | `auditLog.js` | `test/audit_log.test.js` (every `/api` route is audited or explicitly allowlisted); probe §6 |
@@ -74,7 +74,7 @@ Grouped by where you do it. The Master Setup Guide v4.1 section is cited where o
 | `JWT_SECRET` | 64+ random chars, rotated for go-live | yes |
 | `EMR_TOKEN_ENCRYPTION_KEY` | 32 bytes as 64 hex (`node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`) | yes |
 | `MFA_ENFORCE` | leave unset (`false` is refused) | — |
-| `MFA_REQUIRED_ROLES` | default `admin,user,caseManager` | — |
+| `MFA_REQUIRED_ROLES` | leave unset. `admin,user,caseManager` is a built-in floor this can only **add** to (2026-10-14); anyone with a clinical role or manager-level access is gated regardless | — |
 | `SESSION_IDLE_MINUTES` | default `15` | — |
 | `OPENEMR_BASE_URL`, `OPENEMR_SITE` | `https://emr.godwinsfamilycarellc.com`, `default` | yes |
 | `OPENEMR_CLIENT_ID`, `OPENEMR_CLIENT_SECRET` | the v4 client | yes |

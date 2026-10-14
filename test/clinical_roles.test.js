@@ -613,11 +613,15 @@ test('an unrecognised clinicalRole on the user PUT is REFUSED, never silently dr
 // ---- 10. MFA already covers these users (confirm, don't re-plumb) -------
 
 test('clinical users are already in MFA_REQUIRED_ROLES — confirmed, not re-plumbed', () => {
-  const cfg = fs.readFileSync(path.join(root, 'config.js'), 'utf8');
-  const line = cfg.split('\n').find(l => l.includes('const MFA_REQUIRED_ROLES ='));
-  assert.match(line, /admin,user,caseManager/, 'provider/rn/lcsw are role `user`; lmsw case managers are `caseManager`');
-  const mfa = fs.readFileSync(path.join(root, 'mfa.js'), 'utf8');
-  assert.match(mfa, /hasClinicalAccess/, 'and clinical access gates it too — now derived from the role');
+  // The role list moved from one env-defaulted line to a floor (2026-10-14);
+  // what this guards is unchanged: clinical staff and case managers need MFA.
+  const roles = require('../config').MFA_REQUIRED_ROLES;
+  for (const r of ['admin', 'user', 'caseManager']) {
+    assert.ok(roles.includes(r), `${r} must stay in MFA_REQUIRED_ROLES — provider/rn/lcsw are role \`user\`; lmsw case managers are \`caseManager\``);
+  }
+  const mfa = require('../mfa');
+  assert.equal(mfa.mfaRequiredFor({ role: 'vendor', hasClinicalAccess: true }, roles), true, 'clinical access gates it too');
+  assert.equal(mfa.mfaRequiredFor({ role: 'vendor', clinicalRole: 'lmsw' }, roles), true, 'and so does the clinical role itself');
 });
 
 // ---- 11. The UI renders from the served vocabulary, never its own copy --
