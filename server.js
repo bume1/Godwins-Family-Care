@@ -72,6 +72,7 @@ const standingOrders = require('./standingOrders');   // signed, versioned, expi
 const clinicalInbox = require('./clinicalInbox');     // what is waiting on a clinician (4.9)
 const clinicalNotes = require('./clinicalNotes');     // the shared, versioned clinical note (2026-09-27)
 const noteFormat = require('./public/note-format');   // the six formatting shapes — app, OpenEMR and PDF read one rule set
+const insurance = require('./insuranceEligibility'); // ONE payer vocabulary, verification, the claim gate (B1)
 const myDay = require('./myDay');                     // the day, the visit stamps and the pre-visit
                                                       // packet (4.12). Pure — the clock is passed in.
 // Session 4.10 — orders that leave the building. The app GENERATES, a person
@@ -8792,7 +8793,9 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
       serviceLine: client.serviceLine,
       careTier: normalizeCareTier(client.careTier),
       careTierLabel: careTierLabelFor(client.careTier),
-      payerType: (client.payer && client.payer.type) || null,
+      // Read through the ONE payer vocabulary (B1): a label a clinician can
+      // read, never the raw summary code ('medicare_b').
+      payerType: (() => { const p = insurance.normalizePayers(client).primary; return p ? insurance.KIND_LABELS[p.kind] : null; })(),
       allergiesReported: client.allergies || intake.allergies || null,
       medicationsReported: client.medications || [],
       openEmrPatientId: client.openEmrPatientId || null
@@ -14391,6 +14394,20 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/billing-submit', au
       }
     }
 
+    // B1 E1–E3 — THE CLAIM, never the signature. A primary payer that nobody
+    // has checked (or that the check contradicted) is not billed. Asked BEFORE
+    // anything is written, so a refusal leaves the encounter as it was. An
+    // admin may override with a reason, which is stored on the record.
+    const insuranceGate = insurance.checkInsuranceForBilling(ctx.client, {
+      override: body.insuranceOverride, actor: ctx.actor, isAdmin: req.user.role === config.ROLES.ADMIN
+    });
+    if (!insuranceGate.ok) {
+      return res.status(insuranceGate.overrideRefused ? 403 : 409).json({
+        error: insuranceGate.overrideRefused || insuranceGate.message, code: insuranceGate.code,
+        overridable: !!insuranceGate.overridable, adminOnlyOverride: true
+      });
+    }
+
     const warnings = [];
     // The place of service, stamped with billing's own login if missing.
     try {
@@ -14409,6 +14426,8 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/billing-submit', au
       billingSubmittedAt: now, billingSubmittedBy: biller,
       billingProviderNpi: payer.billing_npi_used,
       posMissingReason: null,
+      // What the insurance check said when this claim was released (B1).
+      insuranceCheck: { status: insuranceGate.status, override: insuranceGate.override || null, at: now },
       updatedAt: now
     };
     // Rendering provider = the signing clinician (or the addendum author) —
@@ -14417,6 +14436,11 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/billing-submit', au
     const syncWarning = await syncStructuredNote(ctx.emr, ctx.client, record);
     if (syncWarning) warnings.push(syncWarning);
     await saveBillingRecord(ctx.rows, record);
+    if (insuranceGate.override) {
+      await logActivity(req.user.id, req.user.name || req.user.email, 'billing_insurance_override', 'client', ctx.client.id, {
+        encounterUuid: ctx.encounterUuid, overrode: insuranceGate.override.overrode, reason: insuranceGate.override.reason
+      });
+    }
     await logActivity(req.user.id, req.user.name || req.user.email, 'encounter_billing_submitted', 'client', ctx.client.id, {
       encounterUuid: ctx.encounterUuid, services: (record.services || []).map(x => x.code),
       renderingProviderId: record.renderingProvider ? record.renderingProvider.id : null,
@@ -14425,7 +14449,8 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/billing-submit', au
     // A fixed copay, when the office set one for this patient (patientBilling.js).
     try {
       const copay = await createCopayInvoice({ client: ctx.client, encounterUuid: ctx.encounterUuid, visitDate: record.date || null, by: req.user });
-      if (copay) warnings.push(`Copay statement ${copay.number} (${billing.fmtUsd(copay.totalCents)}) sent to the patient's portal.`);
+      if (copay && copay.blocked) warnings.push(copay.message);
+      else if (copay) warnings.push(`Copay statement ${copay.number} (${billing.fmtUsd(copay.totalCents)}) sent to the patient's portal.`);
     } catch (e) { warnings.push(`The copay statement could not be created (${e.message.slice(0, 120)}).`); }
     res.json({
       message: record.chargesPosted ? 'Submitted to billing; charges posted to Billing Manager' : 'Submitted to billing',
@@ -14435,6 +14460,132 @@ app.post('/api/clinical/patients/:clientId/encounters/:euuid/billing-submit', au
   } catch (error) {
     console.error('Billing submit error:', error);
     res.status(502).json({ error: `Submit to billing failed: ${error.message}` });
+  }
+});
+
+// ============================================================
+// B1 — INSURANCE ELIGIBILITY: the answer coming back (2026-10-13)
+// Rules: insuranceEligibility.js. The biller runs the check in the Availity
+// portal (later OpenEMR's own X12) and records five typed facts here. The app
+// never parses X12, never holds a payer id, and never auto-verifies. Who: an
+// admin or a manager (requireBilling). A clinician sees the RESULT on the
+// banner, My Day and the pre-visit packet, never this form.
+// ============================================================
+const INSURANCE_EVENTS = 'insurance_verification_events';
+const insuranceAssignmentSigned = (client) => {
+  const c = (client && client.consents) || {};
+  return isConsentSatisfied(c.assignmentOfBenefits);
+};
+const insuranceView = (client) => {
+  const norm = insurance.normalizePayers(client);
+  const today = new Date().toISOString().slice(0, 10);
+  return {
+    payers: norm.entries.map(e => ({
+      rank: e.rank, rankSource: e.rankSource, kind: e.kind, kindLabel: insurance.KIND_LABELS[e.kind],
+      payerName: e.payerName, memberId: e.memberId, groupNumber: e.groupNumber,
+      coverageStart: e.coverageStart, coverageEnd: e.coverageEnd,
+      memberIdValid: e.memberIdValid, missing: e.missing, source: e.source,
+      state: e.rank && e.rank !== 'not_billed' ? insurance.verificationState(client, { rank: e.rank, today }) : null,
+      emrInsurance: ((client.insuranceVerification || {})[e.rank] || {}).emrInsurance || null
+    })),
+    unresolved: norm.unresolved, qmb: norm.qmb,
+    assignmentOfBenefitsSigned: insuranceAssignmentSigned(client),
+    kinds: insurance.KINDS.map(k => ({ value: k, label: insurance.KIND_LABELS[k] })),
+    methods: insurance.VERIFICATION_METHODS,
+    noteMax: insurance.NOTE_MAX
+  };
+};
+
+app.get('/api/clinical/patients/:clientId/insurance', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const client = (await getUsers()).find(u => u && u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+    const events = ((await db.get(INSURANCE_EVENTS)) || []).filter(r => r && r.clientId === client.id)
+      .sort((a, b) => String(b.recordedAt).localeCompare(String(a.recordedAt))).slice(0, 20);
+    res.json({ ...insuranceView(client), history: events });
+  } catch (error) {
+    console.error('Insurance read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// OpenEMR's insurance-company list, so the biller can pick the row the
+// patient's coverage is filed under. Its numeric id is OpenEMR's own row id,
+// not a payer id; the plan-name-to-payer-id mapping stays in OpenEMR.
+app.get('/api/clinical/insurance-companies', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    if (!openemr.isConfigured()) return res.status(409).json({ error: 'OpenEMR is not configured', code: 'EMR_NOT_CONFIGURED' });
+    const rows = await openemr.forActor(req.user).listInsuranceCompanies();
+    res.json({ companies: rows.filter(r => !r.inactive).sort((a, b) => a.name.localeCompare(b.name)) });
+  } catch (error) {
+    res.status(error.code === 'EMR_INSURANCE_SCOPE' || error.code === 'EMR_INSURANCE_ACL' ? 409 : 502)
+      .json({ error: error.message, code: error.code || 'EMR_INSURANCE_READ_FAILED' });
+  }
+});
+
+app.post('/api/clinical/patients/:clientId/insurance-verification', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const rank = insurance.readRank(body.rank) || 'primary';
+    const users = await getUsers();
+    const idx = users.findIndex(u => u && u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
+    if (idx === -1) return res.status(404).json({ error: 'Client not found' });
+    const client = users[idx];
+    const current = insurance.normalizePayers(client).entries.find(e => e.rank === rank) || null;
+    const now = new Date().toISOString();
+    const built = insurance.buildVerification({ current, body, actor: req.user, now });
+    if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+    const v = built.value;
+
+    // C2 — the OpenEMR row, written only when the biller picked OpenEMR's
+    // insurance company AND the check verified what intake recorded. A row
+    // the app cannot vouch for is not put on a claim. A failure here never
+    // undoes the verification: the fact the biller recorded is still true.
+    const prior = ((client.insuranceVerification || {})[rank]) || {};
+    let emrInsurance = prior.emrInsurance || null;
+    const companyId = body.openEmrInsuranceCompanyId == null ? '' : String(body.openEmrInsuranceCompanyId).trim();
+    const warnings = [];
+    if (companyId && v.status === 'verified') {
+      const built2 = insurance.buildOpenEmrInsuranceRow({ entry: current, client, companyId, assignmentSigned: insuranceAssignmentSigned(client) });
+      if (built2.error) {
+        emrInsurance = { written: false, code: built2.code, error: built2.error, companyId, at: now };
+      } else if (!client.openEmrPatientId) {
+        emrInsurance = { written: false, code: 'NOT_LINKED', error: 'This client is not linked to an OpenEMR chart yet.', companyId, at: now };
+      } else if (!openemr.isConfigured()) {
+        emrInsurance = { written: false, code: 'EMR_NOT_CONFIGURED', error: 'OpenEMR is not configured.', companyId, at: now };
+      } else {
+        try {
+          const saved = await openemr.forActor(req.user).writePatientInsurance(client.openEmrPatientId, built2.row, prior.emrInsurance && prior.emrInsurance.uuid);
+          emrInsurance = { written: true, uuid: saved.uuid, companyId, type: built2.row.type, at: now };
+        } catch (e) {
+          emrInsurance = { written: false, code: e.code || 'EMR_INSURANCE_WRITE_FAILED', error: String(e.message || e).slice(0, 400), companyId, at: now,
+            uuid: prior.emrInsurance && prior.emrInsurance.uuid ? prior.emrInsurance.uuid : null };
+        }
+      }
+      if (!emrInsurance.written) warnings.push(`Saved in the app, not written to OpenEMR: ${emrInsurance.error}`);
+    } else if (companyId && v.status !== 'verified') {
+      warnings.push('Nothing was written to OpenEMR: only verified coverage goes on the chart.');
+    }
+
+    const stored = { ...v, emrInsurance };
+    client.insuranceVerification = { ...(client.insuranceVerification || {}), [rank]: stored };
+    users[idx] = client;
+    await db.set('users', users);
+    invalidateUsersCache();
+    const events = (await db.get(INSURANCE_EVENTS)) || [];
+    events.push({ id: uuidv4(), clientId: client.id, ...stored });
+    await db.set(INSURANCE_EVENTS, events);
+    // Status and plan type only. A member id is an identifier; the audit trail
+    // is not a second copy of it.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'insurance_verification_recorded', 'client', client.id, {
+      rank, status: v.status, method: v.method, planTypeAsFound: v.planTypeAsFound, autoMismatch: v.autoMismatch,
+      emrWritten: emrInsurance ? !!emrInsurance.written : null
+    });
+    if (v.autoMismatch) warnings.unshift(`Recorded as a MISMATCH: intake says ${insurance.KIND_LABELS[v.recorded.kind]}, the check found ${insurance.KIND_LABELS[v.planTypeAsFound]}. Correct the coverage on the enrollment record, then check it again.`);
+    res.json({ message: v.status === 'verified' ? 'Coverage verified' : `Recorded as ${v.status}`, verification: stored, warnings, ...insuranceView(client) });
+  } catch (error) {
+    console.error('Insurance verification error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -14482,6 +14633,13 @@ const notifyStatement = async (clientId) => {
 const createCopayInvoice = async ({ client, encounterUuid, visitDate, by }) => {
   const cents = client && client.billingSettings && client.billingSettings.copayCents;
   if (!(cents > 0)) return null;
+  // B1 E4 — a QMB patient is never billed Medicare cost sharing. A system
+  // control, not a staff instruction: the statement is simply not created.
+  const qmbBlock = insurance.qmbBlocksPatientBilling(client, 'copay');
+  if (qmbBlock.blocked) {
+    await logActivity(by ? by.id : 'system', by ? by.name : 'Billing', 'invoice_blocked_qmb', 'client', client.id, { kind: 'copay', encounterUuid });
+    return { blocked: true, message: qmbBlock.message, code: qmbBlock.code };
+  }
   const existing = (await readInvoices()).find(r => r.kind === 'copay' && r.encounterUuid === encounterUuid && r.status !== 'void');
   if (existing) return existing;   // a re-submit never bills the copay twice
   const at = new Date().toISOString();
@@ -14627,6 +14785,12 @@ app.post('/api/gfc/admin/billing/invoices/:id/:action', authenticateToken, requi
     if (!to) return res.status(404).json({ error: 'Unknown action' });
     const inv = (await readInvoices()).find(r => r.id === req.params.id);
     const b = req.body || {};
+    // B1 E4 — a copay statement already drafted for a QMB patient is never sent.
+    if (inv && to === 'open') {
+      const qmbClient = (await getUsers()).find(u => u && u.id === inv.clientId);
+      const qmbBlock = insurance.qmbBlocksPatientBilling(qmbClient, inv.kind);
+      if (qmbBlock.blocked) return res.status(409).json({ error: qmbBlock.message, code: qmbBlock.code });
+    }
     const t = billing.transition(inv, to, { at: new Date().toISOString(), by: req.user, reason: b.reason, method: to === 'paid' ? (b.method === 'stripe' ? null : b.method) : undefined, reference: b.reference });
     if (t.error) return res.status(t.code === 'INVOICE_NOT_FOUND' ? 404 : 409).json(t);
     await saveInvoice(t.inv);
@@ -16948,6 +17112,10 @@ app.post('/api/gfc/intake', authenticateToken, requireClientForIntake, async (re
     if (!intake || typeof intake !== 'object') {
       return res.status(400).json({ error: 'intake object is required' });
     }
+    // Exactly one payer may be primary (B1). Ranks are a new field, so this
+    // can only refuse an answer somebody has just given.
+    const rankCheck = insurance.validateRanks({ ...intake });
+    if (rankCheck.error) return res.status(400).json({ error: rankCheck.error, code: rankCheck.code });
     const { users, idx } = await loadClientForMutation(req.user.id);
     if (idx === -1) return res.status(404).json({ error: 'Client record not found' });
 
@@ -16975,9 +17143,15 @@ app.post('/api/gfc/intake', authenticateToken, requireClientForIntake, async (re
     // medical-team fields on every save so edits stay in sync.
     const priorProviders = resolvePriorProviders(users[idx], intake);
 
-    const merged = {
+    // The Medicare number is upper-cased and its spaces and hyphens dropped,
+    // and its validity stamped. A malformed one is SAVED and flagged, never
+    // refused: a card can be re-read later, a lost answer cannot.
+    const { intake: mergedInsurance, mbi } = insurance.normalizeIntakeInsurance({
       ...(users[idx].intake || {}),
-      ...intake,
+      ...intake
+    });
+    const merged = {
+      ...mergedInsurance,
       medications: meds,
       priorProviders,
       dob,
@@ -17005,7 +17179,8 @@ app.post('/api/gfc/intake', authenticateToken, requireClientForIntake, async (re
         noLongerRequiredConsents: serviceLineChange.noLongerRequired
       });
     }
-    res.json({ message: 'Intake saved', intake: merged, age: merged.age, serviceLineChange });
+    res.json({ message: 'Intake saved', intake: merged, age: merged.age, serviceLineChange,
+      insuranceWarnings: mbi && mbi.valid === false ? [{ field: 'medicare.id', message: mbi.message }] : [] });
   } catch (error) {
     console.error('GFC save intake error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -17348,18 +17523,16 @@ const ENROLLMENT_REQUIRED_FIELDS = [
   // LTC claim support — counted only where the client actually holds a policy.
   { key: 'ltcPolicy',        label: 'Long term care carrier and policy number', lanes: PHC_LANES,
     consentTypes: ['financialAgreement', 'serviceAgreement'],
-    applies: (c, i) => {
-      const type = (c.payer && c.payer.type) || (i.payer && i.payer.type) || '';
-      return /ltc/i.test(String(type)) || !!(i.ltc && (i.ltc.carrier || i.ltc.policyNum));
-    },
+    applies: (c, i) => insurance.normalizePayers({ ...c, intake: i || c.intake }).entries.some(e => e.kind === 'ltc'),
     present: (c, i) => !!(i.ltc && i.ltc.carrier && i.ltc.policyNum) },
   // assignmentOfBenefits and the IHPC agreement both print the coverage block.
   { key: 'coverage',         label: 'Insurance coverage on file', lanes: IHPC_LANES,
     consentTypes: ['assignmentOfBenefits', 'ihpcServiceAgreement'],
     present: (c, i) => {
+      if (insurance.normalizePayers({ ...c, intake: i || c.intake }).entries.length) return true;
       const payer = c.payer || i.payer || {};
       const ids = Array.isArray(payer.insuranceIds) ? payer.insuranceIds : [];
-      return !!(payer.type || ids.some(x => x && x.carrier));
+      return ids.some(x => x && x.carrier);
     } }
 ];
 
@@ -20705,6 +20878,12 @@ const commitEnrollmentSubmission = ({ client, priorClient, next, changed, emailC
     };
   }
 
+  // The Medicare number is normalised on every edit, the same way the
+  // client's own intake save does it (B1). Never refused.
+  if (next.medicare && typeof next.medicare === 'object') {
+    const n = insurance.normalizeIntakeInsurance(next).intake;
+    next.medicare = n.medicare;
+  }
   next.age = deriveAge(next.dob);
   next.updatedAt = new Date().toISOString();
   client.intake = next;
@@ -20789,6 +20968,9 @@ app.put('/api/gfc/admin/enrollment/:clientId/details', authenticateToken, requir
         code: 'INTAKE_OPTION_INVALID', fieldErrors
       });
     }
+
+    const rankCheck = insurance.validateRanks(next);
+    if (rankCheck.error) return res.status(400).json({ error: rankCheck.error, code: rankCheck.code });
 
     // Validated by the SAME function the intake wizard and offline onboarding
     // use, so a date this page accepts is a date those two would accept.

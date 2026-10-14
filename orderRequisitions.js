@@ -18,6 +18,7 @@
 'use strict';
 
 const roles = require('./clinicalRoles');
+const insuranceEligibility = require('./insuranceEligibility');
 
 // ---- The two new order types --------------------------------------------
 // PROVIDER-DIRECT ONLY, and that is safe BY CONSTRUCTION rather than by a new
@@ -625,21 +626,13 @@ const normalizeMedicareEnrollment = (raw) => {
   };
 };
 
-// Is this patient a Medicare patient? Read off the client's payer block, which
-// the intake mirror assembles. UNKNOWN IS NOT MEDICARE: warning every patient
-// whose payer we cannot read would make the warning meaningless, and the payer
-// block is the same thing billing reads.
-const isMedicarePatient = (client) => {
-  const payer = (client && client.payer) || {};
-  const type = String(payer.type || '').toLowerCase();
-  if (['medicare', 'medicare_advantage', 'medicareadvantage', 'ma'].includes(type)) return true;
-  // The intake's own structured insurance block, for a record written before
-  // the payer summary existed.
-  const ins = ((client && client.intake) || {}).insurance || {};
-  const types = Array.isArray(ins.insuranceTypes) ? ins.insuranceTypes.map(t => String(t).toLowerCase()) : [];
-  if (types.some(t => t.includes('medicare'))) return true;
-  return /medicare/i.test(String(payer.primaryName || payer.name || ''));
-};
+// Is this patient a Medicare patient? Asked of the ONE payer vocabulary
+// (insuranceEligibility.js), which reads every stored shape, 'medicare_b'
+// included. UNKNOWN IS NOT MEDICARE: warning every patient whose payer we
+// cannot read would make the warning meaningless. This is the PATIENT's payer;
+// the ordering clinician's own Medicare enrollment is a different fact,
+// checked below.
+const isMedicarePatient = (client) => insuranceEligibility.isMedicare(client);
 
 const checkOrderingEnrollment = ({ orderType, client, orderingUser, acknowledgment }) => {
   if (!ENROLLMENT_GATED_TYPES.includes(String(orderType))) return { required: false, ok: true };

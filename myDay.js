@@ -10,6 +10,7 @@
 // BEFORE I KNOCK." Everything here is built for reading on a phone, in a car,
 // before getting out of it.
 //
+const insuranceEligibility = require('./insuranceEligibility'); // B1 D4: coverage checked or not
 const sched = require('./schedulingRepository'); // clientCoords — the ONE reader
                                                  // for a client's location (see
                                                  // coordsOf below).
@@ -349,7 +350,16 @@ const buildDayRow = ({ appointment, client, timing, signed, previousCoords, home
     // existing is the fact the screen needs.
     video: video ? { meetingUri: video.meetingUri || null, meetingCode: video.meetingCode || null } : null,
     location: a.location || (video ? 'telehealth' : null),
-    notes: a.notes || null
+    notes: a.notes || null,
+    // B1 D4: whether the primary coverage has been checked, and how long ago.
+    // Never a reason to skip the visit; shown so the office can catch an
+    // Advantage plan before the visit rather than after the denial.
+    insurance: client ? (() => {
+      const v = insuranceEligibility.verificationState(client, { rank: 'primary', today: a.date || undefined });
+      return { status: v.status, label: v.label, ageDays: v.ageDays,
+        found: v.status === 'mismatch' && v.verification ? { planType: insuranceEligibility.KIND_LABELS[v.verification.planTypeAsFound], payer: v.verification.payerAsFound } : null,
+        recorded: v.status === 'mismatch' && v.verification ? { planType: insuranceEligibility.KIND_LABELS[v.verification.recorded.kind], payer: v.verification.recorded.payerName } : null };
+    })() : null
   };
 };
 

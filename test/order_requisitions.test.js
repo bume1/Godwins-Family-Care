@@ -349,7 +349,15 @@ test('A5: a commercial patient is never warned, and a REFERRAL is never warned',
   // makes the warning meaningless.
   assert.equal(orderReq.isMedicarePatient({ payer: {} }), false);
   assert.equal(orderReq.isMedicarePatient({ payer: { type: 'medicare_advantage' } }), true);
-  assert.equal(orderReq.isMedicarePatient({ intake: { insurance: { insuranceTypes: ['Medicare Part B'] } } }), true);
+  // B1 (2026-10-13): REPOINTED. This line used to assert the
+  // `intake.insurance.insuranceTypes` fallback — a shape production never
+  // writes (intake fields are stored flat), which is why the check never fired
+  // for a real Part B patient. It now asserts the shapes the app actually
+  // stores, all through the one payer normaliser.
+  assert.equal(orderReq.isMedicarePatient({ payer: { type: 'medicare_b' } }), true, "the mirror's own code for 'Medicare Part B'");
+  assert.equal(orderReq.isMedicarePatient({ intake: { insuranceTypes: ['Medicare Part A & B'] } }), true);
+  assert.equal(orderReq.isMedicarePatient({ intake: { medicare: { id: '1EG4TE5MK72' } } }), true);
+  assert.equal(orderReq.isMedicarePatient({ intake: { insurance: { insuranceTypes: ['Medicare Part B'] } } }), false, 'the dead fallback shape is gone');
 });
 
 test('A5: under a standing order the AUTHORIZING provider is checked, not the executing nurse', () => {

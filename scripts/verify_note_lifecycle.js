@@ -49,7 +49,7 @@ require.cache['__memdb__'] = { id: '__memdb__', filename: '__memdb__', loaded: t
 const rows = (k) => STORE.get(k) || [];
 
 // ---- a stateful fake OpenEMR --------------------------------------------------
-const EMR = { seq: 100, encounters: new Map(), soap: new Map(), vitals: [], charges: [], documents: [], encounterUpdates: [], soapUpdates: 0 };
+const EMR = { seq: 100, encounters: new Map(), soap: new Map(), vitals: [], charges: [], documents: [], encounterUpdates: [], soapUpdates: 0, insurance: [] };
 const FACILITIES = [
   { id: '3', name: 'Vinings office', pos_code: '11', service_location: '1', billing_location: '1', primary_business_entity: '1' },
   { id: '5', name: 'Private Residence', pos_code: '12', service_location: '1', billing_location: '0', primary_business_entity: '0' }
@@ -72,6 +72,13 @@ let CLINICIANS_READ_FACILITIES = true;
 openemr.forActor = (actor) => new Proxy({}, {
   get(_t, prop) {
     switch (prop) {
+      // B1: OpenEMR's insurance-company list and the patient insurance write.
+      case 'listInsuranceCompanies': return async () => [{ id: '33', name: 'Medicare Part B (Palmetto GBA)', cmsId: null, inactive: false }];
+      case 'writePatientInsurance': return async (puuid, row, uuid) => {
+        const saved = { uuid: uuid || `ins-${++EMR.seq}`, puuid, ...row };
+        EMR.insurance = EMR.insurance.filter(x => x.uuid !== saved.uuid).concat([saved]);
+        return saved;
+      };
       case 'createEncounter': return async (puuid, fields) => {
         const eid = String(++EMR.seq); const euuid = `enc-${eid}`;
         EMR.encounters.set(euuid, { puuid, eid, ...fields });
@@ -150,7 +157,13 @@ const CM = staff('cm_1', 'Casey Reed', 'readOnly', null, { role: 'caseManager', 
 // clinical role at all.
 const MGR = { id: 'mgr_1', name: 'Morgan Price (TEST DATA)', email: 'mgr_1@example.test', role: 'user', isManager: true, hasClinicalAccess: false, accountStatus: 'active' };
 const PHONEPATIENT = { ...PATIENT, id: 'c_phone', email: 'c_phone@example.test', name: 'Phone Probe Patient (TEST DATA)', slug: 'phone-probe', openEmrPatientId: 'uuid-phone-patient' };
-const BILLPATIENT = { ...PATIENT, id: 'c_bill', email: 'c_bill@example.test', name: 'Billing Probe Patient (TEST DATA)', slug: 'bill-probe', openEmrPatientId: 'uuid-bill-patient' };
+const BILLPATIENT = { ...PATIENT, id: 'c_bill', email: 'c_bill@example.test', name: 'Billing Probe Patient (TEST DATA)', slug: 'bill-probe', openEmrPatientId: 'uuid-bill-patient',
+  // B1: Original Medicare on intake, never checked. The billing gate refuses
+  // it until billing records an eligibility result.
+  intake: { dob: '1948-03-11', clientFirst: 'Billing', clientLast: 'Probe', gender: 'Female', payerType: 'Medicare Part B',
+    medicare: { id: '1eg4-te5-mk72', coverageStart: '2025-01-01' },
+    address: { line1: '118 Hickory Log Dr', city: 'Canton', state: 'GA', zip: '30114' } },
+  payer: { type: 'medicare_b' } };
 
 // Formatted markup, the way the editor stores it.
 const HP_NOTE = {
@@ -484,8 +497,34 @@ const HP_NOTE = {
   check('the rendering clinician is still the FNP, not the manager', record(bv).renderingProvider && record(bv).renderingProvider.id === FNP.id, record(bv).renderingProvider);
   r = await call('POST', `${B}/encounters/${bv}/billing-submit`, tok.mgr, {});
   check('submitting needs billing\'s attestation', r.status === 400 && r.body.code === 'BILLING_NO_ATTEST', r.body);
+  console.log('\n── 13b. B1: the insurance check gates the CLAIM, never the signature ──');
+  check('the note was signed with the coverage unverified', record(bv).billingStatus === 'awaiting_billing');
   r = await call('POST', `${B}/encounters/${bv}/billing-submit`, tok.mgr, { attest: true });
-  check('billing submits', r.status === 200 && record(bv).billingStatus === 'billed', r.body);
+  check('an unverified primary payer refuses the claim, by name', r.status === 409 && r.body.code === 'BILLING_INSURANCE_UNVERIFIED' && /Cannot submit to billing: Medicare coverage is unverified\./.test(r.body.error), r.body);
+  check('and the refusal wrote nothing', record(bv).billingStatus === 'awaiting_billing' && !EMR.charges.some(c => c.euuid === bv));
+  r = await call('POST', `${B}/encounters/${bv}/billing-submit`, tok.mgr, { attest: true, insuranceOverride: { reason: 'Checked by phone' } });
+  check('a manager cannot override the insurance check (admin only)', r.status === 403 && r.body.code === 'BILLING_INSURANCE_UNVERIFIED', r.body);
+  r = await call('GET', `${B}/insurance`, tok.fnp);
+  check('the insurance screen is billing\'s', r.status === 403, r.body);
+  r = await call('GET', `${B}/insurance`, tok.mgr);
+  const bpay = r.body && (r.body.payers || [])[0];
+  check('billing reads one canonical payer: Original Medicare, primary, MBI normalised', r.status === 200 && bpay && bpay.kind === 'medicare_ffs' && bpay.rank === 'primary' && bpay.memberId === '1EG4TE5MK72' && bpay.memberIdValid === true, r.body);
+  r = await call('POST', `${B}/insurance-verification`, tok.mgr, { rank: 'primary', status: 'verified', method: 'availity_portal', planTypeAsFound: 'medicare_advantage', payerAsFound: 'Humana Gold Plus HMO' });
+  check('verifying an Advantage plan against Original Medicare records a MISMATCH', r.status === 200 && r.body.verification.status === 'mismatch' && r.body.verification.recorded.kind === 'medicare_ffs' && r.body.verification.planTypeAsFound === 'medicare_advantage', r.body);
+  r = await call('GET', `${B}/chart`, tok.fnp);
+  const bv_ins = r.body && r.body.banner && r.body.banner.insurance;
+  check('the clinician\'s banner shows BOTH values of the mismatch', bv_ins && bv_ins.verification.status === 'mismatch' && bv_ins.verification.found.payer === 'Humana Gold Plus HMO' && bv_ins.verification.recorded.planType === 'Original Medicare', bv_ins);
+  r = await call('POST', `${B}/encounters/${bv}/billing-submit`, tok.mgr, { attest: true });
+  check('a mismatch refuses the claim', r.status === 409 && r.body.code === 'BILLING_INSURANCE_MISMATCH', r.body);
+  r = await call('GET', '/api/clinical/insurance-companies', tok.mgr);
+  check('billing reads OpenEMR\'s insurance-company list', r.status === 200 && r.body.companies[0].id === '33', r.body);
+  r = await call('POST', `${B}/insurance-verification`, tok.mgr, { rank: 'primary', status: 'verified', method: 'availity_portal', planTypeAsFound: 'medicare_ffs', payerAsFound: 'Medicare Part B', openEmrInsuranceCompanyId: '33' });
+  check('a verified check is recorded', r.status === 200 && r.body.verification.status === 'verified', r.body);
+  const insRow = EMR.insurance.find(x => x.puuid === 'uuid-bill-patient');
+  check('and the row reaches OpenEMR as the primary policy, self-subscriber, no SSN', insRow && insRow.type === 'primary' && insRow.provider === '33' && insRow.policy_number === '1EG4TE5MK72' && insRow.subscriber_relationship === 'self' && insRow.date === '2025-01-01' && !('subscriber_ss' in insRow), insRow);
+  check('the verification is kept as history', (STORE.get('insurance_verification_events') || []).filter(e => e.clientId === BILLPATIENT.id).length === 2);
+  r = await call('POST', `${B}/encounters/${bv}/billing-submit`, tok.mgr, { attest: true });
+  check('billing submits', r.status === 200 && record(bv).billingStatus === 'billed' && record(bv).insuranceCheck.status === 'verified', r.body);
   check('the place of service was stamped from the patient\'s facility with billing\'s login', EMR.encounters.get(bv).pos_code === '12' && String(EMR.encounters.get(bv).facility_id) === '5', EMR.encounters.get(bv));
   const posted = EMR.charges.filter(c => c.euuid === bv);
   check('the charge posted once, with the FNP as rendering provider', posted.length === 1 && posted[0].code === '99349' && posted[0].provider_id === 7, posted);

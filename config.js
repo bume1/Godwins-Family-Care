@@ -373,7 +373,13 @@ const OPENEMR = Object.freeze({
     // INTERSECTION of what is requested here and what the client holds, so the
     // deployed credential swap and this list are BOTH required.
     'user/billing.read', 'user/billing.write',
-    'user/order.read', 'user/order.write', 'user/codes.read'
+    'user/order.read', 'user/order.write', 'user/codes.read',
+    // B1 (2026-10-13): writing a patient's insurance row and reading OpenEMR's
+    // insurance-company list. NOT on the deployed v4 client — they need a
+    // successor client and a credential swap. Requesting them first is safe
+    // (a token carries the intersection), and until then the write reports
+    // EMR_INSURANCE_SCOPE by name and nothing else is affected.
+    'user/insurance.write', 'user/insurance_company.read'
   ].join(' ')
 });
 

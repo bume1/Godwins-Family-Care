@@ -243,7 +243,11 @@ const createEmrAuth = (deps) => {
       missingScopes: connected ? requested.filter(sc => !granted.includes(sc) && !NOT_ECHOED.has(sc)) : [],
       appointmentScopes: connected ? has('user/appointment.read', 'user/appointment.write') : null,
       nativeWriteScopes: connected ? has('user/prescription.read', 'user/prescription.write') : null,
-      billingRouteScopes: connected ? has('user/billing.read', 'user/billing.write', 'user/order.read', 'user/order.write', 'user/codes.read') : null
+      billingRouteScopes: connected ? has('user/billing.read', 'user/billing.write', 'user/order.read', 'user/order.write', 'user/codes.read') : null,
+      // B1: the insurance write. Its absence is expected until the successor
+      // client is registered, so it gets no banner of its own; the billing
+      // screen says it where the write is attempted.
+      insuranceWriteScopes: connected ? has('user/insurance.write', 'user/insurance_company.read') : null
     };
   };
 
