@@ -1152,7 +1152,10 @@ test('both new destinations are reachable and neither is hidden when empty', () 
   // (owner mockup); the view and its key are unchanged.
   assert.match(pageCode, /key: 'queues', tab: 'Tasks'/);
   assert.match(pageCode, /key: 'analytics', tab: 'Reports'/);
-  assert.match(pageCode, /onClick=\{\(\) => \{ setView\(v\.key\)/, 'the sidebar must actually call setView with the clicked entry');
+  // A page link (`href`, e.g. Enrollment) leaves the workspace first; every
+  // other entry switches the view.
+  assert.match(pageCode, /onClick=\{\(\) => \{ if \(v\.href\) \{ window\.location\.assign\(v\.href\); return; \} setView\(v\.key\)/, 'the sidebar must actually call setView with the clicked entry');
+  assert.match(pageCode, /key: 'analytics', tab: 'Reports'[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*\{ key: 'enrollment', tab: 'Enrollment'[^\n]*href: '\/admin\/enrollment'/, 'Enrollment sits directly under Reports and opens the enrollment page');
   assert.match(pageCode, /<WorkQueuesView/);
   assert.match(pageCode, /<AnalyticsView/);
   const i = pageCode.indexOf('const VIEW_TITLES');

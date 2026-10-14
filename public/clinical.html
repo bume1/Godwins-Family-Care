@@ -437,7 +437,7 @@
     const VIEW_TITLES = {
       myday: 'My Day', queues: 'Tasks', analytics: 'Reports', charts: 'Patients', schedule: 'Schedule', queue: 'Coding Queue',
       inbox: 'Inbox', results: 'Results Inbox', overdue: 'Overdue Orders',
-      messages: 'Messages', settings: 'Settings', patients: 'Patients', more: 'More'
+      messages: 'Messages', settings: 'Settings', patients: 'Patients', more: 'More', enrollment: 'Enrollment'
     };
 
     // The nav strip, DECLARED ONCE (owner report 2026-09-23: the top bar was
@@ -467,6 +467,10 @@
       { key: 'results', tab: 'Results', icon: 'ti-flask', group: 'main' },
       { key: 'messages', tab: 'Messages', icon: 'ti-message-circle', group: 'main', phone: true },
       { key: 'analytics', tab: 'Reports', icon: 'ti-file-analytics', group: 'main' },
+      // Owner, 2026-10-14: Enrollment in the sidebar, under Reports. It is its
+      // own page (/admin/enrollment), so `href` leaves the workspace rather
+      // than switching a view. That page gates who may read and write it.
+      { key: 'enrollment', tab: 'Enrollment', icon: 'ti-clipboard-list', group: 'main', href: '/admin/enrollment' },
       { key: 'schedule', tab: 'Schedule', icon: 'ti-calendar-week', group: 'work' },
       { key: 'queue', tab: 'Coding', icon: 'ti-receipt', group: 'work' },
       { key: 'overdue', tab: 'Overdue', icon: 'ti-clock-exclamation', group: 'work' },
@@ -9335,10 +9339,10 @@
       ];
       // One click handler for the sidebar, the phone bottom bar and More.
       // Patients always lands on the list: a chart is reached FROM it.
-      const goView = (v) => { setView(v.key); if (v.key === 'charts') setSel(null); };
+      const goView = (v) => { if (v.href) { window.location.assign(v.href); return; } setView(v.key); if (v.key === 'charts') setSel(null); };
       const navButton = (v) => (
         <button key={v.key} className={view === v.key ? 'on' : ''} title={VIEW_TITLES[v.key]}
-          onClick={() => { setView(v.key); if (v.key === 'charts') setSel(null); }}>
+          onClick={() => { if (v.href) { window.location.assign(v.href); return; } setView(v.key); if (v.key === 'charts') setSel(null); }}>
           <i className={`ti ${v.icon}`} />
           <span>{v.tab}</span>
           {badges[v.key] > 0 && <span className="cw-badge">{badges[v.key]}</span>}
