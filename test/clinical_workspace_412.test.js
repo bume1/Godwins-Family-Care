@@ -711,8 +711,14 @@ test('My Day has an End visit button once a visit is in progress', () => {
 test('My Day is the default landing view', () => {
   // 2026-10-12: `/clinical#inbox` (the referral email) opens the inbox; every
   // other arrival still opens on the day.
-  assert.match(pageCode, /useState\(\(\) => \(String\(window\.location\.hash \|\| ''\)\.replace\(\/\^#\/, ''\) === 'inbox' \? 'inbox' : 'myday'\)\)/,
-    'the workspace must open on the day, not on a patient list');
+  // 2026-10-14: the fragment is now read against NAV_VIEWS, so the to-do
+  // emails' `#queues` opens Tasks instead of silently landing on My Day. The
+  // rule is unchanged and is asserted as a rule rather than as one literal
+  // expression: a known view opens, ANYTHING ELSE opens the day.
+  assert.match(pageCode, /const h = String\(window\.location\.hash \|\| ''\)\.replace\(\/\^#\/, ''\);/);
+  assert.match(pageCode, /return NAV_VIEWS\.some\(v => v\.key === h\) \? h : 'myday';/,
+    'the workspace must open on the day unless the fragment names a view that exists');
+  assert.match(pageCode, /\{ key: 'inbox', tab: 'Inbox'/, 'precondition: #inbox must still resolve');
   assert.match(pageCode, /<MyDayView/);
 });
 

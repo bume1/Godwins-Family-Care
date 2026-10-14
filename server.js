@@ -1640,9 +1640,73 @@ const scanAndQueueNotifications = async () => {
     // owner controls.
     await sendDueVisitReminders();
 
+    // ── The to-do reminders due today (2026-10-14) ───────────────────────
+    // Same reasoning: it rides the scanner that already runs rather than a
+    // second timer of its own.
+    await sendDueTaskReminders();
+
     console.log('[SCANNER] Notification trigger scan completed');
   } catch (err) {
     console.error('[SCANNER] Error scanning for notifications:', err);
+  }
+};
+
+// ── The to-do reminders (owner, 2026-10-14) ──────────────────────────────
+//
+// "one email about task a day": a to-do that is due today, or still open past
+// its due date, emails its ASSIGNEE once each day until it is closed.
+//
+// SWEPT RATHER THAN SCHEDULED, which is the opposite of the visit reminders
+// above, and the difference is the data. A visit reminder is written at
+// booking time because nothing can read OpenEMR's calendar in the background
+// (per-clinician OAuth, Session 5.2). A to-do lives in this app's own store,
+// and its due date can be edited after the fact — so a row scheduled at write
+// time would chase the old date. The sweep re-derives from the to-do as it
+// stands right now.
+//
+// ONE A DAY IS HELD BY THE KEY, NOT BY THE CADENCE. The scanner runs every few
+// minutes; `clinicalTasks.remindersDue` sends nothing before 9am Eastern, and
+// every scan after it re-derives the same rows, whose `<task>:<kind>:<date>`
+// dedupe key the queue then drops. A restart mid-morning cannot double-send.
+//
+// Judged on GEORGIA'S date and hour, never the container's: UTC is already
+// tomorrow for four hours of every evening, so a to-do due today would turn
+// overdue at 8pm and a 9am send would fire at 4am.
+//
+// Wrapped in its own try/catch so a to-do problem never takes the rest of the
+// scan down with it.
+const sendDueTaskReminders = async () => {
+  try {
+    const parts = practiceTime.zonedParts(new Date());
+    const today = (parts && parts.isoDate) || null;
+    const hourEt = parts ? parts.hour : null;
+    if (!today) return;
+    const tasks = (await db.get('clinical_tasks')) || [];
+    const due = clinicalTasks.remindersDue({ tasks, today, hourEt });
+    if (!due.length) return;
+
+    const users = await getUsers();
+    const { findUser, nameOf } = taskNameLookup(users);
+    const base = await getAppBaseUrl();
+    let sent = 0;
+    for (const { task, kind, daysLate } of due) {
+      // THE ASSIGNEE ONLY. The author is told when it is finished, not chased
+      // daily about work that is not theirs to do.
+      const assignee = findUser(task.assigneeId);
+      if (!assignee || !assignee.email) continue;
+      const args = {
+        user: assignee, task, patientName: nameOf(task.clientId),
+        ctaUrl: `${base}${appLinks.tasksFor(assignee)}`,
+        dedupeId: clinicalTasks.reminderKey(task, kind, today)
+      };
+      const out = kind === 'overdue'
+        ? await notify.taskOverdue({ ...args, daysLate })
+        : await notify.taskDueToday(args);
+      sent += out.notified || 0;
+    }
+    if (sent) console.log(`[TASK] Queued ${sent} to-do reminder(s) for ${today}.`);
+  } catch (err) {
+    console.error('[TASK] to-do reminder sweep failed (non-fatal):', err.message);
   }
 };
 
@@ -15844,6 +15908,54 @@ app.get('/api/clinical/tasks', authenticateToken, requireTaskManager, async (req
   } catch (e) { sendTaskError(res, e, 'Task list error'); }
 });
 
+// ── The to-do emails (owner, 2026-10-14) ─────────────────────────────────────
+//
+// Two of the four are events and are sent here, where they happen. The other
+// two are a state and are swept once a day — see `sendDueTaskReminders`.
+//
+// BOTH ARE BEST-EFFORT AND NEITHER MAY THROW. A to-do that is already written
+// must not be undone because an email failed, which is the rule every notice
+// in `notifications.js` follows; the notices catch their own failures and
+// these wrappers catch anything the lookup throws on top.
+//
+// WHO IS TOLD IS `canSee` AND NOTHING WIDER: the assignee hears they have been
+// handed one, the author hears when it is finished. Never admin, never the
+// rest of the team — emailing a third person a to-do they cannot open would
+// hand out by push exactly what the read gate refuses.
+const notifyTaskAssigned = async ({ task, actor, findUser, nameOf }) => {
+  try {
+    if (String(task.assigneeId) === String(actor.id)) return { notified: 0, reason: 'self-assigned' };
+    const assignee = findUser(task.assigneeId);
+    if (!assignee || !assignee.email) return { notified: 0, reason: 'no address' };
+    return await notify.taskAssigned({
+      user: assignee, task, patientName: nameOf(task.clientId),
+      assignedByName: actor.name || null,
+      ctaUrl: `${await getAppBaseUrl()}${appLinks.tasksFor(assignee)}`,
+      actorId: actor.id
+    });
+  } catch (e) {
+    console.error('[TASK] assigned notice failed (non-fatal):', e.message);
+    return { notified: 0, reason: e.message };
+  }
+};
+
+const notifyTaskCompleted = async ({ task, actor, findUser, nameOf }) => {
+  try {
+    if (String(task.createdById) === String(actor.id)) return { notified: 0, reason: 'finished by its author' };
+    const author = findUser(task.createdById);
+    if (!author || !author.email) return { notified: 0, reason: 'no address' };
+    return await notify.taskCompleted({
+      user: author, task, patientName: nameOf(task.clientId),
+      completedByName: actor.name || null,
+      ctaUrl: `${await getAppBaseUrl()}${appLinks.tasksFor(author)}`,
+      actorId: actor.id
+    });
+  } catch (e) {
+    console.error('[TASK] completed notice failed (non-fatal):', e.message);
+    return { notified: 0, reason: e.message };
+  }
+};
+
 app.post('/api/clinical/tasks', authenticateToken, requireTaskManager, async (req, res) => {
   try {
     const today = practiceToday();
@@ -15859,6 +15971,10 @@ app.post('/api/clinical/tasks', authenticateToken, requireTaskManager, async (re
     await db.set('clinical_tasks', rows);
     await logActivity(req.user.id, req.user.name || req.user.email, 'clinical_task_created', 'client', task.clientId,
       { taskId: task.id, assigneeId: task.assigneeId, assignedToSomeoneElse: task.assigneeId !== String(actor.id) });
+    // Tell the assignee — best-effort, and never when they assigned it to
+    // themselves. A notice failure must not undo a to-do that is already
+    // written, the same rule every other notice in this file follows.
+    await notifyTaskAssigned({ task, actor, findUser, nameOf });
     res.status(201).json({ task: clinicalTasks.publicTask({ ...task, patientName: nameOf(task.clientId) }, actor, today) });
   } catch (e) { sendTaskError(res, e, 'Task create error'); }
 });
@@ -15874,12 +15990,24 @@ app.put('/api/clinical/tasks/:taskId', authenticateToken, requireTaskManager, as
       return res.status(404).json({ error: 'To-do not found.', code: 'TASK_NOT_FOUND' });
     }
     const action = String((req.body && req.body.action) || 'edit');
-    const { task, changed } = clinicalTasks.applyTaskAction({ task: rows[idx], action, input: req.body, actor, findUser });
+    const before = rows[idx];
+    const { task, changed } = clinicalTasks.applyTaskAction({ task: before, action, input: req.body, actor, findUser });
     if (changed.length) {
       rows[idx] = task;
       await db.set('clinical_tasks', rows);
       await logActivity(req.user.id, req.user.name || req.user.email, `clinical_task_${action === 'edit' ? 'edited' : action}`, 'client', task.clientId,
         { taskId: task.id, fields: changed });
+      // HANDED TO SOMEBODY NEW is the same event as being handed one in the
+      // first place, so it sends the same notice. Compared against the row as
+      // it stood BEFORE the change — `before` is a snapshot, not the live row,
+      // because `applyTaskAction` returns a new object and an alias here would
+      // read the new assignee on both sides (the bug the shift editor paid for).
+      if (action === 'edit' && changed.includes('assigneeId')) {
+        await notifyTaskAssigned({ task, actor, findUser, nameOf });
+      }
+      // FINISHED: the person waiting on it is the one who wrote it, and they
+      // only hear when somebody else ticked the box.
+      if (action === 'done') await notifyTaskCompleted({ task, actor, findUser, nameOf });
     }
     res.json({ task: clinicalTasks.publicTask({ ...task, patientName: nameOf(task.clientId) }, actor, today) });
   } catch (e) { sendTaskError(res, e, 'Task update error'); }

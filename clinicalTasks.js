@@ -341,9 +341,64 @@ const buildDigest = ({
   };
 };
 
+// ---------------------------------------------------------------------------
+// THE DAILY EMAIL SWEEP (owner, 2026-10-14: "email every time a task is
+// assigned, due, overdue (one email about task a day) and then marked
+// completed.")
+// ---------------------------------------------------------------------------
+// Assigned and completed are EVENTS and are sent where they happen, at the
+// route. Due and overdue are a STATE, so they are swept: a due date can be
+// edited after the fact, which is exactly why nothing is scheduled at write
+// time the way a visit reminder is. A to-do lives in this app's own store, so
+// a background sweep may read it — the rule that stops the visit reminders
+// being swept is OpenEMR's per-clinician OAuth, and it does not apply here.
+//
+// 9am Eastern, like the visit reminders. One constant.
+const TASK_EMAIL_SEND_HOUR_ET = 9;
+
+// ONE EMAIL ABOUT A TO-DO PER DAY, and the key is what guarantees it rather
+// than the queue's cooldown window. Keyed on GEORGIA'S date, so a restart, a
+// second scan or a changed scan interval cannot send twice, and the next
+// calendar day is a new key rather than a duplicate.
+const reminderKey = (task, kind, today) => `${task && task.id}:${kind}:${today}`;
+
+// Whole days between two bare calendar dates, read at midday UTC so no zone
+// moves either across a boundary.
+const daysBetween = (from, to) =>
+  Math.round((new Date(`${to}T12:00:00Z`) - new Date(`${from}T12:00:00Z`)) / 86400000);
+
+// Which to-dos want an email right now. PURE: the caller passes Georgia's date
+// and Georgia's hour, so nothing here reads a clock and the test does not have
+// to run in Eastern to mean anything.
+//
+// NOTHING GOES OUT BEFORE THE SEND HOUR. The scanner runs every few minutes;
+// without this a to-do created at 00:05 would be emailed at 00:05. After the
+// hour every later scan that day re-derives the same rows and the date key
+// above drops them, so the first scan past 9am is the one that sends.
+//
+// A to-do is due OR overdue, never both — `bucketFor` decides, and a closed,
+// cancelled or undated one is never chased.
+const remindersDue = ({ tasks, today, hourEt }) => {
+  if (!isYmd(today) || !Number.isFinite(hourEt) || hourEt < TASK_EMAIL_SEND_HOUR_ET) return [];
+  const out = [];
+  for (const task of tasks || []) {
+    // WHAT ACTUALLY DOES THE WORK is `bucketFor` below: it answers CLOSED for
+    // a to-do that is not open and NO_DATE for one with no due date, so
+    // neither reaches the two branches. This line is belt-and-braces, and is
+    // recorded as such so a later simplification does not drop the real guard
+    // believing this one covers it.
+    if (!task || task.status !== 'open' || !task.dueDate) continue;
+    const bucket = bucketFor(task, today);
+    if (bucket === BUCKETS.TODAY) out.push({ task, kind: 'due', daysLate: 0 });
+    else if (bucket === BUCKETS.OVERDUE) out.push({ task, kind: 'overdue', daysLate: daysBetween(task.dueDate, today) });
+  }
+  return out;
+};
+
 module.exports = {
   STATUSES, PRIORITIES, CATEGORIES, CATEGORY_VALUES, BUCKETS, UPCOMING_DAYS,
   TITLE_MAX, DETAIL_MAX, TaskError,
   isYmd, addDays, canManageTasks, canSee, bucketFor, validateFields,
-  createTask, applyTaskAction, sortTasks, publicTask, listForViewer, buildDigest
+  createTask, applyTaskAction, sortTasks, publicTask, listForViewer, buildDigest,
+  TASK_EMAIL_SEND_HOUR_ET, reminderKey, daysBetween, remindersDue
 };

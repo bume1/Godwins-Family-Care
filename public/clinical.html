@@ -9203,7 +9203,16 @@
       // day starts.
       // `/clinical#inbox` is where the referral email points (appLinks), so the
       // fragment is read ONCE, at mount. Anything else lands on My Day.
-      const [view, setView] = useState(() => (String(window.location.hash || '').replace(/^#/, '') === 'inbox' ? 'inbox' : 'myday')); // 'myday' (4.12) | 'charts' | 'schedule' (4.2) | 'queue' (4.4) | 'inbox' (4.9) | 'results' | 'overdue' (4.10)
+      // THE FRAGMENT PICKS THE VIEW, and it is read against NAV_VIEWS rather
+      // than a list of its own: `#inbox` was the only one that worked, so the
+      // to-do emails' `#queues` would have landed on My Day. An UNKNOWN
+      // fragment still falls back to My Day — a link must never render a tab
+      // that does not exist. Read once, at mount: a later hash change is the
+      // person navigating, and yanking the tab out from under them is worse.
+      const [view, setView] = useState(() => {
+        const h = String(window.location.hash || '').replace(/^#/, '');
+        return NAV_VIEWS.some(v => v.key === h) ? h : 'myday';
+      }); // 'myday' (4.12) | 'charts' | 'schedule' (4.2) | 'queue' (4.4) | 'inbox' (4.9) | 'results' | 'overdue' (4.10)
       const [hpApptEid, setHpApptEid] = useState(null); // H&P opened from an appointment
       const [encTarget, setEncTarget] = useState(null); // encounter to open on the Encounters tab (4.4)
 
