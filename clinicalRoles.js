@@ -340,6 +340,14 @@ const canEditOrderDestination = (user) => !!user && user.accountStatus !== 'inac
   (user.role === 'admin' || user.role === 'caseManager' || user.isManager === true ||
     LICENSED_CLINICAL_ROLES.includes(resolveClinicalRole(user)));
 
+// ---- Patient to-dos (owner, 2026-10-13) ----------------------------------
+// Who may write, complete and be assigned a patient to-do: the same people who
+// may update an order's destination — admin, a manager, a case manager, or any
+// licensed clinician. A case manager stays read-only on the chart; this is the
+// one more door they hold. Visibility of each to-do is decided per row in
+// clinicalTasks.canSee (assignee and author only), not here.
+const canManageTasks = (user) => canEditOrderDestination(user);
+
 // ---- A mental health diagnosis (owner, 2026-10-12) ----------------------
 // An LCSW diagnoses behavioural and mental health conditions on their own
 // licence; an LMSW does not. ICD-10-CM chapter 5 (F01–F99) is that set. The
@@ -614,6 +622,7 @@ module.exports = {
   canCoSignNote,
   canSubmitBilling,
   canEditOrderDestination,
+  canManageTasks,
   isBehavioralHealthDiagnosis,
   canAddProblem,
   problemRefusal,

@@ -267,12 +267,15 @@ test('every /api/clinical route is registered with the matching guard (GET → r
     // the place of service, Submit to billing, charges) carry requireBilling,
     // and coding carries requireClinicalWriteOrBilling. Neither is a READ gate.
     if (method === 'get') {
-      assert.match(l, /requireClinicalRead|requireBilling/, `GET route must use requireClinicalRead (or requireBilling): ${l.slice(0, 90)}`);
+      // 2026-10-13: patient to-dos and the digest carry requireTaskManager —
+      // the clinical team incl. case managers; each to-do is then visible only
+      // to its assignee and its author (clinicalTasks.canSee).
+      assert.match(l, /requireClinicalRead|requireBilling|requireTaskManager/, `GET route must use requireClinicalRead (or requireBilling): ${l.slice(0, 90)}`);
       assert.doesNotMatch(l, /requireClinicalWrite/, l.slice(0, 90));
     } else {
       // 2026-09-29: the order-destination edit carries requireOrderDestinationEditor,
       // the one order door a case manager holds (destination fields only).
-      assert.match(l, /requireClinicalWrite|requireAdmin|requireBilling|requireOrderDestinationEditor|requireOrderAnnotator|requireAvsRecorder|requireProviderListEditor/, `${method.toUpperCase()} route must use requireClinicalWrite (or requireAdmin / requireBilling / requireOrderDestinationEditor): ${l.slice(0, 90)}`);
+      assert.match(l, /requireClinicalWrite|requireAdmin|requireBilling|requireOrderDestinationEditor|requireOrderAnnotator|requireAvsRecorder|requireProviderListEditor|requireTaskManager/, `${method.toUpperCase()} route must use requireClinicalWrite (or requireAdmin / requireBilling / requireOrderDestinationEditor): ${l.slice(0, 90)}`);
       assert.doesNotMatch(l, /requireClinicalRead/, l.slice(0, 90));
     }
   }
