@@ -259,13 +259,23 @@ test('family read the caregiver and office channels, plus a Care Update pushed t
   }
 });
 
-test('SAFETY: a Care Update is readable by family and NOT repliable — it is an update', () => {
+// REPOINTED 2026-10-14 (owner): a Care Update was one-way and told everyone to
+// "reply through Support". It is a conversation now. What stays: a clinician
+// starts it, and a caregiver never reads it.
+test('a Care Update can be answered by everyone who reads it, and a caregiver still cannot read it', () => {
   const push = thread({ channel: 'care_update', participant_ids: ['fnp-1', 'fam-1'] });
-  const post = msg.canPostToThread(u('fam-1'), push, { client: CLIENT });
-  assert.strictEqual(post.allowed, false);
-  assert.strictEqual(post.code, 'CHANNEL_READ_ONLY');
-  assert.match(post.reason, /Support/, 'and it says where to reply instead');
-  assert.strictEqual(msg.canPostToThread(u('fnp-1'), push, { client: CLIENT }).allowed, true);
+  for (const [who, opts] of [['fam-1', {}], ['client-1', {}], ['fam-1', { isPoa: true }], ['cm-1', {}], ['fnp-1', {}], ['admin-1', {}]]) {
+    const post = msg.canPostToThread(u(who), push, { client: CLIENT, ...opts });
+    assert.strictEqual(post.allowed, true, `${who} ${JSON.stringify(opts)}: ${post.code}`);
+  }
+  assert.strictEqual(msg.canPostToThread(u('cg-1'), push, { client: CLIENT }).allowed, false);
+  assert.strictEqual(msg.threadVisibility(u('cg-1'), push, { client: CLIENT }).visible, false);
+  assert.ok(!Object.values(msg.CHANNELS).some(c => c.oneWay), 'no channel tells people to reply somewhere else');
+});
+
+test('a client can answer in their family\'s Family Portal thread', () => {
+  const t = thread({ channel: 'family_portal', participant_ids: ['fam-1', 'cg-1'] });
+  assert.strictEqual(msg.canPostToThread(u('client-1'), t, { client: CLIENT }).allowed, true);
 });
 
 test('a POA reads what the CLIENT reads; non-POA family do not', () => {

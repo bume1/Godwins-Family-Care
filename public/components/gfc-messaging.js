@@ -434,7 +434,10 @@
     var t = state.thread || {};
     var canMoveStatus = t.responseStatus && (state.role === 'clinical' || state.role === 'admin');
     var html = '<div class="mcard">' +
-      '<div class="mbtns" style="margin:0 0 10px"><button class="mbtn ghost" data-back="1">← All Messages</button></div>' +
+      '<div class="mbtns" style="margin:0 0 10px"><button class="mbtn ghost" data-back="1">← All Messages</button>' +
+      // The super admin's alone; the server says who may (owner, 2026-10-14).
+      (state.canDelete ? '<button class="mbtn ghost" data-delete-thread="1" style="margin-left:auto;color:#b42318">Delete Thread</button>' : '') +
+      '</div>' +
       '<div class="mhead"><span class="mav">' + esc(initialsOf(t.clientName || t.channelLabel)) + '</span><div>' +
       '<h3>' + esc(t.clientName || t.channelLabel || 'Conversation') + '</h3>' +
       '<div class="mmu">' + esc(t.clientName ? (t.channelLabel || '') : '') +
@@ -498,6 +501,20 @@
         render(state);
       };
     });
+    var del = root.querySelector('[data-delete-thread]');
+    if (del) del.onclick = function () {
+      var reason = window.prompt('Delete this whole conversation for everyone? It is removed from every screen and kept in the office record. Say why:');
+      if (reason === null) return;
+      if (!String(reason).trim()) { state.error = 'Say why this thread is being deleted.'; render(state); return; }
+      del.disabled = true;
+      go(api(state, '/api/messaging/threads/' + state.thread.id, { method: 'DELETE', body: { reason: reason } })
+        .then(function () {
+          state.draft = newDraft(); state.view = 'list'; state.thread = null;
+          state.notice = 'Conversation deleted.';
+          return refresh(state);
+        }));
+    };
+
     var back = root.querySelector('[data-back]');
     if (back) back.onclick = function () { state.draft = newDraft(); state.view = 'list'; state.error = ''; refresh(state); };
 
@@ -600,6 +617,7 @@
       state.messages = res.messages || [];
       state.canPost = !!res.canPost;
       state.cannotPostReason = res.cannotPostReason;
+      state.canDelete = !!res.canDelete;
       state.view = 'thread';
       state.loading = false;
       render(state);
@@ -658,7 +676,7 @@
       loading: true,
       error: '', notice: '',
       threads: [], channels: [], messages: [],
-      thread: null, canPost: false, cannotPostReason: null,
+      thread: null, canPost: false, cannotPostReason: null, canDelete: false,
       composeChannel: null,
       draft: newDraft()
     };

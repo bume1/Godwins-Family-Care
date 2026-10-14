@@ -328,16 +328,18 @@ const server = app.listen(0, '127.0.0.1', async () => {
     (await storedAll('message_threads', t => t.channel === 'care_coordination'))[0].participant_ids.includes('cm-1'));
 
   // ==========================================================================
-  section('E. A Care Update is an update, not a conversation');
+  section('E. A Care Update can be answered (owner, 2026-10-14)');
   // ==========================================================================
   const famReply = await call('POST', `/api/messaging/threads/${made.care_update}/messages`, {
     as: 'fam-1', body: { body: 'Thank you (TEST DATA)' }
   });
-  check('family cannot reply into a Care Update',
-    famReply.status === 403 && famReply.data.code === 'CHANNEL_READ_ONLY');
-  check('and are told where to reply instead', /Support/i.test(famReply.data.error || ''), famReply.data.error);
-  check('STORED: nothing was written by the refusal',
-    (await storedAll('messages', m => m.thread_id === made.care_update)).length === 1);
+  check('family reply into a Care Update', famReply.status === 200, `${famReply.status} ${JSON.stringify(famReply.data).slice(0, 120)}`);
+  check('STORED: the reply is on the thread',
+    (await storedAll('messages', m => m.thread_id === made.care_update)).length === 2);
+  const cgReply = await call('POST', `/api/messaging/threads/${made.care_update}/messages`, {
+    as: 'cg-1', body: { body: 'x' }
+  });
+  check('a caregiver still cannot reach it', cgReply.status === 403);
 
   // ==========================================================================
   section('F. Client ↔ caregiver turns on and off with the assignment');

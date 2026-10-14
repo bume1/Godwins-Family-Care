@@ -116,12 +116,17 @@ const CHANNELS = Object.freeze({
     initiators: [ROLE.CLINICAL],
     blurb: 'Direction from the clinician to the caregiver on this client.'
   },
+  // Owner, 2026-10-14: "no one can respond to any messages unless they use the
+  // support pipeline. That is an absolutely not." A Care Update used to be
+  // one-way, so the patient, their POA, family and the care team were told to
+  // reply through Support. It is a conversation now: a clinician still starts
+  // it, and everyone who can read it can answer it. Visibility is unchanged,
+  // so a caregiver still never reads a clinical update to family.
   care_update: {
     id: 'care_update', label: 'Care Update',
-    participants: [ROLE.CLINICAL, ROLE.FAMILY],
+    participants: [ROLE.CLINICAL, ROLE.FAMILY, ROLE.CLIENT],
     initiators: [ROLE.CLINICAL],
-    oneWay: true,
-    blurb: 'An update a clinician has chosen to share with family.'
+    blurb: 'An update a clinician has shared with family. You can reply here.'
   },
   // Owner, 2026-09-29: a clinician can message a patient from the clinician
   // portal, with attachments and formatted text, and the patient (or their POA)
@@ -160,7 +165,10 @@ const CHANNELS = Object.freeze({
   },
   family_portal: {
     id: 'family_portal', label: 'Family Portal',
-    participants: [ROLE.FAMILY, ROLE.CAREGIVER],
+    // The client can read their own family's thread with the caregiver, so
+    // they can answer in it too (owner, 2026-10-14). They still do not START
+    // one: that stays family's and the caregiver's.
+    participants: [ROLE.FAMILY, ROLE.CAREGIVER, ROLE.CLIENT],
     initiators: [ROLE.FAMILY, ROLE.CAREGIVER],
     requiresAssignedCaregiver: true,
     blurb: 'Family and the caregiver working with your relative.',
@@ -564,6 +572,13 @@ function canPostToThread(user, thread, { client, isPoa = false } = {}) {
   return { allowed: true, code: null, reason: null };
 }
 
+// Deleting a thread is the super admin's alone (owner, 2026-10-14): role
+// `admin`, never a manager, never anyone else. While viewing as another user
+// the request carries THAT user, so this is false there too.
+function canDeleteThread(user) {
+  return !!user && user.role === 'admin' && user.accountStatus !== 'inactive';
+}
+
 // ---- Sender identity -------------------------------------------------------
 // A POA's message is displayed as "<POA name> as POA for <client name>" to
 // EVERY recipient — the 4.3 rule, and the reason it matters is the same here as
@@ -666,7 +681,7 @@ module.exports = {
   STAFF_ROLES, isStaffRole, isUnrestricted,
   careTeamOf, assignedCaregiverIds, assignedClinicianIds, assignedCaseManagerId, caseManagerIds, hasActiveCaregiver,
   clientInScope, channelAvailability, channelsFor, withPatient,
-  isParty, ownClientId, threadVisibility, canPostToThread,
+  isParty, ownClientId, threadVisibility, canPostToThread, canDeleteThread,
   senderIdentity, validateMessage, previewOf, effectiveRole, MAX_BODY, MAX_ATTACHMENTS, ATTACHMENT_MIMES,
   RESPONSE_STATUSES, RESPONSE_TRANSITIONS, canTransitionResponse, responseRefusal,
   threadTitle, unreadCount
