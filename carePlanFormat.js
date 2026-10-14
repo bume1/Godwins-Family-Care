@@ -26,6 +26,7 @@
 // ============================================================
 
 const crypto = require('crypto');
+const carePlanCatalog = require('./carePlanCatalog');
 
 const GOAL_STATUSES = Object.freeze(['not_started', 'in_progress', 'met', 'not_met', 'deferred']);
 const GOAL_STATUS_LABELS = Object.freeze({
@@ -182,16 +183,24 @@ const normalizeInterventions = (input, goalIds) => {
   const out = [];
   for (const row of rows.slice(0, 60)) {
     const r = asObject(row);
-    const description = str(r.description, 300);
+    // A standard intervention carries its catalog code, and the TYPE comes
+    // from the catalog, so a coded row can be counted and targeted the same
+    // way every time. Its wording may be adjusted; blank takes the catalog's.
+    // Anything else is `custom` with the clinician's own words and type.
+    const std = carePlanCatalog.interventionByCode.get(r.code) || null;
+    const description = str(r.description, 300) || (std ? std.label : '');
     if (!description) continue;
     out.push({
       id: keepId(r.id, 'i') || newId('i'),
+      code: std ? std.code : carePlanCatalog.CUSTOM_INTERVENTION,
+      // The Omaha System category of a standard intervention, for reporting.
+      omaha: std ? std.omaha : null,
       goalIds: (Array.isArray(r.goalIds) ? r.goalIds : []).filter(g => goalIds.has(g)),
       description,
-      responsible: oneOf(r.responsible, RESPONSIBLE) || 'gfc_clinician',
+      responsible: oneOf(r.responsible, RESPONSIBLE) || (std ? std.responsible : 'gfc_clinician'),
       responsibleName: str(r.responsibleName, 120),
-      frequency: oneOf(r.frequency, FREQUENCIES) || 'ongoing',
-      type: oneOf(r.type, INTERVENTION_TYPES) || 'clinical'
+      frequency: oneOf(r.frequency, FREQUENCIES) || (std ? std.frequency : 'ongoing'),
+      type: std ? std.type : (oneOf(r.type, INTERVENTION_TYPES) || 'clinical')
     });
   }
   return out;

@@ -5337,11 +5337,62 @@
           afterHours: s ? s.escalation.afterHours : '',
           hospitalPreference: (s && s.escalation.hospitalPreference) || sug.hospitalPreference || ''
         },
-        review: s ? { ...s.review } : { cadence: null, nextReviewDate: null },
+        // A new plan starts with the served defaults (effective today, review
+        // every 90 days); a new version starts from the plan it replaces.
+        review: s ? { ...s.review } : { ...(((existing && existing.newPlanDefaults) || {}).review || { cadence: null, nextReviewDate: null }) },
         eachVisit: s ? (s.eachVisit || []).join('\n') : '',
         visitFrequency: (s && s.visitFrequency) || '', visitDays: (s && s.visitDays) || [], visitTimes: (s && s.visitTimes) || '',
         duration: (s && s.duration) || '', chargePlanNote: (s && s.chargePlanNote) || '',
-        effectiveDate: (s && s.effectiveDate) || '', targetDate: (s && s.targetDate) || ''
+        effectiveDate: (s && s.effectiveDate) || ((existing && existing.newPlanDefaults) || {}).effectiveDate || '', targetDate: (s && s.targetDate) || ''
+      };
+    };
+
+    // One-click pathway template (owner, 2026-10-14): ADDS the pathway's
+    // problem, goals, interventions, caregiver tasks and warning signs to the
+    // form. Nothing is overwritten, a line already there is not added twice,
+    // and everything stays editable until the author signs. Sections the
+    // client's service line does not have are skipped (and the save drops
+    // them anyway).
+    const applyPathway = (f, p, on) => {
+      const isBlank = (x) => !String(x || '').trim();
+      const has = (list, text) => list.some(x => String(x).trim().toLowerCase() === String(text).trim().toLowerCase());
+      const problems = f.problemItems.filter(x => !isBlank(x.text));
+      let problem = problems.find(x => x.text.trim().toLowerCase() === p.problem.text.toLowerCase());
+      if (!problem) {
+        problem = { id: cpTempId('p'), text: p.problem.text, chartProblemId: null,
+          prognosis: on('problemDetail') ? p.problem.prognosis : '', expectedOutcome: on('problemDetail') ? p.problem.expectedOutcome : '' };
+        problems.push(problem);
+      }
+      const goals = f.goalItems.filter(g => !isBlank(g.statement));
+      const newGoalIds = [];
+      for (const g of p.goals) {
+        if (goals.some(x => x.statement.trim().toLowerCase() === g.statement.toLowerCase())) continue;
+        const id = cpTempId('g');
+        newGoalIds.push(id);
+        goals.push({ id, problemId: problem.id, statement: g.statement,
+          measure: on('goalMeasures') ? (g.measure || '') : '', baseline: '', target: on('goalMeasures') ? (g.target || '') : '',
+          targetDate: null, priority: g.priority || 'medium', patientStated: !!g.patientStated, status: 'not_started' });
+      }
+      const interventions = f.interventions.filter(x => !isBlank(x.description));
+      if (on('interventions')) {
+        for (const iv of p.interventions) {
+          if (interventions.some(x => x.code === iv.code)) continue;
+          interventions.push({ id: cpTempId('i'), code: iv.code, goalIds: newGoalIds.slice(), description: iv.label,
+            responsible: iv.responsible, responsibleName: '', frequency: iv.frequency, type: iv.type });
+        }
+      }
+      const addLines = (text, lines) => {
+        const cur = String(text || '').split('\n').map(x => x.trim()).filter(Boolean);
+        for (const l of lines || []) if (!has(cur, l)) cur.push(l);
+        return cur.join('\n');
+      };
+      return {
+        ...f,
+        problemItems: problems.length ? problems : f.problemItems,
+        goalItems: goals.length ? goals : f.goalItems,
+        interventions,
+        eachVisit: on('eachVisit') ? addLines(f.eachVisit, p.eachVisit) : f.eachVisit,
+        escalation: { ...f.escalation, callGfcWhen: addLines(f.escalation.callGfcWhen, p.callGfcWhen), call911When: addLines(f.escalation.call911When, p.call911When) }
       };
     };
 
@@ -5486,6 +5537,7 @@
     const CarePlanForm = ({ clientId, existing, chartProblems, padRef, onSave, busy, msg, onCancel }) => {
       const [f, setF] = useState(() => carePlanFormFrom(existing));
       const vocab = existing.vocabulary || {};
+      const cat = existing.catalog || {};
       const line = String((existing.client && existing.client.serviceLine) || 'PHC').toUpperCase();
       const reqs = (vocab.requirements || {})[line] || [];
       // Which sections this service line has (served; owner, 2026-10-14). The
@@ -5517,6 +5569,28 @@
       return (
         <div className="p-4 grid gap-2">
           {reqs.length > 0 && <div className="text-[12px] text-stone-500">To save, this {line === 'PHC' ? 'home care' : 'clinical'} plan needs {reqs.map(r => r.label).join('; ')}.</div>}
+          {(cat.pathways || []).length > 0 && (
+            <div className="rounded-xl border border-stone-200 bg-[#FBF8F2] p-3">
+              <div className="lblu mb-1.5">Start from a pathway</div>
+              <div className="flex flex-wrap gap-1.5">
+                {cat.pathways.map(p => (
+                  <button key={p.key} type="button" className="chip border bg-white text-primary border-stone-200" title={`Based on: ${p.source}`}
+                    onClick={() => setF(prev => applyPathway(prev, p, on))}><i className="ti ti-plus" />{p.label}</button>
+                ))}
+              </div>
+              <details className="mt-1.5">
+                <summary className="text-[11px] text-stone-500 cursor-pointer">Evidence behind these suggestions</summary>
+                <ul className="text-[11px] text-stone-500 mt-1 space-y-0.5">
+                  {cat.pathways.map(p => <li key={p.key}><b>{p.label}:</b> {p.source}</li>)}
+                  <li><b>Interventions:</b> grouped by the Omaha System intervention categories (public-domain home health terminology).</li>
+                  <li>Targets and warning signs are starting points. Individualize them for this patient.</li>
+                </ul>
+              </details>
+              <p className="text-[11px] text-stone-500 mt-1.5">Adds the usual problem, goals, {on('interventions') ? 'interventions, ' : ''}{on('eachVisit') ? 'caregiver tasks ' : ''}and warning signs. Edit or remove anything before signing.</p>
+            </div>
+          )}
+          <datalist id="cp-prognosis">{(cat.prognosisOptions || []).map(o => <option key={o} value={o} />)}</datalist>
+          <datalist id="cp-outcomes">{(cat.expectedOutcomeOptions || []).map(o => <option key={o} value={o} />)}</datalist>
 
           <CpSection title="Problems" required={required.has('problems')}>
             {f.problemItems.map((p, i) => (
@@ -5533,8 +5607,8 @@
                     </select>)}
                   <button className="text-stone-400" onClick={() => dropRow('problemItems', i)} aria-label="Remove problem"><i className="ti ti-x" /></button>
                 </div>
-                {on('problemDetail') && <input className="inp" placeholder={`Prognosis${required.has('problemDetail') ? '' : ' (optional)'}`} value={p.prognosis} onChange={e => setRow('problemItems', i, { prognosis: e.target.value })} />}
-                {on('problemDetail') && <input className="inp" placeholder={`Expected outcome${required.has('problemDetail') ? '' : ' (optional)'}`} value={p.expectedOutcome} onChange={e => setRow('problemItems', i, { expectedOutcome: e.target.value })} />}
+                {on('problemDetail') && <input className="inp" list="cp-prognosis" placeholder={`Prognosis${required.has('problemDetail') ? '' : ' (optional)'} — pick or type`} value={p.prognosis} onChange={e => setRow('problemItems', i, { prognosis: e.target.value })} />}
+                {on('problemDetail') && <input className="inp" list="cp-outcomes" placeholder={`Expected outcome${required.has('problemDetail') ? '' : ' (optional)'} — pick or type`} value={p.expectedOutcome} onChange={e => setRow('problemItems', i, { expectedOutcome: e.target.value })} />}
               </div>))}
             <button className="btn ghost" onClick={() => setF(prev => ({ ...prev, problemItems: [...prev.problemItems, { id: cpTempId('p'), text: '', chartProblemId: null, prognosis: '', expectedOutcome: '' }] }))}><i className="ti ti-plus" />Add Problem</button>
           </CpSection>
@@ -5569,14 +5643,34 @@
             {f.interventions.map((iv, i) => (
               <div key={iv.id} className="grid gap-2 mb-3 rounded-xl border border-stone-100 p-3">
                 <div className="flex gap-2">
-                  <input className="inp flex-1" placeholder="What gets done" value={iv.description} onChange={e => setRow('interventions', i, { description: e.target.value })} />
+                  {/* A standard intervention is picked, so it carries a code
+                      reporting and decision support can count. "Other" keeps
+                      the clinician's own words. */}
+                  <select className="inp flex-1" value={iv.code || 'custom'} onChange={e => {
+                    const std = (cat.interventions || []).find(x => x.code === e.target.value);
+                    setRow('interventions', i, std
+                      ? { code: std.code, description: std.label, type: std.type, responsible: std.responsible, frequency: std.frequency }
+                      : { code: 'custom', description: '' });
+                  }}>
+                    {(vocab.interventionTypes || []).map(t => (
+                      <optgroup key={t.value} label={t.label}>
+                        {(cat.interventions || []).filter(x => x.type === t.value).map(x => <option key={x.code} value={x.code}>{x.label}</option>)}
+                      </optgroup>
+                    ))}
+                    <option value="custom">Other (type your own)</option>
+                  </select>
                   <button className="text-stone-400" onClick={() => dropRow('interventions', i)} aria-label="Remove intervention"><i className="ti ti-x" /></button>
                 </div>
-                <div className="grid md:grid-cols-4 gap-2">
+                {(iv.code || 'custom') === 'custom' && (
+                  <div className="grid md:grid-cols-[1fr_200px] gap-2">
+                    <input className="inp" placeholder="What gets done" value={iv.description} onChange={e => setRow('interventions', i, { description: e.target.value })} />
+                    <select className="inp" value={iv.type} onChange={e => setRow('interventions', i, { type: e.target.value })}>{opts(vocab.interventionTypes)}</select>
+                  </div>
+                )}
+                <div className="grid md:grid-cols-3 gap-2">
                   <select className="inp" value={iv.responsible} onChange={e => setRow('interventions', i, { responsible: e.target.value })}>{opts(vocab.responsible)}</select>
                   <input className="inp" placeholder="Name (optional)" value={iv.responsibleName} onChange={e => setRow('interventions', i, { responsibleName: e.target.value })} />
                   <select className="inp" value={iv.frequency} onChange={e => setRow('interventions', i, { frequency: e.target.value })}>{opts(vocab.frequencies)}</select>
-                  <select className="inp" value={iv.type} onChange={e => setRow('interventions', i, { type: e.target.value })}>{opts(vocab.interventionTypes)}</select>
                 </div>
                 {goalChoices.length > 0 && <div className="flex flex-wrap gap-1.5">
                   {goalChoices.map(g => {
@@ -5586,7 +5680,7 @@
                   })}
                 </div>}
               </div>))}
-            <button className="btn ghost" onClick={() => setF(prev => ({ ...prev, interventions: [...prev.interventions, { id: cpTempId('i'), goalIds: [], description: '', responsible: 'gfc_clinician', responsibleName: '', frequency: 'each_visit', type: 'clinical' }] }))}><i className="ti ti-plus" />Add Intervention</button>
+            <button className="btn ghost" onClick={() => setF(prev => ({ ...prev, interventions: [...prev.interventions, (() => { const std = (cat.interventions || [])[0]; return std ? { id: cpTempId('i'), code: std.code, goalIds: [], description: std.label, responsible: std.responsible, responsibleName: '', frequency: std.frequency, type: std.type } : { id: cpTempId('i'), code: 'custom', goalIds: [], description: '', responsible: 'gfc_clinician', responsibleName: '', frequency: 'each_visit', type: 'clinical' }; })()] }))}><i className="ti ti-plus" />Add Intervention</button>
           </CpSection>}
 
           {on('medicationManagement') && <CpSection title="Medication Management" required={required.has('medicationManagement')}>
@@ -5660,7 +5754,13 @@
 
           <CpSection title="Review" required={required.has('review')}>
             <div className="grid md:grid-cols-2 gap-3">
-              <select className="inp" value={f.review.cadence || ''} onChange={e => setNested('review', { cadence: e.target.value || null })}>
+              <select className="inp" value={f.review.cadence || ''} onChange={e => {
+                // Picking a cadence fills the next review date from today; it
+                // can still be changed by hand.
+                const days = (cat.reviewCadenceDays || {})[e.target.value];
+                const next = days ? (() => { const d = new Date(); d.setDate(d.getDate() + days); return GFC_TIME.zonedParts(d).isoDate; })() : f.review.nextReviewDate;
+                setNested('review', { cadence: e.target.value || null, nextReviewDate: next });
+              }}>
                 <option value="">Review cadence</option>{opts(vocab.reviewCadences)}
               </select>
               <input className="inp" type="date" value={f.review.nextReviewDate || ''} onChange={e => setNested('review', { nextReviewDate: e.target.value || null })} />
