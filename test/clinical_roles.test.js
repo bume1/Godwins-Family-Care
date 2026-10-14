@@ -648,3 +648,12 @@ test('the clinical workspace renders from the matrix the API enforces, and re-ch
   assert.ok(!/clinicalRole === 'provider'/.test(cl), 'no role comparison in the page — ask the matrix');
   assert.ok(!/permittedTests\s*=\s*\[/.test(cl), 'the permitted tests come from the protocol, never a list in the page');
 });
+
+// Owner, 2026-10-14: role labels say what the role is, never licensed/unlicensed.
+test('clinical role labels carry no licensed / unlicensed wording', () => {
+  const r = require('../clinicalRoles');
+  for (const [k, label] of Object.entries(r.CLINICAL_ROLE_LABELS)) {
+    assert.doesNotMatch(label, /licensed/i, `${k}: ${label}`);
+  }
+  assert.strictEqual(r.CLINICAL_ROLE_LABELS.coordinator, 'Care Coordinator');
+});
