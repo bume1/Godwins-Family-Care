@@ -4023,7 +4023,8 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
       isManager, assignedClients, phone, accountStatus, emailUnsubscribed,
       licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
       familyIsPoa, openEmrProviderId, npi, payRate, clientPayRates, clinicalRole,
-      prescriberCredential, deaNumber, deaSchedules, deaExpiresAt, medicareEnrollment
+      prescriberCredential, deaNumber, deaSchedules, deaExpiresAt, medicareEnrollment,
+      resetPassword
     } = req.body;
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === userId);
@@ -4047,8 +4048,11 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
     if (name) users[idx].name = name;
     if (email) users[idx].email = email;
     if (role) users[idx].role = role;
+    // A password resets the account only when the caller says so. A browser
+    // autofilling the edit form must never reset someone's password.
     let passwordWasReset = false;
-    if (password) {
+    const passwordIgnored = !!password && resetPassword !== true;
+    if (password && resetPassword === true) {
       users[idx].password = await bcrypt.hash(password, config.BCRYPT_SALT_ROUNDS);
       users[idx].requirePasswordChange = true;
       users[idx].lastPasswordReset = new Date().toISOString();
@@ -4255,6 +4259,8 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
 
     res.json({
       id: users[idx].id,
+      passwordReset: passwordWasReset,
+      passwordIgnored,
       email: users[idx].email,
       name: users[idx].name,
       role: users[idx].role,
