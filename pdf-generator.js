@@ -1663,33 +1663,103 @@ async function generateCarePlanPDF(d) {
       fieldRow([{ label: 'Patient name', value: d.patientName }, { label: 'Date of birth', value: d.patientDOB }]);
       fieldRow([{ label: 'Care track', value: d.careTierLabel || d.careTier || '' }, { label: 'Service line', value: d.serviceLine || '' }]);
 
-      // ── 2 Problems ──
-      section(2, 'Problems addressed');
-      bullets(plan.problems);
+      // The 2026-10-14 format (carePlanFormat.js) when the plan carries it;
+      // the original layout for a plan written before it. Goal STATUS is not
+      // printed: it changes without a new version, so a signed PDF would
+      // show a status that is no longer true.
+      const structured = Array.isArray(plan.goalItems);
+      let n = 1;
+      const next = (label) => section(++n, label);
+      const para = (text, opts = {}) => {
+        if (!text) return;
+        if (y > 720) { doc.addPage(); y = 44; }
+        doc.fontSize(opts.size || 9.5).fillColor(opts.color || ROI_COLORS.ink).font(opts.font || 'Helvetica').text(String(text), L + (opts.indent || 0), y, { width: W - (opts.indent || 0) });
+        y += doc.heightOfString(String(text), { width: W - (opts.indent || 0) }) + (opts.after == null ? 4 : opts.after);
+      };
+      const LBL = {
+        responsible: { gfc_clinician: 'GFC clinician', gfc_caregiver: 'GFC caregiver', family: 'Family', patient: 'Patient', outside_agency: 'Outside agency' },
+        frequency: { daily: 'Daily', each_visit: 'Each visit', weekly: 'Weekly', as_needed: 'As needed', one_time: 'One time', ongoing: 'Ongoing' },
+        managedBy: { patient: 'The patient', family: 'Family', caregiver: 'Caregiver (reminders)', pharmacy_pack: 'Pharmacy blister pack', clinician: 'GFC clinician' },
+        cadence: { '30_days': 'Every 30 days', '60_days': 'Every 60 days', '90_days': 'Every 90 days', '6_months': 'Every 6 months', '12_months': 'Every 12 months' }
+      };
 
-      // ── 3 Goals ──
-      section(3, 'Goals & objectives');
-      bullets(plan.goals);
+      if (!structured) {
+        next('Problems addressed');
+        bullets(plan.problems);
+        next('Goals & objectives');
+        bullets(plan.goals);
+      } else {
+        next('Problems');
+        for (const p of plan.problemItems || []) {
+          para(p.text, { font: 'Helvetica-Bold', after: 2 });
+          if (p.prognosis) para(`Prognosis: ${p.prognosis}`, { indent: 10, after: 2 });
+          if (p.expectedOutcome) para(`Expected outcome: ${p.expectedOutcome}`, { indent: 10 });
+        }
+        next('Goals');
+        const problemText = new Map((plan.problemItems || []).map(p => [p.id, p.text]));
+        for (const g of plan.goalItems) {
+          const tags = [g.priority && `${g.priority[0].toUpperCase()}${g.priority.slice(1)} priority`, g.patientStated && "patient's own goal"].filter(Boolean).join(' · ');
+          para(g.statement, { font: 'Helvetica-Bold', after: 2 });
+          if (tags) para(tags, { indent: 10, size: 8.5, color: ROI_COLORS.muted, after: 2 });
+          if (g.problemId && problemText.get(g.problemId)) para(`For: ${problemText.get(g.problemId)}`, { indent: 10, after: 2 });
+          const m = [g.measure && `Measure: ${g.measure}`, g.baseline && `Baseline ${g.baseline}`, g.target && `Target ${g.target}`, g.targetDate && `by ${fmt(g.targetDate)}`].filter(Boolean).join(' · ');
+          if (m) para(m, { indent: 10 });
+        }
+        if ((plan.interventions || []).length) {
+          next('Interventions');
+          const goalText = new Map(plan.goalItems.map(g => [g.id, g.statement]));
+          for (const i of plan.interventions) {
+            para(i.description, { after: 2 });
+            const forGoals = (i.goalIds || []).map(id => goalText.get(id)).filter(Boolean);
+            para([`${LBL.responsible[i.responsible] || ''}${i.responsibleName ? ` (${i.responsibleName})` : ''}`, LBL.frequency[i.frequency], forGoals.length ? `for: ${forGoals.join('; ')}` : null].filter(Boolean).join(' · '),
+              { indent: 10, size: 8.5, color: ROI_COLORS.muted });
+          }
+        }
+        const mm = plan.medicationManagement || {};
+        if (mm.managedBy || mm.pharmacy || mm.adherenceConcerns) {
+          next('Medication management');
+          fieldRow([{ label: 'Managed day to day by', value: LBL.managedBy[mm.managedBy] || '' }, { label: 'Pharmacy', value: mm.pharmacy || '' }]);
+          if (mm.adherenceConcerns) para(`Adherence concerns: ${mm.adherenceConcerns}`);
+        }
+        const oc = plan.outsideCare || {};
+        if ((oc.externalTeam || []).length || (oc.communityServices || []).length) {
+          next('Outside the practice');
+          bullets((oc.externalTeam || []).map(t => [[t.name, t.role, t.organization].filter(Boolean).join(', '), t.phone, t.handles].filter(Boolean).join(' · ')));
+          bullets((oc.communityServices || []).map(c => `${c.name} (${c.status})${c.notes ? ` · ${c.notes}` : ''}`));
+        }
+      }
 
-      // ── 4 Tasks ──
       if ((plan.eachVisit || []).length) {
-        section(4, 'Task list — each visit');
+        next('Task list — each visit');
         bullets(plan.eachVisit);
       }
 
-      // ── 5 Visits & duration ──
-      section(5, 'Visit schedule & duration');
+      next('Visit schedule & duration');
       fieldRow([{ label: 'Frequency', value: plan.visitFrequency }, { label: 'Days', value: (plan.visitDays || []).join(', ') }]);
       fieldRow([{ label: 'Times', value: plan.visitTimes }, { label: 'Duration', value: plan.duration }]);
-      fieldRow([{ label: 'Effective date', value: fmt(plan.effectiveDate) }, { label: 'Target date', value: fmt(plan.targetDate) }]);
+      fieldRow([{ label: 'Effective date', value: fmt(plan.effectiveDate) }, { label: structured ? 'Next review' : 'Target date', value: fmt(structured ? (plan.review || {}).nextReviewDate : plan.targetDate) }]);
       if (plan.chargePlanNote) {
         doc.fontSize(7).fillColor(ROI_COLORS.muted).font('Helvetica').text('CHARGE PLAN', L, y);
         doc.fontSize(9.5).fillColor(ROI_COLORS.ink).font('Helvetica').text(plan.chargePlanNote, L, y + 10, { width: W });
         y += doc.heightOfString(plan.chargePlanNote, { width: W }) + 20;
       }
 
-      // ── 6 Signatures — THIS document's signatures, respectively ──
-      section(6, 'Signatures');
+      if (structured) {
+        const esc = plan.escalation || {};
+        next('Safety and escalation');
+        if ((esc.callGfcWhen || []).length) { para('Call GFC when:', { font: 'Helvetica-Bold', after: 2 }); bullets(esc.callGfcWhen); }
+        if ((esc.call911When || []).length) { para('Call 911 when:', { font: 'Helvetica-Bold', after: 2 }); bullets(esc.call911When); }
+        if ((esc.callOrder || []).length) para(`Who to call, in order: ${esc.callOrder.join(' → ')}`);
+        if (esc.afterHours) para(`After hours: ${esc.afterHours}`);
+        if (esc.hospitalPreference) para(`Hospital preference: ${esc.hospitalPreference}`);
+        if (d.codeStatus) para(`Code status (from intake): ${d.codeStatus}`);
+        const rv = plan.review || {};
+        next('Review');
+        fieldRow([{ label: 'Review cadence', value: LBL.cadence[rv.cadence] || '' }, { label: 'Next review', value: fmt(rv.nextReviewDate) }]);
+      }
+
+      // ── Signatures — THIS document's signatures, respectively ──
+      next('Signatures');
       doc.fontSize(8.5).fillColor(ROI_COLORS.ink).font('Helvetica')
         .text('This care plan was developed with the client and family and is reviewed periodically. It takes effect when signed by the authoring clinician and co-signed by the client or authorized representative.', L, y, { width: W });
       y += doc.heightOfString('This care plan was developed with the client and family and is reviewed periodically. It takes effect when signed by the authoring clinician and co-signed by the client or authorized representative.', { width: W }) + 8;

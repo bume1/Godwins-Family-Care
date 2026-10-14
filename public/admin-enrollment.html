@@ -2149,6 +2149,18 @@
             </>
           )}
 
+          {/* Every client has a care plan, home care included (owner,
+              2026-10-14). A home care client has no chart in the clinical
+              workspace, so the plan opens on its own page there. */}
+          <Section title="Care plan">
+            <div className="flex flex-wrap items-center gap-3 text-sm">
+              <span className="text-gray-600">
+                {client.carePlan ? `Version ${client.carePlan.version}${client.carePlan.authoredBy ? ` · written by ${client.carePlan.authoredBy}` : ''}` : 'No care plan written yet.'}
+              </span>
+              <a className="btn btn-ghost" href={`/clinical?carePlan=${encodeURIComponent(clientId)}`}>Open Care Plan</a>
+            </div>
+          </Section>
+
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <Section title="Client">
               <dl className="text-sm space-y-1.5">

@@ -5927,8 +5927,53 @@
                   <div className="card">
                     <p className="lbl" style={{ marginTop: 0 }}>Your goals</p>
                     {(cp.goals || []).length === 0 && <p className="sub" style={{ marginTop: 0 }}>No goals listed yet.</p>}
-                    {(cp.goals || []).map((g, i) => <div className="goal" key={i}><i className="ti ti-target-arrow" style={{ color: 'var(--goldd)' }} />{g}</div>)}
+                    {/* With progress where the plan tracks it (full level: the
+                        client and a POA). Family at the summary level gets the
+                        plain list. */}
+                    {(cp.goalProgress || []).length > 0
+                      ? cp.goalProgress.map((g, i) => (
+                        <div className="goal" key={i} style={{ alignItems: 'flex-start' }}>
+                          <i className="ti ti-target-arrow" style={{ color: 'var(--goldd)', marginTop: 3 }} />
+                          <div>
+                            <div>{g.statement}{g.statusLabel && <span className="seg" style={{ marginLeft: 8 }}><span className="on">{g.statusLabel}</span></span>}</div>
+                            {(g.target || g.targetDate) && <div style={{ fontSize: 12.5, color: 'var(--mut)' }}>{[g.measure, g.baseline && `from ${g.baseline}`, g.target && `aiming for ${g.target}`, g.targetDate && `by ${prettyDate(g.targetDate)}`].filter(Boolean).join(' · ')}</div>}
+                          </div>
+                        </div>))
+                      : (cp.goals || []).map((g, i) => <div className="goal" key={i}><i className="ti ti-target-arrow" style={{ color: 'var(--goldd)' }} />{g}</div>)}
                   </div>
+                  {(cp.interventionList || []).length > 0 && (
+                    <div className="card">
+                      <p className="lbl" style={{ marginTop: 0 }}>How we get there</p>
+                      {cp.interventionList.map((iv, i) => (
+                        <div className="goal" key={i} style={{ alignItems: 'flex-start' }}>
+                          <i className="ti ti-checklist" style={{ color: 'var(--navy)', marginTop: 3 }} />
+                          <div>{iv.description}<div style={{ fontSize: 12.5, color: 'var(--mut)' }}>{[iv.who, iv.howOften].filter(Boolean).join(' · ')}</div></div>
+                        </div>))}
+                    </div>
+                  )}
+                  {cp.escalationPlan && ((cp.escalationPlan.callGfcWhen || []).length > 0 || (cp.escalationPlan.call911When || []).length > 0) && (
+                    <div className="card">
+                      <p className="lbl" style={{ marginTop: 0 }}>When to call</p>
+                      {(cp.escalationPlan.callGfcWhen || []).length > 0 && <div style={{ marginBottom: 8 }}><b>Call us when:</b> {cp.escalationPlan.callGfcWhen.join('; ')}</div>}
+                      {(cp.escalationPlan.call911When || []).length > 0 && <div style={{ marginBottom: 8 }}><b>Call 911 when:</b> {cp.escalationPlan.call911When.join('; ')}</div>}
+                      {(cp.escalationPlan.callOrder || []).length > 0 && <div style={{ fontSize: 13 }}>Who to call: {cp.escalationPlan.callOrder.join(' → ')}</div>}
+                      {cp.escalationPlan.afterHours && <div style={{ fontSize: 13 }}>After hours: {cp.escalationPlan.afterHours}</div>}
+                    </div>
+                  )}
+                  {((cp.outsideTeam || []).length > 0 || (cp.communityServices || []).length > 0) && (
+                    <div className="card">
+                      <p className="lbl" style={{ marginTop: 0 }}>Your other care</p>
+                      {(cp.outsideTeam || []).map((t, i) => <div className="goal" key={`t${i}`}><i className="ti ti-stethoscope" style={{ color: 'var(--navy)' }} />{[t.name, t.role, t.organization].filter(Boolean).join(', ')}{t.phone ? ` · ${t.phone}` : ''}</div>)}
+                      {(cp.communityServices || []).map((c, i) => <div className="goal" key={`c${i}`}><i className="ti ti-building-community" style={{ color: 'var(--navy)' }} />{c.name}</div>)}
+                    </div>
+                  )}
+                  {cp.medicationHandling && (
+                    <div className="card">
+                      <p className="lbl" style={{ marginTop: 0 }}>Your medicines</p>
+                      <div>Managed by: {cp.medicationHandling.managedBy}{cp.medicationHandling.pharmacy ? ` · Pharmacy: ${cp.medicationHandling.pharmacy}` : ''}</div>
+                    </div>
+                  )}
+                  {cp.nextReviewDate && <p className="sub">Next plan review: {prettyDate(cp.nextReviewDate)}</p>}
                   {(cp.eachVisit || []).length > 0 && (
                     <div className="card">
                       <p className="lbl" style={{ marginTop: 0 }}>Each visit</p>

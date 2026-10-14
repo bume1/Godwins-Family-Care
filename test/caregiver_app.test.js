@@ -461,6 +461,31 @@ test('SAFETY: the caregiver client view never carries rates, billing or clinical
   assert.deepStrictEqual(view.behavioralProtocols, ['Redirect gently at sundown']);
 });
 
+test('the caregiver sees the plan as the clinician saved it (eachVisit, visitFrequency, visitDays, visitTimes)', () => {
+  // The view used to read tasks/frequency/days/times straight off the plan,
+  // keys no saved plan carries, so a caregiver saw no tasks and no schedule.
+  const view = cg.caregiverClientView(client({
+    carePlan: {
+      version: 3, goals: ['Stay out of hospital'], eachVisit: ['Weight before breakfast'], visitFrequency: '5x/week',
+      visitDays: ['Mon', 'Wed'], visitTimes: '8–10am', problems: ['CHF'],
+      interventions: [
+        { id: 'i-aaaaaa', description: 'Daily weight log', responsible: 'gfc_caregiver', frequency: 'daily', type: 'caregiver_task', goalIds: [] },
+        { id: 'i-bbbbbb', description: 'Furosemide review', responsible: 'gfc_clinician', frequency: 'each_visit', type: 'medication', goalIds: [] }
+      ],
+      escalation: { callGfcWhen: ['Weight up 3 lb overnight'], call911When: ['Chest pain'], callOrder: ['GFC on-call'], afterHours: 'On-call line', hospitalPreference: 'Wellstar' },
+      medicationManagement: { managedBy: 'family', adherenceConcerns: 'skips evening dose', pharmacy: 'Kroger' }
+    }
+  }));
+  assert.deepStrictEqual(view.carePlan.tasks, ['Weight before breakfast']);
+  assert.strictEqual(view.carePlan.frequency, '5x/week');
+  assert.deepStrictEqual(view.carePlan.days, ['Mon', 'Wed']);
+  assert.strictEqual(view.carePlan.times, '8–10am');
+  assert.deepStrictEqual(view.carePlan.caregiverInterventions.map(i => i.description), ['Daily weight log'], 'only caregiver interventions');
+  assert.deepStrictEqual(view.carePlan.escalation.callGfcWhen, ['Weight up 3 lb overnight']);
+  const flat = JSON.stringify(view);
+  assert.ok(!flat.includes('CHF') && !flat.includes('skips evening dose') && !flat.includes('Furosemide'), 'no clinical content reaches a caregiver');
+});
+
 test('isCaregiver requires the vendor role AND a license level', () => {
   assert.ok(cg.isCaregiver({ role: 'vendor', licenseLevel: 'pca' }));
   assert.ok(!cg.isCaregiver({ role: 'vendor', licenseLevel: null }), 'a lab-era vendor is not a caregiver');

@@ -83,7 +83,8 @@ const FILTER_MAP = Object.freeze({
   result: { full: ['id', 'label', 'kind', 'resultDate', 'performedBy', 'reviewStatus', 'reviewedBy', 'reviewedAt', 'patientNote', 'hasFile'] },
   carePlan: {
     full: ['version', 'problems', 'goals', 'eachVisit', 'visitFrequency', 'visitDays', 'visitTimes', 'duration', 'effectiveDate', 'targetDate',
-      'authoredBy', 'authoredAt', 'visitSchedule', 'careTier', 'careTierLabel', 'coSignedAt', 'coSignedBy', 'rnSignedAt', 'rnName', 'updatedAt', 'updatedBy', 'primaryCaregiver', 'careTeam', 'authorizedServices', 'signedPdf'],
+      'authoredBy', 'authoredAt', 'visitSchedule', 'careTier', 'careTierLabel', 'coSignedAt', 'coSignedBy', 'rnSignedAt', 'rnName', 'updatedAt', 'updatedBy', 'primaryCaregiver', 'careTeam', 'authorizedServices', 'signedPdf',
+      'goalProgress', 'interventionList', 'escalationPlan', 'nextReviewDate', 'outsideTeam', 'communityServices', 'medicationHandling'],
     summary: ['version', 'goals', 'eachVisit', 'visitSchedule', 'effectiveDate', 'careTierLabel', 'coSignedAt', 'authoredBy', 'signedPdf']
   }
 });

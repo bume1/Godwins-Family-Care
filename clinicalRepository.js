@@ -12,18 +12,28 @@
 // client.carePlan holds the CURRENT plan (no signature image — that stays in
 // the append-only care_plan_versions collection). Versions start at 1 and
 // increment; prior versions are retained by the caller in care_plan_versions.
+const carePlanFormat = require('./carePlanFormat');
+
 const CARE_PLAN_FIELDS = [
   'problems', 'goals', 'eachVisit', 'visitFrequency', 'visitDays', 'visitTimes',
-  'duration', 'chargePlanNote', 'effectiveDate', 'targetDate'
+  'duration', 'chargePlanNote', 'effectiveDate', 'targetDate',
+  // The 2026-10-14 format (carePlanFormat.js)
+  'problemItems', 'goalItems', 'interventions', 'medicationManagement', 'outsideCare', 'escalation', 'review'
 ];
 
 const sanitizeStringArray = (v, maxLen = 300, maxItems = 40) =>
   Array.isArray(v) ? v.map(x => String(x || '').trim()).filter(Boolean).slice(0, maxItems).map(s => s.slice(0, maxLen)) : [];
 
-const buildCarePlanVersion = (existingPlan, input, author) => {
+// `options.serviceLine` decides which fields the plan must carry
+// (carePlanFormat.REQUIREMENTS). Without one, only a problem and a goal are
+// required, as before.
+const buildCarePlanVersion = (existingPlan, input, author, options = {}) => {
   if (!input || typeof input !== 'object') throw new Error('Care plan payload is required');
-  const goals = sanitizeStringArray(input.goals);
-  const problems = sanitizeStringArray(input.problems);
+  const who = { name: (author && author.name) || null, id: (author && author.id) || null, at: (author && author.at) || new Date().toISOString() };
+  const blocks = carePlanFormat.buildStructuredBlocks(existingPlan, input, who);
+  // The plain lists every older reader uses, derived from the structured items.
+  const problems = blocks.problemItems.map(p => p.text);
+  const goals = blocks.goalItems.map(g => g.statement);
   if (!goals.length) return { error: 'At least one goal is required', code: 'CARE_PLAN_NO_GOALS' };
   if (!problems.length) return { error: 'At least one problem is required', code: 'CARE_PLAN_NO_PROBLEMS' };
 
@@ -43,16 +53,22 @@ const buildCarePlanVersion = (existingPlan, input, author) => {
     chargePlanNote: String(input.chargePlanNote || '').slice(0, 2000),
     effectiveDate: input.effectiveDate || null,
     targetDate: input.targetDate || null,
-    authoredBy: author && author.name ? String(author.name) : null,
-    authoredById: author && author.id ? String(author.id) : null,
-    authoredAt: (author && author.at) || new Date().toISOString(),
+    ...blocks,
+    authoredBy: who.name ? String(who.name) : null,
+    authoredById: who.id ? String(who.id) : null,
+    authoredAt: who.at,
     // Portal display: visitSchedule is the human summary line the client sees
     visitSchedule: input.visitSchedule
       ? String(input.visitSchedule).slice(0, 240)
       : [input.visitFrequency, sanitizeStringArray(input.visitDays, 12, 7).join('/'), input.visitTimes]
           .filter(Boolean).join(' · ') || null
   };
-  return { plan };
+  const missing = carePlanFormat.missingRequirements(plan, options.serviceLine);
+  if (missing.length) {
+    const labels = missing.map(k => carePlanFormat.REQUIREMENT_LABELS[k]);
+    return { error: `This care plan still needs ${labels.join('; ')}.`, code: 'CARE_PLAN_INCOMPLETE', missing, missingLabels: labels };
+  }
+  return { plan, warnings: carePlanFormat.scopeWarnings(plan) };
 };
 
 // ---- Clinical enrollment sequence (v2 §6) ----

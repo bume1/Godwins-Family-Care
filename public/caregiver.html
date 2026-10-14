@@ -1009,6 +1009,8 @@ const ClientsTab = ({ clients, detail, onOpen, onClose, onMessages }) => {
           {!plan ? <p style={{ fontSize: 15, color: 'var(--mut)' }}>No care plan is on file yet.</p> : (
             <div>
               {plan.frequency && <div className="row"><span>Frequency</span><b>{plan.frequency}</b></div>}
+              {Array.isArray(plan.days) && plan.days.length > 0 && <div className="row"><span>Days</span><b>{plan.days.join(', ')}</b></div>}
+              {plan.times && <div className="row"><span>Times</span><b>{plan.times}</b></div>}
               {plan.duration && <div className="row"><span>Duration</span><b>{plan.duration}</b></div>}
               {Array.isArray(plan.goals) && plan.goals.length > 0 && (
                 <div style={{ paddingTop: 10 }}>
@@ -1022,9 +1024,27 @@ const ClientsTab = ({ clients, detail, onOpen, onClose, onMessages }) => {
                   {plan.tasks.map((t, i) => <div className="row" key={i}>{typeof t === 'string' ? t : (t.label || t.task || t.name || '')}</div>)}
                 </div>
               )}
+              {Array.isArray(plan.caregiverInterventions) && plan.caregiverInterventions.length > 0 && (
+                <div style={{ paddingTop: 10 }}>
+                  <div className="grp" style={{ marginTop: 0 }}>Also yours</div>
+                  {plan.caregiverInterventions.map((t, i) => <div className="row" key={i}><span>{t.description}</span>{t.howOften && <b>{t.howOften}</b>}</div>)}
+                </div>
+              )}
             </div>
           )}
         </div>
+
+        {/* When to call, from the care plan. Raising a concern still goes
+            through the Escalate button, which routes it to the right person. */}
+        {plan && plan.escalation && ((plan.escalation.callGfcWhen || []).length > 0 || (plan.escalation.call911When || []).length > 0) && (
+          <div className="card" style={{ borderColor: 'var(--goldd)' }}>
+            <h3>When to call</h3>
+            {(plan.escalation.call911When || []).length > 0 && <div className="row"><span>Call 911</span><b>{plan.escalation.call911When.join('; ')}</b></div>}
+            {(plan.escalation.callGfcWhen || []).length > 0 && <div className="row"><span>Escalate to GFC</span><b>{plan.escalation.callGfcWhen.join('; ')}</b></div>}
+            {(plan.escalation.callOrder || []).length > 0 && <div className="row"><span>Who to call</span><b>{plan.escalation.callOrder.join(' → ')}</b></div>}
+            {plan.escalation.afterHours && <div className="row"><span>After hours</span><b>{plan.escalation.afterHours}</b></div>}
+          </div>
+        )}
 
         {c.behavioralProtocols && c.behavioralProtocols.length > 0 && (
           <div className="card">

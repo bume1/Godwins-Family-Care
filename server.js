@@ -52,6 +52,7 @@ const { createAuditLog } = require('./auditLog');        // durable append-only 
 const { createSessionStore } = require('./sessionStore'); // server-side sessions: idle timeout + revocation (Session 5.3)
 const QRCode = require('qrcode');                        // enrollment QR for the authenticator app (Session 5.3)
 const clinicalRepo = require('./clinicalRepository');
+const carePlanFormat = require('./carePlanFormat');
 const apptTypes = require('./appointmentTypes');
 const screenings = require('./screenings');  // PHQ-2/9, GAD-7, SDOH results (social work, 2026-10-11)  // clinical workspace pure helpers (Session 4.1)
 // Session 4.3 — patient/family/POA clinical read rules + the case-manager read/write split
@@ -6596,6 +6597,11 @@ const buildClientCarePlan = (client) => {
   };
   const coSign = (client.carePlanCoSign || {})[`v${plan.version}`];
   carePlan.coSignedAt = coSign ? coSign.at : null;
+  // The 2026-10-14 format, in patient-facing shapes. The structured blocks
+  // themselves (goalItems, interventions…) are never in the filter map, so
+  // only these projections reach a patient: no prognosis, no adherence notes,
+  // no internal ids.
+  Object.assign(carePlan, carePlanFormat.patientProjection(plan));
   return carePlan;
 };
 
@@ -6622,6 +6628,7 @@ const emitSignedCarePlanPdf = async (clientId, version, clientSignature, actor) 
     const rnSignature = row ? row.rnSignature : null;
 
     const pdfBuffer = await pdfGenerator.generateCarePlanPDF({
+      codeStatus: carePlanFormat.derivedFromClient(client).codeStatus,
       state: 'signed',
       patientName: client.name,
       patientDOB: (client.intake && client.intake.dob) || client.dob || '',
@@ -6728,6 +6735,7 @@ const buildCarePlanPdfForVersion = async (client, version) => {
     .filter(e => e && e.client_id === client.id && String(e.version) === String(version))
     .sort((a, b) => String(b.at).localeCompare(String(a.at)))[0] || null;
   const buffer = await pdfGenerator.generateCarePlanPDF({
+    codeStatus: carePlanFormat.derivedFromClient(client).codeStatus,
     // A plan that has not been co-signed is filed as authored, not as signed —
     // the chart must never carry a signature block the client has not signed.
     state: ev ? 'signed' : 'authored',
@@ -8462,6 +8470,15 @@ const loadClinicalClient = async (clientId) => {
   return { users, idx, client };
 };
 
+// The care plan is written for EVERY client, home care included
+// (owner, 2026-10-14). Only the chart routes are clinical-line-only.
+const loadCarePlanClient = async (clientId) => {
+  const users = await getUsers();
+  const idx = users.findIndex(u => u.id === clientId && u.role === config.ROLES.CLIENT);
+  if (idx === -1) return { users, idx, client: null };
+  return { users, idx, client: users[idx] };
+};
+
 // Map the app client record → FHIR R4 Patient for the link/create step.
 const clientToFhirPatient = (client) => {
   const intake = client.intake || {};
@@ -9424,13 +9441,19 @@ app.post('/api/clinical/patients/:clientId/problems', authenticateToken, require
 // and writes the authored care-plan PDF to OpenEMR Documents.
 app.get('/api/clinical/patients/:clientId/care-plan', authenticateToken, requireClinicalRead, async (req, res) => {
   try {
-    const { client, wrongLine } = await loadClinicalClient(req.params.clientId);
-    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    const { client } = await loadCarePlanClient(req.params.clientId);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
     const versionRows = ((await db.get('care_plan_versions')) || [])
       .filter(r => r && r.client_id === client.id)
       .map(r => ({ version: r.version, authoredAt: r.plan && r.plan.authoredAt, authoredBy: r.plan && r.plan.authoredBy })); // no signature images
     res.json({
+      client: { id: client.id, name: client.name || null, serviceLine: client.serviceLine || 'PHC' },
       carePlan: client.carePlan || null,
+      // Plans written before the 2026-10-14 format, shown in the new shape
+      // without being rewritten.
+      structured: carePlanFormat.structuredView(client.carePlan || null),
+      derived: carePlanFormat.derivedFromClient(client),
+      vocabulary: carePlanFormat.vocabulary(),
       coSign: client.carePlanCoSign || {},
       docs: client.carePlanDocs || {},
       history: versionRows.sort((a, b) => (b.version || 0) - (a.version || 0))
@@ -9443,8 +9466,8 @@ app.get('/api/clinical/patients/:clientId/care-plan', authenticateToken, require
 
 app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.CARE_PLAN_AUTHOR), async (req, res) => {
   try {
-    const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
-    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    const { users, idx, client } = await loadCarePlanClient(req.params.clientId);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
 
     // RN author signature — drawn, same pad mechanism + validation as the
     // 3.4 ROI and the portal co-sign.
@@ -9455,8 +9478,9 @@ app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requir
     if (sig.length > 600 * 1024) return res.status(413).json({ error: 'Signature image is too large' });
 
     const at = new Date().toISOString();
-    const built = clinicalRepo.buildCarePlanVersion(client.carePlan, req.body || {}, { name: req.user.name, id: req.user.id, at });
-    if (built.error) return res.status(400).json({ error: built.error, code: built.code });
+    const built = clinicalRepo.buildCarePlanVersion(client.carePlan, req.body || {}, { name: req.user.name, id: req.user.id, at },
+      { serviceLine: client.serviceLine || 'PHC' });
+    if (built.error) return res.status(400).json({ error: built.error, code: built.code, missing: built.missing || undefined, missingLabels: built.missingLabels || undefined });
     const plan = built.plan;
     const ipHash = roiRepo.hashIp(clientIpFrom(req), JWT_SECRET);
 
@@ -9505,6 +9529,7 @@ app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requir
     if (carePlanBelongsInChart(users[idx]) && openemr.isConfigured()) {
       try {
         const pdfBuffer = await pdfGenerator.generateCarePlanPDF({
+          codeStatus: carePlanFormat.derivedFromClient(client).codeStatus,
           state: 'authored',
           patientName: client.name,
           patientDOB: (client.intake && client.intake.dob) || client.dob || '',
@@ -9534,6 +9559,8 @@ app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requir
         ? `Care plan v${plan.version} saved as the authoring signature — it needs a provider co-signature before it is complete`
         : `Care plan v${plan.version} saved — awaiting client co-signature in the portal`,
       carePlan: users[idx].carePlan, emrDocumented,
+      // Advice about caregiver scope, never a refusal (carePlanFormat.scopeWarnings).
+      warnings: built.warnings || [],
       providerCoSignStatus: plan.providerCoSignStatus,
       providerCoSignReason: plan.providerCoSignReason
     });
@@ -9551,8 +9578,8 @@ app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requir
 // field nothing ever clears.
 app.post('/api/clinical/patients/:clientId/care-plan/provider-cosign', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.CARE_PLAN_SIGN), async (req, res) => {
   try {
-    const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
-    if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
+    const { users, idx, client } = await loadCarePlanClient(req.params.clientId);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
     const plan = client.carePlan;
     if (!plan) return res.status(409).json({ error: 'There is no care plan to co-sign', code: 'NO_CARE_PLAN' });
     if (plan.providerCoSignStatus !== 'pending') {
@@ -9594,6 +9621,52 @@ app.post('/api/clinical/patients/:clientId/care-plan/provider-cosign', authentic
     res.json({ message: `Care plan v${plan.version} co-signed`, carePlan: users[idx].carePlan });
   } catch (error) {
     console.error('Care-plan provider co-sign error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/clinical/patients/:clientId/care-plan/goals/:goalId/status
+// A goal's status changes WITHOUT a new version (owner, 2026-10-14): a new
+// version needs new signatures, and a status update must never send the family
+// back to re-sign. Every change is its own append-only row in
+// care_plan_goal_status_events; the current status sits on the goal.
+// Clinicians only — the same capability that writes the plan.
+app.post('/api/clinical/patients/:clientId/care-plan/goals/:goalId/status', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.CARE_PLAN_AUTHOR), async (req, res) => {
+  try {
+    const { users, idx, client } = await loadCarePlanClient(req.params.clientId);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+    if (!client.carePlan) return res.status(409).json({ error: 'There is no care plan yet', code: 'NO_CARE_PLAN' });
+    const at = new Date().toISOString();
+    const result = carePlanFormat.applyGoalStatus(client.carePlan, String(req.params.goalId), req.body || {}, { id: req.user.id, name: req.user.name }, at);
+    if (result.error) return res.status(result.code === 'GOAL_NOT_FOUND' ? 404 : (result.code === 'CARE_PLAN_LEGACY_GOALS' ? 409 : 400)).json({ error: result.error, code: result.code });
+    const events = (await db.get('care_plan_goal_status_events')) || [];
+    events.push({ id: uuidv4(), client_id: client.id, ...result.event });
+    await db.set('care_plan_goal_status_events', events);
+    users[idx].carePlan = result.plan;
+    await db.set('users', users);
+    invalidateUsersCache();
+    // The audit row names the goal and the status, never the note.
+    await logActivity(req.user.id, req.user.name || req.user.email, 'care_plan_goal_status', 'care_plan', `v${result.plan.version}`, {
+      clientId: client.id, goalId: result.event.goalId, previous: result.event.previous, status: result.event.status
+    });
+    res.json({ carePlan: result.plan, event: result.event });
+  } catch (error) {
+    console.error('Care-plan goal status error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET …/care-plan/goals/:goalId/history — every status this goal has held.
+app.get('/api/clinical/patients/:clientId/care-plan/goals/:goalId/history', authenticateToken, requireClinicalRead, async (req, res) => {
+  try {
+    const { client } = await loadCarePlanClient(req.params.clientId);
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+    const rows = ((await db.get('care_plan_goal_status_events')) || [])
+      .filter(r => r && r.client_id === client.id && r.goalId === String(req.params.goalId))
+      .sort((a, b) => String(b.at).localeCompare(String(a.at)));
+    res.json({ history: rows.map(r => ({ status: r.status, previous: r.previous, note: r.note, byName: r.byName, at: r.at, planVersion: r.planVersion })) });
+  } catch (error) {
+    console.error('Care-plan goal history error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -16926,9 +16999,9 @@ app.get('/api/clinical/inbox', authenticateToken, requireClinicalRead, async (re
     ]);
     const clients = users.filter(u => u.role === config.ROLES.CLIENT);
     const patientNames = new Map(clients.map(c => [String(c.id), c.name || null]));
-    // Only clinical-line clients carry a care plan that needs a provider's
-    // signature; a home-care plan is complete when the RN signs it.
-    const carePlanClients = clients.filter(c => isClinicalServiceLine(c.serviceLine));
+    // Any client's plan can wait on a second signature (an LMSW authors a
+    // home care plan too); the pending flag on the plan decides.
+    const carePlanClients = clients;
     const built = clinicalInbox.buildInbox({
       viewer: actorFromReq(req),
       encounterRecords: records, attestations, orders,
@@ -17872,6 +17945,9 @@ const enrollmentDetail = (client) => {
     // Who approved, and whether they did it over outstanding items. An override
     // that the detail view cannot show is the silent approval it replaced.
     enrollmentApproval: client.enrollmentApproval || null,
+    // Only which version exists and who wrote it; the plan itself opens in
+    // the clinical workspace.
+    carePlan: client.carePlan ? { version: client.carePlan.version, authoredBy: client.carePlan.authoredBy || null, authoredAt: client.carePlan.authoredAt || null } : null,
     age: intake.age != null ? intake.age : deriveAge(intake.dob || client.dob),
     intake,
     consents: defs.map(d => {
