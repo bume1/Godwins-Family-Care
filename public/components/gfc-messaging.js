@@ -450,10 +450,22 @@
     // bubble, because a POA's message must say whose behalf it is on.
     html += '<div class="mlog">' + state.messages.map(function (m) {
       var side = m.mine ? 'me' : 'them';
+      var ed = state.editing && state.editing.id === m.id ? state.editing : null;
+      // Edit is the super admin's alone; the server says who may (owner,
+      // 2026-10-14). A formatted message is edited in its stored form (the six
+      // marks: **bold**, _italic_, __underline__, "- ", "1. ", "## ").
+      var body = ed
+        ? '<textarea class="minput" data-edit-body="1" rows="5" style="width:100%">' + esc(ed.body) + '</textarea>' +
+          (m.format === 'markup' ? '<div class="mmu">Formatting marks: **bold**, _italic_, __underline__, "- " bullet, "1. " numbered, "## " heading.</div>' : '') +
+          '<input class="minput" data-edit-reason="1" style="width:100%;margin-top:6px" maxlength="500" placeholder="Why is this being edited? (kept in the office record)" value="' + esc(ed.reason) + '">' +
+          '<div class="mbtns"><button class="mbtn gold" data-edit-save="1">Save Edit</button><button class="mbtn ghost" data-edit-cancel="1">Cancel</button></div>'
+        : messageHtml(m) + attachmentsHtml(m);
       return '<div class="mwrap ' + side + '"><div class="mbub ' + side + '">' +
         '<div class="mwho">' + esc(m.from) + (m.isPoa ? '' : ' · ' + esc(m.fromRoleLabel)) + '</div>' +
-        messageHtml(m) + attachmentsHtml(m) +
-        '</div><div class="mwhen">' + esc(fmtWhen(m.sentAt)) + '</div></div>';
+        body +
+        '</div><div class="mwhen">' + esc(fmtWhen(m.sentAt)) + (m.edited ? ' · Edited' : '') +
+        (state.canEdit && !ed ? ' · <button class="mbtn ghost" data-edit-msg="' + esc(m.id) + '" style="padding:0 6px;font-size:11px">Edit</button>' : '') +
+        '</div></div>';
     }).join('') + '</div>';
 
     if (state.canPost) {
@@ -513,6 +525,33 @@
           state.notice = 'Conversation deleted.';
           return refresh(state);
         }));
+    };
+
+    root.querySelectorAll('[data-edit-msg]').forEach(function (b) {
+      b.onclick = function () {
+        var id = b.getAttribute('data-edit-msg');
+        var m = state.messages.filter(function (x) { return x.id === id; })[0];
+        if (!m) return;
+        state.editing = { id: id, body: m.body || '', reason: '' };
+        state.error = '';
+        render(state);
+      };
+    });
+    // What is typed is kept in state on every keystroke, so a refused save
+    // keeps it (the composer's rule).
+    var eb = root.querySelector('[data-edit-body]');
+    if (eb) eb.oninput = function () { state.editing.body = eb.value; };
+    var er = root.querySelector('[data-edit-reason]');
+    if (er) er.oninput = function () { state.editing.reason = er.value; };
+    var ec = root.querySelector('[data-edit-cancel]');
+    if (ec) ec.onclick = function () { state.editing = null; state.error = ''; render(state); };
+    var es = root.querySelector('[data-edit-save]');
+    if (es) es.onclick = function () {
+      if (!String(state.editing.reason || '').trim()) { state.error = 'Say why this message is being edited.'; render(state); return; }
+      es.disabled = true;
+      go(api(state, '/api/messaging/messages/' + state.editing.id, { method: 'PUT', body: { body: state.editing.body, reason: state.editing.reason } })
+        .then(function () { state.editing = null; state.notice = 'Message edited.'; return openThread(state, state.thread.id); }))
+        .then(function () { es.disabled = false; });
     };
 
     var back = root.querySelector('[data-back]');
@@ -618,6 +657,7 @@
       state.canPost = !!res.canPost;
       state.cannotPostReason = res.cannotPostReason;
       state.canDelete = !!res.canDelete;
+      state.canEdit = !!res.canEdit;
       state.view = 'thread';
       state.loading = false;
       render(state);
@@ -676,7 +716,7 @@
       loading: true,
       error: '', notice: '',
       threads: [], channels: [], messages: [],
-      thread: null, canPost: false, cannotPostReason: null, canDelete: false,
+      thread: null, canPost: false, cannotPostReason: null, canDelete: false, canEdit: false, editing: null,
       composeChannel: null,
       draft: newDraft()
     };

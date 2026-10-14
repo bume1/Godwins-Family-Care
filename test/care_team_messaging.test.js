@@ -621,3 +621,64 @@ test('the component draws Delete Thread only from the server answer', () => {
   assert.match(comp, /\(state\.canDelete \? '<button class="mbtn ghost" data-delete-thread="1"/);
   assert.match(comp, /method: 'DELETE', body: \{ reason: reason \}/);
 });
+
+// ---- Editing a sent message: super admin only, at any point (owner, 2026-10-14)
+test('only the super admin can edit a sent message; the old words are kept with who, when and why', async () => {
+  const h = await boot();
+  try {
+    const r = await h.call('fnp-1', 'POST', '/api/messaging/threads', { json: { channel: 'care_team', clientId: 'client-1', body: 'Your visit is on Tusday at 10.' } });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+    const id = r.data.thread.id;
+    const sent = rows(h, 'messages').find(m => m.thread_id === id);
+    // The page is told who may edit; it decides nothing itself.
+    assert.equal((await h.call('admin-1', 'GET', `/api/messaging/threads/${id}`)).data.canEdit, true);
+    assert.equal((await h.call('fnp-1', 'GET', `/api/messaging/threads/${id}`)).data.canEdit, false);
+    for (const who of ['fnp-1', 'cm-1', 'client-1', 'poa-1']) {
+      const e = await h.call(who, 'PUT', `/api/messaging/messages/${sent.id}`, { json: { body: 'x', reason: 'x' } });
+      assert.equal(e.status, 403, who);
+      assert.equal(e.data.code, 'EDIT_SUPER_ADMIN_ONLY');
+    }
+    h.store.get('users').push({ id: 'mgr-2', name: 'Manager', email: 'm2@test.local', role: 'user', isManager: true, hasClinicalAccess: true });
+    assert.equal((await h.call('mgr-2', 'PUT', `/api/messaging/messages/${sent.id}`, { json: { body: 'x', reason: 'x' } })).status, 403, 'a manager is not the super admin');
+    const noReason = await h.call('admin-1', 'PUT', `/api/messaging/messages/${sent.id}`, { json: { body: 'Your visit is on Tuesday at 10.' } });
+    assert.equal(noReason.data.code, 'EDIT_REASON_REQUIRED');
+    const blank = await h.call('admin-1', 'PUT', `/api/messaging/messages/${sent.id}`, { json: { body: '   ', reason: 'typo' } });
+    assert.equal(blank.data.code, 'BODY_REQUIRED');
+    const same = await h.call('admin-1', 'PUT', `/api/messaging/messages/${sent.id}`, { json: { body: 'Your visit is on Tusday at 10.', reason: 'typo' } });
+    assert.equal(same.data.code, 'EDIT_NO_CHANGE');
+    assert.equal(rows(h, 'messages').find(m => m.id === sent.id).body, 'Your visit is on Tusday at 10.', 'a refusal changes nothing');
+    assert.equal((await h.call('admin-1', 'PUT', '/api/messaging/messages/nope', { json: { body: 'x', reason: 'x' } })).status, 404);
+
+    const ok = await h.call('admin-1', 'PUT', `/api/messaging/messages/${sent.id}`, { json: { body: 'Your visit is on Tuesday at 10.', reason: 'Fix a typo' } });
+    assert.equal(ok.status, 200, JSON.stringify(ok.data));
+    assert.equal(ok.data.message.edited, true);
+    const stored = rows(h, 'messages').find(m => m.id === sent.id);
+    assert.equal(stored.body, 'Your visit is on Tuesday at 10.');
+    assert.equal(stored.edits.length, 1);
+    assert.equal(stored.edits[0].previousBody, 'Your visit is on Tusday at 10.', 'the old words are kept');
+    assert.equal(stored.edits[0].byId, 'admin-1');
+    assert.equal(stored.edits[0].reason, 'Fix a typo');
+    assert.equal(stored.from_user_id, 'fnp-1', 'the sender does not change');
+
+    // The patient sees the corrected words, marked Edited, and never the old ones.
+    const seen = await h.call('client-1', 'GET', `/api/messaging/threads/${id}`);
+    const pm = seen.data.messages.find(m => m.id === sent.id);
+    assert.equal(pm.body, 'Your visit is on Tuesday at 10.');
+    assert.equal(pm.edited, true);
+    assert.ok(!JSON.stringify(seen.data).includes('Tusday'), 'the old words never reach the screen');
+    assert.ok(!JSON.stringify(seen.data).includes('Fix a typo'), 'nor the reason');
+    assert.equal(rows(h, 'message_threads').find(t => t.id === id).last_message_preview, 'Your visit is on Tuesday at 10.', 'the list preview follows');
+
+    const audit = h.activity.find(a => a[2] === 'message_edited');
+    assert.ok(audit, 'the edit is audited');
+    assert.ok(!JSON.stringify(audit).includes('Tuesday') && !JSON.stringify(audit).includes('typo'), 'the audit row names the message, never its words');
+  } finally { h.close(); }
+});
+
+test('the component draws Edit only from the server answer and marks edited messages', () => {
+  const comp = fs.readFileSync(path.join(__dirname, '..', 'public', 'components', 'gfc-messaging.js'), 'utf8');
+  assert.match(comp, /state\.canEdit = !!res\.canEdit;/);
+  assert.match(comp, /state\.canEdit && !ed \? ' · <button class="mbtn ghost" data-edit-msg="/);
+  assert.match(comp, /\(m\.edited \? ' · Edited' : ''\)/);
+  assert.match(comp, /method: 'PUT', body: \{ body: state\.editing\.body, reason: state\.editing\.reason \}/);
+});
