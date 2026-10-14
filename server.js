@@ -2604,7 +2604,8 @@ const requireClinicalRead = (req, res, next) => {
 };
 // Care coordinators (owner, 2026-10-14) document and schedule without being
 // licensed to write anything else. ONLY the note, encounter and scheduling
-// routes name this gate; every other write route stays on requireClinicalWrite
+// routes, and writing a care plan and its goal status (owner, 2026-10-14: a
+// coordinator's plan waits on a clinician's co-signature), name this gate; every other write route stays on requireClinicalWrite
 // and refuses them. A route added later is closed to coordinators by default.
 const requireClinicalDocumenter = (req, res, next) => {
   if (clinicalRoles.canDocumentClinically(req.user)) return next();
@@ -9489,6 +9490,12 @@ app.get('/api/clinical/patients/:clientId/care-plan', authenticateToken, require
       structured: carePlanFormat.structuredView(client.carePlan || null),
       derived: carePlanFormat.derivedFromClient(client),
       vocabulary: carePlanFormat.vocabulary(),
+      // Whether THIS viewer can supply the co-signature a pending plan waits
+      // on, for this client's service line (an RN can complete a home care
+      // plan, never a clinical patient's). Same question the co-sign route asks.
+      canCoSign: !!(client.carePlan && client.carePlan.providerCoSignStatus === 'pending'
+        && clinicalRoles.canCompleteCarePlan(req.user, client.serviceLine)
+        && String(client.carePlan.authoredById || '') !== String(req.user.id)),
       coSign: client.carePlanCoSign || {},
       docs: client.carePlanDocs || {},
       history: versionRows.sort((a, b) => (b.version || 0) - (a.version || 0))
@@ -9499,7 +9506,7 @@ app.get('/api/clinical/patients/:clientId/care-plan', authenticateToken, require
   }
 });
 
-app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.CARE_PLAN_AUTHOR), async (req, res) => {
+app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requireClinicalDocumenter, requireCapability(clinicalRoles.CAPABILITIES.CARE_PLAN_AUTHOR), async (req, res) => {
   try {
     const { users, idx, client } = await loadCarePlanClient(req.params.clientId);
     if (!client) return res.status(404).json({ error: 'Client not found' });
@@ -9591,7 +9598,7 @@ app.post('/api/clinical/patients/:clientId/care-plan', authenticateToken, requir
     });
     res.json({
       message: pendingProviderCoSign
-        ? `Care plan v${plan.version} saved as the authoring signature — it needs a provider co-signature before it is complete`
+        ? `Care plan v${plan.version} saved as the authoring signature. ${planSig.reason}`
         : `Care plan v${plan.version} saved — awaiting client co-signature in the portal`,
       carePlan: users[idx].carePlan, emrDocumented,
       // Advice about caregiver scope, never a refusal (carePlanFormat.scopeWarnings).
@@ -9679,7 +9686,7 @@ app.post('/api/clinical/patients/:clientId/care-plan/provider-cosign', authentic
 // back to re-sign. Every change is its own append-only row in
 // care_plan_goal_status_events; the current status sits on the goal.
 // Clinicians only — the same capability that writes the plan.
-app.post('/api/clinical/patients/:clientId/care-plan/goals/:goalId/status', authenticateToken, requireClinicalWrite, requireCapability(clinicalRoles.CAPABILITIES.CARE_PLAN_AUTHOR), async (req, res) => {
+app.post('/api/clinical/patients/:clientId/care-plan/goals/:goalId/status', authenticateToken, requireClinicalDocumenter, requireCapability(clinicalRoles.CAPABILITIES.CARE_PLAN_AUTHOR), async (req, res) => {
   try {
     const { users, idx, client } = await loadCarePlanClient(req.params.clientId);
     if (!client) return res.status(404).json({ error: 'Client not found' });

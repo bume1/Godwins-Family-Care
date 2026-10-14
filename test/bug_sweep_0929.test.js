@@ -159,7 +159,7 @@ test('co-sign actions exist on the page for orders and IHPC care plans', () => {
   assert.match(clinical, /providerCoSignCarePlan: \(id, signatureImageB64\) => authedFetch\(`\/api\/clinical\/patients\/\$\{id\}\/care-plan\/provider-cosign`/);
   assert.match(clinical, /coSignOrder: \(orderId\) => authedFetch\(`\/api\/clinical\/orders\/\$\{encodeURIComponent\(orderId\)\}\/co-sign`/);
   assert.match(clinical, /\{i\.kind === 'order_co_sign' && i\.actionable && \(/);
-  assert.match(clinical, /\{providerPending \? 'Awaiting provider signature'/);
+  assert.match(clinical, /\{providerPending \? 'Awaiting clinician co-signature'/);
 });
 
 test('result, referral and DME titles read the fields the records actually carry', () => {

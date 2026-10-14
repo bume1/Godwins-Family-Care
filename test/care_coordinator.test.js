@@ -26,11 +26,13 @@ const routeLine = (needle) => {
 
 test('a coordinator documents and schedules, and holds no licensed capability', () => {
   const C = roles.CAPABILITIES;
-  for (const cap of [C.NURSING_NOTE, C.BEHAVIORAL_NOTE, C.VITALS_WRITE, C.SCREENING_INSTRUMENT, C.SCHEDULING, C.CHART_READ]) {
+  // CARE_PLAN_AUTHOR joined this list on 2026-10-14 (owner): the plan they
+  // write waits on a clinician's co-signature, so it is not a licensed act.
+  for (const cap of [C.NURSING_NOTE, C.BEHAVIORAL_NOTE, C.VITALS_WRITE, C.SCREENING_INSTRUMENT, C.SCHEDULING, C.CHART_READ, C.CARE_PLAN_AUTHOR]) {
     assert.equal(roles.can(coordinator, cap), true, cap);
   }
   for (const cap of [C.PRESCRIBE, C.ORDER_DIRECT, C.ORDER_STANDING, C.SELECT_SERVICE_CODES, C.SIGN_BILLABLE_ENCOUNTER,
-    C.CARE_PLAN_AUTHOR, C.CARE_PLAN_SIGN, C.MED_REC, C.PROBLEM_LIST_WRITE, C.ACKNOWLEDGE_ABNORMAL_RESULT,
+    C.CARE_PLAN_SIGN, C.MED_REC, C.PROBLEM_LIST_WRITE, C.ACKNOWLEDGE_ABNORMAL_RESULT,
     C.AUTHOR_STANDING_ORDER, C.REFER_INTERNAL, C.REFER_EXTERNAL, C.ORDER_STATUS_ADVANCE, C.BEHAVIORAL_DIAGNOSIS]) {
     assert.equal(roles.can(coordinator, cap), false, cap);
   }
@@ -49,14 +51,25 @@ test('a coordinator is not licensed: they document, they never write as a clinic
   assert.equal(roles.isCoordinator(rn), false);
 });
 
-test('a coordinator can never sign, co-sign or author a care plan', () => {
+test('a coordinator never signs or co-signs a note', () => {
   const sig = roles.evaluateEncounterSignature(coordinator, []);
   assert.equal(sig.code, 'SIGN_COORDINATOR');
   assert.equal(roles.evaluateEncounterSignature(coordinator, ['99349']).code, 'SIGN_COORDINATOR');
   assert.equal(roles.canCoSignEncounter(coordinator), false);
   assert.equal(roles.canCoSignNote(coordinator), false);
-  for (const line of ['phc', 'ihpc', 'both']) {
-    assert.equal(roles.evaluateCarePlanSignature(coordinator, line).code, 'CARE_PLAN_NO_CREDENTIAL', line);
+});
+
+// Owner, 2026-10-14: a coordinator authors and updates a care plan, and it is
+// not active until a clinician co-signs it. (This replaces the earlier rule
+// that a coordinator could not author one at all.)
+test('a coordinator authors a care plan that waits on a clinician, on every line', () => {
+  assert.equal(roles.can(coordinator, roles.CAPABILITIES.CARE_PLAN_AUTHOR), true);
+  assert.equal(roles.can(coordinator, roles.CAPABILITIES.CARE_PLAN_SIGN), false);
+  for (const line of ['PHC', 'IHPC', 'BOTH']) {
+    const r = roles.evaluateCarePlanSignature(coordinator, line);
+    assert.equal(r.outcome, roles.CARE_PLAN_OUTCOME.PENDING_PROVIDER, line);
+    assert.equal(r.signatureRole, 'authoring', line);
+    assert.equal(roles.canCompleteCarePlan(coordinator, line), false, `a coordinator never completes a plan (${line})`);
   }
 });
 
@@ -138,4 +151,39 @@ test('the LMSW boot migration never overrules a role an admin chose', () => {
   assert.match(put, /if \(users\[idx\]\.role === config\.ROLES\.CASE_MANAGER && !users\[idx\]\.caseManagerLmswMigration\) \{\s*users\[idx\]\.caseManagerLmswMigration = \{ version: clinicalRoles\.CASE_MANAGER_LMSW_MARKER/);
   const stamped = roles.applyCaseManagerLmswMigration([{ ...readOnlyCm, caseManagerLmswMigration: { version: roles.CASE_MANAGER_LMSW_MARKER, from: 'admin_set' } }]);
   assert.equal(stamped.users[0].clinicalRole, 'readOnly');
+});
+
+test('who can complete a coordinator’s plan depends on the service line', () => {
+  const provider = { id: 'p1', role: 'user', clinicalRole: 'provider' };
+  const lcsw = { id: 'l1', role: 'user', clinicalRole: 'lcsw' };
+  const lmsw = { id: 'm1', role: 'caseManager', clinicalRole: 'lmsw' };
+  // Home care: an RN's own signature completes a plan, so an RN can co-sign.
+  assert.equal(roles.canCompleteCarePlan(rn, 'PHC'), true);
+  assert.equal(roles.canCompleteCarePlan(provider, 'PHC'), true);
+  // A clinical patient needs a provider or an LCSW.
+  assert.equal(roles.canCompleteCarePlan(rn, 'IHPC'), false);
+  assert.equal(roles.canCompleteCarePlan(provider, 'IHPC'), true);
+  assert.equal(roles.canCompleteCarePlan(lcsw, 'BOTH'), true);
+  // An LMSW and read-only staff never complete one.
+  assert.equal(roles.canCompleteCarePlan(lmsw, 'PHC'), false);
+  assert.equal(roles.canCompleteCarePlan(readOnlyCm, 'PHC'), false);
+});
+
+test('the care plan write and goal-status routes admit a coordinator; the co-sign route does not', () => {
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const head = (sig) => { const i = server.indexOf(sig); assert.ok(i > 0, sig); return server.slice(i, i + 300); };
+  assert.match(head("app.post('/api/clinical/patients/:clientId/care-plan',"), /requireClinicalDocumenter, requireCapability\(clinicalRoles\.CAPABILITIES\.CARE_PLAN_AUTHOR\)/);
+  assert.match(head("app.post('/api/clinical/patients/:clientId/care-plan/goals/:goalId/status',"), /requireClinicalDocumenter, requireCapability\(clinicalRoles\.CAPABILITIES\.CARE_PLAN_AUTHOR\)/);
+  assert.match(head("app.post('/api/clinical/patients/:clientId/care-plan/provider-cosign',"), /requireClinicalWrite, requireCapability\(clinicalRoles\.CAPABILITIES\.CARE_PLAN_SIGN\)/);
+});
+
+test('a coordinator’s pending plan reaches the inbox of whoever can complete it, and nobody else', () => {
+  const inbox = require('../clinicalInbox');
+  const client = (line) => ({ id: `c-${line}`, name: 'Hattie', serviceLine: line,
+    carePlan: { version: 1, providerCoSignStatus: 'pending', authoredById: 'cc1', authoredAt: '2026-10-14T12:00:00Z' } });
+  const row = (viewer, line) => inbox.buildInbox({ viewer, carePlanClients: [client(line)], now: '2026-10-14T13:00:00Z' })
+    .items.find(i => i.clientId === `c-${line}`);
+  assert.equal(row(rn, 'PHC').actionable, true, 'an RN can complete a home care plan');
+  assert.equal(row(rn, 'IHPC').actionable, false, 'but not a clinical patient’s');
+  assert.equal(row(coordinator, 'PHC').actionable, false, 'the coordinator who wrote it cannot');
 });

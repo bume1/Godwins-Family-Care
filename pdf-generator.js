@@ -1665,7 +1665,7 @@ async function generateCarePlanPDF(d) {
         y += 30;
       };
       if (d.state === 'authored') banner('PENDING CLIENT CO-SIGNATURE — not yet in effect');
-      if (providerRequired && !providerSigned) banner('PENDING PROVIDER CO-SIGNATURE — not yet in effect');
+      if (providerRequired && !providerSigned) banner('PENDING CLINICIAN CO-SIGNATURE — not yet in effect');
 
       // ── 1 Patient ──
       section(1, 'Patient');
@@ -1772,13 +1772,13 @@ async function generateCarePlanPDF(d) {
       doc.fontSize(8.5).fillColor(ROI_COLORS.ink).font('Helvetica')
         .text('This care plan was developed with the client and family and is reviewed periodically. It takes effect when signed by the authoring clinician and co-signed by the client or authorized representative.', L, y, { width: W });
       y += doc.heightOfString('This care plan was developed with the client and family and is reviewed periodically. It takes effect when signed by the authoring clinician and co-signed by the client or authorized representative.', { width: W }) + 8;
-      signatureBlock('RN / Clinician author signature', d.rnSignature);
+      signatureBlock('Author signature', d.rnSignature);
       if (providerRequired) {
         // The provider (or LCSW) signature that completes an RN- or
         // LMSW-authored plan, with the credential it was signed under.
-        signatureBlock('Provider co-signature', providerSigned ? d.providerSignature : { pending: true });
+        signatureBlock('Clinician co-signature', providerSigned ? d.providerSignature : { pending: true });
         if (providerSigned && (d.providerSignature.clinicalRole || d.providerSignature.npi)) {
-          const role = { provider: 'Provider', lcsw: 'LCSW', rn: 'RN', lmsw: 'LMSW' }[d.providerSignature.clinicalRole] || d.providerSignature.clinicalRole || '';
+          const role = { provider: 'Provider', lcsw: 'LCSW', rn: 'RN', lmsw: 'LMSW', coordinator: 'Care coordinator' }[d.providerSignature.clinicalRole] || d.providerSignature.clinicalRole || '';
           doc.fontSize(8).fillColor(ROI_COLORS.muted).font('Helvetica')
             .text([role && `Signed as ${role}`, d.providerSignature.npi && `NPI ${d.providerSignature.npi}`].filter(Boolean).join(' · '), L, y - 6, { width: W });
           y += 10;

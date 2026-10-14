@@ -4100,7 +4100,7 @@
                 : <>
                   <p className="font-semibold text-primary">{(cp.problems || []).slice(0, 2).join(', ') || `Version ${cp.version}`}</p>
                   <p className="text-[12px] text-stone-500 mt-0.5">Version {cp.version}{cp.authoredAt ? ` · updated ${fmtDate(String(cp.authoredAt).slice(0, 10))}` : ''}</p>
-                  {cp.providerCoSignStatus === 'pending' && <span className="chip bg-amber-50 text-amber-800 mt-2">Awaiting provider signature</span>}
+                  {cp.providerCoSignStatus === 'pending' && <span className="chip bg-amber-50 text-amber-800 mt-2">Awaiting clinician co-signature</span>}
                 </>}
             </OvCard>
             <OvCard title="Last Encounter" onMore={go('encounters')} moreLabel="View encounters">
@@ -5681,7 +5681,6 @@
       // Authoring a plan is any licensed role; the second signature is a
       // provider's or an LCSW's (served).
       const canWrite = useCan('carePlanAuthor');
-      const canCoSignPlan = !!useContext(AccessContext).canCoSignCarePlan;
       const [existing, setExisting] = useState(null);
       const [loadErr, setLoadErr] = useState(null);
       const [chartProblems, setChartProblems] = useState([]);
@@ -5705,6 +5704,10 @@
         return () => { live = false; };
       }, [patient.id]);
       const cp = existing && existing.carePlan;
+      // The server answers whether THIS viewer can complete this plan, for
+      // this client's service line (an RN can complete a home care plan a
+      // coordinator wrote, never a clinical patient's).
+      const canCoSignPlan = !!(existing && existing.canCoSign);
       const coSigned = cp && existing.coSign && existing.coSign[`v${cp.version}`];
       // An IHPC plan (or one an LMSW authored) waits on a PROVIDER signature, and
       // the chip used to say "awaiting client co-signature" for it too.
@@ -5742,7 +5745,7 @@
                   <div className="text-[12px] text-stone-500">{[`Version ${cp.version}`, cp.authoredAt && fmtDate(cp.authoredAt), cp.authoredBy].filter(Boolean).join(' · ')}</div>
                 </div>
                 <span className={`chip ${coSigned && !providerPending ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-800'}`}>
-                  {providerPending ? 'Awaiting provider signature' : coSigned ? `Co-signed ${fmtDate(coSigned.at)}` : 'Awaiting client co-signature'}
+                  {providerPending ? 'Awaiting clinician co-signature' : coSigned ? `Co-signed ${fmtDate(coSigned.at)}` : 'Awaiting client co-signature'}
                 </span>
               </div>
               <div className="p-4 lg:p-5 grid gap-4">
@@ -5756,14 +5759,14 @@
                   </div>
                 )}
                 {providerPending && !canCoSignPlan && (
-                  <div className="text-[12.5px] text-amber-900">Waiting for a provider or an LCSW to add their signature beside the author's.</div>
+                  <div className="text-[12.5px] text-amber-900">{cp.providerCoSignReason || 'Waiting for a clinician to co-sign beside the author.'} The plan is not active until then.</div>
                 )}
                 {providerPending && canCoSignPlan && (
                   <div className="grid gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3">
-                    <div className="text-[12.5px] text-amber-900">This plan needs a second signature (a provider's, or an LCSW's) beside the author's. The author's signature is kept.</div>
+                    <div className="text-[12.5px] text-amber-900">This plan needs your co-signature beside the author's before it is active. The author's signature is kept.</div>
                     <SignaturePad padRef={providerPadRef} />
                     {pMsg && <p className={`text-sm ${pMsg.ok ? 'text-emerald-700' : 'text-red-600'}`}>{pMsg.text}</p>}
-                    <button className="btn w-fit" disabled={pBusy} onClick={providerSign}><i className="ti ti-writing-sign" />{pBusy ? 'Signing…' : 'Sign as Provider'}</button>
+                    <button className="btn w-fit" disabled={pBusy} onClick={providerSign}><i className="ti ti-writing-sign" />{pBusy ? 'Signing…' : 'Co-sign Plan'}</button>
                   </div>
                 )}
                 {(existing.history || []).length > 1 && (
