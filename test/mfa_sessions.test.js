@@ -135,6 +135,29 @@ test('every door the server opens to manager-level access is a door MFA covers',
   assert.ok(seen >= 9, `expected the gates to name their flags (found ${seen}); a scan that finds nothing proves nothing`);
 });
 
+test('everyone the clinical workspace admits needs MFA (owner, 2026-10-14)', () => {
+  // requireClinicalRead has two doors: a clinical role, or billing (admin or
+  // manager). Walk every role × clinical role × manager combination and assert
+  // nobody gets through either door without MFA being required.
+  const clinicalRoles = require('../clinicalRoles');
+  const roles = require('../config').MFA_REQUIRED_ROLES;
+  const accountTypes = ['admin', 'user', 'caseManager', 'vendor', 'client', 'family'];
+  const clinical = [undefined, ...clinicalRoles.ALL_CLINICAL_ROLES];
+  let admitted = 0;
+  for (const role of accountTypes) for (const clinicalRole of clinical) for (const isManager of [false, true]) {
+    for (const hasClinicalAccess of [false, true]) {
+      const u = { role, clinicalRole, isManager, hasClinicalAccess };
+      if (!clinicalRoles.canClinicalRead(u) && !clinicalRoles.canSubmitBilling(u)) continue;
+      admitted++;
+      assert.equal(mfa.mfaRequiredFor(u, roles), true, `admitted to the clinical workspace without MFA: ${JSON.stringify(u)}`);
+    }
+  }
+  assert.ok(admitted > 20, 'the sweep must actually admit people, or it proves nothing');
+  const gate = serverSrc.slice(serverSrc.indexOf('const requireClinicalRead ='), serverSrc.indexOf('const requireClinicalWrite ='));
+  assert.match(gate, /patientRead\.canClinicalRead\(req\.user\) && !clinicalRoles\.canSubmitBilling\(req\.user\)/,
+    'the gate still has exactly the two doors this test sweeps; a new door needs adding here');
+});
+
 test('MFA_REQUIRED_ROLES can widen the floor but never narrow it', () => {
   const { execFileSync } = require('child_process');
   const rolesWith = (value) => JSON.parse(execFileSync(process.execPath,
