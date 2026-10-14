@@ -141,7 +141,10 @@ const appHeldHealth = (client) => {
       ? { source: 'reported', rows: [] }
       : { source: 'reported', rows: [{ id: 'app:0', name: allergyText, severity: null, status: null }] };
   }
-  const planProblems = (c.carePlan && Array.isArray(c.carePlan.problems) ? c.carePlan.problems : []).map(cleanText).filter(Boolean);
+  // A plan still waiting on a clinician's signature is not shown to the
+  // patient anywhere, its problem list included (owner, 2026-10-14).
+  const planOk = c.carePlan && c.carePlan.providerCoSignStatus !== 'pending';
+  const planProblems = (planOk && Array.isArray(c.carePlan.problems) ? c.carePlan.problems : []).map(cleanText).filter(Boolean);
   const reported = (Array.isArray(intake.conditions) ? intake.conditions : []).map(cleanText).filter(Boolean);
   const probs = planProblems.length ? planProblems : reported;
   if (probs.length) {

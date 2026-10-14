@@ -5802,7 +5802,7 @@
       // Overview · Goals · Care Team · Documents (redesign). The signature pad
       // lives on Documents, so it is set up when that tab is open.
       const [tab, setTab] = useState('overview');
-      const padVisible = tab === 'documents' && hasPlan && !readOnly && !coSigned && cp.version != null;
+      const padVisible = tab === 'documents' && hasPlan && !readOnly && !coSigned && cp.version != null && cp.coSignable !== false;
       useEffect(() => {
         if (!padVisible) return;
         const canvas = sigCanvasRef.current;
@@ -5857,7 +5857,7 @@
         (line === 'IHPC' || line === 'BOTH') && { key: 'primary', icon: 'ti-stethoscope', bg: '#E4EEF2', fg: '#033D50', title: 'Primary Care', text: 'Visits with your provider for ongoing conditions, prevention and new concerns.' },
         teamList.some(m => /case manager/i.test(m.role || '')) && { key: 'coord', icon: 'ti-users-group', bg: '#F6EFE2', fg: '#9A7430', title: 'Care Coordination', text: 'Your care team works together to keep you supported.' }
       ].filter(Boolean);
-      const needsSignature = !readOnly && hasPlan && !coSigned && cp.version != null;
+      const needsSignature = !readOnly && hasPlan && !coSigned && cp.version != null && cp.coSignable !== false;
       const TABS = [['overview', 'Overview'], ['goals', 'Goals'], ['team', 'Care Team'], ['documents', 'Documents']];
       return (
         <div className="gfc-body">
@@ -5874,8 +5874,14 @@
               {!hasPlan && data.carePlanShared === false && (
                 <div className="status wait"><i className="ti ti-lock" /><div><b>The care plan isn't shared with family accounts</b><span>{data.greetingName} can change this under Settings → Sharing.</span></div></div>
               )}
-              {!hasPlan && data.carePlanShared !== false && (
+              {!hasPlan && data.carePlanInReview && (
+                <div className="status wait"><i className="ti ti-clipboard-heart" /><div><b>Your care plan is with your care team for clinical review</b><span>You will see it here once a clinician has signed it{readOnly ? '' : ', and then you can co-sign it'}.</span></div></div>
+              )}
+              {!hasPlan && data.carePlanShared !== false && !data.carePlanInReview && (
                 <div className="status wait"><i className="ti ti-clipboard-heart" /><div><b>Your care plan is being prepared</b><span>Your nurse will write your plan and review it with you{readOnly ? '' : ', then you co-sign it here'}.</span></div></div>
+              )}
+              {hasPlan && cp.newVersionInReview && (
+                <div className="status wait"><i className="ti ti-clipboard-heart" /><div><b>An updated plan is with your care team for review</b><span>This is your current plan until a clinician signs the update.</span></div></div>
               )}
               {hasPlan && (
                 <div className="status"><i className="ti ti-leaf" /><div><b>Active care plan</b><span>{[cp.version != null ? `Version ${cp.version}` : null, cp.updatedAt ? `last updated ${prettyDate(cp.updatedAt)}` : (cp.effectiveDate ? `effective ${prettyDate(cp.effectiveDate)}` : null)].filter(Boolean).join(' · ')}</span></div></div>
@@ -6036,6 +6042,8 @@
                         <div className="goal" style={{ margin: 0 }}><i className="ti ti-circle-check" style={{ color: 'var(--teal)' }} />{signedBy && signedBy.includes(' as POA for ') ? `Co-signed by ${signedBy}` : `You co-signed care plan v${cp.version}`} · versions are retained.</div>
                         {(cp.signedPdf && cp.signedPdf.available) || signedBy ? <button className="btn ghost" style={{ marginTop: 12 }} onClick={openSignedPdf}><i className="ti ti-download" style={{ verticalAlign: -2 }} /> Download Signed Plan</button> : null}
                       </React.Fragment>
+                    ) : cp.coSignable === false ? (
+                      <div className="goal" style={{ margin: 0 }}><i className="ti ti-clock" style={{ color: 'var(--goldd)' }} />An updated plan is with your care team for clinical review. You can sign it once a clinician has.</div>
                     ) : (
                       <React.Fragment>
                         <div className="goal" style={{ margin: '0 0 10px', alignItems: 'flex-start' }}><i className="ti ti-square-check" style={{ color: 'var(--navy)' }} />I reviewed this plan and agree to it · sign below. Co-signature required, every version kept.</div>

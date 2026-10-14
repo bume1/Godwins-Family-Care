@@ -432,6 +432,36 @@ const caregiverProjection = (plan) => {
   };
 };
 
+// ---- What the patient may see (owner, 2026-10-14) ----------------------
+// A care plan reaches the patient, their POA and family only once a licensed
+// clinician's signature has made it active: an RN (or provider/LCSW) for a
+// home care plan, a provider or LCSW for a clinical patient's. That is exactly
+// "not waiting on a co-signature" (clinicalRoles.evaluateCarePlanSignature
+// decides who completes a plan). A plan written before the co-signature step
+// existed carries no status and was signed by a clinician, so it is active.
+const isPlanActive = (plan, versionRow = null) => {
+  if (!plan || typeof plan !== 'object') return false;
+  if (plan.providerCoSignStatus !== 'pending') return true;
+  // A version row keeps the status as it was when written ('pending'); the
+  // co-signature added later is what shows it became active.
+  return !!(versionRow && versionRow.providerSignature && versionRow.providerSignature.signatureImage);
+};
+
+// The plan the patient side may see: the current one when it is active,
+// otherwise the newest earlier version that was, so a family keeps the
+// instructions they had while an update waits on a clinician. Null when no
+// version has ever been active. `isCurrent` tells the portal whether the plan
+// shown is the one that can be co-signed.
+const patientVisiblePlan = (current, versionRows = []) => {
+  if (!current || typeof current !== 'object') return null;
+  if (isPlanActive(current)) return { plan: current, version: current.version, isCurrent: true, newerInReview: false };
+  const earlier = (versionRows || [])
+    .filter(r => r && r.plan && Number(r.version) < Number(current.version) && isPlanActive(r.plan, r))
+    .sort((a, b) => Number(b.version) - Number(a.version))[0];
+  if (!earlier) return null;
+  return { plan: earlier.plan, version: earlier.version, isCurrent: false, newerInReview: true };
+};
+
 // The option lists the page draws from, served so the page restates none.
 const vocabulary = () => ({
   goalStatuses: GOAL_STATUSES.map(v => ({ value: v, label: GOAL_STATUS_LABELS[v] })),
@@ -450,5 +480,5 @@ module.exports = {
   INTERVENTION_TYPES, INTERVENTION_TYPE_LABELS, MED_MANAGED_BY, MED_MANAGED_BY_LABELS, SERVICE_STATUSES,
   REVIEW_CADENCES, REVIEW_CADENCE_LABELS, REQUIREMENTS, REQUIREMENT_LABELS,
   buildStructuredBlocks, missingRequirements, scopeWarnings, structuredView, applyGoalStatus,
-  derivedFromClient, vocabulary, patientProjection, caregiverProjection
+  derivedFromClient, vocabulary, patientProjection, caregiverProjection, isPlanActive, patientVisiblePlan
 };

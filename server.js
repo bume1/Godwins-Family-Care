@@ -6615,8 +6615,10 @@ const careTeamForPortal = (client, users) => {
 // Build the client's REAL care plan for portal display, or null when none is on
 // file. Tier/label always come from the client record; co-signature state is
 // keyed to the plan's actual version (versions retained).
-const buildClientCarePlan = (client) => {
-  const plan = (client.carePlan && typeof client.carePlan === 'object') ? client.carePlan : null;
+// `visible` is carePlanFormat.patientVisiblePlan's answer: the patient side
+// sees only a plan a licensed clinician has made active (owner, 2026-10-14).
+const buildClientCarePlan = (client, visible) => {
+  const plan = visible && visible.plan ? visible.plan : null;
   if (!plan) return null;
   const carePlan = {
     ...plan,
@@ -6630,7 +6632,19 @@ const buildClientCarePlan = (client) => {
   // only these projections reach a patient: no prognosis, no adherence notes,
   // no internal ids.
   Object.assign(carePlan, carePlanFormat.patientProjection(plan));
+  // Only the current version can be co-signed; an earlier active version is
+  // shown while a newer one waits on a clinician.
+  carePlan.coSignable = !!visible.isCurrent;
+  carePlan.newVersionInReview = !!visible.newerInReview;
   return carePlan;
+};
+// The patient-side view of a client's plan, from the current plan and its
+// stored versions.
+const loadPatientVisiblePlan = async (client) => {
+  if (!client || !client.carePlan) return null;
+  if (carePlanFormat.isPlanActive(client.carePlan)) return carePlanFormat.patientVisiblePlan(client.carePlan, []);
+  const rows = ((await db.get('care_plan_versions')) || []).filter(r => r && r.client_id === client.id);
+  return carePlanFormat.patientVisiblePlan(client.carePlan, rows);
 };
 
 // ── Signed care-plan PDF emission (Session 4.1, spec §4.3) ──────────────
@@ -6972,7 +6986,8 @@ app.get('/api/gfc/care-plan', authenticateToken, requireEnrolledClient, async (r
     const acting = patientRead.buildActingIdentity(req.user, client);
     const audience = req.user.role === config.ROLES.CLIENT ? 'patient' : (acting.isPoa ? 'poa' : 'family');
     const level = patientRead.sectionsFor(audience, client.sharing).carePlan;
-    let carePlan = buildClientCarePlan(client);
+    const visible = await loadPatientVisiblePlan(client);
+    let carePlan = buildClientCarePlan(client, visible);
     const team = careTeamForPortal(client, await getUsers());
     if (carePlan) {
       carePlan.careTeam = team.careTeam;
@@ -6991,6 +7006,9 @@ app.get('/api/gfc/care-plan', authenticateToken, requireEnrolledClient, async (r
       greetingName: gfcGreetingName(client),
       carePlan,
       carePlanShared: level !== 'none',
+      // A plan exists but no version is active yet: it is with a clinician
+      // for review. Lets the portal say so instead of "being prepared".
+      carePlanInReview: !carePlan && !!client.carePlan && level !== 'none',
       audience,
       isPoa: acting.isPoa,
       actingAs: acting.isPoa ? acting.signerName : null,
@@ -7774,6 +7792,11 @@ app.post('/api/gfc/care-plan/cosign', authenticateToken, requireEnrolledClient, 
     if (currentVersion == null) {
       return res.status(409).json({ error: 'No care plan is on file yet — there is nothing to co-sign.', code: 'NO_CARE_PLAN' });
     }
+    // The client cannot co-sign a plan they cannot see: it is not active until
+    // a licensed clinician has signed it (owner, 2026-10-14).
+    if (!carePlanFormat.isPlanActive(client.carePlan)) {
+      return res.status(409).json({ error: 'Your care plan is with your care team for clinical review. You can sign it once a clinician has.', code: 'CARE_PLAN_AWAITING_CLINICIAN' });
+    }
     // The co-signature must bind to the CURRENT plan version. If the client's UI
     // is showing a stale version (plan re-authored since load), refuse so they
     // re-review the current version before signing.
@@ -7999,7 +8022,8 @@ app.get('/api/gfc/clinical/documents', authenticateToken, requireEnrolledClient,
       // the index lists only what the app holds.
       emrReadSupported: false,
       emrRows: [],
-      carePlanVersions: planVersions || [],
+      // Only versions a licensed clinician made active (owner, 2026-10-14).
+      carePlanVersions: (planVersions || []).filter(r => r && carePlanFormat.isPlanActive(r.plan, r)),
       roiAuthorizations: roiAuths,
       clientUploads: docUploads || [],
       consentDefs: consentDefsForServiceLine(client.serviceLine),
@@ -8063,7 +8087,10 @@ app.get('/api/gfc/clinical/documents/:docId/file', authenticateToken, requireEnr
     if (kind === 'careplan') {
       const version = ref;
       const rows = (await db.get('care_plan_versions')) || [];
-      if (!rows.some(r => r && r.client_id === client.id && String(r.version) === String(version))) {
+      const row = rows.find(r => r && r.client_id === client.id && String(r.version) === String(version));
+      // A version still waiting on a clinician is answered as unknown, not
+      // forbidden: the patient side is not told it exists (owner, 2026-10-14).
+      if (!row || !carePlanFormat.isPlanActive(row.plan, row)) {
         return res.status(404).json({ error: 'No such care-plan version', code: 'CARE_PLAN_VERSION_UNKNOWN' });
       }
       const { buffer, source } = await buildCarePlanPdfForVersion(client, version);
@@ -8243,8 +8270,10 @@ app.get('/api/gfc/clinical/care-plan.pdf', authenticateToken, requireEnrolledCli
     if (patientRead.sectionsFor(audience, client.sharing).carePlan === 'none') {
       return res.status(403).json({ error: 'The care plan is not shared with family members.', code: 'CARE_PLAN_NOT_SHARED' });
     }
-    const version = resolveCarePlanVersion(client);
-    if (version == null) return res.status(404).json({ error: 'No care plan is on file yet.', code: 'NO_CARE_PLAN' });
+    // Only a version a licensed clinician has made active (owner, 2026-10-14).
+    const visible = await loadPatientVisiblePlan(client);
+    if (!visible) return res.status(404).json({ error: 'No care plan is on file yet.', code: 'NO_CARE_PLAN' });
+    const version = visible.version;
     const coSign = (client.carePlanCoSign || {})[`v${version}`];
     if (!coSign) return res.status(409).json({ error: 'The signed care plan is available once it has been co-signed.', code: 'CARE_PLAN_NOT_SIGNED' });
 
