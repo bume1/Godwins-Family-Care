@@ -28,9 +28,15 @@ if (process.env.NODE_ENV === 'production' &&
 // ---- Session 5.3: MFA + session controls ----
 // MFA is required for the roles that can reach PHI at scale: admin, clinical
 // (role 'user' with hasClinicalAccess, and any 'user' at all), case manager.
-// Clients, family and caregivers are not gated today (owner decision pending;
-// MFA_REQUIRED_ROLES widens it without a code change).
-const MFA_REQUIRED_ROLES = Object.freeze(String(process.env.MFA_REQUIRED_ROLES || 'admin,user,caseManager').split(',').map(s => s.trim()).filter(Boolean));
+// mfa.mfaRequiredFor() adds clinical roles and manager-level access on top.
+// Clients, family and caregivers are not gated today (owner decision pending).
+// A floor: MFA_REQUIRED_ROLES can add roles but never remove one, so a narrowed
+// env var cannot silently drop clinicians and case managers from 2FA.
+const MFA_REQUIRED_ROLES_FLOOR = Object.freeze(['admin', 'user', 'caseManager']);
+const MFA_REQUIRED_ROLES = Object.freeze([...new Set([
+  ...MFA_REQUIRED_ROLES_FLOOR,
+  ...String(process.env.MFA_REQUIRED_ROLES || '').split(',').map(s => s.trim()).filter(Boolean)
+])]);
 // MFA_ENFORCE=false is a DEV convenience for local runs and the probe scripts.
 // It is refused in production (below) so it cannot be reached by accident.
 const MFA_ENFORCE = String(process.env.MFA_ENFORCE || 'true').toLowerCase() !== 'false';
@@ -409,7 +415,7 @@ function getPublicConfig() {
 }
 
 module.exports = {
-  MFA_REQUIRED_ROLES, MFA_ENFORCE, MFA_ISSUER, SESSION_IDLE_MINUTES,
+  MFA_REQUIRED_ROLES, MFA_REQUIRED_ROLES_FLOOR, MFA_ENFORCE, MFA_ISSUER, SESSION_IDLE_MINUTES,
   // Security
   JWT_SECRET,
   JWT_EXPIRY,

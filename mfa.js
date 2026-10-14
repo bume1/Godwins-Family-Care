@@ -9,7 +9,9 @@
 // as salted SHA-256 hashes and are single-use.
 //
 // What is enforced and where:
-//   - which roles must have MFA:  config.MFA_REQUIRED_ROLES + mfaRequiredFor()
+//   - who must have MFA:          mfaRequiredFor() — the role floor in
+//                                 config.MFA_REQUIRED_ROLES, any clinical role,
+//                                 and manager-level access
 //   - login gating:               server.js login routes (5.3) — a required
 //                                 role gets a short-lived MFA challenge token
 //                                 instead of a session until the code verifies
@@ -18,6 +20,7 @@
 // ============================================================================
 'use strict';
 const crypto = require('crypto');
+const { canClinicalRead } = require('./clinicalRoles');
 
 const STEP_SECONDS = 30;
 const DIGITS = 6;
@@ -102,12 +105,15 @@ const consumeRecovery = (record, code) => {
 };
 
 // ---- Policy ----
-// A user needs MFA when their role is in the required set OR they hold
-// clinical access (a 'vendor' with hasClinicalAccess would still be gated).
+// MFA follows what a person can reach, not their account type: any clinical
+// role opens a chart, and these flags open the admin hub, the user list and
+// the enrollment records. Clients, family and caregivers stay ungated.
+const MANAGER_LEVEL_FLAGS = Object.freeze(['isManager', 'hasAdminHubAccess', 'hasClientPortalAdminAccess']);
 const mfaRequiredFor = (user, requiredRoles) => {
   if (!user) return false;
   if ((requiredRoles || []).includes(user.role)) return true;
-  return !!user.hasClinicalAccess;
+  if (user.hasClinicalAccess || canClinicalRead(user)) return true;
+  return MANAGER_LEVEL_FLAGS.some(flag => !!user[flag]);
 };
 const isEnrolled = (user) => !!(user && user.mfa && user.mfa.enrolledAt && user.mfa.secret);
 
@@ -115,6 +121,6 @@ module.exports = {
   STEP_SECONDS, DIGITS, DRIFT_STEPS, RECOVERY_CODE_COUNT,
   generateSecret, totp, verifyTotp, otpauthUri, stepFor,
   generateRecoveryCodes, buildRecoveryRecord, consumeRecovery, formatRecovery,
-  mfaRequiredFor, isEnrolled,
+  mfaRequiredFor, isEnrolled, MANAGER_LEVEL_FLAGS,
   _internal: { base32Encode, base32Decode, hotp }
 };
