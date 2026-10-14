@@ -63,8 +63,88 @@ function profileForPatient(client, loginUser) {
     primaryContact: intake.primaryContact && str(intake.primaryContact.name)
       ? { name: str(intake.primaryContact.name), relationship: str(intake.primaryContact.relationship) || null, phone: str(intake.primaryContact.phone) || null }
       : null,
-    coverage: coverageForPatient(client)
+    coverage: coverageForPatient(client),
+    // What the edit form starts from: the stored parts, never a joined line.
+    edit: {
+      preferredName: str(intake.preferredName),
+      phone: str(intake.phone || (client && client.phone)),
+      email: str(loginUser && loginUser.email),
+      address: (() => {
+        const a = intake.address && typeof intake.address === 'object' ? intake.address : {};
+        return { line1: str(a.line1 || a.street), line2: str(a.line2 || a.unit), city: str(a.city), state: str(a.state), zip: str(a.zip) };
+      })(),
+      primaryContact: (() => {
+        const pc = intake.primaryContact || {};
+        return { name: str(pc.name), relationship: str(pc.relationship), phone: str(pc.phone), email: str(pc.email) };
+      })()
+    }
   };
 }
 
-module.exports = { profileForPatient, coverageForPatient, last4 };
+// ---- What a patient (or POA) may change themselves (owner, 2026-10-13) ----
+// Contact details only. Name, date of birth, insurance, the medical team and
+// everything clinical stay with the office: those print onto signed consents
+// and claims, and a change there is a correction staff make.
+const PATIENT_EDITABLE_PATHS = Object.freeze([
+  'preferredName', 'phone',
+  'address.line1', 'address.line2', 'address.city', 'address.state', 'address.zip',
+  'primaryContact.name', 'primaryContact.relationship', 'primaryContact.phone', 'primaryContact.email'
+]);
+// The fields OpenEMR's own demographics carry; a change to one of these is
+// sent to the chart (with a clinician's sign-in, since a patient has none).
+const EMR_CONTACT_PATHS = Object.freeze(['phone', 'address.line1', 'address.line2', 'address.city', 'address.state', 'address.zip', 'email']);
+
+const getPath = (o, path) => path.split('.').reduce((x, k) => (x == null ? undefined : x[k]), o);
+
+// Keep only the allowed fields, nested the way the enrollment editor reads
+// them. Anything else in the body is ignored and named back.
+function pickPatientEdits(body) {
+  const out = {};
+  const ignored = [];
+  const b = body || {};
+  for (const path of PATIENT_EDITABLE_PATHS) {
+    const v = Object.prototype.hasOwnProperty.call(b, path) ? b[path] : getPath(b, path);
+    if (v === undefined) continue;
+    const parts = path.split('.');
+    let cur = out;
+    while (parts.length > 1) { const k = parts.shift(); cur[k] = cur[k] || {}; cur = cur[k]; }
+    cur[parts[0]] = v == null ? '' : String(v).slice(0, 200);
+  }
+  const allowedTop = new Set(['email', 'preferredName', 'phone', 'address', 'primaryContact']);
+  Object.keys(b).forEach(k => { if (!allowedTop.has(k) && !PATIENT_EDITABLE_PATHS.includes(k)) ignored.push(k); });
+  return { edits: out, ignored };
+}
+
+// The patient's address as one line, for the places that print one.
+const composedAddress = (a) => {
+  const x = a || {};
+  return [str(x.line1), str(x.line2), str(x.city), [str(x.state), str(x.zip)].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+};
+
+// OpenEMR's standard-API patient fields for the contact details.
+function emrContactFrom(intake, email) {
+  const a = (intake && intake.address) || {};
+  return {
+    phone_home: str(intake && intake.phone) || undefined,
+    street: [str(a.line1), str(a.line2)].filter(Boolean).join(' ') || undefined,
+    city: str(a.city) || undefined,
+    state: str(a.state) || undefined,
+    postal_code: str(a.zip) || undefined,
+    email: str(email) || undefined
+  };
+}
+
+const TITLES = /^(mr|mrs|ms|miss|mx|dr|rev|sir|madam)\.?$/i;
+function greetingName(client) {
+  const c = client || {};
+  const intake = c.intake || {};
+  const preferred = str(c.preferredName || intake.preferredName);
+  if (preferred) return preferred.slice(0, 40);
+  const first = str(intake.firstName || intake.clientFirst);
+  if (first) return first;
+  const words = str(c.name).split(/\s+/).filter(Boolean);
+  const w = words.find(x => !TITLES.test(x));
+  return w || 'there';
+}
+
+module.exports = { profileForPatient, coverageForPatient, last4, greetingName, PATIENT_EDITABLE_PATHS, EMR_CONTACT_PATHS, pickPatientEdits, composedAddress, emrContactFrom };

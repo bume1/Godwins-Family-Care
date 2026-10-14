@@ -695,14 +695,21 @@ test('every writer of a submission goes through the ONE commit helper', () => {
   const review = reviewHandler();
   assert.match(review, /commitEnrollmentSubmission\(\{/,
     'an accepted extraction is a submission edit and takes the same path');
-  // And neither may have re-grown the steps.
-  for (const route of [detailsRoute(), review]) {
+  // The third caller, by owner decision (2026-10-13): the patient correcting
+  // their own contact details from the portal. Same path, same derivations.
+  const at = SERVER.indexOf("app.put('/api/gfc/profile'");
+  assert.ok(at > 0, 'the patient profile route exists');
+  const profile = SERVER.slice(at, SERVER.indexOf('\n});', at));
+  assert.match(profile, /commitEnrollmentSubmission\(\{/, 'a patient edit takes the same path');
+  assert.match(profile, /applyEnrollmentEdits\(next, edits,/, 'through the same allow-list, narrowed to contact fields');
+  // And none may have re-grown the steps.
+  for (const route of [detailsRoute(), review, profile]) {
     assert.ok(!/mirrorIntakeToClientProfile\(/.test(route), 'the mirror belongs to the helper');
     assert.ok(!/resolvePriorProviders\(/.test(route), 'so does the ROI derivation');
     assert.ok(!/consentActionRequired/.test(route), 'and so does the re-signature check');
   }
-  assert.strictEqual(SERVER.split('commitEnrollmentSubmission(').length - 1, 2,
-    'exactly two callers today — a third writer wants a deliberate decision, not a copy');
+  assert.strictEqual(SERVER.split('commitEnrollmentSubmission(').length - 1, 3,
+    'exactly three callers today: staff, an accepted extraction, the patient. A fourth wants a deliberate decision, not a copy');
 });
 
 test('an accepted extraction is held to the same allow-list a typed correction is', () => {

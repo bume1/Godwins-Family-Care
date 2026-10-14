@@ -131,7 +131,7 @@ const srv = http.createServer((req, res) => {
   let failures = 0;
   for (const name of only) {
     const sc = SCENARIOS[name];
-    const ctx = await browser.newContext({ viewport: { width: 430, height: 1500 } });
+    const ctx = await browser.newContext({ viewport: { width: Number(process.env.VIEWPORT_W) || 430, height: Number(process.env.VIEWPORT_H) || 1500 } });
     const page = await ctx.newPage();
     const errors = []; page.on('pageerror', e => errors.push('pageerror: ' + e.message)); page.on('console', m => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
     await page.addInitScript(([t, u]) => { localStorage.setItem('portal_token', t); localStorage.setItem('portal_user', JSON.stringify(u)); }, ['tok', sc.user]);
@@ -167,6 +167,13 @@ const srv = http.createServer((req, res) => {
           { kind: 'photoId', label: 'Photo ID', status: 'missing', required: true, files: [] }],
         documents: [] });
       if (u === '/api/scheduling/my-upcoming-shifts') return j({ shifts: SHIFTS });
+      if (u === '/api/gfc/profile') {
+        const prof = { name: 'Juanita Guess', preferredName: null, dateOfBirth: '1941-03-02', phone: '404-555-0100', email: 'j@example.test',
+          address: '1 Old Rd, Atlanta, GA 30301', primaryContact: null, coverage: [],
+          edit: { preferredName: '', phone: '404-555-0100', email: 'j@example.test', address: { line1: '1 Old Rd', line2: '', city: 'Atlanta', state: 'GA', zip: '30301' }, primaryContact: { name: '', relationship: '', phone: '', email: '' } } };
+        if (route.request().method() === 'PUT') { const b = JSON.parse(route.request().postData() || '{}'); return j({ changed: ['phone'], consentsNeedingResignature: [], profile: { ...prof, phone: b.phone, edit: { ...prof.edit, phone: b.phone } } }); }
+        return j(prof);
+      }
       return j({});
     });
     await page.goto(`http://localhost:${port}/portal/juanita-guess`, { waitUntil: 'networkidle' }).catch(() => {});
@@ -174,7 +181,7 @@ const srv = http.createServer((req, res) => {
     await page.waitForTimeout(800);
     const S = process.env.SHOTS_DIR || null;
     const out = { name };
-    out.homeText = (await page.locator('body').innerText()).slice(0, 1800);
+    out.homeText = (await page.locator("body").innerText()).slice(0, 1800);
     if (S) await page.screenshot({ path: `${S}/${name}-home.png`, fullPage: true });
     // go to Health
     // Redesign (10/2026): the bottom menu labels the health area Records.
@@ -205,6 +212,24 @@ const srv = http.createServer((req, res) => {
     if (await dl.count()) { await dl.click(); await page.waitForTimeout(600); }
     out.docsText = (await page.locator('body').innerText()).slice(0, 3000);
     if (S) await page.screenshot({ path: `${S}/${name}-documents.png`, fullPage: true });
+    // Profile: open, edit the phone, save.
+    out.profileText = '';
+    if (sc.audience === 'patient') {
+      const more3 = page.locator('.gfc-tabs').getByText('More', { exact: true }).first();
+      if (await more3.count()) { await more3.click(); await page.waitForTimeout(400); }
+      const pr = page.locator('.gfc-main').getByText('Profile', { exact: true }).first();
+      if (await pr.count()) { await pr.click(); await page.waitForTimeout(500); }
+      const ed = page.getByText('Edit my details', { exact: true }).first();
+      if (await ed.count()) {
+        await ed.click(); await page.waitForTimeout(300);
+        const phone = page.locator('.fld').filter({ hasText: 'Phone' }).first().locator('input');
+        await phone.fill('404-555-0199');
+        out.profileEditText = (await page.locator('body').innerText()).slice(0, 3000);
+        if (S) await page.screenshot({ path: `${S}/${name}-profile-edit.png`, fullPage: true });
+        await page.getByText('Save', { exact: true }).first().click(); await page.waitForTimeout(500);
+      }
+      out.profileText = (await page.locator('body').innerText()).slice(0, 3000);
+    }
     OUT[name] = out;
     console.log(`\n=== ${name}: errors=${errors.length} pwned=${out.pwned}`); if (errors.length) { failures++; console.log(errors.slice(0, 5).join('\n')); }
     await ctx.close();
@@ -216,7 +241,7 @@ const srv = http.createServer((req, res) => {
   if (!process.argv[2]) {
     const P = OUT.patient, H = OUT.held, O = OUT.poa, F = OUT.familySummary, U = OUT.unpublished;
     console.log('\nAssertions');
-    expect('patient: Home shows the Latest visit card with the note button and Message the care team', has(P.homeText, /your latest visit/i) && has(P.homeText, /read the full summary and note/i) && has(P.homeText, /message the care team/i));
+    expect('patient: Home shows the Latest visit card with the note button and Message the care team', has(P.homeText, /your latest visit/i) && has(P.homeText, /read (the full )?summary (and|&) note/i) && has(P.homeText, /message (the )?care team/i));
     expect('patient: the visit overview does not repeat the prescription sentence', !has(P.homeText, /prescription was recorded/i) && !has(P.healthText, /prescription was recorded/i));
     expect('patient: the note is readable, with no raw VITALS shorthand', has(P.healthText, /what you told us/i) && !has(P.healthText, /VITALS —/));
     expect('patient: an unreviewed result says so, a reviewed one names who and shows the patient note', has(P.healthText, /not yet reviewed/i) && has(P.healthText, /reviewed by bethel godwins/i) && has(P.healthText, /your x-ray looks fine/i));
@@ -225,12 +250,13 @@ const srv = http.createServer((req, res) => {
     expect('patient: a <script> inside a note is shown as literal text (escaped), not swallowed as markup', has(P.healthText, /<script>window/) && P.pwned.startsWith('not run'));
     expect('patient: medications, allergies, conditions and the sharing card are present', has(P.healthText, /current medications/i) && has(P.healthText, /allergies/i) && has(P.healthText, /what family members can see/i));
     expect('held note: the note body is NOT shown and the held sentence is', !has(H.healthText, /what you told us/i) && has(H.healthText, /available on request/i) && has(H.homeText, /available on request/i));
-    expect('held note: the Home button does not promise the note', has(H.homeText, /read the full summary(?! and)/i) && !has(H.homeText, /summary and note/i));
+    expect('held note: the Home button does not promise the note', has(H.homeText, /read (the full )?summary(?! (and|&))/i) && !has(H.homeText, /summary (and|&) note/i));
     expect('POA: reads the note like the patient, and is told who they are acting for', has(O.healthText, /what you told us/i) && has(O.healthText, /acting as luka agent/i));
     expect('family at summary level: date, provider and reason only — no note, no results, no sections, no sharing card', !has(F.healthText, /what you told us/i) && !has(F.healthText, /not yet reviewed/i) && !has(F.healthText, /current medications/i) && !has(F.healthText, /what family members can see/i));
-    expect('family at summary level: the Home card does not offer a summary they cannot read', has(F.homeText, /your latest visit/i) && !has(F.homeText, /read the full summary/i));
+    expect('family at summary level: the Home card does not offer a summary they cannot read', has(F.homeText, /your latest visit/i) && !has(F.homeText, /read (the full )?summary/i));
     expect('nothing published: says the summary is coming, and each section says the care team will add it (never "none recorded")', has(U.healthText, /health summary is coming/i) && (U.healthText.match(/will add this after a visit/gi) || []).length === 4 && !has(U.healthText, /no allergies recorded|no conditions listed|no medications on your record/i));
     expect('documents: each signed form and each upload is listed once, the packet once, and what is still needed on top', (P.docsText.match(/Notice of Privacy Practices/g) || []).length === 1 && (P.docsText.match(/Insurance card/g) || []).length === 1 && (P.docsText.match(/Enrollment packet/g) || []).length === 1 && has(P.docsText, /we still need · 1/i) && has(P.docsText, /Photo ID/) && has(P.docsText, /Plan of care/));
+    expect('profile: the patient can edit contact details, and the saved phone shows', has(P.profileEditText || '', /street address/i) && has(P.profileEditText || '', /primary contact/i) && has(P.profileText, /404-555-0199/) && has(P.profileText, /Saved/));
     const A = OUT.appHeld, B = OUT.blocked;
     expect('nothing published but the app holds lists: the reconciled medicines and reported conditions show, labelled; NKDA reads as none', has(A.healthText, /Lisinopril 10 mg/) && has(A.healthText, /Reviewed with Bethel Godwins/) && has(A.healthText, /Diabetes/) && has(A.healthText, /what you told us when you enrolled/i) && has(A.healthText, /no known allergies/i));
     expect('clinical read refused: the Health tab is there and says why', has(B.healthText, /Consent to medical treatment must be on file/));

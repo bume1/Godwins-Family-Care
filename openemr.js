@@ -725,6 +725,25 @@ const forActor = (actor) => {
     // 500s on a CSRF check. The patient-facing care-plan PDF continues to be
     // served from the Drive reference on client.carePlanDocs regardless: a
     // patient's own copy should not depend on the EMR being reachable.
+    // Contact details a patient corrected in the portal (owner, 2026-10-13).
+    // Read the row first and send the identity fields back unchanged, because
+    // the update validates the record as a whole. A 200 carrying a
+    // validationErrors map wrote nothing (the silent-200 trap), so it throws.
+    async updatePatientContact(puuid, contact) {
+      const read = await rawRequest({ actor, method: 'GET', url: apiUrl(`patient/${encodeURIComponent(puuid)}`) });
+      const cur = unwrapApi(expectOk(read, 'read patient (contact update)')) || {};
+      const body = { fname: cur.fname, mname: cur.mname, lname: cur.lname, DOB: cur.DOB, sex: cur.sex };
+      Object.entries(contact || {}).forEach(([k, v]) => { if (v !== undefined) body[k] = v; });
+      const res = await rawRequest({ actor, method: 'PUT', url: apiUrl(`patient/${encodeURIComponent(puuid)}`), body });
+      const data = expectOk(res, 'update patient contact');
+      const ve = data && data.validationErrors;
+      if (ve && (Array.isArray(ve) ? ve.length : Object.keys(ve).length)) {
+        throw new OpenEmrError(`OpenEMR did not accept the contact update: ${JSON.stringify(ve).slice(0, 300)}`, res.status, data);
+      }
+      logEmrAccess(actor, 'write', 'Patient', puuid, { op: 'update_contact' });
+      return true;
+    },
+
     async uploadPatientDocument(puuid, fileName, buffer, mimeType, categoryPath) {
       const pid = await resolvePid(puuid);
       const fd = new FormData(); // global (Node 18+)

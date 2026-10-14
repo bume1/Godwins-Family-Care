@@ -6542,7 +6542,10 @@ const resolveCarePlanVersion = (client) =>
   (client && client.carePlan && typeof client.carePlan === 'object' && client.carePlan.version != null)
     ? client.carePlan.version : null;
 
-const gfcGreetingName = (client) => (client.preferredName || client.name || 'there').split(' ')[0];
+// A preferred name is used as given ("Ms. Guess" stays "Ms. Guess"); cutting it
+// to its first word greeted Juanita as "Ms". A legal name gives its first name,
+// skipping a title.
+const gfcGreetingName = (client) => portalProfile.greetingName(client);
 
 // Display initials for a person name ("Jane D." → "JD").
 const nameInitials = (name) => String(name || '')
@@ -8268,6 +8271,95 @@ app.get('/api/gfc/profile', authenticateToken, requireEnrolledClient, async (req
   }
 });
 
+// PUT /api/gfc/profile — the patient (or their POA) corrects their own contact
+// details (owner, 2026-10-13: "ensure it carries across all areas of the app,
+// like enrollment, the clinical record").
+//
+// ONE WRITER. The edit goes through the same allow-list, validation and commit
+// the staff enrollment editor uses (applyEnrollmentEdits, validateClientCoreFields,
+// commitEnrollmentSubmission), so it lands on the intake, the client profile
+// mirror, the face sheet and every screen that reads them, and a signed consent
+// that now prints differently is flagged for re-signature exactly as a staff
+// correction would be. Only the contact fields in portalProfile are accepted.
+// OpenEMR is updated with a clinician's sign-in the next time the chart is
+// opened, because a patient has none (Session 5.2).
+app.put('/api/gfc/profile', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const users = await getUsers();
+    const own = await resolveGfcClientRecord(req.user);
+    if (!own) return res.status(404).json({ error: 'No client record on file' });
+    const acting = patientRead.buildActingIdentity(req.user, own);
+    const isClient = req.user.role === config.ROLES.CLIENT;
+    if (!isClient && !acting.isPoa) {
+      return res.status(403).json({ error: 'Only the client or their designated Power of Attorney can change the profile.', code: 'PROFILE_CLIENT_ONLY' });
+    }
+    const idx = users.findIndex(u => u.id === own.id && u.role === config.ROLES.CLIENT);
+    if (idx === -1) return res.status(404).json({ error: 'No client record on file' });
+    const client = users[idx];
+    const priorClient = JSON.parse(JSON.stringify(client));
+    const body = req.body || {};
+    const { edits } = portalProfile.pickPatientEdits(body);
+
+    const next = { ...(client.intake || {}) };
+    if (next.address && typeof next.address === 'object') next.address = { ...next.address };
+    if (next.primaryContact && typeof next.primaryContact === 'object') next.primaryContact = { ...next.primaryContact };
+    const rejectedValues = [];
+    const changed = applyEnrollmentEdits(next, edits, rejectedValues);
+    if (rejectedValues.length) {
+      const fieldErrors = {};
+      rejectedValues.forEach(r => { fieldErrors[r.path] = `"${r.value}" is not one of the answers offered.`; });
+      return res.status(400).json({ error: 'Some answers are not on the list.', code: 'INTAKE_OPTION_INVALID', fieldErrors });
+    }
+    // The one-line address other screens print follows the parts they edited.
+    if (changed.some(p => p.startsWith('address.'))) {
+      const line = portalProfile.composedAddress(next.address);
+      if (line && line !== next.addressLine1) { next.addressLine1 = line; changed.push('addressLine1'); }
+    }
+    const fieldErrors = validateClientCoreFields(next);
+    if (Object.keys(fieldErrors).length) {
+      return res.status(400).json({ error: 'Some details need correcting.', code: 'INTAKE_INVALID', fieldErrors });
+    }
+
+    // The sign-in email belongs to the client's own login. A POA has their own
+    // login and cannot change the client's.
+    let emailChanged = null;
+    if (body.email !== undefined && body.email !== null) {
+      const email = String(body.email).trim();
+      if (email.toLowerCase() !== String(client.email || '').toLowerCase()) {
+        if (!isClient) return res.status(403).json({ error: 'Only the client can change their own sign-in email.', code: 'PROFILE_EMAIL_CLIENT_ONLY' });
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address.', code: 'EMAIL_INVALID', fieldErrors: { email: 'Enter a valid email address.' } });
+        if (users.some((u, i) => i !== idx && u.email && u.email.toLowerCase() === email.toLowerCase())) {
+          return res.status(400).json({ error: 'Another account already uses that email address.', code: 'EMAIL_TAKEN', fieldErrors: { email: 'Another account already uses that email address.' } });
+        }
+        emailChanged = email.toLowerCase();
+        changed.push('email');
+      }
+    }
+    if (!changed.length) return res.json({ message: 'Nothing changed', changed: [], profile: portalProfile.profileForPatient(client, client) });
+
+    const { nowStale } = commitEnrollmentSubmission({ client, priorClient, next, changed, emailChanged });
+    if (client.openEmrPatientId && changed.some(p => portalProfile.EMR_CONTACT_PATHS.includes(p))) {
+      client.emrContactPendingSince = client.emrContactPendingSince || new Date().toISOString();
+    }
+    users[idx] = client;
+    await db.set('users', users);
+    invalidateUsersCache();
+    // WHICH fields changed, never the values (same rule as the staff editor).
+    await logActivity(req.user.id, req.user.name || req.user.email, 'client_details_updated', 'profile', client.id, {
+      fields: changed, role: req.user.role, by: isClient ? 'client' : 'poa', ...(isClient ? {} : { actingFor: acting.actingFor }),
+      consentsNeedingResignature: nowStale
+    });
+    res.json({
+      message: 'Saved', changed, consentsNeedingResignature: nowStale,
+      emrPending: !!client.emrContactPendingSince,
+      profile: portalProfile.profileForPatient(client, isClient ? { email: client.email } : client)
+    });
+  } catch (error) {
+    console.error('GFC profile update error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // ============================================================
 // FAMILY & CAREGIVERS (portal redesign, owner 2026-10-12)
 // The patient, or their POA, sees who has access and invites someone new.
@@ -8830,6 +8922,7 @@ app.get('/api/clinical/patients/:clientId/chart', authenticateToken, requireClin
     // Anything the patient sent that could not file under their own login
     // files now, with this clinician's (best-effort, not awaited).
     fileWaitingUploads(client.id, req.user);
+    syncPendingContactToEmr(client.id, req.user);
     const emr = openemr.forActor(req.user);
     const puuid = client.openEmrPatientId;
     // Started here rather than awaited at banner-build time: the banner needs
@@ -19644,6 +19737,36 @@ const fileWaitingUploads = (clientId, user) => {
   backfillEmrFilingForClient(clientId, user)
     .then(r => { if (r.filed) console.log(`[AUTO FILE-TO-EMR] filed ${r.filed} waiting upload(s) for a client`); })
     .catch(e => console.warn('[AUTO FILE-TO-EMR] waiting uploads not filed:', e.message));
+};
+
+// Contact details a patient changed in the portal reach OpenEMR the same way
+// their uploads do: with the next licensed clinician's (or admin's) sign-in.
+// Best-effort and not awaited; a failure is kept on the record to retry.
+const syncPendingContactToEmr = (clientId, user) => {
+  if (!clientId || !user || !clinicalRoles.canClinicalWrite(user)) return;
+  (async () => {
+    const users = await getUsers();
+    const client = users.find(u => u.id === clientId);
+    if (!client || !client.emrContactPendingSince || !client.openEmrPatientId || !openemr.isConfigured()) return;
+    const connected = await emrAuth.statusFor(user.id).then(s => !!s.connected).catch(() => false);
+    if (!connected) return;
+    let error = null;
+    try {
+      await openemr.forActor(user).updatePatientContact(client.openEmrPatientId, portalProfile.emrContactFrom(client.intake || {}, client.email));
+    } catch (e) { error = e.message; }
+    const fresh = await getUsers();
+    const i = fresh.findIndex(u => u.id === clientId);
+    if (i === -1) return;
+    if (error) fresh[i] = { ...fresh[i], emrContactLastError: String(error).slice(0, 300) };
+    else {
+      const { emrContactPendingSince, emrContactLastError, ...rest } = fresh[i];
+      fresh[i] = { ...rest, emrContactSyncedAt: new Date().toISOString() };
+    }
+    await db.set('users', fresh);
+    invalidateUsersCache();
+    if (!error) await logActivity(user.id, user.name || user.email, 'client_contact_sent_to_emr', 'client', clientId, {});
+    else console.warn('[EMR CONTACT] not sent:', error);
+  })().catch(e => console.warn('[EMR CONTACT] sync failed:', e.message));
 };
 
 // The catch-up pass. A document can arrive before a client is ever linked to
