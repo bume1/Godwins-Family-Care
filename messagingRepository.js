@@ -582,6 +582,13 @@ function canDeleteThread(user) {
   return !!user && user.role === 'admin' && user.accountStatus !== 'inactive';
 }
 
+// Editing a sent message is the super admin's alone too (owner, 2026-10-14),
+// at any point after it was sent. Same rule as deleting a thread, so the two
+// cannot drift: role `admin`, never a manager, never the sender themselves.
+function canEditMessage(user) {
+  return canDeleteThread(user);
+}
+
 // ---- Sender identity -------------------------------------------------------
 // A POA's message is displayed as "<POA name> as POA for <client name>" to
 // EVERY recipient — the 4.3 rule, and the reason it matters is the same here as
@@ -679,6 +686,7 @@ function unreadCount(messages, userId) {
 }
 
 module.exports = {
+  canEditMessage,
   ROLE, ROLE_LABELS, actorRole,
   CHANNELS, CHANNEL_IDS, MATRIX_ROWS, channelById, blurbFor,
   STAFF_ROLES, isStaffRole, isUnrestricted,

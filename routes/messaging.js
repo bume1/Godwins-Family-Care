@@ -181,6 +181,11 @@ module.exports = function createMessagingRoutes(deps) {
     format: m.body_format === 'markup' ? 'markup' : 'plain',
     attachments: (m.attachments || []).map(a => ({ id: a.id, name: a.name, mime: a.mime, size: a.size })),
     sentAt: m.sent_at,
+    // Everyone reading the thread is told a message was changed after it was
+    // sent (owner, 2026-10-14). Who changed it and what it said before stay in
+    // the office record (`m.edits`), never on the screen.
+    edited: !!m.edited_at,
+    editedAt: m.edited_at || null,
     mine: false
   });
 
@@ -371,7 +376,9 @@ module.exports = function createMessagingRoutes(deps) {
         cannotPostReason: post.allowed ? null : post.reason,
         cannotPostCode: post.allowed ? null : post.code,
         // The page draws Delete Thread from this answer and decides nothing.
-        canDelete: msg.canDeleteThread(req.user)
+        canDelete: msg.canDeleteThread(req.user),
+        // The same for Edit, on every message in the thread.
+        canEdit: msg.canEditMessage(req.user)
       });
     } catch (error) {
       console.error('Messaging thread read error:', error);
@@ -417,6 +424,61 @@ module.exports = function createMessagingRoutes(deps) {
       res.json({ deleted: true, threadId: thread.id, messageCount: removed.length });
     } catch (error) {
       console.error('Messaging thread delete error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  // ==========================================================================
+  // Edit a sent message — SUPER ADMIN ONLY, at any point (owner, 2026-10-14)
+  // The new words replace the old on every screen, and the message is marked
+  // Edited for everyone. The earlier words are never thrown away: each edit
+  // appends what the message said before, who changed it, when and why, onto
+  // the message's own row. A message to a patient is a record. Attachments and
+  // the format (plain or formatted) stay as sent. No new email goes out: an
+  // edit is a correction, not a new message. The audit row names the message,
+  // never its words.
+  // ==========================================================================
+  router.put('/api/messaging/messages/:messageId', authenticateToken, requireMessagingRole, async (req, res) => {
+    try {
+      if (!msg.canEditMessage(req.user)) {
+        return res.status(403).json({ error: 'Only the super admin can edit a sent message.', code: 'EDIT_SUPER_ADMIN_ONLY' });
+      }
+      const body = req.body || {};
+      const reason = String(body.reason || '').trim().slice(0, 500);
+      if (!reason) return res.status(400).json({ error: 'Say why this message is being edited.', code: 'EDIT_REASON_REQUIRED' });
+      const all = await readRows('messages');
+      const m = all.find(x => x && x.id === req.params.messageId);
+      if (!m) return res.status(404).json({ error: 'That message was not found.', code: 'MESSAGE_NOT_FOUND' });
+      const format = m.body_format === 'markup' ? 'markup' : 'plain';
+      const v = msg.validateMessage({ body: body.body, format }, { attachmentCount: (m.attachments || []).length });
+      if (!v.valid) return res.status(400).json({ error: v.errors[0].message, code: v.errors[0].code, errors: v.errors });
+      if (v.clean.body === String(m.body || '')) {
+        return res.status(400).json({ error: 'That is what the message already says.', code: 'EDIT_NO_CHANGE' });
+      }
+      const at = new Date().toISOString();
+      m.edits = (m.edits || []).concat([{
+        at, byId: req.user.id, byName: req.user.name || req.user.email || null, reason,
+        previousBody: m.body, previousFormat: format
+      }]);
+      m.body = v.clean.body;
+      m.edited_at = at;
+      await db.set('messages', all);
+
+      // The thread list shows the last message's preview; keep it true.
+      const threads = await readRows('message_threads');
+      const t = threads.find(x => x && x.id === m.thread_id);
+      if (t) {
+        const last = all.filter(x => x && x.thread_id === t.id).sort((a, b) => String(a.sent_at).localeCompare(String(b.sent_at))).pop();
+        if (last && last.id === m.id) {
+          t.last_message_preview = msg.previewOf(m.body, format, m.attachments);
+          await db.set('message_threads', threads);
+        }
+      }
+      await logActivity(req.user.id, req.user.name || req.user.email, 'message_edited', 'message', m.id,
+        { threadId: m.thread_id, channel: t ? t.channel : null, clientId: t ? t.client_id : null, editCount: m.edits.length });
+      res.json({ message: { ...publicMessage(m), mine: m.from_user_id === req.user.id } });
+    } catch (error) {
+      console.error('Messaging message edit error:', error);
       res.status(500).json({ error: 'Server error' });
     }
   });
