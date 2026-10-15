@@ -132,7 +132,8 @@ const rows = (h, k) => h.store.get(k) || [];
 test('the Care Team channel is in the matrix both ways, and only a client-side or clinical viewer reaches it', () => {
   const c = msg.channelById('care_team');
   assert.ok(c && c.includesPoa && c.requiresAssignedClinician);
-  assert.deepEqual([...c.initiators].sort(), ['client', 'clinical']);
+  // Owner, 2026-10-15: anyone on the client's care team starts one.
+  assert.deepEqual([...c.initiators].sort(), ['caseManager', 'client', 'clinical', 'vendor'], 'caregivers too (owner, 2026-10-15)');
   assert.ok(msg.MATRIX_ROWS.some(r => r.channel === 'care_team' && r.from === 'clinical' && r.to === 'client'));
   assert.ok(msg.MATRIX_ROWS.some(r => r.channel === 'care_team' && r.from === 'client' && r.to === 'clinical'));
   const client = USERS().find(u => u.id === 'client-1');
@@ -142,9 +143,10 @@ test('the Care Team channel is in the matrix both ways, and only a client-side o
   assert.equal(sees('client-1'), true);
   assert.equal(sees('poa-1', true), true, 'a designated POA reads it');
   assert.equal(sees('fnp-1'), true, 'the assigned clinician');
+  assert.equal(sees('cm-1'), true, "the patient's case manager is on the care team too");
   assert.equal(sees('admin-1'), true);
   assert.equal(sees('fam-1', false), false, 'non-POA family never reads a clinical conversation');
-  assert.equal(sees('cg-1'), false, 'and neither does the caregiver');
+  assert.equal(sees('cg-1'), false, 'and neither does a caregiver who is not on this thread');
   assert.equal(sees('fnp-2'), false, 'a clinician not on this patient\'s care team');
   assert.equal(sees('client-2'), false, 'another client');
 });
@@ -153,11 +155,13 @@ test('REGRESSION: a POA is client-equivalent — they can start and reply on the
   const client = USERS().find(u => u.id === 'client-1');
   const poa = USERS().find(u => u.id === 'poa-1');
   const users = USERS();
-  for (const ch of ['clinical_escalation', 'direct_care', 'care_coordination', 'care_team']) {
+  for (const ch of ['clinical_escalation', 'direct_care', 'care_team']) {
     const thread = { id: 't', channel: ch, client_id: 'client-1', participant_ids: ['client-1', 'fnp-1', 'poa-1'] };
     assert.equal(msg.canPostToThread(poa, thread, { client, isPoa: true }).allowed, true, `${ch}: a POA can reply`);
     assert.equal(msg.channelAvailability(ch, { user: poa, client, users, isPoa: true }).available, true, `${ch}: a POA can start`);
   }
+  // Care Coordination is retired (owner, 2026-10-15): nobody starts one, a POA included.
+  assert.equal(msg.channelAvailability('care_coordination', { user: poa, client, users, isPoa: true }).code, 'CHANNEL_RETIRED');
   // Ordinary family is NOT promoted.
   const fam = USERS().find(u => u.id === 'fam-1');
   const thread = { id: 't', channel: 'clinical_escalation', client_id: 'client-1', participant_ids: ['client-1'] };
@@ -219,7 +223,7 @@ test('a clinician sends a formatted message with two attachments; it lands store
     const thread = rows(h, 'message_threads')[0];
     const m = rows(h, 'messages')[0];
     assert.equal(thread.channel, 'care_team');
-    assert.deepEqual([...thread.participant_ids].sort(), ['client-1', 'fnp-1', 'poa-1'], 'the patient, their POA and the sender — not other family, not the caregiver');
+    assert.deepEqual([...thread.participant_ids].sort(), ['cg-1', 'client-1', 'cm-1', 'fnp-1', 'poa-1'], 'the patient, their POA and the whole care team (case manager and caregiver included, owner 2026-10-15), not other family');
     assert.equal(m.body_format, 'markup');
     assert.equal(m.body, body, 'stored as sent: markup, never HTML — the script tag is inert text');
     assert.equal(m.attachments.length, 2);
@@ -237,10 +241,11 @@ test('a clinician sends a formatted message with two attachments; it lands store
     assert.equal(pub.format, 'markup');
     assert.deepEqual(pub.attachments.map(a => Object.keys(a).sort()), [['id', 'mime', 'name', 'size'], ['id', 'mime', 'name', 'size']]);
     assert.ok(!JSON.stringify(listed.data).includes('drv-'), 'no storage id ever leaves the server');
-    // The patient's POA reads it; non-POA family and the caregiver cannot.
+    // The patient's POA reads it; non-POA family cannot. The caregiver is on the
+    // care team now (owner, 2026-10-15), so a whole-team message reaches them.
     assert.equal((await h.call('poa-1', 'GET', `/api/messaging/threads/${thread.id}`)).status, 200);
     assert.equal((await h.call('fam-1', 'GET', `/api/messaging/threads/${thread.id}`)).status, 403);
-    assert.equal((await h.call('cg-1', 'GET', `/api/messaging/threads/${thread.id}`)).status, 403);
+    assert.equal((await h.call('cg-1', 'GET', `/api/messaging/threads/${thread.id}`)).status, 200);
     assert.deepEqual((await h.call('fam-1', 'GET', '/api/messaging/threads')).data.threads.map(t => t.channel), [], 'and it is not in their list');
   } finally { h.close(); }
 });
@@ -250,8 +255,10 @@ test('the email prompt: the patient and their POA get a PHI-free notice that ope
   try {
     await h.call('fnp-1', 'POST', '/api/messaging/threads', { json: { channel: 'care_team', clientId: 'client-1', body: 'Please call me about your **labs**.', format: 'markup' } });
     const to = h.notices.filter(n => n.type === 'message_received');
-    assert.deepEqual(to.map(n => n.email).sort(), ['c1@test.local', 'poa@test.local']);
-    for (const n of to) {
+    // The case manager is on the care team (owner, 2026-10-15), so they hear
+    // about it too, with the staff notice.
+    assert.deepEqual(to.map(n => n.email).sort(), ['c1@test.local', 'cg@test.local', 'cm@test.local', 'poa@test.local']);
+    for (const n of to.filter(x => x.email === 'c1@test.local' || x.email === 'poa@test.local')) {
       const text = `${n.data.subject} ${n.data.body}`;
       assert.ok(!/Juanita|Guess|Bethel|Godwins|labs|call me/i.test(text), `no name and none of the message in the email: ${text}`);
       assert.equal(n.data.ctaUrl, links.PATHS.PORTAL_MESSAGES);
@@ -265,7 +272,7 @@ test('the email prompt: the patient and their POA get a PHI-free notice that ope
     const tid = rows(h, 'message_threads')[0].id;
     await h.call('client-1', 'POST', `/api/messaging/threads/${tid}/messages`, { json: { body: 'Thank you', format: 'markup' } });
     const back = h.notices.filter(n => n.type === 'message_received');
-    assert.deepEqual(back.map(n => n.email).sort(), ['fnp@test.local', 'poa@test.local'], 'the clinician and the POA on the thread, not the sender');
+    assert.deepEqual(back.map(n => n.email).sort(), ['cg@test.local', 'cm@test.local', 'fnp@test.local', 'poa@test.local'], 'the care team and the POA on the thread, not the sender');
     const toClin = back.find(n => n.email === 'fnp@test.local');
     assert.equal(toClin.data.ctaUrl, links.messagesFor(USERS().find(u => u.id === 'fnp-1')));
     assert.equal(back.find(n => n.email === 'poa@test.local').data.ctaUrl, links.PATHS.PORTAL_MESSAGES);
@@ -407,15 +414,22 @@ test('an attachment is served only to someone who may read the thread, with its 
     assert.equal((await h.call('poa-1', 'GET', url)).status, 200, 'the POA');
     assert.equal((await h.call('fnp-1', 'GET', url)).status, 200, 'the clinician');
     assert.equal((await h.call('fam-1', 'GET', url)).status, 403, 'non-POA family');
-    assert.equal((await h.call('cg-1', 'GET', url)).status, 403, 'the caregiver');
+    // A caregiver the sender LEFT OFF cannot open the attachment (owner,
+    // 2026-10-15: the sender chooses who on the care team gets it).
+    await h.call('fnp-1', 'POST', '/api/messaging/threads', { form: h.form({ channel: 'care_team', clientId: 'client-1', body: 'for the case manager', format: 'markup', recipientIds: JSON.stringify(['cm-1']) },
+      [{ name: 'note.pdf', type: 'application/pdf', buf: PDF() }]) });
+    const m2 = rows(h, 'messages').find(x => x.body === 'for the case manager');
+    assert.equal((await h.call('cg-1', 'GET', `/api/messaging/messages/${m2.id}/attachments/${m2.attachments[0].id}`)).status, 403, 'a caregiver left off');
+    assert.equal((await h.call('cm-1', 'GET', `/api/messaging/messages/${m2.id}/attachments/${m2.attachments[0].id}`)).status, 200, 'the one chosen');
     assert.equal((await h.call('client-2', 'GET', url)).status, 403, 'another client');
     assert.equal((await h.call('fnp-2', 'GET', url)).status, 403, 'a clinician not on this care team');
     assert.equal((await h.call(null, 'GET', url)).status, 401, 'no sign-in');
     assert.equal((await h.call('client-1', 'GET', `/api/messaging/messages/${m.id}/attachments/nope`)).status, 404);
     assert.equal((await h.call('client-1', 'GET', `/api/messaging/messages/nope/attachments/${a.id}`)).status, 404);
-    const reads = h.activity.filter(x => x[2] === 'message_attachment_read');
+    const reads = h.activity.filter(x => x[2] === 'message_attachment_read' && x[4] === m.id);
     assert.equal(reads.length, 3, 'one audit row per successful read');
-    assert.ok(reads.every(x => x[4] === m.id && x[5].attachmentId === a.id));
+    assert.ok(reads.every(x => x[5].attachmentId === a.id));
+    assert.equal(h.activity.filter(x => x[2] === 'message_attachment_read' && x[4] === m2.id).length, 1, 'the chosen reader\'s read is audited too, the refused one is not');
     // A Drive read failure is a sentence, not a 500.
     h.drive.files.clear();
     const gone = await h.call('client-1', 'GET', url);
@@ -681,4 +695,127 @@ test('the component draws Edit only from the server answer and marks edited mess
   assert.match(comp, /state\.canEdit && !ed \? ' · <button class="mbtn ghost" data-edit-msg="/);
   assert.match(comp, /\(m\.edited \? ' · Edited' : ''\)/);
   assert.match(comp, /method: 'PUT', body: \{ body: state\.editing\.body, reason: state\.editing\.reason \}/);
+});
+
+// ============================================================
+// The owner's matrix, 2026-10-15
+// ============================================================
+
+test('2026-10-15: the matrix as stated — who is on each conversation and who starts it', () => {
+  const ch = (id) => msg.channelById(id);
+  assert.deepEqual([...ch('direct_care').participants].sort(), ['admin', 'client', 'vendor'], 'Direct: client, caregiver, admin');
+  assert.deepEqual([...ch('direct_care').initiators].sort(), ['admin', 'client', 'vendor']);
+  assert.deepEqual([...ch('support').participants].sort(), ['admin', 'client', 'family']);
+  assert.deepEqual([...ch('support').initiators].sort(), ['admin', 'caseManager', 'client', 'clinical', 'family', 'vendor'], 'any team member starts Support');
+  assert.ok(ch('clinical_escalation').participants.includes('caseManager'), 'the whole clinical team is on a clinical escalation');
+  assert.deepEqual([...ch('care_update').initiators].sort(), ['caseManager', 'clinical'], 'case managers and coordinators make care updates');
+  assert.ok(ch('care_team').participants.includes('vendor') && ch('care_team').initiators.includes('vendor'), 'caregivers are on the care team');
+  assert.deepEqual(ch('clinical_oversight').initiators, ['clinical'], 'clinical oversight is clinician-only');
+  assert.equal(ch('operations').retired, true);
+  assert.equal(ch('care_coordination').retired, true);
+});
+
+test('2026-10-15: Direct puts the office on the thread', async () => {
+  const h = await boot();
+  try {
+    const r = await h.call('client-1', 'POST', '/api/messaging/threads', { json: { channel: 'direct_care', clientId: 'client-1', body: 'See you Tuesday' } });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+    assert.deepEqual([...rows(h, 'message_threads')[0].participant_ids].sort(), ['admin-1', 'cg-1', 'client-1']);
+  } finally { h.close(); }
+});
+
+test('2026-10-15: a caregiver starts Support (Operations is gone) and the client side is on it', async () => {
+  const h = await boot();
+  try {
+    const ops = await h.call('cg-1', 'POST', '/api/messaging/threads', { json: { channel: 'operations', clientId: 'client-1', body: 'timesheet' } });
+    assert.equal(ops.status, 403);
+    assert.equal(ops.data.code, 'CHANNEL_RETIRED');
+    const r = await h.call('cg-1', 'POST', '/api/messaging/threads', { json: { channel: 'support', clientId: 'client-1', body: 'Running 10 minutes late' } });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+    assert.deepEqual([...rows(h, 'message_threads')[0].participant_ids].sort(), ['admin-1', 'cg-1', 'client-1', 'fam-1', 'poa-1']);
+    const read = await h.call('cg-1', 'GET', `/api/messaging/threads/${rows(h, 'message_threads')[0].id}`);
+    assert.equal(read.status, 200, 'the caregiver reads the thread they started');
+    for (const who of ['fnp-1', 'cm-1']) {
+      const s = await h.call(who, 'POST', '/api/messaging/threads', { json: { channel: 'support', clientId: 'client-1', body: 'For the office' } });
+      assert.equal(s.status, 200, `${who} starts Support`);
+    }
+  } finally { h.close(); }
+});
+
+test('2026-10-15: a clinical escalation reaches the whole clinical team, coordinators and supporting case managers included', async () => {
+  const h = await boot();
+  try {
+    const users = h.store.get('users');
+    users.push({ id: 'cm-2', name: 'Supporting CM', email: 'cm2@test.local', role: 'caseManager' });
+    users.push({ id: 'cc-1', name: 'Cora Coordinator', email: 'cc@test.local', role: 'user', isManager: true, clinicalRole: 'coordinator' });
+    const c1 = users.find(u => u.id === 'client-1');
+    c1.careTeam = { ...c1.careTeam, supportingCaseManagers: ['cm-2'], careCoordinators: ['cc-1'] };
+    h.store.set('users', users);
+    const r = await h.call('client-1', 'POST', '/api/messaging/threads', { json: { channel: 'clinical_escalation', clientId: 'client-1', body: 'New dizziness' } });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+    const ids = rows(h, 'message_threads')[0].participant_ids;
+    for (const id of ['client-1', 'fnp-1', 'cm-1', 'cm-2', 'cc-1']) assert.ok(ids.includes(id), `${id} is on the escalation`);
+    assert.ok(!ids.includes('cg-1'), 'a caregiver is not');
+    const emailed = h.notices.filter(n => n.type === 'message_received').map(n => n.email);
+    for (const e of ['fnp@test.local', 'cm@test.local', 'cm2@test.local', 'cc@test.local']) assert.ok(emailed.includes(e), `${e} is told`);
+  } finally { h.close(); }
+});
+
+test('2026-10-15: a case manager makes a Care Update', async () => {
+  const h = await boot();
+  try {
+    const r = await h.call('cm-1', 'POST', '/api/messaging/threads', { json: { channel: 'care_update', clientId: 'client-1', body: 'Home health starts Monday' } });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+    const ids = rows(h, 'message_threads')[0].participant_ids;
+    for (const id of ['cm-1', 'fnp-1', 'fam-1', 'poa-1', 'client-1']) assert.ok(ids.includes(id), id);
+  } finally { h.close(); }
+});
+
+test('2026-10-15: Care Team offers the care team to choose from, caregivers included, never the sender', () => {
+  const users = USERS();
+  const client = users.find(u => u.id === 'client-1');
+  const fnp = users.find(u => u.id === 'fnp-1');
+  const ct = msg.channelsFor({ user: fnp, client, users }).find(c => c.id === 'care_team');
+  assert.deepEqual(ct.recipients.map(m => [m.id, m.what]), [['cm-1', 'Case manager'], ['cg-1', 'Caregiver']]);
+  const cg = users.find(u => u.id === 'cg-1');
+  const forCg = msg.channelsFor({ user: cg, client, users }).find(c => c.id === 'care_team');
+  assert.ok(forCg && forCg.available, 'a caregiver starts a Care Team message');
+  assert.deepEqual(forCg.recipients.map(m => m.id), ['fnp-1', 'cm-1']);
+});
+
+test('2026-10-15: the sender chooses who on the care team gets it; anyone left off cannot read it', async () => {
+  const h = await boot();
+  try {
+    const bad = await h.call('fnp-1', 'POST', '/api/messaging/threads', { json: { channel: 'care_team', clientId: 'client-1', body: 'x', recipientIds: ['fnp-2'] } });
+    assert.equal(bad.status, 400);
+    assert.equal(bad.data.code, 'RECIPIENT_NOT_ON_CARE_TEAM', 'a clinician not on this care team cannot be added');
+    const none = await h.call('fnp-1', 'POST', '/api/messaging/threads', { json: { channel: 'care_team', clientId: 'client-1', body: 'x', recipientIds: [] } });
+    assert.equal(none.status, 400);
+    assert.equal(none.data.code, 'RECIPIENTS_REQUIRED');
+    assert.equal(rows(h, 'message_threads').length, 0, 'nothing is written on a refusal');
+
+    const r = await h.call('fnp-1', 'POST', '/api/messaging/threads', { json: { channel: 'care_team', clientId: 'client-1', body: 'Please check her feet today', recipientIds: ['cg-1'] } });
+    assert.equal(r.status, 200, JSON.stringify(r.data));
+    const t = rows(h, 'message_threads')[0];
+    assert.deepEqual([...t.participant_ids].sort(), ['cg-1', 'client-1', 'fnp-1', 'poa-1'], 'the sender, the chosen caregiver, the patient and their POA');
+    assert.equal(t.audience_chosen, true);
+    assert.equal((await h.call('cg-1', 'GET', `/api/messaging/threads/${t.id}`)).status, 200, 'the chosen caregiver reads it');
+    const cm = await h.call('cm-1', 'GET', `/api/messaging/threads/${t.id}`);
+    assert.equal(cm.status, 403, 'the case manager left off does not, though they are on the care team');
+    assert.equal(cm.data.code, 'NOT_ON_THIS_MESSAGE');
+    assert.equal((await h.call('admin-1', 'GET', `/api/messaging/threads/${t.id}`)).status, 200, 'admin sees every conversation');
+    assert.ok(!h.notices.some(n => n.email === 'cm@test.local'), 'and the case manager is not emailed');
+
+    // Choosing everybody is the same as the whole care team: no restriction.
+    await h.call('fnp-1', 'POST', '/api/messaging/threads', { json: { channel: 'care_team', clientId: 'client-1', body: 'All hands', recipientIds: ['cg-1', 'cm-1'] } });
+    assert.equal(rows(h, 'message_threads')[1].audience_chosen, false);
+  } finally { h.close(); }
+});
+
+test('2026-10-15: the composer shows the served care team as a checklist and sends the choice', () => {
+  const comp = fs.readFileSync(path.join(__dirname, '..', 'public', 'components', 'gfc-messaging.js'), 'utf8');
+  assert.match(comp, /data-recipient="' \+ esc\(m\.id\) \+ '"/, 'one checkbox per served care team member');
+  assert.match(comp, /recipientIds: list && list\.length \? JSON\.stringify\(picked\) : undefined/, 'the choice is sent with the message');
+  assert.match(comp, /Choose at least one person from the care team\./, 'an empty choice is stopped before sending');
+  assert.ok(!/careTeam\.|assignedFNPs/.test(comp), 'the page builds no care team of its own; the list is the server\'s');
 });

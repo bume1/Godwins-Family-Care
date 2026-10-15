@@ -154,18 +154,20 @@ const server = app.listen(0, '127.0.0.1', async () => {
   check('a client reads their channels', clientCh.status === 200);
   const clientIds = clientCh.data.channels.map(c => c.id).sort();
   check('and they reach every role on the care team — caregiver, office, clinician, case manager',
-    JSON.stringify(clientIds) === JSON.stringify(['care_coordination', 'clinical_escalation', 'direct_care', 'support']),
+    JSON.stringify(clientIds) === JSON.stringify(['care_team', 'clinical_escalation', 'direct_care', 'support']),
     JSON.stringify(clientIds));
 
   const cmCh = await call('GET', '/api/messaging/channels?clientId=client-1', { as: 'cm-1' });
   const cmIds = cmCh.data.channels.map(c => c.id).sort();
   check('OWNER RULE: a case manager can now START a conversation, not only receive one',
-    cmCh.status === 200 && JSON.stringify(cmIds) === JSON.stringify(['behavioral_escalation', 'care_coordination']),
+    cmCh.status === 200 && JSON.stringify(cmIds) === JSON.stringify(['behavioral_escalation', 'care_team', 'care_update', 'support']),
     JSON.stringify(cmIds));
 
   const adminCh = await call('GET', '/api/messaging/channels?clientId=client-1', { as: 'admin-1' });
   check('OWNER RULE: admin opens every channel — "admin / manager should be able to message anyone"',
-    adminCh.status === 200 && adminCh.data.channels.length === 10,
+    // 11 channels, two retired on 2026-10-15 (Operations, Care Coordination).
+    adminCh.status === 200 && adminCh.data.channels.length === 9 &&
+      !adminCh.data.channels.some(c => c.id === 'operations' || c.id === 'care_coordination'),
     `${adminCh.data.channels.length} channels`);
 
   const unauth = await call('GET', '/api/messaging/channels');
@@ -178,7 +180,7 @@ const server = app.listen(0, '127.0.0.1', async () => {
     ['client-1', 'support', null, 'Client → Admin (Support)'],
     ['client-1', 'direct_care', null, 'Client → Caregiver (Direct)'],
     ['client-1', 'clinical_escalation', null, 'Client → Clinical (Clinical Escalation)'],
-    ['cg-1', 'operations', 'client-1', 'Caregiver → Admin (Operations)'],
+    ['cg-1', 'support', 'client-1', 'Caregiver → Admin (Support; Operations retired 2026-10-15)'],
     ['cg-1', 'behavioral_escalation', 'client-1', 'Caregiver → Case Manager (Behavioral Escalation)'],
     ['fnp-1', 'clinical_oversight', 'client-1', 'Clinical → Caregiver (Clinical Oversight)'],
     ['fnp-1', 'care_update', 'client-1', 'Clinical → Family (Care Update)'],
@@ -194,6 +196,8 @@ const server = app.listen(0, '127.0.0.1', async () => {
     check(`${label} sends`, r.status === 200, JSON.stringify(r.data).slice(0, 140));
     if (r.status === 200) made[channel] = made[channel] || r.data.thread.id;
   }
+  const ops = await call('POST', '/api/messaging/threads', { as: 'cg-1', body: { channel: 'operations', clientId: 'client-1', body: 'x' } });
+  check('Operations is retired: refused by name', ops.status === 403 && ops.data.code === 'CHANNEL_RETIRED', JSON.stringify(ops.data));
   check('STORED: every channel produced a thread row',
     (await storedAll('message_threads')).length === 10, String((await storedAll('message_threads')).length));
   check('STORED: and the first message of each is on it',
@@ -217,7 +221,7 @@ const server = app.listen(0, '127.0.0.1', async () => {
   const cgThreads = await call('GET', '/api/messaging/threads', { as: 'cg-1' });
   const cgIds = cgThreads.data.threads.map(t => t.channel).sort();
   check('a caregiver sees only their own four',
-    JSON.stringify(cgIds) === JSON.stringify(['admin_direct', 'behavioral_escalation', 'clinical_oversight', 'direct_care', 'family_portal', 'operations'].filter(c => cgIds.includes(c))),
+    JSON.stringify(cgIds) === JSON.stringify(['admin_direct', 'behavioral_escalation', 'clinical_oversight', 'direct_care', 'family_portal', 'support'].filter(c => cgIds.includes(c))),
     JSON.stringify(cgIds));
   check('and NOT the clinical escalation between client and clinician',
     !cgThreads.data.threads.some(t => t.id === made.clinical_escalation));
@@ -311,21 +315,22 @@ const server = app.listen(0, '127.0.0.1', async () => {
     JSON.stringify(clientPicker.data.clients));
 
   const outOfScope = await call('POST', '/api/messaging/threads', {
-    as: 'cm-1', body: { channel: 'care_coordination', clientId: 'client-2', body: 'Not mine (TEST DATA)' }
+    as: 'cm-1', body: { channel: 'support', clientId: 'client-2', body: 'Not mine (TEST DATA)' }
   });
   check('a case manager cannot start a thread about a client who is not theirs',
     outOfScope.status === 403 && outOfScope.data.code === 'CLIENT_NOT_IN_SCOPE',
     `${outOfScope.status} ${JSON.stringify(outOfScope.data).slice(0, 120)}`);
   check('STORED: and nothing was written by that refusal',
-    (await storedAll('message_threads', t => t.client_id === 'client-2' && t.channel === 'care_coordination')).length === 0);
+    (await storedAll('message_threads', t => t.client_id === 'client-2')).length === 0);
 
+  // Care Coordination was retired 2026-10-15: Care Team carries the whole care team.
   const coord = await call('POST', '/api/messaging/threads', {
-    as: 'client-1', body: { channel: 'care_coordination', body: 'A question for my case manager (TEST DATA)' }
+    as: 'client-1', body: { channel: 'care_team', body: 'A question for my care team (TEST DATA)' }
   });
-  check('a client opens Care Coordination with their case manager', coord.status === 200,
+  check('a client opens Care Team, and their case manager is on it', coord.status === 200,
     `${coord.status} ${JSON.stringify(coord.data).slice(0, 120)}`);
   check('STORED: the case manager is on it',
-    (await storedAll('message_threads', t => t.channel === 'care_coordination'))[0].participant_ids.includes('cm-1'));
+    (await storedAll('message_threads', t => t.channel === 'care_team'))[0].participant_ids.includes('cm-1'));
 
   // ==========================================================================
   section('E. A Care Update can be answered (owner, 2026-10-14)');

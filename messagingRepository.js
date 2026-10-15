@@ -71,39 +71,71 @@ const ROLE_LABELS = Object.freeze({
 // it. A Care Update is one-directional on purpose: a clinician pushes it, and
 // family replying into a clinical thread is exactly what the visibility rules
 // exist to prevent — they reply through Support or the Family Portal.
+// THE OWNER'S MATRIX, 2026-10-15 ("to quickly close out this messaging
+// workflow"). Admin sees, joins and starts every type (isUnrestricted below);
+// a manager and a care coordinator message as the office (actorRole).
+//   Direct              client, caregiver, admin.
+//   Support             client, family, admin; ANY team member may start one
+//                       and is on the thread they start. Houses what
+//                       Operations used to.
+//   Clinical Escalation client and assigned clinician; the whole clinical team
+//                       for that patient (case managers / LMSW / LCSW, care
+//                       coordinators) is on it too.
+//   Behavioral Esc.     caregiver and case manager.
+//   Clinical Oversight  started by a clinician only, to the caregiver.
+//   Care Update         started by a clinician, a case manager or a care
+//                       coordinator; reaches family and the client.
+//   Care Team           the client and their whole clinical care team; anyone
+//                       on it may start one.
+//   Family Portal, Admin Broadcast  unchanged.
+// Operations and Care Coordination are RETIRED: nobody starts a new one, and
+// threads already on them stay readable and answerable, because deleting a
+// conversation somebody had is not a cleanup.
 const CHANNELS = Object.freeze({
   direct_care: {
     id: 'direct_care', label: 'Direct',
-    participants: [ROLE.CLIENT, ROLE.CAREGIVER],
-    initiators: [ROLE.CLIENT, ROLE.CAREGIVER],
+    participants: [ROLE.CLIENT, ROLE.CAREGIVER, ROLE.ADMIN],
+    initiators: [ROLE.CLIENT, ROLE.CAREGIVER, ROLE.ADMIN],
     requiresAssignedCaregiver: true,
-    blurb: 'You and the caregiver working with you.',
+    blurb: 'You, the caregiver working with you, and the office.',
     blurbByRole: {
-      [ROLE.CAREGIVER]: 'You and the client you are working with.',
-      [ROLE.ADMIN]: 'The client and the caregiver working with them.'
+      [ROLE.CAREGIVER]: 'You, the client you are working with, and the office.',
+      [ROLE.ADMIN]: 'The client, the caregiver working with them, and the office.'
     }
   },
   support: {
     id: 'support', label: 'Support',
     participants: [ROLE.CLIENT, ROLE.FAMILY, ROLE.ADMIN],
-    initiators: [ROLE.CLIENT, ROLE.FAMILY, ROLE.ADMIN],
-    blurb: 'Scheduling, billing and anything else for the office.'
+    // Any team member may start one (owner, 2026-10-15), and whoever starts it
+    // is on it. A caregiver's questions for the office come here now.
+    initiators: [ROLE.CLIENT, ROLE.FAMILY, ROLE.ADMIN, ROLE.CLINICAL, ROLE.CASE_MANAGER, ROLE.CAREGIVER],
+    blurb: 'Scheduling, billing and anything else for the office.',
+    blurbByRole: {
+      [ROLE.CAREGIVER]: 'The office, about this client. The client and their family are on it too.',
+      [ROLE.CLINICAL]: 'The office, about this client. The client and their family are on it too.',
+      [ROLE.CASE_MANAGER]: 'The office, about this client. The client and their family are on it too.'
+    }
   },
   clinical_escalation: {
     id: 'clinical_escalation', label: 'Clinical Escalation',
-    participants: [ROLE.CLIENT, ROLE.CLINICAL],
+    // The whole clinical team for the patient sees it (owner, 2026-10-15):
+    // the assigned clinicians plus the case managers / social workers and care
+    // coordinators on the patient's care team.
+    participants: [ROLE.CLIENT, ROLE.CLINICAL, ROLE.CASE_MANAGER],
     initiators: [ROLE.CLIENT, ROLE.CLINICAL],
     tracksResponse: true,
-    blurb: 'A clinical concern for the nurse practitioner. Not for emergencies — call 911.',
+    blurb: 'A clinical concern for your clinical team. Not for emergencies — call 911.',
     blurbByRole: {
-      [ROLE.CLINICAL]: 'A clinical concern raised about this client. Not for emergencies.'
+      [ROLE.CLINICAL]: 'A clinical concern raised about this client. Not for emergencies.',
+      [ROLE.CASE_MANAGER]: 'A clinical concern raised about this client. The whole clinical team sees it.'
     }
   },
   operations: {
     id: 'operations', label: 'Operations',
     participants: [ROLE.CAREGIVER, ROLE.ADMIN],
-    initiators: [ROLE.CAREGIVER, ROLE.ADMIN],
-    blurb: 'Shifts, timekeeping and anything else for the office.'
+    initiators: [],
+    retired: true,   // owner, 2026-10-15: Support houses this now
+    blurb: 'Retired. Use Support for the office.'
   },
   behavioral_escalation: {
     id: 'behavioral_escalation', label: 'Behavioral Escalation',
@@ -121,35 +153,36 @@ const CHANNELS = Object.freeze({
     initiators: [ROLE.CLINICAL],
     blurb: 'Direction from the clinician to the caregiver on this client.'
   },
-  // Owner, 2026-10-14: "no one can respond to any messages unless they use the
-  // support pipeline. That is an absolutely not." A Care Update used to be
-  // one-way, so the patient, their POA, family and the care team were told to
-  // reply through Support. It is a conversation now: a clinician still starts
-  // it, and everyone who can read it can answer it. Visibility is unchanged,
-  // so a caregiver still never reads a clinical update to family.
+  // A clinician, a case manager or a care coordinator starts one (owner,
+  // 2026-10-15); everyone who can read it can answer it (2026-10-14).
+  // Visibility is unchanged, so a caregiver never reads one.
   care_update: {
     id: 'care_update', label: 'Care Update',
-    participants: [ROLE.CLINICAL, ROLE.FAMILY, ROLE.CLIENT],
-    initiators: [ROLE.CLINICAL],
-    blurb: 'An update a clinician has shared with family. You can reply here.'
+    participants: [ROLE.CLINICAL, ROLE.CASE_MANAGER, ROLE.FAMILY, ROLE.CLIENT],
+    initiators: [ROLE.CLINICAL, ROLE.CASE_MANAGER],
+    blurb: 'An update from the care team for the family. You can reply here.'
   },
-  // Owner, 2026-09-29: a clinician can message a patient from the clinician
-  // portal, with attachments and formatted text, and the patient (or their POA)
-  // can start one to their clinician. NOT Clinical Escalation: that is a
-  // CONCERN, it tracks whether anyone has responded, and it stays the channel a
-  // patient uses to raise one. `includesPoa` adds the client's designated POA
-  // users as recipients, because a POA is client-equivalent and would otherwise
-  // never be told there was a message.
+  // The client and their whole clinical care team (owner, 2026-10-15: "anyone
+  // on that client's care team can start a message and be on that message"):
+  // the assigned clinicians, case managers / social workers and care
+  // coordinators, plus the client's designated POA. Not Clinical Escalation:
+  // that is a CONCERN and tracks whether anyone has responded.
+  // Caregivers are on it too, and whoever starts one CHOOSES which care team
+  // members it goes to (owner, 2026-10-15). The patient and their POA are
+  // always on it: it is their conversation.
   care_team: {
     id: 'care_team', label: 'Care Team',
-    participants: [ROLE.CLIENT, ROLE.CLINICAL],
-    initiators: [ROLE.CLIENT, ROLE.CLINICAL],
+    participants: [ROLE.CLIENT, ROLE.CLINICAL, ROLE.CASE_MANAGER, ROLE.CAREGIVER],
+    initiators: [ROLE.CLIENT, ROLE.CLINICAL, ROLE.CASE_MANAGER, ROLE.CAREGIVER],
     includesPoa: true,
+    choosesRecipients: true,
     requiresAssignedClinician: true,
-    blurb: 'You and the clinician caring for you. Send questions and documents here. To raise a concern, use Clinical Escalation. Not for emergencies: call 911.',
+    blurb: 'You and your care team. Send questions and documents here. To raise a concern, use Clinical Escalation. Not for emergencies: call 911.',
     blurbByRole: {
-      [ROLE.CLINICAL]: 'The patient, and their designated power of attorney if they have one. Secure messages with attachments.',
-      [ROLE.ADMIN]: 'The patient and their clinician.'
+      [ROLE.CLINICAL]: "The patient, their POA if they have one, and whichever of the patient's care team you choose. Secure messages with attachments.",
+      [ROLE.CASE_MANAGER]: "The patient, their POA if they have one, and whichever of the patient's whole care team you choose. Secure messages with attachments.",
+      [ROLE.CAREGIVER]: "The patient, their POA if they have one, and whichever of the patient's care team you choose.",
+      [ROLE.ADMIN]: 'The patient and their care team.'
     }
   },
   admin_direct: {
@@ -161,12 +194,9 @@ const CHANNELS = Object.freeze({
   care_coordination: {
     id: 'care_coordination', label: 'Care Coordination',
     participants: [ROLE.CLIENT, ROLE.CASE_MANAGER],
-    initiators: [ROLE.CLIENT, ROLE.CASE_MANAGER],
-    blurb: 'You and the case manager coordinating your care.',
-    blurbByRole: {
-      [ROLE.CASE_MANAGER]: 'You and the client whose care you coordinate.',
-      [ROLE.ADMIN]: 'The client and their case manager.'
-    }
+    initiators: [],
+    retired: true,   // owner, 2026-10-15: Care Team covers it
+    blurb: 'Retired. Use Care Team.'
   },
   family_portal: {
     id: 'family_portal', label: 'Family Portal',
@@ -204,39 +234,33 @@ function blurbFor(channelId, role) {
   return (role && byRole[role]) || def.blurb || null;
 }
 
-// The brief's table, verbatim, as data. Every row must resolve to a channel
-// whose participants cover both ends — build-enforced — so collapsing the
-// eleven rows into nine channels cannot silently lose one.
+// THE MATRIX AS DATA (owner, 2026-10-15). Every row must resolve to a live
+// channel whose participants cover both ends — build-enforced — so the table
+// and the channels cannot disagree. It replaces the Session 9 brief's table and
+// its 2026-09-13 / 2026-09-29 amendments, which named Operations and Care
+// Coordination.
 const MATRIX_ROWS = Object.freeze([
   { from: ROLE.CLIENT, to: ROLE.CAREGIVER, label: 'Direct', channel: 'direct_care' },
-  { from: ROLE.CLIENT, to: ROLE.ADMIN, label: 'Support', channel: 'support' },
-  { from: ROLE.CLIENT, to: ROLE.CLINICAL, label: 'Clinical Escalation', channel: 'clinical_escalation' },
   { from: ROLE.CAREGIVER, to: ROLE.CLIENT, label: 'Direct', channel: 'direct_care' },
-  { from: ROLE.CAREGIVER, to: ROLE.ADMIN, label: 'Operations', channel: 'operations' },
+  { from: ROLE.ADMIN, to: ROLE.CLIENT, label: 'Direct', channel: 'direct_care' },
+  { from: ROLE.CLIENT, to: ROLE.ADMIN, label: 'Support', channel: 'support' },
+  { from: ROLE.FAMILY, to: ROLE.ADMIN, label: 'Support', channel: 'support' },
+  { from: ROLE.CAREGIVER, to: ROLE.ADMIN, label: 'Support', channel: 'support' },
+  { from: ROLE.CLINICAL, to: ROLE.ADMIN, label: 'Support', channel: 'support' },
+  { from: ROLE.CASE_MANAGER, to: ROLE.ADMIN, label: 'Support', channel: 'support' },
+  { from: ROLE.CLIENT, to: ROLE.CLINICAL, label: 'Clinical Escalation', channel: 'clinical_escalation' },
+  { from: ROLE.CLINICAL, to: ROLE.CLIENT, label: 'Clinical Escalation', channel: 'clinical_escalation' },
   { from: ROLE.CAREGIVER, to: ROLE.CASE_MANAGER, label: 'Behavioral Escalation', channel: 'behavioral_escalation' },
+  { from: ROLE.CASE_MANAGER, to: ROLE.CAREGIVER, label: 'Behavioral Escalation', channel: 'behavioral_escalation' },
   { from: ROLE.CLINICAL, to: ROLE.CAREGIVER, label: 'Clinical Oversight', channel: 'clinical_oversight' },
   { from: ROLE.CLINICAL, to: ROLE.FAMILY, label: 'Care Update', channel: 'care_update' },
-  { from: ROLE.ADMIN, to: '*', label: 'Admin Broadcast or Direct', channel: 'admin_direct' },
-  { from: ROLE.FAMILY, to: ROLE.CAREGIVER, label: 'Family Portal', channel: 'family_portal' },
-  { from: ROLE.FAMILY, to: ROLE.ADMIN, label: 'Support', channel: 'support' },
-  // ---- Owner amendment, 2026-09-13 -----------------------------------------
-  // "all staff should be able to start and send messages and vice versa …
-  //  client can message anyone who is assigned to them as part of their care
-  //  team." The brief's table had no client↔case-manager row at all and only
-  //  ever let the client open the clinical conversation, so a clinician and a
-  //  case manager could each be on a care team with no way to reach the person
-  //  whose care it is. These four rows are that gap, kept in the same table as
-  //  the brief's own so there is still exactly one place the matrix is stated.
-  { from: ROLE.CLIENT, to: ROLE.CASE_MANAGER, label: 'Care Coordination', channel: 'care_coordination' },
-  { from: ROLE.CASE_MANAGER, to: ROLE.CLIENT, label: 'Care Coordination', channel: 'care_coordination' },
-  { from: ROLE.CLINICAL, to: ROLE.CLIENT, label: 'Clinical Escalation', channel: 'clinical_escalation' },
-  { from: ROLE.CASE_MANAGER, to: ROLE.CAREGIVER, label: 'Behavioral Escalation', channel: 'behavioral_escalation' },
-  // ---- Owner amendment, 2026-09-29 -----------------------------------------
-  // A general clinician <-> patient conversation. Clinical Escalation stays the
-  // patient's way to raise a CONCERN (it tracks a response); this is for
-  // everything else, with attachments and formatted text, in both directions.
+  { from: ROLE.CASE_MANAGER, to: ROLE.FAMILY, label: 'Care Update', channel: 'care_update' },
+  { from: ROLE.CLIENT, to: ROLE.CLINICAL, label: 'Care Team', channel: 'care_team' },
   { from: ROLE.CLINICAL, to: ROLE.CLIENT, label: 'Care Team', channel: 'care_team' },
-  { from: ROLE.CLIENT, to: ROLE.CLINICAL, label: 'Care Team', channel: 'care_team' }
+  { from: ROLE.CASE_MANAGER, to: ROLE.CLIENT, label: 'Care Team', channel: 'care_team' },
+  { from: ROLE.CAREGIVER, to: ROLE.CLINICAL, label: 'Care Team', channel: 'care_team' },
+  { from: ROLE.ADMIN, to: '*', label: 'Admin Broadcast or Direct', channel: 'admin_direct' },
+  { from: ROLE.FAMILY, to: ROLE.CAREGIVER, label: 'Family Portal', channel: 'family_portal' }
 ]);
 
 // The roles that work for the agency. Everything that distinguishes "staff" from
@@ -302,6 +326,30 @@ const caseManagerIds = (client) => {
   return [ct.assignedCaseManager, ...extra, ...coordinators].filter(Boolean).map(String);
 };
 
+// The people on a client's care team a Care Team message can go to (owner,
+// 2026-10-15): assigned clinicians, case managers (assigned, supporting) and
+// care coordinators, and the primary and backup caregivers. Active accounts
+// only, each once, named with what they do. The composer's checklist and the
+// route's check read this one list, so the two cannot disagree.
+function careTeamMembers(client, users) {
+  const list = Array.isArray(users) ? users : [];
+  const byId = new Map(list.filter(Boolean).map(u => [String(u.id), u]));
+  const ct = careTeamOf(client);
+  const coordinators = new Set((Array.isArray(ct.careCoordinators) ? ct.careCoordinators : []).map(String));
+  const out = [];
+  const seen = new Set();
+  const push = (id, what) => {
+    const u = byId.get(String(id));
+    if (!u || seen.has(u.id) || (u.accountStatus || 'active') === 'inactive') return;
+    seen.add(u.id);
+    out.push({ id: u.id, name: u.name || u.email || 'Team member', what });
+  };
+  assignedClinicianIds(client).forEach(id => push(id, 'Clinician'));
+  caseManagerIds(client).forEach(id => push(id, coordinators.has(String(id)) ? 'Care coordinator' : 'Case manager'));
+  assignedCaregiverIds(client).forEach(id => push(id, 'Caregiver'));
+  return out;
+}
+
 // Is a caregiver actively assigned to this client? The client↔caregiver channel
 // turns on and off with this, and the brief is explicit that when it is off the
 // channel is DISABLED WITH A REASON, never hidden: a family member who cannot
@@ -353,6 +401,9 @@ function channelAvailability(channelId, { user, client, users, isPoa = false }) 
 
   const role = effectiveRole(user, isPoa);
   if (!role) return { available: false, code: 'UNKNOWN_ROLE', reason: 'This account has no messaging role.' };
+  if (channel.retired) {
+    return { available: false, code: 'CHANNEL_RETIRED', reason: `${channel.label} is retired. ${channel.blurb.replace(/^Retired\. /, '')}` };
+  }
 
   // Admin starts anything (owner rule 2026-09-13: "admin / manager should be
   // able to message anyone"). Every other role is held to the matrix.
@@ -374,10 +425,11 @@ function channelAvailability(channelId, { user, client, users, isPoa = false }) 
   // Care Team is a conversation with a clinician, so a patient or POA starting
   // one needs somebody on the other end. Shown DISABLED with the reason, never
   // hidden. A clinician or admin starting one is the somebody.
-  if (channel.requiresAssignedClinician && (role === ROLE.CLIENT || role === ROLE.FAMILY) && !assignedClinicianIds(client).length) {
+  if (channel.requiresAssignedClinician && (role === ROLE.CLIENT || role === ROLE.FAMILY) &&
+      !assignedClinicianIds(client).length && !caseManagerIds(client).length) {
     return {
       available: false, code: 'NO_CLINICIAN_ASSIGNED_YET',
-      reason: 'No clinician is assigned to you yet, so there is nobody on the other end. The office assigns one, and this opens on its own. For anything urgent, call the office.'
+      reason: 'Nobody is on your care team yet, so there is nobody on the other end. The office assigns one, and this opens on its own. For anything urgent, call the office.'
     };
   }
   if (channelId === 'clinical_escalation' && !assignedClinicianIds(client).length) {
@@ -412,6 +464,7 @@ function withPatient(id) {
 function channelsFor({ user, client, users, isPoa = false }) {
   const role = effectiveRole(user, isPoa);
   return CHANNEL_IDS
+    .filter(id => !CHANNELS[id].retired)
     .filter(id => isUnrestricted(user) || anyRole(CHANNELS[id].initiators, rolesFor(user, isPoa)))
     .map(id => {
       const a = channelAvailability(id, { user, client, users, isPoa });
@@ -419,7 +472,12 @@ function channelsFor({ user, client, users, isPoa = false }) {
         id, label: CHANNELS[id].label, blurb: blurbFor(id, role),
         available: a.available, code: a.code, reason: a.reason,
         oneWay: !!CHANNELS[id].oneWay,
-        withPatient: withPatient(id)
+        withPatient: withPatient(id),
+        // Who the starter may send a Care Team message to, never including
+        // themselves (owner, 2026-10-15).
+        ...(CHANNELS[id].choosesRecipients && client
+          ? { recipients: careTeamMembers(client, users).filter(m => !user || m.id !== user.id) }
+          : {})
       };
     });
 }
@@ -482,6 +540,11 @@ function threadVisibility(user, thread, { client, isPoa = false } = {}) {
     // name them on it. That is wider than the brief's behavioral-only rule on
     // their own clients and NARROWER everywhere else, and it is consistent with
     // the 08/2026 owner decision that gave case managers scoped clinical READ.
+    // A Care Team message the starter sent to CHOSEN people is read only by
+    // them, whoever else is on the care team (owner, 2026-10-15).
+    if (thread.audience_chosen && !isParty(thread, user.id)) {
+      return deny('NOT_ON_THIS_MESSAGE', 'This message was sent to other members of the care team.');
+    }
     if (caseManagerIds(client).includes(String(user.id))) return { visible: true, code: null, reason: null };
     if (isParty(thread, user.id)) return { visible: true, code: null, reason: null };
     // The one carve-out, and it is the reason the brief made behavioral
@@ -495,6 +558,9 @@ function threadVisibility(user, thread, { client, isPoa = false } = {}) {
   }
 
   if (role === ROLE.CLINICAL) {
+    if (thread.audience_chosen && !isParty(thread, user.id)) {
+      return deny('NOT_ON_THIS_MESSAGE', 'This message was sent to other members of the care team.');
+    }
     const assigned = client ? (assignedClinicianIds(client).includes(user.id) || caseManagerIds(client).includes(String(user.id))) : false;
     if (assigned || isParty(thread, user.id)) return { visible: true, code: null, reason: null };
     return deny('CLINICAL_NOT_ASSIGNED', 'You are not on this client\'s care team.');
@@ -695,7 +761,7 @@ module.exports = {
   ROLE, ROLE_LABELS, actorRole,
   CHANNELS, CHANNEL_IDS, MATRIX_ROWS, channelById, blurbFor,
   STAFF_ROLES, isStaffRole, isUnrestricted,
-  careTeamOf, assignedCaregiverIds, assignedClinicianIds, assignedCaseManagerId, caseManagerIds, hasActiveCaregiver,
+  careTeamOf, assignedCaregiverIds, assignedClinicianIds, assignedCaseManagerId, caseManagerIds, careTeamMembers, hasActiveCaregiver,
   clientInScope, channelAvailability, channelsFor, withPatient,
   isParty, ownClientId, threadVisibility, canPostToThread, canDeleteThread,
   senderIdentity, validateMessage, previewOf, effectiveRole, MAX_BODY, MAX_ATTACHMENTS, ATTACHMENT_MIMES,

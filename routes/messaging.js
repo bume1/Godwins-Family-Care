@@ -129,7 +129,10 @@ module.exports = function createMessagingRoutes(deps) {
     if (wants.includes(msg.ROLE.CLIENT) && client) add(client.id);
     if (wants.includes(msg.ROLE.CAREGIVER)) msg.assignedCaregiverIds(client).forEach(add);
     if (wants.includes(msg.ROLE.CLINICAL)) msg.assignedClinicianIds(client).forEach(add);
-    if (wants.includes(msg.ROLE.CASE_MANAGER)) add(msg.assignedCaseManagerId(client));
+    // Every case manager on the care team: the assigned one, supporting case
+    // managers and care coordinators (owner, 2026-10-15: "the entire clinical
+    // team for that patient").
+    if (wants.includes(msg.ROLE.CASE_MANAGER)) msg.caseManagerIds(client).forEach(add);
     if (wants.includes(msg.ROLE.FAMILY) && client) {
       users.filter(u => u.role === ROLES.FAMILY && u.familyOfClientId === client.id).forEach(u => add(u.id));
     }
@@ -513,6 +516,24 @@ module.exports = function createMessagingRoutes(deps) {
         return res.status(403).json({ error: availability.reason, code: availability.code });
       }
 
+      // CARE TEAM: the starter chooses who on the care team it goes to (owner,
+      // 2026-10-15). Checked against the same list the composer shows, before
+      // anything is stored. Sent without a choice (an older page), it goes to
+      // the whole care team, as it did before.
+      let chosen = null;
+      if (channel.choosesRecipients && body.recipientIds !== undefined && body.recipientIds !== '') {
+        let ids = body.recipientIds;
+        if (typeof ids === 'string') { try { ids = JSON.parse(ids); } catch (e) { ids = null; } }
+        if (!Array.isArray(ids)) return res.status(400).json({ error: 'recipientIds must be a list.', code: 'RECIPIENTS_INVALID' });
+        const team = msg.careTeamMembers(client, users).filter(m => m.id !== req.user.id);
+        const allowed = new Set(team.map(m => String(m.id)));
+        const wanted = [...new Set(ids.map(String))];
+        const stray = wanted.filter(id => !allowed.has(id));
+        if (stray.length) return res.status(400).json({ error: 'Only people on this patient\'s care team can be chosen.', code: 'RECIPIENT_NOT_ON_CARE_TEAM' });
+        if (!wanted.length) return res.status(400).json({ error: 'Choose at least one person from the care team.', code: 'RECIPIENTS_REQUIRED' });
+        chosen = { ids: wanted, partial: wanted.length < team.length };
+      }
+
       const files = req.files || [];
       const { valid, errors, clean } = msg.validateMessage(body, { attachmentCount: files.length });
       if (!valid) return res.status(400).json({ error: errors[0].message, code: errors[0].code, errors });
@@ -533,7 +554,12 @@ module.exports = function createMessagingRoutes(deps) {
         client_id: client.id,
         client_name: client.name,
         subject: String(body.subject || channel.label).trim().slice(0, 140),
-        participant_ids: await participantsFor(channelId, { user: req.user, client }),
+        participant_ids: chosen
+          ? [...new Set([req.user.id, client.id, ...poaIdsFor(users, client), ...chosen.ids])]
+          : await participantsFor(channelId, { user: req.user, client }),
+        // True when the starter left someone on the care team off: then only
+        // the people on it read it (messagingRepository.threadVisibility).
+        audience_chosen: !!(chosen && chosen.partial),
         started_by: req.user.id,
         started_by_name: sender.displayName,
         started_by_role: sender.fromRole,

@@ -722,7 +722,9 @@ test('R14. a patient is told PHI-free on EVERY channel they are on, never the st
   try {
     for (const [channel, sender] of [['care_team', 'ru1'], ['support', 'ra1'],
                                      ['clinical_escalation', 'ru1'], ['admin_direct', 'ra1'],
-                                     ['care_coordination', 'rm1']]) {
+                                     // Care Coordination was retired 2026-10-15; a case
+                                     // manager now reaches the patient by Care Update.
+                                     ['care_update', 'rm1']]) {
       notices.length = 0;
       const res = await fetch(`http://127.0.0.1:${port}/api/messaging/threads`, {
         method: 'POST', headers: { 'x-as': sender, 'Content-Type': 'application/json' },
