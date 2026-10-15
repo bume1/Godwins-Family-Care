@@ -9315,7 +9315,7 @@
       // day starts.
       // `/clinical#inbox` is where the referral email points (appLinks), so the
       // fragment is read ONCE, at mount. Anything else lands on My Day.
-      const [view, setView] = useState(() => (String(window.location.hash || '').replace(/^#/, '') === 'inbox' ? 'inbox' : 'myday')); // 'myday' (4.12) | 'charts' | 'schedule' (4.2) | 'queue' (4.4) | 'inbox' (4.9) | 'results' | 'overdue' (4.10)
+      const [view, setView] = useState(() => { const h = String(window.location.hash || '').replace(/^#/, ''); return h === 'inbox' || h === 'queue' ? h : 'myday'; }); // 'myday' (4.12) | 'charts' | 'schedule' (4.2) | 'queue' (4.4) | 'inbox' (4.9) | 'results' | 'overdue' (4.10)
       const [hpApptEid, setHpApptEid] = useState(null); // H&P opened from an appointment
       const [encTarget, setEncTarget] = useState(null); // encounter to open on the Encounters tab (4.4)
 

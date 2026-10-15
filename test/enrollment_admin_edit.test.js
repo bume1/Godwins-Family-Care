@@ -109,15 +109,15 @@ const WORKFLOW_WRITES = [
   ["app.put('/api/gfc/admin/enrollment/:clientId/rate'", 'set the agreed rate']
 ];
 
-test('every WORKFLOW write on the enrollment surface is still admin only', () => {
+test('every WORKFLOW write on the enrollment surface is admin, manager or coordinator (owner, 2026-10-15)', () => {
   for (const [decl, what] of WORKFLOW_WRITES) {
     const at = SERVER.indexOf(decl);
     assert.notStrictEqual(at, -1, `route missing: ${what}`);
     const line = SERVER.slice(at, SERVER.indexOf('\n', at));
-    assert.ok(line.includes('requireAdmin'), `${what} must be admin-gated — got: ${line.trim()}`);
+    assert.ok(line.includes('requireEnrollmentManager'), `${what} must be on the enrollment-manager gate — got: ${line.trim()}`);
     assert.ok(!line.includes('requireEnrollmentStaff'), `${what} still on the wider staff gate`);
     assert.ok(!line.includes('requireEnrollmentEditor'),
-      `${what} is a decision about the file, not a correction to it — admin only`);
+      `${what} is a decision about the file, not a correction to it — not a clinician's`);
   }
 });
 
@@ -139,9 +139,12 @@ function loadCanEdit() {
   const end = SERVER.indexOf('const requireEnrollmentEditor', start);
   assert.ok(end > start, 'the gate moved away from its predicate');
   const clinicalRoles = require('../clinicalRoles');
+  // canManageEnrollment (owner, 2026-10-15) is the manager/coordinator half.
+  const m = SERVER.indexOf('const canManageEnrollment = ');
+  const manage = SERVER.slice(m, SERVER.indexOf(';', m) + 1);
   // eslint-disable-next-line no-new-func
   return new Function('config', 'patientRead',
-    `${SERVER.slice(start, end)}; return canEditEnrollment;`
+    `${manage}\n${SERVER.slice(start, end)}; return canEditEnrollment;`
   )({ ROLES: { ADMIN: 'admin' } }, { canClinicalWrite: clinicalRoles.canClinicalWrite });
 }
 
@@ -158,6 +161,8 @@ test('an admin and a licensed clinician may edit; a case manager still may not',
   assert.ok(!canEdit({ role: 'caseManager', clinicalRole: 'readOnly', hasClinicalAccess: true }), 'still read-only with the legacy flag');
   assert.ok(!canEdit({ role: 'user', clinicalRole: 'readOnly' }), 'readOnly is read-only');
   assert.ok(!canEdit({ role: 'user' }), 'a non-clinical staff user does not edit');
+  assert.ok(canEdit({ role: 'user', isManager: true }), 'a manager edits (owner, 2026-10-15)');
+  assert.ok(canEdit({ role: 'user', isManager: true, clinicalRole: 'coordinator' }), 'a care coordinator edits');
   assert.ok(!canEdit({ role: 'client' }), 'a client does not edit their own file from here');
   assert.ok(!canEdit(null), 'no user, no edit');
 });
@@ -178,7 +183,7 @@ test('the enrollment page offers no control the API will refuse', () => {
   // A button that answers 403 is worse than no button. TWO answers now, because
   // the API gives two, and each is asked once so no control can drift from the
   // route behind it.
-  assert.match(ENROL, /const canEdit = isAdminRole\(user\)/);
+  assert.match(ENROL, /const canEdit = canManageRole\(user\)/);
   // The submission answer comes FROM THE SERVER, on the record it just served —
   // never inferred from a login stored in this browser, which is how a screen
   // starts offering a button a role narrowed this morning can no longer use.
@@ -197,7 +202,7 @@ test('the enrollment page offers no control the API will refuse', () => {
   assert.match(ENROL, /You can correct this submission/);
   // Note the arrow function in the onClick — [^>]* would stop at its ">".
   assert.match(ENROL, /\{canEdit && <button [\s\S]{0,120}?>Record Paper Signature<\/button>\}/);
-  assert.match(ENROL, /<DocumentExchange clientId=\{clientId\} canEdit=\{canEdit\} isAdmin=\{isAdminRole\(user\)\} \/>/);
+  assert.match(ENROL, /<DocumentExchange clientId=\{clientId\} canEdit=\{canEdit\} isAdmin=\{canManageRole\(user\)\} \/>/);
 });
 
 test('printing a blank consent stays open to staff — it is a read', () => {

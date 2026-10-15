@@ -140,7 +140,11 @@ test('care coordinators sit on the client record and share the case manager scop
   assert.match(serverCode, /team\.careCoordinators[^\n]*'Care coordinator'/, 'the portal care team names them');
   const hub = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin-hub.html'), 'utf8');
   assert.match(hub, /Care Coordinators<\/label>/);
-  assert.match(hub, /<option value="coordinator">Care Coordinator<\/option>/);
+  // The type is SERVED now (accountTypes.js, owner 2026-10-15) and the form
+  // lists none of its own, so the check is on the catalog and the map.
+  const accountTypes = require('../accountTypes');
+  assert.ok(accountTypes.ACCOUNT_TYPES.some(t => t.value === 'coordinator' && t.label === 'Care Coordinator'));
+  assert.match(hub, /accountTypeCatalog\.map/);
 });
 
 test('the LMSW boot migration never overrules a role an admin chose', () => {

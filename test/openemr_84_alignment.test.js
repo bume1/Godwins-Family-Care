@@ -376,10 +376,11 @@ test('signing is gated on a derived place of service', () => {
     'a signed encounter becomes a claim, and a claim needs a real POS');
 });
 
-test('the facility assignment is per-patient, admin-set, and never a clinician choice', () => {
+test('the facility assignment is per-patient, set by whoever runs patient accounts, and never a clinician choice', () => {
   const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
   const route = server.slice(server.indexOf("patients/:clientId/facility'"), server.indexOf("patients/:clientId/facility'") + 2600);
-  assert.match(route, /requireAdmin/, 'assignment is an admin action, not a clinician one');
+  // Owner, 2026-10-15: admin, manager or care coordinator — never a clinician.
+  assert.match(route, /requireEnrollmentManager/, 'assignment is an account-management action, not a clinician one');
   assert.match(route, /openEmrFacilityId/);
   // The POS is read off OpenEMR's facility record; it is never typed here.
   assert.doesNotMatch(route, /pos_code\s*=/, 'the app must never set a POS itself');

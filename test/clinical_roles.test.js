@@ -628,9 +628,14 @@ test('clinical users are already in MFA_REQUIRED_ROLES — confirmed, not re-plu
 
 test('the admin form does not restate the role enum', () => {
   const hub = fs.readFileSync(path.join(root, 'public', 'admin-hub.html'), 'utf8');
-  const form = hub.slice(hub.indexOf('Clinical role (Session 4.8)'), hub.indexOf('Clinical role (Session 4.8)') + 3000);
-  assert.match(form, /clinicalRoleCatalog\.map/, 'options come from GET /api/admin/clinical-roles');
-  for (const v of ['lcsw', 'lmsw']) {
+  // One Account Type picker replaced the Role + Clinical role pair (owner,
+  // 2026-10-15). Its types and a manager's access levels are both served.
+  const start = hub.indexOf('Account Type *');
+  assert.ok(start > 0, 'the account type picker is on the form');
+  const form = hub.slice(start, hub.indexOf('{selectedClinicalRole && (', start));
+  assert.match(form, /accountTypeCatalog\.map/, 'types come from GET /api/admin/clinical-roles');
+  assert.match(form, /managerAccessCatalog\.map/, "a manager's clinical access levels are served too");
+  for (const v of ['lcsw', 'lmsw', 'provider', 'coordinator', 'readOnly']) {
     assert.ok(!new RegExp(`value="${v}"`).test(form), `${v} must not be hardcoded as an option`);
   }
   assert.match(serverSrc, /app\.get\('\/api\/admin\/clinical-roles'/);

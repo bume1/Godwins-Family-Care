@@ -69,6 +69,7 @@ const patientPublish = require('./patientPublish');   // Portal P1: the publishe
 // vocabulary lives there rather than in config.js for the same reason the
 // caregiver vocabulary lives in caregiverRepository.js.
 const clinicalRoles = require('./clinicalRoles');
+const accountTypes = require('./accountTypes');   // one account type sets role, manager flag and clinical role (owner, 2026-10-15)
 const impersonation = require('./impersonation');      // "View as" for the Super Admin (2026-10-12)
 const standingOrders = require('./standingOrders');   // signed, versioned, expiring protocols (4.8 Scope C)
 const clinicalInbox = require('./clinicalInbox');     // what is waiting on a clinician (4.9)
@@ -2349,9 +2350,10 @@ const authenticateToken = async (req, res, next) => {
         projectAccessLevels: freshUser.projectAccessLevels || {},
         // Manager flag - provides limited admin access (client portal admin + service portal in admin hub)
         isManager: isManager,
-        // Granular permission flags
-        hasServicePortalAccess: freshUser.hasServicePortalAccess || false,
-        hasAdminHubAccess: freshUser.hasAdminHubAccess || false,
+        // The one account type (accountTypes.js, owner 2026-10-15). The three
+        // lab-era access checkboxes are gone: only a Super Admin opens the
+        // Admin Hub, the Client Portal Admin and the Service Portal.
+        accountType: accountTypes.accountTypeOf(freshUser),
         hasImplementationsAccess: freshUser.hasImplementationsAccess || false,
         // Clinical (FNP/RN) access — gates the clinician workspace (Session 4.1)
         hasClinicalAccess: freshUser.hasClinicalAccess || false,
@@ -2363,8 +2365,6 @@ const authenticateToken = async (req, res, next) => {
         // every charge (Session 4.4 §4; the EMR write itself is per-user
         // since Session 5.2)
         npi: freshUser.npi || null,
-        // Managers automatically get client portal admin access
-        hasClientPortalAdminAccess: freshUser.hasClientPortalAdminAccess || isManager || false,
         // Vendor-specific: clients they can service
         assignedClients: freshUser.assignedClients || [],
         // Client-specific fields
@@ -2570,6 +2570,19 @@ function buildServiceReportFromTicket(ticket, assignedToId, assignedToName, serv
 }
 
 // Super Admin access - full system access (role === 'admin')
+// WHO RUNS A PATIENT'S ACCOUNT (owner, 2026-10-15): the Super Admin, a
+// manager and a care coordinator ("coordinators and managers need to be able to
+// view and edit enrollment"). Approving enrollment, the service line, the
+// documents, the rate, paper signatures, sign-ups, family invites and the
+// patient's facility. Coordinators carry the manager flag (accountTypes.js),
+// so one predicate covers both.
+const canManageEnrollment = (u) => !!u && u.accountStatus !== 'inactive' &&
+  (u.role === config.ROLES.ADMIN || u.isManager === true);
+const requireEnrollmentManager = (req, res, next) => {
+  if (canManageEnrollment(req.user)) return next();
+  return res.status(403).json({ error: 'An admin, a manager or a care coordinator makes this change.', code: 'ENROLLMENT_MANAGER_ONLY' });
+};
+
 const requireAdmin = (req, res, next) => {
   if (req.user.role !== config.ROLES.ADMIN) {
     return res.status(403).json({ error: 'Super Admin access required' });
@@ -2677,10 +2690,11 @@ const noteTypeRefusal = (user, note, before) => {
   return r.ok ? null : { status: 403, body: { error: r.error, code: r.code, clinicalRole: role } };
 };
 
-// Require Admin Hub access (super admins, managers, or users with hasAdminHubAccess)
-// Note: Managers can access Admin Hub but only Service Portal section (UI handles section visibility)
+// Require Admin Hub access. Super Admin only (owner, 2026-10-15): managers and
+// care coordinators work from the clinical workspace and Private Home Care,
+// and the lab-era hasAdminHubAccess checkbox no longer opens anything.
 const requireAdminHubAccess = (req, res, next) => {
-  if (req.user.role === config.ROLES.ADMIN || req.user.isManager || req.user.hasAdminHubAccess) {
+  if (req.user.role === config.ROLES.ADMIN) {
     return next();
   }
   return res.status(403).json({ error: 'Admin Hub access required' });
@@ -2703,9 +2717,9 @@ const requireImplementationsAccess = (req, res, next) => {
   return res.status(403).json({ error: 'Implementations App access required' });
 };
 
-// Require Client Portal Admin access (super admins, managers, or users with hasClientPortalAdminAccess)
+// Require Client Portal Admin access. Super Admin only (owner, 2026-10-15).
 const requireClientPortalAdmin = (req, res, next) => {
-  if (req.user.role === config.ROLES.ADMIN || req.user.isManager || req.user.hasClientPortalAdminAccess) {
+  if (req.user.role === config.ROLES.ADMIN) {
     return next();
   }
   return res.status(403).json({ error: 'Client Portal admin access required' });
@@ -2742,8 +2756,7 @@ const requireEnrolledClient = async (req, res, next) => {
 
     // Staff oversight roles are not subject to the client enrollment gate.
     if (role === config.ROLES.ADMIN || role === config.ROLES.USER ||
-        role === config.ROLES.CASE_MANAGER || req.user.isManager ||
-        req.user.hasClientPortalAdminAccess) {
+        role === config.ROLES.CASE_MANAGER || req.user.isManager) {
       return next();
     }
 
@@ -2920,7 +2933,12 @@ app.get('/api/admin/clinical-roles', authenticateToken, requireAdmin, (req, res)
       credentialCeiling: clinicalRoles.ceilingFor(value),
       licensed: clinicalRoles.LICENSED_CLINICAL_ROLES.includes(value)
     })),
-    capabilityLabels: clinicalRoles.CAPABILITY_REASONS
+    capabilityLabels: clinicalRoles.CAPABILITY_REASONS,
+    // The ONE account-type picker (owner, 2026-10-15), served so the form
+    // never lists a type of its own.
+    accountTypes: accountTypes.ACCOUNT_TYPES.map(t => ({ ...t, fields: accountTypes.fieldsFor(t.value) })),
+    managerClinicalAccess: accountTypes.MANAGER_CLINICAL_ACCESS,
+    defaultManagerClinicalAccess: accountTypes.DEFAULT_MANAGER_CLINICAL_ACCESS
   });
 });
 
@@ -2935,14 +2953,27 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       return res.status(403).json({ error: 'Admin or Manager access required' });
     }
     const {
-      email, password, name, role, practiceName, isNewClient, assignedProjects, logo,
-      hasServicePortalAccess, hasAdminHubAccess, hasImplementationsAccess, hasClientPortalAdminAccess,
-      isManager, assignedClients, hubspotCompanyId, hubspotDealId, hubspotContactId, projectAccessLevels,
+      email, password, name, practiceName, isNewClient, assignedProjects, logo,
+      hasImplementationsAccess,
+      assignedClients, hubspotCompanyId, hubspotDealId, hubspotContactId, projectAccessLevels,
       existingPortalSlug, phone, sendWelcomeEmail: shouldSendWelcome = true,
       licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
       familyIsPoa, openEmrProviderId, npi, payRate, clientPayRates, rateAgreement,
-      clinicalRole, prescriberCredential, deaNumber, deaSchedules, deaExpiresAt, medicareEnrollment
+      prescriberCredential, deaNumber, deaSchedules, deaExpiresAt, medicareEnrollment,
+      accountType, managerClinicalAccess
     } = req.body;
+
+    // THE ACCOUNT TYPE DECIDES role, isManager and clinicalRole (owner,
+    // 2026-10-15). When the form sends one, it overrides whatever those three
+    // fields said, so the two can never disagree. An unknown type is refused by
+    // name rather than silently falling back to the old fields.
+    if (accountType !== undefined && accountType !== null && accountType !== '' && !accountTypes.isValidType(accountType)) {
+      return res.status(400).json({ error: `accountType must be one of ${accountTypes.ALL_TYPES.join(', ')}`, code: 'ACCOUNT_TYPE_INVALID' });
+    }
+    const typed = accountTypes.isValidType(accountType) ? accountTypes.fieldsFor(accountType, { managerClinicalAccess }) : null;
+    const role = typed ? typed.role : req.body.role;
+    const isManager = typed ? typed.isManager : req.body.isManager;
+    const clinicalRole = typed ? typed.clinicalRole : req.body.clinicalRole;
 
     // Managers can only create client users
     if (isCurrentUserManager && !isSuperAdmin && role !== config.ROLES.CLIENT) {
@@ -2965,11 +2996,14 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       role: role || config.ROLES.USER, // admin (super admin), user, client, vendor
       // Manager flag - provides limited admin access
       isManager: isManager || false,
-      // Permission flags
-      hasServicePortalAccess: hasServicePortalAccess || false,
-      hasAdminHubAccess: hasAdminHubAccess || false,
+      // The lab-era Service Portal / Admin Hub / Client Portal Admin checkboxes
+      // are retired (owner, 2026-10-15): those areas are the Super Admin's.
+      hasServicePortalAccess: false,
+      hasAdminHubAccess: false,
       hasImplementationsAccess: hasImplementationsAccess || false,
-      hasClientPortalAdminAccess: hasClientPortalAdminAccess || false,
+      hasClientPortalAdminAccess: false,
+      accountType: typed ? typed.accountType : null,
+      ...(typed && typed.managerClinicalAccess ? { managerClinicalAccess: typed.managerClinicalAccess } : {}),
       // GFC extended fields
       // Session 4.8: `clinicalRole` is the authority — certification gates
       // prescribing, direct ordering, CPT selection and billable signing.
@@ -2977,9 +3011,10 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       // reader (login destination, messaging, MFA, caregiver + scheduling
       // routes) keeps working; it is no longer what decides anything clinical.
       clinicalRole: clinicalRoles.isValidClinicalRole(clinicalRole) ? String(clinicalRole) : null,
-      hasClinicalAccess: clinicalRoles.isValidClinicalRole(clinicalRole)
-        ? clinicalRoles.derivedHasClinicalAccess({ clinicalRole })
-        : (hasClinicalAccess || false),
+      hasClinicalAccess: typed ? typed.hasClinicalAccess
+        : clinicalRoles.isValidClinicalRole(clinicalRole)
+          ? clinicalRoles.derivedHasClinicalAccess({ clinicalRole })
+          : (hasClinicalAccess || false),
       // A case manager created with a chosen role keeps it: the boot LMSW
       // migration only moves case managers nobody chose a role for.
       ...(role === config.ROLES.CASE_MANAGER && clinicalRoles.isValidClinicalRole(clinicalRole)
@@ -3092,8 +3127,6 @@ app.post('/api/users', authenticateToken, async (req, res) => {
     // Vendor-specific fields
     if (role === config.ROLES.VENDOR) {
       newUser.assignedClients = assignedClients || [];
-      // Vendors automatically get service portal access
-      newUser.hasServicePortalAccess = true;
     }
 
     // Family / authorized contact: the client (user id) this account is linked
@@ -3405,8 +3438,7 @@ app.get('/api/auth/heartbeat', authenticateToken, (req, res) => {
 const viewAsDestination = (u) => {
   const home = appLinks.homeFor(u);
   if (home !== appLinks.PATHS.LOGIN) return home;
-  if (u.isManager || u.hasAdminHubAccess || u.hasClientPortalAdminAccess) return appLinks.PATHS.ADMIN;
-  if (u.role === config.ROLES.VENDOR || u.hasServicePortalAccess) return '/service-portal';
+  // Managers and care coordinators land on the Portal Hub (accountTypes.js).
   return appLinks.PATHS.LOGIN;
 };
 app.post('/api/admin/impersonate/:userId', authenticateToken, requireAdmin, async (req, res) => {
@@ -3475,12 +3507,13 @@ app.post('/api/auth/login', async (req, res) => {
       role: user.role,
       // Manager flag - provides limited admin access
       isManager: isManager,
-      // Include permission flags for all users
-      hasServicePortalAccess: user.hasServicePortalAccess || false,
-      hasAdminHubAccess: user.hasAdminHubAccess || false,
       hasImplementationsAccess: user.hasImplementationsAccess || false,
-      // Managers automatically get client portal admin access
-      hasClientPortalAdminAccess: user.hasClientPortalAdminAccess || isManager || false,
+      // Where this account lands and which hub tiles it sees, answered ONCE on
+      // the server (accountTypes.js) so the login page cannot drift from it.
+      accountType: accountTypes.accountTypeOf(user),
+      clinicalRole: clinicalRoles.resolveClinicalRole(user),
+      landing: accountTypes.landingFor(user),
+      hubTiles: accountTypes.hubTilesFor(user),
       assignedProjects: user.assignedProjects || [],
       assignedClients: user.assignedClients || [],
       // GFC role fields — the login page's directDestination() routes on
@@ -3518,6 +3551,8 @@ app.post('/api/auth/login', async (req, res) => {
     if (user.role === config.ROLES.USER) {
       userResponse.projectAccessLevels = user.projectAccessLevels || {};
     }
+    // A client's slug may have just been generated above; land on it.
+    if (user.role === config.ROLES.CLIENT) userResponse.landing = accountTypes.landingFor({ ...user, slug: userResponse.slug });
     res.json(await finishLogin({ user, req, surface: 'unified', userResponse }));
   } catch (error) {
     console.error('Login error:', error);
@@ -3534,7 +3569,7 @@ app.post('/api/auth/client-login', async (req, res) => {
     }
     const users = await getUsers();
     // Allow clients, admins (super admin), and managers to log into the portal
-    const user = users.find(u => u.email?.toLowerCase() === email.toLowerCase() && (u.role === config.ROLES.CLIENT || u.role === config.ROLES.ADMIN || u.isManager));
+    const user = users.find(u => u.email?.toLowerCase() === email.toLowerCase() && (u.role === config.ROLES.CLIENT || u.role === config.ROLES.ADMIN));
     if (!user || !(await bcrypt.compare(password, user.password))) {
       return res.status(400).json({ error: 'Invalid credentials' });
     }
@@ -3546,16 +3581,15 @@ app.post('/api/auth/client-login', async (req, res) => {
     if (user.role === config.ROLES.CLIENT && slug && user.slug !== slug) {
       return res.status(400).json({ error: 'Invalid portal access' });
     }
-    const isManager = user.isManager || false;
-    // Admin and Manager get 'admin' slug for portal admin access
-    const effectiveSlug = (user.role === config.ROLES.ADMIN || isManager) ? 'admin' : user.slug;
+    // Only a Super Admin opens the Client Portal Admin (owner, 2026-10-15).
+    const effectiveSlug = user.role === config.ROLES.ADMIN ? 'admin' : user.slug;
     res.json(await finishLogin({ user, req, surface: 'portal', userResponse: {
       id: user.id,
       email: user.email,
       name: user.name,
       role: user.role,
-      isManager: isManager,
-      hasClientPortalAdminAccess: user.hasClientPortalAdminAccess || isManager || user.role === config.ROLES.ADMIN,
+      isManager: !!user.isManager,
+      hasClientPortalAdminAccess: user.role === config.ROLES.ADMIN,
       practiceName: user.practiceName,
       isNewClient: user.isNewClient,
       slug: effectiveSlug,
@@ -3903,7 +3937,7 @@ app.get('/api/admin/activity-log', authenticateToken, requireAdmin, async (req, 
 // ============== USER MANAGEMENT (Super Admin, Manager, and Client Portal Admin) ==============
 app.get('/api/users', authenticateToken, async (req, res) => {
   // Allow super admins, managers, and client portal admins to view users
-  if (req.user.role !== config.ROLES.ADMIN && !req.user.isManager && !req.user.hasClientPortalAdminAccess) {
+  if (req.user.role !== config.ROLES.ADMIN && !req.user.isManager) {
     return res.status(403).json({ error: 'Access denied' });
   }
   try {
@@ -3920,11 +3954,13 @@ app.get('/api/users', authenticateToken, async (req, res) => {
       createdAt: u.createdAt,
       // Manager flag
       isManager: u.isManager || false,
-      // Permission flags
-      hasServicePortalAccess: u.hasServicePortalAccess || false,
-      hasAdminHubAccess: u.hasAdminHubAccess || false,
       hasImplementationsAccess: u.hasImplementationsAccess || false,
-      hasClientPortalAdminAccess: u.hasClientPortalAdminAccess || false,
+      // The one account type (owner, 2026-10-15). `accountTypeNeedsReview` is
+      // true for a record the boot migration could not place, so the user form
+      // can say who still needs a type chosen.
+      accountType: accountTypes.accountTypeOf(u),
+      managerClinicalAccess: accountTypes.accountTypeOf(u) === accountTypes.TYPES.MANAGER ? accountTypes.managerAccessOf(u) : null,
+      accountTypeNeedsReview: !accountTypes.accountTypeOf(u),
       // Team member fields
       assignedProjects: u.assignedProjects || [],
       projectAccessLevels: u.projectAccessLevels || {},
@@ -4038,18 +4074,50 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
   try {
     const { userId } = req.params;
     const {
-      name, email, role, password, assignedProjects, projectAccessLevels,
+      name, email, password, assignedProjects, projectAccessLevels,
       practiceName, isNewClient, logo, hubspotCompanyId, hubspotDealId, hubspotContactId,
-      hasServicePortalAccess, hasAdminHubAccess, hasImplementationsAccess, hasClientPortalAdminAccess,
-      isManager, assignedClients, phone, accountStatus, emailUnsubscribed,
+      hasImplementationsAccess,
+      assignedClients, phone, accountStatus, emailUnsubscribed,
       licenseLevel, hasClinicalAccess, enrollmentStatus, careTeam, familyOfClientId,
-      familyIsPoa, openEmrProviderId, npi, payRate, clientPayRates, clinicalRole,
+      familyIsPoa, openEmrProviderId, npi, payRate, clientPayRates,
       prescriberCredential, deaNumber, deaSchedules, deaExpiresAt, medicareEnrollment,
-      resetPassword
+      resetPassword, accountType, managerClinicalAccess
     } = req.body;
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === userId);
     if (idx === -1) return res.status(404).json({ error: 'User not found' });
+
+    // THE ACCOUNT TYPE DECIDES role, isManager and clinicalRole (owner,
+    // 2026-10-15), so the form cannot save a combination that disagrees with
+    // itself. Sent without a type (an older script), the three fields are read
+    // as before.
+    if (accountType !== undefined && accountType !== null && accountType !== '' && !accountTypes.isValidType(accountType)) {
+      return res.status(400).json({ error: `accountType must be one of ${accountTypes.ALL_TYPES.join(', ')}`, code: 'ACCOUNT_TYPE_INVALID' });
+    }
+    if (managerClinicalAccess !== undefined && managerClinicalAccess !== null && managerClinicalAccess !== '' && !accountTypes.isValidManagerAccess(managerClinicalAccess)) {
+      return res.status(400).json({ error: `managerClinicalAccess must be one of ${accountTypes.MANAGER_CLINICAL_ACCESS.map(a => a.value).join(', ')}`, code: 'MANAGER_ACCESS_INVALID' });
+    }
+    const typed = accountTypes.isValidType(accountType) ? accountTypes.fieldsFor(accountType, { managerClinicalAccess }) : null;
+    if (typed && users[idx].role === config.ROLES.ADMIN && typed.role !== config.ROLES.ADMIN &&
+        users.filter(u => u && u.role === config.ROLES.ADMIN && u.accountStatus !== 'inactive').length <= 1) {
+      return res.status(409).json({ error: 'This is the only Super Admin. Make someone else a Super Admin first.', code: 'LAST_SUPER_ADMIN' });
+    }
+    const role = typed ? typed.role : req.body.role;
+    const isManager = typed ? typed.isManager : req.body.isManager;
+    const clinicalRole = typed ? typed.clinicalRole : req.body.clinicalRole;
+    if (typed) {
+      const before = accountTypes.accountTypeOf(users[idx]);
+      const beforeAccess = accountTypes.managerAccessOf(users[idx]);
+      users[idx].accountType = typed.accountType;
+      users[idx].accountTypeNeedsReview = false;
+      if (typed.managerClinicalAccess) users[idx].managerClinicalAccess = typed.managerClinicalAccess;
+      else delete users[idx].managerClinicalAccess;
+      if (before !== typed.accountType || (typed.managerClinicalAccess && typed.managerClinicalAccess !== beforeAccess)) {
+        await logActivity(req.user.id, req.user.name || req.user.email, 'account_type_set', 'user', users[idx].id, {
+          from: before, to: typed.accountType, managerClinicalAccess: typed.managerClinicalAccess || null, targetName: users[idx].name
+        });
+      }
+    }
 
     if (phone !== undefined) users[idx].phone = phone;
     if (emailUnsubscribed !== undefined) users[idx].emailUnsubscribed = emailUnsubscribed;
@@ -4086,11 +4154,12 @@ app.put('/api/users/:userId', authenticateToken, requireAdmin, async (req, res) 
     // Manager flag - provides limited admin access
     if (isManager !== undefined) users[idx].isManager = isManager;
 
-    // Permission flags
-    if (hasServicePortalAccess !== undefined) users[idx].hasServicePortalAccess = hasServicePortalAccess;
-    if (hasAdminHubAccess !== undefined) users[idx].hasAdminHubAccess = hasAdminHubAccess;
+    // The lab-era access checkboxes are retired (owner, 2026-10-15). Any save
+    // clears them, whatever the body says.
+    users[idx].hasServicePortalAccess = false;
+    users[idx].hasAdminHubAccess = false;
+    users[idx].hasClientPortalAdminAccess = false;
     if (hasImplementationsAccess !== undefined) users[idx].hasImplementationsAccess = hasImplementationsAccess;
-    if (hasClientPortalAdminAccess !== undefined) users[idx].hasClientPortalAdminAccess = hasClientPortalAdminAccess;
 
     // GFC extended fields
     if (licenseLevel !== undefined) users[idx].licenseLevel = licenseLevel;
@@ -6405,6 +6474,27 @@ async function migrateClinicalRoles() {
     invalidateUsersCache();
     console.log(`[roles] ${lmsw.changed.length} case manager${lmsw.changed.length === 1 ? '' : 's'} moved from read-only to LMSW (owner rule, 2026-10-12).`);
   }
+}
+
+// ── One account type per user (owner, 2026-10-15) ─────────────────────────
+// Clears the retired lab-era access checkboxes, moves a care coordinator off
+// the case-manager role onto the coordinator type, moves an LMSW set up as a
+// clinical account onto LMSW / Case Manager, and writes `accountType`. A record
+// that does not map cleanly onto a type is FLAGGED for an admin, never guessed.
+// Idempotent: a consistent record is left alone. Runs after the clinical-role
+// migrations so a case manager has already been given LMSW.
+async function migrateAccountTypes() {
+  const users = await getUsers();
+  const { users: next, changed, needsReview } = accountTypes.applyAccountTypeMigration(users);
+  if (changed.length) {
+    await db.set('users', next);
+    invalidateUsersCache();
+    console.log(`[accounts] ${changed.length} account${changed.length === 1 ? '' : 's'} moved onto the one account type.`);
+  }
+  if (needsReview.length) {
+    console.warn(`[accounts] ${needsReview.length} account${needsReview.length === 1 ? '' : 's'} need an admin to choose an account type (Admin hub → User Management).`);
+  }
+  return { changed: changed.length, needsReview: needsReview.length };
 }
 
 // ── Session 4.10: seed the return fax number, ONLY IF UNSET ───────────────
@@ -14997,6 +15087,29 @@ app.post('/api/gfc/billing/invoices/:id/pay', authenticateToken, requireEnrolled
 });
 
 // ---- The office's side ----
+// The Billing module's statement list (owner, 2026-10-15: billing is its own
+// module on the hub, not only inside the clinical workspace, "because it
+// affects both"). Every statement across every client, newest first, plus the
+// client list the "new statement" picker needs. A separate path rather than
+// /billing/statements, which the /billing/:clientId route below would catch.
+app.get('/api/gfc/admin/billing-statements', authenticateToken, requireBilling, async (req, res) => {
+  try {
+    const clients = (await getUsers()).filter(u => u && u.role === config.ROLES.CLIENT && u.accountStatus !== 'inactive');
+    const nameOf = new Map(clients.map(c => [c.id, c.name]));
+    res.json({
+      invoices: (await readInvoices())
+        .map(r => ({ ...r, clientName: nameOf.get(r.clientId) || null }))
+        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))),
+      clients: clients.map(c => ({ id: c.id, name: c.name, serviceLine: c.serviceLine || null, rateSet: !!(c.rateAgreement && c.rateAgreement.hourlyRate) }))
+        .sort((a, b) => String(a.name).localeCompare(String(b.name))),
+      stripe: billing.stripeStatus()
+    });
+  } catch (error) {
+    console.error('Billing statements read error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.get('/api/gfc/admin/billing/:clientId', authenticateToken, requireBilling, async (req, res) => {
   try {
     const client = (await getUsers()).find(u => u && u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -16250,7 +16363,7 @@ app.put('/api/clinical/patients/:clientId/home-visit', authenticateToken, requir
 // the assignment is stored app-side as a pointer, the same way
 // client.openEmrPatientId is. The POS itself always comes from OpenEMR's
 // facility record, never from here.
-app.put('/api/clinical/patients/:clientId/facility', authenticateToken, requireAdmin, async (req, res) => {
+app.put('/api/clinical/patients/:clientId/facility', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -16446,7 +16559,7 @@ app.get('/api/clinical/patients/:clientId/record-extras', authenticateToken, req
 // goes out as a home visit.
 //
 // The vocabulary is SERVED, never restated in a page.
-app.put('/api/clinical/patients/:clientId/usual-location', authenticateToken, requireAdmin, async (req, res) => {
+app.put('/api/clinical/patients/:clientId/usual-location', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const { users, idx, client, wrongLine } = await loadClinicalClient(req.params.clientId);
     if (!client) return res.status(wrongLine ? 409 : 404).json({ error: wrongLine ? 'Client is not on a clinical service line' : 'Client not found' });
@@ -17863,7 +17976,7 @@ const notify = createNotifier({
 });
 const requireEnrollmentStaff = (req, res, next) => {
   const role = req.user.role;
-  if (ENROLLMENT_STAFF_ROLES.includes(role) || req.user.isManager || req.user.hasClientPortalAdminAccess) {
+  if (ENROLLMENT_STAFF_ROLES.includes(role) || req.user.isManager) {
     return next();
   }
   return res.status(403).json({ error: 'Staff access required for the enrollment view.', code: 'ENROLLMENT_STAFF_ONLY' });
@@ -17879,7 +17992,7 @@ const requireEnrollmentStaff = (req, res, next) => {
 // `provider` there, and a CASE MANAGER resolves to `readOnly` and stays a
 // reader — the 4.3 scoped-read rule this must not regress.
 const canEditEnrollment = (user) => !!user &&
-  (user.role === config.ROLES.ADMIN || patientRead.canClinicalWrite(user));
+  (user.role === config.ROLES.ADMIN || canManageEnrollment(user) || patientRead.canClinicalWrite(user));
 // Filing a scanned document into a client's file (2026-10-14): the editors,
 // plus a care coordinator, whose job includes keeping the chart's paperwork in
 // order. Editing the enrollment submission itself stays with the editors.
@@ -18236,7 +18349,7 @@ app.get('/api/gfc/admin/signups', authenticateToken, requireEnrollmentStaff, asy
   }
 });
 
-app.post('/api/gfc/admin/signups/:id/decide', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/gfc/admin/signups/:id/decide', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const { action, clientId, reason } = req.body || {};
     const rows = (await db.get('signup_requests')) || [];
@@ -18336,7 +18449,7 @@ app.get('/api/gfc/admin/enrollment/:clientId/family-invites', authenticateToken,
   }
 });
 
-app.post('/api/gfc/admin/enrollment/:clientId/family-invites/:inviteId/decide', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/family-invites/:inviteId/decide', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const decision = req.body && req.body.decision;
     if (decision !== 'approved' && decision !== 'declined') return res.status(400).json({ error: 'decision must be approved or declined', code: 'INVITE_BAD_DECISION' });
@@ -18412,7 +18525,7 @@ app.get('/api/gfc/admin/enrollment/:clientId', authenticateToken, requireEnrollm
 // nobody finds out by accident — and it is already what the intake save calls.
 // This route is the staff-facing door onto the same function, which is the only
 // way the two paths cannot drift.
-app.put('/api/gfc/admin/enrollment/:clientId/service-line', authenticateToken, requireAdmin, async (req, res) => {
+app.put('/api/gfc/admin/enrollment/:clientId/service-line', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -20017,7 +20130,7 @@ app.post('/api/admin/ai/test', authenticateToken, requireAdmin, async (req, res)
   }
 });
 
-app.post('/api/gfc/admin/enrollment/:clientId/documents/request', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/documents/request', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const users = await getUsers();
     const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -20071,7 +20184,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/request', authenticateTo
 // POST /api/gfc/admin/enrollment/:clientId/documents/remind — chase what is open.
 // Every reminder is stamped on the request, so "we asked three times" is a fact
 // on the record rather than a recollection.
-app.post('/api/gfc/admin/enrollment/:clientId/documents/remind', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/documents/remind', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const users = await getUsers();
     const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -20107,7 +20220,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/remind', authenticateTok
 // or reject what arrived. Rejecting REOPENS the ask, so an unreadable photo of
 // an insurance card goes back on the client's checklist with the reason on it
 // instead of sitting in a folder marked received.
-app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/documents/:uploadId/review', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const decision = String((req.body || {}).decision || '').toLowerCase();
     if (!['accepted', 'rejected'].includes(decision)) {
@@ -20416,7 +20529,7 @@ const moveDocumentToCaregiverHandler = async (req, res) => {
 // Whose record a document truly belongs to IS still an office triage
 // decision, so move-to-caregiver stays admin-only, on the enrollment screen
 // only (owner's explicit ask) — automatic filing never applies to it.
-app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/move-to-caregiver', authenticateToken, requireAdmin, moveDocumentToCaregiverHandler);
+app.post('/api/gfc/admin/enrollment/:clientId/documents/:docId/move-to-caregiver', authenticateToken, requireEnrollmentManager, moveDocumentToCaregiverHandler);
 
 // GET …/enrollment/meta/caregivers — who can receive a moved document. Under
 // `meta/`, not a bare `/enrollment/caregivers`: a single path segment there
@@ -20617,7 +20730,7 @@ app.post('/api/gfc/documents/upload-link/revoke', authenticateToken, requireClie
 // document). Generating an unauthenticated access channel into a client's
 // file is that kind of decision, not a correction, so it does not widen to
 // the clinician editor gate the way a field correction does.
-app.post('/api/gfc/admin/enrollment/:clientId/documents/upload-link', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/documents/upload-link', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const users = await getUsers();
     const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -20647,7 +20760,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/documents/upload-link', authentica
   }
 });
 
-app.post('/api/gfc/admin/enrollment/:clientId/documents/upload-link/revoke', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/documents/upload-link/revoke', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const users = await getUsers();
     const client = users.find(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -20779,7 +20892,7 @@ app.post('/api/gfc/upload/:token', async (req, res) => {
 });
 
 // POST /api/gfc/admin/enrollment/:clientId/review — record a review (no state change).
-app.post('/api/gfc/admin/enrollment/:clientId/review', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/review', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -20801,7 +20914,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/review', authenticateToken, requir
 
 // POST /api/gfc/admin/enrollment/:clientId/follow-up — request patient action.
 // body: { items: [key1, key2, ...] }  (keys are consent types or field keys)
-app.post('/api/gfc/admin/enrollment/:clientId/follow-up', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/follow-up', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const { items } = req.body || {};
     if (!Array.isArray(items) || !items.length) {
@@ -20854,7 +20967,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/follow-up', authenticateToken, req
 // until the gaps actually close. An override that left no trace would be
 // indistinguishable from a complete file a week later, which is the whole
 // failure it is meant to avoid.
-app.post('/api/gfc/admin/enrollment/:clientId/approve', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/approve', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === req.params.clientId && u.role === config.ROLES.CLIENT);
@@ -20926,7 +21039,7 @@ app.post('/api/gfc/admin/enrollment/:clientId/approve', authenticateToken, requi
 // only, Scope B2). Multipart: `files` (paper-packet scans) + `payload` (JSON of
 // the structured entry + consent checklist). Creates a client with
 // source=legacy_offline and enrollmentStatus=intake_complete.
-app.post('/api/gfc/admin/enrollment/offline', authenticateToken, requireAdmin, uploadLimiter, upload.array('files', 20), async (req, res) => {
+app.post('/api/gfc/admin/enrollment/offline', authenticateToken, requireEnrollmentManager, uploadLimiter, upload.array('files', 20), async (req, res) => {
   try {
     let payload = {};
     try { payload = req.body && req.body.payload ? JSON.parse(req.body.payload) : (req.body || {}); }
@@ -21495,7 +21608,7 @@ app.put('/api/gfc/admin/enrollment/:clientId/details', authenticateToken, requir
 // table. Until it exists neither consent is presentable, by design: a client
 // signing a financial agreement with no price in it is the defect, not the
 // blocked signature.
-app.put('/api/gfc/admin/enrollment/:clientId/rate', authenticateToken, requireAdmin, async (req, res) => {
+app.put('/api/gfc/admin/enrollment/:clientId/rate', authenticateToken, requireEnrollmentManager, async (req, res) => {
   try {
     const b = req.body || {};
     const built = buildRateAgreement(b, req.user);
@@ -21587,7 +21700,7 @@ app.get('/api/gfc/admin/enrollment/:clientId/consent/:type/blank.pdf', authentic
 // The scan is the evidence and it is REQUIRED. A paper consent recorded with no
 // document behind it is the same provenance-free record Scope E1 found, just
 // entered by a different hand.
-app.post('/api/gfc/admin/enrollment/:clientId/consent/:type/offline', authenticateToken, requireAdmin, uploadLimiter, upload.single('file'), async (req, res) => {
+app.post('/api/gfc/admin/enrollment/:clientId/consent/:type/offline', authenticateToken, requireEnrollmentManager, uploadLimiter, upload.single('file'), async (req, res) => {
   try {
     const type = req.params.type;
     const users = await getUsers();
@@ -27674,6 +27787,20 @@ app.get('/scheduling', (req, res) => {
   res.sendFile(__dirname + '/public/scheduling.html');
 });
 
+// Messages for managers and care coordinators (owner, 2026-10-15): the Admin
+// Hub's inbox is the Super Admin's, so the office reads Support and Admin
+// Broadcasts here. Shell is public; /api/messaging decides what comes back.
+app.get('/messages', (req, res) => {
+  res.sendFile(__dirname + '/public/messages.html');
+});
+
+// The Billing module (owner, 2026-10-15): claims waiting to be submitted and
+// patient statements in one place, for the Super Admin, managers and care
+// coordinators. Shell is public; every route it calls is requireBilling.
+app.get('/billing', (req, res) => {
+  res.sendFile(__dirname + '/public/billing.html');
+});
+
 // Admin hub login endpoint (same as regular admin login)
 app.post('/api/auth/admin-login', async (req, res) => {
   try {
@@ -27682,7 +27809,7 @@ app.post('/api/auth/admin-login', async (req, res) => {
       return res.status(400).json({ error: 'Missing credentials' });
     }
     const users = await getUsers();
-    const user = users.find(u => u.email?.toLowerCase() === email.toLowerCase() && (u.role === config.ROLES.ADMIN || u.hasAdminHubAccess));
+    const user = users.find(u => u.email?.toLowerCase() === email.toLowerCase() && u.role === config.ROLES.ADMIN);
     if (!user || !(await bcrypt.compare(password, user.password))) {
       return res.status(400).json({ error: 'Invalid credentials' });
     }
@@ -28092,6 +28219,11 @@ app.listen(PORT, () => {
       await migrateClinicalRoles();
     } catch (err) {
       console.error('Clinical-role migration failed (non-fatal):', err.message);
+    }
+    try {
+      await migrateAccountTypes();
+    } catch (err) {
+      console.error('Account-type migration failed (non-fatal):', err.message);
     }
     try {
       await seedRequisitionReturnFax();

@@ -489,7 +489,8 @@ test('recording a paper signature requires the scan, a real past date, and an ac
   // Owner rule, 2026-09-16: every WRITE on the enrollment surface is admin
   // only. Recording a paper signature is a write — it puts a signature on a
   // client's file — so it moved off the staff gate onto requireAdmin.
-  assert.ok(route.includes('requireAdmin'), 'admin-gated at the API layer');
+  // 2026-10-15 (owner): managers and care coordinators run enrollment too.
+  assert.ok(route.includes('requireEnrollmentManager'), 'gated to admin, manager or coordinator at the API layer');
   assert.ok(!route.includes('requireEnrollmentStaff'), 'not the wider staff gate');
   assert.ok(route.includes('CONSENT_SCAN_REQUIRED'), 'the scan is the evidence and is required');
   assert.ok(route.includes('CONSENT_SIGNED_DATE_REQUIRED'));

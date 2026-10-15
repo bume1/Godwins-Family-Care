@@ -56,10 +56,10 @@ test('the limiter caps one key per window', () => {
   assert.equal(lim('a', 0), false); assert.equal(lim('a', 1), false); assert.equal(lim('a', 2), true); assert.equal(lim('b', 2), false); assert.equal(lim('a', 1500), false);
 });
 
-test('build guard: sign-in reveals a sign-up only to its password; an ADMIN decides; accounts start at intake_pending; never a POA', () => {
+test('build guard: sign-in reveals a sign-up only to its password; an admin, manager or coordinator decides; accounts start at intake_pending; never a POA', () => {
   const login = server.slice(server.indexOf("app.post('/api/auth/login'"), server.indexOf("app.post('/api/auth/client-login'"));
   assert.match(login, /if \(pending && await bcrypt\.compare\(password, pending\.passwordHash\)\)/);
-  assert.match(server, /app\.post\('\/api\/gfc\/admin\/signups\/:id\/decide', authenticateToken, requireAdmin, /);
+  assert.match(server, /app\.post\('\/api\/gfc\/admin\/signups\/:id\/decide', authenticateToken, requireEnrollmentManager, /);
   const decide = server.slice(server.indexOf("app.post('/api/gfc/admin/signups/:id/decide'"), server.indexOf('// Family invites waiting on staff'));
   assert.match(decide, /enrollmentStatus: 'intake_pending',/);
   assert.match(decide, /familyIsPoa: false,/);
