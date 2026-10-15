@@ -217,6 +217,8 @@ app.use(cors());
 // raw here, before the JSON parser (which skips a body already read). The
 // route itself is registered with the billing routes, after the audit layer.
 app.use('/api/webhooks/stripe', express.raw({ type: 'application/json', limit: '1mb' }));
+// Quo signs the exact bytes it sends, so its webhook keeps the raw body too.
+app.use('/api/webhooks/quo', express.raw({ type: () => true, limit: '1mb' }));
 app.use(bodyParser.json({ limit: config.BODY_PARSER_LIMIT }));
 // Session 5.4: request context (request id, hashed IP) for every request, and
 // the PHI-access audit row for every request under a PHI prefix. Registered
@@ -2863,15 +2865,20 @@ app.use(schedulingRoutes({
 // Message attachments (2026-09-29): multipart parsing, private Drive storage, and
 // the byte-sniff. `detectFileType` is defined further down this file, so it is
 // passed as a closure; `contentDisposition` is imported at the top.
-app.use(messagingRoutes({
+const messagingRouter = messagingRoutes({
   db, config, logActivity, queueNotification, getUsers, authenticateToken, uuidv4,
   upload, uploadLimiter, googledrive,
   detectFileType: (buf) => detectFileType(buf),
   contentDisposition,
+  // Texting (Quo): the portal link in a text, and a fresh user read after an
+  // opt-in or STOP changes a user record.
+  getAppBaseUrl: () => getAppBaseUrl(),
+  invalidateUsersCache: () => invalidateUsersCache(),
   // A GETTER, not the notifier itself: `notify` is built far below this line
   // and would be in its temporal dead zone here. Called only at request time.
   notify: () => notify
-}));
+});
+app.use(messagingRouter);
 
 // Uploads require authentication - registered here after authenticateToken is defined
 app.use('/uploads', authenticateToken, express.static('uploads', staticOptions));
@@ -8407,6 +8414,80 @@ app.put('/api/gfc/sharing', authenticateToken, requireEnrolledClient, async (req
     res.json({ message: 'Sharing settings saved', sharing });
   } catch (error) {
     console.error('GFC sharing update error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Care Team messages by text (owner, 2026-10-15). The client and a designated
+// POA each turn texts on for themselves; it is off until they do, and a STOP
+// text turns it off again. The client's texts go to the phone on their
+// profile; a POA's to their own phone, which they can set here.
+const quoSms = require('./quoSms');
+async function textSettingsFor(req) {
+  const client = await resolveGfcClientRecord(req.user);
+  if (!client) return { error: { status: 404, body: { error: 'No client record on file' } } };
+  const acting = patientRead.buildActingIdentity(req.user, client);
+  const isClient = req.user.role === config.ROLES.CLIENT;
+  if (!isClient && !acting.isPoa) {
+    return { error: { status: 403, body: { error: 'Only the client or their designated Power of Attorney can turn on texts.', code: 'TEXTS_CLIENT_ONLY' } } };
+  }
+  const users = await getUsers();
+  const me = users.find(u => u.id === req.user.id);
+  return { client, isClient, me, users };
+}
+const textSettingsView = (me, client, isClient) => {
+  const phone = quoSms.phoneForUser(me, client);
+  return {
+    available: quoSms.status().sending,
+    enabled: quoSms.textsOn(me),
+    phone: phone ? quoSms.prettyPhone(phone) : null,
+    // The client's number is the one on their profile; a POA sets their own here.
+    phoneFrom: isClient ? 'profile' : 'own',
+    officeNumber: quoSms.prettyPhone(quoSms.fromNumber()),
+    stoppedByText: !!(me && me.smsOptIn && !me.smsOptIn.enabled && me.smsOptIn.changedBy === 'text STOP')
+  };
+};
+app.get('/api/gfc/text-messages', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const t = await textSettingsFor(req);
+    if (t.error) return res.status(t.error.status).json(t.error.body);
+    res.json(textSettingsView(t.me, t.client, t.isClient));
+  } catch (error) {
+    console.error('Text settings error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+app.put('/api/gfc/text-messages', authenticateToken, requireEnrolledClient, async (req, res) => {
+  try {
+    const t = await textSettingsFor(req);
+    if (t.error) return res.status(t.error.status).json(t.error.body);
+    const body = req.body || {};
+    const { me, client, isClient, users } = t;
+    if (!me) return res.status(404).json({ error: 'Account not found' });
+    if (body.phone !== undefined) {
+      if (isClient) return res.status(400).json({ error: 'Change your phone number under Edit my details.', code: 'TEXTS_PHONE_ON_PROFILE' });
+      const p = quoSms.toE164(body.phone);
+      if (!p) return res.status(400).json({ error: 'Enter a 10-digit US mobile number.', code: 'TEXTS_PHONE_INVALID' });
+      me.phone = quoSms.prettyPhone(p);
+    }
+    if (body.enabled !== undefined) {
+      const on = body.enabled === true;
+      if (on) {
+        if (!quoSms.phoneForUser(me, client)) {
+          return res.status(400).json({ error: isClient ? 'Add your phone number under Edit my details first.' : 'Add your mobile number first.', code: 'TEXTS_NO_PHONE' });
+        }
+        me.smsOptIn = { ...(me.smsOptIn || {}), enabled: true, optedInAt: new Date().toISOString(), stoppedAt: null, changedBy: 'portal' };
+      } else {
+        me.smsOptIn = { ...(me.smsOptIn || {}), enabled: false, stoppedAt: new Date().toISOString(), changedBy: 'portal' };
+      }
+    }
+    await db.set('users', users);
+    invalidateUsersCache();
+    await logActivity(req.user.id, req.user.name || req.user.email, 'sms_settings_changed', 'user', me.id,
+      { clientId: client.id, enabled: quoSms.textsOn(me), phoneChanged: body.phone !== undefined });
+    res.json(textSettingsView(me, client, isClient));
+  } catch (error) {
+    console.error('Text settings save error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -28255,6 +28336,9 @@ app.listen(PORT, () => {
   // Start notification queue processor (Feature 1)
   const queueInterval = config.NOTIFICATION_CHECK_INTERVAL_MINUTES * 60 * 1000;
   setInterval(processNotificationQueue, queueInterval);
+  // Care Team texts held for quiet hours, and retries (Quo). Every minute.
+  setInterval(() => { messagingRouter.sms.drainSmsOutbox().catch(err => console.error('SMS outbox sweep failed:', err.message)); }, 60 * 1000).unref?.();
+  { const st = require('./quoSms').status(); console.log(`💬 Care Team texts: sending ${st.sending ? 'ON' : 'OFF'}, replies ${st.receiving ? 'ON' : 'OFF'}${st.missing.length ? ` (missing ${st.missing.join(', ')})` : ''}`); }
   console.log(`📧 Notification queue processor started (every ${config.NOTIFICATION_CHECK_INTERVAL_MINUTES}m)`);
 
   // Start notification trigger scanner (Feature 2)

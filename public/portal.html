@@ -619,6 +619,10 @@
         fetch(`${API_URL}/api/gfc/billing/invoices/${encodeURIComponent(id)}/pay`, { method: 'POST', headers: { 'Authorization': `Bearer ${token}` } }).then(handleResponse).catch(asError),
       saveGfcProfile: (token, body) =>
         fetch(`${API_URL}/api/gfc/profile`, { method: 'PUT', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(handleResponse).catch(asError),
+      getGfcTexts: (token) =>
+        fetch(`${API_URL}/api/gfc/text-messages`, { headers: { 'Authorization': `Bearer ${token}` } }).then(handleResponse).catch(asError),
+      saveGfcTexts: (token, body) =>
+        fetch(`${API_URL}/api/gfc/text-messages`, { method: 'PUT', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(handleResponse).catch(asError),
       getGfcProfile: (token) =>
         fetch(`${API_URL}/api/gfc/profile`, { headers: { 'Authorization': `Bearer ${token}` } }).then(handleResponse).catch(asError),
       getGfcFamily: (token) =>
@@ -7239,6 +7243,48 @@
       </div>
     );
 
+    // Texts from the care team (owner, 2026-10-15). Off until the person turns
+    // it on. The client's texts go to the phone on their profile; a POA adds
+    // their own mobile here. A STOP text turns it off, and the screen says so.
+    const GfcTextSettings = ({ token, isPoa }) => {
+      const [t, setT] = useState(null);
+      const [phone, setPhone] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      useEffect(() => { api.getGfcTexts(token).then(r => { if (!r.error) setT(r); }); }, [token]);
+      if (!t || !t.available) return null;
+      const save = async (body) => {
+        setBusy(true); setErr('');
+        const r = await api.saveGfcTexts(token, body);
+        setBusy(false);
+        if (r.error) { setErr(r.error); return; }
+        setT(r); setPhone('');
+      };
+      return (
+        <div className="card" style={{ marginTop: 14 }}>
+          <div className="sech" style={{ margin: '0 0 6px' }}><h3>Texts from your care team</h3></div>
+          <p className="sub" style={{ marginTop: 0 }}>
+            Get your care team's messages by text from {t.officeNumber}, and reply by text. Your replies go to your care team the same as a portal message. Reply STOP any time to stop.
+          </p>
+          {t.stoppedByText && !t.enabled && <p className="sub" style={{ color: 'var(--gold-ink)' }}><i className="ti ti-info-circle" /> You turned texts off by replying STOP.</p>}
+          <p className="sub">{t.enabled ? `On. Texts go to ${t.phone}.` : (t.phone ? `Off. Texts would go to ${t.phone}.` : 'Off.')}</p>
+          {isPoa && (
+            <div className="fld"><label>{t.phone ? 'Change my mobile number' : 'My mobile number'}</label>
+              <input type="tel" autoComplete="tel" value={phone} onChange={e => setPhone(e.target.value)} placeholder="(404) 555-0100" />
+            </div>
+          )}
+          {!isPoa && !t.phone && <p className="sub">Add your phone number with Edit my details first.</p>}
+          {err && <div className="err">{err}</div>}
+          <div className="btnrow">
+            {isPoa && phone && <button className="btn line" disabled={busy} onClick={() => save({ phone })}>Save Number</button>}
+            {t.enabled
+              ? <button className="btn line" disabled={busy} onClick={() => save({ enabled: false })}>Turn Off Texts</button>
+              : <button className="btn navy" disabled={busy || !t.phone} onClick={() => save({ enabled: true })}>Turn On Texts</button>}
+          </div>
+        </div>
+      );
+    };
+
     // Profile (owner, 2026-10-13): the patient, or their POA, can correct their
     // own contact details. Name, date of birth and insurance stay with the
     // office. Saved through the same path staff edits use, so enrollment, the
@@ -7294,6 +7340,7 @@
                 <Row label="Primary contact" value={p.primaryContact ? [p.primaryContact.name, p.primaryContact.relationship, p.primaryContact.phone].filter(Boolean).join(' · ') : null} />
               </div>
               <button className="btn navy" style={{ marginTop: 14 }} onClick={start}>Edit my details</button>
+              <GfcTextSettings token={token} isPoa={isPoa} />
             </React.Fragment>
           )}
           {editing && form && (
